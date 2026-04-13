@@ -17,6 +17,7 @@
 #include <span>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/io/io_contract.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <fcntl.h>
@@ -535,10 +536,27 @@ bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
   return file_schema_version == restartSchema().version;
 }
 
+const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
+  static const std::vector<std::string_view> checklist = {
+      "simulation_state_lanes_and_metadata",
+      "module_sidecars_with_schema_versions",
+      "integrator_state",
+      "scheduler_persistent_state",
+      "normalized_config_text_and_hash",
+      "provenance_record",
+      "payload_integrity_hash_and_hex"};
+  return checklist;
+}
+
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   if (payload.state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
+  validateContinuationMetadata(
+      payload.normalized_config_text,
+      payload.normalized_config_hash_hex,
+      payload.provenance,
+      "restart payload");
 
   std::uint64_t hash = k_offset_basis;
 
@@ -661,6 +679,11 @@ void writeRestartCheckpointHdf5(
   if (payload.state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart write payload must include state, integrator_state, and scheduler");
   }
+  validateContinuationMetadata(
+      payload.normalized_config_text,
+      payload.normalized_config_hash_hex,
+      payload.provenance,
+      "restart writer");
   if (!payload.state->validateOwnershipInvariants()) {
     throw std::invalid_argument("cannot checkpoint invalid simulation state");
   }
@@ -679,8 +702,15 @@ void writeRestartCheckpointHdf5(
   writeScalarStringAttribute(file.get(), "payload_integrity_hash_hex", restartPayloadIntegrityHashHex(payload));
   writeScalarU64Attribute(file.get(), "payload_integrity_hash", restartPayloadIntegrityHash(payload));
 
-  writeStringDataset(file.get(), "normalized_config_text", payload.normalized_config_text);
-  writeStringDataset(file.get(), "provenance_record", core::serializeProvenanceRecord(payload.provenance));
+  const auto& shared_names = sharedIoContractNames();
+  writeStringDataset(
+      file.get(),
+      std::string(shared_names.normalized_config_text_dataset),
+      payload.normalized_config_text);
+  writeStringDataset(
+      file.get(),
+      std::string(shared_names.provenance_record_dataset),
+      core::serializeProvenanceRecord(payload.provenance));
 
   writeStateGroup(file.get(), *payload.state);
 
@@ -744,15 +774,20 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   const std::string schema_name = readScalarStringAttribute(file.get(), "restart_schema_name");
   const std::uint32_t schema_version = readScalarU32Attribute(file.get(), "restart_schema_version");
   if (schema_name != restartSchema().name || !isRestartSchemaCompatible(schema_version)) {
-    throw std::runtime_error("restart schema is not compatible with this build");
+    throw std::runtime_error(
+        "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
+        ", expected='" + restartSchema().name + "' v" + std::to_string(restartSchema().version));
   }
 
   result.normalized_config_hash_hex = readScalarStringAttribute(file.get(), "normalized_config_hash_hex");
   result.payload_hash_hex = readScalarStringAttribute(file.get(), "payload_integrity_hash_hex");
   result.payload_hash = readScalarU64Attribute(file.get(), "payload_integrity_hash");
 
-  result.normalized_config_text = readStringDataset(file.get(), "normalized_config_text");
-  result.provenance = core::deserializeProvenanceRecord(readStringDataset(file.get(), "provenance_record"));
+  const auto& shared_names = sharedIoContractNames();
+  result.normalized_config_text =
+      readStringDataset(file.get(), std::string(shared_names.normalized_config_text_dataset));
+  result.provenance = core::deserializeProvenanceRecord(
+      readStringDataset(file.get(), std::string(shared_names.provenance_record_dataset)));
 
   readStateGroup(file.get(), result.state);
 

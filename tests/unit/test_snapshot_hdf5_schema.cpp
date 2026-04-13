@@ -1,5 +1,6 @@
 #include <cassert>
 
+#include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
 
 namespace {
@@ -25,6 +26,11 @@ void testCanonicalSchemaNames() {
     }
   }
   assert(has_particle_id_alias);
+
+  const auto& shared = cosmosim::io::sharedIoContractNames();
+  assert(shared.normalized_config_text_dataset == "normalized_config_text");
+  assert(shared.normalized_config_hash_hex_attribute == "normalized_config_hash_hex");
+  assert(shared.provenance_record_dataset == "provenance_record");
 }
 
 }  // namespace

@@ -1,6 +1,7 @@
 #include <cassert>
 #include <stdexcept>
 
+#include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
@@ -11,6 +12,10 @@ int main() {
   assert(schema.version == 2);
   assert(cosmosim::io::isRestartSchemaCompatible(2));
   assert(!cosmosim::io::isRestartSchemaCompatible(1));
+  const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
+  assert(!checklist.empty());
+  assert(checklist.front() == "simulation_state_lanes_and_metadata");
+  assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;
   try {
@@ -41,11 +46,22 @@ int main() {
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "mode = toy\n";
   payload.normalized_config_hash_hex = "a";
+  payload.provenance = cosmosim::core::makeProvenanceRecord("a", "deadbeef");
 
   const std::uint64_t hash_before = cosmosim::io::restartPayloadIntegrityHash(payload);
   integrator_state.time_bins.active_bin = 1;
   const std::uint64_t hash_after = cosmosim::io::restartPayloadIntegrityHash(payload);
   assert(hash_before != hash_after);
+
+  bool missing_metadata_threw = false;
+  try {
+    cosmosim::io::RestartWritePayload invalid_metadata = payload;
+    invalid_metadata.normalized_config_hash_hex.clear();
+    (void)cosmosim::io::restartPayloadIntegrityHash(invalid_metadata);
+  } catch (const std::invalid_argument&) {
+    missing_metadata_threw = true;
+  }
+  assert(missing_metadata_threw);
 
   return 0;
 }

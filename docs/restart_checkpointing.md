@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v1`) persists:
+The restart schema (`cosmosim_restart_v2`) persists:
 
 - full `SimulationState` hot/cold SoA lanes,
 - `StateMetadata` blob,
@@ -19,7 +19,7 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`1`).
+- Current compatibility policy: exact version match (`2`).
 
 ## Atomic write semantics
 
@@ -39,6 +39,23 @@ behavior on filesystems where `rename` is atomic.
 - Writer stores both integer and hex payload integrity hashes.
 - Reader recomputes hash and rejects mismatches.
 - Provenance is serialized with the checkpoint for continuation auditing.
+
+## Exact-restart completeness checklist
+
+The checklist exposed by `exactRestartCompletenessChecklist()` and enforced by
+restart write/read checks is:
+
+1. `simulation_state_lanes_and_metadata`
+2. `module_sidecars_with_schema_versions`
+3. `integrator_state`
+4. `scheduler_persistent_state`
+5. `normalized_config_text_and_hash`
+6. `provenance_record`
+7. `payload_integrity_hash_and_hex`
+
+`validateContinuationMetadata(...)` now requires non-empty normalized config text,
+non-empty normalized config hash, and non-empty provenance config hash before
+hashing/writing restart payloads.
 
 ## Exactness policy
 
