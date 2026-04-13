@@ -3,10 +3,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
 
 int main() {
+  static_assert(
+      sizeof(cosmosim::core::GravityParticleKernelView) ==
+          sizeof(std::span<std::uint32_t>) + (7 * sizeof(std::span<double>)),
+      "GravityParticleKernelView hot contract changed: unexpected extra field(s)");
+  static_assert(
+      sizeof(cosmosim::core::HydroCellKernelView) ==
+          sizeof(std::span<std::uint32_t>) + (6 * sizeof(std::span<double>)),
+      "HydroCellKernelView hot contract changed: unexpected extra field(s)");
+
   cosmosim::core::SimulationState state;
   state.resizeParticles(5);
   state.resizeCells(3);
@@ -60,6 +70,11 @@ int main() {
   }
 
   state.rebuildSpeciesIndex();
+  assert(state.particle_species_index.count(cosmosim::core::ParticleSpecies::kDarkMatter) == 2);
+  assert(state.particle_species_index.count(cosmosim::core::ParticleSpecies::kStar) == 3);
+  assert(state.particle_species_index.localIndex(4) == 2);
+  assert(state.particle_species_index.globalIndex(cosmosim::core::ParticleSpecies::kStar, 1) == 3);
+
   assert(state.validateOwnershipInvariants());
   assert(state.validateUniqueParticleIds());
 
@@ -79,6 +94,14 @@ int main() {
   const auto packet = state.packSpeciesTransferPacket(cosmosim::core::ParticleSpecies::kStar);
   assert(packet.particle_id.size() == 3);
   assert(packet.particle_id[0] == 1002);
+  for (std::size_t i = 0; i < packet.particle_id.size(); ++i) {
+    const auto global = state.particle_species_index.globalIndex(
+        cosmosim::core::ParticleSpecies::kStar,
+        static_cast<std::uint32_t>(i));
+    assert(packet.particle_id[i] == state.particle_sidecar.particle_id[global]);
+    assert(packet.owning_rank[i] == state.particle_sidecar.owning_rank[global]);
+    assert(packet.mass_code[i] == state.particles.mass_code[global]);
+  }
 
   cosmosim::core::TransientStepWorkspace workspace;
   const std::array<std::uint32_t, 2> particle_indices{1, 3};
@@ -92,6 +115,27 @@ int main() {
   assert(cell_view.size() == 1);
   assert(cell_view.density_code[0] == 12.0);
 
+  const std::array<std::uint32_t, 2> kernel_particle_indices{0, 2};
+  const auto particle_id_before = state.particle_sidecar.particle_id;
+  auto gravity_view =
+      cosmosim::core::buildGravityParticleKernelView(state, kernel_particle_indices, workspace);
+  gravity_view.position_x_comoving[0] = 9.0;
+  gravity_view.mass_code[1] = 8.0;
+  cosmosim::core::scatterGravityParticleKernelView(gravity_view, state);
+  assert(state.particles.position_x_comoving[0] == 9.0);
+  assert(state.particles.mass_code[2] == 8.0);
+  assert(state.particle_sidecar.particle_id == particle_id_before);
+
+  const std::array<std::uint32_t, 2> kernel_cell_indices{0, 1};
+  auto hydro_view = cosmosim::core::buildHydroCellKernelView(state, kernel_cell_indices, workspace);
+  hydro_view.center_x_comoving[1] = 44.0;
+  hydro_view.density_code[0] = 55.0;
+  hydro_view.pressure_code[1] = 66.0;
+  cosmosim::core::scatterHydroCellKernelView(hydro_view, state);
+  assert(state.cells.center_x_comoving[1] == 44.0);
+  assert(state.gas_cells.density_code[0] == 55.0);
+  assert(state.gas_cells.pressure_code[1] == 66.0);
+
   bool threw = false;
   try {
     const std::array<std::uint32_t, 1> bad_indices{8};
@@ -100,6 +144,16 @@ int main() {
     threw = true;
   }
   assert(threw);
+
+  state.particle_sidecar.particle_id[1] = state.particle_sidecar.particle_id[0];
+  assert(!state.validateUniqueParticleIds());
+  state.particle_sidecar.particle_id[1] = 1001;
+  assert(state.validateUniqueParticleIds());
+
+  state.species.count_by_species = {3, 0, 2, 0, 0};
+  assert(!state.validateOwnershipInvariants());
+  state.species.count_by_species = {2, 0, 3, 0, 0};
+  assert(state.validateOwnershipInvariants());
 
   return 0;
 }

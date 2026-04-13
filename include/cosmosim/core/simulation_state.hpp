@@ -284,6 +284,11 @@ struct CellActiveView {
 
 struct GravityParticleKernelView {
   // Compact read/write particle hot view for gravity kernels.
+  // HOT-FIELD CONTRACT (review-critical):
+  //   allowed mutable physics lanes = {position_[xyz]_comoving, velocity_[xyz]_peculiar, mass_code}
+  //   allowed index lane = {particle_index}
+  // No IDs, species tags, owning rank, flags, or any metadata/provenance fields
+  // may be added to this view.
   std::span<std::uint32_t> particle_index;
   std::span<double> position_x_comoving;
   std::span<double> position_y_comoving;
@@ -298,6 +303,11 @@ struct GravityParticleKernelView {
 
 struct HydroCellKernelView {
   // Compact read/write cell hydro view for active hydrodynamics kernels.
+  // HOT-FIELD CONTRACT (review-critical):
+  //   allowed mutable lanes = {center_[xyz]_comoving, mass_code, density_code, pressure_code}
+  //   allowed index lane = {cell_index}
+  // No patch descriptors, thermodynamic cold metadata, reconstruction
+  // gradients, or provenance fields may be added to this hot view.
   std::span<std::uint32_t> cell_index;
   std::span<double> center_x_comoving;
   std::span<double> center_y_comoving;

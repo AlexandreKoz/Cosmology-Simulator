@@ -147,3 +147,38 @@ Observed:
 Interpretation:
 
 - String-driven runtime policy drift is reduced after freeze while preserving param-style UX and deterministic normalized-config provenance semantics.
+
+## 9) SimulationState ownership/invariants decomposition repair
+
+_Date captured: 2026-04-13 (UTC)_
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_simulation_state
+./build/cpu-only-debug/test_unit_simulation_state
+```
+
+Observed:
+
+- `src/core/simulation_state.cpp` responsibility concentration was split by invariant boundary:
+  - storage-lane consistency (`simulation_state_structures.cpp`)
+  - ownership checks (`simulation_state_ownership.cpp`)
+  - species indexing and transfer packing (`simulation_state_species.cpp`)
+  - metadata/module-sidecar serialization (`simulation_state_metadata.cpp`)
+  - active-view assembly/scatter (`simulation_state_active_views.cpp`)
+  - reorder/scratch logic remains in `simulation_state.cpp`
+- Header-level hot-field contract notes now explicitly name allowed gravity/hydro active-view lanes.
+- `tests/unit/test_simulation_state.cpp` now covers:
+  - ownership invariant failure/recovery
+  - unique-ID invariant failure/recovery
+  - species-index rebuild correctness
+  - transfer packet pack/unpack-equivalence checks
+  - metadata serialize/deserialize round-trip
+  - active-view hot-field writeback behavior and cold-lane protection
+  - static assertion guardrails for gravity/hydro active-view compactness.
+
+Interpretation:
+
+- State ownership and active-view invariants are now reviewable in focused files with explicit hot/cold contracts and command-backed checks.

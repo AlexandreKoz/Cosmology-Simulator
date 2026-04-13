@@ -115,6 +115,11 @@ add_library(cosmosim_core STATIC
   src/core/cosmology.cpp
   src/core/units.cpp
   src/core/simulation_state.cpp
+  src/core/simulation_state_structures.cpp
+  src/core/simulation_state_ownership.cpp
+  src/core/simulation_state_species.cpp
+  src/core/simulation_state_metadata.cpp
+  src/core/simulation_state_active_views.cpp
   src/core/soa_storage.cpp
   src/core/simulation_mode.cpp
   src/core/time_integration.cpp
