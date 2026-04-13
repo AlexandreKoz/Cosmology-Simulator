@@ -49,6 +49,17 @@ Restart payload includes:
 
 Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 
+## 2.1) Field ownership table (snapshot vs restart)
+
+| Ownership | Fields |
+|---|---|
+| Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
+| Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
+| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), payload integrity hashes |
+
+Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
+restart is execution-resume oriented.
+
 ## 3) Provenance payload
 
 `ProvenanceRecord` persists:
@@ -74,3 +85,10 @@ When changing snapshot/restart/provenance fields:
 3. Update validation expectations in `docs/validation_plan.md`.
 4. Add/update tests in `tests/unit` + `tests/integration` + `tests/validation` as applicable.
 5. Record rationale in `docs/architecture/decision_log.md`.
+
+## Compatibility notes (2026-04-13)
+
+- No external snapshot dataset names were changed.
+- Restart schema version/name were not changed (`cosmosim_restart_v2`, version `2`).
+- Restart contract enforcement was tightened: missing continuation-critical metadata
+  now fails fast with explicit errors instead of producing weak checkpoints.

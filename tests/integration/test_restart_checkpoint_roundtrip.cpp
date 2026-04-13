@@ -216,6 +216,64 @@ void testRestartRoundtrip() {
   assert(integrity_threw);
 
   std::filesystem::remove(checkpoint_path);
+
+  const std::filesystem::path schema_mismatch_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_schema_mismatch.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(schema_mismatch_path, payload);
+  hid_t schema_file = H5Fopen(schema_mismatch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(schema_file >= 0);
+  hid_t schema_attr = H5Aopen(schema_file, "restart_schema_version", H5P_DEFAULT);
+  assert(schema_attr >= 0);
+  std::uint32_t bad_schema = 1;
+  assert(H5Awrite(schema_attr, H5T_NATIVE_UINT32, &bad_schema) >= 0);
+  H5Aclose(schema_attr);
+  H5Fclose(schema_file);
+
+  bool schema_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(schema_mismatch_path);
+  } catch (const std::runtime_error&) {
+    schema_threw = true;
+  }
+  assert(schema_threw);
+  std::filesystem::remove(schema_mismatch_path);
+
+  const std::filesystem::path missing_required_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_required.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(missing_required_path, payload);
+  hid_t missing_file = H5Fopen(missing_required_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(missing_file >= 0);
+  assert(H5Ldelete(missing_file, "/scheduler/pending_bin_index", H5P_DEFAULT) >= 0);
+  H5Fclose(missing_file);
+  bool missing_required_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(missing_required_path);
+  } catch (const std::runtime_error&) {
+    missing_required_threw = true;
+  }
+  assert(missing_required_threw);
+  std::filesystem::remove(missing_required_path);
+
+  const std::filesystem::path finalize_failure_dir =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_finalize_failure_target";
+  std::filesystem::remove_all(finalize_failure_dir);
+  std::filesystem::create_directories(finalize_failure_dir);
+
+  cosmosim::io::RestartWritePolicy failure_policy;
+  failure_policy.temporary_suffix = ".partial";
+
+  bool finalize_threw = false;
+  try {
+    cosmosim::io::writeRestartCheckpointHdf5(finalize_failure_dir, payload, failure_policy);
+  } catch (const std::runtime_error&) {
+    finalize_threw = true;
+  }
+  assert(finalize_threw);
+  assert(std::filesystem::is_directory(finalize_failure_dir));
+  const std::filesystem::path partial_path = finalize_failure_dir.string() + failure_policy.temporary_suffix;
+  assert(std::filesystem::exists(partial_path));
+  std::filesystem::remove(partial_path);
+  std::filesystem::remove_all(finalize_failure_dir);
 #else
   bool threw = false;
   try {

@@ -173,6 +173,7 @@ add_library(cosmosim_physics STATIC
   src/physics/tracer_support.cpp)
 add_library(cosmosim_io STATIC
   src/io/io_module.cpp
+  src/io/internal/io_contract.cpp
   src/io/ic_reader.cpp
   src/io/snapshot_hdf5.cpp
   src/io/restart_checkpoint.cpp)

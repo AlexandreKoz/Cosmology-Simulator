@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cosmosim/core/provenance.hpp"
@@ -19,6 +20,7 @@ struct RestartSchema {
 
 [[nodiscard]] const RestartSchema& restartSchema();
 [[nodiscard]] bool isRestartSchemaCompatible(std::uint32_t file_schema_version);
+[[nodiscard]] const std::vector<std::string_view>& exactRestartCompletenessChecklist();
 
 struct RestartWritePolicy {
   bool enable_fsync_finalize = false;
