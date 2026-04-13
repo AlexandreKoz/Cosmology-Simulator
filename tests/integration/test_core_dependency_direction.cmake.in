@@ -1,0 +1,24 @@
+# Guardrail: core layer must not include upward modules.
+set(_forbidden_regex "#include[ \t]*[<\"]cosmosim/(analysis|io|physics|workflows|app)/")
+
+file(GLOB_RECURSE _core_headers "@CMAKE_SOURCE_DIR@/include/cosmosim/core/*.hpp")
+file(GLOB_RECURSE _core_sources "@CMAKE_SOURCE_DIR@/src/core/*.cpp")
+
+set(_violations "")
+foreach(_file IN LISTS _core_headers _core_sources)
+  file(READ "${_file}" _content)
+  string(REGEX MATCH "${_forbidden_regex}" _match "${_content}")
+  if(_match)
+    list(APPEND _violations "${_file}")
+  endif()
+endforeach()
+
+if(_violations)
+  list(JOIN _violations "\n  - " _joined)
+  message(FATAL_ERROR
+    "Core dependency-direction guard failed.\n"
+    "The following core files include forbidden upward modules (analysis/io/physics/workflows/app):\n"
+    "  - ${_joined}\n")
+endif()
+
+message(STATUS "Core dependency-direction guard passed.")

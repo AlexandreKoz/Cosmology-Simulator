@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      run_mpi_job:
+        description: "Run optional MPI smoke path"
+        type: boolean
+        default: false
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+      - name: Repository hygiene checks
+        run: ./scripts/ci/check_repo_hygiene.sh
+
+  build_test_matrix:
+    needs: hygiene
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configure_preset: cpu-only-debug
+            build_preset: build-cpu-debug
+            test_preset: test-cpu-debug
+            test_regex: "-"
+            apt_packages: "g++ cmake ninja-build"
+            run_bench: "1"
+          - configure_preset: hdf5-debug
+            build_preset: build-hdf5-debug
+            test_preset: test-hdf5-debug
+            test_regex: "unit_snapshot_hdf5_schema|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip"
+            apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev"
+            run_bench: "0"
+          - configure_preset: pm-hdf5-fftw-debug
+            build_preset: build-pm-hdf5-fftw-debug
+            test_preset: test-pm-hdf5-fftw-debug
+            test_regex: "validation_regression|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|unit_pm_solver"
+            apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev"
+            run_bench: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+      - name: Configure, build, test, and archive preset artifacts
+        run: |
+          ./scripts/ci/run_preset_pipeline.sh \
+            "${{ matrix.configure_preset }}" \
+            "${{ matrix.build_preset }}" \
+            "${{ matrix.test_preset }}" \
+            "${{ matrix.test_regex }}" \
+            "ci_artifacts/${{ matrix.configure_preset }}" \
+            "${{ matrix.run_bench }}"
+      - name: Validate build metadata contract
+        run: |
+          ./scripts/ci/check_build_metadata.py \
+            "ci_artifacts/${{ matrix.configure_preset }}/cosmosim_build_metadata-${{ matrix.configure_preset }}.json" \
+            "validation/reference/ci_build_metadata_expectations_v1.json" \
+            "${{ matrix.configure_preset }}"
+      - name: Upload preset artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-${{ matrix.configure_preset }}
+          path: ci_artifacts/${{ matrix.configure_preset }}
+
+  reproducibility_gate:
+    needs: build_test_matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build
+      - name: Run reproducibility gate
+        run: ./scripts/ci/run_reproducibility_gate.sh ci_artifacts/reproducibility_gate
+      - name: Upload reproducibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reproducibility-gate
+          path: ci_artifacts/reproducibility_gate
+
+  optional_mpi_smoke:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_mpi_job)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin
+      - name: Configure and build MPI preset
+        run: |
+          cmake --preset mpi-release
+          cmake --build --preset build-mpi-release
+      - name: Run MPI smoke tests
+        run: ctest --preset test-mpi-release -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart" --output-junit ci_artifacts/ctest-mpi-release.xml
+      - name: Upload MPI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-mpi-release
+          path: ci_artifacts

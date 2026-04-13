@@ -1,0 +1,8 @@
+# CosmoSim validation input deck (representative)
+validation_case = amr_reflux_sync
+mode = cosmological_cube
+amr_enable = true
+root_dims = 4,4,4
+refinement_gradient_threshold = 1.0
+refinement_mass_threshold_code = 0.5
+reflux_enable = true

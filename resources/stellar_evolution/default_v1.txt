@@ -1,0 +1,12 @@
+# table_id = cosmosim_reference
+# table_version = v1_2026_04
+# columns:
+# age_yr return_fraction_total metal_yield_fraction_total energy_erg_per_initial_mass_code
+# return_winds return_ccsn return_snia metal_winds metal_ccsn metal_snia energy_winds energy_ccsn energy_snia
+0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+3.0e6 0.02 0.001 1.0e46 0.015 0.005 0.0 0.0003 0.0007 0.0 1.0e46 0.0 0.0
+1.0e7 0.10 0.004 6.0e48 0.055 0.045 0.0 0.0013 0.0027 0.0 3.5e47 5.65e48 0.0
+1.0e8 0.18 0.008 1.0e49 0.11 0.06 0.01 0.0033 0.0032 0.0015 7.0e47 8.3e48 1.0e48
+1.0e9 0.28 0.013 1.6e49 0.17 0.07 0.04 0.0060 0.0030 0.0040 1.2e48 9.3e48 5.0e48
+5.0e9 0.34 0.017 1.9e49 0.205 0.07 0.065 0.0080 0.0028 0.0062 1.6e48 9.5e48 7.9e48
+1.4e10 0.40 0.021 2.1e49 0.24 0.07 0.09 0.0100 0.0025 0.0085 2.0e48 9.6e48 9.5e48

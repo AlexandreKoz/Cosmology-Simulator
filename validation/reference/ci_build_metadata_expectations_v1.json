@@ -1,0 +1,58 @@
+{
+  "cpu-only-debug": {
+    "features": {
+      "mpi": false,
+      "hdf5": false,
+      "fftw": false,
+      "cuda": false,
+      "python": false,
+      "tests": true,
+      "benchmarks": true
+    },
+    "dependencies": {
+      "mpi": "disabled",
+      "hdf5": "disabled",
+      "fftw": "disabled",
+      "cuda_toolkit": "disabled",
+      "python": "disabled"
+    },
+    "required_targets": [
+      "cosmosim_core",
+      "cosmosim_gravity",
+      "cosmosim_harness"
+    ]
+  },
+  "pm-hdf5-fftw-debug": {
+    "features": {
+      "mpi": false,
+      "hdf5": true,
+      "fftw": true,
+      "cuda": false,
+      "python": false,
+      "tests": true,
+      "benchmarks": true
+    },
+    "required_targets": [
+      "cosmosim_core",
+      "cosmosim_gravity",
+      "cosmosim_io",
+      "cosmosim_harness"
+    ]
+  },
+  "hdf5-debug": {
+    "features": {
+      "mpi": false,
+      "hdf5": true,
+      "fftw": false,
+      "cuda": false,
+      "python": false,
+      "tests": true,
+      "benchmarks": true
+    },
+    "required_targets": [
+      "cosmosim_core",
+      "cosmosim_io",
+      "cosmosim_harness"
+    ]
+  }
+}

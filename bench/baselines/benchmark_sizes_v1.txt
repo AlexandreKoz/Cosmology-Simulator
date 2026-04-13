@@ -1,0 +1,30 @@
+# benchmark_sizes_v1
+# Stable benchmark sizes and harness defaults for bench/*_kernel and bench_mini_run_pipeline.
+# These values are the reproducibility contract for benchmark comparisons.
+
+[execution]
+default_warmup_iterations=1
+default_measurement_iterations=4
+threads=1
+mpi_ranks=1
+device=cpu
+
+[gravity]
+particle_count=65536
+active_count=16384
+pm_grid_shape=64x64x64
+
+[hydro]
+cell_count=65536
+
+[amr]
+root_patch_cells_per_dim=8
+measurement_steps=64
+
+[io]
+restart_particle_count=65536
+
+[mini_run]
+particle_count=32768
+hydro_cells=4096
+measurement_steps=4

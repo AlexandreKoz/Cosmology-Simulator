@@ -1,0 +1,126 @@
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+#include "cosmosim/gravity/tree_gravity.hpp"
+
+namespace {
+
+constexpr double k_tolerance = 1.0e-10;
+
+void testTwoBodyForce() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 0.6;
+  options.gravitational_constant_code = 2.0;
+  options.max_leaf_size = 1;
+  options.softening.epsilon_comoving = 0.1;
+
+  const std::vector<double> pos_x{0.0, 1.0};
+  const std::vector<double> pos_y{0.0, 0.0};
+  const std::vector<double> pos_z{0.0, 0.0};
+  const std::vector<double> mass{1.0, 3.0};
+
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+
+  const std::vector<std::uint32_t> active{0U};
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(1, 0.0);
+  std::vector<double> az(1, 0.0);
+
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, nullptr);
+
+  const double expected = options.gravitational_constant_code * mass[1] /
+      std::pow(1.0 + options.softening.epsilon_comoving * options.softening.epsilon_comoving, 1.5);
+  assert(std::abs(ax[0] - expected) < k_tolerance);
+  assert(std::abs(ay[0]) < k_tolerance);
+  assert(std::abs(az[0]) < k_tolerance);
+}
+
+void testForceSymmetry() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 0.5;
+  options.gravitational_constant_code = 1.0;
+  options.max_leaf_size = 1;
+  options.softening.epsilon_comoving = 0.0;
+
+  const std::vector<double> pos_x{-0.5, 0.5};
+  const std::vector<double> pos_y{0.0, 0.0};
+  const std::vector<double> pos_z{0.0, 0.0};
+  const std::vector<double> mass{2.0, 2.0};
+
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+
+  const std::vector<std::uint32_t> active{0U, 1U};
+  std::vector<double> ax(2, 0.0);
+  std::vector<double> ay(2, 0.0);
+  std::vector<double> az(2, 0.0);
+
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, nullptr);
+
+  assert(std::abs(ax[0] + ax[1]) < k_tolerance);
+  assert(std::abs(ay[0] + ay[1]) < k_tolerance);
+  assert(std::abs(az[0] + az[1]) < k_tolerance);
+}
+
+void testOpeningCriterionBehavior() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.gravitational_constant_code = 1.0;
+  options.max_leaf_size = 1;
+
+  const std::vector<double> pos_x{-1.0, -0.9, 0.95, 1.0};
+  const std::vector<double> pos_y{0.0, 0.02, -0.01, 0.0};
+  const std::vector<double> pos_z{0.0, 0.0, 0.0, 0.0};
+  const std::vector<double> mass(4, 1.0);
+  const std::vector<std::uint32_t> active{0U};
+
+  options.opening_theta = 0.35;
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+  cosmosim::gravity::TreeGravityProfile strict_profile;
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(1, 0.0);
+  std::vector<double> az(1, 0.0);
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &strict_profile);
+
+  options.opening_theta = 1.5;
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+  cosmosim::gravity::TreeGravityProfile relaxed_profile;
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &relaxed_profile);
+
+  assert(strict_profile.visited_nodes >= relaxed_profile.visited_nodes);
+  assert(strict_profile.accepted_nodes >= relaxed_profile.accepted_nodes);
+}
+
+void testMultipoleAccumulation() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 2;
+
+  const std::vector<double> pos_x{0.0, 2.0, 4.0};
+  const std::vector<double> pos_y{0.0, 0.0, 0.0};
+  const std::vector<double> pos_z{0.0, 0.0, 0.0};
+  const std::vector<double> mass{1.0, 2.0, 3.0};
+
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+
+  const auto& nodes = solver.nodes();
+  assert(nodes.size() > 0);
+  const double total_mass = 1.0 + 2.0 + 3.0;
+  const double expected_com_x = (1.0 * 0.0 + 2.0 * 2.0 + 3.0 * 4.0) / total_mass;
+  assert(std::abs(nodes.mass_code[0] - total_mass) < k_tolerance);
+  assert(std::abs(nodes.com_x_comoving[0] - expected_com_x) < k_tolerance);
+}
+
+}  // namespace
+
+int main() {
+  testTwoBodyForce();
+  testForceSymmetry();
+  testOpeningCriterionBehavior();
+  testMultipoleAccumulation();
+  return 0;
+}

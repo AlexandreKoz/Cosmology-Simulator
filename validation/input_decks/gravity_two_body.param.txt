@@ -1,0 +1,9 @@
+# CosmoSim validation input deck (representative)
+validation_case = gravity_two_body
+mode = isolated
+gravity_solver = tree
+tree_opening_theta = 0.2
+softening_epsilon_comov = 1.0e-6
+units_length = code
+units_mass = code
+units_time = code

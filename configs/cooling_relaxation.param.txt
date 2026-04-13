@@ -1,0 +1,23 @@
+[mode]
+mode = isolated_galaxy
+ic_file = ics.hdf5
+hydro_boundary = open
+gravity_boundary = isolated_monopole
+
+[physics]
+enable_cooling = true
+cooling_model = primordial_plus_metal_table
+uv_background_model = hm12
+self_shielding_model = rahmati13_like
+metal_line_table_path = tables/metal_line_cooling_example.txt
+temperature_floor_k = 100.0
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 0.02
+max_global_steps = 256
+
+[output]
+run_name = cooling_relaxation
+output_stem = snapshot
+restart_stem = restart

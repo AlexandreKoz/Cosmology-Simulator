@@ -1,0 +1,186 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "displayName": "Base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "COSMOSIM_PRESET_NAME": "${presetName}",
+        "CMAKE_CXX_STANDARD": "20",
+        "COSMOSIM_ENABLE_TESTS": "ON",
+        "COSMOSIM_ENABLE_BENCHMARKS": "ON",
+        "COSMOSIM_ENABLE_MPI": "OFF",
+        "COSMOSIM_ENABLE_HDF5": "OFF",
+        "COSMOSIM_ENABLE_FFTW": "OFF",
+        "COSMOSIM_ENABLE_CUDA": "OFF",
+        "COSMOSIM_ENABLE_PYTHON": "OFF",
+        "COSMOSIM_ENABLE_LTO": "OFF"
+      }
+    },
+    {
+      "name": "cpu-only-debug",
+      "inherits": [
+        "base"
+      ],
+      "displayName": "CPU Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "hdf5-debug",
+      "inherits": [
+        "cpu-only-debug"
+      ],
+      "displayName": "HDF5 Debug",
+      "description": "Developer workflow for snapshot/restart schema and provenance work.",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_HDF5": "ON"
+      }
+    },
+    {
+      "name": "pm-hdf5-fftw-debug",
+      "inherits": [
+        "hdf5-debug"
+      ],
+      "displayName": "PM + HDF5 + FFTW Debug",
+      "description": "PM/TreePM validation workflow with HDF5 I/O and FFTW enabled.",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_FFTW": "ON"
+      }
+    },
+    {
+      "name": "python-debug",
+      "inherits": [
+        "cpu-only-debug"
+      ],
+      "displayName": "Python Debug",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "cpu-only-release",
+      "inherits": [
+        "base"
+      ],
+      "displayName": "CPU Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "asan-debug",
+      "inherits": [
+        "base"
+      ],
+      "displayName": "ASan Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "mpi-release",
+      "inherits": [
+        "cpu-only-release"
+      ],
+      "displayName": "MPI Release",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_MPI": "ON"
+      }
+    },
+    {
+      "name": "cuda-release",
+      "inherits": [
+        "cpu-only-release"
+      ],
+      "displayName": "CUDA Release",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_CUDA": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-cpu-debug",
+      "configurePreset": "cpu-only-debug"
+    },
+    {
+      "name": "build-cpu-release",
+      "configurePreset": "cpu-only-release"
+    },
+    {
+      "name": "build-hdf5-debug",
+      "configurePreset": "hdf5-debug"
+    },
+    {
+      "name": "build-pm-hdf5-fftw-debug",
+      "configurePreset": "pm-hdf5-fftw-debug"
+    },
+    {
+      "name": "build-mpi-release",
+      "configurePreset": "mpi-release"
+    },
+    {
+      "name": "build-cuda-release",
+      "configurePreset": "cuda-release"
+    },
+    {
+      "name": "build-python-debug",
+      "configurePreset": "python-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-cpu-debug",
+      "configurePreset": "cpu-only-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-hdf5-debug",
+      "configurePreset": "hdf5-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-pm-hdf5-fftw-debug",
+      "configurePreset": "pm-hdf5-fftw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-mpi-release",
+      "configurePreset": "mpi-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-cuda-release",
+      "configurePreset": "cuda-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-python-debug",
+      "configurePreset": "python-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

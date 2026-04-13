@@ -1,0 +1,48 @@
+set(required_docs
+  "@CMAKE_SOURCE_DIR@/README.md"
+  "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md"
+  "@CMAKE_SOURCE_DIR@/CONTRIBUTING.md"
+  "@CMAKE_SOURCE_DIR@/docs/build_instructions.md"
+  "@CMAKE_SOURCE_DIR@/docs/configuration.md"
+  "@CMAKE_SOURCE_DIR@/docs/output_schema.md"
+  "@CMAKE_SOURCE_DIR@/docs/validation_plan.md"
+  "@CMAKE_SOURCE_DIR@/docs/profiling.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_scope.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_validation_summary.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_benchmark_summary.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/known_issues.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/release_checklist.md"
+  "@CMAKE_SOURCE_DIR@/docs/architecture/overview.md"
+  "@CMAKE_SOURCE_DIR@/docs/architecture/developer_workflow_contract.md")
+
+foreach(doc_file IN LISTS required_docs)
+  if(NOT EXISTS "${doc_file}")
+    message(FATAL_ERROR "Required documentation file missing: ${doc_file}")
+  endif()
+endforeach()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/configuration.md" config_doc)
+if(NOT config_doc MATCHES "zoom_in")
+  message(FATAL_ERROR "Configuration guide must document mode.mode")
+endif()
+if(NOT config_doc MATCHES "enable_diagnostics")
+  message(FATAL_ERROR "Configuration guide must document analysis.enable_diagnostics")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/output_schema.md" schema_doc)
+if(NOT schema_doc MATCHES "gadget_arepo_v1")
+  message(FATAL_ERROR "Output schema guide must mention gadget_arepo_v1")
+endif()
+if(NOT schema_doc MATCHES "cosmosim_restart_v2")
+  message(FATAL_ERROR "Output schema guide must mention cosmosim_restart_v2")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/profiling.md" profiling_doc)
+if(NOT profiling_doc MATCHES "bench_docs_reference_scan")
+  message(FATAL_ERROR "Profiling guide must mention bench_docs_reference_scan")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md" release_notes_doc)
+if(NOT release_notes_doc MATCHES "release_manifest_v1")
+  message(FATAL_ERROR "Release notes must mention release_manifest_v1")
+endif()

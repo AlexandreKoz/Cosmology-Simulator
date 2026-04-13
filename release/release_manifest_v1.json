@@ -1,0 +1,27 @@
+{
+  "manifest_schema": "release_manifest_v1",
+  "project": "cosmosim",
+  "release_id": "v0.1.0-initial",
+  "release_date_utc": "2026-04-08",
+  "source_version": "0.1.0",
+  "naming_rule_version": "lower_snake_v1",
+  "snapshot_schema": "gadget_arepo_v1",
+  "restart_schema": "cosmosim_restart_v2",
+  "provenance_schema": "provenance_v1",
+  "config_schema": "param_txt_v1",
+  "supported_modes": [
+    "zoom_in",
+    "cosmo_cube",
+    "isolated_galaxy",
+    "isolated_cluster"
+  ],
+  "production_ready_paths": {
+    "cpu_only": true,
+    "mpi": true,
+    "gpu_cuda": false
+  },
+  "experimental_modules": [
+    "black_hole_agn",
+    "pm_cuda"
+  ]
+}

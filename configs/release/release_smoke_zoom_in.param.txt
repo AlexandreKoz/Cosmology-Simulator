@@ -1,0 +1,38 @@
+schema_version = 1
+
+[mode]
+mode = zoom_in
+ic_file = generated
+zoom_high_res_region = false
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 0.01
+max_global_steps = 4
+hierarchical_max_rung = 8
+gravity_solver = treepm
+hydro_solver = godunov_fv
+
+[physics]
+enable_cooling = true
+enable_star_formation = true
+enable_feedback = true
+enable_black_hole_agn = false
+
+[analysis]
+enable_diagnostics = true
+enable_halo_workflow = true
+run_health_interval_steps = 1
+science_light_interval_steps = 2
+science_heavy_interval_steps = 4
+
+[output]
+run_name = release_smoke_zoom_in
+output_directory = outputs/release_smoke_zoom_in
+output_stem = snapshot
+restart_stem = restart
+snapshot_interval_steps = 1
+write_restarts = true
+
+[units]
+coordinate_frame = comoving

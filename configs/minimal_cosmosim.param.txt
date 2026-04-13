@@ -1,0 +1,14 @@
+# Minimal valid CosmoSim parameter file with the user-facing GADGET/AREPO-style workflow.
+# This file intentionally uses only required values and relies on defaults for the rest.
+
+schema_version = 1
+
+[mode]
+mode = zoom_in
+ic_file = ics.hdf5
+zoom_high_res_region = false
+
+[output]
+run_name = minimal_smoke
+output_stem = snapshot
+restart_stem = restart

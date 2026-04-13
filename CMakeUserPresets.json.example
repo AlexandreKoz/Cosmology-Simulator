@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "local-clang-debug",
+      "inherits": ["cpu-only-debug"],
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "COSMOSIM_ENABLE_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "local-hdf5-fftw-debug",
+      "inherits": ["pm-hdf5-fftw-debug"],
+      "cacheVariables": {
+        "HDF5_ROOT": "/opt/hdf5",
+        "PKG_CONFIG_PATH": "/opt/fftw/lib/pkgconfig"
+      }
+    }
+  ]
+}

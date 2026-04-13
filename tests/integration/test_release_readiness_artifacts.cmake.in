@@ -1,0 +1,62 @@
+set(release_docs
+  "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_scope.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_validation_summary.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_benchmark_summary.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/known_issues.md"
+  "@CMAKE_SOURCE_DIR@/docs/releases/release_checklist.md"
+  "@CMAKE_SOURCE_DIR@/release/release_manifest_v1.json")
+
+foreach(release_file IN LISTS release_docs)
+  if(NOT EXISTS "${release_file}")
+    message(FATAL_ERROR "Missing release-readiness artifact: ${release_file}")
+  endif()
+endforeach()
+
+file(READ "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md" release_notes)
+if(NOT release_notes MATCHES "v0.1.0-initial")
+  message(FATAL_ERROR "Release notes must include release id v0.1.0-initial")
+endif()
+if(NOT release_notes MATCHES "release_manifest_v1")
+  message(FATAL_ERROR "Release notes must reference release_manifest_v1")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_scope.md" release_scope)
+if(NOT release_scope MATCHES "zoom_in")
+  message(FATAL_ERROR "Release scope must include zoom_in mode")
+endif()
+if(NOT release_scope MATCHES "experimental")
+  message(FATAL_ERROR "Release scope must explicitly identify experimental paths")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/release/release_manifest_v1.json" release_manifest)
+if(NOT release_manifest MATCHES "\"manifest_schema\"[ \t]*:[ \t]*\"release_manifest_v1\"")
+  message(FATAL_ERROR "Release manifest must declare release_manifest_v1 schema")
+endif()
+if(NOT release_manifest MATCHES "\"provenance_schema\"[ \t]*:[ \t]*\"provenance_v1\"")
+  message(FATAL_ERROR "Release manifest must declare provenance_v1")
+endif()
+if(NOT release_manifest MATCHES "\"snapshot_schema\"[ \t]*:[ \t]*\"gadget_arepo_v1\"")
+  message(FATAL_ERROR "Release manifest must declare gadget_arepo_v1 snapshot schema")
+endif()
+if(NOT release_manifest MATCHES "\"restart_schema\"[ \t]*:[ \t]*\"cosmosim_restart_v2\"")
+  message(FATAL_ERROR "Release manifest must declare cosmosim_restart_v2 restart schema")
+endif()
+
+set(release_configs
+  "@CMAKE_SOURCE_DIR@/configs/release/release_smoke_zoom_in.param.txt"
+  "@CMAKE_SOURCE_DIR@/configs/release/release_smoke_isolated_galaxy.param.txt"
+  "@CMAKE_SOURCE_DIR@/configs/release/release_smoke_cosmo_cube.param.txt")
+
+foreach(config_file IN LISTS release_configs)
+  if(NOT EXISTS "${config_file}")
+    message(FATAL_ERROR "Missing release example config: ${config_file}")
+  endif()
+  file(READ "${config_file}" config_text)
+  if(NOT config_text MATCHES "schema_version[ \t]*=[ \t]*1")
+    message(FATAL_ERROR "Release config must pin schema_version=1: ${config_file}")
+  endif()
+  if(NOT config_text MATCHES "coordinate_frame[ \t]*=[ \t]*comoving")
+    message(FATAL_ERROR "Release config must declare comoving frame: ${config_file}")
+  endif()
+endforeach()

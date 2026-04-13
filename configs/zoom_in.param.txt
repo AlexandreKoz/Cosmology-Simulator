@@ -1,0 +1,65 @@
+schema_version = 1
+
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = comoving
+
+[mode]
+mode = zoom_in
+ic_file = zoom_in_ics.hdf5
+zoom_high_res_region = true
+zoom_region_file = zoom_lagrangian_region.hdf5
+hydro_boundary = periodic
+gravity_boundary = periodic
+
+[cosmology]
+omega_matter = 0.3089
+omega_lambda = 0.6911
+omega_baryon = 0.0486
+hubble_param = 0.6774
+sigma8 = 0.8159
+scalar_index_ns = 0.9667
+box_size = 50 mpc
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 1.0
+max_global_steps = 4096
+hierarchical_max_rung = 14
+amr_max_level = 12
+gravity_softening = 0.6 kpc
+gravity_solver = treepm
+hydro_solver = godunov_fv
+
+[physics]
+enable_cooling = true
+enable_star_formation = true
+enable_feedback = true
+reionization_model = hm12
+uv_background_model = hm12
+self_shielding_model = none
+cooling_model = primordial
+temperature_floor_k = 100.0
+sf_density_threshold_code = 10.0
+sf_temperature_threshold_k = 10000.0
+sf_min_converging_flow_rate_code = 0.0
+sf_epsilon_ff = 0.01
+sf_min_star_particle_mass_code = 0.1
+sf_stochastic_spawning = true
+sf_random_seed = 123456789
+
+[output]
+run_name = zoom_in_reference
+output_directory = outputs/zoom_in
+output_stem = snapshot
+restart_stem = restart
+snapshot_interval_steps = 32
+write_restarts = true
+
+[parallel]
+mpi_ranks_expected = 4
+omp_threads = 8
+gpu_devices = 0
+deterministic_reduction = true

@@ -1,0 +1,23 @@
+set(source_dir "@CMAKE_SOURCE_DIR@")
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --preset cpu-only-debug
+  WORKING_DIRECTORY "${source_dir}"
+  RESULT_VARIABLE cpu_result
+  OUTPUT_VARIABLE cpu_stdout
+  ERROR_VARIABLE cpu_stderr)
+
+if(NOT cpu_result EQUAL 0)
+  message(FATAL_ERROR "cpu-only-debug preset configure failed:\n${cpu_stdout}\n${cpu_stderr}")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --preset python-debug
+  WORKING_DIRECTORY "${source_dir}"
+  RESULT_VARIABLE feature_result
+  OUTPUT_VARIABLE feature_stdout
+  ERROR_VARIABLE feature_stderr)
+
+if(NOT feature_result EQUAL 0)
+  message(FATAL_ERROR "python-debug preset configure failed:\n${feature_stdout}\n${feature_stderr}")
+endif()

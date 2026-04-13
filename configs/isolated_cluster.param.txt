@@ -1,0 +1,45 @@
+schema_version = 1
+
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = comoving
+
+[mode]
+mode = isolated_cluster
+ic_file = isolated_cluster_ics.hdf5
+zoom_high_res_region = false
+hydro_boundary = reflective
+gravity_boundary = isolated_monopole
+
+[cosmology]
+omega_matter = 0.31
+omega_lambda = 0.69
+omega_baryon = 0.0486
+hubble_param = 0.677
+sigma8 = 0.81
+scalar_index_ns = 0.966
+box_size = 10 mpc
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 1.0
+max_global_steps = 2500
+hierarchical_max_rung = 11
+amr_max_level = 9
+gravity_softening = 2.0 kpc
+
+[output]
+run_name = isolated_cluster_reference
+output_directory = outputs/isolated_cluster
+output_stem = snapshot
+restart_stem = restart
+snapshot_interval_steps = 40
+write_restarts = true
+
+[parallel]
+mpi_ranks_expected = 2
+omp_threads = 8
+gpu_devices = 0
+deterministic_reduction = true

@@ -1,0 +1,50 @@
+include_guard(GLOBAL)
+
+function(cosmosim_find_fftw out_target)
+  set(COSMOSIM_FFTW_TARGET "" PARENT_SCOPE)
+
+  find_package(FFTW3 CONFIG QUIET)
+  if(FFTW3_FOUND)
+    if(TARGET FFTW3::fftw3)
+      set(COSMOSIM_FFTW_TARGET "FFTW3::fftw3")
+    elseif(TARGET FFTW3::fftw)
+      set(COSMOSIM_FFTW_TARGET "FFTW3::fftw")
+    endif()
+
+    if(NOT "${FFTW3_VERSION}" STREQUAL "")
+      set(FFTW_VERSION "${FFTW3_VERSION}" PARENT_SCOPE)
+    endif()
+  endif()
+
+  if("${COSMOSIM_FFTW_TARGET}" STREQUAL "")
+    find_package(FFTW3 QUIET MODULE)
+    if(FFTW3_FOUND AND TARGET FFTW3::fftw3)
+      set(COSMOSIM_FFTW_TARGET "FFTW3::fftw3")
+      if(NOT "${FFTW3_VERSION}" STREQUAL "")
+        set(FFTW_VERSION "${FFTW3_VERSION}" PARENT_SCOPE)
+      endif()
+    endif()
+  endif()
+
+  if("${COSMOSIM_FFTW_TARGET}" STREQUAL "")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(FFTW_PKG QUIET IMPORTED_TARGET fftw3)
+      if(FFTW_PKG_FOUND)
+        set(COSMOSIM_FFTW_TARGET "PkgConfig::FFTW_PKG")
+        if(NOT "${FFTW_PKG_VERSION}" STREQUAL "")
+          set(FFTW_VERSION "${FFTW_PKG_VERSION}" PARENT_SCOPE)
+        endif()
+      endif()
+    endif()
+  endif()
+
+  if("${COSMOSIM_FFTW_TARGET}" STREQUAL "")
+    message(FATAL_ERROR
+      "COSMOSIM_ENABLE_FFTW=ON but FFTW3 was not found. Tried CMake package config, module lookup, and pkg-config fallback.\n"
+      "Install FFTW3 development packages and either provide FFTW3_DIR/FFTW3_ROOT or expose fftw3.pc via PKG_CONFIG_PATH.\n"
+      "Recommended validation preset: pm-hdf5-fftw-debug.")
+  endif()
+
+  set(${out_target} "${COSMOSIM_FFTW_TARGET}" PARENT_SCOPE)
+endfunction()

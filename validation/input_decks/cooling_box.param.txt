@@ -1,0 +1,7 @@
+# CosmoSim validation input deck (representative)
+validation_case = cooling_box
+mode = isolated
+cooling_enable = true
+uv_background_model = none
+temperature_floor_k = 100.0
+max_subcycles = 32

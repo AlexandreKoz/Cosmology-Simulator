@@ -1,0 +1,162 @@
+#pragma once
+
+#include <complex>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "cosmosim/core/config.hpp"
+#include "cosmosim/core/execution_policy.hpp"
+
+namespace cosmosim::gravity {
+
+enum class PmAssignmentScheme {
+  kCic,
+  kTsc,
+};
+
+struct PmGridShape {
+  std::size_t nx = 0;
+  std::size_t ny = 0;
+  std::size_t nz = 0;
+
+  [[nodiscard]] std::size_t cellCount() const;
+  [[nodiscard]] bool isValid() const;
+};
+
+enum class PmDataResidencyPolicy {
+  kHostOnly,
+  kPreferDevice,
+};
+
+struct PmSolveOptions {
+  double box_size_mpc_comoving = 0.0;
+  double scale_factor = 1.0;
+  double gravitational_constant_code = 1.0;
+  PmAssignmentScheme assignment_scheme = PmAssignmentScheme::kCic;
+  bool enable_window_deconvolution = false;
+  core::ExecutionPolicy execution_policy = core::ExecutionPolicy::kHostSerial;
+  PmDataResidencyPolicy data_residency = PmDataResidencyPolicy::kHostOnly;
+  // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
+  double tree_pm_split_scale_comoving = 0.0;
+};
+
+struct PmProfileEvent {
+  std::uint64_t bytes_moved = 0;
+  double assign_ms = 0.0;
+  double fft_forward_ms = 0.0;
+  double poisson_ms = 0.0;
+  double gradient_ms = 0.0;
+  double fft_inverse_ms = 0.0;
+  double interpolate_ms = 0.0;
+  double transfer_h2d_ms = 0.0;
+  double transfer_d2h_ms = 0.0;
+  double device_kernel_ms = 0.0;
+};
+
+class PmProfiler {
+ public:
+  void reset();
+  void append(const PmProfileEvent& event);
+  [[nodiscard]] const PmProfileEvent& totals() const;
+
+ private:
+  PmProfileEvent m_totals{};
+};
+
+class PmGridStorage {
+ public:
+  explicit PmGridStorage(PmGridShape shape);
+
+  [[nodiscard]] const PmGridShape& shape() const;
+
+  [[nodiscard]] std::span<double> density();
+  [[nodiscard]] std::span<const double> density() const;
+
+  [[nodiscard]] std::span<double> potential();
+  [[nodiscard]] std::span<const double> potential() const;
+
+  [[nodiscard]] std::span<double> force_x();
+  [[nodiscard]] std::span<const double> force_x() const;
+
+  [[nodiscard]] std::span<double> force_y();
+  [[nodiscard]] std::span<const double> force_y() const;
+
+  [[nodiscard]] std::span<double> force_z();
+  [[nodiscard]] std::span<const double> force_z() const;
+
+  [[nodiscard]] std::size_t linearIndex(std::size_t ix, std::size_t iy, std::size_t iz) const;
+  void clear();
+
+ private:
+  PmGridShape m_shape;
+  std::vector<double> m_density;
+  std::vector<double> m_potential;
+  std::vector<double> m_force_x;
+  std::vector<double> m_force_y;
+  std::vector<double> m_force_z;
+};
+
+class PmSolver {
+ public:
+  explicit PmSolver(PmGridShape shape);
+  ~PmSolver();
+  PmSolver(PmSolver&&) noexcept;
+  PmSolver& operator=(PmSolver&&) noexcept;
+  PmSolver(const PmSolver&) = delete;
+  PmSolver& operator=(const PmSolver&) = delete;
+
+  [[nodiscard]] const PmGridShape& shape() const;
+
+  void assignDensity(
+      PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
+
+  void solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
+
+  void interpolateForces(
+      const PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<double> accel_x,
+      std::span<double> accel_y,
+      std::span<double> accel_z,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
+
+  void solveForParticles(
+      PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      std::span<double> accel_x,
+      std::span<double> accel_y,
+      std::span<double> accel_z,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr);
+
+  [[nodiscard]] static bool fftBackendAvailable();
+  [[nodiscard]] static bool cudaBackendAvailable();
+  [[nodiscard]] static std::string fftBackendName();
+
+ private:
+  class Impl;
+  PmGridShape m_shape;
+  std::unique_ptr<Impl> m_impl;
+};
+
+[[nodiscard]] bool treePmSupportedByBuild();
+void requireTreePmSupportOrThrow(core::GravitySolver gravity_solver);
+
+}  // namespace cosmosim::gravity

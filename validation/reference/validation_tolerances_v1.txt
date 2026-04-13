@@ -1,0 +1,20 @@
+# Validation tolerance table for CosmoSim validation ladder.
+# schema_version = 1
+# Policy: thresholds are conservative pass/fail envelopes for routine CI-sized runs.
+# Per-problem reference outputs are tracked in validation/reference/ with explicit version suffixes.
+
+gravity_two_body.max_relative_accel_error = 5.0e-3
+gravity_pm_single_mode.min_cosine_similarity = 5.0e-2
+
+gravity_tree_opening.mean_relative_error_theta_0p8 = 9.0e-2
+gravity_tree_opening.mean_relative_error_theta_0p6 = 6.0e-2
+gravity_tree_opening.mean_relative_error_theta_0p4 = 3.5e-2
+
+hydro_sod_like.mass_abs_error = 1.0e-10
+hydro_sine_wave.l1_density_error_n64 = 2.0e-1
+hydro_sine_wave.l1_density_error_n128 = 1.5e-1
+hydro_sine_wave.observed_order_min = 0.15
+
+amr_reflux.mass_correction_abs = 1.0e-12
+cooling_box.total_energy_nonincrease_eps = 1.0e-12
+star_formation.mass_budget_abs = 1.0e-9

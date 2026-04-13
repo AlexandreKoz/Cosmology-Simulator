@@ -1,0 +1,20 @@
+if(NOT EXISTS "@CMAKE_BINARY_DIR@/cosmosim_feature_summary.txt")
+  message(FATAL_ERROR "Feature summary text file was not generated.")
+endif()
+
+if(NOT EXISTS "@CMAKE_BINARY_DIR@/cosmosim_build_metadata.json")
+  message(FATAL_ERROR "Build metadata JSON file was not generated.")
+endif()
+
+file(READ "@CMAKE_BINARY_DIR@/cosmosim_feature_summary.txt" feature_summary)
+if(NOT feature_summary MATCHES "project=cosmosim")
+  message(FATAL_ERROR "Feature summary does not contain project marker.")
+endif()
+
+if(NOT feature_summary MATCHES "targets=.*cosmosim_core")
+  message(FATAL_ERROR "Feature summary does not list cosmosim_core target.")
+endif()
+
+if(NOT feature_summary MATCHES "feature_tests=true|feature_tests=false")
+  message(FATAL_ERROR "Feature summary does not report test feature state.")
+endif()

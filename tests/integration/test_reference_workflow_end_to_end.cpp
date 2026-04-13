@@ -1,0 +1,40 @@
+#include <cassert>
+#include <filesystem>
+#include <sstream>
+
+#include "cosmosim/cosmosim.hpp"
+
+int main() {
+  std::stringstream stream;
+  stream << "schema_version = 1\n\n";
+  stream << "[mode]\n";
+  stream << "mode = zoom_in\n";
+  stream << "ic_file = generated\n";
+  stream << "zoom_high_res_region = false\n\n";
+  stream << "[output]\n";
+  stream << "run_name = reference_integration_test\n";
+  stream << "output_directory = integration_outputs\n";
+  stream << "output_stem = snapshot\n";
+  stream << "restart_stem = restart\n";
+
+  const cosmosim::core::FrozenConfig frozen =
+      cosmosim::core::loadFrozenConfigFromString(stream.str(), "test_reference_workflow_end_to_end");
+
+  cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+  const std::filesystem::path output_dir =
+      std::filesystem::temp_directory_path() / "cosmosim_reference_workflow_test";
+  const cosmosim::workflows::ReferenceWorkflowReport report =
+      runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+
+  assert(report.config_compatible);
+  assert(report.schema_compatible);
+  assert(report.canonical_stage_order);
+  assert(report.stage_sequence.size() == 7);
+  assert(report.stage_sequence.front() == "gravity_kick_pre");
+  assert(report.stage_sequence.back() == "output_check");
+  assert(std::filesystem::exists(report.profiler_json_path));
+  assert(std::filesystem::exists(report.profiler_csv_path));
+
+  std::filesystem::remove_all(output_dir);
+  return 0;
+}

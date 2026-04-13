@@ -1,0 +1,423 @@
+#include "cosmosim/parallel/distributed_memory.hpp"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "cosmosim/core/build_config.hpp"
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
+
+namespace cosmosim::parallel {
+namespace {
+
+[[nodiscard]] double clampUnit(double value) {
+  if (value <= 0.0) {
+    return 0.0;
+  }
+  if (value >= 1.0) {
+    return std::nextafter(1.0, 0.0);
+  }
+  return value;
+}
+
+[[nodiscard]] std::uint32_t quantize10bit(double coordinate, double min_coord, double max_coord) {
+  const double extent = max_coord - min_coord;
+  if (!(extent > 0.0)) {
+    throw std::invalid_argument("decomposition domain extents must be positive");
+  }
+  const double normalized = clampUnit((coordinate - min_coord) / extent);
+  constexpr double k_scale = 1024.0;
+  const double scaled = std::floor(normalized * k_scale);
+  const auto q = static_cast<std::uint32_t>(scaled);
+  return std::min<std::uint32_t>(q, 1023U);
+}
+
+[[nodiscard]] std::uint64_t expandBits3d(std::uint32_t x) {
+  std::uint64_t value = x & 0x3ffU;
+  value = (value | (value << 16)) & 0x30000ffU;
+  value = (value | (value << 8)) & 0x300f00fU;
+  value = (value | (value << 4)) & 0x30c30c3U;
+  value = (value | (value << 2)) & 0x9249249U;
+  return value;
+}
+
+[[nodiscard]] std::uint64_t mortonKey3d(std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+  return (expandBits3d(z) << 2U) | (expandBits3d(y) << 1U) | expandBits3d(x);
+}
+
+[[nodiscard]] double weightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
+  const double work_term = std::max(0.0, item.work_units);
+  const double memory_term = static_cast<double>(item.memory_bytes);
+  return config.work_weight * work_term + config.memory_weight * memory_term;
+}
+
+template <typename T>
+void appendPod(std::vector<std::uint8_t>& bytes, const T& value) {
+  const std::size_t old_size = bytes.size();
+  bytes.resize(old_size + sizeof(T));
+  std::memcpy(bytes.data() + old_size, &value, sizeof(T));
+}
+
+template <typename T>
+[[nodiscard]] T readPod(const std::vector<std::uint8_t>& bytes, std::size_t* offset) {
+  if (*offset + sizeof(T) > bytes.size()) {
+    throw std::runtime_error("ghost buffer decode overflow");
+  }
+  T value{};
+  std::memcpy(&value, bytes.data() + *offset, sizeof(T));
+  *offset += sizeof(T);
+  return value;
+}
+
+[[nodiscard]] std::vector<std::string> splitLines(const std::string& text) {
+  std::vector<std::string> lines;
+  std::stringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+}  // namespace
+
+DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem> items, const DecompositionConfig& config) {
+  if (config.world_size <= 0) {
+    throw std::invalid_argument("world_size must be positive");
+  }
+  if (config.work_weight < 0.0 || config.memory_weight < 0.0) {
+    throw std::invalid_argument("decomposition weights must be non-negative");
+  }
+
+  struct KeyedItem {
+    std::size_t index = 0;
+    std::uint64_t morton_key = 0;
+    double weighted_load = 0.0;
+  };
+
+  std::vector<KeyedItem> keyed(items.size());
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const std::uint32_t qx = quantize10bit(items[i].x_comov, config.domain_x_min_comov, config.domain_x_max_comov);
+    const std::uint32_t qy = quantize10bit(items[i].y_comov, config.domain_y_min_comov, config.domain_y_max_comov);
+    const std::uint32_t qz = quantize10bit(items[i].z_comov, config.domain_z_min_comov, config.domain_z_max_comov);
+    keyed[i] = KeyedItem{
+        .index = i,
+        .morton_key = mortonKey3d(qx, qy, qz),
+        .weighted_load = weightedLoad(items[i], config),
+    };
+  }
+
+  std::stable_sort(keyed.begin(), keyed.end(), [&](const KeyedItem& a, const KeyedItem& b) {
+    if (a.morton_key != b.morton_key) {
+      return a.morton_key < b.morton_key;
+    }
+    return items[a.index].entity_id < items[b.index].entity_id;
+  });
+
+  DecompositionPlan plan;
+  plan.owning_rank_by_item.assign(items.size(), 0);
+  plan.sorted_indices.resize(items.size());
+  plan.ranges_by_rank.assign(static_cast<std::size_t>(config.world_size), RankRange{});
+  plan.metrics.weighted_load_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.memory_bytes_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+
+  const double total_load = std::accumulate(
+      keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
+  const double target_per_rank = (config.world_size > 0) ? total_load / static_cast<double>(config.world_size) : 0.0;
+
+  int current_rank = 0;
+  double current_prefix_load = 0.0;
+  std::size_t rank_begin = 0;
+
+  for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
+    const std::size_t original_index = keyed[sorted_pos].index;
+    plan.sorted_indices[sorted_pos] = original_index;
+
+    while (current_rank + 1 < config.world_size &&
+           current_prefix_load >= target_per_rank * static_cast<double>(current_rank + 1) &&
+           sorted_pos > rank_begin) {
+      plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{.begin_sorted = rank_begin, .end_sorted = sorted_pos};
+      ++current_rank;
+      rank_begin = sorted_pos;
+    }
+
+    plan.owning_rank_by_item[original_index] = current_rank;
+    plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += keyed[sorted_pos].weighted_load;
+    plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
+    current_prefix_load += keyed[sorted_pos].weighted_load;
+  }
+
+  plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};
+  for (int rank = current_rank + 1; rank < config.world_size; ++rank) {
+    plan.ranges_by_rank[static_cast<std::size_t>(rank)] = RankRange{.begin_sorted = keyed.size(), .end_sorted = keyed.size()};
+  }
+
+  const auto max_load_it = std::max_element(plan.metrics.weighted_load_by_rank.begin(), plan.metrics.weighted_load_by_rank.end());
+  plan.metrics.max_weighted_load =
+      (max_load_it == plan.metrics.weighted_load_by_rank.end()) ? 0.0 : *max_load_it;
+  plan.metrics.mean_weighted_load =
+      plan.metrics.weighted_load_by_rank.empty()
+          ? 0.0
+          : (std::accumulate(plan.metrics.weighted_load_by_rank.begin(), plan.metrics.weighted_load_by_rank.end(), 0.0) /
+             static_cast<double>(plan.metrics.weighted_load_by_rank.size()));
+  plan.metrics.weighted_imbalance_ratio =
+      (plan.metrics.mean_weighted_load > 0.0) ? (plan.metrics.max_weighted_load / plan.metrics.mean_weighted_load) : 0.0;
+
+  plan.metrics.total_memory_bytes = std::accumulate(
+      plan.metrics.memory_bytes_by_rank.begin(), plan.metrics.memory_bytes_by_rank.end(), 0ULL);
+  const auto max_mem_it = std::max_element(plan.metrics.memory_bytes_by_rank.begin(), plan.metrics.memory_bytes_by_rank.end());
+  plan.metrics.max_memory_bytes = (max_mem_it == plan.metrics.memory_bytes_by_rank.end()) ? 0ULL : *max_mem_it;
+  const double mean_memory = plan.metrics.memory_bytes_by_rank.empty()
+                                 ? 0.0
+                                 : (static_cast<double>(plan.metrics.total_memory_bytes) /
+                                    static_cast<double>(plan.metrics.memory_bytes_by_rank.size()));
+  plan.metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? (static_cast<double>(plan.metrics.max_memory_bytes) / mean_memory) : 0.0;
+
+  return plan;
+}
+
+GhostExchangePlan buildGhostExchangePlan(
+    int world_rank,
+    std::span<const int> ghost_owner_rank_by_local_index,
+    std::size_t bytes_per_ghost) {
+  GhostExchangePlan plan;
+  std::vector<int> owners;
+  owners.reserve(ghost_owner_rank_by_local_index.size());
+
+  for (const int owner_rank : ghost_owner_rank_by_local_index) {
+    if (owner_rank < 0) {
+      throw std::invalid_argument("ghost owner rank must be non-negative");
+    }
+    if (owner_rank == world_rank) {
+      continue;
+    }
+    owners.push_back(owner_rank);
+  }
+
+  std::sort(owners.begin(), owners.end());
+  owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
+
+  plan.neighbor_ranks = owners;
+  plan.send_local_indices_by_neighbor.assign(owners.size(), {});
+  plan.recv_local_indices_by_neighbor.assign(owners.size(), {});
+
+  for (std::uint32_t local_index = 0; local_index < ghost_owner_rank_by_local_index.size(); ++local_index) {
+    const int owner_rank = ghost_owner_rank_by_local_index[local_index];
+    if (owner_rank == world_rank) {
+      continue;
+    }
+    const auto it = std::lower_bound(owners.begin(), owners.end(), owner_rank);
+    if (it == owners.end() || *it != owner_rank) {
+      throw std::logic_error("owner rank map mismatch");
+    }
+    const std::size_t neighbor_slot = static_cast<std::size_t>(std::distance(owners.begin(), it));
+    plan.recv_local_indices_by_neighbor[neighbor_slot].push_back(local_index);
+  }
+
+  for (std::size_t i = 0; i < owners.size(); ++i) {
+    // Scaffolding contract: request and response index sets are symmetric in this stage.
+    plan.send_local_indices_by_neighbor[i] = plan.recv_local_indices_by_neighbor[i];
+    plan.recv_bytes += static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+    plan.send_bytes += static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+  }
+
+  return plan;
+}
+
+bool GhostExchangeBufferSoA::isConsistent() const noexcept {
+  return entity_id.size() == density_code.size() && entity_id.size() == velocity_x_code.size() &&
+         entity_id.size() == pressure_code.size();
+}
+
+std::size_t GhostExchangeBufferSoA::size() const noexcept { return entity_id.size(); }
+
+void GhostExchangeBuffer::clear() { m_bytes.clear(); }
+
+std::size_t GhostExchangeBuffer::byteSize() const noexcept { return m_bytes.size(); }
+
+void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::span<const std::uint32_t> local_indices) {
+  if (!source.isConsistent()) {
+    throw std::invalid_argument("ghost source SoA fields must have matching sizes");
+  }
+
+  m_bytes.clear();
+  appendPod<std::uint64_t>(m_bytes, static_cast<std::uint64_t>(local_indices.size()));
+
+  for (const std::uint32_t index : local_indices) {
+    if (index >= source.size()) {
+      throw std::out_of_range("ghost pack local index out of range");
+    }
+
+    appendPod<std::uint64_t>(m_bytes, source.entity_id[index]);
+    appendPod<double>(m_bytes, source.density_code[index]);
+    appendPod<double>(m_bytes, source.velocity_x_code[index]);
+    appendPod<double>(m_bytes, source.pressure_code[index]);
+  }
+}
+
+void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) const {
+  if (!destination.isConsistent()) {
+    throw std::invalid_argument("ghost destination SoA fields must have matching sizes");
+  }
+  if (m_bytes.size() < sizeof(std::uint64_t)) {
+    throw std::runtime_error("ghost buffer is too small");
+  }
+
+  std::size_t offset = 0;
+  const std::uint64_t count = readPod<std::uint64_t>(m_bytes, &offset);
+
+  destination.entity_id.reserve(destination.entity_id.size() + static_cast<std::size_t>(count));
+  destination.density_code.reserve(destination.density_code.size() + static_cast<std::size_t>(count));
+  destination.velocity_x_code.reserve(destination.velocity_x_code.size() + static_cast<std::size_t>(count));
+  destination.pressure_code.reserve(destination.pressure_code.size() + static_cast<std::size_t>(count));
+
+  for (std::uint64_t i = 0; i < count; ++i) {
+    destination.entity_id.push_back(readPod<std::uint64_t>(m_bytes, &offset));
+    destination.density_code.push_back(readPod<double>(m_bytes, &offset));
+    destination.velocity_x_code.push_back(readPod<double>(m_bytes, &offset));
+    destination.pressure_code.push_back(readPod<double>(m_bytes, &offset));
+  }
+
+  if (offset != m_bytes.size()) {
+    throw std::runtime_error("ghost buffer decode found trailing bytes");
+  }
+}
+
+std::string DistributedRestartState::serialize() const {
+  std::ostringstream stream;
+  stream << "schema_version=" << schema_version << '\n';
+  stream << "decomposition_epoch=" << decomposition_epoch << '\n';
+  stream << "world_size=" << world_size << '\n';
+  stream << "item_count=" << owning_rank_by_item.size() << '\n';
+  for (std::size_t i = 0; i < owning_rank_by_item.size(); ++i) {
+    stream << "rank[" << i << "]=" << owning_rank_by_item[i] << '\n';
+  }
+  return stream.str();
+}
+
+DistributedRestartState DistributedRestartState::deserialize(const std::string& encoded) {
+  DistributedRestartState state;
+  const std::vector<std::string> lines = splitLines(encoded);
+  std::size_t expected_item_count = 0;
+
+  for (const std::string& line : lines) {
+    if (line.empty()) {
+      continue;
+    }
+
+    const std::size_t eq = line.find('=');
+    if (eq == std::string::npos) {
+      throw std::invalid_argument("invalid restart encoding line");
+    }
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+
+    if (key == "schema_version") {
+      state.schema_version = static_cast<std::uint32_t>(std::stoul(value));
+    } else if (key == "decomposition_epoch") {
+      state.decomposition_epoch = std::stoull(value);
+    } else if (key == "world_size") {
+      state.world_size = std::stoi(value);
+    } else if (key == "item_count") {
+      expected_item_count = static_cast<std::size_t>(std::stoull(value));
+      state.owning_rank_by_item.assign(expected_item_count, 0);
+    } else if (key.rfind("rank[", 0) == 0) {
+      const std::size_t open = key.find('[');
+      const std::size_t close = key.find(']');
+      if (open == std::string::npos || close == std::string::npos || close <= open + 1) {
+        throw std::invalid_argument("invalid rank entry in restart encoding");
+      }
+      const std::size_t index = static_cast<std::size_t>(std::stoull(key.substr(open + 1, close - open - 1)));
+      if (index >= state.owning_rank_by_item.size()) {
+        throw std::out_of_range("restart rank index out of bounds");
+      }
+      state.owning_rank_by_item[index] = std::stoi(value);
+    }
+  }
+
+  if (state.owning_rank_by_item.size() != expected_item_count) {
+    throw std::runtime_error("restart decode item count mismatch");
+  }
+  if (state.world_size <= 0) {
+    throw std::invalid_argument("restart world_size must be positive");
+  }
+  return state;
+}
+
+void recordDistributedProfiling(
+    core::ProfilerSession* profiler,
+    const LoadBalanceMetrics& metrics,
+    std::uint64_t ghost_exchange_send_bytes,
+    std::uint64_t ghost_exchange_recv_bytes) {
+  if (profiler == nullptr) {
+    return;
+  }
+
+  profiler->counters().setCount("parallel.ghost_exchange_send_bytes", ghost_exchange_send_bytes);
+  profiler->counters().setCount("parallel.ghost_exchange_recv_bytes", ghost_exchange_recv_bytes);
+  profiler->counters().setCount("parallel.total_memory_bytes", metrics.total_memory_bytes);
+
+  const std::uint64_t imbalance_ppm = (metrics.weighted_imbalance_ratio <= 0.0)
+                                          ? 0ULL
+                                          : static_cast<std::uint64_t>(std::llround(metrics.weighted_imbalance_ratio * 1.0e6));
+  profiler->counters().setCount("parallel.weighted_imbalance_ratio_ppm", imbalance_ppm);
+
+  const std::uint64_t bytes_moved = ghost_exchange_send_bytes + ghost_exchange_recv_bytes;
+  profiler->addBytesMoved(bytes_moved);
+}
+
+MpiContext::MpiContext() {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized != 0) {
+    m_is_enabled = true;
+    MPI_Comm_size(MPI_COMM_WORLD, &m_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &m_world_rank);
+  }
+#endif
+}
+
+bool MpiContext::isEnabled() const noexcept { return m_is_enabled; }
+
+int MpiContext::worldSize() const noexcept { return m_world_size; }
+
+int MpiContext::worldRank() const noexcept { return m_world_rank; }
+
+double MpiContext::allreduceSumDouble(double local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    double global = 0.0;
+    MPI_Allreduce(&local_value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    return global;
+  }
+#endif
+  return local_value;
+}
+
+std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t global = 0;
+    MPI_Allreduce(&local_value, &global, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    return global;
+  }
+#endif
+  return local_value;
+}
+
+}  // namespace cosmosim::parallel

@@ -1,0 +1,10 @@
+# CosmoSim validation input deck (representative)
+validation_case = hydro_sod_like
+mode = isolated
+hydro_solver = godunov_fv
+reconstruction = muscl_hancock
+riemann = hllc
+gamma = 1.4
+boundary = periodic
+cells_1d = 64
+dt_code = 6.0e-4
