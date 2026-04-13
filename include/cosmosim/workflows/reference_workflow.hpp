@@ -29,6 +29,7 @@ struct ReferenceWorkflowReport {
   std::vector<std::string> stage_sequence;
   std::filesystem::path profiler_json_path;
   std::filesystem::path profiler_csv_path;
+  std::filesystem::path operational_report_json_path;
   std::filesystem::path restart_path;
   std::filesystem::path snapshot_path;
 };

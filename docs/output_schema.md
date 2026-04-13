@@ -7,6 +7,7 @@ Authoritative interfaces:
 - `include/cosmosim/io/snapshot_hdf5.hpp`
 - `include/cosmosim/io/restart_checkpoint.hpp`
 - `include/cosmosim/core/provenance.hpp`
+- `include/cosmosim/core/profiling.hpp` (operational run-event report)
 
 ## 1) Snapshot schema (GADGET/AREPO interoperability)
 
@@ -75,6 +76,11 @@ restart is execution-resume oriented.
 - Output stems are restricted to `[A-Za-z0-9_-]` for deterministic naming.
 - Normalized config snapshots are written with run outputs.
 - Schema names/versions are part of compatibility behavior and must be updated intentionally.
+- Reference workflow operational report (`reference_operational_events.json`) is schema-tagged (`schema_version = 1`) and includes:
+  - run label,
+  - provenance config hash linkage (`provenance_config_hash_hex`),
+  - severity-count summary and status,
+  - structured events (`event_kind`, `severity`, `subsystem`, optional step/time/scale context, message, payload map).
 
 ## 5) Change procedure for schema-affecting work
 
@@ -92,3 +98,4 @@ When changing snapshot/restart/provenance fields:
 - Restart schema version/name were not changed (`cosmosim_restart_v2`, version `2`).
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
+- New operational diagnostics output is additive only; snapshot/restart/provenance schemas and compatibility contracts are unchanged.

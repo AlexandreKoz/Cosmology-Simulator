@@ -33,5 +33,8 @@ Each run emits:
 
 - `reference_profile.json`
 - `reference_profile.csv`
+- `reference_operational_events.json`
 
 These files are generated from the built-in `core::ProfilerSession` and provide an end-to-end stage profile suitable for regression gating and mini-run cost comparisons. The workflow also emits a `canonical_stage_order` flag in reports/bench output, backed by the canonical order validator in `core::time_integration`.
+
+`reference_operational_events.json` is a compact, structured event stream + summary for infrastructure audits. It records key lifecycle and failure-surface events (for example: config freeze acceptance, restart/snapshot write/read begin/complete/failure) and links them to deterministic provenance context via `provenance_config_hash_hex`.
