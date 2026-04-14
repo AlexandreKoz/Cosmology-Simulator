@@ -240,7 +240,29 @@ Interpretation:
 
 - Pseudo-multi-rank contract clarity and diagnosability improved for review/CI artifacts without adding new MPI features or claiming production multi-rank closure.
 
-## 12) Diagnostics maturity-tier repair (analysis honesty/scalability guard)
+## 13) Parallel contract hardening follow-up (R07c)
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_integration_parallel_two_rank_restart
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart"
+```
+
+Observed:
+
+- Ghost transfer descriptors now encode explicit lifecycle intent (`ghost refresh request`, `ghost refresh receive staging`) and post-transfer residency expectation, with reserved typed migration intents documented as out-of-scope scaffolding placeholders.
+- `validateGhostExchangePlan()` now enforces neighbor-slot/peer-rank role correctness and exact descriptor-index equality against canonical send/recv vectors.
+- Reduction agreement checks now use explicit mode selection (`absolute only`, `relative only`, `absolute and relative`, `absolute or relative`) rather than implicit boolean logic.
+- Unit coverage now includes plan-drift rejection checks and per-policy-mode reduction agreement assertions.
+
+Interpretation:
+
+- Pseudo-multi-rank distributed-memory contracts are now more reviewable and diagnosable without claiming production MPI transfer correctness or migration commit semantics.
+
+## 14) Diagnostics maturity-tier repair (analysis honesty/scalability guard)
 
 _Date captured: 2026-04-14 (UTC)_
 

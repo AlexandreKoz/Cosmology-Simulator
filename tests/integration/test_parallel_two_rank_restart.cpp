@@ -107,9 +107,16 @@ void runOneRankVsTwoRankMassConservation() {
            cosmosim::parallel::GhostTransferRole::kOutboundSend);
     assert(typed_plan_rank0.inbound_transfers[i].role ==
            cosmosim::parallel::GhostTransferRole::kInboundReceive);
+    assert(typed_plan_rank0.outbound_transfers[i].intent ==
+           cosmosim::parallel::GhostTransferIntent::kGhostRefreshRequest);
+    assert(typed_plan_rank0.inbound_transfers[i].intent ==
+           cosmosim::parallel::GhostTransferIntent::kGhostRefreshReceiveStaging);
     assert(typed_plan_rank0.outbound_transfers[i].peer_rank == typed_plan_rank0.neighbor_ranks[i]);
     assert(typed_plan_rank0.inbound_transfers[i].peer_rank == typed_plan_rank0.neighbor_ranks[i]);
+    assert(typed_plan_rank0.outbound_transfers[i].neighbor_slot == i);
+    assert(typed_plan_rank0.inbound_transfers[i].neighbor_slot == i);
   }
+  cosmosim::parallel::validateGhostExchangePlan(typed_plan_rank0);
 
   cosmosim::core::ProfilerSession profiler(true);
   cosmosim::parallel::recordDistributedProfiling(
@@ -134,7 +141,9 @@ void runOneRankVsTwoRankMassConservation() {
   assert(reduction_agreement.absolute_error < 1.0e-12);
   assert(cosmosim::parallel::satisfiesReductionAgreement(
       reduction_agreement,
-      {.absolute_tolerance = 1.0e-12, .relative_tolerance = 1.0e-12}));
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteOrRelative,
+       .absolute_tolerance = 1.0e-12,
+       .relative_tolerance = 1.0e-12}));
 
   const std::vector<cosmosim::parallel::RankConfigDigest> rank_digests = {
       {.world_rank = 0, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
