@@ -230,7 +230,7 @@ template <typename T>
     case SimulationMode::kIsolatedCluster:
       return "isolated_cluster";
   }
-  return "unknown";
+  throw ConfigError("unhandled SimulationMode enum value during serialization");
 }
 
 [[nodiscard]] SimulationMode parseMode(const std::string& value) {
@@ -403,7 +403,7 @@ template <typename T>
     case AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional:
       return "all_including_provisional";
   }
-  return "unknown";
+  throw ConfigError("unhandled DiagnosticsExecutionPolicy enum value during serialization");
 }
 
 struct ConfigKeySpec {

@@ -42,7 +42,7 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
     case DiagnosticClass::kScienceHeavy:
       return "science_heavy";
   }
-  return "unknown";
+  throw std::logic_error("unhandled DiagnosticClass enum value during serialization");
 }
 
 [[nodiscard]] const char* diagnosticTierLabel(DiagnosticTier tier) {
@@ -54,7 +54,7 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
     case DiagnosticTier::kReferenceScience:
       return "reference_science";
   }
-  return "unknown";
+  throw std::logic_error("unhandled DiagnosticTier enum value during serialization");
 }
 
 [[nodiscard]] const char* diagnosticMaturityLabel(DiagnosticMaturity maturity) {
@@ -66,7 +66,7 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
     case DiagnosticMaturity::kProvisional:
       return "provisional";
   }
-  return "unknown";
+  throw std::logic_error("unhandled DiagnosticMaturity enum value during serialization");
 }
 
 [[nodiscard]] const char* diagnosticScalabilityLabel(DiagnosticScalability scalability) {
@@ -78,7 +78,7 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
     case DiagnosticScalability::kHeavyReference:
       return "heavy_reference";
   }
-  return "unknown";
+  throw std::logic_error("unhandled DiagnosticScalability enum value during serialization");
 }
 
 [[nodiscard]] const char* executionPolicyLabel(core::AnalysisConfig::DiagnosticsExecutionPolicy policy) {
@@ -90,7 +90,7 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
     case core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional:
       return "all_including_provisional";
   }
-  return "unknown";
+  throw std::logic_error("unhandled DiagnosticsExecutionPolicy enum value during serialization");
 }
 
 }  // namespace
@@ -416,17 +416,22 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
   }
 
   if (diagnostic_class == DiagnosticClass::kScienceHeavy) {
-    bundle.power_spectrum = computePowerSpectrum(
-        state,
-        static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
-        static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count));
+    const bool heavy_allowed =
+        (m_config.analysis.diagnostics_execution_policy ==
+         core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
+    if (heavy_allowed) {
+      bundle.power_spectrum = computePowerSpectrum(
+          state,
+          static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
+          static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count));
+    }
     bundle.records.push_back(DiagnosticRecord{
         .name = "power_spectrum",
         .tier = DiagnosticTier::kReferenceScience,
         .maturity = DiagnosticMaturity::kProvisional,
         .scalability = DiagnosticScalability::kHeavyReference,
-        .executed = true,
-        .policy_note = "reference_only_non_default",
+        .executed = heavy_allowed,
+        .policy_note = heavy_allowed ? "reference_only_non_default" : "blocked_by_execution_policy",
     });
   }
 
