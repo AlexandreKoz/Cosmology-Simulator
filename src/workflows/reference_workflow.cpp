@@ -56,7 +56,43 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
       config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version == 1 &&
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
+  core::ProfilerSession profiler(true);
+  profiler.recordEvent(core::RuntimeEvent{
+      .event_kind = "config.freeze",
+      .severity = core::RuntimeEventSeverity::kInfo,
+      .subsystem = "core.config",
+      .step_index = options.step_index,
+      .simulation_time_code = config.numerics.time_begin_code,
+      .scale_factor = 1.0,
+      .message = "frozen configuration accepted for reference workflow",
+      .payload =
+          {
+              {"schema_version", std::to_string(config.schema_version)},
+              {"config_hash_hex", m_frozen_config.provenance.config_hash_hex},
+          },
+  });
+
   if (!report.config_compatible || !report.schema_compatible) {
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "validation.fatal",
+        .severity = core::RuntimeEventSeverity::kFatal,
+        .subsystem = "workflows.reference",
+        .step_index = options.step_index,
+        .simulation_time_code = config.numerics.time_begin_code,
+        .scale_factor = 1.0,
+        .message = "reference workflow compatibility validation failed",
+        .payload =
+            {
+                {"config_compatible", report.config_compatible ? "true" : "false"},
+                {"schema_compatible", report.schema_compatible ? "true" : "false"},
+            },
+    });
+    report.operational_report_json_path = run_directory / "reference_operational_events.json";
+    core::writeOperationalReportJson(
+        profiler,
+        report.operational_report_json_path,
+        config.output.run_name,
+        m_frozen_config.provenance.config_hash_hex);
     throw std::runtime_error("reference workflow compatibility validation failed");
   }
 
@@ -113,7 +149,6 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
       physics::BlackHoleAgnModel(physics::makeBlackHoleAgnConfig(config.physics)));
   orchestrator.registerCallback(bh_callback);
 
-  core::ProfilerSession profiler(true);
   core::TransientStepWorkspace workspace;
   orchestrator.executeSingleStep(
       state,
@@ -158,9 +193,82 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
     scheduler_state.reset(static_cast<std::uint32_t>(state.particles.size()), 0);
     restart_payload.scheduler = &scheduler_state;
 
-    io::writeRestartCheckpointHdf5(report.restart_path, restart_payload);
-    const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
-    report.restart_roundtrip_ok = restart_read.state.particles.size() == state.particles.size();
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "restart.write.begin",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "io.restart",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "writing restart checkpoint",
+        .payload = {{"path", report.restart_path.string()}},
+    });
+    try {
+      io::writeRestartCheckpointHdf5(report.restart_path, restart_payload);
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "restart.write.complete",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "io.restart",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "restart checkpoint written",
+          .payload = {{"path", report.restart_path.string()}},
+      });
+    } catch (const std::exception& ex) {
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "restart.write.failure",
+          .severity = core::RuntimeEventSeverity::kError,
+          .subsystem = "io.restart",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "restart checkpoint write failed",
+          .payload = {{"path", report.restart_path.string()}, {"error", ex.what()}},
+      });
+      throw;
+    }
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "restart.read.begin",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "io.restart",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "reading restart checkpoint",
+        .payload = {{"path", report.restart_path.string()}},
+    });
+    try {
+      const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
+      report.restart_roundtrip_ok = restart_read.state.particles.size() == state.particles.size();
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "restart.read.complete",
+          .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo
+                                                  : core::RuntimeEventSeverity::kWarning,
+          .subsystem = "io.restart",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "restart checkpoint read complete",
+          .payload =
+              {
+                  {"path", report.restart_path.string()},
+                  {"roundtrip_ok", report.restart_roundtrip_ok ? "true" : "false"},
+              },
+      });
+    } catch (const std::exception& ex) {
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "restart.read.failure",
+          .severity = core::RuntimeEventSeverity::kError,
+          .subsystem = "io.restart",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "restart checkpoint read failed",
+          .payload = {{"path", report.restart_path.string()}, {"error", ex.what()}},
+      });
+      throw;
+    }
 
     report.snapshot_path = run_directory / "reference_snapshot_0000.hdf5";
     io::SnapshotWritePayload snapshot_payload;
@@ -168,13 +276,92 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
     snapshot_payload.config = &config;
     snapshot_payload.normalized_config_text = m_frozen_config.normalized_text;
     snapshot_payload.provenance = core::makeDefaultProvenanceRecord("reference_workflow");
-    io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "snapshot.write.begin",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "io.snapshot",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "writing snapshot output",
+        .payload = {{"path", report.snapshot_path.string()}},
+    });
+    try {
+      io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "snapshot.write.complete",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "io.snapshot",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "snapshot output written",
+          .payload = {{"path", report.snapshot_path.string()}},
+      });
+    } catch (const std::exception& ex) {
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "snapshot.write.failure",
+          .severity = core::RuntimeEventSeverity::kError,
+          .subsystem = "io.snapshot",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "snapshot write failed",
+          .payload = {{"path", report.snapshot_path.string()}, {"error", ex.what()}},
+      });
+      throw;
+    }
 
-    const io::SnapshotReadResult snapshot_read =
-        io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
-    report.snapshot_roundtrip_ok = snapshot_read.state.particles.size() == state.particles.size();
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "snapshot.read.begin",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "io.snapshot",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "reading snapshot output",
+        .payload = {{"path", report.snapshot_path.string()}},
+    });
+    try {
+      const io::SnapshotReadResult snapshot_read =
+          io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
+      report.snapshot_roundtrip_ok = snapshot_read.state.particles.size() == state.particles.size();
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "snapshot.read.complete",
+          .severity = report.snapshot_roundtrip_ok ? core::RuntimeEventSeverity::kInfo
+                                                   : core::RuntimeEventSeverity::kWarning,
+          .subsystem = "io.snapshot",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "snapshot read complete",
+          .payload =
+              {
+                  {"path", report.snapshot_path.string()},
+                  {"roundtrip_ok", report.snapshot_roundtrip_ok ? "true" : "false"},
+              },
+      });
+    } catch (const std::exception& ex) {
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "snapshot.read.failure",
+          .severity = core::RuntimeEventSeverity::kError,
+          .subsystem = "io.snapshot",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "snapshot read failed",
+          .payload = {{"path", report.snapshot_path.string()}, {"error", ex.what()}},
+      });
+      throw;
+    }
   }
 #endif
+  report.operational_report_json_path = run_directory / "reference_operational_events.json";
+  core::writeOperationalReportJson(
+      profiler,
+      report.operational_report_json_path,
+      config.output.run_name,
+      m_frozen_config.provenance.config_hash_hex);
 
   return report;
 }

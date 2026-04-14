@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "cosmosim/core/profiling.hpp"
@@ -87,11 +89,49 @@ void testJsonAndCsvReportWriters() {
   std::filesystem::remove(csv_path);
 }
 
+void testOperationalEventReportWriter() {
+  cosmosim::core::ProfilerSession session(true);
+  session.recordEvent(cosmosim::core::RuntimeEvent{
+      .event_kind = "config.freeze",
+      .severity = cosmosim::core::RuntimeEventSeverity::kInfo,
+      .subsystem = "core.config",
+      .step_index = 4,
+      .simulation_time_code = 0.125,
+      .scale_factor = 0.5,
+      .message = "configuration frozen",
+      .payload = {{"schema_version", "1"}},
+  });
+  session.recordEvent(cosmosim::core::RuntimeEvent{
+      .event_kind = "restart.write.failure",
+      .severity = cosmosim::core::RuntimeEventSeverity::kError,
+      .subsystem = "io.restart",
+      .step_index = 4,
+      .simulation_time_code = 0.125,
+      .scale_factor = 0.5,
+      .message = "restart write failed",
+      .payload = {{"error", "disk full"}},
+  });
+
+  const auto path = std::filesystem::temp_directory_path() / "cosmosim_operational_events_unit.json";
+  cosmosim::core::writeOperationalReportJson(session, path, "unit_profiling", "cafef00d");
+  assert(std::filesystem::exists(path));
+
+  std::ifstream in(path);
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  assert(text.find("\"run_label\": \"unit_profiling\"") != std::string::npos);
+  assert(text.find("\"provenance_config_hash_hex\": \"cafef00d\"") != std::string::npos);
+  assert(text.find("\"event_kind\": \"restart.write.failure\"") != std::string::npos);
+  assert(text.find("\"status\": \"error\"") != std::string::npos);
+
+  std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
   testNestedTimerAndBytes();
   testCounterAndAllocatorAggregation();
   testJsonAndCsvReportWriters();
+  testOperationalEventReportWriter();
   return 0;
 }

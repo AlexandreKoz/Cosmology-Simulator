@@ -204,3 +204,25 @@ Observed:
 Interpretation:
 
 - Snapshot and restart responsibilities are now explicitly separated and reviewable, with stronger error behavior on continuation-critical contract violations.
+
+## 11) Operational observability repair (structured run events)
+
+_Date captured: 2026-04-13 (UTC)_
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_profiling test_integration_reference_workflow
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_profiling|integration_reference_workflow"
+```
+
+Observed:
+
+- `core::ProfilerSession` now carries a minimal structured runtime event model (kind, severity, subsystem, optional step/time/scale context, message, key/value payload).
+- Reference workflow emits a machine-readable operational report (`reference_operational_events.json`) linked to deterministic config provenance via `provenance_config_hash_hex`.
+- Key infrastructure lifecycle/failure surfaces are explicit in event records (config freeze validation, restart/snapshot write/read begin/complete/failure).
+
+Interpretation:
+
+- Operational troubleshooting and CI artifact review no longer depend on ad hoc text/exception surfaces alone.
+- Reproducibility posture remains unchanged: operational events are additive and provenance-linked; no solver behavior or restart/snapshot schema semantics were changed.

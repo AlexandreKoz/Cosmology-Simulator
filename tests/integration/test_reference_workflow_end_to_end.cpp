@@ -1,5 +1,7 @@
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 
 #include "cosmosim/cosmosim.hpp"
@@ -34,6 +36,13 @@ int main() {
   assert(report.stage_sequence.back() == "output_check");
   assert(std::filesystem::exists(report.profiler_json_path));
   assert(std::filesystem::exists(report.profiler_csv_path));
+  assert(std::filesystem::exists(report.operational_report_json_path));
+
+  std::ifstream op_in(report.operational_report_json_path);
+  const std::string op_text((std::istreambuf_iterator<char>(op_in)), std::istreambuf_iterator<char>());
+  assert(op_text.find("\"event_kind\": \"config.freeze\"") != std::string::npos);
+  assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
+  assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
 
   std::filesystem::remove_all(output_dir);
   return 0;

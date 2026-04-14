@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -29,6 +30,67 @@ namespace {
     }
   }
   return out;
+}
+
+[[nodiscard]] const char* runtimeEventSeverityLabel(RuntimeEventSeverity severity) {
+  switch (severity) {
+    case RuntimeEventSeverity::kInfo:
+      return "info";
+    case RuntimeEventSeverity::kWarning:
+      return "warning";
+    case RuntimeEventSeverity::kError:
+      return "error";
+    case RuntimeEventSeverity::kFatal:
+      return "fatal";
+  }
+  return "unknown";
+}
+
+void writeOptionalU64(std::ostream& out, const std::optional<std::uint64_t>& value) {
+  if (value.has_value()) {
+    out << *value;
+    return;
+  }
+  out << "null";
+}
+
+void writeOptionalDouble(std::ostream& out, const std::optional<double>& value) {
+  if (value.has_value()) {
+    out << std::fixed << std::setprecision(6) << *value;
+    return;
+  }
+  out << "null";
+}
+
+void writeEventJson(std::ostream& out, const RuntimeEvent& event, int indent_level) {
+  const std::string indent(static_cast<std::size_t>(indent_level), ' ');
+  const std::string field_indent(static_cast<std::size_t>(indent_level + 2), ' ');
+  out << indent << "{\n";
+  out << field_indent << "\"event_kind\": \"" << escapeJson(event.event_kind) << "\",\n";
+  out << field_indent << "\"severity\": \"" << runtimeEventSeverityLabel(event.severity) << "\",\n";
+  out << field_indent << "\"subsystem\": \"" << escapeJson(event.subsystem) << "\",\n";
+  out << field_indent << "\"step_index\": ";
+  writeOptionalU64(out, event.step_index);
+  out << ",\n";
+  out << field_indent << "\"simulation_time_code\": ";
+  writeOptionalDouble(out, event.simulation_time_code);
+  out << ",\n";
+  out << field_indent << "\"scale_factor\": ";
+  writeOptionalDouble(out, event.scale_factor);
+  out << ",\n";
+  out << field_indent << "\"message\": \"" << escapeJson(event.message) << "\",\n";
+  out << field_indent << "\"payload\": {";
+  bool first_payload = true;
+  for (const auto& [key, value] : event.payload) {
+    out << (first_payload ? "\n" : ",\n");
+    out << field_indent << "  \"" << escapeJson(key) << "\": \"" << escapeJson(value) << "\"";
+    first_payload = false;
+  }
+  if (!first_payload) {
+    out << "\n" << field_indent;
+  }
+  out << "}\n";
+  out << indent << "}";
 }
 
 void writeNodeJson(std::ostream& out, const std::vector<ProfileNode>& nodes, std::size_t node_index, int indent_level) {
@@ -164,12 +226,17 @@ const std::vector<ProfileNode>& ProfilerSession::nodes() const noexcept { return
 
 std::size_t ProfilerSession::rootNodeIndex() const noexcept { return 0; }
 
+void ProfilerSession::recordEvent(RuntimeEvent event) { m_events.push_back(std::move(event)); }
+
+const std::vector<RuntimeEvent>& ProfilerSession::events() const noexcept { return m_events; }
+
 void ProfilerSession::reset() {
   m_nodes.clear();
   m_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
   m_scope_stack.clear();
   m_counters.reset();
   m_allocator_stats.reset();
+  m_events.clear();
 }
 
 std::size_t ProfilerSession::findOrCreateChild(std::size_t parent_index, std::string_view phase_name) {
@@ -259,6 +326,56 @@ void writeProfilerReportCsv(const ProfilerSession& session, const std::filesyste
       stack.emplace_back(*it, path + "/" + child.name);
     }
   }
+}
+
+void writeOperationalReportJson(
+    const ProfilerSession& session,
+    const std::filesystem::path& output_path,
+    std::string_view run_label,
+    std::string_view provenance_config_hash_hex) {
+  std::ofstream out(output_path);
+  if (!out) {
+    throw std::runtime_error("failed to open operational diagnostics JSON output path");
+  }
+
+  std::uint64_t warning_count = 0;
+  std::uint64_t error_count = 0;
+  std::uint64_t fatal_count = 0;
+  for (const RuntimeEvent& event : session.events()) {
+    if (event.severity == RuntimeEventSeverity::kWarning) {
+      ++warning_count;
+    } else if (event.severity == RuntimeEventSeverity::kError) {
+      ++error_count;
+    } else if (event.severity == RuntimeEventSeverity::kFatal) {
+      ++fatal_count;
+    }
+  }
+
+  out << "{\n";
+  out << "  \"schema_version\": 1,\n";
+  out << "  \"run_label\": \"" << escapeJson(std::string(run_label)) << "\",\n";
+  out << "  \"provenance_config_hash_hex\": \"" << escapeJson(std::string(provenance_config_hash_hex)) << "\",\n";
+  out << "  \"summary\": {\n";
+  out << "    \"event_count\": " << session.events().size() << ",\n";
+  out << "    \"warning_count\": " << warning_count << ",\n";
+  out << "    \"error_count\": " << error_count << ",\n";
+  out << "    \"fatal_count\": " << fatal_count << ",\n";
+  out << "    \"status\": \"" << (fatal_count > 0 || error_count > 0 ? "error" : "ok") << "\"\n";
+  out << "  },\n";
+  out << "  \"events\": [";
+  if (!session.events().empty()) {
+    out << "\n";
+    for (std::size_t i = 0; i < session.events().size(); ++i) {
+      writeEventJson(out, session.events()[i], 4);
+      if (i + 1 < session.events().size()) {
+        out << ",";
+      }
+      out << "\n";
+    }
+    out << "  ";
+  }
+  out << "]\n";
+  out << "}\n";
 }
 
 }  // namespace cosmosim::core

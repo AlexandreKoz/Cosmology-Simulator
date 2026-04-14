@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -55,6 +56,24 @@ struct ProfileNode {
   std::vector<std::size_t> children;
 };
 
+enum class RuntimeEventSeverity : std::uint8_t {
+  kInfo = 0,
+  kWarning = 1,
+  kError = 2,
+  kFatal = 3,
+};
+
+struct RuntimeEvent {
+  std::string event_kind;
+  RuntimeEventSeverity severity = RuntimeEventSeverity::kInfo;
+  std::string subsystem;
+  std::optional<std::uint64_t> step_index;
+  std::optional<double> simulation_time_code;
+  std::optional<double> scale_factor;
+  std::string message;
+  std::unordered_map<std::string, std::string> payload;
+};
+
 class ProfilerSession {
  public:
   using Clock = std::chrono::steady_clock;
@@ -76,6 +95,8 @@ class ProfilerSession {
 
   [[nodiscard]] const std::vector<ProfileNode>& nodes() const noexcept;
   [[nodiscard]] std::size_t rootNodeIndex() const noexcept;
+  void recordEvent(RuntimeEvent event);
+  [[nodiscard]] const std::vector<RuntimeEvent>& events() const noexcept;
 
   void reset();
 
@@ -91,6 +112,7 @@ class ProfilerSession {
   std::vector<ActiveScope> m_scope_stack;
   CounterRegistry m_counters;
   AllocatorStats m_allocator_stats;
+  std::vector<RuntimeEvent> m_events;
 
   [[nodiscard]] std::size_t findOrCreateChild(std::size_t parent_index, std::string_view phase_name);
 };
@@ -109,6 +131,11 @@ class ScopedProfile {
 
 void writeProfilerReportJson(const ProfilerSession& session, const std::filesystem::path& output_path);
 void writeProfilerReportCsv(const ProfilerSession& session, const std::filesystem::path& output_path);
+void writeOperationalReportJson(
+    const ProfilerSession& session,
+    const std::filesystem::path& output_path,
+    std::string_view run_label,
+    std::string_view provenance_config_hash_hex);
 
 }  // namespace cosmosim::core
 
