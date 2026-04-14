@@ -21,16 +21,33 @@ if(_violations)
     "  - ${_joined}\n")
 endif()
 
-message(STATUS "Core dependency-direction guard passed.")
+message(STATUS "Core dependency-direction include guard passed.")
 
-# Guardrail: core target wiring in CMake must not link upward modules.
-file(READ "@CMAKE_SOURCE_DIR@/CMakeLists.txt" _cmake_lists)
-string(REGEX MATCH "target_link_libraries\\([ \t\r\n]*cosmosim_core[ \t\r\n]+[^\\)]*cosmosim_(analysis|io|physics|workflows|app)" _core_link_violation "${_cmake_lists}")
+# Guardrail: core target wiring must not link upward modules.
+# This check uses CMake-generated graph metadata rather than source-text scans.
+set(_graphviz_file "@CMAKE_BINARY_DIR@/core_dependency_graph.dot")
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" "--graphviz=${_graphviz_file}" "@CMAKE_BINARY_DIR@"
+  WORKING_DIRECTORY "@CMAKE_BINARY_DIR@"
+  RESULT_VARIABLE _graphviz_result
+  OUTPUT_VARIABLE _graphviz_stdout
+  ERROR_VARIABLE _graphviz_stderr)
+
+if(NOT _graphviz_result EQUAL 0)
+  message(FATAL_ERROR
+    "Core dependency-direction guard failed.\n"
+    "Unable to generate CMake graphviz dependency graph from @CMAKE_BINARY_DIR@.\n"
+    "stdout: ${_graphviz_stdout}\n"
+    "stderr: ${_graphviz_stderr}")
+endif()
+
+file(READ "${_graphviz_file}" _graphviz_content)
+string(REGEX MATCH "\"cosmosim_core\"[ \t]*->[ \t]*\"cosmosim_(analysis|io|physics|workflows|app)\"" _core_link_violation "${_graphviz_content}")
 if(_core_link_violation)
   message(FATAL_ERROR
     "Core dependency-direction guard failed.\n"
-    "CMake target wiring links cosmosim_core to a forbidden upward module.\n"
+    "CMake target graph links cosmosim_core to a forbidden upward module.\n"
     "Match: ${_core_link_violation}")
 endif()
 
-message(STATUS "Core CMake target-link guard passed.")
+message(STATUS "Core CMake target-link guard passed via graphviz metadata.")

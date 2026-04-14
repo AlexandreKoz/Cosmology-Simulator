@@ -37,3 +37,8 @@ No open P19 blockers remain after the PM/FFTW stabilization repair and full pres
 - **HDF5 path preserved**
 - **PM HDF5+FFTW path restored**
 - **P19 blocker ledger cleared**
+
+## R08 hardening residual limitations (tracked, non-blocking)
+
+- `integration_core_dependency_direction` target-link guard now consumes CMake Graphviz output from the configured build tree, which is materially stronger than top-level text scanning; however, it still relies on target-name pattern matching (`cosmosim_(analysis|io|physics|workflows|app)`) rather than full semantic layer tags. If naming conventions change, this check must be updated in lockstep.
+- Infrastructure gate test scopes are now manifest-driven and converted into a ctest regex at runtime. This removes inline script fragility but still depends on stable test identifiers.
