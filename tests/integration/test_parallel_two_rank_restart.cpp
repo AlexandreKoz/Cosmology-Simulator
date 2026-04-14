@@ -100,6 +100,16 @@ void runOneRankVsTwoRankMassConservation() {
   assert(typed_plan_rank0.recv_local_indices_by_neighbor == plan_rank0.recv_local_indices_by_neighbor);
   assert(typed_plan_rank0.send_bytes == plan_rank0.send_bytes);
   assert(typed_plan_rank0.recv_bytes == plan_rank0.recv_bytes);
+  assert(typed_plan_rank0.outbound_transfers.size() == typed_plan_rank0.neighbor_ranks.size());
+  assert(typed_plan_rank0.inbound_transfers.size() == typed_plan_rank0.neighbor_ranks.size());
+  for (std::size_t i = 0; i < typed_plan_rank0.neighbor_ranks.size(); ++i) {
+    assert(typed_plan_rank0.outbound_transfers[i].role ==
+           cosmosim::parallel::GhostTransferRole::kOutboundSend);
+    assert(typed_plan_rank0.inbound_transfers[i].role ==
+           cosmosim::parallel::GhostTransferRole::kInboundReceive);
+    assert(typed_plan_rank0.outbound_transfers[i].peer_rank == typed_plan_rank0.neighbor_ranks[i]);
+    assert(typed_plan_rank0.inbound_transfers[i].peer_rank == typed_plan_rank0.neighbor_ranks[i]);
+  }
 
   cosmosim::core::ProfilerSession profiler(true);
   cosmosim::parallel::recordDistributedProfiling(
@@ -119,7 +129,12 @@ void runOneRankVsTwoRankMassConservation() {
       rank_local_masses,
       two_rank_sum);
   assert(std::abs(deterministic_mass_sum - two_rank_sum) < 1.0e-12);
+  assert(std::abs(reduction_agreement.deterministic_baseline_sum - deterministic_mass_sum) < 1.0e-12);
+  assert(std::abs(reduction_agreement.measured_sum - two_rank_sum) < 1.0e-12);
   assert(reduction_agreement.absolute_error < 1.0e-12);
+  assert(cosmosim::parallel::satisfiesReductionAgreement(
+      reduction_agreement,
+      {.absolute_tolerance = 1.0e-12, .relative_tolerance = 1.0e-12}));
 
   const std::vector<cosmosim::parallel::RankConfigDigest> rank_digests = {
       {.world_rank = 0, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
@@ -127,6 +142,21 @@ void runOneRankVsTwoRankMassConservation() {
   };
   const auto consensus = cosmosim::parallel::evaluateRankConfigConsensus(rank_digests);
   assert(consensus.allConsistent());
+  assert(consensus.mismatches.empty());
+
+  const std::vector<cosmosim::parallel::RankConfigDigest> rank_digests_mismatch = {
+      {.world_rank = 0, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+      {.world_rank = 1, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = false},
+  };
+  const auto bad_consensus = cosmosim::parallel::evaluateRankConfigConsensus(rank_digests_mismatch);
+  assert(!bad_consensus.allConsistent());
+  assert(bad_consensus.mismatches.size() == 1);
+  assert(bad_consensus.mismatches[0].property ==
+         cosmosim::parallel::RankConfigMismatchProperty::kDeterministicReduction);
+  assert(bad_consensus.mismatches[0].baseline_rank == 0);
+  assert(bad_consensus.mismatches[0].rank == 1);
+  assert(bad_consensus.mismatches[0].baseline_value == "true");
+  assert(bad_consensus.mismatches[0].rank_value == "false");
 }
 
 void runRestartRoundTripWithTwoRankPlan() {
