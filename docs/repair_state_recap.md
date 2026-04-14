@@ -218,6 +218,30 @@ ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_profiling|int
 
 Observed:
 
+## 12) Diagnostics maturity-tier repair (analysis honesty/scalability guard)
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_config_parser test_unit_analysis_diagnostics test_integration_analysis_bundle
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_config_parser|unit_analysis_diagnostics|integration_analysis_bundle"
+```
+
+Observed:
+
+- Analysis config now carries typed `diagnostics_execution_policy` with normalized-config persistence.
+- Diagnostics bundles now emit per-diagnostic maturity metadata (`tier`, `maturity`, `scalability`, execution policy).
+- Provisional heavy reference diagnostics (power spectrum direct summation) no longer run under default policy.
+- Unit/integration tests now assert that heavy provisional diagnostics only run when explicitly opted in.
+
+Interpretation:
+
+- Infrastructure run-health counters remain first-class and cheap.
+- Validated light science diagnostics remain available in default runs.
+- Reference/provisional heavy diagnostics are quarantined behind explicit non-default policy.
+
 - `core::ProfilerSession` now carries a minimal structured runtime event model (kind, severity, subsystem, optional step/time/scale context, message, key/value payload).
 - Reference workflow emits a machine-readable operational report (`reference_operational_events.json`) linked to deterministic config provenance via `provenance_config_hash_hex`.
 - Key infrastructure lifecycle/failure surfaces are explicit in event records (config freeze validation, restart/snapshot write/read begin/complete/failure).

@@ -1,5 +1,8 @@
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
@@ -21,6 +24,8 @@ int main() {
   config.output.run_name = "integration_analysis";
   config.cosmology.box_size_mpc_comoving = 1.0;
   config.analysis.enable_diagnostics = true;
+  config.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
   config.analysis.run_health_interval_steps = 1;
   config.analysis.science_light_interval_steps = 1;
   config.analysis.science_heavy_interval_steps = 2;
@@ -104,12 +109,29 @@ int main() {
   assert(std::filesystem::exists(diagnostics_dir));
 
   std::size_t json_count = 0;
+  bool found_heavy = false;
+  bool found_heavy_metadata = false;
   for (const auto& entry : std::filesystem::directory_iterator(diagnostics_dir)) {
     if (entry.path().extension() == ".json") {
       ++json_count;
+      const std::string filename = entry.path().filename().string();
+      if (filename.find("science_heavy") != std::string::npos) {
+        found_heavy = true;
+        std::ifstream in(entry.path());
+        const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (body.find("\"diagnostics_execution_policy\": \"all_including_provisional\"") !=
+                std::string::npos &&
+            body.find("\"tier\": \"reference_science\"") != std::string::npos &&
+            body.find("\"maturity\": \"provisional\"") != std::string::npos &&
+            body.find("\"name\": \"power_spectrum\"") != std::string::npos) {
+          found_heavy_metadata = true;
+        }
+      }
     }
   }
   assert(json_count >= 3);
+  assert(found_heavy);
+  assert(found_heavy_metadata);
 
   const auto timing = diagnostics_callback.timing();
   assert(timing.run_health_calls >= 2);

@@ -376,6 +376,36 @@ template <typename T>
   throw ConfigError("key 'physics.cooling_model': invalid value '" + value + "'");
 }
 
+[[nodiscard]] AnalysisConfig::DiagnosticsExecutionPolicy parseDiagnosticsExecutionPolicy(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "run_health_only") {
+    return AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly;
+  }
+  if (lower == "run_health_and_light_science") {
+    return AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
+  }
+  if (lower == "all_including_provisional") {
+    return AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+  }
+  throw ConfigError(
+      "analysis.diagnostics_execution_policy must be one of: run_health_only, "
+      "run_health_and_light_science, all_including_provisional");
+}
+
+[[nodiscard]] std::string diagnosticsExecutionPolicyToString(
+    AnalysisConfig::DiagnosticsExecutionPolicy policy) {
+  switch (policy) {
+    case AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly:
+      return "run_health_only";
+    case AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience:
+      return "run_health_and_light_science";
+    case AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional:
+      return "all_including_provisional";
+  }
+  return "unknown";
+}
+
 struct ConfigKeySpec {
   const char* key;
   const char* default_value;
@@ -470,6 +500,7 @@ struct ConfigKeySpec {
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
+      {"analysis.diagnostics_execution_policy", "run_health_and_light_science"},
       {"analysis.run_health_interval_steps", "1"},
       {"analysis.science_light_interval_steps", "8"},
       {"analysis.science_heavy_interval_steps", "64"},
@@ -725,6 +756,8 @@ void validateConfig(const SimulationConfig& config) {
   stream << "enable_halo_workflow = " << (frozen.config.analysis.enable_halo_workflow ? "true" : "false")
          << '\n';
   stream << "halo_on_the_fly = " << (frozen.config.analysis.halo_on_the_fly ? "true" : "false") << '\n';
+  stream << "diagnostics_execution_policy = "
+         << diagnosticsExecutionPolicyToString(frozen.config.analysis.diagnostics_execution_policy) << '\n';
   stream << "run_health_interval_steps = " << frozen.config.analysis.run_health_interval_steps << '\n';
   stream << "science_light_interval_steps = " << frozen.config.analysis.science_light_interval_steps << '\n';
   stream << "science_heavy_interval_steps = " << frozen.config.analysis.science_heavy_interval_steps << '\n';
@@ -1012,6 +1045,11 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.analysis.halo_on_the_fly = parseBool(
       requireString(entries, consumed, "analysis.halo_on_the_fly", "false"),
       "analysis.halo_on_the_fly");
+  frozen.config.analysis.diagnostics_execution_policy = parseDiagnosticsExecutionPolicy(requireString(
+      entries,
+      consumed,
+      "analysis.diagnostics_execution_policy",
+      diagnosticsExecutionPolicyToString(frozen.config.analysis.diagnostics_execution_policy)));
   frozen.config.analysis.run_health_interval_steps = static_cast<int>(parseNumber<long>(
       requireString(entries, consumed, "analysis.run_health_interval_steps", "1"),
       "analysis.run_health_interval_steps"));

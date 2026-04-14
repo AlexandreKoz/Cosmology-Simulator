@@ -19,6 +19,33 @@ enum class DiagnosticClass : std::uint8_t {
   kScienceHeavy = 2,
 };
 
+enum class DiagnosticTier : std::uint8_t {
+  kInfrastructureHealth = 0,
+  kValidatedScience = 1,
+  kReferenceScience = 2,
+};
+
+enum class DiagnosticMaturity : std::uint8_t {
+  kProduction = 0,
+  kValidated = 1,
+  kProvisional = 2,
+};
+
+enum class DiagnosticScalability : std::uint8_t {
+  kCheap = 0,
+  kModerate = 1,
+  kHeavyReference = 2,
+};
+
+struct DiagnosticRecord {
+  std::string name;
+  DiagnosticTier tier = DiagnosticTier::kInfrastructureHealth;
+  DiagnosticMaturity maturity = DiagnosticMaturity::kProduction;
+  DiagnosticScalability scalability = DiagnosticScalability::kCheap;
+  bool executed = false;
+  std::string policy_note;
+};
+
 struct PowerSpectrumBin {
   double k_center_code = 0.0;
   double power_code_volume = 0.0;
@@ -52,7 +79,10 @@ struct DiagnosticsBundle {
   std::uint64_t step_index = 0;
   double scale_factor = 1.0;
   DiagnosticClass diagnostic_class = DiagnosticClass::kRunHealth;
+  core::AnalysisConfig::DiagnosticsExecutionPolicy diagnostics_execution_policy =
+      core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
   RunHealthCounters health;
+  std::vector<DiagnosticRecord> records;
   std::vector<PowerSpectrumBin> power_spectrum;
   std::vector<StarFormationHistoryBin> star_formation_history;
   AngularMomentumBudget angular_momentum;

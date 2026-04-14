@@ -45,6 +45,54 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
   return "unknown";
 }
 
+[[nodiscard]] const char* diagnosticTierLabel(DiagnosticTier tier) {
+  switch (tier) {
+    case DiagnosticTier::kInfrastructureHealth:
+      return "infrastructure_health";
+    case DiagnosticTier::kValidatedScience:
+      return "validated_science";
+    case DiagnosticTier::kReferenceScience:
+      return "reference_science";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] const char* diagnosticMaturityLabel(DiagnosticMaturity maturity) {
+  switch (maturity) {
+    case DiagnosticMaturity::kProduction:
+      return "production";
+    case DiagnosticMaturity::kValidated:
+      return "validated";
+    case DiagnosticMaturity::kProvisional:
+      return "provisional";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] const char* diagnosticScalabilityLabel(DiagnosticScalability scalability) {
+  switch (scalability) {
+    case DiagnosticScalability::kCheap:
+      return "cheap";
+    case DiagnosticScalability::kModerate:
+      return "moderate";
+    case DiagnosticScalability::kHeavyReference:
+      return "heavy_reference";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] const char* executionPolicyLabel(core::AnalysisConfig::DiagnosticsExecutionPolicy policy) {
+  switch (policy) {
+    case core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly:
+      return "run_health_only";
+    case core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience:
+      return "run_health_and_light_science";
+    case core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional:
+      return "all_including_provisional";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 DiagnosticsEngine::DiagnosticsEngine(core::SimulationConfig config) : m_config(std::move(config)) {}
@@ -315,15 +363,56 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
   bundle.step_index = step_index;
   bundle.scale_factor = scale_factor;
   bundle.diagnostic_class = diagnostic_class;
+  bundle.diagnostics_execution_policy = m_config.analysis.diagnostics_execution_policy;
   bundle.health = computeRunHealth(state);
+  bundle.records.push_back(DiagnosticRecord{
+      .name = "run_health_counters",
+      .tier = DiagnosticTier::kInfrastructureHealth,
+      .maturity = DiagnosticMaturity::kProduction,
+      .scalability = DiagnosticScalability::kCheap,
+      .executed = true,
+      .policy_note = "always_on_for_integrity_checks",
+  });
 
   if (diagnostic_class == DiagnosticClass::kScienceLight || diagnostic_class == DiagnosticClass::kScienceHeavy) {
     bundle.star_formation_history =
         computeStarFormationHistory(state, static_cast<std::size_t>(m_config.analysis.sf_history_bin_count));
+    bundle.records.push_back(DiagnosticRecord{
+        .name = "star_formation_history",
+        .tier = DiagnosticTier::kValidatedScience,
+        .maturity = DiagnosticMaturity::kValidated,
+        .scalability = DiagnosticScalability::kModerate,
+        .executed = true,
+        .policy_note = "validated_lightweight_science",
+    });
     bundle.angular_momentum = computeAngularMomentumBudget(state);
+    bundle.records.push_back(DiagnosticRecord{
+        .name = "angular_momentum_budget",
+        .tier = DiagnosticTier::kValidatedScience,
+        .maturity = DiagnosticMaturity::kValidated,
+        .scalability = DiagnosticScalability::kModerate,
+        .executed = true,
+        .policy_note = "validated_lightweight_science",
+    });
     bundle.quicklook_grid_n = static_cast<std::size_t>(m_config.analysis.quicklook_grid_n);
     bundle.xy_slice_density_code = computeGasXySliceDensity(state, bundle.quicklook_grid_n);
     bundle.xy_projection_density_code = computeGasXyProjectionDensity(state, bundle.quicklook_grid_n);
+    bundle.records.push_back(DiagnosticRecord{
+        .name = "gas_xy_slice_density",
+        .tier = DiagnosticTier::kValidatedScience,
+        .maturity = DiagnosticMaturity::kValidated,
+        .scalability = DiagnosticScalability::kModerate,
+        .executed = true,
+        .policy_note = "validated_lightweight_science",
+    });
+    bundle.records.push_back(DiagnosticRecord{
+        .name = "gas_xy_projection_density",
+        .tier = DiagnosticTier::kValidatedScience,
+        .maturity = DiagnosticMaturity::kValidated,
+        .scalability = DiagnosticScalability::kModerate,
+        .executed = true,
+        .policy_note = "validated_lightweight_science",
+    });
   }
 
   if (diagnostic_class == DiagnosticClass::kScienceHeavy) {
@@ -331,6 +420,14 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         state,
         static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
         static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count));
+    bundle.records.push_back(DiagnosticRecord{
+        .name = "power_spectrum",
+        .tier = DiagnosticTier::kReferenceScience,
+        .maturity = DiagnosticMaturity::kProvisional,
+        .scalability = DiagnosticScalability::kHeavyReference,
+        .executed = true,
+        .policy_note = "reference_only_non_default",
+    });
   }
 
   return bundle;
@@ -349,6 +446,8 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
   out << "  \"schema_version\": 1,\n";
   out << "  \"run_name\": \"" << m_config.output.run_name << "\",\n";
   out << "  \"diagnostic_class\": \"" << diagnosticClassLabel(bundle.diagnostic_class) << "\",\n";
+  out << "  \"diagnostics_execution_policy\": \"" << executionPolicyLabel(bundle.diagnostics_execution_policy)
+      << "\",\n";
   out << "  \"step_index\": " << bundle.step_index << ",\n";
   out << "  \"scale_factor\": " << bundle.scale_factor << ",\n";
   out << "  \"units\": {\"frame\": \"comoving\", \"mass\": \"code\", \"length\": \"code\"},\n";
@@ -358,6 +457,16 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
       << ", \"unique_particle_ids_ok\": " << (bundle.health.unique_particle_ids_ok ? "true" : "false")
       << ", \"non_finite_particles\": " << bundle.health.non_finite_particles
       << ", \"non_finite_cells\": " << bundle.health.non_finite_cells << "},\n";
+  out << "  \"diagnostic_records\": [";
+  for (std::size_t i = 0; i < bundle.records.size(); ++i) {
+    const auto& record = bundle.records[i];
+    out << (i == 0 ? "" : ", ") << "{\"name\": \"" << record.name << "\", \"tier\": \""
+        << diagnosticTierLabel(record.tier) << "\", \"maturity\": \"" << diagnosticMaturityLabel(record.maturity)
+        << "\", \"scalability\": \"" << diagnosticScalabilityLabel(record.scalability)
+        << "\", \"executed\": " << (record.executed ? "true" : "false") << ", \"policy_note\": \""
+        << record.policy_note << "\"}";
+  }
+  out << "],\n";
 
   out << "  \"angular_momentum_budget\": {\"total_norm\": " << magnitude(bundle.angular_momentum.total_l_code)
       << ", \"gas_norm\": " << magnitude(bundle.angular_momentum.gas_l_code)
@@ -465,10 +574,16 @@ void DiagnosticsCallback::onStage(core::StepContext& context) {
     runDiagnostics(context, DiagnosticClass::kRunHealth);
   }
   if (step % static_cast<std::uint64_t>(m_config.analysis.science_light_interval_steps) == 0) {
-    runDiagnostics(context, DiagnosticClass::kScienceLight);
+    if (m_config.analysis.diagnostics_execution_policy !=
+        core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly) {
+      runDiagnostics(context, DiagnosticClass::kScienceLight);
+    }
   }
   if (step % static_cast<std::uint64_t>(m_config.analysis.science_heavy_interval_steps) == 0) {
-    runDiagnostics(context, DiagnosticClass::kScienceHeavy);
+    if (m_config.analysis.diagnostics_execution_policy ==
+        core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional) {
+      runDiagnostics(context, DiagnosticClass::kScienceHeavy);
+    }
   }
 
   m_engine.enforceRetentionPolicy();

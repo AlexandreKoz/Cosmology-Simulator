@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 
 #include "cosmosim/analysis/diagnostics.hpp"
@@ -102,6 +103,70 @@ void testDerivedDiagnosticsSanity() {
   const auto bundle = engine.generateBundle(state, 4, 0.7, cosmosim::analysis::DiagnosticClass::kScienceLight);
   assert(bundle.xy_projection_density_code.size() == 16);
   assert(bundle.xy_slice_density_code.size() == 16);
+  assert(!bundle.records.empty());
+  assert(bundle.records.front().name == "run_health_counters");
+}
+
+void testProvisionalHeavyDiagnosticsRequireExplicitPolicy() {
+  cosmosim::core::SimulationConfig config = makeConfig();
+  config.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
+  config.analysis.enable_diagnostics = true;
+  config.analysis.run_health_interval_steps = 1;
+  config.analysis.science_light_interval_steps = 1;
+  config.analysis.science_heavy_interval_steps = 1;
+  config.output.run_name = "unit_analysis_policy_default";
+
+  const std::filesystem::path output_root =
+      std::filesystem::path(config.output.output_directory) / config.output.run_name;
+  std::filesystem::remove_all(output_root);
+
+  cosmosim::analysis::DiagnosticsCallback callback(config);
+  cosmosim::core::SimulationState state = makeSingleModeState();
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.current_scale_factor = 0.5;
+  integrator_state.step_index = 0;
+
+  std::vector<std::uint32_t> particle_indices(state.particles.size());
+  std::vector<std::uint32_t> cell_indices(state.cells.size());
+  for (std::size_t i = 0; i < particle_indices.size(); ++i) {
+    particle_indices[i] = static_cast<std::uint32_t>(i);
+  }
+  for (std::size_t i = 0; i < cell_indices.size(); ++i) {
+    cell_indices[i] = static_cast<std::uint32_t>(i);
+  }
+
+  const cosmosim::core::ActiveSetDescriptor active{
+      .particle_indices = particle_indices,
+      .cell_indices = cell_indices,
+      .particles_are_subset = false,
+      .cells_are_subset = false,
+  };
+  cosmosim::core::StepContext context{
+      .state = state,
+      .integrator_state = integrator_state,
+      .active_set = active,
+      .workspace = nullptr,
+      .cosmology_background = nullptr,
+      .mode_policy = nullptr,
+      .stage = cosmosim::core::IntegrationStage::kAnalysisHooks,
+  };
+
+  callback.onStage(context);
+  const auto timing = callback.timing();
+  assert(timing.heavy_calls == 0);
+  assert(timing.light_calls == 1);
+  assert(timing.run_health_calls == 1);
+
+  bool found_heavy_bundle = false;
+  for (const auto& entry : std::filesystem::directory_iterator(output_root / "diagnostics")) {
+    if (entry.path().filename().string().find("science_heavy") != std::string::npos) {
+      found_heavy_bundle = true;
+    }
+  }
+  assert(!found_heavy_bundle);
+
+  std::filesystem::remove_all(output_root);
 }
 
 }  // namespace
@@ -109,5 +174,6 @@ void testDerivedDiagnosticsSanity() {
 int main() {
   testPowerSpectrumHasSignalAndFiniteModes();
   testDerivedDiagnosticsSanity();
+  testProvisionalHeavyDiagnosticsRequireExplicitPolicy();
   return 0;
 }

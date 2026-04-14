@@ -219,6 +219,36 @@ uv_background_model = cosmic_soup
   assert(threw);
 }
 
+void testDiagnosticsExecutionPolicyValidation() {
+  const std::string good_text = R"(
+[mode]
+mode = zoom_in
+[analysis]
+diagnostics_execution_policy = all_including_provisional
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "diag_policy_good");
+  assert(
+      frozen.config.analysis.diagnostics_execution_policy ==
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
+  assert(
+      frozen.normalized_text.find("diagnostics_execution_policy = all_including_provisional") !=
+      std::string::npos);
+
+  const std::string bad_text = R"(
+[mode]
+mode = zoom_in
+[analysis]
+diagnostics_execution_policy = unsupported_policy
+)";
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_text, "diag_policy_bad");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testBlackHoleAgnConfigKeysAndValidation() {
   const std::string good_text = R"(
 [mode]
@@ -290,6 +320,7 @@ int main() {
   testDeprecatedAliasesAndCanonicalCollision();
   testFeedbackConfigKeysAndValidation();
   testCoolingPolicyEnumsAndValidation();
+  testDiagnosticsExecutionPolicyValidation();
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
   return 0;
