@@ -218,6 +218,32 @@ ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_profiling|int
 
 Observed:
 
+## 12) Infrastructure gate-bundle enforcement hardening
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+bash -n scripts/ci/enforce_infra_gates.sh
+```
+
+Observed:
+
+- Added `scripts/ci/enforce_infra_gates.sh` to run three explicit infrastructure gates with command failure propagated per path:
+  - `cpu_core_boundary_and_config_contract`
+  - `hdf5_schema_and_exact_restart_contract`
+  - `pm_hdf5_fftw_feature_path_validation`
+- Each gate writes artifacts under `ci_artifacts/infrastructure_gates/<gate_id>/`.
+- A machine-readable status file, `infrastructure_gate_report.json`, now records gate ids, presets, test regexes, and pass/fail status for CI interpretation.
+- `.github/workflows/ci.yml` now includes a dedicated `infrastructure_gates` job and makes `reproducibility_gate` depend on both matrix coverage and the explicit gate bundle.
+- `tests/integration/test_core_dependency_direction.cmake.in` now checks both source/header include direction and `CMakeLists.txt` target-link direction for `cosmosim_core`.
+
+Interpretation:
+
+- CPU-only success is no longer treated as implicit feature-path closure because HDF5 and PM/HDF5/FFTW are evaluated in one explicit gate bundle with a consolidated status report.
+- Architecture-boundary enforcement now covers both include-level and build-graph-level dependency direction.
+
 ## 12) Parallel contract hardening follow-up (R07)
 
 _Date captured: 2026-04-14 (UTC)_
