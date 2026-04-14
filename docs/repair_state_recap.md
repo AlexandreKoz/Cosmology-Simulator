@@ -238,6 +238,29 @@ Observed:
 
 Interpretation:
 
+## 13) Distributed-memory ownership/determinism contract hardening
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_integration_parallel_two_rank_restart
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart"
+```
+
+Observed:
+
+- Distributed-memory ghost planning now has an explicit typed ownership contract (`LocalGhostDescriptor` with `kOwned`/`kGhost`) and validation for invalid ownership combinations.
+- Deterministic reduction agreement helpers now provide explicit deterministic reference sums and absolute/relative agreement reporting for reproducibility checks.
+- Multi-rank config-freeze consensus checks now compare normalized config hash + rank-count expectation + deterministic-reduction mode across per-rank digests.
+- Unit/integration tests cover typed ownership planning, deterministic reduction agreement checks, and config-consensus checks using pseudo-multi-rank vectors.
+
+Interpretation:
+
+- Reviewability and contract clarity improved for rank-owned vs ghost state and reduction determinism semantics without expanding scope into new decomposition/scaling features.
+- Evidence remains CPU-only/pseudo-multi-rank in this environment; no claim is made that this alone closes full production MPI execution.
+
 - Infrastructure run-health counters remain first-class and cheap.
 - Validated light science diagnostics remain available in default runs.
 - Reference/provisional heavy diagnostics are quarantined behind explicit non-default policy.

@@ -89,11 +89,69 @@ void testRestartStateRoundTrip() {
   assert(out.owning_rank_by_item == in.owning_rank_by_item);
 }
 
+void testExplicitOwnedVsGhostContracts() {
+  const std::vector<cosmosim::parallel::LocalGhostDescriptor> descriptors = {
+      {.residency = cosmosim::parallel::LocalIndexResidency::kOwned, .owning_rank = 0},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost, .owning_rank = 1},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kOwned, .owning_rank = 0},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost, .owning_rank = 2},
+  };
+
+  const auto plan = cosmosim::parallel::buildGhostExchangePlan(0, descriptors, sizeof(double) * 3 + sizeof(std::uint64_t));
+  assert(plan.neighbor_ranks.size() == 2);
+  assert(plan.neighbor_ranks[0] == 1);
+  assert(plan.neighbor_ranks[1] == 2);
+  assert(plan.recv_local_indices_by_neighbor[0].size() == 1);
+  assert(plan.recv_local_indices_by_neighbor[0][0] == 1);
+  assert(plan.recv_local_indices_by_neighbor[1].size() == 1);
+  assert(plan.recv_local_indices_by_neighbor[1][0] == 3);
+  assert(plan.send_local_indices_by_neighbor == plan.recv_local_indices_by_neighbor);
+}
+
+void testDeterministicReductionAgreement() {
+  const std::vector<double> rank_values = {1.5, -2.0, 3.25, 10.0};
+  const double deterministic = cosmosim::parallel::deterministicRankOrderedSum(rank_values);
+  assert(std::abs(deterministic - 12.75) < 1.0e-15);
+
+  const auto exact = cosmosim::parallel::compareReductionAgreement(rank_values, deterministic);
+  assert(exact.absolute_error < 1.0e-15);
+  assert(exact.relative_error < 1.0e-15);
+
+  const auto perturbed = cosmosim::parallel::compareReductionAgreement(rank_values, deterministic + 1.0e-6);
+  assert(perturbed.absolute_error > 0.0);
+  assert(perturbed.relative_error > 0.0);
+}
+
+void testRankConfigConsensus() {
+  const std::vector<cosmosim::parallel::RankConfigDigest> matching = {
+      {.world_rank = 0, .normalized_config_hash = 0xabcU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+      {.world_rank = 1, .normalized_config_hash = 0xabcU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+  };
+  const auto ok = cosmosim::parallel::evaluateRankConfigConsensus(matching);
+  assert(ok.allConsistent());
+  assert(ok.mismatched_ranks.empty());
+
+  const std::vector<cosmosim::parallel::RankConfigDigest> mismatch = {
+      {.world_rank = 0, .normalized_config_hash = 0xabcU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+      {.world_rank = 1, .normalized_config_hash = 0xdefU, .mpi_ranks_expected = 4, .deterministic_reduction = false},
+  };
+  const auto bad = cosmosim::parallel::evaluateRankConfigConsensus(mismatch);
+  assert(!bad.normalized_config_hash_match);
+  assert(!bad.mpi_ranks_expected_match);
+  assert(!bad.deterministic_reduction_match);
+  assert(!bad.allConsistent());
+  assert(bad.mismatched_ranks.size() == 1);
+  assert(bad.mismatched_ranks[0] == 1);
+}
+
 }  // namespace
 
 int main() {
   testGhostPackUnpackRoundTrip();
   testMortonDecompositionInvariants();
   testRestartStateRoundTrip();
+  testExplicitOwnedVsGhostContracts();
+  testDeterministicReductionAgreement();
+  testRankConfigConsensus();
   return 0;
 }

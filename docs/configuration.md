@@ -131,6 +131,13 @@ Diagnostics maturity policy:
 - `mpi_ranks_expected`, `omp_threads`, `gpu_devices`
 - `deterministic_reduction`
 
+Distributed-memory determinism contract (infrastructure scope):
+
+- `mpi_ranks_expected` must match across all ranks for a valid distributed run contract.
+- `deterministic_reduction=true` means rank-local contributions are compared against a rank-ordered deterministic reference sum in tests and smoke paths.
+- `deterministic_reduction=false` is allowed only when reduction error is evaluated explicitly against a documented absolute/relative agreement policy in code/tests (no implicit “close enough” claims).
+- The normalized frozen config hash (`provenance.config_hash_hex`) is treated as a cross-rank freeze identity and must not diverge across ranks in the same run.
+
 ## `[units]`
 
 - `length_unit`, `mass_unit`, `velocity_unit`, `coordinate_frame`

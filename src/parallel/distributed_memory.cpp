@@ -93,6 +93,15 @@ template <typename T>
   return lines;
 }
 
+[[nodiscard]] double absoluteValue(double value) {
+  return (value < 0.0) ? -value : value;
+}
+
+[[nodiscard]] double stableRelativeError(double measured, double reference, double absolute_error) {
+  const double denom = std::max(absoluteValue(reference), std::numeric_limits<double>::min());
+  return absolute_error / denom;
+}
+
 }  // namespace
 
 DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem> items, const DecompositionConfig& config) {
@@ -192,20 +201,26 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
 
 GhostExchangePlan buildGhostExchangePlan(
     int world_rank,
-    std::span<const int> ghost_owner_rank_by_local_index,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     std::size_t bytes_per_ghost) {
   GhostExchangePlan plan;
   std::vector<int> owners;
-  owners.reserve(ghost_owner_rank_by_local_index.size());
+  owners.reserve(local_ghost_descriptors.size());
 
-  for (const int owner_rank : ghost_owner_rank_by_local_index) {
-    if (owner_rank < 0) {
+  for (const LocalGhostDescriptor descriptor : local_ghost_descriptors) {
+    if (descriptor.owning_rank < 0) {
       throw std::invalid_argument("ghost owner rank must be non-negative");
     }
-    if (owner_rank == world_rank) {
+    if (descriptor.residency == LocalIndexResidency::kOwned) {
+      if (descriptor.owning_rank != world_rank) {
+        throw std::invalid_argument("owned local index must have world_rank ownership");
+      }
       continue;
     }
-    owners.push_back(owner_rank);
+    if (descriptor.owning_rank == world_rank) {
+      throw std::invalid_argument("ghost local index cannot be owned by world_rank");
+    }
+    owners.push_back(descriptor.owning_rank);
   }
 
   std::sort(owners.begin(), owners.end());
@@ -215,13 +230,13 @@ GhostExchangePlan buildGhostExchangePlan(
   plan.send_local_indices_by_neighbor.assign(owners.size(), {});
   plan.recv_local_indices_by_neighbor.assign(owners.size(), {});
 
-  for (std::uint32_t local_index = 0; local_index < ghost_owner_rank_by_local_index.size(); ++local_index) {
-    const int owner_rank = ghost_owner_rank_by_local_index[local_index];
-    if (owner_rank == world_rank) {
+  for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
+    const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
+    if (descriptor.residency == LocalIndexResidency::kOwned) {
       continue;
     }
-    const auto it = std::lower_bound(owners.begin(), owners.end(), owner_rank);
-    if (it == owners.end() || *it != owner_rank) {
+    const auto it = std::lower_bound(owners.begin(), owners.end(), descriptor.owning_rank);
+    if (it == owners.end() || *it != descriptor.owning_rank) {
       throw std::logic_error("owner rank map mismatch");
     }
     const std::size_t neighbor_slot = static_cast<std::size_t>(std::distance(owners.begin(), it));
@@ -236,6 +251,74 @@ GhostExchangePlan buildGhostExchangePlan(
   }
 
   return plan;
+}
+
+GhostExchangePlan buildGhostExchangePlan(
+    int world_rank,
+    std::span<const int> ghost_owner_rank_by_local_index,
+    std::size_t bytes_per_ghost) {
+  std::vector<LocalGhostDescriptor> descriptors;
+  descriptors.reserve(ghost_owner_rank_by_local_index.size());
+  for (const int owner_rank : ghost_owner_rank_by_local_index) {
+    descriptors.push_back(LocalGhostDescriptor{
+        .residency = (owner_rank == world_rank) ? LocalIndexResidency::kOwned : LocalIndexResidency::kGhost,
+        .owning_rank = owner_rank,
+    });
+  }
+  return buildGhostExchangePlan(world_rank, descriptors, bytes_per_ghost);
+}
+
+double deterministicRankOrderedSum(std::span<const double> per_rank_values) {
+  long double sum = 0.0;
+  for (const double value : per_rank_values) {
+    sum += static_cast<long double>(value);
+  }
+  return static_cast<double>(sum);
+}
+
+ReductionAgreement compareReductionAgreement(
+    std::span<const double> per_rank_values,
+    double measured_sum) {
+  const double deterministic_sum = deterministicRankOrderedSum(per_rank_values);
+  const double absolute_error = absoluteValue(measured_sum - deterministic_sum);
+  return ReductionAgreement{
+      .deterministic_sum = deterministic_sum,
+      .reference_sum = measured_sum,
+      .absolute_error = absolute_error,
+      .relative_error = stableRelativeError(measured_sum, deterministic_sum, absolute_error),
+  };
+}
+
+bool RankConfigConsensus::allConsistent() const noexcept {
+  return normalized_config_hash_match && mpi_ranks_expected_match && deterministic_reduction_match;
+}
+
+RankConfigConsensus evaluateRankConfigConsensus(std::span<const RankConfigDigest> digests) {
+  RankConfigConsensus consensus;
+  if (digests.empty()) {
+    return consensus;
+  }
+
+  const RankConfigDigest baseline = digests.front();
+  for (const RankConfigDigest& digest : digests) {
+    bool rank_matches = true;
+    if (digest.normalized_config_hash != baseline.normalized_config_hash) {
+      consensus.normalized_config_hash_match = false;
+      rank_matches = false;
+    }
+    if (digest.mpi_ranks_expected != baseline.mpi_ranks_expected) {
+      consensus.mpi_ranks_expected_match = false;
+      rank_matches = false;
+    }
+    if (digest.deterministic_reduction != baseline.deterministic_reduction) {
+      consensus.deterministic_reduction_match = false;
+      rank_matches = false;
+    }
+    if (!rank_matches) {
+      consensus.mismatched_ranks.push_back(digest.world_rank);
+    }
+  }
+  return consensus;
 }
 
 bool GhostExchangeBufferSoA::isConsistent() const noexcept {
