@@ -134,6 +134,46 @@ void appendRankConfigMismatch(
   return sizeof(std::uint64_t) + sizeof(double) * 3U;
 }
 
+void validateTransferDescriptor(
+    const GhostTransferDescriptor& descriptor,
+    GhostTransferRole expected_role,
+    int expected_peer_rank,
+    std::size_t expected_neighbor_slot,
+    std::span<const std::uint32_t> expected_indices) {
+  if (descriptor.role != expected_role) {
+    throw std::invalid_argument("ghost transfer descriptor role does not match container");
+  }
+  if (descriptor.peer_rank != expected_peer_rank) {
+    throw std::invalid_argument("ghost transfer descriptor peer_rank does not match neighbor slot");
+  }
+  if (descriptor.neighbor_slot != expected_neighbor_slot) {
+    throw std::invalid_argument("ghost transfer descriptor neighbor_slot mismatch");
+  }
+  if (descriptor.local_indices.size() != expected_indices.size() ||
+      !std::equal(descriptor.local_indices.begin(), descriptor.local_indices.end(), expected_indices.begin())) {
+    throw std::invalid_argument("ghost transfer descriptor indices drift from canonical plan indices");
+  }
+  if (descriptor.local_indices.empty()) {
+    throw std::invalid_argument("ghost transfer descriptor local_indices must be non-empty");
+  }
+  if (expected_role == GhostTransferRole::kOutboundSend &&
+      descriptor.intent != GhostTransferIntent::kGhostRefreshRequest &&
+      descriptor.intent != GhostTransferIntent::kOwnershipMigrationSend) {
+    throw std::invalid_argument("outbound transfer intent must be ghost refresh request or migration send");
+  }
+  if (expected_role == GhostTransferRole::kInboundReceive &&
+      descriptor.intent != GhostTransferIntent::kGhostRefreshReceiveStaging &&
+      descriptor.intent != GhostTransferIntent::kOwnershipMigrationReceiveStaging) {
+    throw std::invalid_argument("inbound transfer intent must be receive-staging intent");
+  }
+  if (descriptor.intent == GhostTransferIntent::kGhostRefreshRequest ||
+      descriptor.intent == GhostTransferIntent::kGhostRefreshReceiveStaging) {
+    if (descriptor.expected_post_transfer_residency != LocalIndexResidency::kGhost) {
+      throw std::invalid_argument("ghost refresh transfers must keep ghost post-transfer residency");
+    }
+  }
+}
+
 }  // namespace
 
 DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem> items, const DecompositionConfig& config) {
@@ -285,18 +325,25 @@ GhostExchangePlan buildGhostExchangePlan(
     plan.send_local_indices_by_neighbor[i] = plan.recv_local_indices_by_neighbor[i];
     plan.outbound_transfers[i] = GhostTransferDescriptor{
         .role = GhostTransferRole::kOutboundSend,
+        .intent = GhostTransferIntent::kGhostRefreshRequest,
         .peer_rank = owners[i],
+        .neighbor_slot = i,
+        .expected_post_transfer_residency = LocalIndexResidency::kGhost,
         .local_indices = plan.send_local_indices_by_neighbor[i],
     };
     plan.inbound_transfers[i] = GhostTransferDescriptor{
         .role = GhostTransferRole::kInboundReceive,
+        .intent = GhostTransferIntent::kGhostRefreshReceiveStaging,
         .peer_rank = owners[i],
+        .neighbor_slot = i,
+        .expected_post_transfer_residency = LocalIndexResidency::kGhost,
         .local_indices = plan.recv_local_indices_by_neighbor[i],
     };
     plan.recv_bytes += static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
     plan.send_bytes += static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
   }
 
+  validateGhostExchangePlan(plan);
   return plan;
 }
 
@@ -313,6 +360,33 @@ GhostExchangePlan buildGhostExchangePlan(
     });
   }
   return buildGhostExchangePlan(world_rank, descriptors, bytes_per_ghost);
+}
+
+void validateGhostExchangePlan(const GhostExchangePlan& plan) {
+  const std::size_t neighbor_count = plan.neighbor_ranks.size();
+  if (plan.send_local_indices_by_neighbor.size() != neighbor_count ||
+      plan.recv_local_indices_by_neighbor.size() != neighbor_count ||
+      plan.outbound_transfers.size() != neighbor_count ||
+      plan.inbound_transfers.size() != neighbor_count) {
+    throw std::invalid_argument("ghost exchange plan containers must have matching neighbor counts");
+  }
+  for (std::size_t i = 0; i < neighbor_count; ++i) {
+    if (i > 0 && plan.neighbor_ranks[i - 1] >= plan.neighbor_ranks[i]) {
+      throw std::invalid_argument("ghost exchange plan neighbor_ranks must be strictly increasing");
+    }
+    validateTransferDescriptor(
+        plan.outbound_transfers[i],
+        GhostTransferRole::kOutboundSend,
+        plan.neighbor_ranks[i],
+        i,
+        plan.send_local_indices_by_neighbor[i]);
+    validateTransferDescriptor(
+        plan.inbound_transfers[i],
+        GhostTransferRole::kInboundReceive,
+        plan.neighbor_ranks[i],
+        i,
+        plan.recv_local_indices_by_neighbor[i]);
+  }
 }
 
 double deterministicRankOrderedSum(std::span<const double> per_rank_values) {
@@ -342,8 +416,19 @@ bool satisfiesReductionAgreement(
   if (policy.absolute_tolerance < 0.0 || policy.relative_tolerance < 0.0) {
     throw std::invalid_argument("reduction agreement tolerances must be non-negative");
   }
-  return agreement.absolute_error <= policy.absolute_tolerance ||
-         agreement.relative_error <= policy.relative_tolerance;
+  const bool absolute_ok = agreement.absolute_error <= policy.absolute_tolerance;
+  const bool relative_ok = agreement.relative_error <= policy.relative_tolerance;
+  switch (policy.mode) {
+    case ReductionAgreementMode::kAbsoluteOnly:
+      return absolute_ok;
+    case ReductionAgreementMode::kRelativeOnly:
+      return relative_ok;
+    case ReductionAgreementMode::kAbsoluteAndRelative:
+      return absolute_ok && relative_ok;
+    case ReductionAgreementMode::kAbsoluteOrRelative:
+      return absolute_ok || relative_ok;
+  }
+  throw std::invalid_argument("unknown reduction agreement mode");
 }
 
 bool RankConfigConsensus::allConsistent() const noexcept {

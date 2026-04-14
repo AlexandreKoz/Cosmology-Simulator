@@ -3,7 +3,7 @@
 This document captures the current **reviewable infrastructure contract** for distributed-memory scaffolding.
 It does **not** claim full production MPI capability.
 
-## 1) Ownership + transfer-role contract: owned/ghost/send/receive
+## 1) Ownership + transfer lifecycle contract (scaffold-level)
 
 `parallel::LocalGhostDescriptor` encodes local-index residency explicitly:
 
@@ -12,11 +12,17 @@ It does **not** claim full production MPI capability.
 
 `buildGhostExchangePlan(world_rank, span<LocalGhostDescriptor>, bytes_per_ghost)` rejects mismatched ownership combinations and builds send/recv index maps by remote owner rank.
 
-`parallel::GhostTransferDescriptor` now makes transfer-payload role explicit:
+`parallel::GhostTransferDescriptor` now makes lifecycle intent and post-transfer expectation explicit:
 
 - `role = kOutboundSend`: send-side payload descriptor for a neighbor rank.
 - `role = kInboundReceive`: receive-side payload descriptor for a neighbor rank.
+- `intent`:
+  - `kGhostRefreshRequest` (outbound): request side of ghost refresh.
+  - `kGhostRefreshReceiveStaging` (inbound): receive staging side of ghost refresh response.
+  - `kOwnershipMigrationSend` / `kOwnershipMigrationReceiveStaging`: reserved typed intents for future migration wiring (not produced by current scaffold builder).
 - `peer_rank`: remote rank for this payload contract.
+- `neighbor_slot`: canonical slot in `neighbor_ranks`.
+- `expected_post_transfer_residency`: explicit post-transfer local residency expectation (`kGhost` for current ghost-refresh scaffold).
 - `local_indices`: local indices participating in this transfer payload.
 
 `GhostExchangePlan` now publishes both legacy index vectors and typed transfer-role lists:
@@ -24,7 +30,9 @@ It does **not** claim full production MPI capability.
 - `outbound_transfers` (`kOutboundSend` only)
 - `inbound_transfers` (`kInboundReceive` only)
 
-In this repair scope, request/response sets remain symmetric scaffolding; no full migration scheduler is claimed.
+`validateGhostExchangePlan()` enforces role/intent/container consistency, peer-rank + slot consistency, and exact descriptor-index equality with canonical per-neighbor vectors.
+
+In this repair scope, request/response sets remain symmetric scaffolding and the builder only emits ghost-refresh intents. Full migration scheduling and migration ownership commit are still out of scope.
 
 ## 2) Migration/pack/unpack invariants
 
@@ -48,9 +56,22 @@ Current scaffolding behavior keeps symmetric request/response index sets per nei
 - baseline-vs-measured absolute error
 - baseline-vs-measured relative error
 
-`satisfiesReductionAgreement()` provides a narrow policy gate over absolute/relative tolerances so callers/tests do not reinterpret raw error fields ad hoc.
+`ReductionAgreementPolicy` now includes explicit `mode`:
+
+- `kAbsoluteOnly`
+- `kRelativeOnly`
+- `kAbsoluteAndRelative`
+- `kAbsoluteOrRelative`
+
+`satisfiesReductionAgreement()` uses this explicit mode instead of implicit boolean logic. The pseudo-multi-rank infrastructure tests currently default to `kAbsoluteOrRelative` to preserve scaffold tolerance behavior while making the policy auditable.
 
 This enables explicit reproducibility checks in environment-independent pseudo-multi-rank tests without claiming real MPI collective determinism for all hardware/network stacks.
+
+## 5) What remains unproven in this environment
+
+- No production MPI exchange correctness claim is made; this repo path is still pseudo-multi-rank + CPU-only contract scaffolding.
+- Migration lifecycle beyond typed intents (actual migration transfer execution + ownership commit across ranks) is not implemented in this pass.
+- Symmetric send/recv index construction remains a temporary scaffold assumption for ghost-refresh paths.
 
 ## 4) Config-freeze consensus contract across ranks
 

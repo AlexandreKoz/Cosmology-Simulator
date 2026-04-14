@@ -111,10 +111,21 @@ void testExplicitOwnedVsGhostContracts() {
   assert(plan.inbound_transfers.size() == 2);
   assert(plan.outbound_transfers[0].role == cosmosim::parallel::GhostTransferRole::kOutboundSend);
   assert(plan.inbound_transfers[0].role == cosmosim::parallel::GhostTransferRole::kInboundReceive);
+  assert(plan.outbound_transfers[0].intent ==
+         cosmosim::parallel::GhostTransferIntent::kGhostRefreshRequest);
+  assert(plan.inbound_transfers[0].intent ==
+         cosmosim::parallel::GhostTransferIntent::kGhostRefreshReceiveStaging);
+  assert(plan.outbound_transfers[0].expected_post_transfer_residency ==
+         cosmosim::parallel::LocalIndexResidency::kGhost);
+  assert(plan.inbound_transfers[0].expected_post_transfer_residency ==
+         cosmosim::parallel::LocalIndexResidency::kGhost);
+  assert(plan.outbound_transfers[0].neighbor_slot == 0);
+  assert(plan.inbound_transfers[1].neighbor_slot == 1);
   assert(plan.outbound_transfers[0].peer_rank == 1);
   assert(plan.inbound_transfers[1].peer_rank == 2);
   assert(plan.outbound_transfers[1].local_indices == plan.send_local_indices_by_neighbor[1]);
   assert(plan.inbound_transfers[1].local_indices == plan.recv_local_indices_by_neighbor[1]);
+  cosmosim::parallel::validateGhostExchangePlan(plan);
 }
 
 void testGhostTransferInvariantFailures() {
@@ -177,7 +188,99 @@ void testDeterministicReductionAgreement() {
       {.absolute_tolerance = 1.0e-9, .relative_tolerance = 1.0e-9}));
   assert(cosmosim::parallel::satisfiesReductionAgreement(
       perturbed,
-      {.absolute_tolerance = 2.0e-6, .relative_tolerance = 0.0}));
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteOrRelative,
+       .absolute_tolerance = 2.0e-6,
+       .relative_tolerance = 0.0}));
+}
+
+void testGhostExchangePlanValidationDriftRejection() {
+  const std::vector<cosmosim::parallel::LocalGhostDescriptor> descriptors = {
+      {.residency = cosmosim::parallel::LocalIndexResidency::kOwned, .owning_rank = 0},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost, .owning_rank = 2},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost, .owning_rank = 1},
+  };
+  auto plan = cosmosim::parallel::buildGhostExchangePlan(0, descriptors, sizeof(double));
+
+  {
+    bool threw = false;
+    auto bad = plan;
+    bad.outbound_transfers[0].role = cosmosim::parallel::GhostTransferRole::kInboundReceive;
+    try {
+      cosmosim::parallel::validateGhostExchangePlan(bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  {
+    bool threw = false;
+    auto bad = plan;
+    bad.inbound_transfers[0].peer_rank = 99;
+    try {
+      cosmosim::parallel::validateGhostExchangePlan(bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  {
+    bool threw = false;
+    auto bad = plan;
+    bad.outbound_transfers[0].local_indices.push_back(42);
+    try {
+      cosmosim::parallel::validateGhostExchangePlan(bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+}
+
+void testReductionAgreementPolicyModes() {
+  const cosmosim::parallel::ReductionAgreement agreement{
+      .deterministic_baseline_sum = 10.0,
+      .measured_sum = 10.2,
+      .absolute_error = 0.2,
+      .relative_error = 0.02,
+  };
+
+  assert(cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteOnly,
+       .absolute_tolerance = 0.25,
+       .relative_tolerance = 0.0}));
+  assert(!cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteOnly,
+       .absolute_tolerance = 0.1,
+       .relative_tolerance = 1.0}));
+  assert(cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kRelativeOnly,
+       .absolute_tolerance = 0.0,
+       .relative_tolerance = 0.03}));
+  assert(!cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kRelativeOnly,
+       .absolute_tolerance = 1.0,
+       .relative_tolerance = 0.01}));
+  assert(cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteAndRelative,
+       .absolute_tolerance = 0.3,
+       .relative_tolerance = 0.03}));
+  assert(!cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteAndRelative,
+       .absolute_tolerance = 0.3,
+       .relative_tolerance = 0.01}));
+  assert(cosmosim::parallel::satisfiesReductionAgreement(
+      agreement,
+      {.mode = cosmosim::parallel::ReductionAgreementMode::kAbsoluteOrRelative,
+       .absolute_tolerance = 0.1,
+       .relative_tolerance = 0.03}));
 }
 
 void testRankConfigConsensus() {
@@ -235,6 +338,8 @@ int main() {
   testExplicitOwnedVsGhostContracts();
   testGhostTransferInvariantFailures();
   testDeterministicReductionAgreement();
+  testGhostExchangePlanValidationDriftRejection();
+  testReductionAgreementPolicyModes();
   testRankConfigConsensus();
   testGhostBufferPayloadShapeValidation();
   return 0;

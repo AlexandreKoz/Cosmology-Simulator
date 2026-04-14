@@ -79,9 +79,19 @@ enum class GhostTransferRole : std::uint8_t {
   kInboundReceive = 1,
 };
 
+enum class GhostTransferIntent : std::uint8_t {
+  kGhostRefreshRequest = 0,
+  kGhostRefreshReceiveStaging = 1,
+  kOwnershipMigrationSend = 2,
+  kOwnershipMigrationReceiveStaging = 3,
+};
+
 struct GhostTransferDescriptor {
   GhostTransferRole role = GhostTransferRole::kOutboundSend;
+  GhostTransferIntent intent = GhostTransferIntent::kGhostRefreshRequest;
   int peer_rank = 0;
+  std::size_t neighbor_slot = 0;
+  LocalIndexResidency expected_post_transfer_residency = LocalIndexResidency::kGhost;
   std::vector<std::uint32_t> local_indices;
 };
 
@@ -105,6 +115,8 @@ struct GhostExchangePlan {
     std::span<const int> ghost_owner_rank_by_local_index,
     std::size_t bytes_per_ghost);
 
+void validateGhostExchangePlan(const GhostExchangePlan& plan);
+
 struct ReductionAgreement {
   double deterministic_baseline_sum = 0.0;
   double measured_sum = 0.0;
@@ -112,7 +124,15 @@ struct ReductionAgreement {
   double relative_error = 0.0;
 };
 
+enum class ReductionAgreementMode : std::uint8_t {
+  kAbsoluteOnly = 0,
+  kRelativeOnly = 1,
+  kAbsoluteAndRelative = 2,
+  kAbsoluteOrRelative = 3,
+};
+
 struct ReductionAgreementPolicy {
+  ReductionAgreementMode mode = ReductionAgreementMode::kAbsoluteOrRelative;
   double absolute_tolerance = 0.0;
   double relative_tolerance = 0.0;
 };
