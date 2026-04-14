@@ -343,3 +343,30 @@ Interpretation:
 
 - Operational troubleshooting and CI artifact review no longer depend on ad hoc text/exception surfaces alone.
 - Reproducibility posture remains unchanged: operational events are additive and provenance-linked; no solver behavior or restart/snapshot schema semantics were changed.
+
+## 13) Infrastructure gate hardening follow-up (R08 durability/diagnostics)
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+bash -n scripts/ci/run_preset_pipeline.sh
+bash -n scripts/ci/enforce_infra_gates.sh
+cmake --preset cpu-only-debug
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "integration_core_dependency_direction"
+bash ./scripts/ci/enforce_infra_gates.sh ci_artifacts/local_infra_gates
+```
+
+Observed:
+
+- Infrastructure gates are now defined in `scripts/ci/infrastructure_gates_manifest.tsv` with explicit fields for gate id, preset trio, intended test scope, metadata expectation, artifact subdir, and benchmark toggle.
+- `run_preset_pipeline.sh` now emits `preset_pipeline_report-<preset>.json` with per-phase command metadata and failure phase (`configure`, `build`, `test`, `artifact_collection`, `benchmark`) to improve triage fidelity.
+- `enforce_infra_gates.sh` now records richer per-gate entries in `infrastructure_gate_report.json`, including `build_preset`, `test_preset`, `test_scope`, `artifact_dir`, `failed_phase`, and explicit phase commands.
+- `integration_core_dependency_direction` now validates target-link direction by inspecting CMake-generated Graphviz dependency metadata from the configured build tree instead of scanning only top-level `CMakeLists.txt` text.
+
+Interpretation:
+
+- Gate semantics are less rename-fragile and more reviewable due to a narrow declarative manifest.
+- CI failure triage can identify failing phase and command per gate without log archaeology.
+- Core target-link direction guard is stronger than single-file regex scanning while remaining narrow and infrastructure-focused.
