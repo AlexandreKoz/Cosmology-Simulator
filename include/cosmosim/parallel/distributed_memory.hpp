@@ -64,14 +64,6 @@ struct DecompositionPlan {
     std::span<const DecompositionItem> items,
     const DecompositionConfig& config);
 
-struct GhostExchangePlan {
-  std::vector<int> neighbor_ranks;
-  std::vector<std::vector<std::uint32_t>> send_local_indices_by_neighbor;
-  std::vector<std::vector<std::uint32_t>> recv_local_indices_by_neighbor;
-  std::uint64_t send_bytes = 0;
-  std::uint64_t recv_bytes = 0;
-};
-
 enum class LocalIndexResidency : std::uint8_t {
   kOwned = 0,
   kGhost = 1,
@@ -80,6 +72,27 @@ enum class LocalIndexResidency : std::uint8_t {
 struct LocalGhostDescriptor {
   LocalIndexResidency residency = LocalIndexResidency::kOwned;
   int owning_rank = 0;
+};
+
+enum class GhostTransferRole : std::uint8_t {
+  kOutboundSend = 0,
+  kInboundReceive = 1,
+};
+
+struct GhostTransferDescriptor {
+  GhostTransferRole role = GhostTransferRole::kOutboundSend;
+  int peer_rank = 0;
+  std::vector<std::uint32_t> local_indices;
+};
+
+struct GhostExchangePlan {
+  std::vector<int> neighbor_ranks;
+  std::vector<std::vector<std::uint32_t>> send_local_indices_by_neighbor;
+  std::vector<std::vector<std::uint32_t>> recv_local_indices_by_neighbor;
+  std::vector<GhostTransferDescriptor> outbound_transfers;
+  std::vector<GhostTransferDescriptor> inbound_transfers;
+  std::uint64_t send_bytes = 0;
+  std::uint64_t recv_bytes = 0;
 };
 
 [[nodiscard]] GhostExchangePlan buildGhostExchangePlan(
@@ -93,16 +106,24 @@ struct LocalGhostDescriptor {
     std::size_t bytes_per_ghost);
 
 struct ReductionAgreement {
-  double deterministic_sum = 0.0;
-  double reference_sum = 0.0;
+  double deterministic_baseline_sum = 0.0;
+  double measured_sum = 0.0;
   double absolute_error = 0.0;
   double relative_error = 0.0;
+};
+
+struct ReductionAgreementPolicy {
+  double absolute_tolerance = 0.0;
+  double relative_tolerance = 0.0;
 };
 
 [[nodiscard]] double deterministicRankOrderedSum(std::span<const double> per_rank_values);
 [[nodiscard]] ReductionAgreement compareReductionAgreement(
     std::span<const double> per_rank_values,
     double measured_sum);
+[[nodiscard]] bool satisfiesReductionAgreement(
+    const ReductionAgreement& agreement,
+    const ReductionAgreementPolicy& policy);
 
 struct RankConfigDigest {
   int world_rank = 0;
@@ -111,11 +132,26 @@ struct RankConfigDigest {
   bool deterministic_reduction = true;
 };
 
+enum class RankConfigMismatchProperty : std::uint8_t {
+  kNormalizedConfigHash = 0,
+  kMpiRanksExpected = 1,
+  kDeterministicReduction = 2,
+};
+
+struct RankConfigMismatch {
+  RankConfigMismatchProperty property = RankConfigMismatchProperty::kNormalizedConfigHash;
+  int baseline_rank = 0;
+  int rank = 0;
+  std::string baseline_value;
+  std::string rank_value;
+};
+
 struct RankConfigConsensus {
   bool normalized_config_hash_match = true;
   bool mpi_ranks_expected_match = true;
   bool deterministic_reduction_match = true;
   std::vector<int> mismatched_ranks;
+  std::vector<RankConfigMismatch> mismatches;
 
   [[nodiscard]] bool allConsistent() const noexcept;
 };

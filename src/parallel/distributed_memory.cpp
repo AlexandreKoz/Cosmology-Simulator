@@ -102,6 +102,38 @@ template <typename T>
   return absolute_error / denom;
 }
 
+[[nodiscard]] std::string rankConfigValueString(std::uint64_t value) {
+  return std::to_string(value);
+}
+
+[[nodiscard]] std::string rankConfigValueString(int value) {
+  return std::to_string(value);
+}
+
+[[nodiscard]] std::string rankConfigValueString(bool value) {
+  return value ? "true" : "false";
+}
+
+void appendRankConfigMismatch(
+    RankConfigConsensus* consensus,
+    RankConfigMismatchProperty property,
+    int baseline_rank,
+    int rank,
+    std::string baseline_value,
+    std::string rank_value) {
+  consensus->mismatches.push_back(RankConfigMismatch{
+      .property = property,
+      .baseline_rank = baseline_rank,
+      .rank = rank,
+      .baseline_value = std::move(baseline_value),
+      .rank_value = std::move(rank_value),
+  });
+}
+
+[[nodiscard]] constexpr std::size_t ghostExchangeRecordBytes() {
+  return sizeof(std::uint64_t) + sizeof(double) * 3U;
+}
+
 }  // namespace
 
 DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem> items, const DecompositionConfig& config) {
@@ -203,6 +235,9 @@ GhostExchangePlan buildGhostExchangePlan(
     int world_rank,
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     std::size_t bytes_per_ghost) {
+  if (bytes_per_ghost == 0) {
+    throw std::invalid_argument("bytes_per_ghost must be positive");
+  }
   GhostExchangePlan plan;
   std::vector<int> owners;
   owners.reserve(local_ghost_descriptors.size());
@@ -229,6 +264,8 @@ GhostExchangePlan buildGhostExchangePlan(
   plan.neighbor_ranks = owners;
   plan.send_local_indices_by_neighbor.assign(owners.size(), {});
   plan.recv_local_indices_by_neighbor.assign(owners.size(), {});
+  plan.outbound_transfers.assign(owners.size(), {});
+  plan.inbound_transfers.assign(owners.size(), {});
 
   for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
     const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
@@ -246,6 +283,16 @@ GhostExchangePlan buildGhostExchangePlan(
   for (std::size_t i = 0; i < owners.size(); ++i) {
     // Scaffolding contract: request and response index sets are symmetric in this stage.
     plan.send_local_indices_by_neighbor[i] = plan.recv_local_indices_by_neighbor[i];
+    plan.outbound_transfers[i] = GhostTransferDescriptor{
+        .role = GhostTransferRole::kOutboundSend,
+        .peer_rank = owners[i],
+        .local_indices = plan.send_local_indices_by_neighbor[i],
+    };
+    plan.inbound_transfers[i] = GhostTransferDescriptor{
+        .role = GhostTransferRole::kInboundReceive,
+        .peer_rank = owners[i],
+        .local_indices = plan.recv_local_indices_by_neighbor[i],
+    };
     plan.recv_bytes += static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
     plan.send_bytes += static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
   }
@@ -279,14 +326,24 @@ double deterministicRankOrderedSum(std::span<const double> per_rank_values) {
 ReductionAgreement compareReductionAgreement(
     std::span<const double> per_rank_values,
     double measured_sum) {
-  const double deterministic_sum = deterministicRankOrderedSum(per_rank_values);
-  const double absolute_error = absoluteValue(measured_sum - deterministic_sum);
+  const double deterministic_baseline_sum = deterministicRankOrderedSum(per_rank_values);
+  const double absolute_error = absoluteValue(measured_sum - deterministic_baseline_sum);
   return ReductionAgreement{
-      .deterministic_sum = deterministic_sum,
-      .reference_sum = measured_sum,
+      .deterministic_baseline_sum = deterministic_baseline_sum,
+      .measured_sum = measured_sum,
       .absolute_error = absolute_error,
-      .relative_error = stableRelativeError(measured_sum, deterministic_sum, absolute_error),
+      .relative_error = stableRelativeError(measured_sum, deterministic_baseline_sum, absolute_error),
   };
+}
+
+bool satisfiesReductionAgreement(
+    const ReductionAgreement& agreement,
+    const ReductionAgreementPolicy& policy) {
+  if (policy.absolute_tolerance < 0.0 || policy.relative_tolerance < 0.0) {
+    throw std::invalid_argument("reduction agreement tolerances must be non-negative");
+  }
+  return agreement.absolute_error <= policy.absolute_tolerance ||
+         agreement.relative_error <= policy.relative_tolerance;
 }
 
 bool RankConfigConsensus::allConsistent() const noexcept {
@@ -305,14 +362,35 @@ RankConfigConsensus evaluateRankConfigConsensus(std::span<const RankConfigDigest
     if (digest.normalized_config_hash != baseline.normalized_config_hash) {
       consensus.normalized_config_hash_match = false;
       rank_matches = false;
+      appendRankConfigMismatch(
+          &consensus,
+          RankConfigMismatchProperty::kNormalizedConfigHash,
+          baseline.world_rank,
+          digest.world_rank,
+          rankConfigValueString(baseline.normalized_config_hash),
+          rankConfigValueString(digest.normalized_config_hash));
     }
     if (digest.mpi_ranks_expected != baseline.mpi_ranks_expected) {
       consensus.mpi_ranks_expected_match = false;
       rank_matches = false;
+      appendRankConfigMismatch(
+          &consensus,
+          RankConfigMismatchProperty::kMpiRanksExpected,
+          baseline.world_rank,
+          digest.world_rank,
+          rankConfigValueString(baseline.mpi_ranks_expected),
+          rankConfigValueString(digest.mpi_ranks_expected));
     }
     if (digest.deterministic_reduction != baseline.deterministic_reduction) {
       consensus.deterministic_reduction_match = false;
       rank_matches = false;
+      appendRankConfigMismatch(
+          &consensus,
+          RankConfigMismatchProperty::kDeterministicReduction,
+          baseline.world_rank,
+          digest.world_rank,
+          rankConfigValueString(baseline.deterministic_reduction),
+          rankConfigValueString(digest.deterministic_reduction));
     }
     if (!rank_matches) {
       consensus.mismatched_ranks.push_back(digest.world_rank);
@@ -362,6 +440,11 @@ void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) co
 
   std::size_t offset = 0;
   const std::uint64_t count = readPod<std::uint64_t>(m_bytes, &offset);
+  const std::uint64_t expected_payload_bytes =
+      static_cast<std::uint64_t>(sizeof(std::uint64_t)) + count * static_cast<std::uint64_t>(ghostExchangeRecordBytes());
+  if (expected_payload_bytes != static_cast<std::uint64_t>(m_bytes.size())) {
+    throw std::runtime_error("ghost buffer payload shape does not match encoded count");
+  }
 
   destination.entity_id.reserve(destination.entity_id.size() + static_cast<std::size_t>(count));
   destination.density_code.reserve(destination.density_code.size() + static_cast<std::size_t>(count));

@@ -218,6 +218,28 @@ ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_profiling|int
 
 Observed:
 
+## 12) Parallel contract hardening follow-up (R07)
+
+_Date captured: 2026-04-14 (UTC)_
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart"
+```
+
+Observed:
+
+- Distributed-memory transfer roles now expose typed `outbound_transfers` / `inbound_transfers` descriptors in addition to legacy send/recv index vectors.
+- Plan/buffer invariants were tightened for invalid ownership combinations, zero-byte ghost payload shape, and decode shape checks.
+- Reduction agreement fields now distinguish deterministic baseline vs measured sum, plus a policy helper for absolute/relative tolerance gating.
+- Config consensus mismatch artifacts include property-level mismatch rows with baseline/offending rank-value pairs.
+
+Interpretation:
+
+- Pseudo-multi-rank contract clarity and diagnosability improved for review/CI artifacts without adding new MPI features or claiming production multi-rank closure.
+
 ## 12) Diagnostics maturity-tier repair (analysis honesty/scalability guard)
 
 _Date captured: 2026-04-14 (UTC)_
