@@ -1,4 +1,5 @@
 #include <cassert>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <numeric>
@@ -82,6 +83,23 @@ void runOneRankVsTwoRankMassConservation() {
     ghost_owners[i] = (i % 2 == 0) ? 0 : 1;
   }
   const auto plan_rank0 = cosmosim::parallel::buildGhostExchangePlan(0, ghost_owners, sizeof(double) * 3 + sizeof(std::uint64_t));
+  std::vector<cosmosim::parallel::LocalGhostDescriptor> explicit_rank0_descriptors;
+  explicit_rank0_descriptors.reserve(ghost_owners.size());
+  for (const int owner_rank : ghost_owners) {
+    explicit_rank0_descriptors.push_back(cosmosim::parallel::LocalGhostDescriptor{
+        .residency = (owner_rank == 0) ? cosmosim::parallel::LocalIndexResidency::kOwned
+                                       : cosmosim::parallel::LocalIndexResidency::kGhost,
+        .owning_rank = owner_rank,
+    });
+  }
+  const auto typed_plan_rank0 = cosmosim::parallel::buildGhostExchangePlan(
+      0,
+      explicit_rank0_descriptors,
+      sizeof(double) * 3 + sizeof(std::uint64_t));
+  assert(typed_plan_rank0.neighbor_ranks == plan_rank0.neighbor_ranks);
+  assert(typed_plan_rank0.recv_local_indices_by_neighbor == plan_rank0.recv_local_indices_by_neighbor);
+  assert(typed_plan_rank0.send_bytes == plan_rank0.send_bytes);
+  assert(typed_plan_rank0.recv_bytes == plan_rank0.recv_bytes);
 
   cosmosim::core::ProfilerSession profiler(true);
   cosmosim::parallel::recordDistributedProfiling(
@@ -90,6 +108,25 @@ void runOneRankVsTwoRankMassConservation() {
       plan_rank0.send_bytes,
       plan_rank0.recv_bytes);
   assert(profiler.counters().count("parallel.ghost_exchange_send_bytes") == plan_rank0.send_bytes);
+
+  const std::array<double, 2> rank_local_masses = {
+      rankLocalMassSum(entities, two_rank_plan.owning_rank_by_item, 0),
+      rankLocalMassSum(entities, two_rank_plan.owning_rank_by_item, 1),
+  };
+  const double deterministic_mass_sum =
+      cosmosim::parallel::deterministicRankOrderedSum(rank_local_masses);
+  const auto reduction_agreement = cosmosim::parallel::compareReductionAgreement(
+      rank_local_masses,
+      two_rank_sum);
+  assert(std::abs(deterministic_mass_sum - two_rank_sum) < 1.0e-12);
+  assert(reduction_agreement.absolute_error < 1.0e-12);
+
+  const std::vector<cosmosim::parallel::RankConfigDigest> rank_digests = {
+      {.world_rank = 0, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+      {.world_rank = 1, .normalized_config_hash = 0x52abU, .mpi_ranks_expected = 2, .deterministic_reduction = true},
+  };
+  const auto consensus = cosmosim::parallel::evaluateRankConfigConsensus(rank_digests);
+  assert(consensus.allConsistent());
 }
 
 void runRestartRoundTripWithTwoRankPlan() {

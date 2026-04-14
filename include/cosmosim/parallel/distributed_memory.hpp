@@ -72,10 +72,56 @@ struct GhostExchangePlan {
   std::uint64_t recv_bytes = 0;
 };
 
+enum class LocalIndexResidency : std::uint8_t {
+  kOwned = 0,
+  kGhost = 1,
+};
+
+struct LocalGhostDescriptor {
+  LocalIndexResidency residency = LocalIndexResidency::kOwned;
+  int owning_rank = 0;
+};
+
+[[nodiscard]] GhostExchangePlan buildGhostExchangePlan(
+    int world_rank,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    std::size_t bytes_per_ghost);
+
 [[nodiscard]] GhostExchangePlan buildGhostExchangePlan(
     int world_rank,
     std::span<const int> ghost_owner_rank_by_local_index,
     std::size_t bytes_per_ghost);
+
+struct ReductionAgreement {
+  double deterministic_sum = 0.0;
+  double reference_sum = 0.0;
+  double absolute_error = 0.0;
+  double relative_error = 0.0;
+};
+
+[[nodiscard]] double deterministicRankOrderedSum(std::span<const double> per_rank_values);
+[[nodiscard]] ReductionAgreement compareReductionAgreement(
+    std::span<const double> per_rank_values,
+    double measured_sum);
+
+struct RankConfigDigest {
+  int world_rank = 0;
+  std::uint64_t normalized_config_hash = 0;
+  int mpi_ranks_expected = 1;
+  bool deterministic_reduction = true;
+};
+
+struct RankConfigConsensus {
+  bool normalized_config_hash_match = true;
+  bool mpi_ranks_expected_match = true;
+  bool deterministic_reduction_match = true;
+  std::vector<int> mismatched_ranks;
+
+  [[nodiscard]] bool allConsistent() const noexcept;
+};
+
+[[nodiscard]] RankConfigConsensus evaluateRankConfigConsensus(
+    std::span<const RankConfigDigest> digests);
 
 struct GhostExchangeBufferSoA {
   std::vector<std::uint64_t> entity_id;
