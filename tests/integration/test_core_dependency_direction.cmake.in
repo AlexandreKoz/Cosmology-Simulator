@@ -22,3 +22,15 @@ if(_violations)
 endif()
 
 message(STATUS "Core dependency-direction guard passed.")
+
+# Guardrail: core target wiring in CMake must not link upward modules.
+file(READ "@CMAKE_SOURCE_DIR@/CMakeLists.txt" _cmake_lists)
+string(REGEX MATCH "target_link_libraries\\([ \t\r\n]*cosmosim_core[ \t\r\n]+[^\\)]*cosmosim_(analysis|io|physics|workflows|app)" _core_link_violation "${_cmake_lists}")
+if(_core_link_violation)
+  message(FATAL_ERROR
+    "Core dependency-direction guard failed.\n"
+    "CMake target wiring links cosmosim_core to a forbidden upward module.\n"
+    "Match: ${_core_link_violation}")
+endif()
+
+message(STATUS "Core CMake target-link guard passed.")

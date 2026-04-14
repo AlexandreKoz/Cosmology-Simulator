@@ -11,9 +11,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 mkdir -p "$artifact_dir"
 
-./scripts/ci/run_preset_pipeline.sh cpu-only-debug build-cpu-debug test-cpu-debug "unit_config_parser|integration_provenance_roundtrip|integration_feature_summary|validation_regression" "$artifact_dir" 1
+bash ./scripts/ci/run_preset_pipeline.sh cpu-only-debug build-cpu-debug test-cpu-debug "unit_config_parser|integration_provenance_roundtrip|integration_feature_summary|validation_regression" "$artifact_dir" 1
 
-./scripts/ci/check_build_metadata.py \
+python3 ./scripts/ci/check_build_metadata.py \
   "$artifact_dir/cosmosim_build_metadata-cpu-only-debug.json" \
   "validation/reference/ci_build_metadata_expectations_v1.json" \
   "cpu-only-debug"

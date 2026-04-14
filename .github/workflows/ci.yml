@@ -21,7 +21,7 @@ jobs:
       - name: Install CMake and Ninja
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
       - name: Repository hygiene checks
-        run: ./scripts/ci/check_repo_hygiene.sh
+        run: bash ./scripts/ci/check_repo_hygiene.sh
 
   build_test_matrix:
     needs: hygiene
@@ -56,7 +56,7 @@ jobs:
           sudo apt-get install -y ${{ matrix.apt_packages }}
       - name: Configure, build, test, and archive preset artifacts
         run: |
-          ./scripts/ci/run_preset_pipeline.sh \
+          bash ./scripts/ci/run_preset_pipeline.sh \
             "${{ matrix.configure_preset }}" \
             "${{ matrix.build_preset }}" \
             "${{ matrix.test_preset }}" \
@@ -65,7 +65,7 @@ jobs:
             "${{ matrix.run_bench }}"
       - name: Validate build metadata contract
         run: |
-          ./scripts/ci/check_build_metadata.py \
+          python3 ./scripts/ci/check_build_metadata.py \
             "ci_artifacts/${{ matrix.configure_preset }}/cosmosim_build_metadata-${{ matrix.configure_preset }}.json" \
             "validation/reference/ci_build_metadata_expectations_v1.json" \
             "${{ matrix.configure_preset }}"
@@ -75,15 +75,32 @@ jobs:
           name: ci-${{ matrix.configure_preset }}
           path: ci_artifacts/${{ matrix.configure_preset }}
 
+  infrastructure_gates:
+    needs: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies for explicit feature-path gates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev
+      - name: Run infrastructure gate bundle
+        run: bash ./scripts/ci/enforce_infra_gates.sh ci_artifacts/infrastructure_gates
+      - name: Upload infrastructure gate report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-infrastructure-gates
+          path: ci_artifacts/infrastructure_gates
+
   reproducibility_gate:
-    needs: build_test_matrix
+    needs: [build_test_matrix, infrastructure_gates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build
       - name: Run reproducibility gate
-        run: ./scripts/ci/run_reproducibility_gate.sh ci_artifacts/reproducibility_gate
+        run: bash ./scripts/ci/run_reproducibility_gate.sh ci_artifacts/reproducibility_gate
       - name: Upload reproducibility report
         uses: actions/upload-artifact@v4
         with:
