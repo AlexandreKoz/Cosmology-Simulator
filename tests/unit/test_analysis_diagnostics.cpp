@@ -169,11 +169,55 @@ void testProvisionalHeavyDiagnosticsRequireExplicitPolicy() {
   std::filesystem::remove_all(output_root);
 }
 
+void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
+  cosmosim::core::SimulationConfig blocked_config = makeConfig();
+  blocked_config.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
+
+  cosmosim::analysis::DiagnosticsEngine blocked_engine(blocked_config);
+  const cosmosim::core::SimulationState state = makeSingleModeState();
+
+  const auto blocked_bundle =
+      blocked_engine.generateBundle(state, 7, 0.6, cosmosim::analysis::DiagnosticClass::kScienceHeavy);
+  assert(blocked_bundle.power_spectrum.empty());
+
+  bool found_power_record = false;
+  for (const auto& record : blocked_bundle.records) {
+    if (record.name == "power_spectrum") {
+      found_power_record = true;
+      assert(record.tier == cosmosim::analysis::DiagnosticTier::kReferenceScience);
+      assert(record.maturity == cosmosim::analysis::DiagnosticMaturity::kProvisional);
+      assert(record.scalability == cosmosim::analysis::DiagnosticScalability::kHeavyReference);
+      assert(!record.executed);
+      assert(record.policy_note == "blocked_by_execution_policy");
+    }
+  }
+  assert(found_power_record);
+
+  cosmosim::core::SimulationConfig allowed_config = makeConfig();
+  allowed_config.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+  cosmosim::analysis::DiagnosticsEngine allowed_engine(allowed_config);
+  const auto allowed_bundle =
+      allowed_engine.generateBundle(state, 7, 0.6, cosmosim::analysis::DiagnosticClass::kScienceHeavy);
+  assert(!allowed_bundle.power_spectrum.empty());
+  found_power_record = false;
+  for (const auto& record : allowed_bundle.records) {
+    if (record.name == "power_spectrum") {
+      found_power_record = true;
+      assert(record.executed);
+      assert(record.policy_note == "reference_only_non_default");
+    }
+  }
+  assert(found_power_record);
+}
+
 }  // namespace
 
 int main() {
   testPowerSpectrumHasSignalAndFiniteModes();
   testDerivedDiagnosticsSanity();
   testProvisionalHeavyDiagnosticsRequireExplicitPolicy();
+  testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords();
   return 0;
 }

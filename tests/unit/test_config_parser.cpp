@@ -233,6 +233,7 @@ diagnostics_execution_policy = all_including_provisional
   assert(
       frozen.normalized_text.find("diagnostics_execution_policy = all_including_provisional") !=
       std::string::npos);
+  assert(frozen.normalized_text.find("diagnostics_execution_policy = unknown") == std::string::npos);
 
   const std::string bad_text = R"(
 [mode]
@@ -243,6 +244,16 @@ diagnostics_execution_policy = unsupported_policy
   bool threw = false;
   try {
     (void)cosmosim::core::loadFrozenConfigFromString(bad_text, "diag_policy_bad");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testEnumSerializationIsFailFastWithoutUnknownFallback() {
+  bool threw = false;
+  try {
+    (void)cosmosim::core::modeToString(static_cast<cosmosim::core::SimulationMode>(255));
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
@@ -321,6 +332,7 @@ int main() {
   testFeedbackConfigKeysAndValidation();
   testCoolingPolicyEnumsAndValidation();
   testDiagnosticsExecutionPolicyValidation();
+  testEnumSerializationIsFailFastWithoutUnknownFallback();
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
   return 0;
