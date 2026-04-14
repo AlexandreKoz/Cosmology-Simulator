@@ -82,6 +82,26 @@ restart is execution-resume oriented.
   - severity-count summary and status,
   - structured events (`event_kind`, `severity`, `subsystem`, optional step/time/scale context, message, payload map).
 
+## 4.1) Diagnostics bundle maturity metadata
+
+Diagnostics bundles (`<diagnostics_stem>_<diagnostic_class>_step_*.json`) now include explicit maturity metadata:
+
+- `diagnostic_class`: cadence bucket (`run_health`, `science_light`, `science_heavy`)
+- `diagnostics_execution_policy`: active policy (`run_health_only`, `run_health_and_light_science`, `all_including_provisional`)
+- `diagnostic_records[]`: per-output metadata
+  - `name`
+  - `tier` (`infrastructure_health`, `validated_science`, `reference_science`)
+  - `maturity` (`production`, `validated`, `provisional`)
+  - `scalability` (`cheap`, `moderate`, `heavy_reference`)
+  - `executed`
+  - `policy_note`
+
+Current intended classification:
+
+- Production infrastructure health: `run_health_counters`
+- Validated lightweight science: `star_formation_history`, `angular_momentum_budget`, `gas_xy_slice_density`, `gas_xy_projection_density`
+- Provisional heavy reference-only: `power_spectrum` (disabled unless `diagnostics_execution_policy = all_including_provisional`)
+
 ## 5) Change procedure for schema-affecting work
 
 When changing snapshot/restart/provenance fields:
@@ -99,3 +119,4 @@ When changing snapshot/restart/provenance fields:
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
 - New operational diagnostics output is additive only; snapshot/restart/provenance schemas and compatibility contracts are unchanged.
+- Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.

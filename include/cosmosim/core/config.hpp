@@ -153,9 +153,17 @@ struct OutputConfig {
 
 
 struct AnalysisConfig {
+  enum class DiagnosticsExecutionPolicy : std::uint8_t {
+    kRunHealthOnly = 0,
+    kRunHealthAndLightScience = 1,
+    kAllIncludingProvisional = 2,
+  };
+
   bool enable_diagnostics = true;
   bool enable_halo_workflow = false;
   bool halo_on_the_fly = false;
+  DiagnosticsExecutionPolicy diagnostics_execution_policy =
+      DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
   int run_health_interval_steps = 1;
   int science_light_interval_steps = 8;
   int science_heavy_interval_steps = 64;
