@@ -24,7 +24,7 @@ sha256sum bench/baselines/benchmark_sizes_v1.txt > "$artifact_dir/benchmark_size
 cat > "$artifact_dir/reproducibility_report.txt" <<REPORT
 reproducibility_gate=pass
 preset=cpu-only-debug
-checked_tests=unit_config_parser,integration_feature_summary,validation_regression
+checked_tests=unit_config_parser,integration_provenance_roundtrip,integration_feature_summary,validation_regression
 metadata_contract=validation/reference/ci_build_metadata_expectations_v1.json
 validation_tolerance_hash_file=validation_tolerances_v1.sha256
 benchmark_size_hash_file=benchmark_sizes_v1.sha256

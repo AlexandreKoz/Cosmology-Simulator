@@ -1,23 +1,33 @@
 set(source_dir "@CMAKE_SOURCE_DIR@")
+set(current_build_has_hdf5 "@COSMOSIM_ENABLE_HDF5@")
+set(current_build_has_fftw "@COSMOSIM_ENABLE_FFTW@")
+set(current_build_has_python "@COSMOSIM_ENABLE_PYTHON@")
 
-execute_process(
-  COMMAND "@CMAKE_COMMAND@" --preset cpu-only-debug
-  WORKING_DIRECTORY "${source_dir}"
-  RESULT_VARIABLE cpu_result
-  OUTPUT_VARIABLE cpu_stdout
-  ERROR_VARIABLE cpu_stderr)
+function(require_preset_configure preset_name)
+  execute_process(
+    COMMAND "@CMAKE_COMMAND@" --preset "${preset_name}"
+    WORKING_DIRECTORY "${source_dir}"
+    RESULT_VARIABLE preset_result
+    OUTPUT_VARIABLE preset_stdout
+    ERROR_VARIABLE preset_stderr)
 
-if(NOT cpu_result EQUAL 0)
-  message(FATAL_ERROR "cpu-only-debug preset configure failed:\n${cpu_stdout}\n${cpu_stderr}")
+  if(NOT preset_result EQUAL 0)
+    message(FATAL_ERROR "${preset_name} preset configure failed:
+${preset_stdout}
+${preset_stderr}")
+  endif()
+endfunction()
+
+require_preset_configure(cpu-only-debug)
+
+if(current_build_has_hdf5)
+  require_preset_configure(hdf5-debug)
 endif()
 
-execute_process(
-  COMMAND "@CMAKE_COMMAND@" --preset python-debug
-  WORKING_DIRECTORY "${source_dir}"
-  RESULT_VARIABLE feature_result
-  OUTPUT_VARIABLE feature_stdout
-  ERROR_VARIABLE feature_stderr)
+if(current_build_has_hdf5 AND current_build_has_fftw)
+  require_preset_configure(pm-hdf5-fftw-debug)
+endif()
 
-if(NOT feature_result EQUAL 0)
-  message(FATAL_ERROR "python-debug preset configure failed:\n${feature_stdout}\n${feature_stderr}")
+if(current_build_has_python)
+  require_preset_configure(python-debug)
 endif()

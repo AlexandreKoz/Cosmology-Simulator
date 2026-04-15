@@ -24,7 +24,7 @@ Each matrix leg executes `scripts/ci/run_preset_pipeline.sh` to perform:
 ### Reproducibility gate
 
 `reproducibility_gate` runs `scripts/ci/run_reproducibility_gate.sh`, which enforces:
-- deterministic config/provenance-oriented checks (`unit_config_parser`, `integration_feature_summary`),
+- deterministic config/provenance-oriented checks (`unit_config_parser`, `integration_provenance_roundtrip`, `integration_feature_summary`),
 - feature summary contract check,
 - validation regression check,
 - SHA-256 recording for versioned tolerance and benchmark size baselines.

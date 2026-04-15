@@ -47,8 +47,42 @@ run_cmd() {
   return 0
 }
 
+require_expected_tests_registered() {
+  local test_listing_file="$artifact_dir/ctest-registered-${test_preset}.txt"
+  local parsed_listing_file="$artifact_dir/ctest-registered-names-${test_preset}.txt"
+
+  echo "[preset-pipeline] phase=test_registration cmd=ctest --preset ${test_preset} -N"
+  if ! ctest --preset "$test_preset" -N > "$test_listing_file"; then
+    status="fail"
+    failed_phase="test_registration"
+    message="failed to enumerate registered tests"
+    return 1
+  fi
+
+  sed -n 's/^  Test[[:space:]]*#[0-9][0-9]*: //p' "$test_listing_file" > "$parsed_listing_file"
+
+  if [[ "$test_regex" == "-" ]]; then
+    return 0
+  fi
+
+  IFS='|' read -r -a expected_tests <<< "$test_regex"
+  local expected_name
+  for expected_name in "${expected_tests[@]}"; do
+    [[ -z "$expected_name" ]] && continue
+    if ! grep -Fxq "$expected_name" "$parsed_listing_file"; then
+      status="fail"
+      failed_phase="test_selection"
+      message="expected test not registered: ${expected_name}"
+      return 1
+    fi
+  done
+
+  return 0
+}
+
 if run_cmd "configure" "$configure_cmd" cmake --preset "$configure_preset" \
-  && run_cmd "build" "$build_cmd" cmake --build --preset "$build_preset"; then
+  && run_cmd "build" "$build_cmd" cmake --build --preset "$build_preset" \
+  && require_expected_tests_registered; then
   if [[ "$test_regex" == "-" ]]; then
     run_cmd "test" "$test_cmd" ctest --preset "$test_preset" --output-junit "$ctest_junit"
   else
