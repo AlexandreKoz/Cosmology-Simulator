@@ -44,18 +44,37 @@ struct ParsedEntry {
 }
 
 [[nodiscard]] std::string removeInlineComment(const std::string& line) {
-  std::size_t comment_pos = std::string::npos;
-  for (const std::string marker : {"#", ";", "//"}) {
-    const std::size_t pos = line.find(marker);
-    if (pos != std::string::npos && (comment_pos == std::string::npos || pos < comment_pos)) {
-      comment_pos = pos;
+  bool in_single_quotes = false;
+  bool in_double_quotes = false;
+
+  const auto is_whitespace_boundary = [&line](std::size_t pos) {
+    return pos == 0 || std::isspace(static_cast<unsigned char>(line[pos - 1])) != 0;
+  };
+
+  for (std::size_t pos = 0; pos < line.size(); ++pos) {
+    const char current = line[pos];
+    if (current == '"' && !in_single_quotes) {
+      in_double_quotes = !in_double_quotes;
+      continue;
+    }
+    if (current == '\'' && !in_double_quotes) {
+      in_single_quotes = !in_single_quotes;
+      continue;
+    }
+    if (in_single_quotes || in_double_quotes) {
+      continue;
+    }
+
+    if ((current == '#' || current == ';') && is_whitespace_boundary(pos)) {
+      return line.substr(0, pos);
+    }
+    if (current == '/' && pos + 1 < line.size() && line[pos + 1] == '/' &&
+        is_whitespace_boundary(pos)) {
+      return line.substr(0, pos);
     }
   }
 
-  if (comment_pos == std::string::npos) {
-    return line;
-  }
-  return line.substr(0, comment_pos);
+  return line;
 }
 
 [[nodiscard]] std::map<std::string, ParsedEntry> parseEntries(const std::string& text) {
@@ -94,7 +113,8 @@ struct ParsedEntry {
     }
 
     key = toLower(trim(key));
-    if (key.empty() || value.empty()) {
+    const bool allow_empty_value = (equal_pos != std::string::npos);
+    if (key.empty() || (value.empty() && !allow_empty_value)) {
       throw ConfigError("line " + std::to_string(line_number) + ": expected key and value");
     }
 
@@ -644,7 +664,6 @@ void validateConfig(const SimulationConfig& config) {
 [[nodiscard]] std::string buildNormalizedText(const FrozenConfig& frozen) {
   std::ostringstream stream;
   stream << "schema_version = " << frozen.config.schema_version << '\n';
-  stream << "provenance.config_hash = " << frozen.provenance.config_hash_hex << '\n';
   stream << "\n[units]\n";
   stream << "length_unit = " << frozen.config.units.length_unit << '\n';
   stream << "mass_unit = " << frozen.config.units.mass_unit << '\n';
@@ -665,15 +684,14 @@ void validateConfig(const SimulationConfig& config) {
   stream << "hubble_param = " << frozen.config.cosmology.hubble_param << '\n';
   stream << "sigma8 = " << frozen.config.cosmology.sigma8 << '\n';
   stream << "scalar_index_ns = " << frozen.config.cosmology.scalar_index_ns << '\n';
-  stream << "box_size_mpc_comoving = " << frozen.config.cosmology.box_size_mpc_comoving << '\n';
+  stream << "box_size = " << frozen.config.cosmology.box_size_mpc_comoving << " mpc\n";
   stream << "\n[numerics]\n";
   stream << "time_begin_code = " << frozen.config.numerics.time_begin_code << '\n';
   stream << "time_end_code = " << frozen.config.numerics.time_end_code << '\n';
   stream << "max_global_steps = " << frozen.config.numerics.max_global_steps << '\n';
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
-  stream << "gravity_softening_kpc_comoving = "
-         << frozen.config.numerics.gravity_softening_kpc_comoving << '\n';
+  stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   stream << "gravity_solver = " << gravitySolverToString(frozen.config.numerics.gravity_solver) << '\n';
   stream << "hydro_solver = " << hydroSolverToString(frozen.config.numerics.hydro_solver) << '\n';
   stream << "\n[physics]\n";
@@ -1140,13 +1158,9 @@ void validateConfig(const SimulationConfig& config) {
     throw ConfigError(stream.str());
   }
 
-  frozen.provenance.config_hash = 0;
-  frozen.provenance.config_hash_hex = "0000000000000000";
   frozen.normalized_text = buildNormalizedText(frozen);
-
   frozen.provenance.config_hash = stableConfigHash(frozen.normalized_text);
   frozen.provenance.config_hash_hex = stableConfigHashHex(frozen.normalized_text);
-  frozen.normalized_text = buildNormalizedText(frozen);
 
   return frozen;
 }

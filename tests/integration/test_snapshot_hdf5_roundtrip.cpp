@@ -1,4 +1,5 @@
 #include <cassert>
+#include <array>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -8,6 +9,10 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
+
+#if COSMOSIM_ENABLE_HDF5
+#include <hdf5.h>
+#endif
 
 namespace {
 
@@ -150,9 +155,87 @@ void testRoundtripMixedSpeciesSnapshot() {
 #endif
 }
 
+void testMassTableFallbackSnapshotImport() {
+  cosmosim::core::SimulationConfig config;
+#if COSMOSIM_ENABLE_HDF5
+  const std::filesystem::path snapshot_path =
+      std::filesystem::temp_directory_path() / "cosmosim_snapshot_mass_table_only.hdf5";
+
+  hid_t file = H5Fcreate(snapshot_path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  assert(file >= 0);
+  hid_t header = H5Gcreate2(file, "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  assert(header >= 0);
+  hid_t part1 = H5Gcreate2(file, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  assert(part1 >= 0);
+
+  const std::array<std::uint32_t, 6> counts = {0, 2, 0, 0, 0, 0};
+  const std::array<std::uint32_t, 6> zeros = {0, 0, 0, 0, 0, 0};
+  const std::array<double, 6> mass_table = {0.0, 5.0, 0.0, 0.0, 0.0, 0.0};
+  hsize_t vec_dims[1] = {6};
+  hid_t vec_space = H5Screate_simple(1, vec_dims, nullptr);
+  assert(vec_space >= 0);
+  hid_t attr = H5Acreate2(header, "NumPart_ThisFile", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
+  H5Aclose(attr);
+  attr = H5Acreate2(header, "NumPart_Total", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
+  H5Aclose(attr);
+  attr = H5Acreate2(header, "NumPart_Total_HighWord", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Awrite(attr, H5T_NATIVE_UINT32, zeros.data()) >= 0);
+  H5Aclose(attr);
+  attr = H5Acreate2(header, "MassTable", H5T_IEEE_F64LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Awrite(attr, H5T_NATIVE_DOUBLE, mass_table.data()) >= 0);
+  H5Aclose(attr);
+  H5Sclose(vec_space);
+
+  const std::array<double, 6> coords = {0.0, 0.1, 0.2, 1.0, 1.1, 1.2};
+  const std::array<double, 6> vels = {10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
+  const std::array<std::uint64_t, 2> ids = {101, 102};
+  hsize_t coords_dims[2] = {2, 3};
+  hid_t coords_space = H5Screate_simple(2, coords_dims, nullptr);
+  assert(coords_space >= 0);
+  hid_t dataset = H5Dcreate2(part1, "Coordinates", H5T_IEEE_F64LE, coords_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  assert(dataset >= 0);
+  assert(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, coords.data()) >= 0);
+  H5Dclose(dataset);
+  dataset = H5Dcreate2(part1, "Velocities", H5T_IEEE_F64LE, coords_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  assert(dataset >= 0);
+  assert(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, vels.data()) >= 0);
+  H5Dclose(dataset);
+  H5Sclose(coords_space);
+
+  hsize_t id_dims[1] = {2};
+  hid_t id_space = H5Screate_simple(1, id_dims, nullptr);
+  assert(id_space >= 0);
+  dataset = H5Dcreate2(part1, "ParticleIDs", H5T_STD_U64LE, id_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  assert(dataset >= 0);
+  assert(H5Dwrite(dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, ids.data()) >= 0);
+  H5Dclose(dataset);
+  H5Sclose(id_space);
+
+  H5Gclose(part1);
+  H5Gclose(header);
+  H5Fclose(file);
+
+  const auto imported = cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
+  assert(imported.state.particles.size() == 2);
+  assert(imported.state.particles.mass_code[0] == 5.0);
+  assert(imported.state.particles.mass_code[1] == 5.0);
+  assert(containsString(imported.report.defaulted_fields, "/PartType1/Masses=MassTable"));
+  std::filesystem::remove(snapshot_path);
+#else
+  (void)config;
+#endif
+}
+
 }  // namespace
 
 int main() {
   testRoundtripMixedSpeciesSnapshot();
+  testMassTableFallbackSnapshotImport();
   return 0;
 }

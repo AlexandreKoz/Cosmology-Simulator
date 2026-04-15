@@ -137,7 +137,7 @@ Distributed-memory determinism contract (infrastructure scope):
 - `deterministic_reduction=true` means rank-local contributions are compared against a rank-ordered deterministic reference sum in tests and smoke paths.
 - `deterministic_reduction=false` is allowed only when reduction error is evaluated explicitly against a documented policy mode in code/tests (for example via `parallel::ReductionAgreementMode::{kAbsoluteOnly,kRelativeOnly,kAbsoluteAndRelative,kAbsoluteOrRelative}` used by `parallel::satisfiesReductionAgreement`; no implicit “close enough” claims).
 - Current pseudo-multi-rank infrastructure smoke/integration checks use `kAbsoluteOrRelative` by default and document that choice at call sites.
-- The normalized frozen config hash (`provenance.config_hash_hex`) is treated as a cross-rank freeze identity and must not diverge across ranks in the same run.
+- The normalized frozen config hash (`provenance.config_hash_hex`) is computed over the normalized config text itself and must match both the stored normalized-config hash field and the provenance hash field in continuation artifacts.
 - Cross-rank config consensus diagnostics should emit property-level mismatch records (property name + baseline/offending rank/value pairs), not only pass/fail booleans.
 
 ## `[units]`

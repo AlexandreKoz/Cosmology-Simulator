@@ -153,9 +153,6 @@ void validateTransferDescriptor(
       !std::equal(descriptor.local_indices.begin(), descriptor.local_indices.end(), expected_indices.begin())) {
     throw std::invalid_argument("ghost transfer descriptor indices drift from canonical plan indices");
   }
-  if (descriptor.local_indices.empty()) {
-    throw std::invalid_argument("ghost transfer descriptor local_indices must be non-empty");
-  }
   if (expected_role == GhostTransferRole::kOutboundSend &&
       descriptor.intent != GhostTransferIntent::kGhostRefreshRequest &&
       descriptor.intent != GhostTransferIntent::kOwnershipMigrationSend) {
@@ -165,6 +162,11 @@ void validateTransferDescriptor(
       descriptor.intent != GhostTransferIntent::kGhostRefreshReceiveStaging &&
       descriptor.intent != GhostTransferIntent::kOwnershipMigrationReceiveStaging) {
     throw std::invalid_argument("inbound transfer intent must be receive-staging intent");
+  }
+  if (descriptor.local_indices.empty() &&
+      !(expected_role == GhostTransferRole::kOutboundSend &&
+        descriptor.intent == GhostTransferIntent::kGhostRefreshRequest)) {
+    throw std::invalid_argument("ghost transfer descriptor local_indices must be non-empty");
   }
   if (descriptor.intent == GhostTransferIntent::kGhostRefreshRequest ||
       descriptor.intent == GhostTransferIntent::kGhostRefreshReceiveStaging) {
@@ -321,8 +323,10 @@ GhostExchangePlan buildGhostExchangePlan(
   }
 
   for (std::size_t i = 0; i < owners.size(); ++i) {
-    // Scaffolding contract: request and response index sets are symmetric in this stage.
-    plan.send_local_indices_by_neighbor[i] = plan.recv_local_indices_by_neighbor[i];
+    // Descriptor-only planning can identify local ghost import slots, but not the peer-owned
+    // source rows that must be exported back. Keep outbound payload indices empty rather than
+    // pretending the local ghost rows themselves are valid send sources.
+    plan.send_local_indices_by_neighbor[i].clear();
     plan.outbound_transfers[i] = GhostTransferDescriptor{
         .role = GhostTransferRole::kOutboundSend,
         .intent = GhostTransferIntent::kGhostRefreshRequest,
@@ -339,8 +343,10 @@ GhostExchangePlan buildGhostExchangePlan(
         .expected_post_transfer_residency = LocalIndexResidency::kGhost,
         .local_indices = plan.recv_local_indices_by_neighbor[i],
     };
-    plan.recv_bytes += static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
-    plan.send_bytes += static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+    plan.recv_bytes +=
+        static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+    plan.send_bytes +=
+        static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
   }
 
   validateGhostExchangePlan(plan);
@@ -564,6 +570,7 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
   DistributedRestartState state;
   const std::vector<std::string> lines = splitLines(encoded);
   std::size_t expected_item_count = 0;
+  std::vector<bool> seen_rank_entry;
 
   for (const std::string& line : lines) {
     if (line.empty()) {
@@ -586,6 +593,7 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
     } else if (key == "item_count") {
       expected_item_count = static_cast<std::size_t>(std::stoull(value));
       state.owning_rank_by_item.assign(expected_item_count, 0);
+      seen_rank_entry.assign(expected_item_count, false);
     } else if (key.rfind("rank[", 0) == 0) {
       const std::size_t open = key.find('[');
       const std::size_t close = key.find(']');
@@ -596,7 +604,11 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
       if (index >= state.owning_rank_by_item.size()) {
         throw std::out_of_range("restart rank index out of bounds");
       }
+      if (seen_rank_entry[index]) {
+        throw std::invalid_argument("duplicate restart rank entry");
+      }
       state.owning_rank_by_item[index] = std::stoi(value);
+      seen_rank_entry[index] = true;
     }
   }
 
@@ -605,6 +617,11 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
   }
   if (state.world_size <= 0) {
     throw std::invalid_argument("restart world_size must be positive");
+  }
+  for (bool seen : seen_rank_entry) {
+    if (!seen) {
+      throw std::runtime_error("restart decode missing ownership entry");
+    }
   }
   return state;
 }

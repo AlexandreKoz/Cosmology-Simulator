@@ -284,6 +284,100 @@ void maybeFsync(const std::filesystem::path& file_path, bool enabled) {
 #endif
 }
 
+void writeStarSidecarGroup(hid_t state_group, const core::StarParticleSidecar& stars) {
+  Hdf5Handle star_group(openOrCreateGroup(state_group, "star_particles"));
+  writeDataset1d(star_group.get(), "particle_index", H5T_STD_U32LE, H5T_NATIVE_UINT32, stars.particle_index);
+  writeDataset1d(
+      star_group.get(), "formation_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.formation_scale_factor);
+  writeDataset1d(star_group.get(), "birth_mass_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.birth_mass_code);
+  writeDataset1d(
+      star_group.get(),
+      "metallicity_mass_fraction",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      stars.metallicity_mass_fraction);
+  writeDataset1d(
+      star_group.get(),
+      "stellar_age_years_last",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      stars.stellar_age_years_last);
+  writeDataset1d(
+      star_group.get(),
+      "stellar_returned_mass_cumulative_code",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      stars.stellar_returned_mass_cumulative_code);
+  writeDataset1d(
+      star_group.get(),
+      "stellar_returned_metals_cumulative_code",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      stars.stellar_returned_metals_cumulative_code);
+  writeDataset1d(
+      star_group.get(),
+      "stellar_feedback_energy_cumulative_erg",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      stars.stellar_feedback_energy_cumulative_erg);
+
+  for (std::size_t channel = 0; channel < stars.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    const std::string suffix = std::to_string(channel);
+    writeDataset1d(
+        star_group.get(),
+        "stellar_returned_mass_channel_cumulative_code_" + suffix,
+        H5T_IEEE_F64LE,
+        H5T_NATIVE_DOUBLE,
+        stars.stellar_returned_mass_channel_cumulative_code[channel]);
+    writeDataset1d(
+        star_group.get(),
+        "stellar_returned_metals_channel_cumulative_code_" + suffix,
+        H5T_IEEE_F64LE,
+        H5T_NATIVE_DOUBLE,
+        stars.stellar_returned_metals_channel_cumulative_code[channel]);
+    writeDataset1d(
+        star_group.get(),
+        "stellar_feedback_energy_channel_cumulative_erg_" + suffix,
+        H5T_IEEE_F64LE,
+        H5T_NATIVE_DOUBLE,
+        stars.stellar_feedback_energy_channel_cumulative_erg[channel]);
+  }
+}
+
+void readStarSidecarGroup(hid_t state_group, core::StarParticleSidecar& stars) {
+  Hdf5Handle star_group(H5Gopen2(state_group, "star_particles", H5P_DEFAULT));
+  stars.particle_index = readDataset1dAligned<std::uint32_t>(star_group.get(), "particle_index", H5T_NATIVE_UINT32);
+  stars.formation_scale_factor =
+      readDataset1dAligned<double>(star_group.get(), "formation_scale_factor", H5T_NATIVE_DOUBLE);
+  stars.birth_mass_code = readDataset1dAligned<double>(star_group.get(), "birth_mass_code", H5T_NATIVE_DOUBLE);
+  stars.metallicity_mass_fraction =
+      readDataset1dAligned<double>(star_group.get(), "metallicity_mass_fraction", H5T_NATIVE_DOUBLE);
+  stars.stellar_age_years_last =
+      readDataset1dAligned<double>(star_group.get(), "stellar_age_years_last", H5T_NATIVE_DOUBLE);
+  stars.stellar_returned_mass_cumulative_code = readDataset1dAligned<double>(
+      star_group.get(), "stellar_returned_mass_cumulative_code", H5T_NATIVE_DOUBLE);
+  stars.stellar_returned_metals_cumulative_code = readDataset1dAligned<double>(
+      star_group.get(), "stellar_returned_metals_cumulative_code", H5T_NATIVE_DOUBLE);
+  stars.stellar_feedback_energy_cumulative_erg = readDataset1dAligned<double>(
+      star_group.get(), "stellar_feedback_energy_cumulative_erg", H5T_NATIVE_DOUBLE);
+
+  for (std::size_t channel = 0; channel < stars.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    const std::string suffix = std::to_string(channel);
+    stars.stellar_returned_mass_channel_cumulative_code[channel] = readDataset1dAligned<double>(
+        star_group.get(),
+        "stellar_returned_mass_channel_cumulative_code_" + suffix,
+        H5T_NATIVE_DOUBLE);
+    stars.stellar_returned_metals_channel_cumulative_code[channel] = readDataset1dAligned<double>(
+        star_group.get(),
+        "stellar_returned_metals_channel_cumulative_code_" + suffix,
+        H5T_NATIVE_DOUBLE);
+    stars.stellar_feedback_energy_channel_cumulative_erg[channel] = readDataset1dAligned<double>(
+        star_group.get(),
+        "stellar_feedback_energy_channel_cumulative_erg_" + suffix,
+        H5T_NATIVE_DOUBLE);
+  }
+}
+
 void writeStateGroup(hid_t root, const core::SimulationState& state) {
   Hdf5Handle state_group(openOrCreateGroup(root, "/state"));
   Hdf5Handle particles_group(openOrCreateGroup(state_group.get(), "particles"));
@@ -329,11 +423,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
 
   writeDataset1d(state_group.get(), "species_count_by_species", H5T_STD_U64LE, H5T_NATIVE_UINT64, std::vector<std::uint64_t>(state.species.count_by_species.begin(), state.species.count_by_species.end()));
 
-  Hdf5Handle star_group(openOrCreateGroup(state_group.get(), "star_particles"));
-  writeDataset1d(star_group.get(), "particle_index", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.star_particles.particle_index);
-  writeDataset1d(star_group.get(), "formation_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.star_particles.formation_scale_factor);
-  writeDataset1d(star_group.get(), "birth_mass_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.star_particles.birth_mass_code);
-  writeDataset1d(star_group.get(), "metallicity_mass_fraction", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.star_particles.metallicity_mass_fraction);
+  writeStarSidecarGroup(state_group.get(), state.star_particles);
 
   Hdf5Handle bh_group(openOrCreateGroup(state_group.get(), "black_holes"));
   writeDataset1d(bh_group.get(), "particle_index", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.black_holes.particle_index);
@@ -454,14 +544,7 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
   }
   std::copy(species_count.begin(), species_count.end(), state.species.count_by_species.begin());
 
-  Hdf5Handle star_group(H5Gopen2(state_group.get(), "star_particles", H5P_DEFAULT));
-  state.star_particles.particle_index =
-      readDataset1dAligned<std::uint32_t>(star_group.get(), "particle_index", H5T_NATIVE_UINT32);
-  state.star_particles.formation_scale_factor =
-      readDataset1dAligned<double>(star_group.get(), "formation_scale_factor", H5T_NATIVE_DOUBLE);
-  state.star_particles.birth_mass_code = readDataset1dAligned<double>(star_group.get(), "birth_mass_code", H5T_NATIVE_DOUBLE);
-  state.star_particles.metallicity_mass_fraction =
-      readDataset1dAligned<double>(star_group.get(), "metallicity_mass_fraction", H5T_NATIVE_DOUBLE);
+  readStarSidecarGroup(state_group.get(), state.star_particles);
 
   Hdf5Handle bh_group(H5Gopen2(state_group.get(), "black_holes", H5P_DEFAULT));
   state.black_holes.particle_index = readDataset1dAligned<std::uint32_t>(bh_group.get(), "particle_index", H5T_NATIVE_UINT32);
@@ -616,6 +699,15 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);
   append_any_vec(state.star_particles.metallicity_mass_fraction);
+  append_any_vec(state.star_particles.stellar_age_years_last);
+  append_any_vec(state.star_particles.stellar_returned_mass_cumulative_code);
+  append_any_vec(state.star_particles.stellar_returned_metals_cumulative_code);
+  append_any_vec(state.star_particles.stellar_feedback_energy_cumulative_erg);
+  for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    append_any_vec(state.star_particles.stellar_returned_mass_channel_cumulative_code[channel]);
+    append_any_vec(state.star_particles.stellar_returned_metals_channel_cumulative_code[channel]);
+    append_any_vec(state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel]);
+  }
   append_any_vec(state.black_holes.particle_index);
   append_any_vec(state.black_holes.host_cell_index);
   append_any_vec(state.black_holes.subgrid_mass_code);

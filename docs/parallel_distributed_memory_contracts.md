@@ -32,7 +32,7 @@ It does **not** claim full production MPI capability.
 
 `validateGhostExchangePlan()` enforces role/intent/container consistency, peer-rank + slot consistency, and exact descriptor-index equality with canonical per-neighbor vectors.
 
-In this repair scope, request/response sets remain symmetric scaffolding and the builder only emits ghost-refresh intents. Full migration scheduling and migration ownership commit are still out of scope.
+In this repair scope, the builder only emits ghost-import slots and ghost-refresh intents. `recv_local_indices_by_neighbor` identifies local ghost rows that expect refreshed data, while `send_local_indices_by_neighbor` intentionally remains empty for the descriptor-only planner because peer-owned export rows are not derivable from local ghost placeholders alone. Full migration scheduling and migration ownership commit remain out of scope.
 
 ## 2) Migration/pack/unpack invariants
 
@@ -44,7 +44,7 @@ Ghost packet invariants remain:
 - Decode enforces payload-shape consistency (`encoded_count` must match exact byte payload shape).
 - Decode must consume exactly the buffer payload (no trailing bytes).
 
-Current scaffolding behavior keeps symmetric request/response index sets per neighbor while full migration scheduling is still staged.
+Current scaffolding behavior keeps only the receive-side ghost staging indices in the descriptor-only plan. Export/send row selection requires a future owned-boundary planner.
 
 ## 3) Deterministic reduction contract
 
@@ -71,7 +71,7 @@ This enables explicit reproducibility checks in environment-independent pseudo-m
 
 - No production MPI exchange correctness claim is made; this repo path is still pseudo-multi-rank + CPU-only contract scaffolding.
 - Migration lifecycle beyond typed intents (actual migration transfer execution + ownership commit across ranks) is not implemented in this pass.
-- Symmetric send/recv index construction remains a temporary scaffold assumption for ghost-refresh paths.
+- Descriptor-only ghost planning does not yet compute owned export rows for outbound refresh payloads.
 
 ## 4) Config-freeze consensus contract across ranks
 

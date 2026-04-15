@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v2`
-- `version = 2`
+- `name = cosmosim_restart_v3`
+- `version = 3`
 
 Restart payload includes:
 
@@ -115,7 +115,7 @@ When changing snapshot/restart/provenance fields:
 ## Compatibility notes (2026-04-13)
 
 - No external snapshot dataset names were changed.
-- Restart schema version/name were not changed (`cosmosim_restart_v2`, version `2`).
+- Restart schema version/name were intentionally bumped to `cosmosim_restart_v3`, version `3`, because restart payloads now persist the full stellar-evolution sidecar state and reject older incomplete restart artifacts.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
 - New operational diagnostics output is additive only; snapshot/restart/provenance schemas and compatibility contracts are unchanged.
