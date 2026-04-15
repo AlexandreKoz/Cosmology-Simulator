@@ -52,5 +52,5 @@ These modes are release-ready for CPU-only workstations and small CPU clusters w
 - Normalized, typed configuration is required before run execution.
 - Provenance output is mandatory for release reference runs (`provenance_v1`).
 - Snapshot schema compatibility: `gadget_arepo_v1`.
-- Restart schema compatibility: `cosmosim_restart_v2`.
+- Restart schema compatibility: `cosmosim_restart_v3`.
 - Release metadata schema and packaging manifest: `release_manifest_v1`.

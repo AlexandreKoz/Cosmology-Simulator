@@ -2,6 +2,7 @@
 #include <string>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/provenance.hpp"
 
 namespace {
 
@@ -142,6 +143,25 @@ void testDefaultsCanonicalizationAndDeterminism() {
   assert(frozen_first.config.parallel.deterministic_reduction);
   assert(frozen_first.normalized_text == frozen_second.normalized_text);
   assert(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
+  assert(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
+  const auto reparsed =
+      cosmosim::core::loadFrozenConfigFromString(frozen_first.normalized_text, "normalized_roundtrip");
+  assert(reparsed.normalized_text == frozen_first.normalized_text);
+  assert(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
+}
+
+void testUrlsWindowsPathsAndQuotedHashesAreNotTruncated() {
+  const std::string config_text = R"(
+[mode]
+mode = zoom_in
+[physics]
+metal_line_table_path = https://example.com/tables/metal_line_rates.h5 // fetch remotely later
+stellar_evolution_table_path = "C://stellar_tables//ssp#grid.h5" # local override
+)";
+
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(config_text, "path_preservation");
+  assert(frozen.config.physics.metal_line_table_path == "https://example.com/tables/metal_line_rates.h5");
+  assert(frozen.config.physics.stellar_evolution_table_path == "\"C://stellar_tables//ssp#grid.h5\"");
 }
 
 void testDeprecatedAliasesAndCanonicalCollision() {
@@ -328,6 +348,7 @@ int main() {
   testInvalidTypedPolicyEnumsFail();
   testBoundaryModeValidation();
   testDefaultsCanonicalizationAndDeterminism();
+  testUrlsWindowsPathsAndQuotedHashesAreNotTruncated();
   testDeprecatedAliasesAndCanonicalCollision();
   testFeedbackConfigKeysAndValidation();
   testCoolingPolicyEnumsAndValidation();

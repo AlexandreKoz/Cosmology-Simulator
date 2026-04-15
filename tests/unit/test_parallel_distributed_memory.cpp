@@ -106,7 +106,8 @@ void testExplicitOwnedVsGhostContracts() {
   assert(plan.recv_local_indices_by_neighbor[0][0] == 1);
   assert(plan.recv_local_indices_by_neighbor[1].size() == 1);
   assert(plan.recv_local_indices_by_neighbor[1][0] == 3);
-  assert(plan.send_local_indices_by_neighbor == plan.recv_local_indices_by_neighbor);
+  assert(plan.send_local_indices_by_neighbor[0].empty());
+  assert(plan.send_local_indices_by_neighbor[1].empty());
   assert(plan.outbound_transfers.size() == 2);
   assert(plan.inbound_transfers.size() == 2);
   assert(plan.outbound_transfers[0].role == cosmosim::parallel::GhostTransferRole::kOutboundSend);
@@ -125,7 +126,33 @@ void testExplicitOwnedVsGhostContracts() {
   assert(plan.inbound_transfers[1].peer_rank == 2);
   assert(plan.outbound_transfers[1].local_indices == plan.send_local_indices_by_neighbor[1]);
   assert(plan.inbound_transfers[1].local_indices == plan.recv_local_indices_by_neighbor[1]);
+  assert(plan.send_bytes == 0);
+  assert(plan.recv_bytes == 2 * (sizeof(double) * 3 + sizeof(std::uint64_t)));
   cosmosim::parallel::validateGhostExchangePlan(plan);
+}
+
+void testRestartStateRejectsMissingOrDuplicateOwnershipEntries() {
+  {
+    bool threw = false;
+    try {
+      (void)cosmosim::parallel::DistributedRestartState::deserialize(
+          "schema_version=1\ndecomposition_epoch=7\nworld_size=2\nitem_count=3\nrank[0]=1\n");
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  {
+    bool threw = false;
+    try {
+      (void)cosmosim::parallel::DistributedRestartState::deserialize(
+          "schema_version=1\ndecomposition_epoch=7\nworld_size=2\nitem_count=2\nrank[0]=1\nrank[0]=0\nrank[1]=1\n");
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
 }
 
 void testGhostTransferInvariantFailures() {
@@ -336,6 +363,7 @@ int main() {
   testMortonDecompositionInvariants();
   testRestartStateRoundTrip();
   testExplicitOwnedVsGhostContracts();
+  testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testGhostTransferInvariantFailures();
   testDeterministicReductionAgreement();
   testGhostExchangePlanValidationDriftRejection();

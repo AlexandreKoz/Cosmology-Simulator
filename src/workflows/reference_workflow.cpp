@@ -185,7 +185,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
     io::RestartWritePayload restart_payload;
     restart_payload.state = &state;
     restart_payload.integrator_state = &integrator_state;
-    restart_payload.provenance = core::makeDefaultProvenanceRecord("reference_workflow");
+    restart_payload.provenance =
+        core::makeProvenanceRecord(m_frozen_config.provenance.config_hash_hex, "reference_workflow");
     restart_payload.normalized_config_text = m_frozen_config.normalized_text;
     restart_payload.normalized_config_hash_hex = m_frozen_config.provenance.config_hash_hex;
 
@@ -275,7 +276,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
     snapshot_payload.state = &state;
     snapshot_payload.config = &config;
     snapshot_payload.normalized_config_text = m_frozen_config.normalized_text;
-    snapshot_payload.provenance = core::makeDefaultProvenanceRecord("reference_workflow");
+    snapshot_payload.provenance =
+        core::makeProvenanceRecord(m_frozen_config.provenance.config_hash_hex, "reference_workflow");
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "snapshot.write.begin",
         .severity = core::RuntimeEventSeverity::kInfo,

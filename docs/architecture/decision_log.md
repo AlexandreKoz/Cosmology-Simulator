@@ -123,3 +123,29 @@ Any future regression in one path re-blocks the gate.
 ### Evidence references
 - `docs/repair_closeout_report.md`
 - `docs/repair_open_issues.md`
+
+
+## 2026-04-14 — ADR-REPAIR-CONTINUATION-005: Remove normalized-config self-hash and reject incomplete restart continuations
+
+### Status
+Accepted (targeted infrastructure repair)
+
+### Context
+The normalized config artifact embedded its own hash, which made the canonical text internally inconsistent and non-round-trippable. Separately, restart payloads/schema omitted stellar-evolution continuation lanes while the integrity hash and compatibility contract still claimed exact continuation.
+
+### Decision
+- Define the normalized config hash over the normalized config text alone; do not embed a self-hash line inside the canonical text.
+- Require continuation metadata agreement: normalized text hash == stored normalized-config hash == provenance config hash.
+- Bump restart schema to `cosmosim_restart_v3` and reject older incomplete restart artifacts.
+- Persist and hash the full stellar-evolution star sidecar payload.
+
+### Consequences
+- Positive: normalized config dumps are deterministic, parseable, and hash-consistent.
+- Positive: restart artifacts once again match their exact-continuation claim for currently serialized state.
+- Tradeoff: `cosmosim_restart_v2` artifacts are intentionally incompatible because they omit required continuation state.
+
+### Evidence references
+- `tests/unit/test_config_parser.cpp`
+- `tests/unit/test_restart_checkpoint_schema.cpp`
+- `tests/integration/test_restart_checkpoint_roundtrip.cpp`
+- `tests/integration/test_snapshot_hdf5_roundtrip.cpp`

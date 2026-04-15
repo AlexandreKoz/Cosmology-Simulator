@@ -155,5 +155,19 @@ int main() {
   state.species.count_by_species = {2, 0, 3, 0, 0};
   assert(state.validateOwnershipInvariants());
 
+  state.star_particles.resize(0);
+  assert(!state.validateOwnershipInvariants());
+  state.star_particles.resize(3);
+  for (std::size_t i = 0; i < 3; ++i) {
+    state.star_particles.particle_index[i] = static_cast<std::uint32_t>(i + 2);
+    state.star_particles.formation_scale_factor[i] = 0.5;
+    state.star_particles.birth_mass_code[i] = 1.1;
+    state.star_particles.metallicity_mass_fraction[i] = 0.02;
+  }
+  assert(state.validateOwnershipInvariants());
+
+  state.star_particles.particle_index[1] = 2;
+  assert(!state.validateOwnershipInvariants());
+
   return 0;
 }

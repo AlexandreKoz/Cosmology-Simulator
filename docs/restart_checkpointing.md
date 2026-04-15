@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v2`) persists:
+The restart schema (`cosmosim_restart_v3`) persists:
 
 - full `SimulationState` hot/cold SoA lanes,
 - `StateMetadata` blob,
@@ -19,7 +19,7 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`2`).
+- Current compatibility policy: exact version match (`3`). Older `v2` restart files are intentionally rejected because they omit required stellar-evolution continuation state.
 
 ## Atomic write semantics
 
@@ -31,7 +31,7 @@ behavior on filesystems where `rename` is atomic.
 ## Integrity and provenance
 
 - `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance.
-- The hash covers particle lanes, sidecars, species counts, star/BH/tracer sidecars, integrator
+- The hash covers particle lanes, sidecars, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, and scheduler persistent arrays (`bin_index`, `next_activation_tick`,
   `active_flag`, `pending_bin_index`).
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
@@ -53,9 +53,7 @@ restart write/read checks is:
 6. `provenance_record`
 7. `payload_integrity_hash_and_hex`
 
-`validateContinuationMetadata(...)` now requires non-empty normalized config text,
-non-empty normalized config hash, and non-empty provenance config hash before
-hashing/writing restart payloads.
+`validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 
 ## Exactness policy
 

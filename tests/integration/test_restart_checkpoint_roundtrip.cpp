@@ -47,6 +47,18 @@ void populateState(cosmosim::core::SimulationState& state) {
   state.star_particles.formation_scale_factor[0] = 0.4;
   state.star_particles.birth_mass_code[0] = 9.0;
   state.star_particles.metallicity_mass_fraction[0] = 0.02;
+  state.star_particles.stellar_age_years_last[0] = 1.25e7;
+  state.star_particles.stellar_returned_mass_cumulative_code[0] = 0.4;
+  state.star_particles.stellar_returned_metals_cumulative_code[0] = 0.03;
+  state.star_particles.stellar_feedback_energy_cumulative_erg[0] = 5.0e49;
+  for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    state.star_particles.stellar_returned_mass_channel_cumulative_code[channel][0] =
+        0.01 * static_cast<double>(channel + 1);
+    state.star_particles.stellar_returned_metals_channel_cumulative_code[channel][0] =
+        0.001 * static_cast<double>(channel + 1);
+    state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel][0] =
+        1.0e48 * static_cast<double>(channel + 1);
+  }
 
   state.black_holes.resize(1);
   state.black_holes.particle_index[0] = 4;
@@ -148,6 +160,29 @@ void testRestartRoundtrip() {
   assert(restored.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank);
   assert(restored.state.star_particles.particle_index == state.star_particles.particle_index);
   assert(restored.state.star_particles.formation_scale_factor == state.star_particles.formation_scale_factor);
+  assert(restored.state.star_particles.birth_mass_code == state.star_particles.birth_mass_code);
+  assert(restored.state.star_particles.metallicity_mass_fraction == state.star_particles.metallicity_mass_fraction);
+  assert(restored.state.star_particles.stellar_age_years_last == state.star_particles.stellar_age_years_last);
+  assert(
+      restored.state.star_particles.stellar_returned_mass_cumulative_code ==
+      state.star_particles.stellar_returned_mass_cumulative_code);
+  assert(
+      restored.state.star_particles.stellar_returned_metals_cumulative_code ==
+      state.star_particles.stellar_returned_metals_cumulative_code);
+  assert(
+      restored.state.star_particles.stellar_feedback_energy_cumulative_erg ==
+      state.star_particles.stellar_feedback_energy_cumulative_erg);
+  for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    assert(
+        restored.state.star_particles.stellar_returned_mass_channel_cumulative_code[channel] ==
+        state.star_particles.stellar_returned_mass_channel_cumulative_code[channel]);
+    assert(
+        restored.state.star_particles.stellar_returned_metals_channel_cumulative_code[channel] ==
+        state.star_particles.stellar_returned_metals_channel_cumulative_code[channel]);
+    assert(
+        restored.state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel] ==
+        state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel]);
+  }
   assert(restored.state.black_holes.particle_index == state.black_holes.particle_index);
   assert(restored.state.black_holes.host_cell_index == state.black_holes.host_cell_index);
   assert(restored.state.black_holes.subgrid_mass_code == state.black_holes.subgrid_mass_code);
@@ -224,7 +259,7 @@ void testRestartRoundtrip() {
   assert(schema_file >= 0);
   hid_t schema_attr = H5Aopen(schema_file, "restart_schema_version", H5P_DEFAULT);
   assert(schema_attr >= 0);
-  std::uint32_t bad_schema = 1;
+  std::uint32_t bad_schema = 2;
   assert(H5Awrite(schema_attr, H5T_NATIVE_UINT32, &bad_schema) >= 0);
   H5Aclose(schema_attr);
   H5Fclose(schema_file);

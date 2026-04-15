@@ -8,10 +8,10 @@
 
 int main() {
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v2");
-  assert(schema.version == 2);
-  assert(cosmosim::io::isRestartSchemaCompatible(2));
-  assert(!cosmosim::io::isRestartSchemaCompatible(1));
+  assert(schema.name == "cosmosim_restart_v3");
+  assert(schema.version == 3);
+  assert(cosmosim::io::isRestartSchemaCompatible(3));
+  assert(!cosmosim::io::isRestartSchemaCompatible(2));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
@@ -45,8 +45,8 @@ int main() {
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "mode = toy\n";
-  payload.normalized_config_hash_hex = "a";
-  payload.provenance = cosmosim::core::makeProvenanceRecord("a", "deadbeef");
+  payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
 
   const std::uint64_t hash_before = cosmosim::io::restartPayloadIntegrityHash(payload);
   integrator_state.time_bins.active_bin = 1;
@@ -62,6 +62,18 @@ int main() {
     missing_metadata_threw = true;
   }
   assert(missing_metadata_threw);
+
+  bool mismatched_metadata_threw = false;
+  try {
+    cosmosim::io::RestartWritePayload invalid_metadata = payload;
+    invalid_metadata.normalized_config_hash_hex = "0000000000000000";
+    invalid_metadata.provenance =
+        cosmosim::core::makeProvenanceRecord(invalid_metadata.normalized_config_hash_hex, "deadbeef");
+    (void)cosmosim::io::restartPayloadIntegrityHash(invalid_metadata);
+  } catch (const std::invalid_argument&) {
+    mismatched_metadata_threw = true;
+  }
+  assert(mismatched_metadata_threw);
 
   return 0;
 }

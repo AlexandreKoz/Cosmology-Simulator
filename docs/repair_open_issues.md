@@ -1,10 +1,10 @@
 # Repair open issues (P01–P19 freeze ledger)
 
-_Date captured: 2026-04-07 (UTC)_
+_Date captured: 2026-04-14 (UTC)_
 
 ## Current blocker ledger after dependency-enabled validation
 
-No open P19 blockers remain after the PM/FFTW stabilization repair and full preset revalidation.
+One environment blocker remains in this validation environment: `cmake --preset pm-hdf5-fftw-debug` fails because FFTW3 development files are unavailable. No new in-tree code blocker was observed on the repaired CPU/HDF5 paths.
 
 ## Recently closed items
 
@@ -20,22 +20,27 @@ No open P19 blockers remain after the PM/FFTW stabilization repair and full pres
 | P19-DIAGNOSTICS-TIER-008 | Closed | Diagnostics maturity/scalability labeling | Diagnostics bundles mixed run-health outputs with heavy reference algorithms and did not encode maturity tier in code/output policy. | Added typed analysis execution policy, per-diagnostic tier/maturity/scalability metadata in bundle JSON, and tests proving provisional heavy diagnostics are non-default unless explicitly opted in (`all_including_provisional`). |
 | P19-PARALLEL-CONTRACT-009 | Closed (R07/R07b/R07c hardened) | Distributed-memory ownership/determinism contracts | Owned-vs-ghost residency and reduction/config consensus expectations were partially implicit in ghost-owner vectors and ad-hoc checks. | Added explicit send/receive transfer-role descriptors, lifecycle intent + post-transfer residency typing, strict plan/descriptor consistency validation, unambiguous reduction baseline/measured naming, explicit reduction policy modes, and property-level config mismatch records with rank/value payloads; validated in `test_parallel_distributed_memory` and `test_parallel_two_rank_restart`. |
 | P19-INFRA-GATE-010 | Closed | Infrastructure gate clarity + false-closure prevention | CPU-only pass signals could be misread as full closure when HDF5 or PM/HDF5/FFTW path validation was not surfaced as one explicit gate report. | Added `scripts/ci/enforce_infra_gates.sh` + CI `infrastructure_gates` job to run explicit CPU/HDF5/PM+HDF5+FFTW gate sets, write `infrastructure_gate_report.json`, and fail closure when any feature path gate fails; strengthened `integration_core_dependency_direction` with CMake target-link direction checks. |
+| P20-CONFIG-ROUNDTRIP-011 | Closed | Frozen config canonicalization/provenance | Normalized config emitted non-parseable empty-value/self-hash combinations and could not round-trip through the same parser. | Removed self-hash embedding from normalized text, preserved empty-value parsing for `key =` canonical lines, hardened inline-comment stripping for URLs/path-like values, and added deterministic round-trip/hash checks in `test_unit_config_parser`. |
+| P20-RESTART-STELLAR-012 | Closed | Restart completeness/integrity | Restart payloads omitted stellar-evolution bookkeeping lanes and the payload hash did not cover those lanes. | Bumped restart schema to `cosmosim_restart_v3`, serialized/read all stellar-evolution sidecar lanes, extended integrity hashing coverage, and verified round-trip in `test_integration_restart_checkpoint_roundtrip` + `test_unit_restart_checkpoint_schema`. |
+| P20-SNAPSHOT-MASSTABLE-013 | Closed | Snapshot import safety | HDF5 snapshot import defaulted missing `Masses` datasets to zero instead of using `Header/MassTable`. | Snapshot reader now requires a positive `Header/MassTable` entry for fallback and reports `Masses=MassTable`; verified in `test_integration_snapshot_hdf5_roundtrip`. |
+| P20-PARALLEL-HONESTY-014 | Closed | Distributed-memory scaffolding | Ghost descriptor planning treated local ghost rows as outbound payload rows, and distributed restart decode accepted missing ownership entries as rank 0. | Descriptor-only ghost planning now leaves outbound payload indices empty unless owned export rows are known, duplicate/missing restart ownership entries are rejected, and tests were updated in `test_unit_parallel_distributed_memory`. |
+| P20-STATE-COVERAGE-015 | Closed | Species-sidecar invariants | Species-tagged star/BH/tracer particles could exist without exactly one corresponding sidecar row. | Ownership validation now enforces one-to-one species-tag/sidecar coverage and rejects duplicates; verified in `test_unit_simulation_state`. |
 
-## Verified non-blocking evidence (this run)
 
-- PM HDF5+FFTW path passes:
-  - `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "unit_pm_solver|integration_tree_pm_coupling_periodic"`
-  - `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure` (`36/36` passed)
-- HDF5 path passes:
-  - `ctest --preset test-hdf5-debug --output-on-failure` (`36/36` passed)
-- CPU-only path passes:
-  - `ctest --preset test-cpu-debug --output-on-failure` (`36/36` passed)
+## Verified evidence (this run)
+
+- CPU targeted repair floor passes:
+  - `ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_config_parser|unit_simulation_state|unit_parallel_distributed_memory|unit_restart_checkpoint_schema"`
+- HDF5 targeted repair floor passes:
+  - `ctest --test-dir build/hdf5-debug --output-on-failure -R "unit_restart_checkpoint_schema|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip"`
+- PM HDF5+FFTW configure remains blocked by missing FFTW3 development files in this environment:
+  - `cmake --preset pm-hdf5-fftw-debug`
 
 ## Outcome tags
 
 - **CPU-only preserved**
 - **HDF5 path preserved**
-- **PM HDF5+FFTW path restored**
+- **PM HDF5+FFTW path environment-blocked**
 - **P19 blocker ledger cleared**
 
 ## R08 hardening residual limitations (tracked, non-blocking)

@@ -451,6 +451,18 @@ void readHeaderCounts(hid_t header_group, std::array<std::uint64_t, 6>& out_coun
   }
 }
 
+void readOptionalHeaderMassTable(
+    hid_t header_group,
+    std::array<double, 6>& out_mass_table) {
+  out_mass_table.fill(0.0);
+  Hdf5Handle attr_mass(H5Aopen(header_group, "MassTable", H5P_DEFAULT));
+  if (attr_mass.valid()) {
+    if (H5Aread(attr_mass.get(), H5T_NATIVE_DOUBLE, out_mass_table.data()) < 0) {
+      throw std::runtime_error("Header/MassTable unreadable");
+    }
+  }
+}
+
 void readOptionalHeaderDouble(hid_t header_group, const std::string& key, double default_value, double& out_value) {
   out_value = default_value;
   Hdf5Handle attr(H5Aopen(header_group, key.c_str(), H5P_DEFAULT));
@@ -662,7 +674,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   result.report.schema_version = schema_version;
 
   std::array<std::uint64_t, 6> header_counts{};
+  std::array<double, 6> header_mass_table{};
   readHeaderCounts(header_group.get(), header_counts);
+  readOptionalHeaderMassTable(header_group.get(), header_mass_table);
   std::size_t total_count = 0;
   for (std::uint64_t count : header_counts) {
     total_count += static_cast<std::size_t>(count);
@@ -748,8 +762,15 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     if (!masses_name.empty()) {
       readDatasetChunk1d(group.get(), masses_name, 0, local_count, mass_chunk);
     } else if (options.allow_mass_table_fallback) {
-      mass_chunk.assign(local_count, 0.0);
-      result.report.defaulted_fields.push_back(std::string(schema.part_type_group[type_index]) + "/Masses=zero");
+      const double constant_mass = header_mass_table[type_index];
+      if (!(constant_mass > 0.0)) {
+        throw std::runtime_error(
+            "Masses missing and Header/MassTable fallback is unavailable for type " +
+            std::to_string(type_index));
+      }
+      mass_chunk.assign(local_count, constant_mass);
+      result.report.defaulted_fields.push_back(
+          std::string(schema.part_type_group[type_index]) + "/Masses=MassTable");
     } else {
       throw std::runtime_error("Masses missing and fallback disabled");
     }

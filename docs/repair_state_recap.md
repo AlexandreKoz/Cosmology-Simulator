@@ -370,3 +370,31 @@ Interpretation:
 - Gate semantics are less rename-fragile and more reviewable due to a narrow declarative manifest.
 - CI failure triage can identify failing phase and command per gate without log archaeology.
 - Core target-link direction guard is stronger than single-file regex scanning while remaining narrow and infrastructure-focused.
+
+
+## 11) 2026-04-14 targeted infrastructure repair pass
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j1 --target   test_unit_config_parser   test_unit_simulation_state   test_unit_parallel_distributed_memory   test_unit_restart_checkpoint_schema
+ctest --test-dir build/cpu-only-debug --output-on-failure -R   "unit_config_parser|unit_simulation_state|unit_parallel_distributed_memory|unit_restart_checkpoint_schema"
+
+cmake --preset hdf5-debug
+ninja -C build/hdf5-debug -j8   test_unit_restart_checkpoint_schema   test_integration_snapshot_hdf5_roundtrip   test_integration_restart_checkpoint_roundtrip
+ctest --test-dir build/hdf5-debug --output-on-failure -R   "unit_restart_checkpoint_schema|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip"
+
+cmake --preset pm-hdf5-fftw-debug
+```
+
+Observed:
+
+- CPU targeted repair tests pass after hardening config round-trip/hash semantics, species-sidecar coverage invariants, descriptor-only ghost-plan honesty, and distributed restart decode completeness checks.
+- HDF5 targeted repair tests pass after fixing restart stellar-sidecar completeness, restart payload hash coverage, continuation metadata cross-checking, and `Header/MassTable` snapshot-mass fallback.
+- `pm-hdf5-fftw-debug` configure is blocked in this environment because FFTW3 development files are unavailable.
+
+Interpretation:
+
+- The repaired invariants are command-backed on CPU and HDF5 feature paths.
+- PM/FFTW path remains an environment blocker here, not a demonstrated code regression in this repair pass.
