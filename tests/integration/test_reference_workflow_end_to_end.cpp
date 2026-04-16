@@ -13,6 +13,11 @@ int main() {
   stream << "mode = zoom_in\n";
   stream << "ic_file = generated\n";
   stream << "zoom_high_res_region = false\n\n";
+  stream << "[numerics]\n";
+  stream << "time_begin_code = 0.01\n";
+  stream << "time_end_code = 0.0101\n";
+  stream << "max_global_steps = 1\n";
+  stream << "hierarchical_max_rung = 1\n\n";
   stream << "[output]\n";
   stream << "run_name = reference_integration_test\n";
   stream << "output_directory = integration_outputs\n";
@@ -28,12 +33,18 @@ int main() {
   const cosmosim::workflows::ReferenceWorkflowReport report =
       runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
 
+  const std::filesystem::path expected_run_dir = output_dir / "reference_integration_test";
+
   assert(report.config_compatible);
   assert(report.schema_compatible);
   assert(report.canonical_stage_order);
   assert(report.stage_sequence.size() == 7);
   assert(report.stage_sequence.front() == "gravity_kick_pre");
   assert(report.stage_sequence.back() == "output_check");
+  assert(report.completed_steps == 1);
+  assert(report.run_directory == expected_run_dir);
+  assert(report.normalized_config_snapshot_written);
+  assert(std::filesystem::exists(report.normalized_config_snapshot_path));
   assert(std::filesystem::exists(report.profiler_json_path));
   assert(std::filesystem::exists(report.profiler_csv_path));
   assert(std::filesystem::exists(report.operational_report_json_path));

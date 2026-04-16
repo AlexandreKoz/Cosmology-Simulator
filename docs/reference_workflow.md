@@ -1,23 +1,41 @@
-# Reference workflow integration pass
+# Reference workflow runtime path
 
-This document defines the integrated reference workflow that wires configuration parsing, generated IC ingest, integrator stage sequencing, diagnostics callbacks, star-formation and black-hole callbacks, and profiler report generation through one auditable entry point (`workflows::ReferenceWorkflowRunner`).
+This document describes the live config-driven runtime path assembled by `workflows::ReferenceWorkflowRunner` and exercised by the shipped executable target `cosmosim_harness`.
 
-## Layer placement and boundary
+## What the runtime now does
 
-- The concrete assembly lives in `include/cosmosim/workflows/reference_workflow.hpp` and `src/workflows/reference_workflow.cpp`.
-- `core/` provides only typed state/config/stage contracts (`StepOrchestrator`, `IntegratorState`, etc.) and does not assemble analysis/I/O/physics callbacks.
-- Transitional compatibility aliases are exposed in `namespace cosmosim::core` from the workflow header so existing callers can migrate incrementally without pulling workflow assembly back into `core/`.
+A valid `param.txt` run goes through the following real path:
 
-## Scope and conservative assumptions
+1. `cosmosim_harness <config.param.txt>` loads the typed frozen config with `loadFrozenConfigFromFile(...)`.
+2. The runner validates the mode/build contract before stepping.
+3. Initial conditions are dispatched from the authoritative config contract:
+   - `mode.ic_file=generated` uses the in-repo generated IC path.
+   - any other `mode.ic_file` is resolved relative to the config file and read through the HDF5 IC reader.
+4. The live run loop uses `HierarchicalTimeBinScheduler` as the execution driver.
+5. The orchestrator executes the canonical KDK stage sequence with real gravity and hydro callbacks.
+6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory.
 
-- The reference path requires `numerics.gravity_solver=treepm`, `numerics.hydro_solver=godunov_fv`, and `units.coordinate_frame=comoving`.
-- Schema compatibility is checked against snapshot schema v1 and restart schema v2.
-- By default, integration tests run with `write_outputs=false` so the path remains valid when HDF5 is disabled.
-- When HDF5 is enabled, the runner can emit and read back restart and snapshot files in one pass.
+## Runtime contract
+
+The run directory is:
+
+- `<output.output_directory>/<output.run_name>` in normal CLI usage.
+- `<override_root>/<output.run_name>` only for tests/benchmarks that intentionally override the output root.
+
+The runner honors these config fields directly:
+
+- `mode.mode`
+- `mode.ic_file`
+- `output.output_directory`
+- `output.run_name`
+- `output.output_stem`
+- `output.restart_stem`
+- `output.snapshot_interval_steps`
+- `output.write_restarts`
 
 ## Canonical stage ordering
 
-The runner uses `core::StepOrchestrator` and therefore preserves the canonical order:
+The workflow uses `core::StepOrchestrator` and preserves the canonical order:
 
 1. `gravity_kick_pre`
 2. `drift`
@@ -27,14 +45,27 @@ The runner uses `core::StepOrchestrator` and therefore preserves the canonical o
 6. `analysis_hooks`
 7. `output_check`
 
-## Profiling and reporting
+## Gravity, hydro, and scheduler ownership
 
-Each run emits:
+- Gravity is executed through the live `gravity::TreePmCoordinator` callback.
+- Hydro is executed through the live Godunov finite-volume callback using the hydro core solver, MUSCL-Hancock reconstruction, and HLLC fluxes.
+- Active sets come from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps are committed through `endSubstep()` before restart output is written.
+- Restart payloads therefore serialize the scheduler state that actually drove the run.
 
-- `reference_profile.json`
-- `reference_profile.csv`
-- `reference_operational_events.json`
+## Artifacts emitted by the runtime
 
-These files are generated from the built-in `core::ProfilerSession` and provide an end-to-end stage profile suitable for regression gating and mini-run cost comparisons. The workflow also emits a `canonical_stage_order` flag in reports/bench output, backed by the canonical order validator in `core::time_integration`.
+Every successful run writes the following core artifacts into the run directory:
 
-`reference_operational_events.json` is a compact, structured event stream + summary for infrastructure audits. It records key lifecycle and failure-surface events (for example: config freeze acceptance, restart/snapshot write/read begin/complete/failure) and links them to deterministic provenance context via `provenance_config_hash_hex`.
+- `normalized_config.param.txt`
+- `profile.json`
+- `profile.csv`
+- `operational_events.json`
+
+When output cadence conditions are met and HDF5 is enabled, the runtime also writes:
+
+- `<output.output_stem>_NNN.hdf5`
+- `<output.restart_stem>_NNN.hdf5` when `output.write_restarts=true`
+
+## Failure transparency
+
+The runner flushes the normalized config snapshot as soon as config loading succeeds. A top-level runtime wrapper then attempts to flush `operational_events.json` and profiler reports on both successful completion and runtime failure, so early first-run failures still leave a diagnostic trail whenever the filesystem remains writable.

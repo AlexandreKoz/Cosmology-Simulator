@@ -1,13 +1,17 @@
 # Initial serious release scope (v0.1.0-initial)
 
-## Supported operating modes (release-ready)
+## Supported operating modes (release-ready on the repaired runtime path)
 
 - `zoom_in`
 - `cosmo_cube`
 - `isolated_galaxy`
 - `isolated_cluster`
 
-These modes are release-ready for CPU-only workstations and small CPU clusters when run through preset-based build and test workflows.
+These modes are release-ready for the repaired CPU/HDF5 runtime path when driven through the shipped executable:
+
+```bash
+cosmosim_harness <config.param.txt>
+```
 
 ## Numerical architecture in scope
 
@@ -23,12 +27,12 @@ These modes are release-ready for CPU-only workstations and small CPU clusters w
 ### Production-ready paths
 
 - CPU-only build via `cpu-only-debug` and `cpu-only-release` presets.
-- MPI-enabled decomposition/restart path via `mpi-debug` preset.
-- HDF5 snapshot/restart workflow via `hdf5-debug` preset.
+- HDF5 snapshot/restart + real runtime smoke workflow via `hdf5-debug` preset.
 
-### Conditionally supported path
+### Conditionally supported paths
 
-- FFTW-enabled PM path via `fftw-debug` preset when FFTW is installed.
+- PM/TreePM FFTW validation via `pm-hdf5-fftw-debug` when FFTW is installed.
+- MPI build coverage via `mpi-release`, but this release does **not** claim mandatory multi-process production validation in the default gate.
 
 ### Experimental path (not validated for production science)
 
@@ -50,6 +54,7 @@ These modes are release-ready for CPU-only workstations and small CPU clusters w
 ## Reproducibility and schema commitments
 
 - Normalized, typed configuration is required before run execution.
+- The runtime writes `normalized_config.param.txt` into the run directory after config loading succeeds.
 - Provenance output is mandatory for release reference runs (`provenance_v1`).
 - Snapshot schema compatibility: `gadget_arepo_v1`.
 - Restart schema compatibility: `cosmosim_restart_v3`.

@@ -218,6 +218,8 @@ endforeach()
 target_link_libraries(cosmosim_workflows
   PUBLIC
     cosmosim_analysis
+    cosmosim_gravity
+    cosmosim_hydro
     cosmosim_io
     cosmosim_physics)
 
@@ -556,6 +558,16 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_release_readiness_artifacts
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_release_readiness_artifacts.cmake")
 
+
+  if(COSMOSIM_ENABLE_HDF5)
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_smoke.cmake.in"
+      "${CMAKE_BINARY_DIR}/test_runtime_app_smoke.cmake"
+      @ONLY)
+    add_test(NAME integration_runtime_app_smoke
+             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_smoke.cmake")
+  endif()
+
   add_executable(
     test_validation_unit
     tests/validation/test_validation_unit.cpp
@@ -595,6 +607,32 @@ if(COSMOSIM_ENABLE_TESTS)
   target_compile_definitions(test_validation_regression PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME validation_regression COMMAND test_validation_regression)
   set_tests_properties(validation_regression PROPERTIES LABELS "validation;regression")
+
+
+  get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
+  foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)
+    get_property(cosmosim_existing_labels TEST ${cosmosim_test_name} PROPERTY LABELS)
+    if(NOT cosmosim_existing_labels)
+      set(cosmosim_existing_labels "")
+    endif()
+
+    if(cosmosim_test_name MATCHES "^unit_")
+      list(APPEND cosmosim_existing_labels unit)
+    elseif(cosmosim_test_name MATCHES "^integration_")
+      list(APPEND cosmosim_existing_labels integration)
+    elseif(cosmosim_test_name MATCHES "^validation_")
+      list(APPEND cosmosim_existing_labels validation)
+    endif()
+
+    if(cosmosim_test_name MATCHES "runtime_app_smoke")
+      list(APPEND cosmosim_existing_labels runtime smoke)
+    endif()
+
+    if(cosmosim_existing_labels)
+      list(REMOVE_DUPLICATES cosmosim_existing_labels)
+      set_tests_properties(${cosmosim_test_name} PROPERTIES LABELS "${cosmosim_existing_labels}")
+    endif()
+  endforeach()
 
   if(COSMOSIM_ENABLE_PYTHON)
     add_test(

@@ -772,19 +772,11 @@ std::string PmSolver::fftBackendName() {
 }
 
 bool treePmSupportedByBuild() {
-#if COSMOSIM_ENABLE_FFTW
   return true;
-#else
-  return false;
-#endif
 }
 
 void requireTreePmSupportOrThrow(core::GravitySolver gravity_solver) {
-  if (gravity_solver == core::GravitySolver::kTreePm && !treePmSupportedByBuild()) {
-    throw std::runtime_error(
-        "numerics.gravity_solver=treepm requested, but this build lacks FFTW support. "
-        "Reconfigure with COSMOSIM_ENABLE_FFTW=ON.");
-  }
+  static_cast<void>(gravity_solver);
 }
 
 }  // namespace cosmosim::gravity

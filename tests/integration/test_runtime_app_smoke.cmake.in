@@ -1,0 +1,51 @@
+set(runtime_smoke_root "@CMAKE_BINARY_DIR@/runtime_app_smoke")
+set(runtime_smoke_run_root "${runtime_smoke_root}/outputs")
+set(runtime_smoke_config "${runtime_smoke_root}/runtime_smoke.param.txt")
+set(runtime_smoke_stdout "${runtime_smoke_root}/runtime_stdout.txt")
+set(runtime_smoke_stderr "${runtime_smoke_root}/runtime_stderr.txt")
+set(runtime_smoke_run_dir "${runtime_smoke_run_root}/runtime_app_smoke")
+
+file(REMOVE_RECURSE "${runtime_smoke_root}")
+file(MAKE_DIRECTORY "${runtime_smoke_root}")
+
+file(WRITE "${runtime_smoke_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 1\ngravity_solver = treepm\nhydro_solver = godunov_fv\n\n[analysis]\nenable_diagnostics = true\nenable_halo_workflow = false\nrun_health_interval_steps = 1\nscience_light_interval_steps = 1\nscience_heavy_interval_steps = 4\n\n[output]\nrun_name = runtime_app_smoke\noutput_directory = ${runtime_smoke_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 1\nwrite_restarts = true\n\n[units]\ncoordinate_frame = comoving\n")
+
+execute_process(
+  COMMAND "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_smoke_config}"
+  RESULT_VARIABLE runtime_result
+  OUTPUT_FILE "${runtime_smoke_stdout}"
+  ERROR_FILE "${runtime_smoke_stderr}")
+
+if(NOT runtime_result EQUAL 0)
+  file(READ "${runtime_smoke_stderr}" runtime_err)
+  message(FATAL_ERROR "cosmosim_harness runtime smoke failed with exit code ${runtime_result}:\n${runtime_err}")
+endif()
+
+foreach(required_path IN ITEMS
+    "${runtime_smoke_run_dir}"
+    "${runtime_smoke_run_dir}/normalized_config.param.txt"
+    "${runtime_smoke_run_dir}/operational_events.json"
+    "${runtime_smoke_run_dir}/profile.json"
+    "${runtime_smoke_run_dir}/profile.csv"
+    "${runtime_smoke_run_dir}/snap_001.hdf5"
+    "${runtime_smoke_run_dir}/restart_001.hdf5")
+  if(NOT EXISTS "${required_path}")
+    message(FATAL_ERROR "runtime smoke missing expected artifact: ${required_path}")
+  endif()
+endforeach()
+
+file(READ "${runtime_smoke_stdout}" runtime_stdout_text)
+if(NOT runtime_stdout_text MATCHES "run_directory=${runtime_smoke_run_dir}")
+  message(FATAL_ERROR "runtime smoke stdout must report the concrete run directory")
+endif()
+if(NOT runtime_stdout_text MATCHES "completed_steps=1")
+  message(FATAL_ERROR "runtime smoke stdout must report completed_steps=1")
+endif()
+
+file(READ "${runtime_smoke_run_dir}/operational_events.json" runtime_ops)
+if(NOT runtime_ops MATCHES "run.complete")
+  message(FATAL_ERROR "runtime smoke operational report must record run.complete")
+endif()
+if(NOT runtime_ops MATCHES "config.freeze")
+  message(FATAL_ERROR "runtime smoke operational report must record config.freeze")
+endif()
