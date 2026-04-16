@@ -17,7 +17,7 @@
   ],
   "production_ready_paths": {
     "cpu_only": true,
-    "mpi": true,
+    "mpi": false,
     "gpu_cuda": false
   },
   "experimental_modules": [

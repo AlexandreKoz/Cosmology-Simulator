@@ -88,21 +88,10 @@ void testPoissonAnalyticMode() {
 }
 
 void testTreePmBuildGate() {
-  if (cosmosim::gravity::treePmSupportedByBuild()) {
-    cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
-    return;
-  }
-
-  bool threw = false;
-  bool saw_actionable_message = false;
-  try {
-    cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
-  } catch (const std::runtime_error& ex) {
-    threw = true;
-    saw_actionable_message = std::string(ex.what()).find("COSMOSIM_ENABLE_FFTW=ON") != std::string::npos;
-  }
-  assert(threw);
-  assert(saw_actionable_message);
+  assert(cosmosim::gravity::treePmSupportedByBuild());
+  cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
+  const std::string backend = cosmosim::gravity::PmSolver::fftBackendName();
+  assert(!backend.empty());
 }
 
 void testExecutionPolicyValidation() {

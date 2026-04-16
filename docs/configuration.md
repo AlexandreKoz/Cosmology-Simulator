@@ -4,6 +4,28 @@ CosmoSim uses a GADGET/AREPO-style `param.txt` workflow and normalizes it into a
 
 Authoritative structures: `include/cosmosim/core/config.hpp` and `src/core/config.cpp`.
 
+## CLI runtime entry point
+
+The shipped executable is now a real config-driven runtime application:
+
+```bash
+cosmosim_harness <config.param.txt>
+```
+
+That path:
+
+- loads the config via `loadFrozenConfigFromFile(...)`
+- validates the typed runtime contract
+- constructs the reference workflow
+- runs the live scheduler-driven execution path
+- writes runtime artifacts into the config-driven run directory
+
+The concrete run directory is:
+
+```text
+<output.output_directory>/<output.run_name>
+```
+
 ## Parsing model
 
 - Input supports `key=value` and `key value` forms.
@@ -15,6 +37,7 @@ Authoritative structures: `include/cosmosim/core/config.hpp` and `src/core/confi
 
 - Config is normalized to canonical text.
 - Canonical text is hashed (stable FNV-1a) for provenance.
+- The normalized config snapshot is written to `normalized_config.param.txt` inside the run directory once config loading succeeds.
 - Stable naming constraints apply to `output.output_stem`, `output.restart_stem`, and diagnostics/halo stems.
 - Mode policy is validated before runtime (`mode.mode`, boundary selection, zoom requirements).
 
@@ -105,7 +128,8 @@ Tracers:
 
 ## `[output]`
 
-- `run_name`, `output_directory`
+- `run_name`
+- `output_directory` (output root; the runtime appends `run_name` to form the concrete run directory)
 - `output_stem`, `restart_stem` (stable character set only)
 - `snapshot_interval_steps`, `write_restarts`
 
@@ -135,10 +159,8 @@ Distributed-memory determinism contract (infrastructure scope):
 
 - `mpi_ranks_expected` must match across all ranks for a valid distributed run contract.
 - `deterministic_reduction=true` means rank-local contributions are compared against a rank-ordered deterministic reference sum in tests and smoke paths.
-- `deterministic_reduction=false` is allowed only when reduction error is evaluated explicitly against a documented policy mode in code/tests (for example via `parallel::ReductionAgreementMode::{kAbsoluteOnly,kRelativeOnly,kAbsoluteAndRelative,kAbsoluteOrRelative}` used by `parallel::satisfiesReductionAgreement`; no implicit “close enough” claims).
-- Current pseudo-multi-rank infrastructure smoke/integration checks use `kAbsoluteOrRelative` by default and document that choice at call sites.
+- `deterministic_reduction=false` is allowed only when reduction error is evaluated explicitly against a documented policy mode in code/tests.
 - The normalized frozen config hash (`provenance.config_hash_hex`) is computed over the normalized config text itself and must match both the stored normalized-config hash field and the provenance hash field in continuation artifacts.
-- Cross-rank config consensus diagnostics should emit property-level mismatch records (property name + baseline/offending rank/value pairs), not only pass/fail booleans.
 
 ## `[units]`
 
@@ -158,3 +180,4 @@ Canonical examples are in `configs/`:
 - `isolated_galaxy.param.txt`
 - `isolated_cluster.param.txt`
 - `cooling_relaxation.param.txt`
+- `configs/release/release_smoke_*.param.txt`

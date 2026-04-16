@@ -19,9 +19,13 @@ This initial serious release is scoped to desktop-first and small-cluster-first 
 - Isolated galaxy release smoke workflow: [`configs/release/release_smoke_isolated_galaxy.param.txt`](configs/release/release_smoke_isolated_galaxy.param.txt)
 - Cosmological cube release smoke workflow: [`configs/release/release_smoke_cosmo_cube.param.txt`](configs/release/release_smoke_cosmo_cube.param.txt)
 
+### Runtime entry point in this release
+
+The shipped executable `cosmosim_harness` is a real config-driven runtime application in this release. A valid `param.txt` now produces a concrete run directory outcome, including normalized config and operational reporting artifacts, rather than only printing a banner.
+
 ### Schema and provenance commitments in this release
 
 - Snapshot schema family remains `gadget_arepo_v1` for external interoperability.
-- Restart schema family remains `cosmosim_restart_v2`.
+- Restart schema family remains `cosmosim_restart_v3`.
 - Provenance schema remains `provenance_v1` and includes deterministic normalized config hash metadata.
 - Naming-rule policy follows `lower_snake_v1` for files/directories and explicit unit/frame suffixing in ambiguous internal variables.

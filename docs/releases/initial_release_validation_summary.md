@@ -6,20 +6,24 @@ This summary defines the minimum validation evidence required to declare release
 
 A release-candidate commit must pass:
 
-1. Core unit tests (`ctest -L unit` or equivalent selected unit suite).
-2. Integration smoke through the reference workflow pipeline.
+1. The actual unit and integration suite through `ctest --preset ... --output-on-failure` or an explicitly enumerated equivalent command.
+2. Integration smoke through the real config-driven runtime application path.
 3. Validation ladder checks:
    - unit tolerance checks,
    - integration tolerance checks,
    - regression checks,
    - convergence checks.
 
+Release reports should prefer the preset-wide or explicitly enumerated command rather than a shorthand subset invocation.
+
 ## Required reference tests
 
 - `unit_config_parser`
 - `unit_simulation_state`
 - `unit_time_integration`
+- `unit_pm_solver`
 - `integration_reference_workflow`
+- `integration_runtime_app_smoke` (when HDF5 is enabled)
 - `integration_snapshot_hdf5_roundtrip` (when HDF5 is enabled)
 - `integration_restart_checkpoint_roundtrip`
 - `validation_unit`
@@ -29,10 +33,10 @@ A release-candidate commit must pass:
 
 ## Scientific credibility statement
 
-This release gate is based on explicit documented tolerance checks and integration/regression behavior, not on feature count. Experimental modules are documented separately and are not treated as validated production features.
+This release gate is based on explicit documented tolerance checks, the real config-driven runtime smoke path, and integration/regression behavior, not on feature count. Experimental modules are documented separately and are not treated as validated production features.
 
 ## Limitations and assumptions
 
-- Validation evidence in this document is scoped to repository tests and reference decks under `validation/`.
+- Validation evidence in this document is scoped to repository tests and runnable release smoke configs.
 - GPU/CUDA path is not a release-science gate in this initial release.
-- MPI path is included via decomposition/restart consistency tests but does not claim large-cluster scaling validation.
+- MPI build support exists, but the default release gate does not claim mandatory multi-process production validation.
