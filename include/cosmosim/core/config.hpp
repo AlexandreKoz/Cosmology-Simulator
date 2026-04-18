@@ -23,6 +23,11 @@ enum class HydroSolver {
   kGodunovFv,
 };
 
+enum class TreePmAssignmentScheme {
+  kCic,
+  kTsc,
+};
+
 enum class CoordinateFrame {
   kComoving,
   kPhysical,
@@ -89,6 +94,12 @@ struct NumericsConfig {
   double gravity_softening_kpc_comoving = 1.0;
   GravitySolver gravity_solver = GravitySolver::kTreePm;
   HydroSolver hydro_solver = HydroSolver::kGodunovFv;
+  int treepm_pm_grid = 16;
+  double treepm_asmth_cells = 1.25;
+  double treepm_rcut_cells = 4.5;
+  TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kCic;
+  bool treepm_enable_window_deconvolution = false;
+  int treepm_update_cadence_steps = 1;
 };
 
 struct PhysicsConfig {

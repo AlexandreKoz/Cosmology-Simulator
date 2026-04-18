@@ -32,6 +32,20 @@ The runner honors these config fields directly:
 - `output.restart_stem`
 - `output.snapshot_interval_steps`
 - `output.write_restarts`
+- `numerics.treepm_pm_grid`
+- `numerics.treepm_asmth_cells`
+- `numerics.treepm_rcut_cells`
+- `numerics.treepm_assignment_scheme`
+- `numerics.treepm_enable_window_deconvolution`
+- `numerics.treepm_update_cadence_steps`
+
+TreePM Phase-1 runtime mapping is explicit and auditable:
+
+- `PmGridShape{N,N,N}` uses `N = numerics.treepm_pm_grid`
+- `Δmesh = box_size / N`
+- `r_s = treepm_asmth_cells * Δmesh`
+- `r_cut = treepm_rcut_cells * Δmesh`
+- Assignment/deconvolution/cadence are wired from typed config, not hidden workflow constants
 
 ## Canonical stage ordering
 
@@ -69,3 +83,7 @@ When output cadence conditions are met and HDF5 is enabled, the runtime also wri
 ## Failure transparency
 
 The runner flushes the normalized config snapshot as soon as config loading succeeds. A top-level runtime wrapper then attempts to flush `operational_events.json` and profiler reports on both successful completion and runtime failure, so early first-run failures still leave a diagnostic trail whenever the filesystem remains writable.
+
+## API migration note
+
+`ReferenceWorkflowReport` now includes `treepm_pm_grid`, which records the PM grid size resolved by the runtime gravity callback from typed config.

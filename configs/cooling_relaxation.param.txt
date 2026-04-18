@@ -16,6 +16,12 @@ temperature_floor_k = 100.0
 time_begin_code = 0.0
 time_end_code = 0.02
 max_global_steps = 256
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = false
+treepm_update_cadence_steps = 1
 
 [output]
 run_name = cooling_relaxation

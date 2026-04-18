@@ -12,6 +12,12 @@ max_global_steps = 6
 hierarchical_max_rung = 6
 gravity_solver = treepm
 hydro_solver = godunov_fv
+treepm_pm_grid = 24
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = false
+treepm_update_cadence_steps = 1
 
 [physics]
 enable_cooling = true

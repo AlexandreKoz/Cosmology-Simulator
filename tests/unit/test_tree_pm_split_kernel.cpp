@@ -8,6 +8,7 @@ namespace {
 void testSplitKernelComplementarity() {
   cosmosim::gravity::TreePmSplitPolicy split_policy;
   split_policy.split_scale_comoving = 0.2;
+  split_policy.cutoff_radius_comoving = 1.0;
 
   const double radii[] = {0.01, 0.05, 0.2, 0.4, 1.0};
   for (const double radius : radii) {
@@ -26,6 +27,7 @@ void testSplitKernelComplementarity() {
 void testDiagnosticsContinuityAtSplitScale() {
   cosmosim::gravity::TreePmSplitPolicy split_policy;
   split_policy.split_scale_comoving = 0.125;
+  split_policy.cutoff_radius_comoving = 0.5;
 
   const cosmosim::gravity::TreePmDiagnostics diagnostics = cosmosim::gravity::computeTreePmDiagnostics(split_policy);
   assert(std::abs(diagnostics.split_scale_comoving - split_policy.split_scale_comoving) < 1.0e-15);

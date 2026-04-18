@@ -8,6 +8,14 @@ mode = zoom_in
 ic_file = ics.hdf5
 zoom_high_res_region = false
 
+[numerics]
+treepm_pm_grid = 16
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = false
+treepm_update_cadence_steps = 1
+
 [output]
 run_name = minimal_smoke
 output_stem = snapshot

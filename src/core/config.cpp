@@ -286,6 +286,19 @@ template <typename T>
   throw ConfigError("key 'numerics.hydro_solver': invalid value '" + value + "'");
 }
 
+[[nodiscard]] TreePmAssignmentScheme parseTreePmAssignmentScheme(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "cic") {
+    return TreePmAssignmentScheme::kCic;
+  }
+  if (lower == "tsc") {
+    return TreePmAssignmentScheme::kTsc;
+  }
+  throw ConfigError(
+      "key 'numerics.treepm_assignment_scheme': invalid value '" + value +
+      "' (supported: cic, tsc)");
+}
+
 [[nodiscard]] CoordinateFrame parseCoordinateFrame(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "comoving") {
@@ -459,6 +472,12 @@ struct ConfigKeySpec {
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_solver", "treepm"},
       {"numerics.hydro_solver", "godunov_fv"},
+      {"numerics.treepm_pm_grid", "16"},
+      {"numerics.treepm_asmth_cells", "1.25"},
+      {"numerics.treepm_rcut_cells", "4.5"},
+      {"numerics.treepm_assignment_scheme", "cic"},
+      {"numerics.treepm_enable_window_deconvolution", "false"},
+      {"numerics.treepm_update_cadence_steps", "1"},
       {"physics.enable_cooling", "true"},
       {"physics.enable_star_formation", "true"},
       {"physics.enable_feedback", "true"},
@@ -656,6 +675,18 @@ void validateConfig(const SimulationConfig& config) {
   if (config.physics.tracer_min_host_mass_code < 0.0) {
     throw ConfigError("physics.tracer_min_host_mass_code must be >= 0");
   }
+  if (config.numerics.treepm_pm_grid <= 0) {
+    throw ConfigError("numerics.treepm_pm_grid must be > 0");
+  }
+  if (config.numerics.treepm_asmth_cells <= 0.0) {
+    throw ConfigError("numerics.treepm_asmth_cells must be > 0");
+  }
+  if (config.numerics.treepm_rcut_cells <= 0.0) {
+    throw ConfigError("numerics.treepm_rcut_cells must be > 0");
+  }
+  if (config.numerics.treepm_update_cadence_steps < 1) {
+    throw ConfigError("numerics.treepm_update_cadence_steps must be >= 1");
+  }
   const ModePolicy policy = buildModePolicy(config.mode);
   validateModePolicy(config, policy);
 }
@@ -694,6 +725,15 @@ void validateConfig(const SimulationConfig& config) {
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   stream << "gravity_solver = " << gravitySolverToString(frozen.config.numerics.gravity_solver) << '\n';
   stream << "hydro_solver = " << hydroSolverToString(frozen.config.numerics.hydro_solver) << '\n';
+  stream << "treepm_pm_grid = " << frozen.config.numerics.treepm_pm_grid << '\n';
+  stream << "treepm_asmth_cells = " << frozen.config.numerics.treepm_asmth_cells << '\n';
+  stream << "treepm_rcut_cells = " << frozen.config.numerics.treepm_rcut_cells << '\n';
+  stream << "treepm_assignment_scheme = "
+         << (frozen.config.numerics.treepm_assignment_scheme == TreePmAssignmentScheme::kCic ? "cic" : "tsc")
+         << '\n';
+  stream << "treepm_enable_window_deconvolution = "
+         << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
+  stream << "treepm_update_cadence_steps = " << frozen.config.numerics.treepm_update_cadence_steps << '\n';
   stream << "\n[physics]\n";
   stream << "enable_cooling = " << (frozen.config.physics.enable_cooling ? "true" : "false") << '\n';
   stream << "enable_star_formation = "
@@ -891,6 +931,34 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "numerics.gravity_solver", defaultFor("numerics.gravity_solver")));
   frozen.config.numerics.hydro_solver = parseHydroSolver(
       requireString(entries, consumed, "numerics.hydro_solver", defaultFor("numerics.hydro_solver")));
+  frozen.config.numerics.treepm_pm_grid = static_cast<int>(parseNumber<long>(
+      requireString(entries, consumed, "numerics.treepm_pm_grid", defaultFor("numerics.treepm_pm_grid")),
+      "numerics.treepm_pm_grid"));
+  frozen.config.numerics.treepm_asmth_cells = parseFloating(
+      requireString(entries, consumed, "numerics.treepm_asmth_cells", defaultFor("numerics.treepm_asmth_cells")),
+      "numerics.treepm_asmth_cells");
+  frozen.config.numerics.treepm_rcut_cells = parseFloating(
+      requireString(entries, consumed, "numerics.treepm_rcut_cells", defaultFor("numerics.treepm_rcut_cells")),
+      "numerics.treepm_rcut_cells");
+  frozen.config.numerics.treepm_assignment_scheme = parseTreePmAssignmentScheme(requireString(
+      entries,
+      consumed,
+      "numerics.treepm_assignment_scheme",
+      defaultFor("numerics.treepm_assignment_scheme")));
+  frozen.config.numerics.treepm_enable_window_deconvolution = parseBool(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_enable_window_deconvolution",
+          defaultFor("numerics.treepm_enable_window_deconvolution")),
+      "numerics.treepm_enable_window_deconvolution");
+  frozen.config.numerics.treepm_update_cadence_steps = static_cast<int>(parseNumber<long>(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_update_cadence_steps",
+          defaultFor("numerics.treepm_update_cadence_steps")),
+      "numerics.treepm_update_cadence_steps"));
 
   frozen.config.physics.enable_cooling = parseBool(
       requireString(entries, consumed, "physics.enable_cooling", "true"), "physics.enable_cooling");
