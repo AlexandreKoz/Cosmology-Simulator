@@ -144,8 +144,8 @@ class PmSolver {
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
 
-  // CIC-transpose gather of mesh potential values to particle positions.
-  // This uses the same geometric convention as interpolateForces.
+  // Assignment-scheme transpose gather of mesh potential values to particles.
+  // This uses the same geometric stencil/convention as interpolateForces.
   void interpolatePotential(
       const PmGridStorage& grid,
       std::span<const double> pos_x,
