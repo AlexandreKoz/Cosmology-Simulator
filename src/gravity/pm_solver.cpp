@@ -438,7 +438,15 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
         const std::size_t index = (ix * m_shape.ny + iy) * nz_complex + iz;
         const double k2 = kx * kx + ky * ky + kz * kz;
 
+        // Discrete mode mapping for r2c layout:
+        //   kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)
+        //   ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)
+        //   kz(iz) = 2π/L * iz, iz in [0, Nz/2]
+        // The negative kz branch is represented by Hermitian conjugates and is
+        // not explicitly stored in the reduced-complex array.
         if (k2 == 0.0) {
+          // Zero-mode pinning policy in periodic boxes: potential mean is fixed
+          // to zero, so the solver enforces phi_{k=0}=0 and a_{k=0}=0.
           fourier[index] = {0.0, 0.0};
           continue;
         }
@@ -469,36 +477,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   }
 
   std::vector<std::complex<double>> potential_k(fourier.begin(), fourier.end());
-  std::vector<std::complex<double>> grad_kx(fourier.begin(), fourier.end());
-  std::vector<std::complex<double>> grad_ky(fourier.begin(), fourier.end());
-  std::vector<std::complex<double>> grad_kz(fourier.begin(), fourier.end());
-
-  const auto grad_start = std::chrono::steady_clock::now();
-  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-    const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
-    const double kx = dkx * static_cast<double>(nx_mode);
-    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-      const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
-      const double ky = dky * static_cast<double>(ny_mode);
-      for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-        const double kz = dkz * static_cast<double>(iz);
-        const std::size_t index = (ix * m_shape.ny + iy) * nz_complex + iz;
-        const std::complex<double> minus_ikx(0.0, -kx);
-        const std::complex<double> minus_iky(0.0, -ky);
-        const std::complex<double> minus_ikz(0.0, -kz);
-        grad_kx[index] = minus_ikx * potential_k[index];
-        grad_ky[index] = minus_iky * potential_k[index];
-        grad_kz[index] = minus_ikz * potential_k[index];
-      }
-    }
-  }
-  const auto grad_stop = std::chrono::steady_clock::now();
-
-  if (profile != nullptr) {
-    profile->gradient_ms += std::chrono::duration<double, std::milli>(grad_stop - grad_start).count();
-  }
+  std::vector<std::complex<double>> working_k(potential_k.size());
 
   auto inverse_into = [this, profile](std::span<const std::complex<double>> src, std::span<double> dst) {
     auto fourier_dst = m_impl->fourierGrid();
@@ -518,10 +497,38 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     }
   };
 
+  const auto grad_start = std::chrono::steady_clock::now();
   inverse_into(potential_k, grid.potential());
-  inverse_into(grad_kx, grid.force_x());
-  inverse_into(grad_ky, grid.force_y());
-  inverse_into(grad_kz, grid.force_z());
+
+  auto fill_gradient_k = [&](std::span<std::complex<double>> dst, int axis) {
+    for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+      const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
+                                                            : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
+      const double kx = dkx * static_cast<double>(nx_mode);
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
+                                                              : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
+        const double ky = dky * static_cast<double>(ny_mode);
+        for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+          const double kz = dkz * static_cast<double>(iz);
+          const std::size_t index = (ix * m_shape.ny + iy) * nz_complex + iz;
+          const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
+          dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
+        }
+      }
+    }
+  };
+
+  fill_gradient_k(working_k, 0);
+  inverse_into(working_k, grid.force_x());
+  fill_gradient_k(working_k, 1);
+  inverse_into(working_k, grid.force_y());
+  fill_gradient_k(working_k, 2);
+  inverse_into(working_k, grid.force_z());
+  const auto grad_stop = std::chrono::steady_clock::now();
+  if (profile != nullptr) {
+    profile->gradient_ms += std::chrono::duration<double, std::milli>(grad_stop - grad_start).count();
+  }
 
   if (profile != nullptr) {
     profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 6U;
@@ -589,6 +596,63 @@ void PmSolver::interpolateForces(
     accel_x[p] = gx;
     accel_y[p] = gy;
     accel_z[p] = gz;
+  }
+
+  const auto stop = std::chrono::steady_clock::now();
+  if (profile != nullptr) {
+    profile->interpolate_ms += std::chrono::duration<double, std::milli>(stop - start).count();
+    profile->bytes_moved += bytesForParticles(pos_x.size());
+  }
+}
+
+void PmSolver::interpolatePotential(
+    const PmGridStorage& grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<double> potential,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) const {
+  validateOptions(m_shape, options);
+  if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
+    throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;
+  const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
+  const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
+
+  for (std::size_t p = 0; p < pos_x.size(); ++p) {
+    const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+    const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+    const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+
+    const std::ptrdiff_t ix0 = static_cast<std::ptrdiff_t>(std::floor(x));
+    const std::ptrdiff_t iy0 = static_cast<std::ptrdiff_t>(std::floor(y));
+    const std::ptrdiff_t iz0 = static_cast<std::ptrdiff_t>(std::floor(z));
+
+    const double tx = x - std::floor(x);
+    const double ty = y - std::floor(y);
+    const double tz = z - std::floor(z);
+
+    const std::array<double, 2> wx{1.0 - tx, tx};
+    const std::array<double, 2> wy{1.0 - ty, ty};
+    const std::array<double, 2> wz{1.0 - tz, tz};
+
+    double phi = 0.0;
+    for (std::size_t dx = 0; dx < 2; ++dx) {
+      const std::size_t ix = wrapIndex(ix0 + static_cast<std::ptrdiff_t>(dx), m_shape.nx);
+      for (std::size_t dy = 0; dy < 2; ++dy) {
+        const std::size_t iy = wrapIndex(iy0 + static_cast<std::ptrdiff_t>(dy), m_shape.ny);
+        for (std::size_t dz = 0; dz < 2; ++dz) {
+          const std::size_t iz = wrapIndex(iz0 + static_cast<std::ptrdiff_t>(dz), m_shape.nz);
+          const double weight = wx[dx] * wy[dy] * wz[dz];
+          phi += weight * grid.potential()[grid.linearIndex(ix, iy, iz)];
+        }
+      }
+    }
+    potential[p] = phi;
   }
 
   const auto stop = std::chrono::steady_clock::now();

@@ -75,27 +75,44 @@ void testPmSingleMode(const cosmosim::validation::ValidationToleranceTable& tole
   std::vector<double> accel_x(particle_count, 0.0);
   std::vector<double> accel_y(particle_count, 0.0);
   std::vector<double> accel_z(particle_count, 0.0);
+  std::vector<double> phi(particle_count, 0.0);
 
-  solver.solveForParticles(grid, pos_x, pos_y, pos_z, mass, accel_x, accel_y, accel_z, options, nullptr);
+  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  solver.interpolateForces(grid, pos_x, pos_y, pos_z, accel_x, accel_y, accel_z, options, nullptr);
+  solver.interpolatePotential(grid, pos_x, pos_y, pos_z, phi, options, nullptr);
 
   const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
   const double expected_amp = 4.0 * k_pi * options.gravitational_constant_code *
       options.scale_factor * options.scale_factor * 0.1 / kx;
+  const double expected_phi_amp = -4.0 * k_pi * options.gravitational_constant_code *
+      options.scale_factor * options.scale_factor * 0.1 / (kx * kx);
 
   double corr = 0.0;
   double norm_expected = 0.0;
   double norm_got = 0.0;
+  double corr_phi = 0.0;
+  double norm_phi_expected = 0.0;
+  double norm_phi_got = 0.0;
   for (std::size_t i = 0; i < particle_count; ++i) {
     const double expected = expected_amp * std::cos(kx * pos_x[i]);
+    const double expected_phi = expected_phi_amp * std::sin(kx * pos_x[i]);
     corr += expected * accel_x[i];
     norm_expected += expected * expected;
     norm_got += accel_x[i] * accel_x[i];
+    corr_phi += expected_phi * phi[i];
+    norm_phi_expected += expected_phi * expected_phi;
+    norm_phi_got += phi[i] * phi[i];
   }
 
   const double cosine_similarity = corr / std::sqrt(std::max(norm_expected * norm_got, 1.0e-20));
+  const double cosine_similarity_phi = corr_phi / std::sqrt(std::max(norm_phi_expected * norm_phi_got, 1.0e-20));
   requireOrThrow(
       std::abs(cosine_similarity) >= tolerances.require("gravity_pm_single_mode.min_cosine_similarity"),
       "gravity_pm_single_mode failed: cosine similarity below tolerance");
+  requireOrThrow(
+      std::abs(cosine_similarity_phi) >= tolerances.require("gravity_pm_single_mode.min_cosine_similarity"),
+      "gravity_pm_single_mode failed: potential cosine similarity below tolerance");
 }
 
 void testHydroSodMassConservation(const cosmosim::validation::ValidationToleranceTable& tolerances) {
