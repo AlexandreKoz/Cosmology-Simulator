@@ -280,6 +280,57 @@ void testEnumSerializationIsFailFastWithoutUnknownFallback() {
   assert(threw);
 }
 
+void testTreePmNumericsRoundtripAndValidation() {
+  const std::string good_text = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 64 mpc
+[numerics]
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.5
+treepm_rcut_cells = 5.0
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = true
+treepm_update_cadence_steps = 3
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "treepm_good");
+  assert(frozen.config.numerics.treepm_pm_grid == 32);
+  assert(frozen.config.numerics.treepm_asmth_cells == 1.5);
+  assert(frozen.config.numerics.treepm_rcut_cells == 5.0);
+  assert(
+      frozen.config.numerics.treepm_assignment_scheme ==
+      cosmosim::core::TreePmAssignmentScheme::kCic);
+  assert(frozen.config.numerics.treepm_enable_window_deconvolution);
+  assert(frozen.config.numerics.treepm_update_cadence_steps == 3);
+  assert(frozen.normalized_text.find("treepm_pm_grid = 32") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
+  const auto reparsed =
+      cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "treepm_roundtrip");
+  assert(reparsed.config.numerics.treepm_pm_grid == 32);
+  assert(reparsed.config.numerics.treepm_update_cadence_steps == 3);
+
+  const std::string bad_grid =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_grid = 0\n";
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_grid, "treepm_bad_grid");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::string bad_scheme =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_assignment_scheme = magic\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_scheme, "treepm_bad_scheme");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testBlackHoleAgnConfigKeysAndValidation() {
   const std::string good_text = R"(
 [mode]
@@ -354,6 +405,7 @@ int main() {
   testCoolingPolicyEnumsAndValidation();
   testDiagnosticsExecutionPolicyValidation();
   testEnumSerializationIsFailFastWithoutUnknownFallback();
+  testTreePmNumericsRoundtripAndValidation();
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
   return 0;

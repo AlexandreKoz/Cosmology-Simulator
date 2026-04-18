@@ -18,6 +18,11 @@ int main() {
   stream << "time_end_code = 0.0101\n";
   stream << "max_global_steps = 1\n";
   stream << "hierarchical_max_rung = 1\n\n";
+  stream << "treepm_pm_grid = 9\n";
+  stream << "treepm_asmth_cells = 1.75\n";
+  stream << "treepm_rcut_cells = 6.0\n";
+  stream << "treepm_assignment_scheme = cic\n";
+  stream << "treepm_update_cadence_steps = 1\n\n";
   stream << "[output]\n";
   stream << "run_name = reference_integration_test\n";
   stream << "output_directory = integration_outputs\n";
@@ -42,6 +47,7 @@ int main() {
   assert(report.stage_sequence.front() == "gravity_kick_pre");
   assert(report.stage_sequence.back() == "output_check");
   assert(report.completed_steps == 1);
+  assert(report.treepm_pm_grid == 9);
   assert(report.run_directory == expected_run_dir);
   assert(report.normalized_config_snapshot_written);
   assert(std::filesystem::exists(report.normalized_config_snapshot_path));

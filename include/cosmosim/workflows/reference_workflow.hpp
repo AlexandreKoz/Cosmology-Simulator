@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -28,6 +29,7 @@ struct ReferenceWorkflowReport {
   bool restart_roundtrip_ok = false;
   bool snapshot_roundtrip_ok = false;
   std::uint64_t completed_steps = 0;
+  std::size_t treepm_pm_grid = 0;
   std::vector<std::string> stage_sequence;
   std::filesystem::path run_directory;
   std::filesystem::path normalized_config_snapshot_path;

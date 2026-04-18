@@ -29,6 +29,12 @@ max_global_steps = 2500
 hierarchical_max_rung = 11
 amr_max_level = 9
 gravity_softening = 2.0 kpc
+treepm_pm_grid = 64
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = false
+treepm_update_cadence_steps = 1
 
 [output]
 run_name = isolated_cluster_reference

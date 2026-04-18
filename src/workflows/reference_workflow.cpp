@@ -39,6 +39,19 @@ constexpr double k_pressure_floor = 1.0e-10;
 constexpr double k_density_floor = 1.0e-10;
 constexpr std::size_t k_default_generated_particle_axis = 6;
 
+[[nodiscard]] gravity::PmAssignmentScheme toPmAssignmentScheme(
+    core::TreePmAssignmentScheme assignment_scheme) {
+  switch (assignment_scheme) {
+    case core::TreePmAssignmentScheme::kCic:
+      return gravity::PmAssignmentScheme::kCic;
+    case core::TreePmAssignmentScheme::kTsc:
+      throw std::runtime_error(
+          "numerics.treepm_assignment_scheme=tsc is configured, but TSC runtime support has not "
+          "landed yet; use numerics.treepm_assignment_scheme=cic for this stage");
+  }
+  throw std::runtime_error("unhandled TreePm assignment scheme enum value");
+}
+
 [[nodiscard]] std::filesystem::path computeRunDirectory(
     const core::SimulationConfig& config,
     const std::filesystem::path* output_root_override) {
@@ -222,22 +235,35 @@ class GravityStageCallback final : public core::IntegrationCallback {
   GravityStageCallback(const core::SimulationConfig& config, const core::ModePolicy& mode_policy)
       : m_config(config),
         m_mode_policy(mode_policy),
-        m_tree_pm_coordinator(gravity::PmGridShape{16, 16, 16}) {
+        m_pm_grid_size(static_cast<std::size_t>(config.numerics.treepm_pm_grid)),
+        m_mesh_spacing_mpc_comoving(config.cosmology.box_size_mpc_comoving / static_cast<double>(m_pm_grid_size)),
+        m_tree_pm_coordinator(gravity::PmGridShape{m_pm_grid_size, m_pm_grid_size, m_pm_grid_size}) {
+    if (m_pm_grid_size == 0) {
+      throw std::runtime_error("numerics.treepm_pm_grid must be > 0");
+    }
+    m_pm_update_cadence_steps = static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps);
     m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_mpc_comoving;
     m_tree_pm_options.pm_options.scale_factor = 1.0;
     m_tree_pm_options.pm_options.gravitational_constant_code = 1.0;
+    m_tree_pm_options.pm_options.assignment_scheme =
+        toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
+    m_tree_pm_options.pm_options.enable_window_deconvolution =
+        config.numerics.treepm_enable_window_deconvolution;
     m_tree_pm_options.pm_options.tree_pm_split_scale_comoving =
-        std::max(0.05, 0.25 * config.numerics.gravity_softening_kpc_comoving * 1.0e-3);
+        config.numerics.treepm_asmth_cells * m_mesh_spacing_mpc_comoving;
     m_tree_pm_options.tree_options.opening_theta = 0.7;
     m_tree_pm_options.tree_options.gravitational_constant_code = 1.0;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
     m_tree_pm_options.tree_options.softening.epsilon_comoving =
         config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
     m_tree_pm_options.split_policy.split_scale_comoving =
-        std::max(0.05, 4.0 * m_tree_pm_options.tree_options.softening.epsilon_comoving);
+        m_tree_pm_options.pm_options.tree_pm_split_scale_comoving;
+    m_tree_pm_options.split_policy.cutoff_radius_comoving =
+        config.numerics.treepm_rcut_cells * m_mesh_spacing_mpc_comoving;
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
+  [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_size; }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
@@ -251,6 +277,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     const std::size_t particle_count = context.state.particles.size();
     if (particle_count == 0 || context.active_set.particle_indices.empty()) {
+      return;
+    }
+    if ((context.integrator_state.step_index % m_pm_update_cadence_steps) != 0U) {
       return;
     }
 
@@ -310,6 +339,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
  private:
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
+  std::size_t m_pm_grid_size = 0;
+  double m_mesh_spacing_mpc_comoving = 0.0;
+  std::uint64_t m_pm_update_cadence_steps = 1;
   gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
   std::vector<double> m_active_accel_x;
@@ -702,6 +734,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     StageAuditCallback stage_audit(&report.stage_sequence);
     DriftCallback drift_callback;
     GravityStageCallback gravity_callback(config, mode_policy);
+    report.treepm_pm_grid = gravity_callback.pmGridSize();
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(

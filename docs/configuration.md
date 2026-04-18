@@ -85,6 +85,22 @@ The concrete run directory is:
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
 - `gravity_softening` / `gravity_softening_kpc_comoving`
 - `gravity_solver`, `hydro_solver`
+- TreePM runtime controls (typed + normalized, no hidden workflow defaults):
+  - `treepm_pm_grid` (int, default `16`; Phase 1 cubic PM mesh side length, so `PmGridShape{N,N,N}`)
+  - `treepm_asmth_cells` (float, default `1.25`; split scale in mesh-cell units)
+  - `treepm_rcut_cells` (float, default `4.5`; short-range tree cutoff in mesh-cell units)
+  - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
+  - `treepm_enable_window_deconvolution` (bool, default `false`)
+  - `treepm_update_cadence_steps` (int, default `1`)
+
+TreePM split/cutoff semantics in this phase:
+
+- `Δmesh = cosmology.box_size / numerics.treepm_pm_grid`
+- `r_s = numerics.treepm_asmth_cells * Δmesh`
+- `r_cut = numerics.treepm_rcut_cells * Δmesh`
+
+Normalization emits the dimensionless controls exactly as provided and these are the same values consumed by runtime mapping.
+`treepm_assignment_scheme=tsc` is already part of the typed config surface, but current runtime rejects it with a clear error until the stage-3 TSC path lands.
 
 ## `[physics]`
 

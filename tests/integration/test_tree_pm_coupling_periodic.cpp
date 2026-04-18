@@ -62,6 +62,7 @@ void testPeriodicTreePmAgainstDirectReference() {
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.softening.epsilon_comoving = 0.01;
   options.split_policy.split_scale_comoving = 0.08;
+  options.split_policy.cutoff_radius_comoving = 0.4;
 
   const cosmosim::gravity::PmGridShape pm_shape =
 #if COSMOSIM_ENABLE_FFTW

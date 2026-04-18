@@ -3,6 +3,7 @@
 ## Scope and assumptions
 
 - The implementation targets long-range periodic PM gravity and currently supports **CIC** assignment only.
+- Runtime selection is config-driven through `numerics.treepm_*` keys (no hard-coded PM mesh/split in the workflow path).
 - Force interpolation uses the transpose of the assignment kernel (CIC gather) to preserve consistency.
 - FFT backend defaults to FFTW when `COSMOSIM_ENABLE_FFTW=ON`; otherwise a correctness-oriented fallback backend (`naive_dft`) is used only for small-test workflows and not treated as production TreePM support.
 - The periodic zero mode is explicitly set to zero (`phi_0 = 0`).
@@ -64,8 +65,24 @@ If TreePM is requested without FFTW support, the gate emits a clear runtime erro
 ## Extensibility notes
 
 - `PmAssignmentScheme` already reserves `kTsc` for later extension.
+- `numerics.treepm_assignment_scheme=tsc` is parsed and normalized now, but runtime intentionally rejects it until TSC deposition/interpolation support is completed.
 - FFT backend selection is represented in API (`PmSolver::fftBackendName`) and can be adapted for future cuFFT/pluggable backend wiring.
 - Current data ownership keeps PM grids (`PmGridStorage`) independent from particle state arrays.
+
+## Phase-1 runtime config contract
+
+The reference workflow derives TreePM split controls from normalized config using one formula path:
+
+- `N = numerics.treepm_pm_grid`
+- `Δmesh = cosmology.box_size / N`
+- `r_s = numerics.treepm_asmth_cells * Δmesh`
+- `r_cut = numerics.treepm_rcut_cells * Δmesh`
+
+Additional runtime PM controls:
+
+- `numerics.treepm_assignment_scheme`
+- `numerics.treepm_enable_window_deconvolution`
+- `numerics.treepm_update_cadence_steps`
 
 
 ## Integration stop/go validation ladder

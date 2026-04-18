@@ -13,11 +13,15 @@ enum class TreePmSplitKernel {
 struct TreePmSplitPolicy {
   TreePmSplitKernel kernel = TreePmSplitKernel::kGaussianErfc;
   double split_scale_comoving = 0.0;
+  double cutoff_radius_comoving = 0.0;
 };
 
 inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
   if (policy.split_scale_comoving <= 0.0) {
     throw std::invalid_argument("TreePM split_scale_comoving must be > 0");
+  }
+  if (policy.cutoff_radius_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM cutoff_radius_comoving must be > 0");
   }
   if (policy.kernel != TreePmSplitKernel::kGaussianErfc) {
     throw std::invalid_argument("Unsupported TreePM split kernel");
