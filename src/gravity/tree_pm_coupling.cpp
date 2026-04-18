@@ -95,6 +95,28 @@ void TreePmCoordinator::solveActiveSet(
     const TreePmOptions& options,
     TreePmProfileEvent* profile,
     TreePmDiagnostics* diagnostics) {
+  solveActiveSetWithPmCadence(
+      pos_x_comoving,
+      pos_y_comoving,
+      pos_z_comoving,
+      mass_code,
+      accumulator,
+      options,
+      true,
+      profile,
+      diagnostics);
+}
+
+void TreePmCoordinator::solveActiveSetWithPmCadence(
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving,
+    std::span<const double> mass_code,
+    const TreePmForceAccumulatorView& accumulator,
+    const TreePmOptions& options,
+    bool refresh_long_range_field,
+    TreePmProfileEvent* profile,
+    TreePmDiagnostics* diagnostics) {
   if (!forceAccumulatorShapeValid(accumulator)) {
     throw std::invalid_argument("TreePM force accumulator spans must have matching active-set extent");
   }
@@ -107,12 +129,25 @@ void TreePmCoordinator::solveActiveSet(
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
 
-  // PM owns long-range force via explicit Gaussian Fourier filter.
+  // PM owns long-range force via explicit Gaussian Fourier filter. Cadence-aware callers
+  // may choose to reuse the previously solved PM mesh field.
   PmSolveOptions pm_options = options.pm_options;
   pm_options.tree_pm_split_scale_comoving = options.split_policy.split_scale_comoving;
-  m_pm_solver.assignDensity(m_grid, pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, pm_options,
-      profile != nullptr ? &profile->pm_profile : nullptr);
-  m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+  if (refresh_long_range_field || !m_has_cached_long_range_field) {
+    m_pm_solver.assignDensity(
+        m_grid,
+        pos_x_comoving,
+        pos_y_comoving,
+        pos_z_comoving,
+        mass_code,
+        pm_options,
+        profile != nullptr ? &profile->pm_profile : nullptr);
+    m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+    m_has_cached_long_range_field = true;
+  }
+  if (!m_has_cached_long_range_field) {
+    throw std::runtime_error("TreePM long-range mesh field is unavailable for reuse");
+  }
 
   const std::size_t active_count = accumulator.active_particle_index.size();
   resizeCompactSidecars(m_active_pos_x_comoving, m_active_pos_y_comoving, m_active_pos_z_comoving, active_count);

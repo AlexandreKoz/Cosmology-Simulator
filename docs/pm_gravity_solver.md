@@ -100,6 +100,19 @@ The periodic PM solve reuses persistent solver-owned spectral scratch buffers fo
 
 This keeps the PM operator auditable while avoiding repeated per-solve heap allocation churn on the hot periodic solve path.
 
+## Long-range field cadence and reuse (Reference workflow Phase 1)
+
+The reference TreePM workflow now supports explicit long-range PM reuse controlled by
+`numerics.treepm_update_cadence_steps`:
+
+- cadence unit: gravity kick opportunities (`gravity_kick_pre`, `gravity_kick_post`)
+- refresh rule: rebuild PM mesh/field every `N` kick opportunities (`N >= 1`)
+- reuse rule: between refreshes, reuse the cached PM long-range field and only rebuild/evaluate short-range tree residual forces
+
+Phase 1 scope is deliberately conservative and single-rank. It is an auditable cadence control surface, not a full multirate production design.
+
+Operational metadata records which PM field version each kick used, including the field build step index and build scale factor.
+
 ## Optional modifiers
 
 - `enable_window_deconvolution=true` applies scheme-aware deconvolution to the **combined particle-transfer operator** (`deposit * gather`) in k-space:

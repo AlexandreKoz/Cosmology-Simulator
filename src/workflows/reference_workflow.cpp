@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iomanip>
 #include <optional>
@@ -94,6 +95,60 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
   std::ostringstream out;
   out << stem << '_' << std::setw(3) << std::setfill('0') << index << ".hdf5";
   return out.str();
+}
+
+void fnv1aMix(std::uint64_t& hash, const void* data, std::size_t size) {
+  constexpr std::uint64_t k_fnv_offset_basis = 1469598103934665603ULL;
+  constexpr std::uint64_t k_fnv_prime = 1099511628211ULL;
+  if (hash == 0) {
+    hash = k_fnv_offset_basis;
+  }
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  for (std::size_t i = 0; i < size; ++i) {
+    hash ^= static_cast<std::uint64_t>(bytes[i]);
+    hash *= k_fnv_prime;
+  }
+}
+
+void fnv1aMix(std::uint64_t& hash, double value) { fnv1aMix(hash, &value, sizeof(value)); }
+
+void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value, sizeof(value)); }
+
+[[nodiscard]] std::uint64_t computeStateDigest(const core::SimulationState& state, const core::IntegratorState& integrator_state) {
+  std::uint64_t hash = 0;
+  fnv1aMix(hash, static_cast<std::uint64_t>(state.particles.size()));
+  fnv1aMix(hash, static_cast<std::uint64_t>(state.cells.size()));
+  for (const double value : state.particles.position_x_comoving) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.position_y_comoving) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.position_z_comoving) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.velocity_x_peculiar) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.velocity_y_peculiar) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.velocity_z_peculiar) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.particles.mass_code) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.gas_cells.density_code) {
+    fnv1aMix(hash, value);
+  }
+  for (const double value : state.gas_cells.internal_energy_code) {
+    fnv1aMix(hash, value);
+  }
+  fnv1aMix(hash, integrator_state.current_time_code);
+  fnv1aMix(hash, integrator_state.current_scale_factor);
+  fnv1aMix(hash, integrator_state.step_index);
+  return hash;
 }
 
 void ensureRunDirectory(const std::filesystem::path& run_directory) {
@@ -233,18 +288,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
   GravityStageCallback(const core::SimulationConfig& config, const core::ModePolicy& mode_policy)
       : m_config(config),
         m_mode_policy(mode_policy),
+        m_pm_update_cadence_steps(static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps)),
         m_pm_grid_size(static_cast<std::size_t>(config.numerics.treepm_pm_grid)),
         m_mesh_spacing_mpc_comoving(config.cosmology.box_size_mpc_comoving / static_cast<double>(m_pm_grid_size)),
         m_tree_pm_coordinator(gravity::PmGridShape{m_pm_grid_size, m_pm_grid_size, m_pm_grid_size}) {
     if (m_pm_grid_size == 0) {
       throw std::runtime_error("numerics.treepm_pm_grid must be > 0");
-    }
-    if (config.numerics.treepm_update_cadence_steps != 1) {
-      throw std::runtime_error(
-          "numerics.treepm_update_cadence_steps=" +
-          std::to_string(config.numerics.treepm_update_cadence_steps) +
-          " is configured, but Stage-1 runtime only supports cadence=1 until the dedicated PM "
-          "refresh/reuse implementation lands; use numerics.treepm_update_cadence_steps=1 for now");
     }
     m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_mpc_comoving;
     m_tree_pm_options.pm_options.scale_factor = 1.0;
@@ -266,6 +315,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
   [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_size; }
+  [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
+  [[nodiscard]] std::uint64_t longRangeReuseCount() const noexcept { return m_long_range_reuse_count; }
+  [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_update_cadence_steps); }
+  [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
+    return m_cadence_records;
+  }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
@@ -301,15 +356,60 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
 
-    m_tree_pm_coordinator.solveActiveSet(
+    ++m_gravity_kick_opportunity;
+    const bool refresh_long_range = !m_has_long_range_field ||
+        ((m_gravity_kick_opportunity - m_last_long_range_refresh_opportunity) >= m_pm_update_cadence_steps);
+    if (refresh_long_range) {
+      ++m_long_range_field_version;
+      m_last_long_range_refresh_opportunity = m_gravity_kick_opportunity;
+      m_last_long_range_refresh_step_index = context.integrator_state.step_index;
+      m_last_long_range_refresh_scale_factor = m_tree_pm_options.pm_options.scale_factor;
+      ++m_long_range_refresh_count;
+    } else {
+      ++m_long_range_reuse_count;
+    }
+    m_has_long_range_field = true;
+
+    m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         context.state.particles.position_x_comoving,
         context.state.particles.position_y_comoving,
         context.state.particles.position_z_comoving,
         context.state.particles.mass_code,
         accumulator,
         m_tree_pm_options,
+        refresh_long_range,
         nullptr,
         nullptr);
+
+    m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
+        .step_index = context.integrator_state.step_index,
+        .stage_name = std::string(core::integrationStageName(context.stage)),
+        .gravity_kick_opportunity = m_gravity_kick_opportunity,
+        .field_version = m_long_range_field_version,
+        .field_built_step_index = m_last_long_range_refresh_step_index,
+        .field_built_scale_factor = m_last_long_range_refresh_scale_factor,
+        .refreshed_long_range_field = refresh_long_range,
+    });
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "gravity.pm_long_range_field",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "gravity.treepm",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = refresh_long_range
+              ? "PM long-range field refreshed for gravity kick"
+              : "PM long-range field reused for gravity kick",
+          .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
+                      {"gravity_kick_opportunity", std::to_string(m_gravity_kick_opportunity)},
+                      {"field_version", std::to_string(m_long_range_field_version)},
+                      {"field_built_step_index", std::to_string(m_last_long_range_refresh_step_index)},
+                      {"field_built_scale_factor", std::to_string(m_last_long_range_refresh_scale_factor)},
+                      {"pm_update_cadence_steps", std::to_string(m_pm_update_cadence_steps)},
+                      {"refreshed_long_range_field", refresh_long_range ? "true" : "false"}},
+      });
+    }
 
     const double kick_factor = 0.5 * context.integrator_state.dt_time_code;
     for (std::size_t active_slot = 0; active_slot < context.active_set.particle_indices.size(); ++active_slot) {
@@ -337,6 +437,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
  private:
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
+  std::uint64_t m_pm_update_cadence_steps = 1;
   std::size_t m_pm_grid_size = 0;
   double m_mesh_spacing_mpc_comoving = 0.0;
   gravity::TreePmCoordinator m_tree_pm_coordinator;
@@ -348,6 +449,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_cell_accel_y;
   std::vector<double> m_cell_accel_z;
   std::vector<int> m_active_slot_by_particle;
+  bool m_has_long_range_field = false;
+  std::uint64_t m_gravity_kick_opportunity = 0;
+  std::uint64_t m_last_long_range_refresh_opportunity = 0;
+  std::uint64_t m_last_long_range_refresh_step_index = 0;
+  double m_last_long_range_refresh_scale_factor = 1.0;
+  std::uint64_t m_long_range_field_version = 0;
+  std::uint64_t m_long_range_refresh_count = 0;
+  std::uint64_t m_long_range_reuse_count = 0;
+  std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
 
 class HydroStageCallback final : public core::IntegrationCallback {
@@ -732,6 +842,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     DriftCallback drift_callback;
     GravityStageCallback gravity_callback(config, mode_policy);
     report.treepm_pm_grid = gravity_callback.pmGridSize();
+    report.treepm_update_cadence_steps = gravity_callback.pmCadenceSteps();
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
@@ -794,6 +905,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
 
     report.completed_steps = integrator_state.step_index - options.step_index;
+    report.final_state_digest = computeStateDigest(state, integrator_state);
+    report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
+    report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();
+    report.treepm_cadence_records.assign(
+        gravity_callback.cadenceRecords().begin(),
+        gravity_callback.cadenceRecords().end());
     report.canonical_stage_order = repeatedCanonicalOrder(report.stage_sequence);
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "run.complete",
@@ -804,7 +921,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .scale_factor = integrator_state.current_scale_factor,
         .message = "runtime workflow completed",
         .payload = {{"completed_steps", std::to_string(report.completed_steps)},
-                    {"run_directory", report.run_directory.string()}},
+                    {"run_directory", report.run_directory.string()},
+                    {"treepm_update_cadence_steps", std::to_string(report.treepm_update_cadence_steps)},
+                    {"treepm_long_range_refresh_count", std::to_string(report.treepm_long_range_refresh_count)},
+                    {"treepm_long_range_reuse_count", std::to_string(report.treepm_long_range_reuse_count)},
+                    {"final_state_digest", std::to_string(report.final_state_digest)}},
     });
     flushCommonArtifacts(m_frozen_config, profiler, report);
     return report;

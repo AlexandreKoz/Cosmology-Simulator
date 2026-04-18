@@ -149,6 +149,7 @@ void StepOrchestrator::executeSingleStep(
       .workspace = workspace,
       .cosmology_background = cosmology_background,
       .mode_policy = mode_policy,
+      .profiler_session = profiler_session,
       .stage = IntegrationStage::kGravityKickPre,
   };
 
