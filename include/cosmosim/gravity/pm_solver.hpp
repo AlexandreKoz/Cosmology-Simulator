@@ -121,6 +121,16 @@ class PmSolver {
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
 
+  // Periodic comoving Poisson solve contract on the mesh:
+  //   ∇²φ(x) = 4π G a² [ρ(x) - ρ̄]
+  // Fourier convention (for k != 0):
+  //   φ_k = -4π G a² δρ_k / k², with δρ = ρ - ρ̄
+  //   a_i(k) = -i k_i φ_k
+  // Periodic zero mode policy:
+  //   φ_{k=0} = 0 and therefore a_{k=0} = 0.
+  //
+  // After return, grid.potential() and grid.force_{x,y,z}() are populated and
+  // available for direct mesh inspection and interpolation.
   void solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
 
   void interpolateForces(
@@ -131,6 +141,17 @@ class PmSolver {
       std::span<double> accel_x,
       std::span<double> accel_y,
       std::span<double> accel_z,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
+
+  // CIC-transpose gather of mesh potential values to particle positions.
+  // This uses the same geometric convention as interpolateForces.
+  void interpolatePotential(
+      const PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<double> potential,
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
 

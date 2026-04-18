@@ -1,95 +1,95 @@
 # PM Gravity Solver (Periodic Cosmological Modes)
 
-## Scope and assumptions
+## Scope
 
-- The implementation targets long-range periodic PM gravity and currently supports **CIC** assignment only.
-- Runtime selection is config-driven through `numerics.treepm_*` keys (no hard-coded PM mesh/split in the workflow path), but Stage-1 intentionally remains conservative about features whose full runtime semantics have not landed yet.
-- Force interpolation uses the transpose of the assignment kernel (CIC gather) to preserve consistency.
-- FFT backend defaults to FFTW when `COSMOSIM_ENABLE_FFTW=ON`; otherwise a correctness-oriented fallback backend (`naive_dft`) is used only for small-test workflows and not treated as production TreePM support.
-- The periodic zero mode is explicitly set to zero (`phi_0 = 0`).
-- Units are solver-local and explicit: `box_size_mpc_comoving`, `scale_factor`, and `gravitational_constant_code` are required inputs.
+This document defines the **operational contract** for `cosmosim::gravity::PmSolver` in the periodic cosmological path.
 
-## Solver stages
+- Boundary condition: periodic box only for this stage.
+- Assignment/interpolation kernel: CIC only.
+- Backend policy:
+  - `COSMOSIM_ENABLE_FFTW=ON`: FFTW-backed production path.
+  - `COSMOSIM_ENABLE_FFTW=OFF`: fallback `naive_dft` for bring-up/small tests, not production-grade TreePM.
 
-1. Density assignment (`assignDensity`): particle mass to mesh with CIC.
-2. FFT and Poisson solve (`solvePoissonPeriodic`):
-   - `rho_k = FFT[delta_rho]`
-   - `phi_k = -4π G a^2 rho_k / k^2`, `k != 0`
-   - Optional CIC window deconvolution (`1 / W(k)^2`).
-3. Gradient in k-space:
-   - `g_k = i k phi_k`
-4. Inverse FFT to real-space force components.
-5. Force interpolation (`interpolateForces`): CIC transpose gather to particles.
+## Mathematical contract
 
-## Profiling hooks
+Input mesh field to `solvePoissonPeriodic()` is a physical density field `ρ(x)` in solver code units.
 
-`PmProfileEvent` records:
+The solver applies explicit mean subtraction:
 
-- `assign_ms`
-- `fft_forward_ms`
-- `poisson_ms`
-- `gradient_ms`
-- `fft_inverse_ms`
-- `interpolate_ms`
-- `bytes_moved`
+- `δρ(x) = ρ(x) - ρ̄`
+- `ρ̄ = (1/Ncell) Σcell ρ(xcell)`
 
-These fields are intended for in-run profiling and benchmark summaries, not for correctness validation.
+and solves the periodic comoving Poisson equation:
 
-## FFT backend discovery and validation path
+- `∇² φ(x) = 4 π G a² δρ(x)`
 
-When `COSMOSIM_ENABLE_FFTW=ON`, CMake resolves FFTW in this order:
+with Fourier-space relation (for `k != 0`):
 
-1. `find_package(FFTW3 CONFIG)`
-2. `find_package(FFTW3 MODULE)` (`cmake/FindFFTW3.cmake`)
-3. `pkg-config` fallback (`fftw3.pc`)
+- `φ_k = - 4 π G a² δρ_k / k²`
 
-If all three fail, configuration stops with an actionable fatal error. The build does not silently downgrade a requested FFTW-enabled path.
+and force/acceleration relation:
 
-Recommended PM/TreePM validation workflow:
+- `a_i(k) = - i k_i φ_k`
+
+The periodic zero mode is pinned by policy:
+
+- `φ_{k=0} = 0`
+- `a_{k=0} = 0`
+
+This enforces the periodic-box gauge convention (potential mean fixed to zero; only differences are physical).
+
+## Discrete Fourier conventions
+
+For real-to-complex (`r2c`) storage with mesh `(Nx, Ny, Nz)`, the reduced-complex shape is `(Nx, Ny, Nz/2 + 1)`.
+
+Mode mapping used by the solver:
+
+- `kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)`
+- `ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)`
+- `kz(iz) = 2π/L * iz`, `iz ∈ [0, Nz/2]`
+
+The negative `kz` branch is represented by Hermitian conjugates and is not explicitly stored.
+
+## Normalization and backend behavior
+
+- FFTW inverse transforms are unnormalized by FFTW; solver applies `1/Ncell` after each inverse transform.
+- Fallback `naive_dft` path already applies inverse normalization internally; no extra factor is applied on that path.
+- The contract above (`δρ`, `φ_k`, `-ikφ_k`, zero mode) is backend-invariant.
+
+## API-level output guarantees
+
+After `solvePoissonPeriodic(grid, options, ...)` returns successfully:
+
+- `grid.potential()` contains the periodic potential solve `φ(x)` with zero mode pinned.
+- `grid.force_x()`, `grid.force_y()`, `grid.force_z()` contain mesh acceleration components from `a_i(k) = -i k_i φ_k`.
+
+Potential is a supported output, not an incidental side effect.
+
+For particle-space sampling:
+
+- `interpolateForces(...)` gathers mesh acceleration to particles using CIC transpose gather.
+- `interpolatePotential(...)` gathers mesh potential to particles using the same CIC geometry/convention.
+
+## Optional modifiers
+
+- `enable_window_deconvolution=true` applies CIC-window deconvolution in k-space (`1/W(k)^2`), clamped to avoid division blow-up.
+- `tree_pm_split_scale_comoving > 0` applies TreePM long-range Gaussian filter in k-space.
+
+These modifiers do not alter the base sign/normalization contract above.
+
+## Validation focus for this stage
+
+Validation and tests explicitly cover:
+
+- analytic single-mode potential and force shape,
+- uniform-density cancellation (mean subtraction + zero-mode policy),
+- potential-force consistency for a simple periodic mode,
+- transverse leakage diagnostics in periodic mode integration test.
+
+Recommended commands:
 
 ```bash
 cmake --preset pm-hdf5-fftw-debug
 cmake --build --preset build-pm-hdf5-fftw-debug
-ctest --preset test-pm-hdf5-fftw-debug
+ctest --preset test-pm-hdf5-fftw-debug -R "unit_pm_solver|integration_pm_periodic_mode|validation_integration"
 ```
-
-## Build gating
-
-TreePM build support can be checked with:
-
-- `treePmSupportedByBuild()`
-- `requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm)`
-
-If TreePM is requested without FFTW support, the gate emits a clear runtime error message describing the required build flag (`COSMOSIM_ENABLE_FFTW=ON`).
-
-## Extensibility notes
-
-- `PmAssignmentScheme` already reserves `kTsc` for later extension.
-- `numerics.treepm_assignment_scheme=tsc` is parsed and normalized now, but runtime intentionally rejects it until TSC deposition/interpolation support is completed.
-- FFT backend selection is represented in API (`PmSolver::fftBackendName`) and can be adapted for future cuFFT/pluggable backend wiring.
-- Current data ownership keeps PM grids (`PmGridStorage`) independent from particle state arrays.
-
-## Phase-1 runtime config contract
-
-The reference workflow derives TreePM split controls from normalized config using one formula path:
-
-- `N = numerics.treepm_pm_grid`
-- `Δmesh = cosmology.box_size / N`
-- `r_s = numerics.treepm_asmth_cells * Δmesh`
-- `r_cut = numerics.treepm_rcut_cells * Δmesh`
-
-Additional runtime PM controls:
-
-- `numerics.treepm_assignment_scheme`
-- `numerics.treepm_enable_window_deconvolution`
-- `numerics.treepm_update_cadence_steps` (parsed and normalized now; Stage-1 runtime intentionally requires `1` until explicit PM refresh/reuse semantics land)
-
-
-## Integration stop/go validation ladder
-
-- `tests/integration/test_pm_periodic_mode.cpp` is the periodic PM stop/go test.
-- The test now reports backend, cosine similarity, transverse leakage, and build-flag assumptions in failure diagnostics.
-- Tolerance policy is explicit by feature path:
-  - `COSMOSIM_ENABLE_FFTW=ON`: strict periodic spectral-shape check (`cosine_similarity > 0.9`).
-  - `COSMOSIM_ENABLE_FFTW=OFF`: fallback path is checked only for finite/non-zero response and documented as non-production.
-- This keeps CPU-only fallback useful for bring-up while preventing it from being mistaken for the FFTW validation grade.

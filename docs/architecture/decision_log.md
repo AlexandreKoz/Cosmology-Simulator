@@ -149,3 +149,31 @@ The normalized config artifact embedded its own hash, which made the canonical t
 - `tests/unit/test_restart_checkpoint_schema.cpp`
 - `tests/integration/test_restart_checkpoint_roundtrip.cpp`
 - `tests/integration/test_snapshot_hdf5_roundtrip.cpp`
+
+## 2026-04-18 — ADR-FEATURE-GRAVITY-006: Feature-branch exception for PM periodic solver contract hardening
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+Repository repair guardrails include a repair-only prohibition on solver-behavior edits. This branch is explicitly scoped as a gravity-upgrade feature branch requiring PM solver contract hardening, including potential output formalization and stricter periodic Poisson convention tests.
+
+### Decision
+- Authorize PM solver behavior/documentation/test changes in this branch only, while preserving existing architecture direction:
+  - no dependency-direction inversion,
+  - explicit typed/configured runtime inputs,
+  - auditable solver sign/normalization conventions,
+  - evidence-backed closure via preset configure/build/test commands.
+
+### Consequences
+- Positive: Enables scientifically auditable PM potential+force contract without violating boundary discipline.
+- Positive: Removes ambiguity around `δρ`, zero mode, Fourier `k` mapping, and force sign/normalization.
+- Tradeoff: Branch intentionally changes numerical-solver contract surface and therefore requires same-patch docs/tests updates.
+
+### Evidence references
+- `include/cosmosim/gravity/pm_solver.hpp`
+- `src/gravity/pm_solver.cpp`
+- `docs/pm_gravity_solver.md`
+- `tests/unit/test_pm_solver.cpp`
+- `tests/integration/test_pm_periodic_mode.cpp`
+- `tests/validation/test_validation_integration.cpp`

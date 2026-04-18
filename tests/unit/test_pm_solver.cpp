@@ -59,32 +59,99 @@ void testPoissonAnalyticMode() {
 
   solver.solvePoissonPeriodic(grid, options, nullptr);
 
-  const double expected_amp = 4.0 * k_pi * options.gravitational_constant_code *
+  const double expected_force_amp = 4.0 * k_pi * options.gravitational_constant_code *
       options.scale_factor * options.scale_factor * amplitude / kx;
+  const double expected_phi_amp = -4.0 * k_pi * options.gravitational_constant_code *
+      options.scale_factor * options.scale_factor * amplitude / (kx * kx);
 
-  double corr = 0.0;
-  double norm_expected = 0.0;
-  double norm_got = 0.0;
+  double corr_force = 0.0;
+  double norm_force_expected = 0.0;
+  double norm_force_got = 0.0;
+  double corr_phi = 0.0;
+  double norm_phi_expected = 0.0;
+  double norm_phi_got = 0.0;
   for (std::size_t ix = 0; ix < shape.nx; ++ix) {
     const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
-    const double expected = expected_amp * std::cos(kx * x);
+    const double expected_force = expected_force_amp * std::cos(kx * x);
+    const double expected_phi = expected_phi_amp * std::sin(kx * x);
     for (std::size_t iy = 0; iy < shape.ny; ++iy) {
       for (std::size_t iz = 0; iz < shape.nz; ++iz) {
-        const double got = grid.force_x()[grid.linearIndex(ix, iy, iz)];
-        corr += expected * got;
-        norm_expected += expected * expected;
-        norm_got += got * got;
+        const std::size_t index = grid.linearIndex(ix, iy, iz);
+        const double got_force = grid.force_x()[index];
+        const double got_phi = grid.potential()[index];
+        corr_force += expected_force * got_force;
+        norm_force_expected += expected_force * expected_force;
+        norm_force_got += got_force * got_force;
+        corr_phi += expected_phi * got_phi;
+        norm_phi_expected += expected_phi * expected_phi;
+        norm_phi_got += got_phi * got_phi;
       }
     }
   }
 
-  const double cosine_similarity = corr / std::sqrt(std::max(norm_expected * norm_got, 1.0e-20));
+  const double force_cosine_similarity = corr_force / std::sqrt(std::max(norm_force_expected * norm_force_got, 1.0e-20));
+  const double phi_cosine_similarity = corr_phi / std::sqrt(std::max(norm_phi_expected * norm_phi_got, 1.0e-20));
 #if COSMOSIM_ENABLE_FFTW
-  assert(cosine_similarity > 0.98);
+  assert(force_cosine_similarity > 0.98);
+  assert(phi_cosine_similarity > 0.98);
 #else
-  assert(std::isfinite(cosine_similarity));
-  assert(norm_got > 0.0);
+  assert(std::isfinite(force_cosine_similarity));
+  assert(std::isfinite(phi_cosine_similarity));
+  assert(norm_force_got > 0.0);
+  assert(norm_phi_got > 0.0);
 #endif
+}
+
+void testUniformDensityZeroResponse() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 2.0;
+
+  std::fill(grid.density().begin(), grid.density().end(), 7.5);
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+
+  constexpr double zero_tol = 1.0e-10;
+  for (std::size_t i = 0; i < grid.density().size(); ++i) {
+    assert(std::abs(grid.potential()[i]) < zero_tol);
+    assert(std::abs(grid.force_x()[i]) < zero_tol);
+    assert(std::abs(grid.force_y()[i]) < zero_tol);
+    assert(std::abs(grid.force_z()[i]) < zero_tol);
+  }
+}
+
+void testPotentialInterpolationCicConsistency() {
+  const cosmosim::gravity::PmGridShape shape{4, 4, 4};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+
+  const std::size_t i000 = grid.linearIndex(0, 0, 0);
+  const std::size_t i100 = grid.linearIndex(1, 0, 0);
+  const std::size_t i010 = grid.linearIndex(0, 1, 0);
+  const std::size_t i001 = grid.linearIndex(0, 0, 1);
+  grid.potential()[i000] = 1.0;
+  grid.potential()[i100] = 3.0;
+  grid.potential()[i010] = 5.0;
+  grid.potential()[i001] = 7.0;
+
+  const std::vector<double> pos_x{0.125};
+  const std::vector<double> pos_y{0.125};
+  const std::vector<double> pos_z{0.125};
+  std::vector<double> phi(1, 0.0);
+
+  solver.interpolatePotential(grid, pos_x, pos_y, pos_z, phi, options, nullptr);
+
+  // Exactly at the center of the first cell in a 4^3 grid, CIC weights are 0.5
+  // along each axis, so each of the 8 stencil nodes contributes equally.
+  // Only four nodes above are non-zero.
+  const double expected = 0.125 * (1.0 + 3.0 + 5.0 + 7.0);
+  assert(std::abs(phi[0] - expected) < k_tolerance);
 }
 
 void testTreePmBuildGate() {
@@ -177,6 +244,8 @@ void testDeviceCpuAgreementWhenCudaAvailable() {
 int main() {
   testCicMassConservation();
   testPoissonAnalyticMode();
+  testUniformDensityZeroResponse();
+  testPotentialInterpolationCicConsistency();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();
