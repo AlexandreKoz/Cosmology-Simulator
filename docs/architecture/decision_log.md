@@ -177,3 +177,32 @@ Repository repair guardrails include a repair-only prohibition on solver-behavio
 - `tests/unit/test_pm_solver.cpp`
 - `tests/integration/test_pm_periodic_mode.cpp`
 - `tests/validation/test_validation_integration.cpp`
+
+## 2026-04-18 — ADR-FEATURE-GRAVITY-007: Enable PM assignment/gather upgrade (CIC+TSC) on gravity feature branch
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+The gravity-upgrade branch requires end-to-end PM assignment/gather configurability (`cic`, `tsc`) with auditable transfer-kernel behavior. This intentionally changes solver behavior versus prior CIC-only runtime gating.
+
+### Decision
+- Keep PM assignment and gather strictly matched by selected runtime scheme (no mixed silent modes).
+- Implement TSC alongside CIC in deposition and interpolation paths.
+- Make k-space deconvolution scheme-aware and apply it to the combined transfer operator with a protective floor.
+- Keep conservative defaults (`cic`, deconvolution off) and record behavior in same-patch docs/tests.
+
+### Consequences
+- Positive: `kTsc` is no longer a placeholder; config/runtime/docs/tests align.
+- Positive: PM transfer behavior is explicit and auditable across assignment choices.
+- Tradeoff: TSC increases stencil work (27-point 3D) compared to CIC (8-point 3D).
+
+### Evidence references
+- `include/cosmosim/gravity/pm_solver.hpp`
+- `src/gravity/pm_solver.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `docs/pm_gravity_solver.md`
+- `docs/configuration.md`
+- `tests/unit/test_pm_solver.cpp`
+- `tests/integration/test_pm_periodic_mode.cpp`
+- `tests/validation/test_validation_integration.cpp`

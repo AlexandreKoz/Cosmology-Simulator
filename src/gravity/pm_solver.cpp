@@ -51,6 +51,46 @@ constexpr double k_pi = 3.141592653589793238462643383279502884;
   return std::sin(x) / x;
 }
 
+struct PmAxisStencil1d {
+  std::array<std::ptrdiff_t, 3> offsets{};
+  std::array<double, 3> weights{};
+  std::size_t count = 0;
+};
+
+[[nodiscard]] PmAxisStencil1d makeAxisStencil(double grid_position, PmAssignmentScheme scheme) {
+  PmAxisStencil1d stencil{};
+  if (scheme == PmAssignmentScheme::kCic) {
+    const double base = std::floor(grid_position);
+    const std::ptrdiff_t i0 = static_cast<std::ptrdiff_t>(base);
+    const double t = grid_position - base;
+    stencil.offsets = {i0, i0 + 1, 0};
+    stencil.weights = {1.0 - t, t, 0.0};
+    stencil.count = 2;
+    return stencil;
+  }
+
+  const double center = std::floor(grid_position + 0.5);
+  const std::ptrdiff_t ic = static_cast<std::ptrdiff_t>(center);
+  const double delta = grid_position - center;
+  const double w_m1 = 0.5 * std::pow(0.5 - delta, 2.0);
+  const double w_0 = 0.75 - delta * delta;
+  const double w_p1 = 0.5 * std::pow(0.5 + delta, 2.0);
+  stencil.offsets = {ic - 1, ic, ic + 1};
+  stencil.weights = {w_m1, w_0, w_p1};
+  stencil.count = 3;
+  return stencil;
+}
+
+[[nodiscard]] int assignmentWindowExponent(PmAssignmentScheme scheme) {
+  switch (scheme) {
+    case PmAssignmentScheme::kCic:
+      return 2;
+    case PmAssignmentScheme::kTsc:
+      return 3;
+  }
+  throw std::invalid_argument("Unknown PM assignment scheme in assignmentWindowExponent");
+}
+
 [[nodiscard]] std::uint64_t bytesForGridSweep(std::size_t cell_count) {
   return static_cast<std::uint64_t>(cell_count * sizeof(double));
 }
@@ -72,12 +112,13 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (options.gravitational_constant_code <= 0.0) {
     throw std::invalid_argument("PM solve requires gravitational_constant_code > 0");
   }
-  if (options.assignment_scheme != PmAssignmentScheme::kCic) {
-    throw std::invalid_argument("Only CIC assignment is implemented in this build");
-  }
   if (options.execution_policy == core::ExecutionPolicy::kCuda && options.data_residency == PmDataResidencyPolicy::kHostOnly) {
     throw std::invalid_argument(
         "execution_policy=cuda requires data_residency=kPreferDevice for explicit host/device ownership");
+  }
+  if (options.execution_policy == core::ExecutionPolicy::kCuda && options.assignment_scheme != PmAssignmentScheme::kCic) {
+    throw std::invalid_argument(
+        "execution_policy=cuda currently supports only assignment_scheme=cic in this build");
   }
 }
 
@@ -363,25 +404,17 @@ void PmSolver::assignDensity(
     const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
     const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    const std::ptrdiff_t ix0 = static_cast<std::ptrdiff_t>(std::floor(x));
-    const std::ptrdiff_t iy0 = static_cast<std::ptrdiff_t>(std::floor(y));
-    const std::ptrdiff_t iz0 = static_cast<std::ptrdiff_t>(std::floor(z));
+    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
-    const double tx = x - std::floor(x);
-    const double ty = y - std::floor(y);
-    const double tz = z - std::floor(z);
-
-    const std::array<double, 2> wx{1.0 - tx, tx};
-    const std::array<double, 2> wy{1.0 - ty, ty};
-    const std::array<double, 2> wz{1.0 - tz, tz};
-
-    for (std::size_t dx = 0; dx < 2; ++dx) {
-      const std::size_t ix = wrapIndex(ix0 + static_cast<std::ptrdiff_t>(dx), m_shape.nx);
-      for (std::size_t dy = 0; dy < 2; ++dy) {
-        const std::size_t iy = wrapIndex(iy0 + static_cast<std::ptrdiff_t>(dy), m_shape.ny);
-        for (std::size_t dz = 0; dz < 2; ++dz) {
-          const std::size_t iz = wrapIndex(iz0 + static_cast<std::ptrdiff_t>(dz), m_shape.nz);
-          const double weight = wx[dx] * wy[dy] * wz[dz];
+    for (std::size_t dx = 0; dx < sx.count; ++dx) {
+      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+      for (std::size_t dy = 0; dy < sy.count; ++dy) {
+        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+        for (std::size_t dz = 0; dz < sz.count; ++dz) {
+          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
           grid.density()[grid.linearIndex(ix, iy, iz)] += mass[p] * weight;
         }
       }
@@ -459,11 +492,18 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
         double window_correction = 1.0;
         if (options.enable_window_deconvolution) {
-          const double wx = sinc(0.5 * kx * options.box_size_mpc_comoving / static_cast<double>(m_shape.nx));
-          const double wy = sinc(0.5 * ky * options.box_size_mpc_comoving / static_cast<double>(m_shape.ny));
-          const double wz = sinc(0.5 * kz * options.box_size_mpc_comoving / static_cast<double>(m_shape.nz));
-          const double w = wx * wy * wz;
-          window_correction = 1.0 / std::max(w * w, 1.0e-12);
+          const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
+          const double wx = std::pow(
+              sinc(0.5 * kx * options.box_size_mpc_comoving / static_cast<double>(m_shape.nx)),
+              static_cast<double>(window_exponent));
+          const double wy = std::pow(
+              sinc(0.5 * ky * options.box_size_mpc_comoving / static_cast<double>(m_shape.ny)),
+              static_cast<double>(window_exponent));
+          const double wz = std::pow(
+              sinc(0.5 * kz * options.box_size_mpc_comoving / static_cast<double>(m_shape.nz)),
+              static_cast<double>(window_exponent));
+          const double transfer_window = wx * wy * wz;
+          window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
         }
 
         double split_filter = 1.0;
@@ -569,29 +609,21 @@ void PmSolver::interpolateForces(
     const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
     const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    const std::ptrdiff_t ix0 = static_cast<std::ptrdiff_t>(std::floor(x));
-    const std::ptrdiff_t iy0 = static_cast<std::ptrdiff_t>(std::floor(y));
-    const std::ptrdiff_t iz0 = static_cast<std::ptrdiff_t>(std::floor(z));
-
-    const double tx = x - std::floor(x);
-    const double ty = y - std::floor(y);
-    const double tz = z - std::floor(z);
-
-    const std::array<double, 2> wx{1.0 - tx, tx};
-    const std::array<double, 2> wy{1.0 - ty, ty};
-    const std::array<double, 2> wz{1.0 - tz, tz};
+    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
     double gx = 0.0;
     double gy = 0.0;
     double gz = 0.0;
 
-    for (std::size_t dx = 0; dx < 2; ++dx) {
-      const std::size_t ix = wrapIndex(ix0 + static_cast<std::ptrdiff_t>(dx), m_shape.nx);
-      for (std::size_t dy = 0; dy < 2; ++dy) {
-        const std::size_t iy = wrapIndex(iy0 + static_cast<std::ptrdiff_t>(dy), m_shape.ny);
-        for (std::size_t dz = 0; dz < 2; ++dz) {
-          const std::size_t iz = wrapIndex(iz0 + static_cast<std::ptrdiff_t>(dz), m_shape.nz);
-          const double weight = wx[dx] * wy[dy] * wz[dz];
+    for (std::size_t dx = 0; dx < sx.count; ++dx) {
+      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+      for (std::size_t dy = 0; dy < sy.count; ++dy) {
+        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+        for (std::size_t dz = 0; dz < sz.count; ++dz) {
+          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
           const std::size_t index = grid.linearIndex(ix, iy, iz);
           gx += weight * grid.force_x()[index];
           gy += weight * grid.force_y()[index];
@@ -635,26 +667,18 @@ void PmSolver::interpolatePotential(
     const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
     const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    const std::ptrdiff_t ix0 = static_cast<std::ptrdiff_t>(std::floor(x));
-    const std::ptrdiff_t iy0 = static_cast<std::ptrdiff_t>(std::floor(y));
-    const std::ptrdiff_t iz0 = static_cast<std::ptrdiff_t>(std::floor(z));
-
-    const double tx = x - std::floor(x);
-    const double ty = y - std::floor(y);
-    const double tz = z - std::floor(z);
-
-    const std::array<double, 2> wx{1.0 - tx, tx};
-    const std::array<double, 2> wy{1.0 - ty, ty};
-    const std::array<double, 2> wz{1.0 - tz, tz};
+    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
     double phi = 0.0;
-    for (std::size_t dx = 0; dx < 2; ++dx) {
-      const std::size_t ix = wrapIndex(ix0 + static_cast<std::ptrdiff_t>(dx), m_shape.nx);
-      for (std::size_t dy = 0; dy < 2; ++dy) {
-        const std::size_t iy = wrapIndex(iy0 + static_cast<std::ptrdiff_t>(dy), m_shape.ny);
-        for (std::size_t dz = 0; dz < 2; ++dz) {
-          const std::size_t iz = wrapIndex(iz0 + static_cast<std::ptrdiff_t>(dz), m_shape.nz);
-          const double weight = wx[dx] * wy[dy] * wz[dz];
+    for (std::size_t dx = 0; dx < sx.count; ++dx) {
+      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+      for (std::size_t dy = 0; dy < sy.count; ++dy) {
+        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+        for (std::size_t dz = 0; dz < sz.count; ++dz) {
+          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
           phi += weight * grid.potential()[grid.linearIndex(ix, iy, iz)];
         }
       }

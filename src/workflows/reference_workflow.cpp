@@ -45,9 +45,7 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
     case core::TreePmAssignmentScheme::kCic:
       return gravity::PmAssignmentScheme::kCic;
     case core::TreePmAssignmentScheme::kTsc:
-      throw std::runtime_error(
-          "numerics.treepm_assignment_scheme=tsc is configured, but TSC runtime support has not "
-          "landed yet; use numerics.treepm_assignment_scheme=cic for this stage");
+      return gravity::PmAssignmentScheme::kTsc;
   }
   throw std::runtime_error("unhandled TreePm assignment scheme enum value");
 }

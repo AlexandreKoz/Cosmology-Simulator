@@ -115,6 +115,88 @@ void testPmSingleMode(const cosmosim::validation::ValidationToleranceTable& tole
       "gravity_pm_single_mode failed: potential cosine similarity below tolerance");
 }
 
+struct PmResponseMetrics {
+  double cosine_similarity = 0.0;
+  double force_amplitude = 0.0;
+};
+
+PmResponseMetrics measurePmSingleModeResponse(
+    cosmosim::gravity::PmAssignmentScheme scheme,
+    bool enable_window_deconvolution) {
+  const cosmosim::gravity::PmGridShape shape{32, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  options.assignment_scheme = scheme;
+  options.enable_window_deconvolution = enable_window_deconvolution;
+
+  const std::size_t particle_count = 32;
+  std::vector<double> pos_x(particle_count);
+  std::vector<double> pos_y(particle_count, 0.25);
+  std::vector<double> pos_z(particle_count, 0.75);
+  std::vector<double> mass(particle_count, 1.0);
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    pos_x[i] = (static_cast<double>(i) + 0.5) / static_cast<double>(particle_count) * options.box_size_mpc_comoving;
+    mass[i] = 1.0 + 0.1 * std::sin(2.0 * k_pi * pos_x[i] / options.box_size_mpc_comoving);
+  }
+
+  std::vector<double> accel_x(particle_count, 0.0);
+  std::vector<double> accel_y(particle_count, 0.0);
+  std::vector<double> accel_z(particle_count, 0.0);
+  solver.solveForParticles(grid, pos_x, pos_y, pos_z, mass, accel_x, accel_y, accel_z, options, nullptr);
+
+  const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
+  const double expected_amp = 4.0 * k_pi * options.gravitational_constant_code *
+      options.scale_factor * options.scale_factor * 0.1 / kx;
+
+  double corr = 0.0;
+  double norm_expected = 0.0;
+  double norm_got = 0.0;
+  double amp_projection = 0.0;
+  double basis_norm = 0.0;
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    const double basis = std::cos(kx * pos_x[i]);
+    const double expected = expected_amp * basis;
+    corr += expected * accel_x[i];
+    norm_expected += expected * expected;
+    norm_got += accel_x[i] * accel_x[i];
+    amp_projection += accel_x[i] * basis;
+    basis_norm += basis * basis;
+  }
+
+  PmResponseMetrics metrics;
+  metrics.cosine_similarity = corr / std::sqrt(std::max(norm_expected * norm_got, 1.0e-20));
+  metrics.force_amplitude = amp_projection / std::max(basis_norm, 1.0e-20);
+  return metrics;
+}
+
+void testPmAssignmentAndDeconvolutionComparison() {
+  const auto cic_no = measurePmSingleModeResponse(cosmosim::gravity::PmAssignmentScheme::kCic, false);
+  const auto cic_yes = measurePmSingleModeResponse(cosmosim::gravity::PmAssignmentScheme::kCic, true);
+  const auto tsc_no = measurePmSingleModeResponse(cosmosim::gravity::PmAssignmentScheme::kTsc, false);
+  const auto tsc_yes = measurePmSingleModeResponse(cosmosim::gravity::PmAssignmentScheme::kTsc, true);
+
+  requireOrThrow(std::isfinite(cic_no.cosine_similarity), "cic/no-deconv cosine similarity is not finite");
+  requireOrThrow(std::isfinite(cic_yes.cosine_similarity), "cic/deconv cosine similarity is not finite");
+  requireOrThrow(std::isfinite(tsc_no.cosine_similarity), "tsc/no-deconv cosine similarity is not finite");
+  requireOrThrow(std::isfinite(tsc_yes.cosine_similarity), "tsc/deconv cosine similarity is not finite");
+  requireOrThrow(std::isfinite(cic_no.force_amplitude), "cic/no-deconv amplitude is not finite");
+  requireOrThrow(std::isfinite(cic_yes.force_amplitude), "cic/deconv amplitude is not finite");
+  requireOrThrow(std::isfinite(tsc_no.force_amplitude), "tsc/no-deconv amplitude is not finite");
+  requireOrThrow(std::isfinite(tsc_yes.force_amplitude), "tsc/deconv amplitude is not finite");
+
+  requireOrThrow(std::abs(tsc_no.force_amplitude) <= std::abs(cic_no.force_amplitude) + 1.0e-6,
+      "expected TSC (no deconv) to be no less smoothed than CIC (no deconv)");
+  requireOrThrow(std::abs(cic_yes.force_amplitude) >= std::abs(cic_no.force_amplitude),
+      "expected CIC deconvolution to recover at least as much single-mode amplitude as CIC no-deconv");
+  requireOrThrow(std::abs(tsc_yes.force_amplitude) >= std::abs(tsc_no.force_amplitude),
+      "expected TSC deconvolution to recover at least as much single-mode amplitude as TSC no-deconv");
+}
+
 void testHydroSodMassConservation(const cosmosim::validation::ValidationToleranceTable& tolerances) {
   constexpr std::size_t k_cell_count = 64;
   constexpr std::size_t k_step_count = 24;
@@ -207,6 +289,7 @@ int main() {
       std::string(COSMOSIM_SOURCE_DIR) + "/validation/reference/validation_tolerances_v1.txt");
 
   testPmSingleMode(tolerances);
+  testPmAssignmentAndDeconvolutionComparison();
   testHydroSodMassConservation(tolerances);
   testCoolingEnergyMonotonicity(tolerances);
   return 0;

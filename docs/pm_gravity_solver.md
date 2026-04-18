@@ -5,7 +5,8 @@
 This document defines the **operational contract** for `cosmosim::gravity::PmSolver` in the periodic cosmological path.
 
 - Boundary condition: periodic box only for this stage.
-- Assignment/interpolation kernel: CIC only.
+- Assignment/interpolation kernel: runtime-selectable `CIC` or `TSC`, with matched
+  deposit/gather semantics.
 - Backend policy:
   - `COSMOSIM_ENABLE_FFTW=ON`: FFTW-backed production path.
   - `COSMOSIM_ENABLE_FFTW=OFF`: fallback `naive_dft` for bring-up/small tests, not production-grade TreePM.
@@ -67,8 +68,31 @@ Potential is a supported output, not an incidental side effect.
 
 For particle-space sampling:
 
-- `interpolateForces(...)` gathers mesh acceleration to particles using CIC transpose gather.
-- `interpolatePotential(...)` gathers mesh potential to particles using the same CIC geometry/convention.
+- `interpolateForces(...)` gathers mesh acceleration to particles using the same
+  assignment kernel selected for deposition.
+- `interpolatePotential(...)` gathers mesh potential to particles using the same
+  geometry and stencil.
+
+Matched deposition + gather is a hard contract for both schemes in this stage.
+
+## Assignment/gather kernels (Phase 1)
+
+Let `u = x / Δ` be the particle coordinate in mesh-cell units (per axis).
+
+- **CIC** (first-order B-spline):
+  - support: 2 cells per axis
+  - weights around `i = floor(u)`:
+    - `w_i = 1 - (u - floor(u))`
+    - `w_{i+1} = u - floor(u)`
+  - Fourier window per axis: `W_CIC(k_i) = sinc(k_i Δ / 2)^2`
+
+- **TSC** (second-order B-spline):
+  - support: 3 cells per axis
+  - with `j = floor(u + 1/2)` and `δ = u - j`:
+    - `w_{j-1} = 0.5 * (0.5 - δ)^2`
+    - `w_j = 0.75 - δ^2`
+    - `w_{j+1} = 0.5 * (0.5 + δ)^2`
+  - Fourier window per axis: `W_TSC(k_i) = sinc(k_i Δ / 2)^3`
 
 ## Memory and scratch behavior
 
@@ -81,10 +105,27 @@ This keeps the PM operator auditable while avoiding repeated per-solve heap allo
 
 ## Optional modifiers
 
-- `enable_window_deconvolution=true` applies CIC-window deconvolution in k-space (`1/W(k)^2`), clamped to avoid division blow-up.
+- `enable_window_deconvolution=true` applies scheme-aware deconvolution to the
+  **combined particle-transfer operator** (`deposit * gather`) in k-space:
+  - CIC: divide by `(W_CIC(k_x) W_CIC(k_y) W_CIC(k_z))^2`
+  - TSC: divide by `(W_TSC(k_x) W_TSC(k_y) W_TSC(k_z))^2`
+  - safeguard floor: denominator is clamped to `>= 1e-12` before division
 - `tree_pm_split_scale_comoving > 0` applies TreePM long-range Gaussian filter in k-space.
 
 These modifiers do not alter the base sign/normalization contract above.
+
+Default policy in this phase is conservative:
+
+- `assignment_scheme = CIC`
+- `enable_window_deconvolution = false`
+
+## Accuracy/cost tradeoffs in this stage
+
+- CIC is cheaper (2-point stencil/axis, 8 points in 3D) and remains first-class.
+- TSC is smoother and generally reduces anisotropy/self-force artifacts, but uses
+  3 points/axis (27 points in 3D).
+- Deconvolution improves transfer amplitude matching for resolved modes, but can
+  amplify high-`k` noise/aliasing near Nyquist; therefore it is opt-in.
 
 ## Validation focus for this stage
 
