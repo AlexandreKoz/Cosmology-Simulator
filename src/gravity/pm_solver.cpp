@@ -88,7 +88,9 @@ class PmSolver::Impl {
   explicit Impl(PmGridShape shape)
       : m_shape(shape),
         m_real(shape.cellCount(), 0.0),
-        m_fourier(shape.nx * shape.ny * (shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)) {
+        m_fourier(shape.nx * shape.ny * (shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)),
+        m_potential_k(m_shape.nx * m_shape.ny * (m_shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)),
+        m_working_k(m_shape.nx * m_shape.ny * (m_shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)) {
 #if COSMOSIM_ENABLE_FFTW
     m_forward_plan = fftw_plan_dft_r2c_3d(
         static_cast<int>(m_shape.nx),
@@ -125,6 +127,8 @@ class PmSolver::Impl {
 
   [[nodiscard]] std::span<double> realGrid() { return m_real; }
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return m_fourier; }
+  [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return m_potential_k; }
+  [[nodiscard]] std::span<std::complex<double>> workingScratch() { return m_working_k; }
 
   double forwardFft() {
     const auto start = std::chrono::steady_clock::now();
@@ -212,6 +216,8 @@ class PmSolver::Impl {
   PmGridShape m_shape;
   std::vector<double> m_real;
   std::vector<std::complex<double>> m_fourier;
+  std::vector<std::complex<double>> m_potential_k;
+  std::vector<std::complex<double>> m_working_k;
 #if COSMOSIM_ENABLE_FFTW
   fftw_plan m_forward_plan = nullptr;
   fftw_plan m_inverse_plan = nullptr;
@@ -476,8 +482,9 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     profile->poisson_ms += std::chrono::duration<double, std::milli>(poisson_stop - poisson_start).count();
   }
 
-  std::vector<std::complex<double>> potential_k(fourier.begin(), fourier.end());
-  std::vector<std::complex<double>> working_k(potential_k.size());
+  auto potential_k = m_impl->potentialScratch();
+  std::copy(fourier.begin(), fourier.end(), potential_k.begin());
+  auto working_k = m_impl->workingScratch();
 
   auto inverse_into = [this, profile](std::span<const std::complex<double>> src, std::span<double> dst) {
     auto fourier_dst = m_impl->fourierGrid();

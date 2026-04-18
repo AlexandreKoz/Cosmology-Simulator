@@ -91,12 +91,37 @@ void testPoissonAnalyticMode() {
 
   const double force_cosine_similarity = corr_force / std::sqrt(std::max(norm_force_expected * norm_force_got, 1.0e-20));
   const double phi_cosine_similarity = corr_phi / std::sqrt(std::max(norm_phi_expected * norm_phi_got, 1.0e-20));
+
+  double got_force_amp = 0.0;
+  double got_phi_amp = 0.0;
+  double basis_force_norm = 0.0;
+  double basis_phi_norm = 0.0;
+  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+    const double force_basis = std::cos(kx * x);
+    const double phi_basis = std::sin(kx * x);
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        const std::size_t index = grid.linearIndex(ix, iy, iz);
+        got_force_amp += grid.force_x()[index] * force_basis;
+        got_phi_amp += grid.potential()[index] * phi_basis;
+        basis_force_norm += force_basis * force_basis;
+        basis_phi_norm += phi_basis * phi_basis;
+      }
+    }
+  }
+  got_force_amp /= basis_force_norm;
+  got_phi_amp /= basis_phi_norm;
+  const double force_phi_consistency_rel =
+      std::abs(got_force_amp + kx * got_phi_amp) / std::max(std::abs(got_force_amp), 1.0e-20);
 #if COSMOSIM_ENABLE_FFTW
   assert(force_cosine_similarity > 0.98);
   assert(phi_cosine_similarity > 0.98);
+  assert(force_phi_consistency_rel < 5.0e-2);
 #else
   assert(std::isfinite(force_cosine_similarity));
   assert(std::isfinite(phi_cosine_similarity));
+  assert(std::isfinite(force_phi_consistency_rel));
   assert(norm_force_got > 0.0);
   assert(norm_phi_got > 0.0);
 #endif

@@ -70,6 +70,15 @@ For particle-space sampling:
 - `interpolateForces(...)` gathers mesh acceleration to particles using CIC transpose gather.
 - `interpolatePotential(...)` gathers mesh potential to particles using the same CIC geometry/convention.
 
+## Memory and scratch behavior
+
+The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
+
+- the copied potential spectrum used for mesh potential reconstruction,
+- the temporary gradient spectrum used to recover `a_x`, `a_y`, and `a_z`.
+
+This keeps the PM operator auditable while avoiding repeated per-solve heap allocation churn on the hot periodic solve path.
+
 ## Optional modifiers
 
 - `enable_window_deconvolution=true` applies CIC-window deconvolution in k-space (`1/W(k)^2`), clamped to avoid division blow-up.
