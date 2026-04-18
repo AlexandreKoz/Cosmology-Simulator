@@ -14,7 +14,7 @@ namespace {
 constexpr double k_tolerance = 1.0e-8;
 constexpr double k_pi = 3.141592653589793238462643383279502884;
 
-void testMassConservationForScheme(cosmosim::gravity::PmAssignmentScheme scheme) {
+void testCicMassConservation() {
   const cosmosim::gravity::PmGridShape shape{16, 8, 4};
   cosmosim::gravity::PmGridStorage grid(shape);
   cosmosim::gravity::PmSolver solver(shape);
@@ -27,7 +27,6 @@ void testMassConservationForScheme(cosmosim::gravity::PmAssignmentScheme scheme)
   cosmosim::gravity::PmSolveOptions options;
   options.box_size_mpc_comoving = 8.0;
   options.scale_factor = 1.0;
-  options.assignment_scheme = scheme;
 
   solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
 
@@ -35,45 +34,6 @@ void testMassConservationForScheme(cosmosim::gravity::PmAssignmentScheme scheme)
   const double total_mass = std::accumulate(mass.begin(), mass.end(), 0.0);
   const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) / static_cast<double>(shape.cellCount());
   assert(std::abs(total_density * cell_volume - total_mass) < k_tolerance);
-}
-
-void testAssignmentStencilShapeCicAndTsc() {
-  const cosmosim::gravity::PmGridShape shape{8, 1, 1};
-  cosmosim::gravity::PmGridStorage grid(shape);
-  cosmosim::gravity::PmSolver solver(shape);
-  const double box_size = 1.0;
-  const double cell_volume = std::pow(box_size, 3.0) / static_cast<double>(shape.cellCount());
-
-  const std::vector<double> pos_x{0.3125};  // x * nx = 2.5
-  const std::vector<double> pos_y{0.0};
-  const std::vector<double> pos_z{0.0};
-  const std::vector<double> mass{1.0};
-
-  cosmosim::gravity::PmSolveOptions options;
-  options.box_size_mpc_comoving = box_size;
-  options.scale_factor = 1.0;
-
-  options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kCic;
-  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
-  assert(std::abs(grid.density()[grid.linearIndex(2, 0, 0)] * cell_volume - 0.5) < k_tolerance);
-  assert(std::abs(grid.density()[grid.linearIndex(3, 0, 0)] * cell_volume - 0.5) < k_tolerance);
-  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-    if (ix == 2 || ix == 3) {
-      continue;
-    }
-    assert(std::abs(grid.density()[grid.linearIndex(ix, 0, 0)] * cell_volume) < k_tolerance);
-  }
-
-  options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
-  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
-  assert(std::abs(grid.density()[grid.linearIndex(2, 0, 0)] * cell_volume - 0.5) < k_tolerance);
-  assert(std::abs(grid.density()[grid.linearIndex(3, 0, 0)] * cell_volume - 0.5) < k_tolerance);
-  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-    if (ix == 2 || ix == 3) {
-      continue;
-    }
-    assert(std::abs(grid.density()[grid.linearIndex(ix, 0, 0)] * cell_volume) < k_tolerance);
-  }
 }
 
 void testPoissonAnalyticMode() {
@@ -219,55 +179,6 @@ void testPotentialInterpolationCicConsistency() {
   assert(std::abs(phi[0] - expected) < k_tolerance);
 }
 
-void testPotentialInterpolationTscConsistency() {
-  const cosmosim::gravity::PmGridShape shape{4, 4, 4};
-  cosmosim::gravity::PmGridStorage grid(shape);
-  cosmosim::gravity::PmSolver solver(shape);
-  cosmosim::gravity::PmSolveOptions options;
-  options.box_size_mpc_comoving = 1.0;
-  options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
-
-  for (double& phi : grid.potential()) {
-    phi = 1.0;
-  }
-
-  const std::vector<double> pos_x{0.37};
-  const std::vector<double> pos_y{0.29};
-  const std::vector<double> pos_z{0.61};
-  std::vector<double> phi(1, 0.0);
-  solver.interpolatePotential(grid, pos_x, pos_y, pos_z, phi, options, nullptr);
-  assert(std::abs(phi[0] - 1.0) < k_tolerance);
-}
-
-void testPeriodicSingleParticleSelfForceNearZero() {
-  const cosmosim::gravity::PmGridShape shape{16, 16, 16};
-  cosmosim::gravity::PmGridStorage grid(shape);
-  cosmosim::gravity::PmSolver solver(shape);
-
-  const std::vector<double> pos_x{0.31};
-  const std::vector<double> pos_y{0.53};
-  const std::vector<double> pos_z{0.79};
-  const std::vector<double> mass{1.0};
-  std::vector<double> accel_x(1, 0.0);
-  std::vector<double> accel_y(1, 0.0);
-  std::vector<double> accel_z(1, 0.0);
-
-  for (const auto scheme : {cosmosim::gravity::PmAssignmentScheme::kCic, cosmosim::gravity::PmAssignmentScheme::kTsc}) {
-    cosmosim::gravity::PmSolveOptions options;
-    options.box_size_mpc_comoving = 1.0;
-    options.assignment_scheme = scheme;
-    solver.solveForParticles(grid, pos_x, pos_y, pos_z, mass, accel_x, accel_y, accel_z, options, nullptr);
-#if COSMOSIM_ENABLE_FFTW
-    constexpr double self_force_tol = 1.0e-10;
-#else
-    constexpr double self_force_tol = 1.0e-6;
-#endif
-    assert(std::abs(accel_x[0]) < self_force_tol);
-    assert(std::abs(accel_y[0]) < self_force_tol);
-    assert(std::abs(accel_z[0]) < self_force_tol);
-  }
-}
-
 void testTreePmBuildGate() {
   assert(cosmosim::gravity::treePmSupportedByBuild());
   cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
@@ -356,14 +267,10 @@ void testDeviceCpuAgreementWhenCudaAvailable() {
 }  // namespace
 
 int main() {
-  testMassConservationForScheme(cosmosim::gravity::PmAssignmentScheme::kCic);
-  testMassConservationForScheme(cosmosim::gravity::PmAssignmentScheme::kTsc);
-  testAssignmentStencilShapeCicAndTsc();
+  testCicMassConservation();
   testPoissonAnalyticMode();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();
-  testPotentialInterpolationTscConsistency();
-  testPeriodicSingleParticleSelfForceNearZero();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();

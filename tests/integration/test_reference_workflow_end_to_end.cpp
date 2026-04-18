@@ -62,6 +62,35 @@ int main() {
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
 
+  std::stringstream tsc_stream;
+  tsc_stream << "schema_version = 1\n\n";
+  tsc_stream << "[mode]\n";
+  tsc_stream << "mode = zoom_in\n";
+  tsc_stream << "ic_file = generated\n";
+  tsc_stream << "zoom_high_res_region = false\n\n";
+  tsc_stream << "[numerics]\n";
+  tsc_stream << "time_begin_code = 0.01\n";
+  tsc_stream << "time_end_code = 0.0101\n";
+  tsc_stream << "max_global_steps = 1\n";
+  tsc_stream << "hierarchical_max_rung = 1\n";
+  tsc_stream << "treepm_pm_grid = 9\n";
+  tsc_stream << "treepm_asmth_cells = 1.75\n";
+  tsc_stream << "treepm_rcut_cells = 6.0\n";
+  tsc_stream << "treepm_assignment_scheme = tsc\n";
+  tsc_stream << "treepm_update_cadence_steps = 1\n\n";
+  tsc_stream << "[output]\n";
+  tsc_stream << "run_name = reference_integration_test_tsc\n";
+  tsc_stream << "output_directory = integration_outputs\n";
+  tsc_stream << "output_stem = snapshot\n";
+  tsc_stream << "restart_stem = restart\n";
+
+  const cosmosim::core::FrozenConfig tsc_frozen =
+      cosmosim::core::loadFrozenConfigFromString(tsc_stream.str(), "test_reference_workflow_tsc");
+  cosmosim::workflows::ReferenceWorkflowRunner tsc_runner(tsc_frozen);
+  const cosmosim::workflows::ReferenceWorkflowReport tsc_report =
+      tsc_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  assert(tsc_report.completed_steps == 1);
+  assert(tsc_report.treepm_pm_grid == 9);
 
   std::stringstream bad_stream;
   bad_stream << "schema_version = 1\n\n";

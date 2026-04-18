@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "run_name": "reference_integration_test_tsc",
+  "diagnostic_class": "science_light",
+  "diagnostics_execution_policy": "run_health_and_light_science",
+  "step_index": 0,
+  "scale_factor": 0.01,
+  "units": {"frame": "comoving", "mass": "code", "length": "code"},
+  "health": {"particle_count": 42, "cell_count": 6, "star_count": 0, "ownership_invariants_ok": true, "unique_particle_ids_ok": true, "non_finite_particles": 0, "non_finite_cells": 0},
+  "diagnostic_records": [{"name": "run_health_counters", "tier": "infrastructure_health", "maturity": "production", "scalability": "cheap", "executed": true, "policy_note": "always_on_for_integrity_checks"}, {"name": "star_formation_history", "tier": "validated_science", "maturity": "validated", "scalability": "moderate", "executed": true, "policy_note": "validated_lightweight_science"}, {"name": "angular_momentum_budget", "tier": "validated_science", "maturity": "validated", "scalability": "moderate", "executed": true, "policy_note": "validated_lightweight_science"}, {"name": "gas_xy_slice_density", "tier": "validated_science", "maturity": "validated", "scalability": "moderate", "executed": true, "policy_note": "validated_lightweight_science"}, {"name": "gas_xy_projection_density", "tier": "validated_science", "maturity": "validated", "scalability": "moderate", "executed": true, "policy_note": "validated_lightweight_science"}],
+  "angular_momentum_budget": {"total_norm": 66854099277.927467, "gas_norm": 61759.108151374996, "star_norm": 0, "dark_matter_norm": 66854037518.819321, "black_hole_norm": 0},
+  "power_spectrum": [],
+  "sf_history": [{"scale_factor": 0.03125, "formed_mass_code": 0}, {"scale_factor": 0.09375, "formed_mass_code": 0}, {"scale_factor": 0.15625, "formed_mass_code": 0}, {"scale_factor": 0.21875, "formed_mass_code": 0}, {"scale_factor": 0.28125, "formed_mass_code": 0}, {"scale_factor": 0.34375, "formed_mass_code": 0}, {"scale_factor": 0.40625, "formed_mass_code": 0}, {"scale_factor": 0.46875, "formed_mass_code": 0}, {"scale_factor": 0.53125, "formed_mass_code": 0}, {"scale_factor": 0.59375, "formed_mass_code": 0}, {"scale_factor": 0.65625, "formed_mass_code": 0}, {"scale_factor": 0.71875, "formed_mass_code": 0}, {"scale_factor": 0.78125, "formed_mass_code": 0}, {"scale_factor": 0.84375, "formed_mass_code": 0}, {"scale_factor": 0.90625, "formed_mass_code": 0}, {"scale_factor": 0.96875, "formed_mass_code": 0}]
+}

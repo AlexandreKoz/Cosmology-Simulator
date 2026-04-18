@@ -178,6 +178,7 @@ Repository repair guardrails include a repair-only prohibition on solver-behavio
 - `tests/integration/test_pm_periodic_mode.cpp`
 - `tests/validation/test_validation_integration.cpp`
 
+
 ## 2026-04-18 — ADR-FEATURE-GRAVITY-007: Enable PM assignment/gather upgrade (CIC+TSC) on gravity feature branch
 
 ### Status
@@ -196,6 +197,7 @@ The gravity-upgrade branch requires end-to-end PM assignment/gather configurabil
 - Positive: `kTsc` is no longer a placeholder; config/runtime/docs/tests align.
 - Positive: PM transfer behavior is explicit and auditable across assignment choices.
 - Tradeoff: TSC increases stencil work (27-point 3D) compared to CIC (8-point 3D).
+- Tradeoff: Explicit CUDA PM path remains CIC-only in this build and rejects `tsc` rather than silently diverging.
 
 ### Evidence references
 - `include/cosmosim/gravity/pm_solver.hpp`
