@@ -107,15 +107,18 @@ int main() {
   assert(cadence_two_report_a.treepm_long_range_refresh_count == 2);
   assert(cadence_two_report_a.treepm_long_range_reuse_count == 2);
   assert(cadence_two_report_a.treepm_cadence_records.size() == 4);
+  const std::vector<std::uint64_t> expected_field_versions{1, 1, 2, 2};
+  const std::vector<std::uint64_t> expected_field_built_steps{0, 0, 1, 1};
+  const std::vector<bool> expected_refresh_flags{true, false, true, false};
+  const std::vector<std::string> expected_stage_names{
+      "gravity_kick_pre", "gravity_kick_post", "gravity_kick_pre", "gravity_kick_post"};
   for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
     const auto& record = cadence_two_report_a.treepm_cadence_records[i];
-    if ((i % 2) == 0) {
-      assert(record.refreshed_long_range_field);
-      assert(record.field_built_step_index == record.step_index);
-    } else {
-      assert(!record.refreshed_long_range_field);
-      assert(record.field_built_step_index == record.step_index);
-    }
+    assert(record.stage_name == expected_stage_names[i]);
+    assert(record.gravity_kick_opportunity == i + 1U);
+    assert(record.field_version == expected_field_versions[i]);
+    assert(record.field_built_step_index == expected_field_built_steps[i]);
+    assert(record.refreshed_long_range_field == expected_refresh_flags[i]);
   }
   assert(cadence_two_report_a.final_state_digest == cadence_two_report_b.final_state_digest);
   assert(cadence_two_report_a.treepm_cadence_records.size() == cadence_two_report_b.treepm_cadence_records.size());

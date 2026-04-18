@@ -359,16 +359,17 @@ class GravityStageCallback final : public core::IntegrationCallback {
     ++m_gravity_kick_opportunity;
     const bool refresh_long_range = !m_has_long_range_field ||
         ((m_gravity_kick_opportunity - m_last_long_range_refresh_opportunity) >= m_pm_update_cadence_steps);
-    if (refresh_long_range) {
-      ++m_long_range_field_version;
-      m_last_long_range_refresh_opportunity = m_gravity_kick_opportunity;
-      m_last_long_range_refresh_step_index = context.integrator_state.step_index;
-      m_last_long_range_refresh_scale_factor = m_tree_pm_options.pm_options.scale_factor;
-      ++m_long_range_refresh_count;
-    } else {
-      ++m_long_range_reuse_count;
-    }
-    m_has_long_range_field = true;
+
+    const std::uint64_t record_field_version = refresh_long_range ? (m_long_range_field_version + 1U) : m_long_range_field_version;
+    const std::uint64_t record_field_built_step_index = refresh_long_range
+        ? context.integrator_state.step_index
+        : m_last_long_range_refresh_step_index;
+    const double record_field_built_scale_factor = refresh_long_range
+        ? m_tree_pm_options.pm_options.scale_factor
+        : m_last_long_range_refresh_scale_factor;
+    const std::uint64_t record_last_refresh_opportunity = refresh_long_range
+        ? m_gravity_kick_opportunity
+        : m_last_long_range_refresh_opportunity;
 
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         context.state.particles.position_x_comoving,
@@ -381,13 +382,24 @@ class GravityStageCallback final : public core::IntegrationCallback {
         nullptr,
         nullptr);
 
+    if (refresh_long_range) {
+      m_has_long_range_field = true;
+      m_long_range_field_version = record_field_version;
+      m_last_long_range_refresh_opportunity = record_last_refresh_opportunity;
+      m_last_long_range_refresh_step_index = record_field_built_step_index;
+      m_last_long_range_refresh_scale_factor = record_field_built_scale_factor;
+      ++m_long_range_refresh_count;
+    } else {
+      ++m_long_range_reuse_count;
+    }
+
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
         .gravity_kick_opportunity = m_gravity_kick_opportunity,
-        .field_version = m_long_range_field_version,
-        .field_built_step_index = m_last_long_range_refresh_step_index,
-        .field_built_scale_factor = m_last_long_range_refresh_scale_factor,
+        .field_version = record_field_version,
+        .field_built_step_index = record_field_built_step_index,
+        .field_built_scale_factor = record_field_built_scale_factor,
         .refreshed_long_range_field = refresh_long_range,
     });
     if (context.profiler_session != nullptr) {

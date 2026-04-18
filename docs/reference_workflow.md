@@ -52,7 +52,7 @@ TreePM Phase-1 runtime mapping is explicit and auditable:
   - reuse last long-range PM field between refreshes
   - default remains conservative (`N = 1`, refresh every kick)
 - Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
-- `r_cut` is resolved and recorded from typed config, but explicit residual-traversal pruning is deferred to the later split-hardening stage
+- `r_cut` is resolved from typed config and drives explicit residual-traversal pruning in the TreePM residual path
 
 ## Canonical stage ordering
 
