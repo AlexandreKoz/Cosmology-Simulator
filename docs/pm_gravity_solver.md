@@ -107,6 +107,10 @@ This keeps the PM operator auditable while avoiding repeated per-solve heap allo
   - TSC: divide by `(W_TSC(k_x) W_TSC(k_y) W_TSC(k_z))^2`
   - safeguard floor: denominator is clamped to `>= 1e-12` before division
 - `tree_pm_split_scale_comoving > 0` applies TreePM long-range Gaussian filter in k-space.
+  - In the reference workflow and TreePM coordinator contract, this value is not an independent UX knob;
+    it is derived from normalized config controls as `r_s = asmth_cells * Δmesh`.
+  - `Δmesh = box_size / PMGRID` (Phase-1 cubic PM UX).
+  - Companion TreePM cutoff uses `r_cut = rcut_cells * Δmesh` on the residual tree path.
 
 These modifiers do not alter the base sign/normalization contract above.
 

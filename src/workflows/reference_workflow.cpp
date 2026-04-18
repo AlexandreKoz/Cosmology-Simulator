@@ -253,17 +253,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
         toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
     m_tree_pm_options.pm_options.enable_window_deconvolution =
         config.numerics.treepm_enable_window_deconvolution;
-    m_tree_pm_options.pm_options.tree_pm_split_scale_comoving =
-        config.numerics.treepm_asmth_cells * m_mesh_spacing_mpc_comoving;
     m_tree_pm_options.tree_options.opening_theta = 0.7;
     m_tree_pm_options.tree_options.gravitational_constant_code = 1.0;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
     m_tree_pm_options.tree_options.softening.epsilon_comoving =
         config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
-    m_tree_pm_options.split_policy.split_scale_comoving =
-        m_tree_pm_options.pm_options.tree_pm_split_scale_comoving;
-    m_tree_pm_options.split_policy.cutoff_radius_comoving =
-        config.numerics.treepm_rcut_cells * m_mesh_spacing_mpc_comoving;
+    m_tree_pm_options.split_policy = gravity::makeTreePmSplitPolicyFromMeshSpacing(
+        config.numerics.treepm_asmth_cells,
+        config.numerics.treepm_rcut_cells,
+        m_mesh_spacing_mpc_comoving);
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }

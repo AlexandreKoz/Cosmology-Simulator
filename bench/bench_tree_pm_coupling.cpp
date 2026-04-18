@@ -55,7 +55,13 @@ int main() {
   options.tree_options.max_leaf_size = 16;
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.softening.epsilon_comoving = 3.5e-4;
-  options.split_policy.split_scale_comoving = 0.03;
+  const double mesh_spacing_comoving =
+#if COSMOSIM_ENABLE_FFTW
+      box_size_comoving / 128.0;
+#else
+      box_size_comoving / 16.0;
+#endif
+  options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(3.84, 5.12, mesh_spacing_comoving);
 
   const cosmosim::gravity::PmGridShape pm_shape =
 #if COSMOSIM_ENABLE_FFTW
@@ -90,6 +96,12 @@ int main() {
             << " tree_traversal_ms=" << profile.tree_profile.traversal_ms
             << " coupling_overhead_ms=" << profile.coupling_overhead_ms
             << " split_scale_comoving=" << diagnostics.split_scale_comoving
+            << " cutoff_radius_comoving=" << diagnostics.cutoff_radius_comoving
+            << " asmth_cells=" << diagnostics.asmth_cells
+            << " rcut_cells=" << diagnostics.rcut_cells
+            << " residual_pruned_nodes=" << diagnostics.residual_pruned_nodes
+            << " residual_pair_skips_cutoff=" << diagnostics.residual_pair_skips_cutoff
+            << " residual_pair_evaluations=" << diagnostics.residual_pair_evaluations
             << " split_composition_error=" << diagnostics.composition_error_at_split
             << " bytes_proxy_mb_per_s=" << bytes_proxy
             << " active_mpart_s=" << active_mpart_s

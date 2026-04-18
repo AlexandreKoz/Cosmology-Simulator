@@ -12,11 +12,23 @@ enum class TreePmSplitKernel {
 
 struct TreePmSplitPolicy {
   TreePmSplitKernel kernel = TreePmSplitKernel::kGaussianErfc;
+  double mesh_spacing_comoving = 0.0;
+  double asmth_cells = 0.0;
+  double rcut_cells = 0.0;
   double split_scale_comoving = 0.0;
   double cutoff_radius_comoving = 0.0;
 };
 
 inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
+  if (policy.mesh_spacing_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM mesh_spacing_comoving must be > 0");
+  }
+  if (policy.asmth_cells <= 0.0) {
+    throw std::invalid_argument("TreePM asmth_cells must be > 0");
+  }
+  if (policy.rcut_cells <= 0.0) {
+    throw std::invalid_argument("TreePM rcut_cells must be > 0");
+  }
   if (policy.split_scale_comoving <= 0.0) {
     throw std::invalid_argument("TreePM split_scale_comoving must be > 0");
   }
@@ -26,6 +38,22 @@ inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
   if (policy.kernel != TreePmSplitKernel::kGaussianErfc) {
     throw std::invalid_argument("Unsupported TreePM split kernel");
   }
+}
+
+[[nodiscard]] inline TreePmSplitPolicy makeTreePmSplitPolicyFromMeshSpacing(
+    double asmth_cells,
+    double rcut_cells,
+    double mesh_spacing_comoving,
+    TreePmSplitKernel kernel = TreePmSplitKernel::kGaussianErfc) {
+  TreePmSplitPolicy policy;
+  policy.kernel = kernel;
+  policy.mesh_spacing_comoving = mesh_spacing_comoving;
+  policy.asmth_cells = asmth_cells;
+  policy.rcut_cells = rcut_cells;
+  policy.split_scale_comoving = asmth_cells * mesh_spacing_comoving;
+  policy.cutoff_radius_comoving = rcut_cells * mesh_spacing_comoving;
+  validateTreePmSplitPolicy(policy);
+  return policy;
 }
 
 [[nodiscard]] inline double treePmGaussianShortRangeForceFactor(double distance_comoving, double split_scale_comoving) {

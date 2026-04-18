@@ -2,43 +2,62 @@
 
 ## Scope
 
-This module defines the explicit force split policy used by CosmoSim TreePM:
+`TreePmCoordinator` implements a Gaussian TreePM split with explicit runtime-derived split and cutoff controls from mesh-cell UX parameters:
 
-- PM computes long-range forces with Fourier filter `exp(-k^2 r_s^2)`.
-- Tree computes the complementary short-range residual with the Gaussian real-space factor
-  `erfc(r/(2 r_s)) + 2/sqrt(pi) * (r/(2 r_s)) * exp(-(r/(2 r_s))^2)`.
+- `r_s = asmth_cells * Δmesh`
+- `r_cut = rcut_cells * Δmesh`
+- `Δmesh = box_size / PMGRID`
 
-The split scale `r_s` is carried in `TreePmSplitPolicy::split_scale_comoving` and is also propagated into
-`PmSolveOptions::tree_pm_split_scale_comoving` so the PM filter is auditable.
+where `asmth_cells` and `rcut_cells` are the authoritative user-facing controls.
+
+## Operational split contract
+
+Long-range PM filter in Fourier space:
+
+- `F_LR(k) = exp(-k^2 r_s^2)`
+
+Short-range real-space residual factor:
+
+- `F_SR(r) = erfc(r / (2 r_s)) + (2 / sqrt(pi)) * (r / (2 r_s)) * exp(-(r / (2 r_s))^2)`
+
+Composition requirement (before explicit cutoff):
+
+- `F_SR(r) + F_LR(r) = 1`
+
+### Softening interaction contract
+
+Residual tree forces use the existing tree softening policy (`TreeSofteningPolicy`) first, then apply the Gaussian short-range factor:
+
+- `a_SR = a_tree_softened * F_SR(r)`
+
+This is the explicit branch contract used by tests and diagnostics. It keeps the TreePM split as a decomposition of the same softened force law prior to truncation.
+
+## Cutoff semantics (`r_cut`)
+
+Tree residual traversal is now explicitly cutoff-bounded:
+
+1. **Node-level pruning**: if the minimum distance from target to node AABB exceeds `r_cut`, the node is skipped.
+2. **Node acceptance guard**: accepted internal nodes must be fully enclosed by `r_cut` (maximum target-to-node AABB distance <= `r_cut`), otherwise traversal descends.
+3. **Leaf pair culling**: particle-particle residual contributions with `r > r_cut` are skipped.
+
+This ensures `rcut_cells` changes actual traversal behavior (not diagnostics-only metadata).
+
+## Runtime diagnostics and audibility
+
+`TreePmDiagnostics` reports:
+
+- mesh-cell controls (`asmth_cells`, `rcut_cells`) and derived lengths (`Δmesh`, `r_s`, `r_cut`),
+- split composition checks (`composition_error_at_split`, `max_relative_composition_error`),
+- factors at `r_s` and `r_cut`,
+- residual cutoff traversal counters (`residual_pruned_nodes`, `residual_pair_skips_cutoff`, `residual_pair_evaluations`).
 
 ## Ownership and accumulation order
 
-1. `TreePmCoordinator` zeros a compact active-set force view.
-2. PM density assignment, Poisson solve, and interpolation produce long-range acceleration for active particles.
-3. Tree build/traversal contributes short-range residual acceleration into the same active-set sidecars.
-4. Diagnostics report continuity and composition checks near `r_s`.
+1. PM computes long-range acceleration on the compact active set.
+2. Tree computes short-range residual with Gaussian factor and explicit `r_cut` truncation.
+3. The active-set accumulator stores PM + residual totals.
 
-## Assumptions
+## Validation notes
 
-- Periodic wrapping in the residual pass uses minimum-image offsets and the PM box size.
-- The residual tree multipole acceptance follows the existing geometric opening criterion.
-- `TreeSofteningPolicy` remains authoritative for softened pair behavior.
-
-## Provenance implications
-
-- The split scale and kernel are explicit runtime configuration in `TreePmOptions`.
-- Profiling fields expose PM phase timings plus tree short-range and coupling overhead timing.
-
-
-## Periodic coupling validation ladder
-
-- `tests/integration/test_tree_pm_coupling_periodic.cpp` is the periodic TreePM stop/go test.
-- Failure diagnostics now include:
-  - Build assumption (`COSMOSIM_ENABLE_FFTW`),
-  - Runtime support gate (`treePmSupportedByBuild()`),
-  - Force error (`rel_l2`) versus direct periodic minimum-image reference,
-  - Split continuity metrics (`composition_error_at_split`, `max_relative_composition_error`).
-- Tolerance policy:
-  - FFTW-enabled path uses stricter `rel_l2 < 0.75`.
-  - Non-FFTW fallback path is allowed a looser envelope (`rel_l2 < 1.8`) and is documented as non-production validation grade.
-- Composition continuity remains strict (`< 1e-12`) to protect split-kernel correctness independent of backend performance.
+- `tests/unit/test_tree_pm_split_kernel.cpp` checks split composition and mesh-cell-to-length derivation.
+- `tests/integration/test_tree_pm_coupling_periodic.cpp` checks periodic coupling against a **minimum-image periodic direct reference** (not a full infinite-periodic Ewald sum), plus cutoff-pruning and PM/tree/split consistency checks.
