@@ -4,31 +4,38 @@
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "cosmosim/cosmosim.hpp"
 
 int main() {
+  auto buildConfigText = [](int cadence_steps, const std::string& run_name, std::string_view assignment_scheme) {
+    std::stringstream stream;
+    stream << "schema_version = 1\n\n";
+    stream << "[mode]\n";
+    stream << "mode = zoom_in\n";
+    stream << "ic_file = generated\n";
+    stream << "zoom_high_res_region = false\n\n";
+    stream << "[numerics]\n";
+    stream << "time_begin_code = 0.01\n";
+    stream << "time_end_code = 0.0102\n";
+    stream << "max_global_steps = 2\n";
+    stream << "hierarchical_max_rung = 1\n\n";
+    stream << "treepm_pm_grid = 9\n";
+    stream << "treepm_asmth_cells = 1.75\n";
+    stream << "treepm_rcut_cells = 6.0\n";
+    stream << "treepm_assignment_scheme = " << assignment_scheme << '\n';
+    stream << "treepm_update_cadence_steps = " << cadence_steps << "\n\n";
+    stream << "[output]\n";
+    stream << "run_name = " << run_name << '\n';
+    stream << "output_directory = integration_outputs\n";
+    stream << "output_stem = snapshot\n";
+    stream << "restart_stem = restart\n";
+    return stream.str();
+  };
+
   std::stringstream stream;
-  stream << "schema_version = 1\n\n";
-  stream << "[mode]\n";
-  stream << "mode = zoom_in\n";
-  stream << "ic_file = generated\n";
-  stream << "zoom_high_res_region = false\n\n";
-  stream << "[numerics]\n";
-  stream << "time_begin_code = 0.01\n";
-  stream << "time_end_code = 0.0101\n";
-  stream << "max_global_steps = 1\n";
-  stream << "hierarchical_max_rung = 1\n\n";
-  stream << "treepm_pm_grid = 9\n";
-  stream << "treepm_asmth_cells = 1.75\n";
-  stream << "treepm_rcut_cells = 6.0\n";
-  stream << "treepm_assignment_scheme = cic\n";
-  stream << "treepm_update_cadence_steps = 1\n\n";
-  stream << "[output]\n";
-  stream << "run_name = reference_integration_test\n";
-  stream << "output_directory = integration_outputs\n";
-  stream << "output_stem = snapshot\n";
-  stream << "restart_stem = restart\n";
+  stream << buildConfigText(1, "reference_integration_test", "cic");
 
   const cosmosim::core::FrozenConfig frozen =
       cosmosim::core::loadFrozenConfigFromString(stream.str(), "test_reference_workflow_end_to_end");
@@ -44,11 +51,19 @@ int main() {
   assert(report.config_compatible);
   assert(report.schema_compatible);
   assert(report.canonical_stage_order);
-  assert(report.stage_sequence.size() == 7);
+  assert(report.stage_sequence.size() == 14);
   assert(report.stage_sequence.front() == "gravity_kick_pre");
   assert(report.stage_sequence.back() == "output_check");
-  assert(report.completed_steps == 1);
+  assert(report.completed_steps == 2);
   assert(report.treepm_pm_grid == 9);
+  assert(report.treepm_update_cadence_steps == 1);
+  assert(report.treepm_long_range_refresh_count == 4);
+  assert(report.treepm_long_range_reuse_count == 0);
+  assert(report.treepm_cadence_records.size() == 4);
+  for (const auto& record : report.treepm_cadence_records) {
+    assert(record.refreshed_long_range_field);
+    assert(record.field_built_step_index == record.step_index);
+  }
   assert(report.run_directory == expected_run_dir);
   assert(report.normalized_config_snapshot_written);
   assert(std::filesystem::exists(report.normalized_config_snapshot_path));
@@ -61,69 +76,59 @@ int main() {
   assert(op_text.find("\"event_kind\": \"config.freeze\"") != std::string::npos);
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
+  assert(op_text.find("\"event_kind\": \"gravity.pm_long_range_field\"") != std::string::npos);
+  assert(op_text.find("\"pm_update_cadence_steps\": \"1\"") != std::string::npos);
 
   std::stringstream tsc_stream;
-  tsc_stream << "schema_version = 1\n\n";
-  tsc_stream << "[mode]\n";
-  tsc_stream << "mode = zoom_in\n";
-  tsc_stream << "ic_file = generated\n";
-  tsc_stream << "zoom_high_res_region = false\n\n";
-  tsc_stream << "[numerics]\n";
-  tsc_stream << "time_begin_code = 0.01\n";
-  tsc_stream << "time_end_code = 0.0101\n";
-  tsc_stream << "max_global_steps = 1\n";
-  tsc_stream << "hierarchical_max_rung = 1\n";
-  tsc_stream << "treepm_pm_grid = 9\n";
-  tsc_stream << "treepm_asmth_cells = 1.75\n";
-  tsc_stream << "treepm_rcut_cells = 6.0\n";
-  tsc_stream << "treepm_assignment_scheme = tsc\n";
-  tsc_stream << "treepm_update_cadence_steps = 1\n\n";
-  tsc_stream << "[output]\n";
-  tsc_stream << "run_name = reference_integration_test_tsc\n";
-  tsc_stream << "output_directory = integration_outputs\n";
-  tsc_stream << "output_stem = snapshot\n";
-  tsc_stream << "restart_stem = restart\n";
+  tsc_stream << buildConfigText(1, "reference_integration_test_tsc", "tsc");
 
   const cosmosim::core::FrozenConfig tsc_frozen =
       cosmosim::core::loadFrozenConfigFromString(tsc_stream.str(), "test_reference_workflow_tsc");
   cosmosim::workflows::ReferenceWorkflowRunner tsc_runner(tsc_frozen);
   const cosmosim::workflows::ReferenceWorkflowReport tsc_report =
       tsc_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
-  assert(tsc_report.completed_steps == 1);
+  assert(tsc_report.completed_steps == 2);
   assert(tsc_report.treepm_pm_grid == 9);
+  assert(tsc_report.treepm_long_range_refresh_count == 4);
+  assert(tsc_report.treepm_long_range_reuse_count == 0);
 
-  std::stringstream bad_stream;
-  bad_stream << "schema_version = 1\n\n";
-  bad_stream << "[mode]\n";
-  bad_stream << "mode = zoom_in\n";
-  bad_stream << "ic_file = generated\n";
-  bad_stream << "zoom_high_res_region = false\n\n";
-  bad_stream << "[numerics]\n";
-  bad_stream << "time_begin_code = 0.01\n";
-  bad_stream << "time_end_code = 0.0101\n";
-  bad_stream << "max_global_steps = 1\n";
-  bad_stream << "hierarchical_max_rung = 1\n";
-  bad_stream << "treepm_pm_grid = 9\n";
-  bad_stream << "treepm_asmth_cells = 1.75\n";
-  bad_stream << "treepm_rcut_cells = 6.0\n";
-  bad_stream << "treepm_assignment_scheme = cic\n";
-  bad_stream << "treepm_update_cadence_steps = 2\n\n";
-  bad_stream << "[output]\n";
-  bad_stream << "run_name = reference_integration_test_bad_cadence\n";
-  bad_stream << "output_directory = integration_outputs\n";
-  bad_stream << "output_stem = snapshot\n";
-  bad_stream << "restart_stem = restart\n";
+  const std::string cadence_two_config =
+      buildConfigText(2, "reference_integration_test_cadence_two", "cic");
+  const cosmosim::core::FrozenConfig cadence_two_frozen =
+      cosmosim::core::loadFrozenConfigFromString(cadence_two_config, "test_reference_workflow_cadence_two");
+  cosmosim::workflows::ReferenceWorkflowRunner cadence_two_runner(cadence_two_frozen);
+  const cosmosim::workflows::ReferenceWorkflowReport cadence_two_report_a =
+      cadence_two_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  const cosmosim::workflows::ReferenceWorkflowReport cadence_two_report_b =
+      cadence_two_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
 
-  const cosmosim::core::FrozenConfig bad_frozen =
-      cosmosim::core::loadFrozenConfigFromString(bad_stream.str(), "test_reference_workflow_bad_cadence");
-  cosmosim::workflows::ReferenceWorkflowRunner bad_runner(bad_frozen);
-  bool bad_cadence_threw = false;
-  try {
-    (void)bad_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
-  } catch (const std::runtime_error&) {
-    bad_cadence_threw = true;
+  assert(cadence_two_report_a.completed_steps == 2);
+  assert(cadence_two_report_a.treepm_update_cadence_steps == 2);
+  assert(cadence_two_report_a.treepm_long_range_refresh_count == 2);
+  assert(cadence_two_report_a.treepm_long_range_reuse_count == 2);
+  assert(cadence_two_report_a.treepm_cadence_records.size() == 4);
+  for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
+    const auto& record = cadence_two_report_a.treepm_cadence_records[i];
+    if ((i % 2) == 0) {
+      assert(record.refreshed_long_range_field);
+      assert(record.field_built_step_index == record.step_index);
+    } else {
+      assert(!record.refreshed_long_range_field);
+      assert(record.field_built_step_index == record.step_index);
+    }
   }
-  assert(bad_cadence_threw);
+  assert(cadence_two_report_a.final_state_digest == cadence_two_report_b.final_state_digest);
+  assert(cadence_two_report_a.treepm_cadence_records.size() == cadence_two_report_b.treepm_cadence_records.size());
+  for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
+    const auto& lhs = cadence_two_report_a.treepm_cadence_records[i];
+    const auto& rhs = cadence_two_report_b.treepm_cadence_records[i];
+    assert(lhs.step_index == rhs.step_index);
+    assert(lhs.stage_name == rhs.stage_name);
+    assert(lhs.gravity_kick_opportunity == rhs.gravity_kick_opportunity);
+    assert(lhs.field_version == rhs.field_version);
+    assert(lhs.field_built_step_index == rhs.field_built_step_index);
+    assert(lhs.refreshed_long_range_field == rhs.refreshed_long_range_field);
+  }
 
   std::filesystem::remove_all(output_dir);
   return 0;

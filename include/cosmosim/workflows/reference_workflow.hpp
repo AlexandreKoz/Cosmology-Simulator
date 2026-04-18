@@ -20,6 +20,16 @@ struct ReferenceWorkflowOptions {
 };
 
 struct ReferenceWorkflowReport {
+  struct TreePmCadenceRecord {
+    std::uint64_t step_index = 0;
+    std::string stage_name;
+    std::uint64_t gravity_kick_opportunity = 0;
+    std::uint64_t field_version = 0;
+    std::uint64_t field_built_step_index = 0;
+    double field_built_scale_factor = 1.0;
+    bool refreshed_long_range_field = false;
+  };
+
   bool config_compatible = false;
   bool schema_compatible = false;
   bool canonical_stage_order = false;
@@ -29,8 +39,13 @@ struct ReferenceWorkflowReport {
   bool restart_roundtrip_ok = false;
   bool snapshot_roundtrip_ok = false;
   std::uint64_t completed_steps = 0;
+  std::uint64_t final_state_digest = 0;
+  std::uint64_t treepm_long_range_refresh_count = 0;
+  std::uint64_t treepm_long_range_reuse_count = 0;
   std::size_t treepm_pm_grid = 0;
+  int treepm_update_cadence_steps = 1;
   std::vector<std::string> stage_sequence;
+  std::vector<TreePmCadenceRecord> treepm_cadence_records;
   std::filesystem::path run_directory;
   std::filesystem::path normalized_config_snapshot_path;
   std::filesystem::path profiler_json_path;

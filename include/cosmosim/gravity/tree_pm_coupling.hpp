@@ -57,6 +57,17 @@ class TreePmCoordinator {
  public:
   explicit TreePmCoordinator(PmGridShape pm_shape);
 
+  void solveActiveSetWithPmCadence(
+      std::span<const double> pos_x_comoving,
+      std::span<const double> pos_y_comoving,
+      std::span<const double> pos_z_comoving,
+      std::span<const double> mass_code,
+      const TreePmForceAccumulatorView& accumulator,
+      const TreePmOptions& options,
+      bool refresh_long_range_field,
+      TreePmProfileEvent* profile = nullptr,
+      TreePmDiagnostics* diagnostics = nullptr);
+
   void solveActiveSet(
       std::span<const double> pos_x_comoving,
       std::span<const double> pos_y_comoving,
@@ -96,6 +107,7 @@ class TreePmCoordinator {
   std::vector<double> m_active_pm_ay_comoving;
   std::vector<double> m_active_pm_az_comoving;
   ResidualTraversalStats m_last_residual_stats;
+  bool m_has_cached_long_range_field = false;
 };
 
 [[nodiscard]] TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy);

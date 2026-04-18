@@ -91,7 +91,7 @@ The concrete run directory is:
   - `treepm_rcut_cells` (float, default `4.5`; user-facing short-range cutoff control in mesh-cell units, normalized and recorded now; explicit residual-traversal pruning is deferred to the dedicated split-hardening stage)
   - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
   - `treepm_enable_window_deconvolution` (bool, default `false`; applies scheme-aware PM transfer deconvolution for both `cic` and `tsc`)
-  - `treepm_update_cadence_steps` (int, default `1`; typed/normalized now, but Stage-1 runtime only accepts `1` until the dedicated PM refresh/reuse stage lands)
+  - `treepm_update_cadence_steps` (int, default `1`; authoritative PM long-range refresh cadence in gravity-kick opportunities)
 
 TreePM split/cutoff semantics in this phase:
 
@@ -100,7 +100,11 @@ TreePM split/cutoff semantics in this phase:
 - `r_cut = numerics.treepm_rcut_cells * Δmesh`
 
 Normalization emits the dimensionless controls exactly as provided and these are the same values consumed by runtime mapping.
-`treepm_update_cadence_steps > 1` is rejected by the current Stage-1 runtime rather than silently changing gravity behavior, because the explicit PM refresh/reuse contract belongs to the later cadence stage.
+`treepm_update_cadence_steps` is consumed directly by runtime:
+
+- refresh PM long-range field every `N` gravity-kick opportunities (`N = treepm_update_cadence_steps`)
+- reuse the most recent PM long-range field between refreshes
+- record per-kick refresh/reuse metadata in the reference-workflow report and operational diagnostics events
 `treepm_rcut_cells` is already normalized and carried into runtime options for provenance/contract clarity, but the residual tree traversal is not yet pruned by this control in the current Stage-1 path.
 `treepm_assignment_scheme` now maps directly to matched PM assignment+gather behavior:
 

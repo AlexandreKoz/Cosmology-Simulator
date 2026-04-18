@@ -245,3 +245,35 @@ This branch stage requires solver-behavior edits in the TreePM coupling layer to
 - `docs/tree_pm_coupling.md`
 - `tests/unit/test_tree_pm_split_kernel.cpp`
 - `tests/integration/test_tree_pm_coupling_periodic.cpp`
+
+## 2026-04-18 — ADR-FEATURE-GRAVITY-009: Enable explicit PM long-range cadence/reuse in reference runtime
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+`numerics.treepm_update_cadence_steps` existed in typed/normalized config but runtime still hard-rejected values above `1`, leaving no auditable PM refresh/reuse behavior despite hierarchical stepping and active-set gravity callbacks.
+
+### Decision
+- Treat `treepm_update_cadence_steps` as an authoritative runtime control in the reference workflow.
+- Apply cadence per gravity kick opportunity (`gravity_kick_pre`, `gravity_kick_post`):
+  - refresh PM long-range mesh solve every `N` opportunities,
+  - reuse cached long-range field otherwise,
+  - always recompute short-range tree residual each kick.
+- Keep default conservative (`N=1`) to preserve immediate-refresh baseline behavior.
+- Record refresh/reuse metadata (field version, build step, build scale factor) in workflow report and operational events.
+
+### Consequences
+- Positive: cadence key now changes real runtime behavior and is diagnosable.
+- Positive: PM reuse is explicit, deterministic, and traceable instead of hidden in callback internals.
+- Tradeoff: Phase 1 cadence is single-rank and intentionally simple; it is not yet a full multirate integrator.
+
+### Evidence references
+- `src/workflows/reference_workflow.cpp`
+- `include/cosmosim/workflows/reference_workflow.hpp`
+- `include/cosmosim/gravity/tree_pm_coupling.hpp`
+- `src/gravity/tree_pm_coupling.cpp`
+- `tests/integration/test_reference_workflow_end_to_end.cpp`
+- `docs/time_integration.md`
+- `docs/reference_workflow.md`
+- `docs/pm_gravity_solver.md`

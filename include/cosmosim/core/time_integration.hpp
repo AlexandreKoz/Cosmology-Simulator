@@ -70,6 +70,7 @@ struct StepContext {
   TransientStepWorkspace* workspace = nullptr;
   const LambdaCdmBackground* cosmology_background = nullptr;
   const ModePolicy* mode_policy = nullptr;
+  ProfilerSession* profiler_session = nullptr;
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
 

@@ -16,6 +16,20 @@ The authoritative per-step stage order is:
 
 The scheduler (`StageScheduler`) owns this ordering and solver modules interact via `IntegrationCallback` implementations. This keeps gravity/hydro/source/output sequencing explicit and auditable.
 
+### TreePM long-range cadence contract (Phase 1)
+
+The reference workflow now applies an explicit, config-driven long-range PM refresh cadence:
+
+- cadence control: `numerics.treepm_update_cadence_steps` (integer `>= 1`)
+- cadence unit in Phase 1: **gravity kick opportunities** (`gravity_kick_pre` and `gravity_kick_post`)
+- policy:
+  - refresh PM mesh solve when no cached field exists, or when
+    `current_kick_opportunity - last_refresh_opportunity >= cadence_steps`
+  - otherwise reuse the cached long-range field and only rebuild/evaluate the short-range tree residual
+
+The temporal contract for reuse is explicit: a reused PM field corresponds to the particle state and scale factor from the last refresh opportunity, and that metadata is recorded by the workflow report/events.
+With `treepm_update_cadence_steps = 1` (default), behavior reduces to immediate PM refresh at every kick opportunity.
+
 ## Hierarchical integer timeline bins
 
 `HierarchicalTimeBinScheduler` implements power-of-two integer bins (`dt_bin = dt_min * 2^bin`) and maintains:
@@ -76,6 +90,7 @@ The implementation provides midpoint-integrated drift/kick prefactors over scale
 ## Assumptions (explicit)
 
 - Baseline stage scheme is kick-drift-kick only.
+- PM long-range cadence in Phase 1 is single-rank and intentionally conservative; it is not a full multirate integrator redesign.
 - Time bins use strict power-of-two integer periods in tick space.
 - Scale factor update in the orchestrator uses forward Euler (`advanceScaleFactorEuler`) for conservative simplicity.
 - If no cosmology background is passed to `StepOrchestrator`, the orchestrator advances `time` only and leaves `current_scale_factor` unchanged.

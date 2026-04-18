@@ -37,7 +37,7 @@ The runner honors these config fields directly:
 - `numerics.treepm_rcut_cells`
 - `numerics.treepm_assignment_scheme`
 - `numerics.treepm_enable_window_deconvolution`
-- `numerics.treepm_update_cadence_steps` (parsed and normalized now; Stage-1 runtime intentionally requires `1` until explicit PM refresh/reuse semantics land)
+- `numerics.treepm_update_cadence_steps` (authoritative PM long-range refresh cadence in gravity kick opportunities; integer `>= 1`)
 
 TreePM Phase-1 runtime mapping is explicit and auditable:
 
@@ -47,7 +47,11 @@ TreePM Phase-1 runtime mapping is explicit and auditable:
 - `r_cut = treepm_rcut_cells * Δmesh`
 - Assignment/deconvolution are wired from typed config, not hidden workflow constants
 - `treepm_assignment_scheme` maps directly to runtime PM assignment+gather (`cic` or `tsc`)
-- `treepm_update_cadence_steps` is part of the typed/normalized control surface, but Stage-1 runtime currently accepts only `1` and rejects larger values rather than silently skipping gravity work
+- `treepm_update_cadence_steps` is consumed by runtime PM cadence logic:
+  - refresh long-range PM field every `N` gravity kick opportunities (`N = cadence_steps`)
+  - reuse last long-range PM field between refreshes
+  - default remains conservative (`N = 1`, refresh every kick)
+- Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
 - `r_cut` is resolved and recorded from typed config, but explicit residual-traversal pruning is deferred to the later split-hardening stage
 
 ## Canonical stage ordering
@@ -89,4 +93,11 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 
 ## API migration note
 
-`ReferenceWorkflowReport` now includes `treepm_pm_grid`, which records the PM grid size resolved by the runtime gravity callback from typed config.
+`ReferenceWorkflowReport` includes PM cadence observability fields:
+
+- `treepm_pm_grid`
+- `treepm_update_cadence_steps`
+- `treepm_long_range_refresh_count`
+- `treepm_long_range_reuse_count`
+- `treepm_cadence_records` (per-kick record including step, stage, field version, and refresh/reuse decision)
+- `final_state_digest` (deterministic run-result checksum for reproducibility checks under fixed config/ICs)
