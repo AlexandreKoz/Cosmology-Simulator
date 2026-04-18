@@ -37,7 +37,7 @@ The runner honors these config fields directly:
 - `numerics.treepm_rcut_cells`
 - `numerics.treepm_assignment_scheme`
 - `numerics.treepm_enable_window_deconvolution`
-- `numerics.treepm_update_cadence_steps`
+- `numerics.treepm_update_cadence_steps` (parsed and normalized now; Stage-1 runtime intentionally requires `1` until explicit PM refresh/reuse semantics land)
 
 TreePM Phase-1 runtime mapping is explicit and auditable:
 
@@ -45,7 +45,9 @@ TreePM Phase-1 runtime mapping is explicit and auditable:
 - `Δmesh = box_size / N`
 - `r_s = treepm_asmth_cells * Δmesh`
 - `r_cut = treepm_rcut_cells * Δmesh`
-- Assignment/deconvolution/cadence are wired from typed config, not hidden workflow constants
+- Assignment/deconvolution are wired from typed config, not hidden workflow constants
+- `treepm_update_cadence_steps` is part of the typed/normalized control surface, but Stage-1 runtime currently accepts only `1` and rejects larger values rather than silently skipping gravity work
+- `r_cut` is resolved and recorded from typed config, but explicit residual-traversal pruning is deferred to the later split-hardening stage
 
 ## Canonical stage ordering
 

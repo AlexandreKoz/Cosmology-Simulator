@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <stdexcept>
 
 #include "cosmosim/cosmosim.hpp"
 
@@ -60,6 +61,40 @@ int main() {
   assert(op_text.find("\"event_kind\": \"config.freeze\"") != std::string::npos);
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
+
+
+  std::stringstream bad_stream;
+  bad_stream << "schema_version = 1\n\n";
+  bad_stream << "[mode]\n";
+  bad_stream << "mode = zoom_in\n";
+  bad_stream << "ic_file = generated\n";
+  bad_stream << "zoom_high_res_region = false\n\n";
+  bad_stream << "[numerics]\n";
+  bad_stream << "time_begin_code = 0.01\n";
+  bad_stream << "time_end_code = 0.0101\n";
+  bad_stream << "max_global_steps = 1\n";
+  bad_stream << "hierarchical_max_rung = 1\n";
+  bad_stream << "treepm_pm_grid = 9\n";
+  bad_stream << "treepm_asmth_cells = 1.75\n";
+  bad_stream << "treepm_rcut_cells = 6.0\n";
+  bad_stream << "treepm_assignment_scheme = cic\n";
+  bad_stream << "treepm_update_cadence_steps = 2\n\n";
+  bad_stream << "[output]\n";
+  bad_stream << "run_name = reference_integration_test_bad_cadence\n";
+  bad_stream << "output_directory = integration_outputs\n";
+  bad_stream << "output_stem = snapshot\n";
+  bad_stream << "restart_stem = restart\n";
+
+  const cosmosim::core::FrozenConfig bad_frozen =
+      cosmosim::core::loadFrozenConfigFromString(bad_stream.str(), "test_reference_workflow_bad_cadence");
+  cosmosim::workflows::ReferenceWorkflowRunner bad_runner(bad_frozen);
+  bool bad_cadence_threw = false;
+  try {
+    (void)bad_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  } catch (const std::runtime_error&) {
+    bad_cadence_threw = true;
+  }
+  assert(bad_cadence_threw);
 
   std::filesystem::remove_all(output_dir);
   return 0;

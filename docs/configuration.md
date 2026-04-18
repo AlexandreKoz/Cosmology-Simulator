@@ -88,10 +88,10 @@ The concrete run directory is:
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):
   - `treepm_pm_grid` (int, default `16`; Phase 1 cubic PM mesh side length, so `PmGridShape{N,N,N}`)
   - `treepm_asmth_cells` (float, default `1.25`; split scale in mesh-cell units)
-  - `treepm_rcut_cells` (float, default `4.5`; short-range tree cutoff in mesh-cell units)
+  - `treepm_rcut_cells` (float, default `4.5`; user-facing short-range cutoff control in mesh-cell units, normalized and recorded now; explicit residual-traversal pruning is deferred to the dedicated split-hardening stage)
   - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
   - `treepm_enable_window_deconvolution` (bool, default `false`)
-  - `treepm_update_cadence_steps` (int, default `1`)
+  - `treepm_update_cadence_steps` (int, default `1`; typed/normalized now, but Stage-1 runtime only accepts `1` until the dedicated PM refresh/reuse stage lands)
 
 TreePM split/cutoff semantics in this phase:
 
@@ -100,6 +100,8 @@ TreePM split/cutoff semantics in this phase:
 - `r_cut = numerics.treepm_rcut_cells * Δmesh`
 
 Normalization emits the dimensionless controls exactly as provided and these are the same values consumed by runtime mapping.
+`treepm_update_cadence_steps > 1` is rejected by the current Stage-1 runtime rather than silently changing gravity behavior, because the explicit PM refresh/reuse contract belongs to the later cadence stage.
+`treepm_rcut_cells` is already normalized and carried into runtime options for provenance/contract clarity, but the residual tree traversal is not yet pruned by this control in the current Stage-1 path.
 `treepm_assignment_scheme=tsc` is already part of the typed config surface, but current runtime rejects it with a clear error until the stage-3 TSC path lands.
 
 ## `[physics]`

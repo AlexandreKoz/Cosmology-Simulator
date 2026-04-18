@@ -3,7 +3,7 @@
 ## Scope and assumptions
 
 - The implementation targets long-range periodic PM gravity and currently supports **CIC** assignment only.
-- Runtime selection is config-driven through `numerics.treepm_*` keys (no hard-coded PM mesh/split in the workflow path).
+- Runtime selection is config-driven through `numerics.treepm_*` keys (no hard-coded PM mesh/split in the workflow path), but Stage-1 intentionally remains conservative about features whose full runtime semantics have not landed yet.
 - Force interpolation uses the transpose of the assignment kernel (CIC gather) to preserve consistency.
 - FFT backend defaults to FFTW when `COSMOSIM_ENABLE_FFTW=ON`; otherwise a correctness-oriented fallback backend (`naive_dft`) is used only for small-test workflows and not treated as production TreePM support.
 - The periodic zero mode is explicitly set to zero (`phi_0 = 0`).
@@ -82,7 +82,7 @@ Additional runtime PM controls:
 
 - `numerics.treepm_assignment_scheme`
 - `numerics.treepm_enable_window_deconvolution`
-- `numerics.treepm_update_cadence_steps`
+- `numerics.treepm_update_cadence_steps` (parsed and normalized now; Stage-1 runtime intentionally requires `1` until explicit PM refresh/reuse semantics land)
 
 
 ## Integration stop/go validation ladder

@@ -241,7 +241,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (m_pm_grid_size == 0) {
       throw std::runtime_error("numerics.treepm_pm_grid must be > 0");
     }
-    m_pm_update_cadence_steps = static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps);
+    if (config.numerics.treepm_update_cadence_steps != 1) {
+      throw std::runtime_error(
+          "numerics.treepm_update_cadence_steps=" +
+          std::to_string(config.numerics.treepm_update_cadence_steps) +
+          " is configured, but Stage-1 runtime only supports cadence=1 until the dedicated PM "
+          "refresh/reuse implementation lands; use numerics.treepm_update_cadence_steps=1 for now");
+    }
     m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_mpc_comoving;
     m_tree_pm_options.pm_options.scale_factor = 1.0;
     m_tree_pm_options.pm_options.gravitational_constant_code = 1.0;
@@ -279,10 +285,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (particle_count == 0 || context.active_set.particle_indices.empty()) {
       return;
     }
-    if ((context.integrator_state.step_index % m_pm_update_cadence_steps) != 0U) {
-      return;
-    }
-
     m_active_accel_x.assign(context.active_set.particle_indices.size(), 0.0);
     m_active_accel_y.assign(context.active_set.particle_indices.size(), 0.0);
     m_active_accel_z.assign(context.active_set.particle_indices.size(), 0.0);
@@ -341,7 +343,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
   const core::ModePolicy& m_mode_policy;
   std::size_t m_pm_grid_size = 0;
   double m_mesh_spacing_mpc_comoving = 0.0;
-  std::uint64_t m_pm_update_cadence_steps = 1;
   gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
   std::vector<double> m_active_accel_x;
