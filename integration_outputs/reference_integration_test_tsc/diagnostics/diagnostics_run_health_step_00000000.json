@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "run_name": "reference_integration_test_tsc",
+  "diagnostic_class": "run_health",
+  "diagnostics_execution_policy": "run_health_and_light_science",
+  "step_index": 0,
+  "scale_factor": 0.01,
+  "units": {"frame": "comoving", "mass": "code", "length": "code"},
+  "health": {"particle_count": 42, "cell_count": 6, "star_count": 0, "ownership_invariants_ok": true, "unique_particle_ids_ok": true, "non_finite_particles": 0, "non_finite_cells": 0},
+  "diagnostic_records": [{"name": "run_health_counters", "tier": "infrastructure_health", "maturity": "production", "scalability": "cheap", "executed": true, "policy_note": "always_on_for_integrity_checks"}],
+  "angular_momentum_budget": {"total_norm": 0, "gas_norm": 0, "star_norm": 0, "dark_matter_norm": 0, "black_hole_norm": 0},
+  "power_spectrum": [],
+  "sf_history": []
+}

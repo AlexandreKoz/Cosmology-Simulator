@@ -46,6 +46,7 @@ TreePM Phase-1 runtime mapping is explicit and auditable:
 - `r_s = treepm_asmth_cells * Δmesh`
 - `r_cut = treepm_rcut_cells * Δmesh`
 - Assignment/deconvolution are wired from typed config, not hidden workflow constants
+- `treepm_assignment_scheme` maps directly to runtime PM assignment+gather (`cic` or `tsc`)
 - `treepm_update_cadence_steps` is part of the typed/normalized control surface, but Stage-1 runtime currently accepts only `1` and rejects larger values rather than silently skipping gravity work
 - `r_cut` is resolved and recorded from typed config, but explicit residual-traversal pruning is deferred to the later split-hardening stage
 

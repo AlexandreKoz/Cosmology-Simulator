@@ -5,8 +5,7 @@
 This document defines the **operational contract** for `cosmosim::gravity::PmSolver` in the periodic cosmological path.
 
 - Boundary condition: periodic box only for this stage.
-- Assignment/interpolation kernel: runtime-selectable `CIC` or `TSC`, with matched
-  deposit/gather semantics.
+- Assignment/interpolation kernel: runtime-selectable `CIC` or `TSC`, with matched deposit/gather semantics.
 - Backend policy:
   - `COSMOSIM_ENABLE_FFTW=ON`: FFTW-backed production path.
   - `COSMOSIM_ENABLE_FFTW=OFF`: fallback `naive_dft` for bring-up/small tests, not production-grade TreePM.
@@ -68,10 +67,8 @@ Potential is a supported output, not an incidental side effect.
 
 For particle-space sampling:
 
-- `interpolateForces(...)` gathers mesh acceleration to particles using the same
-  assignment kernel selected for deposition.
-- `interpolatePotential(...)` gathers mesh potential to particles using the same
-  geometry and stencil.
+- `interpolateForces(...)` gathers mesh acceleration to particles using the same assignment kernel selected for deposition.
+- `interpolatePotential(...)` gathers mesh potential to particles using the same geometry and stencil.
 
 Matched deposition + gather is a hard contract for both schemes in this stage.
 
@@ -105,8 +102,7 @@ This keeps the PM operator auditable while avoiding repeated per-solve heap allo
 
 ## Optional modifiers
 
-- `enable_window_deconvolution=true` applies scheme-aware deconvolution to the
-  **combined particle-transfer operator** (`deposit * gather`) in k-space:
+- `enable_window_deconvolution=true` applies scheme-aware deconvolution to the **combined particle-transfer operator** (`deposit * gather`) in k-space:
   - CIC: divide by `(W_CIC(k_x) W_CIC(k_y) W_CIC(k_z))^2`
   - TSC: divide by `(W_TSC(k_x) W_TSC(k_y) W_TSC(k_z))^2`
   - safeguard floor: denominator is clamped to `>= 1e-12` before division
@@ -122,10 +118,12 @@ Default policy in this phase is conservative:
 ## Accuracy/cost tradeoffs in this stage
 
 - CIC is cheaper (2-point stencil/axis, 8 points in 3D) and remains first-class.
-- TSC is smoother and generally reduces anisotropy/self-force artifacts, but uses
-  3 points/axis (27 points in 3D).
-- Deconvolution improves transfer amplitude matching for resolved modes, but can
-  amplify high-`k` noise/aliasing near Nyquist; therefore it is opt-in.
+- TSC is smoother and generally reduces anisotropy/self-force artifacts, but uses 3 points/axis (27 points in 3D).
+- Deconvolution improves transfer amplitude matching for resolved modes, but can amplify high-`k` noise/aliasing near Nyquist; therefore it is opt-in.
+
+## Implementation note
+
+- Explicit CUDA PM assignment/gather remains CIC-only in this build; CPU paths support both `cic` and `tsc`. This guard is intentional and explicit rather than hidden.
 
 ## Validation focus for this stage
 
