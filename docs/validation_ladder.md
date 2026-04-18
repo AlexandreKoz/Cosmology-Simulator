@@ -31,6 +31,8 @@ The ladder is designed for desktop-first CI and developer loops, while preservin
 
 Implemented now:
 - Gravity: two-body symmetry check, PM single-mode response, opening-angle convergence.
+- TreePM split-kernel correctness: Gaussian SR/LR complementarity, mesh-cell (`asmth_cells`, `rcut_cells`) derivation audit,
+  residual-cutoff pruning counters, and PM-only vs tree-only vs split consistency on small periodic setups.
 - Hydro: Sod-like conservation check, smooth-wave self-convergence.
 - AMR: coarse-fine reflux synchronization regression.
 - Galaxy modules: cooling monotonicity check, star-formation mass-budget regression.

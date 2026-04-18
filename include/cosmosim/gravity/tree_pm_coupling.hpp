@@ -29,11 +29,20 @@ struct TreePmOptions {
 };
 
 struct TreePmDiagnostics {
+  double mesh_spacing_comoving = 0.0;
+  double asmth_cells = 0.0;
+  double rcut_cells = 0.0;
   double split_scale_comoving = 0.0;
+  double cutoff_radius_comoving = 0.0;
   double short_range_factor_at_split = 0.0;
   double long_range_factor_at_split = 0.0;
+  double short_range_factor_at_cutoff = 0.0;
+  double long_range_factor_at_cutoff = 0.0;
   double composition_error_at_split = 0.0;
   double max_relative_composition_error = 0.0;
+  std::uint64_t residual_pruned_nodes = 0;
+  std::uint64_t residual_pair_skips_cutoff = 0;
+  std::uint64_t residual_pair_evaluations = 0;
 };
 
 struct TreePmProfileEvent {
@@ -68,6 +77,12 @@ class TreePmCoordinator {
       const TreePmOptions& options,
       TreeGravityProfile* tree_profile);
 
+  struct ResidualTraversalStats {
+    std::uint64_t pruned_nodes = 0;
+    std::uint64_t pair_skips_cutoff = 0;
+    std::uint64_t pair_evaluations = 0;
+  };
+
   PmGridShape m_shape;
   PmGridStorage m_grid;
   PmSolver m_pm_solver;
@@ -80,6 +95,7 @@ class TreePmCoordinator {
   std::vector<double> m_active_pm_ax_comoving;
   std::vector<double> m_active_pm_ay_comoving;
   std::vector<double> m_active_pm_az_comoving;
+  ResidualTraversalStats m_last_residual_stats;
 };
 
 [[nodiscard]] TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy);

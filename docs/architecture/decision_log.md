@@ -208,3 +208,40 @@ The gravity-upgrade branch requires end-to-end PM assignment/gather configurabil
 - `tests/unit/test_pm_solver.cpp`
 - `tests/integration/test_pm_periodic_mode.cpp`
 - `tests/validation/test_validation_integration.cpp`
+
+## 2026-04-18 — ADR-FEATURE-GRAVITY-008: TreePM split/cutoff contract upgrade on gravity feature branch
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+This branch stage requires solver-behavior edits in the TreePM coupling layer to make the AREPO/GADGET-style split contract explicit and runtime-configurable from normalized config controls (`asmth_cells`, `rcut_cells`). Existing residual traversal lacked explicit RCUT truncation behavior.
+
+### Decision
+- Treat mesh-cell controls as authoritative and derive:
+  - `r_s = asmth_cells * Δmesh`
+  - `r_cut = rcut_cells * Δmesh`
+  - `Δmesh = box_size / PMGRID`
+- Keep Gaussian split family:
+  - PM: `exp(-k^2 r_s^2)`
+  - residual tree: Gaussian complementary short-range factor.
+- Enforce explicit residual cutoff in traversal:
+  - node-level AABB pruning,
+  - node-acceptance guard requiring full in-cutoff enclosure,
+  - leaf pair skipping beyond `r_cut`.
+- Expand diagnostics/docs/tests so split parameters, composition checks, and cutoff pruning are auditable.
+
+### Consequences
+- Positive: Removes hidden split heuristics and dual-source ambiguity.
+- Positive: `rcut_cells` now changes actual residual traversal work and force contribution domain.
+- Positive: Improves reproducibility/audibility via runtime diagnostics and same-patch docs/tests.
+- Tradeoff: Tree residual traversal now performs additional cheap AABB distance bounds to guarantee safe pruning.
+
+### Evidence references
+- `include/cosmosim/gravity/tree_pm_split_kernel.hpp`
+- `include/cosmosim/gravity/tree_pm_coupling.hpp`
+- `src/gravity/tree_pm_coupling.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `docs/tree_pm_coupling.md`
+- `tests/unit/test_tree_pm_split_kernel.cpp`
+- `tests/integration/test_tree_pm_coupling_periodic.cpp`

@@ -29,6 +29,42 @@ void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& seco
   third.assign(size, 0.0);
 }
 
+[[nodiscard]] double minimumDistanceToNodeAabb(
+    double px,
+    double py,
+    double pz,
+    double cx,
+    double cy,
+    double cz,
+    double half_size_comoving,
+    double box_size_comoving) {
+  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_size_comoving));
+  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_size_comoving));
+  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_size_comoving));
+  const double ex = std::max(0.0, dx_abs - half_size_comoving);
+  const double ey = std::max(0.0, dy_abs - half_size_comoving);
+  const double ez = std::max(0.0, dz_abs - half_size_comoving);
+  return std::sqrt(ex * ex + ey * ey + ez * ez);
+}
+
+[[nodiscard]] double maximumDistanceToNodeAabb(
+    double px,
+    double py,
+    double pz,
+    double cx,
+    double cy,
+    double cz,
+    double half_size_comoving,
+    double box_size_comoving) {
+  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_size_comoving));
+  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_size_comoving));
+  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_size_comoving));
+  const double max_x = dx_abs + half_size_comoving;
+  const double max_y = dy_abs + half_size_comoving;
+  const double max_z = dz_abs + half_size_comoving;
+  return std::sqrt(max_x * max_x + max_y * max_y + max_z * max_z);
+}
+
 }  // namespace
 
 void TreePmForceAccumulatorView::reset() const {
@@ -67,10 +103,6 @@ void TreePmCoordinator::solveActiveSet(
     throw std::invalid_argument("TreePM requires position and mass spans with equal extent");
   }
   validateTreePmSplitPolicy(options.split_policy);
-
-  if (diagnostics != nullptr) {
-    *diagnostics = computeTreePmDiagnostics(options.split_policy);
-  }
 
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
@@ -125,6 +157,13 @@ void TreePmCoordinator::solveActiveSet(
       profile != nullptr ? &profile->tree_profile : nullptr);
   const auto tree_stop = std::chrono::steady_clock::now();
 
+  if (diagnostics != nullptr) {
+    *diagnostics = computeTreePmDiagnostics(options.split_policy);
+    diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
+    diagnostics->residual_pair_skips_cutoff = m_last_residual_stats.pair_skips_cutoff;
+    diagnostics->residual_pair_evaluations = m_last_residual_stats.pair_evaluations;
+  }
+
   if (profile != nullptr) {
     profile->tree_short_range_ms += std::chrono::duration<double, std::milli>(tree_stop - tree_start).count();
     profile->coupling_overhead_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -142,11 +181,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   std::uint64_t visited_nodes = 0;
   std::uint64_t accepted_nodes = 0;
   std::uint64_t pp_interactions = 0;
+  std::uint64_t cutoff_pruned_nodes = 0;
+  std::uint64_t cutoff_pair_skips = 0;
 
   const auto traversal_start = std::chrono::steady_clock::now();
   const TreeNodeSoa& nodes = m_tree_solver.nodes();
   const TreeMortonOrdering& ordering = m_tree_solver.ordering();
   const double box_size_comoving = options.pm_options.box_size_mpc_comoving;
+  const double cutoff_radius_comoving = options.split_policy.cutoff_radius_comoving;
+  const double cutoff_radius2_comoving = cutoff_radius_comoving * cutoff_radius_comoving;
   std::vector<std::uint32_t> stack;
   stack.reserve(256);
 
@@ -168,16 +211,40 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       stack.pop_back();
       ++visited_nodes;
 
+      const double half_size = nodes.half_size_comoving[node_index];
+      const double min_node_distance = minimumDistanceToNodeAabb(
+          px,
+          py,
+          pz,
+          nodes.center_x_comoving[node_index],
+          nodes.center_y_comoving[node_index],
+          nodes.center_z_comoving[node_index],
+          half_size,
+          box_size_comoving);
+      if (min_node_distance > cutoff_radius_comoving) {
+        ++cutoff_pruned_nodes;
+        continue;
+      }
+
       const double dx = minimumImageDelta(nodes.com_x_comoving[node_index] - px, box_size_comoving);
       const double dy = minimumImageDelta(nodes.com_y_comoving[node_index] - py, box_size_comoving);
       const double dz = minimumImageDelta(nodes.com_z_comoving[node_index] - pz, box_size_comoving);
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double r = std::sqrt(std::max(r2, 1.0e-30));
 
-      const double half_size = nodes.half_size_comoving[node_index];
       const double l_over_r = (2.0 * half_size) / r;
       const bool is_leaf = nodes.child_count[node_index] == 0;
-      const bool accept = is_leaf || (l_over_r < options.tree_options.opening_theta);
+      const bool geometric_accept = is_leaf || (l_over_r < options.tree_options.opening_theta);
+      const bool node_within_cutoff = is_leaf || (maximumDistanceToNodeAabb(
+          px,
+          py,
+          pz,
+          nodes.center_x_comoving[node_index],
+          nodes.center_y_comoving[node_index],
+          nodes.center_z_comoving[node_index],
+          half_size,
+          box_size_comoving) <= cutoff_radius_comoving);
+      const bool accept = geometric_accept && node_within_cutoff;
 
       if (accept) {
         ++accepted_nodes;
@@ -193,8 +260,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             const double sy = minimumImageDelta(pos_y_comoving[source_index] - py, box_size_comoving);
             const double sz = minimumImageDelta(pos_z_comoving[source_index] - pz, box_size_comoving);
             const double sr2 = sx * sx + sy * sy + sz * sz;
+            if (sr2 > cutoff_radius2_comoving) {
+              ++cutoff_pair_skips;
+              continue;
+            }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
             const double split_factor = treePmGaussianShortRangeForceFactor(sr, options.split_policy.split_scale_comoving);
+            // Contract: short-range residual is the softened tree force multiplied by the
+            // Gaussian real-space residual factor so that tree+PM composes to the unsplit
+            // softened force before explicit r_cut truncation.
             const double softened_factor =
                 softenedInvR3(sr2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
             ax += softened_factor * mass_code[source_index] * sx;
@@ -204,6 +278,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           }
         } else {
           const double split_factor = treePmGaussianShortRangeForceFactor(r, options.split_policy.split_scale_comoving);
+          // Same softened-residual contract as the leaf pair path, applied to accepted nodes.
           const double softened_factor =
               softenedInvR3(r2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
           ax += softened_factor * nodes.mass_code[node_index] * dx;
@@ -235,17 +310,28 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           static_cast<double>(accumulator.active_particle_index.size());
     }
   }
+  m_last_residual_stats.pruned_nodes = cutoff_pruned_nodes;
+  m_last_residual_stats.pair_skips_cutoff = cutoff_pair_skips;
+  m_last_residual_stats.pair_evaluations = pp_interactions;
 }
 
 TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy) {
   validateTreePmSplitPolicy(split_policy);
 
   TreePmDiagnostics diagnostics;
+  diagnostics.mesh_spacing_comoving = split_policy.mesh_spacing_comoving;
+  diagnostics.asmth_cells = split_policy.asmth_cells;
+  diagnostics.rcut_cells = split_policy.rcut_cells;
   diagnostics.split_scale_comoving = split_policy.split_scale_comoving;
+  diagnostics.cutoff_radius_comoving = split_policy.cutoff_radius_comoving;
   diagnostics.short_range_factor_at_split =
       treePmGaussianShortRangeForceFactor(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
   diagnostics.long_range_factor_at_split =
       treePmGaussianLongRangeForceFactor(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
+  diagnostics.short_range_factor_at_cutoff =
+      treePmGaussianShortRangeForceFactor(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
+  diagnostics.long_range_factor_at_cutoff =
+      treePmGaussianLongRangeForceFactor(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
   diagnostics.composition_error_at_split = std::abs(
       diagnostics.short_range_factor_at_split + diagnostics.long_range_factor_at_split - 1.0);
 
