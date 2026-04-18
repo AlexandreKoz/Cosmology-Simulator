@@ -194,9 +194,6 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             const double sz = minimumImageDelta(pos_z_comoving[source_index] - pz, box_size_comoving);
             const double sr2 = sx * sx + sy * sy + sz * sz;
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
-            if (sr > options.split_policy.cutoff_radius_comoving) {
-              continue;
-            }
             const double split_factor = treePmGaussianShortRangeForceFactor(sr, options.split_policy.split_scale_comoving);
             const double softened_factor =
                 softenedInvR3(sr2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
@@ -206,9 +203,6 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             ++pp_interactions;
           }
         } else {
-          if (r > options.split_policy.cutoff_radius_comoving) {
-            continue;
-          }
           const double split_factor = treePmGaussianShortRangeForceFactor(r, options.split_policy.split_scale_comoving);
           const double softened_factor =
               softenedInvR3(r2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
