@@ -46,9 +46,12 @@ ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
 - **Periodic PM uniform-density cancellation**
   - Method: exact lattice plus deterministic jittered-lattice (glass-like proxy) particle placement, periodic Poisson solve with mean subtraction.
   - Claim: near-zero force under uniform density.
-- **Periodic TreePM consistency / force error checks**
+- **Periodic TreePM consistency check (integration test)**
+  - Method: minimum-image periodic direct reference.
+  - Explicit limitation: not Ewald exact.
+- **Periodic TreePM force-error mapping (benchmark artifact)**
   - Method: fine spectral PM plus exact pairwise short-range residual periodic proxy reference.
-  - Explicit limitation: this is not Ewald exact and not minimum-image direct-sum.
+  - Explicit limitation: not Ewald exact.
 - **Split-kernel matching checks**
   - Method: Gaussian split SR/LR factor complementarity and TreePM PM-only/tree-only/split comparisons.
   - Claim: split coupling semantics are wired and monotone in expected direction.
