@@ -423,3 +423,25 @@ Interpretation:
 
 - The repaired invariants are command-backed on CPU and HDF5 feature paths.
 - PM/FFTW path remains an environment blocker here, not a demonstrated code regression in this repair pass.
+
+## 14) 2026-04-19 Phase 2 PM slab ownership/storage milestone
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_unit_pm_solver
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|unit_pm_solver"
+```
+
+Observed:
+
+- Added explicit PM slab ownership typing (`parallel::PmSlabLayout`, `PmSlabRange`) with deterministic uneven partitioning, owner-rank lookup, and validated global/local index conversions.
+- `gravity::PmGridStorage` now accepts explicit slab layout and allocates only local slab storage (`local_nx * Ny * Nz`), while default construction remains the one-rank full-domain slab.
+- PM solver entry points now fail fast on partial slabs, preventing pseudo-distributed use until distributed FFT and remote deposition/gather are implemented.
+- Unit tests now cover uneven slab partitioning, ownership queries, index round-trips, one-rank slab equivalence, and explicit rejection of partial-slab use on the single-rank solver path.
+
+Interpretation:
+
+- This is an infrastructure-only Phase 2 milestone: ownership/storage contracts are now auditable without claiming distributed PM algorithm completion.
+- Reproducibility posture is preserved for one-rank runs because default PM storage maps to the same full-domain indexing contract.

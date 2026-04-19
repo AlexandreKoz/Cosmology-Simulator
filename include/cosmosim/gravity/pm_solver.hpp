@@ -11,6 +11,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/execution_policy.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace cosmosim::gravity {
 
@@ -71,8 +72,12 @@ class PmProfiler {
 class PmGridStorage {
  public:
   explicit PmGridStorage(PmGridShape shape);
+  PmGridStorage(PmGridShape shape, parallel::PmSlabLayout layout);
 
   [[nodiscard]] const PmGridShape& shape() const;
+  [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const;
+  [[nodiscard]] bool ownsFullDomain() const noexcept;
+  [[nodiscard]] std::size_t localCellCount() const noexcept;
 
   [[nodiscard]] std::span<double> density();
   [[nodiscard]] std::span<const double> density() const;
@@ -94,6 +99,7 @@ class PmGridStorage {
 
  private:
   PmGridShape m_shape;
+  parallel::PmSlabLayout m_layout;
   std::vector<double> m_density;
   std::vector<double> m_potential;
   std::vector<double> m_force_x;

@@ -93,6 +93,28 @@ Let `u = x / Δ` be the particle coordinate in mesh-cell units (per axis).
 
 ## Memory and scratch behavior
 
+### PM slab ownership/storage contract (Phase 2 milestone)
+
+PM mesh ownership is now explicit through a centralized slab layout contract:
+
+- global shape is `(Nx, Ny, Nz)`,
+- decomposition is by contiguous half-open x-slabs `[x_begin, x_end)`,
+- each global real-space cell `(ix, iy, iz)` is owned by exactly one rank: the slab owner of `ix`.
+
+Storage is represented by `parallel::PmSlabLayout` and consumed by
+`gravity::PmGridStorage`:
+
+- `PmGridStorage(shape)` is the single-rank degenerate case (`world_size=1`, owned slab `[0, Nx)`),
+- `PmGridStorage(shape, layout)` allocates only `layout.local_nx * Ny * Nz` cells,
+- global/local mapping is contractually centralized in:
+  - `local_x = global_x - owned_x.begin` (valid iff `global_x ∈ [owned_x.begin, owned_x.end)`),
+  - `global_x = owned_x.begin + local_x` (valid iff `local_x < owned_x.extent`),
+  - local linear index: `(local_x * Ny + iy) * Nz + iz`.
+
+This patch does **not** implement distributed FFT or remote PM deposition/gather. Therefore,
+`PmSolver::{assignDensity,solvePoissonPeriodic,interpolateForces,interpolatePotential}` still require
+full-domain slab ownership on the calling rank and fail fast for partial slabs to avoid pseudo-distributed behavior.
+
 The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
 
 - the copied potential spectrum used for mesh potential reconstruction,

@@ -356,6 +356,68 @@ void testGhostBufferPayloadShapeValidation() {
   assert(destination.entity_id.size() == 1);
 }
 
+void testPmSlabUnevenPartitionOwnership() {
+  const std::size_t nx = 10;
+  const int world_size = 3;
+  const auto r0 = cosmosim::parallel::pmOwnedXRangeForRank(nx, world_size, 0);
+  const auto r1 = cosmosim::parallel::pmOwnedXRangeForRank(nx, world_size, 1);
+  const auto r2 = cosmosim::parallel::pmOwnedXRangeForRank(nx, world_size, 2);
+
+  assert(r0.begin_x == 0 && r0.end_x == 4);
+  assert(r1.begin_x == 4 && r1.end_x == 7);
+  assert(r2.begin_x == 7 && r2.end_x == 10);
+
+  for (std::size_t x = 0; x < nx; ++x) {
+    const int owner = cosmosim::parallel::pmOwnerRankForGlobalX(nx, world_size, x);
+    if (x < 4) {
+      assert(owner == 0);
+    } else if (x < 7) {
+      assert(owner == 1);
+    } else {
+      assert(owner == 2);
+    }
+  }
+}
+
+void testPmSlabLayoutRoundTripAndCellOwnership() {
+  const auto layout = cosmosim::parallel::makePmSlabLayout(
+      /*global_nx=*/10, /*global_ny=*/6, /*global_nz=*/4, /*world_size=*/3, /*world_rank=*/1);
+  assert(layout.isValid());
+  assert(layout.local_nx() == 3);
+  assert(layout.localCellCount() == 3 * 6 * 4);
+  assert(!layout.ownsFullDomain());
+  assert(layout.owned_x.begin_x == 4);
+  assert(layout.owned_x.end_x == 7);
+
+  for (std::size_t global_x = layout.owned_x.begin_x; global_x < layout.owned_x.end_x; ++global_x) {
+    const std::size_t local_x = layout.localXFromGlobal(global_x);
+    assert(layout.globalXFromLocal(local_x) == global_x);
+  }
+
+  const std::size_t idx = layout.localLinearIndex(/*global_x=*/5, /*global_y=*/2, /*global_z=*/3);
+  assert(idx == ((1 * 6 + 2) * 4 + 3));
+  assert(layout.ownsGlobalCell(/*global_x=*/6, /*global_y=*/5, /*global_z=*/3));
+  assert(!layout.ownsGlobalCell(/*global_x=*/7, /*global_y=*/1, /*global_z=*/1));
+
+  bool threw = false;
+  try {
+    (void)layout.localXFromGlobal(8);
+  } catch (const std::out_of_range&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::parallel::pmOwnerRankForGlobalCell(
+        10, 6, 4, 3, /*global_x=*/9, /*global_y=*/5, /*global_z=*/3);
+  } catch (...) {
+    threw = true;
+  }
+  assert(!threw);
+  assert(cosmosim::parallel::pmOwnerRankForGlobalCell(10, 6, 4, 3, 9, 5, 3) == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -370,5 +432,7 @@ int main() {
   testReductionAgreementPolicyModes();
   testRankConfigConsensus();
   testGhostBufferPayloadShapeValidation();
+  testPmSlabUnevenPartitionOwnership();
+  testPmSlabLayoutRoundTripAndCellOwnership();
   return 0;
 }
