@@ -28,6 +28,15 @@ This supports:
 - sidecar consistency checks,
 - explicit `packSpeciesTransferPacket(...)` staging for MPI/device transfer paths.
 
+For distributed ownership migration boundaries:
+
+- `packParticleMigrationRecords(...)` exports all required authoritative hot lanes plus metadata sidecars (`particle_id`, `sfc_key`, species, flags, ownership) and species-specific sidecar payloads.
+- `commitParticleMigration(...)` is the only state mutation point for ownership transfer:
+  - removes outbound-owned rows and stale ghost/import rows,
+  - appends inbound authoritative rows owned by `world_rank`,
+  - rebuilds species sidecar indices and species counts.
+- This keeps sidecar ownership auditable and prevents ambiguous partial ownership updates.
+
 ## Transient ownership (`TransientStepWorkspace`)
 
 `TransientStepWorkspace` owns temporary compact arrays for active solver subsets and a

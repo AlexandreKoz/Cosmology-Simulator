@@ -169,5 +169,59 @@ int main() {
   state.star_particles.particle_index[1] = 2;
   assert(!state.validateOwnershipInvariants());
 
+  state.star_particles.particle_index[1] = 3;
+  assert(state.validateOwnershipInvariants());
+
+  const std::vector<std::uint32_t> outbound_indices = {3};
+  auto outbound_records = state.packParticleMigrationRecords(outbound_indices);
+  assert(outbound_records.size() == 1);
+  assert(outbound_records[0].particle_id == 1003);
+  outbound_records[0].owning_rank = 0;
+
+  cosmosim::core::ParticleMigrationRecord inbound_record;
+  inbound_record.particle_id = 9090;
+  inbound_record.sfc_key = 777;
+  inbound_record.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
+  inbound_record.particle_flags = 42;
+  inbound_record.owning_rank = 0;
+  inbound_record.position_x_comoving = 11.0;
+  inbound_record.position_y_comoving = 12.0;
+  inbound_record.position_z_comoving = 13.0;
+  inbound_record.velocity_x_peculiar = 1.0;
+  inbound_record.velocity_y_peculiar = 2.0;
+  inbound_record.velocity_z_peculiar = 3.0;
+  inbound_record.mass_code = 9.5;
+  inbound_record.time_bin = 2;
+  inbound_record.has_star_fields = true;
+  inbound_record.star_fields.formation_scale_factor = 0.75;
+  inbound_record.star_fields.birth_mass_code = 5.0;
+  inbound_record.star_fields.metallicity_mass_fraction = 0.04;
+  inbound_record.star_fields.stellar_age_years_last = 1.0e7;
+
+  cosmosim::core::ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = outbound_indices;
+  commit.inbound_records = {inbound_record};
+  commit.stale_local_ghost_indices = {1};
+  state.commitParticleMigration(commit);
+
+  assert(state.validateOwnershipInvariants());
+  assert(state.particles.size() == 4);
+  assert(state.particle_sidecar.owning_rank[3] == 0);
+  assert(state.particle_sidecar.particle_id[3] == 9090);
+  assert(state.star_particles.size() == 3);
+  assert(state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kStar)] == 3);
+
+  bool found_migrated_star = false;
+  for (std::size_t row = 0; row < state.star_particles.size(); ++row) {
+    const auto particle_index = state.star_particles.particle_index[row];
+    if (state.particle_sidecar.particle_id[particle_index] == 9090) {
+      found_migrated_star = true;
+      assert(state.star_particles.formation_scale_factor[row] == 0.75);
+      assert(state.star_particles.birth_mass_code[row] == 5.0);
+    }
+  }
+  assert(found_migrated_star);
+
   return 0;
 }

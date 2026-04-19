@@ -219,6 +219,69 @@ struct ParticleTransferPacket {
   AlignedVector<std::uint32_t> owning_rank;
 };
 
+struct StarParticleMigrationFields {
+  double formation_scale_factor = 0.0;
+  double birth_mass_code = 0.0;
+  double metallicity_mass_fraction = 0.0;
+  double stellar_age_years_last = 0.0;
+  double stellar_returned_mass_cumulative_code = 0.0;
+  double stellar_returned_metals_cumulative_code = 0.0;
+  double stellar_feedback_energy_cumulative_erg = 0.0;
+  std::array<double, 3> stellar_returned_mass_channel_cumulative_code{};
+  std::array<double, 3> stellar_returned_metals_channel_cumulative_code{};
+  std::array<double, 3> stellar_feedback_energy_channel_cumulative_erg{};
+};
+
+struct BlackHoleParticleMigrationFields {
+  std::uint32_t host_cell_index = 0;
+  double subgrid_mass_code = 0.0;
+  double accretion_rate_code = 0.0;
+  double feedback_energy_code = 0.0;
+  double eddington_ratio = 0.0;
+  double cumulative_accreted_mass_code = 0.0;
+  double cumulative_feedback_energy_code = 0.0;
+  double duty_cycle_active_time_code = 0.0;
+  double duty_cycle_total_time_code = 0.0;
+};
+
+struct TracerParticleMigrationFields {
+  std::uint64_t parent_particle_id = 0;
+  std::uint64_t injection_step = 0;
+  std::uint32_t host_cell_index = 0;
+  double mass_fraction_of_host = 0.0;
+  double last_host_mass_code = 0.0;
+  double cumulative_exchanged_mass_code = 0.0;
+};
+
+struct ParticleMigrationRecord {
+  std::uint64_t particle_id = 0;
+  std::uint64_t sfc_key = 0;
+  std::uint32_t species_tag = 0;
+  std::uint32_t particle_flags = 0;
+  std::uint32_t owning_rank = 0;
+  double position_x_comoving = 0.0;
+  double position_y_comoving = 0.0;
+  double position_z_comoving = 0.0;
+  double velocity_x_peculiar = 0.0;
+  double velocity_y_peculiar = 0.0;
+  double velocity_z_peculiar = 0.0;
+  double mass_code = 0.0;
+  std::uint8_t time_bin = 0;
+  bool has_star_fields = false;
+  StarParticleMigrationFields star_fields{};
+  bool has_black_hole_fields = false;
+  BlackHoleParticleMigrationFields black_hole_fields{};
+  bool has_tracer_fields = false;
+  TracerParticleMigrationFields tracer_fields{};
+};
+
+struct ParticleMigrationCommit {
+  int world_rank = 0;
+  std::vector<std::uint32_t> outbound_local_indices;
+  std::vector<ParticleMigrationRecord> inbound_records;
+  std::vector<std::uint32_t> stale_local_ghost_indices;
+};
+
 class SimulationState {
  public:
   // Single ownership root for persistent run state.
@@ -244,6 +307,9 @@ class SimulationState {
   void rebuildSpeciesIndex();
 
   [[nodiscard]] ParticleTransferPacket packSpeciesTransferPacket(ParticleSpecies species_tag) const;
+  [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
+      std::span<const std::uint32_t> local_indices) const;
+  void commitParticleMigration(const ParticleMigrationCommit& commit);
 };
 
 struct ActiveIndexSet {

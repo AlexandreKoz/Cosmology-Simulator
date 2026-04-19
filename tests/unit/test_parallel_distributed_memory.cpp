@@ -47,6 +47,7 @@ void testMortonDecompositionInvariants() {
 
   cosmosim::parallel::DecompositionConfig config;
   config.world_size = 3;
+  config.owned_particle_weight = 1.0;
   config.work_weight = 1.0;
   config.memory_weight = 1.0 / 1024.0;
 
@@ -72,6 +73,55 @@ void testMortonDecompositionInvariants() {
   assert(plan.metrics.weighted_imbalance_ratio >= 1.0);
   assert(plan.metrics.memory_imbalance_ratio >= 1.0);
   assert(plan.metrics.total_memory_bytes > 0);
+  std::uint64_t counted_particles = 0;
+  for (const auto value : plan.metrics.owned_particles_by_rank) {
+    counted_particles += value;
+  }
+  assert(counted_particles == 8);
+}
+
+void testGravityAwareDecompositionTracksInteractionCost() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(8);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    items[i].entity_id = static_cast<std::uint64_t>(i + 1);
+    items[i].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].x_comov = static_cast<double>(i) / 8.0;
+    items[i].y_comov = 0.0;
+    items[i].z_comov = 0.0;
+    items[i].memory_bytes = 256;
+    items[i].active_target_count_recent = (i < 4) ? 1 : 40;
+    items[i].remote_tree_interactions_recent = (i < 4) ? 1 : 50;
+  }
+
+  cosmosim::parallel::DecompositionConfig baseline_config;
+  baseline_config.world_size = 2;
+  baseline_config.owned_particle_weight = 1.0;
+  const auto baseline = cosmosim::parallel::buildMortonSfcDecomposition(items, baseline_config);
+
+  cosmosim::parallel::DecompositionConfig gravity_config;
+  gravity_config.world_size = 2;
+  gravity_config.owned_particle_weight = 1.0;
+  gravity_config.active_target_weight = 2.0;
+  gravity_config.remote_tree_interaction_weight = 3.0;
+  gravity_config.memory_weight = 1.0 / 4096.0;
+
+  const auto plan = cosmosim::parallel::buildMortonSfcDecomposition(items, gravity_config);
+  assert(plan.metrics.active_targets_by_rank.size() == 2);
+  assert(plan.metrics.remote_tree_interactions_by_rank.size() == 2);
+  assert(plan.metrics.active_targets_by_rank[0] != plan.metrics.active_targets_by_rank[1]);
+  assert(plan.metrics.remote_tree_interactions_by_rank[0] !=
+         plan.metrics.remote_tree_interactions_by_rank[1]);
+  assert(plan.owning_rank_by_item != baseline.owning_rank_by_item);
+  std::uint64_t total_active_targets = 0;
+  std::uint64_t total_remote_interactions = 0;
+  for (const auto value : plan.metrics.active_targets_by_rank) {
+    total_active_targets += value;
+  }
+  for (const auto value : plan.metrics.remote_tree_interactions_by_rank) {
+    total_remote_interactions += value;
+  }
+  assert(total_active_targets == (4U * 1U + 4U * 40U));
+  assert(total_remote_interactions == (4U * 1U + 4U * 50U));
 }
 
 void testRestartStateRoundTrip() {
@@ -478,6 +528,7 @@ int main() {
   testGhostPackUnpackRoundTrip();
   testMortonDecompositionInvariants();
   testRestartStateRoundTrip();
+  testGravityAwareDecompositionTracksInteractionCost();
   testExplicitOwnedVsGhostContracts();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testGhostTransferInvariantFailures();
