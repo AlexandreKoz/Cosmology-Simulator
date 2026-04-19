@@ -291,6 +291,99 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
 #endif
 }
 
+void testExplicitFailureContracts(int world_size, int world_rank) {
+  {
+    bool threw = false;
+    try {
+      const cosmosim::parallel::MpiContext runtime(
+          /*is_enabled=*/world_size > 1,
+          world_size,
+          world_rank);
+      (void)cosmosim::parallel::buildDistributedExecutionTopology(
+          16,
+          16,
+          16,
+          runtime,
+          world_size + 1,
+          /*configured_gpu_devices=*/0,
+          /*cuda_runtime_available=*/false,
+          /*visible_device_count=*/0);
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    requireOrThrow(threw, "rank-count/config mismatch must throw");
+  }
+
+  {
+    bool threw = false;
+    try {
+      const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+          "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\n\n"
+          "[numerics]\ntreepm_pm_decomposition_mode = pencil\n",
+          "validation_phase2_unsupported_decomposition");
+      (void)frozen;
+    } catch (const cosmosim::core::ConfigError&) {
+      threw = true;
+    }
+    requireOrThrow(threw, "unsupported decomposition mode must fail config parsing");
+  }
+
+#if COSMOSIM_ENABLE_MPI
+  if (world_size > 1) {
+    bool threw = false;
+    try {
+      const cosmosim::gravity::PmGridShape shape{16, 12, 10};
+      const int mismatched_rank = (world_rank + 1) % world_size;
+      const auto mismatched_layout = cosmosim::parallel::makePmSlabLayout(
+          shape.nx, shape.ny, shape.nz, world_size, mismatched_rank);
+      cosmosim::gravity::PmGridStorage grid(shape, mismatched_layout);
+      cosmosim::gravity::PmSolver solver(shape);
+      cosmosim::gravity::PmSolveOptions options;
+      options.box_size_mpc_comoving = 1.0;
+      options.scale_factor = 1.0;
+      options.gravitational_constant_code = 1.0;
+      std::vector<double> density(grid.cellCount(), 0.0);
+      (void)solver.solvePoissonPeriodic(grid, density, options, nullptr);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    requireOrThrow(threw, "communicator/layout mismatch must throw in PM solve");
+  }
+#endif
+
+  {
+    bool threw = false;
+    try {
+      (void)cosmosim::parallel::DistributedRestartState::deserialize(
+          "schema_version=2\ndecomposition_epoch=1\nworld_size=2\npm_grid_nx=8\npm_grid_ny=8\npm_grid_nz=8\n"
+          "pm_decomposition_mode=slab\ngravity_kick_opportunity=0\npm_update_cadence_steps=1\n"
+          "long_range_field_version=0\nlast_long_range_refresh_opportunity=0\n"
+          "long_range_field_built_step_index=0\nlong_range_field_built_scale_factor=1\n"
+          "long_range_restart_policy=deterministic_rebuild\nitem_count=1\nrank[0]=0\n"
+          "pm_slab_rank_count=2\npm_slab_begin_x[0]=0\npm_slab_end_x[0]=4\n");
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    requireOrThrow(threw, "missing distributed restart metadata must throw");
+  }
+
+  {
+    bool threw = false;
+    try {
+      (void)cosmosim::parallel::DistributedRestartState::deserialize(
+          "schema_version=2\ndecomposition_epoch=1\nworld_size=2\npm_grid_nx=8\npm_grid_ny=8\npm_grid_nz=8\n"
+          "pm_decomposition_mode=slab\ngravity_kick_opportunity=2\npm_update_cadence_steps=2\n"
+          "long_range_field_version=0\nlast_long_range_refresh_opportunity=1\n"
+          "long_range_field_built_step_index=0\nlong_range_field_built_scale_factor=1\n"
+          "long_range_restart_policy=deterministic_rebuild\nitem_count=1\nrank[0]=0\n"
+          "pm_slab_rank_count=2\npm_slab_begin_x[0]=0\npm_slab_end_x[0]=4\npm_slab_begin_x[1]=4\npm_slab_end_x[1]=8\n");
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    requireOrThrow(threw, "inconsistent cadence restart state must throw");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -309,6 +402,7 @@ int main() {
   runTreePmCase(world_size, world_rank, /*communication_stress=*/false);
   runTreePmCase(world_size, world_rank, /*communication_stress=*/true);
   testRestartRoundtripContinuationContract(world_size, world_rank);
+  testExplicitFailureContracts(world_size, world_rank);
 
 #if COSMOSIM_ENABLE_MPI
   MPI_Finalize();

@@ -1,5 +1,35 @@
 # Architecture decision log
 
+## 2026-04-19 — ADR-FEATURE-GRAVITY-011: Phase 2 distributed TreePM closeout hard-gate and failure-contract freeze
+
+### Status
+Accepted (feature-branch distributed TreePM closeout)
+
+### Context
+Phase 2 distributed TreePM implementation/testing was present across PM, tree exchange, workflow cadence, migration, and restart paths, but closeout lacked one command-backed hard-gate document and explicit negative-contract checks for common distributed failure modes.
+
+### Decision
+- Freeze a final closeout artifact at `docs/treepm_phase2_closeout.md` with explicit hard-gate commands.
+- Extend distributed restart compatibility reporting with an explicit cadence validity lane (`pm_cadence_steps_match`).
+- Add/expand test evidence for explicit failure handling:
+  - rank-count/config mismatch,
+  - unsupported PM decomposition mode,
+  - communicator/layout mismatch,
+  - missing distributed restart metadata,
+  - inconsistent cadence metadata.
+
+### Consequences
+- Positive: documentation, validation, and runtime failure reporting now tell one coherent Phase 2 closeout story.
+- Positive: distributed failure modes now fail loudly with typed/reportable reasons instead of implicit drift.
+- Tradeoff: Phase 2 remains intentionally constrained to slab decomposition and deterministic long-range restart rebuild policy.
+
+### Evidence references
+- `docs/treepm_phase2_closeout.md`
+- `include/cosmosim/parallel/distributed_memory.hpp`
+- `src/parallel/distributed_memory.cpp`
+- `tests/unit/test_parallel_distributed_memory.cpp`
+- `tests/validation/test_validation_phase2_mpi_gravity.cpp`
+
 ## 2026-04-19 — ADR-FEATURE-GRAVITY-010: Freeze Phase 2 distributed TreePM contract and evidence floor
 
 ### Status

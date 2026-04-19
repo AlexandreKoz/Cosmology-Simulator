@@ -147,3 +147,7 @@ Outputs (artifact files):
 - `validation/artifacts/pm_only_scaling_np2.csv`
 - `validation/artifacts/tree_only_scaling_np1.csv`
 - `validation/artifacts/tree_only_scaling_np2.csv`
+
+For final integration hard-gates and exact command bundle, see:
+
+- `docs/treepm_phase2_closeout.md`

@@ -4,6 +4,26 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Phase 2 distributed TreePM closeout failure-contract hardening (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory"
+```
+
+Observed:
+
+- Added explicit restart cadence inconsistency validation (`last_long_range_refresh_opportunity` and `long_range_field_version` coherence checks) during distributed restart-state decode.
+- Added explicit restart compatibility-report lane `pm_cadence_steps_match` for invalid cadence metadata.
+- Added/extended Phase 2 negative-contract coverage for rank-count mismatch, unsupported decomposition mode, communicator/layout mismatch, missing distributed restart metadata, and inconsistent cadence metadata.
+- Added final hard-gate closeout document `docs/treepm_phase2_closeout.md`.
+
+Interpretation:
+
+- This pass does not change force-split numerics; it closes coherence/failure-reporting gaps for distributed topology + restart continuity contracts.
+
 ## 0) Phase 2 distributed TreePM validation/gate suite wiring (2026-04-19 UTC)
 
 Commands:

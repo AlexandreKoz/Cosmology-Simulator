@@ -223,6 +223,22 @@ void testRestartStateRejectsMissingOrDuplicateOwnershipEntries() {
     }
     assert(threw);
   }
+
+  {
+    bool threw = false;
+    try {
+      (void)cosmosim::parallel::DistributedRestartState::deserialize(
+          "schema_version=2\ndecomposition_epoch=7\nworld_size=2\npm_grid_nx=8\npm_grid_ny=8\npm_grid_nz=8\n"
+          "pm_decomposition_mode=slab\ngravity_kick_opportunity=3\npm_update_cadence_steps=2\n"
+          "long_range_field_version=0\nlast_long_range_refresh_opportunity=2\n"
+          "long_range_field_built_step_index=0\nlong_range_field_built_scale_factor=1\n"
+          "long_range_restart_policy=deterministic_rebuild\nitem_count=2\nrank[0]=0\nrank[1]=1\n"
+          "pm_slab_rank_count=2\npm_slab_begin_x[0]=0\npm_slab_end_x[0]=4\npm_slab_begin_x[1]=4\npm_slab_end_x[1]=8\n");
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
 }
 
 void testDistributedRestartCompatibilityReporting() {
@@ -249,6 +265,12 @@ void testDistributedRestartCompatibilityReporting() {
   assert(!bad.compatible());
   assert(!bad.pm_grid_shape_match);
   assert(!bad.mismatch_messages.empty());
+
+  restart.pm_update_cadence_steps = 0;
+  runtime.pm_slab = cosmosim::parallel::makePmSlabLayout(8, 8, 8, 2, 1);
+  const auto cadence_bad = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
+  assert(!cadence_bad.compatible());
+  assert(!cadence_bad.pm_cadence_steps_match);
 }
 
 void testGhostTransferInvariantFailures() {
