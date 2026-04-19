@@ -45,7 +45,7 @@ jobs:
           - configure_preset: pm-hdf5-fftw-debug
             build_preset: build-pm-hdf5-fftw-debug
             test_preset: test-pm-hdf5-fftw-debug
-            test_regex: "unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression"
+            test_regex: "unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression|integration_reference_workflow"
             apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev"
             run_bench: "1"
     steps:
@@ -69,6 +69,13 @@ jobs:
             "ci_artifacts/${{ matrix.configure_preset }}/cosmosim_build_metadata-${{ matrix.configure_preset }}.json" \
             "validation/reference/ci_build_metadata_expectations_v1.json" \
             "${{ matrix.configure_preset }}"
+      - name: Generate TreePM force-error map artifact
+        if: matrix.configure_preset == 'pm-hdf5-fftw-debug'
+        run: |
+          cmake --build --preset build-pm-hdf5-fftw-debug --target generate_tree_pm_force_error_map
+          mkdir -p ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts
+          cp validation/artifacts/tree_pm_force_error_map.csv \
+            ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/tree_pm_force_error_map.csv
       - name: Upload preset artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -37,7 +37,7 @@ Implemented now:
   - two-body symmetry check;
   - small-`N` open-boundary tree-vs-direct summation check;
   - PM single-mode (analytic plane-wave) response;
-  - PM uniform-density cancellation on exact lattice plus a deterministic glass-like jittered-lattice proxy that is required to remain substantially quieter than a deterministic Poisson-like reference;
+  - PM uniform-density cancellation on both exact lattice and deterministic parity-balanced glass-like proxy placements;
   - PM-only vs tree-only vs split TreePM consistency check;
   - split-kernel composition identity check;
   - opening-angle convergence check;

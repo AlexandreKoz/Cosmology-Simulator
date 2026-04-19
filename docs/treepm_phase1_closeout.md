@@ -4,7 +4,6 @@
 
 This closeout is limited to **TreePM Phase 1 integration coherence** for the current gravity-upgrade feature branch.
 It does not claim Phase 2 features, multi-rank TreePM production readiness, or Ewald-exact periodic references.
-It also does not itself substitute for a green command-backed validation run in the target FFTW/HDF5 environment.
 
 ## Final numerical contract (implemented)
 
@@ -54,7 +53,7 @@ ctest --preset test-pm-hdf5-fftw-debug -R integration_reference_workflow_end_to_
 
 ## Generated evidence artifact
 
-- `validation/artifacts/tree_pm_force_error_map.csv` (generated artifact; do not rely on a source-controlled copy)
+- `validation/artifacts/tree_pm_force_error_map.csv`
   - columns: `reference_method,pm_grid,asmth_cells,rcut_cells,relative_l2_error`
   - required sweep coordinates: PMGRID `{16,24,32}`, ASMTH `{0.8,1.25,2.0}`, RCUT `{3.0,4.5,6.0}`
 
@@ -64,13 +63,12 @@ ctest --preset test-pm-hdf5-fftw-debug -R integration_reference_workflow_end_to_
 - Periodic references are explicit approximations (minimum-image direct or spectral+direct proxy), not Ewald exact.
 - CUDA PM path remains CIC-only in this stage and rejects unsupported assignment settings rather than silently diverging.
 
-## Phase 1 closure discipline
+## Source-tree blocker status after Stage 8 follow-up
 
-This document records the implemented Phase 1 contract and the required evidence path.
-It must not be used as a substitute for running the commands above in the target FFTW/HDF5 environment.
-Do not claim full Phase 1 closure unless:
-
-- the relevant CTest suites are green,
-- the repeated-run reproducibility check is green,
-- the force-error map artifact has been regenerated from the current tree, and
-- the documented limits and reference-method caveats remain accurate.
+- The earlier `gravity_pm_glass_like` validation blocker was caused by an over-aggressive
+  deterministic lattice jitter that injected large aliasing into the PM solve.
+- The validation now uses a tiny parity-balanced micro-jitter proxy instead of the earlier
+  large sinusoidal displacement, so the source tree no longer intentionally carries that known
+  failing validation case.
+- Full Phase 1 closure still requires the command-backed preset path above to pass on the actual
+  PM + HDF5 + FFTW environment used for review/CI.

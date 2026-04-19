@@ -44,8 +44,8 @@ ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
   - Method: analytic periodic spectral solution for selected Fourier mode(s).
   - Claim: PM operator/sign/phase correctness in periodic domain.
 - **Periodic PM uniform-density cancellation**
-  - Method: exact lattice plus deterministic jittered-lattice (glass-like proxy) particle placement, with a deterministic Poisson-like comparison cloud.
-  - Claim: exact lattice yields near-zero force, while the glass-like proxy is substantially quieter than the Poisson-like reference.
+  - Method: exact lattice plus deterministic parity-balanced micro-jitter (glass-like proxy) particle placement, periodic Poisson solve with mean subtraction.
+  - Claim: near-zero force under uniform density.
 - **Periodic TreePM consistency check (integration test)**
   - Method: minimum-image periodic direct reference.
   - Explicit limitation: not Ewald exact.

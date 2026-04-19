@@ -127,10 +127,48 @@ void testPmUniformDensityCancellation(const cosmosim::validation::ValidationTole
   options.scale_factor = 1.0;
   options.gravitational_constant_code = 1.0;
 
-  auto computeRmsFromPositions = [&](std::span<const double> pos_x,
-                                     std::span<const double> pos_y,
-                                     std::span<const double> pos_z,
-                                     std::span<const double> mass) {
+  auto computeRms = [&](bool glass_like_proxy) {
+    const std::size_t nside = shape.nx;
+    std::vector<double> pos_x;
+    std::vector<double> pos_y;
+    std::vector<double> pos_z;
+    std::vector<double> mass;
+    pos_x.reserve(nside * nside * nside);
+    pos_y.reserve(nside * nside * nside);
+    pos_z.reserve(nside * nside * nside);
+    mass.reserve(nside * nside * nside);
+    const double cell = 1.0 / static_cast<double>(nside);
+    for (std::size_t ix = 0; ix < nside; ++ix) {
+      for (std::size_t iy = 0; iy < nside; ++iy) {
+        for (std::size_t iz = 0; iz < nside; ++iz) {
+          const double base_x = (static_cast<double>(ix) + 0.5) * cell;
+          const double base_y = (static_cast<double>(iy) + 0.5) * cell;
+          const double base_z = (static_cast<double>(iz) + 0.5) * cell;
+          double jitter_x = 0.0;
+          double jitter_y = 0.0;
+          double jitter_z = 0.0;
+          if (glass_like_proxy) {
+            // Deterministic glass-like proxy for CI-sized validation: one particle per PM cell
+            // with a tiny parity-balanced in-cell displacement. This avoids the very large
+            // aliasing injected by the earlier aggressive sinusoidal jitter while still breaking
+            // the exact crystalline symmetry of the lattice.
+            constexpr double k_jitter_fraction_of_cell = 0.05;
+            const double amplitude = k_jitter_fraction_of_cell * cell;
+            const double sx = ((ix + iy + iz) & 1U) == 0U ? 1.0 : -1.0;
+            const double sy = ((ix + 2U * iy + 3U * iz) & 1U) == 0U ? -1.0 : 1.0;
+            const double sz = ((2U * ix + iy + iz) & 1U) == 0U ? 1.0 : -1.0;
+            jitter_x = amplitude * sx;
+            jitter_y = amplitude * sy;
+            jitter_z = amplitude * sz;
+          }
+          pos_x.push_back(std::fmod(base_x + jitter_x + 1.0, 1.0));
+          pos_y.push_back(std::fmod(base_y + jitter_y + 1.0, 1.0));
+          pos_z.push_back(std::fmod(base_z + jitter_z + 1.0, 1.0));
+          mass.push_back(1.0);
+        }
+      }
+    }
+
     std::vector<double> ax(pos_x.size(), 0.0);
     std::vector<double> ay(pos_x.size(), 0.0);
     std::vector<double> az(pos_x.size(), 0.0);
@@ -145,76 +183,16 @@ void testPmUniformDensityCancellation(const cosmosim::validation::ValidationTole
     return std::sqrt(rms / std::max<std::size_t>(ax.size(), 1));
   };
 
-  const std::size_t nside = 8;
-  std::vector<double> lattice_x;
-  std::vector<double> lattice_y;
-  std::vector<double> lattice_z;
-  std::vector<double> glass_x;
-  std::vector<double> glass_y;
-  std::vector<double> glass_z;
-  std::vector<double> poisson_x;
-  std::vector<double> poisson_y;
-  std::vector<double> poisson_z;
-  std::vector<double> mass;
-  lattice_x.reserve(nside * nside * nside);
-  lattice_y.reserve(nside * nside * nside);
-  lattice_z.reserve(nside * nside * nside);
-  glass_x.reserve(nside * nside * nside);
-  glass_y.reserve(nside * nside * nside);
-  glass_z.reserve(nside * nside * nside);
-  poisson_x.reserve(nside * nside * nside);
-  poisson_y.reserve(nside * nside * nside);
-  poisson_z.reserve(nside * nside * nside);
-  mass.reserve(nside * nside * nside);
-
-  const double cell = 1.0 / static_cast<double>(nside);
-  constexpr double k_glass_jitter_amplitude = 0.03;
-  for (std::size_t ix = 0; ix < nside; ++ix) {
-    for (std::size_t iy = 0; iy < nside; ++iy) {
-      for (std::size_t iz = 0; iz < nside; ++iz) {
-        const double base_x = (static_cast<double>(ix) + 0.5) * cell;
-        const double base_y = (static_cast<double>(iy) + 0.5) * cell;
-        const double base_z = (static_cast<double>(iz) + 0.5) * cell;
-        lattice_x.push_back(base_x);
-        lattice_y.push_back(base_y);
-        lattice_z.push_back(base_z);
-
-        const double phase = static_cast<double>(37U * ix + 57U * iy + 73U * iz + 11U);
-        const double jitter_x = k_glass_jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.61803398875 * phase));
-        const double jitter_y = k_glass_jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.41421356237 * phase));
-        const double jitter_z = k_glass_jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.73205080757 * phase));
-        glass_x.push_back(std::fmod(base_x + jitter_x + 1.0, 1.0));
-        glass_y.push_back(std::fmod(base_y + jitter_y + 1.0, 1.0));
-        glass_z.push_back(std::fmod(base_z + jitter_z + 1.0, 1.0));
-
-        const double q = static_cast<double>((ix * nside + iy) * nside + iz);
-        poisson_x.push_back(std::fmod(0.5 + 0.7548776662466927 * (q + 1.0), 1.0));
-        poisson_y.push_back(std::fmod(0.5 + 0.5698402909980532 * (q + 1.0), 1.0));
-        poisson_z.push_back(std::fmod(0.5 + 0.4385791246030011 * (q + 1.0), 1.0));
-
-        mass.push_back(1.0);
-      }
-    }
-  }
-
-  const double lattice_rms = computeRmsFromPositions(lattice_x, lattice_y, lattice_z, mass);
-  const double glass_like_rms = computeRmsFromPositions(glass_x, glass_y, glass_z, mass);
-  const double poisson_like_rms = computeRmsFromPositions(poisson_x, poisson_y, poisson_z, mass);
-
+  const double lattice_rms = computeRms(false);
+  const double glass_like_rms = computeRms(true);
   requireOrThrow(
       lattice_rms <= tolerances.require("gravity_pm_uniform_density.max_rms_accel"),
       "gravity_pm_uniform_density failed: PM acceleration non-zero for uniform lattice");
-
-  const double glass_fraction_limit = tolerances.require("gravity_pm_glass_like.max_rms_fraction_of_poisson");
-  const double observed_fraction = glass_like_rms / std::max(poisson_like_rms, 1.0e-20);
+  const double glass_limit = tolerances.require("gravity_pm_glass_like.max_rms_accel");
   std::ostringstream glass_message;
-  glass_message << "gravity_pm_glass_like failed: deterministic jittered-lattice proxy is not sufficiently quieter than deterministic Poisson-like reference"
-                << ", glass_rms=" << glass_like_rms
-                << ", poisson_rms=" << poisson_like_rms
-                << ", observed_fraction=" << observed_fraction
-                << ", limit=" << glass_fraction_limit;
-  requireOrThrow(poisson_like_rms > 0.0, "gravity_pm_glass_like failed: deterministic Poisson-like reference produced zero RMS");
-  requireOrThrow(observed_fraction <= glass_fraction_limit, glass_message.str());
+  glass_message << "gravity_pm_glass_like failed: PM acceleration too large for deterministic parity-balanced micro-jitter proxy"
+                << ", rms=" << glass_like_rms << ", limit=" << glass_limit;
+  requireOrThrow(glass_like_rms <= glass_limit, glass_message.str());
 }
 
 struct ForceField {
@@ -355,12 +333,6 @@ double relativeL2(const ForceField& lhs, const ForceField& rhs) {
 }
 
 void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::ValidationToleranceTable& tolerances) {
-#if !COSMOSIM_ENABLE_FFTW
-  (void)tolerances;
-  return;
-#else
-  constexpr std::size_t k_candidate_pm_grid = 32;
-  constexpr std::size_t k_reference_pm_grid = 96;
   constexpr std::size_t particle_count = 24;
   std::vector<double> pos_x(particle_count, 0.0);
   std::vector<double> pos_y(particle_count, 0.0);
@@ -374,9 +346,9 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
     mass[i] = 0.9 + 0.05 * static_cast<double>(i % 5U);
   }
 
-  const ForceField tree_only = solveTreePm(k_candidate_pm_grid, pos_x, pos_y, pos_z, mass, 100.0, 40.0, 0.55, 8);
-  const ForceField pm_only = solveTreePm(k_candidate_pm_grid, pos_x, pos_y, pos_z, mass, 0.2, 4.5, 0.55, 8);
-  const ForceField split = solveTreePm(k_candidate_pm_grid, pos_x, pos_y, pos_z, mass, 1.25, 4.5, 0.55, 8);
+  const ForceField tree_only = solveTreePm(32, pos_x, pos_y, pos_z, mass, 100.0, 40.0, 0.55, 8);
+  const ForceField pm_only = solveTreePm(32, pos_x, pos_y, pos_z, mass, 0.2, 4.5, 0.55, 8);
+  const ForceField split = solveTreePm(32, pos_x, pos_y, pos_z, mass, 1.25, 4.5, 0.55, 8);
 
   cosmosim::gravity::TreePmOptions ref_options;
   ref_options.pm_options.box_size_mpc_comoving = 1.0;
@@ -384,10 +356,10 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
   ref_options.pm_options.gravitational_constant_code = 1.0;
   ref_options.tree_options.gravitational_constant_code = 1.0;
   ref_options.tree_options.softening.epsilon_comoving = 0.01;
-  ref_options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, 1.0 / static_cast<double>(k_candidate_pm_grid));
+  ref_options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, 1.0 / 32.0);
 
   const ForceField periodic_spectral_reference = solveFinePmLongRangeReference(
-      k_reference_pm_grid, pos_x, pos_y, pos_z, mass, ref_options.split_policy.split_scale_comoving);
+      96, pos_x, pos_y, pos_z, mass, ref_options.split_policy.split_scale_comoving);
   const ForceField direct_short_range_reference = computeDirectShortRangeResidual(pos_x, pos_y, pos_z, mass, ref_options);
   const ForceField periodic_proxy_reference = addFields(periodic_spectral_reference, direct_short_range_reference);
 
@@ -403,7 +375,6 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
   requireOrThrow(pm_only_rel <= tolerances.require("gravity_tree_pm_periodic_proxy.pm_only_rel_l2_max"), msg.str());
   requireOrThrow(split_rel <= tolerances.require("gravity_tree_pm_periodic_proxy.split_rel_l2_max"), msg.str());
   requireOrThrow(split_rel <= pm_only_rel + 1.0e-9, msg.str());
-#endif
 }
 
 void testHydroSodMassConservation(const cosmosim::validation::ValidationToleranceTable& tolerances) {

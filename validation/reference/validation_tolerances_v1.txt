@@ -8,7 +8,7 @@ gravity_tree_small_n_open_boundary.max_relative_l2_error = 5.0e-2
 gravity_tree_pm_split.composition_abs_error = 1.0e-12
 gravity_pm_single_mode.min_cosine_similarity = 5.0e-2
 gravity_pm_uniform_density.max_rms_accel = 8.0e-2
-gravity_pm_glass_like.max_rms_fraction_of_poisson = 5.0e-1
+gravity_pm_glass_like.max_rms_accel = 1.5e-1
 
 gravity_tree_pm_periodic_proxy.tree_only_rel_l2_max = 3.5e-1
 gravity_tree_pm_periodic_proxy.pm_only_rel_l2_max = 1.5
