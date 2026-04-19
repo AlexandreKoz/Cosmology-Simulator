@@ -127,43 +127,57 @@ void testPmUniformDensityCancellation(const cosmosim::validation::ValidationTole
   options.scale_factor = 1.0;
   options.gravitational_constant_code = 1.0;
 
-  const std::size_t nside = 8;
-  std::vector<double> pos_x;
-  std::vector<double> pos_y;
-  std::vector<double> pos_z;
-  std::vector<double> mass;
-  pos_x.reserve(nside * nside * nside);
-  pos_y.reserve(nside * nside * nside);
-  pos_z.reserve(nside * nside * nside);
-  mass.reserve(nside * nside * nside);
-  for (std::size_t ix = 0; ix < nside; ++ix) {
-    for (std::size_t iy = 0; iy < nside; ++iy) {
-      for (std::size_t iz = 0; iz < nside; ++iz) {
-        pos_x.push_back((static_cast<double>(ix) + 0.5) / static_cast<double>(nside));
-        pos_y.push_back((static_cast<double>(iy) + 0.5) / static_cast<double>(nside));
-        pos_z.push_back((static_cast<double>(iz) + 0.5) / static_cast<double>(nside));
-        mass.push_back(1.0);
+  auto computeRms = [&](double jitter_amplitude) {
+    const std::size_t nside = 8;
+    std::vector<double> pos_x;
+    std::vector<double> pos_y;
+    std::vector<double> pos_z;
+    std::vector<double> mass;
+    pos_x.reserve(nside * nside * nside);
+    pos_y.reserve(nside * nside * nside);
+    pos_z.reserve(nside * nside * nside);
+    mass.reserve(nside * nside * nside);
+    const double cell = 1.0 / static_cast<double>(nside);
+    for (std::size_t ix = 0; ix < nside; ++ix) {
+      for (std::size_t iy = 0; iy < nside; ++iy) {
+        for (std::size_t iz = 0; iz < nside; ++iz) {
+          const double base_x = (static_cast<double>(ix) + 0.5) * cell;
+          const double base_y = (static_cast<double>(iy) + 0.5) * cell;
+          const double base_z = (static_cast<double>(iz) + 0.5) * cell;
+          const double phase = static_cast<double>(37U * ix + 57U * iy + 73U * iz + 11U);
+          const double jitter_x = jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.61803398875 * phase));
+          const double jitter_y = jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.41421356237 * phase));
+          const double jitter_z = jitter_amplitude * cell * std::sin(2.0 * k_pi * (0.73205080757 * phase));
+          pos_x.push_back(std::fmod(base_x + jitter_x + 1.0, 1.0));
+          pos_y.push_back(std::fmod(base_y + jitter_y + 1.0, 1.0));
+          pos_z.push_back(std::fmod(base_z + jitter_z + 1.0, 1.0));
+          mass.push_back(1.0);
+        }
       }
     }
-  }
 
-  std::vector<double> ax(pos_x.size(), 0.0);
-  std::vector<double> ay(pos_x.size(), 0.0);
-  std::vector<double> az(pos_x.size(), 0.0);
+    std::vector<double> ax(pos_x.size(), 0.0);
+    std::vector<double> ay(pos_x.size(), 0.0);
+    std::vector<double> az(pos_x.size(), 0.0);
+    solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
+    solver.solvePoissonPeriodic(grid, options, nullptr);
+    solver.interpolateForces(grid, pos_x, pos_y, pos_z, ax, ay, az, options, nullptr);
 
-  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
-  solver.solvePoissonPeriodic(grid, options, nullptr);
-  solver.interpolateForces(grid, pos_x, pos_y, pos_z, ax, ay, az, options, nullptr);
+    double rms = 0.0;
+    for (std::size_t i = 0; i < ax.size(); ++i) {
+      rms += ax[i] * ax[i] + ay[i] * ay[i] + az[i] * az[i];
+    }
+    return std::sqrt(rms / std::max<std::size_t>(ax.size(), 1));
+  };
 
-  double rms = 0.0;
-  for (std::size_t i = 0; i < ax.size(); ++i) {
-    rms += ax[i] * ax[i] + ay[i] * ay[i] + az[i] * az[i];
-  }
-  rms = std::sqrt(rms / std::max<std::size_t>(ax.size(), 1));
-
+  const double lattice_rms = computeRms(0.0);
+  const double glass_like_rms = computeRms(0.18);
   requireOrThrow(
-      rms <= tolerances.require("gravity_pm_uniform_density.max_rms_accel"),
-      "gravity_pm_uniform_density failed: PM acceleration non-zero for uniform lattice/glass proxy");
+      lattice_rms <= tolerances.require("gravity_pm_uniform_density.max_rms_accel"),
+      "gravity_pm_uniform_density failed: PM acceleration non-zero for uniform lattice");
+  requireOrThrow(
+      glass_like_rms <= tolerances.require("gravity_pm_glass_like.max_rms_accel"),
+      "gravity_pm_glass_like failed: PM acceleration too large for deterministic jittered-lattice proxy");
 }
 
 struct ForceField {
@@ -171,6 +185,10 @@ struct ForceField {
   std::vector<double> ay;
   std::vector<double> az;
 };
+
+[[nodiscard]] double minimumImageDelta(double delta, double box_size_comoving) {
+  return delta - box_size_comoving * std::nearbyint(delta / box_size_comoving);
+}
 
 ForceField solveTreePm(
     std::size_t pm_grid,
@@ -187,6 +205,7 @@ ForceField solveTreePm(
   options.pm_options.scale_factor = 1.0;
   options.pm_options.gravitational_constant_code = 1.0;
   options.pm_options.enable_window_deconvolution = true;
+  options.pm_options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
   options.tree_options.opening_theta = theta;
   options.tree_options.max_leaf_size = max_leaf;
   options.tree_options.gravitational_constant_code = 1.0;
@@ -209,6 +228,82 @@ ForceField solveTreePm(
   return f;
 }
 
+ForceField solveFinePmLongRangeReference(
+    std::size_t pm_grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    double split_scale_comoving) {
+  cosmosim::gravity::PmGridStorage grid({pm_grid, pm_grid, pm_grid});
+  cosmosim::gravity::PmSolver solver({pm_grid, pm_grid, pm_grid});
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  options.enable_window_deconvolution = true;
+  options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
+  options.tree_pm_split_scale_comoving = split_scale_comoving;
+
+  ForceField field{
+      std::vector<double>(pos_x.size(), 0.0),
+      std::vector<double>(pos_x.size(), 0.0),
+      std::vector<double>(pos_x.size(), 0.0)};
+  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  solver.interpolateForces(grid, pos_x, pos_y, pos_z, field.ax, field.ay, field.az, options, nullptr);
+  return field;
+}
+
+ForceField computeDirectShortRangeResidual(
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    const cosmosim::gravity::TreePmOptions& options) {
+  ForceField field{
+      std::vector<double>(pos_x.size(), 0.0),
+      std::vector<double>(pos_x.size(), 0.0),
+      std::vector<double>(pos_x.size(), 0.0)};
+  const double cutoff2 = options.split_policy.cutoff_radius_comoving * options.split_policy.cutoff_radius_comoving;
+  for (std::size_t target = 0; target < pos_x.size(); ++target) {
+    for (std::size_t source = 0; source < pos_x.size(); ++source) {
+      if (target == source) {
+        continue;
+      }
+      const double dx = minimumImageDelta(pos_x[source] - pos_x[target], options.pm_options.box_size_mpc_comoving);
+      const double dy = minimumImageDelta(pos_y[source] - pos_y[target], options.pm_options.box_size_mpc_comoving);
+      const double dz = minimumImageDelta(pos_z[source] - pos_z[target], options.pm_options.box_size_mpc_comoving);
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      if (r2 > cutoff2) {
+        continue;
+      }
+      const double r = std::sqrt(std::max(r2, 1.0e-30));
+      const double split_factor = cosmosim::gravity::treePmGaussianShortRangeForceFactor(
+          r, options.split_policy.split_scale_comoving);
+      const double softened_factor = cosmosim::gravity::softenedInvR3(r2, options.tree_options.softening) *
+          split_factor * options.tree_options.gravitational_constant_code;
+      field.ax[target] += softened_factor * mass[source] * dx;
+      field.ay[target] += softened_factor * mass[source] * dy;
+      field.az[target] += softened_factor * mass[source] * dz;
+    }
+  }
+  return field;
+}
+
+ForceField addFields(const ForceField& lhs, const ForceField& rhs) {
+  ForceField out{
+      std::vector<double>(lhs.ax.size(), 0.0),
+      std::vector<double>(lhs.ay.size(), 0.0),
+      std::vector<double>(lhs.az.size(), 0.0)};
+  for (std::size_t i = 0; i < lhs.ax.size(); ++i) {
+    out.ax[i] = lhs.ax[i] + rhs.ax[i];
+    out.ay[i] = lhs.ay[i] + rhs.ay[i];
+    out.az[i] = lhs.az[i] + rhs.az[i];
+  }
+  return out;
+}
+
 double relativeL2(const ForceField& lhs, const ForceField& rhs) {
   double ref2 = 0.0;
   double err2 = 0.0;
@@ -223,16 +318,16 @@ double relativeL2(const ForceField& lhs, const ForceField& rhs) {
 }
 
 void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::ValidationToleranceTable& tolerances) {
-  constexpr std::size_t particle_count = 48;
+  constexpr std::size_t particle_count = 24;
   std::vector<double> pos_x(particle_count, 0.0);
   std::vector<double> pos_y(particle_count, 0.0);
   std::vector<double> pos_z(particle_count, 0.0);
   std::vector<double> mass(particle_count, 1.0);
 
   for (std::size_t i = 0; i < particle_count; ++i) {
-    pos_x[i] = std::fmod((13.0 * static_cast<double>(i) + 1.0) * 0.023, 1.0);
-    pos_y[i] = std::fmod((19.0 * static_cast<double>(i) + 2.0) * 0.019, 1.0);
-    pos_z[i] = std::fmod((23.0 * static_cast<double>(i) + 3.0) * 0.017, 1.0);
+    pos_x[i] = std::fmod((13.0 * static_cast<double>(i) + 1.0) * 0.047, 1.0);
+    pos_y[i] = std::fmod((19.0 * static_cast<double>(i) + 2.0) * 0.031, 1.0);
+    pos_z[i] = std::fmod((23.0 * static_cast<double>(i) + 3.0) * 0.029, 1.0);
     mass[i] = 0.9 + 0.05 * static_cast<double>(i % 5U);
   }
 
@@ -240,17 +335,26 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
   const ForceField pm_only = solveTreePm(32, pos_x, pos_y, pos_z, mass, 0.2, 4.5, 0.55, 8);
   const ForceField split = solveTreePm(32, pos_x, pos_y, pos_z, mass, 1.25, 4.5, 0.55, 8);
 
-  // Honest periodic reference label: high-resolution periodic spectral+tree proxy,
-  // not an Ewald exact sum and not a minimum-image direct sum.
-  const ForceField periodic_proxy_reference = solveTreePm(64, pos_x, pos_y, pos_z, mass, 1.25, 6.0, 0.35, 2);
+  cosmosim::gravity::TreePmOptions ref_options;
+  ref_options.pm_options.box_size_mpc_comoving = 1.0;
+  ref_options.pm_options.scale_factor = 1.0;
+  ref_options.pm_options.gravitational_constant_code = 1.0;
+  ref_options.tree_options.gravitational_constant_code = 1.0;
+  ref_options.tree_options.softening.epsilon_comoving = 0.01;
+  ref_options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, 1.0 / 32.0);
+
+  const ForceField periodic_spectral_reference = solveFinePmLongRangeReference(
+      96, pos_x, pos_y, pos_z, mass, ref_options.split_policy.split_scale_comoving);
+  const ForceField direct_short_range_reference = computeDirectShortRangeResidual(pos_x, pos_y, pos_z, mass, ref_options);
+  const ForceField periodic_proxy_reference = addFields(periodic_spectral_reference, direct_short_range_reference);
 
   const double tree_only_rel = relativeL2(tree_only, periodic_proxy_reference);
   const double pm_only_rel = relativeL2(pm_only, periodic_proxy_reference);
   const double split_rel = relativeL2(split, periodic_proxy_reference);
 
   std::ostringstream msg;
-  msg << "tree-pm periodic consistency failure: tree_only_rel=" << tree_only_rel
-      << ", split_rel=" << split_rel << ", pm_only_rel=" << pm_only_rel;
+  msg << "tree-pm periodic consistency failure (reference = fine spectral PM + exact pairwise short-range residual; not Ewald exact): tree_only_rel="
+      << tree_only_rel << ", split_rel=" << split_rel << ", pm_only_rel=" << pm_only_rel;
 
   requireOrThrow(tree_only_rel <= tolerances.require("gravity_tree_pm_periodic_proxy.tree_only_rel_l2_max"), msg.str());
   requireOrThrow(pm_only_rel <= tolerances.require("gravity_tree_pm_periodic_proxy.pm_only_rel_l2_max"), msg.str());

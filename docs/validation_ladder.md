@@ -27,7 +27,7 @@ The ladder is designed for desktop-first CI and developer loops, while preservin
 - PM analytic mode validation compares force and potential to the periodic spectral solution for the selected plane-wave mode.
 - Controlled two-body orbit checks use the same softened potential law as the tree solver (`epsilon_comoving`-regularized force and potential).
 - Static-halo profile checks compare tree force against softened direct-summation reference on fixed shells.
-- Periodic TreePM error mapping and periodic consistency checks use a **high-resolution TreePM periodic proxy reference**; this is explicitly not Ewald-exact and not minimum-image direct-sum.
+- Periodic TreePM error mapping and periodic consistency checks use a **fine spectral PM + exact pairwise short-range residual periodic proxy reference**; this is explicitly not Ewald-exact and not minimum-image direct-sum.
 
 ## Coverage ladder (Phase 1 gravity evidence now wired)
 
@@ -36,7 +36,7 @@ Implemented now:
   - two-body symmetry check;
   - small-`N` open-boundary tree-vs-direct summation check;
   - PM single-mode (analytic plane-wave) response;
-  - PM uniform-density (lattice/glass proxy) cancellation check;
+  - PM uniform-density cancellation on both exact lattice and deterministic glass-like jittered-lattice proxy check;
   - PM-only vs tree-only vs split TreePM consistency check;
   - split-kernel composition identity check;
   - opening-angle convergence check;
@@ -60,11 +60,11 @@ Planned as modules mature:
   - `asmth_cells ∈ {0.8,1.25,2.0}`
   - `rcut_cells ∈ {3.0,4.5,6.0}`
 - CSV columns:
-  - `reference_method` (currently `periodic_proxy_treepm_highres`)
+  - `reference_method` (currently `periodic_spectral_direct_proxy`)
   - `pm_grid`, `asmth_cells`, `rcut_cells`
   - `relative_l2_error`
 - Interpretation:
-  - lower `relative_l2_error` indicates closer agreement to the high-resolution periodic proxy;
+  - lower `relative_l2_error` indicates closer agreement to the fine spectral-plus-direct periodic proxy;
   - this map is a parameter-sensitivity evidence class for Phase 1 and must be read with reference-method limits.
 
 ## Benchmark reporting expectations

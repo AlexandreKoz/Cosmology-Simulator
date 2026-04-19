@@ -44,10 +44,10 @@ ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
   - Method: analytic periodic spectral solution for selected Fourier mode(s).
   - Claim: PM operator/sign/phase correctness in periodic domain.
 - **Periodic PM uniform-density cancellation**
-  - Method: lattice/glass-proxy particle placement, periodic Poisson solve with mean subtraction.
+  - Method: exact lattice plus deterministic jittered-lattice (glass-like proxy) particle placement, periodic Poisson solve with mean subtraction.
   - Claim: near-zero force under uniform density.
 - **Periodic TreePM consistency / force error checks**
-  - Method: high-resolution TreePM periodic proxy reference (finer PM grid, tighter tree settings).
+  - Method: fine spectral PM plus exact pairwise short-range residual periodic proxy reference.
   - Explicit limitation: this is not Ewald exact and not minimum-image direct-sum.
 - **Split-kernel matching checks**
   - Method: Gaussian split SR/LR factor complementarity and TreePM PM-only/tree-only/split comparisons.
@@ -71,7 +71,7 @@ Run:
 
 Expected deterministic artifact:
 
-- `validation/artifacts/tree_pm_force_error_map.csv`
+- `validation/artifacts/tree_pm_force_error_map.csv` (generated artifact; do not rely on a source-controlled copy)
 
 The CSV is the required Phase 1 force-error map over PMGRID/ASMTH/RCUT and must be attached/referenced in review evidence.
 

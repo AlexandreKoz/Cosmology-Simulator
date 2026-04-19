@@ -740,7 +740,10 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
   add_executable(bench_tree_pm_force_error_map bench/bench_tree_pm_force_error_map.cpp)
   target_link_libraries(bench_tree_pm_force_error_map PRIVATE cosmosim_gravity)
   target_compile_definitions(bench_tree_pm_force_error_map PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-
+  add_custom_target(generate_tree_pm_force_error_map
+    COMMAND bench_tree_pm_force_error_map
+    DEPENDS bench_tree_pm_force_error_map
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
   add_executable(bench_amr_regrid_sync bench/bench_amr_regrid_sync.cpp)
   target_link_libraries(bench_amr_regrid_sync PRIVATE cosmosim_amr)
