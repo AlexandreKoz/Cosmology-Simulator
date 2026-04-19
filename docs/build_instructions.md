@@ -24,6 +24,7 @@ Optional dependencies are feature-gated and preset-driven:
 | `cpu-only-release` | Performance sanity on CPU-only builds |
 | `hdf5-debug` | Snapshot/restart/provenance schema and I/O work |
 | `pm-hdf5-fftw-debug` | PM/TreePM validation with HDF5+FFTW |
+| `mpi-hdf5-fftw-debug` | Distributed gravity development surface (MPI+HDF5+FFTW) |
 | `asan-debug` | Address-sanitizer safety checks |
 | `mpi-release` | Multi-rank workflow checks |
 | `cuda-release` | GPU-capable build path |
@@ -50,6 +51,14 @@ ctest --preset test-hdf5-debug --output-on-failure
 cmake --preset pm-hdf5-fftw-debug
 cmake --build --preset build-pm-hdf5-fftw-debug
 ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
+```
+
+## Distributed gravity development path (MPI + HDF5 + FFTW)
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug
+ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
 ```
 
 ## MPI and GPU paths

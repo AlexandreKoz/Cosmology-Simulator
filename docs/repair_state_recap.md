@@ -239,6 +239,31 @@ Observed:
 - `.github/workflows/ci.yml` now includes a dedicated `infrastructure_gates` job and makes `reproducibility_gate` depend on both matrix coverage and the explicit gate bundle.
 - `tests/integration/test_core_dependency_direction.cmake.in` now checks both source/header include direction and `CMakeLists.txt` target-link direction for `cosmosim_core`.
 
+## 13) Phase 2 distributed TreePM contract freeze surface
+
+_Date captured: 2026-04-19 (UTC)_
+
+Commands:
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug -j4
+ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure -R "unit_config_parser|integration_docs_scaffold|integration_provenance_roundtrip|unit_parallel_distributed_memory"
+```
+
+Observed:
+
+- Typed config now freezes Phase 2 distributed gravity controls:
+  - `numerics.treepm_pm_decomposition_mode` (`slab` only),
+  - `numerics.treepm_tree_exchange_batch_bytes` (`>0`).
+- Provenance now records those controls for audit continuity.
+- New architecture contract doc exists at `docs/treepm_phase2_distributed_contract.md`.
+- CI matrix now includes `mpi-hdf5-fftw-debug`, so distributed gravity development is not only gated through optional `mpi-release` smoke.
+
+Interpretation:
+
+- Contract/documentation/build surfaces for Phase 2 are now explicit without claiming distributed TreePM algorithm completion.
+
 Interpretation:
 
 - CPU-only success is no longer treated as implicit feature-path closure because HDF5 and PM/HDF5/FFTW are evaluated in one explicit gate bundle with a consolidated status report.

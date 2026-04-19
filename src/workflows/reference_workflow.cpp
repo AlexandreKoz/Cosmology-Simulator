@@ -61,6 +61,14 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
   throw std::runtime_error("unhandled TreePm assignment scheme enum value");
 }
 
+[[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
+  switch (mode) {
+    case core::PmDecompositionMode::kSlab:
+      return "slab";
+  }
+  throw std::runtime_error("unhandled PM decomposition mode enum value");
+}
+
 [[nodiscard]] core::ProvenanceRecord makeGravityAwareProvenanceRecord(
     const core::FrozenConfig& frozen_config,
     const core::SimulationConfig& config) {
@@ -83,6 +91,10 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
   record.gravity_treepm_split_scale_mpc_comoving = split_policy.split_scale_comoving;
   record.gravity_treepm_cutoff_radius_mpc_comoving = split_policy.cutoff_radius_comoving;
   record.gravity_treepm_update_cadence_steps = config.numerics.treepm_update_cadence_steps;
+  record.gravity_treepm_pm_decomposition_mode =
+      pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
+  record.gravity_treepm_tree_exchange_batch_bytes =
+      config.numerics.treepm_tree_exchange_batch_bytes;
   record.gravity_softening_policy = "comoving_fixed";
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;

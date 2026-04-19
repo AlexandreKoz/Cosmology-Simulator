@@ -2,6 +2,8 @@
 
 This document captures the current **reviewable infrastructure contract** for distributed-memory scaffolding.
 It does **not** claim full production MPI capability.
+Phase 2 TreePM-specific ownership/message terminology is frozen in
+`docs/treepm_phase2_distributed_contract.md` and must be used consistently with this file.
 
 ## 1) Ownership + transfer lifecycle contract (scaffold-level)
 
@@ -91,3 +93,13 @@ Consensus now also records machine-readable mismatch rows (`property`, `baseline
 - The legacy owner-rank vector overload remains, but it is an adapter that infers residency from `owner_rank == world_rank`.
 - Callers that already track owned/ghost state explicitly should migrate to `LocalGhostDescriptor` to avoid implicit residency assumptions.
 - Transfer-payload role auditing should prefer `GhostExchangePlan::outbound_transfers` / `inbound_transfers` over ad-hoc interpretation of raw send/recv index vectors.
+
+## Phase 2 distributed gravity vocabulary alignment
+
+For upcoming distributed TreePM work:
+
+- `particle owner`: rank that owns and updates a particle's authoritative state.
+- `slab owner`: rank that owns a PM x-slab when `treepm_pm_decomposition_mode=slab`.
+- `tree export/import`: bounded payload exchange for short-range tree source support, capped by `treepm_tree_exchange_batch_bytes`.
+
+These names are contractual. They prevent pseudo-distributed ambiguity where all ranks hold replicated state but are described as distributed.

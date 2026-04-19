@@ -57,6 +57,17 @@
       }
     },
     {
+      "name": "mpi-hdf5-fftw-debug",
+      "inherits": [
+        "pm-hdf5-fftw-debug"
+      ],
+      "displayName": "MPI + HDF5 + FFTW Debug",
+      "description": "Distributed gravity development preset (Phase 2 contract path).",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_MPI": "ON"
+      }
+    },
+    {
       "name": "python-debug",
       "inherits": [
         "cpu-only-debug"
@@ -127,6 +138,10 @@
       "configurePreset": "pm-hdf5-fftw-debug"
     },
     {
+      "name": "build-mpi-hdf5-fftw-debug",
+      "configurePreset": "mpi-hdf5-fftw-debug"
+    },
+    {
       "name": "build-mpi-release",
       "configurePreset": "mpi-release"
     },
@@ -157,6 +172,13 @@
     {
       "name": "test-pm-hdf5-fftw-debug",
       "configurePreset": "pm-hdf5-fftw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-mpi-hdf5-fftw-debug",
+      "configurePreset": "mpi-hdf5-fftw-debug",
       "output": {
         "outputOnFailure": true
       }

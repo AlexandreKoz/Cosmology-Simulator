@@ -73,7 +73,8 @@ restart is execution-resume oriented.
 - gravity/TreePM reproducibility contract:
   - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
     `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,
-    `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`
+    `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`,
+    `gravity_treepm_pm_decomposition_mode`, `gravity_treepm_tree_exchange_batch_bytes`
   - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving` (`Δmesh`),
     `gravity_treepm_split_scale_mpc_comoving` (`r_s`),
     `gravity_treepm_cutoff_radius_mpc_comoving` (`r_cut`)

@@ -1,5 +1,40 @@
 # Architecture decision log
 
+## 2026-04-19 — ADR-FEATURE-GRAVITY-010: Freeze Phase 2 distributed TreePM contract and evidence floor
+
+### Status
+Accepted (feature-branch distributed gravity contract freeze)
+
+### Context
+Phase 1 TreePM contract is implemented and documented, but Phase 2 distributed ownership/communication semantics were not frozen in typed config and architecture docs. CI surface also centered on CPU/HDF5/PM paths plus an optional MPI release smoke job, which is insufficient for distributed gravity development cadence.
+
+### Decision
+- Freeze Phase 2 config-facing contract with two typed keys:
+  - `numerics.treepm_pm_decomposition_mode` (currently only `slab`)
+  - `numerics.treepm_tree_exchange_batch_bytes` (batch cap for tree export/import payloads)
+- Add a dedicated distributed-gravity developer preset:
+  - `mpi-hdf5-fftw-debug`
+- Publish repository-specific Phase 2 architecture contract in `docs/treepm_phase2_distributed_contract.md`, including:
+  - PM slab ownership semantics,
+  - particle-owner vs slab-owner roles,
+  - distributed FFT stage ordering,
+  - tree export/import batch contract,
+  - active-set and migration timing constraints,
+  - restart continuity and deterministic limits.
+- Explicitly record that pseudo-multi-rank tests are not completion evidence for distributed TreePM implementation.
+
+### Consequences
+- Positive: distributed gravity work now has an auditable typed/config/docs baseline without claiming algorithm completion.
+- Positive: CI/build surface can exercise MPI+HDF5+FFTW debug configuration directly rather than only optional MPI release smoke.
+- Tradeoff: only slab decomposition is valid in this phase; future modes require explicit ADR + typed/config/docs/test expansion.
+
+### Evidence references
+- `include/cosmosim/core/config.hpp`
+- `src/core/config.cpp`
+- `CMakePresets.json`
+- `docs/treepm_phase2_distributed_contract.md`
+- `.github/workflows/ci.yml`
+
 ## 2026-04-12 — ADR-REPAIR-BOUNDARY-005: Keep reference workflow assembly outside `core/`
 
 ### Status

@@ -29,6 +29,8 @@ struct ProvenanceRecord {
   double gravity_treepm_split_scale_mpc_comoving = 0.0;
   double gravity_treepm_cutoff_radius_mpc_comoving = 0.0;
   int gravity_treepm_update_cadence_steps = 0;
+  std::string gravity_treepm_pm_decomposition_mode = "slab";
+  std::uint64_t gravity_treepm_tree_exchange_batch_bytes = 0;
   std::string gravity_softening_policy = "unspecified";
   std::string gravity_softening_kernel = "unknown";
   double gravity_softening_epsilon_kpc_comoving = 0.0;

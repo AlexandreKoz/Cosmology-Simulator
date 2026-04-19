@@ -299,6 +299,16 @@ template <typename T>
       "' (supported: cic, tsc)");
 }
 
+[[nodiscard]] PmDecompositionMode parsePmDecompositionMode(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "slab") {
+    return PmDecompositionMode::kSlab;
+  }
+  throw ConfigError(
+      "key 'numerics.treepm_pm_decomposition_mode': invalid value '" + value +
+      "' (supported: slab)");
+}
+
 [[nodiscard]] CoordinateFrame parseCoordinateFrame(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "comoving") {
@@ -439,6 +449,14 @@ template <typename T>
   throw ConfigError("unhandled DiagnosticsExecutionPolicy enum value during serialization");
 }
 
+[[nodiscard]] std::string pmDecompositionModeToString(PmDecompositionMode mode) {
+  switch (mode) {
+    case PmDecompositionMode::kSlab:
+      return "slab";
+  }
+  throw ConfigError("unhandled PmDecompositionMode enum value during serialization");
+}
+
 struct ConfigKeySpec {
   const char* key;
   const char* default_value;
@@ -478,6 +496,8 @@ struct ConfigKeySpec {
       {"numerics.treepm_assignment_scheme", "cic"},
       {"numerics.treepm_enable_window_deconvolution", "false"},
       {"numerics.treepm_update_cadence_steps", "1"},
+      {"numerics.treepm_pm_decomposition_mode", "slab"},
+      {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
       {"physics.enable_cooling", "true"},
       {"physics.enable_star_formation", "true"},
       {"physics.enable_feedback", "true"},
@@ -687,6 +707,9 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.treepm_update_cadence_steps < 1) {
     throw ConfigError("numerics.treepm_update_cadence_steps must be >= 1");
   }
+  if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
+    throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
+  }
   const ModePolicy policy = buildModePolicy(config.mode);
   validateModePolicy(config, policy);
 }
@@ -734,6 +757,10 @@ void validateConfig(const SimulationConfig& config) {
   stream << "treepm_enable_window_deconvolution = "
          << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
   stream << "treepm_update_cadence_steps = " << frozen.config.numerics.treepm_update_cadence_steps << '\n';
+  stream << "treepm_pm_decomposition_mode = "
+         << pmDecompositionModeToString(frozen.config.numerics.treepm_pm_decomposition_mode) << '\n';
+  stream << "treepm_tree_exchange_batch_bytes = "
+         << frozen.config.numerics.treepm_tree_exchange_batch_bytes << '\n';
   stream << "\n[physics]\n";
   stream << "enable_cooling = " << (frozen.config.physics.enable_cooling ? "true" : "false") << '\n';
   stream << "enable_star_formation = "
@@ -959,6 +986,18 @@ void validateConfig(const SimulationConfig& config) {
           "numerics.treepm_update_cadence_steps",
           defaultFor("numerics.treepm_update_cadence_steps")),
       "numerics.treepm_update_cadence_steps"));
+  frozen.config.numerics.treepm_pm_decomposition_mode = parsePmDecompositionMode(requireString(
+      entries,
+      consumed,
+      "numerics.treepm_pm_decomposition_mode",
+      defaultFor("numerics.treepm_pm_decomposition_mode")));
+  frozen.config.numerics.treepm_tree_exchange_batch_bytes = parseNumber<std::uint64_t>(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_tree_exchange_batch_bytes",
+          defaultFor("numerics.treepm_tree_exchange_batch_bytes")),
+      "numerics.treepm_tree_exchange_batch_bytes");
 
   frozen.config.physics.enable_cooling = parseBool(
       requireString(entries, consumed, "physics.enable_cooling", "true"), "physics.enable_cooling");
