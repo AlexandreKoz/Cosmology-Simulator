@@ -218,6 +218,32 @@ class PmSolver::Impl {
     std::vector<int> recv_displs_bytes;
   };
 
+  template <typename ContributionRecord>
+  struct InterpolationExchangeBuffers {
+    std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank;
+    std::vector<PmInterpolationRequestRecord> send_requests_flat;
+    std::vector<PmInterpolationRequestRecord> recv_requests_flat;
+    std::vector<std::vector<ContributionRecord>> send_contribs_by_rank;
+    std::vector<ContributionRecord> send_contribs_flat;
+    std::vector<ContributionRecord> recv_contribs_flat;
+    std::vector<int> send_counts;
+    std::vector<int> send_displs;
+    std::vector<int> recv_counts;
+    std::vector<int> recv_displs;
+    std::vector<int> send_counts_bytes;
+    std::vector<int> send_displs_bytes;
+    std::vector<int> recv_counts_bytes;
+    std::vector<int> recv_displs_bytes;
+    std::vector<int> send_contrib_counts;
+    std::vector<int> send_contrib_displs;
+    std::vector<int> recv_contrib_counts;
+    std::vector<int> recv_contrib_displs;
+    std::vector<int> send_contrib_counts_bytes;
+    std::vector<int> send_contrib_displs_bytes;
+    std::vector<int> recv_contrib_counts_bytes;
+    std::vector<int> recv_contrib_displs_bytes;
+  };
+
   explicit Impl(PmGridShape shape) : m_shape(shape) {}
 
   ~Impl() {
@@ -360,7 +386,52 @@ class PmSolver::Impl {
     return m_density_exchange.buffers;
   }
 
+  [[nodiscard]] InterpolationExchangeBuffers<PmForceContributionRecord>&
+  forceInterpolationExchangeBuffersForLayout(const parallel::PmSlabLayout& layout) {
+    if (m_force_exchange.world_size != layout.world_size || m_force_exchange.world_rank != layout.world_rank) {
+      m_force_exchange.world_size = layout.world_size;
+      m_force_exchange.world_rank = layout.world_rank;
+      resetInterpolationExchangeForWorld(layout.world_size, m_force_exchange.buffers);
+    }
+    return m_force_exchange.buffers;
+  }
+
+  [[nodiscard]] InterpolationExchangeBuffers<PmPotentialContributionRecord>&
+  potentialInterpolationExchangeBuffersForLayout(const parallel::PmSlabLayout& layout) {
+    if (m_potential_exchange.world_size != layout.world_size ||
+        m_potential_exchange.world_rank != layout.world_rank) {
+      m_potential_exchange.world_size = layout.world_size;
+      m_potential_exchange.world_rank = layout.world_rank;
+      resetInterpolationExchangeForWorld(layout.world_size, m_potential_exchange.buffers);
+    }
+    return m_potential_exchange.buffers;
+  }
+
  private:
+  template <typename ContributionRecord>
+  static void resetInterpolationExchangeForWorld(
+      int world_size,
+      InterpolationExchangeBuffers<ContributionRecord>& buffers) {
+    buffers.send_requests_by_rank.assign(static_cast<std::size_t>(world_size), {});
+    buffers.send_contribs_by_rank.assign(static_cast<std::size_t>(world_size), {});
+    buffers.send_counts.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_displs.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_counts.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_displs.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_counts_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_displs_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_counts_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_displs_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_contrib_counts.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_contrib_displs.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_contrib_counts.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_contrib_displs.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_contrib_counts_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.send_contrib_displs_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_contrib_counts_bytes.assign(static_cast<std::size_t>(world_size), 0);
+    buffers.recv_contrib_displs_bytes.assign(static_cast<std::size_t>(world_size), 0);
+  }
+
   [[nodiscard]] PlanResources& activePlan() {
     if (!m_active_key.has_value()) {
       throw std::logic_error("PM solver plan has not been initialized for the active slab layout");
@@ -441,6 +512,16 @@ class PmSolver::Impl {
     int world_rank = 0;
     DensityExchangeBuffers buffers;
   } m_density_exchange{};
+  struct {
+    int world_size = 1;
+    int world_rank = 0;
+    InterpolationExchangeBuffers<PmForceContributionRecord> buffers;
+  } m_force_exchange{};
+  struct {
+    int world_size = 1;
+    int world_rank = 0;
+    InterpolationExchangeBuffers<PmPotentialContributionRecord> buffers;
+  } m_potential_exchange{};
 };
 
 std::size_t PmGridShape::cellCount() const {
@@ -1028,7 +1109,34 @@ void PmSolver::interpolateForces(
   } else {
 #if COSMOSIM_ENABLE_MPI
     const int world_size = grid.slabLayout().world_size;
-    std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank(static_cast<std::size_t>(world_size));
+    auto& exchange = m_impl->forceInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    for (auto& per_rank : exchange.send_requests_by_rank) {
+      per_rank.clear();
+    }
+    for (auto& per_rank : exchange.send_contribs_by_rank) {
+      per_rank.clear();
+    }
+    exchange.send_requests_flat.clear();
+    exchange.recv_requests_flat.clear();
+    exchange.send_contribs_flat.clear();
+    exchange.recv_contribs_flat.clear();
+    std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
+    std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
+    std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
+    std::fill(exchange.recv_displs.begin(), exchange.recv_displs.end(), 0);
+    std::fill(exchange.send_counts_bytes.begin(), exchange.send_counts_bytes.end(), 0);
+    std::fill(exchange.send_displs_bytes.begin(), exchange.send_displs_bytes.end(), 0);
+    std::fill(exchange.recv_counts_bytes.begin(), exchange.recv_counts_bytes.end(), 0);
+    std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
+    std::fill(exchange.send_contrib_counts.begin(), exchange.send_contrib_counts.end(), 0);
+    std::fill(exchange.send_contrib_displs.begin(), exchange.send_contrib_displs.end(), 0);
+    std::fill(exchange.recv_contrib_counts.begin(), exchange.recv_contrib_counts.end(), 0);
+    std::fill(exchange.recv_contrib_displs.begin(), exchange.recv_contrib_displs.end(), 0);
+    std::fill(exchange.send_contrib_counts_bytes.begin(), exchange.send_contrib_counts_bytes.end(), 0);
+    std::fill(exchange.send_contrib_displs_bytes.begin(), exchange.send_contrib_displs_bytes.end(), 0);
+    std::fill(exchange.recv_contrib_counts_bytes.begin(), exchange.recv_contrib_counts_bytes.end(), 0);
+    std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
+
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
       const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
@@ -1039,7 +1147,7 @@ void PmSolver::interpolateForces(
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
         const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
-        auto& batch = send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
+        auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
@@ -1057,67 +1165,58 @@ void PmSolver::interpolateForces(
       }
     }
 
-    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
     std::size_t total_send = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      const std::size_t count = send_requests_by_rank[static_cast<std::size_t>(rank)].size();
+      const std::size_t count = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)].size();
       if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("PmSolver::interpolateForces request count exceeds MPI int limit");
       }
-      send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
-      send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
+      exchange.send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      exchange.send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
       total_send += count;
     }
 
-    std::vector<PmInterpolationRequestRecord> send_flat;
-    send_flat.reserve(total_send);
+    exchange.send_requests_flat.reserve(total_send);
     for (int rank = 0; rank < world_size; ++rank) {
-      const auto& source = send_requests_by_rank[static_cast<std::size_t>(rank)];
-      send_flat.insert(send_flat.end(), source.begin(), source.end());
+      const auto& source = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)];
+      exchange.send_requests_flat.insert(exchange.send_requests_flat.end(), source.begin(), source.end());
     }
 
-    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Alltoall(
+        exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
     std::size_t total_recv = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
-      total_recv += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(rank)]);
+      exchange.recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
+      total_recv += static_cast<std::size_t>(exchange.recv_counts[static_cast<std::size_t>(rank)]);
     }
-    std::vector<PmInterpolationRequestRecord> recv_flat(total_recv);
+    exchange.recv_requests_flat.resize(total_recv);
 
     const int request_bytes = static_cast<int>(sizeof(PmInterpolationRequestRecord));
-    std::vector<int> send_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs_bytes(static_cast<std::size_t>(world_size), 0);
     for (int rank = 0; rank < world_size; ++rank) {
       const auto r = static_cast<std::size_t>(rank);
-      send_counts_bytes[r] = send_counts[r] * request_bytes;
-      send_displs_bytes[r] = send_displs[r] * request_bytes;
-      recv_counts_bytes[r] = recv_counts[r] * request_bytes;
-      recv_displs_bytes[r] = recv_displs[r] * request_bytes;
+      exchange.send_counts_bytes[r] = exchange.send_counts[r] * request_bytes;
+      exchange.send_displs_bytes[r] = exchange.send_displs[r] * request_bytes;
+      exchange.recv_counts_bytes[r] = exchange.recv_counts[r] * request_bytes;
+      exchange.recv_displs_bytes[r] = exchange.recv_displs[r] * request_bytes;
     }
     MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(send_flat.data()),
-        send_counts_bytes.data(),
-        send_displs_bytes.data(),
+        reinterpret_cast<const std::uint8_t*>(exchange.send_requests_flat.data()),
+        exchange.send_counts_bytes.data(),
+        exchange.send_displs_bytes.data(),
         MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(recv_flat.data()),
-        recv_counts_bytes.data(),
-        recv_displs_bytes.data(),
+        reinterpret_cast<std::uint8_t*>(exchange.recv_requests_flat.data()),
+        exchange.recv_counts_bytes.data(),
+        exchange.recv_displs_bytes.data(),
         MPI_BYTE,
         MPI_COMM_WORLD);
 
-    std::vector<std::vector<PmForceContributionRecord>> send_contribs_by_rank(static_cast<std::size_t>(world_size));
     for (int source_rank = 0; source_rank < world_size; ++source_rank) {
-      auto& batch = send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
-      const int begin = recv_displs[static_cast<std::size_t>(source_rank)];
-      const int count = recv_counts[static_cast<std::size_t>(source_rank)];
+      auto& batch = exchange.send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
+      const int begin = exchange.recv_displs[static_cast<std::size_t>(source_rank)];
+      const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
       for (int i = 0; i < count; ++i) {
-        const auto& request = recv_flat[static_cast<std::size_t>(begin + i)];
+        const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
         if (request.particle_index >= pos_x.size()) {
           throw std::invalid_argument("PmSolver::interpolateForces request particle index out of range");
         }
@@ -1137,64 +1236,62 @@ void PmSolver::interpolateForces(
       }
     }
 
-    std::vector<int> send_contrib_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_contrib_displs(static_cast<std::size_t>(world_size), 0);
     std::size_t total_send_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      const std::size_t count = send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
+      const std::size_t count = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
       if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("PmSolver::interpolateForces contribution count exceeds MPI int limit");
       }
-      send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
-      send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
+      exchange.send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      exchange.send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
       total_send_contribs += count;
     }
 
-    std::vector<PmForceContributionRecord> send_contrib_flat;
-    send_contrib_flat.reserve(total_send_contribs);
+    exchange.send_contribs_flat.reserve(total_send_contribs);
     for (int rank = 0; rank < world_size; ++rank) {
-      const auto& source = send_contribs_by_rank[static_cast<std::size_t>(rank)];
-      send_contrib_flat.insert(send_contrib_flat.end(), source.begin(), source.end());
+      const auto& source = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)];
+      exchange.send_contribs_flat.insert(exchange.send_contribs_flat.end(), source.begin(), source.end());
     }
 
-    std::vector<int> recv_contrib_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_displs(static_cast<std::size_t>(world_size), 0);
-    MPI_Alltoall(send_contrib_counts.data(), 1, MPI_INT, recv_contrib_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Alltoall(
+        exchange.send_contrib_counts.data(),
+        1,
+        MPI_INT,
+        exchange.recv_contrib_counts.data(),
+        1,
+        MPI_INT,
+        MPI_COMM_WORLD);
 
     std::size_t total_recv_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
-      total_recv_contribs += static_cast<std::size_t>(recv_contrib_counts[static_cast<std::size_t>(rank)]);
+      exchange.recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
+      total_recv_contribs += static_cast<std::size_t>(exchange.recv_contrib_counts[static_cast<std::size_t>(rank)]);
     }
-    std::vector<PmForceContributionRecord> recv_contrib_flat(total_recv_contribs);
+    exchange.recv_contribs_flat.resize(total_recv_contribs);
 
     const int contrib_bytes = static_cast<int>(sizeof(PmForceContributionRecord));
-    std::vector<int> send_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
     for (int rank = 0; rank < world_size; ++rank) {
       const auto r = static_cast<std::size_t>(rank);
-      send_contrib_counts_bytes[r] = send_contrib_counts[r] * contrib_bytes;
-      send_contrib_displs_bytes[r] = send_contrib_displs[r] * contrib_bytes;
-      recv_contrib_counts_bytes[r] = recv_contrib_counts[r] * contrib_bytes;
-      recv_contrib_displs_bytes[r] = recv_contrib_displs[r] * contrib_bytes;
+      exchange.send_contrib_counts_bytes[r] = exchange.send_contrib_counts[r] * contrib_bytes;
+      exchange.send_contrib_displs_bytes[r] = exchange.send_contrib_displs[r] * contrib_bytes;
+      exchange.recv_contrib_counts_bytes[r] = exchange.recv_contrib_counts[r] * contrib_bytes;
+      exchange.recv_contrib_displs_bytes[r] = exchange.recv_contrib_displs[r] * contrib_bytes;
     }
     MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(send_contrib_flat.data()),
-        send_contrib_counts_bytes.data(),
-        send_contrib_displs_bytes.data(),
+        reinterpret_cast<const std::uint8_t*>(exchange.send_contribs_flat.data()),
+        exchange.send_contrib_counts_bytes.data(),
+        exchange.send_contrib_displs_bytes.data(),
         MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(recv_contrib_flat.data()),
-        recv_contrib_counts_bytes.data(),
-        recv_contrib_displs_bytes.data(),
+        reinterpret_cast<std::uint8_t*>(exchange.recv_contribs_flat.data()),
+        exchange.recv_contrib_counts_bytes.data(),
+        exchange.recv_contrib_displs_bytes.data(),
         MPI_BYTE,
         MPI_COMM_WORLD);
 
     std::fill(accel_x.begin(), accel_x.end(), 0.0);
     std::fill(accel_y.begin(), accel_y.end(), 0.0);
     std::fill(accel_z.begin(), accel_z.end(), 0.0);
-    for (const auto& contribution : recv_contrib_flat) {
+    for (const auto& contribution : exchange.recv_contribs_flat) {
       if (contribution.particle_index >= pos_x.size()) {
         throw std::invalid_argument("PmSolver::interpolateForces response particle index out of range");
       }
@@ -1282,7 +1379,34 @@ void PmSolver::interpolatePotential(
   } else {
 #if COSMOSIM_ENABLE_MPI
     const int world_size = grid.slabLayout().world_size;
-    std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank(static_cast<std::size_t>(world_size));
+    auto& exchange = m_impl->potentialInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    for (auto& per_rank : exchange.send_requests_by_rank) {
+      per_rank.clear();
+    }
+    for (auto& per_rank : exchange.send_contribs_by_rank) {
+      per_rank.clear();
+    }
+    exchange.send_requests_flat.clear();
+    exchange.recv_requests_flat.clear();
+    exchange.send_contribs_flat.clear();
+    exchange.recv_contribs_flat.clear();
+    std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
+    std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
+    std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
+    std::fill(exchange.recv_displs.begin(), exchange.recv_displs.end(), 0);
+    std::fill(exchange.send_counts_bytes.begin(), exchange.send_counts_bytes.end(), 0);
+    std::fill(exchange.send_displs_bytes.begin(), exchange.send_displs_bytes.end(), 0);
+    std::fill(exchange.recv_counts_bytes.begin(), exchange.recv_counts_bytes.end(), 0);
+    std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
+    std::fill(exchange.send_contrib_counts.begin(), exchange.send_contrib_counts.end(), 0);
+    std::fill(exchange.send_contrib_displs.begin(), exchange.send_contrib_displs.end(), 0);
+    std::fill(exchange.recv_contrib_counts.begin(), exchange.recv_contrib_counts.end(), 0);
+    std::fill(exchange.recv_contrib_displs.begin(), exchange.recv_contrib_displs.end(), 0);
+    std::fill(exchange.send_contrib_counts_bytes.begin(), exchange.send_contrib_counts_bytes.end(), 0);
+    std::fill(exchange.send_contrib_displs_bytes.begin(), exchange.send_contrib_displs_bytes.end(), 0);
+    std::fill(exchange.recv_contrib_counts_bytes.begin(), exchange.recv_contrib_counts_bytes.end(), 0);
+    std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
+
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
       const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
@@ -1293,7 +1417,7 @@ void PmSolver::interpolatePotential(
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
         const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
-        auto& batch = send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
+        auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
@@ -1311,67 +1435,58 @@ void PmSolver::interpolatePotential(
       }
     }
 
-    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
     std::size_t total_send = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      const std::size_t count = send_requests_by_rank[static_cast<std::size_t>(rank)].size();
+      const std::size_t count = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)].size();
       if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("PmSolver::interpolatePotential request count exceeds MPI int limit");
       }
-      send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
-      send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
+      exchange.send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      exchange.send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
       total_send += count;
     }
 
-    std::vector<PmInterpolationRequestRecord> send_flat;
-    send_flat.reserve(total_send);
+    exchange.send_requests_flat.reserve(total_send);
     for (int rank = 0; rank < world_size; ++rank) {
-      const auto& source = send_requests_by_rank[static_cast<std::size_t>(rank)];
-      send_flat.insert(send_flat.end(), source.begin(), source.end());
+      const auto& source = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)];
+      exchange.send_requests_flat.insert(exchange.send_requests_flat.end(), source.begin(), source.end());
     }
 
-    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Alltoall(
+        exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
     std::size_t total_recv = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
-      total_recv += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(rank)]);
+      exchange.recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
+      total_recv += static_cast<std::size_t>(exchange.recv_counts[static_cast<std::size_t>(rank)]);
     }
-    std::vector<PmInterpolationRequestRecord> recv_flat(total_recv);
+    exchange.recv_requests_flat.resize(total_recv);
 
     const int request_bytes = static_cast<int>(sizeof(PmInterpolationRequestRecord));
-    std::vector<int> send_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs_bytes(static_cast<std::size_t>(world_size), 0);
     for (int rank = 0; rank < world_size; ++rank) {
       const auto r = static_cast<std::size_t>(rank);
-      send_counts_bytes[r] = send_counts[r] * request_bytes;
-      send_displs_bytes[r] = send_displs[r] * request_bytes;
-      recv_counts_bytes[r] = recv_counts[r] * request_bytes;
-      recv_displs_bytes[r] = recv_displs[r] * request_bytes;
+      exchange.send_counts_bytes[r] = exchange.send_counts[r] * request_bytes;
+      exchange.send_displs_bytes[r] = exchange.send_displs[r] * request_bytes;
+      exchange.recv_counts_bytes[r] = exchange.recv_counts[r] * request_bytes;
+      exchange.recv_displs_bytes[r] = exchange.recv_displs[r] * request_bytes;
     }
     MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(send_flat.data()),
-        send_counts_bytes.data(),
-        send_displs_bytes.data(),
+        reinterpret_cast<const std::uint8_t*>(exchange.send_requests_flat.data()),
+        exchange.send_counts_bytes.data(),
+        exchange.send_displs_bytes.data(),
         MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(recv_flat.data()),
-        recv_counts_bytes.data(),
-        recv_displs_bytes.data(),
+        reinterpret_cast<std::uint8_t*>(exchange.recv_requests_flat.data()),
+        exchange.recv_counts_bytes.data(),
+        exchange.recv_displs_bytes.data(),
         MPI_BYTE,
         MPI_COMM_WORLD);
 
-    std::vector<std::vector<PmPotentialContributionRecord>> send_contribs_by_rank(static_cast<std::size_t>(world_size));
     for (int source_rank = 0; source_rank < world_size; ++source_rank) {
-      auto& batch = send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
-      const int begin = recv_displs[static_cast<std::size_t>(source_rank)];
-      const int count = recv_counts[static_cast<std::size_t>(source_rank)];
+      auto& batch = exchange.send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
+      const int begin = exchange.recv_displs[static_cast<std::size_t>(source_rank)];
+      const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
       for (int i = 0; i < count; ++i) {
-        const auto& request = recv_flat[static_cast<std::size_t>(begin + i)];
+        const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
         if (request.particle_index >= pos_x.size()) {
           throw std::invalid_argument("PmSolver::interpolatePotential request particle index out of range");
         }
@@ -1389,62 +1504,60 @@ void PmSolver::interpolatePotential(
       }
     }
 
-    std::vector<int> send_contrib_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_contrib_displs(static_cast<std::size_t>(world_size), 0);
     std::size_t total_send_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      const std::size_t count = send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
+      const std::size_t count = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
       if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("PmSolver::interpolatePotential contribution count exceeds MPI int limit");
       }
-      send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
-      send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
+      exchange.send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      exchange.send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
       total_send_contribs += count;
     }
 
-    std::vector<PmPotentialContributionRecord> send_contrib_flat;
-    send_contrib_flat.reserve(total_send_contribs);
+    exchange.send_contribs_flat.reserve(total_send_contribs);
     for (int rank = 0; rank < world_size; ++rank) {
-      const auto& source = send_contribs_by_rank[static_cast<std::size_t>(rank)];
-      send_contrib_flat.insert(send_contrib_flat.end(), source.begin(), source.end());
+      const auto& source = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)];
+      exchange.send_contribs_flat.insert(exchange.send_contribs_flat.end(), source.begin(), source.end());
     }
 
-    std::vector<int> recv_contrib_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_displs(static_cast<std::size_t>(world_size), 0);
-    MPI_Alltoall(send_contrib_counts.data(), 1, MPI_INT, recv_contrib_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Alltoall(
+        exchange.send_contrib_counts.data(),
+        1,
+        MPI_INT,
+        exchange.recv_contrib_counts.data(),
+        1,
+        MPI_INT,
+        MPI_COMM_WORLD);
 
     std::size_t total_recv_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
-      recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
-      total_recv_contribs += static_cast<std::size_t>(recv_contrib_counts[static_cast<std::size_t>(rank)]);
+      exchange.recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
+      total_recv_contribs += static_cast<std::size_t>(exchange.recv_contrib_counts[static_cast<std::size_t>(rank)]);
     }
-    std::vector<PmPotentialContributionRecord> recv_contrib_flat(total_recv_contribs);
+    exchange.recv_contribs_flat.resize(total_recv_contribs);
 
     const int contrib_bytes = static_cast<int>(sizeof(PmPotentialContributionRecord));
-    std::vector<int> send_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
     for (int rank = 0; rank < world_size; ++rank) {
       const auto r = static_cast<std::size_t>(rank);
-      send_contrib_counts_bytes[r] = send_contrib_counts[r] * contrib_bytes;
-      send_contrib_displs_bytes[r] = send_contrib_displs[r] * contrib_bytes;
-      recv_contrib_counts_bytes[r] = recv_contrib_counts[r] * contrib_bytes;
-      recv_contrib_displs_bytes[r] = recv_contrib_displs[r] * contrib_bytes;
+      exchange.send_contrib_counts_bytes[r] = exchange.send_contrib_counts[r] * contrib_bytes;
+      exchange.send_contrib_displs_bytes[r] = exchange.send_contrib_displs[r] * contrib_bytes;
+      exchange.recv_contrib_counts_bytes[r] = exchange.recv_contrib_counts[r] * contrib_bytes;
+      exchange.recv_contrib_displs_bytes[r] = exchange.recv_contrib_displs[r] * contrib_bytes;
     }
     MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(send_contrib_flat.data()),
-        send_contrib_counts_bytes.data(),
-        send_contrib_displs_bytes.data(),
+        reinterpret_cast<const std::uint8_t*>(exchange.send_contribs_flat.data()),
+        exchange.send_contrib_counts_bytes.data(),
+        exchange.send_contrib_displs_bytes.data(),
         MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(recv_contrib_flat.data()),
-        recv_contrib_counts_bytes.data(),
-        recv_contrib_displs_bytes.data(),
+        reinterpret_cast<std::uint8_t*>(exchange.recv_contribs_flat.data()),
+        exchange.recv_contrib_counts_bytes.data(),
+        exchange.recv_contrib_displs_bytes.data(),
         MPI_BYTE,
         MPI_COMM_WORLD);
 
     std::fill(potential.begin(), potential.end(), 0.0);
-    for (const auto& contribution : recv_contrib_flat) {
+    for (const auto& contribution : exchange.recv_contribs_flat) {
       if (contribution.particle_index >= pos_x.size()) {
         throw std::invalid_argument("PmSolver::interpolatePotential response particle index out of range");
       }

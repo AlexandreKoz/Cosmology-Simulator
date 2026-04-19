@@ -4,6 +4,30 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) TreePM Phase 2 distributed gravity performance hardening pass (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_pm_solver bench_pm_solver bench_tree_pm_coupling bench_parallel_decomposition_exchange
+ctest --test-dir build/cpu-only-debug --output-on-failure -R unit_pm_solver
+./build/cpu-only-debug/bench_pm_solver
+./build/cpu-only-debug/bench_tree_pm_coupling
+./build/cpu-only-debug/bench_parallel_decomposition_exchange
+```
+
+Observed:
+
+- PM FFT plans and mesh-side scratch buffers remain cached by slab layout and are now paired with reused distributed interpolation send/receive buffers for force and potential reverse communication paths.
+- TreePM short-range distributed exchange now reuses persistent payload/count buffers and overlaps communication with owner-local target evaluation by running local-local residual work while batched request exchange is in-flight.
+- Active-set compact sidecar arrays in TreePM coupling now resize without per-step zero-fill churn.
+- Bench output now includes repeated warmup/measured iteration fields and PM plan cache counters so reuse behavior is visible in profiler output instead of only one-shot timings.
+
+Interpretation:
+
+- Phase 2 distributed TreePM runtime overhead is reduced via explicit buffer/plan reuse and auditable overlap without changing force-split math or ownership semantics.
+
 ## 0) TreePM Phase 2 gravity-aware ownership decomposition + migration commit repair (2026-04-19 UTC)
 
 Commands:

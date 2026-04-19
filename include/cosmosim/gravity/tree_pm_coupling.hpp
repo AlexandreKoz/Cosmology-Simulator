@@ -111,6 +111,21 @@ class TreePmCoordinator {
   std::vector<double> m_active_pm_ax_comoving;
   std::vector<double> m_active_pm_ay_comoving;
   std::vector<double> m_active_pm_az_comoving;
+  struct TreeExchangeWorkspace {
+    int world_size = 1;
+    std::vector<int> send_counts;
+    std::vector<int> recv_counts;
+    std::vector<int> send_displs;
+    std::vector<int> recv_displs;
+    std::vector<std::uint8_t> send_payload;
+    std::vector<std::uint8_t> recv_payload;
+    std::vector<std::uint8_t> response_send_payload;
+    std::vector<std::uint8_t> response_recv_payload;
+    std::vector<double> remote_batch_ax;
+    std::vector<double> remote_batch_ay;
+    std::vector<double> remote_batch_az;
+    std::vector<std::uint8_t> seen_response;
+  } m_tree_exchange_workspace;
   ResidualTraversalStats m_last_residual_stats;
   bool m_has_cached_long_range_field = false;
 };

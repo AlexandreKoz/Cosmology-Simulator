@@ -12,6 +12,10 @@ Environment blockers currently observed in this validation environment:
 
 No new in-tree CPU-path code blocker was observed on the repaired PM unit/integration single-rank checks.
 
+Additional validation limitation for this pass:
+
+- `test_integration_tree_pm_coupling_periodic` in `cpu-only-debug` remains expensive in this environment (naive DFT PM backend with MPI/FFTW disabled), so the performance-hardening patch evidence is currently anchored on `unit_pm_solver` plus benchmark runs (`bench_pm_solver`, `bench_tree_pm_coupling`, `bench_parallel_decomposition_exchange`) rather than full integration runtime closure in this container.
+
 ## Recently closed items
 
 | ID | Status | Area | Prior symptom | Closure evidence |

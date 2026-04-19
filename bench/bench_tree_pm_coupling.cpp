@@ -71,13 +71,33 @@ int main() {
 #endif
   cosmosim::gravity::TreePmCoordinator coordinator(pm_shape);
 
+  constexpr std::size_t warmup_iterations = 1;
+  constexpr std::size_t measured_iterations = 6;
   cosmosim::gravity::TreePmProfileEvent profile;
   cosmosim::gravity::TreePmDiagnostics diagnostics;
-  coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, accumulator, options, &profile, &diagnostics);
+  for (std::size_t i = 0; i < warmup_iterations; ++i) {
+    coordinator.solveActiveSetWithPmCadence(
+        pos_x, pos_y, pos_z, mass, accumulator, options, /*refresh_long_range_field=*/true, &profile, &diagnostics);
+  }
+  cosmosim::gravity::TreePmProfileEvent measured_profile;
+  for (std::size_t i = 0; i < measured_iterations; ++i) {
+    const bool refresh_long_range_field = (i % 3U) == 0U;
+    coordinator.solveActiveSetWithPmCadence(
+        pos_x,
+        pos_y,
+        pos_z,
+        mass,
+        accumulator,
+        options,
+        refresh_long_range_field,
+        &measured_profile,
+        &diagnostics);
+  }
 
-  const double active_mpart_s = static_cast<double>(active_count) / (profile.coupling_overhead_ms * 1.0e3) * 1.0e-6;
-  const double bytes_proxy = static_cast<double>(profile.pm_profile.bytes_moved) /
-      std::max(profile.pm_profile.assign_ms + profile.pm_profile.interpolate_ms, 1.0e-9) / 1.0e6;
+  const double active_mpart_s =
+      static_cast<double>(active_count * measured_iterations) / (measured_profile.coupling_overhead_ms * 1.0e3) * 1.0e-6;
+  const double bytes_proxy = static_cast<double>(measured_profile.pm_profile.bytes_moved) /
+      std::max(measured_profile.pm_profile.assign_ms + measured_profile.pm_profile.interpolate_ms, 1.0e-9) / 1.0e6;
 
   std::cout << "bench_tree_pm_coupling"
             << " build_type=manual"
@@ -85,16 +105,18 @@ int main() {
             << " features=pm+tree+gaussian_split"
             << " particle_count=" << particle_count
             << " active_count=" << active_count
-            << " assign_ms=" << profile.pm_profile.assign_ms
-            << " fft_forward_ms=" << profile.pm_profile.fft_forward_ms
-            << " poisson_ms=" << profile.pm_profile.poisson_ms
-            << " gradient_ms=" << profile.pm_profile.gradient_ms
-            << " fft_inverse_ms=" << profile.pm_profile.fft_inverse_ms
-            << " interpolate_ms=" << profile.pm_profile.interpolate_ms
-            << " tree_build_ms=" << profile.tree_profile.build_ms
-            << " tree_multipole_ms=" << profile.tree_profile.multipole_ms
-            << " tree_traversal_ms=" << profile.tree_profile.traversal_ms
-            << " coupling_overhead_ms=" << profile.coupling_overhead_ms
+            << " warmup_iterations=" << warmup_iterations
+            << " measured_iterations=" << measured_iterations
+            << " assign_ms=" << measured_profile.pm_profile.assign_ms
+            << " fft_forward_ms=" << measured_profile.pm_profile.fft_forward_ms
+            << " poisson_ms=" << measured_profile.pm_profile.poisson_ms
+            << " gradient_ms=" << measured_profile.pm_profile.gradient_ms
+            << " fft_inverse_ms=" << measured_profile.pm_profile.fft_inverse_ms
+            << " interpolate_ms=" << measured_profile.pm_profile.interpolate_ms
+            << " tree_build_ms=" << measured_profile.tree_profile.build_ms
+            << " tree_multipole_ms=" << measured_profile.tree_profile.multipole_ms
+            << " tree_traversal_ms=" << measured_profile.tree_profile.traversal_ms
+            << " coupling_overhead_ms=" << measured_profile.coupling_overhead_ms
             << " split_scale_comoving=" << diagnostics.split_scale_comoving
             << " cutoff_radius_comoving=" << diagnostics.cutoff_radius_comoving
             << " asmth_cells=" << diagnostics.asmth_cells
