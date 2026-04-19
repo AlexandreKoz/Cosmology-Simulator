@@ -370,10 +370,13 @@ void recordDistributedProfiling(
 class MpiContext {
  public:
   MpiContext();
+  MpiContext(bool is_enabled, int world_size, int world_rank);
 
   [[nodiscard]] bool isEnabled() const noexcept;
+  [[nodiscard]] bool isRoot() const noexcept;
   [[nodiscard]] int worldSize() const noexcept;
   [[nodiscard]] int worldRank() const noexcept;
+  void validateExpectedWorldSizeOrThrow(int expected_world_size) const;
 
   [[nodiscard]] double allreduceSumDouble(double local_value) const;
   [[nodiscard]] std::uint64_t allreduceSumUint64(std::uint64_t local_value) const;
@@ -383,5 +386,42 @@ class MpiContext {
   int m_world_size = 1;
   int m_world_rank = 0;
 };
+
+struct RankDeviceAssignment {
+  int requested_device_count = 0;
+  int visible_device_count = 0;
+  int active_device_count = 0;
+  int assigned_device_index = -1;
+  bool uses_cuda = false;
+
+  [[nodiscard]] bool isValid() const noexcept;
+};
+
+struct DistributedExecutionTopology {
+  int world_size = 1;
+  int world_rank = 0;
+  bool mpi_enabled = false;
+  PmSlabLayout pm_slab{};
+  RankDeviceAssignment device_assignment{};
+
+  [[nodiscard]] bool isDistributed() const noexcept { return world_size > 1; }
+  [[nodiscard]] bool usesCuda() const noexcept { return device_assignment.uses_cuda; }
+};
+
+[[nodiscard]] RankDeviceAssignment selectRankDeviceAssignment(
+    int world_rank,
+    int configured_gpu_devices,
+    bool cuda_runtime_available,
+    int visible_device_count);
+
+[[nodiscard]] DistributedExecutionTopology buildDistributedExecutionTopology(
+    std::size_t global_nx,
+    std::size_t global_ny,
+    std::size_t global_nz,
+    const MpiContext& mpi_context,
+    int mpi_ranks_expected,
+    int configured_gpu_devices,
+    bool cuda_runtime_available,
+    int visible_device_count);
 
 }  // namespace cosmosim::parallel

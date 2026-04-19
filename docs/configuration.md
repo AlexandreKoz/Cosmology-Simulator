@@ -183,6 +183,12 @@ Diagnostics maturity policy:
 ## `[parallel]`
 
 - `mpi_ranks_expected`, `omp_threads`, `gpu_devices`
+
+GPU execution contract:
+
+- `gpu_devices = 0` keeps PM execution on the host.
+- `gpu_devices > 0` explicitly requests the CUDA PM path for CIC assignment/interpolation. The runtime validates that CUDA devices are visible and assigns ranks to devices round-robin across the requested device pool.
+- `gpu_devices` must be `>= 0`; requesting more devices than are visible is a configuration/runtime error rather than a silent fallback.
 - `deterministic_reduction`
 
 Distributed-memory determinism contract (infrastructure scope):

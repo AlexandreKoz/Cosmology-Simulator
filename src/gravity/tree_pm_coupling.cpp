@@ -86,6 +86,17 @@ void TreePmForceAccumulatorView::addToActiveSlot(
 TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape)
     : m_shape(pm_shape), m_grid(pm_shape), m_pm_solver(pm_shape), m_tree_solver() {}
 
+TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout)
+    : m_shape(pm_shape), m_grid(pm_shape, std::move(pm_layout)), m_pm_solver(pm_shape), m_tree_solver() {}
+
+const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
+  return m_grid.slabLayout();
+}
+
+bool TreePmCoordinator::ownsFullPmDomain() const noexcept {
+  return m_grid.ownsFullDomain();
+}
+
 void TreePmCoordinator::solveActiveSet(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,

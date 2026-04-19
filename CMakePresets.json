@@ -78,6 +78,27 @@
       }
     },
     {
+      "name": "cuda-debug",
+      "inherits": [
+        "cpu-only-debug"
+      ],
+      "displayName": "CUDA Debug",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "mpi-cuda-hdf5-fftw-debug",
+      "inherits": [
+        "mpi-hdf5-fftw-debug"
+      ],
+      "displayName": "MPI + CUDA + HDF5 + FFTW Debug",
+      "description": "Distributed gravity + GPU development preset.",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_CUDA": "ON"
+      }
+    },
+    {
       "name": "cpu-only-release",
       "inherits": [
         "base"
@@ -126,6 +147,14 @@
       "configurePreset": "cpu-only-debug"
     },
     {
+      "name": "build-cuda-debug",
+      "configurePreset": "cuda-debug"
+    },
+    {
+      "name": "build-mpi-cuda-hdf5-fftw-debug",
+      "configurePreset": "mpi-cuda-hdf5-fftw-debug"
+    },
+    {
       "name": "build-cpu-release",
       "configurePreset": "cpu-only-release"
     },
@@ -158,6 +187,20 @@
     {
       "name": "test-cpu-debug",
       "configurePreset": "cpu-only-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-cuda-debug",
+      "configurePreset": "cuda-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-mpi-cuda-hdf5-fftw-debug",
+      "configurePreset": "mpi-cuda-hdf5-fftw-debug",
       "output": {
         "outputOnFailure": true
       }

@@ -19,6 +19,7 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/cosmology.hpp"
+#include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/time_integration.hpp"
@@ -59,6 +60,24 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
       return "tsc";
   }
   throw std::runtime_error("unhandled TreePm assignment scheme enum value");
+}
+
+
+
+gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
+    const core::SimulationConfig& config,
+    std::size_t pm_grid_size) {
+  parallel::MpiContext mpi_context;
+  mpi_context.validateExpectedWorldSizeOrThrow(config.parallel.mpi_ranks_expected);
+  const auto layout = parallel::makePmSlabLayout(
+      pm_grid_size,
+      pm_grid_size,
+      pm_grid_size,
+      mpi_context.worldSize(),
+      mpi_context.worldRank());
+  return gravity::TreePmCoordinator(
+      gravity::PmGridShape{pm_grid_size, pm_grid_size, pm_grid_size},
+      layout);
 }
 
 [[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
@@ -342,7 +361,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         m_pm_update_cadence_steps(static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps)),
         m_pm_grid_size(static_cast<std::size_t>(config.numerics.treepm_pm_grid)),
         m_mesh_spacing_mpc_comoving(config.cosmology.box_size_mpc_comoving / static_cast<double>(m_pm_grid_size)),
-        m_tree_pm_coordinator(gravity::PmGridShape{m_pm_grid_size, m_pm_grid_size, m_pm_grid_size}) {
+        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_size)) {
     if (m_pm_grid_size == 0) {
       throw std::runtime_error("numerics.treepm_pm_grid must be > 0");
     }
@@ -353,6 +372,24 @@ class GravityStageCallback final : public core::IntegrationCallback {
         toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
     m_tree_pm_options.pm_options.enable_window_deconvolution =
         config.numerics.treepm_enable_window_deconvolution;
+
+    parallel::MpiContext mpi_context;
+    const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
+    m_runtime_topology = parallel::buildDistributedExecutionTopology(
+        m_pm_grid_size,
+        m_pm_grid_size,
+        m_pm_grid_size,
+        mpi_context,
+        config.parallel.mpi_ranks_expected,
+        config.parallel.gpu_devices,
+        cuda_runtime.runtime_available,
+        cuda_runtime.visible_device_count);
+    if (m_runtime_topology.usesCuda()) {
+      core::setCudaDeviceOrThrow(m_runtime_topology.device_assignment.assigned_device_index);
+      m_tree_pm_options.pm_options.execution_policy = core::ExecutionPolicy::kCuda;
+      m_tree_pm_options.pm_options.data_residency = gravity::PmDataResidencyPolicy::kPreferDevice;
+    }
+
     m_tree_pm_options.tree_options.opening_theta = 0.7;
     m_tree_pm_options.tree_options.gravitational_constant_code = 1.0;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
@@ -364,6 +401,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
         m_mesh_spacing_mpc_comoving);
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
     m_pm_backend = gravity::PmSolver::fftBackendName();
+    if (m_runtime_topology.usesCuda()) {
+      m_pm_backend += "+cuda_cic";
+    }
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
@@ -514,6 +554,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
  private:
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
+  parallel::DistributedExecutionTopology m_runtime_topology{};
   std::uint64_t m_pm_update_cadence_steps = 1;
   std::size_t m_pm_grid_size = 0;
   double m_mesh_spacing_mpc_comoving = 0.0;

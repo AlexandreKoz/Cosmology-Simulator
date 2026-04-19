@@ -618,6 +618,9 @@ void validateConfig(const SimulationConfig& config) {
   if (config.parallel.mpi_ranks_expected <= 0 || config.parallel.omp_threads <= 0) {
     throw ConfigError("parallel settings require positive mpi_ranks_expected and omp_threads");
   }
+  if (config.parallel.gpu_devices < 0) {
+    throw ConfigError("parallel.gpu_devices must be >= 0");
+  }
   if (config.analysis.run_health_interval_steps <= 0 ||
       config.analysis.science_light_interval_steps <= 0 ||
       config.analysis.science_heavy_interval_steps <= 0) {

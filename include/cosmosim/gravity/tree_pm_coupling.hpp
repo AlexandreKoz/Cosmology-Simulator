@@ -56,6 +56,10 @@ struct TreePmProfileEvent {
 class TreePmCoordinator {
  public:
   explicit TreePmCoordinator(PmGridShape pm_shape);
+  TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
+
+  [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
+  [[nodiscard]] bool ownsFullPmDomain() const noexcept;
 
   void solveActiveSetWithPmCadence(
       std::span<const double> pos_x_comoving,
