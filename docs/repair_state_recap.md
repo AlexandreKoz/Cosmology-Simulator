@@ -4,6 +4,34 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) TreePM Phase 2 gravity-aware ownership decomposition + migration commit repair (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_unit_simulation_state
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|unit_simulation_state"
+```
+
+Observed:
+
+- Morton SFC decomposition now supports explicit gravity-aware cost terms for:
+  - owned particle count,
+  - recent active target count,
+  - recent remote tree interaction volume,
+  - memory footprint (plus optional retained generic work term).
+- Per-rank decomposition metrics now expose each component to make imbalance diagnostics auditable.
+- `SimulationState` now provides explicit migration pack/commit boundaries:
+  - packs hot lanes + metadata + species sidecars for migrating rows,
+  - commits ownership only at one synchronization call,
+  - rebuilds species counts and species index,
+  - removes stale local ghost/import rows so post-commit ownership/sidecar state is unambiguous.
+
+Interpretation:
+
+- Distributed TreePM ownership has a real migration commit contract and gravity-aware decomposition input signal.
+- One-rank baseline behavior is preserved when no migration is staged.
+
 ## 0) TreePM Phase 2 distributed workflow cadence-consensus + active-set wiring repair (2026-04-19 UTC)
 
 Commands:

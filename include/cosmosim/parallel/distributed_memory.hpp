@@ -23,6 +23,8 @@ struct DecompositionItem {
   double x_comov = 0.0;
   double y_comov = 0.0;
   double z_comov = 0.0;
+  std::uint64_t active_target_count_recent = 0;
+  std::uint64_t remote_tree_interactions_recent = 0;
   double work_units = 1.0;
   std::uint64_t memory_bytes = 0;
 };
@@ -35,7 +37,10 @@ struct DecompositionConfig {
   double domain_y_max_comov = 1.0;
   double domain_z_min_comov = 0.0;
   double domain_z_max_comov = 1.0;
-  double work_weight = 1.0;
+  double owned_particle_weight = 1.0;
+  double active_target_weight = 0.0;
+  double remote_tree_interaction_weight = 0.0;
+  double work_weight = 0.0;
   double memory_weight = 0.0;
 };
 
@@ -47,6 +52,9 @@ struct RankRange {
 struct LoadBalanceMetrics {
   std::vector<double> weighted_load_by_rank;
   std::vector<std::uint64_t> memory_bytes_by_rank;
+  std::vector<std::uint64_t> owned_particles_by_rank;
+  std::vector<std::uint64_t> active_targets_by_rank;
+  std::vector<std::uint64_t> remote_tree_interactions_by_rank;
   double mean_weighted_load = 0.0;
   double max_weighted_load = 0.0;
   double weighted_imbalance_ratio = 0.0;

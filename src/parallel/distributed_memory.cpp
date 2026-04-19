@@ -60,9 +60,16 @@ namespace {
 }
 
 [[nodiscard]] double weightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
+  const double owned_particle_term =
+      (item.kind == DecompositionEntityKind::kParticle) ? 1.0 : 0.0;
+  const double active_target_term = static_cast<double>(item.active_target_count_recent);
+  const double remote_tree_term = static_cast<double>(item.remote_tree_interactions_recent);
   const double work_term = std::max(0.0, item.work_units);
   const double memory_term = static_cast<double>(item.memory_bytes);
-  return config.work_weight * work_term + config.memory_weight * memory_term;
+  return config.owned_particle_weight * owned_particle_term +
+      config.active_target_weight * active_target_term +
+      config.remote_tree_interaction_weight * remote_tree_term +
+      config.work_weight * work_term + config.memory_weight * memory_term;
 }
 
 template <typename T>
@@ -182,7 +189,8 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   if (config.world_size <= 0) {
     throw std::invalid_argument("world_size must be positive");
   }
-  if (config.work_weight < 0.0 || config.memory_weight < 0.0) {
+  if (config.owned_particle_weight < 0.0 || config.active_target_weight < 0.0 ||
+      config.remote_tree_interaction_weight < 0.0 || config.work_weight < 0.0 || config.memory_weight < 0.0) {
     throw std::invalid_argument("decomposition weights must be non-negative");
   }
 
@@ -217,6 +225,9 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.ranges_by_rank.assign(static_cast<std::size_t>(config.world_size), RankRange{});
   plan.metrics.weighted_load_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.memory_bytes_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+  plan.metrics.owned_particles_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+  plan.metrics.active_targets_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+  plan.metrics.remote_tree_interactions_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
 
   const double total_load = std::accumulate(
       keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
@@ -241,6 +252,13 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
     plan.owning_rank_by_item[original_index] = current_rank;
     plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += keyed[sorted_pos].weighted_load;
     plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
+    if (items[original_index].kind == DecompositionEntityKind::kParticle) {
+      ++plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank)];
+    }
+    plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank)] +=
+        items[original_index].active_target_count_recent;
+    plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
+        items[original_index].remote_tree_interactions_recent;
     current_prefix_load += keyed[sorted_pos].weighted_load;
   }
 
