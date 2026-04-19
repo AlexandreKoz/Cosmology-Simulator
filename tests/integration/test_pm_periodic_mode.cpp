@@ -132,6 +132,124 @@ void testPeriodicSinusoidalForceResponse() {
 }
 
 #if COSMOSIM_ENABLE_MPI
+void runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme scheme) {
+  int world_size = 1;
+  int world_rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (world_size != 2) {
+    return;
+  }
+
+  const cosmosim::gravity::PmGridShape shape{8, 6, 6};
+  const auto local_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, world_rank);
+  cosmosim::gravity::PmGridStorage local_grid(shape, local_layout);
+  cosmosim::gravity::PmSolver local_solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.assignment_scheme = scheme;
+
+  // Deterministic distributed-owner particle partition:
+  // owner rank = particle index % world_size.
+  const std::vector<double> all_x{0.499999, 0.500001, -0.0001, 1.0002, 0.125, 0.875};
+  const std::vector<double> all_y{0.10, 0.20, 0.30, 0.40, 0.55, 0.65};
+  const std::vector<double> all_z{0.15, 0.25, 0.35, 0.45, 0.75, 0.85};
+  const std::vector<double> all_mass{1.0, 2.0, 1.5, 2.5, 3.0, 4.0};
+
+  std::vector<double> local_x;
+  std::vector<double> local_y;
+  std::vector<double> local_z;
+  std::vector<double> local_mass;
+  for (std::size_t i = 0; i < all_x.size(); ++i) {
+    if (static_cast<int>(i % static_cast<std::size_t>(world_size)) == world_rank) {
+      local_x.push_back(all_x[i]);
+      local_y.push_back(all_y[i]);
+      local_z.push_back(all_z[i]);
+      local_mass.push_back(all_mass[i]);
+    }
+  }
+
+  local_solver.assignDensity(local_grid, local_x, local_y, local_z, local_mass, options, nullptr);
+
+  const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) / static_cast<double>(shape.cellCount());
+  const double local_mass_deposited =
+      std::accumulate(local_grid.density().begin(), local_grid.density().end(), 0.0) * cell_volume;
+  double global_mass_deposited = 0.0;
+  MPI_Allreduce(&local_mass_deposited, &global_mass_deposited, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  const double global_particle_mass = std::accumulate(all_mass.begin(), all_mass.end(), 0.0);
+  requireOrThrow(
+      std::abs(global_mass_deposited - global_particle_mass) < 1.0e-12,
+      "Distributed PM density assignment mass conservation failed");
+
+  std::vector<double> reference_local_density(local_layout.localCellCount(), 0.0);
+  if (world_rank == 0) {
+    cosmosim::gravity::PmGridStorage reference_grid(shape);
+    cosmosim::gravity::PmSolver reference_solver(shape);
+    reference_solver.assignDensity(reference_grid, all_x, all_y, all_z, all_mass, options, nullptr);
+
+    for (int target_rank = 0; target_rank < world_size; ++target_rank) {
+      const auto target_layout =
+          cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, target_rank);
+      std::vector<double> target_reference(target_layout.localCellCount(), 0.0);
+      for (std::size_t local_ix = 0; local_ix < target_layout.local_nx(); ++local_ix) {
+        const std::size_t ix = target_layout.globalXFromLocal(local_ix);
+        for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+          for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+            target_reference[(local_ix * shape.ny + iy) * shape.nz + iz] =
+                reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)];
+          }
+        }
+      }
+      if (target_rank == 0) {
+        reference_local_density = std::move(target_reference);
+      } else {
+        MPI_Send(
+            target_reference.data(),
+            static_cast<int>(target_reference.size()),
+            MPI_DOUBLE,
+            target_rank,
+            /*tag=*/52,
+            MPI_COMM_WORLD);
+      }
+    }
+  } else {
+    MPI_Recv(
+        reference_local_density.data(),
+        static_cast<int>(reference_local_density.size()),
+        MPI_DOUBLE,
+        0,
+        /*tag=*/52,
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+  }
+
+  double local_max_abs = 0.0;
+  double local_ref_l2 = 0.0;
+  double local_diff_l2 = 0.0;
+  for (std::size_t i = 0; i < local_grid.localCellCount(); ++i) {
+    const double diff = local_grid.density()[i] - reference_local_density[i];
+    local_max_abs = std::max(local_max_abs, std::abs(diff));
+    local_ref_l2 += reference_local_density[i] * reference_local_density[i];
+    local_diff_l2 += diff * diff;
+  }
+  double global_max_abs = 0.0;
+  double global_ref_l2 = 0.0;
+  double global_diff_l2 = 0.0;
+  MPI_Allreduce(&local_max_abs, &global_max_abs, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_ref_l2, &global_ref_l2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_diff_l2, &global_diff_l2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  const double rel_l2 = std::sqrt(global_diff_l2 / std::max(global_ref_l2, 1.0e-30));
+  requireOrThrow(global_max_abs <= 1.0e-12, "Distributed PM density assignment max-abs drift exceeds tolerance");
+  requireOrThrow(rel_l2 <= 1.0e-12, "Distributed PM density assignment relative L2 drift exceeds tolerance");
+}
+
+void testDistributedDensityAssignmentMatchesReference() {
+  runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme::kCic);
+  runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme::kTsc);
+}
+
 void testDistributedTwoRankMatchesSingleRankReference() {
   int world_size = 1;
   int world_rank = 0;
@@ -261,6 +379,7 @@ int main() {
 #endif
   testPeriodicSinusoidalForceResponse();
 #if COSMOSIM_ENABLE_MPI
+  testDistributedDensityAssignmentMatchesReference();
   testDistributedTwoRankMatchesSingleRankReference();
   MPI_Finalize();
 #endif

@@ -128,4 +128,12 @@ Single-rank mapping is the same abstraction, not a special case:
 
 - `world_size = 1`, `world_rank = 0`, owned slab `[0, global_nx)`, and local storage equals full mesh.
 
-This contract is intentionally storage/ownership-only in this stage; distributed FFT and remote PM mesh communication remain out of scope.
+This contract is intentionally storage/ownership-centric. Distributed PM communication is currently limited to
+**density assignment contribution routing**:
+
+- particle owners compute global stencil contributions,
+- destination slab owner is resolved by `pmOwnerRankForGlobalX(...)`,
+- contributions are batched per destination and exchanged with collective messaging,
+- only slab owners accumulate into local PM density arrays after ownership/range validation.
+
+Distributed force interpolation back to particle owners remains out of scope for this stage.

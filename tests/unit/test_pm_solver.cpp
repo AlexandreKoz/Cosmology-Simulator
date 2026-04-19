@@ -36,6 +36,30 @@ void testCicMassConservation() {
   assert(std::abs(total_density * cell_volume - total_mass) < k_tolerance);
 }
 
+void testTscMassConservationAndPeriodicWrap() {
+  const cosmosim::gravity::PmGridShape shape{12, 10, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  // Include values outside [0, L) to exercise periodic wrapping in TSC assignment.
+  const std::vector<double> pos_x{-0.01, 0.0, 0.99, 1.01};
+  const std::vector<double> pos_y{0.50, -0.25, 1.25, 0.10};
+  const std::vector<double> pos_z{0.25, 1.20, -0.40, 0.80};
+  const std::vector<double> mass{1.0, 2.0, 3.0, 4.0};
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
+
+  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
+
+  const double total_density = std::accumulate(grid.density().begin(), grid.density().end(), 0.0);
+  const double total_mass = std::accumulate(mass.begin(), mass.end(), 0.0);
+  const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) / static_cast<double>(shape.cellCount());
+  assert(std::abs(total_density * cell_volume - total_mass) < k_tolerance);
+}
+
 void testPoissonAnalyticMode() {
   const cosmosim::gravity::PmGridShape shape{16, 8, 8};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -325,6 +349,7 @@ void testPoissonPlanCachingForStableSlabLayout() {
 
 int main() {
   testCicMassConservation();
+  testTscMassConservationAndPeriodicWrap();
   testPoissonAnalyticMode();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();

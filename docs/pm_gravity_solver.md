@@ -128,8 +128,44 @@ For this phase, FFT spectral storage is treated as **non-transposed slab output*
   - `ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)`
   - `kz(iz) = 2π/L * iz`.
 
-Assignment and interpolation entrypoints are still full-domain-only in this phase:
-`PmSolver::{assignDensity,interpolateForces,interpolatePotential}` continue to reject partial slabs.
+Distributed density assignment is now enabled for slab layouts in `PmSolver::assignDensity`
+when MPI is enabled (`COSMOSIM_ENABLE_MPI=ON`) and slab metadata matches
+`MPI_COMM_WORLD`.
+
+`PmSolver::interpolateForces` and `PmSolver::interpolatePotential` remain full-domain-only in
+this phase and still reject partial slabs.
+
+### Distributed density assignment message contract (Phase 2)
+
+Ownership and routing model:
+
+- **particle owner rank** computes assignment stencils in global mesh coordinates from
+  wrapped periodic particle positions.
+- **slab owner rank** is chosen by x-index ownership:
+  - `destination_rank = pmOwnerRankForGlobalX(Nx, world_size, global_ix)`.
+- Only slab owners accumulate to local PM density storage.
+- No remote direct writes are permitted.
+
+Record format (packed per contribution):
+
+- `global_ix` (`uint32`): global x cell index in `[0, Nx)`.
+- `global_iy` (`uint32`): global y cell index in `[0, Ny)`.
+- `global_iz` (`uint32`): global z cell index in `[0, Nz)`.
+- `mass_contribution` (`double`): already weighted by the matched assignment kernel.
+
+Batching and ordering:
+
+- Each owner rank batches records by destination rank.
+- In-batch order is deterministic append order from nested loops:
+  particle index order, then stencil axis loop order (`x`, `y`, `z`).
+- Batched records are exchanged via `MPI_Alltoallv` as byte payloads.
+- PM solver-owned send/recv buffers are reused across solves for stable layout metadata.
+
+Receiver validation before accumulation:
+
+- Reject any received record with out-of-range global indices.
+- Reject any record whose `global_ix` is not owned by the receiving slab rank.
+- Accepted records are accumulated only into owner-local slab storage and then normalized by local cell volume.
 
 The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
 
