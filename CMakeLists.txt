@@ -228,6 +228,8 @@ target_link_libraries(cosmosim_workflows
     cosmosim_parallel
     cosmosim_physics)
 
+target_link_libraries(cosmosim_io PUBLIC cosmosim_parallel)
+
 if(COSMOSIM_ENABLE_MPI)
   target_link_libraries(cosmosim_parallel PUBLIC MPI::MPI_CXX)
 endif()

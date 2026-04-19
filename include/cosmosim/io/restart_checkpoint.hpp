@@ -10,12 +10,13 @@
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace cosmosim::io {
 
 struct RestartSchema {
-  std::string name = "cosmosim_restart_v3";
-  std::uint32_t version = 3;
+  std::string name = "cosmosim_restart_v4";
+  std::uint32_t version = 4;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -34,6 +35,7 @@ struct RestartWritePayload {
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;
+  parallel::DistributedRestartState distributed_gravity_state;
 };
 
 struct RestartReadResult {
@@ -43,6 +45,7 @@ struct RestartReadResult {
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;
+  parallel::DistributedRestartState distributed_gravity_state;
   std::uint64_t payload_hash = 0;
   std::string payload_hash_hex;
 };

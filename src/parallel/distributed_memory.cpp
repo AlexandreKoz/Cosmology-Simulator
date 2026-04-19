@@ -577,9 +577,25 @@ std::string DistributedRestartState::serialize() const {
   stream << "schema_version=" << schema_version << '\n';
   stream << "decomposition_epoch=" << decomposition_epoch << '\n';
   stream << "world_size=" << world_size << '\n';
+  stream << "pm_grid_nx=" << pm_grid_nx << '\n';
+  stream << "pm_grid_ny=" << pm_grid_ny << '\n';
+  stream << "pm_grid_nz=" << pm_grid_nz << '\n';
+  stream << "pm_decomposition_mode=" << pm_decomposition_mode << '\n';
+  stream << "gravity_kick_opportunity=" << gravity_kick_opportunity << '\n';
+  stream << "pm_update_cadence_steps=" << pm_update_cadence_steps << '\n';
+  stream << "long_range_field_version=" << long_range_field_version << '\n';
+  stream << "last_long_range_refresh_opportunity=" << last_long_range_refresh_opportunity << '\n';
+  stream << "long_range_field_built_step_index=" << long_range_field_built_step_index << '\n';
+  stream << "long_range_field_built_scale_factor=" << long_range_field_built_scale_factor << '\n';
+  stream << "long_range_restart_policy=" << long_range_restart_policy << '\n';
   stream << "item_count=" << owning_rank_by_item.size() << '\n';
   for (std::size_t i = 0; i < owning_rank_by_item.size(); ++i) {
     stream << "rank[" << i << "]=" << owning_rank_by_item[i] << '\n';
+  }
+  stream << "pm_slab_rank_count=" << pm_slab_begin_x_by_rank.size() << '\n';
+  for (std::size_t rank = 0; rank < pm_slab_begin_x_by_rank.size(); ++rank) {
+    stream << "pm_slab_begin_x[" << rank << "]=" << pm_slab_begin_x_by_rank[rank] << '\n';
+    stream << "pm_slab_end_x[" << rank << "]=" << pm_slab_end_x_by_rank[rank] << '\n';
   }
   return stream.str();
 }
@@ -589,6 +605,9 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
   const std::vector<std::string> lines = splitLines(encoded);
   std::size_t expected_item_count = 0;
   std::vector<bool> seen_rank_entry;
+  std::size_t expected_slab_rank_count = 0;
+  std::vector<bool> seen_slab_begin;
+  std::vector<bool> seen_slab_end;
 
   for (const std::string& line : lines) {
     if (line.empty()) {
@@ -608,10 +627,38 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
       state.decomposition_epoch = std::stoull(value);
     } else if (key == "world_size") {
       state.world_size = std::stoi(value);
+    } else if (key == "pm_grid_nx") {
+      state.pm_grid_nx = static_cast<std::size_t>(std::stoull(value));
+    } else if (key == "pm_grid_ny") {
+      state.pm_grid_ny = static_cast<std::size_t>(std::stoull(value));
+    } else if (key == "pm_grid_nz") {
+      state.pm_grid_nz = static_cast<std::size_t>(std::stoull(value));
+    } else if (key == "pm_decomposition_mode") {
+      state.pm_decomposition_mode = value;
+    } else if (key == "gravity_kick_opportunity") {
+      state.gravity_kick_opportunity = std::stoull(value);
+    } else if (key == "pm_update_cadence_steps") {
+      state.pm_update_cadence_steps = std::stoull(value);
+    } else if (key == "long_range_field_version") {
+      state.long_range_field_version = std::stoull(value);
+    } else if (key == "last_long_range_refresh_opportunity") {
+      state.last_long_range_refresh_opportunity = std::stoull(value);
+    } else if (key == "long_range_field_built_step_index") {
+      state.long_range_field_built_step_index = std::stoull(value);
+    } else if (key == "long_range_field_built_scale_factor") {
+      state.long_range_field_built_scale_factor = std::stod(value);
+    } else if (key == "long_range_restart_policy") {
+      state.long_range_restart_policy = value;
     } else if (key == "item_count") {
       expected_item_count = static_cast<std::size_t>(std::stoull(value));
       state.owning_rank_by_item.assign(expected_item_count, 0);
       seen_rank_entry.assign(expected_item_count, false);
+    } else if (key == "pm_slab_rank_count") {
+      expected_slab_rank_count = static_cast<std::size_t>(std::stoull(value));
+      state.pm_slab_begin_x_by_rank.assign(expected_slab_rank_count, 0);
+      state.pm_slab_end_x_by_rank.assign(expected_slab_rank_count, 0);
+      seen_slab_begin.assign(expected_slab_rank_count, false);
+      seen_slab_end.assign(expected_slab_rank_count, false);
     } else if (key.rfind("rank[", 0) == 0) {
       const std::size_t open = key.find('[');
       const std::size_t close = key.find(']');
@@ -627,6 +674,30 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
       }
       state.owning_rank_by_item[index] = std::stoi(value);
       seen_rank_entry[index] = true;
+    } else if (key.rfind("pm_slab_begin_x[", 0) == 0 || key.rfind("pm_slab_end_x[", 0) == 0) {
+      const bool is_begin = key.rfind("pm_slab_begin_x[", 0) == 0;
+      const std::size_t open = key.find('[');
+      const std::size_t close = key.find(']');
+      if (open == std::string::npos || close == std::string::npos || close <= open + 1) {
+        throw std::invalid_argument("invalid PM slab entry in restart encoding");
+      }
+      const std::size_t rank_index = static_cast<std::size_t>(std::stoull(key.substr(open + 1, close - open - 1)));
+      if (rank_index >= expected_slab_rank_count) {
+        throw std::out_of_range("restart PM slab rank index out of bounds");
+      }
+      if (is_begin) {
+        if (seen_slab_begin[rank_index]) {
+          throw std::invalid_argument("duplicate PM slab begin entry");
+        }
+        state.pm_slab_begin_x_by_rank[rank_index] = static_cast<std::size_t>(std::stoull(value));
+        seen_slab_begin[rank_index] = true;
+      } else {
+        if (seen_slab_end[rank_index]) {
+          throw std::invalid_argument("duplicate PM slab end entry");
+        }
+        state.pm_slab_end_x_by_rank[rank_index] = static_cast<std::size_t>(std::stoull(value));
+        seen_slab_end[rank_index] = true;
+      }
     }
   }
 
@@ -636,12 +707,85 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
   if (state.world_size <= 0) {
     throw std::invalid_argument("restart world_size must be positive");
   }
+  if (state.pm_update_cadence_steps == 0) {
+    throw std::invalid_argument("restart PM cadence must be >= 1");
+  }
+  if (state.long_range_restart_policy != "deterministic_rebuild") {
+    throw std::invalid_argument("restart long-range policy is unsupported: " + state.long_range_restart_policy);
+  }
+  if (state.schema_version >= 2) {
+    if (state.pm_grid_nx == 0 || state.pm_grid_ny == 0 || state.pm_grid_nz == 0) {
+      throw std::invalid_argument("restart PM grid dimensions must be > 0 for schema_version >= 2");
+    }
+    if (state.pm_decomposition_mode.empty()) {
+      throw std::invalid_argument("restart PM decomposition mode must be non-empty");
+    }
+    if (expected_slab_rank_count != static_cast<std::size_t>(state.world_size)) {
+      throw std::invalid_argument("restart PM slab rank count must match world_size");
+    }
+    for (std::size_t rank = 0; rank < expected_slab_rank_count; ++rank) {
+      if (!seen_slab_begin[rank] || !seen_slab_end[rank]) {
+        throw std::runtime_error("restart decode missing PM slab ownership entry");
+      }
+      if (state.pm_slab_end_x_by_rank[rank] < state.pm_slab_begin_x_by_rank[rank]) {
+        throw std::invalid_argument("restart PM slab end_x must be >= begin_x");
+      }
+    }
+  }
   for (bool seen : seen_rank_entry) {
     if (!seen) {
       throw std::runtime_error("restart decode missing ownership entry");
     }
   }
   return state;
+}
+
+DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
+    const DistributedRestartState& restart_state,
+    const DistributedExecutionTopology& runtime_topology) {
+  DistributedRestartCompatibilityReport report;
+  if (restart_state.world_size != runtime_topology.world_size) {
+    report.world_size_match = false;
+    report.mismatch_messages.push_back(
+        "world_size mismatch: restart=" + std::to_string(restart_state.world_size) +
+        ", runtime=" + std::to_string(runtime_topology.world_size));
+  }
+  if (restart_state.pm_grid_nx != runtime_topology.pm_slab.global_nx ||
+      restart_state.pm_grid_ny != runtime_topology.pm_slab.global_ny ||
+      restart_state.pm_grid_nz != runtime_topology.pm_slab.global_nz) {
+    report.pm_grid_shape_match = false;
+    report.mismatch_messages.push_back(
+        "PM grid mismatch: restart=(" + std::to_string(restart_state.pm_grid_nx) + "," +
+        std::to_string(restart_state.pm_grid_ny) + "," + std::to_string(restart_state.pm_grid_nz) +
+        "), runtime=(" + std::to_string(runtime_topology.pm_slab.global_nx) + "," +
+        std::to_string(runtime_topology.pm_slab.global_ny) + "," +
+        std::to_string(runtime_topology.pm_slab.global_nz) + ")");
+  }
+  if (restart_state.pm_decomposition_mode != "slab") {
+    report.pm_decomposition_mode_match = false;
+    report.mismatch_messages.push_back(
+        "PM decomposition mode mismatch: restart=" + restart_state.pm_decomposition_mode +
+        ", runtime=slab");
+  }
+  if (runtime_topology.world_rank < 0 ||
+      runtime_topology.world_rank >= static_cast<int>(restart_state.pm_slab_begin_x_by_rank.size())) {
+    report.pm_local_slab_match = false;
+    report.mismatch_messages.push_back("runtime world_rank is outside restart PM slab ownership table");
+    return report;
+  }
+  const std::size_t rank = static_cast<std::size_t>(runtime_topology.world_rank);
+  const std::size_t begin_restart = restart_state.pm_slab_begin_x_by_rank[rank];
+  const std::size_t end_restart = restart_state.pm_slab_end_x_by_rank[rank];
+  if (begin_restart != runtime_topology.pm_slab.owned_x.begin_x ||
+      end_restart != runtime_topology.pm_slab.owned_x.end_x) {
+    report.pm_local_slab_match = false;
+    report.mismatch_messages.push_back(
+        "PM slab mismatch for rank " + std::to_string(runtime_topology.world_rank) +
+        ": restart=[" + std::to_string(begin_restart) + "," + std::to_string(end_restart) +
+        "), runtime=[" + std::to_string(runtime_topology.pm_slab.owned_x.begin_x) + "," +
+        std::to_string(runtime_topology.pm_slab.owned_x.end_x) + ")");
+  }
+  return report;
 }
 
 void recordDistributedProfiling(

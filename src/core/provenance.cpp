@@ -154,6 +154,13 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "gravity_softening_kernel=" << record.gravity_softening_kernel << '\n';
   stream << "gravity_softening_epsilon_kpc_comoving=" << record.gravity_softening_epsilon_kpc_comoving << '\n';
   stream << "gravity_pm_fft_backend=" << record.gravity_pm_fft_backend << '\n';
+  stream << "gravity_treepm_decomposition_epoch=" << record.gravity_treepm_decomposition_epoch << '\n';
+  stream << "gravity_treepm_restart_world_size=" << record.gravity_treepm_restart_world_size << '\n';
+  stream << "gravity_treepm_restart_pm_grid=" << record.gravity_treepm_restart_pm_grid << '\n';
+  stream << "gravity_treepm_restart_slab_signature=" << record.gravity_treepm_restart_slab_signature << '\n';
+  stream << "gravity_treepm_restart_kick_opportunity=" << record.gravity_treepm_restart_kick_opportunity << '\n';
+  stream << "gravity_treepm_restart_field_version=" << record.gravity_treepm_restart_field_version << '\n';
+  stream << "gravity_treepm_long_range_restart_policy=" << record.gravity_treepm_long_range_restart_policy << '\n';
   return stream.str();
 }
 
@@ -222,6 +229,20 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_softening_epsilon_kpc_comoving = std::stod(value);
     } else if (key == "gravity_pm_fft_backend") {
       record.gravity_pm_fft_backend = value;
+    } else if (key == "gravity_treepm_decomposition_epoch") {
+      record.gravity_treepm_decomposition_epoch = static_cast<std::uint64_t>(std::stoull(value));
+    } else if (key == "gravity_treepm_restart_world_size") {
+      record.gravity_treepm_restart_world_size = std::stoi(value);
+    } else if (key == "gravity_treepm_restart_pm_grid") {
+      record.gravity_treepm_restart_pm_grid = value;
+    } else if (key == "gravity_treepm_restart_slab_signature") {
+      record.gravity_treepm_restart_slab_signature = value;
+    } else if (key == "gravity_treepm_restart_kick_opportunity") {
+      record.gravity_treepm_restart_kick_opportunity = static_cast<std::uint64_t>(std::stoull(value));
+    } else if (key == "gravity_treepm_restart_field_version") {
+      record.gravity_treepm_restart_field_version = static_cast<std::uint64_t>(std::stoull(value));
+    } else if (key == "gravity_treepm_long_range_restart_policy") {
+      record.gravity_treepm_long_range_restart_policy = value;
     }
   }
   return record;

@@ -121,6 +121,18 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   return record;
 }
 
+[[nodiscard]] std::string pmSlabSignature(const parallel::DistributedRestartState& distributed_state) {
+  std::ostringstream stream;
+  for (std::size_t rank = 0; rank < distributed_state.pm_slab_begin_x_by_rank.size(); ++rank) {
+    if (rank > 0) {
+      stream << ';';
+    }
+    stream << rank << ':' << distributed_state.pm_slab_begin_x_by_rank[rank] << '-' <<
+        distributed_state.pm_slab_end_x_by_rank[rank];
+  }
+  return stream.str();
+}
+
 [[nodiscard]] std::filesystem::path computeRunDirectory(
     const core::SimulationConfig& config,
     const std::filesystem::path* output_root_override) {
@@ -415,6 +427,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
+  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_gravity_kick_opportunity; }
+  [[nodiscard]] std::uint64_t longRangeFieldVersion() const noexcept { return m_long_range_field_version; }
+  [[nodiscard]] std::uint64_t lastLongRangeRefreshOpportunity() const noexcept { return m_last_long_range_refresh_opportunity; }
+  [[nodiscard]] std::uint64_t lastLongRangeRefreshStepIndex() const noexcept { return m_last_long_range_refresh_step_index; }
+  [[nodiscard]] double lastLongRangeRefreshScaleFactor() const noexcept { return m_last_long_range_refresh_scale_factor; }
+  [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
@@ -869,13 +887,67 @@ void maybeWriteOutputs(
         makeGravityAwareProvenanceRecord(frozen_config, config);
     restart_payload.normalized_config_text = frozen_config.normalized_text;
     restart_payload.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
+    restart_payload.distributed_gravity_state.schema_version = 2;
+    restart_payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;
+    restart_payload.distributed_gravity_state.world_size = gravity_callback.runtimeTopology().world_size;
+    restart_payload.distributed_gravity_state.pm_grid_nx = gravity_callback.pmGridSize();
+    restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridSize();
+    restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridSize();
+    restart_payload.distributed_gravity_state.pm_decomposition_mode = "slab";
+    restart_payload.distributed_gravity_state.gravity_kick_opportunity = gravity_callback.gravityKickOpportunity();
+    restart_payload.distributed_gravity_state.pm_update_cadence_steps =
+        static_cast<std::uint64_t>(gravity_callback.pmCadenceSteps());
+    restart_payload.distributed_gravity_state.long_range_field_version =
+        gravity_callback.longRangeFieldVersion();
+    restart_payload.distributed_gravity_state.last_long_range_refresh_opportunity =
+        gravity_callback.lastLongRangeRefreshOpportunity();
+    restart_payload.distributed_gravity_state.long_range_field_built_step_index =
+        gravity_callback.lastLongRangeRefreshStepIndex();
+    restart_payload.distributed_gravity_state.long_range_field_built_scale_factor =
+        gravity_callback.lastLongRangeRefreshScaleFactor();
+    restart_payload.distributed_gravity_state.long_range_restart_policy = "deterministic_rebuild";
+    restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particle_sidecar.owning_rank.size());
+    for (const std::uint32_t owner : state.particle_sidecar.owning_rank) {
+      restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(static_cast<int>(owner));
+    }
+    const std::size_t world_size = static_cast<std::size_t>(gravity_callback.runtimeTopology().world_size);
+    restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank.resize(world_size, 0);
+    restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank.resize(world_size, 0);
+    for (std::size_t rank = 0; rank < world_size; ++rank) {
+      const parallel::PmSlabRange range = parallel::pmOwnedXRangeForRank(
+          gravity_callback.pmGridSize(),
+          static_cast<int>(world_size),
+          static_cast<int>(rank));
+      restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank[rank] = range.begin_x;
+      restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank[rank] = range.end_x;
+    }
+    restart_payload.provenance.gravity_treepm_decomposition_epoch =
+        restart_payload.distributed_gravity_state.decomposition_epoch;
+    restart_payload.provenance.gravity_treepm_restart_world_size =
+        restart_payload.distributed_gravity_state.world_size;
+    restart_payload.provenance.gravity_treepm_restart_pm_grid =
+        std::to_string(restart_payload.distributed_gravity_state.pm_grid_nx) + "x" +
+        std::to_string(restart_payload.distributed_gravity_state.pm_grid_ny) + "x" +
+        std::to_string(restart_payload.distributed_gravity_state.pm_grid_nz);
+    restart_payload.provenance.gravity_treepm_restart_slab_signature =
+        pmSlabSignature(restart_payload.distributed_gravity_state);
+    restart_payload.provenance.gravity_treepm_restart_kick_opportunity =
+        restart_payload.distributed_gravity_state.gravity_kick_opportunity;
+    restart_payload.provenance.gravity_treepm_restart_field_version =
+        restart_payload.distributed_gravity_state.long_range_field_version;
+    restart_payload.provenance.gravity_treepm_long_range_restart_policy =
+        restart_payload.distributed_gravity_state.long_range_restart_policy;
 
     report.restart_path = report.run_directory / formatIndexedFileStem(config.output.restart_stem, integrator_state.step_index);
     io::writeRestartCheckpointHdf5(report.restart_path, restart_payload);
     report.restart_roundtrip_executed = true;
     const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
+    const auto compatibility = parallel::evaluateDistributedRestartCompatibility(
+        restart_read.distributed_gravity_state,
+        gravity_callback.runtimeTopology());
     report.restart_roundtrip_ok = restart_read.state.particles.size() == state.particles.size() &&
-        restart_read.scheduler_state.current_tick == scheduler.currentTick();
+        restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
+        compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "restart.write.complete",
         .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,

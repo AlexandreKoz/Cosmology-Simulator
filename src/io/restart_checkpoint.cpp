@@ -606,6 +606,16 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
     throw std::runtime_error("restart state failed ownership invariant validation");
   }
 }
+
+void writeDistributedGravityGroup(hid_t root, const parallel::DistributedRestartState& distributed_state) {
+  Hdf5Handle group(openOrCreateGroup(root, "/distributed_gravity"));
+  writeStringDataset(group.get(), "state", distributed_state.serialize());
+}
+
+void readDistributedGravityGroup(hid_t root, parallel::DistributedRestartState& distributed_state) {
+  Hdf5Handle group(H5Gopen2(root, "/distributed_gravity", H5P_DEFAULT));
+  distributed_state = parallel::DistributedRestartState::deserialize(readStringDataset(group.get(), "state"));
+}
 #endif
 
 }  // namespace
@@ -625,6 +635,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "module_sidecars_with_schema_versions",
       "integrator_state",
       "scheduler_persistent_state",
+      "distributed_gravity_state",
       "normalized_config_text_and_hash",
       "provenance_record",
       "payload_integrity_hash_and_hex"};
@@ -640,6 +651,24 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
       payload.normalized_config_hash_hex,
       payload.provenance,
       "restart payload");
+  if (payload.distributed_gravity_state.world_size <= 0) {
+    throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
+  }
+  if (payload.distributed_gravity_state.owning_rank_by_item.size() != payload.state->particles.size()) {
+    throw std::invalid_argument(
+        "restart payload distributed_gravity_state.owning_rank_by_item must match particle count");
+  }
+  if (payload.distributed_gravity_state.pm_slab_begin_x_by_rank.size() !=
+          static_cast<std::size_t>(payload.distributed_gravity_state.world_size) ||
+      payload.distributed_gravity_state.pm_slab_end_x_by_rank.size() !=
+          static_cast<std::size_t>(payload.distributed_gravity_state.world_size)) {
+    throw std::invalid_argument(
+        "restart payload distributed_gravity_state PM slab ownership must match world_size");
+  }
+  if (payload.distributed_gravity_state.long_range_restart_policy != "deterministic_rebuild") {
+    throw std::invalid_argument(
+        "restart payload distributed_gravity_state.long_range_restart_policy must be deterministic_rebuild");
+  }
 
   std::uint64_t hash = k_offset_basis;
 
@@ -750,6 +779,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(scheduler_state.next_activation_tick);
   append_any_vec(scheduler_state.active_flag);
   append_any_vec(scheduler_state.pending_bin_index);
+  append_string(payload.distributed_gravity_state.serialize());
 
   return hash;
 }
@@ -834,6 +864,7 @@ void writeRestartCheckpointHdf5(
       H5T_STD_U8LE,
       H5T_NATIVE_UINT8,
       scheduler_state.pending_bin_index);
+  writeDistributedGravityGroup(file.get(), payload.distributed_gravity_state);
 
   if (H5Fflush(file.get(), H5F_SCOPE_GLOBAL) < 0) {
     throw std::runtime_error("failed to flush temporary restart file");
@@ -906,6 +937,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.scheduler_state.active_flag = readDataset1d<std::uint8_t>(scheduler_group.get(), "active_flag", H5T_NATIVE_UINT8);
   result.scheduler_state.pending_bin_index =
       readDataset1d<std::uint8_t>(scheduler_group.get(), "pending_bin_index", H5T_NATIVE_UINT8);
+  readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;
   verify_payload.state = &result.state;
@@ -916,6 +948,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.normalized_config_hash_hex = result.normalized_config_hash_hex;
   verify_payload.normalized_config_text = result.normalized_config_text;
   verify_payload.provenance = result.provenance;
+  verify_payload.distributed_gravity_state = result.distributed_gravity_state;
 
   const std::uint64_t computed_hash = restartPayloadIntegrityHash(verify_payload);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {

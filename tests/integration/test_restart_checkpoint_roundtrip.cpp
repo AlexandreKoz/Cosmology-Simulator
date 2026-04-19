@@ -153,6 +153,23 @@ void testRestartRoundtrip() {
   payload.provenance.gravity_softening_kernel = "plummer";
   payload.provenance.gravity_softening_epsilon_kpc_comoving = 2.0;
   payload.provenance.gravity_pm_fft_backend = "fftw3";
+  payload.distributed_gravity_state.schema_version = 2;
+  payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;
+  payload.distributed_gravity_state.world_size = 1;
+  payload.distributed_gravity_state.pm_grid_nx = 32;
+  payload.distributed_gravity_state.pm_grid_ny = 32;
+  payload.distributed_gravity_state.pm_grid_nz = 32;
+  payload.distributed_gravity_state.pm_decomposition_mode = "slab";
+  payload.distributed_gravity_state.gravity_kick_opportunity = 9;
+  payload.distributed_gravity_state.pm_update_cadence_steps = 3;
+  payload.distributed_gravity_state.long_range_field_version = 4;
+  payload.distributed_gravity_state.last_long_range_refresh_opportunity = 9;
+  payload.distributed_gravity_state.long_range_field_built_step_index = integrator_state.step_index;
+  payload.distributed_gravity_state.long_range_field_built_scale_factor = integrator_state.current_scale_factor;
+  payload.distributed_gravity_state.long_range_restart_policy = "deterministic_rebuild";
+  payload.distributed_gravity_state.owning_rank_by_item.assign(state.particles.size(), 0);
+  payload.distributed_gravity_state.pm_slab_begin_x_by_rank = {0};
+  payload.distributed_gravity_state.pm_slab_end_x_by_rank = {32};
 
   const std::filesystem::path checkpoint_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
@@ -259,6 +276,15 @@ void testRestartRoundtrip() {
       restored.provenance.gravity_softening_epsilon_kpc_comoving ==
       payload.provenance.gravity_softening_epsilon_kpc_comoving);
   assert(restored.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
+  assert(restored.distributed_gravity_state.schema_version == payload.distributed_gravity_state.schema_version);
+  assert(restored.distributed_gravity_state.decomposition_epoch == payload.distributed_gravity_state.decomposition_epoch);
+  assert(restored.distributed_gravity_state.world_size == payload.distributed_gravity_state.world_size);
+  assert(restored.distributed_gravity_state.pm_grid_nx == payload.distributed_gravity_state.pm_grid_nx);
+  assert(restored.distributed_gravity_state.pm_grid_ny == payload.distributed_gravity_state.pm_grid_ny);
+  assert(restored.distributed_gravity_state.pm_grid_nz == payload.distributed_gravity_state.pm_grid_nz);
+  assert(restored.distributed_gravity_state.owning_rank_by_item == payload.distributed_gravity_state.owning_rank_by_item);
+  assert(restored.distributed_gravity_state.pm_slab_begin_x_by_rank == payload.distributed_gravity_state.pm_slab_begin_x_by_rank);
+  assert(restored.distributed_gravity_state.pm_slab_end_x_by_rank == payload.distributed_gravity_state.pm_slab_end_x_by_rank);
   assert(restored.state.sidecars.find("hydro") != nullptr);
   const cosmosim::core::ModuleSidecarBlock* hydro_sidecar = restored.state.sidecars.find("hydro");
   assert(hydro_sidecar->schema_version == 3);
