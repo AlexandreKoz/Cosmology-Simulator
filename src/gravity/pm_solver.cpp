@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <limits>
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/device_buffer.hpp"
@@ -61,6 +62,13 @@ struct PmAxisStencil1d {
   std::array<std::ptrdiff_t, 3> offsets{};
   std::array<double, 3> weights{};
   std::size_t count = 0;
+};
+
+struct PmDensityContributionRecord {
+  std::uint32_t global_ix = 0;
+  std::uint32_t global_iy = 0;
+  std::uint32_t global_iz = 0;
+  double mass_contribution = 0.0;
 };
 
 [[nodiscard]] PmAxisStencil1d makeAxisStencil(double grid_position, PmAssignmentScheme scheme) {
@@ -174,6 +182,20 @@ class PmSolver::Impl {
     bool is_distributed = false;
 #endif
 #endif
+  };
+
+  struct DensityExchangeBuffers {
+    std::vector<std::vector<PmDensityContributionRecord>> send_records_by_rank;
+    std::vector<PmDensityContributionRecord> send_flat_records;
+    std::vector<PmDensityContributionRecord> recv_flat_records;
+    std::vector<int> send_counts;
+    std::vector<int> send_displs;
+    std::vector<int> recv_counts;
+    std::vector<int> recv_displs;
+    std::vector<int> send_counts_bytes;
+    std::vector<int> send_displs_bytes;
+    std::vector<int> recv_counts_bytes;
+    std::vector<int> recv_displs_bytes;
   };
 
   explicit Impl(PmGridShape shape) : m_shape(shape) {}
@@ -301,6 +323,23 @@ class PmSolver::Impl {
   [[nodiscard]] std::size_t planCount() const noexcept { return m_plan_cache.size(); }
   [[nodiscard]] std::size_t planBuildCount() const noexcept { return m_plan_build_count; }
 
+  [[nodiscard]] DensityExchangeBuffers& densityExchangeBuffersForLayout(const parallel::PmSlabLayout& layout) {
+    if (m_density_exchange.world_size != layout.world_size || m_density_exchange.world_rank != layout.world_rank) {
+      m_density_exchange.world_size = layout.world_size;
+      m_density_exchange.world_rank = layout.world_rank;
+      m_density_exchange.buffers.send_records_by_rank.assign(static_cast<std::size_t>(layout.world_size), {});
+      m_density_exchange.buffers.send_counts.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.send_displs.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.recv_counts.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.recv_displs.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.send_counts_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.send_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.recv_counts_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.recv_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
+    }
+    return m_density_exchange.buffers;
+  }
+
  private:
   [[nodiscard]] PlanResources& activePlan() {
     if (!m_active_key.has_value()) {
@@ -377,6 +416,11 @@ class PmSolver::Impl {
   std::unordered_map<PlanKey, PlanResources, PlanKeyHasher> m_plan_cache;
   std::optional<PlanKey> m_active_key;
   std::size_t m_plan_build_count = 0;
+  struct {
+    int world_size = 1;
+    int world_rank = 0;
+    DensityExchangeBuffers buffers;
+  } m_density_exchange{};
 };
 
 std::size_t PmGridShape::cellCount() const {
@@ -526,10 +570,32 @@ void PmSolver::assignDensity(
   if (grid.shape().cellCount() != m_shape.cellCount()) {
     throw std::invalid_argument("PM solver/grid shape mismatch in assignDensity");
   }
-  validateSingleRankFullDomainGridContract(grid, "PmSolver::assignDensity");
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != mass.size()) {
     throw std::invalid_argument("Particle coordinate/mass spans must match in assignDensity");
   }
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::assignDensity requires a valid PM slab layout");
+  }
+  const bool distributed_slabs = grid.slabLayout().world_size > 1;
+#if !COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    throw std::invalid_argument(
+        "PmSolver::assignDensity distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
+#else
+  if (distributed_slabs) {
+    int mpi_world_size = 1;
+    int mpi_world_rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
+      throw std::invalid_argument(
+          "PmSolver::assignDensity slab layout world metadata must match MPI_COMM_WORLD");
+    }
+  } else {
+    validateSingleRankFullDomainGridContract(grid, "PmSolver::assignDensity");
+  }
+#endif
 
   const auto start = std::chrono::steady_clock::now();
   std::fill(grid.density().begin(), grid.density().end(), 0.0);
@@ -538,26 +604,144 @@ void PmSolver::assignDensity(
   const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
   const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
 
-  for (std::size_t p = 0; p < mass.size(); ++p) {
-    const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-    const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-    const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+  const auto accumulate_owned = [&](const PmDensityContributionRecord& record) {
+    if (record.global_ix >= m_shape.nx || record.global_iy >= m_shape.ny || record.global_iz >= m_shape.nz) {
+      throw std::invalid_argument("PmSolver::assignDensity received out-of-range PM contribution record");
+    }
+    if (!grid.slabLayout().ownsGlobalX(record.global_ix)) {
+      throw std::invalid_argument("PmSolver::assignDensity received contribution for non-owned PM slab x-index");
+    }
+    grid.density()[grid.linearIndex(record.global_ix, record.global_iy, record.global_iz)] += record.mass_contribution;
+  };
 
-    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
-    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
-    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+  if (!distributed_slabs) {
+    for (std::size_t p = 0; p < mass.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    for (std::size_t dx = 0; dx < sx.count; ++dx) {
-      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
-      for (std::size_t dy = 0; dy < sy.count; ++dy) {
-        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
-        for (std::size_t dz = 0; dz < sz.count; ++dz) {
-          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
-          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
-          grid.density()[grid.linearIndex(ix, iy, iz)] += mass[p] * weight;
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            accumulate_owned(PmDensityContributionRecord{
+                .global_ix = static_cast<std::uint32_t>(ix),
+                .global_iy = static_cast<std::uint32_t>(iy),
+                .global_iz = static_cast<std::uint32_t>(iz),
+                .mass_contribution = mass[p] * weight,
+            });
+          }
         }
       }
     }
+  } else {
+#if COSMOSIM_ENABLE_MPI
+    auto& exchange = m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+    for (auto& per_rank : exchange.send_records_by_rank) {
+      per_rank.clear();
+    }
+    exchange.send_flat_records.clear();
+    exchange.recv_flat_records.clear();
+    std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
+    std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
+    std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
+    std::fill(exchange.recv_displs.begin(), exchange.recv_displs.end(), 0);
+    std::fill(exchange.send_counts_bytes.begin(), exchange.send_counts_bytes.end(), 0);
+    std::fill(exchange.send_displs_bytes.begin(), exchange.send_displs_bytes.end(), 0);
+    std::fill(exchange.recv_counts_bytes.begin(), exchange.recv_counts_bytes.end(), 0);
+    std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
+
+    for (std::size_t p = 0; p < mass.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, ix);
+        auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            batch.push_back(PmDensityContributionRecord{
+                .global_ix = static_cast<std::uint32_t>(ix),
+                .global_iy = static_cast<std::uint32_t>(iy),
+                .global_iz = static_cast<std::uint32_t>(iz),
+                .mass_contribution = mass[p] * weight,
+            });
+          }
+        }
+      }
+    }
+
+    std::size_t total_send_records = 0;
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      const std::size_t count = exchange.send_records_by_rank[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("PmSolver::assignDensity send contribution count exceeds MPI int limit");
+      }
+      exchange.send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      exchange.send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_records);
+      total_send_records += count;
+    }
+    exchange.send_flat_records.reserve(total_send_records);
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      const auto& records = exchange.send_records_by_rank[static_cast<std::size_t>(rank)];
+      exchange.send_flat_records.insert(exchange.send_flat_records.end(), records.begin(), records.end());
+    }
+
+    MPI_Alltoall(
+        exchange.send_counts.data(),
+        1,
+        MPI_INT,
+        exchange.recv_counts.data(),
+        1,
+        MPI_INT,
+        MPI_COMM_WORLD);
+
+    std::size_t total_recv_records = 0;
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      exchange.recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_records);
+      total_recv_records += static_cast<std::size_t>(exchange.recv_counts[static_cast<std::size_t>(rank)]);
+    }
+    exchange.recv_flat_records.resize(total_recv_records);
+
+    const int record_bytes = static_cast<int>(sizeof(PmDensityContributionRecord));
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      const auto idx = static_cast<std::size_t>(rank);
+      exchange.send_counts_bytes[idx] = exchange.send_counts[idx] * record_bytes;
+      exchange.send_displs_bytes[idx] = exchange.send_displs[idx] * record_bytes;
+      exchange.recv_counts_bytes[idx] = exchange.recv_counts[idx] * record_bytes;
+      exchange.recv_displs_bytes[idx] = exchange.recv_displs[idx] * record_bytes;
+    }
+
+    MPI_Alltoallv(
+        reinterpret_cast<const std::uint8_t*>(exchange.send_flat_records.data()),
+        exchange.send_counts_bytes.data(),
+        exchange.send_displs_bytes.data(),
+        MPI_BYTE,
+        reinterpret_cast<std::uint8_t*>(exchange.recv_flat_records.data()),
+        exchange.recv_counts_bytes.data(),
+        exchange.recv_displs_bytes.data(),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    for (const PmDensityContributionRecord& record : exchange.recv_flat_records) {
+      accumulate_owned(record);
+    }
+#endif
   }
 
   const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) /

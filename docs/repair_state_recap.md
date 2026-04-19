@@ -4,6 +4,27 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) TreePM Phase 2 distributed density assignment repair (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_pm_solver test_integration_pm_periodic_mode
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_pm_solver|integration_pm_periodic_mode"
+```
+
+Observed:
+
+- `PmSolver::assignDensity` now supports slab-distributed owner-to-owner contribution routing with
+  explicit slab ownership validation and no replicated full mesh requirement on each rank.
+- One-rank path remains numerically consistent with prior contract and now also includes TSC wrap/mass checks.
+- Integration tests include distributed density assignment agreement against one-rank reference for both CIC and TSC.
+
+Interpretation:
+
+- Phase 2 PM distributed deposition infrastructure is now implemented and tested at contract level.
+- Distributed FFT solve support status is unchanged from prior repair state.
+
 ## 1) Preset and dependency gates
 
 Commands:
