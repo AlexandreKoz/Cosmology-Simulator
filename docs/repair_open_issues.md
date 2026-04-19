@@ -4,7 +4,12 @@ _Date captured: 2026-04-14 (UTC)_
 
 ## Current blocker ledger after dependency-enabled validation
 
-One environment blocker remains in this validation environment: `cmake --preset pm-hdf5-fftw-debug` fails because FFTW3 development files are unavailable. No new in-tree code blocker was observed on the repaired CPU/HDF5 paths.
+Environment blockers currently observed in this validation environment:
+
+- `cmake --preset pm-hdf5-fftw-debug` can fail when FFTW3 development files are unavailable.
+- `cmake -S . -B build/mpi-fftw-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCOSMOSIM_ENABLE_TESTS=ON -DCOSMOSIM_ENABLE_MPI=ON -DCOSMOSIM_ENABLE_FFTW=ON -DCOSMOSIM_ENABLE_HDF5=OFF` fails in this container because MPI C++ tooling is missing (`Could NOT find MPI_CXX`), preventing two-rank PM distributed runtime closure in CI-like local validation.
+
+No new in-tree CPU-path code blocker was observed on the repaired PM unit/integration single-rank checks.
 
 ## Recently closed items
 

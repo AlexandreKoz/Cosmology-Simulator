@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <stdexcept>
 #include <numeric>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,6 +25,10 @@
 
 #if COSMOSIM_ENABLE_FFTW
 #include <fftw3.h>
+#if COSMOSIM_ENABLE_MPI
+#include <fftw3-mpi.h>
+#include <mpi.h>
+#endif
 #endif
 
 namespace cosmosim::gravity {
@@ -134,55 +140,146 @@ void validateSingleRankFullDomainGridContract(const PmGridStorage& grid, std::st
 
 class PmSolver::Impl {
  public:
-  explicit Impl(PmGridShape shape)
-      : m_shape(shape),
-        m_real(shape.cellCount(), 0.0),
-        m_fourier(shape.nx * shape.ny * (shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)),
-        m_potential_k(m_shape.nx * m_shape.ny * (m_shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)),
-        m_working_k(m_shape.nx * m_shape.ny * (m_shape.nz / 2U + 1U), std::complex<double>(0.0, 0.0)) {
-#if COSMOSIM_ENABLE_FFTW
-    m_forward_plan = fftw_plan_dft_r2c_3d(
-        static_cast<int>(m_shape.nx),
-        static_cast<int>(m_shape.ny),
-        static_cast<int>(m_shape.nz),
-        m_real.data(),
-        reinterpret_cast<fftw_complex*>(m_fourier.data()),
-        FFTW_MEASURE);
-    m_inverse_plan = fftw_plan_dft_c2r_3d(
-        static_cast<int>(m_shape.nx),
-        static_cast<int>(m_shape.ny),
-        static_cast<int>(m_shape.nz),
-        reinterpret_cast<fftw_complex*>(m_fourier.data()),
-        m_real.data(),
-        FFTW_MEASURE);
-    if (m_forward_plan == nullptr || m_inverse_plan == nullptr) {
-      throw std::runtime_error("Failed to create FFTW plans for PM solver");
+  struct PlanKey {
+    int world_size = 1;
+    int world_rank = 0;
+    std::size_t owned_begin_x = 0;
+    std::size_t owned_end_x = 0;
+
+    [[nodiscard]] bool operator==(const PlanKey& other) const noexcept {
+      return world_size == other.world_size && world_rank == other.world_rank && owned_begin_x == other.owned_begin_x &&
+          owned_end_x == other.owned_end_x;
     }
+  };
+
+  struct PlanKeyHasher {
+    [[nodiscard]] std::size_t operator()(const PlanKey& key) const noexcept {
+      std::size_t seed = static_cast<std::size_t>(key.world_size * 1315423911U + key.world_rank);
+      seed ^= key.owned_begin_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+      seed ^= key.owned_end_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+      return seed;
+    }
+  };
+
+  struct PlanResources {
+    parallel::PmSlabLayout layout{};
+    std::vector<double> real;
+    std::vector<std::complex<double>> fourier;
+    std::vector<std::complex<double>> potential_k;
+    std::vector<std::complex<double>> working_k;
+#if COSMOSIM_ENABLE_FFTW
+    fftw_plan forward_plan = nullptr;
+    fftw_plan inverse_plan = nullptr;
+#if COSMOSIM_ENABLE_MPI
+    bool is_distributed = false;
 #endif
-  }
+#endif
+  };
+
+  explicit Impl(PmGridShape shape) : m_shape(shape) {}
 
   ~Impl() {
 #if COSMOSIM_ENABLE_FFTW
-    if (m_forward_plan != nullptr) {
-      fftw_destroy_plan(m_forward_plan);
-      m_forward_plan = nullptr;
-    }
-    if (m_inverse_plan != nullptr) {
-      fftw_destroy_plan(m_inverse_plan);
-      m_inverse_plan = nullptr;
+    for (auto& [_, plan] : m_plan_cache) {
+      if (plan.forward_plan != nullptr) {
+        fftw_destroy_plan(plan.forward_plan);
+      }
+      if (plan.inverse_plan != nullptr) {
+        fftw_destroy_plan(plan.inverse_plan);
+      }
     }
 #endif
   }
 
-  [[nodiscard]] std::span<double> realGrid() { return m_real; }
-  [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return m_fourier; }
-  [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return m_potential_k; }
-  [[nodiscard]] std::span<std::complex<double>> workingScratch() { return m_working_k; }
+  [[nodiscard]] PlanResources& planForLayout(const parallel::PmSlabLayout& layout) {
+    const PlanKey key{
+        .world_size = layout.world_size,
+        .world_rank = layout.world_rank,
+        .owned_begin_x = layout.owned_x.begin_x,
+        .owned_end_x = layout.owned_x.end_x,
+    };
+    auto it = m_plan_cache.find(key);
+    if (it != m_plan_cache.end()) {
+      m_active_key = key;
+      return it->second;
+    }
+
+    PlanResources plan{};
+    plan.layout = layout;
+    plan.real.assign(layout.localCellCount(), 0.0);
+    const std::size_t nz_complex = m_shape.nz / 2U + 1U;
+    const std::size_t local_complex_size = layout.local_nx() * m_shape.ny * nz_complex;
+    plan.fourier.assign(local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.potential_k.assign(local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.working_k.assign(local_complex_size, std::complex<double>(0.0, 0.0));
+
+#if COSMOSIM_ENABLE_FFTW
+#if COSMOSIM_ENABLE_MPI
+    if (layout.world_size > 1) {
+      int mpi_world_size = 1;
+      int mpi_world_rank = 0;
+      MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+      MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+      if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
+        throw std::invalid_argument("PM slab layout world metadata must match MPI_COMM_WORLD for distributed FFT path");
+      }
+      fftw_mpi_init();
+      plan.is_distributed = true;
+      plan.forward_plan = fftw_mpi_plan_dft_r2c_3d(
+          static_cast<ptrdiff_t>(m_shape.nx),
+          static_cast<ptrdiff_t>(m_shape.ny),
+          static_cast<ptrdiff_t>(m_shape.nz),
+          plan.real.data(),
+          reinterpret_cast<fftw_complex*>(plan.fourier.data()),
+          MPI_COMM_WORLD,
+          FFTW_MEASURE);
+      plan.inverse_plan = fftw_mpi_plan_dft_c2r_3d(
+          static_cast<ptrdiff_t>(m_shape.nx),
+          static_cast<ptrdiff_t>(m_shape.ny),
+          static_cast<ptrdiff_t>(m_shape.nz),
+          reinterpret_cast<fftw_complex*>(plan.fourier.data()),
+          plan.real.data(),
+          MPI_COMM_WORLD,
+          FFTW_MEASURE);
+    } else
+#endif
+    {
+      plan.forward_plan = fftw_plan_dft_r2c_3d(
+          static_cast<int>(m_shape.nx),
+          static_cast<int>(m_shape.ny),
+          static_cast<int>(m_shape.nz),
+          plan.real.data(),
+          reinterpret_cast<fftw_complex*>(plan.fourier.data()),
+          FFTW_MEASURE);
+      plan.inverse_plan = fftw_plan_dft_c2r_3d(
+          static_cast<int>(m_shape.nx),
+          static_cast<int>(m_shape.ny),
+          static_cast<int>(m_shape.nz),
+          reinterpret_cast<fftw_complex*>(plan.fourier.data()),
+          plan.real.data(),
+          FFTW_MEASURE);
+    }
+    if (plan.forward_plan == nullptr || plan.inverse_plan == nullptr) {
+      throw std::runtime_error("Failed to create FFTW plans for PM solver");
+    }
+#endif
+
+    auto [insert_it, inserted] = m_plan_cache.emplace(key, std::move(plan));
+    (void)inserted;
+    ++m_plan_build_count;
+    m_active_key = key;
+    return insert_it->second;
+  }
+
+  [[nodiscard]] std::span<double> realGrid() { return activePlan().real; }
+  [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
+  [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
+  [[nodiscard]] std::span<std::complex<double>> workingScratch() { return activePlan().working_k; }
 
   double forwardFft() {
     const auto start = std::chrono::steady_clock::now();
 #if COSMOSIM_ENABLE_FFTW
-    fftw_execute(m_forward_plan);
+    fftw_execute(activePlan().forward_plan);
 #else
     naiveForwardDft();
 #endif
@@ -193,7 +290,7 @@ class PmSolver::Impl {
   double inverseFft() {
     const auto start = std::chrono::steady_clock::now();
 #if COSMOSIM_ENABLE_FFTW
-    fftw_execute(m_inverse_plan);
+    fftw_execute(activePlan().inverse_plan);
 #else
     naiveInverseDft();
 #endif
@@ -201,9 +298,21 @@ class PmSolver::Impl {
     return std::chrono::duration<double, std::milli>(stop - start).count();
   }
 
+  [[nodiscard]] std::size_t planCount() const noexcept { return m_plan_cache.size(); }
+  [[nodiscard]] std::size_t planBuildCount() const noexcept { return m_plan_build_count; }
+
  private:
+  [[nodiscard]] PlanResources& activePlan() {
+    if (!m_active_key.has_value()) {
+      throw std::logic_error("PM solver plan has not been initialized for the active slab layout");
+    }
+    return m_plan_cache.at(*m_active_key);
+  }
+
 #if !COSMOSIM_ENABLE_FFTW
   void naiveForwardDft() {
+    auto& real = activePlan().real;
+    auto& fourier = activePlan().fourier;
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
     for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
       for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
@@ -218,20 +327,22 @@ class PmSolver::Impl {
                      static_cast<double>(iz * z) / static_cast<double>(m_shape.nz));
                 const std::complex<double> euler(std::cos(phase), std::sin(phase));
                 const std::size_t rindex = (x * m_shape.ny + y) * m_shape.nz + z;
-                acc += m_real[rindex] * euler;
+                acc += real[rindex] * euler;
               }
             }
           }
           const std::size_t cindex = (ix * m_shape.ny + iy) * nz_complex + iz;
-          m_fourier[cindex] = acc;
+          fourier[cindex] = acc;
         }
       }
     }
   }
 
   void naiveInverseDft() {
+    auto& real = activePlan().real;
+    auto& fourier = activePlan().fourier;
     const std::size_t total = m_shape.cellCount();
-    std::fill(m_real.begin(), m_real.end(), 0.0);
+    std::fill(real.begin(), real.end(), 0.0);
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
 
     for (std::size_t x = 0; x < m_shape.nx; ++x) {
@@ -248,14 +359,14 @@ class PmSolver::Impl {
                 const std::complex<double> euler(std::cos(phase), std::sin(phase));
                 const std::size_t cindex = (ix * m_shape.ny + iy) * nz_complex + iz;
                 if (iz == 0 || (m_shape.nz % 2U == 0U && iz == m_shape.nz / 2U)) {
-                  acc += m_fourier[cindex] * euler;
+                  acc += fourier[cindex] * euler;
                 } else {
-                  acc += m_fourier[cindex] * euler + std::conj(m_fourier[cindex]) * std::conj(euler);
+                  acc += fourier[cindex] * euler + std::conj(fourier[cindex]) * std::conj(euler);
                 }
               }
             }
           }
-          m_real[(x * m_shape.ny + y) * m_shape.nz + z] = acc.real() / static_cast<double>(total);
+          real[(x * m_shape.ny + y) * m_shape.nz + z] = acc.real() / static_cast<double>(total);
         }
       }
     }
@@ -263,14 +374,9 @@ class PmSolver::Impl {
 #endif
 
   PmGridShape m_shape;
-  std::vector<double> m_real;
-  std::vector<std::complex<double>> m_fourier;
-  std::vector<std::complex<double>> m_potential_k;
-  std::vector<std::complex<double>> m_working_k;
-#if COSMOSIM_ENABLE_FFTW
-  fftw_plan m_forward_plan = nullptr;
-  fftw_plan m_inverse_plan = nullptr;
-#endif
+  std::unordered_map<PlanKey, PlanResources, PlanKeyHasher> m_plan_cache;
+  std::optional<PlanKey> m_active_key;
+  std::size_t m_plan_build_count = 0;
 };
 
 std::size_t PmGridShape::cellCount() const {
@@ -470,16 +576,37 @@ void PmSolver::assignDensity(
 
 void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
   validateOptions(m_shape, options);
-  if (grid.shape().cellCount() != m_shape.cellCount()) {
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonPeriodic");
   }
-  validateSingleRankFullDomainGridContract(grid, "PmSolver::solvePoissonPeriodic");
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::solvePoissonPeriodic requires valid PM slab layout");
+  }
+  if (grid.slabLayout().world_size > 1) {
+#if !(COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI)
+    throw std::invalid_argument(
+        "PmSolver::solvePoissonPeriodic distributed slabs require COSMOSIM_ENABLE_FFTW=ON and COSMOSIM_ENABLE_MPI=ON");
+#endif
+  } else if (!grid.ownsFullDomain()) {
+    throw std::invalid_argument("PmSolver::solvePoissonPeriodic single-rank path requires full-domain slab ownership");
+  }
 
+  auto& plan = m_impl->planForLayout(grid.slabLayout());
   auto real = m_impl->realGrid();
+  auto fourier = m_impl->fourierGrid();
+  auto potential_k = m_impl->potentialScratch();
+  auto working_k = m_impl->workingScratch();
+
   std::copy(grid.density().begin(), grid.density().end(), real.begin());
 
-  const double mean_density = std::accumulate(real.begin(), real.end(), 0.0) /
-      static_cast<double>(m_shape.cellCount());
+  double local_density_sum = std::accumulate(real.begin(), real.end(), 0.0);
+  double global_density_sum = local_density_sum;
+#if COSMOSIM_ENABLE_MPI
+  if (grid.slabLayout().world_size > 1) {
+    MPI_Allreduce(&local_density_sum, &global_density_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  }
+#endif
+  const double mean_density = global_density_sum / static_cast<double>(m_shape.cellCount());
   for (double& value : real) {
     value -= mean_density;
   }
@@ -491,14 +618,15 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   }
 
   const auto poisson_start = std::chrono::steady_clock::now();
-  auto fourier = m_impl->fourierGrid();
   const std::size_t nz_complex = m_shape.nz / 2U + 1U;
   const double prefactor = -4.0 * k_pi * options.gravitational_constant_code * options.scale_factor * options.scale_factor;
   const double dkx = 2.0 * k_pi / options.box_size_mpc_comoving;
   const double dky = 2.0 * k_pi / options.box_size_mpc_comoving;
   const double dkz = 2.0 * k_pi / options.box_size_mpc_comoving;
 
-  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+  const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
+  for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+    const std::size_t ix = global_x_begin + local_ix;
     const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
                                                           : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
     const double kx = dkx * static_cast<double>(nx_mode);
@@ -508,7 +636,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
       const double ky = dky * static_cast<double>(ny_mode);
       for (std::size_t iz = 0; iz < nz_complex; ++iz) {
         const double kz = dkz * static_cast<double>(iz);
-        const std::size_t index = (ix * m_shape.ny + iy) * nz_complex + iz;
+        const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
         const double k2 = kx * kx + ky * ky + kz * kz;
 
         // Discrete mode mapping for r2c layout:
@@ -556,9 +684,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     profile->poisson_ms += std::chrono::duration<double, std::milli>(poisson_stop - poisson_start).count();
   }
 
-  auto potential_k = m_impl->potentialScratch();
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
-  auto working_k = m_impl->workingScratch();
 
   auto inverse_into = [this, profile](std::span<const std::complex<double>> src, std::span<double> dst) {
     auto fourier_dst = m_impl->fourierGrid();
@@ -582,7 +708,8 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   inverse_into(potential_k, grid.potential());
 
   auto fill_gradient_k = [&](std::span<std::complex<double>> dst, int axis) {
-    for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+      const std::size_t ix = global_x_begin + local_ix;
       const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
                                                             : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
       const double kx = dkx * static_cast<double>(nx_mode);
@@ -592,7 +719,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
         const double ky = dky * static_cast<double>(ny_mode);
         for (std::size_t iz = 0; iz < nz_complex; ++iz) {
           const double kz = dkz * static_cast<double>(iz);
-          const std::size_t index = (ix * m_shape.ny + iy) * nz_complex + iz;
+          const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
           const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
           dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
         }
@@ -900,6 +1027,14 @@ std::string PmSolver::fftBackendName() {
 #else
   return "naive_dft";
 #endif
+}
+
+std::size_t PmSolver::cachedPlanCount() const {
+  return m_impl->planCount();
+}
+
+std::size_t PmSolver::planBuildCount() const {
+  return m_impl->planBuildCount();
 }
 
 bool treePmSupportedByBuild() {

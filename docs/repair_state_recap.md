@@ -218,6 +218,31 @@ ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_profiling|int
 
 Observed:
 
+## 12) Phase-2 PM distributed FFT infrastructure repair state
+
+_Date captured: 2026-04-19 (UTC)_
+
+Commands:
+
+```bash
+cmake -S . -B build/mpi-fftw-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCOSMOSIM_ENABLE_TESTS=ON -DCOSMOSIM_ENABLE_MPI=ON -DCOSMOSIM_ENABLE_FFTW=ON -DCOSMOSIM_ENABLE_HDF5=OFF
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_pm_solver test_integration_pm_periodic_mode
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_pm_solver|integration_pm_periodic_mode"
+```
+
+Observed:
+
+- `PmSolver::solvePoissonPeriodic` now accepts slab-owned local PM grids and uses communicator-aware FFTW MPI plans when MPI+FFTW are enabled.
+- PM FFT plan/scratch buffers are cached by slab layout key and reused across calls; unit/integration checks now include plan cache reuse behavior.
+- Single-rank PM periodic checks remain green on CPU-only debug path.
+- This environment cannot complete MPI validation because CMake cannot find MPI (`Could NOT find MPI_CXX`).
+
+Interpretation:
+
+- Distributed PM FFT ownership/message contract is implemented in-tree with command-backed single-rank regression evidence.
+- Multi-rank runtime closure remains blocked in this container by missing MPI runtime/development toolchain.
+
 ## 12) Infrastructure gate-bundle enforcement hardening
 
 _Date captured: 2026-04-14 (UTC)_
@@ -468,4 +493,3 @@ Interpretation:
 
 - This remains infrastructure work, not a claim of distributed PM FFT or MPI+GPU overlap completion.
 - The code path is now materially closer to an operational multi-rank/multi-device TreePM bring-up because rank-local execution intent is explicit and auditable.
-

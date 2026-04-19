@@ -176,6 +176,8 @@ class PmSolver {
   [[nodiscard]] static bool fftBackendAvailable();
   [[nodiscard]] static bool cudaBackendAvailable();
   [[nodiscard]] static std::string fftBackendName();
+  [[nodiscard]] std::size_t cachedPlanCount() const;
+  [[nodiscard]] std::size_t planBuildCount() const;
 
  private:
   class Impl;
