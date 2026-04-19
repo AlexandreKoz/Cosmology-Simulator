@@ -356,6 +356,60 @@ void testGhostBufferPayloadShapeValidation() {
   assert(destination.entity_id.size() == 1);
 }
 
+
+void testMpiContextContractValidation() {
+  const cosmosim::parallel::MpiContext runtime(true, 4, 2);
+  runtime.validateExpectedWorldSizeOrThrow(4);
+  assert(runtime.isEnabled());
+  assert(!runtime.isRoot());
+  assert(runtime.worldSize() == 4);
+  assert(runtime.worldRank() == 2);
+
+  bool threw = false;
+  try {
+    runtime.validateExpectedWorldSizeOrThrow(3);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testDistributedExecutionTopologyCpuOnly() {
+  const cosmosim::parallel::MpiContext runtime(true, 3, 1);
+  const auto topology = cosmosim::parallel::buildDistributedExecutionTopology(
+      12, 8, 4, runtime, /*mpi_ranks_expected=*/3, /*configured_gpu_devices=*/0, /*cuda_runtime_available=*/false, /*visible_device_count=*/0);
+  assert(topology.mpi_enabled);
+  assert(topology.world_size == 3);
+  assert(topology.world_rank == 1);
+  assert(topology.isDistributed());
+  assert(!topology.usesCuda());
+  assert(topology.pm_slab.owned_x.begin_x == 4);
+  assert(topology.pm_slab.owned_x.end_x == 8);
+}
+
+void testDistributedExecutionTopologyCudaAssignment() {
+  const cosmosim::parallel::MpiContext runtime(true, 4, 3);
+  const auto topology = cosmosim::parallel::buildDistributedExecutionTopology(
+      16, 8, 8, runtime, /*mpi_ranks_expected=*/4, /*configured_gpu_devices=*/2, /*cuda_runtime_available=*/true, /*visible_device_count=*/4);
+  assert(topology.usesCuda());
+  assert(topology.device_assignment.requested_device_count == 2);
+  assert(topology.device_assignment.active_device_count == 2);
+  assert(topology.device_assignment.assigned_device_index == 1);
+  assert(topology.device_assignment.isValid());
+}
+
+void testDistributedExecutionTopologyRejectsInvalidGpuRequest() {
+  bool threw = false;
+  try {
+    const cosmosim::parallel::MpiContext runtime(true, 2, 0);
+    (void)cosmosim::parallel::buildDistributedExecutionTopology(
+        8, 8, 8, runtime, /*mpi_ranks_expected=*/2, /*configured_gpu_devices=*/1, /*cuda_runtime_available=*/false, /*visible_device_count=*/0);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testPmSlabUnevenPartitionOwnership() {
   const std::size_t nx = 10;
   const int world_size = 3;
@@ -432,6 +486,10 @@ int main() {
   testReductionAgreementPolicyModes();
   testRankConfigConsensus();
   testGhostBufferPayloadShapeValidation();
+  testMpiContextContractValidation();
+  testDistributedExecutionTopologyCpuOnly();
+  testDistributedExecutionTopologyCudaAssignment();
+  testDistributedExecutionTopologyRejectsInvalidGpuRequest();
   testPmSlabUnevenPartitionOwnership();
   testPmSlabLayoutRoundTripAndCellOwnership();
   return 0;

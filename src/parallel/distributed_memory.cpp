@@ -660,11 +660,34 @@ MpiContext::MpiContext() {
 #endif
 }
 
+MpiContext::MpiContext(bool is_enabled, int world_size, int world_rank)
+    : m_is_enabled(is_enabled), m_world_size(world_size), m_world_rank(world_rank) {
+  if (world_size <= 0) {
+    throw std::invalid_argument("MpiContext world_size must be positive");
+  }
+  if (world_rank < 0 || world_rank >= world_size) {
+    throw std::invalid_argument("MpiContext world_rank must be within [0, world_size)");
+  }
+}
+
 bool MpiContext::isEnabled() const noexcept { return m_is_enabled; }
+
+bool MpiContext::isRoot() const noexcept { return m_world_rank == 0; }
 
 int MpiContext::worldSize() const noexcept { return m_world_size; }
 
 int MpiContext::worldRank() const noexcept { return m_world_rank; }
+
+void MpiContext::validateExpectedWorldSizeOrThrow(int expected_world_size) const {
+  if (expected_world_size <= 0) {
+    throw std::invalid_argument("expected_world_size must be positive");
+  }
+  if (expected_world_size != m_world_size) {
+    throw std::runtime_error(
+        "parallel.mpi_ranks_expected does not match runtime world size: expected=" +
+        std::to_string(expected_world_size) + ", runtime=" + std::to_string(m_world_size));
+  }
+}
 
 double MpiContext::allreduceSumDouble(double local_value) const {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
@@ -687,5 +710,81 @@ std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
 #endif
   return local_value;
 }
+
+
+
+bool RankDeviceAssignment::isValid() const noexcept {
+  if (requested_device_count < 0 || visible_device_count < 0 || active_device_count < 0) {
+    return false;
+  }
+  if (!uses_cuda) {
+    return assigned_device_index == -1;
+  }
+  return active_device_count > 0 && assigned_device_index >= 0 && assigned_device_index < active_device_count &&
+      visible_device_count >= active_device_count;
+}
+
+RankDeviceAssignment selectRankDeviceAssignment(
+    int world_rank,
+    int configured_gpu_devices,
+    bool cuda_runtime_available,
+    int visible_device_count) {
+  if (world_rank < 0) {
+    throw std::invalid_argument("world_rank must be non-negative");
+  }
+  if (configured_gpu_devices < 0) {
+    throw std::invalid_argument("configured_gpu_devices must be >= 0");
+  }
+  if (visible_device_count < 0) {
+    throw std::invalid_argument("visible_device_count must be >= 0");
+  }
+
+  RankDeviceAssignment assignment;
+  assignment.requested_device_count = configured_gpu_devices;
+  assignment.visible_device_count = visible_device_count;
+
+  if (configured_gpu_devices == 0) {
+    return assignment;
+  }
+  if (!cuda_runtime_available || visible_device_count == 0) {
+    throw std::runtime_error(
+        "parallel.gpu_devices requested CUDA PM execution, but no CUDA runtime devices are available");
+  }
+  if (configured_gpu_devices > visible_device_count) {
+    throw std::runtime_error(
+        "parallel.gpu_devices exceeds visible CUDA devices: requested=" + std::to_string(configured_gpu_devices) +
+        ", visible=" + std::to_string(visible_device_count));
+  }
+
+  assignment.uses_cuda = true;
+  assignment.active_device_count = configured_gpu_devices;
+  assignment.assigned_device_index = world_rank % configured_gpu_devices;
+  return assignment;
+}
+
+DistributedExecutionTopology buildDistributedExecutionTopology(
+    std::size_t global_nx,
+    std::size_t global_ny,
+    std::size_t global_nz,
+    const MpiContext& mpi_context,
+    int mpi_ranks_expected,
+    int configured_gpu_devices,
+    bool cuda_runtime_available,
+    int visible_device_count) {
+  mpi_context.validateExpectedWorldSizeOrThrow(mpi_ranks_expected);
+
+  DistributedExecutionTopology topology;
+  topology.world_size = mpi_context.worldSize();
+  topology.world_rank = mpi_context.worldRank();
+  topology.mpi_enabled = mpi_context.isEnabled();
+  topology.pm_slab = makePmSlabLayout(global_nx, global_ny, global_nz, mpi_context.worldSize(), mpi_context.worldRank());
+  topology.device_assignment =
+      selectRankDeviceAssignment(mpi_context.worldRank(), configured_gpu_devices, cuda_runtime_available, visible_device_count);
+  if (!topology.device_assignment.isValid()) {
+    throw std::runtime_error("constructed distributed execution topology is invalid");
+  }
+  return topology;
+}
+
 
 }  // namespace cosmosim::parallel

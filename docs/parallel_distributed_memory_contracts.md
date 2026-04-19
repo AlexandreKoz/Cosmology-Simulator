@@ -100,6 +100,7 @@ For upcoming distributed TreePM work:
 
 - `particle owner`: rank that owns and updates a particle's authoritative state.
 - `slab owner`: rank that owns a PM x-slab when `treepm_pm_decomposition_mode=slab`.
+- `distributed execution topology`: the explicit runtime tuple `(world_size, world_rank, pm_slab, device_assignment)` derived from MPI world state plus validated GPU request state.
 - `tree export/import`: bounded payload exchange for short-range tree source support, capped by `treepm_tree_exchange_batch_bytes`.
 
 These names are contractual. They prevent pseudo-distributed ambiguity where all ranks hold replicated state but are described as distributed.

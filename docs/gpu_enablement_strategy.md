@@ -12,6 +12,7 @@ This document records the first auditable GPU path for PM gravity in CosmoSim.
 
 - `execution_policy = host_serial` keeps all state in host memory.
 - `execution_policy = cuda` requires `data_residency = kPreferDevice`; this avoids hidden offload side effects.
+- Runtime workflow integration now maps `parallel.gpu_devices` onto explicit rank-local CUDA device assignment; device selection is round-robin across the configured visible-device pool.
 - Synchronization points are explicit and auditable:
   1. host → device particle upload,
   2. device assignment kernel completion,

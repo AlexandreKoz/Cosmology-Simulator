@@ -445,3 +445,27 @@ Interpretation:
 
 - This is an infrastructure-only Phase 2 milestone: ownership/storage contracts are now auditable without claiming distributed PM algorithm completion.
 - Reproducibility posture is preserved for one-rank runs because default PM storage maps to the same full-domain indexing contract.
+
+
+## 15) 2026-04-19 MPI/CUDA runtime topology milestone
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_unit_config_parser
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory|unit_config_parser"
+```
+
+Observed:
+
+- Added explicit runtime topology assembly (`parallel::DistributedExecutionTopology`) that binds together MPI world size/rank, PM slab ownership, and rank-local CUDA device assignment.
+- Added `core::CudaRuntimeInfo` and explicit CUDA device-selection helpers so `parallel.gpu_devices` becomes a real runtime contract rather than a dead config field.
+- Reference workflow TreePM initialization now validates `parallel.mpi_ranks_expected` against the runtime world and enables the CUDA PM assignment/interpolation path only when the runtime request is valid.
+- GPU requests now fail loudly when CUDA was requested but no visible devices are available; this avoids silent CPU fallback drift in distributed runs.
+
+Interpretation:
+
+- This remains infrastructure work, not a claim of distributed PM FFT or MPI+GPU overlap completion.
+- The code path is now materially closer to an operational multi-rank/multi-device TreePM bring-up because rank-local execution intent is explicit and auditable.
+

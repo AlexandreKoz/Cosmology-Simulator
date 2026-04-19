@@ -112,6 +112,7 @@ add_library(cosmosim_core STATIC
   src/core/module_registry.cpp
   src/core/config.cpp
   src/core/provenance.cpp
+  src/core/cuda_runtime.cpp
   src/core/cosmology.cpp
   src/core/units.cpp
   src/core/simulation_state.cpp
@@ -153,7 +154,10 @@ add_library(cosmosim_gravity STATIC
   src/gravity/tree_pm_coupling.cpp)
 if(COSMOSIM_ENABLE_CUDA)
   target_sources(cosmosim_gravity PRIVATE src/gravity/pm_cuda_kernels.cu)
-  set_target_properties(cosmosim_gravity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  set_target_properties(cosmosim_gravity PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_STANDARD 20
+    CUDA_STANDARD_REQUIRED ON)
 endif()
 add_library(cosmosim_hydro STATIC
   src/hydro/hydro_module.cpp
@@ -221,6 +225,7 @@ target_link_libraries(cosmosim_workflows
     cosmosim_gravity
     cosmosim_hydro
     cosmosim_io
+    cosmosim_parallel
     cosmosim_physics)
 
 if(COSMOSIM_ENABLE_MPI)

@@ -25,6 +25,8 @@ Optional dependencies are feature-gated and preset-driven:
 | `hdf5-debug` | Snapshot/restart/provenance schema and I/O work |
 | `pm-hdf5-fftw-debug` | PM/TreePM validation with HDF5+FFTW |
 | `mpi-hdf5-fftw-debug` | Distributed gravity development surface (MPI+HDF5+FFTW) |
+| `cuda-debug` | Single-rank CUDA PM development surface |
+| `mpi-cuda-hdf5-fftw-debug` | Distributed gravity + CUDA infrastructure surface |
 | `asan-debug` | Address-sanitizer safety checks |
 | `mpi-release` | Multi-rank workflow checks |
 | `cuda-release` | GPU-capable build path |
@@ -62,6 +64,8 @@ ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
 ```
 
 ## MPI and GPU paths
+
+`parallel.gpu_devices > 0` now acts as an explicit runtime request for the CUDA PM assignment/interpolation path. This request is **not** silently downgraded: the runtime validates visible devices and raises a clear error if CUDA was requested but no compatible runtime devices are present.
 
 ```bash
 cmake --preset mpi-release
