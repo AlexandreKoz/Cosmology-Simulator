@@ -242,10 +242,12 @@ struct DistributedRestartCompatibilityReport {
   bool pm_grid_shape_match = true;
   bool pm_decomposition_mode_match = true;
   bool pm_local_slab_match = true;
+  bool pm_cadence_steps_match = true;
   std::vector<std::string> mismatch_messages;
 
   [[nodiscard]] bool compatible() const noexcept {
-    return world_size_match && pm_grid_shape_match && pm_decomposition_mode_match && pm_local_slab_match;
+    return world_size_match && pm_grid_shape_match && pm_decomposition_mode_match && pm_local_slab_match &&
+        pm_cadence_steps_match;
   }
 };
 

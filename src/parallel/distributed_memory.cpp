@@ -710,6 +710,12 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
   if (state.pm_update_cadence_steps == 0) {
     throw std::invalid_argument("restart PM cadence must be >= 1");
   }
+  if (state.last_long_range_refresh_opportunity > state.gravity_kick_opportunity) {
+    throw std::invalid_argument("restart cadence state is inconsistent: last refresh opportunity exceeds kick opportunity");
+  }
+  if (state.long_range_field_version == 0 && state.last_long_range_refresh_opportunity != 0) {
+    throw std::invalid_argument("restart cadence state is inconsistent: non-zero refresh opportunity with zero field version");
+  }
   if (state.long_range_restart_policy != "deterministic_rebuild") {
     throw std::invalid_argument("restart long-range policy is unsupported: " + state.long_range_restart_policy);
   }
@@ -766,6 +772,11 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
     report.mismatch_messages.push_back(
         "PM decomposition mode mismatch: restart=" + restart_state.pm_decomposition_mode +
         ", runtime=slab");
+  }
+  if (restart_state.pm_update_cadence_steps == 0) {
+    report.pm_cadence_steps_match = false;
+    report.mismatch_messages.push_back(
+        "PM cadence mismatch: restart cadence must be >= 1, got 0");
   }
   if (runtime_topology.world_rank < 0 ||
       runtime_topology.world_rank >= static_cast<int>(restart_state.pm_slab_begin_x_by_rank.size())) {

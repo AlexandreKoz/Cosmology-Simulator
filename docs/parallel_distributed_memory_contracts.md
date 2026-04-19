@@ -1,7 +1,7 @@
 # Parallel distributed-memory contracts (repair scope)
 
-This document captures the current **reviewable infrastructure contract** for distributed-memory scaffolding.
-It does **not** claim full production MPI capability.
+This document captures the current **reviewable distributed-memory contract** used by the
+Phase 2 TreePM implementation.
 Phase 2 TreePM-specific ownership/message terminology is frozen in
 `docs/treepm_phase2_distributed_contract.md` and must be used consistently with this file.
 
@@ -111,11 +111,13 @@ For particle ownership migration in `core::SimulationState`:
 
 This enables explicit reproducibility checks in environment-independent pseudo-multi-rank tests without claiming real MPI collective determinism for all hardware/network stacks.
 
-## 6) What remains unproven in this environment
+## 6) Remaining scope limits (post-Phase 2 closeout)
 
-- No production MPI exchange correctness claim is made; this repo path is still pseudo-multi-rank + CPU-only contract scaffolding.
-- Migration lifecycle beyond typed intents (actual migration transfer execution + ownership commit across ranks) is not implemented in this pass.
-- Descriptor-only ghost planning does not yet compute owned export rows for outbound refresh payloads.
+- PM decomposition mode is currently `slab` only.
+- Restart continuation of PM long-range field values is policy-limited to `deterministic_rebuild`
+  (metadata is serialized; cached field arrays are rebuilt after resume).
+- Descriptor-only ghost-plan builder still does not infer owned export rows from ghost-only local
+  metadata; explicit owned-boundary export planning remains future work.
 
 ## 5) Config-freeze consensus contract across ranks
 
@@ -170,15 +172,15 @@ Single-rank mapping is the same abstraction, not a special case:
 
 - `world_size = 1`, `world_rank = 0`, owned slab `[0, global_nx)`, and local storage equals full mesh.
 
-This contract is intentionally storage/ownership-centric. Distributed PM communication is currently limited to
-**density assignment contribution routing**:
+This contract is intentionally storage/ownership-centric. Distributed PM communication covers both
+owner-routed deposition and reverse interpolation delivery:
 
 - particle owners compute global stencil contributions,
 - destination slab owner is resolved by `pmOwnerRankForGlobalX(...)`,
 - contributions are batched per destination and exchanged with collective messaging,
-- only slab owners accumulate into local PM density arrays after ownership/range validation.
-
-Distributed force interpolation back to particle owners remains out of scope for this stage.
+- only slab owners accumulate into local PM density arrays after ownership/range validation,
+- slab owners compute interpolation contributions for owned stencil cells and return force/potential
+  contributions back to particle owners via reverse communication.
 
 ## Distributed TreePM restart/debug continuation contract
 
@@ -205,7 +207,8 @@ Current policy is explicitly fixed to `deterministic_rebuild`:
 - world size mismatch,
 - PM grid-shape mismatch,
 - PM decomposition-mode mismatch,
-- per-rank local slab ownership mismatch.
+- per-rank local slab ownership mismatch,
+- invalid PM cadence metadata (`pm_update_cadence_steps >= 1` required).
 
 This reporting is used for continuation debugging and avoids opaque restart failures when
 rank layout/config drifts between write and resume.
