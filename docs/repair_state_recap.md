@@ -6,6 +6,30 @@ This recap records **current command-backed audit evidence** for the emergency r
 
 ## 0) TreePM Phase 2 distributed PM interpolation return path repair (2026-04-19 UTC)
 
+## 0) TreePM Phase 2 distributed short-range tree export/import repair (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_tree_pm_coupling_periodic
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "integration_tree_pm_coupling_periodic"
+```
+
+Observed:
+
+- `TreePmCoordinator::evaluateShortRangeResidual` now runs an explicit active-target export/import protocol when `world_size>1`:
+  - owner rank computes local-local residual,
+  - owner exports target batches (bounded by `tree_exchange_batch_bytes`) to each peer,
+  - peer evaluates requests against its local tree/source data and returns partial accelerations,
+  - owner validates response coverage (`batch_token`, `request_id`) and accumulates remote partials.
+- The workflow now wires `numerics.treepm_tree_exchange_batch_bytes` into `TreePmOptions`.
+- MPI integration coverage was added (`integration_tree_pm_coupling_periodic_mpi_two_rank`) for two-rank distributed-vs-single-rank agreement including cutoff-boundary cross-rank peers.
+
+Interpretation:
+
+- Phase 2 short-range distributed TreePM now uses real peer participation instead of rank-local-only residual evaluation.
+- The one-rank numerical contract remains the reference and is used as distributed comparison baseline.
+
 Commands:
 
 ```bash

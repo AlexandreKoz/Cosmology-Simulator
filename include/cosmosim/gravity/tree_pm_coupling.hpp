@@ -26,6 +26,7 @@ struct TreePmOptions {
   PmSolveOptions pm_options{};
   TreeGravityOptions tree_options{};
   TreePmSplitPolicy split_policy{};
+  std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
 };
 
 struct TreePmDiagnostics {

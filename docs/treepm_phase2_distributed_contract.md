@@ -5,7 +5,7 @@
 This document freezes what **Phase 2** means in this repository for distributed gravity infrastructure.
 
 - In scope: ownership semantics, decomposition terminology, message contract, config/documentation/build surface.
-- Out of scope in this stage: implementing distributed PM FFT, distributed tree force evaluation, or new physics behavior.
+- Out of scope in this stage: introducing new physics behavior beyond the existing TreePM split contract.
 
 Phase 1 remains the numerical baseline. A one-rank run through future distributed code paths must stay numerically consistent with the current Phase 1 single-rank TreePM contract unless an explicit bug-fix ADR states otherwise.
 
@@ -26,7 +26,7 @@ Phase 1 remains the numerical baseline. A one-rank run through future distribute
 
 ### 3) Distributed FFT path (targeted sequence)
 
-For each PM refresh event in future Phase 2 runtime work:
+For each PM refresh event in Phase 2 runtime:
 
 1. Particle owners export assignment contributions to slab owners.
 2. Slab owners assemble local density slabs.
@@ -35,17 +35,19 @@ For each PM refresh event in future Phase 2 runtime work:
    - `φ_{k=0}=0`, `a_{k=0}=0`
 4. Slab owners send needed force samples/interpolants back to particle owners for active particles.
 
-This stage freezes terminology and ordering only; algorithmic implementation is deferred.
+This sequence is implemented in the current runtime path; the document remains the contract anchor for ownership and ordering.
 
-## Tree export/import contract (target)
+## Tree export/import contract (implemented)
 
 - Short-range tree work is particle-owner-centric.
 - Remote source data are exchanged in explicit batches, bounded by:
   - `numerics.treepm_tree_exchange_batch_bytes` (must be `> 0`)
 - Exchange contract:
-  - exporter rank sends compact tree/export payload chunks up to configured batch cap,
-  - importer rank consumes chunks for short-range walk support,
-  - no implied ownership transfer from export/import itself.
+  - target-owner rank exports compact active-target request batches to each peer, capped by the configured byte limit,
+  - peer ranks evaluate each request target against local tree/source data with the current short-range kernel, MAC, and cutoff semantics,
+  - peers return partial acceleration responses keyed by batch/request IDs,
+  - target-owner rank validates per-peer request/response coverage (duplicate/missing detection) and accumulates returned partials.
+- Export/import does not imply ownership transfer.
 
 ## Active-set and migration timing
 

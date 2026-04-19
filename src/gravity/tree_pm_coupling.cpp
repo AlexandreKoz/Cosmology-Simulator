@@ -1,11 +1,21 @@
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
 
 namespace cosmosim::gravity {
 namespace {
@@ -27,6 +37,29 @@ void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& seco
   first.assign(size, 0.0);
   second.assign(size, 0.0);
   third.assign(size, 0.0);
+}
+
+template <typename T>
+[[nodiscard]] std::vector<std::uint8_t> asBytes(std::span<const T> records) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  std::vector<std::uint8_t> bytes(records.size_bytes(), 0U);
+  if (!records.empty()) {
+    std::memcpy(bytes.data(), records.data(), records.size_bytes());
+  }
+  return bytes;
+}
+
+template <typename T>
+[[nodiscard]] std::vector<T> decodeRecords(std::span<const std::uint8_t> bytes) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  if (bytes.size() % sizeof(T) != 0) {
+    throw std::runtime_error("TreePM short-range exchange payload is misaligned");
+  }
+  std::vector<T> records(bytes.size() / sizeof(T));
+  if (!records.empty()) {
+    std::memcpy(records.data(), bytes.data(), bytes.size());
+  }
+  return records;
 }
 
 [[nodiscard]] double minimumDistanceToNodeAabb(
@@ -64,6 +97,25 @@ void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& seco
   const double max_z = dz_abs + half_size_comoving;
   return std::sqrt(max_x * max_x + max_y * max_y + max_z * max_z);
 }
+
+struct ShortRangeTargetRequestPacket {
+  std::uint32_t batch_token = 0;
+  std::uint32_t request_id = 0;
+  double target_x_comoving = 0.0;
+  double target_y_comoving = 0.0;
+  double target_z_comoving = 0.0;
+};
+
+struct ShortRangeTargetResponsePacket {
+  std::uint32_t batch_token = 0;
+  std::uint32_t request_id = 0;
+  double accel_x_comoving = 0.0;
+  double accel_y_comoving = 0.0;
+  double accel_z_comoving = 0.0;
+};
+
+static_assert(std::is_trivially_copyable_v<ShortRangeTargetRequestPacket>);
+static_assert(std::is_trivially_copyable_v<ShortRangeTargetResponsePacket>);
 
 }  // namespace
 
@@ -136,6 +188,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     throw std::invalid_argument("TreePM requires position and mass spans with equal extent");
   }
   validateTreePmSplitPolicy(options.split_policy);
+  if (options.tree_exchange_batch_bytes == 0) {
+    throw std::invalid_argument("TreePM tree_exchange_batch_bytes must be > 0");
+  }
 
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
@@ -239,16 +294,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   std::vector<std::uint32_t> stack;
   stack.reserve(256);
 
-  for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
-    const std::uint32_t particle_index = accumulator.active_particle_index[active_i];
-    const double px = pos_x_comoving[particle_index];
-    const double py = pos_y_comoving[particle_index];
-    const double pz = pos_z_comoving[particle_index];
-
+  auto evaluateTargetAgainstLocalTree = [&](double px, double py, double pz, std::uint32_t self_index, bool skip_self) {
     double ax = 0.0;
     double ay = 0.0;
     double az = 0.0;
-
     stack.clear();
     stack.push_back(0U);
 
@@ -299,7 +348,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           const std::uint32_t end = begin + nodes.particle_count[node_index];
           for (std::uint32_t sorted_i = begin; sorted_i < end; ++sorted_i) {
             const std::uint32_t source_index = ordering.sorted_particle_index[sorted_i];
-            if (source_index == particle_index) {
+            if (skip_self && source_index == self_index) {
               continue;
             }
             const double sx = minimumImageDelta(pos_x_comoving[source_index] - px, box_size_comoving);
@@ -341,9 +390,203 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         }
       }
     }
+    return std::array<double, 3>{ax, ay, az};
+  };
 
-    accumulator.addToActiveSlot(active_i, ax, ay, az);
+  for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
+    const std::uint32_t particle_index = accumulator.active_particle_index[active_i];
+    const double px = pos_x_comoving[particle_index];
+    const double py = pos_y_comoving[particle_index];
+    const double pz = pos_z_comoving[particle_index];
+    const auto local_accel = evaluateTargetAgainstLocalTree(px, py, pz, particle_index, true);
+    accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
   }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const parallel::PmSlabLayout& layout = m_grid.slabLayout();
+  if (layout.world_size > 1) {
+    int mpi_world_size = 1;
+    int mpi_world_rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
+      throw std::invalid_argument("TreePM short-range exchange layout world metadata must match MPI_COMM_WORLD");
+    }
+
+    const std::size_t max_requests_per_peer = std::max<std::size_t>(
+        1U,
+        static_cast<std::size_t>(options.tree_exchange_batch_bytes / sizeof(ShortRangeTargetRequestPacket)));
+
+    std::vector<int> send_counts(static_cast<std::size_t>(mpi_world_size), 0);
+    std::vector<int> recv_counts(static_cast<std::size_t>(mpi_world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(mpi_world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(mpi_world_size), 0);
+    std::vector<std::uint8_t> send_payload;
+    std::vector<std::uint8_t> recv_payload;
+    std::vector<std::uint8_t> response_send_payload;
+    std::vector<std::uint8_t> response_recv_payload;
+    std::vector<double> remote_batch_ax;
+    std::vector<double> remote_batch_ay;
+    std::vector<double> remote_batch_az;
+
+    for (std::size_t batch_begin = 0; batch_begin < accumulator.active_particle_index.size();) {
+      const std::size_t batch_size = std::min(
+          max_requests_per_peer,
+          accumulator.active_particle_index.size() - batch_begin);
+      const std::uint32_t batch_token = static_cast<std::uint32_t>(batch_begin);
+
+      std::vector<ShortRangeTargetRequestPacket> local_requests;
+      local_requests.reserve(batch_size);
+      for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
+        const std::uint32_t particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
+        local_requests.push_back(ShortRangeTargetRequestPacket{
+            .batch_token = batch_token,
+            .request_id = static_cast<std::uint32_t>(batch_slot),
+            .target_x_comoving = pos_x_comoving[particle_index],
+            .target_y_comoving = pos_y_comoving[particle_index],
+            .target_z_comoving = pos_z_comoving[particle_index],
+        });
+      }
+
+      send_payload.clear();
+      for (int rank = 0; rank < mpi_world_size; ++rank) {
+        if (rank == mpi_world_rank) {
+          send_counts[static_cast<std::size_t>(rank)] = 0;
+        } else {
+          send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(local_requests.size() * sizeof(ShortRangeTargetRequestPacket));
+        }
+      }
+      std::partial_sum(send_counts.begin(), send_counts.end() - 1, send_displs.begin() + 1);
+      send_payload.resize(static_cast<std::size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)), 0U);
+      for (int rank = 0; rank < mpi_world_size; ++rank) {
+        if (rank == mpi_world_rank) {
+          continue;
+        }
+        const auto request_bytes = asBytes(std::span<const ShortRangeTargetRequestPacket>(local_requests.data(), local_requests.size()));
+        std::copy(
+            request_bytes.begin(),
+            request_bytes.end(),
+            send_payload.begin() + send_displs[static_cast<std::size_t>(rank)]);
+      }
+
+      MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+      std::partial_sum(recv_counts.begin(), recv_counts.end() - 1, recv_displs.begin() + 1);
+      recv_payload.resize(static_cast<std::size_t>(std::accumulate(recv_counts.begin(), recv_counts.end(), 0)), 0U);
+      MPI_Alltoallv(
+          send_payload.data(),
+          send_counts.data(),
+          send_displs.data(),
+          MPI_BYTE,
+          recv_payload.data(),
+          recv_counts.data(),
+          recv_displs.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+
+      response_send_payload.assign(recv_payload.size(), 0U);
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        const int peer_recv_bytes = recv_counts[static_cast<std::size_t>(peer)];
+        if (peer_recv_bytes == 0) {
+          continue;
+        }
+        const std::span<const std::uint8_t> peer_request_bytes(
+            recv_payload.data() + recv_displs[static_cast<std::size_t>(peer)],
+            static_cast<std::size_t>(peer_recv_bytes));
+        const std::vector<ShortRangeTargetRequestPacket> peer_requests =
+            decodeRecords<ShortRangeTargetRequestPacket>(peer_request_bytes);
+
+        std::vector<ShortRangeTargetResponsePacket> peer_responses;
+        peer_responses.reserve(peer_requests.size());
+        for (const ShortRangeTargetRequestPacket& request : peer_requests) {
+          const auto remote_accel = evaluateTargetAgainstLocalTree(
+              request.target_x_comoving,
+              request.target_y_comoving,
+              request.target_z_comoving,
+              0U,
+              false);
+          peer_responses.push_back(ShortRangeTargetResponsePacket{
+              .batch_token = request.batch_token,
+              .request_id = request.request_id,
+              .accel_x_comoving = remote_accel[0],
+              .accel_y_comoving = remote_accel[1],
+              .accel_z_comoving = remote_accel[2],
+          });
+        }
+        const auto encoded_responses =
+            asBytes(std::span<const ShortRangeTargetResponsePacket>(peer_responses.data(), peer_responses.size()));
+        if (encoded_responses.size() != static_cast<std::size_t>(peer_recv_bytes)) {
+          throw std::runtime_error("TreePM short-range response payload size mismatch");
+        }
+        std::copy(
+            encoded_responses.begin(),
+            encoded_responses.end(),
+            response_send_payload.begin() + recv_displs[static_cast<std::size_t>(peer)]);
+      }
+
+      response_recv_payload.resize(send_payload.size(), 0U);
+      MPI_Alltoallv(
+          response_send_payload.data(),
+          recv_counts.data(),
+          recv_displs.data(),
+          MPI_BYTE,
+          response_recv_payload.data(),
+          send_counts.data(),
+          send_displs.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+
+      remote_batch_ax.assign(batch_size, 0.0);
+      remote_batch_ay.assign(batch_size, 0.0);
+      remote_batch_az.assign(batch_size, 0.0);
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        const int expected_bytes = send_counts[static_cast<std::size_t>(peer)];
+        if (peer == mpi_world_rank) {
+          continue;
+        }
+        if (expected_bytes == 0) {
+          continue;
+        }
+        const std::span<const std::uint8_t> peer_response_bytes(
+            response_recv_payload.data() + send_displs[static_cast<std::size_t>(peer)],
+            static_cast<std::size_t>(expected_bytes));
+        const std::vector<ShortRangeTargetResponsePacket> responses =
+            decodeRecords<ShortRangeTargetResponsePacket>(peer_response_bytes);
+        if (responses.size() != batch_size) {
+          throw std::runtime_error("TreePM short-range response count mismatch");
+        }
+        std::vector<std::uint8_t> seen(batch_size, 0U);
+        for (const ShortRangeTargetResponsePacket& response : responses) {
+          if (response.batch_token != batch_token || response.request_id >= batch_size) {
+            throw std::runtime_error("TreePM short-range response packet ID mismatch");
+          }
+          if (seen[response.request_id] != 0U) {
+            throw std::runtime_error("TreePM short-range duplicate response packet detected");
+          }
+          seen[response.request_id] = 1U;
+          remote_batch_ax[response.request_id] += response.accel_x_comoving;
+          remote_batch_ay[response.request_id] += response.accel_y_comoving;
+          remote_batch_az[response.request_id] += response.accel_z_comoving;
+        }
+        if (std::any_of(seen.begin(), seen.end(), [](std::uint8_t mark) { return mark == 0U; })) {
+          throw std::runtime_error("TreePM short-range missing response packet detected");
+        }
+      }
+
+      for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
+        accumulator.addToActiveSlot(
+            batch_begin + batch_slot,
+            remote_batch_ax[batch_slot],
+            remote_batch_ay[batch_slot],
+            remote_batch_az[batch_slot]);
+      }
+      batch_begin += batch_size;
+    }
+  }
+#else
+  if (m_grid.slabLayout().world_size > 1) {
+    throw std::invalid_argument("TreePM short-range distributed exchange requires COSMOSIM_ENABLE_MPI=ON");
+  }
+#endif
 
   if (tree_profile != nullptr) {
     tree_profile->visited_nodes += visited_nodes;

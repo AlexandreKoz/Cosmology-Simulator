@@ -513,6 +513,12 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_tree_pm_coupling_periodic tests/integration/test_tree_pm_coupling_periodic.cpp)
   target_link_libraries(test_integration_tree_pm_coupling_periodic PRIVATE cosmosim_gravity)
   add_test(NAME integration_tree_pm_coupling_periodic COMMAND test_integration_tree_pm_coupling_periodic)
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_tree_pm_coupling_periodic_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_coupling_periodic> ${MPIEXEC_POSTFLAGS})
+  endif()
 
 
   add_executable(test_integration_ic_generated_pipeline tests/integration/test_ic_generated_pipeline.cpp)

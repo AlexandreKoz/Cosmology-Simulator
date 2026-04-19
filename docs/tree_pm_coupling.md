@@ -57,8 +57,42 @@ This ensures `rcut_cells` changes actual traversal behavior (not diagnostics-onl
 2. Tree computes short-range residual with Gaussian factor and explicit `r_cut` truncation.
 3. The active-set accumulator stores PM + residual totals.
 
+### Distributed short-range export/import contract (Phase 2 active-target model)
+
+When `world_size > 1` and MPI is enabled, short-range residual evaluation is no longer rank-replicated:
+
+1. **Target owner local pass**:
+   - owner rank computes local-local short-range residual for its active targets against local sources.
+2. **Export requests by peer**:
+   - for each remote peer rank, owner exports active target batches capped by `tree_exchange_batch_bytes`.
+   - request packet fields:
+     - `batch_token` (`uint32`): active-batch start slot on owner rank.
+     - `request_id` (`uint32`): index inside batch (`[0, batch_size)`).
+     - `target_x_comoving`, `target_y_comoving`, `target_z_comoving` (`double`): target coordinates.
+3. **Remote source evaluation**:
+   - remote rank evaluates each request target against its local tree/source particles with the same:
+     - opening criterion (`l/r < theta`),
+     - softening policy (`softenedInvR3`),
+     - split factor (`F_SR(r)`),
+     - cutoff policy (`r_cut` AABB pruning + leaf pair skip).
+4. **Return partial responses**:
+   - response packet fields:
+     - `batch_token` (`uint32`) and `request_id` (`uint32`) echoed from request,
+     - `accel_x_comoving`, `accel_y_comoving`, `accel_z_comoving` (`double`) partial acceleration from that remote rank.
+5. **Owner accumulation and validation**:
+   - owner sums returned partials across peers into active slots.
+   - duplicates or missing responses are detected per peer/per batch by `(batch_token, request_id)` coverage checks; mismatches fail fast with an exception.
+
+Ordering is deterministic by rank order and batch-local request order.
+
 ## Validation notes
 
 - `tests/unit/test_tree_pm_split_kernel.cpp` checks split composition and mesh-cell-to-length derivation.
 - `tests/integration/test_tree_pm_coupling_periodic.cpp` checks periodic coupling against a **minimum-image periodic direct reference** (not a full infinite-periodic Ewald sum), plus cutoff-pruning and PM/tree/split consistency checks.
+- `tests/integration/test_tree_pm_coupling_periodic.cpp` also includes an MPI two-rank distributed short-range export/import check (active-target export, cutoff-boundary peers, one-rank reference agreement).
 - `bench/bench_tree_pm_force_error_map.cpp` maps force error against a **periodic spectral + direct short-range proxy reference** across PMGRID/ASMTH/RCUT sweeps and writes `validation/artifacts/tree_pm_force_error_map.csv`.
+
+## Migration notes
+
+- `TreePmOptions` now includes `tree_exchange_batch_bytes` (default `4 MiB`), and workflow wiring sets it from `numerics.treepm_tree_exchange_batch_bytes`.
+- Existing callers constructing `TreePmOptions` without this field keep prior behavior via default value.
