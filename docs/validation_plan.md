@@ -114,3 +114,36 @@ Use one of these config-driven paths for honest runtime smoke checks:
 Or run the built-in integration smoke gate:
 
 - `integration_runtime_app_smoke` (HDF5-enabled builds)
+
+
+## Phase 2 distributed TreePM validation gate (MPI gravity gate)
+
+The Phase 2 gate is now a dedicated MPI validation suite:
+
+- Executable: `test_validation_phase2_mpi_gravity`
+- CTest entries:
+  - `validation_phase2_mpi_gravity_single_rank`
+  - `validation_phase2_mpi_gravity_two_rank`
+  - `validation_phase2_mpi_gravity_three_rank`
+
+### Numerical contracts enforced
+
+- Distributed PM equivalence vs one-rank reference: `rel_L2 <= 1e-10`.
+- Distributed full TreePM equivalence vs one-rank reference: `rel_L2 <= 5e-6` and `max_rel <= 5e-5`.
+- Communication stress path: tiny tree exchange batches (`tree_exchange_batch_bytes=64`) plus PM cadence refresh/reuse toggles, checked against the same TreePM thresholds.
+- Restart continuation contract in MPI mode: reference workflow restart write/read roundtrip must report `restart_roundtrip_ok=true`.
+
+### Phase 2 scaling artifacts
+
+Run in MPI-enabled builds:
+
+```bash
+cmake --build --preset build-mpi-hdf5-fftw-debug --target generate_mpi_gravity_scaling_artifacts
+```
+
+Outputs (artifact files):
+
+- `validation/artifacts/pm_only_scaling_np1.csv`
+- `validation/artifacts/pm_only_scaling_np2.csv`
+- `validation/artifacts/tree_only_scaling_np1.csv`
+- `validation/artifacts/tree_only_scaling_np2.csv`
