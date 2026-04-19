@@ -4,11 +4,20 @@
 # Per-problem reference outputs are tracked in validation/reference/ with explicit version suffixes.
 
 gravity_two_body.max_relative_accel_error = 5.0e-3
+gravity_tree_small_n_open_boundary.max_relative_l2_error = 5.0e-2
+gravity_tree_pm_split.composition_abs_error = 1.0e-12
 gravity_pm_single_mode.min_cosine_similarity = 5.0e-2
+gravity_pm_uniform_density.max_rms_accel = 8.0e-2
+
+gravity_tree_pm_periodic_proxy.tree_only_rel_l2_max = 4.0e-1
+gravity_tree_pm_periodic_proxy.pm_only_rel_l2_max = 2.3
+gravity_tree_pm_periodic_proxy.split_rel_l2_max = 1.0
 
 gravity_tree_opening.mean_relative_error_theta_0p8 = 9.0e-2
 gravity_tree_opening.mean_relative_error_theta_0p6 = 6.0e-2
 gravity_tree_opening.mean_relative_error_theta_0p4 = 3.5e-2
+gravity_two_body_orbit.max_relative_energy_drift = 1.5e-1
+gravity_static_halo.max_radial_relative_force_error = 1.2e-1
 
 hydro_sod_like.mass_abs_error = 1.0e-10
 hydro_sine_wave.l1_density_error_n64 = 2.0e-1

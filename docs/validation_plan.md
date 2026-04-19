@@ -35,6 +35,46 @@ cmake --build --preset build-pm-hdf5-fftw-debug
 ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
 ```
 
+## Gravity Phase 1 evidence classes (explicit references)
+
+- **Open-boundary small-`N` tree check**
+  - Method: direct summation, softened with the same `epsilon_comoving` as tree solver.
+  - Claim: local tree operator correctness for non-periodic pair accumulation.
+- **Periodic PM plane-wave mode check**
+  - Method: analytic periodic spectral solution for selected Fourier mode(s).
+  - Claim: PM operator/sign/phase correctness in periodic domain.
+- **Periodic PM uniform-density cancellation**
+  - Method: lattice/glass-proxy particle placement, periodic Poisson solve with mean subtraction.
+  - Claim: near-zero force under uniform density.
+- **Periodic TreePM consistency / force error checks**
+  - Method: high-resolution TreePM periodic proxy reference (finer PM grid, tighter tree settings).
+  - Explicit limitation: this is not Ewald exact and not minimum-image direct-sum.
+- **Split-kernel matching checks**
+  - Method: Gaussian split SR/LR factor complementarity and TreePM PM-only/tree-only/split comparisons.
+  - Claim: split coupling semantics are wired and monotone in expected direction.
+- **Two-body orbit controlled run + energy drift monitor**
+  - Method: leapfrog integration with tree accelerations and softened two-body energy accounting.
+  - Claim: bounded long-run drift in a controlled setup.
+- **Static halo radial-force profile**
+  - Method: tree force on shell probes versus softened direct-summation reference.
+  - Claim: radial-force profile agreement for a static mass distribution.
+- **Regression-only checks (AMR reflux / SF mass budget)**
+  - Claim: implementation stability against historical behavior, not standalone validation proof.
+
+## Force-error mapping artifact requirement
+
+Run:
+
+```bash
+./build/pm-hdf5-fftw-debug/bench_tree_pm_force_error_map
+```
+
+Expected deterministic artifact:
+
+- `validation/artifacts/tree_pm_force_error_map.csv`
+
+The CSV is the required Phase 1 force-error map over PMGRID/ASMTH/RCUT and must be attached/referenced in review evidence.
+
 ## Validation invariants
 
 - No silent comoving/proper or code/SI unit mixing.

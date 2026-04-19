@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -208,6 +209,141 @@ void testHydroResolutionConvergence(const cosmosim::validation::ValidationTolera
       "hydro sine observed order below minimum");
 }
 
+void testTwoBodyOrbitEnergyDrift(const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  constexpr double dt = 1.0e-3;
+  constexpr std::size_t steps = 4000;
+  constexpr double g = 1.0;
+  constexpr double m0 = 1.0;
+  constexpr double m1 = 1.0;
+
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 0.2;
+  options.max_leaf_size = 1;
+  options.gravitational_constant_code = g;
+  options.softening.epsilon_comoving = 1.0e-3;
+
+  std::vector<double> px = {-0.5, 0.5};
+  std::vector<double> py = {0.0, 0.0};
+  std::vector<double> pz = {0.0, 0.0};
+  const double v = std::sqrt(g * (m0 + m1) / 1.0) * 0.5;
+  std::vector<double> vx = {0.0, 0.0};
+  std::vector<double> vy = {v, -v};
+  std::vector<double> vz = {0.0, 0.0};
+  std::vector<double> mass = {m0, m1};
+  std::vector<std::uint32_t> active = {0U, 1U};
+
+  auto totalEnergy = [&]() {
+    const double dx = px[1] - px[0];
+    const double dy = py[1] - py[0];
+    const double dz = pz[1] - pz[0];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    const double kinetic = 0.5 * m0 * (vx[0] * vx[0] + vy[0] * vy[0] + vz[0] * vz[0]) +
+        0.5 * m1 * (vx[1] * vx[1] + vy[1] * vy[1] + vz[1] * vz[1]);
+    const double potential = -g * m0 * m1 / std::sqrt(r2 + options.softening.epsilon_comoving * options.softening.epsilon_comoving);
+    return kinetic + potential;
+  };
+
+  std::vector<double> ax(2, 0.0), ay(2, 0.0), az(2, 0.0);
+  cosmosim::gravity::TreeGravitySolver solver;
+  solver.build(px, py, pz, mass, options, nullptr);
+  solver.evaluateActiveSet(px, py, pz, mass, active, ax, ay, az, options, nullptr);
+
+  const double e0 = totalEnergy();
+  for (std::size_t step = 0; step < steps; ++step) {
+    for (std::size_t i = 0; i < 2; ++i) {
+      vx[i] += 0.5 * dt * ax[i];
+      vy[i] += 0.5 * dt * ay[i];
+      vz[i] += 0.5 * dt * az[i];
+      px[i] += dt * vx[i];
+      py[i] += dt * vy[i];
+      pz[i] += dt * vz[i];
+    }
+    solver.build(px, py, pz, mass, options, nullptr);
+    solver.evaluateActiveSet(px, py, pz, mass, active, ax, ay, az, options, nullptr);
+    for (std::size_t i = 0; i < 2; ++i) {
+      vx[i] += 0.5 * dt * ax[i];
+      vy[i] += 0.5 * dt * ay[i];
+      vz[i] += 0.5 * dt * az[i];
+    }
+  }
+
+  const double e1 = totalEnergy();
+  const double rel_drift = std::abs(e1 - e0) / std::max(std::abs(e0), 1.0e-20);
+  requireOrThrow(
+      rel_drift <= tolerances.require("gravity_two_body_orbit.max_relative_energy_drift"),
+      "gravity_two_body_orbit failed: relative energy drift above tolerance");
+}
+
+void testStaticHaloRadialProfile(const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  constexpr std::size_t shell_count = 6;
+  constexpr std::size_t particle_count = 96;
+  constexpr double g = 1.0;
+
+  std::vector<double> px(particle_count, 0.0);
+  std::vector<double> py(particle_count, 0.0);
+  std::vector<double> pz(particle_count, 0.0);
+  std::vector<double> mass(particle_count, 1.0 / static_cast<double>(particle_count));
+
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    const double u = (static_cast<double>(i) + 0.5) / static_cast<double>(particle_count);
+    const double v = std::fmod(0.61803398875 * static_cast<double>(i), 1.0);
+    const double w = std::fmod(0.41421356237 * static_cast<double>(i), 1.0);
+    const double r = 0.05 + 0.45 * std::cbrt(u);
+    const double cos_t = 1.0 - 2.0 * v;
+    const double sin_t = std::sqrt(std::max(0.0, 1.0 - cos_t * cos_t));
+    const double phi = 2.0 * k_pi * w;
+    px[i] = r * sin_t * std::cos(phi);
+    py[i] = r * sin_t * std::sin(phi);
+    pz[i] = r * cos_t;
+  }
+
+  std::vector<double> test_x(shell_count, 0.0);
+  std::vector<double> test_y(shell_count, 0.0);
+  std::vector<double> test_z(shell_count, 0.0);
+  std::vector<double> test_m(shell_count, 1.0e-6);
+  std::vector<std::uint32_t> active(shell_count, 0U);
+  for (std::size_t i = 0; i < shell_count; ++i) {
+    const double r = 0.08 + 0.06 * static_cast<double>(i);
+    test_x[i] = r;
+    active[i] = static_cast<std::uint32_t>(i);
+  }
+
+  std::vector<double> all_x = test_x;
+  std::vector<double> all_y = test_y;
+  std::vector<double> all_z = test_z;
+  std::vector<double> all_m = test_m;
+  all_x.insert(all_x.end(), px.begin(), px.end());
+  all_y.insert(all_y.end(), py.begin(), py.end());
+  all_z.insert(all_z.end(), pz.begin(), pz.end());
+  all_m.insert(all_m.end(), mass.begin(), mass.end());
+
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 0.35;
+  options.max_leaf_size = 4;
+  options.gravitational_constant_code = g;
+  options.softening.epsilon_comoving = 5.0e-3;
+
+  cosmosim::gravity::TreeGravitySolver solver;
+  solver.build(all_x, all_y, all_z, all_m, options, nullptr);
+  std::vector<double> ax(shell_count, 0.0), ay(shell_count, 0.0), az(shell_count, 0.0);
+  solver.evaluateActiveSet(all_x, all_y, all_z, all_m, active, ax, ay, az, options, nullptr);
+
+  std::vector<double> ref_ax(shell_count, 0.0), ref_ay(shell_count, 0.0), ref_az(shell_count, 0.0);
+  directSumAcceleration(all_x, all_y, all_z, all_m, active, options, ref_ax, ref_ay, ref_az);
+
+  double max_radial_rel = 0.0;
+  for (std::size_t i = 0; i < shell_count; ++i) {
+    const double ar_tree = ax[i];
+    const double ar_ref = ref_ax[i];
+    const double rel = std::abs(ar_tree - ar_ref) / std::max(std::abs(ar_ref), 1.0e-12);
+    max_radial_rel = std::max(max_radial_rel, rel);
+  }
+
+  requireOrThrow(
+      max_radial_rel <= tolerances.require("gravity_static_halo.max_radial_relative_force_error"),
+      "gravity_static_halo failed: radial profile mismatch vs softened direct-sum reference");
+}
+
 }  // namespace
 
 int main() {
@@ -216,5 +352,7 @@ int main() {
 
   testGravityOpeningConvergence(tolerances);
   testHydroResolutionConvergence(tolerances);
+  testTwoBodyOrbitEnergyDrift(tolerances);
+  testStaticHaloRadialProfile(tolerances);
   return 0;
 }
