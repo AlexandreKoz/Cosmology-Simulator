@@ -302,6 +302,16 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_reference_workflow tests/integration/test_reference_workflow_end_to_end.cpp)
   target_link_libraries(test_integration_reference_workflow PRIVATE cosmosim_all)
   add_test(NAME integration_reference_workflow COMMAND test_integration_reference_workflow)
+  add_executable(
+    test_integration_reference_workflow_distributed_treepm_mpi
+    tests/integration/test_reference_workflow_distributed_treepm_mpi.cpp)
+  target_link_libraries(test_integration_reference_workflow_distributed_treepm_mpi PRIVATE cosmosim_all)
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_reference_workflow_distributed_treepm_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_reference_workflow_distributed_treepm_mpi> ${MPIEXEC_POSTFLAGS})
+  endif()
 
   add_executable(test_unit_simulation_state tests/unit/test_simulation_state.cpp)
   target_link_libraries(test_unit_simulation_state PRIVATE cosmosim_all)

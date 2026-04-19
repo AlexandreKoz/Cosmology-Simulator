@@ -4,6 +4,34 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) TreePM Phase 2 distributed workflow cadence-consensus + active-set wiring repair (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_integration_reference_workflow test_integration_reference_workflow_distributed_treepm_mpi test_integration_tree_pm_coupling_periodic
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "integration_reference_workflow"
+./build/cpu-only-debug/test_integration_reference_workflow_distributed_treepm_mpi
+```
+
+Observed:
+
+- The live gravity callback path now enforces rank-consensus cadence metadata for each gravity kick:
+  - all ranks advance `gravity_kick_opportunity` every gravity kick stage,
+  - refresh/reuse decisions are reduced and must agree on all ranks,
+  - divergence fails loudly instead of silently drifting counters or field-version metadata.
+- Early return on empty local active targets was removed so distributed PM cadence bookkeeping remains coherent even for ranks with no active targets on a given kick.
+- Integration coverage now includes:
+  - single-rank active-subset agreement against full solve in TreePM coupling tests,
+  - distributed active-subset two-rank vs one-rank reference agreement in TreePM coupling tests,
+  - distributed workflow MPI smoke test for cadence-record coherence and final digest agreement.
+
+Interpretation:
+
+- Distributed PM cadence and metadata contracts are now wired in the real reference workflow callback path.
+- TreePM source/target split is preserved: PM refresh consumes all mass sources, while active-target export/import remains short-range-only work.
+
 ## 0) TreePM Phase 2 distributed PM interpolation return path repair (2026-04-19 UTC)
 
 ## 0) TreePM Phase 2 distributed short-range tree export/import repair (2026-04-19 UTC)
