@@ -156,6 +156,24 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
   std::vector<double> mass;
   buildDeterministicParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
   const std::vector<std::uint32_t> owned = ownedParticleIndices(pos_x.size(), world_size, world_rank);
+  std::vector<double> local_x;
+  std::vector<double> local_y;
+  std::vector<double> local_z;
+  std::vector<double> local_mass;
+  local_x.reserve(owned.size());
+  local_y.reserve(owned.size());
+  local_z.reserve(owned.size());
+  local_mass.reserve(owned.size());
+  for (const std::uint32_t index : owned) {
+    local_x.push_back(pos_x[index]);
+    local_y.push_back(pos_y[index]);
+    local_z.push_back(pos_z[index]);
+    local_mass.push_back(mass[index]);
+  }
+  std::vector<std::uint32_t> local_active(local_x.size(), 0U);
+  for (std::size_t i = 0; i < local_active.size(); ++i) {
+    local_active[i] = static_cast<std::uint32_t>(i);
+  }
 
   cosmosim::gravity::TreePmOptions options;
   options.pm_options.box_size_mpc_comoving = 1.0;
@@ -175,10 +193,10 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
     options.tree_exchange_batch_bytes = 64;
   }
 
-  std::vector<double> dist_ax(owned.size(), 0.0);
-  std::vector<double> dist_ay(owned.size(), 0.0);
-  std::vector<double> dist_az(owned.size(), 0.0);
-  cosmosim::gravity::TreePmForceAccumulatorView dist_acc{owned, dist_ax, dist_ay, dist_az};
+  std::vector<double> dist_ax(local_active.size(), 0.0);
+  std::vector<double> dist_ay(local_active.size(), 0.0);
+  std::vector<double> dist_az(local_active.size(), 0.0);
+  cosmosim::gravity::TreePmForceAccumulatorView dist_acc{local_active, dist_ax, dist_ay, dist_az};
   cosmosim::gravity::TreePmCoordinator dist_coordinator(pm_shape, layout);
   cosmosim::gravity::TreePmDiagnostics dist_diag;
 
@@ -186,17 +204,17 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
   for (int i = 0; i < iterations; ++i) {
     if (communication_stress) {
       dist_coordinator.solveActiveSetWithPmCadence(
-          pos_x,
-          pos_y,
-          pos_z,
-          mass,
+          local_x,
+          local_y,
+          local_z,
+          local_mass,
           dist_acc,
           options,
           (i % 2) == 0,
           nullptr,
           &dist_diag);
     } else {
-      dist_coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, dist_acc, options, nullptr, &dist_diag);
+      dist_coordinator.solveActiveSet(local_x, local_y, local_z, local_mass, dist_acc, options, nullptr, &dist_diag);
     }
   }
 

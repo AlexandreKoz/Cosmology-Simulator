@@ -88,6 +88,44 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   throw std::runtime_error("unhandled PM decomposition mode enum value");
 }
 
+
+[[nodiscard]] double wrapPeriodicPosition(double position_comoving, double box_size_mpc_comoving) {
+  if (box_size_mpc_comoving <= 0.0) {
+    return position_comoving;
+  }
+  double wrapped = std::fmod(position_comoving, box_size_mpc_comoving);
+  if (wrapped < 0.0) {
+    wrapped += box_size_mpc_comoving;
+  }
+  if (wrapped >= box_size_mpc_comoving) {
+    wrapped -= box_size_mpc_comoving;
+  }
+  return wrapped;
+}
+
+void seedParticleOwnershipFromPmSlabs(
+    core::SimulationState& state,
+    std::size_t pm_grid_size,
+    int world_size,
+    double box_size_mpc_comoving) {
+  if (pm_grid_size == 0) {
+    throw std::invalid_argument("seedParticleOwnershipFromPmSlabs requires pm_grid_size > 0");
+  }
+  if (world_size <= 0) {
+    throw std::invalid_argument("seedParticleOwnershipFromPmSlabs requires world_size > 0");
+  }
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const double wrapped_x = wrapPeriodicPosition(state.particles.position_x_comoving[i], box_size_mpc_comoving);
+    std::size_t global_x = 0;
+    if (box_size_mpc_comoving > 0.0) {
+      const double scaled = (wrapped_x / box_size_mpc_comoving) * static_cast<double>(pm_grid_size);
+      global_x = std::min(pm_grid_size - 1U, static_cast<std::size_t>(scaled));
+    }
+    state.particle_sidecar.owning_rank[i] = static_cast<std::uint32_t>(
+        parallel::pmOwnerRankForGlobalX(pm_grid_size, world_size, global_x));
+  }
+}
+
 [[nodiscard]] core::ProvenanceRecord makeGravityAwareProvenanceRecord(
     const core::FrozenConfig& frozen_config,
     const core::SimulationConfig& config) {
@@ -346,7 +384,18 @@ class DriftCallback final : public core::IntegrationCallback {
     const double inv_a = (context.integrator_state.current_scale_factor > 0.0)
         ? (1.0 / context.integrator_state.current_scale_factor)
         : 1.0;
+    parallel::MpiContext mpi_context;
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
     for (const std::uint32_t particle_index : context.active_set.particle_indices) {
+      if (particle_index >= context.state.particles.size()) {
+        throw std::out_of_range("drift callback active particle index out of range");
+      }
+      if (particle_index >= context.state.particle_sidecar.owning_rank.size()) {
+        throw std::out_of_range("drift callback owning-rank sidecar index out of range");
+      }
+      if (context.state.particle_sidecar.owning_rank[particle_index] != world_rank) {
+        continue;
+      }
       context.state.particles.position_x_comoving[particle_index] +=
           context.state.particles.velocity_x_peculiar[particle_index] * dt * inv_a;
       context.state.particles.position_y_comoving[particle_index] +=
@@ -482,16 +531,17 @@ class GravityStageCallback final : public core::IntegrationCallback {
           "TreePM long-range cadence local decision drifted from rank consensus");
     }
 
-    m_active_accel_x.assign(context.active_set.particle_indices.size(), 0.0);
-    m_active_accel_y.assign(context.active_set.particle_indices.size(), 0.0);
-    m_active_accel_z.assign(context.active_set.particle_indices.size(), 0.0);
+    rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
+    m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
+    m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
+    m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
     m_active_slot_by_particle.assign(particle_count, -1);
-    for (std::size_t i = 0; i < context.active_set.particle_indices.size(); ++i) {
-      m_active_slot_by_particle[context.active_set.particle_indices[i]] = static_cast<int>(i);
+    for (std::size_t i = 0; i < m_local_active_global_indices.size(); ++i) {
+      m_active_slot_by_particle[m_local_active_global_indices[i]] = static_cast<int>(i);
     }
 
     gravity::TreePmForceAccumulatorView accumulator{
-        .active_particle_index = context.active_set.particle_indices,
+        .active_particle_index = m_local_active_indices,
         .accel_x_comoving = m_active_accel_x,
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
@@ -514,10 +564,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
         : m_last_long_range_refresh_opportunity;
 
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
-        context.state.particles.position_x_comoving,
-        context.state.particles.position_y_comoving,
-        context.state.particles.position_z_comoving,
-        context.state.particles.mass_code,
+        m_local_source_x,
+        m_local_source_y,
+        m_local_source_z,
+        m_local_source_mass,
         accumulator,
         m_tree_pm_options,
         refresh_long_range,
@@ -578,8 +628,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
 
     const double kick_factor = 0.5 * context.integrator_state.dt_time_code;
-    for (std::size_t active_slot = 0; active_slot < context.active_set.particle_indices.size(); ++active_slot) {
-      const std::uint32_t particle_index = context.active_set.particle_indices[active_slot];
+    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
+      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
       context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_active_accel_x[active_slot];
       context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_active_accel_y[active_slot];
       context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_active_accel_z[active_slot];
@@ -601,6 +651,42 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
  private:
+  void rebuildOwnedParticleCompactView(const core::SimulationState& state, std::span<const std::uint32_t> active_particles) {
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
+    const std::size_t particle_count = state.particles.size();
+    m_owned_local_index_by_global.assign(particle_count, -1);
+    m_local_source_x.clear();
+    m_local_source_y.clear();
+    m_local_source_z.clear();
+    m_local_source_mass.clear();
+    m_local_to_global.clear();
+    for (std::size_t global_index = 0; global_index < particle_count; ++global_index) {
+      if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
+        continue;
+      }
+      m_owned_local_index_by_global[global_index] = static_cast<int>(m_local_to_global.size());
+      m_local_to_global.push_back(static_cast<std::uint32_t>(global_index));
+      m_local_source_x.push_back(state.particles.position_x_comoving[global_index]);
+      m_local_source_y.push_back(state.particles.position_y_comoving[global_index]);
+      m_local_source_z.push_back(state.particles.position_z_comoving[global_index]);
+      m_local_source_mass.push_back(state.particles.mass_code[global_index]);
+    }
+
+    m_local_active_indices.clear();
+    m_local_active_global_indices.clear();
+    for (const std::uint32_t global_index : active_particles) {
+      if (global_index >= particle_count) {
+        throw std::out_of_range("gravity callback active particle index out of range");
+      }
+      const int local_index = m_owned_local_index_by_global[global_index];
+      if (local_index < 0) {
+        continue;
+      }
+      m_local_active_indices.push_back(static_cast<std::uint32_t>(local_index));
+      m_local_active_global_indices.push_back(global_index);
+    }
+  }
+
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   parallel::DistributedExecutionTopology m_runtime_topology{};
@@ -618,6 +704,14 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_cell_accel_y;
   std::vector<double> m_cell_accel_z;
   std::vector<int> m_active_slot_by_particle;
+  std::vector<int> m_owned_local_index_by_global;
+  std::vector<double> m_local_source_x;
+  std::vector<double> m_local_source_y;
+  std::vector<double> m_local_source_z;
+  std::vector<double> m_local_source_mass;
+  std::vector<std::uint32_t> m_local_to_global;
+  std::vector<std::uint32_t> m_local_active_indices;
+  std::vector<std::uint32_t> m_local_active_global_indices;
   bool m_has_long_range_field = false;
   std::uint64_t m_gravity_kick_opportunity = 0;
   std::uint64_t m_last_long_range_refresh_opportunity = 0;
@@ -1030,6 +1124,14 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     io::IcReadResult ic_result = loadInitialConditions(m_frozen_config);
     core::SimulationState state = std::move(ic_result.state);
     finalizeStateMetadata(m_frozen_config, state);
+    {
+      parallel::MpiContext mpi_context;
+      seedParticleOwnershipFromPmSlabs(
+          state,
+          static_cast<std::size_t>(config.numerics.treepm_pm_grid),
+          mpi_context.worldSize(),
+          config.cosmology.box_size_mpc_comoving);
+    }
 
     core::CosmologyBackgroundConfig background_config;
     background_config.hubble_param = config.cosmology.hubble_param;

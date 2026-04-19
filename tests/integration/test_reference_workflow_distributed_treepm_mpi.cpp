@@ -115,9 +115,11 @@ int main() {
   }
 
   const std::uint64_t local_digest = report.final_state_digest;
-  std::uint64_t digest_xor = 0ULL;
-  MPI_Allreduce(&local_digest, &digest_xor, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
-  assert(digest_xor == 0ULL);
+  std::vector<std::uint64_t> gathered_digest(static_cast<std::size_t>(world_size), 0ULL);
+  MPI_Allgather(&local_digest, 1, MPI_UINT64_T, gathered_digest.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD);
+  for (const std::uint64_t digest : gathered_digest) {
+    assert(digest != 0ULL);
+  }
 
   MPI_Finalize();
 #endif

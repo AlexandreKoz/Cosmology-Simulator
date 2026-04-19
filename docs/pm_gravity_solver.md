@@ -114,6 +114,8 @@ Storage is represented by `parallel::PmSlabLayout` and consumed by
 `PmSolver::solvePoissonPeriodic` now supports true slab-distributed FFT on MPI ranks when
 `COSMOSIM_ENABLE_MPI=ON` and `COSMOSIM_ENABLE_FFTW=ON`:
 
+- The configured `parallel::PmSlabLayout` is validated against FFTW MPI ownership (`local_nx`, `local_0_start`) before plan creation; mismatched user-side slab partitions are rejected instead of silently assuming backend compatibility.
+
 - each rank owns only `layout.local_nx * Ny * Nz` real cells and solves only that slab portion;
 - no rank-0 gather path is used in the long-range PM solve;
 - FFT plans are created with `fftw_mpi_plan_dft_r2c_3d/c2r_3d` and `MPI_COMM_WORLD`;
@@ -272,3 +274,5 @@ cmake --preset mpi-hdf5-fftw-debug
 cmake --build --preset build-mpi-hdf5-fftw-debug
 ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two_rank"
 ```
+
+- Distributed PM source terms are owner-local inputs: ranks contribute only their owned particle subset, while PM deposition and interpolation route remote slab interactions explicitly through MPI.

@@ -160,7 +160,7 @@ void validateSingleRankFullDomainGridContract(const PmGridStorage& grid, std::st
   if (!grid.ownsFullDomain()) {
     throw std::invalid_argument(
         std::string(callsite) +
-        " currently requires a full-domain PM slab on this rank; distributed FFT/deposit/gather is not implemented in this phase");
+        " requires full-domain PM slab ownership in single-rank mode; use a valid distributed slab layout for multi-rank PM execution");
   }
 }
 
@@ -276,10 +276,8 @@ class PmSolver::Impl {
     plan.layout = layout;
     plan.real.assign(layout.localCellCount(), 0.0);
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
-    const std::size_t local_complex_size = layout.local_nx() * m_shape.ny * nz_complex;
-    plan.fourier.assign(local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.potential_k.assign(local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.working_k.assign(local_complex_size, std::complex<double>(0.0, 0.0));
+    const std::size_t expected_local_complex_size = layout.local_nx() * m_shape.ny * nz_complex;
+    std::size_t allocated_local_complex_size = expected_local_complex_size;
 
 #if COSMOSIM_ENABLE_FFTW
 #if COSMOSIM_ENABLE_MPI
@@ -292,7 +290,35 @@ class PmSolver::Impl {
         throw std::invalid_argument("PM slab layout world metadata must match MPI_COMM_WORLD for distributed FFT path");
       }
       fftw_mpi_init();
+      ptrdiff_t backend_local_nx = 0;
+      ptrdiff_t backend_begin_x = 0;
+      const ptrdiff_t backend_alloc_local = fftw_mpi_local_size_3d(
+          static_cast<ptrdiff_t>(m_shape.nx),
+          static_cast<ptrdiff_t>(m_shape.ny),
+          static_cast<ptrdiff_t>(nz_complex),
+          MPI_COMM_WORLD,
+          &backend_local_nx,
+          &backend_begin_x);
+      if (backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx()) ||
+          backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x)) {
+        throw std::invalid_argument(
+            "PM slab layout is incompatible with FFTW MPI ownership for this communicator; the configured slab partition does not match backend local_nx/local_0_start");
+      }
+      if (backend_alloc_local <= 0) {
+        throw std::runtime_error("FFTW MPI reported non-positive local allocation size for distributed PM plan");
+      }
+      allocated_local_complex_size = static_cast<std::size_t>(backend_alloc_local);
       plan.is_distributed = true;
+    }
+#endif
+    plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+#if COSMOSIM_ENABLE_MPI
+    if (layout.world_size > 1) {
+      if (allocated_local_complex_size < expected_local_complex_size) {
+        throw std::runtime_error("FFTW MPI local allocation is smaller than the expected slab-local Fourier extent");
+      }
       plan.forward_plan = fftw_mpi_plan_dft_r2c_3d(
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
@@ -312,6 +338,9 @@ class PmSolver::Impl {
     } else
 #endif
     {
+      plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),

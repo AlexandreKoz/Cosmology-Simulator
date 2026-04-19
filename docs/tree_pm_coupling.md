@@ -96,3 +96,8 @@ Ordering is deterministic by rank order and batch-local request order.
 
 - `TreePmOptions` now includes `tree_exchange_batch_bytes` (default `4 MiB`), and workflow wiring sets it from `numerics.treepm_tree_exchange_batch_bytes`.
 - Existing callers constructing `TreePmOptions` without this field keep prior behavior via default value.
+
+
+## Distributed source ownership note
+
+In multi-rank TreePM, the short-range tree is intended to be built from **rank-owned source particles only**. Active targets may be a strict owned subset of that local source set, and export/import validation should compare gathered owner-local results against a single-rank reference rather than relying on replicated full-state digests.
