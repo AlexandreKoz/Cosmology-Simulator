@@ -71,6 +71,26 @@ struct PmDensityContributionRecord {
   double mass_contribution = 0.0;
 };
 
+struct PmInterpolationRequestRecord {
+  std::uint32_t particle_index = 0;
+  std::uint32_t global_ix = 0;
+  std::uint32_t global_iy = 0;
+  std::uint32_t global_iz = 0;
+  double weight = 0.0;
+};
+
+struct PmForceContributionRecord {
+  std::uint32_t particle_index = 0;
+  double accel_x = 0.0;
+  double accel_y = 0.0;
+  double accel_z = 0.0;
+};
+
+struct PmPotentialContributionRecord {
+  std::uint32_t particle_index = 0;
+  double potential = 0.0;
+};
+
 [[nodiscard]] PmAxisStencil1d makeAxisStencil(double grid_position, PmAssignmentScheme scheme) {
   PmAxisStencil1d stencil{};
   if (scheme == PmAssignmentScheme::kCic) {
@@ -942,7 +962,29 @@ void PmSolver::interpolateForces(
       pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
     throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
   }
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::interpolateForces requires a valid PM slab layout");
+  }
+
+  const bool distributed_slabs = grid.slabLayout().world_size > 1;
+#if !COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    throw std::invalid_argument("PmSolver::interpolateForces distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
   validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolateForces");
+#else
+  if (distributed_slabs) {
+    int mpi_world_size = 1;
+    int mpi_world_rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
+      throw std::invalid_argument("PmSolver::interpolateForces slab layout world metadata must match MPI_COMM_WORLD");
+    }
+  } else {
+    validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolateForces");
+  }
+#endif
 
   const auto start = std::chrono::steady_clock::now();
 
@@ -950,37 +992,218 @@ void PmSolver::interpolateForces(
   const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
   const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
 
-  for (std::size_t p = 0; p < pos_x.size(); ++p) {
-    const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-    const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-    const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+  if (!distributed_slabs) {
+    for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
-    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
-    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
-    double gx = 0.0;
-    double gy = 0.0;
-    double gz = 0.0;
+      double gx = 0.0;
+      double gy = 0.0;
+      double gz = 0.0;
 
-    for (std::size_t dx = 0; dx < sx.count; ++dx) {
-      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
-      for (std::size_t dy = 0; dy < sy.count; ++dy) {
-        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
-        for (std::size_t dz = 0; dz < sz.count; ++dz) {
-          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
-          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
-          const std::size_t index = grid.linearIndex(ix, iy, iz);
-          gx += weight * grid.force_x()[index];
-          gy += weight * grid.force_y()[index];
-          gz += weight * grid.force_z()[index];
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            const std::size_t index = grid.linearIndex(ix, iy, iz);
+            gx += weight * grid.force_x()[index];
+            gy += weight * grid.force_y()[index];
+            gz += weight * grid.force_z()[index];
+          }
+        }
+      }
+
+      accel_x[p] = gx;
+      accel_y[p] = gy;
+      accel_z[p] = gz;
+    }
+  } else {
+#if COSMOSIM_ENABLE_MPI
+    const int world_size = grid.slabLayout().world_size;
+    std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank(static_cast<std::size_t>(world_size));
+    for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
+        auto& batch = send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            batch.push_back(PmInterpolationRequestRecord{
+                .particle_index = static_cast<std::uint32_t>(p),
+                .global_ix = static_cast<std::uint32_t>(ix),
+                .global_iy = static_cast<std::uint32_t>(iy),
+                .global_iz = static_cast<std::uint32_t>(iz),
+                .weight = weight,
+            });
+          }
         }
       }
     }
 
-    accel_x[p] = gx;
-    accel_y[p] = gy;
-    accel_z[p] = gz;
+    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_send = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      const std::size_t count = send_requests_by_rank[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("PmSolver::interpolateForces request count exceeds MPI int limit");
+      }
+      send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
+      total_send += count;
+    }
+
+    std::vector<PmInterpolationRequestRecord> send_flat;
+    send_flat.reserve(total_send);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto& source = send_requests_by_rank[static_cast<std::size_t>(rank)];
+      send_flat.insert(send_flat.end(), source.begin(), source.end());
+    }
+
+    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    std::size_t total_recv = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
+      total_recv += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(rank)]);
+    }
+    std::vector<PmInterpolationRequestRecord> recv_flat(total_recv);
+
+    const int request_bytes = static_cast<int>(sizeof(PmInterpolationRequestRecord));
+    std::vector<int> send_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto r = static_cast<std::size_t>(rank);
+      send_counts_bytes[r] = send_counts[r] * request_bytes;
+      send_displs_bytes[r] = send_displs[r] * request_bytes;
+      recv_counts_bytes[r] = recv_counts[r] * request_bytes;
+      recv_displs_bytes[r] = recv_displs[r] * request_bytes;
+    }
+    MPI_Alltoallv(
+        reinterpret_cast<const std::uint8_t*>(send_flat.data()),
+        send_counts_bytes.data(),
+        send_displs_bytes.data(),
+        MPI_BYTE,
+        reinterpret_cast<std::uint8_t*>(recv_flat.data()),
+        recv_counts_bytes.data(),
+        recv_displs_bytes.data(),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    std::vector<std::vector<PmForceContributionRecord>> send_contribs_by_rank(static_cast<std::size_t>(world_size));
+    for (int source_rank = 0; source_rank < world_size; ++source_rank) {
+      auto& batch = send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
+      const int begin = recv_displs[static_cast<std::size_t>(source_rank)];
+      const int count = recv_counts[static_cast<std::size_t>(source_rank)];
+      for (int i = 0; i < count; ++i) {
+        const auto& request = recv_flat[static_cast<std::size_t>(begin + i)];
+        if (request.particle_index >= pos_x.size()) {
+          throw std::invalid_argument("PmSolver::interpolateForces request particle index out of range");
+        }
+        if (request.global_ix >= m_shape.nx || request.global_iy >= m_shape.ny || request.global_iz >= m_shape.nz) {
+          throw std::invalid_argument("PmSolver::interpolateForces request PM index out of range");
+        }
+        if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
+          throw std::invalid_argument("PmSolver::interpolateForces request x-index is not owned by receiving slab");
+        }
+        const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        batch.push_back(PmForceContributionRecord{
+            .particle_index = request.particle_index,
+            .accel_x = request.weight * grid.force_x()[index],
+            .accel_y = request.weight * grid.force_y()[index],
+            .accel_z = request.weight * grid.force_z()[index],
+        });
+      }
+    }
+
+    std::vector<int> send_contrib_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_contrib_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_send_contribs = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      const std::size_t count = send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("PmSolver::interpolateForces contribution count exceeds MPI int limit");
+      }
+      send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
+      total_send_contribs += count;
+    }
+
+    std::vector<PmForceContributionRecord> send_contrib_flat;
+    send_contrib_flat.reserve(total_send_contribs);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto& source = send_contribs_by_rank[static_cast<std::size_t>(rank)];
+      send_contrib_flat.insert(send_contrib_flat.end(), source.begin(), source.end());
+    }
+
+    std::vector<int> recv_contrib_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_displs(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_contrib_counts.data(), 1, MPI_INT, recv_contrib_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    std::size_t total_recv_contribs = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
+      total_recv_contribs += static_cast<std::size_t>(recv_contrib_counts[static_cast<std::size_t>(rank)]);
+    }
+    std::vector<PmForceContributionRecord> recv_contrib_flat(total_recv_contribs);
+
+    const int contrib_bytes = static_cast<int>(sizeof(PmForceContributionRecord));
+    std::vector<int> send_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto r = static_cast<std::size_t>(rank);
+      send_contrib_counts_bytes[r] = send_contrib_counts[r] * contrib_bytes;
+      send_contrib_displs_bytes[r] = send_contrib_displs[r] * contrib_bytes;
+      recv_contrib_counts_bytes[r] = recv_contrib_counts[r] * contrib_bytes;
+      recv_contrib_displs_bytes[r] = recv_contrib_displs[r] * contrib_bytes;
+    }
+    MPI_Alltoallv(
+        reinterpret_cast<const std::uint8_t*>(send_contrib_flat.data()),
+        send_contrib_counts_bytes.data(),
+        send_contrib_displs_bytes.data(),
+        MPI_BYTE,
+        reinterpret_cast<std::uint8_t*>(recv_contrib_flat.data()),
+        recv_contrib_counts_bytes.data(),
+        recv_contrib_displs_bytes.data(),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    std::fill(accel_x.begin(), accel_x.end(), 0.0);
+    std::fill(accel_y.begin(), accel_y.end(), 0.0);
+    std::fill(accel_z.begin(), accel_z.end(), 0.0);
+    for (const auto& contribution : recv_contrib_flat) {
+      if (contribution.particle_index >= pos_x.size()) {
+        throw std::invalid_argument("PmSolver::interpolateForces response particle index out of range");
+      }
+      const std::size_t p = static_cast<std::size_t>(contribution.particle_index);
+      accel_x[p] += contribution.accel_x;
+      accel_y[p] += contribution.accel_y;
+      accel_z[p] += contribution.accel_z;
+    }
+#endif
   }
 
   const auto stop = std::chrono::steady_clock::now();
@@ -1002,35 +1225,232 @@ void PmSolver::interpolatePotential(
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
     throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
   }
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::interpolatePotential requires a valid PM slab layout");
+  }
+
+  const bool distributed_slabs = grid.slabLayout().world_size > 1;
+#if !COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    throw std::invalid_argument("PmSolver::interpolatePotential distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
   validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolatePotential");
+#else
+  if (distributed_slabs) {
+    int mpi_world_size = 1;
+    int mpi_world_rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
+      throw std::invalid_argument(
+          "PmSolver::interpolatePotential slab layout world metadata must match MPI_COMM_WORLD");
+    }
+  } else {
+    validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolatePotential");
+  }
+#endif
 
   const auto start = std::chrono::steady_clock::now();
   const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;
   const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
   const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
 
-  for (std::size_t p = 0; p < pos_x.size(); ++p) {
-    const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-    const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-    const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+  if (!distributed_slabs) {
+    for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
 
-    const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
-    const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
-    const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
-    double phi = 0.0;
-    for (std::size_t dx = 0; dx < sx.count; ++dx) {
-      const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
-      for (std::size_t dy = 0; dy < sy.count; ++dy) {
-        const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
-        for (std::size_t dz = 0; dz < sz.count; ++dz) {
-          const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
-          const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
-          phi += weight * grid.potential()[grid.linearIndex(ix, iy, iz)];
+      double phi = 0.0;
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            phi += weight * grid.potential()[grid.linearIndex(ix, iy, iz)];
+          }
+        }
+      }
+      potential[p] = phi;
+    }
+  } else {
+#if COSMOSIM_ENABLE_MPI
+    const int world_size = grid.slabLayout().world_size;
+    std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank(static_cast<std::size_t>(world_size));
+    for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
+      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
+      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
+      const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
+      const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
+      for (std::size_t dx = 0; dx < sx.count; ++dx) {
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
+        auto& batch = send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
+        for (std::size_t dy = 0; dy < sy.count; ++dy) {
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          for (std::size_t dz = 0; dz < sz.count; ++dz) {
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            batch.push_back(PmInterpolationRequestRecord{
+                .particle_index = static_cast<std::uint32_t>(p),
+                .global_ix = static_cast<std::uint32_t>(ix),
+                .global_iy = static_cast<std::uint32_t>(iy),
+                .global_iz = static_cast<std::uint32_t>(iz),
+                .weight = weight,
+            });
+          }
         }
       }
     }
-    potential[p] = phi;
+
+    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_send = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      const std::size_t count = send_requests_by_rank[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("PmSolver::interpolatePotential request count exceeds MPI int limit");
+      }
+      send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      send_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send);
+      total_send += count;
+    }
+
+    std::vector<PmInterpolationRequestRecord> send_flat;
+    send_flat.reserve(total_send);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto& source = send_requests_by_rank[static_cast<std::size_t>(rank)];
+      send_flat.insert(send_flat.end(), source.begin(), source.end());
+    }
+
+    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    std::size_t total_recv = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv);
+      total_recv += static_cast<std::size_t>(recv_counts[static_cast<std::size_t>(rank)]);
+    }
+    std::vector<PmInterpolationRequestRecord> recv_flat(total_recv);
+
+    const int request_bytes = static_cast<int>(sizeof(PmInterpolationRequestRecord));
+    std::vector<int> send_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto r = static_cast<std::size_t>(rank);
+      send_counts_bytes[r] = send_counts[r] * request_bytes;
+      send_displs_bytes[r] = send_displs[r] * request_bytes;
+      recv_counts_bytes[r] = recv_counts[r] * request_bytes;
+      recv_displs_bytes[r] = recv_displs[r] * request_bytes;
+    }
+    MPI_Alltoallv(
+        reinterpret_cast<const std::uint8_t*>(send_flat.data()),
+        send_counts_bytes.data(),
+        send_displs_bytes.data(),
+        MPI_BYTE,
+        reinterpret_cast<std::uint8_t*>(recv_flat.data()),
+        recv_counts_bytes.data(),
+        recv_displs_bytes.data(),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    std::vector<std::vector<PmPotentialContributionRecord>> send_contribs_by_rank(static_cast<std::size_t>(world_size));
+    for (int source_rank = 0; source_rank < world_size; ++source_rank) {
+      auto& batch = send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
+      const int begin = recv_displs[static_cast<std::size_t>(source_rank)];
+      const int count = recv_counts[static_cast<std::size_t>(source_rank)];
+      for (int i = 0; i < count; ++i) {
+        const auto& request = recv_flat[static_cast<std::size_t>(begin + i)];
+        if (request.particle_index >= pos_x.size()) {
+          throw std::invalid_argument("PmSolver::interpolatePotential request particle index out of range");
+        }
+        if (request.global_ix >= m_shape.nx || request.global_iy >= m_shape.ny || request.global_iz >= m_shape.nz) {
+          throw std::invalid_argument("PmSolver::interpolatePotential request PM index out of range");
+        }
+        if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
+          throw std::invalid_argument("PmSolver::interpolatePotential request x-index is not owned by receiving slab");
+        }
+        const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        batch.push_back(PmPotentialContributionRecord{
+            .particle_index = request.particle_index,
+            .potential = request.weight * grid.potential()[index],
+        });
+      }
+    }
+
+    std::vector<int> send_contrib_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_contrib_displs(static_cast<std::size_t>(world_size), 0);
+    std::size_t total_send_contribs = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      const std::size_t count = send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("PmSolver::interpolatePotential contribution count exceeds MPI int limit");
+      }
+      send_contrib_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      send_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_send_contribs);
+      total_send_contribs += count;
+    }
+
+    std::vector<PmPotentialContributionRecord> send_contrib_flat;
+    send_contrib_flat.reserve(total_send_contribs);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto& source = send_contribs_by_rank[static_cast<std::size_t>(rank)];
+      send_contrib_flat.insert(send_contrib_flat.end(), source.begin(), source.end());
+    }
+
+    std::vector<int> recv_contrib_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_displs(static_cast<std::size_t>(world_size), 0);
+    MPI_Alltoall(send_contrib_counts.data(), 1, MPI_INT, recv_contrib_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    std::size_t total_recv_contribs = 0;
+    for (int rank = 0; rank < world_size; ++rank) {
+      recv_contrib_displs[static_cast<std::size_t>(rank)] = static_cast<int>(total_recv_contribs);
+      total_recv_contribs += static_cast<std::size_t>(recv_contrib_counts[static_cast<std::size_t>(rank)]);
+    }
+    std::vector<PmPotentialContributionRecord> recv_contrib_flat(total_recv_contribs);
+
+    const int contrib_bytes = static_cast<int>(sizeof(PmPotentialContributionRecord));
+    std::vector<int> send_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_counts_bytes(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_contrib_displs_bytes(static_cast<std::size_t>(world_size), 0);
+    for (int rank = 0; rank < world_size; ++rank) {
+      const auto r = static_cast<std::size_t>(rank);
+      send_contrib_counts_bytes[r] = send_contrib_counts[r] * contrib_bytes;
+      send_contrib_displs_bytes[r] = send_contrib_displs[r] * contrib_bytes;
+      recv_contrib_counts_bytes[r] = recv_contrib_counts[r] * contrib_bytes;
+      recv_contrib_displs_bytes[r] = recv_contrib_displs[r] * contrib_bytes;
+    }
+    MPI_Alltoallv(
+        reinterpret_cast<const std::uint8_t*>(send_contrib_flat.data()),
+        send_contrib_counts_bytes.data(),
+        send_contrib_displs_bytes.data(),
+        MPI_BYTE,
+        reinterpret_cast<std::uint8_t*>(recv_contrib_flat.data()),
+        recv_contrib_counts_bytes.data(),
+        recv_contrib_displs_bytes.data(),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    std::fill(potential.begin(), potential.end(), 0.0);
+    for (const auto& contribution : recv_contrib_flat) {
+      if (contribution.particle_index >= pos_x.size()) {
+        throw std::invalid_argument("PmSolver::interpolatePotential response particle index out of range");
+      }
+      potential[static_cast<std::size_t>(contribution.particle_index)] += contribution.potential;
+    }
+#endif
   }
 
   const auto stop = std::chrono::steady_clock::now();

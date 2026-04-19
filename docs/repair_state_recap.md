@@ -4,6 +4,27 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) TreePM Phase 2 distributed PM interpolation return path repair (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_pm_periodic_mode
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "integration_pm_periodic_mode"
+```
+
+Observed:
+
+- `PmSolver::interpolateForces` now supports slab-distributed reverse communication:
+  particle-owner ranks send weighted stencil requests to slab owners, slab owners return weighted force contributions, and owners accumulate in local particle order.
+- `PmSolver::interpolatePotential` uses the same reverse message contract for optional potential gather.
+- Distributed PM integration coverage now includes CIC and TSC one-rank vs two-rank interpolation agreement with slab-boundary particle cases.
+
+Interpretation:
+
+- Phase 2 PM long-range path is now distributed through deposition, solve, and particle-force/potential return without replicated mesh gather assumptions.
+- One-rank PM numerical contract remains the baseline reference and is used as the distributed comparison target.
+
 ## 0) TreePM Phase 2 distributed density assignment repair (2026-04-19 UTC)
 
 Commands:

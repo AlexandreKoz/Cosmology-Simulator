@@ -132,8 +132,40 @@ Distributed density assignment is now enabled for slab layouts in `PmSolver::ass
 when MPI is enabled (`COSMOSIM_ENABLE_MPI=ON`) and slab metadata matches
 `MPI_COMM_WORLD`.
 
-`PmSolver::interpolateForces` and `PmSolver::interpolatePotential` remain full-domain-only in
-this phase and still reject partial slabs.
+`PmSolver::interpolateForces` and `PmSolver::interpolatePotential` now support slab-distributed
+particle ownership with explicit reverse communication. Particle-owner ranks build global
+stencil requests and send them to slab owners (`MPI_Alltoallv`); slab owners validate ownership,
+compute weighted contributions from local PM fields, and return per-particle contributions to
+the requesting owner ranks (`MPI_Alltoallv`). Final acceleration/potential accumulation occurs
+only on the particle-owner rank in local particle order.
+
+
+
+### Distributed interpolation reverse-message contract (Phase 2)
+
+Ownership and message flow for both force and potential gather:
+
+1. **Particle-owner rank** computes CIC/TSC stencil nodes in global periodic mesh coordinates.
+2. For each stencil node `(ix, iy, iz)`, particle owner routes a request to
+   `pmOwnerRankForGlobalX(Nx, world_size, ix)`.
+3. Request payload fields are:
+   - `particle_index` (owner-local index into the caller spans),
+   - `global_ix/global_iy/global_iz`,
+   - `weight` (matched deposit/gather kernel weight).
+4. **Slab-owner rank** receives requests, validates that the x-index is locally owned and the
+   global indices are in range, then computes:
+   - force gather: `weight * (ax, ay, az)` from owner-local PM force fields,
+   - potential gather: `weight * phi` from owner-local PM potential field.
+5. Slab owners send per-request contributions back to the originating particle-owner rank.
+6. Particle-owner rank accumulates returned contributions by `particle_index` into output spans.
+
+Ordering/determinism policy:
+
+- Request generation order is deterministic: particle index order, then stencil loop order
+  (`x`, `y`, `z`).
+- Returned contributions are accumulated on owner rank in MPI receive order; accumulation target is
+  owner-local particle order indexed by `particle_index`.
+- No rank requires replicated full PM fields for interpolation in distributed mode.
 
 ### Distributed density assignment message contract (Phase 2)
 
