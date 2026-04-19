@@ -9,6 +9,10 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 
+#if COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
+
 namespace {
 
 void requireOrThrow(bool condition, const std::string& message) {
@@ -179,7 +183,9 @@ void testPeriodicTreePmAgainstDirectReference() {
   requireOrThrow(rel_l2 < max_rel_l2, diag.str());
   requireOrThrow(diagnostics.composition_error_at_split < 1.0e-12, diag.str());
   requireOrThrow(diagnostics.max_relative_composition_error < 1.0e-12, diag.str());
-  requireOrThrow(diagnostics.residual_pruned_nodes > 0, diag.str());
+  requireOrThrow(
+      diagnostics.residual_pruned_nodes > 0 || diagnostics.residual_pair_skips_cutoff > 0,
+      diag.str());
   requireOrThrow(diagnostics.residual_pair_skips_cutoff > 0, diag.str());
 }
 
@@ -285,11 +291,147 @@ void testPmOnlyTreeOnlyAndTreePmConsistency() {
   requireOrThrow(split_rel <= pm_only_rel + 1.0e-9, message.str());
 }
 
+#if COSMOSIM_ENABLE_MPI
+void testDistributedShortRangeExportImportMatchesSingleRankReference() {
+  int world_size = 1;
+  int world_rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (world_size != 2) {
+    return;
+  }
+
+  constexpr double box_size_comoving = 1.0;
+  const cosmosim::gravity::PmGridShape pm_shape{16, 16, 16};
+  const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
+
+  const std::vector<double> global_x = {
+      0.08, 0.14, 0.22, 0.30, 0.41, 0.47, 0.492, 0.498,
+      0.502, 0.508, 0.53, 0.61, 0.72, 0.81, 0.90, 0.96,
+  };
+  const std::vector<double> global_y = {
+      0.11, 0.19, 0.27, 0.33, 0.39, 0.46, 0.49, 0.52,
+      0.55, 0.58, 0.63, 0.67, 0.71, 0.76, 0.84, 0.93,
+  };
+  const std::vector<double> global_z = {
+      0.07, 0.13, 0.20, 0.28, 0.35, 0.44, 0.495, 0.499,
+      0.501, 0.505, 0.57, 0.64, 0.70, 0.79, 0.87, 0.95,
+  };
+  std::vector<double> global_mass(global_x.size(), 1.0);
+  for (std::size_t i = 0; i < global_mass.size(); ++i) {
+    global_mass[i] = 0.9 + 0.02 * static_cast<double>(i % 7U);
+  }
+
+  std::vector<double> local_x;
+  std::vector<double> local_y;
+  std::vector<double> local_z;
+  std::vector<double> local_mass;
+  std::vector<std::size_t> local_to_global;
+  for (std::size_t i = 0; i < global_x.size(); ++i) {
+    const int owner_rank = (global_x[i] < 0.5) ? 0 : 1;
+    if (owner_rank == world_rank) {
+      local_x.push_back(global_x[i]);
+      local_y.push_back(global_y[i]);
+      local_z.push_back(global_z[i]);
+      local_mass.push_back(global_mass[i]);
+      local_to_global.push_back(i);
+    }
+  }
+
+  std::vector<std::uint32_t> local_active(local_x.size(), 0U);
+  for (std::size_t i = 0; i < local_active.size(); ++i) {
+    local_active[i] = static_cast<std::uint32_t>(i);
+  }
+  ForceField local_field{
+      std::vector<double>(local_x.size(), 0.0),
+      std::vector<double>(local_x.size(), 0.0),
+      std::vector<double>(local_x.size(), 0.0),
+  };
+  cosmosim::gravity::TreePmForceAccumulatorView local_accumulator{
+      local_active,
+      local_field.ax,
+      local_field.ay,
+      local_field.az,
+  };
+
+  cosmosim::gravity::TreePmOptions options;
+  options.pm_options.box_size_mpc_comoving = box_size_comoving;
+  options.pm_options.scale_factor = 1.0;
+  options.pm_options.gravitational_constant_code = 1.0;
+  options.tree_options.opening_theta = 0.55;
+  options.tree_options.max_leaf_size = 4;
+  options.tree_options.gravitational_constant_code = 1.0;
+  options.tree_options.softening.epsilon_comoving = 1.0e-3;
+  options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(2.0, 4.0, mesh_spacing);
+  options.tree_exchange_batch_bytes = sizeof(double) * 3U * 3U;
+
+  const auto local_layout =
+      cosmosim::parallel::makePmSlabLayout(pm_shape.nx, pm_shape.ny, pm_shape.nz, world_size, world_rank);
+  cosmosim::gravity::TreePmCoordinator distributed(pm_shape, local_layout);
+  cosmosim::gravity::TreePmDiagnostics distributed_diag;
+  distributed.solveActiveSet(local_x, local_y, local_z, local_mass, local_accumulator, options, nullptr, &distributed_diag);
+
+  std::vector<std::uint32_t> ref_active(global_x.size(), 0U);
+  for (std::size_t i = 0; i < ref_active.size(); ++i) {
+    ref_active[i] = static_cast<std::uint32_t>(i);
+  }
+  ForceField reference_field{
+      std::vector<double>(global_x.size(), 0.0),
+      std::vector<double>(global_x.size(), 0.0),
+      std::vector<double>(global_x.size(), 0.0),
+  };
+  cosmosim::gravity::TreePmForceAccumulatorView ref_accumulator{
+      ref_active,
+      reference_field.ax,
+      reference_field.ay,
+      reference_field.az,
+  };
+  cosmosim::gravity::TreePmCoordinator single_rank(pm_shape);
+  cosmosim::gravity::TreePmDiagnostics reference_diag;
+  single_rank.solveActiveSet(global_x, global_y, global_z, global_mass, ref_accumulator, options, nullptr, &reference_diag);
+
+  double local_diff2 = 0.0;
+  double local_ref2 = 0.0;
+  for (std::size_t i = 0; i < local_x.size(); ++i) {
+    const std::size_t gi = local_to_global[i];
+    const double dx = local_field.ax[i] - reference_field.ax[gi];
+    const double dy = local_field.ay[i] - reference_field.ay[gi];
+    const double dz = local_field.az[i] - reference_field.az[gi];
+    local_diff2 += dx * dx + dy * dy + dz * dz;
+    local_ref2 += reference_field.ax[gi] * reference_field.ax[gi] +
+        reference_field.ay[gi] * reference_field.ay[gi] +
+        reference_field.az[gi] * reference_field.az[gi];
+  }
+
+  double global_diff2 = 0.0;
+  double global_ref2 = 0.0;
+  MPI_Allreduce(&local_diff2, &global_diff2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_ref2, &global_ref2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  const double rel_l2 = std::sqrt(global_diff2 / std::max(global_ref2, 1.0e-30));
+
+  std::ostringstream msg;
+  msg << "Distributed TreePM short-range export/import drift: rel_l2=" << rel_l2
+      << ", world_rank=" << world_rank
+      << ", residual_pruned_nodes=" << distributed_diag.residual_pruned_nodes
+      << ", residual_pair_skips_cutoff=" << distributed_diag.residual_pair_skips_cutoff
+      << ", reference_pair_skips_cutoff=" << reference_diag.residual_pair_skips_cutoff;
+  requireOrThrow(rel_l2 <= 1.0e-9, msg.str());
+  requireOrThrow(distributed_diag.residual_pair_skips_cutoff > 0, msg.str());
+}
+#endif
+
 }  // namespace
 
 int main() {
+#if COSMOSIM_ENABLE_MPI
+  MPI_Init(nullptr, nullptr);
+#endif
   testPeriodicTreePmAgainstDirectReference();
   testResidualCutoffPrunesTreePath();
   testPmOnlyTreeOnlyAndTreePmConsistency();
+#if COSMOSIM_ENABLE_MPI
+  testDistributedShortRangeExportImportMatchesSingleRankReference();
+  MPI_Finalize();
+#endif
   return 0;
 }

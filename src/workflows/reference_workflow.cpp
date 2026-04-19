@@ -399,6 +399,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         config.numerics.treepm_asmth_cells,
         config.numerics.treepm_rcut_cells,
         m_mesh_spacing_mpc_comoving);
+    m_tree_pm_options.tree_exchange_batch_bytes = config.numerics.treepm_tree_exchange_batch_bytes;
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
     m_pm_backend = gravity::PmSolver::fftBackendName();
     if (m_runtime_topology.usesCuda()) {

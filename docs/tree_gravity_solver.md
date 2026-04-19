@@ -55,6 +55,15 @@ Integration with normalized config/provenance can map directly to `TreeGravityOp
 - Integration test: `tests/integration/test_tree_gravity_vs_direct.cpp`
 - Benchmark: `bench/bench_tree_gravity.cpp`
 
+## Distributed TreePM reuse contract
+
+`TreePmCoordinator` reuses the same tree traversal kernel for remote short-range requests in distributed runs. Remote request targets are evaluated against rank-local tree/source data with unchanged:
+
+- MAC (`l/r < theta`),
+- softening (`softenedInvR3`),
+- short-range split factor (`F_SR`),
+- cutoff semantics (`r_cut` pruning + pair culling).
+
 
 ## Integration validation tightening
 
