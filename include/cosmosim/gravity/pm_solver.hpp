@@ -149,6 +149,9 @@ class PmSolver {
       std::span<double> accel_z,
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
+  // For slab-distributed meshes, interpolation uses reverse communication:
+  // particle owners send weighted stencil requests to slab owners and receive
+  // weighted contributions back, then accumulate locally in particle order.
 
   // Assignment-scheme transpose gather of mesh potential values to particles.
   // This uses the same geometric stencil/convention as interpolateForces.

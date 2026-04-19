@@ -250,6 +250,152 @@ void testDistributedDensityAssignmentMatchesReference() {
   runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme::kTsc);
 }
 
+
+void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentScheme scheme, bool gather_potential) {
+  int world_size = 1;
+  int world_rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (world_size != 2) {
+    return;
+  }
+
+  const cosmosim::gravity::PmGridShape shape{16, 8, 8};
+  const auto local_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, world_rank);
+  cosmosim::gravity::PmGridStorage local_grid(shape, local_layout);
+  cosmosim::gravity::PmSolver local_solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  options.assignment_scheme = scheme;
+
+  const std::vector<double> all_x{0.499999, 0.500001, -0.0001, 1.0002, 0.125, 0.875, 0.24999, 0.75001};
+  const std::vector<double> all_y{0.10, 0.20, 0.30, 0.40, 0.55, 0.65, 0.35, 0.85};
+  const std::vector<double> all_z{0.15, 0.25, 0.35, 0.45, 0.75, 0.85, 0.95, 0.05};
+  const std::vector<double> all_mass{1.0, 2.0, 1.5, 2.5, 3.0, 4.0, 1.25, 0.75};
+
+  std::vector<double> local_x;
+  std::vector<double> local_y;
+  std::vector<double> local_z;
+  std::vector<double> local_mass;
+  for (std::size_t i = 0; i < all_x.size(); ++i) {
+    if (static_cast<int>(i % static_cast<std::size_t>(world_size)) == world_rank) {
+      local_x.push_back(all_x[i]);
+      local_y.push_back(all_y[i]);
+      local_z.push_back(all_z[i]);
+      local_mass.push_back(all_mass[i]);
+    }
+  }
+
+  std::vector<double> local_ax(local_x.size(), 0.0);
+  std::vector<double> local_ay(local_x.size(), 0.0);
+  std::vector<double> local_az(local_x.size(), 0.0);
+  local_solver.solveForParticles(local_grid, local_x, local_y, local_z, local_mass, local_ax, local_ay, local_az, options, nullptr);
+
+  std::vector<double> local_phi(local_x.size(), 0.0);
+  if (gather_potential) {
+    local_solver.interpolatePotential(local_grid, local_x, local_y, local_z, local_phi, options, nullptr);
+  }
+
+  std::vector<double> expected_local_ax(local_x.size(), 0.0);
+  std::vector<double> expected_local_ay(local_x.size(), 0.0);
+  std::vector<double> expected_local_az(local_x.size(), 0.0);
+  std::vector<double> expected_local_phi(local_x.size(), 0.0);
+
+  if (world_rank == 0) {
+    cosmosim::gravity::PmGridStorage reference_grid(shape);
+    cosmosim::gravity::PmSolver reference_solver(shape);
+    std::vector<double> ref_ax(all_x.size(), 0.0);
+    std::vector<double> ref_ay(all_x.size(), 0.0);
+    std::vector<double> ref_az(all_x.size(), 0.0);
+    reference_solver.solveForParticles(reference_grid, all_x, all_y, all_z, all_mass, ref_ax, ref_ay, ref_az, options, nullptr);
+    std::vector<double> ref_phi(all_x.size(), 0.0);
+    if (gather_potential) {
+      reference_solver.interpolatePotential(reference_grid, all_x, all_y, all_z, ref_phi, options, nullptr);
+    }
+
+    for (int target_rank = 0; target_rank < world_size; ++target_rank) {
+      std::vector<double> target_ax;
+      std::vector<double> target_ay;
+      std::vector<double> target_az;
+      std::vector<double> target_phi;
+      for (std::size_t i = 0; i < all_x.size(); ++i) {
+        if (static_cast<int>(i % static_cast<std::size_t>(world_size)) != target_rank) {
+          continue;
+        }
+        target_ax.push_back(ref_ax[i]);
+        target_ay.push_back(ref_ay[i]);
+        target_az.push_back(ref_az[i]);
+        if (gather_potential) {
+          target_phi.push_back(ref_phi[i]);
+        }
+      }
+      if (target_rank == 0) {
+        expected_local_ax = target_ax;
+        expected_local_ay = target_ay;
+        expected_local_az = target_az;
+        if (gather_potential) {
+          expected_local_phi = target_phi;
+        }
+      } else {
+        MPI_Send(target_ax.data(), static_cast<int>(target_ax.size()), MPI_DOUBLE, target_rank, 61, MPI_COMM_WORLD);
+        MPI_Send(target_ay.data(), static_cast<int>(target_ay.size()), MPI_DOUBLE, target_rank, 62, MPI_COMM_WORLD);
+        MPI_Send(target_az.data(), static_cast<int>(target_az.size()), MPI_DOUBLE, target_rank, 63, MPI_COMM_WORLD);
+        if (gather_potential) {
+          MPI_Send(target_phi.data(), static_cast<int>(target_phi.size()), MPI_DOUBLE, target_rank, 64, MPI_COMM_WORLD);
+        }
+      }
+    }
+  } else {
+    MPI_Recv(expected_local_ax.data(), static_cast<int>(expected_local_ax.size()), MPI_DOUBLE, 0, 61, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(expected_local_ay.data(), static_cast<int>(expected_local_ay.size()), MPI_DOUBLE, 0, 62, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(expected_local_az.data(), static_cast<int>(expected_local_az.size()), MPI_DOUBLE, 0, 63, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    if (gather_potential) {
+      MPI_Recv(expected_local_phi.data(), static_cast<int>(expected_local_phi.size()), MPI_DOUBLE, 0, 64, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+  }
+
+  double local_diff2 = 0.0;
+  double local_ref2 = 0.0;
+  for (std::size_t i = 0; i < local_ax.size(); ++i) {
+    const double dx = local_ax[i] - expected_local_ax[i];
+    const double dy = local_ay[i] - expected_local_ay[i];
+    const double dz = local_az[i] - expected_local_az[i];
+    local_diff2 += dx * dx + dy * dy + dz * dz;
+    local_ref2 += expected_local_ax[i] * expected_local_ax[i] + expected_local_ay[i] * expected_local_ay[i] +
+        expected_local_az[i] * expected_local_az[i];
+  }
+  double global_diff2 = 0.0;
+  double global_ref2 = 0.0;
+  MPI_Allreduce(&local_diff2, &global_diff2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_ref2, &global_ref2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  const double force_rel_l2 = std::sqrt(global_diff2 / std::max(global_ref2, 1.0e-30));
+  requireOrThrow(force_rel_l2 <= 1.0e-10, "Distributed PM interpolation force agreement drift exceeds tolerance");
+
+  if (gather_potential) {
+    double local_phi_diff2 = 0.0;
+    double local_phi_ref2 = 0.0;
+    for (std::size_t i = 0; i < local_phi.size(); ++i) {
+      const double diff = local_phi[i] - expected_local_phi[i];
+      local_phi_diff2 += diff * diff;
+      local_phi_ref2 += expected_local_phi[i] * expected_local_phi[i];
+    }
+    double global_phi_diff2 = 0.0;
+    double global_phi_ref2 = 0.0;
+    MPI_Allreduce(&local_phi_diff2, &global_phi_diff2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_phi_ref2, &global_phi_ref2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    const double phi_rel_l2 = std::sqrt(global_phi_diff2 / std::max(global_phi_ref2, 1.0e-30));
+    requireOrThrow(phi_rel_l2 <= 1.0e-10, "Distributed PM interpolation potential agreement drift exceeds tolerance");
+  }
+}
+
+void testDistributedInterpolationAgreement() {
+  runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentScheme::kCic, true);
+  runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentScheme::kTsc, true);
+}
+
 void testDistributedTwoRankMatchesSingleRankReference() {
   int world_size = 1;
   int world_rank = 0;
@@ -381,6 +527,7 @@ int main() {
 #if COSMOSIM_ENABLE_MPI
   testDistributedDensityAssignmentMatchesReference();
   testDistributedTwoRankMatchesSingleRankReference();
+  testDistributedInterpolationAgreement();
   MPI_Finalize();
 #endif
   return 0;
