@@ -264,6 +264,39 @@ void testDeviceCpuAgreementWhenCudaAvailable() {
   }
 }
 
+void testSingleRankSlabLayoutStorageEquivalence() {
+  const cosmosim::gravity::PmGridShape shape{8, 4, 2};
+  const auto layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 1, 0);
+  cosmosim::gravity::PmGridStorage grid(shape, layout);
+  assert(grid.ownsFullDomain());
+  assert(grid.localCellCount() == shape.cellCount());
+  assert(grid.slabLayout().owned_x.begin_x == 0);
+  assert(grid.slabLayout().owned_x.end_x == shape.nx);
+
+  const std::size_t idx = grid.linearIndex(7, 3, 1);
+  assert(idx == shape.cellCount() - 1);
+}
+
+void testPartialSlabStorageRejectsSingleRankSolverPath() {
+  const cosmosim::gravity::PmGridShape shape{8, 4, 4};
+  const auto layout_rank0 = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 2, 0);
+  cosmosim::gravity::PmGridStorage grid(shape, layout_rank0);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+
+  bool threw = false;
+  try {
+    solver.solvePoissonPeriodic(grid, options, nullptr);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +304,8 @@ int main() {
   testPoissonAnalyticMode();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();
+  testSingleRankSlabLayoutStorageEquivalence();
+  testPartialSlabStorageRejectsSingleRankSolverPath();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <vector>
@@ -213,6 +215,151 @@ struct DistributedRestartState {
   [[nodiscard]] std::string serialize() const;
   [[nodiscard]] static DistributedRestartState deserialize(const std::string& encoded);
 };
+
+struct PmSlabRange {
+  std::size_t begin_x = 0;
+  std::size_t end_x = 0;
+
+  [[nodiscard]] std::size_t extentX() const noexcept {
+    return (end_x >= begin_x) ? (end_x - begin_x) : 0;
+  }
+  [[nodiscard]] bool contains(std::size_t global_x) const noexcept {
+    return global_x >= begin_x && global_x < end_x;
+  }
+};
+
+struct PmSlabLayout {
+  std::size_t global_nx = 0;
+  std::size_t global_ny = 0;
+  std::size_t global_nz = 0;
+  int world_size = 1;
+  int world_rank = 0;
+  PmSlabRange owned_x{};
+
+  [[nodiscard]] std::size_t local_nx() const noexcept {
+    return owned_x.extentX();
+  }
+  [[nodiscard]] std::size_t localCellCount() const noexcept {
+    return local_nx() * global_ny * global_nz;
+  }
+  [[nodiscard]] bool isValid() const noexcept;
+  [[nodiscard]] bool ownsGlobalX(std::size_t global_x) const noexcept {
+    return owned_x.contains(global_x);
+  }
+  [[nodiscard]] bool ownsGlobalCell(std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept {
+    if (global_y >= global_ny || global_z >= global_nz) {
+      return false;
+    }
+    return ownsGlobalX(global_x);
+  }
+  [[nodiscard]] std::size_t localXFromGlobal(std::size_t global_x) const;
+  [[nodiscard]] std::size_t globalXFromLocal(std::size_t local_x) const;
+  [[nodiscard]] std::size_t localLinearIndex(std::size_t global_x, std::size_t global_y, std::size_t global_z) const;
+  [[nodiscard]] bool ownsFullDomain() const noexcept {
+    return owned_x.begin_x == 0 && owned_x.end_x == global_nx;
+  }
+};
+
+[[nodiscard]] inline PmSlabRange pmOwnedXRangeForRank(std::size_t global_nx, int world_size, int rank) {
+  if (global_nx == 0) {
+    throw std::invalid_argument("global_nx must be positive");
+  }
+  if (world_size <= 0) {
+    throw std::invalid_argument("world_size must be positive");
+  }
+  if (rank < 0 || rank >= world_size) {
+    throw std::invalid_argument("rank must be within [0, world_size)");
+  }
+  const std::size_t world = static_cast<std::size_t>(world_size);
+  const std::size_t rank_u = static_cast<std::size_t>(rank);
+  const std::size_t base = global_nx / world;
+  const std::size_t remainder = global_nx % world;
+  const std::size_t begin = rank_u * base + std::min(rank_u, remainder);
+  const std::size_t extent = base + (rank_u < remainder ? 1U : 0U);
+  return {.begin_x = begin, .end_x = begin + extent};
+}
+
+[[nodiscard]] inline int pmOwnerRankForGlobalX(std::size_t global_nx, int world_size, std::size_t global_x) {
+  if (global_x >= global_nx) {
+    throw std::out_of_range("global_x must be within [0, global_nx)");
+  }
+  for (int rank = 0; rank < world_size; ++rank) {
+    const PmSlabRange owned = pmOwnedXRangeForRank(global_nx, world_size, rank);
+    if (owned.contains(global_x)) {
+      return rank;
+    }
+  }
+  throw std::logic_error("no owner rank found for global_x");
+}
+
+[[nodiscard]] inline int pmOwnerRankForGlobalCell(
+    std::size_t global_nx,
+    std::size_t global_ny,
+    std::size_t global_nz,
+    int world_size,
+    std::size_t global_x,
+    std::size_t global_y,
+    std::size_t global_z) {
+  if (global_y >= global_ny || global_z >= global_nz) {
+    throw std::out_of_range("global cell y/z index out of range");
+  }
+  return pmOwnerRankForGlobalX(global_nx, world_size, global_x);
+}
+[[nodiscard]] inline PmSlabLayout makePmSlabLayout(
+    std::size_t global_nx,
+    std::size_t global_ny,
+    std::size_t global_nz,
+    int world_size,
+    int world_rank) {
+  PmSlabLayout layout{
+      .global_nx = global_nx,
+      .global_ny = global_ny,
+      .global_nz = global_nz,
+      .world_size = world_size,
+      .world_rank = world_rank,
+      .owned_x = pmOwnedXRangeForRank(global_nx, world_size, world_rank),
+  };
+  if (!layout.isValid()) {
+    throw std::invalid_argument("constructed PM slab layout is invalid");
+  }
+  return layout;
+}
+
+inline bool PmSlabLayout::isValid() const noexcept {
+  if (global_nx == 0 || global_ny == 0 || global_nz == 0) {
+    return false;
+  }
+  if (world_size <= 0 || world_rank < 0 || world_rank >= world_size) {
+    return false;
+  }
+  if (owned_x.begin_x > owned_x.end_x || owned_x.end_x > global_nx) {
+    return false;
+  }
+  const PmSlabRange expected = pmOwnedXRangeForRank(global_nx, world_size, world_rank);
+  return expected.begin_x == owned_x.begin_x && expected.end_x == owned_x.end_x;
+}
+
+inline std::size_t PmSlabLayout::localXFromGlobal(std::size_t global_x) const {
+  if (!ownsGlobalX(global_x)) {
+    throw std::out_of_range("global x index is not owned by this PM slab");
+  }
+  return global_x - owned_x.begin_x;
+}
+
+inline std::size_t PmSlabLayout::globalXFromLocal(std::size_t local_x) const {
+  if (local_x >= local_nx()) {
+    throw std::out_of_range("local PM slab x index out of range");
+  }
+  return owned_x.begin_x + local_x;
+}
+
+inline std::size_t PmSlabLayout::localLinearIndex(std::size_t global_x, std::size_t global_y, std::size_t global_z) const {
+  if (!ownsGlobalCell(global_x, global_y, global_z)) {
+    throw std::out_of_range("global PM cell is not owned by this slab");
+  }
+  const std::size_t local_x = localXFromGlobal(global_x);
+  return (local_x * global_ny + global_y) * global_nz + global_z;
+}
 
 void recordDistributedProfiling(
     core::ProfilerSession* profiler,

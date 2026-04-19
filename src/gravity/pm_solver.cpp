@@ -122,6 +122,14 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   }
 }
 
+void validateSingleRankFullDomainGridContract(const PmGridStorage& grid, std::string_view callsite) {
+  if (!grid.ownsFullDomain()) {
+    throw std::invalid_argument(
+        std::string(callsite) +
+        " currently requires a full-domain PM slab on this rank; distributed FFT/deposit/gather is not implemented in this phase");
+  }
+}
+
 }  // namespace
 
 class PmSolver::Impl {
@@ -295,19 +303,43 @@ const PmProfileEvent& PmProfiler::totals() const {
 }
 
 PmGridStorage::PmGridStorage(PmGridShape shape)
+    : PmGridStorage(
+          shape,
+          parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, /*world_size=*/1, /*world_rank=*/0)) {}
+
+PmGridStorage::PmGridStorage(PmGridShape shape, parallel::PmSlabLayout layout)
     : m_shape(shape),
-      m_density(shape.cellCount(), 0.0),
-      m_potential(shape.cellCount(), 0.0),
-      m_force_x(shape.cellCount(), 0.0),
-      m_force_y(shape.cellCount(), 0.0),
-      m_force_z(shape.cellCount(), 0.0) {
+      m_layout(std::move(layout)),
+      m_density(m_layout.localCellCount(), 0.0),
+      m_potential(m_layout.localCellCount(), 0.0),
+      m_force_x(m_layout.localCellCount(), 0.0),
+      m_force_y(m_layout.localCellCount(), 0.0),
+      m_force_z(m_layout.localCellCount(), 0.0) {
   if (!m_shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be valid");
+  }
+  if (!m_layout.isValid()) {
+    throw std::invalid_argument("PM slab layout must be valid");
+  }
+  if (m_layout.global_nx != m_shape.nx || m_layout.global_ny != m_shape.ny || m_layout.global_nz != m_shape.nz) {
+    throw std::invalid_argument("PM slab layout global shape must match PM grid shape");
   }
 }
 
 const PmGridShape& PmGridStorage::shape() const {
   return m_shape;
+}
+
+const parallel::PmSlabLayout& PmGridStorage::slabLayout() const {
+  return m_layout;
+}
+
+bool PmGridStorage::ownsFullDomain() const noexcept {
+  return m_layout.ownsFullDomain();
+}
+
+std::size_t PmGridStorage::localCellCount() const noexcept {
+  return m_layout.localCellCount();
 }
 
 std::span<double> PmGridStorage::density() {
@@ -351,7 +383,7 @@ std::span<const double> PmGridStorage::force_z() const {
 }
 
 std::size_t PmGridStorage::linearIndex(std::size_t ix, std::size_t iy, std::size_t iz) const {
-  return (ix * m_shape.ny + iy) * m_shape.nz + iz;
+  return m_layout.localLinearIndex(ix, iy, iz);
 }
 
 void PmGridStorage::clear() {
@@ -388,6 +420,7 @@ void PmSolver::assignDensity(
   if (grid.shape().cellCount() != m_shape.cellCount()) {
     throw std::invalid_argument("PM solver/grid shape mismatch in assignDensity");
   }
+  validateSingleRankFullDomainGridContract(grid, "PmSolver::assignDensity");
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != mass.size()) {
     throw std::invalid_argument("Particle coordinate/mass spans must match in assignDensity");
   }
@@ -440,6 +473,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   if (grid.shape().cellCount() != m_shape.cellCount()) {
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonPeriodic");
   }
+  validateSingleRankFullDomainGridContract(grid, "PmSolver::solvePoissonPeriodic");
 
   auto real = m_impl->realGrid();
   std::copy(grid.density().begin(), grid.density().end(), real.begin());
@@ -597,6 +631,7 @@ void PmSolver::interpolateForces(
       pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
     throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
   }
+  validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolateForces");
 
   const auto start = std::chrono::steady_clock::now();
 
@@ -656,6 +691,7 @@ void PmSolver::interpolatePotential(
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
     throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
   }
+  validateSingleRankFullDomainGridContract(grid, "PmSolver::interpolatePotential");
 
   const auto start = std::chrono::steady_clock::now();
   const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;

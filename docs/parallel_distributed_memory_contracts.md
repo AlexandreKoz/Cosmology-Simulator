@@ -103,3 +103,28 @@ For upcoming distributed TreePM work:
 - `tree export/import`: bounded payload exchange for short-range tree source support, capped by `treepm_tree_exchange_batch_bytes`.
 
 These names are contractual. They prevent pseudo-distributed ambiguity where all ranks hold replicated state but are described as distributed.
+
+## PM slab layout ownership contract (new explicit type)
+
+`parallel::PmSlabLayout` defines the auditable PM real-space ownership mapping used by gravity storage:
+
+- decomposition axis: x only,
+- slab range representation: half-open `[begin_x, end_x)`,
+- per-rank slab rule for `global_nx` and `world_size`:
+  - `base = global_nx / world_size`,
+  - `remainder = global_nx % world_size`,
+  - rank `r` owns `base + 1` x-indices if `r < remainder`, else `base`,
+  - `begin_x = r * base + min(r, remainder)`.
+
+Contracted helpers:
+
+- `pmOwnedXRangeForRank(...)`: deterministic per-rank slab bounds,
+- `pmOwnerRankForGlobalX(...)` / `pmOwnerRankForGlobalCell(...)`: ownership lookup,
+- `PmSlabLayout::{localXFromGlobal, globalXFromLocal, localLinearIndex}`:
+  centralized global/local conversions with range validation.
+
+Single-rank mapping is the same abstraction, not a special case:
+
+- `world_size = 1`, `world_rank = 0`, owned slab `[0, global_nx)`, and local storage equals full mesh.
+
+This contract is intentionally storage/ownership-only in this stage; distributed FFT and remote PM mesh communication remain out of scope.
