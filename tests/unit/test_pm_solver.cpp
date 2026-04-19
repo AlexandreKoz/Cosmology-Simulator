@@ -297,6 +297,30 @@ void testPartialSlabStorageRejectsSingleRankSolverPath() {
   assert(threw);
 }
 
+void testPoissonPlanCachingForStableSlabLayout() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+
+  std::fill(grid.density().begin(), grid.density().end(), 0.0);
+  grid.density()[grid.linearIndex(1, 0, 0)] = 1.0;
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  const std::size_t plan_count_after_first = solver.cachedPlanCount();
+  const std::size_t plan_builds_after_first = solver.planBuildCount();
+
+  grid.density()[grid.linearIndex(2, 0, 0)] = 1.0;
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+
+  assert(solver.cachedPlanCount() == plan_count_after_first);
+  assert(solver.planBuildCount() == plan_builds_after_first);
+  assert(plan_count_after_first == 1U);
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +330,7 @@ int main() {
   testPotentialInterpolationCicConsistency();
   testSingleRankSlabLayoutStorageEquivalence();
   testPartialSlabStorageRejectsSingleRankSolverPath();
+  testPoissonPlanCachingForStableSlabLayout();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();

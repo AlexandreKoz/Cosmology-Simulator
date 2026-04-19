@@ -243,6 +243,14 @@ endif()
 
 if(COSMOSIM_ENABLE_FFTW)
   target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_TARGET})
+  if(COSMOSIM_ENABLE_MPI)
+    if(NOT "${COSMOSIM_FFTW_MPI_TARGET}" STREQUAL "")
+      target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_MPI_TARGET})
+    else()
+      message(FATAL_ERROR
+        "COSMOSIM_ENABLE_MPI=ON with COSMOSIM_ENABLE_FFTW=ON requires FFTW MPI library (fftw3_mpi).")
+    endif()
+  endif()
 endif()
 
 if(COSMOSIM_ENABLE_CUDA)
@@ -471,6 +479,12 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_pm_periodic_mode tests/integration/test_pm_periodic_mode.cpp)
   target_link_libraries(test_integration_pm_periodic_mode PRIVATE cosmosim_gravity)
   add_test(NAME integration_pm_periodic_mode COMMAND test_integration_pm_periodic_mode)
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_pm_periodic_mode_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
+  endif()
 
   if(COSMOSIM_ENABLE_CUDA)
     add_executable(test_integration_pm_cuda_smoke tests/integration/test_pm_cuda_smoke.cpp)

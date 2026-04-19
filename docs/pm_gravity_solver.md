@@ -111,9 +111,25 @@ Storage is represented by `parallel::PmSlabLayout` and consumed by
   - `global_x = owned_x.begin + local_x` (valid iff `local_x < owned_x.extent`),
   - local linear index: `(local_x * Ny + iy) * Nz + iz`.
 
-This patch does **not** implement distributed FFT or remote PM deposition/gather. Therefore,
-`PmSolver::{assignDensity,solvePoissonPeriodic,interpolateForces,interpolatePotential}` still require
-full-domain slab ownership on the calling rank and fail fast for partial slabs to avoid pseudo-distributed behavior.
+`PmSolver::solvePoissonPeriodic` now supports true slab-distributed FFT on MPI ranks when
+`COSMOSIM_ENABLE_MPI=ON` and `COSMOSIM_ENABLE_FFTW=ON`:
+
+- each rank owns only `layout.local_nx * Ny * Nz` real cells and solves only that slab portion;
+- no rank-0 gather path is used in the long-range PM solve;
+- FFT plans are created with `fftw_mpi_plan_dft_r2c_3d/c2r_3d` and `MPI_COMM_WORLD`;
+- one-rank solves and multi-rank solves share the same k-space Poisson/gradient operator.
+
+For this phase, FFT spectral storage is treated as **non-transposed slab output**:
+
+- local spectral index: `(local_ix, iy, iz)` with flat index `(local_ix * Ny + iy) * (Nz/2+1) + iz`;
+- global mode index: `ix = owned_x.begin + local_ix`, `iy`, `iz`;
+- mode mapping remains:
+  - `kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)`
+  - `ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)`
+  - `kz(iz) = 2π/L * iz`.
+
+Assignment and interpolation entrypoints are still full-domain-only in this phase:
+`PmSolver::{assignDensity,interpolateForces,interpolatePotential}` continue to reject partial slabs.
 
 The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
 
@@ -121,6 +137,10 @@ The periodic PM solve reuses persistent solver-owned spectral scratch buffers fo
 - the temporary gradient spectrum used to recover `a_x`, `a_y`, and `a_z`.
 
 This keeps the PM operator auditable while avoiding repeated per-solve heap allocation churn on the hot periodic solve path.
+
+Plan/scratch caches are keyed by slab layout ownership metadata (`world_size`, `world_rank`,
+`owned_x.begin`, `owned_x.end`) and are reused until layout/communicator metadata changes.
+Inverse normalization is applied exactly once per inverse field (`φ`, `a_x`, `a_y`, `a_z`).
 
 ## Long-range field cadence and reuse (Reference workflow Phase 1)
 
@@ -179,4 +199,8 @@ Recommended commands:
 cmake --preset pm-hdf5-fftw-debug
 cmake --build --preset build-pm-hdf5-fftw-debug
 ctest --preset test-pm-hdf5-fftw-debug -R "unit_pm_solver|integration_pm_periodic_mode|validation_integration"
+# when MPI is available:
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug
+ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two_rank"
 ```

@@ -6,6 +6,11 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
+
+#if COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
 
 namespace {
 
@@ -126,9 +131,138 @@ void testPeriodicSinusoidalForceResponse() {
   requireOrThrow(profile.bytes_moved > 0, "PM profile.bytes_moved must be positive");
 }
 
+#if COSMOSIM_ENABLE_MPI
+void testDistributedTwoRankMatchesSingleRankReference() {
+  int world_size = 1;
+  int world_rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (world_size != 2) {
+    return;
+  }
+
+  const cosmosim::gravity::PmGridShape shape{16, 8, 8};
+  const auto local_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, world_rank);
+  cosmosim::gravity::PmGridStorage local_grid(shape, local_layout);
+  cosmosim::gravity::PmSolver local_solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 0.8;
+  options.gravitational_constant_code = 1.0;
+
+  const double amplitude = 0.1;
+  const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
+  for (std::size_t local_ix = 0; local_ix < local_layout.local_nx(); ++local_ix) {
+    const std::size_t ix = local_layout.globalXFromLocal(local_ix);
+    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        local_grid.density()[local_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
+      }
+    }
+  }
+  local_solver.solvePoissonPeriodic(local_grid, options, nullptr);
+
+  std::vector<double> reference_force_x(local_grid.localCellCount(), 0.0);
+  if (world_rank == 0) {
+    cosmosim::gravity::PmGridStorage reference_grid(shape);
+    cosmosim::gravity::PmSolver reference_solver(shape);
+    for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+      const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+          reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
+        }
+      }
+    }
+    reference_solver.solvePoissonPeriodic(reference_grid, options, nullptr);
+    for (std::size_t local_ix = 0; local_ix < local_layout.local_nx(); ++local_ix) {
+      const std::size_t ix = local_layout.globalXFromLocal(local_ix);
+      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+          reference_force_x[(local_ix * shape.ny + iy) * shape.nz + iz] =
+              reference_grid.force_x()[reference_grid.linearIndex(ix, iy, iz)];
+        }
+      }
+    }
+  }
+
+  if (world_rank == 0) {
+    for (int target_rank = 1; target_rank < world_size; ++target_rank) {
+      const auto target_layout =
+          cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, target_rank);
+      std::vector<double> target_ref(target_layout.localCellCount(), 0.0);
+      cosmosim::gravity::PmGridStorage reference_grid(shape);
+      cosmosim::gravity::PmSolver reference_solver(shape);
+      for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+        const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+        for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+          for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+            reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
+          }
+        }
+      }
+      reference_solver.solvePoissonPeriodic(reference_grid, options, nullptr);
+      for (std::size_t local_ix = 0; local_ix < target_layout.local_nx(); ++local_ix) {
+        const std::size_t ix = target_layout.globalXFromLocal(local_ix);
+        for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+          for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+            target_ref[(local_ix * shape.ny + iy) * shape.nz + iz] =
+                reference_grid.force_x()[reference_grid.linearIndex(ix, iy, iz)];
+          }
+        }
+      }
+      MPI_Send(
+          target_ref.data(),
+          static_cast<int>(target_ref.size()),
+          MPI_DOUBLE,
+          target_rank,
+          /*tag=*/41,
+          MPI_COMM_WORLD);
+    }
+  } else {
+    MPI_Recv(
+        reference_force_x.data(),
+        static_cast<int>(reference_force_x.size()),
+        MPI_DOUBLE,
+        0,
+        /*tag=*/41,
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+  }
+
+  constexpr double k_rel_l2_tol = 2.0e-6;
+  double diff2 = 0.0;
+  double ref2 = 0.0;
+  for (std::size_t i = 0; i < local_grid.localCellCount(); ++i) {
+    const double diff = local_grid.force_x()[i] - reference_force_x[i];
+    diff2 += diff * diff;
+    ref2 += reference_force_x[i] * reference_force_x[i];
+  }
+  double global_diff2 = 0.0;
+  double global_ref2 = 0.0;
+  MPI_Allreduce(&diff2, &global_diff2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&ref2, &global_ref2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  const double rel_l2 = std::sqrt(global_diff2 / std::max(global_ref2, 1.0e-30));
+  requireOrThrow(rel_l2 <= k_rel_l2_tol, "Distributed PM force_x drift vs one-rank reference exceeds tolerance");
+
+  requireOrThrow(local_solver.cachedPlanCount() == 1U, "Distributed PM solver should cache one plan per slab layout");
+  const std::size_t plan_builds_before = local_solver.planBuildCount();
+  local_solver.solvePoissonPeriodic(local_grid, options, nullptr);
+  requireOrThrow(local_solver.planBuildCount() == plan_builds_before, "Distributed PM solver should reuse FFT plan cache");
+}
+#endif
+
 }  // namespace
 
 int main() {
+#if COSMOSIM_ENABLE_MPI
+  MPI_Init(nullptr, nullptr);
+#endif
   testPeriodicSinusoidalForceResponse();
+#if COSMOSIM_ENABLE_MPI
+  testDistributedTwoRankMatchesSingleRankReference();
+  MPI_Finalize();
+#endif
   return 0;
 }
