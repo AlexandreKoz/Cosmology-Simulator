@@ -215,14 +215,45 @@ class GhostExchangeBuffer {
 };
 
 struct DistributedRestartState {
-  std::uint32_t schema_version = 1;
+  std::uint32_t schema_version = 2;
   std::uint64_t decomposition_epoch = 0;
   int world_size = 1;
+  std::size_t pm_grid_nx = 0;
+  std::size_t pm_grid_ny = 0;
+  std::size_t pm_grid_nz = 0;
+  std::string pm_decomposition_mode = "slab";
+  std::uint64_t gravity_kick_opportunity = 0;
+  std::uint64_t pm_update_cadence_steps = 1;
+  std::uint64_t long_range_field_version = 0;
+  std::uint64_t last_long_range_refresh_opportunity = 0;
+  std::uint64_t long_range_field_built_step_index = 0;
+  double long_range_field_built_scale_factor = 1.0;
+  std::string long_range_restart_policy = "deterministic_rebuild";
   std::vector<int> owning_rank_by_item;
+  std::vector<std::size_t> pm_slab_begin_x_by_rank;
+  std::vector<std::size_t> pm_slab_end_x_by_rank;
 
   [[nodiscard]] std::string serialize() const;
   [[nodiscard]] static DistributedRestartState deserialize(const std::string& encoded);
 };
+
+struct DistributedRestartCompatibilityReport {
+  bool world_size_match = true;
+  bool pm_grid_shape_match = true;
+  bool pm_decomposition_mode_match = true;
+  bool pm_local_slab_match = true;
+  std::vector<std::string> mismatch_messages;
+
+  [[nodiscard]] bool compatible() const noexcept {
+    return world_size_match && pm_grid_shape_match && pm_decomposition_mode_match && pm_local_slab_match;
+  }
+};
+
+struct DistributedExecutionTopology;
+
+[[nodiscard]] DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
+    const DistributedRestartState& restart_state,
+    const DistributedExecutionTopology& runtime_topology);
 
 struct PmSlabRange {
   std::size_t begin_x = 0;

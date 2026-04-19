@@ -183,10 +183,23 @@ void runRestartRoundTripWithTwoRankPlan() {
   const auto plan = cosmosim::parallel::buildMortonSfcDecomposition(items, cfg);
 
   cosmosim::parallel::DistributedRestartState state;
-  state.schema_version = 1;
+  state.schema_version = 2;
   state.decomposition_epoch = 12;
   state.world_size = 2;
+  state.pm_grid_nx = 16;
+  state.pm_grid_ny = 16;
+  state.pm_grid_nz = 16;
+  state.pm_decomposition_mode = "slab";
+  state.gravity_kick_opportunity = 7;
+  state.pm_update_cadence_steps = 2;
+  state.long_range_field_version = 3;
+  state.last_long_range_refresh_opportunity = 6;
+  state.long_range_field_built_step_index = 24;
+  state.long_range_field_built_scale_factor = 0.5;
+  state.long_range_restart_policy = "deterministic_rebuild";
   state.owning_rank_by_item = plan.owning_rank_by_item;
+  state.pm_slab_begin_x_by_rank = {0, 8};
+  state.pm_slab_end_x_by_rank = {8, 16};
 
   const std::string encoded = state.serialize();
   const auto restored = cosmosim::parallel::DistributedRestartState::deserialize(encoded);
@@ -194,7 +207,10 @@ void runRestartRoundTripWithTwoRankPlan() {
   assert(restored.schema_version == state.schema_version);
   assert(restored.decomposition_epoch == state.decomposition_epoch);
   assert(restored.world_size == state.world_size);
+  assert(restored.pm_grid_nx == state.pm_grid_nx);
+  assert(restored.gravity_kick_opportunity == state.gravity_kick_opportunity);
   assert(restored.owning_rank_by_item == state.owning_rank_by_item);
+  assert(restored.pm_slab_begin_x_by_rank == state.pm_slab_begin_x_by_rank);
 }
 
 }  // namespace

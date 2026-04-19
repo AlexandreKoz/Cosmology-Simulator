@@ -3,13 +3,14 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v3`) persists:
+The restart schema (`cosmosim_restart_v4`) persists:
 
 - full `SimulationState` hot/cold SoA lanes,
 - `StateMetadata` blob,
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
 - `IntegratorState`,
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
+- distributed TreePM continuation state (`distributed_gravity_state`, schema-versioned),
 - normalized config text/hash and provenance payload,
 - payload integrity hash (FNV-1a 64-bit).
 
@@ -19,7 +20,8 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`3`). Older `v2` restart files are intentionally rejected because they omit required stellar-evolution continuation state.
+- Current compatibility policy: exact version match (`4`).
+- `v3` restart files are intentionally rejected because they omit explicit distributed TreePM continuation metadata.
 
 ## Atomic write semantics
 
@@ -38,6 +40,19 @@ behavior on filesystems where `rename` is atomic.
   and integrity-protect the exact PM controls (`pm_grid`, assignment, deconvolution,
   `asmth_cells`, `rcut_cells`, cadence), derived scales (`Δmesh`, `r_s`, `r_cut`),
   softening policy/kernel/epsilon, and FFT backend name.
+- Distributed continuation metadata is persisted under `/distributed_gravity/state` (text-encoded
+  `parallel::DistributedRestartState`) and includes:
+  - decomposition epoch,
+  - per-particle owning rank mapping (`owning_rank_by_item`),
+  - PM grid shape and slab ownership table (`pm_slab_begin_x_by_rank`, `pm_slab_end_x_by_rank`),
+  - kick-opportunity cadence state (`gravity_kick_opportunity`, `pm_update_cadence_steps`),
+  - long-range field refresh metadata (`long_range_field_version`,
+    `last_long_range_refresh_opportunity`, `long_range_field_built_step_index`,
+    `long_range_field_built_scale_factor`),
+  - restart long-range policy (`long_range_restart_policy`).
+- **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild`.
+  Cached PM long-range field arrays are not serialized; on resume, PM long-range state is rebuilt
+  deterministically on the next refresh opportunity. This is contractually explicit in restart payload + provenance.
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
   `last_host_mass_code`, `cumulative_exchanged_mass_code`) for deterministic continuation.
 - Writer stores both integer and hex payload integrity hashes.
@@ -53,9 +68,10 @@ restart write/read checks is:
 2. `module_sidecars_with_schema_versions`
 3. `integrator_state`
 4. `scheduler_persistent_state`
-5. `normalized_config_text_and_hash`
-6. `provenance_record`
-7. `payload_integrity_hash_and_hex`
+5. `distributed_gravity_state`
+6. `normalized_config_text_and_hash`
+7. `provenance_record`
+8. `payload_integrity_hash_and_hex`
 
 `validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 

@@ -10,7 +10,7 @@ namespace cosmosim::core {
 
 // Canonical provenance payload written alongside run outputs.
 struct ProvenanceRecord {
-  std::string schema_version = "provenance_v2";
+  std::string schema_version = "provenance_v3";
   std::string git_sha = "unknown";
   std::string compiler_id = "unknown";
   std::string compiler_version = "unknown";
@@ -35,6 +35,13 @@ struct ProvenanceRecord {
   std::string gravity_softening_kernel = "unknown";
   double gravity_softening_epsilon_kpc_comoving = 0.0;
   std::string gravity_pm_fft_backend = "unknown";
+  std::uint64_t gravity_treepm_decomposition_epoch = 0;
+  int gravity_treepm_restart_world_size = 1;
+  std::string gravity_treepm_restart_pm_grid = "0x0x0";
+  std::string gravity_treepm_restart_slab_signature = "";
+  std::uint64_t gravity_treepm_restart_kick_opportunity = 0;
+  std::uint64_t gravity_treepm_restart_field_version = 0;
+  std::string gravity_treepm_long_range_restart_policy = "deterministic_rebuild";
 };
 
 [[nodiscard]] std::string collectCompilerId();

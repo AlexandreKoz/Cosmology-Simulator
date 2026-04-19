@@ -179,3 +179,33 @@ This contract is intentionally storage/ownership-centric. Distributed PM communi
 - only slab owners accumulate into local PM density arrays after ownership/range validation.
 
 Distributed force interpolation back to particle owners remains out of scope for this stage.
+
+## Distributed TreePM restart/debug continuation contract
+
+`parallel::DistributedRestartState` (schema_version `2`) now defines the serialized distributed
+continuation contract used by restart checkpoints:
+
+- decomposition ownership: `decomposition_epoch`, `world_size`, `owning_rank_by_item`
+- PM layout contract: `pm_grid_nx/ny/nz`, `pm_decomposition_mode`, slab ownership vectors
+  `pm_slab_begin_x_by_rank` / `pm_slab_end_x_by_rank`
+- cadence/field metadata: `gravity_kick_opportunity`, `pm_update_cadence_steps`,
+  `long_range_field_version`, `last_long_range_refresh_opportunity`,
+  `long_range_field_built_step_index`, `long_range_field_built_scale_factor`
+- long-range continuation policy: `long_range_restart_policy`
+
+Current policy is explicitly fixed to `deterministic_rebuild`:
+
+- cached PM long-range arrays are not serialized;
+- restart resumes with deterministic rebuild at the next cadence-triggered refresh;
+- this policy is versioned and validated during deserialize + restart hashing.
+
+`evaluateDistributedRestartCompatibility(...)` compares restart metadata against current
+`DistributedExecutionTopology` and returns typed booleans + mismatch messages for:
+
+- world size mismatch,
+- PM grid-shape mismatch,
+- PM decomposition-mode mismatch,
+- per-rank local slab ownership mismatch.
+
+This reporting is used for continuation debugging and avoids opaque restart failures when
+rank layout/config drifts between write and resume.

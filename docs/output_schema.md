@@ -36,14 +36,15 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v3`
-- `version = 3`
+- `name = cosmosim_restart_v4`
+- `version = 4`
 
 Restart payload includes:
 
 - `SimulationState`
 - `IntegratorState`
 - `HierarchicalTimeBinScheduler` persistent state (`TimeBinPersistentState`)
+- distributed TreePM continuation metadata (`DistributedRestartState`)
 - normalized config text and normalized config hash
 - provenance record
 - payload integrity hash
@@ -56,7 +57,7 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 |---|---|
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
-| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), payload integrity hashes |
+| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes |
 
 Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
 restart is execution-resume oriented.
@@ -65,7 +66,7 @@ restart is execution-resume oriented.
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v2`)
+- schema tag (`provenance_v3`)
 - build identity (`git_sha`, compiler id/version, build preset, feature flags)
 - deterministic config hash
 - UTC timestamp and hardware summary
@@ -80,6 +81,14 @@ restart is execution-resume oriented.
     `gravity_treepm_cutoff_radius_mpc_comoving` (`r_cut`)
   - softening/backend: `gravity_softening_policy`, `gravity_softening_kernel`,
     `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`
+  - restart/debug continuation metadata:
+    - `gravity_treepm_decomposition_epoch`
+    - `gravity_treepm_restart_world_size`
+    - `gravity_treepm_restart_pm_grid`
+    - `gravity_treepm_restart_slab_signature`
+    - `gravity_treepm_restart_kick_opportunity`
+    - `gravity_treepm_restart_field_version`
+    - `gravity_treepm_long_range_restart_policy`
 
 ## 4) Naming and stability conventions
 
@@ -133,9 +142,9 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v2` (`schema_version = 2`)
   to add explicit gravity provenance attributes under `/Provenance`.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name were intentionally bumped to `cosmosim_restart_v3`, version `3`, because restart payloads now persist the full stellar-evolution sidecar state and reject older incomplete restart artifacts.
+- Restart schema version/name are now `cosmosim_restart_v4`, version `4`, because restart payloads persist explicit distributed TreePM continuation state and policy.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
-- Restart schema remains `cosmosim_restart_v3`; gravity provenance is serialized through the existing
-  provenance dataset and covered by restart integrity hashing.
+- Restart schema is `cosmosim_restart_v4`; distributed TreePM state is persisted under restart-only
+  data and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.

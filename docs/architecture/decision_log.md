@@ -372,3 +372,36 @@ Final TreePM Phase 1 integration requires coherence across runtime wiring, confi
 - `tests/integration/test_reference_workflow_end_to_end.cpp`
 - `bench/bench_tree_pm_force_error_map.cpp`
 - `validation/artifacts/tree_pm_force_error_map.csv`
+
+## 2026-04-19 — ADR-INFRA-RESTART-012: Version distributed TreePM continuation state in restart/provenance
+
+### Status
+Accepted (infrastructure repair)
+
+### Context
+Phase 2 distributed TreePM restart continuation lacked an explicit, versioned contract for rank ownership, PM slab layout, cadence state, and long-range field refresh metadata. This made rank/layout mismatch debugging ambiguous and allowed implicit continuation assumptions.
+
+### Decision
+- Bump restart schema to `cosmosim_restart_v4` and require a new restart group `/distributed_gravity/state` carrying serialized `parallel::DistributedRestartState` (schema_version `2`).
+- Persist explicit distributed continuation fields:
+  decomposition epoch, owning-rank table, PM grid/layout metadata, kick-opportunity cadence state, long-range refresh/version metadata, and explicit long-range restart policy.
+- Adopt and enforce restart policy `deterministic_rebuild` for PM long-range field continuation.
+  Cached long-range arrays are not serialized; restart resumes with deterministic rebuild at the next cadence-triggered refresh.
+- Extend provenance (`provenance_v3`) with distributed restart diagnostics (epoch/world/grid/slab signature/kick+field version/policy).
+- Add compatibility diagnostics API `evaluateDistributedRestartCompatibility(...)` to emit explicit mismatch reasons.
+
+### Consequences
+- Positive: distributed restart semantics are explicit, versioned, and integrity-hashed.
+- Positive: rank/layout/config mismatch debugging has typed reporting instead of opaque failures.
+- Tradeoff: `cosmosim_restart_v3` artifacts are intentionally incompatible with `v4`.
+
+### Evidence references
+- `include/cosmosim/io/restart_checkpoint.hpp`
+- `src/io/restart_checkpoint.cpp`
+- `include/cosmosim/parallel/distributed_memory.hpp`
+- `src/parallel/distributed_memory.cpp`
+- `include/cosmosim/core/provenance.hpp`
+- `src/core/provenance.cpp`
+- `tests/unit/test_restart_checkpoint_schema.cpp`
+- `tests/integration/test_restart_checkpoint_roundtrip.cpp`
+- `tests/unit/test_parallel_distributed_memory.cpp`

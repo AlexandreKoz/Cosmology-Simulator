@@ -126,10 +126,23 @@ void testGravityAwareDecompositionTracksInteractionCost() {
 
 void testRestartStateRoundTrip() {
   cosmosim::parallel::DistributedRestartState in;
-  in.schema_version = 1;
+  in.schema_version = 2;
   in.decomposition_epoch = 7;
   in.world_size = 2;
+  in.pm_grid_nx = 16;
+  in.pm_grid_ny = 16;
+  in.pm_grid_nz = 16;
+  in.pm_decomposition_mode = "slab";
+  in.gravity_kick_opportunity = 5;
+  in.pm_update_cadence_steps = 2;
+  in.long_range_field_version = 3;
+  in.last_long_range_refresh_opportunity = 4;
+  in.long_range_field_built_step_index = 12;
+  in.long_range_field_built_scale_factor = 0.4;
+  in.long_range_restart_policy = "deterministic_rebuild";
   in.owning_rank_by_item = {0, 1, 1, 0};
+  in.pm_slab_begin_x_by_rank = {0, 8};
+  in.pm_slab_end_x_by_rank = {8, 16};
 
   const std::string encoded = in.serialize();
   const auto out = cosmosim::parallel::DistributedRestartState::deserialize(encoded);
@@ -137,7 +150,14 @@ void testRestartStateRoundTrip() {
   assert(out.schema_version == in.schema_version);
   assert(out.decomposition_epoch == in.decomposition_epoch);
   assert(out.world_size == in.world_size);
+  assert(out.pm_grid_nx == in.pm_grid_nx);
+  assert(out.pm_grid_ny == in.pm_grid_ny);
+  assert(out.pm_grid_nz == in.pm_grid_nz);
+  assert(out.gravity_kick_opportunity == in.gravity_kick_opportunity);
+  assert(out.long_range_field_version == in.long_range_field_version);
   assert(out.owning_rank_by_item == in.owning_rank_by_item);
+  assert(out.pm_slab_begin_x_by_rank == in.pm_slab_begin_x_by_rank);
+  assert(out.pm_slab_end_x_by_rank == in.pm_slab_end_x_by_rank);
 }
 
 void testExplicitOwnedVsGhostContracts() {
@@ -203,6 +223,32 @@ void testRestartStateRejectsMissingOrDuplicateOwnershipEntries() {
     }
     assert(threw);
   }
+}
+
+void testDistributedRestartCompatibilityReporting() {
+  cosmosim::parallel::DistributedRestartState restart;
+  restart.schema_version = 2;
+  restart.world_size = 2;
+  restart.pm_grid_nx = 8;
+  restart.pm_grid_ny = 8;
+  restart.pm_grid_nz = 8;
+  restart.pm_decomposition_mode = "slab";
+  restart.pm_slab_begin_x_by_rank = {0, 4};
+  restart.pm_slab_end_x_by_rank = {4, 8};
+
+  cosmosim::parallel::DistributedExecutionTopology runtime;
+  runtime.world_size = 2;
+  runtime.world_rank = 1;
+  runtime.pm_slab = cosmosim::parallel::makePmSlabLayout(8, 8, 8, 2, 1);
+  const auto ok = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
+  assert(ok.compatible());
+  assert(ok.mismatch_messages.empty());
+
+  runtime.pm_slab = cosmosim::parallel::makePmSlabLayout(10, 8, 8, 2, 1);
+  const auto bad = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
+  assert(!bad.compatible());
+  assert(!bad.pm_grid_shape_match);
+  assert(!bad.mismatch_messages.empty());
 }
 
 void testGhostTransferInvariantFailures() {
@@ -531,6 +577,7 @@ int main() {
   testGravityAwareDecompositionTracksInteractionCost();
   testExplicitOwnedVsGhostContracts();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
+  testDistributedRestartCompatibilityReporting();
   testGhostTransferInvariantFailures();
   testDeterministicReductionAgreement();
   testGhostExchangePlanValidationDriftRejection();

@@ -615,3 +615,25 @@ Interpretation:
 
 - This remains infrastructure work, not a claim of distributed PM FFT or MPI+GPU overlap completion.
 - The code path is now materially closer to an operational multi-rank/multi-device TreePM bring-up because rank-local execution intent is explicit and auditable.
+
+## 16) 2026-04-19 distributed restart/provenance continuation-safety milestone
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_restart_checkpoint_schema test_unit_parallel_distributed_memory test_integration_restart_checkpoint_roundtrip test_integration_parallel_two_rank_restart
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_restart_checkpoint_schema|unit_parallel_distributed_memory|integration_restart_checkpoint_roundtrip|integration_parallel_two_rank_restart"
+```
+
+Observed:
+
+- Restart schema bumped to `cosmosim_restart_v4` with explicit `/distributed_gravity/state` payload (`parallel::DistributedRestartState`, schema_version=2).
+- Distributed continuation payload now persists decomposition epoch, owning-rank table, PM slab layout metadata, gravity-kick cadence state, long-range field refresh/version metadata, and explicit `long_range_restart_policy`.
+- Policy is explicit and enforced: `deterministic_rebuild` (cached long-range PM field arrays are not serialized; continuation rebuilds deterministically on cadence refresh).
+- Provenance schema bumped to `provenance_v3` to include distributed restart diagnostics (epoch/world/grid/slab signature/kick opportunity/field version/restart policy).
+- Added typed compatibility diagnostics (`evaluateDistributedRestartCompatibility`) plus negative mismatch coverage.
+
+Interpretation:
+
+- This is an infrastructure-repair continuation-safety improvement for Phase 2 distributed TreePM, not a new physics model.
+- Reproducibility posture remains explicit: restart carries deterministic policy + auditable rank/layout metadata, and integrity hashing now includes distributed continuation state.
