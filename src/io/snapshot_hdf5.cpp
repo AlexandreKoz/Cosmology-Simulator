@@ -440,6 +440,28 @@ void readScalarStringAttribute(hid_t location, const std::string& key, std::stri
   out_value = buffer;
 }
 
+[[nodiscard]] bool readScalarUint32Attribute(hid_t location, const std::string& key, std::uint32_t& out_value) {
+  Hdf5Handle attr(H5Aopen(location, key.c_str(), H5P_DEFAULT));
+  if (!attr.valid()) {
+    return false;
+  }
+  if (H5Aread(attr.get(), H5T_NATIVE_UINT32, &out_value) < 0) {
+    throw std::runtime_error("failed reading attribute: " + key);
+  }
+  return true;
+}
+
+[[nodiscard]] bool readScalarDoubleAttribute(hid_t location, const std::string& key, double& out_value) {
+  Hdf5Handle attr(H5Aopen(location, key.c_str(), H5P_DEFAULT));
+  if (!attr.valid()) {
+    return false;
+  }
+  if (H5Aread(attr.get(), H5T_NATIVE_DOUBLE, &out_value) < 0) {
+    throw std::runtime_error("failed reading attribute: " + key);
+  }
+  return true;
+}
+
 void readHeaderCounts(hid_t header_group, std::array<std::uint64_t, 6>& out_counts) {
   Hdf5Handle attr_count(H5Aopen(header_group, "NumPart_ThisFile", H5P_DEFAULT));
   std::array<std::uint32_t, 6> raw_count{};
@@ -555,6 +577,58 @@ void writeGadgetArepoSnapshotHdf5(
   writeScalarStringAttribute(provenance_group.get(), "config_hash_hex", payload.provenance.config_hash_hex);
   writeScalarStringAttribute(provenance_group.get(), "timestamp_utc", payload.provenance.timestamp_utc);
   writeScalarStringAttribute(provenance_group.get(), "hardware_summary", payload.provenance.hardware_summary);
+  writeScalarUint32Attribute(
+      provenance_group.get(),
+      "gravity_treepm_pm_grid",
+      static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_pm_grid, 0)));
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_treepm_assignment_scheme",
+      payload.provenance.gravity_treepm_assignment_scheme);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_treepm_window_deconvolution",
+      payload.provenance.gravity_treepm_window_deconvolution ? "true" : "false");
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_asmth_cells",
+      payload.provenance.gravity_treepm_asmth_cells);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_rcut_cells",
+      payload.provenance.gravity_treepm_rcut_cells);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_mesh_spacing_mpc_comoving",
+      payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_split_scale_mpc_comoving",
+      payload.provenance.gravity_treepm_split_scale_mpc_comoving);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_cutoff_radius_mpc_comoving",
+      payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving);
+  writeScalarUint32Attribute(
+      provenance_group.get(),
+      "gravity_treepm_update_cadence_steps",
+      static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_update_cadence_steps, 0)));
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_softening_policy",
+      payload.provenance.gravity_softening_policy);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_softening_kernel",
+      payload.provenance.gravity_softening_kernel);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_softening_epsilon_kpc_comoving",
+      payload.provenance.gravity_softening_epsilon_kpc_comoving);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_pm_fft_backend",
+      payload.provenance.gravity_pm_fft_backend);
 
   for (std::size_t type_index = 0; type_index < schema.part_type_group.size(); ++type_index) {
     const std::vector<std::uint32_t> indices = collectGlobalIndicesForPartType(state, type_index);
@@ -861,6 +935,61 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     readScalarStringAttribute(provenance_group.get(), "config_hash_hex", result.provenance.config_hash_hex);
     readScalarStringAttribute(provenance_group.get(), "timestamp_utc", result.provenance.timestamp_utc);
     readScalarStringAttribute(provenance_group.get(), "hardware_summary", result.provenance.hardware_summary);
+    std::uint32_t gravity_pm_grid = 0;
+    if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid", gravity_pm_grid)) {
+      result.provenance.gravity_treepm_pm_grid = static_cast<int>(gravity_pm_grid);
+    }
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_treepm_assignment_scheme",
+        result.provenance.gravity_treepm_assignment_scheme);
+    std::string gravity_deconvolution;
+    readScalarStringAttribute(
+        provenance_group.get(), "gravity_treepm_window_deconvolution", gravity_deconvolution);
+    if (!gravity_deconvolution.empty()) {
+      result.provenance.gravity_treepm_window_deconvolution = gravity_deconvolution == "true";
+    }
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_asmth_cells",
+        result.provenance.gravity_treepm_asmth_cells));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_rcut_cells",
+        result.provenance.gravity_treepm_rcut_cells));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_mesh_spacing_mpc_comoving",
+        result.provenance.gravity_treepm_mesh_spacing_mpc_comoving));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_split_scale_mpc_comoving",
+        result.provenance.gravity_treepm_split_scale_mpc_comoving));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_cutoff_radius_mpc_comoving",
+        result.provenance.gravity_treepm_cutoff_radius_mpc_comoving));
+    std::uint32_t gravity_pm_cadence = 0;
+    if (readScalarUint32Attribute(
+            provenance_group.get(), "gravity_treepm_update_cadence_steps", gravity_pm_cadence)) {
+      result.provenance.gravity_treepm_update_cadence_steps = static_cast<int>(gravity_pm_cadence);
+    }
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_softening_policy",
+        result.provenance.gravity_softening_policy);
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_softening_kernel",
+        result.provenance.gravity_softening_kernel);
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_softening_epsilon_kpc_comoving",
+        result.provenance.gravity_softening_epsilon_kpc_comoving));
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_pm_fft_backend",
+        result.provenance.gravity_pm_fft_backend);
   }
 
   result.report.chunk_particle_count = 0;

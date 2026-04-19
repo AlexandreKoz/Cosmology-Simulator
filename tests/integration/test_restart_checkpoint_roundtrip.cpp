@@ -140,6 +140,19 @@ void testRestartRoundtrip() {
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance.gravity_treepm_pm_grid = 32;
+  payload.provenance.gravity_treepm_assignment_scheme = "tsc";
+  payload.provenance.gravity_treepm_window_deconvolution = true;
+  payload.provenance.gravity_treepm_asmth_cells = 1.25;
+  payload.provenance.gravity_treepm_rcut_cells = 5.5;
+  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = 0.25;
+  payload.provenance.gravity_treepm_split_scale_mpc_comoving = 0.3125;
+  payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 1.375;
+  payload.provenance.gravity_treepm_update_cadence_steps = 3;
+  payload.provenance.gravity_softening_policy = "comoving_fixed";
+  payload.provenance.gravity_softening_kernel = "plummer";
+  payload.provenance.gravity_softening_epsilon_kpc_comoving = 2.0;
+  payload.provenance.gravity_pm_fft_backend = "fftw3";
 
   const std::filesystem::path checkpoint_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
@@ -219,6 +232,33 @@ void testRestartRoundtrip() {
   assert(restored.normalized_config_hash_hex == payload.normalized_config_hash_hex);
   assert(restored.normalized_config_text == payload.normalized_config_text);
   assert(restored.provenance.config_hash_hex == payload.provenance.config_hash_hex);
+  assert(restored.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
+  assert(
+      restored.provenance.gravity_treepm_assignment_scheme ==
+      payload.provenance.gravity_treepm_assignment_scheme);
+  assert(
+      restored.provenance.gravity_treepm_window_deconvolution ==
+      payload.provenance.gravity_treepm_window_deconvolution);
+  assert(restored.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
+  assert(restored.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
+  assert(
+      restored.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_split_scale_mpc_comoving ==
+      payload.provenance.gravity_treepm_split_scale_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_cutoff_radius_mpc_comoving ==
+      payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_update_cadence_steps ==
+      payload.provenance.gravity_treepm_update_cadence_steps);
+  assert(restored.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
+  assert(restored.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
+  assert(
+      restored.provenance.gravity_softening_epsilon_kpc_comoving ==
+      payload.provenance.gravity_softening_epsilon_kpc_comoving);
+  assert(restored.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
   assert(restored.state.sidecars.find("hydro") != nullptr);
   const cosmosim::core::ModuleSidecarBlock* hydro_sidecar = restored.state.sidecars.find("hydro");
   assert(hydro_sidecar->schema_version == 3);

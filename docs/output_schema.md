@@ -13,8 +13,8 @@ Authoritative interfaces:
 
 Current schema identity:
 
-- `schema_name = gadget_arepo_v1`
-- `schema_version = 1`
+- `schema_name = gadget_arepo_v2`
+- `schema_version = 2`
 
 Logical groups:
 
@@ -65,11 +65,20 @@ restart is execution-resume oriented.
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v1`)
+- schema tag (`provenance_v2`)
 - build identity (`git_sha`, compiler id/version, build preset, feature flags)
 - deterministic config hash
 - UTC timestamp and hardware summary
 - rank attribution (`author_rank`)
+- gravity/TreePM reproducibility contract:
+  - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
+    `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,
+    `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`
+  - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving` (`Δmesh`),
+    `gravity_treepm_split_scale_mpc_comoving` (`r_s`),
+    `gravity_treepm_cutoff_radius_mpc_comoving` (`r_cut`)
+  - softening/backend: `gravity_softening_policy`, `gravity_softening_kernel`,
+    `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`
 
 ## 4) Naming and stability conventions
 
@@ -81,6 +90,12 @@ restart is execution-resume oriented.
   - provenance config hash linkage (`provenance_config_hash_hex`),
   - severity-count summary and status,
   - structured events (`event_kind`, `severity`, `subsystem`, optional step/time/scale context, message, payload map).
+  - gravity runtime events include:
+    - `gravity.treepm_setup` (one setup event with PMGRID, assignment, deconvolution,
+      ASMTH/RCUT controls, derived `Δmesh`/`r_s`/`r_cut`, cadence, softening policy/kernel,
+      FFT backend),
+    - `gravity.pm_long_range_field` (refresh/reuse event per gravity kick opportunity carrying
+      the same PM contract plus cadence state/version payload).
 
 ## 4.1) Diagnostics bundle maturity metadata
 
@@ -112,11 +127,14 @@ When changing snapshot/restart/provenance fields:
 4. Add/update tests in `tests/unit` + `tests/integration` + `tests/validation` as applicable.
 5. Record rationale in `docs/architecture/decision_log.md`.
 
-## Compatibility notes (2026-04-13)
+## Compatibility notes (2026-04-18)
 
-- No external snapshot dataset names were changed.
+- Snapshot schema was intentionally bumped to `gadget_arepo_v2` (`schema_version = 2`)
+  to add explicit gravity provenance attributes under `/Provenance`.
+- No external `/PartType*` dataset names were changed.
 - Restart schema version/name were intentionally bumped to `cosmosim_restart_v3`, version `3`, because restart payloads now persist the full stellar-evolution sidecar state and reject older incomplete restart artifacts.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
-- New operational diagnostics output is additive only; snapshot/restart/provenance schemas and compatibility contracts are unchanged.
+- Restart schema remains `cosmosim_restart_v3`; gravity provenance is serialized through the existing
+  provenance dataset and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.

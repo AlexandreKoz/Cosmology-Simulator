@@ -277,3 +277,36 @@ Accepted (feature-branch gravity upgrade)
 - `docs/time_integration.md`
 - `docs/reference_workflow.md`
 - `docs/pm_gravity_solver.md`
+
+## 2026-04-18 — ADR-FEATURE-GRAVITY-010: Persist TreePM provenance contract in snapshot/restart/log outputs
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+TreePM controls and derived scales materially affect force accuracy/reproducibility, but output artifacts did not carry a complete gravity contract across snapshots, restarts, and runtime operational events.
+
+### Decision
+- Extend `core::ProvenanceRecord` with gravity provenance fields covering:
+  - controls (`pm_grid`, assignment, deconvolution, `asmth_cells`, `rcut_cells`, cadence),
+  - derived scales (`Δmesh`, `r_s`, `r_cut`),
+  - softening policy/kernel/epsilon and PM FFT backend.
+- Bump snapshot schema identity to `gadget_arepo_v2` / `schema_version=2` and persist the new provenance attributes in `/Provenance`.
+- Keep restart schema `cosmosim_restart_v3`; serialize gravity provenance through existing provenance dataset and integrity hash path.
+- Emit structured runtime events (`gravity.treepm_setup`, enriched `gravity.pm_long_range_field`) that expose the same gravity contract at setup/refresh points.
+
+### Consequences
+- Positive: Snapshot/restart/runtime logs can reconstruct the exact TreePM runtime contract used for a run.
+- Positive: Derived physical/comoving scales are auditable without re-deriving from partial controls.
+- Tradeoff: Snapshot schema version increased; downstream readers that hardcode schema version `1` must accept `2`.
+
+### Evidence references
+- `include/cosmosim/core/provenance.hpp`
+- `src/core/provenance.cpp`
+- `include/cosmosim/io/snapshot_hdf5.hpp`
+- `src/io/snapshot_hdf5.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `tests/integration/test_snapshot_hdf5_roundtrip.cpp`
+- `tests/integration/test_restart_checkpoint_roundtrip.cpp`
+- `tests/integration/test_provenance_roundtrip.cpp`
+- `tests/integration/test_reference_workflow_end_to_end.cpp`
