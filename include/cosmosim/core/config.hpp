@@ -28,6 +28,10 @@ enum class TreePmAssignmentScheme {
   kTsc,
 };
 
+enum class PmDecompositionMode {
+  kSlab,
+};
+
 enum class CoordinateFrame {
   kComoving,
   kPhysical,
@@ -100,6 +104,8 @@ struct NumericsConfig {
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kCic;
   bool treepm_enable_window_deconvolution = false;
   int treepm_update_cadence_steps = 1;
+  PmDecompositionMode treepm_pm_decomposition_mode = PmDecompositionMode::kSlab;
+  std::uint64_t treepm_tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
 };
 
 struct PhysicsConfig {

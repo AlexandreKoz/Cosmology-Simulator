@@ -48,6 +48,12 @@ jobs:
             test_regex: "unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression|integration_reference_workflow"
             apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev"
             run_bench: "1"
+          - configure_preset: mpi-hdf5-fftw-debug
+            build_preset: build-mpi-hdf5-fftw-debug
+            test_preset: test-mpi-hdf5-fftw-debug
+            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory"
+            apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev"
+            run_bench: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies

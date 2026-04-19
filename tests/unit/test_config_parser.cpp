@@ -293,6 +293,8 @@ treepm_rcut_cells = 5.0
 treepm_assignment_scheme = cic
 treepm_enable_window_deconvolution = true
 treepm_update_cadence_steps = 3
+treepm_pm_decomposition_mode = slab
+treepm_tree_exchange_batch_bytes = 8388608
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "treepm_good");
   assert(frozen.config.numerics.treepm_pm_grid == 32);
@@ -303,12 +305,18 @@ treepm_update_cadence_steps = 3
       cosmosim::core::TreePmAssignmentScheme::kCic);
   assert(frozen.config.numerics.treepm_enable_window_deconvolution);
   assert(frozen.config.numerics.treepm_update_cadence_steps == 3);
+  assert(
+      frozen.config.numerics.treepm_pm_decomposition_mode ==
+      cosmosim::core::PmDecompositionMode::kSlab);
+  assert(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
   assert(frozen.normalized_text.find("treepm_pm_grid = 32") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_pm_decomposition_mode = slab") != std::string::npos);
   const auto reparsed =
       cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "treepm_roundtrip");
   assert(reparsed.config.numerics.treepm_pm_grid == 32);
   assert(reparsed.config.numerics.treepm_update_cadence_steps == 3);
+  assert(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
 
   const std::string bad_grid =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_grid = 0\n";
@@ -325,6 +333,26 @@ treepm_update_cadence_steps = 3
   threw = false;
   try {
     (void)cosmosim::core::loadFrozenConfigFromString(bad_scheme, "treepm_bad_scheme");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::string bad_decomposition =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_decomposition_mode = pencil\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_decomposition, "treepm_bad_decomp");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::string bad_batch_bytes =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_exchange_batch_bytes = 0\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_batch_bytes, "treepm_bad_batch");
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }

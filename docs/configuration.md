@@ -92,6 +92,8 @@ The concrete run directory is:
   - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
   - `treepm_enable_window_deconvolution` (bool, default `false`; applies scheme-aware PM transfer deconvolution for both `cic` and `tsc`)
   - `treepm_update_cadence_steps` (int, default `1`; authoritative PM long-range refresh cadence in gravity-kick opportunities)
+  - `treepm_pm_decomposition_mode` (`slab` only in Phase 2 freeze; default `slab`)
+  - `treepm_tree_exchange_batch_bytes` (uint64 bytes, default `4194304`; cap for tree export/import payload chunking in distributed gravity paths)
 
 TreePM split/cutoff semantics in this phase:
 
@@ -112,6 +114,7 @@ Normalization emits the dimensionless controls exactly as provided and these are
 - `tsc`: 3-point/axis stencil, higher cost, smoother transfer and typically lower anisotropy.
 
 `treepm_enable_window_deconvolution=true` deconvolves the matched deposit/gather transfer window for the selected scheme with a safety floor in k-space (disabled by default).
+`treepm_pm_decomposition_mode` and `treepm_tree_exchange_batch_bytes` freeze the distributed TreePM contract surface for Phase 2 infrastructure work; they do not by themselves imply that distributed PM/tree algorithms are already implemented.
 
 ## `[physics]`
 

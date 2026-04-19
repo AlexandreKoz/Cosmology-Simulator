@@ -4,6 +4,7 @@
 
 This closeout is limited to **TreePM Phase 1 integration coherence** for the current gravity-upgrade feature branch.
 It does not claim Phase 2 features, multi-rank TreePM production readiness, or Ewald-exact periodic references.
+Phase 2 distributed contracts are now frozen separately in `docs/treepm_phase2_distributed_contract.md`.
 
 ## Final numerical contract (implemented)
 
