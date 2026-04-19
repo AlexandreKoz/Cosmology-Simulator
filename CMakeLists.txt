@@ -645,6 +645,25 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME validation_regression COMMAND test_validation_regression)
   set_tests_properties(validation_regression PROPERTIES LABELS "validation;regression")
 
+  add_executable(test_validation_phase2_mpi_gravity tests/validation/test_validation_phase2_mpi_gravity.cpp)
+  target_link_libraries(test_validation_phase2_mpi_gravity PRIVATE cosmosim_all)
+  add_test(NAME validation_phase2_mpi_gravity_single_rank COMMAND test_validation_phase2_mpi_gravity)
+  set_tests_properties(validation_phase2_mpi_gravity_single_rank PROPERTIES LABELS "validation;gravity;mpi")
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME validation_phase2_mpi_gravity_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME validation_phase2_mpi_gravity_three_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      validation_phase2_mpi_gravity_two_rank
+      validation_phase2_mpi_gravity_three_rank
+      PROPERTIES LABELS "validation;gravity;mpi")
+  endif()
+
 
   get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
   foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)
@@ -781,6 +800,22 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
     COMMAND bench_tree_pm_force_error_map
     DEPENDS bench_tree_pm_force_error_map
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+  add_executable(bench_pm_only_scaling_mpi bench/bench_pm_only_scaling_mpi.cpp)
+  target_link_libraries(bench_pm_only_scaling_mpi PRIVATE cosmosim_gravity cosmosim_parallel)
+
+  add_executable(bench_tree_only_scaling_mpi bench/bench_tree_only_scaling_mpi.cpp)
+  target_link_libraries(bench_tree_only_scaling_mpi PRIVATE cosmosim_gravity)
+
+  if(COSMOSIM_ENABLE_MPI)
+    add_custom_target(generate_mpi_gravity_scaling_artifacts
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      DEPENDS bench_pm_only_scaling_mpi bench_tree_only_scaling_mpi
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  endif()
 
   add_executable(bench_amr_regrid_sync bench/bench_amr_regrid_sync.cpp)
   target_link_libraries(bench_amr_regrid_sync PRIVATE cosmosim_amr)

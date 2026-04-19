@@ -51,7 +51,7 @@ jobs:
           - configure_preset: mpi-hdf5-fftw-debug
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
-            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory"
+            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
             apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev"
             run_bench: "0"
     steps:
@@ -82,6 +82,15 @@ jobs:
           mkdir -p ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts
           cp validation/artifacts/tree_pm_force_error_map.csv \
             ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/tree_pm_force_error_map.csv
+      - name: Generate MPI gravity scaling artifacts
+        if: matrix.configure_preset == 'mpi-hdf5-fftw-debug'
+        run: |
+          cmake --build --preset build-mpi-hdf5-fftw-debug --target generate_mpi_gravity_scaling_artifacts
+          mkdir -p ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts
+          cp validation/artifacts/pm_only_scaling_np1.csv ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/pm_only_scaling_np1.csv
+          cp validation/artifacts/pm_only_scaling_np2.csv ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/pm_only_scaling_np2.csv
+          cp validation/artifacts/tree_only_scaling_np1.csv ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/tree_only_scaling_np1.csv
+          cp validation/artifacts/tree_only_scaling_np2.csv ci_artifacts/${{ matrix.configure_preset }}/validation_artifacts/tree_only_scaling_np2.csv
       - name: Upload preset artifacts
         uses: actions/upload-artifact@v4
         with:

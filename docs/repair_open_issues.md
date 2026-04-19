@@ -6,6 +6,8 @@ _Date captured: 2026-04-14 (UTC)_
 
 Environment blockers currently observed in this validation environment:
 
+
+- MPI gravity gate now expects `validation_phase2_mpi_gravity_two_rank` and `validation_phase2_mpi_gravity_three_rank` in MPI-enabled presets; if MPI runners have fewer than 3 ranks available to `mpiexec`, this gate will fail by construction and should be treated as an environment-capacity blocker, not a silent skip.
 - `cmake --preset pm-hdf5-fftw-debug` can fail when FFTW3 development files are unavailable.
 - `cmake -S . -B build/mpi-fftw-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCOSMOSIM_ENABLE_TESTS=ON -DCOSMOSIM_ENABLE_MPI=ON -DCOSMOSIM_ENABLE_FFTW=ON -DCOSMOSIM_ENABLE_HDF5=OFF` fails in this container because MPI C++ tooling is missing (`Could NOT find MPI_CXX`), preventing two-rank PM distributed runtime closure in CI-like local validation.
 - The `cpu-only-debug` preset used for quick repair validation sets `COSMOSIM_ENABLE_MPI=OFF`, so MPI two-rank tests such as `integration_reference_workflow_distributed_treepm_mpi_two_rank` are not registered in that preset.

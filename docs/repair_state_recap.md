@@ -4,6 +4,33 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Phase 2 distributed TreePM validation/gate suite wiring (2026-04-19 UTC)
+
+Commands:
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug -j4 --target test_validation_phase2_mpi_gravity generate_mpi_gravity_scaling_artifacts
+ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure -R "validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
+```
+
+Observed:
+
+- Added an explicit MPI gravity validation gate (`validation_phase2_mpi_gravity_*`) covering:
+  - distributed PM vs one-rank force reference (`rel_L2 <= 1e-10`),
+  - distributed full TreePM vs one-rank force reference (`rel_L2 <= 5e-6`, `max_rel <= 5e-5`),
+  - rank-count reproducibility sweep (`np=1,2,3`),
+  - communication-stress path with tiny tree exchange batches,
+  - MPI restart write/read continuation verification through reference workflow roundtrip.
+- Added separate PM-only and tree-only MPI scaling artifact generators:
+  - `validation/artifacts/pm_only_scaling_np{1,2}.csv`
+  - `validation/artifacts/tree_only_scaling_np{1,2}.csv`
+- CI now surfaces the MPI gravity gate in the MPI+HDF5+FFTW matrix row and uploads scaling artifacts.
+
+Interpretation:
+
+- Phase 2 evidence now has an auditable distributed gravity gate suite rather than relying on pseudo two-rank scaffolding alone.
+
 ## 0) TreePM Phase 2 distributed gravity performance hardening pass (2026-04-19 UTC)
 
 Commands:

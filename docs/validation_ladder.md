@@ -47,10 +47,18 @@ Implemented now:
 - AMR: coarse-fine reflux synchronization regression.
 - Galaxy modules: cooling monotonicity check, star-formation mass-budget regression.
 
+Phase 2 distributed TreePM gravity gate (implemented):
+- `validation_phase2_mpi_gravity_single_rank`: one-rank reference baseline through the same distributed-code path harness.
+- `validation_phase2_mpi_gravity_two_rank`: distributed PM and distributed full TreePM vs one-rank reference, with explicit thresholds:
+  - PM force `rel_L2 <= 1e-10`.
+  - TreePM force `rel_L2 <= 5e-6`, `max_rel <= 5e-5`.
+- `validation_phase2_mpi_gravity_three_rank`: rank-count reproducibility sweep using the same invariants at `np=3`.
+- Communication stress is included in the same executable using `tree_exchange_batch_bytes=64` and PM-cadence toggling to force repeated export/import rounds.
+- Restart continuation gate is included through reference-workflow restart write/read verification in MPI mode (`restart_roundtrip_ok`).
+
 Planned as modules mature:
 - Sedov blast convergence ladder.
 - Evrard collapse regression and convergence set.
-- MPI single-rank vs multi-rank consistency tests once MPI path is active in CI.
 
 ## Force-error map artifact (PMGRID/ASMTH/RCUT)
 
@@ -78,3 +86,11 @@ Planned as modules mature:
 - throughput proxy (`hydro_face_rate_mface_s`).
 
 These measurements support profiling and regression triage only; they are not correctness evidence.
+
+## Phase 2 scaling artifacts (separate PM-only and tree-only)
+
+- Target: `generate_mpi_gravity_scaling_artifacts` (MPI-enabled builds).
+- Produces deterministic CSV artifacts in `validation/artifacts/`:
+  - `pm_only_scaling_np1.csv`, `pm_only_scaling_np2.csv`
+  - `tree_only_scaling_np1.csv`, `tree_only_scaling_np2.csv`
+- These are performance evidence artifacts, not correctness gates.
