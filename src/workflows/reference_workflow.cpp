@@ -51,6 +51,45 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
   throw std::runtime_error("unhandled TreePm assignment scheme enum value");
 }
 
+[[nodiscard]] std::string treePmAssignmentSchemeName(core::TreePmAssignmentScheme assignment_scheme) {
+  switch (assignment_scheme) {
+    case core::TreePmAssignmentScheme::kCic:
+      return "cic";
+    case core::TreePmAssignmentScheme::kTsc:
+      return "tsc";
+  }
+  throw std::runtime_error("unhandled TreePm assignment scheme enum value");
+}
+
+[[nodiscard]] core::ProvenanceRecord makeGravityAwareProvenanceRecord(
+    const core::FrozenConfig& frozen_config,
+    const core::SimulationConfig& config) {
+  core::ProvenanceRecord record = core::makeProvenanceRecord(
+      frozen_config.provenance.config_hash_hex, frozen_config.provenance.source_name);
+  const double mesh_spacing_mpc_comoving =
+      config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid);
+  const gravity::TreePmSplitPolicy split_policy = gravity::makeTreePmSplitPolicyFromMeshSpacing(
+      config.numerics.treepm_asmth_cells,
+      config.numerics.treepm_rcut_cells,
+      mesh_spacing_mpc_comoving);
+  record.gravity_treepm_pm_grid = config.numerics.treepm_pm_grid;
+  record.gravity_treepm_assignment_scheme =
+      treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
+  record.gravity_treepm_window_deconvolution =
+      config.numerics.treepm_enable_window_deconvolution;
+  record.gravity_treepm_asmth_cells = config.numerics.treepm_asmth_cells;
+  record.gravity_treepm_rcut_cells = config.numerics.treepm_rcut_cells;
+  record.gravity_treepm_mesh_spacing_mpc_comoving = mesh_spacing_mpc_comoving;
+  record.gravity_treepm_split_scale_mpc_comoving = split_policy.split_scale_comoving;
+  record.gravity_treepm_cutoff_radius_mpc_comoving = split_policy.cutoff_radius_comoving;
+  record.gravity_treepm_update_cadence_steps = config.numerics.treepm_update_cadence_steps;
+  record.gravity_softening_policy = "comoving_fixed";
+  record.gravity_softening_kernel = "plummer";
+  record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;
+  record.gravity_pm_fft_backend = gravity::PmSolver::fftBackendName();
+  return record;
+}
+
 [[nodiscard]] std::filesystem::path computeRunDirectory(
     const core::SimulationConfig& config,
     const std::filesystem::path* output_root_override) {
@@ -311,6 +350,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
         config.numerics.treepm_asmth_cells,
         config.numerics.treepm_rcut_cells,
         m_mesh_spacing_mpc_comoving);
+    m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
+    m_pm_backend = gravity::PmSolver::fftBackendName();
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
@@ -419,6 +460,18 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"field_built_step_index", std::to_string(m_last_long_range_refresh_step_index)},
                       {"field_built_scale_factor", std::to_string(m_last_long_range_refresh_scale_factor)},
                       {"pm_update_cadence_steps", std::to_string(m_pm_update_cadence_steps)},
+                      {"pm_grid", std::to_string(m_pm_grid_size)},
+                      {"pm_assignment_scheme", m_pm_assignment_scheme},
+                      {"pm_window_deconvolution", m_config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
+                      {"asmth_cells", std::to_string(m_config.numerics.treepm_asmth_cells)},
+                      {"rcut_cells", std::to_string(m_config.numerics.treepm_rcut_cells)},
+                      {"mesh_spacing_mpc_comoving", std::to_string(m_mesh_spacing_mpc_comoving)},
+                      {"split_scale_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.split_scale_comoving)},
+                      {"cutoff_radius_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
+                      {"softening_policy", "comoving_fixed"},
+                      {"softening_kernel", "plummer"},
+                      {"softening_epsilon_kpc_comoving", std::to_string(m_config.numerics.gravity_softening_kpc_comoving)},
+                      {"pm_fft_backend", m_pm_backend},
                       {"refreshed_long_range_field", refresh_long_range ? "true" : "false"}},
       });
     }
@@ -452,6 +505,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_pm_update_cadence_steps = 1;
   std::size_t m_pm_grid_size = 0;
   double m_mesh_spacing_mpc_comoving = 0.0;
+  std::string m_pm_assignment_scheme = "unknown";
+  std::string m_pm_backend = "unknown";
   gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
   std::vector<double> m_active_accel_x;
@@ -704,7 +759,7 @@ void maybeWriteOutputs(
   snapshot_payload.config = &config;
   snapshot_payload.normalized_config_text = frozen_config.normalized_text;
   snapshot_payload.provenance =
-      core::makeProvenanceRecord(frozen_config.provenance.config_hash_hex, frozen_config.provenance.source_name);
+      makeGravityAwareProvenanceRecord(frozen_config, config);
   report.snapshot_path = report.run_directory / formatIndexedFileStem(config.output.output_stem, integrator_state.step_index);
   io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
   report.snapshot_roundtrip_executed = true;
@@ -727,7 +782,7 @@ void maybeWriteOutputs(
     restart_payload.integrator_state = &integrator_state;
     restart_payload.scheduler = &scheduler;
     restart_payload.provenance =
-        core::makeProvenanceRecord(frozen_config.provenance.config_hash_hex, frozen_config.provenance.source_name);
+        makeGravityAwareProvenanceRecord(frozen_config, config);
     restart_payload.normalized_config_text = frozen_config.normalized_text;
     restart_payload.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
 
@@ -779,7 +834,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
   report.run_directory = computeRunDirectory(config, output_root_override);
   report.config_compatible = true;
   report.schema_compatible =
-      config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version == 1 &&
+      config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version == 2 &&
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
   core::ProfilerSession profiler(true);
@@ -855,6 +910,30 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     GravityStageCallback gravity_callback(config, mode_policy);
     report.treepm_pm_grid = gravity_callback.pmGridSize();
     report.treepm_update_cadence_steps = gravity_callback.pmCadenceSteps();
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "gravity.treepm_setup",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "gravity.treepm",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "TreePM runtime configuration initialized",
+        .payload = {
+            {"pm_grid", std::to_string(config.numerics.treepm_pm_grid)},
+            {"pm_assignment_scheme", treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme)},
+            {"pm_window_deconvolution", config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
+            {"asmth_cells", std::to_string(config.numerics.treepm_asmth_cells)},
+            {"rcut_cells", std::to_string(config.numerics.treepm_rcut_cells)},
+            {"mesh_spacing_mpc_comoving", std::to_string(config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid))},
+            {"split_scale_mpc_comoving", std::to_string(config.numerics.treepm_asmth_cells * (config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid)))},
+            {"cutoff_radius_mpc_comoving", std::to_string(config.numerics.treepm_rcut_cells * (config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid)))},
+            {"pm_update_cadence_steps", std::to_string(config.numerics.treepm_update_cadence_steps)},
+            {"softening_policy", "comoving_fixed"},
+            {"softening_kernel", "plummer"},
+            {"softening_epsilon_kpc_comoving", std::to_string(config.numerics.gravity_softening_kpc_comoving)},
+            {"pm_fft_backend", gravity::PmSolver::fftBackendName()},
+        },
+    });
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(

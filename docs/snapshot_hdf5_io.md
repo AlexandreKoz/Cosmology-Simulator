@@ -17,12 +17,20 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
   - `NumPart_ThisFile`, `NumPart_Total`, `NumPart_Total_HighWord`, `MassTable`
   - `Time`, `Redshift`, `BoxSize`, `Omega0`, `OmegaLambda`, `OmegaBaryon`, `HubbleParam`
 - Snapshot schema metadata:
-  - `CosmoSimSchemaName="gadget_arepo_v1"`
-  - `CosmoSimSchemaVersion=1`
+  - `CosmoSimSchemaName="gadget_arepo_v2"`
+  - `CosmoSimSchemaVersion=2`
 - Config metadata group:
   - `/Config` attribute `normalized` containing normalized text config dump
 - Provenance metadata group:
   - `/Provenance` attributes for compiler/build/git/config hash/timestamp/hardware
+  - gravity reproducibility attributes:
+    - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
+      `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,
+      `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`
+    - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving`,
+      `gravity_treepm_split_scale_mpc_comoving`, `gravity_treepm_cutoff_radius_mpc_comoving`
+    - softening/backend: `gravity_softening_policy`, `gravity_softening_kernel`,
+      `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`
 
 ## Dataset aliasing and compatibility
 
@@ -66,7 +74,7 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
     - schema name/version,
     - normalized config text preservation,
     - provenance field preservation (`schema_version`, `git_sha`, `enabled_features`,
-      `config_hash_hex`),
+      `config_hash_hex`, and gravity provenance controls/derived fields/backend),
     - dataset alias resolution reporting.
 - `COSMOSIM_ENABLE_HDF5=OFF`:
   - snapshot writer and reader are intentionally unavailable and throw

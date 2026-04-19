@@ -76,7 +76,12 @@ int main() {
   assert(op_text.find("\"event_kind\": \"config.freeze\"") != std::string::npos);
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
+  assert(op_text.find("\"event_kind\": \"gravity.treepm_setup\"") != std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.pm_long_range_field\"") != std::string::npos);
+  assert(op_text.find("\"pm_grid\": \"9\"") != std::string::npos);
+  assert(op_text.find("\"pm_assignment_scheme\": \"cic\"") != std::string::npos);
+  assert(op_text.find("\"softening_kernel\": \"plummer\"") != std::string::npos);
+  assert(op_text.find("\"pm_fft_backend\"") != std::string::npos);
   assert(op_text.find("\"pm_update_cadence_steps\": \"1\"") != std::string::npos);
 
   std::stringstream tsc_stream;

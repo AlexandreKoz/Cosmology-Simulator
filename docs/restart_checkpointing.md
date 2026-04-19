@@ -32,8 +32,12 @@ behavior on filesystems where `rename` is atomic.
 
 - `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance.
 - The hash covers particle lanes, sidecars, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
-  time-bin context, and scheduler persistent arrays (`bin_index`, `next_activation_tick`,
-  `active_flag`, `pending_bin_index`).
+  time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
+  `active_flag`, `pending_bin_index`), and the full serialized provenance payload.
+- Because gravity TreePM metadata now lives in `ProvenanceRecord`, restart artifacts carry
+  and integrity-protect the exact PM controls (`pm_grid`, assignment, deconvolution,
+  `asmth_cells`, `rcut_cells`, cadence), derived scales (`Δmesh`, `r_s`, `r_cut`),
+  softening policy/kernel/epsilon, and FFT backend name.
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
   `last_host_mass_code`, `cumulative_exchanged_mass_code`) for deterministic continuation.
 - Writer stores both integer and hex payload integrity hashes.

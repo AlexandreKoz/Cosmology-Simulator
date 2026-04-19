@@ -85,6 +85,19 @@ void testRoundtripMixedSpeciesSnapshot() {
   payload.config = &config;
   payload.normalized_config_text = "schema_version=1\nmode=zoom_in\n";
   payload.provenance = cosmosim::core::makeProvenanceRecord("abc123", "deadbeef", 0);
+  payload.provenance.gravity_treepm_pm_grid = 9;
+  payload.provenance.gravity_treepm_assignment_scheme = "cic";
+  payload.provenance.gravity_treepm_window_deconvolution = true;
+  payload.provenance.gravity_treepm_asmth_cells = 1.75;
+  payload.provenance.gravity_treepm_rcut_cells = 6.0;
+  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = 1.0 / 9.0;
+  payload.provenance.gravity_treepm_split_scale_mpc_comoving = 1.75 / 9.0;
+  payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 6.0 / 9.0;
+  payload.provenance.gravity_treepm_update_cadence_steps = 1;
+  payload.provenance.gravity_softening_policy = "comoving_fixed";
+  payload.provenance.gravity_softening_kernel = "plummer";
+  payload.provenance.gravity_softening_epsilon_kpc_comoving = 1.5;
+  payload.provenance.gravity_pm_fft_backend = "fftw3";
 
   cosmosim::io::SnapshotIoPolicy policy;
   policy.enable_compression = true;
@@ -106,6 +119,31 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.provenance.git_sha == payload.provenance.git_sha);
   assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);
   assert(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
+  assert(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
+  assert(roundtrip.provenance.gravity_treepm_assignment_scheme == payload.provenance.gravity_treepm_assignment_scheme);
+  assert(
+      roundtrip.provenance.gravity_treepm_window_deconvolution ==
+      payload.provenance.gravity_treepm_window_deconvolution);
+  assert(roundtrip.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
+  assert(roundtrip.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
+  assert(
+      roundtrip.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_split_scale_mpc_comoving ==
+      payload.provenance.gravity_treepm_split_scale_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_cutoff_radius_mpc_comoving ==
+      payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_update_cadence_steps ==
+      payload.provenance.gravity_treepm_update_cadence_steps);
+  assert(roundtrip.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
+  assert(roundtrip.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
+  assert(
+      roundtrip.provenance.gravity_softening_epsilon_kpc_comoving ==
+      payload.provenance.gravity_softening_epsilon_kpc_comoving);
+  assert(roundtrip.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
   assert(containsString(roundtrip.report.present_aliases, "/PartType0/Coordinates=Coordinates"));
   assert(containsString(roundtrip.report.present_aliases, "/PartType1/Coordinates=Coordinates"));
   assert(containsString(roundtrip.report.present_aliases, "/PartType3/Coordinates=Coordinates"));

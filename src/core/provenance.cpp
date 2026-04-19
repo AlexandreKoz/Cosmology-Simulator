@@ -137,6 +137,20 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "timestamp_utc=" << record.timestamp_utc << '\n';
   stream << "hardware_summary=" << record.hardware_summary << '\n';
   stream << "author_rank=" << record.author_rank << '\n';
+  stream << "gravity_treepm_pm_grid=" << record.gravity_treepm_pm_grid << '\n';
+  stream << "gravity_treepm_assignment_scheme=" << record.gravity_treepm_assignment_scheme << '\n';
+  stream << "gravity_treepm_window_deconvolution="
+         << (record.gravity_treepm_window_deconvolution ? "true" : "false") << '\n';
+  stream << "gravity_treepm_asmth_cells=" << record.gravity_treepm_asmth_cells << '\n';
+  stream << "gravity_treepm_rcut_cells=" << record.gravity_treepm_rcut_cells << '\n';
+  stream << "gravity_treepm_mesh_spacing_mpc_comoving=" << record.gravity_treepm_mesh_spacing_mpc_comoving << '\n';
+  stream << "gravity_treepm_split_scale_mpc_comoving=" << record.gravity_treepm_split_scale_mpc_comoving << '\n';
+  stream << "gravity_treepm_cutoff_radius_mpc_comoving=" << record.gravity_treepm_cutoff_radius_mpc_comoving << '\n';
+  stream << "gravity_treepm_update_cadence_steps=" << record.gravity_treepm_update_cadence_steps << '\n';
+  stream << "gravity_softening_policy=" << record.gravity_softening_policy << '\n';
+  stream << "gravity_softening_kernel=" << record.gravity_softening_kernel << '\n';
+  stream << "gravity_softening_epsilon_kpc_comoving=" << record.gravity_softening_epsilon_kpc_comoving << '\n';
+  stream << "gravity_pm_fft_backend=" << record.gravity_pm_fft_backend << '\n';
   return stream.str();
 }
 
@@ -175,6 +189,32 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.hardware_summary = value;
     } else if (key == "author_rank") {
       record.author_rank = std::stoi(value);
+    } else if (key == "gravity_treepm_pm_grid") {
+      record.gravity_treepm_pm_grid = std::stoi(value);
+    } else if (key == "gravity_treepm_assignment_scheme") {
+      record.gravity_treepm_assignment_scheme = value;
+    } else if (key == "gravity_treepm_window_deconvolution") {
+      record.gravity_treepm_window_deconvolution = value == "true";
+    } else if (key == "gravity_treepm_asmth_cells") {
+      record.gravity_treepm_asmth_cells = std::stod(value);
+    } else if (key == "gravity_treepm_rcut_cells") {
+      record.gravity_treepm_rcut_cells = std::stod(value);
+    } else if (key == "gravity_treepm_mesh_spacing_mpc_comoving") {
+      record.gravity_treepm_mesh_spacing_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_split_scale_mpc_comoving") {
+      record.gravity_treepm_split_scale_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_cutoff_radius_mpc_comoving") {
+      record.gravity_treepm_cutoff_radius_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_update_cadence_steps") {
+      record.gravity_treepm_update_cadence_steps = std::stoi(value);
+    } else if (key == "gravity_softening_policy") {
+      record.gravity_softening_policy = value;
+    } else if (key == "gravity_softening_kernel") {
+      record.gravity_softening_kernel = value;
+    } else if (key == "gravity_softening_epsilon_kpc_comoving") {
+      record.gravity_softening_epsilon_kpc_comoving = std::stod(value);
+    } else if (key == "gravity_pm_fft_backend") {
+      record.gravity_pm_fft_backend = value;
     }
   }
   return record;

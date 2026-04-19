@@ -18,6 +18,19 @@ int main() {
   in.timestamp_utc = "2026-04-05T00:00:00Z";
   in.hardware_summary = "logical_threads=8";
   in.author_rank = 0;
+  in.gravity_treepm_pm_grid = 64;
+  in.gravity_treepm_assignment_scheme = "tsc";
+  in.gravity_treepm_window_deconvolution = true;
+  in.gravity_treepm_asmth_cells = 1.25;
+  in.gravity_treepm_rcut_cells = 4.5;
+  in.gravity_treepm_mesh_spacing_mpc_comoving = 0.5;
+  in.gravity_treepm_split_scale_mpc_comoving = 0.625;
+  in.gravity_treepm_cutoff_radius_mpc_comoving = 2.25;
+  in.gravity_treepm_update_cadence_steps = 2;
+  in.gravity_softening_policy = "comoving_fixed";
+  in.gravity_softening_kernel = "plummer";
+  in.gravity_softening_epsilon_kpc_comoving = 1.0;
+  in.gravity_pm_fft_backend = "fftw3";
 
   cosmosim::core::writeProvenanceRecord(in, run_directory);
 
@@ -32,6 +45,19 @@ int main() {
   assert(out.timestamp_utc == in.timestamp_utc);
   assert(out.hardware_summary == in.hardware_summary);
   assert(out.author_rank == in.author_rank);
+  assert(out.gravity_treepm_pm_grid == in.gravity_treepm_pm_grid);
+  assert(out.gravity_treepm_assignment_scheme == in.gravity_treepm_assignment_scheme);
+  assert(out.gravity_treepm_window_deconvolution == in.gravity_treepm_window_deconvolution);
+  assert(out.gravity_treepm_asmth_cells == in.gravity_treepm_asmth_cells);
+  assert(out.gravity_treepm_rcut_cells == in.gravity_treepm_rcut_cells);
+  assert(out.gravity_treepm_mesh_spacing_mpc_comoving == in.gravity_treepm_mesh_spacing_mpc_comoving);
+  assert(out.gravity_treepm_split_scale_mpc_comoving == in.gravity_treepm_split_scale_mpc_comoving);
+  assert(out.gravity_treepm_cutoff_radius_mpc_comoving == in.gravity_treepm_cutoff_radius_mpc_comoving);
+  assert(out.gravity_treepm_update_cadence_steps == in.gravity_treepm_update_cadence_steps);
+  assert(out.gravity_softening_policy == in.gravity_softening_policy);
+  assert(out.gravity_softening_kernel == in.gravity_softening_kernel);
+  assert(out.gravity_softening_epsilon_kpc_comoving == in.gravity_softening_epsilon_kpc_comoving);
+  assert(out.gravity_pm_fft_backend == in.gravity_pm_fft_backend);
 
   std::filesystem::remove_all(run_directory);
   return 0;

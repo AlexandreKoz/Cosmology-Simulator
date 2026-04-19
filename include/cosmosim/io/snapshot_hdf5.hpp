@@ -20,8 +20,8 @@ struct GadgetArepoFieldAliases {
 };
 
 struct GadgetArepoSchemaMap {
-  std::string_view schema_name = "gadget_arepo_v1";
-  std::uint32_t schema_version = 1;
+  std::string_view schema_name = "gadget_arepo_v2";
+  std::uint32_t schema_version = 2;
 
   std::string_view header_group = "/Header";
   std::string_view config_group = "/Config";
@@ -61,8 +61,8 @@ struct SnapshotReadOptions {
 };
 
 struct SnapshotIoReport {
-  std::string schema_name = "gadget_arepo_v1";
-  std::uint32_t schema_version = 1;
+  std::string schema_name = "gadget_arepo_v2";
+  std::uint32_t schema_version = 2;
   bool compression_enabled = false;
   int compression_level = 0;
   std::size_t chunk_particle_count = 0;
