@@ -737,6 +737,9 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_tree_pm_coupling bench/bench_tree_pm_coupling.cpp)
   target_link_libraries(bench_tree_pm_coupling PRIVATE cosmosim_gravity)
+  add_executable(bench_tree_pm_force_error_map bench/bench_tree_pm_force_error_map.cpp)
+  target_link_libraries(bench_tree_pm_force_error_map PRIVATE cosmosim_gravity)
+  target_compile_definitions(bench_tree_pm_force_error_map PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 
   add_executable(bench_amr_regrid_sync bench/bench_amr_regrid_sync.cpp)
