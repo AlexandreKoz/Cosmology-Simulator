@@ -45,7 +45,7 @@ jobs:
           - configure_preset: pm-hdf5-fftw-debug
             build_preset: build-pm-hdf5-fftw-debug
             test_preset: test-pm-hdf5-fftw-debug
-            test_regex: "validation_regression|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|unit_pm_solver"
+            test_regex: "unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression"
             apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev"
             run_bench: "1"
     steps:

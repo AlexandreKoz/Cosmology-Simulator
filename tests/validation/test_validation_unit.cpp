@@ -155,7 +155,7 @@ void testToleranceTableCompleteness(const cosmosim::validation::ValidationTolera
   requireOrThrow(tolerances.has("gravity_two_body.max_relative_accel_error"), "missing key: gravity two-body");
   requireOrThrow(tolerances.has("gravity_tree_small_n_open_boundary.max_relative_l2_error"), "missing key: small-N tree");
   requireOrThrow(tolerances.has("gravity_tree_pm_split.composition_abs_error"), "missing key: split composition");
-  requireOrThrow(tolerances.has("gravity_pm_glass_like.max_rms_accel"), "missing key: glass-like pm uniformity");
+  requireOrThrow(tolerances.has("gravity_pm_glass_like.max_rms_fraction_of_poisson"), "missing key: glass-like pm uniformity");
   requireOrThrow(tolerances.has("hydro_sine_wave.l1_density_error_n64"), "missing key: hydro n64");
   requireOrThrow(tolerances.has("amr_reflux.mass_correction_abs"), "missing key: amr reflux");
 }
