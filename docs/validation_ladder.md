@@ -27,7 +27,8 @@ The ladder is designed for desktop-first CI and developer loops, while preservin
 - PM analytic mode validation compares force and potential to the periodic spectral solution for the selected plane-wave mode.
 - Controlled two-body orbit checks use the same softened potential law as the tree solver (`epsilon_comoving`-regularized force and potential).
 - Static-halo profile checks compare tree force against softened direct-summation reference on fixed shells.
-- Periodic TreePM error mapping and periodic consistency checks use a **fine spectral PM + exact pairwise short-range residual periodic proxy reference**; this is explicitly not Ewald-exact and not minimum-image direct-sum.
+- Periodic TreePM **force-error mapping** uses a **fine spectral PM + exact pairwise short-range residual periodic proxy reference**; this is explicitly not Ewald-exact.
+- Periodic TreePM **integration consistency** (`test_tree_pm_coupling_periodic`) uses a **minimum-image periodic direct reference**; this is also not Ewald-exact.
 
 ## Coverage ladder (Phase 1 gravity evidence now wired)
 

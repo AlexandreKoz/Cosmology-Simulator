@@ -61,3 +61,4 @@ This ensures `rcut_cells` changes actual traversal behavior (not diagnostics-onl
 
 - `tests/unit/test_tree_pm_split_kernel.cpp` checks split composition and mesh-cell-to-length derivation.
 - `tests/integration/test_tree_pm_coupling_periodic.cpp` checks periodic coupling against a **minimum-image periodic direct reference** (not a full infinite-periodic Ewald sum), plus cutoff-pruning and PM/tree/split consistency checks.
+- `bench/bench_tree_pm_force_error_map.cpp` maps force error against a **periodic spectral + direct short-range proxy reference** across PMGRID/ASMTH/RCUT sweeps and writes `validation/artifacts/tree_pm_force_error_map.csv`.

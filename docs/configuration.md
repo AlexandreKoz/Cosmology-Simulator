@@ -105,7 +105,7 @@ Normalization emits the dimensionless controls exactly as provided and these are
 - refresh PM long-range field every `N` gravity-kick opportunities (`N = treepm_update_cadence_steps`)
 - reuse the most recent PM long-range field between refreshes
 - record per-kick refresh/reuse metadata in the reference-workflow report and operational diagnostics events
-`treepm_rcut_cells` is already normalized and carried into runtime options for provenance/contract clarity, but the residual tree traversal is not yet pruned by this control in the current Stage-1 path.
+`treepm_rcut_cells` is normalized, carried into provenance, and consumed by runtime residual traversal pruning (node-level AABB pruning + acceptance guard + pair culling beyond `r_cut`).
 `treepm_assignment_scheme` now maps directly to matched PM assignment+gather behavior:
 
 - `cic`: 2-point/axis stencil, lower cost, stronger smoothing.

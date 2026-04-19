@@ -310,3 +310,30 @@ TreePM controls and derived scales materially affect force accuracy/reproducibil
 - `tests/integration/test_restart_checkpoint_roundtrip.cpp`
 - `tests/integration/test_provenance_roundtrip.cpp`
 - `tests/integration/test_reference_workflow_end_to_end.cpp`
+
+## 2026-04-19 — ADR-FEATURE-GRAVITY-011: TreePM Phase 1 integration hard-gate closure contract
+
+### Status
+Accepted (feature-branch gravity upgrade)
+
+### Context
+Final TreePM Phase 1 integration requires coherence across runtime wiring, config normalization, provenance/output audibility, validation docs, and command-backed evidence. Earlier stage changes introduced PMGRID/ASMTH/RCUT/cadence controls and TreePM runtime behavior, but Phase 1 closure requires a single explicit contract and hard-gate evidence checklist.
+
+### Decision
+- Adopt an explicit Phase 1 integration hard gate that must be evidenced together:
+  1. no hard-coded PM mesh in workflow (PMGRID is config-driven),
+  2. no hidden split assumptions (ASMTH/RCUT drive runtime `r_s`/`r_cut`),
+  3. deterministic repeated-run reproducibility evidence on identical config,
+  4. force-error map artifact over PMGRID/ASMTH/RCUT sweep.
+- Record the final contract and evidence procedure in `docs/treepm_phase1_closeout.md` and align cross-doc language (`configuration`, `tree_pm_coupling`, `validation_ladder`, `validation_plan`).
+
+### Consequences
+- Positive: Phase 1 completion claims are tied to auditable artifacts and commands rather than narrative-only status.
+- Positive: Runtime/config/docs/output semantics are synchronized for TreePM controls.
+- Tradeoff: Phase 1 closeout remains scoped to single-rank periodic TreePM and non-Ewald references.
+
+### Evidence references
+- `docs/treepm_phase1_closeout.md`
+- `tests/integration/test_reference_workflow_end_to_end.cpp`
+- `bench/bench_tree_pm_force_error_map.cpp`
+- `validation/artifacts/tree_pm_force_error_map.csv`

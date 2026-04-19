@@ -175,9 +175,11 @@ void testPmUniformDensityCancellation(const cosmosim::validation::ValidationTole
   requireOrThrow(
       lattice_rms <= tolerances.require("gravity_pm_uniform_density.max_rms_accel"),
       "gravity_pm_uniform_density failed: PM acceleration non-zero for uniform lattice");
-  requireOrThrow(
-      glass_like_rms <= tolerances.require("gravity_pm_glass_like.max_rms_accel"),
-      "gravity_pm_glass_like failed: PM acceleration too large for deterministic jittered-lattice proxy");
+  const double glass_limit = tolerances.require("gravity_pm_glass_like.max_rms_accel");
+  std::ostringstream glass_message;
+  glass_message << "gravity_pm_glass_like failed: PM acceleration too large for deterministic jittered-lattice proxy"
+                << ", rms=" << glass_like_rms << ", limit=" << glass_limit;
+  requireOrThrow(glass_like_rms <= glass_limit, glass_message.str());
 }
 
 struct ForceField {
