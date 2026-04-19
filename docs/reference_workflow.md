@@ -53,6 +53,16 @@ TreePM Phase-1 runtime mapping is explicit and auditable:
   - default remains conservative (`N = 1`, refresh every kick)
 - Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
 - `r_cut` is resolved from typed config and drives explicit residual-traversal pruning in the TreePM residual path
+- distributed cadence coherence:
+  - all ranks advance `gravity_kick_opportunity` together for every gravity kick stage;
+  - long-range PM refresh/reuse is checked as a rank-consensus decision, so rank-local counters cannot silently drift;
+  - per-kick cadence records (`gravity_kick_opportunity`, `field_version`, refresh flag) are expected to match across ranks.
+
+TreePM source/target ownership in the workflow path is now explicit:
+
+- PM refresh uses all local particle masses on every rank (global mass sources are distributed by slab ownership).
+- PM force interpolation and velocity kick updates target only the active particle subset for that kick.
+- Distributed tree export/import is only for short-range residual target requests (active targets), not for PM source deposition.
 
 ## Canonical stage ordering
 

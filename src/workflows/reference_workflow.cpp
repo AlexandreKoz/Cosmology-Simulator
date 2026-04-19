@@ -426,10 +426,44 @@ class GravityStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    const std::size_t particle_count = context.state.particles.size();
-    if (particle_count == 0 || context.active_set.particle_indices.empty()) {
-      return;
+    parallel::MpiContext mpi_context;
+    const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
+    if (m_runtime_topology.world_size != mpi_context.worldSize()) {
+      throw std::runtime_error("reference workflow runtime topology world_size drifted from MPI context");
     }
+
+    const auto requireKickConsensus = [&](std::uint64_t local_value, std::string_view name) {
+      const std::uint64_t global_sum = mpi_context.allreduceSumUint64(local_value);
+      if (global_sum != local_value * world_size) {
+        throw std::runtime_error(
+            "TreePM cadence rank-consensus failure for " + std::string(name) +
+            ": local=" + std::to_string(local_value) + ", reduced_sum=" + std::to_string(global_sum) +
+            ", world_size=" + std::to_string(world_size));
+      }
+    };
+
+    const std::size_t particle_count = context.state.particles.size();
+
+    // Contract: kick-opportunity cadence metadata is rank-global and must advance
+    // identically on every gravity kick stage, even if a rank has no active targets.
+    ++m_gravity_kick_opportunity;
+    requireKickConsensus(m_gravity_kick_opportunity, "gravity_kick_opportunity");
+
+    const bool refresh_long_range_local = !m_has_long_range_field ||
+        ((m_gravity_kick_opportunity - m_last_long_range_refresh_opportunity) >= m_pm_update_cadence_steps);
+    const std::uint64_t refresh_vote = refresh_long_range_local ? 1ULL : 0ULL;
+    const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
+    if (refresh_vote_sum != 0ULL && refresh_vote_sum != world_size) {
+      throw std::runtime_error(
+          "TreePM long-range cadence decision diverged across ranks: refresh_vote_sum=" +
+          std::to_string(refresh_vote_sum) + ", world_size=" + std::to_string(world_size));
+    }
+    const bool refresh_long_range = (refresh_vote_sum == world_size);
+    if (refresh_long_range != refresh_long_range_local) {
+      throw std::runtime_error(
+          "TreePM long-range cadence local decision drifted from rank consensus");
+    }
+
     m_active_accel_x.assign(context.active_set.particle_indices.size(), 0.0);
     m_active_accel_y.assign(context.active_set.particle_indices.size(), 0.0);
     m_active_accel_z.assign(context.active_set.particle_indices.size(), 0.0);
@@ -449,10 +483,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (!m_mode_policy.cosmological_comoving_frame) {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
-
-    ++m_gravity_kick_opportunity;
-    const bool refresh_long_range = !m_has_long_range_field ||
-        ((m_gravity_kick_opportunity - m_last_long_range_refresh_opportunity) >= m_pm_update_cadence_steps);
 
     const std::uint64_t record_field_version = refresh_long_range ? (m_long_range_field_version + 1U) : m_long_range_field_version;
     const std::uint64_t record_field_built_step_index = refresh_long_range

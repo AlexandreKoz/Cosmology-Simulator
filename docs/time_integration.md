@@ -16,16 +16,20 @@ The authoritative per-step stage order is:
 
 The scheduler (`StageScheduler`) owns this ordering and solver modules interact via `IntegrationCallback` implementations. This keeps gravity/hydro/source/output sequencing explicit and auditable.
 
-### TreePM long-range cadence contract (Phase 1)
+### TreePM long-range cadence contract (distributed TreePM runtime)
 
 The reference workflow now applies an explicit, config-driven long-range PM refresh cadence:
 
 - cadence control: `numerics.treepm_update_cadence_steps` (integer `>= 1`)
-- cadence unit in Phase 1: **gravity kick opportunities** (`gravity_kick_pre` and `gravity_kick_post`)
+- cadence unit: **gravity kick opportunities** (`gravity_kick_pre` and `gravity_kick_post`)
 - policy:
   - refresh PM mesh solve when no cached field exists, or when
     `current_kick_opportunity - last_refresh_opportunity >= cadence_steps`
   - otherwise reuse the cached long-range field and only rebuild/evaluate the short-range tree residual
+- rank-consensus requirements in distributed runs:
+  - each rank increments the kick opportunity on every gravity kick stage, even when the local active target set is empty;
+  - refresh/reuse is a rank-consensus decision (all ranks must either refresh or reuse on the same opportunity);
+  - cadence metadata (`gravity_kick_opportunity`, `field_version`, refresh flag) is expected to remain coherent across ranks.
 
 The temporal contract for reuse is explicit: a reused PM field corresponds to the particle state and scale factor from the last refresh opportunity, and that metadata is recorded by the workflow report/events.
 With `treepm_update_cadence_steps = 1` (default), behavior reduces to immediate PM refresh at every kick opportunity.
