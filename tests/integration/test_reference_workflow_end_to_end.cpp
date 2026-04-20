@@ -102,6 +102,8 @@ int main() {
   assert(op_text.find("\"softening_kernel\": \"plummer\"") != std::string::npos);
   assert(op_text.find("\"pm_fft_backend\"") != std::string::npos);
   assert(op_text.find("\"pm_update_cadence_steps\": \"1\"") != std::string::npos);
+  assert(op_text.find("\"event_kind\": \"gravity.health_summary\"") != std::string::npos);
+  assert(op_text.find("\"heavy_reference_checks_opt_in\": \"false\"") != std::string::npos);
 
   std::stringstream tsc_stream;
   tsc_stream << buildConfigText(1, "reference_integration_test_tsc", "tsc");
@@ -156,6 +158,43 @@ int main() {
     assert(lhs.field_built_step_index == rhs.field_built_step_index);
     assert(lhs.refreshed_long_range_field == rhs.refreshed_long_range_field);
   }
+
+  auto invalidGravityConfig = []() {
+    std::stringstream cfg;
+    cfg << "schema_version = 1\n\n";
+    cfg << "[mode]\n";
+    cfg << "mode = zoom_in\n";
+    cfg << "ic_file = generated\n";
+    cfg << "zoom_high_res_region = false\n\n";
+    cfg << "[numerics]\n";
+    cfg << "time_begin_code = 0.01\n";
+    cfg << "time_end_code = 0.0101\n";
+    cfg << "max_global_steps = 1\n";
+    cfg << "treepm_pm_grid = 9\n";
+    cfg << "treepm_asmth_cells = nan\n";
+    cfg << "treepm_rcut_cells = 6.0\n";
+    cfg << "treepm_update_cadence_steps = 1\n\n";
+    cfg << "[output]\n";
+    cfg << "run_name = reference_integration_test_invalid_gravity\n";
+    cfg << "output_directory = integration_outputs\n";
+    cfg << "output_stem = snapshot\n";
+    cfg << "restart_stem = restart\n";
+    return cfg.str();
+  };
+
+  bool trapped_invalid_gravity_state = false;
+  try {
+    const cosmosim::core::FrozenConfig bad_frozen =
+        cosmosim::core::loadFrozenConfigFromString(invalidGravityConfig(), "test_reference_workflow_invalid_gravity");
+    cosmosim::workflows::ReferenceWorkflowRunner bad_runner(bad_frozen);
+    (void)bad_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    trapped_invalid_gravity_state =
+        message.find("fatal gravity-state check failed") != std::string::npos ||
+        message.find("runtime workflow schema compatibility validation failed") != std::string::npos;
+  }
+  assert(trapped_invalid_gravity_state);
 
   std::filesystem::remove_all(output_dir);
   return 0;

@@ -117,6 +117,10 @@ restart is execution-resume oriented.
     - `gravity.pm_long_range_field` (refresh/reuse event per gravity kick opportunity carrying
       the same PM contract plus cadence state/version payload).
     - `gravity.zoom_force_diagnostics` (per-kick zoom decomposition norms and low-resolution contamination counters).
+    - `gravity.health_check` (targeted warning/fatal event for explicit gravity-state violations;
+      fatal events are not downgraded into generic diagnostics).
+    - `gravity.health_summary` (per-kick gravity health counters summarizing cheap always-on checks
+      and heavy reference-only checks when policy enabled).
 
 ## 4.1) Diagnostics bundle maturity metadata
 
@@ -135,8 +139,15 @@ Diagnostics bundles (`<diagnostics_stem>_<diagnostic_class>_step_*.json`) now in
 Current intended classification:
 
 - Production infrastructure health: `run_health_counters`
+- Production infrastructure health: `gravity_health_summary`
 - Validated lightweight science: `star_formation_history`, `angular_momentum_budget`, `gas_xy_slice_density`, `gas_xy_projection_density`
 - Provisional heavy reference-only: `power_spectrum` (disabled unless `diagnostics_execution_policy = all_including_provisional`)
+
+Run-health payload now includes additive gravity integrity counters:
+
+- `gravity_softening_sidecar_size_ok`
+- `non_finite_gravity_softening`
+- `non_positive_particle_mass`
 
 ## 5) Change procedure for schema-affecting work
 

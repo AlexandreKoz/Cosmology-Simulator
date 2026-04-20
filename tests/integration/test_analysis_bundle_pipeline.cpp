@@ -123,7 +123,10 @@ int main() {
                 std::string::npos &&
             body.find("\"tier\": \"reference_science\"") != std::string::npos &&
             body.find("\"maturity\": \"provisional\"") != std::string::npos &&
-            body.find("\"name\": \"power_spectrum\"") != std::string::npos) {
+            body.find("\"name\": \"power_spectrum\"") != std::string::npos &&
+            body.find("\"name\": \"gravity_health_summary\"") != std::string::npos &&
+            body.find("\"gravity_softening_sidecar_size_ok\": true") != std::string::npos &&
+            body.find("\"non_finite_gravity_softening\": 0") != std::string::npos) {
           found_heavy_metadata = true;
         }
       }

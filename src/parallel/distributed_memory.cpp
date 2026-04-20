@@ -825,6 +825,17 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
     report.mismatch_messages.push_back(
         "PM cadence mismatch: restart cadence must be >= 1, got 0");
   }
+  if (restart_state.last_long_range_refresh_opportunity > restart_state.gravity_kick_opportunity) {
+    report.gravity_kick_state_match = false;
+    report.mismatch_messages.push_back(
+        "gravity kick mismatch: last refresh opportunity exceeds current kick opportunity");
+  }
+  if ((restart_state.long_range_field_version == 0) !=
+      (restart_state.last_long_range_refresh_opportunity == 0)) {
+    report.long_range_field_state_match = false;
+    report.mismatch_messages.push_back(
+        "long-range field mismatch: field version and refresh opportunity are inconsistent");
+  }
   if (runtime_topology.world_rank < 0 ||
       runtime_topology.world_rank >= static_cast<int>(restart_state.pm_slab_begin_x_by_rank.size())) {
     report.pm_local_slab_match = false;

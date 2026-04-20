@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -151,6 +152,32 @@ int main() {
         gathered_last_refresh_opportunity[i] * static_cast<std::uint64_t>(world_size));
     assert(reduced_refresh_flag[i] == gathered_refresh_flag[i] * static_cast<std::uint64_t>(world_size));
   }
+
+  cosmosim::parallel::DistributedRestartState invalid_restart_state;
+  invalid_restart_state.world_size = world_size;
+  invalid_restart_state.pm_grid_nx = 16;
+  invalid_restart_state.pm_grid_ny = 16;
+  invalid_restart_state.pm_grid_nz = 16;
+  invalid_restart_state.pm_decomposition_mode = "slab";
+  invalid_restart_state.pm_update_cadence_steps = 0;
+  invalid_restart_state.gravity_kick_opportunity = 1;
+  invalid_restart_state.last_long_range_refresh_opportunity = 2;
+  invalid_restart_state.long_range_field_version = 0;
+  invalid_restart_state.pm_slab_begin_x_by_rank.resize(static_cast<std::size_t>(world_size), 0);
+  invalid_restart_state.pm_slab_end_x_by_rank.resize(static_cast<std::size_t>(world_size), 0);
+  for (int rank = 0; rank < world_size; ++rank) {
+    const auto slab = cosmosim::parallel::pmOwnedXRangeForRank(16, world_size, rank);
+    invalid_restart_state.pm_slab_begin_x_by_rank[static_cast<std::size_t>(rank)] = slab.begin_x;
+    invalid_restart_state.pm_slab_end_x_by_rank[static_cast<std::size_t>(rank)] = slab.end_x;
+  }
+  const auto compatibility = cosmosim::parallel::evaluateDistributedRestartCompatibility(
+      invalid_restart_state,
+      cosmosim::parallel::buildDistributedExecutionTopology(
+          world_size, world_rank, /*gpu_devices=*/0, "slab", 16, 16, 16));
+  assert(!compatibility.compatible());
+  assert(!compatibility.pm_cadence_steps_match);
+  assert(!compatibility.gravity_kick_state_match);
+  assert(!compatibility.long_range_field_state_match);
 
   const std::uint64_t local_digest = report.final_state_digest;
   std::vector<std::uint64_t> gathered_digest(static_cast<std::size_t>(world_size), 0ULL);
