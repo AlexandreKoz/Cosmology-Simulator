@@ -46,10 +46,24 @@ This sequence is implemented in the current runtime path; the document remains t
   - `numerics.treepm_tree_exchange_batch_bytes` (must be `> 0`)
 - Exchange contract:
   - target-owner rank exports compact active-target request batches to each peer, capped by the configured byte limit,
+  - request export eligibility is geometry-only: a peer is queried only when the active target is within `r_cut`
+    of that peer's periodic source-support bounds (with wrap-aware tight intervals to avoid boundary over-export),
   - peer ranks evaluate each request target against local tree/source data with the current short-range kernel, MAC, and cutoff semantics,
   - peers return partial acceleration responses keyed by batch/request IDs,
   - target-owner rank validates per-peer request/response coverage (duplicate/missing detection) and accumulates returned partials.
 - Export/import does not imply ownership transfer.
+
+### Runtime diagnostics for distributed short-range exchange
+
+`TreePmDiagnostics` includes distributed short-range observability counters for repair validation:
+
+- request/response packet and byte counts,
+- request batch count and peer participation count,
+- per-batch max-per-peer packet pressure + packet-imbalance ratio,
+- targets that required remote requests vs targets fully served locally,
+- request peer-pair culls from periodic source-support geometry bounds.
+
+These counters are observability-only and do not alter force composition or ownership semantics.
 
 ## Active-set and migration timing
 

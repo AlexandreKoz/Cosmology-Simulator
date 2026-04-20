@@ -55,6 +55,37 @@ void buildDeterministicParticles(
   }
 }
 
+void buildClusteredParticles(
+    std::size_t particle_count,
+    double box_size,
+    std::vector<double>& pos_x,
+    std::vector<double>& pos_y,
+    std::vector<double>& pos_z,
+    std::vector<double>& mass) {
+  pos_x.resize(particle_count);
+  pos_y.resize(particle_count);
+  pos_z.resize(particle_count);
+  mass.resize(particle_count);
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    const bool first_cluster = i < (particle_count / 2U);
+    const double cx = first_cluster ? 0.08 : 0.92;
+    const double cy = first_cluster ? 0.18 : 0.81;
+    const double cz = first_cluster ? 0.26 : 0.74;
+    const double phase = static_cast<double>(i + 1U);
+    const auto wrap = [box_size](double value) {
+      double out = std::fmod(value, box_size);
+      if (out < 0.0) {
+        out += box_size;
+      }
+      return out;
+    };
+    pos_x[i] = wrap(cx + 0.03 * std::sin(0.37 * phase));
+    pos_y[i] = wrap(cy + 0.028 * std::cos(0.31 * phase));
+    pos_z[i] = wrap(cz + 0.024 * std::sin(0.29 * phase + (first_cluster ? 0.3 : 1.1)));
+    mass[i] = first_cluster ? 1.1 : 0.75;
+  }
+}
+
 [[nodiscard]] std::vector<std::uint32_t> ownedParticleIndices(std::size_t count, int world_size, int world_rank) {
   std::vector<std::uint32_t> owned;
   for (std::size_t i = 0; i < count; ++i) {
@@ -155,7 +186,7 @@ void testDistributedPmEquivalence(int world_size, int world_rank) {
   requireOrThrow(rel_l2 <= 1.0e-10, msg.str());
 }
 
-void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
+void runTreePmCase(int world_size, int world_rank, bool communication_stress, bool clustered_sources) {
   const cosmosim::gravity::PmGridShape pm_shape{32, 32, 32};
   const auto layout = cosmosim::parallel::makePmSlabLayout(pm_shape.nx, pm_shape.ny, pm_shape.nz, world_size, world_rank);
 
@@ -163,7 +194,11 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
   std::vector<double> pos_y;
   std::vector<double> pos_z;
   std::vector<double> mass;
-  buildDeterministicParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
+  if (clustered_sources) {
+    buildClusteredParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
+  } else {
+    buildDeterministicParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
+  }
   const std::vector<std::uint32_t> owned = ownedParticleIndices(pos_x.size(), world_size, world_rank);
   std::vector<double> local_x;
   std::vector<double> local_y;
@@ -255,6 +290,7 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
   std::ostringstream msg;
   msg << "distributed TreePM equivalence failed: world_size=" << world_size
       << ", communication_stress=" << (communication_stress ? "true" : "false")
+      << ", clustered_sources=" << (clustered_sources ? "true" : "false")
       << ", rel_l2=" << rel_l2 << " (required <= 5e-6)"
       << ", max_rel=" << global_norm.max_rel << " (required <= 5e-5)"
       << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff;
@@ -262,6 +298,8 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
   requireOrThrow(global_norm.max_rel <= 5.0e-5, msg.str());
   if (communication_stress) {
     requireOrThrow(dist_diag.residual_pair_skips_cutoff > 0, msg.str());
+    requireOrThrow(dist_diag.residual_remote_pairs_pruned_by_bounds > 0, msg.str());
+    requireOrThrow(dist_diag.residual_remote_request_packet_imbalance_ratio >= 1.0, msg.str());
   }
 }
 
@@ -432,8 +470,9 @@ int main() {
 #endif
 
   testDistributedPmEquivalence(world_size, world_rank);
-  runTreePmCase(world_size, world_rank, /*communication_stress=*/false);
-  runTreePmCase(world_size, world_rank, /*communication_stress=*/true);
+  runTreePmCase(world_size, world_rank, /*communication_stress=*/false, /*clustered_sources=*/false);
+  runTreePmCase(world_size, world_rank, /*communication_stress=*/true, /*clustered_sources=*/false);
+  runTreePmCase(world_size, world_rank, /*communication_stress=*/true, /*clustered_sources=*/true);
   testRestartRoundtripContinuationContract(world_size, world_rank);
   testExplicitFailureContracts(world_size, world_rank);
 

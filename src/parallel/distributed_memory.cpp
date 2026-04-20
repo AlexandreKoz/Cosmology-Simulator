@@ -240,15 +240,6 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
     const std::size_t original_index = keyed[sorted_pos].index;
     plan.sorted_indices[sorted_pos] = original_index;
-
-    while (current_rank + 1 < config.world_size &&
-           current_prefix_load >= target_per_rank * static_cast<double>(current_rank + 1) &&
-           sorted_pos > rank_begin) {
-      plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{.begin_sorted = rank_begin, .end_sorted = sorted_pos};
-      ++current_rank;
-      rank_begin = sorted_pos;
-    }
-
     plan.owning_rank_by_item[original_index] = current_rank;
     plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += keyed[sorted_pos].weighted_load;
     plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
@@ -259,7 +250,63 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
         items[original_index].active_target_count_recent;
     plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
         items[original_index].remote_tree_interactions_recent;
-    current_prefix_load += keyed[sorted_pos].weighted_load;
+    const double item_load = keyed[sorted_pos].weighted_load;
+    current_prefix_load += item_load;
+
+    if (current_rank + 1 >= config.world_size) {
+      continue;
+    }
+    if (sorted_pos + 1 >= keyed.size()) {
+      continue;
+    }
+
+    const std::size_t items_remaining = keyed.size() - (sorted_pos + 1U);
+    const std::size_t ranks_remaining = static_cast<std::size_t>(config.world_size - (current_rank + 1));
+    if (items_remaining < ranks_remaining) {
+      continue;
+    }
+
+    const double next_target_prefix = target_per_rank * static_cast<double>(current_rank + 1);
+    const bool crossed_target = current_prefix_load >= next_target_prefix;
+    const bool rank_has_multiple_items = sorted_pos > rank_begin;
+    if (!crossed_target || !rank_has_multiple_items) {
+      continue;
+    }
+
+    const double before_distance = std::abs((current_prefix_load - item_load) - next_target_prefix);
+    const double after_distance = std::abs(current_prefix_load - next_target_prefix);
+    const bool cut_before_current = before_distance < after_distance;
+    if (cut_before_current) {
+      plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{
+          .begin_sorted = rank_begin,
+          .end_sorted = sorted_pos};
+      ++current_rank;
+      rank_begin = sorted_pos;
+      plan.owning_rank_by_item[original_index] = current_rank;
+      plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += item_load;
+      plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank - 1)] -= item_load;
+      plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
+      plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank - 1)] -= items[original_index].memory_bytes;
+      if (items[original_index].kind == DecompositionEntityKind::kParticle) {
+        ++plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank)];
+        --plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank - 1)];
+      }
+      plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank)] +=
+          items[original_index].active_target_count_recent;
+      plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank - 1)] -=
+          items[original_index].active_target_count_recent;
+      plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
+          items[original_index].remote_tree_interactions_recent;
+      plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank - 1)] -=
+          items[original_index].remote_tree_interactions_recent;
+      continue;
+    }
+
+    plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{
+        .begin_sorted = rank_begin,
+        .end_sorted = sorted_pos + 1U};
+    ++current_rank;
+    rank_begin = sorted_pos + 1U;
   }
 
   plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};

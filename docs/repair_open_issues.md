@@ -87,3 +87,9 @@ Additional validation limitation for this pass:
 - Tree softening maturity limitations after stage 2026-04-20:
   - Node-level accepted multipoles currently use `epsilon_node_max` as a conservative aggregate for mixed-source nodes; this favors safety/coherence over minimum-bias accuracy for strongly heterogeneous softening distributions.
   - Snapshot softening sidecar field is additive and optional; external consumers that assume only canonical GADGET datasets may ignore `GravitySofteningComoving` unless upgraded.
+
+## New open follow-up items (post P29 closeout)
+
+| ID | Status | Area | Current limitation | Next-step evidence target |
+|---|---|---|---|---|
+| P30-CLUSTERED-LOAD-MATURITY-025 | Open | Distributed gravity clustered-load maturity | Current deterministic contiguous SFC cuts reduce clustered overshoot but remain one-dimensional; extreme multi-cluster anisotropy can still create per-rank remote short-range pressure skew even when weighted load appears balanced. | Add clustered MPI scaling sweeps (2/3/4+ ranks) that jointly track weighted-load imbalance and remote request packet imbalance against acceptance thresholds in `bench_tree_only_scaling_mpi` + `bench_tree_pm_coupling`. |

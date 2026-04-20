@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -18,9 +19,22 @@ int main() {
     items[i].entity_id = static_cast<std::uint64_t>(i);
     items[i].kind = (i % 8 == 0) ? cosmosim::parallel::DecompositionEntityKind::kAmrPatch
                                  : cosmosim::parallel::DecompositionEntityKind::kParticle;
-    items[i].x_comov = static_cast<double>(i % 512) / 512.0;
-    items[i].y_comov = static_cast<double>((i / 64) % 512) / 512.0;
-    items[i].z_comov = static_cast<double>((i / 4096) % 128) / 128.0;
+    const bool in_cluster = (i % 7U) < 5U;
+    const double cluster_center = in_cluster ? 0.15 : 0.82;
+    items[i].x_comov = std::fmod(cluster_center + 0.03 * std::sin(0.011 * static_cast<double>(i + 1U)), 1.0);
+    if (items[i].x_comov < 0.0) {
+      items[i].x_comov += 1.0;
+    }
+    items[i].y_comov = std::fmod(cluster_center + 0.04 * std::cos(0.017 * static_cast<double>(i + 3U)), 1.0);
+    if (items[i].y_comov < 0.0) {
+      items[i].y_comov += 1.0;
+    }
+    items[i].z_comov = std::fmod(cluster_center + 0.02 * std::sin(0.013 * static_cast<double>(i + 7U)), 1.0);
+    if (items[i].z_comov < 0.0) {
+      items[i].z_comov += 1.0;
+    }
+    items[i].active_target_count_recent = in_cluster ? 35U : 2U;
+    items[i].remote_tree_interactions_recent = in_cluster ? 51U : 1U;
     items[i].work_units = 1.0 + static_cast<double>(i % 11);
     items[i].memory_bytes = 64U + static_cast<std::uint64_t>((i % 13) * 16U);
   }
@@ -29,6 +43,8 @@ int main() {
   config.world_size = k_world_size;
   config.work_weight = 1.0;
   config.memory_weight = 1.0 / 1024.0;
+  config.active_target_weight = 2.5;
+  config.remote_tree_interaction_weight = 1.75;
 
   double warmup_checksum = 0.0;
   for (std::size_t i = 0; i < execution.warmup_iterations; ++i) {
@@ -40,10 +56,16 @@ int main() {
   std::uint64_t total_send_bytes = 0;
   std::uint64_t total_recv_bytes = 0;
   double checksum = warmup_checksum;
+  double weighted_imbalance_accum = 0.0;
+  std::uint64_t remote_interactions_accum = 0;
 
   for (std::size_t iter = 0; iter < execution.measurement_iterations; ++iter) {
     const auto plan = cosmosim::parallel::buildMortonSfcDecomposition(items, config);
     checksum += plan.metrics.weighted_imbalance_ratio;
+    weighted_imbalance_accum += plan.metrics.weighted_imbalance_ratio;
+    for (const std::uint64_t per_rank : plan.metrics.remote_tree_interactions_by_rank) {
+      remote_interactions_accum += per_rank;
+    }
 
     std::vector<int> ghost_owner_rank(items.size());
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -71,6 +93,12 @@ int main() {
       elapsed_ms / static_cast<double>(execution.measurement_iterations));
   reporter.addField("ghost_send_bytes_total", total_send_bytes);
   reporter.addField("ghost_recv_bytes_total", total_recv_bytes);
+  reporter.addField(
+      "mean_weighted_imbalance_ratio",
+      weighted_imbalance_accum / static_cast<double>(execution.measurement_iterations));
+  reporter.addField(
+      "mean_remote_interactions_per_iter",
+      static_cast<double>(remote_interactions_accum) / static_cast<double>(execution.measurement_iterations));
   cosmosim::bench::addBandwidthFields(
       reporter,
       total_send_bytes + total_recv_bytes,
