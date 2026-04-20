@@ -493,6 +493,22 @@ void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value,
   return hash;
 }
 
+[[nodiscard]] std::uint64_t computeParticleIdSum(const core::SimulationState& state) {
+  std::uint64_t sum = 0;
+  for (const std::uint64_t particle_id : state.particle_sidecar.particle_id) {
+    sum += particle_id;
+  }
+  return sum;
+}
+
+[[nodiscard]] std::uint64_t computeParticleIdXor(const core::SimulationState& state) {
+  std::uint64_t value = 0;
+  for (const std::uint64_t particle_id : state.particle_sidecar.particle_id) {
+    value ^= particle_id;
+  }
+  return value;
+}
+
 void ensureRunDirectory(const std::filesystem::path& run_directory) {
   std::filesystem::create_directories(run_directory);
 }
@@ -1262,10 +1278,23 @@ void maybeWriteOutputs(
     const auto compatibility = parallel::evaluateDistributedRestartCompatibility(
         restart_read.distributed_gravity_state,
         gravity_callback.runtimeTopology());
+    const bool restart_rank_qualified_name =
+        gravity_callback.runtimeTopology().world_size == 1 ||
+        report.restart_path.filename().string().find("_rank") != std::string::npos;
     report.restart_roundtrip_ok = restart_read.state.particles.size() == state.particles.size() &&
+        restart_read.state.cells.size() == state.cells.size() &&
         restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
+        restart_read.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id &&
         restart_read.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank &&
+        computeParticleIdSum(restart_read.state) == computeParticleIdSum(state) &&
+        computeParticleIdXor(restart_read.state) == computeParticleIdXor(state) &&
         restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particle_sidecar.owning_rank.size() &&
+        restart_read.distributed_gravity_state.owning_rank_by_item == restart_payload.distributed_gravity_state.owning_rank_by_item &&
+        restart_read.distributed_gravity_state.pm_slab_begin_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank &&
+        restart_read.distributed_gravity_state.pm_slab_end_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank &&
+        restart_read.distributed_gravity_state.gravity_kick_opportunity == restart_payload.distributed_gravity_state.gravity_kick_opportunity &&
+        restart_read.distributed_gravity_state.long_range_field_version == restart_payload.distributed_gravity_state.long_range_field_version &&
+        restart_rank_qualified_name &&
         compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "restart.write.complete",
@@ -1349,15 +1378,43 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     io::IcReadResult ic_result = loadInitialConditions(m_frozen_config);
     core::SimulationState state = std::move(ic_result.state);
     finalizeStateMetadata(m_frozen_config, state);
-    {
-      parallel::MpiContext mpi_context;
-      seedParticleOwnershipFromPmSlabs(
-          state,
-          static_cast<std::size_t>(config.numerics.treepm_pm_grid),
-          mpi_context.worldSize(),
-          config.cosmology.box_size_mpc_comoving);
-      applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank());
-    }
+    parallel::MpiContext mpi_context;
+    report.world_size = mpi_context.worldSize();
+    report.world_rank = mpi_context.worldRank();
+    seedParticleOwnershipFromPmSlabs(
+        state,
+        static_cast<std::size_t>(config.numerics.treepm_pm_grid),
+        mpi_context.worldSize(),
+        config.cosmology.box_size_mpc_comoving);
+    applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank());
+
+    report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
+    report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
+    report.local_particle_id_sum = computeParticleIdSum(state);
+    report.local_particle_id_xor = computeParticleIdXor(state);
+    report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
+    report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
+    report.global_particle_id_sum = mpi_context.allreduceSumUint64(report.local_particle_id_sum);
+    report.global_particle_id_xor = mpi_context.allreduceXorUint64(report.local_particle_id_xor);
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "parallel.ownership.partition_summary",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "parallel.ownership",
+        .step_index = options.step_index,
+        .simulation_time_code = config.numerics.time_begin_code,
+        .scale_factor = 1.0,
+        .message = "initial ownership-partition summary recorded",
+        .payload = {{"world_size", std::to_string(report.world_size)},
+                    {"world_rank", std::to_string(report.world_rank)},
+                    {"local_particle_count", std::to_string(report.local_particle_count)},
+                    {"global_particle_count", std::to_string(report.global_particle_count)},
+                    {"local_cell_count", std::to_string(report.local_cell_count)},
+                    {"global_cell_count", std::to_string(report.global_cell_count)},
+                    {"local_particle_id_sum", std::to_string(report.local_particle_id_sum)},
+                    {"global_particle_id_sum", std::to_string(report.global_particle_id_sum)},
+                    {"local_particle_id_xor", std::to_string(report.local_particle_id_xor)},
+                    {"global_particle_id_xor", std::to_string(report.global_particle_id_xor)}},
+    });
 
     core::CosmologyBackgroundConfig background_config;
     background_config.hubble_param = config.cosmology.hubble_param;
@@ -1481,6 +1538,14 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     report.completed_steps = integrator_state.step_index - options.step_index;
     report.final_state_digest = computeStateDigest(state, integrator_state);
+    report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
+    report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
+    report.local_particle_id_sum = computeParticleIdSum(state);
+    report.local_particle_id_xor = computeParticleIdXor(state);
+    report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
+    report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
+    report.global_particle_id_sum = mpi_context.allreduceSumUint64(report.local_particle_id_sum);
+    report.global_particle_id_xor = mpi_context.allreduceXorUint64(report.local_particle_id_xor);
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();
     report.treepm_cadence_records.assign(
@@ -1500,6 +1565,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     {"treepm_update_cadence_steps", std::to_string(report.treepm_update_cadence_steps)},
                     {"treepm_long_range_refresh_count", std::to_string(report.treepm_long_range_refresh_count)},
                     {"treepm_long_range_reuse_count", std::to_string(report.treepm_long_range_reuse_count)},
+                    {"local_particle_count", std::to_string(report.local_particle_count)},
+                    {"global_particle_count", std::to_string(report.global_particle_count)},
+                    {"local_particle_id_sum", std::to_string(report.local_particle_id_sum)},
+                    {"global_particle_id_sum", std::to_string(report.global_particle_id_sum)},
+                    {"local_particle_id_xor", std::to_string(report.local_particle_id_xor)},
+                    {"global_particle_id_xor", std::to_string(report.global_particle_id_xor)},
                     {"final_state_digest", std::to_string(report.final_state_digest)}},
     });
     flushCommonArtifacts(m_frozen_config, profiler, report);

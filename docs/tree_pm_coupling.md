@@ -59,6 +59,8 @@ This ensures `rcut_cells` changes actual traversal behavior (not diagnostics-onl
 
 ### Distributed short-range export/import contract (Phase 2 active-target model)
 
+The runtime now records and enforces **response coverage** for each active-target batch slot. If a target was exported to `N` peers after periodic-bound pruning, the caller must receive exactly `N` responses before accumulation; missing or duplicate responses are treated as hard runtime errors rather than silently under-accumulating the short-range residual.
+
 When `world_size > 1` and MPI is enabled, short-range residual evaluation is no longer rank-replicated:
 
 1. **Target owner local pass**:

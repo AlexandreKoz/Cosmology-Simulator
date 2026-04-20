@@ -13,6 +13,15 @@
 
 namespace {
 
+[[nodiscard]] std::uint64_t xorRangeOneToN(std::uint64_t n) {
+  switch (n & 3ULL) {
+    case 0ULL: return n;
+    case 1ULL: return 1ULL;
+    case 2ULL: return n + 1ULL;
+    default: return 0ULL;
+  }
+}
+
 std::string buildConfigText(int cadence_steps, int mpi_ranks_expected) {
   std::stringstream stream;
   stream << "schema_version = 1\n\n";
@@ -64,6 +73,12 @@ int main() {
       runner.run(cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
 
   assert(report.completed_steps == 2);
+  assert(report.world_size == world_size);
+  assert(report.world_rank == world_rank);
+  assert(report.global_particle_count == 42ULL);
+  assert(report.global_cell_count == 6ULL);
+  assert(report.global_particle_id_sum == (42ULL * 43ULL) / 2ULL);
+  assert(report.global_particle_id_xor == xorRangeOneToN(42ULL));
   assert(report.treepm_update_cadence_steps == 2);
   assert(report.treepm_long_range_refresh_count == 2);
   assert(report.treepm_long_range_reuse_count == 2);
@@ -120,6 +135,33 @@ int main() {
   for (const std::uint64_t digest : gathered_digest) {
     assert(digest != 0ULL);
   }
+
+  const std::uint64_t local_particle_count = report.local_particle_count;
+  std::vector<std::uint64_t> gathered_particle_count(static_cast<std::size_t>(world_size), 0ULL);
+  MPI_Allgather(&local_particle_count, 1, MPI_UINT64_T, gathered_particle_count.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD);
+  std::uint64_t reduced_particle_count = 0ULL;
+  MPI_Allreduce(&local_particle_count, &reduced_particle_count, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  assert(reduced_particle_count == report.global_particle_count);
+  bool all_ranks_hold_full_state = true;
+  for (const std::uint64_t count : gathered_particle_count) {
+    all_ranks_hold_full_state = all_ranks_hold_full_state && (count == report.global_particle_count);
+  }
+  assert(!all_ranks_hold_full_state);
+
+  const std::uint64_t local_cell_count = report.local_cell_count;
+  std::uint64_t reduced_cell_count = 0ULL;
+  MPI_Allreduce(&local_cell_count, &reduced_cell_count, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  assert(reduced_cell_count == report.global_cell_count);
+
+  const std::uint64_t local_id_sum = report.local_particle_id_sum;
+  std::uint64_t reduced_id_sum = 0ULL;
+  MPI_Allreduce(&local_id_sum, &reduced_id_sum, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  assert(reduced_id_sum == report.global_particle_id_sum);
+
+  const std::uint64_t local_id_xor = report.local_particle_id_xor;
+  std::uint64_t reduced_id_xor = 0ULL;
+  MPI_Allreduce(&local_id_xor, &reduced_id_xor, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
+  assert(reduced_id_xor == report.global_particle_id_xor);
 
   MPI_Finalize();
 #endif

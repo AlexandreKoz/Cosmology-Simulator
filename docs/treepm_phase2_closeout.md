@@ -40,6 +40,7 @@ Phase 2 distributed TreePM implementation path.
   and response batches (`tree_exchange_batch_bytes` bounded).
 - **Cadence contract** is global over gravity-kick opportunities; every rank must agree on
   refresh/reuse decisions and cadence metadata on each kick.
+- **Workflow evidence** must prove partitioned final ownership rather than replicated per-rank state; the repository now records local/global owned counts and particle-ID sum/xor so MPI workflow tests can check this explicitly.
 
 ## Explicit failure contracts covered in code/tests
 
@@ -53,6 +54,7 @@ Phase 2 distributed TreePM implementation path.
   are absent.
 - Inconsistent cadence state: restart decode throws when cadence metadata is contradictory
   (for example, non-zero refresh opportunity with zero long-range field version).
+- Short-range export/import response coverage mismatch: runtime throws if any batch slot receives fewer or more peer responses than were requested from the participation set chosen for that batch.
 
 ## Residual limitations (honest, non-silent)
 

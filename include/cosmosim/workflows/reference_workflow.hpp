@@ -40,6 +40,16 @@ struct ReferenceWorkflowReport {
   bool snapshot_roundtrip_ok = false;
   std::uint64_t completed_steps = 0;
   std::uint64_t final_state_digest = 0;
+  std::uint64_t local_particle_count = 0;
+  std::uint64_t global_particle_count = 0;
+  std::uint64_t local_cell_count = 0;
+  std::uint64_t global_cell_count = 0;
+  std::uint64_t local_particle_id_sum = 0;
+  std::uint64_t global_particle_id_sum = 0;
+  std::uint64_t local_particle_id_xor = 0;
+  std::uint64_t global_particle_id_xor = 0;
+  int world_size = 1;
+  int world_rank = 0;
   std::uint64_t treepm_long_range_refresh_count = 0;
   std::uint64_t treepm_long_range_reuse_count = 0;
   std::size_t treepm_pm_grid = 0;

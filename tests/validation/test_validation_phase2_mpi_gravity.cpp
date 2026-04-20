@@ -15,6 +15,15 @@
 
 namespace {
 
+[[nodiscard]] std::uint64_t xorRangeOneToN(std::uint64_t n) {
+  switch (n & 3ULL) {
+    case 0ULL: return n;
+    case 1ULL: return 1ULL;
+    case 2ULL: return n + 1ULL;
+    default: return 0ULL;
+  }
+}
+
 struct VectorErrorNorm {
   double diff_l2 = 0.0;
   double ref_l2 = 0.0;
@@ -293,6 +302,15 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
   requireOrThrow(report.restart_roundtrip_executed, "restart roundtrip was not executed");
   requireOrThrow(report.restart_roundtrip_ok, "restart roundtrip failed verification");
   requireOrThrow(!report.restart_path.empty(), "restart path missing from workflow report");
+  requireOrThrow(report.world_size == world_size, "workflow report world_size mismatch");
+  requireOrThrow(report.world_rank == world_rank, "workflow report world_rank mismatch");
+  requireOrThrow(report.global_particle_count == 42ULL, "distributed workflow global particle count mismatch");
+  requireOrThrow(report.global_cell_count == 6ULL, "distributed workflow global cell count mismatch");
+  requireOrThrow(report.global_particle_id_sum == (42ULL * 43ULL) / 2ULL, "distributed workflow global particle-id sum mismatch");
+  requireOrThrow(report.global_particle_id_xor == xorRangeOneToN(42ULL), "distributed workflow global particle-id xor mismatch");
+  if (world_size > 1) {
+    requireOrThrow(report.restart_path.filename().string().find("_rank") != std::string::npos, "distributed restart filename must be rank-qualified");
+  }
 
 #if COSMOSIM_ENABLE_MPI
   MPI_Barrier(MPI_COMM_WORLD);

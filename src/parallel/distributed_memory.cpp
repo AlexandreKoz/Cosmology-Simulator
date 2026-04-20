@@ -884,6 +884,17 @@ std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t global = 0;
+    MPI_Allreduce(&local_value, &global, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
+    return global;
+  }
+#endif
+  return local_value;
+}
+
 
 
 bool RankDeviceAssignment::isValid() const noexcept {

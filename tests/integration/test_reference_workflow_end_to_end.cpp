@@ -8,6 +8,15 @@
 
 #include "cosmosim/cosmosim.hpp"
 
+[[nodiscard]] std::uint64_t xorRangeOneToN(std::uint64_t n) {
+  switch (n & 3ULL) {
+    case 0ULL: return n;
+    case 1ULL: return 1ULL;
+    case 2ULL: return n + 1ULL;
+    default: return 0ULL;
+  }
+}
+
 int main() {
   auto buildConfigText = [](int cadence_steps, const std::string& run_name, std::string_view assignment_scheme) {
     std::stringstream stream;
@@ -55,6 +64,16 @@ int main() {
   assert(report.stage_sequence.front() == "gravity_kick_pre");
   assert(report.stage_sequence.back() == "output_check");
   assert(report.completed_steps == 2);
+  assert(report.world_size == 1);
+  assert(report.world_rank == 0);
+  assert(report.local_particle_count == 42);
+  assert(report.global_particle_count == 42);
+  assert(report.local_cell_count == 6);
+  assert(report.global_cell_count == 6);
+  assert(report.local_particle_id_sum == (42ULL * 43ULL) / 2ULL);
+  assert(report.global_particle_id_sum == (42ULL * 43ULL) / 2ULL);
+  assert(report.local_particle_id_xor == xorRangeOneToN(42));
+  assert(report.global_particle_id_xor == xorRangeOneToN(42));
   assert(report.treepm_pm_grid == 9);
   assert(report.treepm_update_cadence_steps == 1);
   assert(report.treepm_long_range_refresh_count == 4);

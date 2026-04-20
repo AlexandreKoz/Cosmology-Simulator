@@ -44,6 +44,10 @@ struct TreePmDiagnostics {
   std::uint64_t residual_pruned_nodes = 0;
   std::uint64_t residual_pair_skips_cutoff = 0;
   std::uint64_t residual_pair_evaluations = 0;
+  std::uint64_t residual_remote_request_packets = 0;
+  std::uint64_t residual_remote_response_packets = 0;
+  std::uint64_t residual_remote_request_batches = 0;
+  std::uint64_t residual_remote_peer_participations = 0;
 };
 
 struct TreePmProfileEvent {
@@ -97,6 +101,10 @@ class TreePmCoordinator {
     std::uint64_t pruned_nodes = 0;
     std::uint64_t pair_skips_cutoff = 0;
     std::uint64_t pair_evaluations = 0;
+    std::uint64_t remote_request_packets = 0;
+    std::uint64_t remote_response_packets = 0;
+    std::uint64_t remote_request_batches = 0;
+    std::uint64_t remote_peer_participations = 0;
   };
 
   PmGridShape m_shape;
@@ -124,7 +132,8 @@ class TreePmCoordinator {
     std::vector<double> remote_batch_ax;
     std::vector<double> remote_batch_ay;
     std::vector<double> remote_batch_az;
-    std::vector<std::uint8_t> seen_response;
+    std::vector<std::uint16_t> expected_response_count;
+    std::vector<std::uint16_t> received_response_count;
   } m_tree_exchange_workspace;
   ResidualTraversalStats m_last_residual_stats;
   bool m_has_cached_long_range_field = false;

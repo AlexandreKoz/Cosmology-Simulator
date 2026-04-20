@@ -81,6 +81,7 @@ The workflow uses `core::StepOrchestrator` and preserves the canonical order:
 - Gravity is executed through the live `gravity::TreePmCoordinator` callback.
 - Hydro is executed through the live Godunov finite-volume callback using the hydro core solver, MUSCL-Hancock reconstruction, and HLLC fluxes.
 - Active sets come from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps are committed through `endSubstep()` before restart output is written.
+- In MPI mode the workflow report records both local owned counts/checksums and reduced global counts/checksums (`particle_count`, `cell_count`, particle-ID sum/xor). This is part of the operational honesty contract for distributed runs: tests must be able to distinguish a true partitioned state from an accidentally replicated one.
 - Restart payloads therefore serialize the scheduler state that actually drove the run.
 
 ## Artifacts emitted by the runtime

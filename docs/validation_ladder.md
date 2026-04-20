@@ -54,7 +54,8 @@ Phase 2 distributed TreePM gravity gate (implemented):
   - TreePM force `rel_L2 <= 5e-6`, `max_rel <= 5e-5`.
 - `validation_phase2_mpi_gravity_three_rank`: rank-count reproducibility sweep using the same invariants at `np=3`.
 - Communication stress is included in the same executable using `tree_exchange_batch_bytes=64` and PM-cadence toggling to force repeated export/import rounds.
-- Restart continuation gate is included through reference-workflow restart write/read verification in MPI mode (`restart_roundtrip_ok`).
+- Restart continuation gate is included through reference-workflow restart write/read verification in MPI mode (`restart_roundtrip_ok`), exact distributed ownership/slab metadata replay, and rank-qualified restart file naming.
+- Distributed-workflow honesty is checked separately in `test_reference_workflow_distributed_treepm_mpi` by reducing local owned counts and particle-ID checksums; identical per-rank full-state digests are not treated as evidence of a real distributed-memory workflow.
 
 Planned as modules mature:
 - Sedov blast convergence ladder.
