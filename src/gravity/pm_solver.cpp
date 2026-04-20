@@ -359,6 +359,14 @@ class PmSolver::Impl {
     if (plan.forward_plan == nullptr || plan.inverse_plan == nullptr) {
       throw std::runtime_error("Failed to create FFTW plans for PM solver");
     }
+#else
+    if (!layout.ownsFullDomain()) {
+      throw std::invalid_argument(
+          "PM solver naive DFT fallback requires full-domain slab ownership; distributed PM requires COSMOSIM_ENABLE_FFTW=ON and COSMOSIM_ENABLE_MPI=ON");
+    }
+    plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
 #endif
 
     auto [insert_it, inserted] = m_plan_cache.emplace(key, std::move(plan));
@@ -470,6 +478,10 @@ class PmSolver::Impl {
 
 #if !COSMOSIM_ENABLE_FFTW
   void naiveForwardDft() {
+    if (!activePlan().layout.ownsFullDomain()) {
+      throw std::logic_error(
+          "PM solver naiveForwardDft requires full-domain ownership; distributed PM is unavailable without FFTW/MPI");
+    }
     auto& real = activePlan().real;
     auto& fourier = activePlan().fourier;
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
@@ -498,6 +510,10 @@ class PmSolver::Impl {
   }
 
   void naiveInverseDft() {
+    if (!activePlan().layout.ownsFullDomain()) {
+      throw std::logic_error(
+          "PM solver naiveInverseDft requires full-domain ownership; distributed PM is unavailable without FFTW/MPI");
+    }
     auto& real = activePlan().real;
     auto& fourier = activePlan().fourier;
     const std::size_t total = m_shape.cellCount();
