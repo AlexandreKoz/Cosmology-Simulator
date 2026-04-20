@@ -213,6 +213,17 @@ Plan/scratch caches are keyed by slab layout ownership metadata (`world_size`, `
 `owned_x.begin`, `owned_x.end`) and are reused until layout/communicator metadata changes.
 Inverse normalization is applied exactly once per inverse field (`φ`, `a_x`, `a_y`, `a_z`).
 
+### Pencil-transposed distributed PM path (current implementation)
+
+`numerics.treepm_pm_decomposition_mode = pencil` now activates a transposed distributed FFT path
+when FFTW+MPI distributed plans are available. The path is explicit and does not alias slab mode:
+
+- real-space ownership remains x-slab (`PmSlabLayout`) for particle-owner deposition/interpolation,
+- forward FFT uses `fftw_mpi_plan_dft_r2c_3d(..., FFTW_MPI_TRANSPOSED_OUT)` and switches spectral ownership to y-partitioned transposed storage,
+- inverse FFT uses `FFTW_MPI_TRANSPOSED_IN` to return from transposed spectral ownership back to x-slab real-space ownership.
+
+This gives a real end-to-end alternate decomposition mode with explicit transpose ownership and sequence while preserving existing slab semantics as fallback.
+
 ## Long-range field cadence and reuse (Reference workflow Phase 1)
 
 The reference TreePM workflow now supports explicit long-range PM reuse controlled by

@@ -351,17 +351,13 @@ void testExplicitFailureContracts(int world_size, int world_rank) {
   }
 
   {
-    bool threw = false;
-    try {
-      const auto frozen = cosmosim::core::loadFrozenConfigFromString(
-          "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\n\n"
-          "[numerics]\ntreepm_pm_decomposition_mode = pencil\n",
-          "validation_phase2_unsupported_decomposition");
-      (void)frozen;
-    } catch (const cosmosim::core::ConfigError&) {
-      threw = true;
-    }
-    requireOrThrow(threw, "unsupported decomposition mode must fail config parsing");
+    const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+        "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\n\n"
+        "[numerics]\ntreepm_pm_decomposition_mode = pencil\n",
+        "validation_phase2_pencil_decomposition");
+    requireOrThrow(
+        frozen.config.numerics.treepm_pm_decomposition_mode == cosmosim::core::PmDecompositionMode::kPencil,
+        "pencil decomposition mode must parse to typed enum");
   }
 
 #if COSMOSIM_ENABLE_MPI

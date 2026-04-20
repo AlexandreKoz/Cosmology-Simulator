@@ -340,15 +340,12 @@ treepm_tree_exchange_batch_bytes = 8388608
   }
   assert(threw);
 
-  const std::string bad_decomposition =
+  const std::string pencil_decomposition =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_decomposition_mode = pencil\n";
-  threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(bad_decomposition, "treepm_bad_decomp");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
-  }
-  assert(threw);
+  const auto parsed_pencil = cosmosim::core::loadFrozenConfigFromString(
+      pencil_decomposition, "treepm_pencil_decomp");
+  assert(parsed_pencil.config.numerics.treepm_pm_decomposition_mode ==
+      cosmosim::core::PmDecompositionMode::kPencil);
 
   const std::string bad_batch_bytes =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_exchange_batch_bytes = 0\n";

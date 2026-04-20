@@ -767,11 +767,11 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
         std::to_string(runtime_topology.pm_slab.global_ny) + "," +
         std::to_string(runtime_topology.pm_slab.global_nz) + ")");
   }
-  if (restart_state.pm_decomposition_mode != "slab") {
+  if (restart_state.pm_decomposition_mode != runtime_topology.pm_decomposition_mode) {
     report.pm_decomposition_mode_match = false;
     report.mismatch_messages.push_back(
         "PM decomposition mode mismatch: restart=" + restart_state.pm_decomposition_mode +
-        ", runtime=slab");
+        ", runtime=" + runtime_topology.pm_decomposition_mode);
   }
   if (restart_state.pm_update_cadence_steps == 0) {
     report.pm_cadence_steps_match = false;
@@ -954,13 +954,15 @@ DistributedExecutionTopology buildDistributedExecutionTopology(
     int mpi_ranks_expected,
     int configured_gpu_devices,
     bool cuda_runtime_available,
-    int visible_device_count) {
+    int visible_device_count,
+    std::string pm_decomposition_mode) {
   mpi_context.validateExpectedWorldSizeOrThrow(mpi_ranks_expected);
 
   DistributedExecutionTopology topology;
   topology.world_size = mpi_context.worldSize();
   topology.world_rank = mpi_context.worldRank();
   topology.mpi_enabled = mpi_context.isEnabled();
+  topology.pm_decomposition_mode = std::move(pm_decomposition_mode);
   topology.pm_slab = makePmSlabLayout(global_nx, global_ny, global_nz, mpi_context.worldSize(), mpi_context.worldRank());
   topology.device_assignment =
       selectRankDeviceAssignment(mpi_context.worldRank(), configured_gpu_devices, cuda_runtime_available, visible_device_count);

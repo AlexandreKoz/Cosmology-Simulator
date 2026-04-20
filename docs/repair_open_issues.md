@@ -18,7 +18,7 @@ Environment blockers currently observed in this validation environment:
 
 Deferred to Phase 3 follow-up after axis-aware geometry repair:
 
-- Pencil PM decomposition remains out of scope (`treepm_pm_decomposition_mode=slab` only).
+- Full 2D pencil decomposition beyond FFTW transposed ownership remains open. Current `pencil` mode is now an end-to-end transposed PM path with explicit ownership contracts, but wider process-grid scaling and non-FFTW backend parity remain follow-up scope.
 - Isolated/non-periodic PM operator modes remain out of scope (periodic PM only in this stage).
 - CUDA PM kernels still require cubic box lengths; non-cubic CUDA PM support is deferred.
 
