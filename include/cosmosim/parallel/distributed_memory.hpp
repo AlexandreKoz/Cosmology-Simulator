@@ -443,6 +443,7 @@ struct DistributedExecutionTopology {
   int world_size = 1;
   int world_rank = 0;
   bool mpi_enabled = false;
+  std::string pm_decomposition_mode = "slab";
   PmSlabLayout pm_slab{};
   RankDeviceAssignment device_assignment{};
 
@@ -464,6 +465,7 @@ struct DistributedExecutionTopology {
     int mpi_ranks_expected,
     int configured_gpu_devices,
     bool cuda_runtime_available,
-    int visible_device_count);
+    int visible_device_count,
+    std::string pm_decomposition_mode = "slab");
 
 }  // namespace cosmosim::parallel

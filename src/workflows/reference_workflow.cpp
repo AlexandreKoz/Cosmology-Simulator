@@ -85,6 +85,8 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   switch (mode) {
     case core::PmDecompositionMode::kSlab:
       return "slab";
+    case core::PmDecompositionMode::kPencil:
+      return "pencil";
   }
   throw std::runtime_error("unhandled PM decomposition mode enum value");
 }
@@ -685,6 +687,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
     m_tree_pm_options.pm_options.enable_window_deconvolution =
         config.numerics.treepm_enable_window_deconvolution;
+    m_tree_pm_options.pm_options.decomposition_mode = config.numerics.treepm_pm_decomposition_mode;
 
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
@@ -696,7 +699,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
         config.parallel.mpi_ranks_expected,
         config.parallel.gpu_devices,
         cuda_runtime.runtime_available,
-        cuda_runtime.visible_device_count);
+        cuda_runtime.visible_device_count,
+        pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode));
     if (m_runtime_topology.usesCuda()) {
       core::setCudaDeviceOrThrow(m_runtime_topology.device_assignment.assigned_device_index);
       m_tree_pm_options.pm_options.execution_policy = core::ExecutionPolicy::kCuda;
@@ -1256,7 +1260,8 @@ void maybeWriteOutputs(
     restart_payload.distributed_gravity_state.pm_grid_nx = gravity_callback.pmGridShape().nx;
     restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridShape().ny;
     restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridShape().nz;
-    restart_payload.distributed_gravity_state.pm_decomposition_mode = "slab";
+    restart_payload.distributed_gravity_state.pm_decomposition_mode =
+        pmDecompositionModeName(m_config.numerics.treepm_pm_decomposition_mode);
     restart_payload.distributed_gravity_state.gravity_kick_opportunity = gravity_callback.gravityKickOpportunity();
     restart_payload.distributed_gravity_state.pm_update_cadence_steps =
         static_cast<std::uint64_t>(gravity_callback.pmCadenceSteps());

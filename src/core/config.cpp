@@ -304,9 +304,12 @@ template <typename T>
   if (lower == "slab") {
     return PmDecompositionMode::kSlab;
   }
+  if (lower == "pencil") {
+    return PmDecompositionMode::kPencil;
+  }
   throw ConfigError(
       "key 'numerics.treepm_pm_decomposition_mode': invalid value '" + value +
-      "' (supported: slab)");
+      "' (supported: slab, pencil)");
 }
 
 [[nodiscard]] CoordinateFrame parseCoordinateFrame(const std::string& value) {
@@ -453,6 +456,8 @@ template <typename T>
   switch (mode) {
     case PmDecompositionMode::kSlab:
       return "slab";
+    case PmDecompositionMode::kPencil:
+      return "pencil";
   }
   throw ConfigError("unhandled PmDecompositionMode enum value during serialization");
 }

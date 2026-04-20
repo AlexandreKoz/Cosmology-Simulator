@@ -15,7 +15,9 @@ Phase 1 remains the numerical baseline. A one-rank run through future distribute
 
 - PM mesh ownership is distributed by **x-slabs**.
 - For a global mesh with `N = numerics.treepm_pm_grid` and `R = world_size`, slab owner rank `r` owns a contiguous x-index interval `[x_begin_r, x_end_r)`.
-- Slab decomposition mode is configured by `numerics.treepm_pm_decomposition_mode` and currently only allows `slab`.
+- Decomposition mode is configured by `numerics.treepm_pm_decomposition_mode`:
+  - `slab` is the validated baseline path.
+  - `pencil` enables FFTW-MPI transposed spectral ownership (`TRANSPOSED_OUT/IN`) while retaining slab real-space ownership.
 - Empty slabs are allowed when `R > N`; ownership remains deterministic from rank order.
 
 ### 2) Particle owner vs slab owner

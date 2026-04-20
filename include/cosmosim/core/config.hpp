@@ -30,6 +30,7 @@ enum class TreePmAssignmentScheme {
 
 enum class PmDecompositionMode {
   kSlab,
+  kPencil,
 };
 
 enum class CoordinateFrame {

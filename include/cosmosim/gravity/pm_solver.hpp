@@ -46,6 +46,7 @@ struct PmSolveOptions {
   bool enable_window_deconvolution = false;
   core::ExecutionPolicy execution_policy = core::ExecutionPolicy::kHostSerial;
   PmDataResidencyPolicy data_residency = PmDataResidencyPolicy::kHostOnly;
+  core::PmDecompositionMode decomposition_mode = core::PmDecompositionMode::kSlab;
   // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
   double tree_pm_split_scale_comoving = 0.0;
 };
@@ -57,10 +58,12 @@ struct PmProfileEvent {
   double poisson_ms = 0.0;
   double gradient_ms = 0.0;
   double fft_inverse_ms = 0.0;
+  double fft_transpose_ms = 0.0;
   double interpolate_ms = 0.0;
   double transfer_h2d_ms = 0.0;
   double transfer_d2h_ms = 0.0;
   double device_kernel_ms = 0.0;
+  std::uint64_t fft_transpose_bytes = 0;
 };
 
 class PmProfiler {

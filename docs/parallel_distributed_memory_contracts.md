@@ -113,7 +113,9 @@ This enables explicit reproducibility checks in environment-independent pseudo-m
 
 ## 6) Remaining scope limits (post-Phase 2 closeout)
 
-- PM decomposition mode is currently `slab` only.
+- PM decomposition mode supports:
+  - `slab`: baseline x-slab distributed ownership,
+  - `pencil`: transposed FFT mode with explicit real-space x-slab ownership and intermediate y-owned transposed spectral ownership.
 - Restart continuation of PM long-range field values is policy-limited to `deterministic_rebuild`
   (metadata is serialized; cached field arrays are rebuilt after resume).
 - Descriptor-only ghost-plan builder still does not infer owned export rows from ghost-only local

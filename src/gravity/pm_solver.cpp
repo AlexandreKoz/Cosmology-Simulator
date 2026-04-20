@@ -193,10 +193,11 @@ class PmSolver::Impl {
     int world_rank = 0;
     std::size_t owned_begin_x = 0;
     std::size_t owned_end_x = 0;
+    core::PmDecompositionMode decomposition_mode = core::PmDecompositionMode::kSlab;
 
     [[nodiscard]] bool operator==(const PlanKey& other) const noexcept {
       return world_size == other.world_size && world_rank == other.world_rank && owned_begin_x == other.owned_begin_x &&
-          owned_end_x == other.owned_end_x;
+          owned_end_x == other.owned_end_x && decomposition_mode == other.decomposition_mode;
     }
   };
 
@@ -205,6 +206,7 @@ class PmSolver::Impl {
       std::size_t seed = static_cast<std::size_t>(key.world_size * 1315423911U + key.world_rank);
       seed ^= key.owned_begin_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
       seed ^= key.owned_end_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+      seed ^= static_cast<std::size_t>(key.decomposition_mode) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
       return seed;
     }
   };
@@ -218,10 +220,11 @@ class PmSolver::Impl {
 #if COSMOSIM_ENABLE_FFTW
     fftw_plan forward_plan = nullptr;
     fftw_plan inverse_plan = nullptr;
-#if COSMOSIM_ENABLE_MPI
+#endif
     bool is_distributed = false;
-#endif
-#endif
+    bool spectral_transposed = false;
+    std::size_t transposed_local_ny = 0;
+    std::size_t transposed_begin_y = 0;
   };
 
   struct DensityExchangeBuffers {
@@ -279,12 +282,13 @@ class PmSolver::Impl {
 #endif
   }
 
-  [[nodiscard]] PlanResources& planForLayout(const parallel::PmSlabLayout& layout) {
+  [[nodiscard]] PlanResources& planForLayout(const parallel::PmSlabLayout& layout, core::PmDecompositionMode decomposition_mode) {
     const PlanKey key{
         .world_size = layout.world_size,
         .world_rank = layout.world_rank,
         .owned_begin_x = layout.owned_x.begin_x,
         .owned_end_x = layout.owned_x.end_x,
+        .decomposition_mode = decomposition_mode,
     };
     auto it = m_plan_cache.find(key);
     if (it != m_plan_cache.end()) {
@@ -312,13 +316,28 @@ class PmSolver::Impl {
       fftw_mpi_init();
       ptrdiff_t backend_local_nx = 0;
       ptrdiff_t backend_begin_x = 0;
-      const ptrdiff_t backend_alloc_local = fftw_mpi_local_size_3d(
-          static_cast<ptrdiff_t>(m_shape.nx),
-          static_cast<ptrdiff_t>(m_shape.ny),
-          static_cast<ptrdiff_t>(nz_complex),
-          MPI_COMM_WORLD,
-          &backend_local_nx,
-          &backend_begin_x);
+      ptrdiff_t backend_alloc_local = 0;
+      ptrdiff_t backend_local_ny = 0;
+      ptrdiff_t backend_begin_y = 0;
+      if (decomposition_mode == core::PmDecompositionMode::kPencil) {
+        backend_alloc_local = fftw_mpi_local_size_3d_transposed(
+            static_cast<ptrdiff_t>(m_shape.nx),
+            static_cast<ptrdiff_t>(m_shape.ny),
+            static_cast<ptrdiff_t>(nz_complex),
+            MPI_COMM_WORLD,
+            &backend_local_nx,
+            &backend_begin_x,
+            &backend_local_ny,
+            &backend_begin_y);
+      } else {
+        backend_alloc_local = fftw_mpi_local_size_3d(
+            static_cast<ptrdiff_t>(m_shape.nx),
+            static_cast<ptrdiff_t>(m_shape.ny),
+            static_cast<ptrdiff_t>(nz_complex),
+            MPI_COMM_WORLD,
+            &backend_local_nx,
+            &backend_begin_x);
+      }
       if (backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx()) ||
           backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x)) {
         throw std::invalid_argument(
@@ -329,6 +348,11 @@ class PmSolver::Impl {
       }
       allocated_local_complex_size = static_cast<std::size_t>(backend_alloc_local);
       plan.is_distributed = true;
+      if (decomposition_mode == core::PmDecompositionMode::kPencil) {
+        plan.spectral_transposed = true;
+        plan.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
+        plan.transposed_begin_y = static_cast<std::size_t>(backend_begin_y);
+      }
     }
 #endif
     plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -346,7 +370,9 @@ class PmSolver::Impl {
           plan.real.data(),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           MPI_COMM_WORLD,
-          FFTW_MEASURE);
+          decomposition_mode == core::PmDecompositionMode::kPencil
+              ? (FFTW_MEASURE | FFTW_MPI_TRANSPOSED_OUT)
+              : FFTW_MEASURE);
       plan.inverse_plan = fftw_mpi_plan_dft_c2r_3d(
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
@@ -354,7 +380,9 @@ class PmSolver::Impl {
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           plan.real.data(),
           MPI_COMM_WORLD,
-          FFTW_MEASURE);
+          decomposition_mode == core::PmDecompositionMode::kPencil
+              ? (FFTW_MEASURE | FFTW_MPI_TRANSPOSED_IN)
+              : FFTW_MEASURE);
     } else
 #endif
     {
@@ -608,10 +636,12 @@ void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.poisson_ms += event.poisson_ms;
   m_totals.gradient_ms += event.gradient_ms;
   m_totals.fft_inverse_ms += event.fft_inverse_ms;
+  m_totals.fft_transpose_ms += event.fft_transpose_ms;
   m_totals.interpolate_ms += event.interpolate_ms;
   m_totals.transfer_h2d_ms += event.transfer_h2d_ms;
   m_totals.transfer_d2h_ms += event.transfer_d2h_ms;
   m_totals.device_kernel_ms += event.device_kernel_ms;
+  m_totals.fft_transpose_bytes += event.fft_transpose_bytes;
 }
 
 const PmProfileEvent& PmProfiler::totals() const {
@@ -942,7 +972,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     throw std::invalid_argument("PmSolver::solvePoissonPeriodic single-rank path requires full-domain slab ownership");
   }
 
-  auto& plan = m_impl->planForLayout(grid.slabLayout());
+  auto& plan = m_impl->planForLayout(grid.slabLayout(), options.decomposition_mode);
   auto real = m_impl->realGrid();
   auto fourier = m_impl->fourierGrid();
   auto potential_k = m_impl->potentialScratch();
@@ -962,10 +992,12 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     value -= mean_density;
   }
 
+  const double forward_fft_ms = m_impl->forwardFft();
   if (profile != nullptr) {
-    profile->fft_forward_ms += m_impl->forwardFft();
-  } else {
-    (void)m_impl->forwardFft();
+    profile->fft_forward_ms += forward_fft_ms;
+    if (plan.spectral_transposed) {
+      profile->fft_transpose_ms += forward_fft_ms;
+    }
   }
 
   const auto poisson_start = std::chrono::steady_clock::now();
@@ -977,18 +1009,16 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   const double dkz = 2.0 * k_pi / lengths.lz;
 
   const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
-  for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-    const std::size_t ix = global_x_begin + local_ix;
+  auto apply_poisson_stencil = [&](std::size_t ix, std::size_t iy, std::size_t base_index) {
     const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
                                                           : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
+    const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
+                                                          : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
     const double kx = dkx * static_cast<double>(nx_mode);
-    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-      const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
-      const double ky = dky * static_cast<double>(ny_mode);
-      for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+    const double ky = dky * static_cast<double>(ny_mode);
+    for (std::size_t iz = 0; iz < nz_complex; ++iz) {
         const double kz = dkz * static_cast<double>(iz);
-        const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
+        const std::size_t index = base_index + iz;
         const double k2 = kx * kx + ky * ky + kz * kz;
 
         // Discrete mode mapping for r2c layout:
@@ -1027,6 +1057,22 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
         }
 
         fourier[index] *= prefactor * window_correction * split_filter / k2;
+    }
+  };
+  if (plan.spectral_transposed) {
+    for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
+      const std::size_t iy = plan.transposed_begin_y + local_iy;
+      for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+        const std::size_t base = (local_iy * m_shape.nx + ix) * nz_complex;
+        apply_poisson_stencil(ix, iy, base);
+      }
+    }
+  } else {
+    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+      const std::size_t ix = global_x_begin + local_ix;
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        const std::size_t base = (local_ix * m_shape.ny + iy) * nz_complex;
+        apply_poisson_stencil(ix, iy, base);
       }
     }
   }
@@ -1038,7 +1084,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
 
-  auto inverse_into = [this, profile](std::span<const std::complex<double>> src, std::span<double> dst) {
+  auto inverse_into = [this, profile, &plan](std::span<const std::complex<double>> src, std::span<double> dst) {
     auto fourier_dst = m_impl->fourierGrid();
     std::copy(src.begin(), src.end(), fourier_dst.begin());
     const double fft_time = m_impl->inverseFft();
@@ -1053,6 +1099,9 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 #endif
     if (profile != nullptr) {
       profile->fft_inverse_ms += fft_time;
+      if (plan.spectral_transposed) {
+        profile->fft_transpose_ms += fft_time;
+      }
     }
   };
 
@@ -1060,20 +1109,40 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   inverse_into(potential_k, grid.potential());
 
   auto fill_gradient_k = [&](std::span<std::complex<double>> dst, int axis) {
-    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-      const std::size_t ix = global_x_begin + local_ix;
-      const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                            : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
-      const double kx = dkx * static_cast<double>(nx_mode);
-      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+    if (plan.spectral_transposed) {
+      for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
+        const std::size_t iy = plan.transposed_begin_y + local_iy;
         const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
                                                               : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
         const double ky = dky * static_cast<double>(ny_mode);
-        for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-          const double kz = dkz * static_cast<double>(iz);
-          const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
-          const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
-          dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
+        for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+          const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
+                                                                : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
+          const double kx = dkx * static_cast<double>(nx_mode);
+          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+            const double kz = dkz * static_cast<double>(iz);
+            const std::size_t index = (local_iy * m_shape.nx + ix) * nz_complex + iz;
+            const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
+            dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
+          }
+        }
+      }
+    } else {
+      for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+        const std::size_t ix = global_x_begin + local_ix;
+        const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
+                                                              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
+        const double kx = dkx * static_cast<double>(nx_mode);
+        for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+          const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
+                                                                : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
+          const double ky = dky * static_cast<double>(ny_mode);
+          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+            const double kz = dkz * static_cast<double>(iz);
+            const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
+            const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
+            dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
+          }
         }
       }
     }
@@ -1092,6 +1161,10 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
   if (profile != nullptr) {
     profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 6U;
+    if (plan.spectral_transposed) {
+      profile->fft_transpose_bytes +=
+          static_cast<std::uint64_t>(sizeof(std::complex<double>)) * static_cast<std::uint64_t>(fourier.size()) * 8ULL;
+    }
   }
 }
 

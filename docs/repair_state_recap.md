@@ -553,6 +553,29 @@ Interpretation:
 
 - Pseudo-multi-rank contract clarity and diagnosability improved for review/CI artifacts without adding new MPI features or claiming production multi-rank closure.
 
+## 14) Pencil PM end-to-end transposed path hardening
+
+_Date captured: 2026-04-20 (UTC)_
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_config_parser
+./build/cpu-only-debug/test_unit_config_parser
+```
+
+Observed:
+
+- `numerics.treepm_pm_decomposition_mode` has typed enum coverage for `slab` and `pencil`.
+- `pencil` now executes through explicit FFTW-MPI transposed plans (`TRANSPOSED_OUT/IN`) rather than a slab alias.
+- Real-space ownership remains slab for deposition/interpolation while spectral ownership is explicitly transposed by y-range in pencil mode.
+- Restart/runtime topology now carry decomposition mode metadata instead of forcing `"slab"`.
+
+Interpretation:
+
+- This patch closes the previous prompt-violation gap by providing an end-to-end non-aliased pencil PM mode with explicit transpose ownership semantics.
+
 ## 13) Parallel contract hardening follow-up (R07c)
 
 _Date captured: 2026-04-14 (UTC)_
