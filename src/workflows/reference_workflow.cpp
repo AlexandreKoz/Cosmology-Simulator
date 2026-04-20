@@ -688,6 +688,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_tree_pm_options.pm_options.enable_window_deconvolution =
         config.numerics.treepm_enable_window_deconvolution;
     m_tree_pm_options.pm_options.decomposition_mode = config.numerics.treepm_pm_decomposition_mode;
+    m_tree_pm_options.pm_options.boundary_condition = mode_policy.gravity_boundary ==
+            core::GravityBoundaryModel::kPeriodicPoisson
+        ? gravity::PmBoundaryCondition::kPeriodic
+        : gravity::PmBoundaryCondition::kIsolatedOpen;
+    if (m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kIsolatedOpen &&
+        config.parallel.mpi_ranks_expected != 1) {
+      throw std::runtime_error(
+          "isolated PM gravity currently requires parallel.mpi_ranks_expected=1");
+    }
 
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();

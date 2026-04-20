@@ -263,6 +263,10 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (options.tree_exchange_batch_bytes == 0) {
     throw std::invalid_argument("TreePM tree_exchange_batch_bytes must be > 0");
   }
+  if (options.pm_options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
+      m_grid.slabLayout().world_size > 1) {
+    throw std::invalid_argument("TreePM isolated PM path currently supports only single-rank execution");
+  }
 
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
@@ -280,7 +284,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         mass_code,
         pm_options,
         profile != nullptr ? &profile->pm_profile : nullptr);
-    m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+    if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+      m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+    } else {
+      m_pm_solver.solvePoissonIsolatedOpen(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+    }
     m_has_cached_long_range_field = true;
   }
   if (!m_has_cached_long_range_field) {
@@ -365,7 +373,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   const auto traversal_start = std::chrono::steady_clock::now();
   const TreeNodeSoa& nodes = m_tree_solver.nodes();
   const TreeMortonOrdering& ordering = m_tree_solver.ordering();
-  const double box_size_comoving = options.pm_options.box_size_mpc_comoving;
+  const double box_size_comoving = options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic
+      ? options.pm_options.box_size_mpc_comoving
+      : 0.0;
   const double cutoff_radius_comoving = options.split_policy.cutoff_radius_comoving;
   const double cutoff_radius2_comoving = cutoff_radius_comoving * cutoff_radius_comoving;
   std::vector<std::uint32_t> stack;

@@ -51,6 +51,10 @@ constexpr double k_pi = 3.141592653589793238462643383279502884;
   return wrapped < 0.0 ? wrapped + box_size : wrapped;
 }
 
+[[nodiscard]] bool positionInsideOpenDomain(double x, double box_size) {
+  return x >= 0.0 && x < box_size;
+}
+
 [[nodiscard]] double sinc(double x) {
   if (std::abs(x) < 1.0e-12) {
     return 1.0;
@@ -174,6 +178,10 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
     throw std::invalid_argument(
         "execution_policy=cuda currently requires cubic PM box lengths in this build");
   }
+  if (options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
+      options.enable_window_deconvolution) {
+    throw std::invalid_argument("isolated PM currently does not support window deconvolution");
+  }
 }
 
 void validateSingleRankFullDomainGridContract(const PmGridStorage& grid, std::string_view callsite) {
@@ -279,8 +287,106 @@ class PmSolver::Impl {
         fftw_destroy_plan(plan.inverse_plan);
       }
     }
+    if (m_isolated_workspace.forward_plan != nullptr) {
+      fftw_destroy_plan(m_isolated_workspace.forward_plan);
+    }
+    if (m_isolated_workspace.inverse_plan != nullptr) {
+      fftw_destroy_plan(m_isolated_workspace.inverse_plan);
+    }
 #endif
   }
+
+  struct IsolatedOpenWorkspace {
+    std::size_t nx = 0;
+    std::size_t ny = 0;
+    std::size_t nz = 0;
+    std::vector<std::complex<double>> rho_k;
+    std::vector<std::complex<double>> kernel_k;
+    std::vector<std::complex<double>> scratch;
+    std::vector<double> potential_real;
+    bool kernel_ready = false;
+    double dx = 0.0;
+    double dy = 0.0;
+    double dz = 0.0;
+    double split_scale = -1.0;
+#if COSMOSIM_ENABLE_FFTW
+    fftw_plan forward_plan = nullptr;
+    fftw_plan inverse_plan = nullptr;
+#endif
+  };
+
+  void ensureIsolatedWorkspace(std::size_t nx, std::size_t ny, std::size_t nz) {
+    const bool shape_changed = nx != m_isolated_workspace.nx || ny != m_isolated_workspace.ny || nz != m_isolated_workspace.nz;
+    if (!shape_changed) {
+      return;
+    }
+#if COSMOSIM_ENABLE_FFTW
+    if (m_isolated_workspace.forward_plan != nullptr) {
+      fftw_destroy_plan(m_isolated_workspace.forward_plan);
+      m_isolated_workspace.forward_plan = nullptr;
+    }
+    if (m_isolated_workspace.inverse_plan != nullptr) {
+      fftw_destroy_plan(m_isolated_workspace.inverse_plan);
+      m_isolated_workspace.inverse_plan = nullptr;
+    }
+#endif
+    m_isolated_workspace.nx = nx;
+    m_isolated_workspace.ny = ny;
+    m_isolated_workspace.nz = nz;
+    const std::size_t n_tot = nx * ny * nz;
+    m_isolated_workspace.rho_k.assign(n_tot, {0.0, 0.0});
+    m_isolated_workspace.kernel_k.assign(n_tot, {0.0, 0.0});
+    m_isolated_workspace.scratch.assign(n_tot, {0.0, 0.0});
+    m_isolated_workspace.potential_real.assign(n_tot, 0.0);
+    m_isolated_workspace.kernel_ready = false;
+    m_isolated_workspace.dx = 0.0;
+    m_isolated_workspace.dy = 0.0;
+    m_isolated_workspace.dz = 0.0;
+    m_isolated_workspace.split_scale = -1.0;
+#if COSMOSIM_ENABLE_FFTW
+    m_isolated_workspace.forward_plan = fftw_plan_dft_3d(
+        static_cast<int>(nx),
+        static_cast<int>(ny),
+        static_cast<int>(nz),
+        reinterpret_cast<fftw_complex*>(m_isolated_workspace.scratch.data()),
+        reinterpret_cast<fftw_complex*>(m_isolated_workspace.scratch.data()),
+        FFTW_FORWARD,
+        FFTW_ESTIMATE);
+    m_isolated_workspace.inverse_plan = fftw_plan_dft_3d(
+        static_cast<int>(nx),
+        static_cast<int>(ny),
+        static_cast<int>(nz),
+        reinterpret_cast<fftw_complex*>(m_isolated_workspace.scratch.data()),
+        reinterpret_cast<fftw_complex*>(m_isolated_workspace.scratch.data()),
+        FFTW_BACKWARD,
+        FFTW_ESTIMATE);
+    if (m_isolated_workspace.forward_plan == nullptr || m_isolated_workspace.inverse_plan == nullptr) {
+      throw std::runtime_error("failed to create isolated PM FFTW plans");
+    }
+#endif
+  }
+
+  void isolatedForward(std::span<std::complex<double>> field) {
+    std::copy(field.begin(), field.end(), m_isolated_workspace.scratch.begin());
+#if COSMOSIM_ENABLE_FFTW
+    fftw_execute(m_isolated_workspace.forward_plan);
+    std::copy(m_isolated_workspace.scratch.begin(), m_isolated_workspace.scratch.end(), field.begin());
+#else
+    naiveComplexDft(field, /*forward=*/true);
+#endif
+  }
+
+  void isolatedInverse(std::span<std::complex<double>> field) {
+    std::copy(field.begin(), field.end(), m_isolated_workspace.scratch.begin());
+#if COSMOSIM_ENABLE_FFTW
+    fftw_execute(m_isolated_workspace.inverse_plan);
+    std::copy(m_isolated_workspace.scratch.begin(), m_isolated_workspace.scratch.end(), field.begin());
+#else
+    naiveComplexDft(field, /*forward=*/false);
+#endif
+  }
+
+  [[nodiscard]] IsolatedOpenWorkspace& isolatedWorkspace() { return m_isolated_workspace; }
 
   [[nodiscard]] PlanResources& planForLayout(const parallel::PmSlabLayout& layout, core::PmDecompositionMode decomposition_mode) {
     const PlanKey key{
@@ -525,6 +631,42 @@ class PmSolver::Impl {
   }
 
 #if !COSMOSIM_ENABLE_FFTW
+  void naiveComplexDft(std::span<std::complex<double>> field, bool forward) {
+    const std::size_t nx = m_isolated_workspace.nx;
+    const std::size_t ny = m_isolated_workspace.ny;
+    const std::size_t nz = m_isolated_workspace.nz;
+    const std::size_t total = nx * ny * nz;
+    std::vector<std::complex<double>> out(total, {0.0, 0.0});
+    const double sign = forward ? -1.0 : 1.0;
+    for (std::size_t kx = 0; kx < nx; ++kx) {
+      for (std::size_t ky = 0; ky < ny; ++ky) {
+        for (std::size_t kz = 0; kz < nz; ++kz) {
+          std::complex<double> acc(0.0, 0.0);
+          for (std::size_t x = 0; x < nx; ++x) {
+            for (std::size_t y = 0; y < ny; ++y) {
+              for (std::size_t z = 0; z < nz; ++z) {
+                const double phase = sign * 2.0 * k_pi *
+                    (static_cast<double>(kx * x) / static_cast<double>(nx) +
+                     static_cast<double>(ky * y) / static_cast<double>(ny) +
+                     static_cast<double>(kz * z) / static_cast<double>(nz));
+                const std::complex<double> euler(std::cos(phase), std::sin(phase));
+                acc += field[(x * ny + y) * nz + z] * euler;
+              }
+            }
+          }
+          out[(kx * ny + ky) * nz + kz] = acc;
+        }
+      }
+    }
+    if (!forward) {
+      const double inv_total = 1.0 / static_cast<double>(total);
+      for (auto& v : out) {
+        v *= inv_total;
+      }
+    }
+    std::copy(out.begin(), out.end(), field.begin());
+  }
+
   void naiveForwardDft() {
     if (!activePlan().layout.ownsFullDomain()) {
       throw std::logic_error(
@@ -615,6 +757,7 @@ class PmSolver::Impl {
     int world_rank = 0;
     InterpolationExchangeBuffers<PmPotentialContributionRecord> buffers;
   } m_potential_exchange{};
+  IsolatedOpenWorkspace m_isolated_workspace{};
 };
 
 std::size_t PmGridShape::cellCount() const {
@@ -1165,6 +1308,162 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
       profile->fft_transpose_bytes +=
           static_cast<std::uint64_t>(sizeof(std::complex<double>)) * static_cast<std::uint64_t>(fourier.size()) * 8ULL;
     }
+  }
+}
+
+void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
+  validateOptions(m_shape, options);
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+    throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
+  }
+  if (!grid.slabLayout().isValid() || !grid.ownsFullDomain() || grid.slabLayout().world_size != 1) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen currently requires single-rank full-domain ownership");
+  }
+
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double dx = lengths.lx / static_cast<double>(m_shape.nx);
+  const double dy = lengths.ly / static_cast<double>(m_shape.ny);
+  const double dz = lengths.lz / static_cast<double>(m_shape.nz);
+  if (m_shape.nx < 3 || m_shape.ny < 3 || m_shape.nz < 3) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen requires nx,ny,nz >= 3 for one-sided boundary gradients");
+  }
+
+  const auto poisson_start = std::chrono::steady_clock::now();
+  const std::size_t pad_nx = 2U * m_shape.nx;
+  const std::size_t pad_ny = 2U * m_shape.ny;
+  const std::size_t pad_nz = 2U * m_shape.nz;
+  const std::size_t pad_total = pad_nx * pad_ny * pad_nz;
+  m_impl->ensureIsolatedWorkspace(pad_nx, pad_ny, pad_nz);
+  auto& ws = m_impl->isolatedWorkspace();
+
+  std::fill(ws.rho_k.begin(), ws.rho_k.end(), std::complex<double>(0.0, 0.0));
+  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        const std::size_t src = grid.linearIndex(ix, iy, iz);
+        const std::size_t dst = (ix * pad_ny + iy) * pad_nz + iz;
+        ws.rho_k[dst] = {grid.density()[src], 0.0};
+      }
+    }
+  }
+  m_impl->isolatedForward(ws.rho_k);
+
+  if (!ws.kernel_ready || ws.dx != dx || ws.dy != dy || ws.dz != dz ||
+      ws.split_scale != options.tree_pm_split_scale_comoving) {
+    ws.dx = dx;
+    ws.dy = dy;
+    ws.dz = dz;
+    ws.split_scale = options.tree_pm_split_scale_comoving;
+    std::fill(ws.kernel_k.begin(), ws.kernel_k.end(), std::complex<double>(0.0, 0.0));
+    for (std::size_t ix = 0; ix < pad_nx; ++ix) {
+      const std::ptrdiff_t sx = ix <= m_shape.nx
+          ? static_cast<std::ptrdiff_t>(ix)
+          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(pad_nx);
+      const double rx = static_cast<double>(sx) * dx;
+      for (std::size_t iy = 0; iy < pad_ny; ++iy) {
+        const std::ptrdiff_t sy = iy <= m_shape.ny
+            ? static_cast<std::ptrdiff_t>(iy)
+            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(pad_ny);
+        const double ry = static_cast<double>(sy) * dy;
+        for (std::size_t iz = 0; iz < pad_nz; ++iz) {
+          const std::ptrdiff_t sz = iz <= m_shape.nz
+              ? static_cast<std::ptrdiff_t>(iz)
+              : static_cast<std::ptrdiff_t>(iz) - static_cast<std::ptrdiff_t>(pad_nz);
+          const double rz = static_cast<double>(sz) * dz;
+          const double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+          double kernel = 0.0;  // self term policy: zero self-contribution at r=0.
+          if (r > 0.0) {
+            kernel = -1.0 / r;
+            if (options.tree_pm_split_scale_comoving > 0.0) {
+              kernel = -std::erf(0.5 * r / options.tree_pm_split_scale_comoving) / r;
+            }
+          }
+          ws.kernel_k[(ix * pad_ny + iy) * pad_nz + iz] = {kernel, 0.0};
+        }
+      }
+    }
+    m_impl->isolatedForward(ws.kernel_k);
+    ws.kernel_ready = true;
+  }
+
+  for (std::size_t i = 0; i < pad_total; ++i) {
+    ws.rho_k[i] *= ws.kernel_k[i];
+  }
+  m_impl->isolatedInverse(ws.rho_k);
+
+  const double cell_volume = dx * dy * dz;
+  const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
+  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        const std::size_t physical_index = grid.linearIndex(ix, iy, iz);
+        const std::size_t padded_index = (ix * pad_ny + iy) * pad_nz + iz;
+        double value = ws.rho_k[padded_index].real();
+#if COSMOSIM_ENABLE_FFTW
+        value /= static_cast<double>(pad_total);
+#endif
+        grid.potential()[physical_index] = prefactor * value;
+      }
+    }
+  }
+
+  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        const std::size_t center = grid.linearIndex(ix, iy, iz);
+        const auto grad_x = [&]() {
+          if (ix == 0) {
+            return (-3.0 * grid.potential()[grid.linearIndex(0, iy, iz)] +
+                    4.0 * grid.potential()[grid.linearIndex(1, iy, iz)] -
+                    grid.potential()[grid.linearIndex(2, iy, iz)]) / (2.0 * dx);
+          }
+          if (ix + 1U == m_shape.nx) {
+            return (3.0 * grid.potential()[grid.linearIndex(m_shape.nx - 1U, iy, iz)] -
+                    4.0 * grid.potential()[grid.linearIndex(m_shape.nx - 2U, iy, iz)] +
+                    grid.potential()[grid.linearIndex(m_shape.nx - 3U, iy, iz)]) / (2.0 * dx);
+          }
+          return (grid.potential()[grid.linearIndex(ix + 1U, iy, iz)] -
+                  grid.potential()[grid.linearIndex(ix - 1U, iy, iz)]) / (2.0 * dx);
+        }();
+        const auto grad_y = [&]() {
+          if (iy == 0) {
+            return (-3.0 * grid.potential()[grid.linearIndex(ix, 0, iz)] +
+                    4.0 * grid.potential()[grid.linearIndex(ix, 1, iz)] -
+                    grid.potential()[grid.linearIndex(ix, 2, iz)]) / (2.0 * dy);
+          }
+          if (iy + 1U == m_shape.ny) {
+            return (3.0 * grid.potential()[grid.linearIndex(ix, m_shape.ny - 1U, iz)] -
+                    4.0 * grid.potential()[grid.linearIndex(ix, m_shape.ny - 2U, iz)] +
+                    grid.potential()[grid.linearIndex(ix, m_shape.ny - 3U, iz)]) / (2.0 * dy);
+          }
+          return (grid.potential()[grid.linearIndex(ix, iy + 1U, iz)] -
+                  grid.potential()[grid.linearIndex(ix, iy - 1U, iz)]) / (2.0 * dy);
+        }();
+        const auto grad_z = [&]() {
+          if (iz == 0) {
+            return (-3.0 * grid.potential()[grid.linearIndex(ix, iy, 0)] +
+                    4.0 * grid.potential()[grid.linearIndex(ix, iy, 1)] -
+                    grid.potential()[grid.linearIndex(ix, iy, 2)]) / (2.0 * dz);
+          }
+          if (iz + 1U == m_shape.nz) {
+            return (3.0 * grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 1U)] -
+                    4.0 * grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 2U)] +
+                    grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 3U)]) / (2.0 * dz);
+          }
+          return (grid.potential()[grid.linearIndex(ix, iy, iz + 1U)] -
+                  grid.potential()[grid.linearIndex(ix, iy, iz - 1U)]) / (2.0 * dz);
+        }();
+        grid.force_x()[center] = -grad_x;
+        grid.force_y()[center] = -grad_y;
+        grid.force_z()[center] = -grad_z;
+      }
+    }
+  }
+
+  if (profile != nullptr) {
+    const auto stop = std::chrono::steady_clock::now();
+    profile->poisson_ms += std::chrono::duration<double, std::milli>(stop - poisson_start).count();
+    profile->gradient_ms += 0.0;
   }
 }
 
@@ -1861,7 +2160,11 @@ void PmSolver::solveForParticles(
   }
 
   assignDensity(grid, pos_x, pos_y, pos_z, mass, options, profile);
-  solvePoissonPeriodic(grid, options, profile);
+  if (options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+    solvePoissonPeriodic(grid, options, profile);
+  } else {
+    solvePoissonIsolatedOpen(grid, options, profile);
+  }
   interpolateForces(grid, pos_x, pos_y, pos_z, accel_x, accel_y, accel_z, options, profile);
 }
 

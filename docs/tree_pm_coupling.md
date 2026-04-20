@@ -103,3 +103,13 @@ Ordering is deterministic by rank order and batch-local request order.
 ## Distributed source ownership note
 
 In multi-rank TreePM, the short-range tree is intended to be built from **rank-owned source particles only**. Active targets may be a strict owned subset of that local source set, and export/import validation should compare gathered owner-local results against a single-rank reference rather than relying on replicated full-state digests.
+
+
+### Boundary-condition coupling
+
+`TreePmCoordinator` now branches by `PmSolveOptions::boundary_condition`:
+- `kPeriodic`: periodic FFT PM long-range + periodic minimum-image short-range residual.
+- `kIsolatedOpen`: open-boundary doubled-domain free-space PM convolution + non-periodic short-range residual (minimum-image disabled).
+
+Unsupported combinations fail fast:
+- isolated/open PM with `world_size > 1` throws.

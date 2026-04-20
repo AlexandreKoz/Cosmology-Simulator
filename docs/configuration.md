@@ -72,6 +72,7 @@ The concrete run directory is:
 - `zoom_region_file` (required when `zoom_high_res_region=true`)
 - `hydro_boundary` (`auto`, `periodic`, `open`, `reflective`)
 - `gravity_boundary` (`auto`, `periodic`, `isolated_monopole`)
+  - `isolated_monopole` now activates non-periodic/open PM long-range gravity; current implementation requires `parallel.mpi_ranks_expected = 1` and fails fast otherwise.
 
 ## `[cosmology]`
 
