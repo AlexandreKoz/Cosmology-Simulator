@@ -44,9 +44,9 @@ For real-to-complex (`r2c`) storage with mesh `(Nx, Ny, Nz)`, the reduced-comple
 
 Mode mapping used by the solver:
 
-- `kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)`
-- `ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)`
-- `kz(iz) = 2π/L * iz`, `iz ∈ [0, Nz/2]`
+- `kx(ix) = 2π/Lx * (ix <= Nx/2 ? ix : ix - Nx)`
+- `ky(iy) = 2π/Ly * (iy <= Ny/2 ? iy : iy - Ny)`
+- `kz(iz) = 2π/Lz * iz`, `iz ∈ [0, Nz/2]`
 
 The negative `kz` branch is represented by Hermitian conjugates and is not explicitly stored.
 
@@ -74,14 +74,15 @@ Matched deposition + gather is a hard contract for both schemes in this stage.
 
 ## Assignment/gather kernels (Phase 1)
 
-Let `u = x / Δ` be the particle coordinate in mesh-cell units (per axis).
+Let `u_i = x_i / Δi` be the particle coordinate in mesh-cell units on axis `i`, where
+`Δx = Lx/Nx`, `Δy = Ly/Ny`, `Δz = Lz/Nz`.
 
 - **CIC** (first-order B-spline):
   - support: 2 cells per axis
   - weights around `i = floor(u)`:
     - `w_i = 1 - (u - floor(u))`
     - `w_{i+1} = u - floor(u)`
-  - Fourier window per axis: `W_CIC(k_i) = sinc(k_i Δ / 2)^2`
+  - Fourier window per axis: `W_CIC(k_i) = sinc(k_i Δi / 2)^2`
 
 - **TSC** (second-order B-spline):
   - support: 3 cells per axis
@@ -89,7 +90,7 @@ Let `u = x / Δ` be the particle coordinate in mesh-cell units (per axis).
     - `w_{j-1} = 0.5 * (0.5 - δ)^2`
     - `w_j = 0.75 - δ^2`
     - `w_{j+1} = 0.5 * (0.5 + δ)^2`
-  - Fourier window per axis: `W_TSC(k_i) = sinc(k_i Δ / 2)^3`
+  - Fourier window per axis: `W_TSC(k_i) = sinc(k_i Δi / 2)^3`
 
 ## Memory and scratch behavior
 
@@ -126,9 +127,9 @@ For this phase, FFT spectral storage is treated as **non-transposed slab output*
 - local spectral index: `(local_ix, iy, iz)` with flat index `(local_ix * Ny + iy) * (Nz/2+1) + iz`;
 - global mode index: `ix = owned_x.begin + local_ix`, `iy`, `iz`;
 - mode mapping remains:
-  - `kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)`
-  - `ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)`
-  - `kz(iz) = 2π/L * iz`.
+  - `kx(ix) = 2π/Lx * (ix <= Nx/2 ? ix : ix - Nx)`
+  - `ky(iy) = 2π/Ly * (iy <= Ny/2 ? iy : iy - Ny)`
+  - `kz(iz) = 2π/Lz * iz`.
 
 Distributed density assignment is now enabled for slab layouts in `PmSolver::assignDensity`
 when MPI is enabled (`COSMOSIM_ENABLE_MPI=ON`) and slab metadata matches
@@ -234,7 +235,7 @@ Operational metadata records which PM field version each kick used, including th
 - `tree_pm_split_scale_comoving > 0` applies TreePM long-range Gaussian filter in k-space.
   - In the reference workflow and TreePM coordinator contract, this value is not an independent UX knob;
     it is derived from normalized config controls as `r_s = asmth_cells * Δmesh`.
-  - `Δmesh = box_size / PMGRID` (Phase-1 cubic PM UX).
+  - `Δmesh = cbrt((Lx/Nx)*(Ly/Ny)*(Lz/Nz))` in this stage.
   - Companion TreePM cutoff uses `r_cut = rcut_cells * Δmesh` on the residual tree path.
 
 These modifiers do not alter the base sign/normalization contract above.

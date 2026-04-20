@@ -32,17 +32,20 @@ The runner honors these config fields directly:
 - `output.restart_stem`
 - `output.snapshot_interval_steps`
 - `output.write_restarts`
-- `numerics.treepm_pm_grid`
+- `numerics.treepm_pm_grid_nx`
+- `numerics.treepm_pm_grid_ny`
+- `numerics.treepm_pm_grid_nz`
 - `numerics.treepm_asmth_cells`
 - `numerics.treepm_rcut_cells`
 - `numerics.treepm_assignment_scheme`
 - `numerics.treepm_enable_window_deconvolution`
 - `numerics.treepm_update_cadence_steps` (authoritative PM long-range refresh cadence in gravity kick opportunities; integer `>= 1`)
 
-TreePM Phase-1 runtime mapping is explicit and auditable:
+TreePM runtime mapping is explicit and auditable:
 
-- `PmGridShape{N,N,N}` uses `N = numerics.treepm_pm_grid`
-- `Δmesh = box_size / N`
+- `PmGridShape{Nx,Ny,Nz}` uses `numerics.treepm_pm_grid_nx/ny/nz`
+- `Δx = box_size_x / Nx`, `Δy = box_size_y / Ny`, `Δz = box_size_z / Nz`
+- split-spacing scalar used for current TreePM split policy is `Δmesh = cbrt(Δx*Δy*Δz)`
 - `r_s = treepm_asmth_cells * Δmesh`
 - `r_cut = treepm_rcut_cells * Δmesh`
 - Assignment/deconvolution are wired from typed config, not hidden workflow constants
@@ -106,7 +109,7 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 
 `ReferenceWorkflowReport` includes PM cadence observability fields:
 
-- `treepm_pm_grid`
+- `treepm_pm_grid` (legacy report field: currently mirrors `treepm_pm_grid_nx` for compatibility)
 - `treepm_update_cadence_steps`
 - `treepm_long_range_refresh_count`
 - `treepm_long_range_reuse_count`

@@ -77,7 +77,10 @@ The concrete run directory is:
 
 - `omega_matter`, `omega_lambda`, `omega_baryon`
 - `hubble_param`, `sigma8`, `scalar_index_ns`
-- `box_size` / `box_size_mpc_comoving`
+- canonical axis-aware box lengths:
+  - `box_size_x`, `box_size_y`, `box_size_z` (recommended; normalized output always emits these keys)
+- backward-compatible scalar input:
+  - `box_size` / `box_size_mpc_comoving` (legacy alias; when provided alone it maps to `box_size_x=y=z`)
 
 ## `[numerics]`
 
@@ -86,7 +89,10 @@ The concrete run directory is:
 - `gravity_softening` / `gravity_softening_kpc_comoving`
 - `gravity_solver`, `hydro_solver`
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):
-  - `treepm_pm_grid` (int, default `16`; Phase 1 cubic PM mesh side length, so `PmGridShape{N,N,N}`)
+  - canonical axis-aware PM grid:
+    - `treepm_pm_grid_nx`, `treepm_pm_grid_ny`, `treepm_pm_grid_nz` (normalized output always emits these keys)
+  - backward-compatible scalar input:
+    - `treepm_pm_grid` (legacy alias; when provided alone it maps to `treepm_pm_grid_nx=ny=nz`)
   - `treepm_asmth_cells` (float, default `1.25`; split scale in mesh-cell units)
   - `treepm_rcut_cells` (float, default `4.5`; user-facing short-range cutoff control in mesh-cell units; this now drives explicit residual-traversal pruning in the TreePM coupling path)
   - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
@@ -97,7 +103,11 @@ The concrete run directory is:
 
 TreePM split/cutoff semantics in this phase:
 
-- `Δmesh = cosmology.box_size / numerics.treepm_pm_grid`
+- `Δx = cosmology.box_size_x / numerics.treepm_pm_grid_nx`
+- `Δy = cosmology.box_size_y / numerics.treepm_pm_grid_ny`
+- `Δz = cosmology.box_size_z / numerics.treepm_pm_grid_nz`
+- representative split spacing for TreePM scalar split controls remains
+  `Δmesh = cbrt(Δx * Δy * Δz)` in this phase (pencil/isotropic split redesign deferred)
 - `r_s = numerics.treepm_asmth_cells * Δmesh`
 - `r_cut = numerics.treepm_rcut_cells * Δmesh`
 
@@ -115,6 +125,15 @@ Normalization emits the dimensionless controls exactly as provided and these are
 
 `treepm_enable_window_deconvolution=true` deconvolves the matched deposit/gather transfer window for the selected scheme with a safety floor in k-space (disabled by default).
 `treepm_pm_decomposition_mode` and `treepm_tree_exchange_batch_bytes` freeze the distributed TreePM contract surface for Phase 2 infrastructure work; they do not by themselves imply that distributed PM/tree algorithms are already implemented.
+
+## Migration notes (axis-aware TreePM geometry)
+
+- Existing scalar configs remain valid:
+  - `cosmology.box_size = L` maps to `box_size_x=box_size_y=box_size_z=L`.
+  - `numerics.treepm_pm_grid = N` maps to `treepm_pm_grid_nx=ny=nz=N`.
+- Mixed partial axis input is rejected:
+  - either provide all three axis keys or provide the scalar compatibility key.
+- Normalized config dumps now always emit canonical axis-aware keys (`box_size_{x,y,z}`, `treepm_pm_grid_n{xyz}`).
 
 ## `[physics]`
 

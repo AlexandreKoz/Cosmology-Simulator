@@ -86,6 +86,10 @@ struct CosmologyConfig {
   double hubble_param = 0.674;
   double sigma8 = 0.811;
   double scalar_index_ns = 0.965;
+  double box_size_x_mpc_comoving = 50.0;
+  double box_size_y_mpc_comoving = 50.0;
+  double box_size_z_mpc_comoving = 50.0;
+  // Legacy scalar compatibility lane; canonical runtime geometry must use axis-aware fields above.
   double box_size_mpc_comoving = 50.0;
 };
 
@@ -98,6 +102,10 @@ struct NumericsConfig {
   double gravity_softening_kpc_comoving = 1.0;
   GravitySolver gravity_solver = GravitySolver::kTreePm;
   HydroSolver hydro_solver = HydroSolver::kGodunovFv;
+  int treepm_pm_grid_nx = 16;
+  int treepm_pm_grid_ny = 16;
+  int treepm_pm_grid_nz = 16;
+  // Legacy scalar compatibility lane; canonical runtime geometry must use axis-aware fields above.
   int treepm_pm_grid = 16;
   double treepm_asmth_cells = 1.25;
   double treepm_rcut_cells = 4.5;

@@ -69,18 +69,16 @@ constexpr std::size_t k_default_generated_particle_axis = 6;
 
 gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
     const core::SimulationConfig& config,
-    std::size_t pm_grid_size) {
+    const gravity::PmGridShape& pm_grid_shape) {
   parallel::MpiContext mpi_context;
   mpi_context.validateExpectedWorldSizeOrThrow(config.parallel.mpi_ranks_expected);
   const auto layout = parallel::makePmSlabLayout(
-      pm_grid_size,
-      pm_grid_size,
-      pm_grid_size,
+      pm_grid_shape.nx,
+      pm_grid_shape.ny,
+      pm_grid_shape.nz,
       mpi_context.worldSize(),
       mpi_context.worldRank());
-  return gravity::TreePmCoordinator(
-      gravity::PmGridShape{pm_grid_size, pm_grid_size, pm_grid_size},
-      layout);
+  return gravity::TreePmCoordinator(pm_grid_shape, layout);
 }
 
 [[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
@@ -293,11 +291,11 @@ void applyInitialGravityAwareDecomposition(
   parallel::DecompositionConfig decomposition_config;
   decomposition_config.world_size = world_size;
   decomposition_config.domain_x_min_comov = 0.0;
-  decomposition_config.domain_x_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.domain_x_max_comov = config.cosmology.box_size_x_mpc_comoving;
   decomposition_config.domain_y_min_comov = 0.0;
-  decomposition_config.domain_y_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.domain_y_max_comov = config.cosmology.box_size_y_mpc_comoving;
   decomposition_config.domain_z_min_comov = 0.0;
-  decomposition_config.domain_z_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
   decomposition_config.owned_particle_weight = 1.0;
   decomposition_config.active_target_weight = 4.0;
   decomposition_config.remote_tree_interaction_weight = 0.0;
@@ -327,24 +325,24 @@ void applyInitialGravityAwareDecomposition(
 
 void seedParticleOwnershipFromPmSlabs(
     core::SimulationState& state,
-    std::size_t pm_grid_size,
+    std::size_t pm_grid_nx,
     int world_size,
-    double box_size_mpc_comoving) {
-  if (pm_grid_size == 0) {
-    throw std::invalid_argument("seedParticleOwnershipFromPmSlabs requires pm_grid_size > 0");
+    double box_size_x_mpc_comoving) {
+  if (pm_grid_nx == 0) {
+    throw std::invalid_argument("seedParticleOwnershipFromPmSlabs requires pm_grid_nx > 0");
   }
   if (world_size <= 0) {
     throw std::invalid_argument("seedParticleOwnershipFromPmSlabs requires world_size > 0");
   }
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const double wrapped_x = wrapPeriodicPosition(state.particles.position_x_comoving[i], box_size_mpc_comoving);
+    const double wrapped_x = wrapPeriodicPosition(state.particles.position_x_comoving[i], box_size_x_mpc_comoving);
     std::size_t global_x = 0;
-    if (box_size_mpc_comoving > 0.0) {
-      const double scaled = (wrapped_x / box_size_mpc_comoving) * static_cast<double>(pm_grid_size);
-      global_x = std::min(pm_grid_size - 1U, static_cast<std::size_t>(scaled));
+    if (box_size_x_mpc_comoving > 0.0) {
+      const double scaled = (wrapped_x / box_size_x_mpc_comoving) * static_cast<double>(pm_grid_nx);
+      global_x = std::min(pm_grid_nx - 1U, static_cast<std::size_t>(scaled));
     }
     state.particle_sidecar.owning_rank[i] = static_cast<std::uint32_t>(
-        parallel::pmOwnerRankForGlobalX(pm_grid_size, world_size, global_x));
+        parallel::pmOwnerRankForGlobalX(pm_grid_nx, world_size, global_x));
   }
 }
 
@@ -353,13 +351,18 @@ void seedParticleOwnershipFromPmSlabs(
     const core::SimulationConfig& config) {
   core::ProvenanceRecord record = core::makeProvenanceRecord(
       frozen_config.provenance.config_hash_hex, frozen_config.provenance.source_name);
-  const double mesh_spacing_mpc_comoving =
-      config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid);
+  const double dx = config.cosmology.box_size_x_mpc_comoving /
+      static_cast<double>(config.numerics.treepm_pm_grid_nx);
+  const double dy = config.cosmology.box_size_y_mpc_comoving /
+      static_cast<double>(config.numerics.treepm_pm_grid_ny);
+  const double dz = config.cosmology.box_size_z_mpc_comoving /
+      static_cast<double>(config.numerics.treepm_pm_grid_nz);
+  const double mesh_spacing_mpc_comoving = std::cbrt(dx * dy * dz);
   const gravity::TreePmSplitPolicy split_policy = gravity::makeTreePmSplitPolicyFromMeshSpacing(
       config.numerics.treepm_asmth_cells,
       config.numerics.treepm_rcut_cells,
       mesh_spacing_mpc_comoving);
-  record.gravity_treepm_pm_grid = config.numerics.treepm_pm_grid;
+  record.gravity_treepm_pm_grid = config.numerics.treepm_pm_grid_nx;
   record.gravity_treepm_assignment_scheme =
       treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
   record.gravity_treepm_window_deconvolution =
@@ -658,13 +661,24 @@ class GravityStageCallback final : public core::IntegrationCallback {
       : m_config(config),
         m_mode_policy(mode_policy),
         m_pm_update_cadence_steps(static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps)),
-        m_pm_grid_size(static_cast<std::size_t>(config.numerics.treepm_pm_grid)),
-        m_mesh_spacing_mpc_comoving(config.cosmology.box_size_mpc_comoving / static_cast<double>(m_pm_grid_size)),
-        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_size)) {
-    if (m_pm_grid_size == 0) {
-      throw std::runtime_error("numerics.treepm_pm_grid must be > 0");
+        m_pm_grid_shape(gravity::PmGridShape{
+            static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
+            static_cast<std::size_t>(config.numerics.treepm_pm_grid_ny),
+            static_cast<std::size_t>(config.numerics.treepm_pm_grid_nz)}),
+        m_mesh_spacing_x_mpc_comoving(
+            config.cosmology.box_size_x_mpc_comoving / static_cast<double>(m_pm_grid_shape.nx)),
+        m_mesh_spacing_y_mpc_comoving(
+            config.cosmology.box_size_y_mpc_comoving / static_cast<double>(m_pm_grid_shape.ny)),
+        m_mesh_spacing_z_mpc_comoving(
+            config.cosmology.box_size_z_mpc_comoving / static_cast<double>(m_pm_grid_shape.nz)),
+        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_shape)) {
+    if (!m_pm_grid_shape.isValid()) {
+      throw std::runtime_error("numerics.treepm_pm_grid_n{xyz} must all be > 0");
     }
-    m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_mpc_comoving;
+    m_tree_pm_options.pm_options.box_size_x_mpc_comoving = config.cosmology.box_size_x_mpc_comoving;
+    m_tree_pm_options.pm_options.box_size_y_mpc_comoving = config.cosmology.box_size_y_mpc_comoving;
+    m_tree_pm_options.pm_options.box_size_z_mpc_comoving = config.cosmology.box_size_z_mpc_comoving;
+    m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_x_mpc_comoving;
     m_tree_pm_options.pm_options.scale_factor = 1.0;
     m_tree_pm_options.pm_options.gravitational_constant_code = 1.0;
     m_tree_pm_options.pm_options.assignment_scheme =
@@ -675,9 +689,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
     m_runtime_topology = parallel::buildDistributedExecutionTopology(
-        m_pm_grid_size,
-        m_pm_grid_size,
-        m_pm_grid_size,
+        m_pm_grid_shape.nx,
+        m_pm_grid_shape.ny,
+        m_pm_grid_shape.nz,
         mpi_context,
         config.parallel.mpi_ranks_expected,
         config.parallel.gpu_devices,
@@ -697,7 +711,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_tree_pm_options.split_policy = gravity::makeTreePmSplitPolicyFromMeshSpacing(
         config.numerics.treepm_asmth_cells,
         config.numerics.treepm_rcut_cells,
-        m_mesh_spacing_mpc_comoving);
+        std::cbrt(
+            m_mesh_spacing_x_mpc_comoving * m_mesh_spacing_y_mpc_comoving *
+            m_mesh_spacing_z_mpc_comoving));
     m_tree_pm_options.tree_exchange_batch_bytes = config.numerics.treepm_tree_exchange_batch_bytes;
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
     m_pm_backend = gravity::PmSolver::fftBackendName();
@@ -707,7 +723,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
-  [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_size; }
+  [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_shape.nx; }
+  [[nodiscard]] const gravity::PmGridShape& pmGridShape() const noexcept { return m_pm_grid_shape; }
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
   [[nodiscard]] std::uint64_t longRangeReuseCount() const noexcept { return m_long_range_reuse_count; }
   [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_update_cadence_steps); }
@@ -849,12 +866,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"field_built_step_index", std::to_string(m_last_long_range_refresh_step_index)},
                       {"field_built_scale_factor", std::to_string(m_last_long_range_refresh_scale_factor)},
                       {"pm_update_cadence_steps", std::to_string(m_pm_update_cadence_steps)},
-                      {"pm_grid", std::to_string(m_pm_grid_size)},
+                      {"pm_grid", std::to_string(m_pm_grid_shape.nx) + "x" + std::to_string(m_pm_grid_shape.ny) +
+                              "x" + std::to_string(m_pm_grid_shape.nz)},
                       {"pm_assignment_scheme", m_pm_assignment_scheme},
                       {"pm_window_deconvolution", m_config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
                       {"asmth_cells", std::to_string(m_config.numerics.treepm_asmth_cells)},
                       {"rcut_cells", std::to_string(m_config.numerics.treepm_rcut_cells)},
-                      {"mesh_spacing_mpc_comoving", std::to_string(m_mesh_spacing_mpc_comoving)},
+                      {"mesh_spacing_x_mpc_comoving", std::to_string(m_mesh_spacing_x_mpc_comoving)},
+                      {"mesh_spacing_y_mpc_comoving", std::to_string(m_mesh_spacing_y_mpc_comoving)},
+                      {"mesh_spacing_z_mpc_comoving", std::to_string(m_mesh_spacing_z_mpc_comoving)},
                       {"split_scale_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.split_scale_comoving)},
                       {"cutoff_radius_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
                       {"softening_policy", "comoving_fixed"},
@@ -929,8 +949,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   const core::ModePolicy& m_mode_policy;
   parallel::DistributedExecutionTopology m_runtime_topology{};
   std::uint64_t m_pm_update_cadence_steps = 1;
-  std::size_t m_pm_grid_size = 0;
-  double m_mesh_spacing_mpc_comoving = 0.0;
+  gravity::PmGridShape m_pm_grid_shape{};
+  double m_mesh_spacing_x_mpc_comoving = 0.0;
+  double m_mesh_spacing_y_mpc_comoving = 0.0;
+  double m_mesh_spacing_z_mpc_comoving = 0.0;
   std::string m_pm_assignment_scheme = "unknown";
   std::string m_pm_backend = "unknown";
   gravity::TreePmCoordinator m_tree_pm_coordinator;
@@ -1077,7 +1099,13 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     m_cached_cell_count = cell_count;
     m_geometry = {};
-    m_geometry.cell_volume_comoving = std::max(1.0, m_config.cosmology.box_size_mpc_comoving / std::max<std::size_t>(cell_count, 1));
+    const double box_volume_comoving =
+        m_config.cosmology.box_size_x_mpc_comoving *
+        m_config.cosmology.box_size_y_mpc_comoving *
+        m_config.cosmology.box_size_z_mpc_comoving;
+    m_geometry.cell_volume_comoving = std::max(
+        1.0,
+        box_volume_comoving / static_cast<double>(std::max<std::size_t>(cell_count, 1)));
     m_geometry.faces.clear();
     if (cell_count == 0) {
       return;
@@ -1124,7 +1152,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
       }
     }
 
-    const double dx = std::max(1.0e-6, m_config.cosmology.box_size_mpc_comoving / std::max<std::size_t>(cell_count, 1));
+    const double dx = std::max(
+        1.0e-6,
+        m_config.cosmology.box_size_x_mpc_comoving / static_cast<double>(std::max<std::size_t>(cell_count, 1)));
     m_reconstruction = hydro::MusclHancockReconstruction(hydro::HydroReconstructionPolicy{
         .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
         .dt_over_dx_code = dt_time_code / dx,
@@ -1223,9 +1253,9 @@ void maybeWriteOutputs(
     restart_payload.distributed_gravity_state.schema_version = 2;
     restart_payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;
     restart_payload.distributed_gravity_state.world_size = gravity_callback.runtimeTopology().world_size;
-    restart_payload.distributed_gravity_state.pm_grid_nx = gravity_callback.pmGridSize();
-    restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridSize();
-    restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridSize();
+    restart_payload.distributed_gravity_state.pm_grid_nx = gravity_callback.pmGridShape().nx;
+    restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridShape().ny;
+    restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridShape().nz;
     restart_payload.distributed_gravity_state.pm_decomposition_mode = "slab";
     restart_payload.distributed_gravity_state.gravity_kick_opportunity = gravity_callback.gravityKickOpportunity();
     restart_payload.distributed_gravity_state.pm_update_cadence_steps =
@@ -1248,7 +1278,7 @@ void maybeWriteOutputs(
     restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank.resize(world_size, 0);
     for (std::size_t rank = 0; rank < world_size; ++rank) {
       const parallel::PmSlabRange range = parallel::pmOwnedXRangeForRank(
-          gravity_callback.pmGridSize(),
+          gravity_callback.pmGridShape().nx,
           static_cast<int>(world_size),
           static_cast<int>(rank));
       restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank[rank] = range.begin_x;
@@ -1383,9 +1413,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.world_rank = mpi_context.worldRank();
     seedParticleOwnershipFromPmSlabs(
         state,
-        static_cast<std::size_t>(config.numerics.treepm_pm_grid),
+        static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
         mpi_context.worldSize(),
-        config.cosmology.box_size_mpc_comoving);
+        config.cosmology.box_size_x_mpc_comoving);
     applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank());
 
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
@@ -1460,14 +1490,24 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .scale_factor = integrator_state.current_scale_factor,
         .message = "TreePM runtime configuration initialized",
         .payload = {
-            {"pm_grid", std::to_string(config.numerics.treepm_pm_grid)},
+            {"pm_grid", std::to_string(config.numerics.treepm_pm_grid_nx) + "x" +
+                    std::to_string(config.numerics.treepm_pm_grid_ny) + "x" +
+                    std::to_string(config.numerics.treepm_pm_grid_nz)},
             {"pm_assignment_scheme", treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme)},
             {"pm_window_deconvolution", config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
             {"asmth_cells", std::to_string(config.numerics.treepm_asmth_cells)},
             {"rcut_cells", std::to_string(config.numerics.treepm_rcut_cells)},
-            {"mesh_spacing_mpc_comoving", std::to_string(config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid))},
-            {"split_scale_mpc_comoving", std::to_string(config.numerics.treepm_asmth_cells * (config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid)))},
-            {"cutoff_radius_mpc_comoving", std::to_string(config.numerics.treepm_rcut_cells * (config.cosmology.box_size_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid)))},
+            {"mesh_spacing_x_mpc_comoving", std::to_string(config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx))},
+            {"mesh_spacing_y_mpc_comoving", std::to_string(config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny))},
+            {"mesh_spacing_z_mpc_comoving", std::to_string(config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))},
+            {"split_scale_mpc_comoving", std::to_string(config.numerics.treepm_asmth_cells *
+                std::cbrt((config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx)) *
+                          (config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny)) *
+                          (config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))))},
+            {"cutoff_radius_mpc_comoving", std::to_string(config.numerics.treepm_rcut_cells *
+                std::cbrt((config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx)) *
+                          (config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny)) *
+                          (config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))))},
             {"pm_update_cadence_steps", std::to_string(config.numerics.treepm_update_cadence_steps)},
             {"softening_policy", "comoving_fixed"},
             {"softening_kernel", "plummer"},
