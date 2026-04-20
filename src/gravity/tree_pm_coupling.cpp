@@ -33,6 +33,93 @@ namespace {
       accumulator.active_particle_index.size() == accumulator.accel_z_comoving.size();
 }
 
+[[nodiscard]] bool acceptNodeByMac(
+    TreeOpeningCriterion criterion,
+    bool is_leaf,
+    double theta,
+    double half_size,
+    double com_center_offset,
+    double r2) {
+  if (is_leaf) {
+    return true;
+  }
+  const double r = std::sqrt(r2 + 1.0e-30);
+  const double width = 2.0 * half_size;
+  if (criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
+    return (width / r) < theta;
+  }
+  const double effective_size = width + com_center_offset;
+  return (effective_size / r) < theta;
+}
+
+[[nodiscard]] std::array<double, 3> monopolePlusQuadrupoleAccelPeriodic(
+    const TreeNodeSoa& nodes,
+    std::uint32_t node_index,
+    double dx,
+    double dy,
+    double dz,
+    const TreeGravityOptions& options,
+    double split_factor) {
+  const double r2 = dx * dx + dy * dy + dz * dz;
+  const double eps2 = options.softening.epsilon_comoving * options.softening.epsilon_comoving;
+  const double denom = std::max(r2 + eps2, 1.0e-30);
+  const double inv_r3 = 1.0 / (denom * std::sqrt(denom));
+  const double inv_r5 = inv_r3 / denom;
+  const double inv_r7 = inv_r5 / denom;
+  const double prefactor = options.gravitational_constant_code * split_factor;
+
+  double ax = prefactor * nodes.mass_code[node_index] * inv_r3 * dx;
+  double ay = prefactor * nodes.mass_code[node_index] * inv_r3 * dy;
+  double az = prefactor * nodes.mass_code[node_index] * inv_r3 * dz;
+  if (options.multipole_order != TreeMultipoleOrder::kQuadrupole) {
+    return {ax, ay, az};
+  }
+
+  const double qxx = nodes.quad_xx[node_index];
+  const double qxy = nodes.quad_xy[node_index];
+  const double qxz = nodes.quad_xz[node_index];
+  const double qyy = nodes.quad_yy[node_index];
+  const double qyz = nodes.quad_yz[node_index];
+  const double qzz = nodes.quad_zz[node_index];
+  const double qrx = qxx * dx + qxy * dy + qxz * dz;
+  const double qry = qxy * dx + qyy * dy + qyz * dz;
+  const double qrz = qxz * dx + qyz * dy + qzz * dz;
+  const double rqr = dx * qrx + dy * qry + dz * qrz;
+  const double quad_prefactor = 0.5 * prefactor;
+  ax += quad_prefactor * (2.0 * qrx * inv_r5 - 5.0 * rqr * dx * inv_r7);
+  ay += quad_prefactor * (2.0 * qry * inv_r5 - 5.0 * rqr * dy * inv_r7);
+  az += quad_prefactor * (2.0 * qrz * inv_r5 - 5.0 * rqr * dz * inv_r7);
+  return {ax, ay, az};
+}
+
+void pushChildrenNearFirstPeriodic(
+    const TreeNodeSoa& nodes,
+    std::uint32_t node_index,
+    double px,
+    double py,
+    double pz,
+    double box_size_comoving,
+    std::vector<std::uint32_t>& stack) {
+  std::array<std::pair<double, std::uint32_t>, 8> child_dist2{};
+  std::size_t count = 0;
+  const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
+  for (std::uint8_t octant = 0; octant < 8U; ++octant) {
+    const std::uint32_t child = nodes.child_index[child_offset + octant];
+    if (child == std::numeric_limits<std::uint32_t>::max()) {
+      continue;
+    }
+    const double dx = minimumImageDelta(nodes.center_x_comoving[child] - px, box_size_comoving);
+    const double dy = minimumImageDelta(nodes.center_y_comoving[child] - py, box_size_comoving);
+    const double dz = minimumImageDelta(nodes.center_z_comoving[child] - pz, box_size_comoving);
+    child_dist2[count++] = {dx * dx + dy * dy + dz * dz, child};
+  }
+  std::sort(child_dist2.begin(), child_dist2.begin() + static_cast<std::ptrdiff_t>(count),
+      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  for (std::size_t i = count; i > 0; --i) {
+    stack.push_back(child_dist2[i - 1].second);
+  }
+}
+
 void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& second, std::vector<double>& third, std::size_t size) {
   first.resize(size);
   second.resize(size);
@@ -417,9 +504,18 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double r = std::sqrt(std::max(r2, 1.0e-30));
 
-      const double l_over_r = (2.0 * half_size) / r;
       const bool is_leaf = nodes.child_count[node_index] == 0;
-      const bool geometric_accept = is_leaf || (l_over_r < options.tree_options.opening_theta);
+      const double center_dx = nodes.center_x_comoving[node_index] - nodes.com_x_comoving[node_index];
+      const double center_dy = nodes.center_y_comoving[node_index] - nodes.com_y_comoving[node_index];
+      const double center_dz = nodes.center_z_comoving[node_index] - nodes.com_z_comoving[node_index];
+      const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
+      const bool mac_accept = acceptNodeByMac(
+          options.tree_options.opening_criterion,
+          is_leaf,
+          options.tree_options.opening_theta,
+          half_size,
+          com_offset,
+          r2);
       const bool node_within_cutoff = is_leaf || (maximumDistanceToNodeAabb(
           px,
           py,
@@ -429,7 +525,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_z_comoving[node_index],
           half_size,
           box_size_comoving) <= cutoff_radius_comoving);
-      const bool accept = geometric_accept && node_within_cutoff;
+      const bool accept = mac_accept && node_within_cutoff;
 
       if (accept) {
         ++accepted_nodes;
@@ -464,20 +560,14 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         } else {
           const double split_factor = treePmGaussianShortRangeForceFactor(r, options.split_policy.split_scale_comoving);
           // Same softened-residual contract as the leaf pair path, applied to accepted nodes.
-          const double softened_factor =
-              softenedInvR3(r2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
-          ax += softened_factor * nodes.mass_code[node_index] * dx;
-          ay += softened_factor * nodes.mass_code[node_index] * dy;
-          az += softened_factor * nodes.mass_code[node_index] * dz;
+          const auto contrib =
+              monopolePlusQuadrupoleAccelPeriodic(nodes, node_index, dx, dy, dz, options.tree_options, split_factor);
+          ax += contrib[0];
+          ay += contrib[1];
+          az += contrib[2];
         }
       } else {
-        const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
-        for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-          const std::uint32_t child = nodes.child_index[child_offset + octant];
-          if (child != std::numeric_limits<std::uint32_t>::max()) {
-            stack.push_back(child);
-          }
-        }
+        pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_size_comoving, stack);
       }
     }
     return std::array<double, 3>{ax, ay, az};

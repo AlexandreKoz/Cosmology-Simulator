@@ -113,6 +113,37 @@ void testMultipoleAccumulation() {
   const double expected_com_x = (1.0 * 0.0 + 2.0 * 2.0 + 3.0 * 4.0) / total_mass;
   assert(std::abs(nodes.mass_code[0] - total_mass) < k_tolerance);
   assert(std::abs(nodes.com_x_comoving[0] - expected_com_x) < k_tolerance);
+  const double trace = nodes.quad_xx[0] + nodes.quad_yy[0] + nodes.quad_zz[0];
+  assert(std::abs(trace) < 1.0e-8);
+  assert(std::abs(nodes.quad_xx[0]) > 0.0);
+}
+
+void testMacCriteriaAreAvailable() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  const std::vector<double> pos_x{-1.0, -0.7, 0.8, 1.2, 1.3};
+  const std::vector<double> pos_y{0.0, 0.1, -0.1, 0.0, 0.03};
+  const std::vector<double> pos_z{0.0, 0.0, 0.0, 0.0, 0.02};
+  const std::vector<double> mass(5, 1.0);
+  const std::vector<std::uint32_t> active{0U};
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(1, 0.0);
+  std::vector<double> az(1, 0.0);
+
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 1;
+  options.opening_theta = 0.7;
+  options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutGeometric;
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+  cosmosim::gravity::TreeGravityProfile geometric_profile;
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &geometric_profile);
+
+  options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance;
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
+  cosmosim::gravity::TreeGravityProfile com_distance_profile;
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &com_distance_profile);
+
+  assert(geometric_profile.visited_nodes > 0);
+  assert(com_distance_profile.visited_nodes > 0);
 }
 
 }  // namespace
@@ -122,5 +153,6 @@ int main() {
   testForceSymmetry();
   testOpeningCriterionBehavior();
   testMultipoleAccumulation();
+  testMacCriteriaAreAvailable();
   return 0;
 }

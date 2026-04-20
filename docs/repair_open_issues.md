@@ -28,6 +28,7 @@ No new in-tree CPU-path code blocker was observed on the repaired PM unit/integr
 Additional validation limitation for this pass:
 
 - `test_integration_tree_pm_coupling_periodic` in `cpu-only-debug` remains expensive in this environment (naive DFT PM backend with MPI/FFTW disabled), so the performance-hardening patch evidence is currently anchored on `unit_pm_solver` plus benchmark runs (`bench_pm_solver`, `bench_tree_pm_coupling`, `bench_parallel_decomposition_exchange`) rather than full integration runtime closure in this container.
+- `test_integration_tree_pm_coupling_periodic` also remains runtime-heavy after quadrupole + mature MAC tree upgrades; in this container it exceeded a 300s direct invocation timeout, so distributed short-range agreement evidence continues to rely on existing MPI-enabled validation gates (`validation_phase2_mpi_gravity_*`) outside the CPU-only preset.
 
 ## Recently closed items
 
