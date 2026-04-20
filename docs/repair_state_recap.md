@@ -775,3 +775,5 @@ Interpretation:
 
 - This is an infrastructure-repair continuation-safety improvement for Phase 2 distributed TreePM, not a new physics model.
 - Reproducibility posture remains explicit: restart carries deterministic policy + auditable rank/layout metadata, and integrity hashing now includes distributed continuation state.
+
+- Added operational isolated/open PM long-range path selection in `reference_workflow` and `TreePmCoordinator`; isolated now solves a non-periodic open-boundary Green operator and disables minimum-image short-range wrapping. Current limitation: single-rank only, with explicit fail-fast on multi-rank.

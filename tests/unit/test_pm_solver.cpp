@@ -173,6 +173,47 @@ void testUniformDensityZeroResponse() {
   }
 }
 
+void testIsolatedOpenPointMassReference() {
+  const cosmosim::gravity::PmGridShape shape{10, 10, 10};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.boundary_condition = cosmosim::gravity::PmBoundaryCondition::kIsolatedOpen;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+
+  const std::size_t cx = 5;
+  const std::size_t cy = 5;
+  const std::size_t cz = 5;
+  grid.density()[grid.linearIndex(cx, cy, cz)] = 1000.0;  // one-cell unit mass since dV=1/1000
+  solver.solvePoissonIsolatedOpen(grid, options, nullptr);
+
+  const std::size_t sample = grid.linearIndex(7, 5, 5);
+  const double got = grid.force_x()[sample];
+  const double r = 0.2;
+  const double expected = -1.0 / (r * r);
+  assert(got < 0.0);
+  assert(std::abs((got - expected) / expected) < 0.30);
+}
+
+void testIsolatedOpenRejectsDistributedSlab() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  const auto layout = cosmosim::parallel::makePmSlabLayout(8, 8, 8, 2, 0);
+  cosmosim::gravity::PmGridStorage grid(shape, layout);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.boundary_condition = cosmosim::gravity::PmBoundaryCondition::kIsolatedOpen;
+  bool threw = false;
+  try {
+    solver.solvePoissonIsolatedOpen(grid, options, nullptr);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testPotentialInterpolationCicConsistency() {
   const cosmosim::gravity::PmGridShape shape{4, 4, 4};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -353,6 +394,8 @@ int main() {
   testPoissonAnalyticMode();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();
+  testIsolatedOpenPointMassReference();
+  testIsolatedOpenRejectsDistributedSlab();
   testSingleRankSlabLayoutStorageEquivalence();
   testPartialSlabStorageRejectsSingleRankSolverPath();
   testPoissonPlanCachingForStableSlabLayout();

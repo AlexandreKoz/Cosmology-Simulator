@@ -51,6 +51,10 @@ constexpr double k_pi = 3.141592653589793238462643383279502884;
   return wrapped < 0.0 ? wrapped + box_size : wrapped;
 }
 
+[[nodiscard]] bool positionInsideOpenDomain(double x, double box_size) {
+  return x >= 0.0 && x < box_size;
+}
+
 [[nodiscard]] double sinc(double x) {
   if (std::abs(x) < 1.0e-12) {
     return 1.0;
@@ -173,6 +177,10 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
       (std::abs(lengths.lx - lengths.ly) > 1.0e-12 || std::abs(lengths.lx - lengths.lz) > 1.0e-12)) {
     throw std::invalid_argument(
         "execution_policy=cuda currently requires cubic PM box lengths in this build");
+  }
+  if (options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
+      options.enable_window_deconvolution) {
+    throw std::invalid_argument("isolated PM currently does not support window deconvolution");
   }
 }
 
@@ -1168,6 +1176,94 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   }
 }
 
+void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
+  validateOptions(m_shape, options);
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+    throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
+  }
+  if (!grid.slabLayout().isValid() || !grid.ownsFullDomain() || grid.slabLayout().world_size != 1) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen currently requires single-rank full-domain ownership");
+  }
+
+  const auto poisson_start = std::chrono::steady_clock::now();
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double dx = lengths.lx / static_cast<double>(m_shape.nx);
+  const double dy = lengths.ly / static_cast<double>(m_shape.ny);
+  const double dz = lengths.lz / static_cast<double>(m_shape.nz);
+  const double cell_volume = dx * dy * dz;
+  const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
+  const double split_scale = options.tree_pm_split_scale_comoving;
+
+  std::fill(grid.potential().begin(), grid.potential().end(), 0.0);
+  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        const std::size_t target = grid.linearIndex(ix, iy, iz);
+        double phi = 0.0;
+        const double x = (static_cast<double>(ix) + 0.5) * dx;
+        const double y = (static_cast<double>(iy) + 0.5) * dy;
+        const double z = (static_cast<double>(iz) + 0.5) * dz;
+        for (std::size_t jx = 0; jx < m_shape.nx; ++jx) {
+          const double sx = (static_cast<double>(jx) + 0.5) * dx;
+          for (std::size_t jy = 0; jy < m_shape.ny; ++jy) {
+            const double sy = (static_cast<double>(jy) + 0.5) * dy;
+            for (std::size_t jz = 0; jz < m_shape.nz; ++jz) {
+              const std::size_t source = grid.linearIndex(jx, jy, jz);
+              const double rho = grid.density()[source];
+              if (rho == 0.0) {
+                continue;
+              }
+              const double sz = (static_cast<double>(jz) + 0.5) * dz;
+              const double rx = x - sx;
+              const double ry = y - sy;
+              const double rz = z - sz;
+              const double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+              if (r < 1.0e-12) {
+                continue;
+              }
+              double kernel = -1.0 / r;
+              if (split_scale > 0.0) {
+                kernel = -std::erf(0.5 * r / split_scale) / r;
+              }
+              phi += rho * kernel;
+            }
+          }
+        }
+        grid.potential()[target] = prefactor * phi;
+      }
+    }
+  }
+
+  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        const std::size_t center = grid.linearIndex(ix, iy, iz);
+        const std::size_t ix_l = ix > 0 ? ix - 1 : ix;
+        const std::size_t ix_r = ix + 1 < m_shape.nx ? ix + 1 : ix;
+        const std::size_t iy_l = iy > 0 ? iy - 1 : iy;
+        const std::size_t iy_r = iy + 1 < m_shape.ny ? iy + 1 : iy;
+        const std::size_t iz_l = iz > 0 ? iz - 1 : iz;
+        const std::size_t iz_r = iz + 1 < m_shape.nz ? iz + 1 : iz;
+        const double dphidx = (grid.potential()[grid.linearIndex(ix_r, iy, iz)] -
+            grid.potential()[grid.linearIndex(ix_l, iy, iz)]) / ((ix_r - ix_l) * dx + 1.0e-30);
+        const double dphidy = (grid.potential()[grid.linearIndex(ix, iy_r, iz)] -
+            grid.potential()[grid.linearIndex(ix, iy_l, iz)]) / ((iy_r - iy_l) * dy + 1.0e-30);
+        const double dphidz = (grid.potential()[grid.linearIndex(ix, iy, iz_r)] -
+            grid.potential()[grid.linearIndex(ix, iy, iz_l)]) / ((iz_r - iz_l) * dz + 1.0e-30);
+        grid.force_x()[center] = -dphidx;
+        grid.force_y()[center] = -dphidy;
+        grid.force_z()[center] = -dphidz;
+      }
+    }
+  }
+
+  if (profile != nullptr) {
+    const auto stop = std::chrono::steady_clock::now();
+    profile->poisson_ms += std::chrono::duration<double, std::milli>(stop - poisson_start).count();
+    profile->gradient_ms += 0.0;
+  }
+}
+
 void PmSolver::interpolateForces(
     const PmGridStorage& grid,
     std::span<const double> pos_x,
@@ -1861,7 +1957,11 @@ void PmSolver::solveForParticles(
   }
 
   assignDensity(grid, pos_x, pos_y, pos_z, mass, options, profile);
-  solvePoissonPeriodic(grid, options, profile);
+  if (options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+    solvePoissonPeriodic(grid, options, profile);
+  } else {
+    solvePoissonIsolatedOpen(grid, options, profile);
+  }
   interpolateForces(grid, pos_x, pos_y, pos_z, accel_x, accel_y, accel_z, options, profile);
 }
 

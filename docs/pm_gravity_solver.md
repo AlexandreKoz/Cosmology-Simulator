@@ -288,3 +288,26 @@ ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two
 ```
 
 - Distributed PM source terms are owner-local inputs: ranks contribute only their owned particle subset, while PM deposition and interpolation route remote slab interactions explicitly through MPI.
+
+
+## Isolated/open PM operator (non-periodic)
+
+For `mode_policy.gravity_boundary = isolated_monopole`, the PM long-range solve now uses an explicit open-boundary Green-function operator on the mesh (single rank in this stage).
+
+We solve the isolated Poisson problem in a finite domain with far-field gauge
+\(\phi(\|x\|\to\infty)=0\):
+
+- unsplit: \(\nabla^2\phi = 4\pi G a^2 \rho\)
+- TreePM long-range split: \(\phi_{\mathrm{LR}}(x)= -G a^2\int \rho(x')\,\frac{\mathrm{erf}(\|x-x'\|/(2r_s))}{\|x-x'\|}\,d^3x'\)
+
+with \(r_s =\) `tree_pm_split_scale_comoving`.
+
+Conventions in this stage:
+- **Potential gauge:** \(\phi(\infty)=0\), approximated by finite-box open convolution.
+- **Force recovery:** \(\mathbf{a}=-\nabla\phi\), using mesh finite differences.
+- **Boundary condition model:** open/non-periodic; no periodic image wrapping in the short-range residual path.
+- **Split consistency:** Tree short-range residual keeps the complementary Gaussian real-space factor `erfc(r/(2r_s))`, so long+short composes to Newtonian force before explicit cutoff.
+
+Current stage limitations:
+- Isolated PM is restricted to **single-rank** runtime (`mpi_ranks_expected=1`). Multi-rank isolated PM fails hard.
+- Isolated PM currently uses the host serial Poisson path.

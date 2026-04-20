@@ -20,6 +20,11 @@ enum class PmAssignmentScheme {
   kTsc,
 };
 
+enum class PmBoundaryCondition {
+  kPeriodic,
+  kIsolatedOpen,
+};
+
 struct PmGridShape {
   std::size_t nx = 0;
   std::size_t ny = 0;
@@ -47,6 +52,7 @@ struct PmSolveOptions {
   core::ExecutionPolicy execution_policy = core::ExecutionPolicy::kHostSerial;
   PmDataResidencyPolicy data_residency = PmDataResidencyPolicy::kHostOnly;
   core::PmDecompositionMode decomposition_mode = core::PmDecompositionMode::kSlab;
+  PmBoundaryCondition boundary_condition = PmBoundaryCondition::kPeriodic;
   // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
   double tree_pm_split_scale_comoving = 0.0;
 };
@@ -145,6 +151,7 @@ class PmSolver {
   // After return, grid.potential() and grid.force_{x,y,z}() are populated and
   // available for direct mesh inspection and interpolation.
   void solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
+  void solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
 
   void interpolateForces(
       const PmGridStorage& grid,

@@ -78,3 +78,5 @@ Additional validation limitation for this pass:
 
 - `integration_core_dependency_direction` target-link guard now consumes CMake Graphviz output from the configured build tree, which is materially stronger than top-level text scanning; however, it still relies on target-name pattern matching (`cosmosim_(analysis|io|physics|workflows|app)`) rather than full semantic layer tags. If naming conventions change, this check must be updated in lockstep.
 - Infrastructure gate test scopes are now manifest-driven and converted into a ctest regex at runtime. This removes inline script fragility but still depends on stable test identifiers.
+
+- Isolated/open PM remains single-rank in this stage; distributed isolated PM (MPI slabs) is intentionally blocked with runtime errors until a distributed open-boundary PM strategy is implemented.
