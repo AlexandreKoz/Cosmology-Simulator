@@ -124,3 +124,7 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 - `treepm_cadence_records` (per-kick record including step, stage, field version, and refresh/reuse decision)
 - `final_state_digest` (deterministic run-result checksum for reproducibility checks under fixed config/ICs)
 - operational events include `gravity.zoom_force_diagnostics` with PM/tree/total force norms plus low-resolution contamination counters.
+- operational events include `gravity.health_summary` plus targeted `gravity.health_check` warning/fatal events:
+  - cheap checks are always-on (PM/force finiteness, sync-state invariants, decomposition/zoom sanity),
+  - heavy reference checks are opt-in only when `analysis.diagnostics_execution_policy = all_including_provisional`.
+  - fatal gravity-state failures are escalated as runtime errors and are never demoted to warnings.

@@ -71,8 +71,11 @@ struct RunHealthCounters {
   std::uint64_t star_count = 0;
   bool ownership_invariants_ok = false;
   bool unique_particle_ids_ok = false;
+  bool gravity_softening_sidecar_size_ok = false;
   std::uint64_t non_finite_particles = 0;
   std::uint64_t non_finite_cells = 0;
+  std::uint64_t non_finite_gravity_softening = 0;
+  std::uint64_t non_positive_particle_mass = 0;
 };
 
 struct DiagnosticsBundle {

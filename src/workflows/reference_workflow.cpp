@@ -718,6 +718,19 @@ class DriftCallback final : public core::IntegrationCallback {
 
 class GravityStageCallback final : public core::IntegrationCallback {
  public:
+  struct GravityHealthSummary {
+    std::uint64_t cheap_checks_executed = 0;
+    std::uint64_t heavy_checks_executed = 0;
+    std::uint64_t warning_count = 0;
+    std::uint64_t fatal_count = 0;
+    std::uint64_t pm_field_non_finite_count = 0;
+    std::uint64_t force_non_finite_count = 0;
+    std::uint64_t force_abnormal_count = 0;
+    std::uint64_t illegal_sync_state_count = 0;
+    std::uint64_t zoom_sanity_failure_count = 0;
+    std::uint64_t decomposition_sanity_failure_count = 0;
+  };
+
   enum class PmSyncSurface : std::uint8_t {
     kKickPre = 0,
     kKickPost = 1,
@@ -975,6 +988,14 @@ class GravityStageCallback final : public core::IntegrationCallback {
         &m_last_tree_pm_diagnostics,
         {});
 
+    const bool allow_heavy_reference_checks =
+        m_config.analysis.diagnostics_execution_policy ==
+        core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+    GravityHealthSummary gravity_health = validateGravityHealth(
+        context,
+        decision,
+        allow_heavy_reference_checks);
+
     if (decision.refresh_long_range_field) {
       m_has_long_range_field = true;
       m_long_range_field_version = decision.field_version;
@@ -985,6 +1006,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     } else {
       ++m_long_range_reuse_count;
     }
+    m_last_committed_field_version = m_long_range_field_version;
 
     const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
         context.state.particles.size() - m_local_active_global_indices.size());
@@ -1059,6 +1081,32 @@ class GravityStageCallback final : public core::IntegrationCallback {
               {"zoom_low_res_contamination_mass_code", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_mass_code)},
           },
       });
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "gravity.health_summary",
+          .severity = (gravity_health.fatal_count > 0U)
+              ? core::RuntimeEventSeverity::kFatal
+              : (gravity_health.warning_count > 0U)
+                    ? core::RuntimeEventSeverity::kWarning
+                    : core::RuntimeEventSeverity::kInfo,
+          .subsystem = "gravity.treepm",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "gravity health summary across PM field, force, sync, zoom, and decomposition checks",
+          .payload = {
+              {"cheap_checks_executed", std::to_string(gravity_health.cheap_checks_executed)},
+              {"heavy_checks_executed", std::to_string(gravity_health.heavy_checks_executed)},
+              {"warning_count", std::to_string(gravity_health.warning_count)},
+              {"fatal_count", std::to_string(gravity_health.fatal_count)},
+              {"pm_field_non_finite_count", std::to_string(gravity_health.pm_field_non_finite_count)},
+              {"force_non_finite_count", std::to_string(gravity_health.force_non_finite_count)},
+              {"force_abnormal_count", std::to_string(gravity_health.force_abnormal_count)},
+              {"illegal_sync_state_count", std::to_string(gravity_health.illegal_sync_state_count)},
+              {"zoom_sanity_failure_count", std::to_string(gravity_health.zoom_sanity_failure_count)},
+              {"decomposition_sanity_failure_count", std::to_string(gravity_health.decomposition_sanity_failure_count)},
+              {"heavy_reference_checks_opt_in", allow_heavy_reference_checks ? "true" : "false"},
+          },
+      });
     }
 
     const double kick_factor = 0.5 * context.integrator_state.dt_time_code;
@@ -1085,6 +1133,131 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
  private:
+  void emitGravityEvent(
+      core::StepContext& context,
+      core::RuntimeEventSeverity severity,
+      std::string message,
+      std::unordered_map<std::string, std::string> payload = {}) const {
+    if (context.profiler_session == nullptr) {
+      return;
+    }
+    context.profiler_session->recordEvent(core::RuntimeEvent{
+        .event_kind = "gravity.health_check",
+        .severity = severity,
+        .subsystem = "gravity.treepm",
+        .step_index = context.integrator_state.step_index,
+        .simulation_time_code = context.integrator_state.current_time_code,
+        .scale_factor = context.integrator_state.current_scale_factor,
+        .message = std::move(message),
+        .payload = std::move(payload),
+    });
+  }
+
+  [[nodiscard]] GravityHealthSummary validateGravityHealth(
+      core::StepContext& context,
+      const PmLongRangeKickDecision& decision,
+      bool allow_heavy_reference_checks) {
+    GravityHealthSummary summary;
+    auto failFatal = [&](std::string message, std::unordered_map<std::string, std::string> payload = {}) {
+      ++summary.fatal_count;
+      emitGravityEvent(context, core::RuntimeEventSeverity::kFatal, message, payload);
+      throw std::runtime_error("fatal gravity-state check failed: " + message);
+    };
+    auto addWarning = [&](std::string message, std::unordered_map<std::string, std::string> payload = {}) {
+      ++summary.warning_count;
+      emitGravityEvent(context, core::RuntimeEventSeverity::kWarning, message, payload);
+    };
+
+    ++summary.cheap_checks_executed;
+    if (m_local_active_indices.size() != m_local_active_global_indices.size()) {
+      ++summary.decomposition_sanity_failure_count;
+      failFatal("local active index vectors diverged after compact-view rebuild");
+    }
+    if (m_local_active_indices.size() > m_local_source_x.size()) {
+      ++summary.decomposition_sanity_failure_count;
+      failFatal("active local subset exceeds local source population");
+    }
+
+    ++summary.cheap_checks_executed;
+    if (!std::isfinite(m_last_tree_pm_diagnostics.force_l2_pm_global) ||
+        !std::isfinite(m_last_tree_pm_diagnostics.force_l2_pm_zoom_correction) ||
+        !std::isfinite(m_last_tree_pm_diagnostics.force_l2_tree_short_range) ||
+        !std::isfinite(m_last_tree_pm_diagnostics.force_l2_total)) {
+      ++summary.pm_field_non_finite_count;
+      failFatal("PM/tree force norm diagnostics contain NaN or Inf");
+    }
+
+    ++summary.cheap_checks_executed;
+    for (std::size_t i = 0; i < m_active_accel_x.size(); ++i) {
+      if (!std::isfinite(m_active_accel_x[i]) ||
+          !std::isfinite(m_active_accel_y[i]) ||
+          !std::isfinite(m_active_accel_z[i])) {
+        ++summary.force_non_finite_count;
+        failFatal(
+            "active-set acceleration contains NaN or Inf",
+            {{"active_slot", std::to_string(i)}});
+      }
+    }
+
+    ++summary.cheap_checks_executed;
+    if (m_last_long_range_refresh_opportunity > m_gravity_kick_opportunity ||
+        m_long_range_field_version < m_last_committed_field_version) {
+      ++summary.illegal_sync_state_count;
+      failFatal("gravity sync-state regressed across kick opportunities");
+    }
+    if (decision.refresh_long_range_field) {
+      if (decision.field_version != m_long_range_field_version + 1U) {
+        ++summary.illegal_sync_state_count;
+        failFatal("refresh decision must increment field_version by exactly one");
+      }
+    } else if (decision.field_version != m_long_range_field_version) {
+      ++summary.illegal_sync_state_count;
+      failFatal("reuse decision must not mutate field_version");
+    }
+
+    ++summary.cheap_checks_executed;
+    if (m_mode_policy.zoom_region_expected &&
+        m_tree_pm_options.zoom_region_radius_comoving <= 0.0) {
+      ++summary.zoom_sanity_failure_count;
+      failFatal("zoom mode requires a strictly positive zoom region radius");
+    }
+    if (!m_mode_policy.zoom_region_expected &&
+        m_tree_pm_options.enable_zoom_long_range_correction &&
+        m_last_tree_pm_diagnostics.zoom_high_res_source_count == 0U &&
+        m_last_tree_pm_diagnostics.zoom_low_res_source_count == 0U) {
+      ++summary.zoom_sanity_failure_count;
+      addWarning("zoom long-range correction enabled without detected zoom population");
+    }
+
+    if (allow_heavy_reference_checks) {
+      ++summary.heavy_checks_executed;
+      const double total_force = m_last_tree_pm_diagnostics.force_l2_total;
+      const double pm_component = m_last_tree_pm_diagnostics.force_l2_pm_global;
+      const double tree_component = m_last_tree_pm_diagnostics.force_l2_tree_short_range;
+      if (total_force > 0.0 && std::isfinite(total_force)) {
+        const double component_sum = pm_component + tree_component;
+        const double relative_gap = std::abs(component_sum - total_force) / total_force;
+        if (relative_gap > 1.0) {
+          ++summary.force_abnormal_count;
+          addWarning(
+              "force decomposition appears abnormal under heavy reference check",
+              {{"relative_gap", std::to_string(relative_gap)}});
+        }
+      }
+      ++summary.heavy_checks_executed;
+      if (m_mode_policy.zoom_region_expected &&
+          m_last_tree_pm_diagnostics.zoom_low_res_contamination_count > 0U) {
+        ++summary.force_abnormal_count;
+        addWarning(
+            "zoom contamination detected in low-resolution source particles",
+            {{"zoom_low_res_contamination_count",
+              std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_count)}});
+      }
+    }
+
+    return summary;
+  }
+
   void rebuildOwnedParticleCompactView(const core::SimulationState& state, std::span<const std::uint32_t> active_particles) {
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
@@ -1157,6 +1330,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_last_long_range_refresh_step_index = 0;
   double m_last_long_range_refresh_scale_factor = 1.0;
   std::uint64_t m_long_range_field_version = 0;
+  std::uint64_t m_last_committed_field_version = 0;
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
@@ -1503,7 +1677,17 @@ void maybeWriteOutputs(
         restart_read.distributed_gravity_state.pm_slab_begin_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank &&
         restart_read.distributed_gravity_state.pm_slab_end_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank &&
         restart_read.distributed_gravity_state.gravity_kick_opportunity == restart_payload.distributed_gravity_state.gravity_kick_opportunity &&
+        restart_read.distributed_gravity_state.pm_update_cadence_steps == restart_payload.distributed_gravity_state.pm_update_cadence_steps &&
         restart_read.distributed_gravity_state.long_range_field_version == restart_payload.distributed_gravity_state.long_range_field_version &&
+        restart_read.distributed_gravity_state.last_long_range_refresh_opportunity ==
+            restart_payload.distributed_gravity_state.last_long_range_refresh_opportunity &&
+        restart_read.distributed_gravity_state.long_range_field_built_step_index ==
+            restart_payload.distributed_gravity_state.long_range_field_built_step_index &&
+        std::abs(
+            restart_read.distributed_gravity_state.long_range_field_built_scale_factor -
+            restart_payload.distributed_gravity_state.long_range_field_built_scale_factor) <= 1.0e-12 &&
+        restart_read.distributed_gravity_state.long_range_restart_policy ==
+            restart_payload.distributed_gravity_state.long_range_restart_policy &&
         restart_rank_qualified_name &&
         compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{

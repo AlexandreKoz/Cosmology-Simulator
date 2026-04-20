@@ -4,6 +4,21 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Gravity invalid-state diagnostics/escalation hardening (2026-04-20 UTC)
+
+Observed:
+
+- Added explicit gravity health checks in the reference workflow for PM/force finiteness, sync-state legality, and zoom/decomposition sanity.
+- Added per-kick gravity runtime summaries (`gravity.health_summary`) plus targeted warning/fatal events (`gravity.health_check`).
+- Fatal gravity-state violations now throw immediately and are not hidden behind generic diagnostics bundles.
+- Added additive run-health gravity counters in diagnostics bundles (`gravity_softening_sidecar_size_ok`, `non_finite_gravity_softening`, `non_positive_particle_mass`).
+- Extended restart roundtrip verification and distributed restart compatibility reporting to include gravity cadence/field-state consistency checks.
+
+Reproducibility impact:
+
+- Cheap gravity integrity checks are always-on and deterministic.
+- Heavy reference checks remain opt-in behind `analysis.diagnostics_execution_policy = all_including_provisional`; default runtime behavior is unchanged.
+
 ## 0) Zoom long-range gravity contract hardening (2026-04-20 UTC)
 
 Observed:

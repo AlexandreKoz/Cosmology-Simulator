@@ -104,6 +104,9 @@ RunHealthCounters DiagnosticsEngine::computeRunHealth(const core::SimulationStat
   counters.star_count = static_cast<std::uint64_t>(state.star_particles.size());
   counters.ownership_invariants_ok = state.validateOwnershipInvariants();
   counters.unique_particle_ids_ok = state.validateUniqueParticleIds();
+  counters.gravity_softening_sidecar_size_ok =
+      state.particle_sidecar.gravity_softening_comoving.empty() ||
+      state.particle_sidecar.gravity_softening_comoving.size() == state.particles.size();
 
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     if (!finite3(
@@ -117,12 +120,21 @@ RunHealthCounters DiagnosticsEngine::computeRunHealth(const core::SimulationStat
         !std::isfinite(state.particles.mass_code[i])) {
       ++counters.non_finite_particles;
     }
+    if (state.particles.mass_code[i] <= 0.0) {
+      ++counters.non_positive_particle_mass;
+    }
   }
 
   for (std::size_t i = 0; i < state.cells.size(); ++i) {
     if (!finite3(state.cells.center_x_comoving[i], state.cells.center_y_comoving[i], state.cells.center_z_comoving[i]) ||
         !std::isfinite(state.cells.mass_code[i]) || !std::isfinite(state.gas_cells.density_code[i])) {
       ++counters.non_finite_cells;
+    }
+  }
+  for (std::size_t i = 0; i < state.particle_sidecar.gravity_softening_comoving.size(); ++i) {
+    const double softening = state.particle_sidecar.gravity_softening_comoving[i];
+    if (!std::isfinite(softening) || softening < 0.0) {
+      ++counters.non_finite_gravity_softening;
     }
   }
 
@@ -373,6 +385,14 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
       .executed = true,
       .policy_note = "always_on_for_integrity_checks",
   });
+  bundle.records.push_back(DiagnosticRecord{
+      .name = "gravity_health_summary",
+      .tier = DiagnosticTier::kInfrastructureHealth,
+      .maturity = DiagnosticMaturity::kProduction,
+      .scalability = DiagnosticScalability::kCheap,
+      .executed = true,
+      .policy_note = "always_on_gravity_state_sanity",
+  });
 
   if (diagnostic_class == DiagnosticClass::kScienceLight || diagnostic_class == DiagnosticClass::kScienceHeavy) {
     bundle.star_formation_history =
@@ -460,8 +480,12 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
       << ", \"cell_count\": " << bundle.health.cell_count << ", \"star_count\": " << bundle.health.star_count
       << ", \"ownership_invariants_ok\": " << (bundle.health.ownership_invariants_ok ? "true" : "false")
       << ", \"unique_particle_ids_ok\": " << (bundle.health.unique_particle_ids_ok ? "true" : "false")
+      << ", \"gravity_softening_sidecar_size_ok\": "
+      << (bundle.health.gravity_softening_sidecar_size_ok ? "true" : "false")
       << ", \"non_finite_particles\": " << bundle.health.non_finite_particles
-      << ", \"non_finite_cells\": " << bundle.health.non_finite_cells << "},\n";
+      << ", \"non_finite_cells\": " << bundle.health.non_finite_cells
+      << ", \"non_finite_gravity_softening\": " << bundle.health.non_finite_gravity_softening
+      << ", \"non_positive_particle_mass\": " << bundle.health.non_positive_particle_mass << "},\n";
   out << "  \"diagnostic_records\": [";
   for (std::size_t i = 0; i < bundle.records.size(); ++i) {
     const auto& record = bundle.records[i];

@@ -144,6 +144,10 @@ The Phase 2 gate is now a dedicated MPI validation suite:
 - Distributed full TreePM equivalence vs one-rank reference: `rel_L2 <= 5e-6` and `max_rel <= 5e-5`.
 - Communication stress path: tiny tree exchange batches (`tree_exchange_batch_bytes=64`) plus PM cadence refresh/reuse toggles, checked against the same TreePM thresholds.
 - Restart continuation contract in MPI mode: reference workflow restart write/read roundtrip must report `restart_roundtrip_ok=true`, preserve rank-qualified restart naming (`..._rank###.hdf5`) for multi-rank runs, and preserve distributed ownership/slab metadata exactly across write/read.
+- Gravity invalid-state trap contract:
+  - NaN/Inf force or PM diagnostic norms must raise fatal gravity-state runtime errors.
+  - Illegal gravity sync-state transitions (cadence/version/opportunity regressions) must raise fatal gravity-state runtime errors.
+  - Distributed restart compatibility must reject gravity-specific metadata mismatches (cadence state and field-version/refresh coherence).
 - Distributed workflow honesty floor: the reference workflow MPI test must prove that the final runtime state is partitioned rather than silently replicated by checking (a) reduced local particle/cell counts equal the reported global counts and (b) the reduced particle-ID sum/xor matches the deterministic generated-IC set.
 
 ### Phase 2 scaling artifacts
