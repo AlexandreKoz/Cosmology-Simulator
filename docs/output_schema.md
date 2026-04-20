@@ -93,6 +93,12 @@ restart is execution-resume oriented.
     - `gravity_treepm_restart_kick_opportunity`
     - `gravity_treepm_restart_field_version`
     - `gravity_treepm_long_range_restart_policy`
+  - zoom-gravity metadata:
+    - `zoom_long_range_strategy`
+    - `zoom_region_center_{x,y,z}_mpc_comoving`
+    - `zoom_region_radius_mpc_comoving`
+    - `zoom_focused_pm_grid`
+    - `zoom_contamination_radius_mpc_comoving`
 
 ## 4) Naming and stability conventions
 
@@ -110,6 +116,7 @@ restart is execution-resume oriented.
       FFT backend),
     - `gravity.pm_long_range_field` (refresh/reuse event per gravity kick opportunity carrying
       the same PM contract plus cadence state/version payload).
+    - `gravity.zoom_force_diagnostics` (per-kick zoom decomposition norms and low-resolution contamination counters).
 
 ## 4.1) Diagnostics bundle maturity metadata
 
@@ -152,3 +159,5 @@ When changing snapshot/restart/provenance fields:
 - Restart schema is `cosmosim_restart_v5`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.
+- Provenance payload now includes additive zoom-gravity metadata and contamination-radius contract keys;
+  this is a backward-compatible extension to `provenance_v3`.

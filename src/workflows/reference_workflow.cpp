@@ -383,6 +383,22 @@ void seedParticleOwnershipFromPmSlabs(
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;
   record.gravity_pm_fft_backend = gravity::PmSolver::fftBackendName();
+  switch (config.mode.zoom_long_range_strategy) {
+    case core::ZoomLongRangeStrategy::kDisabled:
+      record.zoom_long_range_strategy = "disabled";
+      break;
+    case core::ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection:
+      record.zoom_long_range_strategy = "global_coarse_plus_focused_highres_correction";
+      break;
+  }
+  record.zoom_region_center_x_mpc_comoving = config.mode.zoom_region_center_x_mpc_comoving;
+  record.zoom_region_center_y_mpc_comoving = config.mode.zoom_region_center_y_mpc_comoving;
+  record.zoom_region_center_z_mpc_comoving = config.mode.zoom_region_center_z_mpc_comoving;
+  record.zoom_region_radius_mpc_comoving = config.mode.zoom_region_radius_mpc_comoving;
+  record.zoom_focused_pm_grid = std::to_string(config.mode.zoom_focused_pm_grid_nx) + "x" +
+      std::to_string(config.mode.zoom_focused_pm_grid_ny) + "x" +
+      std::to_string(config.mode.zoom_focused_pm_grid_nz);
+  record.zoom_contamination_radius_mpc_comoving = config.mode.zoom_contamination_radius_mpc_comoving;
   return record;
 }
 
@@ -742,6 +758,21 @@ class GravityStageCallback final : public core::IntegrationCallback {
         std::cbrt(
             m_mesh_spacing_x_mpc_comoving * m_mesh_spacing_y_mpc_comoving *
             m_mesh_spacing_z_mpc_comoving));
+    m_tree_pm_options.enable_zoom_long_range_correction =
+        config.mode.zoom_long_range_strategy ==
+        core::ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection;
+    m_tree_pm_options.zoom_focused_pm_shape = gravity::PmGridShape{
+        static_cast<std::size_t>(std::max(config.mode.zoom_focused_pm_grid_nx, 0)),
+        static_cast<std::size_t>(std::max(config.mode.zoom_focused_pm_grid_ny, 0)),
+        static_cast<std::size_t>(std::max(config.mode.zoom_focused_pm_grid_nz, 0))};
+    m_tree_pm_options.zoom_region_center_x_comoving = config.mode.zoom_region_center_x_mpc_comoving;
+    m_tree_pm_options.zoom_region_center_y_comoving = config.mode.zoom_region_center_y_mpc_comoving;
+    m_tree_pm_options.zoom_region_center_z_comoving = config.mode.zoom_region_center_z_mpc_comoving;
+    m_tree_pm_options.zoom_region_radius_comoving = config.mode.zoom_region_radius_mpc_comoving;
+    m_tree_pm_options.zoom_contamination_radius_comoving =
+        config.mode.zoom_contamination_radius_mpc_comoving > 0.0
+        ? config.mode.zoom_contamination_radius_mpc_comoving
+        : config.mode.zoom_region_radius_mpc_comoving;
     m_tree_pm_options.tree_exchange_batch_bytes = config.numerics.treepm_tree_exchange_batch_bytes;
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
     m_pm_backend = gravity::PmSolver::fftBackendName();
@@ -838,10 +869,28 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
+    m_active_is_high_res.assign(m_local_active_indices.size(), 0U);
     m_active_slot_by_particle.assign(particle_count, -1);
     for (std::size_t i = 0; i < m_local_active_global_indices.size(); ++i) {
       m_active_slot_by_particle[m_local_active_global_indices[i]] = static_cast<int>(i);
     }
+    const double box_size = m_config.cosmology.box_size_x_mpc_comoving;
+    m_source_is_high_res.assign(m_local_source_x.size(), 0U);
+    for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
+      const double dx = m_local_source_x[i] - m_tree_pm_options.zoom_region_center_x_comoving;
+      const double dy = m_local_source_y[i] - m_tree_pm_options.zoom_region_center_y_comoving;
+      const double dz = m_local_source_z[i] - m_tree_pm_options.zoom_region_center_z_comoving;
+      const double wrapped_dx = dx - box_size * std::nearbyint(dx / box_size);
+      const double wrapped_dy = dy - box_size * std::nearbyint(dy / box_size);
+      const double wrapped_dz = dz - box_size * std::nearbyint(dz / box_size);
+      const double r = std::sqrt(wrapped_dx * wrapped_dx + wrapped_dy * wrapped_dy + wrapped_dz * wrapped_dz);
+      m_source_is_high_res[i] = (r <= m_tree_pm_options.zoom_region_radius_comoving) ? 1U : 0U;
+    }
+    for (std::size_t i = 0; i < m_local_active_indices.size(); ++i) {
+      m_active_is_high_res[i] = m_source_is_high_res[m_local_active_indices[i]];
+    }
+    m_tree_pm_options.source_is_high_res = m_source_is_high_res;
+    m_tree_pm_options.active_is_high_res = m_active_is_high_res;
 
     gravity::TreePmForceAccumulatorView accumulator{
         .active_particle_index = m_local_active_indices,
@@ -880,7 +929,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         m_tree_pm_options,
         decision.refresh_long_range_field,
         nullptr,
-        nullptr,
+        &m_last_tree_pm_diagnostics,
         {});
 
     if (decision.refresh_long_range_field) {
@@ -947,6 +996,25 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
                       {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
                       {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
+      });
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "gravity.zoom_force_diagnostics",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "gravity.treepm",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "zoom force decomposition and contamination diagnostics",
+          .payload = {
+              {"force_l2_pm_global", std::to_string(m_last_tree_pm_diagnostics.force_l2_pm_global)},
+              {"force_l2_pm_zoom_correction", std::to_string(m_last_tree_pm_diagnostics.force_l2_pm_zoom_correction)},
+              {"force_l2_tree_short_range", std::to_string(m_last_tree_pm_diagnostics.force_l2_tree_short_range)},
+              {"force_l2_total", std::to_string(m_last_tree_pm_diagnostics.force_l2_total)},
+              {"zoom_high_res_source_count", std::to_string(m_last_tree_pm_diagnostics.zoom_high_res_source_count)},
+              {"zoom_low_res_source_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_source_count)},
+              {"zoom_low_res_contamination_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_count)},
+              {"zoom_low_res_contamination_mass_code", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_mass_code)},
+          },
       });
     }
 
@@ -1034,9 +1102,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_local_source_y;
   std::vector<double> m_local_source_z;
   std::vector<double> m_local_source_mass;
+  std::vector<std::uint8_t> m_source_is_high_res;
+  std::vector<std::uint8_t> m_active_is_high_res;
   std::vector<std::uint32_t> m_local_to_global;
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
+  gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
   bool m_has_long_range_field = false;
   std::uint64_t m_gravity_kick_opportunity = 0;
   std::uint64_t m_last_long_range_refresh_opportunity = 0;
@@ -1575,6 +1646,18 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                           (config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny)) *
                           (config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))))},
             {"pm_update_cadence_steps", std::to_string(config.numerics.treepm_update_cadence_steps)},
+            {"zoom_long_range_strategy",
+                config.mode.zoom_long_range_strategy == core::ZoomLongRangeStrategy::kDisabled
+                    ? "disabled"
+                    : "global_coarse_plus_focused_highres_correction"},
+            {"zoom_region_center_x_mpc_comoving", std::to_string(config.mode.zoom_region_center_x_mpc_comoving)},
+            {"zoom_region_center_y_mpc_comoving", std::to_string(config.mode.zoom_region_center_y_mpc_comoving)},
+            {"zoom_region_center_z_mpc_comoving", std::to_string(config.mode.zoom_region_center_z_mpc_comoving)},
+            {"zoom_region_radius_mpc_comoving", std::to_string(config.mode.zoom_region_radius_mpc_comoving)},
+            {"zoom_focused_pm_grid", std::to_string(config.mode.zoom_focused_pm_grid_nx) + "x" +
+                std::to_string(config.mode.zoom_focused_pm_grid_ny) + "x" +
+                std::to_string(config.mode.zoom_focused_pm_grid_nz)},
+            {"zoom_contamination_radius_mpc_comoving", std::to_string(config.mode.zoom_contamination_radius_mpc_comoving)},
             {"softening_policy", "comoving_fixed"},
             {"softening_kernel", "plummer"},
             {"softening_epsilon_kpc_comoving", std::to_string(config.numerics.gravity_softening_kpc_comoving)},

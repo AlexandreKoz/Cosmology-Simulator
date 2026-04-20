@@ -49,6 +49,9 @@ ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
 - **Periodic TreePM consistency check (integration test)**
   - Method: minimum-image periodic direct reference.
   - Explicit limitation: not Ewald exact.
+- **Zoom long-range correction + contamination diagnostics check (integration test)**
+  - Method: synthetic high-resolution membership mask with focused PM correction enabled; compare high-res vs low-res target force deltas against no-zoom baseline and assert contamination counters.
+  - Claim: explicit zoom force decomposition is wired, high-res membership is not implicit, and contamination failure modes remain visible.
 - **Periodic TreePM force-error mapping (benchmark artifact)**
   - Method: fine spectral PM plus exact pairwise short-range residual periodic proxy reference.
   - Explicit limitation: not Ewald exact.

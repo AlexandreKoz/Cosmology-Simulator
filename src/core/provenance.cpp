@@ -161,6 +161,13 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "gravity_treepm_restart_kick_opportunity=" << record.gravity_treepm_restart_kick_opportunity << '\n';
   stream << "gravity_treepm_restart_field_version=" << record.gravity_treepm_restart_field_version << '\n';
   stream << "gravity_treepm_long_range_restart_policy=" << record.gravity_treepm_long_range_restart_policy << '\n';
+  stream << "zoom_long_range_strategy=" << record.zoom_long_range_strategy << '\n';
+  stream << "zoom_region_center_x_mpc_comoving=" << record.zoom_region_center_x_mpc_comoving << '\n';
+  stream << "zoom_region_center_y_mpc_comoving=" << record.zoom_region_center_y_mpc_comoving << '\n';
+  stream << "zoom_region_center_z_mpc_comoving=" << record.zoom_region_center_z_mpc_comoving << '\n';
+  stream << "zoom_region_radius_mpc_comoving=" << record.zoom_region_radius_mpc_comoving << '\n';
+  stream << "zoom_focused_pm_grid=" << record.zoom_focused_pm_grid << '\n';
+  stream << "zoom_contamination_radius_mpc_comoving=" << record.zoom_contamination_radius_mpc_comoving << '\n';
   return stream.str();
 }
 
@@ -243,6 +250,20 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_treepm_restart_field_version = static_cast<std::uint64_t>(std::stoull(value));
     } else if (key == "gravity_treepm_long_range_restart_policy") {
       record.gravity_treepm_long_range_restart_policy = value;
+    } else if (key == "zoom_long_range_strategy") {
+      record.zoom_long_range_strategy = value;
+    } else if (key == "zoom_region_center_x_mpc_comoving") {
+      record.zoom_region_center_x_mpc_comoving = std::stod(value);
+    } else if (key == "zoom_region_center_y_mpc_comoving") {
+      record.zoom_region_center_y_mpc_comoving = std::stod(value);
+    } else if (key == "zoom_region_center_z_mpc_comoving") {
+      record.zoom_region_center_z_mpc_comoving = std::stod(value);
+    } else if (key == "zoom_region_radius_mpc_comoving") {
+      record.zoom_region_radius_mpc_comoving = std::stod(value);
+    } else if (key == "zoom_focused_pm_grid") {
+      record.zoom_focused_pm_grid = value;
+    } else if (key == "zoom_contamination_radius_mpc_comoving") {
+      record.zoom_contamination_radius_mpc_comoving = std::stod(value);
     }
   }
   return record;

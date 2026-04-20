@@ -70,6 +70,11 @@ The concrete run directory is:
 - `ic_file`
 - `zoom_high_res_region` (bool)
 - `zoom_region_file` (required when `zoom_high_res_region=true`)
+- `zoom_long_range_strategy` (`disabled`, `global_coarse_plus_focused_highres_correction`)
+- `zoom_region_center_x`, `zoom_region_center_y`, `zoom_region_center_z` (comoving Mpc)
+- `zoom_region_radius` (comoving Mpc; required `>0` when `zoom_high_res_region=true`)
+- `zoom_focused_pm_grid_nx`, `zoom_focused_pm_grid_ny`, `zoom_focused_pm_grid_nz` (required when focused correction is enabled)
+- `zoom_contamination_radius` (comoving Mpc; defaults to `zoom_region_radius` when `<=0`)
 - `hydro_boundary` (`auto`, `periodic`, `open`, `reflective`)
 - `gravity_boundary` (`auto`, `periodic`, `isolated_monopole`)
   - `isolated_monopole` now activates non-periodic/open PM long-range gravity; current implementation requires `parallel.mpi_ranks_expected = 1` and fails fast otherwise.
@@ -119,6 +124,12 @@ Normalization emits the dimensionless controls exactly as provided and these are
 - reuse the most recent PM long-range field between refreshes
 - record per-kick refresh/reuse metadata in the reference-workflow report and operational diagnostics events
 `treepm_rcut_cells` is normalized, carried into provenance, and consumed by runtime residual traversal pruning (node-level AABB pruning + acceptance guard + pair culling beyond `r_cut`).
+Zoom long-range strategy semantics:
+
+- `disabled`: standard TreePM split force only.
+- `global_coarse_plus_focused_highres_correction`:  
+  `a_total = a_PM_global_coarse(all sources) + a_PM_zoom_correction(high-res targets) + a_tree_short_residual(all sources)`  
+  where `a_PM_zoom_correction = a_PM_focused(high-res sources) - a_PM_coarse(high-res sources)` to avoid double counting while retaining global tidal content from the coarse PM solve.
 `treepm_assignment_scheme` now maps directly to matched PM assignment+gather behavior:
 
 - `cic`: 2-point/axis stencil, lower cost, stronger smoothing.

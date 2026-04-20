@@ -26,6 +26,15 @@ struct TreePmOptions {
   PmSolveOptions pm_options{};
   TreeGravityOptions tree_options{};
   TreePmSplitPolicy split_policy{};
+  bool enable_zoom_long_range_correction = false;
+  PmGridShape zoom_focused_pm_shape{};
+  std::span<const std::uint8_t> source_is_high_res;
+  std::span<const std::uint8_t> active_is_high_res;
+  double zoom_region_center_x_comoving = 0.0;
+  double zoom_region_center_y_comoving = 0.0;
+  double zoom_region_center_z_comoving = 0.0;
+  double zoom_region_radius_comoving = 0.0;
+  double zoom_contamination_radius_comoving = 0.0;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
 };
 
@@ -48,6 +57,14 @@ struct TreePmDiagnostics {
   std::uint64_t residual_remote_response_packets = 0;
   std::uint64_t residual_remote_request_batches = 0;
   std::uint64_t residual_remote_peer_participations = 0;
+  std::uint64_t zoom_high_res_source_count = 0;
+  std::uint64_t zoom_low_res_source_count = 0;
+  std::uint64_t zoom_low_res_contamination_count = 0;
+  double zoom_low_res_contamination_mass_code = 0.0;
+  double force_l2_pm_global = 0.0;
+  double force_l2_pm_zoom_correction = 0.0;
+  double force_l2_tree_short_range = 0.0;
+  double force_l2_total = 0.0;
 };
 
 struct TreePmProfileEvent {
@@ -122,6 +139,9 @@ class TreePmCoordinator {
   std::vector<double> m_active_pm_ax_comoving;
   std::vector<double> m_active_pm_ay_comoving;
   std::vector<double> m_active_pm_az_comoving;
+  std::vector<double> m_active_zoom_corr_ax_comoving;
+  std::vector<double> m_active_zoom_corr_ay_comoving;
+  std::vector<double> m_active_zoom_corr_az_comoving;
   struct TreeExchangeWorkspace {
     int world_size = 1;
     std::vector<int> send_counts;

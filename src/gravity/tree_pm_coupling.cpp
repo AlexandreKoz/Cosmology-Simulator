@@ -27,6 +27,10 @@ namespace {
   return delta - box_size_comoving * std::nearbyint(delta / box_size_comoving);
 }
 
+[[nodiscard]] double norm3(double x, double y, double z) {
+  return std::sqrt(x * x + y * y + z * z);
+}
+
 [[nodiscard]] bool forceAccumulatorShapeValid(const TreePmForceAccumulatorView& accumulator) {
   return accumulator.active_particle_index.size() == accumulator.accel_x_comoving.size() &&
       accumulator.active_particle_index.size() == accumulator.accel_y_comoving.size() &&
@@ -127,6 +131,17 @@ void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& seco
   first.resize(size);
   second.resize(size);
   third.resize(size);
+}
+
+[[nodiscard]] double l2NormFromComponents(
+    std::span<const double> ax,
+    std::span<const double> ay,
+    std::span<const double> az) {
+  double sum = 0.0;
+  for (std::size_t i = 0; i < ax.size(); ++i) {
+    sum += ax[i] * ax[i] + ay[i] * ay[i] + az[i] * az[i];
+  }
+  return std::sqrt(sum);
 }
 
 template <typename T>
@@ -392,6 +407,14 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   const std::size_t active_count = accumulator.active_particle_index.size();
   resizeCompactSidecars(m_active_pos_x_comoving, m_active_pos_y_comoving, m_active_pos_z_comoving, active_count);
   resizeCompactSidecars(m_active_pm_ax_comoving, m_active_pm_ay_comoving, m_active_pm_az_comoving, active_count);
+  resizeCompactSidecars(
+      m_active_zoom_corr_ax_comoving,
+      m_active_zoom_corr_ay_comoving,
+      m_active_zoom_corr_az_comoving,
+      active_count);
+  std::fill(m_active_zoom_corr_ax_comoving.begin(), m_active_zoom_corr_ax_comoving.end(), 0.0);
+  std::fill(m_active_zoom_corr_ay_comoving.begin(), m_active_zoom_corr_ay_comoving.end(), 0.0);
+  std::fill(m_active_zoom_corr_az_comoving.begin(), m_active_zoom_corr_az_comoving.end(), 0.0);
 
   for (std::size_t i = 0; i < accumulator.active_particle_index.size(); ++i) {
     const std::uint32_t particle_index = accumulator.active_particle_index[i];
@@ -416,6 +439,113 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
   for (std::size_t i = 0; i < accumulator.active_particle_index.size(); ++i) {
     accumulator.addToActiveSlot(i, m_active_pm_ax_comoving[i], m_active_pm_ay_comoving[i], m_active_pm_az_comoving[i]);
+  }
+
+  if (options.enable_zoom_long_range_correction) {
+    if (!options.zoom_focused_pm_shape.isValid()) {
+      throw std::invalid_argument("zoom_focused_pm_shape must be valid when zoom correction is enabled");
+    }
+    if (options.source_is_high_res.size() != pos_x_comoving.size()) {
+      throw std::invalid_argument("zoom source high-res mask size must match source particle count");
+    }
+    if (options.active_is_high_res.size() != accumulator.active_particle_index.size()) {
+      throw std::invalid_argument("zoom active high-res mask size must match active set");
+    }
+    std::vector<double> high_res_source_x;
+    std::vector<double> high_res_source_y;
+    std::vector<double> high_res_source_z;
+    std::vector<double> high_res_source_mass;
+    high_res_source_x.reserve(pos_x_comoving.size());
+    high_res_source_y.reserve(pos_y_comoving.size());
+    high_res_source_z.reserve(pos_z_comoving.size());
+    high_res_source_mass.reserve(mass_code.size());
+    for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
+      if (options.source_is_high_res[i] == 0U) {
+        continue;
+      }
+      high_res_source_x.push_back(pos_x_comoving[i]);
+      high_res_source_y.push_back(pos_y_comoving[i]);
+      high_res_source_z.push_back(pos_z_comoving[i]);
+      high_res_source_mass.push_back(mass_code[i]);
+    }
+
+    if (!high_res_source_x.empty()) {
+      PmGridStorage high_res_coarse_grid(m_shape);
+      m_pm_solver.assignDensity(
+          high_res_coarse_grid,
+          high_res_source_x,
+          high_res_source_y,
+          high_res_source_z,
+          high_res_source_mass,
+          pm_options,
+          profile != nullptr ? &profile->pm_profile : nullptr);
+      if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+        m_pm_solver.solvePoissonPeriodic(
+            high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      } else {
+        m_pm_solver.solvePoissonIsolatedOpen(
+            high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      }
+
+      PmSolveOptions zoom_pm_options = pm_options;
+      PmSolver zoom_solver(options.zoom_focused_pm_shape);
+      PmGridStorage high_res_focused_grid(options.zoom_focused_pm_shape);
+      zoom_solver.assignDensity(
+          high_res_focused_grid,
+          high_res_source_x,
+          high_res_source_y,
+          high_res_source_z,
+          high_res_source_mass,
+          zoom_pm_options,
+          profile != nullptr ? &profile->pm_profile : nullptr);
+      if (zoom_pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+        zoom_solver.solvePoissonPeriodic(
+            high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      } else {
+        zoom_solver.solvePoissonIsolatedOpen(
+            high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      }
+
+      std::vector<double> high_res_pm_coarse_ax(active_count, 0.0);
+      std::vector<double> high_res_pm_coarse_ay(active_count, 0.0);
+      std::vector<double> high_res_pm_coarse_az(active_count, 0.0);
+      std::vector<double> high_res_pm_focused_ax(active_count, 0.0);
+      std::vector<double> high_res_pm_focused_ay(active_count, 0.0);
+      std::vector<double> high_res_pm_focused_az(active_count, 0.0);
+      m_pm_solver.interpolateForces(
+          high_res_coarse_grid,
+          m_active_pos_x_comoving,
+          m_active_pos_y_comoving,
+          m_active_pos_z_comoving,
+          high_res_pm_coarse_ax,
+          high_res_pm_coarse_ay,
+          high_res_pm_coarse_az,
+          pm_options,
+          profile != nullptr ? &profile->pm_profile : nullptr);
+      zoom_solver.interpolateForces(
+          high_res_focused_grid,
+          m_active_pos_x_comoving,
+          m_active_pos_y_comoving,
+          m_active_pos_z_comoving,
+          high_res_pm_focused_ax,
+          high_res_pm_focused_ay,
+          high_res_pm_focused_az,
+          zoom_pm_options,
+          profile != nullptr ? &profile->pm_profile : nullptr);
+
+      for (std::size_t i = 0; i < active_count; ++i) {
+        if (options.active_is_high_res[i] == 0U) {
+          continue;
+        }
+        const double corr_x = high_res_pm_focused_ax[i] - high_res_pm_coarse_ax[i];
+        const double corr_y = high_res_pm_focused_ay[i] - high_res_pm_coarse_ay[i];
+        const double corr_z = high_res_pm_focused_az[i] - high_res_pm_coarse_az[i];
+        m_active_zoom_corr_ax_comoving[i] = corr_x;
+        m_active_zoom_corr_ay_comoving[i] = corr_y;
+        m_active_zoom_corr_az_comoving[i] = corr_z;
+        accumulator.addToActiveSlot(i, corr_x, corr_y, corr_z);
+      }
+    }
   }
 
   // Tree owns short-range residual with the complementary real-space kernel.
@@ -448,6 +578,50 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->residual_remote_response_packets = m_last_residual_stats.remote_response_packets;
     diagnostics->residual_remote_request_batches = m_last_residual_stats.remote_request_batches;
     diagnostics->residual_remote_peer_participations = m_last_residual_stats.remote_peer_participations;
+    diagnostics->force_l2_pm_global = l2NormFromComponents(
+        m_active_pm_ax_comoving, m_active_pm_ay_comoving, m_active_pm_az_comoving);
+    diagnostics->force_l2_pm_zoom_correction = l2NormFromComponents(
+        m_active_zoom_corr_ax_comoving,
+        m_active_zoom_corr_ay_comoving,
+        m_active_zoom_corr_az_comoving);
+    double tree_sq = 0.0;
+    double total_sq = 0.0;
+    for (std::size_t i = 0; i < active_count; ++i) {
+      const double total_x = accumulator.accel_x_comoving[i];
+      const double total_y = accumulator.accel_y_comoving[i];
+      const double total_z = accumulator.accel_z_comoving[i];
+      const double tree_x =
+          total_x - m_active_pm_ax_comoving[i] - m_active_zoom_corr_ax_comoving[i];
+      const double tree_y =
+          total_y - m_active_pm_ay_comoving[i] - m_active_zoom_corr_ay_comoving[i];
+      const double tree_z =
+          total_z - m_active_pm_az_comoving[i] - m_active_zoom_corr_az_comoving[i];
+      tree_sq += tree_x * tree_x + tree_y * tree_y + tree_z * tree_z;
+      total_sq += total_x * total_x + total_y * total_y + total_z * total_z;
+    }
+    diagnostics->force_l2_tree_short_range = std::sqrt(tree_sq);
+    diagnostics->force_l2_total = std::sqrt(total_sq);
+    for (std::size_t i = 0; i < options.source_is_high_res.size(); ++i) {
+      if (options.source_is_high_res[i] != 0U) {
+        ++diagnostics->zoom_high_res_source_count;
+      } else {
+        ++diagnostics->zoom_low_res_source_count;
+        const double dx = minimumImageDelta(
+            pos_x_comoving[i] - options.zoom_region_center_x_comoving,
+            options.pm_options.box_size_mpc_comoving);
+        const double dy = minimumImageDelta(
+            pos_y_comoving[i] - options.zoom_region_center_y_comoving,
+            options.pm_options.box_size_mpc_comoving);
+        const double dz = minimumImageDelta(
+            pos_z_comoving[i] - options.zoom_region_center_z_comoving,
+            options.pm_options.box_size_mpc_comoving);
+        const double r = norm3(dx, dy, dz);
+        if (r <= options.zoom_contamination_radius_comoving) {
+          ++diagnostics->zoom_low_res_contamination_count;
+          diagnostics->zoom_low_res_contamination_mass_code += mass_code[i];
+        }
+      }
+    }
   }
 
   if (profile != nullptr) {

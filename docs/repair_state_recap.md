@@ -4,6 +4,19 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Zoom long-range gravity contract hardening (2026-04-20 UTC)
+
+Observed:
+
+- Added typed zoom metadata/config validation for authoritative high-resolution membership and focused PM correction controls.
+- Implemented explicit zoom force decomposition in TreePM coupling:
+  `PM_global_coarse(all) + [PM_focused(highres)-PM_coarse(highres)] + tree_short_residual(all)`.
+- Added low-resolution contamination counters and force-component norms to runtime diagnostics/provenance pathways.
+
+Reproducibility impact:
+
+- Zoom membership and correction controls are now explicit typed config/provenance lanes; restart/snapshot continuation remains deterministic under the existing cadence policy.
+
 ## 0) Tree gravity multipole/MAC maturation repair (2026-04-20 UTC)
 
 Commands:
