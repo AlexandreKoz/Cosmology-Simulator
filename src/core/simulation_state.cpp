@@ -126,6 +126,9 @@ void reorderParticles(
   reorderAlignedVector(state.particle_sidecar.species_tag, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.particle_flags, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.owning_rank, new_to_old_index);
+  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+    reorderAlignedVector(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
+  }
 
   auto remap_sidecar_index = [&](AlignedVector<std::uint32_t>& particle_index, SidecarSyncMode mode) {
     if (mode == SidecarSyncMode::kMoveWithParent) {

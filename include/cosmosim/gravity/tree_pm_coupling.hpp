@@ -75,7 +75,8 @@ class TreePmCoordinator {
       const TreePmOptions& options,
       bool refresh_long_range_field,
       TreePmProfileEvent* profile = nullptr,
-      TreePmDiagnostics* diagnostics = nullptr);
+      TreePmDiagnostics* diagnostics = nullptr,
+      const TreeSofteningView& softening_view = {});
 
   void solveActiveSet(
       std::span<const double> pos_x_comoving,
@@ -85,7 +86,8 @@ class TreePmCoordinator {
       const TreePmForceAccumulatorView& accumulator,
       const TreePmOptions& options,
       TreePmProfileEvent* profile = nullptr,
-      TreePmDiagnostics* diagnostics = nullptr);
+      TreePmDiagnostics* diagnostics = nullptr,
+      const TreeSofteningView& softening_view = {});
 
  private:
   void evaluateShortRangeResidual(
@@ -95,6 +97,7 @@ class TreePmCoordinator {
       std::span<const double> mass_code,
       const TreePmForceAccumulatorView& accumulator,
       const TreePmOptions& options,
+      const TreeSofteningView& softening_view,
       TreeGravityProfile* tree_profile);
 
   struct ResidualTraversalStats {

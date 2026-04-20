@@ -396,6 +396,14 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.species_tag);
   writeDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.particle_flags);
   writeDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.owning_rank);
+  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+    writeDataset1d(
+        particle_sidecar_group.get(),
+        "gravity_softening_comoving",
+        H5T_IEEE_F64LE,
+        H5T_NATIVE_DOUBLE,
+        state.particle_sidecar.gravity_softening_comoving);
+  }
 
   Hdf5Handle cells_group(openOrCreateGroup(state_group.get(), "cells"));
   writeDataset1d(cells_group.get(), "center_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.cells.center_x_comoving);
@@ -513,6 +521,12 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "particle_flags", H5T_NATIVE_UINT32);
   state.particle_sidecar.owning_rank =
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "owning_rank", H5T_NATIVE_UINT32);
+  if (H5Lexists(particle_sidecar_group.get(), "gravity_softening_comoving", H5P_DEFAULT) > 0) {
+    state.particle_sidecar.gravity_softening_comoving =
+        readDataset1dAligned<double>(particle_sidecar_group.get(), "gravity_softening_comoving", H5T_NATIVE_DOUBLE);
+  } else {
+    state.particle_sidecar.gravity_softening_comoving.clear();
+  }
 
   Hdf5Handle cells_group(H5Gopen2(state_group.get(), "cells", H5P_DEFAULT));
   state.cells.center_x_comoving = readDataset1dAligned<double>(cells_group.get(), "center_x_comoving", H5T_NATIVE_DOUBLE);
@@ -703,6 +717,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.particle_sidecar.species_tag);
   append_any_vec(state.particle_sidecar.particle_flags);
   append_any_vec(state.particle_sidecar.owning_rank);
+  append_any_vec(state.particle_sidecar.gravity_softening_comoving);
 
   append_any_vec(state.cells.center_x_comoving);
   append_any_vec(state.cells.center_y_comoving);

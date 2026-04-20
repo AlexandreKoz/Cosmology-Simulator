@@ -13,8 +13,8 @@ Authoritative interfaces:
 
 Current schema identity:
 
-- `schema_name = gadget_arepo_v2`
-- `schema_version = 2`
+- `schema_name = gadget_arepo_v3`
+- `schema_version = 3`
 
 Logical groups:
 
@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v4`
-- `version = 4`
+- `name = cosmosim_restart_v5`
+- `version = 5`
 
 Restart payload includes:
 
@@ -58,6 +58,10 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
 | Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes |
+
+Additive softening sidecar persistence:
+- Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units).
+- Restart `/state/particle_sidecar/gravity_softening_comoving` (`float64`, optional; per-particle, comoving units).
 
 Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
 restart is execution-resume oriented.
@@ -137,14 +141,14 @@ When changing snapshot/restart/provenance fields:
 4. Add/update tests in `tests/unit` + `tests/integration` + `tests/validation` as applicable.
 5. Record rationale in `docs/architecture/decision_log.md`.
 
-## Compatibility notes (2026-04-18)
+## Compatibility notes (2026-04-20)
 
-- Snapshot schema was intentionally bumped to `gadget_arepo_v2` (`schema_version = 2`)
-  to add explicit gravity provenance attributes under `/Provenance`.
+- Snapshot schema was intentionally bumped to `gadget_arepo_v3` (`schema_version = 3`)
+  to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v4`, version `4`, because restart payloads persist explicit distributed TreePM continuation state and policy.
+- Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v4`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v5`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.

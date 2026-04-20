@@ -35,6 +35,7 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.particles.mass_code[i] = 10.0 + static_cast<double>(i);
     state.particles.time_bin[i] = static_cast<std::uint8_t>(i % 2);
   }
+  state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005};
   state.particle_sidecar.species_tag = {
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
@@ -188,6 +189,7 @@ void testRestartRoundtrip() {
   assert(restored.state.particle_sidecar.species_tag == state.particle_sidecar.species_tag);
   assert(restored.state.particle_sidecar.particle_flags == state.particle_sidecar.particle_flags);
   assert(restored.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank);
+  assert(restored.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
   assert(restored.state.star_particles.particle_index == state.star_particles.particle_index);
   assert(restored.state.star_particles.formation_scale_factor == state.star_particles.formation_scale_factor);
   assert(restored.state.star_particles.birth_mass_code == state.star_particles.birth_mass_code);

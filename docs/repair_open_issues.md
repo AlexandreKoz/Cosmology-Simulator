@@ -82,3 +82,7 @@ Additional validation limitation for this pass:
 - Infrastructure gate test scopes are now manifest-driven and converted into a ctest regex at runtime. This removes inline script fragility but still depends on stable test identifiers.
 
 - Isolated/open PM remains single-rank in this stage; distributed isolated PM (MPI slabs) is intentionally blocked with runtime errors until a distributed open-boundary PM strategy is implemented.
+
+- Tree softening maturity limitations after stage 2026-04-20:
+  - Node-level accepted multipoles currently use `epsilon_node_max` as a conservative aggregate for mixed-source nodes; this favors safety/coherence over minimum-bias accuracy for strongly heterogeneous softening distributions.
+  - Snapshot softening sidecar field is additive and optional; external consumers that assume only canonical GADGET datasets may ignore `GravitySofteningComoving` unless upgraded.

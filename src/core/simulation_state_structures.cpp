@@ -29,6 +29,7 @@ void ParticleSidecar::resize(std::size_t count) {
   species_tag.resize(count);
   particle_flags.resize(count);
   owning_rank.resize(count);
+  gravity_softening_comoving.clear();
 }
 
 std::size_t ParticleSidecar::size() const noexcept { return particle_id.size(); }
@@ -36,7 +37,8 @@ std::size_t ParticleSidecar::size() const noexcept { return particle_id.size(); 
 bool ParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_id.size();
   return sfc_key.size() == expected && species_tag.size() == expected && particle_flags.size() == expected &&
-         owning_rank.size() == expected;
+         owning_rank.size() == expected &&
+         (gravity_softening_comoving.empty() || gravity_softening_comoving.size() == expected);
 }
 
 void CellSoa::resize(std::size_t count) {

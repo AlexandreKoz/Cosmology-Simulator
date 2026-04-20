@@ -49,6 +49,9 @@ struct ParticleSidecar {
   AlignedVector<std::uint32_t> species_tag;
   AlignedVector<std::uint32_t> particle_flags;
   AlignedVector<std::uint32_t> owning_rank;
+  // Optional per-particle gravity softening sidecar (comoving code units).
+  // Empty means "use species/global policy only".
+  AlignedVector<double> gravity_softening_comoving;
 
   void resize(std::size_t count);
   [[nodiscard]] std::size_t size() const noexcept;

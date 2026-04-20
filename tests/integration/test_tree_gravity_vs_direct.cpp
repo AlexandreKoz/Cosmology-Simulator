@@ -56,6 +56,47 @@ void directSumAcceleration(
   }
 }
 
+void directSumAccelerationWithSofteningView(
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    std::span<const std::uint32_t> active,
+    const cosmosim::gravity::TreeGravityOptions& options,
+    const cosmosim::gravity::TreeSofteningView& softening_view,
+    std::span<double> ax,
+    std::span<double> ay,
+    std::span<double> az) {
+  for (std::size_t i = 0; i < active.size(); ++i) {
+    const std::uint32_t target = active[i];
+    const double tx = pos_x[target];
+    const double ty = pos_y[target];
+    const double tz = pos_z[target];
+    const double target_eps = cosmosim::gravity::resolveTargetSofteningEpsilon(i, options.softening, softening_view);
+    double acc_x = 0.0;
+    double acc_y = 0.0;
+    double acc_z = 0.0;
+    for (std::size_t j = 0; j < mass.size(); ++j) {
+      if (j == target) {
+        continue;
+      }
+      const double dx = pos_x[j] - tx;
+      const double dy = pos_y[j] - ty;
+      const double dz = pos_z[j] - tz;
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      const double source_eps = cosmosim::gravity::resolveSourceSofteningEpsilon(j, options.softening, softening_view);
+      const double pair_eps = cosmosim::gravity::combineSofteningPairEpsilon(source_eps, target_eps);
+      const double factor = options.gravitational_constant_code * mass[j] * cosmosim::gravity::softenedInvR3(r2, pair_eps);
+      acc_x += factor * dx;
+      acc_y += factor * dy;
+      acc_z += factor * dz;
+    }
+    ax[i] = acc_x;
+    ay[i] = acc_y;
+    az[i] = acc_z;
+  }
+}
+
 [[nodiscard]] double solveAndMeasureMaxRelativeError(
     std::span<const double> pos_x,
     std::span<const double> pos_y,
@@ -150,9 +191,80 @@ struct Distribution {
   return distribution;
 }
 
+void testMixedSpeciesSofteningAgainstDirect() {
+  Distribution dist = makeQuasiUniformDistribution();
+  dist.active.resize(dist.pos_x.size());
+  for (std::size_t i = 0; i < dist.active.size(); ++i) {
+    dist.active[i] = static_cast<std::uint32_t>(i);
+  }
+  std::vector<std::uint32_t> species_tag(dist.pos_x.size(), 0U);
+  for (std::size_t i = 0; i < species_tag.size(); ++i) {
+    species_tag[i] = static_cast<std::uint32_t>(i % 3U);
+  }
+  std::vector<double> source_override(species_tag.size(), 0.0);
+  source_override[5] = 0.03;
+  source_override[14] = 0.05;
+  std::vector<double> target_override(dist.active.size(), 0.0);
+  for (std::size_t i = 0; i < target_override.size(); ++i) {
+    if ((i % 7U) == 0U) {
+      target_override[i] = 0.04;
+    }
+  }
+
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 0.35;
+  options.multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole;
+  options.gravitational_constant_code = 1.0;
+  options.max_leaf_size = 1;
+  options.softening.epsilon_comoving = 1.0e-3;
+  cosmosim::gravity::TreeSofteningView softening_view{
+      .source_species_tag = species_tag,
+      .source_particle_epsilon_comoving = source_override,
+      .target_particle_epsilon_comoving = target_override,
+      .species_policy = {.epsilon_comoving_by_species = {0.001, 0.01, 0.02, 0.0, 0.0}, .enabled = true},
+  };
+
+  cosmosim::gravity::TreeGravitySolver solver;
+  solver.build(dist.pos_x, dist.pos_y, dist.pos_z, dist.mass, options, nullptr, softening_view);
+  std::vector<double> tree_ax(dist.active.size(), 0.0);
+  std::vector<double> tree_ay(dist.active.size(), 0.0);
+  std::vector<double> tree_az(dist.active.size(), 0.0);
+  solver.evaluateActiveSet(
+      dist.pos_x,
+      dist.pos_y,
+      dist.pos_z,
+      dist.mass,
+      dist.active,
+      tree_ax,
+      tree_ay,
+      tree_az,
+      options,
+      nullptr,
+      softening_view);
+
+  std::vector<double> ref_ax(dist.active.size(), 0.0);
+  std::vector<double> ref_ay(dist.active.size(), 0.0);
+  std::vector<double> ref_az(dist.active.size(), 0.0);
+  directSumAccelerationWithSofteningView(
+      dist.pos_x, dist.pos_y, dist.pos_z, dist.mass, dist.active, options, softening_view, ref_ax, ref_ay, ref_az);
+
+  double diff2 = 0.0;
+  double ref2 = 0.0;
+  for (std::size_t i = 0; i < tree_ax.size(); ++i) {
+    const double dx = tree_ax[i] - ref_ax[i];
+    const double dy = tree_ay[i] - ref_ay[i];
+    const double dz = tree_az[i] - ref_az[i];
+    diff2 += dx * dx + dy * dy + dz * dz;
+    ref2 += ref_ax[i] * ref_ax[i] + ref_ay[i] * ref_ay[i] + ref_az[i] * ref_az[i];
+  }
+  const double rel_l2 = std::sqrt(diff2 / std::max(ref2, 1.0e-30));
+  requireOrThrow(rel_l2 < 0.02, "mixed-species/per-particle softening tree vs direct mismatch");
+}
+
 }  // namespace
 
 int main() {
+  testMixedSpeciesSofteningAgainstDirect();
   const std::vector<Distribution> distributions = {makeQuasiUniformDistribution(), makeClusteredDistribution()};
   for (std::size_t dist_i = 0; dist_i < distributions.size(); ++dist_i) {
     const Distribution& dist = distributions[dist_i];

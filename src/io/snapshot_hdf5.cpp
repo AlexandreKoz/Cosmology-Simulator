@@ -656,6 +656,13 @@ void writeGadgetArepoSnapshotHdf5(
     writeDataset2d3(type_group.get(), schema.velocities.canonical_name, velocities, indices.size(), policy);
     writeDataset1d(type_group.get(), schema.masses.canonical_name, masses.data(), indices.size(), policy);
     writeDataset1dU64(type_group.get(), schema.particle_ids.canonical_name, ids.data(), indices.size(), policy);
+    if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+      std::vector<double> particle_softening(indices.size(), 0.0);
+      for (std::size_t i = 0; i < indices.size(); ++i) {
+        particle_softening[i] = state.particle_sidecar.gravity_softening_comoving[indices[i]];
+      }
+      writeDataset1d(type_group.get(), "GravitySofteningComoving", particle_softening.data(), indices.size(), policy);
+    }
     if (type_index == 3) {
       std::vector<std::uint64_t> parent_particle_id(indices.size(), 0);
       std::vector<std::uint64_t> injection_step(indices.size(), 0);
@@ -814,6 +821,7 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     std::vector<std::uint32_t> tracer_host_chunk;
     std::vector<double> tracer_fraction_chunk;
     std::vector<double> tracer_exchange_chunk;
+    std::vector<double> softening_chunk;
 
     readDatasetChunk2d(group.get(), coordinates_name, 0, local_count, coords_chunk);
     if (!velocities_name.empty()) {
@@ -847,6 +855,11 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
           std::string(schema.part_type_group[type_index]) + "/Masses=MassTable");
     } else {
       throw std::runtime_error("Masses missing and fallback disabled");
+    }
+    if (hdf5PathExists(group.get(), "GravitySofteningComoving")) {
+      readDatasetChunk1d(group.get(), "GravitySofteningComoving", 0, local_count, softening_chunk);
+    } else {
+      softening_chunk.clear();
     }
     if (type_index == 3) {
       if (hdf5PathExists(group.get(), "TracerParentParticleID")) {
@@ -889,6 +902,12 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       result.state.particle_sidecar.particle_id[global_i] = ids_chunk[i];
       result.state.particle_sidecar.species_tag[global_i] = mapPartTypeToSpeciesTag(type_index);
       result.state.particle_sidecar.owning_rank[global_i] = 0;
+      if (!softening_chunk.empty()) {
+        if (result.state.particle_sidecar.gravity_softening_comoving.empty()) {
+          result.state.particle_sidecar.gravity_softening_comoving.resize(result.state.particles.size(), 0.0);
+        }
+        result.state.particle_sidecar.gravity_softening_comoving[global_i] = softening_chunk[i];
+      }
       result.state.species.count_by_species[result.state.particle_sidecar.species_tag[global_i]] += 1;
       if (type_index == 3) {
         tracer_particle_index.push_back(static_cast<std::uint32_t>(global_i));

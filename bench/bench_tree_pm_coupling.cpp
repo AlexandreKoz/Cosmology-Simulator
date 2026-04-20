@@ -77,7 +77,16 @@ int main() {
   cosmosim::gravity::TreePmDiagnostics diagnostics;
   for (std::size_t i = 0; i < warmup_iterations; ++i) {
     coordinator.solveActiveSetWithPmCadence(
-        pos_x, pos_y, pos_z, mass, accumulator, options, /*refresh_long_range_field=*/true, &profile, &diagnostics);
+        pos_x,
+        pos_y,
+        pos_z,
+        mass,
+        accumulator,
+        options,
+        /*refresh_long_range_field=*/true,
+        &profile,
+        &diagnostics,
+        {});
   }
   cosmosim::gravity::TreePmProfileEvent measured_profile;
   for (std::size_t i = 0; i < measured_iterations; ++i) {
@@ -91,7 +100,8 @@ int main() {
         options,
         refresh_long_range_field,
         &measured_profile,
-        &diagnostics);
+        &diagnostics,
+        {});
   }
 
   const double active_mpart_s =

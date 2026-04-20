@@ -880,7 +880,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
         m_tree_pm_options,
         decision.refresh_long_range_field,
         nullptr,
-        nullptr);
+        nullptr,
+        {});
 
     if (decision.refresh_long_range_field) {
       m_has_long_range_field = true;
@@ -1321,7 +1322,7 @@ void maybeWriteOutputs(
     restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridShape().ny;
     restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridShape().nz;
     restart_payload.distributed_gravity_state.pm_decomposition_mode =
-        pmDecompositionModeName(m_config.numerics.treepm_pm_decomposition_mode);
+        pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
     restart_payload.distributed_gravity_state.gravity_kick_opportunity = gravity_callback.gravityKickOpportunity();
     restart_payload.distributed_gravity_state.pm_update_cadence_steps =
         static_cast<std::uint64_t>(gravity_callback.pmCadenceSteps());

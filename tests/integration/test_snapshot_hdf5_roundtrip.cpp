@@ -43,6 +43,7 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
     state.particle_sidecar.particle_id[i] = 1000 + i;
     state.particle_sidecar.owning_rank[i] = 0;
   }
+  state.particle_sidecar.gravity_softening_comoving = {0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06};
 
   state.particle_sidecar.species_tag[0] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
   state.particle_sidecar.species_tag[1] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
@@ -154,6 +155,21 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.state.tracers.host_cell_index[0] == 1);
   assert(std::abs(roundtrip.state.tracers.mass_fraction_of_host[0] - 0.25) < 1.0e-12);
   assert(std::abs(roundtrip.state.tracers.cumulative_exchanged_mass_code[0] - 0.1) < 1.0e-12);
+  assert(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() == state.particles.size());
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const std::uint64_t id = state.particle_sidecar.particle_id[i];
+    std::size_t roundtrip_index = roundtrip.state.particles.size();
+    for (std::size_t j = 0; j < roundtrip.state.particles.size(); ++j) {
+      if (roundtrip.state.particle_sidecar.particle_id[j] == id) {
+        roundtrip_index = j;
+        break;
+      }
+    }
+    assert(roundtrip_index < roundtrip.state.particles.size());
+    assert(std::abs(
+               roundtrip.state.particle_sidecar.gravity_softening_comoving[roundtrip_index] -
+               state.particle_sidecar.gravity_softening_comoving[i]) < 1.0e-12);
+  }
 
   double checksum_in = 0.0;
   double checksum_out = 0.0;
