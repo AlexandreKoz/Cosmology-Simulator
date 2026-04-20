@@ -23,3 +23,10 @@
 - Scope: high-rank production deployment.
 - Impact: architecture supports scale-up, but this release package does not claim full strong/weak scaling certification on large HPC systems.
 - Mitigation: use desktop/small-cluster scale for this release; add dedicated scaling campaign in a follow-up release.
+
+
+## TreePM Phase 3 maturity is not yet implemented
+
+- Scope: integrator-grade hierarchical cadence/PM synchronization maturity and Phase 3 closure evidence.
+- Impact: current release evidence supports Phase 1/2 baseline correctness contracts, but not Phase 3 completion claims.
+- Mitigation: follow `docs/treepm_phase3_contract.md` hard-gate requirements before using Phase 3-complete language.
