@@ -117,6 +117,78 @@ struct ShortRangeTargetResponsePacket {
 static_assert(std::is_trivially_copyable_v<ShortRangeTargetRequestPacket>);
 static_assert(std::is_trivially_copyable_v<ShortRangeTargetResponsePacket>);
 
+struct SourceDomainBoundsPacket {
+  double min_x_comoving = 0.0;
+  double max_x_comoving = 0.0;
+  double min_y_comoving = 0.0;
+  double max_y_comoving = 0.0;
+  double min_z_comoving = 0.0;
+  double max_z_comoving = 0.0;
+  std::uint64_t source_particle_count = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
+
+[[nodiscard]] double minimumDistanceToPeriodicInterval(
+    double coordinate,
+    double interval_min,
+    double interval_max,
+    double box_size_comoving) {
+  if (interval_max < interval_min) {
+    return 0.0;
+  }
+  auto interval_distance = [](double value, double lower, double upper) {
+    if (value < lower) {
+      return lower - value;
+    }
+    if (value > upper) {
+      return value - upper;
+    }
+    return 0.0;
+  };
+  if (box_size_comoving <= 0.0) {
+    return interval_distance(coordinate, interval_min, interval_max);
+  }
+  double best = std::numeric_limits<double>::max();
+  for (const double shift : {-box_size_comoving, 0.0, box_size_comoving}) {
+    best = std::min(best, interval_distance(coordinate, interval_min + shift, interval_max + shift));
+  }
+  return best;
+}
+
+[[nodiscard]] double minimumDistanceToPeriodicBounds(
+    double px,
+    double py,
+    double pz,
+    const SourceDomainBoundsPacket& bounds,
+    double box_size_comoving) {
+  if (bounds.source_particle_count == 0) {
+    return std::numeric_limits<double>::infinity();
+  }
+  const double dx = minimumDistanceToPeriodicInterval(px, bounds.min_x_comoving, bounds.max_x_comoving, box_size_comoving);
+  const double dy = minimumDistanceToPeriodicInterval(py, bounds.min_y_comoving, bounds.max_y_comoving, box_size_comoving);
+  const double dz = minimumDistanceToPeriodicInterval(pz, bounds.min_z_comoving, bounds.max_z_comoving, box_size_comoving);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+[[nodiscard]] SourceDomainBoundsPacket computeLocalSourceBounds(
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving) {
+  SourceDomainBoundsPacket bounds;
+  bounds.source_particle_count = static_cast<std::uint64_t>(pos_x_comoving.size());
+  if (pos_x_comoving.empty()) {
+    return bounds;
+  }
+  bounds.min_x_comoving = *std::min_element(pos_x_comoving.begin(), pos_x_comoving.end());
+  bounds.max_x_comoving = *std::max_element(pos_x_comoving.begin(), pos_x_comoving.end());
+  bounds.min_y_comoving = *std::min_element(pos_y_comoving.begin(), pos_y_comoving.end());
+  bounds.max_y_comoving = *std::max_element(pos_y_comoving.begin(), pos_y_comoving.end());
+  bounds.min_z_comoving = *std::min_element(pos_z_comoving.begin(), pos_z_comoving.end());
+  bounds.max_z_comoving = *std::max_element(pos_z_comoving.begin(), pos_z_comoving.end());
+  return bounds;
+}
+
 }  // namespace
 
 void TreePmForceAccumulatorView::reset() const {
@@ -296,6 +368,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
   auto evaluateTargetAgainstLocalTree = [&](double px, double py, double pz, std::uint32_t self_index, bool skip_self) {
     double ax = 0.0;
+    if (nodes.size() == 0) {
+      return std::array<double, 3>{0.0, 0.0, 0.0};
+    }
     double ay = 0.0;
     double az = 0.0;
     stack.clear();
@@ -443,23 +518,55 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& remote_batch_az = m_tree_exchange_workspace.remote_batch_az;
     auto& seen_response = m_tree_exchange_workspace.seen_response;
 
+    SourceDomainBoundsPacket local_bounds = computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving);
+    std::vector<SourceDomainBoundsPacket> peer_bounds(static_cast<std::size_t>(mpi_world_size));
+    MPI_Allgather(
+        &local_bounds,
+        static_cast<int>(sizeof(SourceDomainBoundsPacket)),
+        MPI_BYTE,
+        peer_bounds.data(),
+        static_cast<int>(sizeof(SourceDomainBoundsPacket)),
+        MPI_BYTE,
+        MPI_COMM_WORLD);
+
+    std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer(static_cast<std::size_t>(mpi_world_size));
+
     for (std::size_t batch_begin = 0; batch_begin < accumulator.active_particle_index.size();) {
       const std::size_t batch_size = std::min(
           max_requests_per_peer,
           accumulator.active_particle_index.size() - batch_begin);
       const std::uint32_t batch_token = static_cast<std::uint32_t>(batch_begin);
 
-      std::vector<ShortRangeTargetRequestPacket> local_requests;
-      local_requests.reserve(batch_size);
+      for (auto& peer_requests : requests_by_peer) {
+        peer_requests.clear();
+      }
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        if (peer != mpi_world_rank) {
+          requests_by_peer[static_cast<std::size_t>(peer)].reserve(batch_size);
+        }
+      }
+
       for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
         const std::uint32_t particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
-        local_requests.push_back(ShortRangeTargetRequestPacket{
-            .batch_token = batch_token,
-            .request_id = static_cast<std::uint32_t>(batch_slot),
-            .target_x_comoving = pos_x_comoving[particle_index],
-            .target_y_comoving = pos_y_comoving[particle_index],
-            .target_z_comoving = pos_z_comoving[particle_index],
-        });
+        const double px = pos_x_comoving[particle_index];
+        const double py = pos_y_comoving[particle_index];
+        const double pz = pos_z_comoving[particle_index];
+        for (int peer = 0; peer < mpi_world_size; ++peer) {
+          if (peer == mpi_world_rank) {
+            continue;
+          }
+          if (minimumDistanceToPeriodicBounds(px, py, pz, peer_bounds[static_cast<std::size_t>(peer)], box_size_comoving) >
+              cutoff_radius_comoving) {
+            continue;
+          }
+          requests_by_peer[static_cast<std::size_t>(peer)].push_back(ShortRangeTargetRequestPacket{
+              .batch_token = batch_token,
+              .request_id = static_cast<std::uint32_t>(batch_slot),
+              .target_x_comoving = px,
+              .target_y_comoving = py,
+              .target_z_comoving = pz,
+          });
+        }
       }
 
       std::fill(send_counts.begin(), send_counts.end(), 0);
@@ -467,24 +574,26 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       std::fill(send_displs.begin(), send_displs.end(), 0);
       std::fill(recv_displs.begin(), recv_displs.end(), 0);
       send_payload.clear();
-      for (int rank = 0; rank < mpi_world_size; ++rank) {
-        if (rank == mpi_world_rank) {
-          send_counts[static_cast<std::size_t>(rank)] = 0;
-        } else {
-          send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(local_requests.size() * sizeof(ShortRangeTargetRequestPacket));
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        if (peer == mpi_world_rank) {
+          continue;
         }
+        send_counts[static_cast<std::size_t>(peer)] = static_cast<int>(
+            requests_by_peer[static_cast<std::size_t>(peer)].size() * sizeof(ShortRangeTargetRequestPacket));
       }
       std::partial_sum(send_counts.begin(), send_counts.end() - 1, send_displs.begin() + 1);
       send_payload.resize(static_cast<std::size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)), 0U);
-      for (int rank = 0; rank < mpi_world_size; ++rank) {
-        if (rank == mpi_world_rank) {
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        if (peer == mpi_world_rank || requests_by_peer[static_cast<std::size_t>(peer)].empty()) {
           continue;
         }
-        const auto request_bytes = asBytes(std::span<const ShortRangeTargetRequestPacket>(local_requests.data(), local_requests.size()));
+        const auto request_bytes = asBytes(std::span<const ShortRangeTargetRequestPacket>(
+            requests_by_peer[static_cast<std::size_t>(peer)].data(),
+            requests_by_peer[static_cast<std::size_t>(peer)].size()));
         std::copy(
             request_bytes.begin(),
             request_bytes.end(),
-            send_payload.begin() + send_displs[static_cast<std::size_t>(rank)]);
+            send_payload.begin() + send_displs[static_cast<std::size_t>(peer)]);
       }
 
       MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
@@ -566,11 +675,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       remote_batch_ax.assign(batch_size, 0.0);
       remote_batch_ay.assign(batch_size, 0.0);
       remote_batch_az.assign(batch_size, 0.0);
+      seen_response.assign(batch_size, 0U);
       for (int peer = 0; peer < mpi_world_size; ++peer) {
-        const int expected_bytes = send_counts[static_cast<std::size_t>(peer)];
         if (peer == mpi_world_rank) {
           continue;
         }
+        const int expected_bytes = send_counts[static_cast<std::size_t>(peer)];
         if (expected_bytes == 0) {
           continue;
         }
@@ -579,28 +689,21 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             static_cast<std::size_t>(expected_bytes));
         const std::vector<ShortRangeTargetResponsePacket> responses =
             decodeRecords<ShortRangeTargetResponsePacket>(peer_response_bytes);
-        if (responses.size() != batch_size) {
-          throw std::runtime_error("TreePM short-range response count mismatch");
-        }
-        seen_response.assign(batch_size, 0U);
         for (const ShortRangeTargetResponsePacket& response : responses) {
           if (response.batch_token != batch_token || response.request_id >= batch_size) {
             throw std::runtime_error("TreePM short-range response packet ID mismatch");
           }
-          if (seen_response[response.request_id] != 0U) {
-            throw std::runtime_error("TreePM short-range duplicate response packet detected");
-          }
-          seen_response[response.request_id] = 1U;
           remote_batch_ax[response.request_id] += response.accel_x_comoving;
           remote_batch_ay[response.request_id] += response.accel_y_comoving;
           remote_batch_az[response.request_id] += response.accel_z_comoving;
-        }
-        if (std::any_of(seen_response.begin(), seen_response.end(), [](std::uint8_t mark) { return mark == 0U; })) {
-          throw std::runtime_error("TreePM short-range missing response packet detected");
+          seen_response[response.request_id] = 1U;
         }
       }
 
       for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
+        if (seen_response[batch_slot] == 0U) {
+          continue;
+        }
         accumulator.addToActiveSlot(
             batch_begin + batch_slot,
             remote_batch_ax[batch_slot],

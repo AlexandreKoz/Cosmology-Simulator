@@ -118,6 +118,8 @@ Or run the built-in integration smoke gate:
 
 ## Phase 2 distributed TreePM validation gate (MPI gravity gate)
 
+- Distributed workflow snapshot/restart paths are rank-qualified (`..._rank###.hdf5`) so MPI restart validation does not rely on unsafe multi-rank writes to a single file.
+
 The Phase 2 gate is now a dedicated MPI validation suite:
 
 - Executable: `test_validation_phase2_mpi_gravity`

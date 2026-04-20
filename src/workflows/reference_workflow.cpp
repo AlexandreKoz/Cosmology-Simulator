@@ -12,7 +12,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
+#include <cstring>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -86,6 +89,225 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
       return "slab";
   }
   throw std::runtime_error("unhandled PM decomposition mode enum value");
+}
+
+
+struct GasCellMigrationRecord {
+  std::uint64_t particle_id = 0;
+  double center_x_comoving = 0.0;
+  double center_y_comoving = 0.0;
+  double center_z_comoving = 0.0;
+  double mass_code = 0.0;
+  std::uint8_t time_bin = 0;
+  std::uint32_t patch_index = 0;
+  double density_code = 0.0;
+  double pressure_code = 0.0;
+  double internal_energy_code = 0.0;
+  double temperature_code = 0.0;
+  double sound_speed_code = 0.0;
+  double recon_gradient_x = 0.0;
+  double recon_gradient_y = 0.0;
+  double recon_gradient_z = 0.0;
+};
+
+static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
+
+[[nodiscard]] std::string formatIndexedRankedFileStem(
+    std::string_view stem,
+    std::uint64_t index,
+    int world_size,
+    int world_rank) {
+  std::ostringstream out;
+  out << stem << '_' << std::setw(3) << std::setfill('0') << index;
+  if (world_size > 1) {
+    out << "_rank" << std::setw(3) << std::setfill('0') << world_rank;
+  }
+  out << ".hdf5";
+  return out.str();
+}
+
+[[nodiscard]] std::unordered_map<std::uint64_t, GasCellMigrationRecord> collectLocalGasCellRecords(
+    const core::SimulationState& state,
+    std::span<const std::uint32_t> gas_particle_indices) {
+  std::unordered_map<std::uint64_t, GasCellMigrationRecord> records;
+  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  if (state.cells.size() != gas_globals.size()) {
+    throw std::runtime_error("gas cell count must match local gas particle count when collecting migration records");
+  }
+  std::vector<std::uint8_t> keep_mask(state.particles.size(), 0U);
+  for (const std::uint32_t particle_index : gas_particle_indices) {
+    if (particle_index >= state.particles.size()) {
+      throw std::out_of_range("gas particle index out of range while collecting gas migration records");
+    }
+    keep_mask[particle_index] = 1U;
+  }
+  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
+    const std::uint32_t particle_index = gas_globals[cell_index];
+    if (keep_mask[particle_index] == 0U) {
+      continue;
+    }
+    GasCellMigrationRecord record;
+    record.particle_id = state.particle_sidecar.particle_id[particle_index];
+    record.center_x_comoving = state.cells.center_x_comoving[cell_index];
+    record.center_y_comoving = state.cells.center_y_comoving[cell_index];
+    record.center_z_comoving = state.cells.center_z_comoving[cell_index];
+    record.mass_code = state.cells.mass_code[cell_index];
+    record.time_bin = state.cells.time_bin[cell_index];
+    record.patch_index = state.cells.patch_index[cell_index];
+    record.density_code = state.gas_cells.density_code[cell_index];
+    record.pressure_code = state.gas_cells.pressure_code[cell_index];
+    record.internal_energy_code = state.gas_cells.internal_energy_code[cell_index];
+    record.temperature_code = state.gas_cells.temperature_code[cell_index];
+    record.sound_speed_code = state.gas_cells.sound_speed_code[cell_index];
+    record.recon_gradient_x = state.gas_cells.recon_gradient_x[cell_index];
+    record.recon_gradient_y = state.gas_cells.recon_gradient_y[cell_index];
+    record.recon_gradient_z = state.gas_cells.recon_gradient_z[cell_index];
+    records.emplace(record.particle_id, record);
+  }
+  return records;
+}
+
+[[nodiscard]] std::vector<std::uint64_t> gasParticleIdByOldCellIndex(const core::SimulationState& state) {
+  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  if (state.cells.size() != gas_globals.size()) {
+    throw std::runtime_error("gas cell count must match local gas particle count when capturing host-cell mapping");
+  }
+  std::vector<std::uint64_t> cell_particle_ids(state.cells.size(), 0ULL);
+  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
+    cell_particle_ids[cell_index] = state.particle_sidecar.particle_id[gas_globals[cell_index]];
+  }
+  return cell_particle_ids;
+}
+
+void rebuildLocalGasStateFromParticleIds(
+    core::SimulationState& state,
+    const std::unordered_map<std::uint64_t, GasCellMigrationRecord>& gas_records_by_particle_id,
+    std::span<const std::uint64_t> old_cell_particle_id) {
+  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  core::CellSoa rebuilt_cells;
+  core::GasCellSidecar rebuilt_gas;
+  rebuilt_cells.resize(gas_globals.size());
+  rebuilt_gas.resize(gas_globals.size());
+
+  std::unordered_map<std::uint64_t, std::uint32_t> new_cell_index_by_particle_id;
+  new_cell_index_by_particle_id.reserve(gas_globals.size());
+  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
+    const std::uint64_t particle_id = state.particle_sidecar.particle_id[gas_globals[cell_index]];
+    const auto found = gas_records_by_particle_id.find(particle_id);
+    if (found == gas_records_by_particle_id.end()) {
+      throw std::runtime_error("missing gas-cell migration record for local gas particle after ownership compaction");
+    }
+    const GasCellMigrationRecord& record = found->second;
+    rebuilt_cells.center_x_comoving[cell_index] = record.center_x_comoving;
+    rebuilt_cells.center_y_comoving[cell_index] = record.center_y_comoving;
+    rebuilt_cells.center_z_comoving[cell_index] = record.center_z_comoving;
+    rebuilt_cells.mass_code[cell_index] = record.mass_code;
+    rebuilt_cells.time_bin[cell_index] = record.time_bin;
+    rebuilt_cells.patch_index[cell_index] = record.patch_index;
+    rebuilt_gas.density_code[cell_index] = record.density_code;
+    rebuilt_gas.pressure_code[cell_index] = record.pressure_code;
+    rebuilt_gas.internal_energy_code[cell_index] = record.internal_energy_code;
+    rebuilt_gas.temperature_code[cell_index] = record.temperature_code;
+    rebuilt_gas.sound_speed_code[cell_index] = record.sound_speed_code;
+    rebuilt_gas.recon_gradient_x[cell_index] = record.recon_gradient_x;
+    rebuilt_gas.recon_gradient_y[cell_index] = record.recon_gradient_y;
+    rebuilt_gas.recon_gradient_z[cell_index] = record.recon_gradient_z;
+    new_cell_index_by_particle_id.emplace(particle_id, static_cast<std::uint32_t>(cell_index));
+  }
+
+  state.cells = std::move(rebuilt_cells);
+  state.gas_cells = std::move(rebuilt_gas);
+
+  const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
+    if (old_cell_index >= old_cell_particle_id.size()) {
+      return std::uint32_t{0};
+    }
+    const std::uint64_t host_particle_id = old_cell_particle_id[old_cell_index];
+    const auto found = new_cell_index_by_particle_id.find(host_particle_id);
+    if (found == new_cell_index_by_particle_id.end()) {
+      return std::uint32_t{0};
+    }
+    return found->second;
+  };
+
+  for (std::size_t row = 0; row < state.black_holes.size(); ++row) {
+    state.black_holes.host_cell_index[row] = remap_host_cell(state.black_holes.host_cell_index[row]);
+  }
+  for (std::size_t row = 0; row < state.tracers.size(); ++row) {
+    state.tracers.host_cell_index[row] = remap_host_cell(state.tracers.host_cell_index[row]);
+  }
+}
+
+void compactStateToCurrentOwner(
+    core::SimulationState& state,
+    int world_rank) {
+  if (world_rank < 0) {
+    throw std::invalid_argument("compactStateToCurrentOwner requires non-negative world rank");
+  }
+  std::vector<std::uint32_t> kept_gas_particle_indices;
+  kept_gas_particle_indices.reserve(state.cells.size());
+  std::vector<std::uint32_t> outbound_indices;
+  outbound_indices.reserve(state.particles.size());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    const bool owned_here = state.particle_sidecar.owning_rank[particle_index] == static_cast<std::uint32_t>(world_rank);
+    if (owned_here) {
+      if (state.particle_sidecar.species_tag[particle_index] == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
+        kept_gas_particle_indices.push_back(static_cast<std::uint32_t>(particle_index));
+      }
+    } else {
+      outbound_indices.push_back(static_cast<std::uint32_t>(particle_index));
+    }
+  }
+  const auto gas_records = collectLocalGasCellRecords(state, kept_gas_particle_indices);
+  const auto old_cell_particle_id = gasParticleIdByOldCellIndex(state);
+  core::ParticleMigrationCommit commit;
+  commit.world_rank = world_rank;
+  commit.outbound_local_indices = std::move(outbound_indices);
+  state.commitParticleMigration(commit);
+  rebuildLocalGasStateFromParticleIds(state, gas_records, old_cell_particle_id);
+}
+
+void applyInitialGravityAwareDecomposition(
+    core::SimulationState& state,
+    const core::SimulationConfig& config,
+    int world_size,
+    int world_rank) {
+  if (world_size <= 1) {
+    return;
+  }
+  std::vector<parallel::DecompositionItem> items;
+  items.reserve(state.particles.size());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    parallel::DecompositionItem item;
+    item.entity_id = state.particle_sidecar.particle_id[particle_index];
+    item.kind = parallel::DecompositionEntityKind::kParticle;
+    item.x_comov = state.particles.position_x_comoving[particle_index];
+    item.y_comov = state.particles.position_y_comoving[particle_index];
+    item.z_comov = state.particles.position_z_comoving[particle_index];
+    item.active_target_count_recent = 0;
+    item.remote_tree_interactions_recent = 0;
+    item.work_units = 1.0;
+    item.memory_bytes = sizeof(double) * 7 + sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t) * 3;
+    items.push_back(item);
+  }
+  parallel::DecompositionConfig decomposition_config;
+  decomposition_config.world_size = world_size;
+  decomposition_config.domain_x_min_comov = 0.0;
+  decomposition_config.domain_x_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.domain_y_min_comov = 0.0;
+  decomposition_config.domain_y_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.domain_z_min_comov = 0.0;
+  decomposition_config.domain_z_max_comov = config.cosmology.box_size_mpc_comoving;
+  decomposition_config.owned_particle_weight = 1.0;
+  decomposition_config.active_target_weight = 4.0;
+  decomposition_config.remote_tree_interaction_weight = 0.0;
+  decomposition_config.work_weight = 1.0;
+  decomposition_config.memory_weight = 0.1;
+  const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
+  for (std::size_t item_index = 0; item_index < items.size(); ++item_index) {
+    state.particle_sidecar.owning_rank[item_index] = static_cast<std::uint32_t>(plan.owning_rank_by_item[item_index]);
+  }
+  compactStateToCurrentOwner(state, world_rank);
 }
 
 
@@ -932,6 +1154,7 @@ void maybeWriteOutputs(
     const core::SimulationState& state,
     const core::IntegratorState& integrator_state,
     const core::HierarchicalTimeBinScheduler& scheduler,
+    const GravityStageCallback& gravity_callback,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
     bool write_outputs_enabled) {
@@ -956,7 +1179,7 @@ void maybeWriteOutputs(
   snapshot_payload.normalized_config_text = frozen_config.normalized_text;
   snapshot_payload.provenance =
       makeGravityAwareProvenanceRecord(frozen_config, config);
-  report.snapshot_path = report.run_directory / formatIndexedFileStem(config.output.output_stem, integrator_state.step_index);
+  report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
   io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
   report.snapshot_roundtrip_executed = true;
   const io::SnapshotReadResult snapshot_read = io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
@@ -1032,7 +1255,7 @@ void maybeWriteOutputs(
     restart_payload.provenance.gravity_treepm_long_range_restart_policy =
         restart_payload.distributed_gravity_state.long_range_restart_policy;
 
-    report.restart_path = report.run_directory / formatIndexedFileStem(config.output.restart_stem, integrator_state.step_index);
+    report.restart_path = report.run_directory / formatIndexedRankedFileStem(config.output.restart_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
     io::writeRestartCheckpointHdf5(report.restart_path, restart_payload);
     report.restart_roundtrip_executed = true;
     const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
@@ -1041,6 +1264,8 @@ void maybeWriteOutputs(
         gravity_callback.runtimeTopology());
     report.restart_roundtrip_ok = restart_read.state.particles.size() == state.particles.size() &&
         restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
+        restart_read.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank &&
+        restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particle_sidecar.owning_rank.size() &&
         compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "restart.write.complete",
@@ -1131,6 +1356,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           static_cast<std::size_t>(config.numerics.treepm_pm_grid),
           mpi_context.worldSize(),
           config.cosmology.box_size_mpc_comoving);
+      applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank());
     }
 
     core::CosmologyBackgroundConfig background_config;
@@ -1250,7 +1476,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       state.metadata.scale_factor = integrator_state.current_scale_factor;
       scheduler.endSubstep();
       syncTimeBinsFromScheduler(scheduler, state);
-      maybeWriteOutputs(m_frozen_config, config, state, integrator_state, scheduler, report, profiler, options.write_outputs);
+      maybeWriteOutputs(m_frozen_config, config, state, integrator_state, scheduler, gravity_callback, report, profiler, options.write_outputs);
     }
 
     report.completed_steps = integrator_state.step_index - options.step_index;
