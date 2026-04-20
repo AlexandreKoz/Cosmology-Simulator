@@ -6,6 +6,32 @@ This recap records **current command-backed audit evidence** for the emergency r
 
 ## 0) Axis-aware TreePM geometry contract repair (2026-04-20 UTC)
 
+## 0) Hierarchical KDK + TreePM explicit PM synchronization contract repair (2026-04-20 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target \
+  test_integration_reference_workflow_distributed_treepm_mpi \
+  test_integration_time_integration_loop \
+  test_integration_hierarchical_time_bins \
+  test_integration_hierarchical_timestep_regression \
+  test_unit_parallel_distributed_memory
+ctest --test-dir build/cpu-only-debug --output-on-failure -R \
+  "integration_hierarchical_time_bins|integration_hierarchical_timestep_regression|integration_time_integration_loop|unit_parallel_distributed_memory"
+```
+
+Observed:
+
+- The PM long-range kick is now documented and recorded as an explicit kick-surface operator at `gravity_kick_pre` and `gravity_kick_post`.
+- Rank-consensus checks were hardened to include PM field version and last-refresh opportunity metadata (not only refresh votes).
+- Cadence records now explicitly report PM sync surface and active/inactive kick ownership per event.
+- Restart continuation rule remains explicit deterministic rebuild with persisted cadence metadata.
+
+Reproducibility impact:
+
+- Deterministic scheduling semantics are unchanged; this pass improves auditability and explicit operator metadata for PM synchronization and restart continuation.
+
 Observed:
 
 - Added canonical axis-aware config lanes for cosmological box lengths and PM grid shape while preserving scalar compatibility inputs.

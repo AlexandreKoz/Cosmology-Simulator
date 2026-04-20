@@ -87,19 +87,32 @@ int main() {
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
     const auto& record = report.treepm_cadence_records[i];
     assert(record.gravity_kick_opportunity == i + 1U);
+    assert(record.pm_sync_surface == ((i % 2U == 0U) ? "kick_pre" : "kick_post"));
+    assert(record.stage_name == ((i % 2U == 0U) ? "gravity_kick_pre" : "gravity_kick_post"));
+    if (record.refreshed_long_range_field) {
+      assert(record.field_age_in_kick_opportunities == 0U);
+      assert(record.gravity_kick_opportunity == record.last_refresh_opportunity);
+    } else {
+      assert(record.field_age_in_kick_opportunities > 0U);
+      assert(record.gravity_kick_opportunity > record.last_refresh_opportunity);
+    }
+    assert(record.active_particles_kicked + record.inactive_particles_skipped == report.local_particle_count);
   }
 
   std::vector<std::uint64_t> gathered_opportunity(report.treepm_cadence_records.size(), 0ULL);
   std::vector<std::uint64_t> gathered_field_version(report.treepm_cadence_records.size(), 0ULL);
+  std::vector<std::uint64_t> gathered_last_refresh_opportunity(report.treepm_cadence_records.size(), 0ULL);
   std::vector<std::uint64_t> gathered_refresh_flag(report.treepm_cadence_records.size(), 0ULL);
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
     gathered_opportunity[i] = report.treepm_cadence_records[i].gravity_kick_opportunity;
     gathered_field_version[i] = report.treepm_cadence_records[i].field_version;
+    gathered_last_refresh_opportunity[i] = report.treepm_cadence_records[i].last_refresh_opportunity;
     gathered_refresh_flag[i] = report.treepm_cadence_records[i].refreshed_long_range_field ? 1ULL : 0ULL;
   }
 
   std::vector<std::uint64_t> reduced_opportunity(gathered_opportunity.size(), 0ULL);
   std::vector<std::uint64_t> reduced_field_version(gathered_field_version.size(), 0ULL);
+  std::vector<std::uint64_t> reduced_last_refresh_opportunity(gathered_last_refresh_opportunity.size(), 0ULL);
   std::vector<std::uint64_t> reduced_refresh_flag(gathered_refresh_flag.size(), 0ULL);
   MPI_Allreduce(
       gathered_opportunity.data(),
@@ -116,6 +129,13 @@ int main() {
       MPI_SUM,
       MPI_COMM_WORLD);
   MPI_Allreduce(
+      gathered_last_refresh_opportunity.data(),
+      reduced_last_refresh_opportunity.data(),
+      static_cast<int>(gathered_last_refresh_opportunity.size()),
+      MPI_UINT64_T,
+      MPI_SUM,
+      MPI_COMM_WORLD);
+  MPI_Allreduce(
       gathered_refresh_flag.data(),
       reduced_refresh_flag.data(),
       static_cast<int>(gathered_refresh_flag.size()),
@@ -126,6 +146,9 @@ int main() {
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
     assert(reduced_opportunity[i] == gathered_opportunity[i] * static_cast<std::uint64_t>(world_size));
     assert(reduced_field_version[i] == gathered_field_version[i] * static_cast<std::uint64_t>(world_size));
+    assert(
+        reduced_last_refresh_opportunity[i] ==
+        gathered_last_refresh_opportunity[i] * static_cast<std::uint64_t>(world_size));
     assert(reduced_refresh_flag[i] == gathered_refresh_flag[i] * static_cast<std::uint64_t>(world_size));
   }
 

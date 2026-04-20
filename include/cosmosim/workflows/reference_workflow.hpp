@@ -23,10 +23,15 @@ struct ReferenceWorkflowReport {
   struct TreePmCadenceRecord {
     std::uint64_t step_index = 0;
     std::string stage_name;
+    std::string pm_sync_surface;
     std::uint64_t gravity_kick_opportunity = 0;
     std::uint64_t field_version = 0;
+    std::uint64_t last_refresh_opportunity = 0;
     std::uint64_t field_built_step_index = 0;
     double field_built_scale_factor = 1.0;
+    std::uint64_t field_age_in_kick_opportunities = 0;
+    std::uint64_t active_particles_kicked = 0;
+    std::uint64_t inactive_particles_skipped = 0;
     bool refreshed_long_range_field = false;
   };
 
