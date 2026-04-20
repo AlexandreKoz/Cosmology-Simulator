@@ -435,3 +435,32 @@ Phase 2 distributed TreePM restart continuation lacked an explicit, versioned co
 - `tests/unit/test_restart_checkpoint_schema.cpp`
 - `tests/integration/test_restart_checkpoint_roundtrip.cpp`
 - `tests/unit/test_parallel_distributed_memory.cpp`
+
+## 2026-04-20 — ADR-INFRA-GRAVITY-013: Freeze TreePM Phase 3 contract and maturity map before numerics work
+
+### Status
+Accepted (infrastructure planning/audit freeze)
+
+### Context
+The repository now has a documented and tested Phase 1/2 TreePM baseline (including distributed slab ownership/message contracts and Phase 2 MPI validation gates), but does not yet have an explicit Phase 3 closure contract tied to evidence boundaries. Without a frozen Phase 3 contract, later implementation prompts risk over-claiming completion or conflating scaling artifacts with production certification.
+
+### Decision
+- Add a Phase 3 contract document (`docs/treepm_phase3_contract.md`) that records:
+  - audited current baseline facts,
+  - required Phase 3 additions,
+  - forbidden completion claims before evidence,
+  - explicit hard closure gate,
+  - staged requirement-to-files maturity map.
+- Update validation/release planning docs so Phase 3 is tracked as pending contract work, not completed functionality.
+- Do not implement Phase 3 numerics in this patch.
+
+### Consequences
+- Positive: later implementation work has a single auditable closure contract and anti-drift guardrails.
+- Positive: prevents false closure claims by separating “Phase 2 correctness evidence” from “Phase 3 maturity evidence.”
+- Tradeoff: this ADR adds planning/documentation overhead before any algorithmic implementation.
+
+### Evidence references
+- `docs/treepm_phase3_contract.md`
+- `docs/validation_ladder.md`
+- `docs/validation_plan.md`
+- `docs/releases/known_issues.md`

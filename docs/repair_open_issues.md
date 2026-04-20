@@ -2,7 +2,11 @@
 
 _Date captured: 2026-04-14 (UTC)_
 
+
 ## Current blocker ledger after dependency-enabled validation
+
+- TreePM Phase 3 implementation/closure work remains open by contract: see `docs/treepm_phase3_contract.md` hard-gate requirements and staged maturity map.
+
 
 Environment blockers currently observed in this validation environment:
 

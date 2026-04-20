@@ -116,6 +116,13 @@ Or run the built-in integration smoke gate:
 - `integration_runtime_app_smoke` (HDF5-enabled builds)
 
 
+
+## Phase 3 validation status
+
+- Phase 3 validation closure criteria are defined in `docs/treepm_phase3_contract.md`.
+- This repository stage does not yet provide a dedicated `test_validation_phase3_*` executable/gate.
+- Current Phase 2 MPI gravity validation is necessary baseline evidence, but not sufficient evidence for Phase 3 closure.
+
 ## Phase 2 distributed TreePM validation gate (MPI gravity gate)
 
 - Distributed workflow snapshot/restart paths are rank-qualified (`..._rank###.hdf5`) so MPI restart validation does not rely on unsafe multi-rank writes to a single file.

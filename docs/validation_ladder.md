@@ -88,6 +88,13 @@ Planned as modules mature:
 
 These measurements support profiling and regression triage only; they are not correctness evidence.
 
+
+## Phase 3 status (contract frozen, implementation pending)
+
+- Phase 3 closure criteria are now frozen in `docs/treepm_phase3_contract.md`.
+- Current ladder evidence remains Phase 1/2-focused and does **not** by itself close Phase 3.
+- Existing `pm_only_scaling_*` and `tree_only_scaling_*` artifacts are performance artifacts and must not be treated as strong/weak scaling certification.
+
 ## Phase 2 scaling artifacts (separate PM-only and tree-only)
 
 - Target: `generate_mpi_gravity_scaling_artifacts` (MPI-enabled builds).

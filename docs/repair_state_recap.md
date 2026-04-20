@@ -4,6 +4,37 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+
+## 0) TreePM Phase 3 contract freeze and gravity-stack audit baseline (2026-04-20 UTC)
+
+Commands:
+
+```bash
+sed -n '1,220p' docs/treepm_phase2_closeout.md
+sed -n '1,260p' docs/treepm_phase2_distributed_contract.md
+sed -n '1,320p' docs/pm_gravity_solver.md
+sed -n '1,260p' docs/tree_gravity_solver.md
+sed -n '1,260p' docs/tree_pm_coupling.md
+sed -n '1,220p' docs/time_integration.md
+sed -n '1,220p' docs/hierarchical_timestepping_audit_2026-04-06.md
+sed -n '1,220p' docs/parallel_distributed_memory_contracts.md
+sed -n '1,260p' docs/validation_plan.md
+sed -n '1,220p' docs/validation_ladder.md
+sed -n '1,220p' docs/releases/known_issues.md
+sed -n '1,260p' docs/architecture/decision_log.md
+```
+
+Observed:
+
+- Added `docs/treepm_phase3_contract.md` as the Phase 3 contract/maturity-map anchor.
+- Recorded explicit audited baseline facts (periodic PM production path, slab-only PM decomposition, cubic PM grid wiring from scalar PMGRID, monopole tree MAC, single-policy softening lane, hierarchy present but Phase 3 integrator-grade PM synchronization unproven).
+- Added ADR record in `docs/architecture/decision_log.md` for the Phase 3 contract freeze.
+- Updated validation/release docs to keep honest language: Phase 1/2 evidence is not Phase 3 closure; scaling artifacts are not certification.
+
+Interpretation:
+
+- This pass is documentation/infrastructure alignment only and does not change solver behavior, config semantics, or schema payload contracts.
+
 ## 0) Phase 2 distributed TreePM closeout failure-contract hardening (2026-04-19 UTC)
 
 Commands:
