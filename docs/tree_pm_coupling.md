@@ -109,7 +109,7 @@ In multi-rank TreePM, the short-range tree is intended to be built from **rank-o
 
 `TreePmCoordinator` now branches by `PmSolveOptions::boundary_condition`:
 - `kPeriodic`: periodic FFT PM long-range + periodic minimum-image short-range residual.
-- `kIsolatedOpen`: open-boundary PM long-range operator + non-periodic short-range residual (minimum-image disabled).
+- `kIsolatedOpen`: open-boundary doubled-domain free-space PM convolution + non-periodic short-range residual (minimum-image disabled).
 
 Unsupported combinations fail fast:
 - isolated/open PM with `world_size > 1` throws.

@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cmath>
+#include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -8,6 +9,7 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
+#include "cosmosim/gravity/tree_pm_split_kernel.hpp"
 
 namespace {
 
@@ -173,28 +175,128 @@ void testUniformDensityZeroResponse() {
   }
 }
 
-void testIsolatedOpenPointMassReference() {
-  const cosmosim::gravity::PmGridShape shape{10, 10, 10};
+struct IsolatedPointMassCaseResult {
+  double relative_error = 0.0;
+  double got_force_x = 0.0;
+  double expected_force_x = 0.0;
+};
+
+void requireIsolatedCheck(bool condition, const std::string& message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+[[nodiscard]] IsolatedPointMassCaseResult runIsolatedPointMassCase(
+    cosmosim::gravity::PmGridShape shape,
+    double lx,
+    double ly,
+    double lz,
+    std::size_t src_ix,
+    std::size_t src_iy,
+    std::size_t src_iz,
+    std::size_t sample_ix,
+    std::size_t sample_iy,
+    std::size_t sample_iz,
+    double split_scale = 0.0) {
   cosmosim::gravity::PmGridStorage grid(shape);
   cosmosim::gravity::PmSolver solver(shape);
   cosmosim::gravity::PmSolveOptions options;
-  options.box_size_mpc_comoving = 1.0;
+  options.box_size_x_mpc_comoving = lx;
+  options.box_size_y_mpc_comoving = ly;
+  options.box_size_z_mpc_comoving = lz;
+  options.box_size_mpc_comoving = lx;
   options.boundary_condition = cosmosim::gravity::PmBoundaryCondition::kIsolatedOpen;
   options.scale_factor = 1.0;
   options.gravitational_constant_code = 1.0;
+  options.tree_pm_split_scale_comoving = split_scale;
 
-  const std::size_t cx = 5;
-  const std::size_t cy = 5;
-  const std::size_t cz = 5;
-  grid.density()[grid.linearIndex(cx, cy, cz)] = 1000.0;  // one-cell unit mass since dV=1/1000
+  const double dx = lx / static_cast<double>(shape.nx);
+  const double dy = ly / static_cast<double>(shape.ny);
+  const double dz = lz / static_cast<double>(shape.nz);
+  const double cell_volume = dx * dy * dz;
+  const double point_mass = 1.0;
+  grid.density()[grid.linearIndex(src_ix, src_iy, src_iz)] = point_mass / cell_volume;
   solver.solvePoissonIsolatedOpen(grid, options, nullptr);
 
-  const std::size_t sample = grid.linearIndex(7, 5, 5);
-  const double got = grid.force_x()[sample];
-  const double r = 0.2;
-  const double expected = -1.0 / (r * r);
-  assert(got < 0.0);
-  assert(std::abs((got - expected) / expected) < 0.30);
+  const double src_x = (static_cast<double>(src_ix) + 0.5) * dx;
+  const double src_y = (static_cast<double>(src_iy) + 0.5) * dy;
+  const double src_z = (static_cast<double>(src_iz) + 0.5) * dz;
+  const double x = (static_cast<double>(sample_ix) + 0.5) * dx;
+  const double y = (static_cast<double>(sample_iy) + 0.5) * dy;
+  const double z = (static_cast<double>(sample_iz) + 0.5) * dz;
+  const double rx = x - src_x;
+  const double ry = y - src_y;
+  const double rz = z - src_z;
+  const double r2 = rx * rx + ry * ry + rz * rz;
+  const double r = std::sqrt(r2);
+
+  double long_range_factor = 1.0;
+  if (split_scale > 0.0) {
+    long_range_factor = cosmosim::gravity::treePmGaussianLongRangeForceFactor(r, split_scale);
+  }
+  const double expected_force_x = -(point_mass * rx / (r * r * r)) * long_range_factor;
+  const double got_force_x = grid.force_x()[grid.linearIndex(sample_ix, sample_iy, sample_iz)];
+  const double rel = std::abs(got_force_x - expected_force_x) / std::max(std::abs(expected_force_x), 1.0e-14);
+  return {.relative_error = rel, .got_force_x = got_force_x, .expected_force_x = expected_force_x};
+}
+
+void testIsolatedOpenPointMassCenteredOffCenteredAndBoundary() {
+  const auto centered = runIsolatedPointMassCase(
+      {16, 16, 16}, 1.0, 1.0, 1.0, 8, 8, 8, 12, 8, 8);
+  const auto off_center = runIsolatedPointMassCase(
+      {12, 12, 12}, 1.0, 1.0, 1.0, 3, 6, 8, 6, 6, 8);
+  const auto near_boundary = runIsolatedPointMassCase(
+      {16, 16, 16}, 1.0, 1.0, 1.0, 1, 8, 8, 5, 8, 8);
+  std::cerr << "[isolated_pm] centered_rel_err=" << centered.relative_error
+            << " off_center_rel_err=" << off_center.relative_error
+            << " near_boundary_rel_err=" << near_boundary.relative_error << '\n';
+  requireIsolatedCheck(centered.relative_error < 0.18, "centered isolated point-mass error too large");
+  requireIsolatedCheck(off_center.relative_error < 0.20, "off-center isolated point-mass error too large");
+  requireIsolatedCheck(near_boundary.relative_error < 0.18, "near-boundary isolated point-mass error too large");
+}
+
+void testIsolatedOpenResolutionConvergence() {
+  const auto coarse = runIsolatedPointMassCase(
+      {10, 10, 10}, 1.0, 1.0, 1.0, 5, 5, 5, 7, 5, 5);
+  const auto fine = runIsolatedPointMassCase(
+      {14, 14, 14}, 1.0, 1.0, 1.0, 7, 7, 7, 10, 7, 7);
+  std::cerr << "[isolated_pm] convergence coarse=" << coarse.relative_error
+            << " fine=" << fine.relative_error << '\n';
+  requireIsolatedCheck(fine.relative_error < coarse.relative_error, "isolated resolution convergence failed");
+  requireIsolatedCheck(fine.relative_error < 0.20, "isolated fine-grid error too large");
+}
+
+void testIsolatedOpenBoxSizeSensitivity() {
+  const auto small_box = runIsolatedPointMassCase(
+      {12, 12, 12}, 1.0, 1.0, 1.0, 6, 6, 6, 8, 6, 6);
+  const auto large_box = runIsolatedPointMassCase(
+      {12, 12, 12}, 2.0, 2.0, 2.0, 6, 6, 6, 8, 6, 6);
+  std::cerr << "[isolated_pm] box_sensitivity small=" << small_box.relative_error
+            << " large=" << large_box.relative_error << '\n';
+  requireIsolatedCheck(large_box.relative_error < small_box.relative_error, "isolated box-size truncation sanity failed");
+}
+
+void testIsolatedOpenSplitConsistencyAndNonCubic() {
+  const auto unsplit = runIsolatedPointMassCase(
+      {10, 12, 14}, 1.2, 1.8, 2.4, 4, 6, 6, 6, 6, 6, 0.0);
+  const auto split = runIsolatedPointMassCase(
+      {10, 12, 14}, 1.2, 1.8, 2.4, 4, 6, 6, 6, 6, 6, 0.08);
+  std::cerr << "[isolated_pm] non_cubic_unsplit=" << unsplit.relative_error
+            << " split=" << split.relative_error << '\n';
+  requireIsolatedCheck(unsplit.relative_error < 0.24, "isolated non-cubic unsplit error too large");
+  requireIsolatedCheck(split.relative_error < 0.24, "isolated non-cubic split error too large");
+}
+
+void testIsolatedOpenNoFftwSmoke() {
+  const auto centered = runIsolatedPointMassCase(
+      {8, 8, 8}, 1.0, 1.0, 1.0, 4, 4, 4, 6, 4, 4);
+  const auto split = runIsolatedPointMassCase(
+      {8, 10, 12}, 1.0, 1.5, 2.0, 3, 5, 6, 5, 5, 6, 0.10);
+  std::cerr << "[isolated_pm_no_fftw] centered=" << centered.relative_error
+            << " split_non_cubic=" << split.relative_error << '\n';
+  requireIsolatedCheck(centered.relative_error < 0.45, "no-fftw isolated centered smoke failed");
+  requireIsolatedCheck(split.relative_error < 0.45, "no-fftw isolated split smoke failed");
 }
 
 void testIsolatedOpenRejectsDistributedSlab() {
@@ -394,7 +496,14 @@ int main() {
   testPoissonAnalyticMode();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();
-  testIsolatedOpenPointMassReference();
+  if (cosmosim::gravity::PmSolver::fftBackendAvailable()) {
+    testIsolatedOpenPointMassCenteredOffCenteredAndBoundary();
+    testIsolatedOpenResolutionConvergence();
+    testIsolatedOpenBoxSizeSensitivity();
+    testIsolatedOpenSplitConsistencyAndNonCubic();
+  } else {
+    testIsolatedOpenNoFftwSmoke();
+  }
   testIsolatedOpenRejectsDistributedSlab();
   testSingleRankSlabLayoutStorageEquivalence();
   testPartialSlabStorageRejectsSingleRankSolverPath();

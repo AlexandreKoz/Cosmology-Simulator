@@ -292,7 +292,13 @@ ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two
 
 ## Isolated/open PM operator (non-periodic)
 
-For `mode_policy.gravity_boundary = isolated_monopole`, the PM long-range solve now uses an explicit open-boundary Green-function operator on the mesh (single rank in this stage).
+For `mode_policy.gravity_boundary = isolated_monopole`, the PM long-range solve uses a **single-rank doubled-domain free-space convolution** on the mesh:
+
+1. embed physical density on a padded grid `(2Nx, 2Ny, 2Nz)`,
+2. convolve with the free-space kernel in Fourier space,
+3. extract the physical `(Nx,Ny,Nz)` block.
+
+This is linear (non-circular) convolution on the physical domain, so isolated mode does not reuse periodic-image PM semantics.
 
 We solve the isolated Poisson problem in a finite domain with far-field gauge
 \(\phi(\|x\|\to\infty)=0\):
@@ -304,10 +310,11 @@ with \(r_s =\) `tree_pm_split_scale_comoving`.
 
 Conventions in this stage:
 - **Potential gauge:** \(\phi(\infty)=0\), approximated by finite-box open convolution.
-- **Force recovery:** \(\mathbf{a}=-\nabla\phi\), using mesh finite differences.
+- **Force recovery:** \(\mathbf{a}=-\nabla\phi\), using second-order central differences in the interior and second-order one-sided stencils on physical boundaries.
 - **Boundary condition model:** open/non-periodic; no periodic image wrapping in the short-range residual path.
 - **Split consistency:** Tree short-range residual keeps the complementary Gaussian real-space factor `erfc(r/(2r_s))`, so long+short composes to Newtonian force before explicit cutoff.
+- **Self term policy:** kernel value at `r=0` is set to zero in the PM convolution.
 
 Current stage limitations:
 - Isolated PM is restricted to **single-rank** runtime (`mpi_ranks_expected=1`). Multi-rank isolated PM fails hard.
-- Isolated PM currently uses the host serial Poisson path.
+- Distributed isolated/open PM is still open work; this stage does not claim distributed isolated maturity.
