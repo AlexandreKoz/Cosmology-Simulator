@@ -8,6 +8,9 @@ Phase 2 TreePM-specific ownership/message terminology is frozen in
 ## 1) Gravity-aware decomposition contract
 
 `buildMortonSfcDecomposition(...)` uses Morton ordering plus a weighted gravity-cost model.
+Rank-range cuts are contiguous in SFC order and now use nearest-target boundary selection when a
+prefix crosses each rank load target. This keeps ownership deterministic while reducing clustered
+load overshoot compared with a first-crossing-only split.
 
 Per-item weighted load is:
 

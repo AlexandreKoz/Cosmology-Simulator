@@ -230,17 +230,72 @@ struct SourceDomainBoundsPacket {
   double max_y_comoving = 0.0;
   double min_z_comoving = 0.0;
   double max_z_comoving = 0.0;
+  std::uint8_t wraps_x = 0;
+  std::uint8_t wraps_y = 0;
+  std::uint8_t wraps_z = 0;
+  std::uint8_t reserved0 = 0;
   std::uint64_t source_particle_count = 0;
 };
 
 static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
 
+struct PeriodicInterval {
+  double min = 0.0;
+  double max = 0.0;
+  bool wraps = false;
+};
+
+[[nodiscard]] PeriodicInterval tightPeriodicInterval(std::span<const double> values, double box_size_comoving) {
+  PeriodicInterval interval{};
+  if (values.empty()) {
+    return interval;
+  }
+  if (box_size_comoving <= 0.0) {
+    interval.min = *std::min_element(values.begin(), values.end());
+    interval.max = *std::max_element(values.begin(), values.end());
+    interval.wraps = false;
+    return interval;
+  }
+  std::vector<double> wrapped(values.begin(), values.end());
+  for (double& value : wrapped) {
+    value = std::fmod(value, box_size_comoving);
+    if (value < 0.0) {
+      value += box_size_comoving;
+    }
+  }
+  std::sort(wrapped.begin(), wrapped.end());
+  if (wrapped.size() == 1) {
+    interval.min = wrapped.front();
+    interval.max = wrapped.front();
+    interval.wraps = false;
+    return interval;
+  }
+  std::size_t largest_gap_start = 0;
+  double largest_gap = -1.0;
+  for (std::size_t i = 0; i < wrapped.size(); ++i) {
+    const std::size_t j = (i + 1U) % wrapped.size();
+    const double next = (j == 0) ? (wrapped[j] + box_size_comoving) : wrapped[j];
+    const double gap = next - wrapped[i];
+    if (gap > largest_gap) {
+      largest_gap = gap;
+      largest_gap_start = i;
+    }
+  }
+  const std::size_t interval_begin_index = (largest_gap_start + 1U) % wrapped.size();
+  const std::size_t interval_end_index = largest_gap_start;
+  interval.min = wrapped[interval_begin_index];
+  interval.max = wrapped[interval_end_index];
+  interval.wraps = interval.min > interval.max;
+  return interval;
+}
+
 [[nodiscard]] double minimumDistanceToPeriodicInterval(
     double coordinate,
     double interval_min,
     double interval_max,
+    bool interval_wraps,
     double box_size_comoving) {
-  if (interval_max < interval_min) {
+  if (interval_max < interval_min && !interval_wraps) {
     return 0.0;
   }
   auto interval_distance = [](double value, double lower, double upper) {
@@ -252,6 +307,14 @@ static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
     }
     return 0.0;
   };
+  if (interval_wraps) {
+    if (box_size_comoving <= 0.0) {
+      return 0.0;
+    }
+    const double d0 = interval_distance(coordinate, interval_min, box_size_comoving);
+    const double d1 = interval_distance(coordinate, 0.0, interval_max);
+    return std::min(d0, d1);
+  }
   if (box_size_comoving <= 0.0) {
     return interval_distance(coordinate, interval_min, interval_max);
   }
@@ -271,27 +334,49 @@ static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
   if (bounds.source_particle_count == 0) {
     return std::numeric_limits<double>::infinity();
   }
-  const double dx = minimumDistanceToPeriodicInterval(px, bounds.min_x_comoving, bounds.max_x_comoving, box_size_comoving);
-  const double dy = minimumDistanceToPeriodicInterval(py, bounds.min_y_comoving, bounds.max_y_comoving, box_size_comoving);
-  const double dz = minimumDistanceToPeriodicInterval(pz, bounds.min_z_comoving, bounds.max_z_comoving, box_size_comoving);
+  const double dx = minimumDistanceToPeriodicInterval(
+      px,
+      bounds.min_x_comoving,
+      bounds.max_x_comoving,
+      bounds.wraps_x != 0U,
+      box_size_comoving);
+  const double dy = minimumDistanceToPeriodicInterval(
+      py,
+      bounds.min_y_comoving,
+      bounds.max_y_comoving,
+      bounds.wraps_y != 0U,
+      box_size_comoving);
+  const double dz = minimumDistanceToPeriodicInterval(
+      pz,
+      bounds.min_z_comoving,
+      bounds.max_z_comoving,
+      bounds.wraps_z != 0U,
+      box_size_comoving);
   return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 [[nodiscard]] SourceDomainBoundsPacket computeLocalSourceBounds(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
-    std::span<const double> pos_z_comoving) {
+    std::span<const double> pos_z_comoving,
+    double box_size_comoving) {
   SourceDomainBoundsPacket bounds;
   bounds.source_particle_count = static_cast<std::uint64_t>(pos_x_comoving.size());
   if (pos_x_comoving.empty()) {
     return bounds;
   }
-  bounds.min_x_comoving = *std::min_element(pos_x_comoving.begin(), pos_x_comoving.end());
-  bounds.max_x_comoving = *std::max_element(pos_x_comoving.begin(), pos_x_comoving.end());
-  bounds.min_y_comoving = *std::min_element(pos_y_comoving.begin(), pos_y_comoving.end());
-  bounds.max_y_comoving = *std::max_element(pos_y_comoving.begin(), pos_y_comoving.end());
-  bounds.min_z_comoving = *std::min_element(pos_z_comoving.begin(), pos_z_comoving.end());
-  bounds.max_z_comoving = *std::max_element(pos_z_comoving.begin(), pos_z_comoving.end());
+  const PeriodicInterval interval_x = tightPeriodicInterval(pos_x_comoving, box_size_comoving);
+  const PeriodicInterval interval_y = tightPeriodicInterval(pos_y_comoving, box_size_comoving);
+  const PeriodicInterval interval_z = tightPeriodicInterval(pos_z_comoving, box_size_comoving);
+  bounds.min_x_comoving = interval_x.min;
+  bounds.max_x_comoving = interval_x.max;
+  bounds.min_y_comoving = interval_y.min;
+  bounds.max_y_comoving = interval_y.max;
+  bounds.min_z_comoving = interval_z.min;
+  bounds.max_z_comoving = interval_z.max;
+  bounds.wraps_x = interval_x.wraps ? 1U : 0U;
+  bounds.wraps_y = interval_y.wraps ? 1U : 0U;
+  bounds.wraps_z = interval_z.wraps ? 1U : 0U;
   return bounds;
 }
 
@@ -576,8 +661,17 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->residual_pair_evaluations = m_last_residual_stats.pair_evaluations;
     diagnostics->residual_remote_request_packets = m_last_residual_stats.remote_request_packets;
     diagnostics->residual_remote_response_packets = m_last_residual_stats.remote_response_packets;
+    diagnostics->residual_remote_request_bytes = m_last_residual_stats.remote_request_bytes;
+    diagnostics->residual_remote_response_bytes = m_last_residual_stats.remote_response_bytes;
     diagnostics->residual_remote_request_batches = m_last_residual_stats.remote_request_batches;
     diagnostics->residual_remote_peer_participations = m_last_residual_stats.remote_peer_participations;
+    diagnostics->residual_remote_targets_with_requests = m_last_residual_stats.remote_targets_with_requests;
+    diagnostics->residual_remote_targets_without_requests = m_last_residual_stats.remote_targets_without_requests;
+    diagnostics->residual_remote_pairs_pruned_by_bounds = m_last_residual_stats.remote_pairs_pruned_by_bounds;
+    diagnostics->residual_remote_request_packets_max_peer = m_last_residual_stats.remote_request_packets_max_peer;
+    diagnostics->residual_remote_response_packets_max_peer = m_last_residual_stats.remote_response_packets_max_peer;
+    diagnostics->residual_remote_request_packet_imbalance_ratio =
+        m_last_residual_stats.remote_request_packet_imbalance_ratio;
     diagnostics->force_l2_pm_global = l2NormFromComponents(
         m_active_pm_ax_comoving, m_active_pm_ay_comoving, m_active_pm_az_comoving);
     diagnostics->force_l2_pm_zoom_correction = l2NormFromComponents(
@@ -835,7 +929,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& expected_response_count = m_tree_exchange_workspace.expected_response_count;
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
-    SourceDomainBoundsPacket local_bounds = computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving);
+    SourceDomainBoundsPacket local_bounds =
+        computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving, box_size_comoving);
     std::vector<SourceDomainBoundsPacket> peer_bounds(static_cast<std::size_t>(mpi_world_size));
     MPI_Allgather(
         &local_bounds,
@@ -878,6 +973,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           }
           if (minimumDistanceToPeriodicBounds(px, py, pz, peer_bounds[static_cast<std::size_t>(peer)], box_size_comoving) >
               cutoff_radius_comoving) {
+            ++m_last_residual_stats.remote_pairs_pruned_by_bounds;
             continue;
           }
           requests_by_peer[static_cast<std::size_t>(peer)].push_back(ShortRangeTargetRequestPacket{
@@ -889,6 +985,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               .target_softening_epsilon_comoving = target_softening,
           });
           ++expected_response_count[batch_slot];
+        }
+        if (expected_response_count[batch_slot] > 0U) {
+          ++m_last_residual_stats.remote_targets_with_requests;
+        } else {
+          ++m_last_residual_stats.remote_targets_without_requests;
         }
       }
 
@@ -960,8 +1061,30 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
       m_last_residual_stats.remote_request_batches += 1;
       m_last_residual_stats.remote_request_packets += static_cast<std::uint64_t>(total_send_bytes / sizeof(ShortRangeTargetRequestPacket));
+      m_last_residual_stats.remote_request_bytes += static_cast<std::uint64_t>(total_send_bytes);
       m_last_residual_stats.remote_peer_participations += static_cast<std::uint64_t>(std::count_if(send_counts.begin(), send_counts.end(), [](int bytes) { return bytes > 0; }));
       m_last_residual_stats.remote_peer_participations += static_cast<std::uint64_t>(std::count_if(recv_counts.begin(), recv_counts.end(), [](int bytes) { return bytes > 0; }));
+      {
+        std::uint64_t packet_sum = 0;
+        std::uint64_t packet_max = 0;
+        for (int peer = 0; peer < mpi_world_size; ++peer) {
+          if (peer == mpi_world_rank) {
+            continue;
+          }
+          const std::uint64_t packets = static_cast<std::uint64_t>(
+              send_counts[static_cast<std::size_t>(peer)] / static_cast<int>(sizeof(ShortRangeTargetRequestPacket)));
+          packet_sum += packets;
+          packet_max = std::max(packet_max, packets);
+        }
+        m_last_residual_stats.remote_request_packets_max_peer =
+            std::max(m_last_residual_stats.remote_request_packets_max_peer, packet_max);
+        const double mean_packets = (mpi_world_size > 1)
+            ? static_cast<double>(packet_sum) / static_cast<double>(mpi_world_size - 1)
+            : 0.0;
+        const double imbalance = (mean_packets > 0.0) ? static_cast<double>(packet_max) / mean_packets : 0.0;
+        m_last_residual_stats.remote_request_packet_imbalance_ratio =
+            std::max(m_last_residual_stats.remote_request_packet_imbalance_ratio, imbalance);
+      }
 
       response_send_payload.assign(recv_payload.size(), 0U);
       for (int peer = 0; peer < mpi_world_size; ++peer) {
@@ -1019,6 +1142,20 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       remote_batch_ax.assign(batch_size, 0.0);
       remote_batch_ay.assign(batch_size, 0.0);
       remote_batch_az.assign(batch_size, 0.0);
+      m_last_residual_stats.remote_response_bytes += static_cast<std::uint64_t>(response_recv_payload.size());
+      {
+        std::uint64_t response_max = 0;
+        for (int peer = 0; peer < mpi_world_size; ++peer) {
+          if (peer == mpi_world_rank) {
+            continue;
+          }
+          const std::uint64_t packets = static_cast<std::uint64_t>(
+              send_counts[static_cast<std::size_t>(peer)] / static_cast<int>(sizeof(ShortRangeTargetResponsePacket)));
+          response_max = std::max(response_max, packets);
+        }
+        m_last_residual_stats.remote_response_packets_max_peer =
+            std::max(m_last_residual_stats.remote_response_packets_max_peer, response_max);
+      }
       for (int peer = 0; peer < mpi_world_size; ++peer) {
         if (peer == mpi_world_rank) {
           continue;

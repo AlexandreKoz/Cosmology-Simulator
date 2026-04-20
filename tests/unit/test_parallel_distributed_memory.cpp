@@ -124,6 +124,50 @@ void testGravityAwareDecompositionTracksInteractionCost() {
   assert(total_remote_interactions == (4U * 1U + 4U * 50U));
 }
 
+void testClusteredGravityAwareDecompositionImprovesWeightedImbalance() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(96);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const bool clustered = (i % 3U) != 0U;
+    const double center = clustered ? 0.92 : 0.18;
+    items[i].entity_id = static_cast<std::uint64_t>(1000U + i);
+    items[i].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].x_comov = std::fmod(center + 0.03 * std::sin(0.23 * static_cast<double>(i + 1U)), 1.0);
+    if (items[i].x_comov < 0.0) {
+      items[i].x_comov += 1.0;
+    }
+    items[i].y_comov = std::fmod(center + 0.025 * std::cos(0.29 * static_cast<double>(i + 3U)), 1.0);
+    if (items[i].y_comov < 0.0) {
+      items[i].y_comov += 1.0;
+    }
+    items[i].z_comov = std::fmod(center + 0.019 * std::sin(0.31 * static_cast<double>(i + 5U)), 1.0);
+    if (items[i].z_comov < 0.0) {
+      items[i].z_comov += 1.0;
+    }
+    items[i].active_target_count_recent = clustered ? 44U : 2U;
+    items[i].remote_tree_interactions_recent = clustered ? 57U : 1U;
+    items[i].work_units = clustered ? 2.0 : 1.0;
+    items[i].memory_bytes = clustered ? 288U : 192U;
+  }
+
+  cosmosim::parallel::DecompositionConfig baseline_config;
+  baseline_config.world_size = 4;
+  baseline_config.owned_particle_weight = 1.0;
+  baseline_config.work_weight = 1.0;
+  const auto baseline = cosmosim::parallel::buildMortonSfcDecomposition(items, baseline_config);
+
+  cosmosim::parallel::DecompositionConfig gravity_config;
+  gravity_config.world_size = 4;
+  gravity_config.owned_particle_weight = 1.0;
+  gravity_config.active_target_weight = 2.0;
+  gravity_config.remote_tree_interaction_weight = 1.5;
+  gravity_config.work_weight = 1.0;
+  gravity_config.memory_weight = 1.0 / 4096.0;
+  const auto gravity_plan = cosmosim::parallel::buildMortonSfcDecomposition(items, gravity_config);
+
+  assert(gravity_plan.metrics.weighted_imbalance_ratio < 1.6);
+  assert(gravity_plan.owning_rank_by_item != baseline.owning_rank_by_item);
+}
+
 void testRestartStateRoundTrip() {
   cosmosim::parallel::DistributedRestartState in;
   in.schema_version = 2;
@@ -597,6 +641,7 @@ int main() {
   testMortonDecompositionInvariants();
   testRestartStateRoundTrip();
   testGravityAwareDecompositionTracksInteractionCost();
+  testClusteredGravityAwareDecompositionImprovesWeightedImbalance();
   testExplicitOwnedVsGhostContracts();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testDistributedRestartCompatibilityReporting();

@@ -55,8 +55,16 @@ struct TreePmDiagnostics {
   std::uint64_t residual_pair_evaluations = 0;
   std::uint64_t residual_remote_request_packets = 0;
   std::uint64_t residual_remote_response_packets = 0;
+  std::uint64_t residual_remote_request_bytes = 0;
+  std::uint64_t residual_remote_response_bytes = 0;
   std::uint64_t residual_remote_request_batches = 0;
   std::uint64_t residual_remote_peer_participations = 0;
+  std::uint64_t residual_remote_targets_with_requests = 0;
+  std::uint64_t residual_remote_targets_without_requests = 0;
+  std::uint64_t residual_remote_pairs_pruned_by_bounds = 0;
+  std::uint64_t residual_remote_request_packets_max_peer = 0;
+  std::uint64_t residual_remote_response_packets_max_peer = 0;
+  double residual_remote_request_packet_imbalance_ratio = 0.0;
   std::uint64_t zoom_high_res_source_count = 0;
   std::uint64_t zoom_low_res_source_count = 0;
   std::uint64_t zoom_low_res_contamination_count = 0;
@@ -123,8 +131,16 @@ class TreePmCoordinator {
     std::uint64_t pair_evaluations = 0;
     std::uint64_t remote_request_packets = 0;
     std::uint64_t remote_response_packets = 0;
+    std::uint64_t remote_request_bytes = 0;
+    std::uint64_t remote_response_bytes = 0;
     std::uint64_t remote_request_batches = 0;
     std::uint64_t remote_peer_participations = 0;
+    std::uint64_t remote_targets_with_requests = 0;
+    std::uint64_t remote_targets_without_requests = 0;
+    std::uint64_t remote_pairs_pruned_by_bounds = 0;
+    std::uint64_t remote_request_packets_max_peer = 0;
+    std::uint64_t remote_response_packets_max_peer = 0;
+    double remote_request_packet_imbalance_ratio = 0.0;
   };
 
   PmGridShape m_shape;

@@ -275,6 +275,47 @@ void applyInitialGravityAwareDecomposition(
   if (world_size <= 1) {
     return;
   }
+  constexpr std::size_t k_density_grid = 16;
+  const std::size_t grid_cells = k_density_grid * k_density_grid * k_density_grid;
+  std::vector<std::uint32_t> occupancy(grid_cells, 0U);
+  const auto wrap = [](double x, double box) {
+    if (box <= 0.0) {
+      return x;
+    }
+    double wrapped = std::fmod(x, box);
+    if (wrapped < 0.0) {
+      wrapped += box;
+    }
+    return wrapped;
+  };
+  const auto density_cell_index = [&](double x, double y, double z) {
+    const double box_x = config.cosmology.box_size_x_mpc_comoving;
+    const double box_y = config.cosmology.box_size_y_mpc_comoving;
+    const double box_z = config.cosmology.box_size_z_mpc_comoving;
+    const std::size_t ix = (box_x > 0.0)
+        ? std::min<std::size_t>(
+              k_density_grid - 1U,
+              static_cast<std::size_t>((wrap(x, box_x) / box_x) * static_cast<double>(k_density_grid)))
+        : 0U;
+    const std::size_t iy = (box_y > 0.0)
+        ? std::min<std::size_t>(
+              k_density_grid - 1U,
+              static_cast<std::size_t>((wrap(y, box_y) / box_y) * static_cast<double>(k_density_grid)))
+        : 0U;
+    const std::size_t iz = (box_z > 0.0)
+        ? std::min<std::size_t>(
+              k_density_grid - 1U,
+              static_cast<std::size_t>((wrap(z, box_z) / box_z) * static_cast<double>(k_density_grid)))
+        : 0U;
+    return (ix * k_density_grid + iy) * k_density_grid + iz;
+  };
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    const std::size_t cell = density_cell_index(
+        state.particles.position_x_comoving[particle_index],
+        state.particles.position_y_comoving[particle_index],
+        state.particles.position_z_comoving[particle_index]);
+    ++occupancy[cell];
+  }
   std::vector<parallel::DecompositionItem> items;
   items.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
@@ -284,9 +325,11 @@ void applyInitialGravityAwareDecomposition(
     item.x_comov = state.particles.position_x_comoving[particle_index];
     item.y_comov = state.particles.position_y_comoving[particle_index];
     item.z_comov = state.particles.position_z_comoving[particle_index];
-    item.active_target_count_recent = 0;
+    const std::size_t density_cell = density_cell_index(item.x_comov, item.y_comov, item.z_comov);
+    const std::uint32_t local_density = occupancy[density_cell];
+    item.active_target_count_recent = local_density;
     item.remote_tree_interactions_recent = 0;
-    item.work_units = 1.0;
+    item.work_units = 1.0 + static_cast<double>(local_density);
     item.memory_bytes = sizeof(double) * 7 + sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t) * 3;
     items.push_back(item);
   }
@@ -299,9 +342,9 @@ void applyInitialGravityAwareDecomposition(
   decomposition_config.domain_z_min_comov = 0.0;
   decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
   decomposition_config.owned_particle_weight = 1.0;
-  decomposition_config.active_target_weight = 4.0;
+  decomposition_config.active_target_weight = 2.0;
   decomposition_config.remote_tree_interaction_weight = 0.0;
-  decomposition_config.work_weight = 1.0;
+  decomposition_config.work_weight = 0.5;
   decomposition_config.memory_weight = 0.1;
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
   for (std::size_t item_index = 0; item_index < items.size(); ++item_index) {

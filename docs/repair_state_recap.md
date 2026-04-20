@@ -862,3 +862,24 @@ Observed:
 Interpretation:
 
 - This is an infrastructure-contract maturation pass: explicit pairwise softening semantics are now documented, tested, and consistent between tree-only and TreePM residual evaluation paths.
+
+## 18) 2026-04-20 distributed gravity clustered-load balancing and exchange observability hardening
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_validation_phase2_mpi_gravity
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_parallel_distributed_memory"
+```
+
+Observed:
+
+- Morton SFC decomposition now chooses rank cut points by nearest target-prefix boundary once crossed, reducing clustered-load overshoot while preserving contiguous deterministic ownership ranges.
+- Distributed TreePM short-range peer gating keeps exact force behavior but tightens periodic source-support bounds using wrap-aware compact intervals, reducing unnecessary remote request export volume for clustered data near periodic boundaries.
+- Distributed short-range diagnostics now expose request/response bytes, target request coverage, geometry-pruned pair counts, and request pressure imbalance metrics (max-peer + ratio), enabling clustered-run communication auditing.
+- Existing send/recv payload/displacement buffers continue to be reused from persistent coordinator workspace across batches/steps.
+
+Interpretation:
+
+- This is infrastructure repair for distributed maturity and observability under clustered loads; no force-kernel heuristics, dropped contributions, or mid-kick ownership repartitioning were introduced.
+- Remaining maturity limits are tracked in `docs/repair_open_issues.md` (see open entry for clustered decomposition/short-range scheduling limits).

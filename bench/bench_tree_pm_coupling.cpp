@@ -134,6 +134,19 @@ int main() {
             << " residual_pruned_nodes=" << diagnostics.residual_pruned_nodes
             << " residual_pair_skips_cutoff=" << diagnostics.residual_pair_skips_cutoff
             << " residual_pair_evaluations=" << diagnostics.residual_pair_evaluations
+            << " residual_remote_request_packets=" << diagnostics.residual_remote_request_packets
+            << " residual_remote_response_packets=" << diagnostics.residual_remote_response_packets
+            << " residual_remote_request_bytes=" << diagnostics.residual_remote_request_bytes
+            << " residual_remote_response_bytes=" << diagnostics.residual_remote_response_bytes
+            << " residual_remote_targets_with_requests=" << diagnostics.residual_remote_targets_with_requests
+            << " residual_remote_targets_without_requests=" << diagnostics.residual_remote_targets_without_requests
+            << " residual_remote_pairs_pruned_by_bounds=" << diagnostics.residual_remote_pairs_pruned_by_bounds
+            << " residual_remote_request_packets_max_peer="
+            << diagnostics.residual_remote_request_packets_max_peer
+            << " residual_remote_response_packets_max_peer="
+            << diagnostics.residual_remote_response_packets_max_peer
+            << " residual_remote_request_packet_imbalance_ratio="
+            << diagnostics.residual_remote_request_packet_imbalance_ratio
             << " split_composition_error=" << diagnostics.composition_error_at_split
             << " bytes_proxy_mb_per_s=" << bytes_proxy
             << " active_mpart_s=" << active_mpart_s
