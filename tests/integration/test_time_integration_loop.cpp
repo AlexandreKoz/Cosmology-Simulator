@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,28 @@ class GravityKickMock final : public cosmosim::core::IntegrationCallback {
       state.particles.velocity_x_peculiar[i] += kick;
     }
   }
+};
+
+class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
+ public:
+  std::string_view callbackName() const override { return "active_subset_kick_mock"; }
+
+  void onStage(cosmosim::core::StepContext& context) override {
+    if (context.stage != cosmosim::core::IntegrationStage::kGravityKickPre &&
+        context.stage != cosmosim::core::IntegrationStage::kGravityKickPost) {
+      return;
+    }
+    ++kick_stage_invocations;
+    kicked_particles_per_stage.push_back(context.active_set.particle_indices.size());
+
+    const double kick = 0.5 * context.integrator_state.dt_time_code;
+    for (const std::uint32_t particle_index : context.active_set.particle_indices) {
+      context.state.particles.velocity_x_peculiar[particle_index] += kick;
+    }
+  }
+
+  int kick_stage_invocations = 0;
+  std::vector<std::size_t> kicked_particles_per_stage;
 };
 
 void runNoPhysicsLoop() {
@@ -140,11 +163,51 @@ void runStarFormationSourceTermLoop() {
   assert(integrator_state.step_index == 3U);
 }
 
+void runActiveSubsetKickContractLoop() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(6);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particles.velocity_x_peculiar[i] = 0.0;
+  }
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 0.2;
+  integrator_state.current_scale_factor = 1.0;
+
+  std::vector<std::uint32_t> active_particles = {0, 2, 5};
+  cosmosim::core::ActiveSetDescriptor active_set{
+      .particle_indices = active_particles,
+      .particles_are_subset = true,
+  };
+
+  ActiveSubsetKickMock subset_kick;
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(subset_kick);
+  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr);
+
+  assert(subset_kick.kick_stage_invocations == 2);
+  assert(subset_kick.kicked_particles_per_stage.size() == 2);
+  assert(subset_kick.kicked_particles_per_stage[0] == active_particles.size());
+  assert(subset_kick.kicked_particles_per_stage[1] == active_particles.size());
+
+  // Two kick stages, each applies 0.5*dt to active particles only.
+  const double expected_active_velocity = integrator_state.dt_time_code;
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const bool is_active = (i == 0 || i == 2 || i == 5);
+    if (is_active) {
+      assert(std::abs(state.particles.velocity_x_peculiar[i] - expected_active_velocity) < 1.0e-12);
+    } else {
+      assert(std::abs(state.particles.velocity_x_peculiar[i]) < 1.0e-12);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   runNoPhysicsLoop();
   runGravityOnlyLoop();
   runStarFormationSourceTermLoop();
+  runActiveSubsetKickContractLoop();
   return 0;
 }

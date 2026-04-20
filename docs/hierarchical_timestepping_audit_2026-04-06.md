@@ -1,5 +1,16 @@
 # Hierarchical Timestepping Audit (2026-04-06)
 
+## Addendum (2026-04-20): explicit PM synchronization operator wiring
+
+- Long-range PM kick semantics are now explicit at both KDK kick surfaces (`gravity_kick_pre`, `gravity_kick_post`) through auditable cadence records and runtime events.
+- Refresh/reuse decisions remain cadence-gated but are now rank-consensus checked for:
+  - `gravity_kick_opportunity`,
+  - `long_range_field_version`,
+  - `last_long_range_refresh_opportunity`,
+  - refresh vote consistency.
+- Active vs inactive treatment is now explicit in report metadata (`active_particles_kicked`, `inactive_particles_skipped`).
+- Restart continuation remains `deterministic_rebuild`: cadence metadata is persisted; PM mesh field payload is rebuilt at first post-restart kick opportunity.
+
 ## Scope reviewed
 - Scheduler implementation and bin legality/synchronization paths:
   - `include/cosmosim/core/time_integration.hpp`

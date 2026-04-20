@@ -659,6 +659,21 @@ class DriftCallback final : public core::IntegrationCallback {
 
 class GravityStageCallback final : public core::IntegrationCallback {
  public:
+  enum class PmSyncSurface : std::uint8_t {
+    kKickPre = 0,
+    kKickPost = 1,
+  };
+
+  struct PmLongRangeKickDecision {
+    PmSyncSurface sync_surface = PmSyncSurface::kKickPre;
+    std::uint64_t gravity_kick_opportunity = 0;
+    bool refresh_long_range_field = false;
+    std::uint64_t field_version = 0;
+    std::uint64_t last_refresh_opportunity = 0;
+    std::uint64_t field_built_step_index = 0;
+    double field_built_scale_factor = 1.0;
+  };
+
   GravityStageCallback(const core::SimulationConfig& config, const core::ModePolicy& mode_policy)
       : m_config(config),
         m_mode_policy(mode_policy),
@@ -755,6 +770,26 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
   [[nodiscard]] std::span<const double> cellAccelZ() const noexcept { return m_cell_accel_z; }
 
+  [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
+    if (stage == core::IntegrationStage::kGravityKickPre) {
+      return PmSyncSurface::kKickPre;
+    }
+    if (stage == core::IntegrationStage::kGravityKickPost) {
+      return PmSyncSurface::kKickPost;
+    }
+    throw std::invalid_argument("TreePM sync surface is only defined on gravity kick stages");
+  }
+
+  [[nodiscard]] static std::string_view pmSyncSurfaceName(PmSyncSurface surface) {
+    switch (surface) {
+      case PmSyncSurface::kKickPre:
+        return "kick_pre";
+      case PmSyncSurface::kKickPost:
+        return "kick_post";
+    }
+    return "unknown";
+  }
+
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kGravityKickPre &&
         context.stage != core::IntegrationStage::kGravityKickPost) {
@@ -820,16 +855,21 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
 
-    const std::uint64_t record_field_version = refresh_long_range ? (m_long_range_field_version + 1U) : m_long_range_field_version;
-    const std::uint64_t record_field_built_step_index = refresh_long_range
-        ? context.integrator_state.step_index
-        : m_last_long_range_refresh_step_index;
-    const double record_field_built_scale_factor = refresh_long_range
-        ? m_tree_pm_options.pm_options.scale_factor
-        : m_last_long_range_refresh_scale_factor;
-    const std::uint64_t record_last_refresh_opportunity = refresh_long_range
-        ? m_gravity_kick_opportunity
-        : m_last_long_range_refresh_opportunity;
+    PmLongRangeKickDecision decision{
+        .sync_surface = toPmSyncSurface(context.stage),
+        .gravity_kick_opportunity = m_gravity_kick_opportunity,
+        .refresh_long_range_field = refresh_long_range,
+        .field_version = refresh_long_range ? (m_long_range_field_version + 1U) : m_long_range_field_version,
+        .last_refresh_opportunity = refresh_long_range ? m_gravity_kick_opportunity : m_last_long_range_refresh_opportunity,
+        .field_built_step_index = refresh_long_range
+            ? context.integrator_state.step_index
+            : m_last_long_range_refresh_step_index,
+        .field_built_scale_factor = refresh_long_range
+            ? m_tree_pm_options.pm_options.scale_factor
+            : m_last_long_range_refresh_scale_factor,
+    };
+    requireKickConsensus(decision.field_version, "long_range_field_version");
+    requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
 
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         m_local_source_x,
@@ -838,29 +878,37 @@ class GravityStageCallback final : public core::IntegrationCallback {
         m_local_source_mass,
         accumulator,
         m_tree_pm_options,
-        refresh_long_range,
+        decision.refresh_long_range_field,
         nullptr,
         nullptr);
 
-    if (refresh_long_range) {
+    if (decision.refresh_long_range_field) {
       m_has_long_range_field = true;
-      m_long_range_field_version = record_field_version;
-      m_last_long_range_refresh_opportunity = record_last_refresh_opportunity;
-      m_last_long_range_refresh_step_index = record_field_built_step_index;
-      m_last_long_range_refresh_scale_factor = record_field_built_scale_factor;
+      m_long_range_field_version = decision.field_version;
+      m_last_long_range_refresh_opportunity = decision.last_refresh_opportunity;
+      m_last_long_range_refresh_step_index = decision.field_built_step_index;
+      m_last_long_range_refresh_scale_factor = decision.field_built_scale_factor;
       ++m_long_range_refresh_count;
     } else {
       ++m_long_range_reuse_count;
     }
 
+    const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
+        context.state.particles.size() - m_local_active_global_indices.size());
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
-        .gravity_kick_opportunity = m_gravity_kick_opportunity,
-        .field_version = record_field_version,
-        .field_built_step_index = record_field_built_step_index,
-        .field_built_scale_factor = record_field_built_scale_factor,
-        .refreshed_long_range_field = refresh_long_range,
+        .pm_sync_surface = std::string(pmSyncSurfaceName(decision.sync_surface)),
+        .gravity_kick_opportunity = decision.gravity_kick_opportunity,
+        .field_version = decision.field_version,
+        .last_refresh_opportunity = decision.last_refresh_opportunity,
+        .field_built_step_index = decision.field_built_step_index,
+        .field_built_scale_factor = decision.field_built_scale_factor,
+        .field_age_in_kick_opportunities =
+            decision.gravity_kick_opportunity - decision.last_refresh_opportunity,
+        .active_particles_kicked = static_cast<std::uint64_t>(m_local_active_global_indices.size()),
+        .inactive_particles_skipped = inactive_particles_skipped,
+        .refreshed_long_range_field = decision.refresh_long_range_field,
     });
     if (context.profiler_session != nullptr) {
       context.profiler_session->recordEvent(core::RuntimeEvent{
@@ -870,10 +918,11 @@ class GravityStageCallback final : public core::IntegrationCallback {
           .step_index = context.integrator_state.step_index,
           .simulation_time_code = context.integrator_state.current_time_code,
           .scale_factor = context.integrator_state.current_scale_factor,
-          .message = refresh_long_range
+          .message = decision.refresh_long_range_field
               ? "PM long-range field refreshed for gravity kick"
               : "PM long-range field reused for gravity kick",
           .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
+                      {"pm_sync_surface", std::string(pmSyncSurfaceName(decision.sync_surface))},
                       {"gravity_kick_opportunity", std::to_string(m_gravity_kick_opportunity)},
                       {"field_version", std::to_string(m_long_range_field_version)},
                       {"field_built_step_index", std::to_string(m_last_long_range_refresh_step_index)},
@@ -894,7 +943,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"softening_kernel", "plummer"},
                       {"softening_epsilon_kpc_comoving", std::to_string(m_config.numerics.gravity_softening_kpc_comoving)},
                       {"pm_fft_backend", m_pm_backend},
-                      {"refreshed_long_range_field", refresh_long_range ? "true" : "false"}},
+                      {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
+                      {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
+                      {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
       });
     }
 
