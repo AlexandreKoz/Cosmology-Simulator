@@ -481,6 +481,9 @@ struct ConfigKeySpec {
       {"cosmology.hubble_param", "0.674"},
       {"cosmology.sigma8", "0.811"},
       {"cosmology.scalar_index_ns", "0.965"},
+      {"cosmology.box_size_x", "50.0"},
+      {"cosmology.box_size_y", "50.0"},
+      {"cosmology.box_size_z", "50.0"},
       {"cosmology.box_size", "50.0"},
       {"numerics.time_begin_code", "0.0"},
       {"numerics.time_end_code", "1.0"},
@@ -490,6 +493,9 @@ struct ConfigKeySpec {
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_solver", "treepm"},
       {"numerics.hydro_solver", "godunov_fv"},
+      {"numerics.treepm_pm_grid_nx", "16"},
+      {"numerics.treepm_pm_grid_ny", "16"},
+      {"numerics.treepm_pm_grid_nz", "16"},
       {"numerics.treepm_pm_grid", "16"},
       {"numerics.treepm_asmth_cells", "1.25"},
       {"numerics.treepm_rcut_cells", "4.5"},
@@ -698,8 +704,15 @@ void validateConfig(const SimulationConfig& config) {
   if (config.physics.tracer_min_host_mass_code < 0.0) {
     throw ConfigError("physics.tracer_min_host_mass_code must be >= 0");
   }
-  if (config.numerics.treepm_pm_grid <= 0) {
-    throw ConfigError("numerics.treepm_pm_grid must be > 0");
+  if (config.cosmology.box_size_x_mpc_comoving <= 0.0 ||
+      config.cosmology.box_size_y_mpc_comoving <= 0.0 ||
+      config.cosmology.box_size_z_mpc_comoving <= 0.0) {
+    throw ConfigError("cosmology.box_size_{x,y,z} must all be > 0");
+  }
+  if (config.numerics.treepm_pm_grid_nx <= 0 ||
+      config.numerics.treepm_pm_grid_ny <= 0 ||
+      config.numerics.treepm_pm_grid_nz <= 0) {
+    throw ConfigError("numerics.treepm_pm_grid_n{xyz} must all be > 0");
   }
   if (config.numerics.treepm_asmth_cells <= 0.0) {
     throw ConfigError("numerics.treepm_asmth_cells must be > 0");
@@ -741,7 +754,9 @@ void validateConfig(const SimulationConfig& config) {
   stream << "hubble_param = " << frozen.config.cosmology.hubble_param << '\n';
   stream << "sigma8 = " << frozen.config.cosmology.sigma8 << '\n';
   stream << "scalar_index_ns = " << frozen.config.cosmology.scalar_index_ns << '\n';
-  stream << "box_size = " << frozen.config.cosmology.box_size_mpc_comoving << " mpc\n";
+  stream << "box_size_x = " << frozen.config.cosmology.box_size_x_mpc_comoving << " mpc\n";
+  stream << "box_size_y = " << frozen.config.cosmology.box_size_y_mpc_comoving << " mpc\n";
+  stream << "box_size_z = " << frozen.config.cosmology.box_size_z_mpc_comoving << " mpc\n";
   stream << "\n[numerics]\n";
   stream << "time_begin_code = " << frozen.config.numerics.time_begin_code << '\n';
   stream << "time_end_code = " << frozen.config.numerics.time_end_code << '\n';
@@ -751,7 +766,9 @@ void validateConfig(const SimulationConfig& config) {
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   stream << "gravity_solver = " << gravitySolverToString(frozen.config.numerics.gravity_solver) << '\n';
   stream << "hydro_solver = " << hydroSolverToString(frozen.config.numerics.hydro_solver) << '\n';
-  stream << "treepm_pm_grid = " << frozen.config.numerics.treepm_pm_grid << '\n';
+  stream << "treepm_pm_grid_nx = " << frozen.config.numerics.treepm_pm_grid_nx << '\n';
+  stream << "treepm_pm_grid_ny = " << frozen.config.numerics.treepm_pm_grid_ny << '\n';
+  stream << "treepm_pm_grid_nz = " << frozen.config.numerics.treepm_pm_grid_nz << '\n';
   stream << "treepm_asmth_cells = " << frozen.config.numerics.treepm_asmth_cells << '\n';
   stream << "treepm_rcut_cells = " << frozen.config.numerics.treepm_rcut_cells << '\n';
   stream << "treepm_assignment_scheme = "
@@ -934,10 +951,41 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.cosmology.scalar_index_ns = parseFloating(
       requireString(entries, consumed, "cosmology.scalar_index_ns", "0.965"),
       "cosmology.scalar_index_ns");
-  frozen.config.cosmology.box_size_mpc_comoving = parseLengthMpc(
-      requireString(entries, consumed, "cosmology.box_size", "50.0"),
-      frozen.config.units.length_unit,
-      "cosmology.box_size");
+  const bool has_box_size_x = entries.contains("cosmology.box_size_x");
+  const bool has_box_size_y = entries.contains("cosmology.box_size_y");
+  const bool has_box_size_z = entries.contains("cosmology.box_size_z");
+  const bool has_box_size_scalar = entries.contains("cosmology.box_size");
+  if ((has_box_size_x || has_box_size_y || has_box_size_z) &&
+      !(has_box_size_x && has_box_size_y && has_box_size_z)) {
+    throw ConfigError(
+        "cosmology.box_size_x, cosmology.box_size_y, and cosmology.box_size_z must be specified together");
+  }
+  if (has_box_size_x) {
+    frozen.config.cosmology.box_size_x_mpc_comoving = parseLengthMpc(
+        requireString(entries, consumed, "cosmology.box_size_x", defaultFor("cosmology.box_size_x")),
+        frozen.config.units.length_unit,
+        "cosmology.box_size_x");
+    frozen.config.cosmology.box_size_y_mpc_comoving = parseLengthMpc(
+        requireString(entries, consumed, "cosmology.box_size_y", defaultFor("cosmology.box_size_y")),
+        frozen.config.units.length_unit,
+        "cosmology.box_size_y");
+    frozen.config.cosmology.box_size_z_mpc_comoving = parseLengthMpc(
+        requireString(entries, consumed, "cosmology.box_size_z", defaultFor("cosmology.box_size_z")),
+        frozen.config.units.length_unit,
+        "cosmology.box_size_z");
+    if (has_box_size_scalar) {
+      consumed.insert("cosmology.box_size");
+    }
+  } else {
+    const double box_size_scalar_mpc = parseLengthMpc(
+        requireString(entries, consumed, "cosmology.box_size", defaultFor("cosmology.box_size")),
+        frozen.config.units.length_unit,
+        "cosmology.box_size");
+    frozen.config.cosmology.box_size_x_mpc_comoving = box_size_scalar_mpc;
+    frozen.config.cosmology.box_size_y_mpc_comoving = box_size_scalar_mpc;
+    frozen.config.cosmology.box_size_z_mpc_comoving = box_size_scalar_mpc;
+  }
+  frozen.config.cosmology.box_size_mpc_comoving = frozen.config.cosmology.box_size_x_mpc_comoving;
 
   frozen.config.numerics.time_begin_code = parseFloating(
       requireString(entries, consumed, "numerics.time_begin_code", "0.0"),
@@ -961,9 +1009,37 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "numerics.gravity_solver", defaultFor("numerics.gravity_solver")));
   frozen.config.numerics.hydro_solver = parseHydroSolver(
       requireString(entries, consumed, "numerics.hydro_solver", defaultFor("numerics.hydro_solver")));
-  frozen.config.numerics.treepm_pm_grid = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "numerics.treepm_pm_grid", defaultFor("numerics.treepm_pm_grid")),
-      "numerics.treepm_pm_grid"));
+  const bool has_pm_grid_nx = entries.contains("numerics.treepm_pm_grid_nx");
+  const bool has_pm_grid_ny = entries.contains("numerics.treepm_pm_grid_ny");
+  const bool has_pm_grid_nz = entries.contains("numerics.treepm_pm_grid_nz");
+  const bool has_pm_grid_scalar = entries.contains("numerics.treepm_pm_grid");
+  if ((has_pm_grid_nx || has_pm_grid_ny || has_pm_grid_nz) &&
+      !(has_pm_grid_nx && has_pm_grid_ny && has_pm_grid_nz)) {
+    throw ConfigError(
+        "numerics.treepm_pm_grid_nx, numerics.treepm_pm_grid_ny, and numerics.treepm_pm_grid_nz must be specified together");
+  }
+  if (has_pm_grid_nx) {
+    frozen.config.numerics.treepm_pm_grid_nx = static_cast<int>(parseNumber<long>(
+        requireString(entries, consumed, "numerics.treepm_pm_grid_nx", defaultFor("numerics.treepm_pm_grid_nx")),
+        "numerics.treepm_pm_grid_nx"));
+    frozen.config.numerics.treepm_pm_grid_ny = static_cast<int>(parseNumber<long>(
+        requireString(entries, consumed, "numerics.treepm_pm_grid_ny", defaultFor("numerics.treepm_pm_grid_ny")),
+        "numerics.treepm_pm_grid_ny"));
+    frozen.config.numerics.treepm_pm_grid_nz = static_cast<int>(parseNumber<long>(
+        requireString(entries, consumed, "numerics.treepm_pm_grid_nz", defaultFor("numerics.treepm_pm_grid_nz")),
+        "numerics.treepm_pm_grid_nz"));
+    if (has_pm_grid_scalar) {
+      consumed.insert("numerics.treepm_pm_grid");
+    }
+  } else {
+    const int pm_grid_scalar = static_cast<int>(parseNumber<long>(
+        requireString(entries, consumed, "numerics.treepm_pm_grid", defaultFor("numerics.treepm_pm_grid")),
+        "numerics.treepm_pm_grid"));
+    frozen.config.numerics.treepm_pm_grid_nx = pm_grid_scalar;
+    frozen.config.numerics.treepm_pm_grid_ny = pm_grid_scalar;
+    frozen.config.numerics.treepm_pm_grid_nz = pm_grid_scalar;
+  }
+  frozen.config.numerics.treepm_pm_grid = frozen.config.numerics.treepm_pm_grid_nx;
   frozen.config.numerics.treepm_asmth_cells = parseFloating(
       requireString(entries, consumed, "numerics.treepm_asmth_cells", defaultFor("numerics.treepm_asmth_cells")),
       "numerics.treepm_asmth_cells");

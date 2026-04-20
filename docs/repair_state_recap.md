@@ -4,6 +4,19 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Axis-aware TreePM geometry contract repair (2026-04-20 UTC)
+
+Observed:
+
+- Added canonical axis-aware config lanes for cosmological box lengths and PM grid shape while preserving scalar compatibility inputs.
+- Updated PM periodic spectral operator, per-axis window deconvolution factors, and cell-volume normalization to use `(Lx,Ly,Lz)` and `(Nx,Ny,Nz)` directly.
+- Updated reference workflow/runtime topology/restart metadata wiring to carry full PM shape and axis-aware geometry instead of forcing cubic `(N,N,N)` and `(L,L,L)`.
+- Added parser compatibility and integration coverage for non-cubic periodic PM geometry.
+
+Reproducibility impact:
+
+- Normalized config output is now canonicalized to axis-aware keys (`box_size_{x,y,z}`, `treepm_pm_grid_n{xyz}`), which removes ambiguity while retaining scalar input compatibility.
+
 
 ## 0) TreePM Phase 3 contract freeze and gravity-stack audit baseline (2026-04-20 UTC)
 

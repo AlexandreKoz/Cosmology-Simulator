@@ -28,14 +28,17 @@ void testPeriodicSinusoidalForceResponse() {
   cosmosim::gravity::PmSolver solver(shape);
 
   cosmosim::gravity::PmSolveOptions options;
-  options.box_size_mpc_comoving = 1.0;
+  options.box_size_x_mpc_comoving = 1.5;
+  options.box_size_y_mpc_comoving = 0.75;
+  options.box_size_z_mpc_comoving = 2.25;
   options.scale_factor = 0.8;
   options.gravitational_constant_code = 1.0;
 
+  const double lx = options.box_size_x_mpc_comoving;
   const double amplitude = 0.1;
-  const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
+  const double kx = 2.0 * k_pi / lx;
   for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * lx;
     for (std::size_t iy = 0; iy < shape.ny; ++iy) {
       for (std::size_t iz = 0; iz < shape.nz; ++iz) {
         grid.density()[grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
@@ -60,9 +63,9 @@ void testPeriodicSinusoidalForceResponse() {
   double consistency_rms = 0.0;
   double consistency_ref_rms = 0.0;
   double max_transverse = 0.0;
-  const double dx = options.box_size_mpc_comoving / static_cast<double>(shape.nx);
+  const double dx = lx / static_cast<double>(shape.nx);
   for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+    const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * lx;
     const double expected_force = expected_force_amp * std::cos(kx * x);
     const double expected_phi = expected_phi_amp * std::sin(kx * x);
     const double consistency_force = expected_force;

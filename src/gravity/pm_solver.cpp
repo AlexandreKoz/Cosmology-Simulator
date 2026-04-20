@@ -133,12 +133,27 @@ struct PmPotentialContributionRecord {
   return static_cast<std::uint64_t>(particle_count * sizeof(double) * 4U);
 }
 
+struct BoxLengths {
+  double lx = 0.0;
+  double ly = 0.0;
+  double lz = 0.0;
+};
+
+[[nodiscard]] BoxLengths effectiveBoxLengths(const PmSolveOptions& options) {
+  const double scalar = options.box_size_mpc_comoving;
+  const double lx = options.box_size_x_mpc_comoving > 0.0 ? options.box_size_x_mpc_comoving : scalar;
+  const double ly = options.box_size_y_mpc_comoving > 0.0 ? options.box_size_y_mpc_comoving : scalar;
+  const double lz = options.box_size_z_mpc_comoving > 0.0 ? options.box_size_z_mpc_comoving : scalar;
+  return BoxLengths{.lx = lx, .ly = ly, .lz = lz};
+}
+
 void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (!shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be non-zero in all dimensions");
   }
-  if (options.box_size_mpc_comoving <= 0.0) {
-    throw std::invalid_argument("PM solve requires box_size_mpc_comoving > 0");
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  if (lengths.lx <= 0.0 || lengths.ly <= 0.0 || lengths.lz <= 0.0) {
+    throw std::invalid_argument("PM solve requires positive box lengths on all axes");
   }
   if (options.scale_factor <= 0.0) {
     throw std::invalid_argument("PM solve requires scale_factor > 0");
@@ -153,6 +168,11 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (options.execution_policy == core::ExecutionPolicy::kCuda && options.assignment_scheme != PmAssignmentScheme::kCic) {
     throw std::invalid_argument(
         "execution_policy=cuda currently supports only assignment_scheme=cic in this build");
+  }
+  if (options.execution_policy == core::ExecutionPolicy::kCuda &&
+      (std::abs(lengths.lx - lengths.ly) > 1.0e-12 || std::abs(lengths.lx - lengths.lz) > 1.0e-12)) {
+    throw std::invalid_argument(
+        "execution_policy=cuda currently requires cubic PM box lengths in this build");
   }
 }
 
@@ -746,9 +766,10 @@ void PmSolver::assignDensity(
   const auto start = std::chrono::steady_clock::now();
   std::fill(grid.density().begin(), grid.density().end(), 0.0);
 
-  const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;
-  const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
-  const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
+  const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
+  const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
 
   const auto accumulate_owned = [&](const PmDensityContributionRecord& record) {
     if (record.global_ix >= m_shape.nx || record.global_iy >= m_shape.ny || record.global_iz >= m_shape.nz) {
@@ -762,9 +783,9 @@ void PmSolver::assignDensity(
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -805,9 +826,9 @@ void PmSolver::assignDensity(
     std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
@@ -890,8 +911,8 @@ void PmSolver::assignDensity(
 #endif
   }
 
-  const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) /
-      static_cast<double>(m_shape.cellCount());
+  const double cell_volume =
+      (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
   for (double& density_cell : grid.density()) {
     density_cell /= cell_volume;
   }
@@ -950,9 +971,10 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   const auto poisson_start = std::chrono::steady_clock::now();
   const std::size_t nz_complex = m_shape.nz / 2U + 1U;
   const double prefactor = -4.0 * k_pi * options.gravitational_constant_code * options.scale_factor * options.scale_factor;
-  const double dkx = 2.0 * k_pi / options.box_size_mpc_comoving;
-  const double dky = 2.0 * k_pi / options.box_size_mpc_comoving;
-  const double dkz = 2.0 * k_pi / options.box_size_mpc_comoving;
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double dkx = 2.0 * k_pi / lengths.lx;
+  const double dky = 2.0 * k_pi / lengths.ly;
+  const double dkz = 2.0 * k_pi / lengths.lz;
 
   const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
   for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
@@ -986,13 +1008,13 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
         if (options.enable_window_deconvolution) {
           const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
           const double wx = std::pow(
-              sinc(0.5 * kx * options.box_size_mpc_comoving / static_cast<double>(m_shape.nx)),
+              sinc(0.5 * kx * lengths.lx / static_cast<double>(m_shape.nx)),
               static_cast<double>(window_exponent));
           const double wy = std::pow(
-              sinc(0.5 * ky * options.box_size_mpc_comoving / static_cast<double>(m_shape.ny)),
+              sinc(0.5 * ky * lengths.ly / static_cast<double>(m_shape.ny)),
               static_cast<double>(window_exponent));
           const double wz = std::pow(
-              sinc(0.5 * kz * options.box_size_mpc_comoving / static_cast<double>(m_shape.nz)),
+              sinc(0.5 * kz * lengths.lz / static_cast<double>(m_shape.nz)),
               static_cast<double>(window_exponent));
           const double transfer_window = wx * wy * wz;
           window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
@@ -1114,15 +1136,16 @@ void PmSolver::interpolateForces(
 
   const auto start = std::chrono::steady_clock::now();
 
-  const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;
-  const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
-  const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
+  const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
+  const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -1183,9 +1206,9 @@ void PmSolver::interpolateForces(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
@@ -1393,15 +1416,16 @@ void PmSolver::interpolatePotential(
 #endif
 
   const auto start = std::chrono::steady_clock::now();
-  const double inv_dx = static_cast<double>(m_shape.nx) / options.box_size_mpc_comoving;
-  const double inv_dy = static_cast<double>(m_shape.ny) / options.box_size_mpc_comoving;
-  const double inv_dz = static_cast<double>(m_shape.nz) / options.box_size_mpc_comoving;
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
+  const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
+  const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -1453,9 +1477,9 @@ void PmSolver::interpolatePotential(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], options.box_size_mpc_comoving) * inv_dx;
-      const double y = wrapPosition(pos_y[p], options.box_size_mpc_comoving) * inv_dy;
-      const double z = wrapPosition(pos_z[p], options.box_size_mpc_comoving) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
@@ -1693,7 +1717,9 @@ void PmSolver::solveForParticles(
         profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_density_stop - copy_density_start).count();
       }
 
-      const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) / static_cast<double>(m_shape.cellCount());
+      const BoxLengths lengths = effectiveBoxLengths(options);
+      const double cell_volume =
+          (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
       for (double& density_cell : grid.density()) {
         density_cell /= cell_volume;
       }

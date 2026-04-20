@@ -297,7 +297,9 @@ treepm_pm_decomposition_mode = slab
 treepm_tree_exchange_batch_bytes = 8388608
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "treepm_good");
-  assert(frozen.config.numerics.treepm_pm_grid == 32);
+  assert(frozen.config.numerics.treepm_pm_grid_nx == 32);
+  assert(frozen.config.numerics.treepm_pm_grid_ny == 32);
+  assert(frozen.config.numerics.treepm_pm_grid_nz == 32);
   assert(frozen.config.numerics.treepm_asmth_cells == 1.5);
   assert(frozen.config.numerics.treepm_rcut_cells == 5.0);
   assert(
@@ -309,12 +311,12 @@ treepm_tree_exchange_batch_bytes = 8388608
       frozen.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kSlab);
   assert(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
-  assert(frozen.normalized_text.find("treepm_pm_grid = 32") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_pm_decomposition_mode = slab") != std::string::npos);
   const auto reparsed =
       cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "treepm_roundtrip");
-  assert(reparsed.config.numerics.treepm_pm_grid == 32);
+  assert(reparsed.config.numerics.treepm_pm_grid_nx == 32);
   assert(reparsed.config.numerics.treepm_update_cadence_steps == 3);
   assert(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
 
@@ -357,6 +359,47 @@ treepm_tree_exchange_batch_bytes = 8388608
     threw = true;
   }
   assert(threw);
+}
+
+void testAxisAwareBoxAndPmGridCanonicalizationCompatibility() {
+  const std::string scalar_text = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 64 mpc
+[numerics]
+treepm_pm_grid = 24
+)";
+  const auto scalar_frozen = cosmosim::core::loadFrozenConfigFromString(scalar_text, "scalar_compat");
+  assert(scalar_frozen.config.cosmology.box_size_x_mpc_comoving == 64.0);
+  assert(scalar_frozen.config.cosmology.box_size_y_mpc_comoving == 64.0);
+  assert(scalar_frozen.config.cosmology.box_size_z_mpc_comoving == 64.0);
+  assert(scalar_frozen.config.numerics.treepm_pm_grid_nx == 24);
+  assert(scalar_frozen.config.numerics.treepm_pm_grid_ny == 24);
+  assert(scalar_frozen.config.numerics.treepm_pm_grid_nz == 24);
+  assert(scalar_frozen.normalized_text.find("box_size_x = 64 mpc") != std::string::npos);
+  assert(scalar_frozen.normalized_text.find("treepm_pm_grid_nx = 24") != std::string::npos);
+  assert(scalar_frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
+
+  const std::string axis_text = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size_x = 70 mpc
+box_size_y = 50 mpc
+box_size_z = 30 mpc
+[numerics]
+treepm_pm_grid_nx = 28
+treepm_pm_grid_ny = 20
+treepm_pm_grid_nz = 12
+)";
+  const auto axis_frozen = cosmosim::core::loadFrozenConfigFromString(axis_text, "axis_canonical");
+  assert(axis_frozen.config.cosmology.box_size_x_mpc_comoving == 70.0);
+  assert(axis_frozen.config.cosmology.box_size_y_mpc_comoving == 50.0);
+  assert(axis_frozen.config.cosmology.box_size_z_mpc_comoving == 30.0);
+  assert(axis_frozen.config.numerics.treepm_pm_grid_nx == 28);
+  assert(axis_frozen.config.numerics.treepm_pm_grid_ny == 20);
+  assert(axis_frozen.config.numerics.treepm_pm_grid_nz == 12);
 }
 
 void testBlackHoleAgnConfigKeysAndValidation() {
@@ -434,6 +477,7 @@ int main() {
   testDiagnosticsExecutionPolicyValidation();
   testEnumSerializationIsFailFastWithoutUnknownFallback();
   testTreePmNumericsRoundtripAndValidation();
+  testAxisAwareBoxAndPmGridCanonicalizationCompatibility();
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
   return 0;

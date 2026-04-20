@@ -35,6 +35,10 @@ enum class PmDataResidencyPolicy {
 };
 
 struct PmSolveOptions {
+  double box_size_x_mpc_comoving = 0.0;
+  double box_size_y_mpc_comoving = 0.0;
+  double box_size_z_mpc_comoving = 0.0;
+  // Legacy scalar compatibility lane; if axis-aware lengths are zero, this value is used for all axes.
   double box_size_mpc_comoving = 0.0;
   double scale_factor = 1.0;
   double gravitational_constant_code = 1.0;
