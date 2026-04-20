@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <numeric>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -97,77 +99,135 @@ void directSumAcceleration(
   return max_relative_error;
 }
 
+struct Distribution {
+  std::vector<double> pos_x;
+  std::vector<double> pos_y;
+  std::vector<double> pos_z;
+  std::vector<double> mass;
+  std::vector<std::uint32_t> active;
+};
+
+[[nodiscard]] Distribution makeQuasiUniformDistribution() {
+  constexpr std::size_t particle_count = 96;
+  Distribution distribution;
+  distribution.pos_x.resize(particle_count, 0.0);
+  distribution.pos_y.resize(particle_count, 0.0);
+  distribution.pos_z.resize(particle_count, 0.0);
+  distribution.mass.resize(particle_count, 0.0);
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    distribution.pos_x[i] = std::fmod(static_cast<double>((29U * i + 7U) % 997U) * 0.013, 1.0);
+    distribution.pos_y[i] = std::fmod(static_cast<double>((47U * i + 11U) % 991U) * 0.017, 1.0);
+    distribution.pos_z[i] = std::fmod(static_cast<double>((71U * i + 3U) % 983U) * 0.019, 1.0);
+    distribution.mass[i] = 0.5 + static_cast<double>((13U * i) % 9U) * 0.05;
+  }
+  distribution.active.resize(16);
+  for (std::size_t i = 0; i < distribution.active.size(); ++i) {
+    distribution.active[i] = static_cast<std::uint32_t>(i * 3U);
+  }
+  return distribution;
+}
+
+[[nodiscard]] Distribution makeClusteredDistribution() {
+  constexpr std::size_t particle_count = 96;
+  Distribution distribution;
+  distribution.pos_x.resize(particle_count, 0.0);
+  distribution.pos_y.resize(particle_count, 0.0);
+  distribution.pos_z.resize(particle_count, 0.0);
+  distribution.mass.resize(particle_count, 0.0);
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    const bool first_cluster = i < particle_count / 2U;
+    const double phase = static_cast<double>(i % 48U);
+    const double center = first_cluster ? 0.28 : 0.74;
+    distribution.pos_x[i] = center + 0.045 * std::sin(0.31 * phase + (first_cluster ? 0.3 : 0.9));
+    distribution.pos_y[i] = center + 0.038 * std::cos(0.27 * phase + (first_cluster ? 0.2 : 1.1));
+    distribution.pos_z[i] = center + 0.041 * std::sin(0.19 * phase + (first_cluster ? 0.7 : 1.4));
+    distribution.mass[i] = 0.4 + 0.03 * static_cast<double>((7U * i + 3U) % 11U);
+  }
+  distribution.active.resize(24);
+  for (std::size_t i = 0; i < distribution.active.size(); ++i) {
+    distribution.active[i] = static_cast<std::uint32_t>((5U * i + 1U) % particle_count);
+  }
+  return distribution;
+}
+
 }  // namespace
 
 int main() {
-  constexpr std::size_t particle_count = 96;
-  std::vector<double> pos_x(particle_count, 0.0);
-  std::vector<double> pos_y(particle_count, 0.0);
-  std::vector<double> pos_z(particle_count, 0.0);
-  std::vector<double> mass(particle_count, 0.0);
+  const std::vector<Distribution> distributions = {makeQuasiUniformDistribution(), makeClusteredDistribution()};
+  for (std::size_t dist_i = 0; dist_i < distributions.size(); ++dist_i) {
+    const Distribution& dist = distributions[dist_i];
+    cosmosim::gravity::TreeGravityOptions options;
+    options.opening_theta = 0.6;
+    options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance;
+    options.multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole;
+    options.gravitational_constant_code = 1.0;
+    options.max_leaf_size = 4;
+    options.softening.epsilon_comoving = 1.0e-3;
 
-  for (std::size_t i = 0; i < particle_count; ++i) {
-    pos_x[i] = std::fmod(static_cast<double>((29U * i + 7U) % 997U) * 0.013, 1.0);
-    pos_y[i] = std::fmod(static_cast<double>((47U * i + 11U) % 991U) * 0.017, 1.0);
-    pos_z[i] = std::fmod(static_cast<double>((71U * i + 3U) % 983U) * 0.019, 1.0);
-    mass[i] = 0.5 + static_cast<double>((13U * i) % 9U) * 0.05;
+    const std::array<double, 3> theta_schedule = {0.35, 0.6, 0.9};
+    std::array<double, 3> max_error{};
+    std::array<double, 3> mean_error{};
+    std::array<std::uint64_t, 3> visited_nodes{};
+    std::array<std::uint64_t, 3> pp_interactions{};
+
+    for (std::size_t i = 0; i < theta_schedule.size(); ++i) {
+      options.opening_theta = theta_schedule[i];
+      cosmosim::gravity::TreeGravityProfile profile;
+      max_error[i] = solveAndMeasureMaxRelativeError(
+          dist.pos_x,
+          dist.pos_y,
+          dist.pos_z,
+          dist.mass,
+          dist.active,
+          options,
+          &profile,
+          &mean_error[i]);
+      visited_nodes[i] = profile.visited_nodes;
+      pp_interactions[i] = profile.particle_particle_interactions;
+      requireOrThrow(profile.build_ms >= 0.0, "Tree profile.build_ms must be non-negative");
+      requireOrThrow(profile.multipole_ms >= 0.0, "Tree profile.multipole_ms must be non-negative");
+      requireOrThrow(profile.traversal_ms >= 0.0, "Tree profile.traversal_ms must be non-negative");
+      requireOrThrow(profile.accepted_nodes > 0, "Tree profile.accepted_nodes must be positive");
+    }
+
+    std::ostringstream diag;
+    diag << "Tree-vs-direct validation failed for distribution=" << dist_i
+         << " (isolated/non-periodic tree traversal only): "
+         << "theta=[" << theta_schedule[0] << "," << theta_schedule[1] << "," << theta_schedule[2] << "]"
+         << " max_error=[" << max_error[0] << "," << max_error[1] << "," << max_error[2] << "]"
+         << " mean_error=[" << mean_error[0] << "," << mean_error[1] << "," << mean_error[2] << "]"
+         << " visited_nodes=[" << visited_nodes[0] << "," << visited_nodes[1] << "," << visited_nodes[2] << "]"
+         << " pp_interactions=[" << pp_interactions[0] << "," << pp_interactions[1] << "," << pp_interactions[2] << "]";
+
+    requireOrThrow(max_error[0] <= max_error[1] + 1.0e-6, diag.str());
+    requireOrThrow(max_error[1] <= max_error[2] + 1.0e-6, diag.str());
+    requireOrThrow(mean_error[0] <= mean_error[1] + 1.0e-6, diag.str());
+    requireOrThrow(mean_error[1] <= mean_error[2] + 1.0e-6, diag.str());
+    requireOrThrow(visited_nodes[0] >= visited_nodes[1], diag.str());
+    requireOrThrow(visited_nodes[1] >= visited_nodes[2], diag.str());
+    requireOrThrow(pp_interactions[0] >= pp_interactions[1], diag.str());
+    requireOrThrow(pp_interactions[1] >= pp_interactions[2], diag.str());
+    requireOrThrow(max_error[0] < 0.02, diag.str());
+    requireOrThrow(mean_error[0] < 0.01, diag.str());
+
+    cosmosim::gravity::TreeGravityOptions geometric_options = options;
+    geometric_options.opening_theta = 0.6;
+    geometric_options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutGeometric;
+    cosmosim::gravity::TreeGravityProfile geometric_profile;
+    double geometric_mean_error = 0.0;
+    const double geometric_max_error = solveAndMeasureMaxRelativeError(
+        dist.pos_x,
+        dist.pos_y,
+        dist.pos_z,
+        dist.mass,
+        dist.active,
+        geometric_options,
+        &geometric_profile,
+        &geometric_mean_error);
+    requireOrThrow(max_error[1] <= 0.95 * geometric_max_error + 1.0e-6, diag.str());
+    requireOrThrow(mean_error[1] <= 0.95 * geometric_mean_error + 1.0e-6, diag.str());
+    requireOrThrow(visited_nodes[1] >= geometric_profile.visited_nodes, diag.str());
   }
-
-  std::vector<std::uint32_t> active(16);
-  for (std::size_t i = 0; i < active.size(); ++i) {
-    active[i] = static_cast<std::uint32_t>(i * 3U);
-  }
-
-  cosmosim::gravity::TreeGravityOptions tight_options;
-  tight_options.opening_theta = 0.4;
-  tight_options.gravitational_constant_code = 1.0;
-  tight_options.max_leaf_size = 4;
-  tight_options.softening.epsilon_comoving = 1.0e-3;
-
-  cosmosim::gravity::TreeGravityProfile tight_profile;
-  double tight_mean_relative_error = 0.0;
-  const double tight_max_relative_error = solveAndMeasureMaxRelativeError(
-      pos_x,
-      pos_y,
-      pos_z,
-      mass,
-      active,
-      tight_options,
-      &tight_profile,
-      &tight_mean_relative_error);
-
-  cosmosim::gravity::TreeGravityOptions loose_options = tight_options;
-  loose_options.opening_theta = 0.8;
-
-  cosmosim::gravity::TreeGravityProfile loose_profile;
-  double loose_mean_relative_error = 0.0;
-  const double loose_max_relative_error = solveAndMeasureMaxRelativeError(
-      pos_x,
-      pos_y,
-      pos_z,
-      mass,
-      active,
-      loose_options,
-      &loose_profile,
-      &loose_mean_relative_error);
-
-  std::ostringstream diag;
-  diag << "Tree-vs-direct validation failed. "
-       << "Assumption: this test targets isolated/non-periodic tree traversal only (no minimum-image wrapping). "
-       << "tight(theta=" << tight_options.opening_theta << "): max_rel=" << tight_max_relative_error
-       << ", mean_rel=" << tight_mean_relative_error
-       << "; loose(theta=" << loose_options.opening_theta << "): max_rel=" << loose_max_relative_error
-       << ", mean_rel=" << loose_mean_relative_error
-       << "; tight.accepted_nodes=" << tight_profile.accepted_nodes
-       << ", tight.visited_nodes=" << tight_profile.visited_nodes;
-
-  requireOrThrow(tight_max_relative_error < 0.03, diag.str());
-  requireOrThrow(tight_mean_relative_error < 0.015, diag.str());
-  requireOrThrow(loose_max_relative_error >= tight_max_relative_error, diag.str());
-  requireOrThrow(tight_profile.build_ms >= 0.0, "Tree profile.build_ms must be non-negative");
-  requireOrThrow(tight_profile.multipole_ms >= 0.0, "Tree profile.multipole_ms must be non-negative");
-  requireOrThrow(tight_profile.traversal_ms >= 0.0, "Tree profile.traversal_ms must be non-negative");
-  requireOrThrow(tight_profile.accepted_nodes > 0, "Tree profile.accepted_nodes must be positive");
 
   return 0;
 }

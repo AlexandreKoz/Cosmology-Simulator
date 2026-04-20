@@ -73,10 +73,11 @@ When `world_size > 1` and MPI is enabled, short-range residual evaluation is no 
      - `target_x_comoving`, `target_y_comoving`, `target_z_comoving` (`double`): target coordinates.
 3. **Remote source evaluation**:
    - remote rank evaluates each request target against its local tree/source particles with the same:
-     - opening criterion (`l/r < theta`),
-     - softening policy (`softenedInvR3`),
-     - split factor (`F_SR(r)`),
-     - cutoff policy (`r_cut` AABB pruning + leaf pair skip).
+    - opening criterion (selected MAC: geometric `l/r < theta` or COM-distance-aware `(l+δ_com)/r < theta`),
+    - multipole truncation order (`kMonopole` or `kQuadrupole`),
+    - softening policy (`softenedInvR3`),
+    - split factor (`F_SR(r)`),
+    - cutoff policy (`r_cut` AABB pruning + leaf pair skip).
 4. **Return partial responses**:
    - response packet fields:
      - `batch_token` (`uint32`) and `request_id` (`uint32`) echoed from request,

@@ -10,8 +10,20 @@
 
 namespace cosmosim::gravity {
 
+enum class TreeOpeningCriterion {
+  kBarnesHutGeometric,
+  kBarnesHutComDistance,
+};
+
+enum class TreeMultipoleOrder {
+  kMonopole = 0,
+  kQuadrupole = 2,
+};
+
 struct TreeGravityOptions {
-  double opening_theta = 0.7;
+  double opening_theta = 0.6;
+  TreeOpeningCriterion opening_criterion = TreeOpeningCriterion::kBarnesHutComDistance;
+  TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;
   double gravitational_constant_code = 1.0;
   std::size_t max_leaf_size = 16;
   TreeSofteningPolicy softening{};
@@ -37,6 +49,13 @@ struct TreeNodeSoa {
   std::vector<double> com_x_comoving;
   std::vector<double> com_y_comoving;
   std::vector<double> com_z_comoving;
+  // Symmetric, traceless quadrupole tensor components Q_ij around each node COM.
+  std::vector<double> quad_xx;
+  std::vector<double> quad_xy;
+  std::vector<double> quad_xz;
+  std::vector<double> quad_yy;
+  std::vector<double> quad_yz;
+  std::vector<double> quad_zz;
   std::vector<std::uint32_t> child_base;
   std::vector<std::uint8_t> child_count;
   std::vector<std::uint32_t> child_index;
@@ -94,7 +113,8 @@ class TreeGravitySolver {
       std::span<const double> pos_y_comoving,
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
-      std::uint32_t node_index);
+      std::uint32_t node_index,
+      TreeMultipoleOrder multipole_order);
 
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;

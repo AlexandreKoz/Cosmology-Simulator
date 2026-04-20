@@ -4,6 +4,32 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Tree gravity multipole/MAC maturation repair (2026-04-20 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target \
+  test_unit_tree_gravity \
+  test_integration_tree_gravity_vs_direct \
+  test_integration_tree_pm_coupling_periodic \
+  bench_tree_gravity
+ctest --test-dir build/cpu-only-debug --output-on-failure -R \
+  "unit_tree_gravity|integration_tree_gravity_vs_direct"
+./build/cpu-only-debug/bench_tree_gravity
+```
+
+Observed:
+
+- Tree gravity now supports explicit multipole order selection with production path set to quadrupole (`l=2`) plus monopole fallback.
+- MAC selection is now explicit (`geometric` and COM-distance-aware), with the COM-distance-aware criterion set as default and validated against direct-force references on quasi-uniform and clustered distributions.
+- Traversal order was updated to push near children first from compact SoA sidecars to improve locality in hot loops without adding node-struct bloat.
+- TreePM residual local and remote-source evaluation paths now use the same upgraded MAC + multipole acceptance/evaluation semantics.
+
+Reproducibility impact:
+
+- Self-exclusion, softening policy application, TreePM split factor multiplication, and cutoff pruning semantics are preserved; changes are in truncation order and acceptance policy only.
+
 ## 0) Axis-aware TreePM geometry contract repair (2026-04-20 UTC)
 
 ## 0) Hierarchical KDK + TreePM explicit PM synchronization contract repair (2026-04-20 UTC)

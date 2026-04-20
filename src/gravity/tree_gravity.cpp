@@ -41,6 +41,96 @@ void validateInputSpans(
   }
 }
 
+[[nodiscard]] bool acceptNodeByMac(
+    TreeOpeningCriterion criterion,
+    bool is_leaf,
+    double theta,
+    double half_size,
+    double com_center_offset,
+    double r2) {
+  if (is_leaf) {
+    return true;
+  }
+  const double r = std::sqrt(r2 + 1.0e-30);
+  const double width = 2.0 * half_size;
+  if (criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
+    return (width / r) < theta;
+  }
+  const double effective_size = width + com_center_offset;
+  return (effective_size / r) < theta;
+}
+
+[[nodiscard]] std::array<double, 3> monopolePlusQuadrupoleAccel(
+    const TreeNodeSoa& nodes,
+    std::uint32_t node_index,
+    double dx,
+    double dy,
+    double dz,
+    const TreeGravityOptions& options) {
+  const double r2 = dx * dx + dy * dy + dz * dz;
+  const double eps2 = options.softening.epsilon_comoving * options.softening.epsilon_comoving;
+  const double denom = std::max(r2 + eps2, 1.0e-30);
+
+  const double inv_r3 = 1.0 / (denom * std::sqrt(denom));
+  const double inv_r5 = inv_r3 / denom;
+  const double inv_r7 = inv_r5 / denom;
+
+  const double gm = options.gravitational_constant_code * nodes.mass_code[node_index];
+  double ax = gm * inv_r3 * dx;
+  double ay = gm * inv_r3 * dy;
+  double az = gm * inv_r3 * dz;
+
+  if (options.multipole_order != TreeMultipoleOrder::kQuadrupole) {
+    return {ax, ay, az};
+  }
+
+  const double qxx = nodes.quad_xx[node_index];
+  const double qxy = nodes.quad_xy[node_index];
+  const double qxz = nodes.quad_xz[node_index];
+  const double qyy = nodes.quad_yy[node_index];
+  const double qyz = nodes.quad_yz[node_index];
+  const double qzz = nodes.quad_zz[node_index];
+
+  const double qrx = qxx * dx + qxy * dy + qxz * dz;
+  const double qry = qxy * dx + qyy * dy + qyz * dz;
+  const double qrz = qxz * dx + qyz * dy + qzz * dz;
+  const double rqr = dx * qrx + dy * qry + dz * qrz;
+
+  const double quad_prefactor = 0.5 * options.gravitational_constant_code;
+  ax += quad_prefactor * (2.0 * qrx * inv_r5 - 5.0 * rqr * dx * inv_r7);
+  ay += quad_prefactor * (2.0 * qry * inv_r5 - 5.0 * rqr * dy * inv_r7);
+  az += quad_prefactor * (2.0 * qrz * inv_r5 - 5.0 * rqr * dz * inv_r7);
+  return {ax, ay, az};
+}
+
+void pushChildrenNearFirst(
+    const TreeNodeSoa& nodes,
+    std::uint32_t node_index,
+    double px,
+    double py,
+    double pz,
+    std::vector<std::uint32_t>& stack) {
+  std::array<std::pair<double, std::uint32_t>, 8> child_dist2{};
+  std::size_t count = 0;
+  const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
+  for (std::uint8_t octant = 0; octant < 8U; ++octant) {
+    const std::uint32_t child = nodes.child_index[child_offset + octant];
+    if (child == std::numeric_limits<std::uint32_t>::max()) {
+      continue;
+    }
+    const double dx = nodes.center_x_comoving[child] - px;
+    const double dy = nodes.center_y_comoving[child] - py;
+    const double dz = nodes.center_z_comoving[child] - pz;
+    child_dist2[count++] = {dx * dx + dy * dy + dz * dz, child};
+  }
+
+  std::sort(child_dist2.begin(), child_dist2.begin() + static_cast<std::ptrdiff_t>(count),
+      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  for (std::size_t i = count; i > 0; --i) {
+    stack.push_back(child_dist2[i - 1].second);
+  }
+}
+
 }  // namespace
 
 std::size_t TreeNodeSoa::size() const {
@@ -56,6 +146,12 @@ void TreeNodeSoa::clear() {
   com_x_comoving.clear();
   com_y_comoving.clear();
   com_z_comoving.clear();
+  quad_xx.clear();
+  quad_xy.clear();
+  quad_xz.clear();
+  quad_yy.clear();
+  quad_yz.clear();
+  quad_zz.clear();
   child_base.clear();
   child_count.clear();
   child_index.clear();
@@ -72,6 +168,12 @@ void TreeNodeSoa::reserve(std::size_t count) {
   com_x_comoving.reserve(count);
   com_y_comoving.reserve(count);
   com_z_comoving.reserve(count);
+  quad_xx.reserve(count);
+  quad_xy.reserve(count);
+  quad_xz.reserve(count);
+  quad_yy.reserve(count);
+  quad_yz.reserve(count);
+  quad_zz.reserve(count);
   child_base.reserve(count);
   child_count.reserve(count);
   child_index.reserve(count * 8U);
@@ -124,7 +226,7 @@ void TreeGravitySolver::build(
   (void)root_index;
 
   const auto multipole_start = std::chrono::steady_clock::now();
-  accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, 0);
+  accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, 0, options.multipole_order);
   const auto multipole_stop = std::chrono::steady_clock::now();
 
   if (profile != nullptr) {
@@ -158,6 +260,9 @@ void TreeGravitySolver::evaluateActiveSet(
   std::uint64_t visited_nodes = 0;
   std::uint64_t pp_interactions = 0;
 
+  std::vector<std::uint32_t> stack;
+  stack.reserve(256);
+
   for (std::size_t active_i = 0; active_i < active_particle_index.size(); ++active_i) {
     const std::uint32_t particle_index = active_particle_index[active_i];
     if (particle_index >= pos_x_comoving.size()) {
@@ -172,7 +277,7 @@ void TreeGravitySolver::evaluateActiveSet(
     double ay = 0.0;
     double az = 0.0;
 
-    std::vector<std::uint32_t> stack;
+    stack.clear();
     stack.push_back(0U);
 
     while (!stack.empty()) {
@@ -185,9 +290,12 @@ void TreeGravitySolver::evaluateActiveSet(
       const double dz = m_nodes.com_z_comoving[node_index] - pz;
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double half_size = m_nodes.half_size_comoving[node_index];
-      const double l_over_r = (2.0 * half_size) / std::sqrt(r2 + 1.0e-30);
+      const double center_dx = m_nodes.center_x_comoving[node_index] - m_nodes.com_x_comoving[node_index];
+      const double center_dy = m_nodes.center_y_comoving[node_index] - m_nodes.com_y_comoving[node_index];
+      const double center_dz = m_nodes.center_z_comoving[node_index] - m_nodes.com_z_comoving[node_index];
+      const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
       const bool is_leaf = m_nodes.child_count[node_index] == 0;
-      const bool accept = is_leaf || (l_over_r < options.opening_theta);
+      const bool accept = acceptNodeByMac(options.opening_criterion, is_leaf, options.opening_theta, half_size, com_offset, r2);
 
       if (accept) {
         ++accepted_nodes;
@@ -211,20 +319,13 @@ void TreeGravitySolver::evaluateActiveSet(
             ++pp_interactions;
           }
         } else {
-          const double factor = options.gravitational_constant_code * m_nodes.mass_code[node_index] *
-              softenedInvR3(r2, options.softening);
-          ax += factor * dx;
-          ay += factor * dy;
-          az += factor * dz;
+          const auto contrib = monopolePlusQuadrupoleAccel(m_nodes, node_index, dx, dy, dz, options);
+          ax += contrib[0];
+          ay += contrib[1];
+          az += contrib[2];
         }
       } else {
-        const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
-        for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-          const std::uint32_t child = m_nodes.child_index[child_offset + octant];
-          if (child != std::numeric_limits<std::uint32_t>::max()) {
-            stack.push_back(child);
-          }
-        }
+        pushChildrenNearFirst(m_nodes, node_index, px, py, pz, stack);
       }
     }
 
@@ -280,6 +381,12 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   m_nodes.com_x_comoving.push_back(center_x_comoving);
   m_nodes.com_y_comoving.push_back(center_y_comoving);
   m_nodes.com_z_comoving.push_back(center_z_comoving);
+  m_nodes.quad_xx.push_back(0.0);
+  m_nodes.quad_xy.push_back(0.0);
+  m_nodes.quad_xz.push_back(0.0);
+  m_nodes.quad_yy.push_back(0.0);
+  m_nodes.quad_yz.push_back(0.0);
+  m_nodes.quad_zz.push_back(0.0);
   m_nodes.child_base.push_back(0U);
   m_nodes.child_count.push_back(0U);
   for (std::uint8_t i = 0; i < 8U; ++i) {
@@ -365,7 +472,8 @@ void TreeGravitySolver::accumulateMultipoles(
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
-    std::uint32_t node_index) {
+    std::uint32_t node_index,
+    TreeMultipoleOrder multipole_order) {
   if (m_nodes.child_count[node_index] == 0U) {
     const std::uint32_t begin = m_nodes.particle_begin[node_index];
     const std::uint32_t end = begin + m_nodes.particle_count[node_index];
@@ -387,6 +495,37 @@ void TreeGravitySolver::accumulateMultipoles(
       m_nodes.com_y_comoving[node_index] = wy / total_mass;
       m_nodes.com_z_comoving[node_index] = wz / total_mass;
     }
+    if (multipole_order == TreeMultipoleOrder::kQuadrupole && total_mass > 0.0) {
+      const double cx = m_nodes.com_x_comoving[node_index];
+      const double cy = m_nodes.com_y_comoving[node_index];
+      const double cz = m_nodes.com_z_comoving[node_index];
+      double i_xx = 0.0;
+      double i_xy = 0.0;
+      double i_xz = 0.0;
+      double i_yy = 0.0;
+      double i_yz = 0.0;
+      double i_zz = 0.0;
+      for (std::uint32_t i = begin; i < end; ++i) {
+        const std::uint32_t particle = m_ordering.sorted_particle_index[i];
+        const double m = mass_code[particle];
+        const double rx = pos_x_comoving[particle] - cx;
+        const double ry = pos_y_comoving[particle] - cy;
+        const double rz = pos_z_comoving[particle] - cz;
+        i_xx += m * rx * rx;
+        i_xy += m * rx * ry;
+        i_xz += m * rx * rz;
+        i_yy += m * ry * ry;
+        i_yz += m * ry * rz;
+        i_zz += m * rz * rz;
+      }
+      const double trace = i_xx + i_yy + i_zz;
+      m_nodes.quad_xx[node_index] = 3.0 * i_xx - trace;
+      m_nodes.quad_xy[node_index] = 3.0 * i_xy;
+      m_nodes.quad_xz[node_index] = 3.0 * i_xz;
+      m_nodes.quad_yy[node_index] = 3.0 * i_yy - trace;
+      m_nodes.quad_yz[node_index] = 3.0 * i_yz;
+      m_nodes.quad_zz[node_index] = 3.0 * i_zz - trace;
+    }
     return;
   }
 
@@ -401,7 +540,7 @@ void TreeGravitySolver::accumulateMultipoles(
     if (child == std::numeric_limits<std::uint32_t>::max()) {
       continue;
     }
-    accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child);
+    accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
     total_mass += m_nodes.mass_code[child];
     wx += m_nodes.mass_code[child] * m_nodes.com_x_comoving[child];
     wy += m_nodes.mass_code[child] * m_nodes.com_y_comoving[child];
@@ -414,6 +553,53 @@ void TreeGravitySolver::accumulateMultipoles(
     m_nodes.com_y_comoving[node_index] = wy / total_mass;
     m_nodes.com_z_comoving[node_index] = wz / total_mass;
   }
+
+  if (multipole_order != TreeMultipoleOrder::kQuadrupole || total_mass <= 0.0) {
+    m_nodes.quad_xx[node_index] = 0.0;
+    m_nodes.quad_xy[node_index] = 0.0;
+    m_nodes.quad_xz[node_index] = 0.0;
+    m_nodes.quad_yy[node_index] = 0.0;
+    m_nodes.quad_yz[node_index] = 0.0;
+    m_nodes.quad_zz[node_index] = 0.0;
+    return;
+  }
+
+  const double cx = m_nodes.com_x_comoving[node_index];
+  const double cy = m_nodes.com_y_comoving[node_index];
+  const double cz = m_nodes.com_z_comoving[node_index];
+
+  double qxx = 0.0;
+  double qxy = 0.0;
+  double qxz = 0.0;
+  double qyy = 0.0;
+  double qyz = 0.0;
+  double qzz = 0.0;
+
+  for (std::uint8_t octant = 0; octant < 8U; ++octant) {
+    const std::uint32_t child = m_nodes.child_index[child_offset + octant];
+    if (child == std::numeric_limits<std::uint32_t>::max()) {
+      continue;
+    }
+    const double dx = m_nodes.com_x_comoving[child] - cx;
+    const double dy = m_nodes.com_y_comoving[child] - cy;
+    const double dz = m_nodes.com_z_comoving[child] - cz;
+    const double m = m_nodes.mass_code[child];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+
+    qxx += m_nodes.quad_xx[child] + m * (3.0 * dx * dx - d2);
+    qxy += m_nodes.quad_xy[child] + m * (3.0 * dx * dy);
+    qxz += m_nodes.quad_xz[child] + m * (3.0 * dx * dz);
+    qyy += m_nodes.quad_yy[child] + m * (3.0 * dy * dy - d2);
+    qyz += m_nodes.quad_yz[child] + m * (3.0 * dy * dz);
+    qzz += m_nodes.quad_zz[child] + m * (3.0 * dz * dz - d2);
+  }
+
+  m_nodes.quad_xx[node_index] = qxx;
+  m_nodes.quad_xy[node_index] = qxy;
+  m_nodes.quad_xz[node_index] = qxz;
+  m_nodes.quad_yy[node_index] = qyy;
+  m_nodes.quad_yz[node_index] = qyz;
+  m_nodes.quad_zz[node_index] = qzz;
 }
 
 }  // namespace cosmosim::gravity
