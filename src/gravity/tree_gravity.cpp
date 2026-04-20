@@ -66,9 +66,12 @@ void validateInputSpans(
     double dx,
     double dy,
     double dz,
+    double target_softening_comoving,
     const TreeGravityOptions& options) {
   const double r2 = dx * dx + dy * dy + dz * dz;
-  const double eps2 = options.softening.epsilon_comoving * options.softening.epsilon_comoving;
+  const double pair_epsilon =
+      combineSofteningPairEpsilon(nodes.softening_max_comoving[node_index], target_softening_comoving);
+  const double eps2 = pair_epsilon * pair_epsilon;
   const double denom = std::max(r2 + eps2, 1.0e-30);
 
   const double inv_r3 = 1.0 / (denom * std::sqrt(denom));
@@ -152,6 +155,7 @@ void TreeNodeSoa::clear() {
   quad_yy.clear();
   quad_yz.clear();
   quad_zz.clear();
+  softening_max_comoving.clear();
   child_base.clear();
   child_count.clear();
   child_index.clear();
@@ -174,6 +178,7 @@ void TreeNodeSoa::reserve(std::size_t count) {
   quad_yy.reserve(count);
   quad_yz.reserve(count);
   quad_zz.reserve(count);
+  softening_max_comoving.reserve(count);
   child_base.reserve(count);
   child_count.reserve(count);
   child_index.reserve(count * 8U);
@@ -187,7 +192,8 @@ void TreeGravitySolver::build(
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
     const TreeGravityOptions& options,
-    TreeGravityProfile* profile) {
+    TreeGravityProfile* profile,
+    const TreeSofteningView& softening_view) {
   const auto build_start = std::chrono::steady_clock::now();
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
   if (options.opening_theta <= 0.0 || options.gravitational_constant_code <= 0.0 || options.max_leaf_size == 0) {
@@ -195,6 +201,18 @@ void TreeGravitySolver::build(
   }
 
   m_nodes.clear();
+  m_source_softening_epsilon_comoving.clear();
+  m_source_softening_epsilon_comoving.resize(pos_x_comoving.size(), options.softening.epsilon_comoving);
+  if (!softening_view.source_particle_epsilon_comoving.empty() &&
+      softening_view.source_particle_epsilon_comoving.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument("Tree gravity source softening sidecar size must match source particle count");
+  }
+  if (!softening_view.source_species_tag.empty() && softening_view.source_species_tag.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument("Tree gravity source species sidecar size must match source particle count");
+  }
+  for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
+    m_source_softening_epsilon_comoving[i] = resolveSourceSofteningEpsilon(i, options.softening, softening_view);
+  }
   m_ordering = buildMortonOrdering(pos_x_comoving, pos_y_comoving, pos_z_comoving);
   if (pos_x_comoving.empty()) {
     if (profile != nullptr) {
@@ -245,7 +263,8 @@ void TreeGravitySolver::evaluateActiveSet(
     std::span<double> accel_y_comoving,
     std::span<double> accel_z_comoving,
     const TreeGravityOptions& options,
-    TreeGravityProfile* profile) const {
+    TreeGravityProfile* profile,
+    const TreeSofteningView& softening_view) const {
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
   if (!built()) {
     throw std::runtime_error("Tree must be built before traversal");
@@ -253,6 +272,10 @@ void TreeGravitySolver::evaluateActiveSet(
   if (active_particle_index.size() != accel_x_comoving.size() || active_particle_index.size() != accel_y_comoving.size() ||
       active_particle_index.size() != accel_z_comoving.size()) {
     throw std::invalid_argument("Active-set and acceleration spans must match");
+  }
+  if (!softening_view.target_particle_epsilon_comoving.empty() &&
+      softening_view.target_particle_epsilon_comoving.size() != active_particle_index.size()) {
+    throw std::invalid_argument("Tree gravity target softening sidecar size must match active-set size");
   }
 
   const auto traversal_start = std::chrono::steady_clock::now();
@@ -272,6 +295,7 @@ void TreeGravitySolver::evaluateActiveSet(
     const double px = pos_x_comoving[particle_index];
     const double py = pos_y_comoving[particle_index];
     const double pz = pos_z_comoving[particle_index];
+    const double target_softening_comoving = resolveTargetSofteningEpsilon(active_i, options.softening, softening_view);
 
     double ax = 0.0;
     double ay = 0.0;
@@ -311,15 +335,18 @@ void TreeGravitySolver::evaluateActiveSet(
             const double sy = pos_y_comoving[source_index] - py;
             const double sz = pos_z_comoving[source_index] - pz;
             const double sr2 = sx * sx + sy * sy + sz * sz;
+            const double pair_epsilon = combineSofteningPairEpsilon(
+                m_source_softening_epsilon_comoving[source_index], target_softening_comoving);
             const double factor = options.gravitational_constant_code * mass_code[source_index] *
-                softenedInvR3(sr2, options.softening);
+                softenedInvR3(sr2, pair_epsilon);
             ax += factor * sx;
             ay += factor * sy;
             az += factor * sz;
             ++pp_interactions;
           }
         } else {
-          const auto contrib = monopolePlusQuadrupoleAccel(m_nodes, node_index, dx, dy, dz, options);
+          const auto contrib =
+              monopolePlusQuadrupoleAccel(m_nodes, node_index, dx, dy, dz, target_softening_comoving, options);
           ax += contrib[0];
           ay += contrib[1];
           az += contrib[2];
@@ -387,6 +414,7 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   m_nodes.quad_yy.push_back(0.0);
   m_nodes.quad_yz.push_back(0.0);
   m_nodes.quad_zz.push_back(0.0);
+  m_nodes.softening_max_comoving.push_back(0.0);
   m_nodes.child_base.push_back(0U);
   m_nodes.child_count.push_back(0U);
   for (std::uint8_t i = 0; i < 8U; ++i) {
@@ -484,6 +512,8 @@ void TreeGravitySolver::accumulateMultipoles(
     for (std::uint32_t i = begin; i < end; ++i) {
       const std::uint32_t particle = m_ordering.sorted_particle_index[i];
       const double m = mass_code[particle];
+      m_nodes.softening_max_comoving[node_index] =
+          std::max(m_nodes.softening_max_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
       total_mass += m;
       wx += m * pos_x_comoving[particle];
       wy += m * pos_y_comoving[particle];
@@ -541,6 +571,8 @@ void TreeGravitySolver::accumulateMultipoles(
       continue;
     }
     accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
+    m_nodes.softening_max_comoving[node_index] =
+        std::max(m_nodes.softening_max_comoving[node_index], m_nodes.softening_max_comoving[child]);
     total_mass += m_nodes.mass_code[child];
     wx += m_nodes.mass_code[child] * m_nodes.com_x_comoving[child];
     wy += m_nodes.mass_code[child] * m_nodes.com_y_comoving[child];

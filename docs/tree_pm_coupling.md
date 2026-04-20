@@ -26,7 +26,12 @@ Composition requirement (before explicit cutoff):
 
 ### Softening interaction contract
 
-Residual tree forces use the existing tree softening policy (`TreeSofteningPolicy`) first, then apply the Gaussian short-range factor:
+Residual tree forces use the existing tree softening policy (`TreeSofteningPolicy`) first, then apply the Gaussian short-range factor.
+The effective pair softening is the same as the tree solver:
+
+- source epsilon resolution: per-particle sidecar -> species epsilon table -> scalar fallback,
+- target epsilon resolution: per-active-target sidecar -> scalar fallback,
+- pair rule: `epsilon_pair = max(epsilon_source, epsilon_target)`.
 
 - `a_SR = a_tree_softened * F_SR(r)`
 
@@ -70,7 +75,8 @@ When `world_size > 1` and MPI is enabled, short-range residual evaluation is no 
    - request packet fields:
      - `batch_token` (`uint32`): active-batch start slot on owner rank.
      - `request_id` (`uint32`): index inside batch (`[0, batch_size)`).
-     - `target_x_comoving`, `target_y_comoving`, `target_z_comoving` (`double`): target coordinates.
+    - `target_x_comoving`, `target_y_comoving`, `target_z_comoving` (`double`): target coordinates.
+    - `target_softening_epsilon_comoving` (`double`): resolved target-side epsilon for the same pair law.
 3. **Remote source evaluation**:
    - remote rank evaluates each request target against its local tree/source particles with the same:
     - opening criterion (selected MAC: geometric `l/r < theta` or COM-distance-aware `(l+δ_com)/r < theta`),

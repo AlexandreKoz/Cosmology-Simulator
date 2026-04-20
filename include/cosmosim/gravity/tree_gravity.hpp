@@ -56,6 +56,7 @@ struct TreeNodeSoa {
   std::vector<double> quad_yy;
   std::vector<double> quad_yz;
   std::vector<double> quad_zz;
+  std::vector<double> softening_max_comoving;
   std::vector<std::uint32_t> child_base;
   std::vector<std::uint8_t> child_count;
   std::vector<std::uint32_t> child_index;
@@ -77,7 +78,8 @@ class TreeGravitySolver {
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
       const TreeGravityOptions& options,
-      TreeGravityProfile* profile = nullptr);
+      TreeGravityProfile* profile = nullptr,
+      const TreeSofteningView& softening_view = {});
 
   void evaluateActiveSet(
       std::span<const double> pos_x_comoving,
@@ -89,7 +91,8 @@ class TreeGravitySolver {
       std::span<double> accel_y_comoving,
       std::span<double> accel_z_comoving,
       const TreeGravityOptions& options,
-      TreeGravityProfile* profile = nullptr) const;
+      TreeGravityProfile* profile = nullptr,
+      const TreeSofteningView& softening_view = {}) const;
 
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
@@ -118,6 +121,7 @@ class TreeGravitySolver {
 
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;
+  std::vector<double> m_source_softening_epsilon_comoving;
 };
 
 }  // namespace cosmosim::gravity

@@ -58,10 +58,13 @@ namespace {
     double dx,
     double dy,
     double dz,
+    double target_softening_comoving,
     const TreeGravityOptions& options,
     double split_factor) {
   const double r2 = dx * dx + dy * dy + dz * dz;
-  const double eps2 = options.softening.epsilon_comoving * options.softening.epsilon_comoving;
+  const double pair_epsilon =
+      combineSofteningPairEpsilon(nodes.softening_max_comoving[node_index], target_softening_comoving);
+  const double eps2 = pair_epsilon * pair_epsilon;
   const double denom = std::max(r2 + eps2, 1.0e-30);
   const double inv_r3 = 1.0 / (denom * std::sqrt(denom));
   const double inv_r5 = inv_r3 / denom;
@@ -191,6 +194,7 @@ struct ShortRangeTargetRequestPacket {
   double target_x_comoving = 0.0;
   double target_y_comoving = 0.0;
   double target_z_comoving = 0.0;
+  double target_softening_epsilon_comoving = 0.0;
 };
 
 struct ShortRangeTargetResponsePacket {
@@ -316,7 +320,8 @@ void TreePmCoordinator::solveActiveSet(
     const TreePmForceAccumulatorView& accumulator,
     const TreePmOptions& options,
     TreePmProfileEvent* profile,
-    TreePmDiagnostics* diagnostics) {
+    TreePmDiagnostics* diagnostics,
+    const TreeSofteningView& softening_view) {
   solveActiveSetWithPmCadence(
       pos_x_comoving,
       pos_y_comoving,
@@ -326,7 +331,8 @@ void TreePmCoordinator::solveActiveSet(
       options,
       true,
       profile,
-      diagnostics);
+      diagnostics,
+      softening_view);
 }
 
 void TreePmCoordinator::solveActiveSetWithPmCadence(
@@ -338,7 +344,8 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     const TreePmOptions& options,
     bool refresh_long_range_field,
     TreePmProfileEvent* profile,
-    TreePmDiagnostics* diagnostics) {
+    TreePmDiagnostics* diagnostics,
+    const TreeSofteningView& softening_view) {
   if (!forceAccumulatorShapeValid(accumulator)) {
     throw std::invalid_argument("TreePM force accumulator spans must have matching active-set extent");
   }
@@ -413,8 +420,14 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
   // Tree owns short-range residual with the complementary real-space kernel.
   const auto tree_start = std::chrono::steady_clock::now();
-  m_tree_solver.build(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, options.tree_options,
-      profile != nullptr ? &profile->tree_profile : nullptr);
+  m_tree_solver.build(
+      pos_x_comoving,
+      pos_y_comoving,
+      pos_z_comoving,
+      mass_code,
+      options.tree_options,
+      profile != nullptr ? &profile->tree_profile : nullptr,
+      softening_view);
   evaluateShortRangeResidual(
       pos_x_comoving,
       pos_y_comoving,
@@ -422,6 +435,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       mass_code,
       accumulator,
       options,
+      softening_view,
       profile != nullptr ? &profile->tree_profile : nullptr);
   const auto tree_stop = std::chrono::steady_clock::now();
 
@@ -449,6 +463,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     std::span<const double> mass_code,
     const TreePmForceAccumulatorView& accumulator,
     const TreePmOptions& options,
+    const TreeSofteningView& softening_view,
     TreeGravityProfile* tree_profile) {
   std::uint64_t visited_nodes = 0;
   std::uint64_t accepted_nodes = 0;
@@ -465,10 +480,27 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       : 0.0;
   const double cutoff_radius_comoving = options.split_policy.cutoff_radius_comoving;
   const double cutoff_radius2_comoving = cutoff_radius_comoving * cutoff_radius_comoving;
+  if (!softening_view.source_particle_epsilon_comoving.empty() &&
+      softening_view.source_particle_epsilon_comoving.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument("TreePM source softening sidecar size must match source particle count");
+  }
+  if (!softening_view.source_species_tag.empty() && softening_view.source_species_tag.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument("TreePM source species sidecar size must match source particle count");
+  }
+  if (!softening_view.target_particle_epsilon_comoving.empty() &&
+      softening_view.target_particle_epsilon_comoving.size() != accumulator.active_particle_index.size()) {
+    throw std::invalid_argument("TreePM target softening sidecar size must match active-set size");
+  }
   std::vector<std::uint32_t> stack;
   stack.reserve(256);
 
-  auto evaluateTargetAgainstLocalTree = [&](double px, double py, double pz, std::uint32_t self_index, bool skip_self) {
+  auto evaluateTargetAgainstLocalTree = [&](
+                                         double px,
+                                         double py,
+                                         double pz,
+                                         std::uint32_t self_index,
+                                         bool skip_self,
+                                         double target_softening_comoving) {
     double ax = 0.0;
     if (nodes.size() == 0) {
       return std::array<double, 3>{0.0, 0.0, 0.0};
@@ -547,11 +579,14 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
             const double split_factor = treePmGaussianShortRangeForceFactor(sr, options.split_policy.split_scale_comoving);
+            const double source_softening =
+                resolveSourceSofteningEpsilon(source_index, options.tree_options.softening, softening_view);
+            const double pair_epsilon = combineSofteningPairEpsilon(source_softening, target_softening_comoving);
             // Contract: short-range residual is the softened tree force multiplied by the
             // Gaussian real-space residual factor so that tree+PM composes to the unsplit
             // softened force before explicit r_cut truncation.
             const double softened_factor =
-                softenedInvR3(sr2, options.tree_options.softening) * split_factor * options.tree_options.gravitational_constant_code;
+                softenedInvR3(sr2, pair_epsilon) * split_factor * options.tree_options.gravitational_constant_code;
             ax += softened_factor * mass_code[source_index] * sx;
             ay += softened_factor * mass_code[source_index] * sy;
             az += softened_factor * mass_code[source_index] * sz;
@@ -561,7 +596,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           const double split_factor = treePmGaussianShortRangeForceFactor(r, options.split_policy.split_scale_comoving);
           // Same softened-residual contract as the leaf pair path, applied to accepted nodes.
           const auto contrib =
-              monopolePlusQuadrupoleAccelPeriodic(nodes, node_index, dx, dy, dz, options.tree_options, split_factor);
+              monopolePlusQuadrupoleAccelPeriodic(
+                  nodes, node_index, dx, dy, dz, target_softening_comoving, options.tree_options, split_factor);
           ax += contrib[0];
           ay += contrib[1];
           az += contrib[2];
@@ -583,7 +619,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double px = pos_x_comoving[particle_index];
       const double py = pos_y_comoving[particle_index];
       const double pz = pos_z_comoving[particle_index];
-      const auto local_accel = evaluateTargetAgainstLocalTree(px, py, pz, particle_index, true);
+      const double target_softening = resolveTargetSofteningEpsilon(active_i, options.tree_options.softening, softening_view);
+      const auto local_accel = evaluateTargetAgainstLocalTree(px, py, pz, particle_index, true, target_softening);
       accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
     }
   }
@@ -659,6 +696,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const double px = pos_x_comoving[particle_index];
         const double py = pos_y_comoving[particle_index];
         const double pz = pos_z_comoving[particle_index];
+        const double target_softening =
+            resolveTargetSofteningEpsilon(batch_begin + batch_slot, options.tree_options.softening, softening_view);
         for (int peer = 0; peer < mpi_world_size; ++peer) {
           if (peer == mpi_world_rank) {
             continue;
@@ -673,6 +712,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               .target_x_comoving = px,
               .target_y_comoving = py,
               .target_z_comoving = pz,
+              .target_softening_epsilon_comoving = target_softening,
           });
           ++expected_response_count[batch_slot];
         }
@@ -713,8 +753,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
       for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
         const std::uint32_t particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
+        const double target_softening =
+            resolveTargetSofteningEpsilon(batch_begin + batch_slot, options.tree_options.softening, softening_view);
         const auto local_accel = evaluateTargetAgainstLocalTree(
-            pos_x_comoving[particle_index], pos_y_comoving[particle_index], pos_z_comoving[particle_index], particle_index, true);
+            pos_x_comoving[particle_index],
+            pos_y_comoving[particle_index],
+            pos_z_comoving[particle_index],
+            particle_index,
+            true,
+            target_softening);
         accumulator.addToActiveSlot(batch_begin + batch_slot, local_accel[0], local_accel[1], local_accel[2]);
       }
 
@@ -762,7 +809,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               request.target_y_comoving,
               request.target_z_comoving,
               0U,
-              false);
+              false,
+              request.target_softening_epsilon_comoving);
           peer_responses.push_back(ShortRangeTargetResponsePacket{
               .batch_token = request.batch_token,
               .request_id = request.request_id,

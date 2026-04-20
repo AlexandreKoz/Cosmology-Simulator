@@ -829,3 +829,23 @@ Interpretation:
 - Reproducibility posture remains explicit: restart carries deterministic policy + auditable rank/layout metadata, and integrity hashing now includes distributed continuation state.
 
 - Added isolated/open PM long-range path selection in `reference_workflow` and `TreePmCoordinator`; isolated now uses doubled-domain free-space convolution (padded FFT-style linear convolution) and disables minimum-image short-range wrapping. Current limitation remains single-rank only, with explicit fail-fast on multi-rank.
+
+## 17) 2026-04-20 Tree softening maturity: species + optional per-particle sidecars
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_tree_gravity test_integration_tree_gravity_vs_direct test_integration_snapshot_hdf5_roundtrip test_integration_restart_checkpoint_roundtrip
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_tree_gravity|integration_tree_gravity_vs_direct|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip"
+```
+
+Observed:
+
+- Tree gravity now resolves softening at source/target with optional sidecars (species table and per-particle overrides) and uses an explicit pair rule `epsilon_pair = max(epsilon_i, epsilon_j)` across leaf P2P and accepted-node multipole paths.
+- TreePM short-range residual uses the same pair law for local and distributed remote request/response paths (request packet now carries target epsilon).
+- Optional per-particle softening sidecar persistence is added to snapshot (`/PartTypeN/GravitySofteningComoving`) and restart (`/state/particle_sidecar/gravity_softening_comoving`) paths.
+- Schema versions are intentionally bumped for additive softening sidecar fields: snapshot `gadget_arepo_v3` and restart `cosmosim_restart_v5`.
+
+Interpretation:
+
+- This is an infrastructure-contract maturation pass: explicit pairwise softening semantics are now documented, tested, and consistent between tree-only and TreePM residual evaluation paths.

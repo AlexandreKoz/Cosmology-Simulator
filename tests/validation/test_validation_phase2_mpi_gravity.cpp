@@ -221,7 +221,8 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress) {
           options,
           (i % 2) == 0,
           nullptr,
-          &dist_diag);
+          &dist_diag,
+          {});
     } else {
       dist_coordinator.solveActiveSet(local_x, local_y, local_z, local_mass, dist_acc, options, nullptr, &dist_diag);
     }

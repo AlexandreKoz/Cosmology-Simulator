@@ -28,7 +28,7 @@ truncated at quadrupole order:
 
 Monopole term:
 \[
-\mathbf{a}_{M} = G M \frac{\mathbf{r}}{(r^2+\epsilon^2)^{3/2}},\quad \mathbf{r}=\mathbf{x}_{\mathrm{com}}-\mathbf{x}
+\mathbf{a}_{M} = G M \frac{\mathbf{r}}{(r^2+\epsilon_{\mathrm{pair}}^2)^{3/2}},\quad \mathbf{r}=\mathbf{x}_{\mathrm{com}}-\mathbf{x}
 \]
 
 Traceless quadrupole tensor:
@@ -38,8 +38,28 @@ Q_{ij} = \sum_a m_a (3\,\Delta x_{a,i}\Delta x_{a,j} - |\Delta \mathbf{x}_a|^2\d
 
 Quadrupole acceleration correction:
 \[
-a_{Q,i}=\frac{G}{2}\left[2\frac{(Q\mathbf{r})_i}{(r^2+\epsilon^2)^{5/2}}-5\frac{(\mathbf{r}^TQ\mathbf{r})r_i}{(r^2+\epsilon^2)^{7/2}}\right]
+a_{Q,i}=\frac{G}{2}\left[2\frac{(Q\mathbf{r})_i}{(r^2+\epsilon_{\mathrm{pair}}^2)^{5/2}}-5\frac{(\mathbf{r}^TQ\mathbf{r})r_i}{(r^2+\epsilon_{\mathrm{pair}}^2)^{7/2}}\right]
 \]
+
+Softening source/target resolution order:
+
+1. source particle per-particle sidecar (if provided),
+2. source species table lookup (if enabled),
+3. scalar global fallback (`TreeSofteningPolicy::epsilon_comoving`).
+
+Target resolution order:
+
+1. active-target per-particle sidecar (if provided),
+2. scalar global fallback.
+
+Pairwise effective softening law (used by both P2P and accepted-node multipoles):
+
+\[
+\epsilon_{\mathrm{pair}}(i,j)=\max(\epsilon_i,\epsilon_j)
+\]
+
+Accepted-node multipoles use the node aggregate \(\epsilon_{\mathrm{node,max}}\) and apply
+\(\epsilon_{\mathrm{pair}}=\max(\epsilon_{\mathrm{target}}, \epsilon_{\mathrm{node,max}})\).
 
 Supported opening criteria (MAC):
 
@@ -82,6 +102,10 @@ Integration with normalized config/provenance can map directly to `TreeGravityOp
 - `max_leaf_size`
 - `gravitational_constant_code`
 - `softening.epsilon_comoving`
+- optional softening sidecars:
+  - source species tags + species epsilon table,
+  - source per-particle epsilon,
+  - active-target per-particle epsilon.
 
 ## Tests and benchmark hooks
 
