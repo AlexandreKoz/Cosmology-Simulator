@@ -56,6 +56,14 @@ TreePM runtime mapping is explicit and auditable:
   - default remains conservative (`N = 1`, refresh every kick)
 - Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
 - `r_cut` is resolved from typed config and drives explicit residual-traversal pruning in the TreePM residual path
+- zoom-focused long-range correction (when enabled):
+  - authoritative high-resolution membership is computed from the configured zoom center/radius every gravity kick.
+  - long-range decomposition is explicit:
+    - global coarse PM from all sources,
+    - focused PM correction on high-resolution targets only:
+      `a_PM_focused(high-res sources) - a_PM_coarse(high-res sources)`,
+    - tree short-range residual from all sources.
+  - contamination diagnostics count low-resolution source particles/mass inside the configured contamination radius and are emitted as runtime operational events.
 - distributed cadence coherence:
   - all ranks advance `gravity_kick_opportunity` together for every gravity kick stage;
   - long-range PM refresh/reuse is checked as a rank-consensus decision, so rank-local counters cannot silently drift;
@@ -115,3 +123,4 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 - `treepm_long_range_reuse_count`
 - `treepm_cadence_records` (per-kick record including step, stage, field version, and refresh/reuse decision)
 - `final_state_digest` (deterministic run-result checksum for reproducibility checks under fixed config/ICs)
+- operational events include `gravity.zoom_force_diagnostics` with PM/tree/total force norms plus low-resolution contamination counters.

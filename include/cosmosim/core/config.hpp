@@ -51,6 +51,11 @@ enum class ModeGravityBoundary {
   kIsolatedMonopole,
 };
 
+enum class ZoomLongRangeStrategy {
+  kDisabled,
+  kGlobalCoarsePlusFocusedHighResCorrection,
+};
+
 enum class FeedbackMode {
   kThermal,
   kKinetic,
@@ -227,6 +232,16 @@ struct ModeConfig {
   std::string ic_file = "ics.hdf5";
   bool zoom_high_res_region = false;
   std::string zoom_region_file;
+  ZoomLongRangeStrategy zoom_long_range_strategy =
+      ZoomLongRangeStrategy::kDisabled;
+  double zoom_region_center_x_mpc_comoving = 0.5;
+  double zoom_region_center_y_mpc_comoving = 0.5;
+  double zoom_region_center_z_mpc_comoving = 0.5;
+  double zoom_region_radius_mpc_comoving = 0.0;
+  int zoom_focused_pm_grid_nx = 0;
+  int zoom_focused_pm_grid_ny = 0;
+  int zoom_focused_pm_grid_nz = 0;
+  double zoom_contamination_radius_mpc_comoving = 0.0;
   ModeHydroBoundary hydro_boundary = ModeHydroBoundary::kAuto;
   ModeGravityBoundary gravity_boundary = ModeGravityBoundary::kAuto;
 };

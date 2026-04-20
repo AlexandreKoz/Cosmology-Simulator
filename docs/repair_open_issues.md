@@ -7,6 +7,7 @@ _Date captured: 2026-04-14 (UTC)_
 
 - TreePM Phase 3 implementation/closure work remains open by contract: see `docs/treepm_phase3_contract.md` hard-gate requirements and staged maturity map.
 - Even with explicit PM kick-surface synchronization metadata, cadence-gated PM reuse is still an approximation and not full asynchronous multirate PM maturity.
+- Zoom focused-PM stage currently assumes periodic minimum-image distance and configured spherical membership metadata; file-driven irregular zoom-region masks remain follow-up scope.
 
 
 Environment blockers currently observed in this validation environment:

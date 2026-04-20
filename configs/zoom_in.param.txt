@@ -11,6 +11,15 @@ mode = zoom_in
 ic_file = zoom_in_ics.hdf5
 zoom_high_res_region = true
 zoom_region_file = zoom_lagrangian_region.hdf5
+zoom_long_range_strategy = global_coarse_plus_focused_highres_correction
+zoom_region_center_x = 25.0
+zoom_region_center_y = 25.0
+zoom_region_center_z = 25.0
+zoom_region_radius = 5.0
+zoom_focused_pm_grid_nx = 128
+zoom_focused_pm_grid_ny = 128
+zoom_focused_pm_grid_nz = 128
+zoom_contamination_radius = 7.5
 hydro_boundary = periodic
 gravity_boundary = periodic
 

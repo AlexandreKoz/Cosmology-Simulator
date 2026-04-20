@@ -354,6 +354,27 @@ template <typename T>
   throw ConfigError("key 'mode.gravity_boundary': invalid value '" + value + "'");
 }
 
+[[nodiscard]] ZoomLongRangeStrategy parseZoomLongRangeStrategy(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "disabled") {
+    return ZoomLongRangeStrategy::kDisabled;
+  }
+  if (lower == "global_coarse_plus_focused_highres_correction") {
+    return ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection;
+  }
+  throw ConfigError("key 'mode.zoom_long_range_strategy': invalid value '" + value + "'");
+}
+
+[[nodiscard]] std::string zoomLongRangeStrategyToString(ZoomLongRangeStrategy strategy) {
+  switch (strategy) {
+    case ZoomLongRangeStrategy::kDisabled:
+      return "disabled";
+    case ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection:
+      return "global_coarse_plus_focused_highres_correction";
+  }
+  throw ConfigError("unhandled ZoomLongRangeStrategy enum value during serialization");
+}
+
 [[nodiscard]] FeedbackMode parseFeedbackMode(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "thermal") {
@@ -478,6 +499,15 @@ struct ConfigKeySpec {
       {"mode.ic_file", "ics.hdf5"},
       {"mode.zoom_high_res_region", "false"},
       {"mode.zoom_region_file", ""},
+      {"mode.zoom_long_range_strategy", "disabled"},
+      {"mode.zoom_region_center_x", "0.5"},
+      {"mode.zoom_region_center_y", "0.5"},
+      {"mode.zoom_region_center_z", "0.5"},
+      {"mode.zoom_region_radius", "0.0"},
+      {"mode.zoom_focused_pm_grid_nx", "0"},
+      {"mode.zoom_focused_pm_grid_ny", "0"},
+      {"mode.zoom_focused_pm_grid_nz", "0"},
+      {"mode.zoom_contamination_radius", "0.0"},
       {"mode.hydro_boundary", "auto"},
       {"mode.gravity_boundary", "auto"},
       {"cosmology.omega_matter", "0.315"},
@@ -731,6 +761,29 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
     throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
   }
+  if (config.mode.zoom_region_radius_mpc_comoving < 0.0) {
+    throw ConfigError("mode.zoom_region_radius must be >= 0");
+  }
+  if (config.mode.zoom_contamination_radius_mpc_comoving < 0.0) {
+    throw ConfigError("mode.zoom_contamination_radius must be >= 0");
+  }
+  if (config.mode.zoom_high_res_region &&
+      config.mode.zoom_region_radius_mpc_comoving <= 0.0) {
+    throw ConfigError("mode.zoom_region_radius must be > 0 when mode.zoom_high_res_region is true");
+  }
+  if (config.mode.zoom_long_range_strategy ==
+      ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection) {
+    if (!config.mode.zoom_high_res_region) {
+      throw ConfigError(
+          "mode.zoom_long_range_strategy requires mode.zoom_high_res_region=true");
+    }
+    if (config.mode.zoom_focused_pm_grid_nx <= 0 ||
+        config.mode.zoom_focused_pm_grid_ny <= 0 ||
+        config.mode.zoom_focused_pm_grid_nz <= 0) {
+      throw ConfigError(
+          "mode.zoom_focused_pm_grid_n{xyz} must be > 0 for focused zoom PM correction");
+    }
+  }
   const ModePolicy policy = buildModePolicy(config.mode);
   validateModePolicy(config, policy);
 }
@@ -750,6 +803,15 @@ void validateConfig(const SimulationConfig& config) {
   stream << "zoom_high_res_region = " << (frozen.config.mode.zoom_high_res_region ? "true" : "false")
          << '\n';
   stream << "zoom_region_file = " << frozen.config.mode.zoom_region_file << '\n';
+  stream << "zoom_long_range_strategy = " << zoomLongRangeStrategyToString(frozen.config.mode.zoom_long_range_strategy) << '\n';
+  stream << "zoom_region_center_x = " << frozen.config.mode.zoom_region_center_x_mpc_comoving << '\n';
+  stream << "zoom_region_center_y = " << frozen.config.mode.zoom_region_center_y_mpc_comoving << '\n';
+  stream << "zoom_region_center_z = " << frozen.config.mode.zoom_region_center_z_mpc_comoving << '\n';
+  stream << "zoom_region_radius = " << frozen.config.mode.zoom_region_radius_mpc_comoving << '\n';
+  stream << "zoom_focused_pm_grid_nx = " << frozen.config.mode.zoom_focused_pm_grid_nx << '\n';
+  stream << "zoom_focused_pm_grid_ny = " << frozen.config.mode.zoom_focused_pm_grid_ny << '\n';
+  stream << "zoom_focused_pm_grid_nz = " << frozen.config.mode.zoom_focused_pm_grid_nz << '\n';
+  stream << "zoom_contamination_radius = " << frozen.config.mode.zoom_contamination_radius_mpc_comoving << '\n';
   stream << "hydro_boundary = " << modeHydroBoundaryToString(frozen.config.mode.hydro_boundary) << '\n';
   stream << "gravity_boundary = " << modeGravityBoundaryToString(frozen.config.mode.gravity_boundary) << '\n';
   stream << "\n[cosmology]\n";
@@ -934,6 +996,39 @@ void validateConfig(const SimulationConfig& config) {
       "mode.zoom_high_res_region");
   frozen.config.mode.zoom_region_file =
       requireString(entries, consumed, "mode.zoom_region_file", defaultFor("mode.zoom_region_file"));
+  frozen.config.mode.zoom_long_range_strategy = parseZoomLongRangeStrategy(requireString(
+      entries,
+      consumed,
+      "mode.zoom_long_range_strategy",
+      defaultFor("mode.zoom_long_range_strategy")));
+  frozen.config.mode.zoom_region_center_x_mpc_comoving = parseFloating(
+      requireString(entries, consumed, "mode.zoom_region_center_x", defaultFor("mode.zoom_region_center_x")),
+      "mode.zoom_region_center_x");
+  frozen.config.mode.zoom_region_center_y_mpc_comoving = parseFloating(
+      requireString(entries, consumed, "mode.zoom_region_center_y", defaultFor("mode.zoom_region_center_y")),
+      "mode.zoom_region_center_y");
+  frozen.config.mode.zoom_region_center_z_mpc_comoving = parseFloating(
+      requireString(entries, consumed, "mode.zoom_region_center_z", defaultFor("mode.zoom_region_center_z")),
+      "mode.zoom_region_center_z");
+  frozen.config.mode.zoom_region_radius_mpc_comoving = parseFloating(
+      requireString(entries, consumed, "mode.zoom_region_radius", defaultFor("mode.zoom_region_radius")),
+      "mode.zoom_region_radius");
+  frozen.config.mode.zoom_focused_pm_grid_nx = parseNumber<int>(
+      requireString(entries, consumed, "mode.zoom_focused_pm_grid_nx", defaultFor("mode.zoom_focused_pm_grid_nx")),
+      "mode.zoom_focused_pm_grid_nx");
+  frozen.config.mode.zoom_focused_pm_grid_ny = parseNumber<int>(
+      requireString(entries, consumed, "mode.zoom_focused_pm_grid_ny", defaultFor("mode.zoom_focused_pm_grid_ny")),
+      "mode.zoom_focused_pm_grid_ny");
+  frozen.config.mode.zoom_focused_pm_grid_nz = parseNumber<int>(
+      requireString(entries, consumed, "mode.zoom_focused_pm_grid_nz", defaultFor("mode.zoom_focused_pm_grid_nz")),
+      "mode.zoom_focused_pm_grid_nz");
+  frozen.config.mode.zoom_contamination_radius_mpc_comoving = parseFloating(
+      requireString(
+          entries,
+          consumed,
+          "mode.zoom_contamination_radius",
+          defaultFor("mode.zoom_contamination_radius")),
+      "mode.zoom_contamination_radius");
   frozen.config.mode.hydro_boundary = parseModeHydroBoundary(
       requireString(entries, consumed, "mode.hydro_boundary", defaultFor("mode.hydro_boundary")));
   frozen.config.mode.gravity_boundary = parseModeGravityBoundary(

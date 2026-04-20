@@ -590,6 +590,60 @@ void testDistributedActiveSubsetMatchesSingleRankReference() {
 }
 #endif
 
+void testZoomFocusedPmCorrectionAndContaminationDiagnostics() {
+  constexpr double box_size_comoving = 1.0;
+  std::vector<double> pos_x = {0.49, 0.52, 0.51, 0.20, 0.80};
+  std::vector<double> pos_y = {0.50, 0.50, 0.53, 0.20, 0.80};
+  std::vector<double> pos_z = {0.50, 0.50, 0.47, 0.20, 0.80};
+  std::vector<double> mass = {1.0, 1.1, 0.9, 2.0, 2.5};
+  std::vector<std::uint8_t> source_is_high_res = {1, 1, 1, 0, 0};
+  std::vector<std::uint8_t> active_is_high_res = source_is_high_res;
+
+  cosmosim::gravity::TreePmOptions no_zoom;
+  no_zoom.pm_options.box_size_mpc_comoving = box_size_comoving;
+  no_zoom.pm_options.scale_factor = 1.0;
+  no_zoom.pm_options.gravitational_constant_code = 1.0;
+  no_zoom.tree_options.opening_theta = 0.55;
+  no_zoom.tree_options.max_leaf_size = 4;
+  no_zoom.tree_options.gravitational_constant_code = 1.0;
+  no_zoom.tree_options.softening.epsilon_comoving = 1.0e-3;
+  const cosmosim::gravity::PmGridShape coarse_shape{16, 16, 16};
+  const double mesh_spacing = box_size_comoving / static_cast<double>(coarse_shape.nx);
+  no_zoom.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
+  cosmosim::gravity::TreePmDiagnostics no_zoom_diag;
+  const ForceField no_zoom_force =
+      solveTreePm(pos_x, pos_y, pos_z, mass, coarse_shape, no_zoom, &no_zoom_diag);
+
+  cosmosim::gravity::TreePmOptions with_zoom = no_zoom;
+  with_zoom.enable_zoom_long_range_correction = true;
+  with_zoom.zoom_focused_pm_shape = cosmosim::gravity::PmGridShape{32, 32, 32};
+  with_zoom.source_is_high_res = source_is_high_res;
+  with_zoom.active_is_high_res = active_is_high_res;
+  with_zoom.zoom_region_center_x_comoving = 0.5;
+  with_zoom.zoom_region_center_y_comoving = 0.5;
+  with_zoom.zoom_region_center_z_comoving = 0.5;
+  with_zoom.zoom_region_radius_comoving = 0.08;
+  with_zoom.zoom_contamination_radius_comoving = 0.4;
+  cosmosim::gravity::TreePmDiagnostics with_zoom_diag;
+  const ForceField with_zoom_force =
+      solveTreePm(pos_x, pos_y, pos_z, mass, coarse_shape, with_zoom, &with_zoom_diag);
+
+  const double highres_delta = std::abs(with_zoom_force.ax[0] - no_zoom_force.ax[0]) +
+      std::abs(with_zoom_force.ay[1] - no_zoom_force.ay[1]) +
+      std::abs(with_zoom_force.az[2] - no_zoom_force.az[2]);
+  const double lowres_delta = std::abs(with_zoom_force.ax[3] - no_zoom_force.ax[3]) +
+      std::abs(with_zoom_force.ay[4] - no_zoom_force.ay[4]);
+  requireOrThrow(highres_delta > 1.0e-6, "zoom PM correction should change high-res target forces");
+  requireOrThrow(lowres_delta < 1.0e-12, "zoom PM correction must not modify low-res target forces");
+  requireOrThrow(with_zoom_diag.zoom_high_res_source_count == 3, "unexpected zoom high-res source count");
+  requireOrThrow(with_zoom_diag.zoom_low_res_source_count == 2, "unexpected zoom low-res source count");
+  requireOrThrow(with_zoom_diag.zoom_low_res_contamination_count >= 1, "expected at least one low-res contaminant");
+  requireOrThrow(with_zoom_diag.force_l2_pm_zoom_correction > 0.0, "zoom PM correction norm should be positive");
+  requireOrThrow(std::isfinite(with_zoom_diag.force_l2_pm_global), "pm-global force norm must be finite");
+  requireOrThrow(std::isfinite(with_zoom_diag.force_l2_tree_short_range), "tree-short force norm must be finite");
+  requireOrThrow(std::isfinite(with_zoom_diag.force_l2_total), "total force norm must be finite");
+}
+
 }  // namespace
 
 int main() {
@@ -599,6 +653,7 @@ int main() {
   testPeriodicTreePmAgainstDirectReference();
   testResidualCutoffPrunesTreePath();
   testPmOnlyTreeOnlyAndTreePmConsistency();
+  testZoomFocusedPmCorrectionAndContaminationDiagnostics();
   testActiveSubsetMatchesFullSolveSingleRank();
 #if COSMOSIM_ENABLE_MPI
   testDistributedShortRangeExportImportMatchesSingleRankReference();

@@ -42,6 +42,13 @@ struct ProvenanceRecord {
   std::uint64_t gravity_treepm_restart_kick_opportunity = 0;
   std::uint64_t gravity_treepm_restart_field_version = 0;
   std::string gravity_treepm_long_range_restart_policy = "deterministic_rebuild";
+  std::string zoom_long_range_strategy = "disabled";
+  double zoom_region_center_x_mpc_comoving = 0.0;
+  double zoom_region_center_y_mpc_comoving = 0.0;
+  double zoom_region_center_z_mpc_comoving = 0.0;
+  double zoom_region_radius_mpc_comoving = 0.0;
+  std::string zoom_focused_pm_grid = "0x0x0";
+  double zoom_contamination_radius_mpc_comoving = 0.0;
 };
 
 [[nodiscard]] std::string collectCompilerId();

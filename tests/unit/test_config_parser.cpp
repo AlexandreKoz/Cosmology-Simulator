@@ -18,6 +18,7 @@ mode = zoom_in
 ic_file = zoom_ics.hdf5
 zoom_high_res_region = true
 zoom_region_file = region_zoom.hdf5
+zoom_region_radius = 1.0
 
 [cosmology]
 box_size = 50000 kpc
@@ -456,6 +457,50 @@ tracer_min_host_mass_code = 1.0e-6
   assert(threw);
 }
 
+void testZoomLongRangeStrategyValidationAndRoundtrip() {
+  const std::string good_text = R"(
+[mode]
+mode = zoom_in
+zoom_high_res_region = true
+zoom_region_file = zoom_region.hdf5
+zoom_long_range_strategy = global_coarse_plus_focused_highres_correction
+zoom_region_center_x = 12.5
+zoom_region_center_y = 13.5
+zoom_region_center_z = 14.5
+zoom_region_radius = 2.0
+zoom_focused_pm_grid_nx = 32
+zoom_focused_pm_grid_ny = 48
+zoom_focused_pm_grid_nz = 64
+zoom_contamination_radius = 3.0
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "zoom_long_range_good");
+  assert(frozen.config.mode.zoom_long_range_strategy ==
+      cosmosim::core::ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection);
+  assert(frozen.config.mode.zoom_region_center_x_mpc_comoving == 12.5);
+  assert(frozen.config.mode.zoom_focused_pm_grid_nz == 64);
+  assert(frozen.normalized_text.find("zoom_long_range_strategy = global_coarse_plus_focused_highres_correction") !=
+      std::string::npos);
+
+  const std::string bad_text = R"(
+[mode]
+mode = zoom_in
+zoom_high_res_region = true
+zoom_region_file = zoom_region.hdf5
+zoom_long_range_strategy = global_coarse_plus_focused_highres_correction
+zoom_region_radius = 2.0
+zoom_focused_pm_grid_nx = 0
+zoom_focused_pm_grid_ny = 16
+zoom_focused_pm_grid_nz = 16
+)";
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_text, "zoom_long_range_bad");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -477,5 +522,6 @@ int main() {
   testAxisAwareBoxAndPmGridCanonicalizationCompatibility();
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
+  testZoomLongRangeStrategyValidationAndRoundtrip();
   return 0;
 }
