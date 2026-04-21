@@ -281,6 +281,29 @@ void testEnumSerializationIsFailFastWithoutUnknownFallback() {
   assert(threw);
 }
 
+void testSpeciesSofteningOverridesRoundtrip() {
+  const std::string text = R"(
+[mode]
+mode = zoom_in
+[numerics]
+gravity_softening = 1.0 kpc
+gravity_softening_gas = 0.5 kpc
+gravity_softening_dark_matter = 2.0 kpc
+gravity_softening_star = 0.2 kpc
+gravity_softening_black_hole = 0.05 kpc
+gravity_softening_tracer = 1.5 kpc
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "species_softening");
+  assert(std::abs(frozen.config.numerics.gravity_softening_gas_kpc_comoving - 0.5) < 1.0e-12);
+  assert(std::abs(frozen.config.numerics.gravity_softening_dark_matter_kpc_comoving - 2.0) < 1.0e-12);
+  assert(std::abs(frozen.config.numerics.gravity_softening_star_kpc_comoving - 0.2) < 1.0e-12);
+  assert(std::abs(frozen.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
+  assert(std::abs(frozen.config.numerics.gravity_softening_tracer_kpc_comoving - 1.5) < 1.0e-12);
+  assert(frozen.normalized_text.find("gravity_softening_gas = ") != std::string::npos);
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "species_softening_roundtrip");
+  assert(std::abs(reparsed.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
+}
+
 void testTreePmNumericsRoundtripAndValidation() {
   const std::string good_text = R"(
 [mode]
@@ -518,6 +541,7 @@ int main() {
   testCoolingPolicyEnumsAndValidation();
   testDiagnosticsExecutionPolicyValidation();
   testEnumSerializationIsFailFastWithoutUnknownFallback();
+  testSpeciesSofteningOverridesRoundtrip();
   testTreePmNumericsRoundtripAndValidation();
   testAxisAwareBoxAndPmGridCanonicalizationCompatibility();
   testBlackHoleAgnConfigKeysAndValidation();

@@ -242,6 +242,8 @@ class PmSolver::Impl {
     double cached_ly = 0.0;
     double cached_lz = 0.0;
     double cached_split_scale = -1.0;
+    double cached_scale_factor = -1.0;
+    double cached_gravitational_constant_code = -1.0;
     bool cached_window_deconvolution = false;
     PmAssignmentScheme cached_assignment_scheme = PmAssignmentScheme::kCic;
   };
@@ -568,6 +570,8 @@ class PmSolver::Impl {
         plan.cached_ly == lengths.ly &&
         plan.cached_lz == lengths.lz &&
         plan.cached_split_scale == options.tree_pm_split_scale_comoving &&
+        plan.cached_scale_factor == options.scale_factor &&
+        plan.cached_gravitational_constant_code == options.gravitational_constant_code &&
         plan.cached_window_deconvolution == options.enable_window_deconvolution &&
         plan.cached_assignment_scheme == options.assignment_scheme) {
       return;
@@ -650,6 +654,8 @@ class PmSolver::Impl {
     plan.cached_ly = lengths.ly;
     plan.cached_lz = lengths.lz;
     plan.cached_split_scale = options.tree_pm_split_scale_comoving;
+    plan.cached_scale_factor = options.scale_factor;
+    plan.cached_gravitational_constant_code = options.gravitational_constant_code;
     plan.cached_window_deconvolution = options.enable_window_deconvolution;
     plan.cached_assignment_scheme = options.assignment_scheme;
   }

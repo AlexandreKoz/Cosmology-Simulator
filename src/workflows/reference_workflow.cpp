@@ -96,6 +96,168 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   throw std::runtime_error("unhandled PM decomposition mode enum value");
 }
 
+[[nodiscard]] gravity::TreeSofteningSpeciesPolicy speciesSofteningByTag(
+    const core::SimulationConfig& config) {
+  gravity::TreeSofteningSpeciesPolicy values{};
+  values.enabled = config.numerics.gravity_softening_gas_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_dark_matter_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_star_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_black_hole_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_tracer_kpc_comoving > 0.0;
+  values.epsilon_comoving_by_species.fill(config.numerics.gravity_softening_kpc_comoving * 1.0e-3);
+  values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)] =
+      (config.numerics.gravity_softening_dark_matter_kpc_comoving > 0.0)
+      ? (config.numerics.gravity_softening_dark_matter_kpc_comoving * 1.0e-3)
+      : values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
+  values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)] =
+      (config.numerics.gravity_softening_gas_kpc_comoving > 0.0)
+      ? (config.numerics.gravity_softening_gas_kpc_comoving * 1.0e-3)
+      : values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)];
+  values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kStar)] =
+      (config.numerics.gravity_softening_star_kpc_comoving > 0.0)
+      ? (config.numerics.gravity_softening_star_kpc_comoving * 1.0e-3)
+      : values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kStar)];
+  values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kBlackHole)] =
+      (config.numerics.gravity_softening_black_hole_kpc_comoving > 0.0)
+      ? (config.numerics.gravity_softening_black_hole_kpc_comoving * 1.0e-3)
+      : values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kBlackHole)];
+  values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kTracer)] =
+      (config.numerics.gravity_softening_tracer_kpc_comoving > 0.0)
+      ? (config.numerics.gravity_softening_tracer_kpc_comoving * 1.0e-3)
+      : values.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kTracer)];
+  return values;
+}
+
+[[nodiscard]] bool hasSpeciesSpecificSoftening(const core::SimulationConfig& config) {
+  return config.numerics.gravity_softening_gas_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_dark_matter_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_star_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_black_hole_kpc_comoving > 0.0 ||
+      config.numerics.gravity_softening_tracer_kpc_comoving > 0.0;
+}
+
+[[nodiscard]] std::string describeSofteningPolicy(
+    const core::SimulationConfig& config,
+    const core::SimulationState* state = nullptr) {
+  const bool per_species = hasSpeciesSpecificSoftening(config);
+  const bool per_particle = state != nullptr && !state->particle_sidecar.gravity_softening_comoving.empty();
+  if (per_particle && per_species) {
+    return "comoving_species_plus_particle_override";
+  }
+  if (per_particle) {
+    return "comoving_particle_override";
+  }
+  if (per_species) {
+    return "comoving_species";
+  }
+  return "comoving_fixed";
+}
+
+void maybeInitializeParticleSofteningFromSpeciesPolicy(
+    core::SimulationState& state,
+    const core::SimulationConfig& config) {
+  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+    return;
+  }
+  if (!hasSpeciesSpecificSoftening(config)) {
+    return;
+  }
+  const auto by_species = speciesSofteningByTag(config);
+  state.particle_sidecar.gravity_softening_comoving.resize(state.particles.size(), 0.0);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const std::size_t species_tag = static_cast<std::size_t>(state.particle_sidecar.species_tag[i]);
+    if (species_tag < by_species.epsilon_comoving_by_species.size()) {
+      state.particle_sidecar.gravity_softening_comoving[i] = by_species.epsilon_comoving_by_species[species_tag];
+    } else {
+      state.particle_sidecar.gravity_softening_comoving[i] = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+    }
+  }
+}
+
+void updateAdaptiveTimeBins(
+    core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& scheduler,
+    const core::IntegratorState& integrator_state,
+    const core::SimulationConfig& config,
+    std::span<const double> particle_accel_x,
+    std::span<const double> particle_accel_y,
+    std::span<const double> particle_accel_z,
+    std::span<const double> cell_accel_x,
+    std::span<const double> cell_accel_y,
+    std::span<const double> cell_accel_z) {
+  if (integrator_state.dt_time_code <= 0.0) {
+    throw std::invalid_argument("adaptive time-bin update requires dt_time_code > 0");
+  }
+  const core::TimeStepLimits limits{
+      .min_dt_time_code = integrator_state.dt_time_code,
+      .max_dt_time_code = integrator_state.dt_time_code * static_cast<double>(1ULL << scheduler.maxBin()),
+      .max_bin = scheduler.maxBin(),
+  };
+  const double box_volume =
+      config.cosmology.box_size_x_mpc_comoving * config.cosmology.box_size_y_mpc_comoving * config.cosmology.box_size_z_mpc_comoving;
+  const double cell_width = state.cells.size() > 0
+      ? std::cbrt(box_volume / static_cast<double>(state.cells.size()))
+      : std::cbrt(box_volume / std::max<double>(static_cast<double>(state.particles.size()), 1.0));
+  const auto species_softening = speciesSofteningByTag(config);
+  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+  for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
+    core::TimeStepCriteriaRegistry registry;
+    if (element_index < state.cells.size() && element_index < gas_globals.size()) {
+      const std::uint32_t gas_index = gas_globals[element_index];
+      const double vx = state.particles.velocity_x_peculiar[gas_index];
+      const double vy = state.particles.velocity_y_peculiar[gas_index];
+      const double vz = state.particles.velocity_z_peculiar[gas_index];
+      const double flow_speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+      const double sound_speed = std::max(state.gas_cells.sound_speed_code[element_index], 0.0);
+      registry.registerCflHook([=](std::uint32_t) {
+        return core::computeCflTimeStep({.cell_width_code = cell_width, .flow_speed_code = flow_speed, .sound_speed_code = sound_speed}, 0.4);
+      });
+      const double ax = (element_index < cell_accel_x.size()) ? cell_accel_x[element_index] : 0.0;
+      const double ay = (element_index < cell_accel_y.size()) ? cell_accel_y[element_index] : 0.0;
+      const double az = (element_index < cell_accel_z.size()) ? cell_accel_z[element_index] : 0.0;
+      const double amag = std::sqrt(ax * ax + ay * ay + az * az);
+      const double eps = !state.particle_sidecar.gravity_softening_comoving.empty()
+          ? state.particle_sidecar.gravity_softening_comoving[gas_index]
+          : species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)];
+      registry.registerGravityHook([=](std::uint32_t) {
+        return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
+      });
+      const auto mapped_bin = core::mapDtToTimeBin(
+          core::combineTimeStepCriteria(element_index, registry.hooks(), limits.max_dt_time_code),
+          limits).bin_index;
+      scheduler.requestBinTransition(element_index, mapped_bin);
+      if (gas_index < scheduler.elementCount()) {
+        scheduler.requestBinTransition(gas_index, mapped_bin);
+      }
+      continue;
+    }
+    if (element_index < state.particles.size()) {
+      const double vx = state.particles.velocity_x_peculiar[element_index];
+      const double vy = state.particles.velocity_y_peculiar[element_index];
+      const double vz = state.particles.velocity_z_peculiar[element_index];
+      const double speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+      registry.registerCflHook([=](std::uint32_t) {
+        return (speed > 0.0) ? (0.4 * cell_width / speed) : std::numeric_limits<double>::infinity();
+      });
+      const double ax = (element_index < particle_accel_x.size()) ? particle_accel_x[element_index] : 0.0;
+      const double ay = (element_index < particle_accel_y.size()) ? particle_accel_y[element_index] : 0.0;
+      const double az = (element_index < particle_accel_z.size()) ? particle_accel_z[element_index] : 0.0;
+      const double amag = std::sqrt(ax * ax + ay * ay + az * az);
+      const double eps = !state.particle_sidecar.gravity_softening_comoving.empty()
+          ? state.particle_sidecar.gravity_softening_comoving[element_index]
+          : ((static_cast<std::size_t>(state.particle_sidecar.species_tag[element_index]) < species_softening.epsilon_comoving_by_species.size())
+                ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(state.particle_sidecar.species_tag[element_index])]
+                : global_softening);
+      registry.registerGravityHook([=](std::uint32_t) {
+        return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
+      });
+      const double desired_dt = core::combineTimeStepCriteria(element_index, registry.hooks(), limits.max_dt_time_code);
+      scheduler.requestBinTransition(element_index, core::mapDtToTimeBin(desired_dt, limits).bin_index);
+    }
+  }
+}
+
 
 struct GasCellMigrationRecord {
   std::uint64_t particle_id = 0;
@@ -348,7 +510,7 @@ void applyInitialGravityAwareDecomposition(
   decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
   decomposition_config.owned_particle_weight = 1.0;
   decomposition_config.active_target_weight = 2.0;
-  decomposition_config.remote_tree_interaction_weight = 0.0;
+  decomposition_config.remote_tree_interaction_weight = 1.0;
   decomposition_config.work_weight = 0.5;
   decomposition_config.memory_weight = 0.1;
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
@@ -433,7 +595,7 @@ void seedParticleOwnershipFromPmSlabs(
       pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
   record.gravity_treepm_tree_exchange_batch_bytes =
       config.numerics.treepm_tree_exchange_batch_bytes;
-  record.gravity_softening_policy = "comoving_fixed";
+  record.gravity_softening_policy = describeSofteningPolicy(config);
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;
   record.gravity_pm_fft_backend = gravity::PmSolver::fftBackendName();
@@ -868,12 +1030,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
             core::GravityBoundaryModel::kPeriodicPoisson
         ? gravity::PmBoundaryCondition::kPeriodic
         : gravity::PmBoundaryCondition::kIsolatedOpen;
-    if (m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kIsolatedOpen &&
-        config.parallel.mpi_ranks_expected != 1) {
-      throw std::runtime_error(
-          "isolated PM gravity currently requires parallel.mpi_ranks_expected=1");
-    }
-
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
     m_runtime_topology = parallel::buildDistributedExecutionTopology(
@@ -897,6 +1053,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
     m_tree_pm_options.tree_options.softening.epsilon_comoving =
         config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+    m_tree_pm_species_softening = speciesSofteningByTag(config);
     m_tree_pm_options.split_policy = gravity::makeTreePmSplitPolicyFromMeshSpacing(
         config.numerics.treepm_asmth_cells,
         config.numerics.treepm_rcut_cells,
@@ -945,6 +1102,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
   [[nodiscard]] std::span<const double> cellAccelZ() const noexcept { return m_cell_accel_z; }
+  [[nodiscard]] std::span<const double> particleAccelX() const noexcept { return m_particle_accel_x; }
+  [[nodiscard]] std::span<const double> particleAccelY() const noexcept { return m_particle_accel_y; }
+  [[nodiscard]] std::span<const double> particleAccelZ() const noexcept { return m_particle_accel_z; }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
     if (stage == core::IntegrationStage::kGravityKickPre) {
@@ -1053,7 +1213,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         .accel_z_comoving = m_active_accel_z,
     };
 
-    m_tree_pm_options.pm_options.scale_factor = std::max(1.0, context.integrator_state.current_scale_factor);
+    m_tree_pm_options.pm_options.scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor);
     if (!m_mode_policy.cosmological_comoving_frame) {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
@@ -1074,6 +1234,24 @@ class GravityStageCallback final : public core::IntegrationCallback {
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
 
+    if (m_particle_accel_x.size() != particle_count) {
+      m_particle_accel_x.assign(particle_count, 0.0);
+      m_particle_accel_y.assign(particle_count, 0.0);
+      m_particle_accel_z.assign(particle_count, 0.0);
+    }
+    if (m_cell_accel_x.size() != context.state.cells.size()) {
+      m_cell_accel_x.assign(context.state.cells.size(), 0.0);
+      m_cell_accel_y.assign(context.state.cells.size(), 0.0);
+      m_cell_accel_z.assign(context.state.cells.size(), 0.0);
+    }
+    const gravity::TreeSofteningView softening_view{
+        .source_species_tag = std::span<const std::uint32_t>(context.state.particle_sidecar.species_tag.data(), context.state.particle_sidecar.species_tag.size()),
+        .source_particle_epsilon_comoving = std::span<const double>(
+            context.state.particle_sidecar.gravity_softening_comoving.empty() ? nullptr : context.state.particle_sidecar.gravity_softening_comoving.data(),
+            context.state.particle_sidecar.gravity_softening_comoving.size()),
+        .target_particle_epsilon_comoving = std::span<const double>(),
+        .species_policy = m_tree_pm_species_softening,
+    };
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         m_local_source_x,
         m_local_source_y,
@@ -1084,7 +1262,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         decision.refresh_long_range_field,
         nullptr,
         &m_last_tree_pm_diagnostics,
-        {});
+        softening_view);
 
     const bool allow_heavy_reference_checks =
         m_config.analysis.diagnostics_execution_policy ==
@@ -1152,7 +1330,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"mesh_spacing_z_mpc_comoving", std::to_string(m_mesh_spacing_z_mpc_comoving)},
                       {"split_scale_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.split_scale_comoving)},
                       {"cutoff_radius_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
-                      {"softening_policy", "comoving_fixed"},
+                      {"softening_policy", describeSofteningPolicy(m_config, &context.state)},
                       {"softening_kernel", "plummer"},
                       {"softening_epsilon_kpc_comoving", std::to_string(m_config.numerics.gravity_softening_kpc_comoving)},
                       {"pm_fft_backend", m_pm_backend},
@@ -1216,10 +1394,14 @@ class GravityStageCallback final : public core::IntegrationCallback {
       context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_active_accel_z[active_slot];
     }
 
+    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
+      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
+      m_particle_accel_x[particle_index] = m_active_accel_x[active_slot];
+      m_particle_accel_y[particle_index] = m_active_accel_y[active_slot];
+      m_particle_accel_z[particle_index] = m_active_accel_z[active_slot];
+    }
+
     const auto gas_globals = context.state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-    m_cell_accel_x.assign(context.state.cells.size(), 0.0);
-    m_cell_accel_y.assign(context.state.cells.size(), 0.0);
-    m_cell_accel_z.assign(context.state.cells.size(), 0.0);
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size() && cell_index < gas_globals.size(); ++cell_index) {
       const int active_slot = m_active_slot_by_particle[gas_globals[cell_index]];
       if (active_slot < 0) {
@@ -1433,9 +1615,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::string m_pm_backend = "unknown";
   gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
+  gravity::TreeSofteningSpeciesPolicy m_tree_pm_species_softening{};
   std::vector<double> m_active_accel_x;
   std::vector<double> m_active_accel_y;
   std::vector<double> m_active_accel_z;
+  std::vector<double> m_particle_accel_x;
+  std::vector<double> m_particle_accel_y;
+  std::vector<double> m_particle_accel_z;
   std::vector<double> m_cell_accel_x;
   std::vector<double> m_cell_accel_y;
   std::vector<double> m_cell_accel_z;
@@ -1526,7 +1712,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     hydro::HydroUpdateContext update{
         .dt_code = context.integrator_state.dt_time_code,
-        .scale_factor = std::max(1.0, context.integrator_state.current_scale_factor),
+        .scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor),
         .hubble_rate_code = hubble_rate_code,
     };
 
@@ -1903,6 +2089,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     io::IcReadResult ic_result = loadInitialConditions(m_frozen_config);
     core::SimulationState state = std::move(ic_result.state);
     finalizeStateMetadata(m_frozen_config, state);
+    maybeInitializeParticleSofteningFromSpeciesPolicy(state, config);
     parallel::MpiContext mpi_context;
     report.world_size = mpi_context.worldSize();
     report.world_rank = mpi_context.worldRank();
@@ -2025,7 +2212,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                 std::to_string(config.mode.zoom_focused_pm_grid_ny) + "x" +
                 std::to_string(config.mode.zoom_focused_pm_grid_nz)},
             {"zoom_contamination_radius_mpc_comoving", std::to_string(config.mode.zoom_contamination_radius_mpc_comoving)},
-            {"softening_policy", "comoving_fixed"},
+            {"softening_policy", describeSofteningPolicy(config, &state)},
             {"softening_kernel", "plummer"},
             {"softening_epsilon_kpc_comoving", std::to_string(config.numerics.gravity_softening_kpc_comoving)},
             {"pm_fft_backend", gravity::PmSolver::fftBackendName()},
@@ -2045,6 +2232,18 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     orchestrator.registerCallback(star_formation_callback);
     orchestrator.registerCallback(bh_callback);
     orchestrator.registerCallback(diagnostics_callback);
+
+    updateAdaptiveTimeBins(
+        state,
+        scheduler,
+        integrator_state,
+        config,
+        {},
+        {},
+        {},
+        {},
+        {},
+        {});
 
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
@@ -2087,6 +2286,17 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;
+      updateAdaptiveTimeBins(
+          state,
+          scheduler,
+          integrator_state,
+          config,
+          gravity_callback.particleAccelX(),
+          gravity_callback.particleAccelY(),
+          gravity_callback.particleAccelZ(),
+          gravity_callback.cellAccelX(),
+          gravity_callback.cellAccelY(),
+          gravity_callback.cellAccelZ());
       scheduler.endSubstep();
       syncTimeBinsFromScheduler(scheduler, state);
       maybeWriteOutputs(m_frozen_config, config, state, integrator_state, scheduler, gravity_callback, report, profiler, options.write_outputs);
