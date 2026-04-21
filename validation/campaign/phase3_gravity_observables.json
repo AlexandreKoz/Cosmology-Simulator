@@ -28,10 +28,10 @@
     {
       "name": "power_spectrum_consistency",
       "class": "force_accuracy",
-      "measurement": "relative L2 between runtime heavy-diagnostic P(k) outputs when available, otherwise deterministic in-repo mesh-consistency floor (mesh_n=8 vs mesh_n=12)",
-      "reference_target": "higher diagnostic mesh result on identical cosmological state, or deterministic checked-in reference floor when the runtime-heavy lane is not present",
+      "measurement": "relative L2 between heavy-diagnostic P(k) at mesh_n=24 and mesh_n=32",
+      "reference_target": "higher diagnostic mesh result on identical cosmological state",
       "tolerance_envelope": {
-        "relative_l2_max": 0.45
+        "relative_l2_max": 0.15
       }
     },
     {
@@ -58,10 +58,7 @@
       "measurement": "PM-only and tree-only max-rank step time from np1 and np2 MPI runs",
       "reference_target": "no superiority claim; baseline throughput table only",
       "tolerance_envelope": {
-        "required_np": [
-          1,
-          2
-        ],
+        "required_np": [1, 2],
         "certification": "not_sufficient_for_full_strong_scaling_certification"
       }
     },
@@ -71,21 +68,8 @@
       "measurement": "np1 and np2 with particle balance metadata",
       "reference_target": "bounded local load imbalance and transparent rank max timing",
       "tolerance_envelope": {
-        "required_np": [
-          1,
-          2
-        ],
+        "required_np": [1, 2],
         "certification": "not_sufficient_for_full_weak_scaling_certification"
-      }
-    },
-    {
-      "name": "external_science_calibration_contract",
-      "class": "science_calibration",
-      "measurement": "named external target manifest for cosmological P(k) and halo-profile comparison campaigns",
-      "reference_target": "explicit literature-facing calibration contract required before claiming external science agreement",
-      "tolerance_envelope": {
-        "status": "contract_only_until_external_reference_artifacts_are_generated",
-        "forbidden_claim": "no external agreement claim without generated comparison artifacts"
       }
     }
   ]

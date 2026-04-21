@@ -151,72 +151,6 @@ struct BoxLengths {
   return BoxLengths{.lx = lx, .ly = ly, .lz = lz};
 }
 
-[[nodiscard]] std::size_t globalLinearIndex(const PmGridShape& shape, std::size_t ix, std::size_t iy, std::size_t iz) {
-  return (ix * shape.ny + iy) * shape.nz + iz;
-}
-
-void copyGlobalFieldToLocalSlab(
-    std::span<const double> global_field,
-    const parallel::PmSlabLayout& layout,
-    std::span<double> local_field) {
-  const std::size_t expected_local_size = layout.localCellCount();
-  if (local_field.size() != expected_local_size) {
-    throw std::invalid_argument("local PM slab field size mismatch in copyGlobalFieldToLocalSlab");
-  }
-  const std::size_t expected_global_size = layout.global_nx * layout.global_ny * layout.global_nz;
-  if (global_field.size() != expected_global_size) {
-    throw std::invalid_argument("global PM field size mismatch in copyGlobalFieldToLocalSlab");
-  }
-
-  for (std::size_t local_x = 0; local_x < layout.local_nx(); ++local_x) {
-    const std::size_t global_x = layout.globalXFromLocal(local_x);
-    for (std::size_t iy = 0; iy < layout.global_ny; ++iy) {
-      for (std::size_t iz = 0; iz < layout.global_nz; ++iz) {
-        const std::size_t local_index = (local_x * layout.global_ny + iy) * layout.global_nz + iz;
-        local_field[local_index] = global_field[(global_x * layout.global_ny + iy) * layout.global_nz + iz];
-      }
-    }
-  }
-}
-
-#if COSMOSIM_ENABLE_MPI
-[[nodiscard]] std::vector<double> gatherDistributedSlabField(
-    std::span<const double> local_field,
-    const parallel::PmSlabLayout& layout) {
-  const std::size_t global_size = layout.global_nx * layout.global_ny * layout.global_nz;
-  std::vector<double> gathered(global_size, 0.0);
-
-  std::vector<int> recv_counts(static_cast<std::size_t>(layout.world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(layout.world_size), 0);
-  std::size_t displacement = 0;
-  for (int rank = 0; rank < layout.world_size; ++rank) {
-    const auto owned = parallel::pmOwnedXRangeForRank(layout.global_nx, layout.world_size, rank);
-    const std::size_t slab_count = owned.extentX() * layout.global_ny * layout.global_nz;
-    if (slab_count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::invalid_argument("gatherDistributedSlabField slab count exceeds MPI int limit");
-    }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(slab_count);
-    recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(displacement);
-    displacement += slab_count;
-  }
-
-  if (local_field.size() != layout.localCellCount()) {
-    throw std::invalid_argument("gatherDistributedSlabField local slab size mismatch");
-  }
-
-  MPI_Allgatherv(
-      local_field.data(),
-      static_cast<int>(local_field.size()),
-      MPI_DOUBLE,
-      gathered.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_DOUBLE,
-      MPI_COMM_WORLD);
-  return gathered;
-}
-#endif
-
 void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (!shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be non-zero in all dimensions");
@@ -291,6 +225,10 @@ class PmSolver::Impl {
     std::vector<std::complex<double>> fourier;
     std::vector<std::complex<double>> potential_k;
     std::vector<std::complex<double>> working_k;
+    std::vector<double> poisson_kernel;
+    std::vector<double> grad_kx;
+    std::vector<double> grad_ky;
+    std::vector<double> grad_kz;
 #if COSMOSIM_ENABLE_FFTW
     fftw_plan forward_plan = nullptr;
     fftw_plan inverse_plan = nullptr;
@@ -299,6 +237,13 @@ class PmSolver::Impl {
     bool spectral_transposed = false;
     std::size_t transposed_local_ny = 0;
     std::size_t transposed_begin_y = 0;
+    bool spectral_operators_ready = false;
+    double cached_lx = 0.0;
+    double cached_ly = 0.0;
+    double cached_lz = 0.0;
+    double cached_split_scale = -1.0;
+    bool cached_window_deconvolution = false;
+    PmAssignmentScheme cached_assignment_scheme = PmAssignmentScheme::kCic;
   };
 
   struct DensityExchangeBuffers {
@@ -530,6 +475,10 @@ class PmSolver::Impl {
     plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.poisson_kernel.assign(allocated_local_complex_size, 0.0);
+    plan.grad_kx.assign(allocated_local_complex_size, 0.0);
+    plan.grad_ky.assign(allocated_local_complex_size, 0.0);
+    plan.grad_kz.assign(allocated_local_complex_size, 0.0);
 #if COSMOSIM_ENABLE_MPI
     if (layout.world_size > 1) {
       if (allocated_local_complex_size < expected_local_complex_size) {
@@ -561,6 +510,10 @@ class PmSolver::Impl {
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
+      plan.grad_kx.assign(expected_local_complex_size, 0.0);
+      plan.grad_ky.assign(expected_local_complex_size, 0.0);
+      plan.grad_kz.assign(expected_local_complex_size, 0.0);
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),
@@ -587,6 +540,10 @@ class PmSolver::Impl {
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+    plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
+    plan.grad_kx.assign(expected_local_complex_size, 0.0);
+    plan.grad_ky.assign(expected_local_complex_size, 0.0);
+    plan.grad_kz.assign(expected_local_complex_size, 0.0);
 #endif
 
     auto [insert_it, inserted] = m_plan_cache.emplace(key, std::move(plan));
@@ -600,6 +557,102 @@ class PmSolver::Impl {
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
   [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
   [[nodiscard]] std::span<std::complex<double>> workingScratch() { return activePlan().working_k; }
+
+  void ensureSpectralOperators(
+      PlanResources& plan,
+      const BoxLengths& lengths,
+      const PmSolveOptions& options,
+      const PmGridShape& shape) {
+    if (plan.spectral_operators_ready &&
+        plan.cached_lx == lengths.lx &&
+        plan.cached_ly == lengths.ly &&
+        plan.cached_lz == lengths.lz &&
+        plan.cached_split_scale == options.tree_pm_split_scale_comoving &&
+        plan.cached_window_deconvolution == options.enable_window_deconvolution &&
+        plan.cached_assignment_scheme == options.assignment_scheme) {
+      return;
+    }
+
+    std::fill(plan.poisson_kernel.begin(), plan.poisson_kernel.end(), 0.0);
+    std::fill(plan.grad_kx.begin(), plan.grad_kx.end(), 0.0);
+    std::fill(plan.grad_ky.begin(), plan.grad_ky.end(), 0.0);
+    std::fill(plan.grad_kz.begin(), plan.grad_kz.end(), 0.0);
+
+    const std::size_t nz_complex = shape.nz / 2U + 1U;
+    const double prefactor = -4.0 * k_pi * options.gravitational_constant_code * options.scale_factor * options.scale_factor;
+    const double dkx = 2.0 * k_pi / lengths.lx;
+    const double dky = 2.0 * k_pi / lengths.ly;
+    const double dkz = 2.0 * k_pi / lengths.lz;
+
+    auto set_entry = [&](std::size_t index, double kx, double ky, double kz) {
+      const double k2 = kx * kx + ky * ky + kz * kz;
+      if (k2 == 0.0) {
+        return;
+      }
+      double window_correction = 1.0;
+      if (options.enable_window_deconvolution) {
+        const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
+        const double wx = std::pow(sinc(0.5 * kx * lengths.lx / static_cast<double>(shape.nx)), static_cast<double>(window_exponent));
+        const double wy = std::pow(sinc(0.5 * ky * lengths.ly / static_cast<double>(shape.ny)), static_cast<double>(window_exponent));
+        const double wz = std::pow(sinc(0.5 * kz * lengths.lz / static_cast<double>(shape.nz)), static_cast<double>(window_exponent));
+        const double transfer_window = wx * wy * wz;
+        window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
+      }
+      double split_filter = 1.0;
+      if (options.tree_pm_split_scale_comoving > 0.0) {
+        split_filter = treePmGaussianFourierLongRangeFilter(std::sqrt(k2), options.tree_pm_split_scale_comoving);
+      }
+      plan.poisson_kernel[index] = prefactor * window_correction * split_filter / k2;
+      plan.grad_kx[index] = kx;
+      plan.grad_ky[index] = ky;
+      plan.grad_kz[index] = kz;
+    };
+
+    if (plan.spectral_transposed) {
+      for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
+        const std::size_t iy = plan.transposed_begin_y + local_iy;
+        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
+                                                           : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+        const double ky = dky * static_cast<double>(ny_mode);
+        for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
+                                                             : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+          const double kx = dkx * static_cast<double>(nx_mode);
+          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+            const double kz = dkz * static_cast<double>(iz);
+            const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
+            set_entry(index, kx, ky, kz);
+          }
+        }
+      }
+    } else {
+      const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
+      for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+        const std::size_t ix = global_x_begin + local_ix;
+        const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
+                                                           : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+        const double kx = dkx * static_cast<double>(nx_mode);
+        for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+          const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
+                                                             : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+          const double ky = dky * static_cast<double>(ny_mode);
+          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+            const double kz = dkz * static_cast<double>(iz);
+            const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
+            set_entry(index, kx, ky, kz);
+          }
+        }
+      }
+    }
+
+    plan.spectral_operators_ready = true;
+    plan.cached_lx = lengths.lx;
+    plan.cached_ly = lengths.ly;
+    plan.cached_lz = lengths.lz;
+    plan.cached_split_scale = options.tree_pm_split_scale_comoving;
+    plan.cached_window_deconvolution = options.enable_window_deconvolution;
+    plan.cached_assignment_scheme = options.assignment_scheme;
+  }
 
   double forwardFft() {
     const auto start = std::chrono::steady_clock::now();
@@ -1081,37 +1134,21 @@ void PmSolver::assignDensity(
     std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
-      if (!periodic &&
-          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
-        continue;
-      }
-      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
-      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
-      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
-          continue;
-        }
-        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, ix);
         auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
-            continue;
-          }
-          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
-              continue;
-            }
-            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmDensityContributionRecord{
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -1242,80 +1279,10 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   }
 
   const auto poisson_start = std::chrono::steady_clock::now();
-  const std::size_t nz_complex = m_shape.nz / 2U + 1U;
-  const double prefactor = -4.0 * k_pi * options.gravitational_constant_code * options.scale_factor * options.scale_factor;
   const BoxLengths lengths = effectiveBoxLengths(options);
-  const double dkx = 2.0 * k_pi / lengths.lx;
-  const double dky = 2.0 * k_pi / lengths.ly;
-  const double dkz = 2.0 * k_pi / lengths.lz;
-
-  const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
-  auto apply_poisson_stencil = [&](std::size_t ix, std::size_t iy, std::size_t base_index) {
-    const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
-    const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                          : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
-    const double kx = dkx * static_cast<double>(nx_mode);
-    const double ky = dky * static_cast<double>(ny_mode);
-    for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-        const double kz = dkz * static_cast<double>(iz);
-        const std::size_t index = base_index + iz;
-        const double k2 = kx * kx + ky * ky + kz * kz;
-
-        // Discrete mode mapping for r2c layout:
-        //   kx(ix) = 2π/L * (ix <= Nx/2 ? ix : ix - Nx)
-        //   ky(iy) = 2π/L * (iy <= Ny/2 ? iy : iy - Ny)
-        //   kz(iz) = 2π/L * iz, iz in [0, Nz/2]
-        // The negative kz branch is represented by Hermitian conjugates and is
-        // not explicitly stored in the reduced-complex array.
-        if (k2 == 0.0) {
-          // Zero-mode pinning policy in periodic boxes: potential mean is fixed
-          // to zero, so the solver enforces phi_{k=0}=0 and a_{k=0}=0.
-          fourier[index] = {0.0, 0.0};
-          continue;
-        }
-
-        double window_correction = 1.0;
-        if (options.enable_window_deconvolution) {
-          const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
-          const double wx = std::pow(
-              sinc(0.5 * kx * lengths.lx / static_cast<double>(m_shape.nx)),
-              static_cast<double>(window_exponent));
-          const double wy = std::pow(
-              sinc(0.5 * ky * lengths.ly / static_cast<double>(m_shape.ny)),
-              static_cast<double>(window_exponent));
-          const double wz = std::pow(
-              sinc(0.5 * kz * lengths.lz / static_cast<double>(m_shape.nz)),
-              static_cast<double>(window_exponent));
-          const double transfer_window = wx * wy * wz;
-          window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
-        }
-
-        double split_filter = 1.0;
-        if (options.tree_pm_split_scale_comoving > 0.0) {
-          const double wave_number_comoving = std::sqrt(k2);
-          split_filter = treePmGaussianFourierLongRangeFilter(wave_number_comoving, options.tree_pm_split_scale_comoving);
-        }
-
-        fourier[index] *= prefactor * window_correction * split_filter / k2;
-    }
-  };
-  if (plan.spectral_transposed) {
-    for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
-      const std::size_t iy = plan.transposed_begin_y + local_iy;
-      for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-        const std::size_t base = (local_iy * m_shape.nx + ix) * nz_complex;
-        apply_poisson_stencil(ix, iy, base);
-      }
-    }
-  } else {
-    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-      const std::size_t ix = global_x_begin + local_ix;
-      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-        const std::size_t base = (local_ix * m_shape.ny + iy) * nz_complex;
-        apply_poisson_stencil(ix, iy, base);
-      }
-    }
+  m_impl->ensureSpectralOperators(plan, lengths, options, m_shape);
+  for (std::size_t i = 0; i < fourier.size(); ++i) {
+    fourier[i] *= plan.poisson_kernel[i];
   }
   const auto poisson_stop = std::chrono::steady_clock::now();
 
@@ -1350,42 +1317,13 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   inverse_into(potential_k, grid.potential());
 
   auto fill_gradient_k = [&](std::span<std::complex<double>> dst, int axis) {
-    if (plan.spectral_transposed) {
-      for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
-        const std::size_t iy = plan.transposed_begin_y + local_iy;
-        const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                              : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
-        const double ky = dky * static_cast<double>(ny_mode);
-        for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-          const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                                : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
-          const double kx = dkx * static_cast<double>(nx_mode);
-          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-            const double kz = dkz * static_cast<double>(iz);
-            const std::size_t index = (local_iy * m_shape.nx + ix) * nz_complex + iz;
-            const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
-            dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
-          }
-        }
-      }
-    } else {
-      for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-        const std::size_t ix = global_x_begin + local_ix;
-        const std::ptrdiff_t nx_mode = ix <= m_shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(m_shape.nx);
-        const double kx = dkx * static_cast<double>(nx_mode);
-        for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-          const std::ptrdiff_t ny_mode = iy <= m_shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                                : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(m_shape.ny);
-          const double ky = dky * static_cast<double>(ny_mode);
-          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-            const double kz = dkz * static_cast<double>(iz);
-            const std::size_t index = (local_ix * m_shape.ny + iy) * nz_complex + iz;
-            const double component_k = axis == 0 ? kx : (axis == 1 ? ky : kz);
-            dst[index] = std::complex<double>(0.0, -component_k) * potential_k[index];
-          }
-        }
-      }
+    const std::span<const double> grad = axis == 0
+        ? std::span<const double>(plan.grad_kx.data(), plan.grad_kx.size())
+        : (axis == 1
+            ? std::span<const double>(plan.grad_ky.data(), plan.grad_ky.size())
+            : std::span<const double>(plan.grad_kz.data(), plan.grad_kz.size()));
+    for (std::size_t index = 0; index < dst.size(); ++index) {
+      dst[index] = std::complex<double>(0.0, -grad[index]) * potential_k[index];
     }
   };
 
@@ -1415,39 +1353,29 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
   }
   if (!grid.slabLayout().isValid()) {
-    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen requires a valid PM slab layout");
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen requires valid PM slab layout");
   }
+#if !COSMOSIM_ENABLE_MPI
+  if (grid.slabLayout().world_size > 1) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
+#endif
 
   const bool distributed_slabs = grid.slabLayout().world_size > 1;
-#if !COSMOSIM_ENABLE_MPI
-  if (distributed_slabs) {
-    throw std::invalid_argument(
-        "PmSolver::solvePoissonIsolatedOpen distributed slabs require COSMOSIM_ENABLE_MPI=ON");
-  }
-#else
+#if COSMOSIM_ENABLE_MPI
   if (distributed_slabs) {
     int mpi_world_size = 1;
     int mpi_world_rank = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
     if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
-      throw std::invalid_argument(
-          "PmSolver::solvePoissonIsolatedOpen slab layout world metadata must match MPI_COMM_WORLD");
+      throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen slab layout world metadata must match MPI_COMM_WORLD");
     }
-  } else {
-    validateSingleRankFullDomainGridContract(grid, "PmSolver::solvePoissonIsolatedOpen");
-  }
+  } else
 #endif
-
-  const std::size_t global_cell_count = m_shape.cellCount();
-  std::vector<double> global_density_storage;
-  std::span<const double> density_field = grid.density();
-#if COSMOSIM_ENABLE_MPI
-  if (distributed_slabs) {
-    global_density_storage = gatherDistributedSlabField(grid.density(), grid.slabLayout());
-    density_field = global_density_storage;
+  if (!grid.ownsFullDomain()) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen single-rank path requires full-domain ownership");
   }
-#endif
 
   const BoxLengths lengths = effectiveBoxLengths(options);
   const double dx = lengths.lx / static_cast<double>(m_shape.nx);
@@ -1457,171 +1385,187 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
     throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen requires nx,ny,nz >= 3 for one-sided boundary gradients");
   }
 
+  constexpr int k_root = 0;
+  const bool is_root = !distributed_slabs || grid.slabLayout().world_rank == k_root;
   const auto poisson_start = std::chrono::steady_clock::now();
+
+  std::vector<double> global_density;
+#if COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    const std::size_t global_size = grid.slabLayout().global_nx * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
+    std::vector<int> recv_counts(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
+    std::size_t disp = 0;
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      const auto owned = parallel::pmOwnedXRangeForRank(grid.slabLayout().global_nx, grid.slabLayout().world_size, rank);
+      const std::size_t count = owned.extentX() * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("isolated PM distributed slab count exceeds MPI int limit");
+      }
+      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(disp);
+      disp += count;
+    }
+    if (is_root) {
+      global_density.assign(global_size, 0.0);
+    }
+    MPI_Gatherv(
+        grid.density().data(),
+        static_cast<int>(grid.density().size()),
+        MPI_DOUBLE,
+        is_root ? global_density.data() : nullptr,
+        recv_counts.data(),
+        recv_displs.data(),
+        MPI_DOUBLE,
+        k_root,
+        MPI_COMM_WORLD);
+  }
+#endif
+
   const std::size_t pad_nx = 2U * m_shape.nx;
   const std::size_t pad_ny = 2U * m_shape.ny;
   const std::size_t pad_nz = 2U * m_shape.nz;
   const std::size_t pad_total = pad_nx * pad_ny * pad_nz;
-  m_impl->ensureIsolatedWorkspace(pad_nx, pad_ny, pad_nz);
-  auto& ws = m_impl->isolatedWorkspace();
-
-  std::fill(ws.rho_k.begin(), ws.rho_k.end(), std::complex<double>(0.0, 0.0));
-  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t src = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
-        const std::size_t dst = (ix * pad_ny + iy) * pad_nz + iz;
-        ws.rho_k[dst] = {density_field[src], 0.0};
-      }
-    }
-  }
-  m_impl->isolatedForward(ws.rho_k);
-
-  if (!ws.kernel_ready || ws.dx != dx || ws.dy != dy || ws.dz != dz ||
-      ws.split_scale != options.tree_pm_split_scale_comoving) {
-    ws.dx = dx;
-    ws.dy = dy;
-    ws.dz = dz;
-    ws.split_scale = options.tree_pm_split_scale_comoving;
-    std::fill(ws.kernel_k.begin(), ws.kernel_k.end(), std::complex<double>(0.0, 0.0));
-    for (std::size_t ix = 0; ix < pad_nx; ++ix) {
-      const std::ptrdiff_t sx = ix <= m_shape.nx
-          ? static_cast<std::ptrdiff_t>(ix)
-          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(pad_nx);
-      const double rx = static_cast<double>(sx) * dx;
-      for (std::size_t iy = 0; iy < pad_ny; ++iy) {
-        const std::ptrdiff_t sy = iy <= m_shape.ny
-            ? static_cast<std::ptrdiff_t>(iy)
-            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(pad_ny);
-        const double ry = static_cast<double>(sy) * dy;
-        for (std::size_t iz = 0; iz < pad_nz; ++iz) {
-          const std::ptrdiff_t sz = iz <= m_shape.nz
-              ? static_cast<std::ptrdiff_t>(iz)
-              : static_cast<std::ptrdiff_t>(iz) - static_cast<std::ptrdiff_t>(pad_nz);
-          const double rz = static_cast<double>(sz) * dz;
-          const double r = std::sqrt(rx * rx + ry * ry + rz * rz);
-          double kernel = 0.0;  // self term policy: zero self-contribution at r=0.
-          if (r > 0.0) {
-            kernel = -1.0 / r;
-            if (options.tree_pm_split_scale_comoving > 0.0) {
-              kernel = -std::erf(0.5 * r / options.tree_pm_split_scale_comoving) / r;
-            }
-          }
-          ws.kernel_k[(ix * pad_ny + iy) * pad_nz + iz] = {kernel, 0.0};
-        }
-      }
-    }
-    m_impl->isolatedForward(ws.kernel_k);
-    ws.kernel_ready = true;
-  }
-
-  for (std::size_t i = 0; i < pad_total; ++i) {
-    ws.rho_k[i] *= ws.kernel_k[i];
-  }
-  m_impl->isolatedInverse(ws.rho_k);
-
-  const double cell_volume = dx * dy * dz;
-  const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
   std::vector<double> full_potential;
   std::vector<double> full_force_x;
   std::vector<double> full_force_y;
   std::vector<double> full_force_z;
-  std::span<double> potential_field = grid.potential();
-  std::span<double> force_x_field = grid.force_x();
-  std::span<double> force_y_field = grid.force_y();
-  std::span<double> force_z_field = grid.force_z();
-  if (distributed_slabs) {
-    full_potential.assign(global_cell_count, 0.0);
-    full_force_x.assign(global_cell_count, 0.0);
-    full_force_y.assign(global_cell_count, 0.0);
-    full_force_z.assign(global_cell_count, 0.0);
-    potential_field = full_potential;
-    force_x_field = full_force_x;
-    force_y_field = full_force_y;
-    force_z_field = full_force_z;
-  }
-  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t physical_index = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
-        const std::size_t padded_index = (ix * pad_ny + iy) * pad_nz + iz;
-        double value = ws.rho_k[padded_index].real();
+
+  if (is_root) {
+    m_impl->ensureIsolatedWorkspace(pad_nx, pad_ny, pad_nz);
+    auto& ws = m_impl->isolatedWorkspace();
+    std::fill(ws.rho_k.begin(), ws.rho_k.end(), std::complex<double>(0.0, 0.0));
+    for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+          const std::size_t src = distributed_slabs ? (ix * m_shape.ny + iy) * m_shape.nz + iz : grid.linearIndex(ix, iy, iz);
+          const std::size_t dst = (ix * pad_ny + iy) * pad_nz + iz;
+          ws.rho_k[dst] = {(distributed_slabs ? global_density[src] : grid.density()[src]), 0.0};
+        }
+      }
+    }
+    m_impl->isolatedForward(ws.rho_k);
+
+    if (!ws.kernel_ready || ws.dx != dx || ws.dy != dy || ws.dz != dz || ws.split_scale != options.tree_pm_split_scale_comoving) {
+      ws.dx = dx;
+      ws.dy = dy;
+      ws.dz = dz;
+      ws.split_scale = options.tree_pm_split_scale_comoving;
+      std::fill(ws.kernel_k.begin(), ws.kernel_k.end(), std::complex<double>(0.0, 0.0));
+      for (std::size_t ix = 0; ix < pad_nx; ++ix) {
+        const std::ptrdiff_t sx = ix <= m_shape.nx ? static_cast<std::ptrdiff_t>(ix)
+                                                   : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(pad_nx);
+        const double rx = static_cast<double>(sx) * dx;
+        for (std::size_t iy = 0; iy < pad_ny; ++iy) {
+          const std::ptrdiff_t sy = iy <= m_shape.ny ? static_cast<std::ptrdiff_t>(iy)
+                                                     : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(pad_ny);
+          const double ry = static_cast<double>(sy) * dy;
+          for (std::size_t iz = 0; iz < pad_nz; ++iz) {
+            const std::ptrdiff_t sz = iz <= m_shape.nz ? static_cast<std::ptrdiff_t>(iz)
+                                                       : static_cast<std::ptrdiff_t>(iz) - static_cast<std::ptrdiff_t>(pad_nz);
+            const double rz = static_cast<double>(sz) * dz;
+            const double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+            double kernel = 0.0;
+            if (r > 0.0) {
+              kernel = -1.0 / r;
+              if (options.tree_pm_split_scale_comoving > 0.0) {
+                kernel = -std::erf(0.5 * r / options.tree_pm_split_scale_comoving) / r;
+              }
+            }
+            ws.kernel_k[(ix * pad_ny + iy) * pad_nz + iz] = {kernel, 0.0};
+          }
+        }
+      }
+      m_impl->isolatedForward(ws.kernel_k);
+      ws.kernel_ready = true;
+    }
+
+    for (std::size_t i = 0; i < pad_total; ++i) {
+      ws.rho_k[i] *= ws.kernel_k[i];
+    }
+    m_impl->isolatedInverse(ws.rho_k);
+
+    const double cell_volume = dx * dy * dz;
+    const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
+    full_potential.assign(m_shape.cellCount(), 0.0);
+    full_force_x.assign(m_shape.cellCount(), 0.0);
+    full_force_y.assign(m_shape.cellCount(), 0.0);
+    full_force_z.assign(m_shape.cellCount(), 0.0);
+    for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+          const std::size_t physical_index = (ix * m_shape.ny + iy) * m_shape.nz + iz;
+          const std::size_t padded_index = (ix * pad_ny + iy) * pad_nz + iz;
+          double value = ws.rho_k[padded_index].real();
 #if COSMOSIM_ENABLE_FFTW
-        value /= static_cast<double>(pad_total);
+          value /= static_cast<double>(pad_total);
 #endif
-        potential_field[physical_index] = prefactor * value;
+          full_potential[physical_index] = prefactor * value;
+        }
+      }
+    }
+
+    const auto fieldPotential = [&](std::size_t ix, std::size_t iy, std::size_t iz) -> double {
+      return full_potential[(ix * m_shape.ny + iy) * m_shape.nz + iz];
+    };
+    for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+          const std::size_t center = (ix * m_shape.ny + iy) * m_shape.nz + iz;
+          const auto grad_x = [&]() {
+            if (ix == 0) return (-3.0 * fieldPotential(0, iy, iz) + 4.0 * fieldPotential(1, iy, iz) - fieldPotential(2, iy, iz)) / (2.0 * dx);
+            if (ix + 1U == m_shape.nx) return (3.0 * fieldPotential(m_shape.nx - 1U, iy, iz) - 4.0 * fieldPotential(m_shape.nx - 2U, iy, iz) + fieldPotential(m_shape.nx - 3U, iy, iz)) / (2.0 * dx);
+            return (fieldPotential(ix + 1U, iy, iz) - fieldPotential(ix - 1U, iy, iz)) / (2.0 * dx);
+          }();
+          const auto grad_y = [&]() {
+            if (iy == 0) return (-3.0 * fieldPotential(ix, 0, iz) + 4.0 * fieldPotential(ix, 1, iz) - fieldPotential(ix, 2, iz)) / (2.0 * dy);
+            if (iy + 1U == m_shape.ny) return (3.0 * fieldPotential(ix, m_shape.ny - 1U, iz) - 4.0 * fieldPotential(ix, m_shape.ny - 2U, iz) + fieldPotential(ix, m_shape.ny - 3U, iz)) / (2.0 * dy);
+            return (fieldPotential(ix, iy + 1U, iz) - fieldPotential(ix, iy - 1U, iz)) / (2.0 * dy);
+          }();
+          const auto grad_z = [&]() {
+            if (iz == 0) return (-3.0 * fieldPotential(ix, iy, 0) + 4.0 * fieldPotential(ix, iy, 1) - fieldPotential(ix, iy, 2)) / (2.0 * dz);
+            if (iz + 1U == m_shape.nz) return (3.0 * fieldPotential(ix, iy, m_shape.nz - 1U) - 4.0 * fieldPotential(ix, iy, m_shape.nz - 2U) + fieldPotential(ix, iy, m_shape.nz - 3U)) / (2.0 * dz);
+            return (fieldPotential(ix, iy, iz + 1U) - fieldPotential(ix, iy, iz - 1U)) / (2.0 * dz);
+          }();
+          full_force_x[center] = -grad_x;
+          full_force_y[center] = -grad_y;
+          full_force_z[center] = -grad_z;
+        }
       }
     }
   }
 
-  const auto fieldPotential = [&](std::size_t ix, std::size_t iy, std::size_t iz) -> double {
-    return potential_field[distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz)];
-  };
-
-  for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
-    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t center = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
-        const auto grad_x = [&]() {
-          if (ix == 0) {
-            return (-3.0 * fieldPotential(0, iy, iz) +
-                    4.0 * fieldPotential(1, iy, iz) -
-                    fieldPotential(2, iy, iz)) / (2.0 * dx);
-          }
-          if (ix + 1U == m_shape.nx) {
-            return (3.0 * fieldPotential(m_shape.nx - 1U, iy, iz) -
-                    4.0 * fieldPotential(m_shape.nx - 2U, iy, iz) +
-                    fieldPotential(m_shape.nx - 3U, iy, iz)) / (2.0 * dx);
-          }
-          return (fieldPotential(ix + 1U, iy, iz) - fieldPotential(ix - 1U, iy, iz)) / (2.0 * dx);
-        }();
-        const auto grad_y = [&]() {
-          if (iy == 0) {
-            return (-3.0 * fieldPotential(ix, 0, iz) +
-                    4.0 * fieldPotential(ix, 1, iz) -
-                    fieldPotential(ix, 2, iz)) / (2.0 * dy);
-          }
-          if (iy + 1U == m_shape.ny) {
-            return (3.0 * fieldPotential(ix, m_shape.ny - 1U, iz) -
-                    4.0 * fieldPotential(ix, m_shape.ny - 2U, iz) +
-                    fieldPotential(ix, m_shape.ny - 3U, iz)) / (2.0 * dy);
-          }
-          return (fieldPotential(ix, iy + 1U, iz) - fieldPotential(ix, iy - 1U, iz)) / (2.0 * dy);
-        }();
-        const auto grad_z = [&]() {
-          if (iz == 0) {
-            return (-3.0 * fieldPotential(ix, iy, 0) +
-                    4.0 * fieldPotential(ix, iy, 1) -
-                    fieldPotential(ix, iy, 2)) / (2.0 * dz);
-          }
-          if (iz + 1U == m_shape.nz) {
-            return (3.0 * fieldPotential(ix, iy, m_shape.nz - 1U) -
-                    4.0 * fieldPotential(ix, iy, m_shape.nz - 2U) +
-                    fieldPotential(ix, iy, m_shape.nz - 3U)) / (2.0 * dz);
-          }
-          return (fieldPotential(ix, iy, iz + 1U) - fieldPotential(ix, iy, iz - 1U)) / (2.0 * dz);
-        }();
-        force_x_field[center] = -grad_x;
-        force_y_field[center] = -grad_y;
-        force_z_field[center] = -grad_z;
-      }
-    }
-  }
-
+#if COSMOSIM_ENABLE_MPI
   if (distributed_slabs) {
-    copyGlobalFieldToLocalSlab(full_potential, grid.slabLayout(), grid.potential());
-    copyGlobalFieldToLocalSlab(full_force_x, grid.slabLayout(), grid.force_x());
-    copyGlobalFieldToLocalSlab(full_force_y, grid.slabLayout(), grid.force_y());
-    copyGlobalFieldToLocalSlab(full_force_z, grid.slabLayout(), grid.force_z());
-    if (profile != nullptr) {
-      profile->bytes_moved += static_cast<std::uint64_t>(4U * global_cell_count * sizeof(double));
+    std::vector<int> recv_counts(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
+    std::size_t disp = 0;
+    for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+      const auto owned = parallel::pmOwnedXRangeForRank(grid.slabLayout().global_nx, grid.slabLayout().world_size, rank);
+      const std::size_t count = owned.extentX() * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
+      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
+      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(disp);
+      disp += count;
     }
+    MPI_Scatterv(is_root ? full_potential.data() : nullptr, recv_counts.data(), recv_displs.data(), MPI_DOUBLE, grid.potential().data(), static_cast<int>(grid.potential().size()), MPI_DOUBLE, k_root, MPI_COMM_WORLD);
+    MPI_Scatterv(is_root ? full_force_x.data() : nullptr, recv_counts.data(), recv_displs.data(), MPI_DOUBLE, grid.force_x().data(), static_cast<int>(grid.force_x().size()), MPI_DOUBLE, k_root, MPI_COMM_WORLD);
+    MPI_Scatterv(is_root ? full_force_y.data() : nullptr, recv_counts.data(), recv_displs.data(), MPI_DOUBLE, grid.force_y().data(), static_cast<int>(grid.force_y().size()), MPI_DOUBLE, k_root, MPI_COMM_WORLD);
+    MPI_Scatterv(is_root ? full_force_z.data() : nullptr, recv_counts.data(), recv_displs.data(), MPI_DOUBLE, grid.force_z().data(), static_cast<int>(grid.force_z().size()), MPI_DOUBLE, k_root, MPI_COMM_WORLD);
+  } else
+#endif
+  {
+    std::copy(full_potential.begin(), full_potential.end(), grid.potential().begin());
+    std::copy(full_force_x.begin(), full_force_x.end(), grid.force_x().begin());
+    std::copy(full_force_y.begin(), full_force_y.end(), grid.force_y().begin());
+    std::copy(full_force_z.begin(), full_force_z.end(), grid.force_z().begin());
   }
 
   if (profile != nullptr) {
     const auto stop = std::chrono::steady_clock::now();
     profile->poisson_ms += std::chrono::duration<double, std::milli>(stop - poisson_start).count();
-    profile->gradient_ms += 0.0;
+    if (distributed_slabs) {
+      profile->bytes_moved += static_cast<std::uint64_t>(5U * grid.localCellCount() * sizeof(double));
+    }
   }
 }
 
@@ -1755,36 +1699,20 @@ void PmSolver::interpolateForces(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
-      if (!periodic &&
-          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
-        continue;
-      }
-      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
-      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
-      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
-          continue;
-        }
-        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
         auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
-            continue;
-          }
-          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
-              continue;
-            }
-            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmInterpolationRequestRecord{
                 .particle_index = static_cast<std::uint32_t>(p),
@@ -2042,36 +1970,20 @@ void PmSolver::interpolatePotential(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
-      if (!periodic &&
-          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
-        continue;
-      }
-      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
-      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
-      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
+      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
+      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
+      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
-          continue;
-        }
-        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
+        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
         auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
-            continue;
-          }
-          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
+          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
-              continue;
-            }
-            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
+            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmInterpolationRequestRecord{
                 .particle_index = static_cast<std::uint32_t>(p),

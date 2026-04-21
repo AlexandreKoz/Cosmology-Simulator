@@ -1,7 +1,7 @@
 {
   "campaign": "phase3_gravity_maturity_evidence",
-  "generated_utc": "2026-04-21T19:36:40.985557+00:00",
-  "git_commit": "archive-no-git-metadata",
+  "generated_utc": "2026-04-21T13:09:49.370913+00:00",
+  "git_commit": "04de1ca5e93680ad8e9c721d9a2bc5c452fbd29b",
   "classification": {
     "correctness": "validation/artifacts/research_grade/phase3/correctness",
     "force_accuracy": "validation/artifacts/research_grade/phase3/force_accuracy",

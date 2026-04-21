@@ -533,6 +533,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (options.tree_exchange_batch_bytes == 0) {
     throw std::invalid_argument("TreePM tree_exchange_batch_bytes must be > 0");
   }
+  if (options.pm_options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
+      m_grid.slabLayout().world_size > 1) {
+    throw std::invalid_argument("TreePM isolated PM path currently supports only single-rank execution");
+  }
+
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
 

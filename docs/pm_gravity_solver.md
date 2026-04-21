@@ -316,5 +316,5 @@ Conventions in this stage:
 - **Self term policy:** kernel value at `r=0` is set to zero in the PM convolution.
 
 Current stage limitations:
-- Multi-rank isolated/open PM now uses a correctness-first replicated full-mesh open solve built from gathered slab density. This removes the old hard block, but it is not yet a scalable distributed isolated FFT/Green operator.
-- Distributed isolated/open PM therefore remains an operational capability, not a large-rank maturity claim.
+- Isolated PM is restricted to **single-rank** runtime (`mpi_ranks_expected=1`). Multi-rank isolated PM fails hard.
+- Distributed isolated/open PM is still open work; this stage does not claim distributed isolated maturity.

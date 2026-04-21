@@ -41,5 +41,5 @@
 ## Phase 3 closeout hard gate remains open (2026-04-21 audit)
 
 - Scope: final Phase 3 integration closeout.
-- Impact: current audit cycle still does not reach a full hard-gate pass because distributed MPI+FFTW evidence and multi-rank scaling certification remain environment-blocked/incomplete, but the previously failing periodic zoom invariant, single-rank communication-stress validation lane, and reference-floor power-spectrum artifact path are now repaired.
-- Mitigation: resolve the remaining distributed evidence blockers listed in `docs/treepm_phase3_closeout.md` before claiming Phase 3 completion.
+- Impact: current audit cycle did not reach a full hard-gate pass; periodic/zoom integration and reference-workflow/schema lanes include failing tests, and distributed MPI+FFTW command bundle is environment-blocked.
+- Mitigation: resolve blockers listed in `docs/treepm_phase3_closeout.md` before claiming Phase 3 completion.

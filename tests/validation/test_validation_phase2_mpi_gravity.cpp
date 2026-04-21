@@ -296,15 +296,10 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
       << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff;
   requireOrThrow(rel_l2 <= 5.0e-6, msg.str());
   requireOrThrow(global_norm.max_rel <= 5.0e-5, msg.str());
-  if (communication_stress && world_size > 1) {
-    requireOrThrow(dist_diag.residual_remote_request_batches > 0, msg.str());
-    requireOrThrow(dist_diag.residual_remote_peer_participations > 0, msg.str());
+  if (communication_stress) {
+    requireOrThrow(dist_diag.residual_pair_skips_cutoff > 0, msg.str());
+    requireOrThrow(dist_diag.residual_remote_pairs_pruned_by_bounds > 0, msg.str());
     requireOrThrow(dist_diag.residual_remote_request_packet_imbalance_ratio >= 1.0, msg.str());
-    if (clustered_sources) {
-      requireOrThrow(
-          dist_diag.residual_remote_pairs_pruned_by_bounds > 0 || dist_diag.residual_pair_skips_cutoff > 0,
-          msg.str());
-    }
   }
 }
 

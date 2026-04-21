@@ -1,17 +1,13 @@
 {
   "observable": "power_spectrum_consistency",
-  "reference_target": "deterministic in-repo power-spectrum mesh-consistency floor (8 vs 12)",
+  "reference_target": "same cosmological run with higher diagnostic mesh (32 vs 24)",
   "tolerance_envelope": {
-    "relative_l2_max": 0.45
+    "relative_l2_max": 0.15
   },
-  "measured": {
-    "relative_l2": 0.40666741686867675,
-    "matched_bin_count": 4
-  },
-  "pass": true,
-  "source_diagnostics": [
-    "validation/reference/phase3/power_spectrum_low.json",
-    "validation/reference/phase3/power_spectrum_high.json"
-  ],
-  "source_kind": "checked_in_reference_floor"
+  "pass": false,
+  "blocked": "missing_diagnostics_inputs",
+  "required_files": [
+    "outputs/phase3_cosmo_box_ps_low/diagnostics/diag_0008_science_heavy.json",
+    "outputs/phase3_cosmo_box_ps_high/diagnostics/diag_0008_science_heavy.json"
+  ]
 }
