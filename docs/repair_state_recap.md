@@ -906,3 +906,34 @@ Interpretation:
 - Added research-grade observable contract in `validation/campaign/phase3_gravity_observables.json`.
 - Added provenance collector `scripts/validation/collect_phase3_evidence.py` and campaign guide `docs/validation_phase3_campaign.md`.
 - Validation convergence now emits deterministic force-profile and time-integration artifacts under `validation/artifacts/research_grade/phase3/`.
+
+## 0) Phase 3 final integration closeout audit (2026-04-21 UTC)
+
+Commands:
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --preset pm-hdf5-fftw-debug
+cmake --build --preset build-pm-hdf5-fftw-debug
+ctest --test-dir build/pm-hdf5-fftw-debug -R "integration_tree_gravity_vs_direct|integration_tree_pm_coupling_periodic|integration_reference_workflow_distributed_treepm_mpi|validation_phase2_mpi_gravity_single_rank|validation_convergence|integration_reference_workflow$|integration_time_integration_loop" --output-on-failure
+python3 scripts/validation/collect_phase3_evidence.py
+```
+
+Observed:
+
+- `mpi-hdf5-fftw-debug` configure is blocked in this environment by missing FFTW MPI library (`fftw3_mpi`).
+- `pm-hdf5-fftw-debug` configure/build succeeds.
+- Targeted gravity/Phase 3 coherence suite is not green in this cycle:
+  - `integration_reference_workflow` fails with runtime workflow schema compatibility validation error.
+  - `integration_tree_pm_coupling_periodic` fails the zoom low-res contamination invariant.
+  - `validation_phase2_mpi_gravity_single_rank` fails communication-stress residual-cutoff expectation despite zero force-error norm.
+- Manifest/provenance collector ran successfully and refreshed Phase 3 campaign metadata to current HEAD.
+
+Interpretation:
+
+- Phase 3 cannot be marked closed in this audit cycle.
+- Closeout verdict is recorded in `docs/treepm_phase3_closeout.md` as **incomplete** with explicit blockers and forbidden claims.
+
+Reproducibility impact:
+
+- Documentation/evidence-manifest refresh only; no solver, schema, or config semantic changes.

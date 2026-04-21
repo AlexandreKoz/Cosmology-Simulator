@@ -464,3 +464,27 @@ The repository now has a documented and tested Phase 1/2 TreePM baseline (includ
 - `docs/validation_ladder.md`
 - `docs/validation_plan.md`
 - `docs/releases/known_issues.md`
+
+## 2026-04-21 — ADR-FEATURE-GRAVITY-012: Record Phase 3 final integration closeout as incomplete
+
+### Status
+Accepted (closeout audit record)
+
+### Context
+A final integration/coherence audit was run against the Phase 3 contract surfaces, campaign artifacts, and targeted gravity validation lanes. The cycle included PM/HDF5+FFTW configure/build and targeted integration/validation commands, plus manifest repro collection.
+
+### Decision
+- Publish explicit closeout artifact `docs/treepm_phase3_closeout.md`.
+- Record this cycle as **not Phase 3 complete** due to command-backed blockers.
+- Keep claim discipline explicit: no Phase 3 completion language until blockers are cleared in one evidence cycle.
+
+### Consequences
+- Positive: avoids false completion claims and keeps evidence/limitations auditable.
+- Positive: provides an exact blocker list tied to failing commands.
+- Tradeoff: release/readme language must continue to use non-closure wording for Phase 3.
+
+### Evidence references
+- `docs/treepm_phase3_closeout.md`
+- `docs/repair_state_recap.md`
+- `docs/repair_open_issues.md`
+- `docs/releases/known_issues.md`

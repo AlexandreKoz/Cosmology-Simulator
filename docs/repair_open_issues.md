@@ -100,3 +100,14 @@ Additional validation limitation for this pass:
 
 - Large-rank (beyond np2) strong/weak scaling certification sweep still required for Phase 3 closeout.
 - External literature-target calibration for cosmological P(k) and halo profile systematics remains outside this stage; current campaign uses explicit in-repo reference contracts and envelopes.
+
+## 2026-04-21: Phase 3 final integration closeout blockers
+
+- `cmake --preset mpi-hdf5-fftw-debug` fails in this environment because `fftw3_mpi` is unavailable; distributed MPI+FFTW command bundle cannot be executed end-to-end in this cycle.
+- `ctest --test-dir build/pm-hdf5-fftw-debug -R "integration_reference_workflow" --output-on-failure` fails with `runtime workflow schema compatibility validation failed`.
+- `ctest --test-dir build/pm-hdf5-fftw-debug -R "integration_tree_pm_coupling_periodic" --output-on-failure` fails with `expected at least one low-res contaminant`.
+- `ctest --test-dir build/pm-hdf5-fftw-debug -R "validation_phase2_mpi_gravity_single_rank" --output-on-failure` fails in communication-stress mode due residual-cutoff expectation mismatch.
+- `validation/artifacts/research_grade/phase3/correctness/power_spectrum_consistency.json` remains blocked (`missing_diagnostics_inputs`), so Phase 3 correctness/force-accuracy envelope is not fully evidenced.
+- Multi-rank scaling evidence in the audited artifact set remains baseline-only and non-certifying (`phase2_baseline_scaling_summary.json`); checked-in CSV artifacts currently cover `np1` only.
+
+Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.md`).

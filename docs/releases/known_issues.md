@@ -37,3 +37,9 @@
 - Scope: strong/weak scaling certification.
 - Impact: campaign now exports explicit baseline scaling artifacts and provenance, but certification-grade large-rank sweeps are still pending.
 - Mitigation: treat `validation/artifacts/research_grade/phase3/scaling/phase2_baseline_scaling_summary.json` as baseline evidence only and complete the larger-rank follow-on campaign before certification claims.
+
+## Phase 3 closeout hard gate remains open (2026-04-21 audit)
+
+- Scope: final Phase 3 integration closeout.
+- Impact: current audit cycle did not reach a full hard-gate pass; periodic/zoom integration and reference-workflow/schema lanes include failing tests, and distributed MPI+FFTW command bundle is environment-blocked.
+- Mitigation: resolve blockers listed in `docs/treepm_phase3_closeout.md` before claiming Phase 3 completion.
