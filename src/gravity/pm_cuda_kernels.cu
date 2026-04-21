@@ -36,13 +36,13 @@ __global__ void assignDensityKernel(
     return;
   }
 
-  const double inv_dx = static_cast<double>(launch.nx) / launch.box_size_mpc_comoving;
-  const double inv_dy = static_cast<double>(launch.ny) / launch.box_size_mpc_comoving;
-  const double inv_dz = static_cast<double>(launch.nz) / launch.box_size_mpc_comoving;
+  const double inv_dx = static_cast<double>(launch.nx) / launch.box_size_x_mpc_comoving;
+  const double inv_dy = static_cast<double>(launch.ny) / launch.box_size_y_mpc_comoving;
+  const double inv_dz = static_cast<double>(launch.nz) / launch.box_size_z_mpc_comoving;
 
-  const double x = wrapPositionDevice(pos_x[particle_index], launch.box_size_mpc_comoving) * inv_dx;
-  const double y = wrapPositionDevice(pos_y[particle_index], launch.box_size_mpc_comoving) * inv_dy;
-  const double z = wrapPositionDevice(pos_z[particle_index], launch.box_size_mpc_comoving) * inv_dz;
+  const double x = wrapPositionDevice(pos_x[particle_index], launch.box_size_x_mpc_comoving) * inv_dx;
+  const double y = wrapPositionDevice(pos_y[particle_index], launch.box_size_y_mpc_comoving) * inv_dy;
+  const double z = wrapPositionDevice(pos_z[particle_index], launch.box_size_z_mpc_comoving) * inv_dz;
 
   const long long ix0 = static_cast<long long>(floor(x));
   const long long iy0 = static_cast<long long>(floor(y));
@@ -85,13 +85,13 @@ __global__ void interpolateForcesKernel(
     return;
   }
 
-  const double inv_dx = static_cast<double>(launch.nx) / launch.box_size_mpc_comoving;
-  const double inv_dy = static_cast<double>(launch.ny) / launch.box_size_mpc_comoving;
-  const double inv_dz = static_cast<double>(launch.nz) / launch.box_size_mpc_comoving;
+  const double inv_dx = static_cast<double>(launch.nx) / launch.box_size_x_mpc_comoving;
+  const double inv_dy = static_cast<double>(launch.ny) / launch.box_size_y_mpc_comoving;
+  const double inv_dz = static_cast<double>(launch.nz) / launch.box_size_z_mpc_comoving;
 
-  const double x = wrapPositionDevice(pos_x[particle_index], launch.box_size_mpc_comoving) * inv_dx;
-  const double y = wrapPositionDevice(pos_y[particle_index], launch.box_size_mpc_comoving) * inv_dy;
-  const double z = wrapPositionDevice(pos_z[particle_index], launch.box_size_mpc_comoving) * inv_dz;
+  const double x = wrapPositionDevice(pos_x[particle_index], launch.box_size_x_mpc_comoving) * inv_dx;
+  const double y = wrapPositionDevice(pos_y[particle_index], launch.box_size_y_mpc_comoving) * inv_dy;
+  const double z = wrapPositionDevice(pos_z[particle_index], launch.box_size_z_mpc_comoving) * inv_dz;
 
   const long long ix0 = static_cast<long long>(floor(x));
   const long long iy0 = static_cast<long long>(floor(y));

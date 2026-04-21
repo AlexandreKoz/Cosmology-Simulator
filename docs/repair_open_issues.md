@@ -22,8 +22,8 @@ Environment blockers currently observed in this validation environment:
 Deferred to Phase 3 follow-up after axis-aware geometry repair:
 
 - Full 2D pencil decomposition beyond FFTW transposed ownership remains open. Current `pencil` mode is now an end-to-end transposed PM path with explicit ownership contracts, but wider process-grid scaling and non-FFTW backend parity remain follow-up scope.
-- Isolated/non-periodic PM operator modes remain out of scope (periodic PM only in this stage).
-- CUDA PM kernels still require cubic box lengths; non-cubic CUDA PM support is deferred.
+- Isolated/non-periodic PM is now implemented for the single-rank path; distributed isolated/open PM remains intentionally blocked until a multi-rank open-boundary strategy exists.
+- CUDA PM CIC deposition/interpolation now accepts axis-aware periodic box lengths; isolated/open CUDA PM remains unsupported and fails fast.
 
 No new in-tree CPU-path code blocker was observed on the repaired PM unit/integration single-rank checks.
 

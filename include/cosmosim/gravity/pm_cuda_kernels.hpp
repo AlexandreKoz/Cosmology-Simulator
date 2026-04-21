@@ -9,7 +9,9 @@ struct PmCudaAssignLaunch {
   std::size_t nx = 0;
   std::size_t ny = 0;
   std::size_t nz = 0;
-  double box_size_mpc_comoving = 0.0;
+  double box_size_x_mpc_comoving = 0.0;
+  double box_size_y_mpc_comoving = 0.0;
+  double box_size_z_mpc_comoving = 0.0;
 };
 
 struct PmCudaInterpLaunch {
@@ -17,7 +19,9 @@ struct PmCudaInterpLaunch {
   std::size_t nx = 0;
   std::size_t ny = 0;
   std::size_t nz = 0;
-  double box_size_mpc_comoving = 0.0;
+  double box_size_x_mpc_comoving = 0.0;
+  double box_size_y_mpc_comoving = 0.0;
+  double box_size_z_mpc_comoving = 0.0;
 };
 
 void pmCudaAssignDensityCic(

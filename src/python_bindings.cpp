@@ -121,6 +121,18 @@ PYBIND11_MODULE(_cosmosim, module) {
           [](const SimulationConfig& config) { return config.cosmology.box_size_mpc_comoving; },
           [](SimulationConfig& config, double value) { config.cosmology.box_size_mpc_comoving = value; })
       .def_property(
+          "box_size_x_mpc_comov",
+          [](const SimulationConfig& config) { return config.cosmology.box_size_x_mpc_comoving; },
+          [](SimulationConfig& config, double value) { config.cosmology.box_size_x_mpc_comoving = value; })
+      .def_property(
+          "box_size_y_mpc_comov",
+          [](const SimulationConfig& config) { return config.cosmology.box_size_y_mpc_comoving; },
+          [](SimulationConfig& config, double value) { config.cosmology.box_size_y_mpc_comoving = value; })
+      .def_property(
+          "box_size_z_mpc_comov",
+          [](const SimulationConfig& config) { return config.cosmology.box_size_z_mpc_comoving; },
+          [](SimulationConfig& config, double value) { config.cosmology.box_size_z_mpc_comoving = value; })
+      .def_property(
           "output_directory",
           [](const SimulationConfig& config) { return config.output.output_directory; },
           [](SimulationConfig& config, const std::string& value) { config.output.output_directory = value; })

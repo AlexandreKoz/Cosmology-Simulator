@@ -58,6 +58,10 @@ struct ReferenceWorkflowReport {
   std::uint64_t treepm_long_range_refresh_count = 0;
   std::uint64_t treepm_long_range_reuse_count = 0;
   std::size_t treepm_pm_grid = 0;
+  std::size_t treepm_pm_grid_nx = 0;
+  std::size_t treepm_pm_grid_ny = 0;
+  std::size_t treepm_pm_grid_nz = 0;
+  std::string treepm_pm_grid_shape;
   int treepm_update_cadence_steps = 1;
   std::vector<std::string> stage_sequence;
   std::vector<TreePmCadenceRecord> treepm_cadence_records;

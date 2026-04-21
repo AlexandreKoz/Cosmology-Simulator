@@ -848,7 +848,7 @@ Observed:
 - Restart schema bumped to `cosmosim_restart_v4` with explicit `/distributed_gravity/state` payload (`parallel::DistributedRestartState`, schema_version=2).
 - Distributed continuation payload now persists decomposition epoch, owning-rank table, PM slab layout metadata, gravity-kick cadence state, long-range field refresh/version metadata, and explicit `long_range_restart_policy`.
 - Policy is explicit and enforced: `deterministic_rebuild` (cached long-range PM field arrays are not serialized; continuation rebuilds deterministically on cadence refresh).
-- Provenance schema bumped to `provenance_v3` to include distributed restart diagnostics (epoch/world/grid/slab signature/kick opportunity/field version/restart policy).
+- Provenance schema bumped to `provenance_v4` to add axis-aware PM grid and mesh-spacing metadata while preserving legacy scalar aliases for compatibility.
 - Added typed compatibility diagnostics (`evaluateDistributedRestartCompatibility`) plus negative mismatch coverage.
 
 Interpretation:
@@ -872,7 +872,7 @@ Observed:
 - Tree gravity now resolves softening at source/target with optional sidecars (species table and per-particle overrides) and uses an explicit pair rule `epsilon_pair = max(epsilon_i, epsilon_j)` across leaf P2P and accepted-node multipole paths.
 - TreePM short-range residual uses the same pair law for local and distributed remote request/response paths (request packet now carries target epsilon).
 - Optional per-particle softening sidecar persistence is added to snapshot (`/PartTypeN/GravitySofteningComoving`) and restart (`/state/particle_sidecar/gravity_softening_comoving`) paths.
-- Schema versions are intentionally bumped for additive softening sidecar fields: snapshot `gadget_arepo_v3` and restart `cosmosim_restart_v5`.
+- Schema versions are intentionally bumped for additive axis-aware PM metadata: snapshot `gadget_arepo_v4`, provenance `provenance_v4`, while restart remains `cosmosim_restart_v5`.
 
 Interpretation:
 

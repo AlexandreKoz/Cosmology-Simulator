@@ -174,9 +174,9 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
         "execution_policy=cuda currently supports only assignment_scheme=cic in this build");
   }
   if (options.execution_policy == core::ExecutionPolicy::kCuda &&
-      (std::abs(lengths.lx - lengths.ly) > 1.0e-12 || std::abs(lengths.lx - lengths.lz) > 1.0e-12)) {
+      options.boundary_condition != PmBoundaryCondition::kPeriodic) {
     throw std::invalid_argument(
-        "execution_policy=cuda currently requires cubic PM box lengths in this build");
+        "execution_policy=cuda currently supports only boundary_condition=periodic in this build");
   }
   if (options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
       options.enable_window_deconvolution) {
@@ -2061,9 +2061,18 @@ void PmSolver::solveForParticles(
         profile->transfer_h2d_ms += std::chrono::duration<double, std::milli>(copy_h2d_stop - copy_h2d_start).count();
       }
 
+      const BoxLengths lengths = effectiveBoxLengths(options);
+
       const auto kernel_assign_start = std::chrono::steady_clock::now();
       pmCudaAssignDensityCic(
-          PmCudaAssignLaunch{pos_x.size(), m_shape.nx, m_shape.ny, m_shape.nz, options.box_size_mpc_comoving},
+          PmCudaAssignLaunch{
+              pos_x.size(),
+              m_shape.nx,
+              m_shape.ny,
+              m_shape.nz,
+              lengths.lx,
+              lengths.ly,
+              lengths.lz},
           pos_x_device.data(),
           pos_y_device.data(),
           pos_z_device.data(),
@@ -2088,8 +2097,6 @@ void PmSolver::solveForParticles(
       if (profile != nullptr) {
         profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_density_stop - copy_density_start).count();
       }
-
-      const BoxLengths lengths = effectiveBoxLengths(options);
       const double cell_volume =
           (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
       for (double& density_cell : grid.density()) {
@@ -2112,7 +2119,14 @@ void PmSolver::solveForParticles(
 
       const auto kernel_interp_start = std::chrono::steady_clock::now();
       pmCudaInterpolateForcesCic(
-          PmCudaInterpLaunch{pos_x.size(), m_shape.nx, m_shape.ny, m_shape.nz, options.box_size_mpc_comoving},
+          PmCudaInterpLaunch{
+              pos_x.size(),
+              m_shape.nx,
+              m_shape.ny,
+              m_shape.nz,
+              lengths.lx,
+              lengths.ly,
+              lengths.lz},
           pos_x_device.data(),
           pos_y_device.data(),
           pos_z_device.data(),

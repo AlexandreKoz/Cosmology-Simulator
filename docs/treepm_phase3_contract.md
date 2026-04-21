@@ -26,7 +26,7 @@ The following statements are true in the current tree and are treated as baselin
 
 1. **PM solver production contract is periodic** in the documented path (`solvePoissonPeriodic`, periodic zero-mode pinning, periodic deposition/gather semantics). This is the primary production PM contract described in repository docs and current solver API behavior.
 2. **Distributed PM decomposition is slab-only** (`treepm_pm_decomposition_mode=slab`; non-slab modes are rejected in current config/validation paths).
-3. **Reference workflow still wires cubic PM shape from one scalar grid size** (`treepm_pm_grid` is expanded to `(Nx,Ny,Nz)=(N,N,N)` in workflow coordinator construction and reporting).
+3. **Axis-aware runtime support exists but scalar legacy/reporting and downstream consumers still need periodic cleanup** (workflow now constructs full `(Nx,Ny,Nz)` PM shapes, but legacy scalar aliases and some downstream surfaces remain for compatibility).
 4. **Tree short-range path is monopole-only** with geometric MAC `l / r < theta`.
 5. **Tree softening remains one-policy / one-epsilon in runtime path** (`comoving_fixed` + Plummer-style softened inverse-r^3 lane via one configured epsilon).
 6. **Hierarchical stepping infrastructure exists**, including staged callbacks and time-bin scheduling; however, **integrator-grade PM synchronization/accuracy claims for a future multirate Phase 3 regime are not yet proven** by current evidence.

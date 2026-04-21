@@ -5,6 +5,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string_view>
 #include <stdexcept>
@@ -127,6 +128,7 @@ ProvenanceRecord makeProvenanceRecord(
 
 std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   std::ostringstream stream;
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10);
   stream << "schema_version=" << record.schema_version << '\n';
   stream << "git_sha=" << record.git_sha << '\n';
   stream << "compiler_id=" << record.compiler_id << '\n';
@@ -138,12 +140,18 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "hardware_summary=" << record.hardware_summary << '\n';
   stream << "author_rank=" << record.author_rank << '\n';
   stream << "gravity_treepm_pm_grid=" << record.gravity_treepm_pm_grid << '\n';
+  stream << "gravity_treepm_pm_grid_nx=" << record.gravity_treepm_pm_grid_nx << '\n';
+  stream << "gravity_treepm_pm_grid_ny=" << record.gravity_treepm_pm_grid_ny << '\n';
+  stream << "gravity_treepm_pm_grid_nz=" << record.gravity_treepm_pm_grid_nz << '\n';
   stream << "gravity_treepm_assignment_scheme=" << record.gravity_treepm_assignment_scheme << '\n';
   stream << "gravity_treepm_window_deconvolution="
          << (record.gravity_treepm_window_deconvolution ? "true" : "false") << '\n';
   stream << "gravity_treepm_asmth_cells=" << record.gravity_treepm_asmth_cells << '\n';
   stream << "gravity_treepm_rcut_cells=" << record.gravity_treepm_rcut_cells << '\n';
   stream << "gravity_treepm_mesh_spacing_mpc_comoving=" << record.gravity_treepm_mesh_spacing_mpc_comoving << '\n';
+  stream << "gravity_treepm_mesh_spacing_x_mpc_comoving=" << record.gravity_treepm_mesh_spacing_x_mpc_comoving << '\n';
+  stream << "gravity_treepm_mesh_spacing_y_mpc_comoving=" << record.gravity_treepm_mesh_spacing_y_mpc_comoving << '\n';
+  stream << "gravity_treepm_mesh_spacing_z_mpc_comoving=" << record.gravity_treepm_mesh_spacing_z_mpc_comoving << '\n';
   stream << "gravity_treepm_split_scale_mpc_comoving=" << record.gravity_treepm_split_scale_mpc_comoving << '\n';
   stream << "gravity_treepm_cutoff_radius_mpc_comoving=" << record.gravity_treepm_cutoff_radius_mpc_comoving << '\n';
   stream << "gravity_treepm_update_cadence_steps=" << record.gravity_treepm_update_cadence_steps << '\n';
@@ -208,6 +216,12 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.author_rank = std::stoi(value);
     } else if (key == "gravity_treepm_pm_grid") {
       record.gravity_treepm_pm_grid = std::stoi(value);
+    } else if (key == "gravity_treepm_pm_grid_nx") {
+      record.gravity_treepm_pm_grid_nx = std::stoi(value);
+    } else if (key == "gravity_treepm_pm_grid_ny") {
+      record.gravity_treepm_pm_grid_ny = std::stoi(value);
+    } else if (key == "gravity_treepm_pm_grid_nz") {
+      record.gravity_treepm_pm_grid_nz = std::stoi(value);
     } else if (key == "gravity_treepm_assignment_scheme") {
       record.gravity_treepm_assignment_scheme = value;
     } else if (key == "gravity_treepm_window_deconvolution") {
@@ -218,6 +232,12 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_treepm_rcut_cells = std::stod(value);
     } else if (key == "gravity_treepm_mesh_spacing_mpc_comoving") {
       record.gravity_treepm_mesh_spacing_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_mesh_spacing_x_mpc_comoving") {
+      record.gravity_treepm_mesh_spacing_x_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_mesh_spacing_y_mpc_comoving") {
+      record.gravity_treepm_mesh_spacing_y_mpc_comoving = std::stod(value);
+    } else if (key == "gravity_treepm_mesh_spacing_z_mpc_comoving") {
+      record.gravity_treepm_mesh_spacing_z_mpc_comoving = std::stod(value);
     } else if (key == "gravity_treepm_split_scale_mpc_comoving") {
       record.gravity_treepm_split_scale_mpc_comoving = std::stod(value);
     } else if (key == "gravity_treepm_cutoff_radius_mpc_comoving") {
@@ -265,6 +285,17 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
     } else if (key == "zoom_contamination_radius_mpc_comoving") {
       record.zoom_contamination_radius_mpc_comoving = std::stod(value);
     }
+  }
+  if (record.gravity_treepm_pm_grid_nx == 0 && record.gravity_treepm_pm_grid > 0) {
+    record.gravity_treepm_pm_grid_nx = record.gravity_treepm_pm_grid;
+    record.gravity_treepm_pm_grid_ny = record.gravity_treepm_pm_grid;
+    record.gravity_treepm_pm_grid_nz = record.gravity_treepm_pm_grid;
+  }
+  if (record.gravity_treepm_mesh_spacing_x_mpc_comoving == 0.0 &&
+      record.gravity_treepm_mesh_spacing_mpc_comoving > 0.0) {
+    record.gravity_treepm_mesh_spacing_x_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
+    record.gravity_treepm_mesh_spacing_y_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
+    record.gravity_treepm_mesh_spacing_z_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
   }
   return record;
 }

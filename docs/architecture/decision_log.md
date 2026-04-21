@@ -417,7 +417,7 @@ Phase 2 distributed TreePM restart continuation lacked an explicit, versioned co
   decomposition epoch, owning-rank table, PM grid/layout metadata, kick-opportunity cadence state, long-range refresh/version metadata, and explicit long-range restart policy.
 - Adopt and enforce restart policy `deterministic_rebuild` for PM long-range field continuation.
   Cached long-range arrays are not serialized; restart resumes with deterministic rebuild at the next cadence-triggered refresh.
-- Extend provenance (`provenance_v3`) with distributed restart diagnostics (epoch/world/grid/slab signature/kick+field version/policy).
+- Extend provenance (`provenance_v4`) with axis-aware PM grid/mesh-spacing metadata in addition to distributed restart diagnostics (epoch/world/grid/slab signature/kick+field version/policy).
 - Add compatibility diagnostics API `evaluateDistributedRestartCompatibility(...)` to emit explicit mismatch reasons.
 
 ### Consequences

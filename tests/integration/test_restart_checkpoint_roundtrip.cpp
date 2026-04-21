@@ -142,11 +142,17 @@ void testRestartRoundtrip() {
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
   payload.provenance.gravity_treepm_pm_grid = 32;
+  payload.provenance.gravity_treepm_pm_grid_nx = 32;
+  payload.provenance.gravity_treepm_pm_grid_ny = 24;
+  payload.provenance.gravity_treepm_pm_grid_nz = 16;
   payload.provenance.gravity_treepm_assignment_scheme = "tsc";
   payload.provenance.gravity_treepm_window_deconvolution = true;
   payload.provenance.gravity_treepm_asmth_cells = 1.25;
   payload.provenance.gravity_treepm_rcut_cells = 5.5;
-  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = 0.25;
+  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = std::cbrt(0.25 * 0.5 * 0.75);
+  payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving = 0.25;
+  payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving = 0.5;
+  payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving = 0.75;
   payload.provenance.gravity_treepm_split_scale_mpc_comoving = 0.3125;
   payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 1.375;
   payload.provenance.gravity_treepm_update_cadence_steps = 3;
@@ -263,6 +269,15 @@ void testRestartRoundtrip() {
   assert(
       restored.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving);
+  assert(
+      restored.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving);
   assert(
       restored.provenance.gravity_treepm_split_scale_mpc_comoving ==
       payload.provenance.gravity_treepm_split_scale_mpc_comoving);

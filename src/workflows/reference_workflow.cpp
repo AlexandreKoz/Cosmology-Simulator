@@ -408,6 +408,9 @@ void seedParticleOwnershipFromPmSlabs(
       config.numerics.treepm_rcut_cells,
       mesh_spacing_mpc_comoving);
   record.gravity_treepm_pm_grid = config.numerics.treepm_pm_grid_nx;
+  record.gravity_treepm_pm_grid_nx = config.numerics.treepm_pm_grid_nx;
+  record.gravity_treepm_pm_grid_ny = config.numerics.treepm_pm_grid_ny;
+  record.gravity_treepm_pm_grid_nz = config.numerics.treepm_pm_grid_nz;
   record.gravity_treepm_assignment_scheme =
       treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
   record.gravity_treepm_window_deconvolution =
@@ -415,6 +418,9 @@ void seedParticleOwnershipFromPmSlabs(
   record.gravity_treepm_asmth_cells = config.numerics.treepm_asmth_cells;
   record.gravity_treepm_rcut_cells = config.numerics.treepm_rcut_cells;
   record.gravity_treepm_mesh_spacing_mpc_comoving = mesh_spacing_mpc_comoving;
+  record.gravity_treepm_mesh_spacing_x_mpc_comoving = dx;
+  record.gravity_treepm_mesh_spacing_y_mpc_comoving = dy;
+  record.gravity_treepm_mesh_spacing_z_mpc_comoving = dz;
   record.gravity_treepm_split_scale_mpc_comoving = split_policy.split_scale_comoving;
   record.gravity_treepm_cutoff_radius_mpc_comoving = split_policy.cutoff_radius_comoving;
   record.gravity_treepm_update_cadence_steps = config.numerics.treepm_update_cadence_steps;
@@ -1732,7 +1738,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
   report.run_directory = computeRunDirectory(config, output_root_override);
   report.config_compatible = true;
   report.schema_compatible =
-      config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version == 2 &&
+      config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version >= 2 &&
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
   core::ProfilerSession profiler(true);
@@ -1844,6 +1850,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     DriftCallback drift_callback;
     GravityStageCallback gravity_callback(config, mode_policy);
     report.treepm_pm_grid = gravity_callback.pmGridSize();
+    report.treepm_pm_grid_nx = gravity_callback.pmGridShape().nx;
+    report.treepm_pm_grid_ny = gravity_callback.pmGridShape().ny;
+    report.treepm_pm_grid_nz = gravity_callback.pmGridShape().nz;
+    report.treepm_pm_grid_shape = std::to_string(report.treepm_pm_grid_nx) + "x" +
+        std::to_string(report.treepm_pm_grid_ny) + "x" + std::to_string(report.treepm_pm_grid_nz);
     report.treepm_update_cadence_steps = gravity_callback.pmCadenceSteps();
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "gravity.treepm_setup",

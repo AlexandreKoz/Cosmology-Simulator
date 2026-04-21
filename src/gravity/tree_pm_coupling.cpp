@@ -27,6 +27,20 @@ namespace {
   return delta - box_size_comoving * std::nearbyint(delta / box_size_comoving);
 }
 
+struct PeriodicBoxLengths {
+  double lx = 0.0;
+  double ly = 0.0;
+  double lz = 0.0;
+};
+
+[[nodiscard]] PeriodicBoxLengths effectivePeriodicBoxLengths(const PmSolveOptions& options) {
+  const double scalar = options.box_size_mpc_comoving;
+  return PeriodicBoxLengths{
+      .lx = options.box_size_x_mpc_comoving > 0.0 ? options.box_size_x_mpc_comoving : scalar,
+      .ly = options.box_size_y_mpc_comoving > 0.0 ? options.box_size_y_mpc_comoving : scalar,
+      .lz = options.box_size_z_mpc_comoving > 0.0 ? options.box_size_z_mpc_comoving : scalar};
+}
+
 [[nodiscard]] double norm3(double x, double y, double z) {
   return std::sqrt(x * x + y * y + z * z);
 }
@@ -105,7 +119,7 @@ void pushChildrenNearFirstPeriodic(
     double px,
     double py,
     double pz,
-    double box_size_comoving,
+    const PeriodicBoxLengths& box_lengths,
     std::vector<std::uint32_t>& stack) {
   std::array<std::pair<double, std::uint32_t>, 8> child_dist2{};
   std::size_t count = 0;
@@ -115,9 +129,9 @@ void pushChildrenNearFirstPeriodic(
     if (child == std::numeric_limits<std::uint32_t>::max()) {
       continue;
     }
-    const double dx = minimumImageDelta(nodes.center_x_comoving[child] - px, box_size_comoving);
-    const double dy = minimumImageDelta(nodes.center_y_comoving[child] - py, box_size_comoving);
-    const double dz = minimumImageDelta(nodes.center_z_comoving[child] - pz, box_size_comoving);
+    const double dx = minimumImageDelta(nodes.center_x_comoving[child] - px, box_lengths.lx);
+    const double dy = minimumImageDelta(nodes.center_y_comoving[child] - py, box_lengths.ly);
+    const double dz = minimumImageDelta(nodes.center_z_comoving[child] - pz, box_lengths.lz);
     child_dist2[count++] = {dx * dx + dy * dy + dz * dz, child};
   }
   std::sort(child_dist2.begin(), child_dist2.begin() + static_cast<std::ptrdiff_t>(count),
@@ -175,10 +189,10 @@ template <typename T>
     double cy,
     double cz,
     double half_size_comoving,
-    double box_size_comoving) {
-  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_size_comoving));
-  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_size_comoving));
-  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_size_comoving));
+    const PeriodicBoxLengths& box_lengths) {
+  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_lengths.lx));
+  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_lengths.ly));
+  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_lengths.lz));
   const double ex = std::max(0.0, dx_abs - half_size_comoving);
   const double ey = std::max(0.0, dy_abs - half_size_comoving);
   const double ez = std::max(0.0, dz_abs - half_size_comoving);
@@ -193,10 +207,10 @@ template <typename T>
     double cy,
     double cz,
     double half_size_comoving,
-    double box_size_comoving) {
-  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_size_comoving));
-  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_size_comoving));
-  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_size_comoving));
+    const PeriodicBoxLengths& box_lengths) {
+  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_lengths.lx));
+  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_lengths.ly));
+  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_lengths.lz));
   const double max_x = dx_abs + half_size_comoving;
   const double max_y = dy_abs + half_size_comoving;
   const double max_z = dz_abs + half_size_comoving;
@@ -330,7 +344,7 @@ struct PeriodicInterval {
     double py,
     double pz,
     const SourceDomainBoundsPacket& bounds,
-    double box_size_comoving) {
+    const PeriodicBoxLengths& box_lengths) {
   if (bounds.source_particle_count == 0) {
     return std::numeric_limits<double>::infinity();
   }
@@ -339,19 +353,19 @@ struct PeriodicInterval {
       bounds.min_x_comoving,
       bounds.max_x_comoving,
       bounds.wraps_x != 0U,
-      box_size_comoving);
+      box_lengths.lx);
   const double dy = minimumDistanceToPeriodicInterval(
       py,
       bounds.min_y_comoving,
       bounds.max_y_comoving,
       bounds.wraps_y != 0U,
-      box_size_comoving);
+      box_lengths.ly);
   const double dz = minimumDistanceToPeriodicInterval(
       pz,
       bounds.min_z_comoving,
       bounds.max_z_comoving,
       bounds.wraps_z != 0U,
-      box_size_comoving);
+      box_lengths.lz);
   return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
@@ -359,15 +373,15 @@ struct PeriodicInterval {
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
-    double box_size_comoving) {
+    const PeriodicBoxLengths& box_lengths) {
   SourceDomainBoundsPacket bounds;
   bounds.source_particle_count = static_cast<std::uint64_t>(pos_x_comoving.size());
   if (pos_x_comoving.empty()) {
     return bounds;
   }
-  const PeriodicInterval interval_x = tightPeriodicInterval(pos_x_comoving, box_size_comoving);
-  const PeriodicInterval interval_y = tightPeriodicInterval(pos_y_comoving, box_size_comoving);
-  const PeriodicInterval interval_z = tightPeriodicInterval(pos_z_comoving, box_size_comoving);
+  const PeriodicInterval interval_x = tightPeriodicInterval(pos_x_comoving, box_lengths.lx);
+  const PeriodicInterval interval_y = tightPeriodicInterval(pos_y_comoving, box_lengths.ly);
+  const PeriodicInterval interval_z = tightPeriodicInterval(pos_z_comoving, box_lengths.lz);
   bounds.min_x_comoving = interval_x.min;
   bounds.max_x_comoving = interval_x.max;
   bounds.min_y_comoving = interval_y.min;
@@ -655,6 +669,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   const auto tree_stop = std::chrono::steady_clock::now();
 
   if (diagnostics != nullptr) {
+    const PeriodicBoxLengths diagnostic_box_lengths = effectivePeriodicBoxLengths(options.pm_options);
     *diagnostics = computeTreePmDiagnostics(options.split_policy);
     diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
     diagnostics->residual_pair_skips_cutoff = m_last_residual_stats.pair_skips_cutoff;
@@ -702,13 +717,13 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         ++diagnostics->zoom_low_res_source_count;
         const double dx = minimumImageDelta(
             pos_x_comoving[i] - options.zoom_region_center_x_comoving,
-            options.pm_options.box_size_mpc_comoving);
+            diagnostic_box_lengths.lx);
         const double dy = minimumImageDelta(
             pos_y_comoving[i] - options.zoom_region_center_y_comoving,
-            options.pm_options.box_size_mpc_comoving);
+            diagnostic_box_lengths.ly);
         const double dz = minimumImageDelta(
             pos_z_comoving[i] - options.zoom_region_center_z_comoving,
-            options.pm_options.box_size_mpc_comoving);
+            diagnostic_box_lengths.lz);
         const double r = norm3(dx, dy, dz);
         if (r <= options.zoom_contamination_radius_comoving) {
           ++diagnostics->zoom_low_res_contamination_count;
@@ -743,9 +758,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   const auto traversal_start = std::chrono::steady_clock::now();
   const TreeNodeSoa& nodes = m_tree_solver.nodes();
   const TreeMortonOrdering& ordering = m_tree_solver.ordering();
-  const double box_size_comoving = options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic
-      ? options.pm_options.box_size_mpc_comoving
-      : 0.0;
+  const PeriodicBoxLengths box_lengths = options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic
+      ? effectivePeriodicBoxLengths(options.pm_options)
+      : PeriodicBoxLengths{};
   const double cutoff_radius_comoving = options.split_policy.cutoff_radius_comoving;
   const double cutoff_radius2_comoving = cutoff_radius_comoving * cutoff_radius_comoving;
   if (!softening_view.source_particle_epsilon_comoving.empty() &&
@@ -792,15 +807,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_y_comoving[node_index],
           nodes.center_z_comoving[node_index],
           half_size,
-          box_size_comoving);
+          box_lengths);
       if (min_node_distance > cutoff_radius_comoving) {
         ++cutoff_pruned_nodes;
         continue;
       }
 
-      const double dx = minimumImageDelta(nodes.com_x_comoving[node_index] - px, box_size_comoving);
-      const double dy = minimumImageDelta(nodes.com_y_comoving[node_index] - py, box_size_comoving);
-      const double dz = minimumImageDelta(nodes.com_z_comoving[node_index] - pz, box_size_comoving);
+      const double dx = minimumImageDelta(nodes.com_x_comoving[node_index] - px, box_lengths.lx);
+      const double dy = minimumImageDelta(nodes.com_y_comoving[node_index] - py, box_lengths.ly);
+      const double dz = minimumImageDelta(nodes.com_z_comoving[node_index] - pz, box_lengths.lz);
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double r = std::sqrt(std::max(r2, 1.0e-30));
 
@@ -824,7 +839,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_y_comoving[node_index],
           nodes.center_z_comoving[node_index],
           half_size,
-          box_size_comoving) <= cutoff_radius_comoving);
+          box_lengths) <= cutoff_radius_comoving);
       const bool accept = mac_accept && node_within_cutoff;
 
       if (accept) {
@@ -837,9 +852,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             if (skip_self && source_index == self_index) {
               continue;
             }
-            const double sx = minimumImageDelta(pos_x_comoving[source_index] - px, box_size_comoving);
-            const double sy = minimumImageDelta(pos_y_comoving[source_index] - py, box_size_comoving);
-            const double sz = minimumImageDelta(pos_z_comoving[source_index] - pz, box_size_comoving);
+            const double sx = minimumImageDelta(pos_x_comoving[source_index] - px, box_lengths.lx);
+            const double sy = minimumImageDelta(pos_y_comoving[source_index] - py, box_lengths.ly);
+            const double sz = minimumImageDelta(pos_z_comoving[source_index] - pz, box_lengths.lz);
             const double sr2 = sx * sx + sy * sy + sz * sz;
             if (sr2 > cutoff_radius2_comoving) {
               ++cutoff_pair_skips;
@@ -871,7 +886,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           az += contrib[2];
         }
       } else {
-        pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_size_comoving, stack);
+        pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_lengths, stack);
       }
     }
     return std::array<double, 3>{ax, ay, az};
@@ -930,7 +945,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
     SourceDomainBoundsPacket local_bounds =
-        computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving, box_size_comoving);
+        computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving, box_lengths);
     std::vector<SourceDomainBoundsPacket> peer_bounds(static_cast<std::size_t>(mpi_world_size));
     MPI_Allgather(
         &local_bounds,
@@ -971,7 +986,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           if (peer == mpi_world_rank) {
             continue;
           }
-          if (minimumDistanceToPeriodicBounds(px, py, pz, peer_bounds[static_cast<std::size_t>(peer)], box_size_comoving) >
+          if (minimumDistanceToPeriodicBounds(px, py, pz, peer_bounds[static_cast<std::size_t>(peer)], box_lengths) >
               cutoff_radius_comoving) {
             ++m_last_residual_stats.remote_pairs_pruned_by_bounds;
             continue;

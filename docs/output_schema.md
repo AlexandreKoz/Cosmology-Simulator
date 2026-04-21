@@ -13,8 +13,8 @@ Authoritative interfaces:
 
 Current schema identity:
 
-- `schema_name = gadget_arepo_v3`
-- `schema_version = 3`
+- `schema_name = gadget_arepo_v4`
+- `schema_version = 4`
 
 Logical groups:
 
@@ -70,7 +70,7 @@ restart is execution-resume oriented.
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v3`)
+- schema tag (`provenance_v4`)
 - build identity (`git_sha`, compiler id/version, build preset, feature flags)
 - deterministic config hash
 - UTC timestamp and hardware summary
@@ -161,7 +161,7 @@ When changing snapshot/restart/provenance fields:
 
 ## Compatibility notes (2026-04-20)
 
-- Snapshot schema was intentionally bumped to `gadget_arepo_v3` (`schema_version = 3`)
+- Snapshot schema was intentionally bumped to `gadget_arepo_v3` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
 - Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state.
@@ -171,4 +171,4 @@ When changing snapshot/restart/provenance fields:
   data and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.
 - Provenance payload now includes additive zoom-gravity metadata and contamination-radius contract keys;
-  this is a backward-compatible extension to `provenance_v3`.
+  this is a backward-compatible extension to `provenance_v4`.

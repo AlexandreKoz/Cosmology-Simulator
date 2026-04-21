@@ -75,6 +75,10 @@ int main() {
   assert(report.local_particle_id_xor == xorRangeOneToN(42));
   assert(report.global_particle_id_xor == xorRangeOneToN(42));
   assert(report.treepm_pm_grid == 9);
+  assert(report.treepm_pm_grid_nx == 9);
+  assert(report.treepm_pm_grid_ny == 9);
+  assert(report.treepm_pm_grid_nz == 9);
+  assert(report.treepm_pm_grid_shape == "9x9x9");
   assert(report.treepm_update_cadence_steps == 1);
   assert(report.treepm_long_range_refresh_count == 4);
   assert(report.treepm_long_range_reuse_count == 0);
@@ -97,7 +101,7 @@ int main() {
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.treepm_setup\"") != std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.pm_long_range_field\"") != std::string::npos);
-  assert(op_text.find("\"pm_grid\": \"9\"") != std::string::npos);
+  assert(op_text.find("\"pm_grid\": \"9x9x9\"") != std::string::npos);
   assert(op_text.find("\"pm_assignment_scheme\": \"cic\"") != std::string::npos);
   assert(op_text.find("\"softening_kernel\": \"plummer\"") != std::string::npos);
   assert(op_text.find("\"pm_fft_backend\"") != std::string::npos);
@@ -115,6 +119,7 @@ int main() {
       tsc_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
   assert(tsc_report.completed_steps == 2);
   assert(tsc_report.treepm_pm_grid == 9);
+  assert(tsc_report.treepm_pm_grid_shape == "9x9x9");
   assert(tsc_report.treepm_long_range_refresh_count == 4);
   assert(tsc_report.treepm_long_range_reuse_count == 0);
 

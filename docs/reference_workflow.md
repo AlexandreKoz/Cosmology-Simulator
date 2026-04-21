@@ -118,6 +118,7 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 `ReferenceWorkflowReport` includes PM cadence observability fields:
 
 - `treepm_pm_grid` (legacy report field: currently mirrors `treepm_pm_grid_nx` for compatibility)
+- `treepm_pm_grid_nx`, `treepm_pm_grid_ny`, `treepm_pm_grid_nz`, `treepm_pm_grid_shape`
 - `treepm_update_cadence_steps`
 - `treepm_long_range_refresh_count`
 - `treepm_long_range_reuse_count`

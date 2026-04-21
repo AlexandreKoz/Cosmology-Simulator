@@ -1,5 +1,6 @@
 #include <cassert>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -73,6 +74,10 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
 void testRoundtripMixedSpeciesSnapshot() {
   cosmosim::core::SimulationConfig config;
   config.output.run_name = "snapshot_roundtrip";
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 8.0;
+  config.cosmology.box_size_z_mpc_comoving = 6.0;
+  config.cosmology.box_size_mpc_comoving = config.cosmology.box_size_x_mpc_comoving;
 
   cosmosim::core::SimulationState state;
   fillMixedSpeciesState(state);
@@ -87,12 +92,18 @@ void testRoundtripMixedSpeciesSnapshot() {
   payload.normalized_config_text = "schema_version=1\nmode=zoom_in\n";
   payload.provenance = cosmosim::core::makeProvenanceRecord("abc123", "deadbeef", 0);
   payload.provenance.gravity_treepm_pm_grid = 9;
+  payload.provenance.gravity_treepm_pm_grid_nx = 9;
+  payload.provenance.gravity_treepm_pm_grid_ny = 7;
+  payload.provenance.gravity_treepm_pm_grid_nz = 5;
   payload.provenance.gravity_treepm_assignment_scheme = "cic";
   payload.provenance.gravity_treepm_window_deconvolution = true;
   payload.provenance.gravity_treepm_asmth_cells = 1.75;
   payload.provenance.gravity_treepm_rcut_cells = 6.0;
-  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = 1.0 / 9.0;
-  payload.provenance.gravity_treepm_split_scale_mpc_comoving = 1.75 / 9.0;
+  payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving = std::cbrt((10.0 / 9.0) * (8.0 / 7.0) * (6.0 / 5.0));
+  payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving = 10.0 / 9.0;
+  payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving = 8.0 / 7.0;
+  payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving = 6.0 / 5.0;
+  payload.provenance.gravity_treepm_split_scale_mpc_comoving = 1.75 * payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving;
   payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 6.0 / 9.0;
   payload.provenance.gravity_treepm_update_cadence_steps = 1;
   payload.provenance.gravity_softening_policy = "comoving_fixed";
@@ -105,6 +116,31 @@ void testRoundtripMixedSpeciesSnapshot() {
   policy.compression_level = 1;
   policy.chunk_particle_count = 2;
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
+
+  hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  assert(inspect_file >= 0);
+  hid_t inspect_header = H5Gopen2(inspect_file, "/Header", H5P_DEFAULT);
+  assert(inspect_header >= 0);
+  double box_x = 0.0;
+  double box_y = 0.0;
+  double box_z = 0.0;
+  hid_t attr = H5Aopen(inspect_header, "CosmoSimBoxSizeX", H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_x) >= 0);
+  H5Aclose(attr);
+  attr = H5Aopen(inspect_header, "CosmoSimBoxSizeY", H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_y) >= 0);
+  H5Aclose(attr);
+  attr = H5Aopen(inspect_header, "CosmoSimBoxSizeZ", H5P_DEFAULT);
+  assert(attr >= 0);
+  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_z) >= 0);
+  H5Aclose(attr);
+  assert(std::abs(box_x - config.cosmology.box_size_x_mpc_comoving) < 1.0e-12);
+  assert(std::abs(box_y - config.cosmology.box_size_y_mpc_comoving) < 1.0e-12);
+  assert(std::abs(box_z - config.cosmology.box_size_z_mpc_comoving) < 1.0e-12);
+  H5Gclose(inspect_header);
+  H5Fclose(inspect_file);
 
   const cosmosim::io::SnapshotReadResult roundtrip =
       cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
@@ -121,6 +157,9 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);
   assert(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
   assert(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
+  assert(roundtrip.provenance.gravity_treepm_pm_grid_nx == payload.provenance.gravity_treepm_pm_grid_nx);
+  assert(roundtrip.provenance.gravity_treepm_pm_grid_ny == payload.provenance.gravity_treepm_pm_grid_ny);
+  assert(roundtrip.provenance.gravity_treepm_pm_grid_nz == payload.provenance.gravity_treepm_pm_grid_nz);
   assert(roundtrip.provenance.gravity_treepm_assignment_scheme == payload.provenance.gravity_treepm_assignment_scheme);
   assert(
       roundtrip.provenance.gravity_treepm_window_deconvolution ==
@@ -130,6 +169,15 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(
       roundtrip.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving);
+  assert(
+      roundtrip.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving ==
+      payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving);
   assert(
       roundtrip.provenance.gravity_treepm_split_scale_mpc_comoving ==
       payload.provenance.gravity_treepm_split_scale_mpc_comoving);

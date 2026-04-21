@@ -204,6 +204,28 @@ void writeHeaderArrays(
   writeScalarDoubleAttribute(header_group, "Time", state.metadata.scale_factor);
   writeScalarDoubleAttribute(header_group, "Redshift", (1.0 / state.metadata.scale_factor) - 1.0);
   writeScalarDoubleAttribute(header_group, "BoxSize", config.cosmology.box_size_mpc_comoving);
+  writeScalarDoubleAttribute(header_group, "CosmoSimBoxSizeX", config.cosmology.box_size_x_mpc_comoving);
+  writeScalarDoubleAttribute(header_group, "CosmoSimBoxSizeY", config.cosmology.box_size_y_mpc_comoving);
+  writeScalarDoubleAttribute(header_group, "CosmoSimBoxSizeZ", config.cosmology.box_size_z_mpc_comoving);
+  {
+    const std::array<double, 3> box_size_vec = {
+        config.cosmology.box_size_x_mpc_comoving,
+        config.cosmology.box_size_y_mpc_comoving,
+        config.cosmology.box_size_z_mpc_comoving};
+    hsize_t dims[1] = {3};
+    Hdf5Handle vec_space(H5Screate_simple(1, dims, nullptr));
+    Hdf5Handle vec_attr(H5Acreate2(
+        header_group,
+        "CosmoSimBoxSizeVec",
+        H5T_IEEE_F64LE,
+        vec_space.get(),
+        H5P_DEFAULT,
+        H5P_DEFAULT));
+    if (!vec_space.valid() || !vec_attr.valid() ||
+        H5Awrite(vec_attr.get(), H5T_NATIVE_DOUBLE, box_size_vec.data()) < 0) {
+      throw std::runtime_error("failed to write axis-aware BoxSize header attributes");
+    }
+  }
   writeScalarDoubleAttribute(header_group, "Omega0", config.cosmology.omega_matter);
   writeScalarDoubleAttribute(header_group, "OmegaLambda", config.cosmology.omega_lambda);
   writeScalarDoubleAttribute(header_group, "OmegaBaryon", config.cosmology.omega_baryon);
@@ -581,6 +603,18 @@ void writeGadgetArepoSnapshotHdf5(
       provenance_group.get(),
       "gravity_treepm_pm_grid",
       static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_pm_grid, 0)));
+  writeScalarUint32Attribute(
+      provenance_group.get(),
+      "gravity_treepm_pm_grid_nx",
+      static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_pm_grid_nx, 0)));
+  writeScalarUint32Attribute(
+      provenance_group.get(),
+      "gravity_treepm_pm_grid_ny",
+      static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_pm_grid_ny, 0)));
+  writeScalarUint32Attribute(
+      provenance_group.get(),
+      "gravity_treepm_pm_grid_nz",
+      static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_pm_grid_nz, 0)));
   writeScalarStringAttribute(
       provenance_group.get(),
       "gravity_treepm_assignment_scheme",
@@ -601,6 +635,18 @@ void writeGadgetArepoSnapshotHdf5(
       provenance_group.get(),
       "gravity_treepm_mesh_spacing_mpc_comoving",
       payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_mesh_spacing_x_mpc_comoving",
+      payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_mesh_spacing_y_mpc_comoving",
+      payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_mesh_spacing_z_mpc_comoving",
+      payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving);
   writeScalarDoubleAttribute(
       provenance_group.get(),
       "gravity_treepm_split_scale_mpc_comoving",
@@ -958,6 +1004,18 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid", gravity_pm_grid)) {
       result.provenance.gravity_treepm_pm_grid = static_cast<int>(gravity_pm_grid);
     }
+    std::uint32_t gravity_pm_grid_nx = 0;
+    std::uint32_t gravity_pm_grid_ny = 0;
+    std::uint32_t gravity_pm_grid_nz = 0;
+    if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid_nx", gravity_pm_grid_nx)) {
+      result.provenance.gravity_treepm_pm_grid_nx = static_cast<int>(gravity_pm_grid_nx);
+    }
+    if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid_ny", gravity_pm_grid_ny)) {
+      result.provenance.gravity_treepm_pm_grid_ny = static_cast<int>(gravity_pm_grid_ny);
+    }
+    if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid_nz", gravity_pm_grid_nz)) {
+      result.provenance.gravity_treepm_pm_grid_nz = static_cast<int>(gravity_pm_grid_nz);
+    }
     readScalarStringAttribute(
         provenance_group.get(),
         "gravity_treepm_assignment_scheme",
@@ -980,6 +1038,18 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         provenance_group.get(),
         "gravity_treepm_mesh_spacing_mpc_comoving",
         result.provenance.gravity_treepm_mesh_spacing_mpc_comoving));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_mesh_spacing_x_mpc_comoving",
+        result.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_mesh_spacing_y_mpc_comoving",
+        result.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_mesh_spacing_z_mpc_comoving",
+        result.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving));
     static_cast<void>(readScalarDoubleAttribute(
         provenance_group.get(),
         "gravity_treepm_split_scale_mpc_comoving",
@@ -1009,6 +1079,20 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         provenance_group.get(),
         "gravity_pm_fft_backend",
         result.provenance.gravity_pm_fft_backend);
+    if (result.provenance.gravity_treepm_pm_grid_nx == 0 && result.provenance.gravity_treepm_pm_grid > 0) {
+      result.provenance.gravity_treepm_pm_grid_nx = result.provenance.gravity_treepm_pm_grid;
+      result.provenance.gravity_treepm_pm_grid_ny = result.provenance.gravity_treepm_pm_grid;
+      result.provenance.gravity_treepm_pm_grid_nz = result.provenance.gravity_treepm_pm_grid;
+    }
+    if (result.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving == 0.0 &&
+        result.provenance.gravity_treepm_mesh_spacing_mpc_comoving > 0.0) {
+      result.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving =
+          result.provenance.gravity_treepm_mesh_spacing_mpc_comoving;
+      result.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving =
+          result.provenance.gravity_treepm_mesh_spacing_mpc_comoving;
+      result.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving =
+          result.provenance.gravity_treepm_mesh_spacing_mpc_comoving;
+    }
   }
 
   result.report.chunk_particle_count = 0;

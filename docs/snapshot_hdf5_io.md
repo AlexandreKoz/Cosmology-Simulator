@@ -15,19 +15,19 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
   - `/PartType0..5` with optional `/ParticleType0..5` aliases
 - Header group `/Header` stores canonical GADGET/AREPO attributes, including:
   - `NumPart_ThisFile`, `NumPart_Total`, `NumPart_Total_HighWord`, `MassTable`
-  - `Time`, `Redshift`, `BoxSize`, `Omega0`, `OmegaLambda`, `OmegaBaryon`, `HubbleParam`
+  - `Time`, `Redshift`, `BoxSize` (legacy scalar alias), `CosmoSimBoxSizeX`, `CosmoSimBoxSizeY`, `CosmoSimBoxSizeZ`, `CosmoSimBoxSizeVec`, `Omega0`, `OmegaLambda`, `OmegaBaryon`, `HubbleParam`
 - Snapshot schema metadata:
   - `CosmoSimSchemaName="gadget_arepo_v2"`
-  - `CosmoSimSchemaVersion=2`
+  - `CosmoSimSchemaVersion=4`
 - Config metadata group:
   - `/Config` attribute `normalized` containing normalized text config dump
 - Provenance metadata group:
   - `/Provenance` attributes for compiler/build/git/config hash/timestamp/hardware
   - gravity reproducibility attributes:
-    - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
+    - controls: `gravity_treepm_pm_grid`, `gravity_treepm_pm_grid_nx`, `gravity_treepm_pm_grid_ny`, `gravity_treepm_pm_grid_nz`, `gravity_treepm_assignment_scheme`,
       `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,
       `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`
-    - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving`,
+    - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving`, `gravity_treepm_mesh_spacing_x_mpc_comoving`, `gravity_treepm_mesh_spacing_y_mpc_comoving`, `gravity_treepm_mesh_spacing_z_mpc_comoving`,
       `gravity_treepm_split_scale_mpc_comoving`, `gravity_treepm_cutoff_radius_mpc_comoving`
     - softening/backend: `gravity_softening_policy`, `gravity_softening_kernel`,
       `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`
