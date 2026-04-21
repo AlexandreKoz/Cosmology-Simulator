@@ -664,6 +664,12 @@ if(COSMOSIM_ENABLE_TESTS)
       PROPERTIES LABELS "validation;gravity;mpi")
   endif()
 
+  add_executable(test_validation_phase3_power_spectrum tests/validation/test_validation_phase3_power_spectrum.cpp)
+  target_link_libraries(test_validation_phase3_power_spectrum PRIVATE cosmosim_all)
+  target_compile_definitions(test_validation_phase3_power_spectrum PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  add_test(NAME validation_phase3_power_spectrum COMMAND test_validation_phase3_power_spectrum)
+  set_tests_properties(validation_phase3_power_spectrum PROPERTIES LABELS "validation;gravity;analysis")
+
 
   get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
   foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)

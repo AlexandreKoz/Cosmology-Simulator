@@ -1,6 +1,7 @@
 {
   "classification": "performance_evidence_only",
   "note": "np1/np2 baseline only; not full strong/weak scaling certification",
+  "baseline_complete": false,
   "entries": [
     {
       "world_size": "1",
@@ -13,6 +14,10 @@
       "artifact": "validation/artifacts/pm_only_scaling_np1.csv"
     },
     {
+      "artifact": "validation/artifacts/pm_only_scaling_np2.csv",
+      "status": "missing_artifact"
+    },
+    {
       "world_size": "1",
       "particle_count": "140000",
       "active_count_total": "140000",
@@ -21,6 +26,10 @@
       "local_active_min": "140000",
       "local_active_max": "140000",
       "artifact": "validation/artifacts/tree_only_scaling_np1.csv"
+    },
+    {
+      "artifact": "validation/artifacts/tree_only_scaling_np2.csv",
+      "status": "missing_artifact"
     }
   ]
 }

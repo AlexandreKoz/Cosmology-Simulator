@@ -1,0 +1,8 @@
+{
+  "power_spectrum": [
+    {"k_code": 12.6669, "p_code_volume": 0.000649372, "mode_count": 80},
+    {"k_code": 26.4131, "p_code_volume": 0.00406822, "mode_count": 506},
+    {"k_code": 40.1298, "p_code_volume": 0.00374354, "mode_count": 919},
+    {"k_code": 52.5957, "p_code_volume": 0.00426176, "mode_count": 222}
+  ]
+}

@@ -177,4 +177,4 @@ For Phase 3 gravity maturity evidence generation and separation of correctness/f
 - Campaign command bundle: `docs/validation_phase3_campaign.md`
 - Provenance collector: `scripts/validation/collect_phase3_evidence.py`
 
-The campaign requires explicit cosmological and zoom runtime runs plus force/time-integration/scaling artifacts. Existing `np1/np2` scaling outputs remain baseline performance evidence only and are not standalone certification.
+The campaign requires explicit cosmological and zoom runtime runs plus force/time-integration/scaling artifacts. When runtime-heavy cosmological diagnostics are unavailable in the current environment, `validation_phase3_power_spectrum` generates a deterministic checked-in mesh-consistency floor for the power-spectrum observable; that fallback is evidence of estimator coherence only, not a replacement for the full cosmological runtime lane. Existing `np1/np2` scaling outputs remain baseline performance evidence only and are not standalone certification.
