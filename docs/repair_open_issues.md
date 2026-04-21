@@ -22,7 +22,7 @@ Environment blockers currently observed in this validation environment:
 Deferred to Phase 3 follow-up after axis-aware geometry repair:
 
 - Full 2D pencil decomposition beyond FFTW transposed ownership remains open. Current `pencil` mode is now an end-to-end transposed PM path with explicit ownership contracts, but wider process-grid scaling and non-FFTW backend parity remain follow-up scope.
-- Isolated/non-periodic PM is now implemented for the single-rank path; distributed isolated/open PM remains intentionally blocked until a multi-rank open-boundary strategy exists.
+- Isolated/non-periodic PM now has a distributed correctness-first lane via replicated gathered open solves; scalable distributed isolated PM remains open.
 - CUDA PM CIC deposition/interpolation now accepts axis-aware periodic box lengths; isolated/open CUDA PM remains unsupported and fails fast.
 
 No new in-tree CPU-path code blocker was observed on the repaired PM unit/integration single-rank checks.
@@ -83,7 +83,7 @@ Additional validation limitation for this pass:
 - `integration_core_dependency_direction` target-link guard now consumes CMake Graphviz output from the configured build tree, which is materially stronger than top-level text scanning; however, it still relies on target-name pattern matching (`cosmosim_(analysis|io|physics|workflows|app)`) rather than full semantic layer tags. If naming conventions change, this check must be updated in lockstep.
 - Infrastructure gate test scopes are now manifest-driven and converted into a ctest regex at runtime. This removes inline script fragility but still depends on stable test identifiers.
 
-- Isolated/open PM remains single-rank in this stage; distributed isolated PM (MPI slabs) is intentionally blocked with runtime errors until a distributed open-boundary PM strategy is implemented.
+- Distributed isolated PM is no longer hard-blocked, but the current MPI lane is a replicated gathered open solve and therefore not yet a large-rank maturity endpoint.
 
 - Tree softening maturity limitations after stage 2026-04-20:
   - Node-level accepted multipoles currently use `epsilon_node_max` as a conservative aggregate for mixed-source nodes; this favors safety/coherence over minimum-bias accuracy for strongly heterogeneous softening distributions.
@@ -93,7 +93,7 @@ Additional validation limitation for this pass:
 
 | ID | Status | Area | Current limitation | Next-step evidence target |
 |---|---|---|---|---|
-| P30-CLUSTERED-LOAD-MATURITY-025 | Open | Distributed gravity clustered-load maturity | Current deterministic contiguous SFC cuts reduce clustered overshoot but remain one-dimensional; extreme multi-cluster anisotropy can still create per-rank remote short-range pressure skew even when weighted load appears balanced. | Add clustered MPI scaling sweeps (2/3/4+ ranks) that jointly track weighted-load imbalance and remote request packet imbalance against acceptance thresholds in `bench_tree_only_scaling_mpi` + `bench_tree_pm_coupling`. |
+| P30-CLUSTERED-LOAD-MATURITY-025 | Open | Distributed gravity clustered-load maturity | Gravity-aware decomposition now includes a local clustered-neighbor pressure proxy, but extreme multi-cluster anisotropy still needs MPI evidence beyond heuristic weighting. | Add clustered MPI scaling sweeps (2/3/4+ ranks) that jointly track weighted-load imbalance and remote request packet imbalance against acceptance thresholds in `bench_tree_only_scaling_mpi` + `bench_tree_pm_coupling`. |
 
 
 ## 2026-04-20: Remaining Phase 3 campaign blockers

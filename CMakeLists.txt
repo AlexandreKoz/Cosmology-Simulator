@@ -821,6 +821,18 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
       DEPENDS bench_pm_only_scaling_mpi bench_tree_only_scaling_mpi
       WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
+    add_custom_target(generate_mpi_gravity_scaling_artifacts_extended
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 8 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_pm_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 8 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:bench_tree_only_scaling_mpi> ${MPIEXEC_POSTFLAGS}
+      DEPENDS bench_pm_only_scaling_mpi bench_tree_only_scaling_mpi
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
   endif()
 
   add_executable(bench_amr_regrid_sync bench/bench_amr_regrid_sync.cpp)

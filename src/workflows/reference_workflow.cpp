@@ -321,6 +321,27 @@ void applyInitialGravityAwareDecomposition(
         state.particles.position_z_comoving[particle_index]);
     ++occupancy[cell];
   }
+  const auto clustered_neighbor_pressure = [&](std::size_t flat_index) {
+    const std::size_t ix = flat_index / (k_density_grid * k_density_grid);
+    const std::size_t rem = flat_index % (k_density_grid * k_density_grid);
+    const std::size_t iy = rem / k_density_grid;
+    const std::size_t iz = rem % k_density_grid;
+    std::uint64_t pressure = 0;
+    for (int dx = -1; dx <= 1; ++dx) {
+      const std::size_t nix = static_cast<std::size_t>((static_cast<int>(ix) + dx + static_cast<int>(k_density_grid)) % static_cast<int>(k_density_grid));
+      for (int dy = -1; dy <= 1; ++dy) {
+        const std::size_t niy = static_cast<std::size_t>((static_cast<int>(iy) + dy + static_cast<int>(k_density_grid)) % static_cast<int>(k_density_grid));
+        for (int dz = -1; dz <= 1; ++dz) {
+          const std::size_t niz = static_cast<std::size_t>((static_cast<int>(iz) + dz + static_cast<int>(k_density_grid)) % static_cast<int>(k_density_grid));
+          pressure += occupancy[(nix * k_density_grid + niy) * k_density_grid + niz];
+        }
+      }
+    }
+    if (pressure < occupancy[flat_index]) {
+      return static_cast<std::uint64_t>(occupancy[flat_index]);
+    }
+    return static_cast<std::uint64_t>(pressure - occupancy[flat_index]);
+  };
   std::vector<parallel::DecompositionItem> items;
   items.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
@@ -332,9 +353,10 @@ void applyInitialGravityAwareDecomposition(
     item.z_comov = state.particles.position_z_comoving[particle_index];
     const std::size_t density_cell = density_cell_index(item.x_comov, item.y_comov, item.z_comov);
     const std::uint32_t local_density = occupancy[density_cell];
+    const std::uint64_t remote_pressure = clustered_neighbor_pressure(density_cell);
     item.active_target_count_recent = local_density;
-    item.remote_tree_interactions_recent = 0;
-    item.work_units = 1.0 + static_cast<double>(local_density);
+    item.remote_tree_interactions_recent = remote_pressure;
+    item.work_units = 1.0 + static_cast<double>(local_density) + 0.25 * static_cast<double>(remote_pressure);
     item.memory_bytes = sizeof(double) * 7 + sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t) * 3;
     items.push_back(item);
   }
@@ -348,7 +370,7 @@ void applyInitialGravityAwareDecomposition(
   decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
   decomposition_config.owned_particle_weight = 1.0;
   decomposition_config.active_target_weight = 2.0;
-  decomposition_config.remote_tree_interaction_weight = 0.0;
+  decomposition_config.remote_tree_interaction_weight = 1.0;
   decomposition_config.work_weight = 0.5;
   decomposition_config.memory_weight = 0.1;
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
@@ -433,7 +455,13 @@ void seedParticleOwnershipFromPmSlabs(
       pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
   record.gravity_treepm_tree_exchange_batch_bytes =
       config.numerics.treepm_tree_exchange_batch_bytes;
-  record.gravity_softening_policy = "comoving_fixed";
+  const bool species_softening_enabled =
+      config.numerics.gravity_softening_dm_kpc_comoving != config.numerics.gravity_softening_kpc_comoving ||
+      config.numerics.gravity_softening_gas_kpc_comoving != config.numerics.gravity_softening_kpc_comoving ||
+      config.numerics.gravity_softening_star_kpc_comoving != config.numerics.gravity_softening_kpc_comoving ||
+      config.numerics.gravity_softening_bh_kpc_comoving != config.numerics.gravity_softening_kpc_comoving ||
+      config.numerics.gravity_softening_tracer_kpc_comoving != config.numerics.gravity_softening_kpc_comoving;
+  record.gravity_softening_policy = species_softening_enabled ? "comoving_per_species_with_optional_particle_override" : "comoving_fixed";
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;
   record.gravity_pm_fft_backend = gravity::PmSolver::fftBackendName();
@@ -773,10 +801,7 @@ class DriftCallback final : public core::IntegrationCallback {
         : 1.0;
     parallel::MpiContext mpi_context;
     const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
-    for (const std::uint32_t particle_index : context.active_set.particle_indices) {
-      if (particle_index >= context.state.particles.size()) {
-        throw std::out_of_range("drift callback active particle index out of range");
-      }
+    for (std::uint32_t particle_index = 0; particle_index < context.state.particles.size(); ++particle_index) {
       if (particle_index >= context.state.particle_sidecar.owning_rank.size()) {
         throw std::out_of_range("drift callback owning-rank sidecar index out of range");
       }
@@ -868,12 +893,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
             core::GravityBoundaryModel::kPeriodicPoisson
         ? gravity::PmBoundaryCondition::kPeriodic
         : gravity::PmBoundaryCondition::kIsolatedOpen;
-    if (m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kIsolatedOpen &&
-        config.parallel.mpi_ranks_expected != 1) {
-      throw std::runtime_error(
-          "isolated PM gravity currently requires parallel.mpi_ranks_expected=1");
-    }
-
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
     m_runtime_topology = parallel::buildDistributedExecutionTopology(
@@ -1074,6 +1093,19 @@ class GravityStageCallback final : public core::IntegrationCallback {
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
 
+    gravity::TreeSofteningView softening_view{
+        .source_species_tag = m_local_source_species_tag,
+        .target_species_tag = m_active_target_species_tag,
+        .source_particle_epsilon_comoving = m_local_source_softening,
+        .target_particle_epsilon_comoving = m_active_target_softening,
+        .species_policy = {.epsilon_comoving_by_species = {
+            m_config.numerics.gravity_softening_dm_kpc_comoving * 1.0e-3,
+            m_config.numerics.gravity_softening_gas_kpc_comoving * 1.0e-3,
+            m_config.numerics.gravity_softening_star_kpc_comoving * 1.0e-3,
+            m_config.numerics.gravity_softening_bh_kpc_comoving * 1.0e-3,
+            m_config.numerics.gravity_softening_tracer_kpc_comoving * 1.0e-3},
+            .enabled = true},
+    };
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         m_local_source_x,
         m_local_source_y,
@@ -1084,7 +1116,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         decision.refresh_long_range_field,
         nullptr,
         &m_last_tree_pm_diagnostics,
-        {});
+        softening_view);
 
     const bool allow_heavy_reference_checks =
         m_config.analysis.diagnostics_execution_policy ==
@@ -1124,6 +1156,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
         .refreshed_long_range_field = decision.refresh_long_range_field,
     });
     if (context.profiler_session != nullptr) {
+      const bool species_softening_enabled =
+          m_config.numerics.gravity_softening_dm_kpc_comoving != m_config.numerics.gravity_softening_kpc_comoving ||
+          m_config.numerics.gravity_softening_gas_kpc_comoving != m_config.numerics.gravity_softening_kpc_comoving ||
+          m_config.numerics.gravity_softening_star_kpc_comoving != m_config.numerics.gravity_softening_kpc_comoving ||
+          m_config.numerics.gravity_softening_bh_kpc_comoving != m_config.numerics.gravity_softening_kpc_comoving ||
+          m_config.numerics.gravity_softening_tracer_kpc_comoving != m_config.numerics.gravity_softening_kpc_comoving;
       context.profiler_session->recordEvent(core::RuntimeEvent{
           .event_kind = "gravity.pm_long_range_field",
           .severity = core::RuntimeEventSeverity::kInfo,
@@ -1152,7 +1190,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"mesh_spacing_z_mpc_comoving", std::to_string(m_mesh_spacing_z_mpc_comoving)},
                       {"split_scale_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.split_scale_comoving)},
                       {"cutoff_radius_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
-                      {"softening_policy", "comoving_fixed"},
+                      {"softening_policy", species_softening_enabled ? "comoving_per_species_with_optional_particle_override" : "comoving_fixed"},
                       {"softening_kernel", "plummer"},
                       {"softening_epsilon_kpc_comoving", std::to_string(m_config.numerics.gravity_softening_kpc_comoving)},
                       {"pm_fft_backend", m_pm_backend},
@@ -1393,6 +1431,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_local_source_y.clear();
     m_local_source_z.clear();
     m_local_source_mass.clear();
+    m_local_source_species_tag.clear();
+    m_local_source_softening.clear();
     m_local_to_global.clear();
     for (std::size_t global_index = 0; global_index < particle_count; ++global_index) {
       if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
@@ -1404,9 +1444,18 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_local_source_y.push_back(state.particles.position_y_comoving[global_index]);
       m_local_source_z.push_back(state.particles.position_z_comoving[global_index]);
       m_local_source_mass.push_back(state.particles.mass_code[global_index]);
+      m_local_source_species_tag.push_back(state.particle_sidecar.species_tag[global_index]);
+      if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+        m_local_source_softening.push_back(state.particle_sidecar.gravity_softening_comoving[global_index]);
+      }
+    }
+    if (state.particle_sidecar.gravity_softening_comoving.empty()) {
+      m_local_source_softening.clear();
     }
 
     m_local_active_indices.clear();
+    m_active_target_species_tag.clear();
+    m_active_target_softening.clear();
     m_local_active_global_indices.clear();
     for (const std::uint32_t global_index : active_particles) {
       if (global_index >= particle_count) {
@@ -1418,6 +1467,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
       }
       m_local_active_indices.push_back(static_cast<std::uint32_t>(local_index));
       m_local_active_global_indices.push_back(global_index);
+      m_active_target_species_tag.push_back(state.particle_sidecar.species_tag[global_index]);
+      if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+        m_active_target_softening.push_back(state.particle_sidecar.gravity_softening_comoving[global_index]);
+      }
+    }
+    if (state.particle_sidecar.gravity_softening_comoving.empty()) {
+      m_active_target_softening.clear();
     }
   }
 
@@ -1445,6 +1501,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_local_source_y;
   std::vector<double> m_local_source_z;
   std::vector<double> m_local_source_mass;
+  std::vector<std::uint32_t> m_local_source_species_tag;
+  std::vector<double> m_local_source_softening;
+  std::vector<std::uint32_t> m_active_target_species_tag;
+  std::vector<double> m_active_target_softening;
   std::vector<std::uint8_t> m_source_is_high_res;
   std::vector<std::uint8_t> m_active_is_high_res;
   std::vector<std::uint32_t> m_local_to_global;

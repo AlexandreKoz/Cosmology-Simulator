@@ -77,7 +77,7 @@ The concrete run directory is:
 - `zoom_contamination_radius` (comoving Mpc; defaults to `zoom_region_radius` when `<=0`)
 - `hydro_boundary` (`auto`, `periodic`, `open`, `reflective`)
 - `gravity_boundary` (`auto`, `periodic`, `isolated_monopole`)
-  - `isolated_monopole` now activates non-periodic/open PM long-range gravity; current implementation requires `parallel.mpi_ranks_expected = 1` and fails fast otherwise.
+  - `isolated_monopole` now activates non-periodic/open PM long-range gravity; MPI slab runs use a replicated full-mesh open solve in this stage, so correctness is available before scalable distributed isolated PM optimization.
 
 ## `[cosmology]`
 
@@ -93,6 +93,12 @@ The concrete run directory is:
 - `time_begin_code`, `time_end_code`
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
 - `gravity_softening` / `gravity_softening_kpc_comoving`
+- optional species overrides (fall back to `gravity_softening` when omitted):
+  - `gravity_softening_dm`
+  - `gravity_softening_gas`
+  - `gravity_softening_star`
+  - `gravity_softening_bh`
+  - `gravity_softening_tracer`
 - `gravity_solver`, `hydro_solver`
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):
   - canonical axis-aware PM grid:

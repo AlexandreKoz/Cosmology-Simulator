@@ -106,6 +106,11 @@ struct NumericsConfig {
   int hierarchical_max_rung = 12;
   int amr_max_level = 10;
   double gravity_softening_kpc_comoving = 1.0;
+  double gravity_softening_dm_kpc_comoving = -1.0;
+  double gravity_softening_gas_kpc_comoving = -1.0;
+  double gravity_softening_star_kpc_comoving = -1.0;
+  double gravity_softening_bh_kpc_comoving = -1.0;
+  double gravity_softening_tracer_kpc_comoving = -1.0;
   GravitySolver gravity_solver = GravitySolver::kTreePm;
   HydroSolver hydro_solver = HydroSolver::kGodunovFv;
   int treepm_pm_grid_nx = 16;

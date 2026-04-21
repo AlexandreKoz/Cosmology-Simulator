@@ -25,6 +25,7 @@ struct TreeSofteningSpeciesPolicy {
 
 struct TreeSofteningView {
   std::span<const std::uint32_t> source_species_tag{};
+  std::span<const std::uint32_t> target_species_tag{};
   std::span<const double> source_particle_epsilon_comoving{};
   std::span<const double> target_particle_epsilon_comoving{};
   TreeSofteningSpeciesPolicy species_policy{};
@@ -52,6 +53,12 @@ struct TreeSofteningView {
     const TreeSofteningView& view) {
   if (!view.target_particle_epsilon_comoving.empty()) {
     return view.target_particle_epsilon_comoving[target_active_slot];
+  }
+  if (view.species_policy.enabled && !view.target_species_tag.empty()) {
+    const std::size_t species = static_cast<std::size_t>(view.target_species_tag[target_active_slot]);
+    if (species < view.species_policy.epsilon_comoving_by_species.size()) {
+      return view.species_policy.epsilon_comoving_by_species[species];
+    }
   }
   return fallback.epsilon_comoving;
 }

@@ -15,6 +15,7 @@ When the full runtime-heavy cosmological diagnostics lane is not available in th
 Authoritative machine-readable contracts:
 
 - `validation/campaign/phase3_gravity_observables.json`
+- `validation/reference/phase3/external_calibration_manifest.json`
 
 Each observable defines:
 
@@ -57,7 +58,10 @@ ctest --test-dir build/cpu-only-debug -R validation_phase3_power_spectrum --outp
 
 ```bash
 cmake --build --preset build-mpi-hdf5-fftw-debug --target generate_mpi_gravity_scaling_artifacts
+cmake --build --preset build-mpi-hdf5-fftw-debug --target generate_mpi_gravity_scaling_artifacts_extended
 ```
+
+The extended target is an execution scaffold for `np={1,2,4,8}` when the runner supports those ranks. Its presence is not itself a certification claim.
 
 ### Provenance-rich manifest and evidence summary
 

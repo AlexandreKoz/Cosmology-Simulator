@@ -527,6 +527,11 @@ struct ConfigKeySpec {
       {"numerics.hierarchical_max_rung", "12"},
       {"numerics.amr_max_level", "10"},
       {"numerics.gravity_softening", "1.0 kpc"},
+      {"numerics.gravity_softening_dm", ""},
+      {"numerics.gravity_softening_gas", ""},
+      {"numerics.gravity_softening_star", ""},
+      {"numerics.gravity_softening_bh", ""},
+      {"numerics.gravity_softening_tracer", ""},
       {"numerics.gravity_solver", "treepm"},
       {"numerics.hydro_solver", "godunov_fv"},
       {"numerics.treepm_pm_grid_nx", "16"},
@@ -834,6 +839,11 @@ void validateConfig(const SimulationConfig& config) {
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
+  stream << "gravity_softening_dm = " << frozen.config.numerics.gravity_softening_dm_kpc_comoving << " kpc\n";
+  stream << "gravity_softening_gas = " << frozen.config.numerics.gravity_softening_gas_kpc_comoving << " kpc\n";
+  stream << "gravity_softening_star = " << frozen.config.numerics.gravity_softening_star_kpc_comoving << " kpc\n";
+  stream << "gravity_softening_bh = " << frozen.config.numerics.gravity_softening_bh_kpc_comoving << " kpc\n";
+  stream << "gravity_softening_tracer = " << frozen.config.numerics.gravity_softening_tracer_kpc_comoving << " kpc\n";
   stream << "gravity_solver = " << gravitySolverToString(frozen.config.numerics.gravity_solver) << '\n';
   stream << "hydro_solver = " << hydroSolverToString(frozen.config.numerics.hydro_solver) << '\n';
   stream << "treepm_pm_grid_nx = " << frozen.config.numerics.treepm_pm_grid_nx << '\n';
@@ -1108,6 +1118,24 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "numerics.gravity_softening", "1.0 kpc"),
       frozen.config.units.length_unit,
       "numerics.gravity_softening");
+  const auto parseOptionalSpeciesSoftening = [&](std::string_view key, double fallback_kpc) {
+    auto it = entries.find(std::string(key));
+    if (it == entries.end() || trim(it->second.value).empty()) {
+      return fallback_kpc;
+    }
+    consumed.insert(std::string(key));
+    return parseLengthKpc(it->second.value, frozen.config.units.length_unit, std::string(key));
+  };
+  frozen.config.numerics.gravity_softening_dm_kpc_comoving =
+      parseOptionalSpeciesSoftening("numerics.gravity_softening_dm", frozen.config.numerics.gravity_softening_kpc_comoving);
+  frozen.config.numerics.gravity_softening_gas_kpc_comoving =
+      parseOptionalSpeciesSoftening("numerics.gravity_softening_gas", frozen.config.numerics.gravity_softening_kpc_comoving);
+  frozen.config.numerics.gravity_softening_star_kpc_comoving =
+      parseOptionalSpeciesSoftening("numerics.gravity_softening_star", frozen.config.numerics.gravity_softening_kpc_comoving);
+  frozen.config.numerics.gravity_softening_bh_kpc_comoving =
+      parseOptionalSpeciesSoftening("numerics.gravity_softening_bh", frozen.config.numerics.gravity_softening_kpc_comoving);
+  frozen.config.numerics.gravity_softening_tracer_kpc_comoving =
+      parseOptionalSpeciesSoftening("numerics.gravity_softening_tracer", frozen.config.numerics.gravity_softening_kpc_comoving);
   frozen.config.numerics.gravity_solver = parseGravitySolver(
       requireString(entries, consumed, "numerics.gravity_solver", defaultFor("numerics.gravity_solver")));
   frozen.config.numerics.hydro_solver = parseHydroSolver(

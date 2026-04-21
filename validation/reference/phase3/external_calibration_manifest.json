@@ -1,0 +1,30 @@
+{
+  "campaign": "phase3_external_science_calibration_contract",
+  "status": "contract_only",
+  "forbidden_claim": "No external science agreement claim may be made until comparison artifacts are generated.",
+  "targets": [
+    {
+      "observable": "matter_power_spectrum",
+      "comparison_class": "cosmological_pk",
+      "reference_expectation": "named literature-facing or cross-code comparison artifact",
+      "required_artifacts": [
+        "config and build provenance",
+        "measured P(k)",
+        "reference P(k)",
+        "binning/window conventions",
+        "relative error envelope"
+      ]
+    },
+    {
+      "observable": "halo_force_profile",
+      "comparison_class": "halo_structure",
+      "reference_expectation": "named reference halo profile or cross-code matched setup",
+      "required_artifacts": [
+        "halo selection contract",
+        "softening and force-law metadata",
+        "radial force/potential profiles",
+        "error envelope"
+      ]
+    }
+  ]
+}

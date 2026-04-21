@@ -151,6 +151,72 @@ struct BoxLengths {
   return BoxLengths{.lx = lx, .ly = ly, .lz = lz};
 }
 
+[[nodiscard]] std::size_t globalLinearIndex(const PmGridShape& shape, std::size_t ix, std::size_t iy, std::size_t iz) {
+  return (ix * shape.ny + iy) * shape.nz + iz;
+}
+
+void copyGlobalFieldToLocalSlab(
+    std::span<const double> global_field,
+    const parallel::PmSlabLayout& layout,
+    std::span<double> local_field) {
+  const std::size_t expected_local_size = layout.localCellCount();
+  if (local_field.size() != expected_local_size) {
+    throw std::invalid_argument("local PM slab field size mismatch in copyGlobalFieldToLocalSlab");
+  }
+  const std::size_t expected_global_size = layout.global_nx * layout.global_ny * layout.global_nz;
+  if (global_field.size() != expected_global_size) {
+    throw std::invalid_argument("global PM field size mismatch in copyGlobalFieldToLocalSlab");
+  }
+
+  for (std::size_t local_x = 0; local_x < layout.local_nx(); ++local_x) {
+    const std::size_t global_x = layout.globalXFromLocal(local_x);
+    for (std::size_t iy = 0; iy < layout.global_ny; ++iy) {
+      for (std::size_t iz = 0; iz < layout.global_nz; ++iz) {
+        const std::size_t local_index = (local_x * layout.global_ny + iy) * layout.global_nz + iz;
+        local_field[local_index] = global_field[(global_x * layout.global_ny + iy) * layout.global_nz + iz];
+      }
+    }
+  }
+}
+
+#if COSMOSIM_ENABLE_MPI
+[[nodiscard]] std::vector<double> gatherDistributedSlabField(
+    std::span<const double> local_field,
+    const parallel::PmSlabLayout& layout) {
+  const std::size_t global_size = layout.global_nx * layout.global_ny * layout.global_nz;
+  std::vector<double> gathered(global_size, 0.0);
+
+  std::vector<int> recv_counts(static_cast<std::size_t>(layout.world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(layout.world_size), 0);
+  std::size_t displacement = 0;
+  for (int rank = 0; rank < layout.world_size; ++rank) {
+    const auto owned = parallel::pmOwnedXRangeForRank(layout.global_nx, layout.world_size, rank);
+    const std::size_t slab_count = owned.extentX() * layout.global_ny * layout.global_nz;
+    if (slab_count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument("gatherDistributedSlabField slab count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(slab_count);
+    recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(displacement);
+    displacement += slab_count;
+  }
+
+  if (local_field.size() != layout.localCellCount()) {
+    throw std::invalid_argument("gatherDistributedSlabField local slab size mismatch");
+  }
+
+  MPI_Allgatherv(
+      local_field.data(),
+      static_cast<int>(local_field.size()),
+      MPI_DOUBLE,
+      gathered.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_DOUBLE,
+      MPI_COMM_WORLD);
+  return gathered;
+}
+#endif
+
 void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (!shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be non-zero in all dimensions");
@@ -1015,21 +1081,37 @@ void PmSolver::assignDensity(
     std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, ix);
         auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmDensityContributionRecord{
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -1332,9 +1414,40 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
   }
-  if (!grid.slabLayout().isValid() || !grid.ownsFullDomain() || grid.slabLayout().world_size != 1) {
-    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen currently requires single-rank full-domain ownership");
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen requires a valid PM slab layout");
   }
+
+  const bool distributed_slabs = grid.slabLayout().world_size > 1;
+#if !COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    throw std::invalid_argument(
+        "PmSolver::solvePoissonIsolatedOpen distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
+#else
+  if (distributed_slabs) {
+    int mpi_world_size = 1;
+    int mpi_world_rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
+      throw std::invalid_argument(
+          "PmSolver::solvePoissonIsolatedOpen slab layout world metadata must match MPI_COMM_WORLD");
+    }
+  } else {
+    validateSingleRankFullDomainGridContract(grid, "PmSolver::solvePoissonIsolatedOpen");
+  }
+#endif
+
+  const std::size_t global_cell_count = m_shape.cellCount();
+  std::vector<double> global_density_storage;
+  std::span<const double> density_field = grid.density();
+#if COSMOSIM_ENABLE_MPI
+  if (distributed_slabs) {
+    global_density_storage = gatherDistributedSlabField(grid.density(), grid.slabLayout());
+    density_field = global_density_storage;
+  }
+#endif
 
   const BoxLengths lengths = effectiveBoxLengths(options);
   const double dx = lengths.lx / static_cast<double>(m_shape.nx);
@@ -1356,9 +1469,9 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t src = grid.linearIndex(ix, iy, iz);
+        const std::size_t src = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
         const std::size_t dst = (ix * pad_ny + iy) * pad_nz + iz;
-        ws.rho_k[dst] = {grid.density()[src], 0.0};
+        ws.rho_k[dst] = {density_field[src], 0.0};
       }
     }
   }
@@ -1409,70 +1522,99 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
 
   const double cell_volume = dx * dy * dz;
   const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
+  std::vector<double> full_potential;
+  std::vector<double> full_force_x;
+  std::vector<double> full_force_y;
+  std::vector<double> full_force_z;
+  std::span<double> potential_field = grid.potential();
+  std::span<double> force_x_field = grid.force_x();
+  std::span<double> force_y_field = grid.force_y();
+  std::span<double> force_z_field = grid.force_z();
+  if (distributed_slabs) {
+    full_potential.assign(global_cell_count, 0.0);
+    full_force_x.assign(global_cell_count, 0.0);
+    full_force_y.assign(global_cell_count, 0.0);
+    full_force_z.assign(global_cell_count, 0.0);
+    potential_field = full_potential;
+    force_x_field = full_force_x;
+    force_y_field = full_force_y;
+    force_z_field = full_force_z;
+  }
   for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t physical_index = grid.linearIndex(ix, iy, iz);
+        const std::size_t physical_index = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
         const std::size_t padded_index = (ix * pad_ny + iy) * pad_nz + iz;
         double value = ws.rho_k[padded_index].real();
 #if COSMOSIM_ENABLE_FFTW
         value /= static_cast<double>(pad_total);
 #endif
-        grid.potential()[physical_index] = prefactor * value;
+        potential_field[physical_index] = prefactor * value;
       }
     }
   }
 
+  const auto fieldPotential = [&](std::size_t ix, std::size_t iy, std::size_t iz) -> double {
+    return potential_field[distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz)];
+  };
+
   for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-        const std::size_t center = grid.linearIndex(ix, iy, iz);
+        const std::size_t center = distributed_slabs ? globalLinearIndex(m_shape, ix, iy, iz) : grid.linearIndex(ix, iy, iz);
         const auto grad_x = [&]() {
           if (ix == 0) {
-            return (-3.0 * grid.potential()[grid.linearIndex(0, iy, iz)] +
-                    4.0 * grid.potential()[grid.linearIndex(1, iy, iz)] -
-                    grid.potential()[grid.linearIndex(2, iy, iz)]) / (2.0 * dx);
+            return (-3.0 * fieldPotential(0, iy, iz) +
+                    4.0 * fieldPotential(1, iy, iz) -
+                    fieldPotential(2, iy, iz)) / (2.0 * dx);
           }
           if (ix + 1U == m_shape.nx) {
-            return (3.0 * grid.potential()[grid.linearIndex(m_shape.nx - 1U, iy, iz)] -
-                    4.0 * grid.potential()[grid.linearIndex(m_shape.nx - 2U, iy, iz)] +
-                    grid.potential()[grid.linearIndex(m_shape.nx - 3U, iy, iz)]) / (2.0 * dx);
+            return (3.0 * fieldPotential(m_shape.nx - 1U, iy, iz) -
+                    4.0 * fieldPotential(m_shape.nx - 2U, iy, iz) +
+                    fieldPotential(m_shape.nx - 3U, iy, iz)) / (2.0 * dx);
           }
-          return (grid.potential()[grid.linearIndex(ix + 1U, iy, iz)] -
-                  grid.potential()[grid.linearIndex(ix - 1U, iy, iz)]) / (2.0 * dx);
+          return (fieldPotential(ix + 1U, iy, iz) - fieldPotential(ix - 1U, iy, iz)) / (2.0 * dx);
         }();
         const auto grad_y = [&]() {
           if (iy == 0) {
-            return (-3.0 * grid.potential()[grid.linearIndex(ix, 0, iz)] +
-                    4.0 * grid.potential()[grid.linearIndex(ix, 1, iz)] -
-                    grid.potential()[grid.linearIndex(ix, 2, iz)]) / (2.0 * dy);
+            return (-3.0 * fieldPotential(ix, 0, iz) +
+                    4.0 * fieldPotential(ix, 1, iz) -
+                    fieldPotential(ix, 2, iz)) / (2.0 * dy);
           }
           if (iy + 1U == m_shape.ny) {
-            return (3.0 * grid.potential()[grid.linearIndex(ix, m_shape.ny - 1U, iz)] -
-                    4.0 * grid.potential()[grid.linearIndex(ix, m_shape.ny - 2U, iz)] +
-                    grid.potential()[grid.linearIndex(ix, m_shape.ny - 3U, iz)]) / (2.0 * dy);
+            return (3.0 * fieldPotential(ix, m_shape.ny - 1U, iz) -
+                    4.0 * fieldPotential(ix, m_shape.ny - 2U, iz) +
+                    fieldPotential(ix, m_shape.ny - 3U, iz)) / (2.0 * dy);
           }
-          return (grid.potential()[grid.linearIndex(ix, iy + 1U, iz)] -
-                  grid.potential()[grid.linearIndex(ix, iy - 1U, iz)]) / (2.0 * dy);
+          return (fieldPotential(ix, iy + 1U, iz) - fieldPotential(ix, iy - 1U, iz)) / (2.0 * dy);
         }();
         const auto grad_z = [&]() {
           if (iz == 0) {
-            return (-3.0 * grid.potential()[grid.linearIndex(ix, iy, 0)] +
-                    4.0 * grid.potential()[grid.linearIndex(ix, iy, 1)] -
-                    grid.potential()[grid.linearIndex(ix, iy, 2)]) / (2.0 * dz);
+            return (-3.0 * fieldPotential(ix, iy, 0) +
+                    4.0 * fieldPotential(ix, iy, 1) -
+                    fieldPotential(ix, iy, 2)) / (2.0 * dz);
           }
           if (iz + 1U == m_shape.nz) {
-            return (3.0 * grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 1U)] -
-                    4.0 * grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 2U)] +
-                    grid.potential()[grid.linearIndex(ix, iy, m_shape.nz - 3U)]) / (2.0 * dz);
+            return (3.0 * fieldPotential(ix, iy, m_shape.nz - 1U) -
+                    4.0 * fieldPotential(ix, iy, m_shape.nz - 2U) +
+                    fieldPotential(ix, iy, m_shape.nz - 3U)) / (2.0 * dz);
           }
-          return (grid.potential()[grid.linearIndex(ix, iy, iz + 1U)] -
-                  grid.potential()[grid.linearIndex(ix, iy, iz - 1U)]) / (2.0 * dz);
+          return (fieldPotential(ix, iy, iz + 1U) - fieldPotential(ix, iy, iz - 1U)) / (2.0 * dz);
         }();
-        grid.force_x()[center] = -grad_x;
-        grid.force_y()[center] = -grad_y;
-        grid.force_z()[center] = -grad_z;
+        force_x_field[center] = -grad_x;
+        force_y_field[center] = -grad_y;
+        force_z_field[center] = -grad_z;
       }
+    }
+  }
+
+  if (distributed_slabs) {
+    copyGlobalFieldToLocalSlab(full_potential, grid.slabLayout(), grid.potential());
+    copyGlobalFieldToLocalSlab(full_force_x, grid.slabLayout(), grid.force_x());
+    copyGlobalFieldToLocalSlab(full_force_y, grid.slabLayout(), grid.force_y());
+    copyGlobalFieldToLocalSlab(full_force_z, grid.slabLayout(), grid.force_z());
+    if (profile != nullptr) {
+      profile->bytes_moved += static_cast<std::uint64_t>(4U * global_cell_count * sizeof(double));
     }
   }
 
@@ -1613,20 +1755,36 @@ void PmSolver::interpolateForces(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
         auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmInterpolationRequestRecord{
                 .particle_index = static_cast<std::uint32_t>(p),
@@ -1884,20 +2042,36 @@ void PmSolver::interpolatePotential(
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
         auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             batch.push_back(PmInterpolationRequestRecord{
                 .particle_index = static_cast<std::uint32_t>(p),
