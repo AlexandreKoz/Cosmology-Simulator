@@ -102,3 +102,17 @@ These measurements support profiling and regression triage only; they are not co
   - `pm_only_scaling_np1.csv`, `pm_only_scaling_np2.csv`
   - `tree_only_scaling_np1.csv`, `tree_only_scaling_np2.csv`
 - These are performance evidence artifacts, not correctness gates.
+
+
+## Phase 3 evidence campaign separation (new)
+
+Machine-readable observable contracts are now defined in:
+
+- `validation/campaign/phase3_gravity_observables.json`
+
+Campaign orchestration and artifact/provenance generation are documented in:
+
+- `docs/validation_phase3_campaign.md`
+- `scripts/validation/collect_phase3_evidence.py`
+
+Research-grade campaign outputs are written under `validation/artifacts/research_grade/phase3/` with subfolders for correctness, force-accuracy, time-integration, scaling, and metadata.

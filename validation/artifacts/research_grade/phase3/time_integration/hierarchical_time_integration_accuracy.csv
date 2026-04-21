@@ -1,0 +1,5 @@
+observable,reference_target,tolerance_envelope,time_bin_index,dt_code,relative_energy_drift
+two_body_energy_drift,leapfrog_softened_orbit,0.08,-1,0.001,3.94795702352e-13
+two_body_energy_drift,leapfrog_softened_orbit,0.08,0,0.001,3.94795702352e-13
+two_body_energy_drift,leapfrog_softened_orbit,0.08,1,0.002,9.61343078365e-12
+two_body_energy_drift,leapfrog_softened_orbit,0.08,2,0.004,2.74255559404e-10

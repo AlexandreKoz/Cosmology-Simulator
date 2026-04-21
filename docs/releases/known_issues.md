@@ -30,3 +30,10 @@
 - Scope: integrator-grade hierarchical cadence/PM synchronization maturity and Phase 3 closure evidence.
 - Impact: current release evidence supports Phase 1/2 baseline correctness contracts, but not Phase 3 completion claims.
 - Mitigation: follow `docs/treepm_phase3_contract.md` hard-gate requirements before using Phase 3-complete language.
+
+
+## Phase 3 scaling evidence remains baseline-only in this stage
+
+- Scope: strong/weak scaling certification.
+- Impact: campaign now exports explicit baseline scaling artifacts and provenance, but certification-grade large-rank sweeps are still pending.
+- Mitigation: treat `validation/artifacts/research_grade/phase3/scaling/phase2_baseline_scaling_summary.json` as baseline evidence only and complete the larger-rank follow-on campaign before certification claims.

@@ -1,0 +1,49 @@
+schema_version = 1
+
+[mode]
+mode = cosmo_cube
+ic_file = generated
+zoom_high_res_region = false
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 0.02
+max_global_steps = 8
+hierarchical_max_rung = 7
+gravity_solver = treepm
+hydro_solver = godunov_fv
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = true
+treepm_update_cadence_steps = 1
+
+[physics]
+enable_cooling = false
+enable_star_formation = false
+enable_feedback = false
+enable_black_hole_agn = false
+
+[analysis]
+enable_diagnostics = true
+enable_halo_workflow = false
+run_health_interval_steps = 1
+science_light_interval_steps = 2
+science_heavy_interval_steps = 1
+diagnostics_execution_policy = all_including_provisional
+power_spectrum_mesh_n = 32
+power_spectrum_bin_count = 12
+quicklook_grid_n = 32
+
+
+[output]
+run_name = phase3_cosmo_box_ps_high
+output_directory = outputs/phase3_cosmo_box_ps_high
+output_stem = snapshot
+restart_stem = restart
+snapshot_interval_steps = 1
+write_restarts = true
+
+[units]
+coordinate_frame = comoving

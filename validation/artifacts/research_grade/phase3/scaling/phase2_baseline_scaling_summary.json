@@ -1,0 +1,26 @@
+{
+  "classification": "performance_evidence_only",
+  "note": "np1/np2 baseline only; not full strong/weak scaling certification",
+  "entries": [
+    {
+      "world_size": "1",
+      "particle_count": "120000",
+      "pm_grid_nx": "64",
+      "avg_rank_step_ms": "840.988",
+      "max_rank_step_ms": "840.988",
+      "local_particle_balance_min": "120000",
+      "local_particle_balance_max": "120000",
+      "artifact": "validation/artifacts/pm_only_scaling_np1.csv"
+    },
+    {
+      "world_size": "1",
+      "particle_count": "140000",
+      "active_count_total": "140000",
+      "avg_rank_step_ms": "23981.5",
+      "max_rank_step_ms": "23981.5",
+      "local_active_min": "140000",
+      "local_active_max": "140000",
+      "artifact": "validation/artifacts/tree_only_scaling_np1.csv"
+    }
+  ]
+}

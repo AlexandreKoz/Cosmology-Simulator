@@ -1,0 +1,2 @@
+world_size,particle_count,active_count_total,avg_rank_step_ms,max_rank_step_ms,local_active_min,local_active_max
+1,140000,140000,23981.5,23981.5,140000,140000

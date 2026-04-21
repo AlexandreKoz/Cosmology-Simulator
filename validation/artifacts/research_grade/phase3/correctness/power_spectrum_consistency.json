@@ -1,0 +1,13 @@
+{
+  "observable": "power_spectrum_consistency",
+  "reference_target": "same cosmological run with higher diagnostic mesh (32 vs 24)",
+  "tolerance_envelope": {
+    "relative_l2_max": 0.15
+  },
+  "pass": false,
+  "blocked": "missing_diagnostics_inputs",
+  "required_files": [
+    "outputs/phase3_cosmo_box_ps_low/diagnostics/diag_0008_science_heavy.json",
+    "outputs/phase3_cosmo_box_ps_high/diagnostics/diag_0008_science_heavy.json"
+  ]
+}
