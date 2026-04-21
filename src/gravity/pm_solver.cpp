@@ -956,20 +956,36 @@ void PmSolver::assignDensity(
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<int>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<int>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<int>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             accumulate_owned(PmDensityContributionRecord{
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -1515,9 +1531,19 @@ void PmSolver::interpolateForces(
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        accel_x[p] = 0.0;
+        accel_y[p] = 0.0;
+        accel_z[p] = 0.0;
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -1528,11 +1554,20 @@ void PmSolver::interpolateForces(
       double gz = 0.0;
 
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<int>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic ? wrapIndex(sx.offsets[dx], m_shape.nx) : static_cast<std::size_t>(sx.offsets[dx]);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<int>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic ? wrapIndex(sy.offsets[dy], m_shape.ny) : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<int>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic ? wrapIndex(sz.offsets[dz], m_shape.nz) : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             const std::size_t index = grid.linearIndex(ix, iy, iz);
             gx += weight * grid.force_x()[index];

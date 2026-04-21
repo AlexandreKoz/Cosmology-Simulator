@@ -56,6 +56,7 @@ struct TreeNodeSoa {
   std::vector<double> quad_yy;
   std::vector<double> quad_yz;
   std::vector<double> quad_zz;
+  std::vector<double> softening_min_comoving;
   std::vector<double> softening_max_comoving;
   std::vector<std::uint32_t> child_base;
   std::vector<std::uint8_t> child_count;

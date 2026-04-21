@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -749,11 +750,13 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.treepm_pm_grid_nz <= 0) {
     throw ConfigError("numerics.treepm_pm_grid_n{xyz} must all be > 0");
   }
-  if (config.numerics.treepm_asmth_cells <= 0.0) {
-    throw ConfigError("numerics.treepm_asmth_cells must be > 0");
+  if (!std::isfinite(config.numerics.treepm_asmth_cells) ||
+      config.numerics.treepm_asmth_cells <= 0.0) {
+    throw ConfigError("numerics.treepm_asmth_cells must be finite and > 0");
   }
-  if (config.numerics.treepm_rcut_cells <= 0.0) {
-    throw ConfigError("numerics.treepm_rcut_cells must be > 0");
+  if (!std::isfinite(config.numerics.treepm_rcut_cells) ||
+      config.numerics.treepm_rcut_cells <= 0.0) {
+    throw ConfigError("numerics.treepm_rcut_cells must be finite and > 0");
   }
   if (config.numerics.treepm_update_cadence_steps < 1) {
     throw ConfigError("numerics.treepm_update_cadence_steps must be >= 1");

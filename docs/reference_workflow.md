@@ -57,7 +57,7 @@ TreePM runtime mapping is explicit and auditable:
 - Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
 - `r_cut` is resolved from typed config and drives explicit residual-traversal pruning in the TreePM residual path
 - zoom-focused long-range correction (when enabled):
-  - authoritative high-resolution membership is computed from the configured zoom center/radius every gravity kick.
+  - authoritative high-resolution membership is loaded from `mode.zoom_region_file` when provided (plain-text IDs or HDF5 `ParticleIDs`/`Region/ParticleIDs`); otherwise the configured zoom center/radius fallback is used.
   - long-range decomposition is explicit:
     - global coarse PM from all sources,
     - focused PM correction on high-resolution targets only:

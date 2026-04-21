@@ -193,6 +193,8 @@ int main() {
         cosmosim::core::loadFrozenConfigFromString(invalidGravityConfig(), "test_reference_workflow_invalid_gravity");
     cosmosim::workflows::ReferenceWorkflowRunner bad_runner(bad_frozen);
     (void)bad_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  } catch (const cosmosim::core::ConfigError&) {
+    trapped_invalid_gravity_state = true;
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     trapped_invalid_gravity_state =
@@ -200,6 +202,49 @@ int main() {
         message.find("runtime workflow schema compatibility validation failed") != std::string::npos;
   }
   assert(trapped_invalid_gravity_state);
+
+
+  const std::filesystem::path zoom_id_path = output_dir / "zoom_ids.txt";
+  {
+    std::ofstream zoom_out(zoom_id_path);
+    zoom_out << "1\n2\n3\n";
+  }
+  std::stringstream zoom_stream;
+  zoom_stream << "schema_version = 1\n\n";
+  zoom_stream << "[mode]\n";
+  zoom_stream << "mode = zoom_in\n";
+  zoom_stream << "ic_file = generated\n";
+  zoom_stream << "zoom_high_res_region = true\n";
+  zoom_stream << "zoom_region_file = " << zoom_id_path.string() << "\n";
+  zoom_stream << "zoom_region_radius = 0.05\n";
+  zoom_stream << "zoom_long_range_strategy = global_coarse_plus_focused_highres_correction\n";
+  zoom_stream << "zoom_focused_pm_grid_nx = 9\n";
+  zoom_stream << "zoom_focused_pm_grid_ny = 9\n";
+  zoom_stream << "zoom_focused_pm_grid_nz = 9\n\n";
+  zoom_stream << "[numerics]\n";
+  zoom_stream << "time_begin_code = 0.01\n";
+  zoom_stream << "time_end_code = 0.0101\n";
+  zoom_stream << "max_global_steps = 1\n";
+  zoom_stream << "hierarchical_max_rung = 1\n";
+  zoom_stream << "treepm_pm_grid = 9\n";
+  zoom_stream << "treepm_asmth_cells = 1.25\n";
+  zoom_stream << "treepm_rcut_cells = 4.5\n";
+  zoom_stream << "treepm_assignment_scheme = cic\n";
+  zoom_stream << "treepm_update_cadence_steps = 1\n\n";
+  zoom_stream << "[output]\n";
+  zoom_stream << "run_name = reference_integration_test_zoom_file\n";
+  zoom_stream << "output_directory = integration_outputs\n";
+  zoom_stream << "output_stem = snapshot\n";
+  zoom_stream << "restart_stem = restart\n";
+
+  const cosmosim::core::FrozenConfig zoom_frozen =
+      cosmosim::core::loadFrozenConfigFromString(zoom_stream.str(), "test_reference_workflow_zoom_file");
+  cosmosim::workflows::ReferenceWorkflowRunner zoom_runner(zoom_frozen);
+  const cosmosim::workflows::ReferenceWorkflowReport zoom_report =
+      zoom_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  std::ifstream zoom_op_in(zoom_report.operational_report_json_path);
+  const std::string zoom_op_text((std::istreambuf_iterator<char>(zoom_op_in)), std::istreambuf_iterator<char>());
+  assert(zoom_op_text.find("\"zoom_membership_source\": \"particle_id_file_text\"") != std::string::npos);
 
   std::filesystem::remove_all(output_dir);
   return 0;

@@ -23,7 +23,7 @@ Reproducibility impact:
 
 Observed:
 
-- Added typed zoom metadata/config validation for authoritative high-resolution membership and focused PM correction controls.
+- Added typed zoom metadata/config validation plus authoritative file-driven high-resolution membership and focused PM correction controls.
 - Implemented explicit zoom force decomposition in TreePM coupling:
   `PM_global_coarse(all) + [PM_focused(highres)-PM_coarse(highres)] + tree_short_residual(all)`.
 - Added low-resolution contamination counters and force-component norms to runtime diagnostics/provenance pathways.

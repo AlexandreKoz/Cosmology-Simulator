@@ -10,6 +10,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -69,6 +70,67 @@ struct PeriodicBoxLengths {
   const double effective_size = width + com_center_offset;
   return (effective_size / r) < theta;
 }
+
+
+[[nodiscard]] bool passesSofteningEnvelopeGuard(
+    bool is_leaf,
+    double half_size,
+    double r,
+    double target_softening_comoving,
+    double node_softening_min_comoving,
+    double node_softening_max_comoving) {
+  if (is_leaf) {
+    return true;
+  }
+  const double heterogeneity = node_softening_max_comoving - node_softening_min_comoving;
+  if (heterogeneity <= 1.0e-12) {
+    return true;
+  }
+  const double pair_softening_max =
+      combineSofteningPairEpsilon(node_softening_max_comoving, target_softening_comoving);
+  const double envelope_radius = 2.0 * half_size + 2.0 * pair_softening_max;
+  return r > envelope_radius;
+}
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+struct GatheredParticleField {
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
+  std::vector<double> m;
+};
+
+[[nodiscard]] GatheredParticleField allGatherParticleField(
+    std::span<const double> x,
+    std::span<const double> y,
+    std::span<const double> z,
+    std::span<const double> m) {
+  if (x.size() != y.size() || x.size() != z.size() || x.size() != m.size()) {
+    throw std::invalid_argument("allGatherParticleField requires equal local span lengths");
+  }
+  int world_size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  const int local_count = static_cast<int>(x.size());
+  std::vector<int> counts(static_cast<std::size_t>(world_size), 0);
+  MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  std::vector<int> displs(static_cast<std::size_t>(world_size), 0);
+  int total = 0;
+  for (int i = 0; i < world_size; ++i) {
+    displs[static_cast<std::size_t>(i)] = total;
+    total += counts[static_cast<std::size_t>(i)];
+  }
+  GatheredParticleField out;
+  out.x.resize(static_cast<std::size_t>(total));
+  out.y.resize(static_cast<std::size_t>(total));
+  out.z.resize(static_cast<std::size_t>(total));
+  out.m.resize(static_cast<std::size_t>(total));
+  MPI_Allgatherv(x.data(), local_count, MPI_DOUBLE, out.x.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+  MPI_Allgatherv(y.data(), local_count, MPI_DOUBLE, out.y.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+  MPI_Allgatherv(z.data(), local_count, MPI_DOUBLE, out.z.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+  MPI_Allgatherv(m.data(), local_count, MPI_DOUBLE, out.m.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+  return out;
+}
+#endif
 
 [[nodiscard]] std::array<double, 3> monopolePlusQuadrupoleAccelPeriodic(
     const TreeNodeSoa& nodes,
@@ -568,6 +630,16 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       high_res_source_mass.push_back(mass_code[i]);
     }
 
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (m_grid.slabLayout().world_size > 1) {
+      const auto gathered = allGatherParticleField(high_res_source_x, high_res_source_y, high_res_source_z, high_res_source_mass);
+      high_res_source_x = std::move(gathered.x);
+      high_res_source_y = std::move(gathered.y);
+      high_res_source_z = std::move(gathered.z);
+      high_res_source_mass = std::move(gathered.m);
+    }
+#endif
+
     if (!high_res_source_x.empty()) {
       PmGridStorage high_res_coarse_grid(m_shape);
       m_pm_solver.assignDensity(
@@ -586,24 +658,57 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
             high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
       }
 
+      const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(pm_options);
+      const double focused_half_extent = std::max({
+          options.zoom_region_radius_comoving,
+          options.zoom_contamination_radius_comoving,
+          options.split_policy.cutoff_radius_comoving});
       PmSolveOptions zoom_pm_options = pm_options;
+      zoom_pm_options.boundary_condition = PmBoundaryCondition::kIsolatedOpen;
+      zoom_pm_options.box_size_x_mpc_comoving = 2.0 * focused_half_extent;
+      zoom_pm_options.box_size_y_mpc_comoving = 2.0 * focused_half_extent;
+      zoom_pm_options.box_size_z_mpc_comoving = 2.0 * focused_half_extent;
+      zoom_pm_options.box_size_mpc_comoving = 2.0 * focused_half_extent;
       PmSolver zoom_solver(options.zoom_focused_pm_shape);
       PmGridStorage high_res_focused_grid(options.zoom_focused_pm_shape);
+      std::vector<double> focused_source_x;
+      std::vector<double> focused_source_y;
+      std::vector<double> focused_source_z;
+      std::vector<double> focused_source_mass;
+      focused_source_x.reserve(high_res_source_x.size());
+      focused_source_y.reserve(high_res_source_y.size());
+      focused_source_z.reserve(high_res_source_z.size());
+      focused_source_mass.reserve(high_res_source_mass.size());
+      for (std::size_t i = 0; i < high_res_source_x.size(); ++i) {
+        const double dx_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(high_res_source_x[i] - options.zoom_region_center_x_comoving, box_lengths.lx)
+            : (high_res_source_x[i] - options.zoom_region_center_x_comoving);
+        const double dy_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(high_res_source_y[i] - options.zoom_region_center_y_comoving, box_lengths.ly)
+            : (high_res_source_y[i] - options.zoom_region_center_y_comoving);
+        const double dz_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(high_res_source_z[i] - options.zoom_region_center_z_comoving, box_lengths.lz)
+            : (high_res_source_z[i] - options.zoom_region_center_z_comoving);
+        if (std::abs(dx_local) > focused_half_extent ||
+            std::abs(dy_local) > focused_half_extent ||
+            std::abs(dz_local) > focused_half_extent) {
+          continue;
+        }
+        focused_source_x.push_back(dx_local + focused_half_extent);
+        focused_source_y.push_back(dy_local + focused_half_extent);
+        focused_source_z.push_back(dz_local + focused_half_extent);
+        focused_source_mass.push_back(high_res_source_mass[i]);
+      }
       zoom_solver.assignDensity(
           high_res_focused_grid,
-          high_res_source_x,
-          high_res_source_y,
-          high_res_source_z,
-          high_res_source_mass,
+          focused_source_x,
+          focused_source_y,
+          focused_source_z,
+          focused_source_mass,
           zoom_pm_options,
           profile != nullptr ? &profile->pm_profile : nullptr);
-      if (zoom_pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
-        zoom_solver.solvePoissonPeriodic(
-            high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
-      } else {
-        zoom_solver.solvePoissonIsolatedOpen(
-            high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
-      }
+      zoom_solver.solvePoissonIsolatedOpen(
+          high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
 
       std::vector<double> high_res_pm_coarse_ax(active_count, 0.0);
       std::vector<double> high_res_pm_coarse_ay(active_count, 0.0);
@@ -621,11 +726,28 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
           high_res_pm_coarse_az,
           pm_options,
           profile != nullptr ? &profile->pm_profile : nullptr);
+      std::vector<double> focused_active_x(active_count, focused_half_extent);
+      std::vector<double> focused_active_y(active_count, focused_half_extent);
+      std::vector<double> focused_active_z(active_count, focused_half_extent);
+      for (std::size_t i = 0; i < active_count; ++i) {
+        const double dx_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(m_active_pos_x_comoving[i] - options.zoom_region_center_x_comoving, box_lengths.lx)
+            : (m_active_pos_x_comoving[i] - options.zoom_region_center_x_comoving);
+        const double dy_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(m_active_pos_y_comoving[i] - options.zoom_region_center_y_comoving, box_lengths.ly)
+            : (m_active_pos_y_comoving[i] - options.zoom_region_center_y_comoving);
+        const double dz_local = (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic)
+            ? minimumImageDelta(m_active_pos_z_comoving[i] - options.zoom_region_center_z_comoving, box_lengths.lz)
+            : (m_active_pos_z_comoving[i] - options.zoom_region_center_z_comoving);
+        focused_active_x[i] = dx_local + focused_half_extent;
+        focused_active_y[i] = dy_local + focused_half_extent;
+        focused_active_z[i] = dz_local + focused_half_extent;
+      }
       zoom_solver.interpolateForces(
           high_res_focused_grid,
-          m_active_pos_x_comoving,
-          m_active_pos_y_comoving,
-          m_active_pos_z_comoving,
+          focused_active_x,
+          focused_active_y,
+          focused_active_z,
           high_res_pm_focused_ax,
           high_res_pm_focused_ay,
           high_res_pm_focused_az,
@@ -840,7 +962,14 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_z_comoving[node_index],
           half_size,
           box_lengths) <= cutoff_radius_comoving);
-      const bool accept = mac_accept && node_within_cutoff;
+      const bool softening_accept = passesSofteningEnvelopeGuard(
+          is_leaf,
+          half_size,
+          r,
+          target_softening_comoving,
+          nodes.softening_min_comoving[node_index],
+          nodes.softening_max_comoving[node_index]);
+      const bool accept = mac_accept && node_within_cutoff && softening_accept;
 
       if (accept) {
         ++accepted_nodes;

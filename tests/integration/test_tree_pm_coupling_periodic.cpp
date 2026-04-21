@@ -590,6 +590,45 @@ void testDistributedActiveSubsetMatchesSingleRankReference() {
 }
 #endif
 
+
+void testZoomMembershipPeriodicWrapAffectsCorrection() {
+  constexpr double box_size_comoving = 1.0;
+  std::vector<double> pos_x = {0.98, 0.02, 0.50};
+  std::vector<double> pos_y = {0.50, 0.50, 0.50};
+  std::vector<double> pos_z = {0.50, 0.50, 0.50};
+  std::vector<double> mass = {1.0, 1.0, 2.0};
+  std::vector<std::uint8_t> source_is_high_res = {1, 1, 0};
+  std::vector<std::uint8_t> active_is_high_res = source_is_high_res;
+
+  cosmosim::gravity::TreePmOptions opts;
+  opts.pm_options.box_size_mpc_comoving = box_size_comoving;
+  opts.pm_options.box_size_x_mpc_comoving = box_size_comoving;
+  opts.pm_options.box_size_y_mpc_comoving = box_size_comoving;
+  opts.pm_options.box_size_z_mpc_comoving = box_size_comoving;
+  opts.pm_options.scale_factor = 1.0;
+  opts.pm_options.gravitational_constant_code = 1.0;
+  opts.tree_options.opening_theta = 0.55;
+  opts.tree_options.max_leaf_size = 4;
+  opts.tree_options.gravitational_constant_code = 1.0;
+  opts.tree_options.softening.epsilon_comoving = 1.0e-3;
+  const cosmosim::gravity::PmGridShape coarse_shape{16,16,16};
+  const double mesh_spacing = box_size_comoving / static_cast<double>(coarse_shape.nx);
+  opts.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
+  opts.enable_zoom_long_range_correction = true;
+  opts.zoom_focused_pm_shape = cosmosim::gravity::PmGridShape{24,24,24};
+  opts.source_is_high_res = source_is_high_res;
+  opts.active_is_high_res = active_is_high_res;
+  opts.zoom_region_center_x_comoving = 0.0;
+  opts.zoom_region_center_y_comoving = 0.5;
+  opts.zoom_region_center_z_comoving = 0.5;
+  opts.zoom_region_radius_comoving = 0.06;
+  opts.zoom_contamination_radius_comoving = 0.1;
+  cosmosim::gravity::TreePmDiagnostics diag;
+  const ForceField force = solveTreePm(pos_x, pos_y, pos_z, mass, coarse_shape, opts, &diag);
+  requireOrThrow(diag.force_l2_pm_zoom_correction > 0.0, "wrapped zoom pair should produce focused correction");
+  requireOrThrow(std::abs(force.ax[0]) > 0.0 || std::abs(force.ax[1]) > 0.0, "wrapped high-res targets should feel non-zero force");
+}
+
 void testZoomFocusedPmCorrectionAndContaminationDiagnostics() {
   constexpr double box_size_comoving = 1.0;
   std::vector<double> pos_x = {0.49, 0.52, 0.51, 0.20, 0.80};
@@ -653,6 +692,7 @@ int main() {
   testPeriodicTreePmAgainstDirectReference();
   testResidualCutoffPrunesTreePath();
   testPmOnlyTreeOnlyAndTreePmConsistency();
+  testZoomMembershipPeriodicWrapAffectsCorrection();
   testZoomFocusedPmCorrectionAndContaminationDiagnostics();
   testActiveSubsetMatchesFullSolveSingleRank();
 #if COSMOSIM_ENABLE_MPI

@@ -60,6 +60,27 @@ void validateInputSpans(
   return (effective_size / r) < theta;
 }
 
+
+[[nodiscard]] bool passesSofteningEnvelopeGuard(
+    bool is_leaf,
+    double half_size,
+    double r,
+    double target_softening_comoving,
+    double node_softening_min_comoving,
+    double node_softening_max_comoving) {
+  if (is_leaf) {
+    return true;
+  }
+  const double heterogeneity = node_softening_max_comoving - node_softening_min_comoving;
+  if (heterogeneity <= 1.0e-12) {
+    return true;
+  }
+  const double pair_softening_max =
+      combineSofteningPairEpsilon(node_softening_max_comoving, target_softening_comoving);
+  const double envelope_radius = 2.0 * half_size + 2.0 * pair_softening_max;
+  return r > envelope_radius;
+}
+
 [[nodiscard]] std::array<double, 3> monopolePlusQuadrupoleAccel(
     const TreeNodeSoa& nodes,
     std::uint32_t node_index,
@@ -155,6 +176,7 @@ void TreeNodeSoa::clear() {
   quad_yy.clear();
   quad_yz.clear();
   quad_zz.clear();
+  softening_min_comoving.clear();
   softening_max_comoving.clear();
   child_base.clear();
   child_count.clear();
@@ -178,6 +200,7 @@ void TreeNodeSoa::reserve(std::size_t count) {
   quad_yy.reserve(count);
   quad_yz.reserve(count);
   quad_zz.reserve(count);
+  softening_min_comoving.reserve(count);
   softening_max_comoving.reserve(count);
   child_base.reserve(count);
   child_count.reserve(count);
@@ -319,7 +342,17 @@ void TreeGravitySolver::evaluateActiveSet(
       const double center_dz = m_nodes.center_z_comoving[node_index] - m_nodes.com_z_comoving[node_index];
       const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
       const bool is_leaf = m_nodes.child_count[node_index] == 0;
-      const bool accept = acceptNodeByMac(options.opening_criterion, is_leaf, options.opening_theta, half_size, com_offset, r2);
+      const double r = std::sqrt(r2 + 1.0e-30);
+      const bool mac_accept =
+          acceptNodeByMac(options.opening_criterion, is_leaf, options.opening_theta, half_size, com_offset, r2);
+      const bool softening_accept = passesSofteningEnvelopeGuard(
+          is_leaf,
+          half_size,
+          r,
+          target_softening_comoving,
+          m_nodes.softening_min_comoving[node_index],
+          m_nodes.softening_max_comoving[node_index]);
+      const bool accept = mac_accept && softening_accept;
 
       if (accept) {
         ++accepted_nodes;
@@ -414,6 +447,7 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   m_nodes.quad_yy.push_back(0.0);
   m_nodes.quad_yz.push_back(0.0);
   m_nodes.quad_zz.push_back(0.0);
+  m_nodes.softening_min_comoving.push_back(std::numeric_limits<double>::infinity());
   m_nodes.softening_max_comoving.push_back(0.0);
   m_nodes.child_base.push_back(0U);
   m_nodes.child_count.push_back(0U);
@@ -512,6 +546,8 @@ void TreeGravitySolver::accumulateMultipoles(
     for (std::uint32_t i = begin; i < end; ++i) {
       const std::uint32_t particle = m_ordering.sorted_particle_index[i];
       const double m = mass_code[particle];
+      m_nodes.softening_min_comoving[node_index] =
+          std::min(m_nodes.softening_min_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
       m_nodes.softening_max_comoving[node_index] =
           std::max(m_nodes.softening_max_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
       total_mass += m;
@@ -571,6 +607,8 @@ void TreeGravitySolver::accumulateMultipoles(
       continue;
     }
     accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
+    m_nodes.softening_min_comoving[node_index] =
+        std::min(m_nodes.softening_min_comoving[node_index], m_nodes.softening_min_comoving[child]);
     m_nodes.softening_max_comoving[node_index] =
         std::max(m_nodes.softening_max_comoving[node_index], m_nodes.softening_max_comoving[child]);
     total_mass += m_nodes.mass_code[child];

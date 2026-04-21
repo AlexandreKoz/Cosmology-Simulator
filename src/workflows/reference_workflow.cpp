@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <optional>
 #include <span>
@@ -35,6 +36,10 @@
 #include "cosmosim/io/snapshot_hdf5.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/star_formation.hpp"
+
+#if COSMOSIM_ENABLE_HDF5
+#include <hdf5.h>
+#endif
 
 namespace cosmosim::workflows {
 namespace {
@@ -618,6 +623,80 @@ void flushCommonArtifacts(
   return io::readGadgetArepoHdf5Ic(ic_path, config);
 }
 
+[[nodiscard]] bool hasHdf5Extension(const std::filesystem::path& path) {
+  const std::string ext = path.extension().string();
+  return ext == ".h5" || ext == ".hdf5";
+}
+
+[[nodiscard]] std::unordered_set<std::uint64_t> loadZoomParticleIdsFromText(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("failed to open zoom region file: " + path.string());
+  }
+  std::unordered_set<std::uint64_t> ids;
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto comment = line.find('#');
+    if (comment != std::string::npos) {
+      line.erase(comment);
+    }
+    std::istringstream stream(line);
+    std::uint64_t id = 0;
+    while (stream >> id) {
+      ids.insert(id);
+    }
+  }
+  return ids;
+}
+
+#if COSMOSIM_ENABLE_HDF5
+[[nodiscard]] std::unordered_set<std::uint64_t> loadZoomParticleIdsFromHdf5(const std::filesystem::path& path) {
+  hid_t file = H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  if (file < 0) {
+    throw std::runtime_error("failed to open zoom region HDF5 file: " + path.string());
+  }
+  auto close_file = [&]() { H5Fclose(file); };
+  const char* candidates[] = {"/Region/ParticleIDs", "/ParticleIDs", "Region/ParticleIDs", "ParticleIDs"};
+  hid_t dataset = -1;
+  for (const char* candidate : candidates) {
+    if (H5Lexists(file, candidate, H5P_DEFAULT) > 0) {
+      dataset = H5Dopen2(file, candidate, H5P_DEFAULT);
+      if (dataset >= 0) {
+        break;
+      }
+    }
+  }
+  if (dataset < 0) {
+    close_file();
+    throw std::runtime_error("zoom region HDF5 file lacks ParticleIDs dataset: " + path.string());
+  }
+  hid_t space = H5Dget_space(dataset);
+  if (space < 0) {
+    H5Dclose(dataset); close_file();
+    throw std::runtime_error("failed to query zoom region HDF5 dataspace");
+  }
+  hsize_t dims[1] = {0};
+  if (H5Sget_simple_extent_ndims(space) != 1 || H5Sget_simple_extent_dims(space, dims, nullptr) != 1) {
+    H5Sclose(space); H5Dclose(dataset); close_file();
+    throw std::runtime_error("zoom region ParticleIDs dataset must be 1D");
+  }
+  std::vector<std::uint64_t> values(static_cast<std::size_t>(dims[0]), 0ULL);
+  const hid_t dtype = H5Dget_type(dataset);
+  const H5T_class_t cls = H5Tget_class(dtype);
+  if (cls != H5T_INTEGER) {
+    H5Tclose(dtype); H5Sclose(space); H5Dclose(dataset); close_file();
+    throw std::runtime_error("zoom region ParticleIDs dataset must be integer typed");
+  }
+  if (!values.empty() && H5Dread(dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) < 0) {
+    H5Tclose(dtype); H5Sclose(space); H5Dclose(dataset); close_file();
+    throw std::runtime_error("failed to read zoom region ParticleIDs dataset");
+  }
+  H5Tclose(dtype); H5Sclose(space); H5Dclose(dataset); close_file();
+  return std::unordered_set<std::uint64_t>(values.begin(), values.end());
+}
+#endif
+
+
 void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::SimulationState& state) {
   state.metadata.run_name = frozen_config.config.output.run_name;
   state.metadata.normalized_config_hash = frozen_config.provenance.config_hash;
@@ -752,7 +831,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     double field_built_scale_factor = 1.0;
   };
 
-  GravityStageCallback(const core::SimulationConfig& config, const core::ModePolicy& mode_policy)
+  GravityStageCallback(
+      const core::SimulationConfig& config,
+      const core::ModePolicy& mode_policy,
+      std::filesystem::path zoom_region_path = {})
       : m_config(config),
         m_mode_policy(mode_policy),
         m_pm_update_cadence_steps(static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps)),
@@ -766,7 +848,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
             config.cosmology.box_size_y_mpc_comoving / static_cast<double>(m_pm_grid_shape.ny)),
         m_mesh_spacing_z_mpc_comoving(
             config.cosmology.box_size_z_mpc_comoving / static_cast<double>(m_pm_grid_shape.nz)),
-        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_shape)) {
+        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_shape)),
+        m_zoom_region_path(std::move(zoom_region_path)) {
     if (!m_pm_grid_shape.isValid()) {
       throw std::runtime_error("numerics.treepm_pm_grid_n{xyz} must all be > 0");
     }
@@ -936,15 +1019,24 @@ class GravityStageCallback final : public core::IntegrationCallback {
     for (std::size_t i = 0; i < m_local_active_global_indices.size(); ++i) {
       m_active_slot_by_particle[m_local_active_global_indices[i]] = static_cast<int>(i);
     }
-    const double box_size = m_config.cosmology.box_size_x_mpc_comoving;
+    ensureZoomMembershipLoaded(context.state);
+    const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
+    const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
+    const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
     m_source_is_high_res.assign(m_local_source_x.size(), 0U);
     for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
+      if (!m_zoom_high_res_particle_ids.empty()) {
+        const std::uint32_t global_index = m_local_to_global[i];
+        const std::uint64_t particle_id = context.state.particle_sidecar.particle_id[global_index];
+        m_source_is_high_res[i] = m_zoom_high_res_particle_ids.contains(particle_id) ? 1U : 0U;
+        continue;
+      }
       const double dx = m_local_source_x[i] - m_tree_pm_options.zoom_region_center_x_comoving;
       const double dy = m_local_source_y[i] - m_tree_pm_options.zoom_region_center_y_comoving;
       const double dz = m_local_source_z[i] - m_tree_pm_options.zoom_region_center_z_comoving;
-      const double wrapped_dx = dx - box_size * std::nearbyint(dx / box_size);
-      const double wrapped_dy = dy - box_size * std::nearbyint(dy / box_size);
-      const double wrapped_dz = dz - box_size * std::nearbyint(dz / box_size);
+      const double wrapped_dx = dx - box_size_x * std::nearbyint(dx / box_size_x);
+      const double wrapped_dy = dy - box_size_y * std::nearbyint(dy / box_size_y);
+      const double wrapped_dz = dz - box_size_z * std::nearbyint(dz / box_size_z);
       const double r = std::sqrt(wrapped_dx * wrapped_dx + wrapped_dy * wrapped_dy + wrapped_dz * wrapped_dz);
       m_source_is_high_res[i] = (r <= m_tree_pm_options.zoom_region_radius_comoving) ? 1U : 0U;
     }
@@ -1085,6 +1177,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
               {"zoom_low_res_source_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_source_count)},
               {"zoom_low_res_contamination_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_count)},
               {"zoom_low_res_contamination_mass_code", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_mass_code)},
+              {"zoom_membership_source", m_zoom_membership_source},
           },
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{
@@ -1264,6 +1357,34 @@ class GravityStageCallback final : public core::IntegrationCallback {
     return summary;
   }
 
+  void ensureZoomMembershipLoaded(const core::SimulationState& state) {
+    if (m_zoom_membership_loaded) {
+      return;
+    }
+    m_zoom_membership_loaded = true;
+    if (!m_mode_policy.zoom_region_expected || m_config.mode.zoom_region_file.empty()) {
+      m_zoom_membership_source = m_mode_policy.zoom_region_expected ? "configured_spherical_region" : "disabled";
+      return;
+    }
+    const std::filesystem::path path = m_zoom_region_path.empty()
+        ? std::filesystem::path(m_config.mode.zoom_region_file)
+        : m_zoom_region_path;
+    if (hasHdf5Extension(path)) {
+#if COSMOSIM_ENABLE_HDF5
+      m_zoom_high_res_particle_ids = loadZoomParticleIdsFromHdf5(path);
+      m_zoom_membership_source = "particle_id_file_hdf5";
+#else
+      throw std::runtime_error("zoom_region_file requires HDF5 support in this build");
+#endif
+    } else {
+      m_zoom_high_res_particle_ids = loadZoomParticleIdsFromText(path);
+      m_zoom_membership_source = "particle_id_file_text";
+    }
+    for (const std::uint64_t id : state.particle_sidecar.particle_id) {
+      (void)id;
+    }
+  }
+
   void rebuildOwnedParticleCompactView(const core::SimulationState& state, std::span<const std::uint32_t> active_particles) {
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
@@ -1327,6 +1448,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<std::uint8_t> m_source_is_high_res;
   std::vector<std::uint8_t> m_active_is_high_res;
   std::vector<std::uint32_t> m_local_to_global;
+  std::filesystem::path m_zoom_region_path;
+  bool m_zoom_membership_loaded = false;
+  std::unordered_set<std::uint64_t> m_zoom_high_res_particle_ids;
+  std::string m_zoom_membership_source = "disabled";
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
@@ -1848,7 +1973,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     core::StepOrchestrator orchestrator;
     StageAuditCallback stage_audit(&report.stage_sequence);
     DriftCallback drift_callback;
-    GravityStageCallback gravity_callback(config, mode_policy);
+    const std::filesystem::path zoom_region_path =
+        config.mode.zoom_region_file.empty()
+        ? std::filesystem::path{}
+        : resolveConfigRelativePath(m_frozen_config, std::filesystem::path(config.mode.zoom_region_file));
+    GravityStageCallback gravity_callback(config, mode_policy, zoom_region_path);
     report.treepm_pm_grid = gravity_callback.pmGridSize();
     report.treepm_pm_grid_nx = gravity_callback.pmGridShape().nx;
     report.treepm_pm_grid_ny = gravity_callback.pmGridShape().ny;
