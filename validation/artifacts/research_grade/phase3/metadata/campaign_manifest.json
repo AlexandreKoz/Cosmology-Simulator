@@ -1,0 +1,21 @@
+{
+  "campaign": "phase3_gravity_maturity_evidence",
+  "generated_utc": "2026-04-20T22:17:30.090530+00:00",
+  "git_commit": "579b70d9801a7ef5d77813a7a25b4392f17f58f1",
+  "classification": {
+    "correctness": "validation/artifacts/research_grade/phase3/correctness",
+    "force_accuracy": "validation/artifacts/research_grade/phase3/force_accuracy",
+    "time_integration": "validation/artifacts/research_grade/phase3/time_integration",
+    "scaling": "validation/artifacts/research_grade/phase3/scaling",
+    "toy_regression": "validation/artifacts/*.csv (legacy toy/perf baselines)"
+  },
+  "observables": [
+    "cosmological_box_run_health",
+    "zoom_run_health",
+    "power_spectrum_consistency",
+    "halo_force_potential_profiles",
+    "hierarchical_stepping_time_integration_accuracy",
+    "strong_scaling_baseline",
+    "weak_scaling_baseline"
+  ]
+}

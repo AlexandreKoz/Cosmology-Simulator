@@ -1,0 +1,7 @@
+observable,reference_target,tolerance_envelope,radius_code,tree_force_code,reference_force_code,tree_potential_estimate_code,reference_potential_code,force_relative_error
+halo_radial_profile,softened_direct_sum,0.1,0.08,-0.478875028147,-0.478875028147,-0.397681549112,-2.74622089414,8.114393856e-16
+halo_radial_profile,softened_direct_sum,0.1,0.14,-0.451640459423,-0.451640459423,-0.369766084485,-2.71713918596,1.22910049516e-16
+halo_radial_profile,softened_direct_sum,0.1,0.2,-0.153397510742,-0.153397510742,-0.35161494538,-2.69773243934,1.80938891911e-16
+halo_radial_profile,softened_direct_sum,0.1,0.26,-0.795810184103,-0.795810184103,-0.323138714535,-2.68390477577,1.39508521856e-16
+halo_radial_profile,softened_direct_sum,0.1,0.32,-3.21672802889,-3.21672802889,-0.202762568145,-2.55504930016,1.38056188109e-16
+halo_radial_profile,softened_direct_sum,0.1,0.38,-3.54202424262,-3.54202424262,0,-2.34722126101,2.50754472262e-16

@@ -168,3 +168,13 @@ Outputs (artifact files):
 For final integration hard-gates and exact command bundle, see:
 
 - `docs/treepm_phase2_closeout.md`
+
+## Phase 3 research-grade evidence campaign
+
+For Phase 3 gravity maturity evidence generation and separation of correctness/force-accuracy/scaling classes, use:
+
+- Observable contract: `validation/campaign/phase3_gravity_observables.json`
+- Campaign command bundle: `docs/validation_phase3_campaign.md`
+- Provenance collector: `scripts/validation/collect_phase3_evidence.py`
+
+The campaign requires explicit cosmological and zoom runtime runs plus force/time-integration/scaling artifacts. Existing `np1/np2` scaling outputs remain baseline performance evidence only and are not standalone certification.

@@ -1,0 +1,76 @@
+{
+  "campaign": "phase3_gravity_maturity_evidence",
+  "observables": [
+    {
+      "name": "cosmological_box_run_health",
+      "class": "correctness",
+      "measurement": "final heavy diagnostics bundle for phase3_cosmo_box_ps_high",
+      "reference_target": "run health invariants in diagnostics schema v1",
+      "tolerance_envelope": {
+        "ownership_invariants_ok": true,
+        "unique_particle_ids_ok": true,
+        "non_finite_particles": 0,
+        "non_finite_cells": 0
+      }
+    },
+    {
+      "name": "zoom_run_health",
+      "class": "correctness",
+      "measurement": "final heavy diagnostics bundle for phase3_zoom_validation",
+      "reference_target": "same run-health invariants as cosmological run",
+      "tolerance_envelope": {
+        "ownership_invariants_ok": true,
+        "unique_particle_ids_ok": true,
+        "non_finite_particles": 0,
+        "non_finite_cells": 0
+      }
+    },
+    {
+      "name": "power_spectrum_consistency",
+      "class": "force_accuracy",
+      "measurement": "relative L2 between heavy-diagnostic P(k) at mesh_n=24 and mesh_n=32",
+      "reference_target": "higher diagnostic mesh result on identical cosmological state",
+      "tolerance_envelope": {
+        "relative_l2_max": 0.15
+      }
+    },
+    {
+      "name": "halo_force_potential_profiles",
+      "class": "force_accuracy",
+      "measurement": "tree radial force profile and potential estimate vs softened direct-sum reference",
+      "reference_target": "softened direct summation with identical epsilon_comoving",
+      "tolerance_envelope": {
+        "max_radial_relative_force_error": 0.08
+      }
+    },
+    {
+      "name": "hierarchical_stepping_time_integration_accuracy",
+      "class": "correctness",
+      "measurement": "two-body leapfrog energy drift sampled at bin-indexed dt levels",
+      "reference_target": "baseline tolerance gravity_two_body_orbit.max_relative_energy_drift",
+      "tolerance_envelope": {
+        "max_relative_energy_drift": 0.02
+      }
+    },
+    {
+      "name": "strong_scaling_baseline",
+      "class": "scaling",
+      "measurement": "PM-only and tree-only max-rank step time from np1 and np2 MPI runs",
+      "reference_target": "no superiority claim; baseline throughput table only",
+      "tolerance_envelope": {
+        "required_np": [1, 2],
+        "certification": "not_sufficient_for_full_strong_scaling_certification"
+      }
+    },
+    {
+      "name": "weak_scaling_baseline",
+      "class": "scaling",
+      "measurement": "np1 and np2 with particle balance metadata",
+      "reference_target": "bounded local load imbalance and transparent rank max timing",
+      "tolerance_envelope": {
+        "required_np": [1, 2],
+        "certification": "not_sufficient_for_full_weak_scaling_certification"
+      }
+    }
+  ]
+}

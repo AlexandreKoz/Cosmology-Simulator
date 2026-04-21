@@ -1,11 +1,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "validation_tolerance.hpp"
@@ -13,6 +17,21 @@
 namespace {
 
 constexpr double k_pi = 3.141592653589793238462643383279502884;
+
+struct TwoBodyEnergyDriftResult {
+  double dt_code = 0.0;
+  int bin_index = 0;
+  double relative_energy_drift = 0.0;
+};
+
+struct HaloProfileRow {
+  double radius_code = 0.0;
+  double tree_radial_force_code = 0.0;
+  double reference_radial_force_code = 0.0;
+  double tree_potential_code_estimate = 0.0;
+  double reference_potential_code = 0.0;
+  double radial_force_relative_error = 0.0;
+};
 
 void requireOrThrow(bool condition, const std::string& message) {
   if (!condition) {
@@ -56,6 +75,31 @@ void directSumAcceleration(
     ay[i] = acc_y;
     az[i] = acc_z;
   }
+}
+
+double softenedDirectPotentialAt(
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    std::uint32_t active_index,
+    const cosmosim::gravity::TreeGravityOptions& options) {
+  const double tx = pos_x[active_index];
+  const double ty = pos_y[active_index];
+  const double tz = pos_z[active_index];
+  double phi = 0.0;
+  const double eps2 = options.softening.epsilon_comoving * options.softening.epsilon_comoving;
+  for (std::size_t j = 0; j < mass.size(); ++j) {
+    if (j == active_index) {
+      continue;
+    }
+    const double dx = pos_x[j] - tx;
+    const double dy = pos_y[j] - ty;
+    const double dz = pos_z[j] - tz;
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    phi += -options.gravitational_constant_code * mass[j] / std::sqrt(r2 + eps2);
+  }
+  return phi;
 }
 
 [[nodiscard]] double meanTreeRelativeError(const cosmosim::gravity::TreeGravityOptions& options) {
@@ -209,8 +253,7 @@ void testHydroResolutionConvergence(const cosmosim::validation::ValidationTolera
       "hydro sine observed order below minimum");
 }
 
-void testTwoBodyOrbitEnergyDrift(const cosmosim::validation::ValidationToleranceTable& tolerances) {
-  constexpr double dt = 1.0e-3;
+TwoBodyEnergyDriftResult runTwoBodyOrbitEnergyDrift(double dt, int bin_index) {
   constexpr std::size_t steps = 4000;
   constexpr double g = 1.0;
   constexpr double m0 = 1.0;
@@ -269,12 +312,32 @@ void testTwoBodyOrbitEnergyDrift(const cosmosim::validation::ValidationTolerance
 
   const double e1 = totalEnergy();
   const double rel_drift = std::abs(e1 - e0) / std::max(std::abs(e0), 1.0e-20);
-  requireOrThrow(
-      rel_drift <= tolerances.require("gravity_two_body_orbit.max_relative_energy_drift"),
-      "gravity_two_body_orbit failed: relative energy drift above tolerance");
+  return TwoBodyEnergyDriftResult{.dt_code = dt, .bin_index = bin_index, .relative_energy_drift = rel_drift};
 }
 
-void testStaticHaloRadialProfile(const cosmosim::validation::ValidationToleranceTable& tolerances) {
+std::vector<TwoBodyEnergyDriftResult> testTwoBodyOrbitEnergyDrift(
+    const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  const auto baseline = runTwoBodyOrbitEnergyDrift(1.0e-3, -1);
+  requireOrThrow(
+      baseline.relative_energy_drift <= tolerances.require("gravity_two_body_orbit.max_relative_energy_drift"),
+      "gravity_two_body_orbit failed: relative energy drift above tolerance");
+
+  const cosmosim::core::TimeStepLimits limits{
+      .min_dt_time_code = 1.0e-3,
+      .max_dt_time_code = 8.0e-3,
+      .max_bin = 3,
+  };
+
+  std::vector<TwoBodyEnergyDriftResult> rows;
+  rows.push_back(baseline);
+  for (int bin = 0; bin <= 2; ++bin) {
+    const double dt = cosmosim::core::binIndexToDt(bin, limits);
+    rows.push_back(runTwoBodyOrbitEnergyDrift(dt, bin));
+  }
+  return rows;
+}
+
+std::vector<HaloProfileRow> testStaticHaloRadialProfile(const cosmosim::validation::ValidationToleranceTable& tolerances) {
   constexpr std::size_t shell_count = 6;
   constexpr std::size_t particle_count = 96;
   constexpr double g = 1.0;
@@ -331,17 +394,79 @@ void testStaticHaloRadialProfile(const cosmosim::validation::ValidationTolerance
   std::vector<double> ref_ax(shell_count, 0.0), ref_ay(shell_count, 0.0), ref_az(shell_count, 0.0);
   directSumAcceleration(all_x, all_y, all_z, all_m, active, options, ref_ax, ref_ay, ref_az);
 
+  std::vector<HaloProfileRow> rows;
+  rows.reserve(shell_count);
   double max_radial_rel = 0.0;
   for (std::size_t i = 0; i < shell_count; ++i) {
     const double ar_tree = ax[i];
     const double ar_ref = ref_ax[i];
     const double rel = std::abs(ar_tree - ar_ref) / std::max(std::abs(ar_ref), 1.0e-12);
     max_radial_rel = std::max(max_radial_rel, rel);
+    rows.push_back(HaloProfileRow{
+        .radius_code = test_x[i],
+        .tree_radial_force_code = ar_tree,
+        .reference_radial_force_code = ar_ref,
+        .tree_potential_code_estimate = 0.0,
+        .reference_potential_code = softenedDirectPotentialAt(all_x, all_y, all_z, all_m, active[i], options),
+        .radial_force_relative_error = rel,
+    });
+  }
+
+  for (std::size_t i = rows.size(); i > 1; --i) {
+    const std::size_t inner = i - 2;
+    const std::size_t outer = i - 1;
+    const double dr = rows[outer].radius_code - rows[inner].radius_code;
+    rows[inner].tree_potential_code_estimate =
+        rows[outer].tree_potential_code_estimate + 0.5 * (rows[outer].tree_radial_force_code + rows[inner].tree_radial_force_code) * dr;
   }
 
   requireOrThrow(
       max_radial_rel <= tolerances.require("gravity_static_halo.max_radial_relative_force_error"),
       "gravity_static_halo failed: radial profile mismatch vs softened direct-sum reference");
+  return rows;
+}
+
+void writePhase3Artifacts(
+    std::span<const TwoBodyEnergyDriftResult> drift_rows,
+    std::span<const HaloProfileRow> halo_rows,
+    const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  const std::filesystem::path root =
+      std::filesystem::path(COSMOSIM_SOURCE_DIR) / "validation" / "artifacts" / "research_grade" / "phase3";
+  const std::filesystem::path force_dir = root / "force_accuracy";
+  const std::filesystem::path time_dir = root / "time_integration";
+  std::filesystem::create_directories(force_dir);
+  std::filesystem::create_directories(time_dir);
+
+  {
+    std::ofstream out(force_dir / "halo_force_potential_profile.csv");
+    out << std::setprecision(12);
+    out << "observable,reference_target,tolerance_envelope,radius_code,tree_force_code,reference_force_code,tree_potential_estimate_code,reference_potential_code,force_relative_error\n";
+    for (const auto& row : halo_rows) {
+      out << "halo_radial_profile,softened_direct_sum,"
+          << tolerances.require("gravity_static_halo.max_radial_relative_force_error")
+          << ',' << row.radius_code
+          << ',' << row.tree_radial_force_code
+          << ',' << row.reference_radial_force_code
+          << ',' << row.tree_potential_code_estimate
+          << ',' << row.reference_potential_code
+          << ',' << row.radial_force_relative_error
+          << '\n';
+    }
+  }
+
+  {
+    std::ofstream out(time_dir / "hierarchical_time_integration_accuracy.csv");
+    out << std::setprecision(12);
+    out << "observable,reference_target,tolerance_envelope,time_bin_index,dt_code,relative_energy_drift\n";
+    for (const auto& row : drift_rows) {
+      out << "two_body_energy_drift,leapfrog_softened_orbit,"
+          << tolerances.require("gravity_two_body_orbit.max_relative_energy_drift")
+          << ',' << row.bin_index
+          << ',' << row.dt_code
+          << ',' << row.relative_energy_drift
+          << '\n';
+    }
+  }
 }
 
 }  // namespace
@@ -352,7 +477,8 @@ int main() {
 
   testGravityOpeningConvergence(tolerances);
   testHydroResolutionConvergence(tolerances);
-  testTwoBodyOrbitEnergyDrift(tolerances);
-  testStaticHaloRadialProfile(tolerances);
+  const auto drift_rows = testTwoBodyOrbitEnergyDrift(tolerances);
+  const auto halo_rows = testStaticHaloRadialProfile(tolerances);
+  writePhase3Artifacts(drift_rows, halo_rows, tolerances);
   return 0;
 }

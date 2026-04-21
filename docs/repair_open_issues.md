@@ -94,3 +94,9 @@ Additional validation limitation for this pass:
 | ID | Status | Area | Current limitation | Next-step evidence target |
 |---|---|---|---|---|
 | P30-CLUSTERED-LOAD-MATURITY-025 | Open | Distributed gravity clustered-load maturity | Current deterministic contiguous SFC cuts reduce clustered overshoot but remain one-dimensional; extreme multi-cluster anisotropy can still create per-rank remote short-range pressure skew even when weighted load appears balanced. | Add clustered MPI scaling sweeps (2/3/4+ ranks) that jointly track weighted-load imbalance and remote request packet imbalance against acceptance thresholds in `bench_tree_only_scaling_mpi` + `bench_tree_pm_coupling`. |
+
+
+## 2026-04-20: Remaining Phase 3 campaign blockers
+
+- Large-rank (beyond np2) strong/weak scaling certification sweep still required for Phase 3 closeout.
+- External literature-target calibration for cosmological P(k) and halo profile systematics remains outside this stage; current campaign uses explicit in-repo reference contracts and envelopes.

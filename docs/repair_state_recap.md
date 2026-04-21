@@ -898,3 +898,11 @@ Interpretation:
 
 - This is infrastructure repair for distributed maturity and observability under clustered loads; no force-kernel heuristics, dropped contributions, or mid-kick ownership repartitioning were introduced.
 - Remaining maturity limits are tracked in `docs/repair_open_issues.md` (see open entry for clustered decomposition/short-range scheduling limits).
+
+
+## 2026-04-20: Phase 3 gravity evidence campaign scaffolding
+
+- Added campaign-specific validation configs for cosmological box and zoom runs under `configs/validation_phase3/`.
+- Added research-grade observable contract in `validation/campaign/phase3_gravity_observables.json`.
+- Added provenance collector `scripts/validation/collect_phase3_evidence.py` and campaign guide `docs/validation_phase3_campaign.md`.
+- Validation convergence now emits deterministic force-profile and time-integration artifacts under `validation/artifacts/research_grade/phase3/`.

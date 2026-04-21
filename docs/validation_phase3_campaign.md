@@ -1,0 +1,84 @@
+# Phase 3 gravity maturity evidence campaign (research-grade separation)
+
+This campaign defines and generates **separate** evidence classes:
+
+- correctness evidence,
+- force-accuracy evidence,
+- performance/scaling evidence.
+
+It does **not** claim superiority or full strong/weak scaling certification beyond the generated rank set.
+
+## Observable contracts
+
+Authoritative machine-readable contracts:
+
+- `validation/campaign/phase3_gravity_observables.json`
+
+Each observable defines:
+
+- explicit measurement,
+- explicit reference target,
+- explicit tolerance/envelope,
+- evidence class.
+
+## Campaign commands
+
+### Build (MPI + HDF5 + FFTW)
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug
+```
+
+### Correctness runs (cosmological + zoom)
+
+```bash
+./build/mpi-hdf5-fftw-debug/cosmosim_harness configs/validation_phase3/phase3_cosmo_box_ps_low.param.txt
+./build/mpi-hdf5-fftw-debug/cosmosim_harness configs/validation_phase3/phase3_cosmo_box_ps_high.param.txt
+./build/mpi-hdf5-fftw-debug/cosmosim_harness configs/validation_phase3/phase3_zoom_validation.param.txt
+```
+
+### Force-accuracy and time-integration artifacts
+
+```bash
+ctest --test-dir build/mpi-hdf5-fftw-debug -R validation_convergence --output-on-failure
+./build/mpi-hdf5-fftw-debug/bench_tree_pm_force_error_map
+```
+
+### Scaling artifacts (performance evidence only)
+
+```bash
+cmake --build --preset build-mpi-hdf5-fftw-debug --target generate_mpi_gravity_scaling_artifacts
+```
+
+### Provenance-rich manifest and evidence summary
+
+```bash
+python3 scripts/validation/collect_phase3_evidence.py
+```
+
+## Artifact locations
+
+Research-grade campaign outputs:
+
+- `validation/artifacts/research_grade/phase3/correctness/`
+- `validation/artifacts/research_grade/phase3/force_accuracy/`
+- `validation/artifacts/research_grade/phase3/time_integration/`
+- `validation/artifacts/research_grade/phase3/scaling/`
+- `validation/artifacts/research_grade/phase3/metadata/`
+
+Legacy toy/perf artifacts kept separate:
+
+- `validation/artifacts/pm_only_scaling_np*.csv`
+- `validation/artifacts/tree_only_scaling_np*.csv`
+- `validation/artifacts/tree_pm_force_error_map.csv`
+
+## Reproducibility impact statement
+
+This campaign does not modify solver numerics or runtime stepping semantics. It adds:
+
+- dedicated campaign configs,
+- deterministic artifact exports from validation execution,
+- manifest/provenance collection tooling.
+
+Deterministic behavior of existing tests and configs is preserved.
