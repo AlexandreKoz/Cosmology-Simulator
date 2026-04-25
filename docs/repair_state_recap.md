@@ -32,6 +32,31 @@ Reproducibility impact:
 - Deterministic behavior is preserved; this pass hardens ownership/index-safety checks and sidecar movement invariants without changing solver numerics.
 
 
+## 0) Species migration + canonical grouping invariants (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_species_migration_invariants test_unit_simulation_state
+ctest --preset test-cpu-debug --output-on-failure -R "species|migration|sidecar"
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added deterministic migration-focused integration coverage in `tests/integration/test_species_migration_invariants.cpp` for:
+  - single-particle species migration with stable particle identity and canonical species regrouping checks,
+  - batch migration with sidecar-family transitions (star/BH/tracer attach-detach invariants),
+  - migration followed by reorder/resize and scheduler active-set extraction checks,
+  - softening priority continuity (`per-particle override > species default > global default`) after migration/reorder.
+- Repaired `SimulationState::{packParticleMigrationRecords,commitParticleMigration}` to preserve optional per-particle softening override sidecar values across migration commits, including inbound records.
+- Updated runtime ownership docs to state allowed migration path ownership, sidecar attach/detach expectations, and species-agnostic scheduler active-eligibility behavior.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved; this pass hardens migration-state invariants and sidecar continuity without adding new physics or changing solver numerics.
+
+
 ## 0) Timestep/bin authority invariant test floor (2026-04-25 UTC)
 
 Commands:

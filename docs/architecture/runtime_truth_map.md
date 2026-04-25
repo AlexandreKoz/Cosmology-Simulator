@@ -69,6 +69,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 - `tests/integration/test_hierarchical_timestep_regression.cpp`
 - `tests/integration/test_time_integration_loop.cpp`
 - `tests/integration/test_reorder_compaction_sidecars.cpp`
+- `tests/integration/test_species_migration_invariants.cpp`
 - `tests/integration/test_soa_species_pipeline.cpp`
 - `tests/integration/test_species_mixed_state.cpp`
 - `tests/integration/test_restart_checkpoint_roundtrip.cpp`
@@ -171,6 +172,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ### Reorder/resize/migration behavior
 
 - Active sets are index-based and therefore sensitive to reorder/migration operations; downstream paths rely on updated indices from reorder/migration routines.
+- Active eligibility is species-agnostic in the scheduler contract; migration changes tags/sidecars but does not itself change active membership unless scheduler bins are reassigned through scheduler APIs.
 
 ### Restart/reload behavior
 

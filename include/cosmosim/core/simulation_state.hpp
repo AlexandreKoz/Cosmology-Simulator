@@ -270,6 +270,8 @@ struct ParticleMigrationRecord {
   double velocity_z_peculiar = 0.0;
   double mass_code = 0.0;
   std::uint8_t time_bin = 0;
+  bool has_gravity_softening_override = false;
+  double gravity_softening_comoving = 0.0;
   bool has_star_fields = false;
   StarParticleMigrationFields star_fields{};
   bool has_black_hole_fields = false;
