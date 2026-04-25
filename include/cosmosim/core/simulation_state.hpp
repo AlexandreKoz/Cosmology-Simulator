@@ -313,6 +313,14 @@ class SimulationState {
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
       std::span<const std::uint32_t> local_indices) const;
   void commitParticleMigration(const ParticleMigrationCommit& commit);
+  [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
+  [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
+  void bumpParticleIndexGeneration() noexcept;
+  void bumpCellIndexGeneration() noexcept;
+
+ private:
+  std::uint64_t m_particle_index_generation = 0;
+  std::uint64_t m_cell_index_generation = 0;
 };
 
 struct ActiveIndexSet {

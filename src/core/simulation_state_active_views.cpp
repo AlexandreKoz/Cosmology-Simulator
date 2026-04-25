@@ -1,6 +1,12 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <unordered_map>
+
 namespace cosmosim::core {
+namespace {
+std::unordered_map<const void*, std::uint64_t> g_particle_view_generation;
+std::unordered_map<const void*, std::uint64_t> g_cell_view_generation;
+}  // namespace
 
 void ActiveIndexSet::clear() {
   particle_indices.clear();
@@ -169,6 +175,8 @@ GravityParticleKernelView buildGravityParticleKernelView(
       active_particle_indices,
       workspace.particle_velocity_z_peculiar);
   gatherSpan<double>(state.particles.mass_code, active_particle_indices, workspace.particle_mass_code);
+  g_particle_view_generation[static_cast<const void*>(workspace.gravity_particle_index.data())] =
+      state.particleIndexGeneration();
 
   return GravityParticleKernelView{
       .particle_index = workspace.gravity_particle_index,
@@ -183,6 +191,11 @@ GravityParticleKernelView buildGravityParticleKernelView(
 }
 
 void scatterGravityParticleKernelView(const GravityParticleKernelView& view, SimulationState& state) {
+  const auto* view_key = static_cast<const void*>(view.particle_index.data());
+  const auto it = g_particle_view_generation.find(view_key);
+  if (it != g_particle_view_generation.end() && it->second != state.particleIndexGeneration()) {
+    throw std::runtime_error("scatterGravityParticleKernelView: stale particle view generation");
+  }
   for (std::size_t i = 0; i < view.size(); ++i) {
     const auto destination = view.particle_index[i];
     if (destination >= state.particles.size()) {
@@ -233,6 +246,8 @@ HydroCellKernelView buildHydroCellKernelView(
   gatherSpan<double>(state.cells.mass_code, active_cell_indices, workspace.hydro_cell_mass_code);
   gatherSpan<double>(state.gas_cells.density_code, active_cell_indices, workspace.hydro_cell_density_code);
   gatherSpan<double>(state.gas_cells.pressure_code, active_cell_indices, workspace.hydro_cell_pressure_code);
+  g_cell_view_generation[static_cast<const void*>(workspace.hydro_cell_index.data())] =
+      state.cellIndexGeneration();
 
   return HydroCellKernelView{
       .cell_index = workspace.hydro_cell_index,
@@ -246,6 +261,11 @@ HydroCellKernelView buildHydroCellKernelView(
 }
 
 void scatterHydroCellKernelView(const HydroCellKernelView& view, SimulationState& state) {
+  const auto* view_key = static_cast<const void*>(view.cell_index.data());
+  const auto it = g_cell_view_generation.find(view_key);
+  if (it != g_cell_view_generation.end() && it->second != state.cellIndexGeneration()) {
+    throw std::runtime_error("scatterHydroCellKernelView: stale cell view generation");
+  }
   for (std::size_t i = 0; i < view.size(); ++i) {
     const auto destination = view.cell_index[i];
     if (destination >= state.cells.size()) {

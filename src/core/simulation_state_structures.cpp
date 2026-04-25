@@ -29,7 +29,9 @@ void ParticleSidecar::resize(std::size_t count) {
   species_tag.resize(count);
   particle_flags.resize(count);
   owning_rank.resize(count);
-  gravity_softening_comoving.clear();
+  if (!gravity_softening_comoving.empty()) {
+    gravity_softening_comoving.resize(count);
+  }
 }
 
 std::size_t ParticleSidecar::size() const noexcept { return particle_id.size(); }

@@ -5,11 +5,13 @@ namespace cosmosim::core {
 void SimulationState::resizeParticles(std::size_t count) {
   particles.resize(count);
   particle_sidecar.resize(count);
+  bumpParticleIndexGeneration();
 }
 
 void SimulationState::resizeCells(std::size_t count) {
   cells.resize(count);
   gas_cells.resize(count);
+  bumpCellIndexGeneration();
 }
 
 void SimulationState::resizePatches(std::size_t count) { patches.resize(count); }
@@ -121,5 +123,17 @@ bool SimulationState::validateOwnershipInvariants() const {
 
   return true;
 }
+
+std::uint64_t SimulationState::particleIndexGeneration() const noexcept {
+  return m_particle_index_generation;
+}
+
+std::uint64_t SimulationState::cellIndexGeneration() const noexcept {
+  return m_cell_index_generation;
+}
+
+void SimulationState::bumpParticleIndexGeneration() noexcept { ++m_particle_index_generation; }
+
+void SimulationState::bumpCellIndexGeneration() noexcept { ++m_cell_index_generation; }
 
 }  // namespace cosmosim::core

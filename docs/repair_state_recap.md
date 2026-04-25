@@ -5,6 +5,33 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Particle ordering/resize/reorder sidecar invariants (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_reorder_compaction_sidecars
+ctest --preset test-cpu-debug --output-on-failure -R "reorder|sidecar|resize|particle"
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added deterministic integration invariants in `tests/integration/test_reorder_compaction_sidecars.cpp` for:
+  - particle identity pairing across grow/shrink operations,
+  - canonical reorder + adversarial permutation consistency,
+  - species labels, timestep bins, and per-particle softening override continuity by particle ID,
+  - full payload movement for star/black-hole/tracer sidecar rows under `SidecarSyncMode::kMoveWithParent`,
+  - stale mutable compact-view invalidation via index-space generation checks.
+- Repaired `ParticleSidecar::resize` so optional `gravity_softening_comoving` values are preserved across structural resize when the override sidecar is populated.
+- Repaired `reorderParticles` `kMoveWithParent` handling to move complete sidecar rows (not index-only remap), then remap parent indices to post-reorder positions.
+- Added generation counters on `SimulationState` index spaces and enforced generation mismatch failures in particle/cell kernel scatter paths.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved; this pass hardens ownership/index-safety checks and sidecar movement invariants without changing solver numerics.
+
+
 ## 0) Timestep/bin authority invariant test floor (2026-04-25 UTC)
 
 Commands:
