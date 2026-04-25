@@ -132,6 +132,28 @@ void reorderParticles(
   if (!reorder_map.isConsistent(state.particles.size())) {
     throw std::invalid_argument("reorderParticles: inconsistent reorder map");
   }
+  if (state.cells.size() > 0) {
+    const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+    if (gas_globals.size() != state.cells.size()) {
+      throw std::runtime_error("reorderParticles: gas-cell identity contract violated before reorder");
+    }
+    std::vector<std::uint64_t> gas_particle_ids_old;
+    gas_particle_ids_old.reserve(gas_globals.size());
+    for (const auto gas_global : gas_globals) {
+      gas_particle_ids_old.push_back(state.particle_sidecar.particle_id[gas_global]);
+    }
+    std::vector<std::uint64_t> gas_particle_ids_new;
+    gas_particle_ids_new.reserve(gas_globals.size());
+    for (const auto old_index : reorder_map.new_to_old_index) {
+      if (state.particle_sidecar.species_tag[old_index] == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+        gas_particle_ids_new.push_back(state.particle_sidecar.particle_id[old_index]);
+      }
+    }
+    if (gas_particle_ids_new != gas_particle_ids_old) {
+      throw std::invalid_argument(
+          "reorderParticles: temporary gas-cell contract forbids gas-particle relative reorder without gas-cell rebuild");
+    }
+  }
 
   const std::span<const std::uint32_t> new_to_old_index = reorder_map.new_to_old_index;
 
@@ -231,6 +253,17 @@ void debugAssertNoStaleParticleIndices(const SimulationState& state) {
   check_indices(state.star_particles.particle_index, "star_particles");
   check_indices(state.black_holes.particle_index, "black_holes");
   check_indices(state.tracers.particle_index, "tracers");
+}
+
+void debugAssertGasCellIdentityContract(const SimulationState& state) {
+  const std::size_t gas_particle_count = state.particle_species_index.count(ParticleSpecies::kGas);
+  if (gas_particle_count == 0) {
+    return;
+  }
+  if (state.cells.size() != gas_particle_count || state.gas_cells.size() != gas_particle_count) {
+    throw std::runtime_error(
+        "debugAssertGasCellIdentityContract: temporary contract requires local 1:1 gas particles and gas cells");
+  }
 }
 
 }  // namespace cosmosim::core

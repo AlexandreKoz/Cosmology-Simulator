@@ -25,7 +25,7 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | Active/inactive status | Scheduler subsystem | `HierarchicalTimeBinScheduler::m_hot.active_flag` and `m_active_elements` | `beginSubstep` (`rebuildActiveSet`), `endSubstep` | `ActiveSetDescriptor` is per-step derived data. |
 | Canonical particle order | `core::SimulationState` particle SoA+sidecar lanes | `SimulationState::{particles,particle_sidecar}` row order | `reorderParticles`, `commitParticleMigration` | All sidecars must be synchronized through these APIs. |
 | Species partition/grouping | `ParticleSidecar::species_tag` with ledger/index maintained by `SimulationState` | `particle_sidecar.species_tag`; `species.count_by_species`; `particle_species_index` | `reorderParticles` (then `rebuildSpeciesIndex`), `commitParticleMigration`, species-changing physics callbacks | `species.count_by_species` and `particle_species_index` are derived/validated mirrors. |
-| Gas cell identity and gas-cell row order | Local gas particle identity (`particle_sidecar.particle_id` for gas species) mediated by workflow gas rebuild path | `cells` + `gas_cells` rows keyed by gas particle IDs during migration/rebuild | `rebuildLocalGasStateFromParticleIds` and related migration helpers in `workflows/reference_workflow.cpp` | Gas cell index is not globally stable; gas particle ID is stable identity anchor. |
+| Gas cell identity and gas-cell row order | Local gas particle identity (`particle_sidecar.particle_id` for gas species) mediated by workflow gas rebuild path | `cells` + `gas_cells` rows keyed by gas particle IDs during migration/rebuild | `rebuildLocalGasStateFromParticleIds` and related migration helpers in `workflows/reference_workflow.cpp`; `debugAssertGasCellIdentityContract`; guarded `reorderParticles` | **Temporary contract:** local 1:1 gas-particle/gas-cell ownership is required on hydro/active-kernel paths. Gas cell index is local/transient only; gas particle ID is the stable identity anchor. |
 | Softening (global/species/per-particle) | Frozen typed config for policy defaults; particle sidecar for overrides | Defaults: `SimulationConfig.numerics.gravity_softening_*`; overrides: `particle_sidecar.gravity_softening_comoving` | Config load/normalization; `materializePerParticleSoftening` | Diagnostics/provenance are observers, never authorities. |
 | Raw config, normalized config, derived runtime constants, provenance | Config/provenance subsystem (`core::FrozenConfig`, `core::ProvenanceRecord`) | `FrozenConfig::{config,normalized_text,provenance}` + persisted normalized/provenance artifacts | `loadFrozenConfigFromFile/String`, `writeNormalizedConfigSnapshot`, provenance constructors and IO writers | Runtime mutation of typed config is forbidden. |
 | Restart continuation truth | Restart schema payload + typed restart read result | `io::RestartReadResult::{state,integrator_state,scheduler_state,provenance,normalized_config_*}` | `writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5` | Restart preserves full scheduler persistent state; snapshot does not. |
@@ -43,6 +43,12 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | `ParticleSpeciesIndex` | `SimulationState` species index subsystem | `particle_sidecar.species_tag` | Must rebuild via `SimulationState::rebuildSpeciesIndex()` after any change affecting particle order/count/species tags | Invalid immediately after reorder/migration/species-tag edits until rebuild | Persistent derived index |
 | `SpeciesContainer::count_by_species` ledger | `SimulationState::species` | `particle_sidecar.species_tag` | Updated by authoritative mutation APIs and validated by invariants | Invalid after unsynchronized direct species-tag edits (forbidden) | Persistent derived ledger |
 | Gas migration lookup maps (e.g., `GasCellMigrationRecord` maps) | Reference workflow migration helpers | Gas particle ID + gas-cell row data | Recomputed at each migration/compaction event | Invalid after migration commit/reorder | Event-scoped transient |
+
+Gas identity field classes:
+- **Stable identity field:** gas particle ID (`particle_sidecar.particle_id` for gas species rows).
+- **Persistent owner-mutable hydro sidecar fields:** `density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`.
+- **Persistent reconstruction sidecar fields (not identity):** `recon_gradient_{x,y,z}`.
+- **Scratch/transient hydro extraction fields:** `HydroCellKernelView` gathered active-cell buffers in `TransientStepWorkspace`; these are not persistence or identity authority.
 
 ### C. Mutation authority table
 
@@ -78,9 +84,10 @@ Debug/test enforcement helpers:
 4. `debugAssertNoStaleParticleIndices` should be used in debug/repair paths when reorder/migration risk stale sidecar indices.
 5. `SidecarSyncMode::kMoveWithParent` requires full-row movement for each species sidecar payload, not only `particle_index` remapping.
 6. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
-7. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
-8. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
-9. Species migration that changes sidecar family (e.g., star->gas, BH->gas, gas->star/tracer) must drop obsolete sidecar rows and initialize required destination sidecar rows in the same commit boundary.
+7. Temporary safety guard: `reorderParticles` must fail loudly if it would change the relative gas-particle order while gas cells exist (unless a gas-cell ID-based rebuild follows in the same repair path).
+8. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
+9. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
+10. Species migration that changes sidecar family (e.g., star->gas, BH->gas, gas->star/tracer) must drop obsolete sidecar rows and initialize required destination sidecar rows in the same commit boundary.
 
 ### F. Softening override priority and preservation
 
@@ -127,6 +134,8 @@ The following patterns are explicitly forbidden:
 5. Reusing active-set caches/views after bin mutation, reorder, resize, migration, or restart without rebuild.
 6. Recomputing normalized/derived config values inconsistently in multiple subsystems outside typed config/provenance contracts.
 7. Persisting/reloading active set lists as continuation truth independent of scheduler persistent state.
+8. Treating hydro reconstruction scratch buffers or active-kernel compact views as persistent gas-cell identity.
+9. Assuming gas-cell identity is `cell_index` alone across reorder/resize/migration/restart boundaries.
 
 ## Test obligations for follow-up prompts
 
