@@ -76,8 +76,9 @@ Debug/test enforcement helpers:
 2. Sidecar synchronization policy (`SidecarSyncPolicy`) must be explicit per sidecar lane; default is parent-indirection remap.
 3. Any reorder/migration changing particle indices requires `rebuildSpeciesIndex` before species-index consumers execute.
 4. `debugAssertNoStaleParticleIndices` should be used in debug/repair paths when reorder/migration risk stale sidecar indices.
-5. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
-6. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
+5. `SidecarSyncMode::kMoveWithParent` requires full-row movement for each species sidecar payload, not only `particle_index` remapping.
+6. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
+7. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
 
 ### F. Softening override priority and preservation
 
@@ -108,8 +109,9 @@ Preservation rules:
    - scheduler bin mutation (`requestBinTransition` + `endSubstep`),
    - any reorder/resize/migration affecting index spaces,
    - restart/reload of state/scheduler.
-5. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
-6. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
+5. Mutable compact kernel views must carry captured index-space generation and fail scatter when generations mismatch.
+6. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
+7. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
 
 ## Forbidden duplicate authority patterns
 

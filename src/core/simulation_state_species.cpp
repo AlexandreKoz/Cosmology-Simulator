@@ -472,6 +472,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     ++species.count_by_species[tag];
   }
   rebuildSpeciesIndex();
+  bumpParticleIndexGeneration();
 }
 
 }  // namespace cosmosim::core
