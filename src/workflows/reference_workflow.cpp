@@ -296,6 +296,7 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
 [[nodiscard]] std::unordered_map<std::uint64_t, GasCellMigrationRecord> collectLocalGasCellRecords(
     const core::SimulationState& state,
     std::span<const std::uint32_t> gas_particle_indices) {
+  core::debugAssertGasCellIdentityContract(state);
   std::unordered_map<std::uint64_t, GasCellMigrationRecord> records;
   const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
   if (state.cells.size() != gas_globals.size()) {
@@ -335,6 +336,7 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
 }
 
 [[nodiscard]] std::vector<std::uint64_t> gasParticleIdByOldCellIndex(const core::SimulationState& state) {
+  core::debugAssertGasCellIdentityContract(state);
   const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
   if (state.cells.size() != gas_globals.size()) {
     throw std::runtime_error("gas cell count must match local gas particle count when capturing host-cell mapping");

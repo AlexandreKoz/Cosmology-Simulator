@@ -535,5 +535,7 @@ void reorderParticles(
 
 // Debug guard: throw on any species sidecar index no longer owned by particles.
 void debugAssertNoStaleParticleIndices(const SimulationState& state);
+// Debug guard: enforce temporary gas ownership contract (local 1:1 gas particle <-> gas cell rows).
+void debugAssertGasCellIdentityContract(const SimulationState& state);
 
 }  // namespace cosmosim::core

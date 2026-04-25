@@ -2,6 +2,7 @@
 #include <cmath>
 #include <filesystem>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
@@ -113,10 +114,21 @@ void populateState(cosmosim::core::SimulationState& state) {
   assert(state.validateOwnershipInvariants());
 }
 
+std::unordered_map<std::uint64_t, double> gasDensityByParticleId(const cosmosim::core::SimulationState& state) {
+  std::unordered_map<std::uint64_t, double> by_id;
+  const auto gas_globals = state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas);
+  assert(gas_globals.size() == state.cells.size());
+  for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
+    by_id.emplace(state.particle_sidecar.particle_id[gas_globals[cell]], state.gas_cells.density_code[cell]);
+  }
+  return by_id;
+}
+
 void testRestartRoundtrip() {
 #if COSMOSIM_ENABLE_HDF5
   cosmosim::core::SimulationState state;
   populateState(state);
+  const auto gas_density_before = gasDensityByParticleId(state);
 
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.current_time_code = 0.123;
@@ -185,6 +197,7 @@ void testRestartRoundtrip() {
   const cosmosim::io::RestartReadResult restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
 
   assert(restored.state.validateOwnershipInvariants());
+  cosmosim::core::debugAssertGasCellIdentityContract(restored.state);
   assert(restored.state.metadata.run_name == state.metadata.run_name);
   assert(restored.state.metadata.schema_version == state.metadata.schema_version);
   assert(restored.state.metadata.step_index == state.metadata.step_index);
@@ -240,6 +253,7 @@ void testRestartRoundtrip() {
       restored.state.black_holes.duty_cycle_total_time_code ==
       state.black_holes.duty_cycle_total_time_code);
   assert(restored.state.species.count_by_species == state.species.count_by_species);
+  assert(gasDensityByParticleId(restored.state) == gas_density_before);
   assert(restored.integrator_state.step_index == integrator_state.step_index);
   assert(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);
   assert(restored.integrator_state.scheme == integrator_state.scheme);

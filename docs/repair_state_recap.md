@@ -4,6 +4,34 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Gas-cell identity and hydro-state ownership invariant tests (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_gas_cell_identity_invariants test_integration_restart_checkpoint_roundtrip
+ctest --preset test-cpu-debug --output-on-failure -R "gas|hydro|cell"
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added targeted invariants in `tests/unit/test_gas_cell_identity_invariants.cpp` for:
+  - explicit local gas identity construction checks (stable gas-particle ID anchor, hydro sidecar ownership, and active hydro extraction safety),
+  - reorder and resize drift detection with loud failures when the temporary local 1:1 gas-particle/gas-cell contract is violated,
+  - stale hydro active-view scatter invalidation after cell index-space resize,
+  - explicit separation between persistent hydro sidecar fields and active-kernel scratch views.
+- Hardened runtime guardrails:
+  - `core::debugAssertGasCellIdentityContract(...)` added for cheap invariant checks,
+  - gas migration/compaction rebuild helpers now assert the temporary gas contract before reconstructing local gas ownership maps,
+  - `reorderParticles(...)` now fails loudly when gas-relative reorder would silently drift gas-cell ownership without an ID-based rebuild.
+- Extended restart roundtrip coverage in `tests/integration/test_restart_checkpoint_roundtrip.cpp` to assert gas density-by-particle-ID mapping survives restart I/O.
+- Updated runtime ownership ADR to explicitly document temporary contract status, stable fields, scratch/derived fields, and forbidden gas identity assumptions.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved and made louder on contract violations; no hydro solver numerics or physics models were changed.
+
 
 ## 0) Particle ordering/resize/reorder sidecar invariants (2026-04-25 UTC)
 
