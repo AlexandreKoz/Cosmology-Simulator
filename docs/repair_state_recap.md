@@ -4,6 +4,28 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+
+## 0) Stage 0 runtime-truth ownership map freeze (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added a code-verified runtime ownership map in `docs/architecture/runtime_truth_map.md` covering timestep bins, active-set construction, particle/species ordering, sidecars, gas identity, softening, config-derived runtime values, and restart/checkpoint truth.
+- Recorded explicit duplication/mirror lanes and mutation-authority ambiguity for scheduler/state time bins and gas identity mapping.
+- Documented Stage 0 follow-up repair tickets without broad runtime behavior changes.
+- `cpu-only-debug` configure/build succeeded; test preset run exposed an existing blocker: `test_unit_snapshot_hdf5_schema` expects schema `gadget_arepo_v2` while runtime schema reports `gadget_arepo_v4`.
+
+Reproducibility impact:
+
+- No runtime behavior or schema payload changed in this pass; this is an audit/documentation freeze only.
+
 ## 0) Gravity invalid-state diagnostics/escalation hardening (2026-04-20 UTC)
 
 Observed:
