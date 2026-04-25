@@ -5,6 +5,33 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Timestep/bin authority invariant test floor (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_time_integration
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_time_integration|integration_hierarchical_time_bins|integration_restart_checkpoint_roundtrip"
+```
+
+Observed:
+
+- Added deterministic timestep/bin authority invariants in `tests/unit/test_time_integration.cpp` for:
+  - scheduler-owned assignment/reassignment,
+  - unauthorized mirror mutation detection,
+  - reorder identity survival (bin follows particle ID),
+  - scheduler persistent-state roundtrip equivalence (restart lane contract).
+- Added explicit helper seam in `core/time_integration`:
+  - `timeBinMirrorsMatchScheduler(...)`
+  - `debugAssertTimeBinMirrorAuthorityInvariant(...)`
+  so non-owner mutation of mirror lanes is detectable in debug/test paths.
+- Updated ownership documentation to record these enforcement helpers and to reduce the timestep missing-test gap in the runtime truth map.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved. No timestep algorithm or solver numerics changed; this pass adds invariant checks/tests and documentation only.
+
+
 ## 0) Runtime ownership ADR freeze (2026-04-25 UTC)
 
 Commands:

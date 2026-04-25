@@ -2,9 +2,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/core/simulation_state.hpp"
 
 namespace {
 
@@ -170,6 +172,126 @@ void testHierarchicalSchedulerTransitions() {
   assert(scheduler.diagnostics().demoted_elements >= 2);
 }
 
+void syncStateTimeBinsFromScheduler(
+    const cosmosim::core::HierarchicalTimeBinScheduler& scheduler,
+    cosmosim::core::SimulationState& state) {
+  const auto persistent = scheduler.exportPersistentState();
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particles.time_bin[i] = persistent.bin_index[i];
+  }
+  for (std::size_t i = 0; i < state.cells.size(); ++i) {
+    state.cells.time_bin[i] = persistent.bin_index[i];
+  }
+}
+
+void testTimestepBinAuthorityInvariant() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  state.resizeCells(2);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particles.time_bin[i] = 0;
+  }
+  for (std::size_t i = 0; i < state.cells.size(); ++i) {
+    state.cells.time_bin[i] = 0;
+  }
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(4, 0, 0);
+  scheduler.setElementBin(1, 1, scheduler.currentTick());
+  scheduler.setElementBin(2, 2, scheduler.currentTick());
+  syncStateTimeBinsFromScheduler(scheduler, state);
+
+  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
+  cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+
+  // Unauthorized non-owner mutation of mirror lanes is detectable.
+  state.particles.time_bin[2] = 0;
+  assert(!cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
+  bool threw = false;
+  try {
+    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+
+  // Active-set authority remains scheduler-owned despite mirror tampering.
+  const auto active = scheduler.beginSubstep();
+  assert(active.size() == 4);
+  assert(active[0] == 0 && active[1] == 1 && active[2] == 2 && active[3] == 3);
+  scheduler.endSubstep();
+
+  // Authorized path re-synchronizes mirrors.
+  syncStateTimeBinsFromScheduler(scheduler, state);
+  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
+}
+
+void testTimestepBinReassignmentAndRestartRoundTrip() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(5, 1, 0);
+
+  scheduler.beginSubstep();
+  scheduler.requestBinTransition(0, 0);
+  scheduler.requestBinTransition(3, 2);
+  scheduler.endSubstep();
+
+  while (scheduler.currentTick() < 4) {
+    scheduler.beginSubstep();
+    scheduler.endSubstep();
+  }
+
+  scheduler.beginSubstep();
+  scheduler.requestBinTransition(0, 2);
+  scheduler.endSubstep();
+
+  const auto saved = scheduler.exportPersistentState();
+  cosmosim::core::HierarchicalTimeBinScheduler restored(saved.max_bin);
+  restored.importPersistentState(saved);
+  const auto loaded = restored.exportPersistentState();
+  assert(loaded.current_tick == saved.current_tick);
+  assert(loaded.max_bin == saved.max_bin);
+  assert(loaded.bin_index == saved.bin_index);
+  assert(loaded.next_activation_tick == saved.next_activation_tick);
+  assert(loaded.active_flag == saved.active_flag);
+  assert(loaded.pending_bin_index == saved.pending_bin_index);
+}
+
+void testTimestepBinReorderIdentitySurvival() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(5);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.particle_id[i] = 100 + i;
+    state.particle_sidecar.sfc_key[i] = static_cast<std::uint64_t>(9 - i);
+    state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+    state.particle_sidecar.particle_flags[i] = 0;
+    state.particle_sidecar.owning_rank[i] = 0;
+  }
+  state.species.count_by_species = {5, 0, 0, 0, 0};
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(5, 0, 0);
+  scheduler.setElementBin(0, 2, scheduler.currentTick());
+  scheduler.setElementBin(1, 0, scheduler.currentTick());
+  scheduler.setElementBin(2, 1, scheduler.currentTick());
+  scheduler.setElementBin(3, 3, scheduler.currentTick());
+  scheduler.setElementBin(4, 1, scheduler.currentTick());
+  syncStateTimeBinsFromScheduler(scheduler, state);
+
+  std::vector<std::uint8_t> original_bin_by_id(5, 0);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    original_bin_by_id[i] = state.particles.time_bin[i];
+  }
+
+  const auto reorder_map = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
+  cosmosim::core::reorderParticles(state, reorder_map);
+
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const std::uint64_t id = state.particle_sidecar.particle_id[i];
+    const std::size_t old_index = static_cast<std::size_t>(id - 100);
+    assert(state.particles.time_bin[i] == original_bin_by_id[old_index]);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -178,5 +300,8 @@ int main() {
   testActiveSubsetDetection();
   testTimeBinMappingAndCriteria();
   testHierarchicalSchedulerTransitions();
+  testTimestepBinAuthorityInvariant();
+  testTimestepBinReassignmentAndRestartRoundTrip();
+  testTimestepBinReorderIdentitySurvival();
   return 0;
 }

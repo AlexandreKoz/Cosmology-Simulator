@@ -94,6 +94,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 - Scheduler mutates bin/tick truth via `reset`, `setElementBin`, `requestBinTransition`, `beginSubstep` + `endSubstep`.
 - Runtime bin adaptation mutates pending transitions in `updateAdaptiveTimeBins(...)`.
 - State mirrors refreshed from scheduler in `syncTimeBinsFromScheduler(...)`.
+- Mirror drift detection is now explicit via `timeBinMirrorsMatchScheduler(...)` / `debugAssertTimeBinMirrorAuthorityInvariant(...)`.
 - Restart load mutates integrator/scheduler via `readRestartCheckpointHdf5(...)` and `importPersistentState(...)`.
 
 ### Read paths
@@ -138,9 +139,8 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 - `tests/integration/test_restart_checkpoint_roundtrip.cpp`
 - `tests/unit/test_restart_checkpoint_schema.cpp`
 
-### Missing tests (audit-identified)
+### Remaining tests (audit-identified)
 
-- Explicit invariant test that scheduler↔state bin mirrors cannot silently diverge across full loop stages.
 - Snapshot read/write test asserting intentional loss (or future preservation) of timestep bins, to avoid accidental contract drift.
 
 ---

@@ -58,6 +58,10 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | Normalized config/provenance text/hash | Config/provenance loading and snapshot/restart IO contracts | Recomputing/rewriting normalized config or hashes in unrelated subsystems |
 | Active-set buffers/views | Active-view builders and scatter functions | Caching and reusing stale active views across reorder/bin changes |
 
+Debug/test enforcement helpers:
+- `timeBinMirrorsMatchScheduler(...)` reports whether particle/cell mirror lanes still match scheduler authority.
+- `debugAssertTimeBinMirrorAuthorityInvariant(...)` fails loudly when a non-owner mutation (or stale mirror) is observed.
+
 ### D. Restart/reload rules
 
 1. **Restart checkpoint is continuation authority** for scheduler + integrator + state + normalized config + provenance (`readRestartCheckpointHdf5`).
