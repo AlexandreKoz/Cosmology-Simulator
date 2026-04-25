@@ -437,6 +437,9 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_reorder_compaction_sidecars PRIVATE cosmosim_core)
   add_test(NAME integration_reorder_compaction_sidecars COMMAND test_integration_reorder_compaction_sidecars)
 
+  add_executable(test_integration_species_migration_invariants tests/integration/test_species_migration_invariants.cpp)
+  target_link_libraries(test_integration_species_migration_invariants PRIVATE cosmosim_core cosmosim_gravity)
+  add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
 
 
   add_executable(test_integration_profiling_mini_run tests/integration/test_profiling_mini_run.cpp)

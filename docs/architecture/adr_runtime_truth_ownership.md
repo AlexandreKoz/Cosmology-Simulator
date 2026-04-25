@@ -79,6 +79,8 @@ Debug/test enforcement helpers:
 5. `SidecarSyncMode::kMoveWithParent` requires full-row movement for each species sidecar payload, not only `particle_index` remapping.
 6. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
 7. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
+8. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
+9. Species migration that changes sidecar family (e.g., star->gas, BH->gas, gas->star/tracer) must drop obsolete sidecar rows and initialize required destination sidecar rows in the same commit boundary.
 
 ### F. Softening override priority and preservation
 
@@ -111,7 +113,8 @@ Preservation rules:
    - restart/reload of state/scheduler.
 5. Mutable compact kernel views must carry captured index-space generation and fail scatter when generations mismatch.
 6. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
-7. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
+7. Active eligibility is scheduler/bin-driven and species-agnostic by contract; species migration alone does not authorize ad-hoc active-set mutations outside scheduler ownership APIs.
+8. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
 
 ## Forbidden duplicate authority patterns
 
