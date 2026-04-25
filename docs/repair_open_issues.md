@@ -94,6 +94,7 @@ Additional validation limitation for this pass:
 | ID | Status | Area | Current limitation | Next-step evidence target |
 |---|---|---|---|---|
 | P30-CLUSTERED-LOAD-MATURITY-025 | Open | Distributed gravity clustered-load maturity | Current deterministic contiguous SFC cuts reduce clustered overshoot but remain one-dimensional; extreme multi-cluster anisotropy can still create per-rank remote short-range pressure skew even when weighted load appears balanced. | Add clustered MPI scaling sweeps (2/3/4+ ranks) that jointly track weighted-load imbalance and remote request packet imbalance against acceptance thresholds in `bench_tree_only_scaling_mpi` + `bench_tree_pm_coupling`. |
+| P31-STATE-TEST-DRIFT-026 | Open | Snapshot schema contract drift | `test_unit_snapshot_hdf5_schema` currently expects `gadget_arepo_v2` while runtime schema advertises `gadget_arepo_v4`, causing `ctest --preset test-cpu-debug --output-on-failure` failure during Stage 0 audit. | Align snapshot schema contract between implementation/tests/docs and re-run `test_unit_snapshot_hdf5_schema` plus `test_integration_snapshot_hdf5_roundtrip` with explicit migration/compatibility note if required. |
 
 
 ## 2026-04-20: Remaining Phase 3 campaign blockers

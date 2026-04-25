@@ -1,5 +1,31 @@
 # Architecture decision log
 
+## 2026-04-25 — ADR-INFRA-AUDIT-012: Stage 0 runtime-truth freeze initiated
+
+### Status
+Accepted (infrastructure audit baseline)
+
+### Context
+Runtime-state ownership across scheduler bins, species sidecars, gas identity mapping, and restart/snapshot overlap needed a code-verified truth map before additional repair edits.
+
+### Decision
+- Freeze a repository-local runtime truth map at `docs/architecture/runtime_truth_map.md` based on direct code inspection.
+- Record explicit mutation/read/serialization owners for timestep bins, active sets, ordering/sidecars, gas identity, softening, config-derived runtime values, and restart/checkpoint truth.
+- Record ambiguity/duplication and follow-up repair tickets without broad behavior edits in this stage.
+
+### Consequences
+- Positive: follow-up repair prompts can target one explicit audited baseline instead of inferred ownership.
+- Positive: ambiguous mutation authority is called out explicitly rather than hidden in helper paths.
+- Tradeoff: documentation overhead increases, but runtime behavior remains unchanged.
+
+### Evidence references
+- `docs/architecture/runtime_truth_map.md`
+- `src/core/time_integration.cpp`
+- `src/core/simulation_state_species.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `src/io/restart_checkpoint.cpp`
+- `src/io/snapshot_hdf5.cpp`
+
 ## 2026-04-19 — ADR-FEATURE-GRAVITY-011: Phase 2 distributed TreePM closeout hard-gate and failure-contract freeze
 
 ### Status
