@@ -5,6 +5,26 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Runtime ownership ADR freeze (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added formal ownership ADR `docs/architecture/adr_runtime_truth_ownership.md` that assigns one authoritative owner per runtime domain and codifies mirror/cache/view refresh+invalidation, mutation authority, restart/reload rules, reorder/resize/migration rules, and forbidden duplicate-authority patterns.
+- Updated architecture decision log with `ADR-INFRA-OWNERSHIP-013` linking the new runtime ownership policy to the Stage 0 truth map baseline.
+
+Reproducibility impact:
+
+- Documentation/policy-only change; no runtime/state schema or solver behavior change.
+
+
 ## 0) Stage 0 runtime-truth ownership map freeze (2026-04-25 UTC)
 
 Commands:
