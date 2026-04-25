@@ -1,5 +1,32 @@
 # Architecture decision log
 
+## 2026-04-25 — ADR-INFRA-OWNERSHIP-013: Single-source-of-truth runtime ownership policy
+
+### Status
+Accepted (infrastructure ownership policy baseline)
+
+### Context
+Stage 0 runtime-truth mapping (`docs/architecture/runtime_truth_map.md`) captured authoritative lanes and ambiguity, but ownership/mirror/invalidation/mutation authority contracts were not yet frozen in one ADR.
+
+### Decision
+- Add `docs/architecture/adr_runtime_truth_ownership.md` as the formal single-source-of-truth policy for runtime state ownership.
+- Assign one authoritative owner per runtime domain (integrator time, scheduler bins/active sets, particle order/species grouping, gas identity mapping, softening policy lanes, config/provenance lanes, restart continuation payloads).
+- Define explicit mirror/cache/view refresh + invalidation rules, mutation authority boundaries, restart vs snapshot semantics, and forbidden duplicate-authority patterns.
+
+### Consequences
+- Positive: reviewers and follow-up repair prompts now have one normative ownership contract tied to concrete modules/classes/fields.
+- Positive: duplication lanes remain allowed only as documented mirrors/derived indices with explicit synchronization obligations.
+- Tradeoff: stricter ownership language may require targeted follow-up tests when touching ambiguous domains.
+
+### Evidence references
+- `docs/architecture/runtime_truth_map.md`
+- `docs/architecture/adr_runtime_truth_ownership.md`
+- `include/cosmosim/core/time_integration.hpp`
+- `include/cosmosim/core/simulation_state.hpp`
+- `src/workflows/reference_workflow.cpp`
+- `src/io/restart_checkpoint.cpp`
+- `src/io/snapshot_hdf5.cpp`
+
 ## 2026-04-25 — ADR-INFRA-AUDIT-012: Stage 0 runtime-truth freeze initiated
 
 ### Status
