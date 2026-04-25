@@ -247,6 +247,12 @@ class HierarchicalTimeBinScheduler {
 
 [[nodiscard]] TimeBinMappingResult mapDtToTimeBin(double dt_time_code, const TimeStepLimits& limits);
 [[nodiscard]] double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits);
+[[nodiscard]] bool timeBinMirrorsMatchScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state);
+void debugAssertTimeBinMirrorAuthorityInvariant(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state);
 
 [[nodiscard]] double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl);
 [[nodiscard]] double computeGravityTimeStep(const GravityTimeStepInput& input, double eta);

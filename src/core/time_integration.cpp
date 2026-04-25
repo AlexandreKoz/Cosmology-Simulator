@@ -496,6 +496,36 @@ double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits) {
   return limits.min_dt_time_code * static_cast<double>(powerOfTwo(std::min(bin_index, limits.max_bin)));
 }
 
+bool timeBinMirrorsMatchScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state) {
+  const auto persistent = scheduler.exportPersistentState();
+  if (persistent.bin_index.size() < state.particles.size() || persistent.bin_index.size() < state.cells.size()) {
+    return false;
+  }
+
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    if (state.particles.time_bin[i] != persistent.bin_index[i]) {
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < state.cells.size(); ++i) {
+    if (state.cells.time_bin[i] != persistent.bin_index[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void debugAssertTimeBinMirrorAuthorityInvariant(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state) {
+  if (!timeBinMirrorsMatchScheduler(scheduler, state)) {
+    throw std::runtime_error(
+        "time-bin mirror authority invariant violated: state mirrors diverged from scheduler authority");
+  }
+}
+
 double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl) {
   if (input.cell_width_code <= 0.0) {
     throw std::invalid_argument("cell_width_code must be positive");
