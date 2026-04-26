@@ -4,6 +4,40 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Stage 0 consolidation gate and runtime-truth freeze (P0-10, 2026-04-26 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure -R "runtime|truth|timestep|scheduler|active|particle|sidecar|species|gas|hydro|softening|config|restart|checkpoint|provenance"
+ctest --preset test-cpu-debug --output-on-failure
+
+cmake --preset hdf5-debug
+cmake --build --preset build-hdf5-debug
+ctest --preset test-hdf5-debug --output-on-failure
+
+cmake --preset pm-hdf5-fftw-debug
+cmake --build --preset build-pm-hdf5-fftw-debug
+ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
+```
+
+Observed:
+
+- Stage 0 targeted runtime-truth suite on `cpu-only-debug` passed (21/21) across timestep/bin, active-set, particle/sidecar, species, gas, softening, config/provenance, and restart/checkpoint families.
+- Full CPU/HDF5 suite runs are currently not fully green in this environment:
+  - `unit_snapshot_hdf5_schema` mismatch (`gadget_arepo_v2` expected by test while runtime schema references newer naming),
+  - long-running `integration_tree_pm_coupling_periodic` path limits timely full-cycle completion in this container.
+- PM+HDF5+FFTW preset run completed with explicit failures (`8/75` failed): `integration_softening_ownership_invariants`, `unit_pm_solver`, `unit_snapshot_hdf5_schema`, `integration_tree_pm_coupling_periodic`, `integration_docs_scaffold`, `integration_release_readiness_artifacts`, `integration_runtime_app_smoke`, `validation_phase2_mpi_gravity_single_rank`.
+- Added Stage 0 grouped ctest preset: `test-stage0-runtime-truth-cpu-debug`.
+- Added closure artifact `docs/repair/stage0_runtime_truth_freeze.md` and recorded gate ADR entry (`ADR-INFRA-STAGE0-GATE-014`).
+- Updated `docs/repair_open_issues.md` with precise Stage 0 closure blockers and retest commands.
+
+Reproducibility impact:
+
+- Deterministic behavior unchanged. This pass records gate evidence, test-group metadata, and blocker docs only; no new physics or solver-model features were introduced.
+
 ## 0) Restart/reload runtime-truth round-trip invariant suite (2026-04-26 UTC)
 
 Commands:

@@ -1,5 +1,31 @@
 # Architecture decision log
 
+## 2026-04-26 — ADR-INFRA-STAGE0-GATE-014: Stage 0 consolidation gate remains open (runtime-truth freeze not yet closed)
+
+### Status
+Accepted (gate record; Stage 0 not closed)
+
+### Context
+Stage 0 required a full consolidation gate across runtime-truth invariant suites, CPU debug/full suites, and dependency-enabled HDF5/PM+HDF5+FFTW presets before allowing new physics or performance work.
+
+### Decision
+- Run the Stage 0 targeted runtime-truth suite and full debug preset suites using repository presets.
+- Record the gate closure artifact at `docs/repair/stage0_runtime_truth_freeze.md`.
+- Keep Stage 0 marked **not closed** until currently failing contract/invariant tests are repaired and revalidated.
+- Add named Stage 0 grouped test execution preset `test-stage0-runtime-truth-cpu-debug` in `CMakePresets.json`.
+
+### Consequences
+- Positive: Stage 0 closure status is explicit and command-backed, with a discoverable one-command Stage 0 runtime-truth suite.
+- Positive: Prevents premature resumption of feature work while known runtime-truth contract failures remain.
+- Tradeoff: Progression remains blocked behind existing red tests in CPU/HDF5/PM+HDF5+FFTW paths.
+
+### Evidence references
+- `docs/repair/stage0_runtime_truth_freeze.md`
+- `docs/repair_open_issues.md`
+- `docs/architecture/runtime_truth_map.md`
+- `docs/architecture/adr_runtime_truth_ownership.md`
+- `CMakePresets.json`
+
 ## 2026-04-25 — ADR-INFRA-OWNERSHIP-013: Single-source-of-truth runtime ownership policy
 
 ### Status

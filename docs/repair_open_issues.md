@@ -2,6 +2,22 @@
 
 _Date captured: 2026-04-14 (UTC)_
 
+## Stage 0 gate status update (2026-04-26 UTC)
+
+- **Stage 0 status: NOT CLOSED.**
+- Gate evidence: `docs/repair/stage0_runtime_truth_freeze.md`.
+- New physics/performance work remains blocked pending closure of Stage 0 blockers below.
+
+### Stage 0 closure blockers (this gate run)
+
+| ID | Status | Area | Current limitation | Next-step evidence target |
+|---|---|---|---|---|
+| P0-10-STAGE0-GATE-028 | Open | Stage 0 closure gate | Full Stage 0 consolidation gate remains red: full CPU/HDF5/PM preset suites did not complete cleanly, and Stage 0 cannot be closed while required invariants/contracts fail. | Re-run full command bundle from `docs/repair/stage0_runtime_truth_freeze.md` after listed blockers are fixed and keep Stage 0 marked closed only after all required suites pass. |
+| P32-SOFTENING-PROVENANCE-029 | Open | Softening + restart/provenance contract | `integration_softening_ownership_invariants` aborts on HDF5/PM presets with `restart writer requires provenance.config_hash_hex`. | Repair provenance/config hash population path and re-run `ctest --preset test-hdf5-debug --output-on-failure -R "integration_softening_ownership_invariants|restart|provenance"` and `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "integration_softening_ownership_invariants"`. |
+| P33-APP-CONFIG-ROUNDTRIP-030 | Open | Runtime app normalized config contract | `integration_runtime_app_smoke` fails (`normalized config must preserve numerics.treepm_pm_grid`) on PM+HDF5+FFTW preset. | Repair app/runtime config normalization round-trip and re-run `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "integration_runtime_app_smoke|integration_config_examples|unit_config_parser"`. |
+| P34-RELEASE-SCHEMA-DRIFT-031 | Open | Release/docs schema metadata drift | `integration_release_readiness_artifacts` fails because release manifest expectation for restart schema/version is out of sync; docs scaffold also expects outdated snapshot schema naming. | Align implementation/tests/docs/release artifacts for snapshot+restart schema names/versions and re-run `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "integration_docs_scaffold|integration_release_readiness_artifacts|unit_snapshot_hdf5_schema"`. |
+| P35-PM-VALIDATION-CONTRACT-032 | Open | PM isolated/coupling/validation contract | PM preset still fails `unit_pm_solver`, `integration_tree_pm_coupling_periodic`, and `validation_phase2_mpi_gravity_single_rank` contract checks. | Repair PM contract expectations and re-run `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "unit_pm_solver|integration_tree_pm_coupling_periodic|validation_phase2_mpi_gravity_single_rank"`. |
+
 
 ## Current blocker ledger after dependency-enabled validation
 
