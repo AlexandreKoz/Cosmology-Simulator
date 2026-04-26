@@ -112,6 +112,23 @@ Preservation rules:
 4. **Runtime-mutable values**: only dedicated runtime state (`SimulationState`, `IntegratorState`, scheduler state). `SimulationConfig` itself is immutable at runtime.
 5. **Provenance owner**: `core::ProvenanceRecord` produced from frozen config/runtime context and serialized by snapshot/restart IO layers.
 
+Ownership map for config-derived values used in runtime pathways:
+
+| Value lane | Owner | Examples | Mutation policy |
+|---|---|---|---|
+| Raw config | Config parser input | `param.txt` key/value lines, legacy aliases (e.g., `mode`, `box_size`, `treepm_pm_grid`) | Parse-time only; never consumed directly by solver modules. |
+| Normalized config | `core::FrozenConfig` | `FrozenConfig::config` typed enums/numerics, `FrozenConfig::normalized_text`, `FrozenConfig::provenance.config_hash_hex` | Immutable after freeze; canonical source for runtime construction and reproducible hashing. |
+| Derived runtime constants | Runtime constructors + typed helper seams | TreePM mesh spacing/split/cutoff from `treepm_*` + box/grid axes, species softening policy arrays, `LambdaCdmBackground` and `UnitSystem` | Must be computed from normalized typed config through a single owning construction path per subsystem; no parallel ad-hoc recomputation with divergent formulas. |
+| Runtime-mutable state | Runtime state owners | `IntegratorState::{current_time_code,current_scale_factor,step_index}`, scheduler bins/ticks, particle/cell arrays and sidecars | Mutated only by runtime evolution/restart import APIs; not fed back into config authority. |
+| Diagnostic/provenance mirrors | `core::ProvenanceRecord` + IO payload wrappers | `gravity_treepm_mesh_spacing_*`, `gravity_treepm_split_scale_mpc_comoving`, normalized config hash mirror fields in snapshot/restart payloads | Observer-only for audit/continuation validation; never promoted to solver authority. |
+
+Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
+
+- `numerics.time_begin_code` and `numerics.time_end_code` are **code-time domain scalars**, not redshift or physical seconds.
+- `IntegratorState.current_scale_factor` is the cosmological scale factor `a`; continuation/restart must carry this runtime lane explicitly.
+- Redshift is diagnostic-only derived metadata (`z = 1/a - 1` when `a>0`), not a persisted runtime authority lane.
+- In non-cosmological modes, scale factor fallback is treated as a runtime compatibility lane and must not be interpreted as physical-time truth.
+
 ### H. Active-set construction policy
 
 1. Active-set authority is scheduler output from `beginSubstep()`.

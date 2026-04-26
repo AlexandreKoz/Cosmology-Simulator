@@ -3,6 +3,7 @@
 #include <string>
 
 #include "cosmosim/core/constants.hpp"
+#include "cosmosim/core/config.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/units.hpp"
@@ -84,6 +85,38 @@ void testStableHash() {
   assert(hash_a == hash_b);
 }
 
+void testDerivedConstantsConsistencyFromNormalizedConfig() {
+  const std::string text = R"(
+[mode]
+mode = cosmo_cube
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+[cosmology]
+hubble_param = 0.7
+omega_matter = 0.3
+omega_lambda = 0.7
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "derived_constants");
+  const auto units_from_frozen = cosmosim::core::makeUnitSystem(
+      frozen.config.units.length_unit,
+      frozen.config.units.mass_unit,
+      frozen.config.units.velocity_unit);
+  const auto units_from_roundtrip = cosmosim::core::makeUnitSystem("mpc", "msun", "km_s");
+  assert(std::abs(units_from_frozen.length_si_per_code - units_from_roundtrip.length_si_per_code) < k_tolerance);
+
+  cosmosim::core::CosmologyBackgroundConfig bg_cfg;
+  bg_cfg.hubble_param = frozen.config.cosmology.hubble_param;
+  bg_cfg.omega_matter = frozen.config.cosmology.omega_matter;
+  bg_cfg.omega_lambda = frozen.config.cosmology.omega_lambda;
+  bg_cfg.omega_radiation = 0.0;
+  bg_cfg.omega_curvature = 0.0;
+  const cosmosim::core::LambdaCdmBackground background(bg_cfg);
+  const double expected_h0 = frozen.config.cosmology.hubble_param * cosmosim::core::constants::k_hubble_100_km_s_mpc_si;
+  assert(std::abs(background.hubble0Si() - expected_h0) / expected_h0 < k_tolerance);
+}
+
 }  // namespace
 
 int main() {
@@ -92,5 +125,6 @@ int main() {
   testComovingPhysicalConversions();
   testUnitsConversions();
   testStableHash();
+  testDerivedConstantsConsistencyFromNormalizedConfig();
   return 0;
 }

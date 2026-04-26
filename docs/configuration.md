@@ -94,6 +94,12 @@ The concrete run directory is:
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
 - `gravity_softening` / `gravity_softening_kpc_comoving`
 - `gravity_solver`, `hydro_solver`
+
+Time/scale semantics (anti-ambiguity contract):
+
+- `time_begin_code` / `time_end_code` are code-time boundaries for integration bookkeeping.
+- They are not redshift keys and not SI physical-time keys.
+- Runtime cosmological scale-factor authority is `IntegratorState.current_scale_factor` (restart-continuation lane), while redshift remains a derived diagnostic (`z = 1/a - 1` when `a>0`).
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):
   - canonical axis-aware PM grid:
     - `treepm_pm_grid_nx`, `treepm_pm_grid_ny`, `treepm_pm_grid_nz` (normalized output always emits these keys)

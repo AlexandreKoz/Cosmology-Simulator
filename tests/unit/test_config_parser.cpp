@@ -151,6 +151,44 @@ void testDefaultsCanonicalizationAndDeterminism() {
   assert(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
 }
 
+void testConfigNormalizationHashDeterminism() {
+  const std::string first =
+      "[mode]\nmode = zoom_in\n[output]\nrun_name = hash_a\n";
+  const std::string second =
+      "[output]\nrun_name = hash_a\n[mode]\nmode = zoom_in\n";
+  const auto frozen_first = cosmosim::core::loadFrozenConfigFromString(first, "hash_first");
+  const auto frozen_second = cosmosim::core::loadFrozenConfigFromString(second, "hash_second");
+  assert(frozen_first.normalized_text == frozen_second.normalized_text);
+  assert(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
+  assert(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
+}
+
+void testConfigRuntimeOwnership() {
+  const std::string text = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 64 mpc
+[numerics]
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 4.5
+[output]
+run_name = ownership
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "runtime_ownership");
+  assert(frozen.config.numerics.treepm_pm_grid_nx == 32);
+  assert(frozen.config.numerics.treepm_pm_grid_ny == 32);
+  assert(frozen.config.numerics.treepm_pm_grid_nz == 32);
+  assert(frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
+  assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "runtime_ownership_reparse");
+  assert(reparsed.config.numerics.treepm_pm_grid_nx == frozen.config.numerics.treepm_pm_grid_nx);
+  assert(reparsed.config.numerics.treepm_asmth_cells == frozen.config.numerics.treepm_asmth_cells);
+  assert(reparsed.config.numerics.treepm_rcut_cells == frozen.config.numerics.treepm_rcut_cells);
+  assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+}
+
 void testUrlsWindowsPathsAndQuotedHashesAreNotTruncated() {
   const std::string config_text = R"(
 [mode]
@@ -535,6 +573,8 @@ int main() {
   testInvalidTypedPolicyEnumsFail();
   testBoundaryModeValidation();
   testDefaultsCanonicalizationAndDeterminism();
+  testConfigNormalizationHashDeterminism();
+  testConfigRuntimeOwnership();
   testUrlsWindowsPathsAndQuotedHashesAreNotTruncated();
   testDeprecatedAliasesAndCanonicalCollision();
   testFeedbackConfigKeysAndValidation();

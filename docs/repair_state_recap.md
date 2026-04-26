@@ -4,6 +4,33 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Config/runtime ownership and provenance-restart consistency hardening (2026-04-26 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_config_parser test_unit_units_cosmology_provenance test_unit_restart_checkpoint_schema
+ctest --preset test-cpu-debug --output-on-failure -R "config|provenance|runtime|restart"
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added targeted config/runtime ownership coverage in `tests/unit/test_config_parser.cpp`:
+  - deterministic normalized-text + hash stability from equivalent raw inputs,
+  - legacy alias-to-canonical normalization checks for runtime-owned numerics lanes,
+  - normalized text reparse checks to ensure one frozen/typed authority lane.
+- Added derived-constant consistency coverage in `tests/unit/test_units_cosmology_provenance.cpp`:
+  - normalized typed config -> `UnitSystem` mapping consistency,
+  - normalized typed cosmology -> `LambdaCdmBackground` H0 derivation consistency.
+- Added restart metadata integrity rejection coverage in `tests/unit/test_restart_checkpoint_schema.cpp`:
+  - explicit rejection of normalized-text/hash mismatches even when caller-provided hash/provenance strings are non-empty.
+- Updated ownership/config docs (`docs/architecture/adr_runtime_truth_ownership.md`, `docs/configuration.md`) with an explicit raw/normalized/derived/mutable/provenance classification map and anti-ambiguity notes for `time_begin_code`, `time_end_code`, `current_scale_factor`, and diagnostic redshift.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved and tightened: this pass adds validation/tests/docs only and does not change solver numerics or physical-model equations.
+
 ## 0) Softening ownership/priority + override-preservation invariant floor (2026-04-25 UTC)
 
 Commands:

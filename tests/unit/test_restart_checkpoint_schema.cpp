@@ -83,5 +83,17 @@ int main() {
   }
   assert(mismatched_metadata_threw);
 
+  bool text_hash_mismatch_threw = false;
+  try {
+    cosmosim::io::RestartWritePayload invalid_metadata = payload;
+    invalid_metadata.normalized_config_text = "mode = altered\n";
+    invalid_metadata.normalized_config_hash_hex = payload.normalized_config_hash_hex;
+    invalid_metadata.provenance = payload.provenance;
+    (void)cosmosim::io::restartPayloadIntegrityHash(invalid_metadata);
+  } catch (const std::invalid_argument&) {
+    text_hash_mismatch_threw = true;
+  }
+  assert(text_hash_mismatch_threw);
+
   return 0;
 }
