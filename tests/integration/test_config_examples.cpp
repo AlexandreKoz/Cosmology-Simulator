@@ -13,10 +13,14 @@ void checkExample(const std::filesystem::path& path, cosmosim::core::SimulationM
   assert(!frozen.config.output.run_name.empty());
   assert(!frozen.provenance.config_hash_hex.empty());
   assert(frozen.config.numerics.treepm_pm_grid > 0);
+  assert(frozen.config.numerics.treepm_pm_grid_nx > 0);
+  assert(frozen.config.numerics.treepm_pm_grid_ny > 0);
+  assert(frozen.config.numerics.treepm_pm_grid_nz > 0);
   assert(frozen.config.numerics.treepm_asmth_cells > 0.0);
   assert(frozen.config.numerics.treepm_rcut_cells > 0.0);
   assert(frozen.config.numerics.treepm_update_cadence_steps >= 1);
-  assert(frozen.normalized_text.find("treepm_pm_grid = ") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_pm_grid_nx = ") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_pm_grid = ") == std::string::npos);
 
   const std::filesystem::path run_dir = std::filesystem::temp_directory_path() / "cosmosim_config_test" /
                                         frozen.config.output.run_name;
