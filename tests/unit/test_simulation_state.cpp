@@ -136,6 +136,87 @@ int main() {
   assert(state.gas_cells.density_code[0] == 55.0);
   assert(state.gas_cells.pressure_code[1] == 66.0);
 
+  {
+    // test_active_set_cache_invalidation: stale compact views fail loudly on index-space mutation.
+    cosmosim::core::SimulationState particle_state = state;
+    particle_state.resizeCells(0);
+    cosmosim::core::TransientStepWorkspace stale_workspace;
+    const std::array<std::uint32_t, 2> stale_particle_indices{0, 1};
+    auto stale_gravity_view =
+        cosmosim::core::buildGravityParticleKernelView(particle_state, stale_particle_indices, stale_workspace);
+    const auto reorder_map =
+        cosmosim::core::buildParticleReorderMap(particle_state, cosmosim::core::ParticleReorderMode::kBySfcKey);
+    cosmosim::core::reorderParticles(particle_state, reorder_map);
+    bool stale_particle_threw = false;
+    try {
+      cosmosim::core::scatterGravityParticleKernelView(stale_gravity_view, particle_state);
+    } catch (const std::runtime_error&) {
+      stale_particle_threw = true;
+    }
+    assert(stale_particle_threw);
+  }
+
+  {
+    cosmosim::core::SimulationState cell_state;
+    cell_state.resizeCells(3);
+    for (std::size_t i = 0; i < cell_state.cells.size(); ++i) {
+      cell_state.cells.center_x_comoving[i] = static_cast<double>(100 + i);
+      cell_state.cells.center_y_comoving[i] = static_cast<double>(110 + i);
+      cell_state.cells.center_z_comoving[i] = static_cast<double>(120 + i);
+      cell_state.cells.mass_code[i] = static_cast<double>(130 + i);
+      cell_state.gas_cells.density_code[i] = static_cast<double>(140 + i);
+      cell_state.gas_cells.pressure_code[i] = static_cast<double>(150 + i);
+    }
+    cosmosim::core::TransientStepWorkspace stale_workspace;
+    const std::array<std::uint32_t, 2> stale_cell_indices{0, 1};
+    auto stale_hydro_view = cosmosim::core::buildHydroCellKernelView(cell_state, stale_cell_indices, stale_workspace);
+    cell_state.resizeCells(2);
+    bool stale_cell_threw = false;
+    try {
+      cosmosim::core::scatterHydroCellKernelView(stale_hydro_view, cell_state);
+    } catch (const std::runtime_error&) {
+      stale_cell_threw = true;
+    }
+    assert(stale_cell_threw);
+  }
+
+  {
+    // test_active_set_no_competing_builders: solver-local views derive from authoritative active indices.
+    cosmosim::core::SimulationState derivation_state;
+    derivation_state.resizeParticles(4);
+    derivation_state.resizeCells(2);
+    for (std::size_t i = 0; i < derivation_state.particles.size(); ++i) {
+      derivation_state.particle_sidecar.particle_id[i] = 4000 + i;
+      derivation_state.particles.position_x_comoving[i] = static_cast<double>(10 + i);
+      derivation_state.particles.mass_code[i] = static_cast<double>(20 + i);
+    }
+    for (std::size_t i = 0; i < derivation_state.cells.size(); ++i) {
+      derivation_state.cells.center_x_comoving[i] = static_cast<double>(30 + i);
+      derivation_state.gas_cells.density_code[i] = static_cast<double>(40 + i);
+    }
+    const std::array<std::uint32_t, 2> authoritative_particle_indices{1, 3};
+    const std::array<std::uint32_t, 1> authoritative_cell_indices{1};
+    cosmosim::core::TransientStepWorkspace derivation_workspace;
+    const auto particle_active =
+        cosmosim::core::buildParticleActiveView(derivation_state, authoritative_particle_indices, derivation_workspace);
+    const auto gravity_active =
+        cosmosim::core::buildGravityParticleKernelView(
+            derivation_state,
+            authoritative_particle_indices,
+            derivation_workspace);
+    assert(gravity_active.size() == particle_active.size());
+    assert(gravity_active.position_x_comoving[0] == particle_active.position_x_comoving[0]);
+    assert(gravity_active.mass_code[1] == particle_active.mass_code[1]);
+
+    const auto cell_active =
+        cosmosim::core::buildCellActiveView(derivation_state, authoritative_cell_indices, derivation_workspace);
+    const auto hydro_active =
+        cosmosim::core::buildHydroCellKernelView(derivation_state, authoritative_cell_indices, derivation_workspace);
+    assert(hydro_active.size() == cell_active.size());
+    assert(hydro_active.center_x_comoving[0] == cell_active.center_x_comoving[0]);
+    assert(hydro_active.density_code[0] == cell_active.density_code[0]);
+  }
+
   bool threw = false;
   try {
     const std::array<std::uint32_t, 1> bad_indices{8};

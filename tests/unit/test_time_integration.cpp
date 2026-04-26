@@ -292,6 +292,76 @@ void testTimestepBinReorderIdentitySurvival() {
   }
 }
 
+std::vector<std::uint32_t> buildCompetingActiveFromStateMirror(
+    const cosmosim::core::SimulationState& state,
+    std::uint8_t active_bin) {
+  std::vector<std::uint32_t> active;
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    if (state.particles.time_bin[i] == active_bin) {
+      active.push_back(i);
+    }
+  }
+  return active;
+}
+
+void testActiveSetAuthority() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(6, 2, 0);
+  scheduler.setElementBin(0, 0, scheduler.currentTick());
+  scheduler.setElementBin(1, 1, scheduler.currentTick());
+  scheduler.setElementBin(2, 2, scheduler.currentTick());
+  scheduler.setElementBin(3, 1, scheduler.currentTick());
+  scheduler.setElementBin(4, 0, scheduler.currentTick());
+  scheduler.setElementBin(5, 2, scheduler.currentTick());
+
+  const auto active0 = scheduler.beginSubstep();
+  const std::vector<std::uint32_t> expected0{0, 1, 2, 3, 4, 5};
+  assert(std::vector<std::uint32_t>(active0.begin(), active0.end()) == expected0);
+
+  scheduler.requestBinTransition(2, 0);
+  scheduler.endSubstep();
+
+  const auto active1 = scheduler.beginSubstep();
+  const std::vector<std::uint32_t> expected1{0, 2, 4};
+  assert(std::vector<std::uint32_t>(active1.begin(), active1.end()) == expected1);
+  scheduler.endSubstep();
+}
+
+void testActiveSetNoCompetingBuilders() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(6);
+  state.resizeCells(2);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particles.time_bin[i] = 0;
+  }
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(6, 0, 0);
+  scheduler.setElementBin(0, 0, scheduler.currentTick());
+  scheduler.setElementBin(1, 1, scheduler.currentTick());
+  scheduler.setElementBin(2, 2, scheduler.currentTick());
+  scheduler.setElementBin(3, 0, scheduler.currentTick());
+  scheduler.setElementBin(4, 1, scheduler.currentTick());
+  scheduler.setElementBin(5, 2, scheduler.currentTick());
+  syncStateTimeBinsFromScheduler(scheduler, state);
+
+  const auto authoritative = scheduler.beginSubstep();
+  assert(!authoritative.empty());
+
+  // Simulate stale mirror mutation; competing local builders should diverge and be detectable.
+  state.particles.time_bin[5] = 0;
+  const auto competing_after = buildCompetingActiveFromStateMirror(state, 0);
+  assert(competing_after != std::vector<std::uint32_t>(authoritative.begin(), authoritative.end()));
+  bool threw = false;
+  try {
+    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+  scheduler.endSubstep();
+}
+
 }  // namespace
 
 int main() {
@@ -303,5 +373,7 @@ int main() {
   testTimestepBinAuthorityInvariant();
   testTimestepBinReassignmentAndRestartRoundTrip();
   testTimestepBinReorderIdentitySurvival();
+  testActiveSetAuthority();
+  testActiveSetNoCompetingBuilders();
   return 0;
 }
