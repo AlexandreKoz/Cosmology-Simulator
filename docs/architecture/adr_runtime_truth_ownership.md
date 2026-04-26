@@ -98,8 +98,11 @@ Priority order for gravity softening values:
 
 Preservation rules:
 - Reorder/migration must move/remap per-particle overrides with parent particles (`reorderParticles`, migration commit paths).
+- Resize grow/shrink must preserve retained-row override values when the optional sidecar lane is populated.
+- Active-set extraction lanes are mirrors only: gathered active softening slices must reflect sidecar truth and may never write back as an independent authority.
 - Restart must persist and reload override sidecar values.
 - Snapshot contracts must not be treated as authoritative for restart continuation-grade override semantics unless explicitly documented and tested.
+- Diagnostics/provenance softening fields (`gravity_softening_policy`, `gravity_softening_kernel`, `gravity_softening_epsilon_kpc_comoving`) are descriptive mirrors and are never runtime authority.
 
 ### G. Config-derived runtime value ownership
 
