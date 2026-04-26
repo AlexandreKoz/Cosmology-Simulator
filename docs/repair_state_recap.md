@@ -4,6 +4,31 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Active-set ownership + cache-invalidation invariant floor (2026-04-26 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug --target test_unit_time_integration test_unit_simulation_state
+ctest --test-dir build/cpu-only-debug --output-on-failure -R "unit_time_integration|unit_simulation_state"
+```
+
+Observed:
+
+- Added active-set authority and divergence-risk coverage in `tests/unit/test_time_integration.cpp`:
+  - `testActiveSetAuthority` validates known scheduler-driven extraction from controlled bin assignments plus authorized bin mutation refresh behavior.
+  - `testActiveSetNoCompetingBuilders` demonstrates that a mirror-based competing builder can diverge after non-owner mirror mutation and is caught by `debugAssertTimeBinMirrorAuthorityInvariant(...)`.
+- Added mutable compact-view invalidation + solver-derivation checks in `tests/unit/test_simulation_state.cpp`:
+  - stale gravity compact views fail loudly after particle reorder generation change,
+  - stale hydro compact views fail loudly after cell resize generation change,
+  - gravity/hydro solver-local views are verified as derived from the same authoritative active indices used by read-only active views.
+- Updated `docs/architecture/adr_runtime_truth_ownership.md` with explicit active-set owner/layering rules, forbidden module-local fallback builders, generation-counter scatter rules, and lifetime/invalidation events.
+- Updated issue ledger entry in `docs/repair_open_issues.md` to mark P0-08 closed with command-backed test/document evidence.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved; this pass adds/strengthens ownership tests and explicit invalidation policy without changing solver numerics or physics models.
+
 ## 0) Config/runtime ownership and provenance-restart consistency hardening (2026-04-26 UTC)
 
 Commands:

@@ -133,15 +133,34 @@ Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
 
 1. Active-set authority is scheduler output from `beginSubstep()`.
 2. `ActiveSetDescriptor` is derived per substep by splitting scheduler element indices into particle/cell subsets in workflow orchestration.
-3. Active views are transient gather/scatter workspaces and must not be persisted as authority.
-4. Active-set caches may exist only within a substep/stage and must be invalidated after:
+3. Solver-local active views (`GravityParticleKernelView`, `HydroCellKernelView`, and read-only active views) must be derived only from the current authoritative `ActiveSetDescriptor` indices for that same substep.
+4. Active views are transient gather/scatter workspaces and must not be persisted as authority.
+5. No module-local fallback builder is allowed to infer active membership directly from `state.*.time_bin` mirrors during stepping; mirror lanes are debug/IO mirrors only.
+6. Scheduler-driven active extraction and solver-local derived views are a two-layer contract:
+   - Layer A (authority): `HierarchicalTimeBinScheduler::beginSubstep()`.
+   - Layer B (derived): workflow split -> `ActiveSetDescriptor` -> active view builders.
+   Any alternate authority lane is forbidden.
+7. Active-set caches/views must be generation-gated for mutable scatter paths.
+   - Particle compact mutable views capture `SimulationState::particleIndexGeneration()`.
+   - Cell compact mutable views capture `SimulationState::cellIndexGeneration()`.
+   Scatter must fail loudly on generation mismatch.
+8. Allowed invalidation events for active views/caches:
    - scheduler bin mutation (`requestBinTransition` + `endSubstep`),
-   - any reorder/resize/migration affecting index spaces,
-   - restart/reload of state/scheduler.
-5. Mutable compact kernel views must carry captured index-space generation and fail scatter when generations mismatch.
-6. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
-7. Active eligibility is scheduler/bin-driven and species-agnostic by contract; species migration alone does not authorize ad-hoc active-set mutations outside scheduler ownership APIs.
-8. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
+   - particle/cell reorder,
+   - particle/cell resize,
+   - migration commit that rewires index spaces,
+   - restart/reload that imports scheduler/state truth.
+9. Rebuild policy:
+   - rebuild authoritative active indices at each `beginSubstep()`,
+   - rebuild solver-local compact views when entering the stage that uses them,
+   - never reuse mutable compact views across structural mutations.
+10. Lifetime:
+   - authoritative active indices: one scheduler substep,
+   - `ActiveSetDescriptor`: one orchestrator step call,
+   - compact solver views: one callback stage region from build to scatter.
+11. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
+12. Active eligibility is scheduler/bin-driven and species-agnostic by contract; species migration alone does not authorize ad-hoc active-set mutations outside scheduler ownership APIs.
+13. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
 
 ## Forbidden duplicate authority patterns
 
