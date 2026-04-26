@@ -1223,3 +1223,30 @@ Interpretation:
 Reproducibility impact:
 
 - Documentation/evidence-manifest refresh only; no solver, schema, or config semantic changes.
+
+## 2026-04-26: Runtime identity, sidecar, and schema-drift hardening
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS_DEBUG=-g0
+cmake --build --preset build-cpu-debug --target test_integration_species_migration_invariants test_unit_simulation_state test_integration_reorder_compaction_sidecars test_integration_softening_ownership_invariants test_unit_snapshot_hdf5_schema -j1
+./build/cpu-only-debug/test_unit_simulation_state
+./build/cpu-only-debug/test_integration_reorder_compaction_sidecars
+./build/cpu-only-debug/test_integration_species_migration_invariants
+./build/cpu-only-debug/test_integration_softening_ownership_invariants
+./build/cpu-only-debug/test_unit_snapshot_hdf5_schema
+```
+
+Observed:
+
+- Particle migration commits now validate every inbound record before mutating state: species tags must be valid, sidecar payload flags must exactly match the species contract, inbound owner rank must match the receiving commit rank, and the final kept-plus-inbound particle-ID set must remain unique.
+- Ownership invariants now include particle-ID uniqueness, so duplicate identity state fails loudly instead of surviving as a later restart/I/O/migration corruption.
+- Active gravity/hydro kernel-view scatter now protects the global generation registry with a mutex and rejects unregistered or stale compact views rather than silently accepting a pointer not produced by the gather path.
+- Snapshot HDF5 species mapping now rejects invalid species tags and invalid `PartType` indices instead of implicitly falling back to dark matter.
+- Snapshot schema drift test/documentation was aligned to the runtime additive schema identity `gadget_arepo_v4` / schema version 4, closing the stale `gadget_arepo_v2` unit-test expectation.
+
+Interpretation:
+
+- This is a blocker-oriented corruption hardening pass. No force-kernel heuristics, cosmological parameters, gravity split scales, hydrodynamic flux formulas, or subgrid calibration constants were changed.
+- HDF5 roundtrip with real HDF5 was not rerun in this CPU-only environment; the CPU-only schema contract and identity/sidecar regression binaries passed directly.

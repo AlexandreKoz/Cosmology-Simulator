@@ -33,32 +33,38 @@ constexpr std::uint32_t k_species_tracer = static_cast<std::uint32_t>(core::Part
   if (species_tag == k_species_gas) {
     return 0;
   }
-  if (species_tag == k_species_star) {
-    return 4;
+  if (species_tag == k_species_dark_matter) {
+    return 1;
   }
   if (species_tag == k_species_tracer) {
     return 3;
   }
+  if (species_tag == k_species_star) {
+    return 4;
+  }
   if (species_tag == k_species_black_hole) {
     return 5;
   }
-  return 1;
+  throw std::invalid_argument("snapshot HDF5: invalid particle species tag " + std::to_string(species_tag));
 }
 
 [[nodiscard]] std::uint32_t mapPartTypeToSpeciesTag(std::size_t part_type) {
   if (part_type == 0) {
     return k_species_gas;
   }
-  if (part_type == 4) {
-    return k_species_star;
+  if (part_type == 1 || part_type == 2) {
+    return k_species_dark_matter;
   }
   if (part_type == 3) {
     return k_species_tracer;
   }
+  if (part_type == 4) {
+    return k_species_star;
+  }
   if (part_type == 5) {
     return k_species_black_hole;
   }
-  return k_species_dark_matter;
+  throw std::invalid_argument("snapshot HDF5: invalid PartType index " + std::to_string(part_type));
 }
 
 [[nodiscard]] std::string toTypeAliasPath(std::size_t type_index) {

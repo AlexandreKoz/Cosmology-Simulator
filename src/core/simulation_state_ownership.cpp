@@ -27,6 +27,10 @@ bool SimulationState::validateOwnershipInvariants() const {
     return false;
   }
 
+  if (!validateUniqueParticleIds()) {
+    return false;
+  }
+
   if (cells.size() != gas_cells.size()) {
     return false;
   }

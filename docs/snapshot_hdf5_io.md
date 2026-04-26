@@ -17,7 +17,7 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
   - `NumPart_ThisFile`, `NumPart_Total`, `NumPart_Total_HighWord`, `MassTable`
   - `Time`, `Redshift`, `BoxSize` (legacy scalar alias), `CosmoSimBoxSizeX`, `CosmoSimBoxSizeY`, `CosmoSimBoxSizeZ`, `CosmoSimBoxSizeVec`, `Omega0`, `OmegaLambda`, `OmegaBaryon`, `HubbleParam`
 - Snapshot schema metadata:
-  - `CosmoSimSchemaName="gadget_arepo_v2"`
+  - `CosmoSimSchemaName="gadget_arepo_v4"`
   - `CosmoSimSchemaVersion=4`
 - Config metadata group:
   - `/Config` attribute `normalized` containing normalized text config dump

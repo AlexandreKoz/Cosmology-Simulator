@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 
 namespace cosmosim::core {
@@ -248,6 +249,50 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     }
   }
 
+  auto require_inbound_sidecar_contract = [](const ParticleMigrationRecord& inbound) {
+    if (!isValidSpeciesTag(inbound.species_tag)) {
+      throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
+    }
+
+    const auto species = static_cast<ParticleSpecies>(inbound.species_tag);
+    const bool requires_star_fields = species == ParticleSpecies::kStar;
+    const bool requires_black_hole_fields = species == ParticleSpecies::kBlackHole;
+    const bool requires_tracer_fields = species == ParticleSpecies::kTracer;
+
+    if (inbound.has_star_fields != requires_star_fields) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound star sidecar fields do not match species tag");
+    }
+    if (inbound.has_black_hole_fields != requires_black_hole_fields) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound black-hole sidecar fields do not match species tag");
+    }
+    if (inbound.has_tracer_fields != requires_tracer_fields) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound tracer sidecar fields do not match species tag");
+    }
+  };
+
+  std::unordered_set<std::uint64_t> final_particle_ids;
+  final_particle_ids.reserve(particle_count + commit.inbound_records.size());
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    if (remove_mask[i] != 0U) {
+      continue;
+    }
+    if (!final_particle_ids.insert(particle_sidecar.particle_id[i]).second) {
+      throw std::invalid_argument("commitParticleMigration: kept particles contain duplicate IDs");
+    }
+  }
+  for (const auto& inbound : commit.inbound_records) {
+    require_inbound_sidecar_contract(inbound);
+    if (inbound.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
+      throw std::invalid_argument("commitParticleMigration: inbound record ownership must equal commit world rank");
+    }
+    if (!final_particle_ids.insert(inbound.particle_id).second) {
+      throw std::invalid_argument("commitParticleMigration: inbound record would create duplicate particle ID");
+    }
+  }
+
   std::vector<std::uint32_t> old_to_new(particle_count, std::numeric_limits<std::uint32_t>::max());
   std::size_t kept_count = 0;
   for (std::size_t i = 0; i < particle_count; ++i) {
@@ -299,12 +344,6 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   }
 
   for (const auto& inbound : commit.inbound_records) {
-    if (!isValidSpeciesTag(inbound.species_tag)) {
-      throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
-    }
-    if (inbound.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
-      throw std::invalid_argument("commitParticleMigration: inbound record ownership must equal commit world rank");
-    }
     new_particles.position_x_comoving[write_index] = inbound.position_x_comoving;
     new_particles.position_y_comoving[write_index] = inbound.position_y_comoving;
     new_particles.position_z_comoving[write_index] = inbound.position_z_comoving;
