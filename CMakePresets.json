@@ -246,6 +246,18 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "test-stage0-runtime-truth-cpu-debug",
+      "configurePreset": "cpu-only-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "name": "runtime|truth|timestep|scheduler|active|particle|sidecar|species|gas|hydro|softening|config|restart|checkpoint|provenance"
+        }
+      }
     }
   ]
 }
