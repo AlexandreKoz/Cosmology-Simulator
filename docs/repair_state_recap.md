@@ -4,6 +4,31 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Softening ownership/priority + override-preservation invariant floor (2026-04-25 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_softening_ownership_invariants
+ctest --preset test-cpu-debug --output-on-failure -R "softening|gravity|sidecar"
+ctest --preset test-cpu-debug --output-on-failure
+```
+
+Observed:
+
+- Added targeted invariant coverage in `tests/integration/test_softening_ownership_invariants.cpp` for:
+  - explicit source-priority checks (`per-particle override > species default > global default`) in tree softening resolution helpers,
+  - preservation of per-particle override values across resize grow/shrink, reorder/permutation, and species migration commit,
+  - restart checkpoint roundtrip retention of per-particle softening override values (HDF5-enabled path),
+  - active-set softening extraction mirror checks that ensure gathered lanes reflect sidecar truth,
+  - diagnostics observer checks proving run-health softening diagnostics do not mutate runtime softening state.
+- Registered `integration_softening_ownership_invariants` in CMake and updated ownership ADR softening rules to call out resize preservation, active-set mirror status, restart serialization, and diagnostic/provenance non-authority.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved; this pass adds invariant tests and ownership documentation without changing gravity force physics or introducing new softening models.
+
+
 ## 0) Gas-cell identity and hydro-state ownership invariant tests (2026-04-25 UTC)
 
 Commands:

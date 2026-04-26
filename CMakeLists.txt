@@ -444,6 +444,10 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_species_migration_invariants PRIVATE cosmosim_core cosmosim_gravity)
   add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
 
+  add_executable(test_integration_softening_ownership_invariants tests/integration/test_softening_ownership_invariants.cpp)
+  target_link_libraries(test_integration_softening_ownership_invariants PRIVATE cosmosim_all)
+  add_test(NAME integration_softening_ownership_invariants COMMAND test_integration_softening_ownership_invariants)
+
 
   add_executable(test_integration_profiling_mini_run tests/integration/test_profiling_mini_run.cpp)
   target_link_libraries(test_integration_profiling_mini_run PRIVATE cosmosim_core)
