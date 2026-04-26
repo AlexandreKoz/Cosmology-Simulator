@@ -1,13 +1,16 @@
 #include <cassert>
 #include <cmath>
 #include <filesystem>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/gravity/tree_softening.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
@@ -17,11 +20,11 @@
 namespace {
 
 void populateState(cosmosim::core::SimulationState& state) {
-  state.resizeParticles(5);
+  state.resizeParticles(6);
   state.resizeCells(3);
   state.resizePatches(1);
 
-  state.species.count_by_species = {2, 1, 1, 1, 0};
+  state.species.count_by_species = {1, 3, 1, 1, 0};
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     state.particle_sidecar.particle_id[i] = 100 + i;
     state.particle_sidecar.sfc_key[i] = 200 + i;
@@ -36,16 +39,17 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.particles.mass_code[i] = 10.0 + static_cast<double>(i);
     state.particles.time_bin[i] = static_cast<std::uint8_t>(i % 2);
   }
-  state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005};
+  state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005, 0.006};
   state.particle_sidecar.species_tag = {
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
-      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kBlackHole)};
 
   state.star_particles.resize(1);
-  state.star_particles.particle_index[0] = 3;
+  state.star_particles.particle_index[0] = 4;
   state.star_particles.formation_scale_factor[0] = 0.4;
   state.star_particles.birth_mass_code[0] = 9.0;
   state.star_particles.metallicity_mass_fraction[0] = 0.02;
@@ -63,8 +67,8 @@ void populateState(cosmosim::core::SimulationState& state) {
   }
 
   state.black_holes.resize(1);
-  state.black_holes.particle_index[0] = 4;
-  state.black_holes.host_cell_index[0] = 3;
+  state.black_holes.particle_index[0] = 5;
+  state.black_holes.host_cell_index[0] = 2;
   state.black_holes.subgrid_mass_code[0] = 12.0;
   state.black_holes.accretion_rate_code[0] = 0.1;
   state.black_holes.feedback_energy_code[0] = 0.8;
@@ -124,6 +128,49 @@ std::unordered_map<std::uint64_t, double> gasDensityByParticleId(const cosmosim:
   return by_id;
 }
 
+std::vector<std::uint64_t> particleIdsForIndices(
+    const cosmosim::core::SimulationState& state,
+    std::span<const std::uint32_t> indices) {
+  std::vector<std::uint64_t> ids;
+  ids.reserve(indices.size());
+  for (const std::uint32_t index : indices) {
+    ids.push_back(state.particle_sidecar.particle_id[index]);
+  }
+  return ids;
+}
+
+std::vector<std::uint64_t> schedulerActiveIdsFromPersistentState(
+    const cosmosim::core::SimulationState& state,
+    const cosmosim::core::TimeBinPersistentState& persistent_state) {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler_probe(persistent_state.max_bin);
+  scheduler_probe.importPersistentState(persistent_state);
+  const auto active = scheduler_probe.beginSubstep();
+  return particleIdsForIndices(state, active);
+}
+
+void assertSofteningPriorityResolution(const cosmosim::core::SimulationState& state) {
+  cosmosim::gravity::TreeSofteningPolicy global_softening;
+  global_softening.epsilon_comoving = 0.123;
+
+  cosmosim::gravity::TreeSofteningSpeciesPolicy species_softening;
+  species_softening.enabled = true;
+  species_softening.epsilon_comoving_by_species = {0.011, 0.022, 0.033, 0.044, 0.055};
+
+  const cosmosim::gravity::TreeSofteningView softening_view{
+      .source_species_tag = std::span<const std::uint32_t>(
+          state.particle_sidecar.species_tag.data(),
+          state.particle_sidecar.species_tag.size()),
+      .source_particle_epsilon_comoving = std::span<const double>(
+          state.particle_sidecar.gravity_softening_comoving.data(),
+          state.particle_sidecar.gravity_softening_comoving.size()),
+      .target_particle_epsilon_comoving = {},
+      .species_policy = species_softening,
+  };
+
+  assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(0, global_softening, softening_view) - 0.001) < 1.0e-15);
+  assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_softening, softening_view) - 0.003) < 1.0e-15);
+}
+
 void testRestartRoundtrip() {
 #if COSMOSIM_ENABLE_HDF5
   cosmosim::core::SimulationState state;
@@ -140,11 +187,13 @@ void testRestartRoundtrip() {
   integrator_state.time_bins.max_bin = 3;
 
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
-  scheduler.reset(5, 2, 8);
+  scheduler.reset(6, 2, 8);
   scheduler.setElementBin(1, 1, scheduler.currentTick());
   scheduler.requestBinTransition(4, 3);
   scheduler.beginSubstep();
   scheduler.endSubstep();
+  const std::vector<std::uint64_t> expected_active_particle_ids =
+      schedulerActiveIdsFromPersistentState(state, scheduler.exportPersistentState());
 
   cosmosim::io::RestartWritePayload payload;
   payload.state = &state;
@@ -253,7 +302,12 @@ void testRestartRoundtrip() {
       restored.state.black_holes.duty_cycle_total_time_code ==
       state.black_holes.duty_cycle_total_time_code);
   assert(restored.state.species.count_by_species == state.species.count_by_species);
+  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kDarkMatter).size() == 1);
+  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas).size() == 3);
+  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kStar).size() == 1);
+  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kBlackHole).size() == 1);
   assert(gasDensityByParticleId(restored.state) == gas_density_before);
+  assertSofteningPriorityResolution(restored.state);
   assert(restored.integrator_state.step_index == integrator_state.step_index);
   assert(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);
   assert(restored.integrator_state.scheme == integrator_state.scheme);
@@ -329,6 +383,8 @@ void testRestartRoundtrip() {
   cosmosim::core::HierarchicalTimeBinScheduler resumed_scheduler(restored.scheduler_state.max_bin);
   resumed_scheduler.importPersistentState(restored.scheduler_state);
   assert(resumed_scheduler.currentTick() == scheduler.currentTick());
+  const auto resumed_active = resumed_scheduler.beginSubstep();
+  assert(particleIdsForIndices(restored.state, resumed_active) == expected_active_particle_ids);
 
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(tamper_file >= 0);
@@ -378,13 +434,36 @@ void testRestartRoundtrip() {
   assert(H5Ldelete(missing_file, "/scheduler/pending_bin_index", H5P_DEFAULT) >= 0);
   H5Fclose(missing_file);
   bool missing_required_threw = false;
+  std::string missing_required_error;
   try {
     (void)cosmosim::io::readRestartCheckpointHdf5(missing_required_path);
-  } catch (const std::runtime_error&) {
+  } catch (const std::runtime_error& error) {
     missing_required_threw = true;
+    missing_required_error = error.what();
   }
   assert(missing_required_threw);
+  const bool missing_field_named = missing_required_error.find("pending_bin_index") != std::string::npos;
+  const bool integrity_guard_rejected =
+      missing_required_error.find("integrity hash mismatch") != std::string::npos;
+  assert(missing_field_named || integrity_guard_rejected);
   std::filesystem::remove(missing_required_path);
+
+  const std::filesystem::path legacy_softening_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_legacy_softening_compat.hdf5";
+  cosmosim::core::SimulationState legacy_softening_state = state;
+  legacy_softening_state.particle_sidecar.gravity_softening_comoving.clear();
+  cosmosim::io::RestartWritePayload legacy_softening_payload = payload;
+  legacy_softening_payload.state = &legacy_softening_state;
+  legacy_softening_payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  legacy_softening_payload.provenance.gravity_softening_policy = payload.provenance.gravity_softening_policy;
+  legacy_softening_payload.provenance.gravity_softening_kernel = payload.provenance.gravity_softening_kernel;
+  legacy_softening_payload.provenance.gravity_softening_epsilon_kpc_comoving =
+      payload.provenance.gravity_softening_epsilon_kpc_comoving;
+  cosmosim::io::writeRestartCheckpointHdf5(legacy_softening_path, legacy_softening_payload);
+  const cosmosim::io::RestartReadResult legacy_softening_result =
+      cosmosim::io::readRestartCheckpointHdf5(legacy_softening_path);
+  assert(legacy_softening_result.state.particle_sidecar.gravity_softening_comoving.empty());
+  std::filesystem::remove(legacy_softening_path);
 
   const std::filesystem::path finalize_failure_dir =
       std::filesystem::temp_directory_path() / "cosmosim_restart_finalize_failure_target";

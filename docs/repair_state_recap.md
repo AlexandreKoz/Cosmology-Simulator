@@ -4,6 +4,32 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Restart/reload runtime-truth round-trip invariant suite (2026-04-26 UTC)
+
+Commands:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_integration_restart_checkpoint_roundtrip
+ctest --preset test-cpu-debug --output-on-failure -R "restart|checkpoint|roundtrip|provenance"
+```
+
+Observed:
+
+- Extended `tests/integration/test_restart_checkpoint_roundtrip.cpp` to harden runtime-truth continuation checks for:
+  - canonical particle ID/order survival, species ledger/index reconstruction, gas identity mapping, and sidecar roundtrip,
+  - scheduler persistent-state restoration with active-set reconstruction equivalence at resume tick,
+  - per-particle softening override continuation and precedence behavior after reload,
+  - normalized config/provenance hash continuity across restart read.
+- Added explicit missing/legacy field behavior checks:
+  - missing required scheduler lane (`pending_bin_index`) fails with a clear field-specific error,
+  - missing legacy optional per-particle softening dataset follows documented compatibility behavior (`no overrides`).
+- Updated restart/ownership documentation (`docs/restart_checkpointing.md`, `docs/architecture/adr_runtime_truth_ownership.md`) with authoritative serialized fields, derived reconstruction rules, active-set rebuild expectations, and compatibility-path constraints.
+- Updated issue ledger in `docs/repair_open_issues.md` to mark P0-09 closed with command-backed evidence.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved; this pass adds restart-continuation invariant tests and documentation, without changing solver numerics or adding new physics.
+
 ## 0) Active-set ownership + cache-invalidation invariant floor (2026-04-26 UTC)
 
 Commands:

@@ -82,6 +82,24 @@ expect bitwise equality for persisted arrays and strict scalar equality, with no
 window except tiny floating-point assertion slack in selected test comparisons (`< 1e-15`)
 to avoid false negatives from host-side literal conversions.
 
+## Runtime-truth round-trip and compatibility behavior
+
+Restart round-trip invariant coverage now explicitly checks that:
+
+- particle IDs and canonical particle order survive reload,
+- species counts/index reconstruction and gas identity-by-particle-ID survive reload,
+- scheduler persistent state survives and reconstructs the same active set at resume tick,
+- per-particle softening overrides survive and continue to take precedence over species/global defaults,
+- normalized config text/hash and provenance config hash remain aligned after reload.
+
+Compatibility policy for legacy restart payloads is explicit:
+
+- Missing required continuation fields (for example scheduler persistent lanes such as
+  `pending_bin_index`) are rejected with clear read errors.
+- Missing optional per-particle softening override dataset
+  (`/state/particle_sidecar/gravity_softening_comoving`) is accepted as a legacy path and
+  interpreted as “no per-particle overrides present”.
+
 ## Parallel and scale-up note
 
 The current implementation is single-rank write/read but keeps explicit scheduler/rank-related sidecars,
