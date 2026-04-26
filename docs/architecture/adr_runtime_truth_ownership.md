@@ -73,8 +73,10 @@ Debug/test enforcement helpers:
 1. **Restart checkpoint is continuation authority** for scheduler + integrator + state + normalized config + provenance (`readRestartCheckpointHdf5`).
 2. `HierarchicalTimeBinScheduler::importPersistentState` is the only valid path to restore scheduler bin/tick membership exactly.
 3. After restart state load, consumers must rebuild/validate derived indices (`rebuildSpeciesIndex`, ownership invariants) before stepping.
-4. **Snapshot is not timestep-bin continuation authority**: snapshot read assigns particle `time_bin = 0` on import path, then rebuilds species/index; scheduler continuity must come from restart, not snapshot.
-5. Restart compatibility and integrity requirements remain schema/version/hash gated by restart IO contracts.
+4. Resume-time active sets are reconstructed from scheduler persistent state (`importPersistentState` + scheduler active-set rebuild), not from serialized active-view caches.
+5. Missing required restart continuation fields must fail loudly; optional legacy compatibility is allowed only when explicitly documented and tested (current example: absent per-particle softening override dataset is treated as no overrides present).
+6. **Snapshot is not timestep-bin continuation authority**: snapshot read assigns particle `time_bin = 0` on import path, then rebuilds species/index; scheduler continuity must come from restart, not snapshot.
+7. Restart compatibility and integrity requirements remain schema/version/hash gated by restart IO contracts.
 
 ### E. Reorder / resize / migration rules
 
