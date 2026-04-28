@@ -83,6 +83,7 @@ void test_species_migration_identity_invariants() {
 
   records[0].species_tag = speciesTag(ParticleSpecies::kGas);
   records[0].has_star_fields = false;
+  records[0].has_gravity_softening_value = true;
   records[0].has_gravity_softening_override = true;
   records[0].gravity_softening_comoving = 0.0725;
 
@@ -97,6 +98,7 @@ void test_species_migration_identity_invariants() {
   assert((state.species.count_by_species == std::array<std::uint64_t, 5>{1, 3, 0, 1, 1}));
   assert(state.particles.time_bin[migrated_index] == records[0].time_bin);
   assert(state.particle_sidecar.gravity_softening_comoving[migrated_index] == 0.0725);
+  assert(state.particle_sidecar.hasGravitySofteningOverride(migrated_index));
   assert(state.star_particles.size() == 0);
 
   const auto canonical = cosmosim::core::buildParticleReorderMap(state, ParticleReorderMode::kBySpecies);
@@ -152,6 +154,7 @@ void test_species_migration_sidecar_invariants() {
   inbound_star.mass_code = 4.5;
   inbound_star.has_star_fields = true;
   inbound_star.star_fields.birth_mass_code = 8.0;
+  inbound_star.has_gravity_softening_value = true;
   inbound_star.has_gravity_softening_override = true;
   inbound_star.gravity_softening_comoving = 0.025;
 
@@ -189,6 +192,31 @@ void test_species_migration_sidecar_invariants() {
   assert(state.black_holes.size() == 0);
 }
 
+
+void test_species_migration_preserves_materialized_softening_without_promoting_default_to_override() {
+  SimulationState state;
+  seedState(state);
+
+  const std::uint32_t outbound_index = findParticleIndexById(state, 1101);
+  const std::array<std::uint32_t, 1> outbound_indices{outbound_index};
+  auto records = state.packParticleMigrationRecords(outbound_indices);
+  assert(records.size() == 1);
+  assert(records[0].has_gravity_softening_value);
+  assert(!records[0].has_gravity_softening_override);
+
+  records[0].species_tag = speciesTag(ParticleSpecies::kDarkMatter);
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {outbound_index};
+  commit.inbound_records = records;
+  state.commitParticleMigration(commit);
+
+  const std::uint32_t migrated_index = findParticleIndexById(state, 1101);
+  assert(state.particle_sidecar.gravity_softening_comoving[migrated_index] == records[0].gravity_softening_comoving);
+  assert(!state.particle_sidecar.hasGravitySofteningOverride(migrated_index));
+  assert(state.validateOwnershipInvariants());
+}
 
 void test_species_migration_rejects_inbound_sidecar_mismatch() {
   SimulationState state;
@@ -291,6 +319,7 @@ void test_species_migration_softening_timestep_invariants() {
   records[0].species_tag = speciesTag(ParticleSpecies::kStar);
   records[0].has_star_fields = true;
   records[0].star_fields.birth_mass_code = 12.0;
+  records[0].has_gravity_softening_value = true;
   records[0].has_gravity_softening_override = true;
   records[0].gravity_softening_comoving = 0.077;
 
@@ -329,6 +358,7 @@ void test_species_migration_softening_timestep_invariants() {
   const std::uint32_t reordered_index = findParticleIndexById(state, migrated_id);
   assert(state.particles.time_bin[reordered_index] == records[0].time_bin);
   assert(state.particle_sidecar.gravity_softening_comoving[reordered_index] == 0.077);
+  assert(state.particle_sidecar.hasGravitySofteningOverride(reordered_index));
 }
 
 }  // namespace
@@ -337,6 +367,7 @@ int main() {
   test_species_migration_identity_invariants();
   test_species_migration_sidecar_invariants();
   test_species_migration_softening_timestep_invariants();
+  test_species_migration_preserves_materialized_softening_without_promoting_default_to_override();
   test_species_migration_rejects_inbound_sidecar_mismatch();
   test_species_migration_rejects_duplicate_final_particle_ids();
   return 0;

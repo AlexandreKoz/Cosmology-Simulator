@@ -26,7 +26,7 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | Canonical particle order | `core::SimulationState` particle SoA+sidecar lanes | `SimulationState::{particles,particle_sidecar}` row order | `reorderParticles`, `commitParticleMigration` | All sidecars must be synchronized through these APIs. |
 | Species partition/grouping | `ParticleSidecar::species_tag` with ledger/index maintained by `SimulationState` | `particle_sidecar.species_tag`; `species.count_by_species`; `particle_species_index` | `reorderParticles` (then `rebuildSpeciesIndex`), `commitParticleMigration`, species-changing physics callbacks | `species.count_by_species` and `particle_species_index` are derived/validated mirrors. |
 | Gas cell identity and gas-cell row order | Local gas particle identity (`particle_sidecar.particle_id` for gas species) mediated by workflow gas rebuild path | `cells` + `gas_cells` rows keyed by gas particle IDs during migration/rebuild | `rebuildLocalGasStateFromParticleIds` and related migration helpers in `workflows/reference_workflow.cpp`; `debugAssertGasCellIdentityContract`; guarded `reorderParticles` | **Temporary contract:** local 1:1 gas-particle/gas-cell ownership is required on hydro/active-kernel paths. Gas cell index is local/transient only; gas particle ID is the stable identity anchor. |
-| Softening (global/species/per-particle) | Frozen typed config for policy defaults; particle sidecar for overrides | Defaults: `SimulationConfig.numerics.gravity_softening_*`; overrides: `particle_sidecar.gravity_softening_comoving` | Config load/normalization; `materializePerParticleSoftening` | Diagnostics/provenance are observers, never authorities. |
+| Softening (global/species/per-particle) | Frozen typed config for policy defaults; particle sidecar for overrides | Defaults: `SimulationConfig.numerics.gravity_softening_*`; overrides: `particle_sidecar.gravity_softening_comoving` gated by `particle_sidecar.has_gravity_softening_override` | Config load/normalization; `materializePerParticleSoftening` | Diagnostics/provenance are observers, never authorities. |
 | Raw config, normalized config, derived runtime constants, provenance | Config/provenance subsystem (`core::FrozenConfig`, `core::ProvenanceRecord`) | `FrozenConfig::{config,normalized_text,provenance}` + persisted normalized/provenance artifacts | `loadFrozenConfigFromFile/String`, `writeNormalizedConfigSnapshot`, provenance constructors and IO writers | Runtime mutation of typed config is forbidden. |
 | Restart continuation truth | Restart schema payload + typed restart read result | `io::RestartReadResult::{state,integrator_state,scheduler_state,provenance,normalized_config_*}` | `writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5` | Restart preserves full scheduler persistent state; snapshot does not. |
 | Active-set construction | Scheduler active-elements + workflow split into particle/cell subsets | `scheduler.beginSubstep()` output then `ActiveSetDescriptor` | Reference workflow step loop | Active views are transient gather/scatter workspaces only. |
@@ -35,7 +35,7 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 
 | Mirror/cache/view | Owner of mirror object | Source of truth | Refresh policy | Invalidation policy | Allowed lifetime |
 |---|---|---|---|---|---|
-| `SimulationState::particles.time_bin` | `SimulationState` storage lane (mirror role) | `HierarchicalTimeBinScheduler` persistent/hot bin state | Must refresh via `syncTimeBinsFromScheduler(...)` after scheduler mutation cycles (`initializeSchedulerBins`, post-`endSubstep`, post-restart import path) | Invalid immediately after any scheduler bin mutation until sync | Persistent lane, but non-authoritative during stepping |
+| `SimulationState::particles.time_bin` | `SimulationState` storage lane (mirror role) | `HierarchicalTimeBinScheduler` persistent/hot bin state | Must refresh via `syncTimeBinMirrorsFromScheduler(...)` after scheduler mutation cycles (`initializeSchedulerBins`, post-`endSubstep`, post-restart import path) | Invalid immediately after any scheduler bin mutation until sync | Persistent lane, but non-authoritative during stepping |
 | `SimulationState::cells.time_bin` | `SimulationState` storage lane (mirror role) | Scheduler bin state (shared index-space convention in reference workflow) | Same as particle bin mirror | Same as particle bin mirror | Persistent lane, non-authoritative during stepping |
 | `IntegratorState::time_bins` metadata | Integrator subsystem | Scheduler configuration/runtime context | Refresh at scheduler initialization/reload (`hierarchical_enabled`, `max_bin`, `active_bin`) | Invalid for occupancy/active membership inference at all times | Persistent metadata only |
 | `ActiveSetDescriptor` | Orchestrator/workflow | Scheduler `beginSubstep()` result | Rebuild each substep from current active scheduler elements | Invalid after reorder/migration/bin mutation outside its construction point | Single substep |
@@ -56,11 +56,11 @@ Gas identity field classes:
 |---|---|---|
 | `IntegratorState::{current_time_code,current_scale_factor,step_index}` | `StepOrchestrator::executeSingleStep`; restart import/read assignment | Solver callbacks directly mutating integrator time/step counters |
 | Scheduler bin/tick/active state | `HierarchicalTimeBinScheduler` public APIs only (`reset`,`setElementBin`,`requestBinTransition`,`beginSubstep`,`endSubstep`,`importPersistentState`) | Direct writes to scheduler internals; direct writes to `state.*.time_bin` as authority |
-| Particle/cell time-bin mirrors | `syncTimeBinsFromScheduler`; restart read into `SimulationState` as load-time artifact | Any module treating mirrors as independent bin authority |
+| Particle/cell time-bin mirrors | `syncTimeBinMirrorsFromScheduler`; restart read into `SimulationState` as load-time artifact | Any module treating mirrors as independent bin authority |
 | Particle order and sidecar alignment | `reorderParticles`; `commitParticleMigration` | Ad-hoc partial reorders of subset arrays/sidecars |
 | Species index and counts | `rebuildSpeciesIndex` + synchronized species-ledger updates in canonical mutation paths | Manual edits to `particle_species_index`/`count_by_species` detached from `species_tag` truth |
 | Gas cell rows/identity mapping | Workflow gas rebuild helpers keyed by gas particle IDs | Assuming pre-migration cell index stability or mutating cells without ID remap |
-| Per-particle softening overrides | Controlled writes to `particle_sidecar.gravity_softening_comoving` (materialization/init and explicitly scoped update paths) | Diagnostics/provenance or tree kernels writing override truth |
+| Per-particle softening overrides | Controlled writes to `particle_sidecar.setGravitySofteningOverride` / `clearGravitySofteningOverride`; materialized default values may populate `gravity_softening_comoving` only when the override mask is false | Diagnostics/provenance or tree kernels writing override truth |
 | Normalized config/provenance text/hash | Config/provenance loading and snapshot/restart IO contracts | Recomputing/rewriting normalized config or hashes in unrelated subsystems |
 | Active-set buffers/views | Active-view builders and scatter functions | Caching and reusing stale active views across reorder/bin changes |
 
@@ -94,7 +94,7 @@ Debug/test enforcement helpers:
 ### F. Softening override priority and preservation
 
 Priority order for gravity softening values:
-1. Per-particle override (`particle_sidecar.gravity_softening_comoving[i]`) when sidecar is populated.
+1. Per-particle override only when `particle_sidecar.has_gravity_softening_override[i] != 0`; `gravity_softening_comoving[i]` without the mask is a materialized default/diagnostic value, not override authority.
 2. Species-specific config default (`SimulationConfig.numerics.gravity_softening_<species>_kpc_comoving`) when positive.
 3. Global config default (`SimulationConfig.numerics.gravity_softening_kpc_comoving`).
 
@@ -142,7 +142,7 @@ Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
    - Layer A (authority): `HierarchicalTimeBinScheduler::beginSubstep()`.
    - Layer B (derived): workflow split -> `ActiveSetDescriptor` -> active view builders.
    Any alternate authority lane is forbidden.
-7. Active-set caches/views must be generation-gated for mutable scatter paths.
+7. Active-set caches/views must carry explicit source generation fields for mutable scatter paths; pointer-keyed global registries are forbidden because view lifetime must be local and auditable.
    - Particle compact mutable views capture `SimulationState::particleIndexGeneration()`.
    - Cell compact mutable views capture `SimulationState::cellIndexGeneration()`.
    Scatter must fail loudly on generation mismatch.
@@ -199,3 +199,7 @@ Future repair prompts that touch these domains must include targeted tests (or c
 ## Reproducibility impact
 
 This ADR is documentation/policy only and does not change runtime behavior, schema payloads, or solver numerics. It strengthens deterministic continuation expectations by making ownership and invalidation contracts explicit.
+
+### Stage 0 P0-04 migration softening payload rule
+
+`ParticleMigrationRecord::has_gravity_softening_value` records whether the migration payload carries a numeric softening value at all. `ParticleMigrationRecord::has_gravity_softening_override` records whether that numeric value is authoritative per-particle override truth. This distinction is required so cross-rank or local species migration can preserve materialized species/default values without promoting them into true overrides.

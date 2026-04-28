@@ -75,8 +75,8 @@ SimulationState seedStateWithSelectiveOverrides() {
     state.particle_sidecar.gravity_softening_comoving[i] = species_policy.epsilon_comoving_by_species[sp];
   }
   // Selective per-particle overrides over species defaults.
-  state.particle_sidecar.gravity_softening_comoving[1] = 0.03125;  // gas override
-  state.particle_sidecar.gravity_softening_comoving[4] = 0.07250;  // BH override
+  state.particle_sidecar.setGravitySofteningOverride(1, 0.03125);  // gas override
+  state.particle_sidecar.setGravitySofteningOverride(4, 0.07250);  // BH override
 
   state.star_particles.resize(1);
   state.star_particles.particle_index[0] = 2;
@@ -188,6 +188,7 @@ void test_softening_override_resize_reorder_preservation() {
   assert(packet.size() == 1);
   packet[0].species_tag = speciesTag(ParticleSpecies::kGas);
   packet[0].has_black_hole_fields = false;
+  packet[0].has_gravity_softening_value = true;
   packet[0].has_gravity_softening_override = true;
   packet[0].gravity_softening_comoving = id505_eps;
 
@@ -238,6 +239,7 @@ void test_softening_override_restart_roundtrip() {
 
   assert(restored.state.validateOwnershipInvariants());
   assert(restored.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  assert(restored.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
 
   const auto species_policy = makeSpeciesPolicy();
   cosmosim::gravity::TreeSofteningPolicy global_policy;

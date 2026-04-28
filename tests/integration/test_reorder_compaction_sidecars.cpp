@@ -19,6 +19,7 @@ struct ParticleIdentityRecord {
   double position_x = 0.0;
   double mass = 0.0;
   double softening = 0.0;
+  bool has_softening_override = false;
 };
 
 [[nodiscard]] std::unordered_map<std::uint64_t, ParticleIdentityRecord> captureParticleIdentity(const SimulationState& state) {
@@ -32,6 +33,7 @@ struct ParticleIdentityRecord {
         .softening = state.particle_sidecar.gravity_softening_comoving.empty()
                          ? 0.0
                          : state.particle_sidecar.gravity_softening_comoving[i],
+        .has_softening_override = state.particle_sidecar.hasGravitySofteningOverride(i),
     };
   }
   return map;
@@ -76,6 +78,9 @@ void seedSyntheticState(SimulationState& state) {
     state.particles.time_bin[i] = static_cast<std::uint8_t>((i * 3U) % 4U);
     state.particle_sidecar.gravity_softening_comoving[i] = 0.005 * static_cast<double>(i + 1U);
   }
+
+  state.particle_sidecar.setGravitySofteningOverride(3, 0.123);
+  state.particle_sidecar.setGravitySofteningOverride(5, 0.456);
 
   state.star_particles.resize(2);
   state.star_particles.particle_index = {2U, 6U};
@@ -218,6 +223,7 @@ void assertParticleIdentityInvariant(
     assert(state.particles.mass_code[i] == it->second.mass);
     assert(!state.particle_sidecar.gravity_softening_comoving.empty());
     assert(state.particle_sidecar.gravity_softening_comoving[i] == it->second.softening);
+    assert(state.particle_sidecar.hasGravitySofteningOverride(i) == it->second.has_softening_override);
   }
 
   cosmosim::core::debugAssertNoStaleParticleIndices(state);

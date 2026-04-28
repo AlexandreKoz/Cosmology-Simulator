@@ -496,36 +496,90 @@ double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits) {
   return limits.min_dt_time_code * static_cast<double>(powerOfTwo(std::min(bin_index, limits.max_bin)));
 }
 
+void syncTimeBinMirrorsFromScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state,
+    TimeBinMirrorDomain domain) {
+  const auto persistent = scheduler.exportPersistentState();
+  auto sync_particles = [&]() {
+    if (persistent.bin_index.size() < state.particles.size()) {
+      throw std::invalid_argument("syncTimeBinMirrorsFromScheduler: scheduler lacks particle bin entries");
+    }
+    for (std::size_t i = 0; i < state.particles.size(); ++i) {
+      state.particles.time_bin[i] = persistent.bin_index[i];
+    }
+  };
+  auto sync_cells = [&]() {
+    if (persistent.bin_index.size() < state.cells.size()) {
+      throw std::invalid_argument("syncTimeBinMirrorsFromScheduler: scheduler lacks cell bin entries");
+    }
+    for (std::size_t i = 0; i < state.cells.size(); ++i) {
+      state.cells.time_bin[i] = persistent.bin_index[i];
+    }
+  };
+
+  switch (domain) {
+    case TimeBinMirrorDomain::kParticles:
+      sync_particles();
+      break;
+    case TimeBinMirrorDomain::kCells:
+      sync_cells();
+      break;
+    case TimeBinMirrorDomain::kParticlesAndCells:
+      sync_particles();
+      sync_cells();
+      break;
+  }
+}
+
 bool timeBinMirrorsMatchScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
-    const SimulationState& state) {
+    const SimulationState& state,
+    TimeBinMirrorDomain domain) {
   const auto persistent = scheduler.exportPersistentState();
-  if (persistent.bin_index.size() < state.particles.size() || persistent.bin_index.size() < state.cells.size()) {
-    return false;
-  }
+  auto particles_match = [&]() {
+    if (persistent.bin_index.size() < state.particles.size()) {
+      return false;
+    }
+    for (std::size_t i = 0; i < state.particles.size(); ++i) {
+      if (state.particles.time_bin[i] != persistent.bin_index[i]) {
+        return false;
+      }
+    }
+    return true;
+  };
+  auto cells_match = [&]() {
+    if (persistent.bin_index.size() < state.cells.size()) {
+      return false;
+    }
+    for (std::size_t i = 0; i < state.cells.size(); ++i) {
+      if (state.cells.time_bin[i] != persistent.bin_index[i]) {
+        return false;
+      }
+    }
+    return true;
+  };
 
-  for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    if (state.particles.time_bin[i] != persistent.bin_index[i]) {
-      return false;
-    }
+  switch (domain) {
+    case TimeBinMirrorDomain::kParticles:
+      return particles_match();
+    case TimeBinMirrorDomain::kCells:
+      return cells_match();
+    case TimeBinMirrorDomain::kParticlesAndCells:
+      return particles_match() && cells_match();
   }
-  for (std::size_t i = 0; i < state.cells.size(); ++i) {
-    if (state.cells.time_bin[i] != persistent.bin_index[i]) {
-      return false;
-    }
-  }
-  return true;
+  return false;
 }
 
 void debugAssertTimeBinMirrorAuthorityInvariant(
     const HierarchicalTimeBinScheduler& scheduler,
-    const SimulationState& state) {
-  if (!timeBinMirrorsMatchScheduler(scheduler, state)) {
+    const SimulationState& state,
+    TimeBinMirrorDomain domain) {
+  if (!timeBinMirrorsMatchScheduler(scheduler, state, domain)) {
     throw std::runtime_error(
         "time-bin mirror authority invariant violated: state mirrors diverged from scheduler authority");
   }
 }
-
 double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl) {
   if (input.cell_width_code <= 0.0) {
     throw std::invalid_argument("cell_width_code must be positive");

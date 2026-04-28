@@ -247,12 +247,24 @@ class HierarchicalTimeBinScheduler {
 
 [[nodiscard]] TimeBinMappingResult mapDtToTimeBin(double dt_time_code, const TimeStepLimits& limits);
 [[nodiscard]] double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits);
+enum class TimeBinMirrorDomain : std::uint8_t {
+  kParticles = 0,
+  kCells = 1,
+  kParticlesAndCells = 2,
+};
+
+void syncTimeBinMirrorsFromScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state,
+    TimeBinMirrorDomain domain = TimeBinMirrorDomain::kParticles);
 [[nodiscard]] bool timeBinMirrorsMatchScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
-    const SimulationState& state);
+    const SimulationState& state,
+    TimeBinMirrorDomain domain = TimeBinMirrorDomain::kParticles);
 void debugAssertTimeBinMirrorAuthorityInvariant(
     const HierarchicalTimeBinScheduler& scheduler,
-    const SimulationState& state);
+    const SimulationState& state,
+    TimeBinMirrorDomain domain = TimeBinMirrorDomain::kParticles);
 
 [[nodiscard]] double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl);
 [[nodiscard]] double computeGravityTimeStep(const GravityTimeStepInput& input, double eta);

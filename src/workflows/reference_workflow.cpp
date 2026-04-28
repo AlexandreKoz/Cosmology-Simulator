@@ -140,7 +140,7 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
     const core::SimulationConfig& config,
     const core::SimulationState* state = nullptr) {
   const bool per_species = hasSpeciesSpecificSoftening(config);
-  const bool per_particle = state != nullptr && !state->particle_sidecar.gravity_softening_comoving.empty();
+  const bool per_particle = state != nullptr && !state->particle_sidecar.has_gravity_softening_override.empty();
   if (per_particle && per_species) {
     return "comoving_species_plus_particle_override";
   }
@@ -898,13 +898,8 @@ void initializeSchedulerBins(
 void syncTimeBinsFromScheduler(
     const core::HierarchicalTimeBinScheduler& scheduler,
     core::SimulationState& state) {
-  const auto persistent = scheduler.exportPersistentState();
-  for (std::size_t i = 0; i < state.particles.size() && i < persistent.bin_index.size(); ++i) {
-    state.particles.time_bin[i] = persistent.bin_index[i];
-  }
-  for (std::size_t i = 0; i < state.cells.size() && i < persistent.bin_index.size(); ++i) {
-    state.cells.time_bin[i] = persistent.bin_index[i];
-  }
+  core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, core::TimeBinMirrorDomain::kParticlesAndCells);
 }
 
 class StageAuditCallback final : public core::IntegrationCallback {

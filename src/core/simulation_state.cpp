@@ -174,6 +174,9 @@ void reorderParticles(
   if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
     reorderAlignedVector(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
   }
+  if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
+    reorderAlignedVector(state.particle_sidecar.has_gravity_softening_override, new_to_old_index);
+  }
 
   auto remap_sidecar_index = [&](AlignedVector<std::uint32_t>& particle_index) {
     for (auto& index : particle_index) {

@@ -32,15 +32,71 @@ void ParticleSidecar::resize(std::size_t count) {
   if (!gravity_softening_comoving.empty()) {
     gravity_softening_comoving.resize(count);
   }
+  if (!has_gravity_softening_override.empty()) {
+    has_gravity_softening_override.resize(count, 0U);
+    if (gravity_softening_comoving.empty()) {
+      gravity_softening_comoving.resize(count, 0.0);
+    }
+  }
 }
 
 std::size_t ParticleSidecar::size() const noexcept { return particle_id.size(); }
 
 bool ParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_id.size();
-  return sfc_key.size() == expected && species_tag.size() == expected && particle_flags.size() == expected &&
-         owning_rank.size() == expected &&
-         (gravity_softening_comoving.empty() || gravity_softening_comoving.size() == expected);
+  if (sfc_key.size() != expected || species_tag.size() != expected || particle_flags.size() != expected ||
+      owning_rank.size() != expected ||
+      (!gravity_softening_comoving.empty() && gravity_softening_comoving.size() != expected) ||
+      (!has_gravity_softening_override.empty() && has_gravity_softening_override.size() != expected) ||
+      (!has_gravity_softening_override.empty() && gravity_softening_comoving.empty())) {
+    return false;
+  }
+  for (const auto flag : has_gravity_softening_override) {
+    if (flag > 1U) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ParticleSidecar::hasGravitySofteningOverride(std::size_t particle_index) const {
+  if (particle_index >= particle_id.size()) {
+    throw std::out_of_range("ParticleSidecar.hasGravitySofteningOverride: particle index out of range");
+  }
+  return !has_gravity_softening_override.empty() && has_gravity_softening_override[particle_index] != 0U;
+}
+
+double ParticleSidecar::gravitySofteningOverride(std::size_t particle_index) const {
+  if (!hasGravitySofteningOverride(particle_index)) {
+    throw std::runtime_error("ParticleSidecar.gravitySofteningOverride: particle has no override");
+  }
+  if (gravity_softening_comoving.empty() || particle_index >= gravity_softening_comoving.size()) {
+    throw std::runtime_error("ParticleSidecar.gravitySofteningOverride: override value sidecar missing");
+  }
+  return gravity_softening_comoving[particle_index];
+}
+
+void ParticleSidecar::setGravitySofteningOverride(std::size_t particle_index, double epsilon_comoving) {
+  if (particle_index >= particle_id.size()) {
+    throw std::out_of_range("ParticleSidecar.setGravitySofteningOverride: particle index out of range");
+  }
+  if (gravity_softening_comoving.empty()) {
+    gravity_softening_comoving.resize(particle_id.size(), 0.0);
+  }
+  if (has_gravity_softening_override.empty()) {
+    has_gravity_softening_override.resize(particle_id.size(), 0U);
+  }
+  gravity_softening_comoving[particle_index] = epsilon_comoving;
+  has_gravity_softening_override[particle_index] = 1U;
+}
+
+void ParticleSidecar::clearGravitySofteningOverride(std::size_t particle_index) {
+  if (particle_index >= particle_id.size()) {
+    throw std::out_of_range("ParticleSidecar.clearGravitySofteningOverride: particle index out of range");
+  }
+  if (!has_gravity_softening_override.empty()) {
+    has_gravity_softening_override[particle_index] = 0U;
+  }
 }
 
 void CellSoa::resize(std::size_t count) {

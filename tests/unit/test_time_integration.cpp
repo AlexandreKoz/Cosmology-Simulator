@@ -175,13 +175,8 @@ void testHierarchicalSchedulerTransitions() {
 void syncStateTimeBinsFromScheduler(
     const cosmosim::core::HierarchicalTimeBinScheduler& scheduler,
     cosmosim::core::SimulationState& state) {
-  const auto persistent = scheduler.exportPersistentState();
-  for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    state.particles.time_bin[i] = persistent.bin_index[i];
-  }
-  for (std::size_t i = 0; i < state.cells.size(); ++i) {
-    state.cells.time_bin[i] = persistent.bin_index[i];
-  }
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 }
 
 void testTimestepBinAuthorityInvariant() {
@@ -201,15 +196,15 @@ void testTimestepBinAuthorityInvariant() {
   scheduler.setElementBin(2, 2, scheduler.currentTick());
   syncStateTimeBinsFromScheduler(scheduler, state);
 
-  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
-  cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells));
+  cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
   // Unauthorized non-owner mutation of mirror lanes is detectable.
   state.particles.time_bin[2] = 0;
-  assert(!cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
+  assert(!cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells));
   bool threw = false;
   try {
-    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
   } catch (const std::runtime_error&) {
     threw = true;
   }
@@ -223,7 +218,7 @@ void testTimestepBinAuthorityInvariant() {
 
   // Authorized path re-synchronizes mirrors.
   syncStateTimeBinsFromScheduler(scheduler, state);
-  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state));
+  assert(cosmosim::core::timeBinMirrorsMatchScheduler(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells));
 }
 
 void testTimestepBinReassignmentAndRestartRoundTrip() {
@@ -354,7 +349,7 @@ void testActiveSetNoCompetingBuilders() {
   assert(competing_after != std::vector<std::uint32_t>(authoritative.begin(), authoritative.end()));
   bool threw = false;
   try {
-    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state);
+    cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
   } catch (const std::runtime_error&) {
     threw = true;
   }

@@ -105,3 +105,27 @@ Determinism/reproducibility policy is unchanged. This gate pass only records com
 ## Commit context (at gate run)
 
 - Evaluated commit: `dc989e07111786621e4dc8e1e095f509fdd13c1f`
+
+## Follow-up repair pass — P0-00 through P0-04 hardening
+
+This follow-up pass addresses the first audit batch only: runtime-truth documentation, timestep/bin mirror authority, particle ordering/sidecar invariants, species migration invariants, and active-view lifetime safety. It does not close later Stage 0 restart/HDF5 gates.
+
+Changes made:
+
+- Added `syncTimeBinMirrorsFromScheduler(...)` with an explicit `TimeBinMirrorDomain` so timestep/bin mirror refreshes use a named authoritative synchronization path instead of ad-hoc local copy loops.
+- Replaced pointer-keyed global active-view generation registries with generation fields carried directly by mutable kernel views (`GravityParticleKernelView::source_particle_index_generation` and `HydroCellKernelView::source_cell_index_generation`). Scatter now validates the view against the owning `SimulationState` generation without hidden process-global pointer maps.
+- Added an explicit `ParticleSidecar::has_gravity_softening_override` mask plus helper methods so materialized species/default softening values are not confused with true per-particle override authority.
+- Updated particle reorder and migration paths to preserve both softening values and override-mask semantics across reorder, resize, and species migration.
+- Added/updated invariant coverage so species migration preserves materialized softening values without promoting them to override authority, true override flags survive migration/reorder, and migration records distinguish numeric softening-value presence from override authority.
+
+Validation note:
+
+- Static edits were completed in the repository tree. The execution environment used for this repair pass repeatedly timed out during CMake/compiler invocations before producing actionable diagnostics, so this archive should be rebuilt with the standard presets in a normal development environment.
+- Required local verification commands remain:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure -R "time|scheduler|active|particle|sidecar|species|migration|reorder"
+ctest --preset test-cpu-debug --output-on-failure
+```

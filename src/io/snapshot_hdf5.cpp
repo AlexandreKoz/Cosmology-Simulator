@@ -289,6 +289,22 @@ void writeDataset1d(
   }
 }
 
+
+void writeDataset1dU8(
+    hid_t group,
+    std::string_view name,
+    const std::uint8_t* values,
+    std::size_t count,
+    const SnapshotIoPolicy& policy) {
+  hsize_t dims[1] = {static_cast<hsize_t>(count)};
+  Hdf5Handle dataspace(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle properties = createDatasetProperties(count, 1, policy);
+  Hdf5Handle dataset(
+      H5Dcreate2(group, std::string(name).c_str(), H5T_STD_U8LE, dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
+  if (!dataset.valid() || H5Dwrite(dataset.get(), H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, values) < 0) {
+    throw std::runtime_error("failed to write dataset: " + std::string(name));
+  }
+}
 void writeDataset1dU64(
     hid_t group,
     std::string_view name,
@@ -376,6 +392,25 @@ void readDatasetChunk1d(
   }
 }
 
+
+void readDatasetChunk1dU8(
+    hid_t group,
+    const std::string& dataset_name,
+    std::size_t start,
+    std::size_t count,
+    std::vector<std::uint8_t>& out) {
+  Hdf5Handle dataset(H5Dopen2(group, dataset_name.c_str(), H5P_DEFAULT));
+  Hdf5Handle file_space(H5Dget_space(dataset.get()));
+  hsize_t file_offset[1] = {static_cast<hsize_t>(start)};
+  hsize_t file_count[1] = {static_cast<hsize_t>(count)};
+  H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr);
+  hsize_t mem_dims[1] = {static_cast<hsize_t>(count)};
+  Hdf5Handle mem_space(H5Screate_simple(1, mem_dims, nullptr));
+  out.resize(count);
+  if (!dataset.valid() || H5Dread(dataset.get(), H5T_NATIVE_UINT8, mem_space.get(), file_space.get(), H5P_DEFAULT, out.data()) < 0) {
+    throw std::runtime_error("failed to read 1D uint8 dataset: " + dataset_name);
+  }
+}
 void readDatasetChunk2d(
     hid_t group,
     const std::string& dataset_name,
@@ -714,6 +749,13 @@ void writeGadgetArepoSnapshotHdf5(
         particle_softening[i] = state.particle_sidecar.gravity_softening_comoving[indices[i]];
       }
       writeDataset1d(type_group.get(), "GravitySofteningComoving", particle_softening.data(), indices.size(), policy);
+      if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
+        std::vector<std::uint8_t> override_mask(indices.size(), 0U);
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+          override_mask[i] = state.particle_sidecar.has_gravity_softening_override[indices[i]];
+        }
+        writeDataset1dU8(type_group.get(), "GravitySofteningOverrideMask", override_mask.data(), indices.size(), policy);
+      }
     }
     if (type_index == 3) {
       std::vector<std::uint64_t> parent_particle_id(indices.size(), 0);
@@ -874,6 +916,7 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     std::vector<double> tracer_fraction_chunk;
     std::vector<double> tracer_exchange_chunk;
     std::vector<double> softening_chunk;
+    std::vector<std::uint8_t> softening_override_mask_chunk;
 
     readDatasetChunk2d(group.get(), coordinates_name, 0, local_count, coords_chunk);
     if (!velocities_name.empty()) {
@@ -912,6 +955,11 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       readDatasetChunk1d(group.get(), "GravitySofteningComoving", 0, local_count, softening_chunk);
     } else {
       softening_chunk.clear();
+    }
+    if (hdf5PathExists(group.get(), "GravitySofteningOverrideMask")) {
+      readDatasetChunk1dU8(group.get(), "GravitySofteningOverrideMask", 0, local_count, softening_override_mask_chunk);
+    } else {
+      softening_override_mask_chunk.clear();
     }
     if (type_index == 3) {
       if (hdf5PathExists(group.get(), "TracerParentParticleID")) {
@@ -959,6 +1007,12 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
           result.state.particle_sidecar.gravity_softening_comoving.resize(result.state.particles.size(), 0.0);
         }
         result.state.particle_sidecar.gravity_softening_comoving[global_i] = softening_chunk[i];
+        if (!softening_override_mask_chunk.empty()) {
+          if (result.state.particle_sidecar.has_gravity_softening_override.empty()) {
+            result.state.particle_sidecar.has_gravity_softening_override.resize(result.state.particles.size(), 0U);
+          }
+          result.state.particle_sidecar.has_gravity_softening_override[global_i] = softening_override_mask_chunk[i];
+        }
       }
       result.state.species.count_by_species[result.state.particle_sidecar.species_tag[global_i]] += 1;
       if (type_index == 3) {

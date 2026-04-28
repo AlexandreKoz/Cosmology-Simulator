@@ -159,8 +159,12 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
     record.mass_code = particles.mass_code[index];
     record.time_bin = particles.time_bin[index];
     if (!particle_sidecar.gravity_softening_comoving.empty()) {
-      record.has_gravity_softening_override = true;
+      record.has_gravity_softening_value = true;
       record.gravity_softening_comoving = particle_sidecar.gravity_softening_comoving[index];
+    }
+    if (particle_sidecar.hasGravitySofteningOverride(index)) {
+      record.has_gravity_softening_value = true;
+      record.has_gravity_softening_override = true;
     }
 
     if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
@@ -308,14 +312,21 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   new_sidecar.resize(final_count);
 
   bool has_softening_sidecar = !particle_sidecar.gravity_softening_comoving.empty();
+  bool has_softening_override_mask = !particle_sidecar.has_gravity_softening_override.empty();
   for (const auto& inbound : commit.inbound_records) {
+    if (inbound.has_gravity_softening_value) {
+      has_softening_sidecar = true;
+    }
     if (inbound.has_gravity_softening_override) {
       has_softening_sidecar = true;
-      break;
+      has_softening_override_mask = true;
     }
   }
   if (has_softening_sidecar) {
     new_sidecar.gravity_softening_comoving.resize(final_count, 0.0);
+  }
+  if (has_softening_override_mask) {
+    new_sidecar.has_gravity_softening_override.resize(final_count, 0U);
   }
 
   std::size_t write_index = 0;
@@ -340,6 +351,9 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       new_sidecar.gravity_softening_comoving[write_index] =
           particle_sidecar.gravity_softening_comoving.empty() ? 0.0 : particle_sidecar.gravity_softening_comoving[i];
     }
+    if (has_softening_override_mask && particle_sidecar.hasGravitySofteningOverride(i)) {
+      new_sidecar.has_gravity_softening_override[write_index] = 1U;
+    }
     ++write_index;
   }
 
@@ -357,9 +371,11 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     new_sidecar.species_tag[write_index] = inbound.species_tag;
     new_sidecar.particle_flags[write_index] = inbound.particle_flags;
     new_sidecar.owning_rank[write_index] = inbound.owning_rank;
-    if (has_softening_sidecar) {
-      new_sidecar.gravity_softening_comoving[write_index] =
-          inbound.has_gravity_softening_override ? inbound.gravity_softening_comoving : 0.0;
+    if (has_softening_sidecar && inbound.has_gravity_softening_value) {
+      new_sidecar.gravity_softening_comoving[write_index] = inbound.gravity_softening_comoving;
+    }
+    if (has_softening_override_mask && inbound.has_gravity_softening_override) {
+      new_sidecar.has_gravity_softening_override[write_index] = 1U;
     }
     ++write_index;
   }

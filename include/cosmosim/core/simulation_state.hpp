@@ -49,13 +49,20 @@ struct ParticleSidecar {
   AlignedVector<std::uint32_t> species_tag;
   AlignedVector<std::uint32_t> particle_flags;
   AlignedVector<std::uint32_t> owning_rank;
-  // Optional per-particle gravity softening sidecar (comoving code units).
-  // Empty means "use species/global policy only".
+  // Optional per-particle gravity softening value sidecar (comoving code units).
+  // has_gravity_softening_override is the authoritative override mask. A populated
+  // value vector without a populated mask is a materialized diagnostic/default mirror,
+  // not independent per-particle override truth.
   AlignedVector<double> gravity_softening_comoving;
+  AlignedVector<std::uint8_t> has_gravity_softening_override;
 
   void resize(std::size_t count);
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] bool isConsistent() const noexcept;
+  [[nodiscard]] bool hasGravitySofteningOverride(std::size_t particle_index) const;
+  [[nodiscard]] double gravitySofteningOverride(std::size_t particle_index) const;
+  void setGravitySofteningOverride(std::size_t particle_index, double epsilon_comoving);
+  void clearGravitySofteningOverride(std::size_t particle_index);
 };
 
 struct CellSoa {
@@ -270,6 +277,7 @@ struct ParticleMigrationRecord {
   double velocity_z_peculiar = 0.0;
   double mass_code = 0.0;
   std::uint8_t time_bin = 0;
+  bool has_gravity_softening_value = false;
   bool has_gravity_softening_override = false;
   double gravity_softening_comoving = 0.0;
   bool has_star_fields = false;
@@ -376,6 +384,7 @@ struct GravityParticleKernelView {
   std::span<double> velocity_y_peculiar;
   std::span<double> velocity_z_peculiar;
   std::span<double> mass_code;
+  std::uint64_t source_particle_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
 };
@@ -394,6 +403,7 @@ struct HydroCellKernelView {
   std::span<double> mass_code;
   std::span<double> density_code;
   std::span<double> pressure_code;
+  std::uint64_t source_cell_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
 };

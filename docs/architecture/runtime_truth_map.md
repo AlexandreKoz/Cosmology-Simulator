@@ -94,7 +94,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 - Scheduler mutates bin/tick truth via `reset`, `setElementBin`, `requestBinTransition`, `beginSubstep` + `endSubstep`.
 - Runtime bin adaptation mutates pending transitions in `updateAdaptiveTimeBins(...)`.
-- State mirrors refreshed from scheduler in `syncTimeBinsFromScheduler(...)`.
+- State mirrors refreshed from scheduler in `syncTimeBinMirrorsFromScheduler(...)`.
 - Mirror drift detection is now explicit via `timeBinMirrorsMatchScheduler(...)` / `debugAssertTimeBinMirrorAuthorityInvariant(...)`.
 - Restart load mutates integrator/scheduler via `readRestartCheckpointHdf5(...)` and `importPersistentState(...)`.
 
@@ -363,7 +363,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ### Storage locations
 
 - Config-level defaults/species lanes in `SimulationConfig::numerics`.
-- Optional per-particle override sidecar: `particle_sidecar.gravity_softening_comoving`.
+- Optional per-particle softening value sidecar: `particle_sidecar.gravity_softening_comoving`; authoritative override membership is `particle_sidecar.has_gravity_softening_override`. A value without a mask bit is a materialized default/diagnostic mirror, not override authority.
 - Provenance lanes (`ProvenanceRecord` softening policy/kernel/epsilon).
 
 ### Mutation paths
@@ -546,3 +546,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ## Reproducibility impact statement
 
 This stage is documentation/audit only. No runtime behavior, schema payload, deterministic scheduling mode, config normalization flow, or provenance completeness path was modified by this change.
+
+### Stage 0 follow-up note: migration softening value vs override authority
+
+Migration payloads now distinguish `has_gravity_softening_value` from `has_gravity_softening_override`. The former preserves a materialized numeric value when present; the latter is the only flag that carries per-particle override authority across migration.
