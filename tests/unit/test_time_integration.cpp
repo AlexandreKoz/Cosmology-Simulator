@@ -313,6 +313,22 @@ void testActiveSetAuthority() {
   const std::vector<std::uint32_t> expected0{0, 1, 2, 3, 4, 5};
   assert(std::vector<std::uint32_t>(active0.begin(), active0.end()) == expected0);
 
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(6);
+  const auto descriptor = cosmosim::core::makeSchedulerActiveSetDescriptor(scheduler, state, active0);
+  assert(descriptor.particles_from_scheduler);
+  assert(descriptor.has_generation_metadata);
+  assert(descriptor.source_scheduler_tick == scheduler.currentTick());
+  cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state);
+  state.bumpParticleIndexGeneration();
+  bool stale_descriptor_threw = false;
+  try {
+    cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state);
+  } catch (const std::runtime_error&) {
+    stale_descriptor_threw = true;
+  }
+  assert(stale_descriptor_threw);
+
   scheduler.requestBinTransition(2, 0);
   scheduler.endSubstep();
 

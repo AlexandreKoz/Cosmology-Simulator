@@ -91,6 +91,50 @@ bool ActiveSetDescriptor::hasCellSubset(std::size_t total_cell_count) const noex
   return cells_are_subset && cell_indices.size() < total_cell_count;
 }
 
+ActiveSetDescriptor makeSchedulerActiveSetDescriptor(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> active_particle_indices,
+    std::span<const std::uint32_t> active_cell_indices) {
+  ActiveSetDescriptor descriptor{
+      .particle_indices = active_particle_indices,
+      .cell_indices = active_cell_indices,
+      .particles_are_subset = active_particle_indices.size() != state.particles.size(),
+      .cells_are_subset = active_cell_indices.size() != state.cells.size(),
+      .particles_from_scheduler = true,
+      .cells_from_scheduler = !active_cell_indices.empty(),
+      .has_generation_metadata = true,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+      .source_cell_index_generation = state.cellIndexGeneration(),
+      .source_scheduler_tick = scheduler.currentTick(),
+  };
+  debugAssertActiveSetDescriptorFresh(descriptor, state);
+  return descriptor;
+}
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state) {
+  if (active_set.has_generation_metadata &&
+      active_set.source_particle_index_generation != state.particleIndexGeneration()) {
+    throw std::runtime_error("ActiveSetDescriptor particle generation is stale");
+  }
+  if (active_set.has_generation_metadata &&
+      active_set.source_cell_index_generation != state.cellIndexGeneration()) {
+    throw std::runtime_error("ActiveSetDescriptor cell generation is stale");
+  }
+  for (const std::uint32_t particle_index : active_set.particle_indices) {
+    if (particle_index >= state.particles.size()) {
+      throw std::out_of_range("ActiveSetDescriptor contains stale particle index");
+    }
+  }
+  for (const std::uint32_t cell_index : active_set.cell_indices) {
+    if (cell_index >= state.cells.size()) {
+      throw std::out_of_range("ActiveSetDescriptor contains stale cell index");
+    }
+  }
+}
+
 std::vector<IntegrationStage> StageScheduler::schedule(
     const IntegratorState& integrator_state,
     const ActiveSetDescriptor& /*active_set*/) const {
@@ -129,6 +173,7 @@ void StepOrchestrator::executeSingleStep(
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("dt_time_code must be positive");
   }
+  debugAssertActiveSetDescriptorFresh(active_set, state);
 
   COSMOSIM_PROFILE_SCOPE(profiler_session, "step_orchestrator.execute_single_step");
 

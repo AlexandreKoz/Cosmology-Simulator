@@ -203,3 +203,12 @@ This ADR is documentation/policy only and does not change runtime behavior, sche
 ### Stage 0 P0-04 migration softening payload rule
 
 `ParticleMigrationRecord::has_gravity_softening_value` records whether the migration payload carries a numeric softening value at all. `ParticleMigrationRecord::has_gravity_softening_override` records whether that numeric value is authoritative per-particle override truth. This distinction is required so cross-rank or local species migration can preserve materialized species/default values without promoting them into true overrides.
+
+## Stage 0 P0-05..P0-08 repair addendum
+
+The P0-05..P0-08 repair pass strengthened the ownership contract in four places.
+
+- Gas-cell identity is now represented explicitly by `GasCellSidecar::gas_cell_id` and `GasCellSidecar::parent_particle_id` for particle-bound gas-cell layouts. These lanes are persistent runtime truth for restartable particle-bound gas cells and are refreshed from canonical gas-particle ordering only by the state ownership layer.
+- Per-particle softening override authority is no longer inferred from the existence of a numeric softening value. `has_gravity_softening_override` is the explicit override mask; unmasked numeric values are materialized cache/default values and fall back to species/global softening in gravity softening resolution.
+- Config-derived runtime values are owned by `DerivedRuntimeConfig`, produced from `FrozenConfig` by `deriveRuntimeConfig()`. Runtime modules must not independently reinterpret raw config keys when a derived runtime value exists.
+- Active-set descriptors are derived scheduler products with source generation metadata. A descriptor is invalid after particle/cell generation changes and must be rebuilt from scheduler-owned activity rather than repaired locally by a solver.

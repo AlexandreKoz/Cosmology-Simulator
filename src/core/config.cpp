@@ -1515,6 +1515,54 @@ FrozenConfig loadFrozenConfigFromString(
   return normalizeValidateFreeze(entries, source_name, options);
 }
 
+DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
+  const SimulationConfig& config = frozen_config.config;
+
+  if (!(config.numerics.time_end_code > config.numerics.time_begin_code)) {
+    throw ConfigError(
+        "derived runtime config requires numerics.time_end_code > numerics.time_begin_code");
+  }
+  if (config.cosmology.box_size_x_mpc_comoving <= 0.0 ||
+      config.cosmology.box_size_y_mpc_comoving <= 0.0 ||
+      config.cosmology.box_size_z_mpc_comoving <= 0.0) {
+    throw ConfigError("derived runtime config requires positive comoving box-size axes");
+  }
+  if (config.numerics.treepm_pm_grid_nx <= 0 ||
+      config.numerics.treepm_pm_grid_ny <= 0 ||
+      config.numerics.treepm_pm_grid_nz <= 0) {
+    throw ConfigError("derived runtime config requires positive TreePM PM grid shape");
+  }
+  if (!(config.numerics.gravity_softening_kpc_comoving > 0.0)) {
+    throw ConfigError("derived runtime config requires positive numerics.gravity_softening");
+  }
+
+  const auto choose_softening = [fallback = config.numerics.gravity_softening_kpc_comoving](
+                                    double species_value) {
+    return species_value > 0.0 ? species_value : fallback;
+  };
+
+  DerivedRuntimeConfig derived;
+  derived.time_begin_code = config.numerics.time_begin_code;
+  derived.time_end_code = config.numerics.time_end_code;
+  derived.box_size_mpc_comoving = {
+      config.cosmology.box_size_x_mpc_comoving,
+      config.cosmology.box_size_y_mpc_comoving,
+      config.cosmology.box_size_z_mpc_comoving};
+  derived.treepm_pm_grid_shape = {
+      config.numerics.treepm_pm_grid_nx,
+      config.numerics.treepm_pm_grid_ny,
+      config.numerics.treepm_pm_grid_nz};
+  derived.gravity_softening_kpc_comoving_by_species = {
+      choose_softening(config.numerics.gravity_softening_dark_matter_kpc_comoving),
+      choose_softening(config.numerics.gravity_softening_gas_kpc_comoving),
+      choose_softening(config.numerics.gravity_softening_star_kpc_comoving),
+      choose_softening(config.numerics.gravity_softening_black_hole_kpc_comoving),
+      choose_softening(config.numerics.gravity_softening_tracer_kpc_comoving)};
+  derived.normalized_config_hash = frozen_config.provenance.config_hash;
+  derived.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
+  return derived;
+}
+
 void writeNormalizedConfigSnapshot(
     const FrozenConfig& frozen_config,
     const std::filesystem::path& run_directory) {

@@ -375,6 +375,9 @@ IcReadResult buildGeneratedIsolatedIc(
 
   fillSpeciesLedger(result.state);
   result.state.rebuildSpeciesIndex();
+  if (gas_particle_count > 0) {
+    result.state.refreshGasCellIdentityFromParticleOrder();
+  }
   return result;
 }
 
@@ -615,6 +618,9 @@ IcReadResult readGadgetArepoHdf5Ic(
 
   fillSpeciesLedger(result.state);
   result.state.rebuildSpeciesIndex();
+  if (gas_cell_count > 0) {
+    result.state.refreshGasCellIdentityFromParticleOrder();
+  }
   if (!result.state.validateOwnershipInvariants()) {
     throw std::runtime_error("IC import produced invalid ownership invariants");
   }

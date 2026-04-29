@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <string>
 
 #include "cosmosim/core/config.hpp"
@@ -187,6 +188,53 @@ run_name = ownership
   assert(reparsed.config.numerics.treepm_asmth_cells == frozen.config.numerics.treepm_asmth_cells);
   assert(reparsed.config.numerics.treepm_rcut_cells == frozen.config.numerics.treepm_rcut_cells);
   assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+}
+
+void testDerivedRuntimeConfigOwnership() {
+  const std::string text = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size_x = 70 mpc
+box_size_y = 50 mpc
+box_size_z = 30 mpc
+[numerics]
+time_begin_code = 0.125
+time_end_code = 0.875
+gravity_softening = 1.0 kpc
+gravity_softening_gas = 0.5 kpc
+gravity_softening_black_hole = 0.05 kpc
+treepm_pm_grid_nx = 28
+treepm_pm_grid_ny = 20
+treepm_pm_grid_nz = 12
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "derived_runtime");
+  const auto derived = cosmosim::core::deriveRuntimeConfig(frozen);
+  assert(derived.time_begin_code == 0.125);
+  assert(derived.time_end_code == 0.875);
+  assert(derived.box_size_mpc_comoving[0] == 70.0);
+  assert(derived.box_size_mpc_comoving[1] == 50.0);
+  assert(derived.box_size_mpc_comoving[2] == 30.0);
+  assert(derived.treepm_pm_grid_shape[0] == 28);
+  assert(derived.treepm_pm_grid_shape[1] == 20);
+  assert(derived.treepm_pm_grid_shape[2] == 12);
+  assert(derived.gravity_softening_kpc_comoving_by_species[0] == 1.0);
+  assert(derived.gravity_softening_kpc_comoving_by_species[1] == 0.5);
+  assert(derived.gravity_softening_kpc_comoving_by_species[2] == 1.0);
+  assert(derived.gravity_softening_kpc_comoving_by_species[3] == 0.05);
+  assert(derived.gravity_softening_kpc_comoving_by_species[4] == 1.0);
+  assert(derived.normalized_config_hash == frozen.provenance.config_hash);
+  assert(derived.normalized_config_hash_hex == frozen.provenance.config_hash_hex);
+
+  const std::string bad_time = "[mode]\nmode = zoom_in\n[numerics]\ntime_begin_code = 1.0\ntime_end_code = 0.5\n";
+  bool threw = false;
+  try {
+    const auto bad = cosmosim::core::loadFrozenConfigFromString(bad_time, "derived_runtime_bad_time");
+    (void)cosmosim::core::deriveRuntimeConfig(bad);
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
 }
 
 void testUrlsWindowsPathsAndQuotedHashesAreNotTruncated() {
@@ -575,6 +623,7 @@ int main() {
   testDefaultsCanonicalizationAndDeterminism();
   testConfigNormalizationHashDeterminism();
   testConfigRuntimeOwnership();
+  testDerivedRuntimeConfigOwnership();
   testUrlsWindowsPathsAndQuotedHashesAreNotTruncated();
   testDeprecatedAliasesAndCanonicalCollision();
   testFeedbackConfigKeysAndValidation();

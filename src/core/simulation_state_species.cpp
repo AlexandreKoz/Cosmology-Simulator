@@ -87,7 +87,17 @@ std::uint32_t ParticleSpeciesIndex::globalIndex(ParticleSpecies species, std::ui
   return species_indices[local_index];
 }
 
-void SimulationState::rebuildSpeciesIndex() { particle_species_index.rebuild(particle_sidecar); }
+void SimulationState::rebuildSpeciesIndex() {
+  particle_species_index.rebuild(particle_sidecar);
+  const auto gas_count = particle_species_index.count(ParticleSpecies::kGas);
+  const bool identity_uninitialized = gas_cells.gas_cell_id.empty() ||
+      gas_cells.parent_particle_id.empty() ||
+      (std::all_of(gas_cells.gas_cell_id.begin(), gas_cells.gas_cell_id.end(), [](std::uint64_t id) { return id == 0; }) &&
+       std::all_of(gas_cells.parent_particle_id.begin(), gas_cells.parent_particle_id.end(), [](std::uint64_t id) { return id == 0; }));
+  if (gas_count > 0 && gas_count == cells.size() && gas_count == gas_cells.size() && identity_uninitialized) {
+    refreshGasCellIdentityFromParticleOrder();
+  }
+}
 
 bool SimulationState::validateUniqueParticleIds() const {
   std::unordered_set<std::uint64_t> ids;

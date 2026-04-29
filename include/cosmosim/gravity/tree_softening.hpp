@@ -26,7 +26,9 @@ struct TreeSofteningSpeciesPolicy {
 struct TreeSofteningView {
   std::span<const std::uint32_t> source_species_tag{};
   std::span<const double> source_particle_epsilon_comoving{};
+  std::span<const std::uint8_t> source_particle_epsilon_override_mask{};
   std::span<const double> target_particle_epsilon_comoving{};
+  std::span<const std::uint8_t> target_particle_epsilon_override_mask{};
   TreeSofteningSpeciesPolicy species_policy{};
 };
 
@@ -35,7 +37,10 @@ struct TreeSofteningView {
     const TreeSofteningPolicy& fallback,
     const TreeSofteningView& view) {
   if (!view.source_particle_epsilon_comoving.empty()) {
-    return view.source_particle_epsilon_comoving[source_index];
+    if (view.source_particle_epsilon_override_mask.empty() ||
+        view.source_particle_epsilon_override_mask[source_index] != 0U) {
+      return view.source_particle_epsilon_comoving[source_index];
+    }
   }
   if (view.species_policy.enabled && !view.source_species_tag.empty()) {
     const std::size_t species = static_cast<std::size_t>(view.source_species_tag[source_index]);
@@ -51,7 +56,10 @@ struct TreeSofteningView {
     const TreeSofteningPolicy& fallback,
     const TreeSofteningView& view) {
   if (!view.target_particle_epsilon_comoving.empty()) {
-    return view.target_particle_epsilon_comoving[target_active_slot];
+    if (view.target_particle_epsilon_override_mask.empty() ||
+        view.target_particle_epsilon_override_mask[target_active_slot] != 0U) {
+      return view.target_particle_epsilon_comoving[target_active_slot];
+    }
   }
   return fallback.epsilon_comoving;
 }

@@ -307,6 +307,9 @@ void testRestartRoundtrip() {
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kStar).size() == 1);
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kBlackHole).size() == 1);
   assert(gasDensityByParticleId(restored.state) == gas_density_before);
+  assert(restored.state.gasCellIdentityMatchesParticleOrder());
+  assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
+  assert(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
   assertSofteningPriorityResolution(restored.state);
   assert(restored.integrator_state.step_index == integrator_state.step_index);
   assert(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);

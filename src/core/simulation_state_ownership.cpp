@@ -35,6 +35,13 @@ bool SimulationState::validateOwnershipInvariants() const {
     return false;
   }
 
+  const auto gas_count = particle_species_index.count(ParticleSpecies::kGas);
+  if (gas_count > 0 && gas_count == cells.size()) {
+    if (!gasCellIdentityMatchesParticleOrder()) {
+      return false;
+    }
+  }
+
   if (!species.isConsistentWith(particle_sidecar)) {
     return false;
   }

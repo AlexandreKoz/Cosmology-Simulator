@@ -81,6 +81,11 @@ struct CellSoa {
 
 struct GasCellSidecar {
   // Gas-cell thermodynamic and reconstruction state excluded from gravity-hot paths.
+  // Stage-0 gas identity contract: gas cells are currently particle-bound finite-volume
+  // carriers. gas_cell_id and parent_particle_id are persistent identity lanes and must
+  // match the canonical gas-particle ordering whenever local gas cells exist.
+  AlignedVector<std::uint64_t> gas_cell_id;
+  AlignedVector<std::uint64_t> parent_particle_id;
   AlignedVector<double> density_code;
   AlignedVector<double> pressure_code;
   AlignedVector<double> internal_energy_code;
@@ -318,6 +323,8 @@ class SimulationState {
   [[nodiscard]] bool validateOwnershipInvariants() const;
   [[nodiscard]] bool validateUniqueParticleIds() const;
   void rebuildSpeciesIndex();
+  void refreshGasCellIdentityFromParticleOrder();
+  [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
 
   [[nodiscard]] ParticleTransferPacket packSpeciesTransferPacket(ParticleSpecies species_tag) const;
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
@@ -545,6 +552,9 @@ void reorderParticles(
 
 // Debug guard: throw on any species sidecar index no longer owned by particles.
 void debugAssertNoStaleParticleIndices(const SimulationState& state);
+// Rebuild/check the temporary gas identity lanes from canonical gas-particle ordering.
+void refreshGasCellIdentityFromParticleOrder(SimulationState& state);
+[[nodiscard]] bool gasCellIdentityMatchesParticleOrder(const SimulationState& state);
 // Debug guard: enforce temporary gas ownership contract (local 1:1 gas particle <-> gas cell rows).
 void debugAssertGasCellIdentityContract(const SimulationState& state);
 

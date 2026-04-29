@@ -140,7 +140,10 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
     const core::SimulationConfig& config,
     const core::SimulationState* state = nullptr) {
   const bool per_species = hasSpeciesSpecificSoftening(config);
-  const bool per_particle = state != nullptr && !state->particle_sidecar.has_gravity_softening_override.empty();
+  const bool per_particle = state != nullptr && std::any_of(
+      state->particle_sidecar.has_gravity_softening_override.begin(),
+      state->particle_sidecar.has_gravity_softening_override.end(),
+      [](std::uint8_t flag) { return flag != 0U; });
   if (per_particle && per_species) {
     return "comoving_species_plus_particle_override";
   }
@@ -367,6 +370,8 @@ void rebuildLocalGasStateFromParticleIds(
       throw std::runtime_error("missing gas-cell migration record for local gas particle after ownership compaction");
     }
     const GasCellMigrationRecord& record = found->second;
+    rebuilt_gas.gas_cell_id[cell_index] = particle_id;
+    rebuilt_gas.parent_particle_id[cell_index] = particle_id;
     rebuilt_cells.center_x_comoving[cell_index] = record.center_x_comoving;
     rebuilt_cells.center_y_comoving[cell_index] = record.center_y_comoving;
     rebuilt_cells.center_z_comoving[cell_index] = record.center_z_comoving;
@@ -386,6 +391,7 @@ void rebuildLocalGasStateFromParticleIds(
 
   state.cells = std::move(rebuilt_cells);
   state.gas_cells = std::move(rebuilt_gas);
+  state.bumpCellIndexGeneration();
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
     if (old_cell_index >= old_cell_particle_id.size()) {
@@ -1246,7 +1252,11 @@ class GravityStageCallback final : public core::IntegrationCallback {
         .source_particle_epsilon_comoving = std::span<const double>(
             context.state.particle_sidecar.gravity_softening_comoving.empty() ? nullptr : context.state.particle_sidecar.gravity_softening_comoving.data(),
             context.state.particle_sidecar.gravity_softening_comoving.size()),
+        .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
+            context.state.particle_sidecar.has_gravity_softening_override.empty() ? nullptr : context.state.particle_sidecar.has_gravity_softening_override.data(),
+            context.state.particle_sidecar.has_gravity_softening_override.size()),
         .target_particle_epsilon_comoving = std::span<const double>(),
+        .target_particle_epsilon_override_mask = std::span<const std::uint8_t>(),
         .species_policy = m_tree_pm_species_softening,
     };
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
@@ -2265,12 +2275,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
 
       core::TransientStepWorkspace workspace;
-      const core::ActiveSetDescriptor active_set{
-          .particle_indices = active_particles,
-          .cell_indices = active_cells,
-          .particles_are_subset = active_particles.size() < state.particles.size(),
-          .cells_are_subset = active_cells.size() < state.cells.size(),
-      };
+      const core::ActiveSetDescriptor active_set = core::makeSchedulerActiveSetDescriptor(
+          scheduler, state, active_particles, active_cells);
 
       orchestrator.executeSingleStep(
           state,

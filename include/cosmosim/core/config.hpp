@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <stdexcept>
@@ -281,6 +282,16 @@ struct FrozenConfig {
   ProvenanceMetadata provenance;
 };
 
+struct DerivedRuntimeConfig {
+  double time_begin_code = 0.0;
+  double time_end_code = 1.0;
+  std::array<double, 3> box_size_mpc_comoving{};
+  std::array<int, 3> treepm_pm_grid_shape{};
+  std::array<double, 5> gravity_softening_kpc_comoving_by_species{};
+  std::uint64_t normalized_config_hash = 0;
+  std::string normalized_config_hash_hex;
+};
+
 struct ParseOptions {
   bool allow_unknown_keys = false;
 };
@@ -298,6 +309,8 @@ class ConfigError : public std::runtime_error {
     const std::string& config_text,
     const std::string& source_name,
     const ParseOptions& options = {});
+
+[[nodiscard]] DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config);
 
 void writeNormalizedConfigSnapshot(
     const FrozenConfig& frozen_config,

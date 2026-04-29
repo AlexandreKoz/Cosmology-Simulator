@@ -57,6 +57,15 @@ struct ActiveSetDescriptor {
   std::span<const std::uint32_t> cell_indices;
   bool particles_are_subset = false;
   bool cells_are_subset = false;
+  // Runtime-truth metadata: active descriptors are derived products of the
+  // scheduler/state generation that created them, never independent active-set
+  // authority. Stale descriptors must fail before solver kernels consume them.
+  bool particles_from_scheduler = false;
+  bool cells_from_scheduler = false;
+  bool has_generation_metadata = false;
+  std::uint64_t source_particle_index_generation = 0;
+  std::uint64_t source_cell_index_generation = 0;
+  std::uint64_t source_scheduler_tick = 0;
 
   [[nodiscard]] bool hasParticleSubset(std::size_t total_particle_count) const noexcept;
   [[nodiscard]] bool hasCellSubset(std::size_t total_cell_count) const noexcept;
@@ -244,6 +253,16 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::uint32_t> m_active_elements;
   TimeBinDiagnostics m_diagnostics;
 };
+
+[[nodiscard]] ActiveSetDescriptor makeSchedulerActiveSetDescriptor(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> active_particle_indices,
+    std::span<const std::uint32_t> active_cell_indices = {});
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state);
 
 [[nodiscard]] TimeBinMappingResult mapDtToTimeBin(double dt_time_code, const TimeStepLimits& limits);
 [[nodiscard]] double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits);

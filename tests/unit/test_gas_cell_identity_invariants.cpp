@@ -34,6 +34,7 @@ cosmosim::core::SimulationState makeGasContractState() {
   }
 
   state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   return state;
 }
 

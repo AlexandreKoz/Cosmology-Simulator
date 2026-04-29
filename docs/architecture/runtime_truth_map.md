@@ -550,3 +550,14 @@ This stage is documentation/audit only. No runtime behavior, schema payload, det
 ### Stage 0 follow-up note: migration softening value vs override authority
 
 Migration payloads now distinguish `has_gravity_softening_value` from `has_gravity_softening_override`. The former preserves a materialized numeric value when present; the latter is the only flag that carries per-particle override authority across migration.
+
+## Stage 0 P0-05..P0-08 repair update
+
+The P0-05..P0-08 repair pass adds the following concrete runtime-truth structures:
+
+- `GasCellSidecar::gas_cell_id` and `GasCellSidecar::parent_particle_id` are the explicit gas-cell identity lanes for particle-bound gas-cell states. They are serialized in restart/checkpoint state and included in restart integrity hashing.
+- `ParticleSidecar::has_gravity_softening_override` is the explicit owner of per-particle softening override authority. Numeric softening values without a corresponding override bit are materialized values, not independent override truth.
+- `DerivedRuntimeConfig` is the owner for normalized-config-derived runtime constants.
+- `ActiveSetDescriptor` now carries scheduler provenance and state generation metadata; stale descriptors fail through `debugAssertActiveSetDescriptorFresh()` before solver consumption.
+
+Remaining caveat: some legacy physics/unit tests still operate standalone hydro cells without particle-bound gas identity. Those states are deliberately not promoted to the one-to-one gas-particle identity contract unless gas-particle count matches cell count and the state ownership layer refreshes identity lanes.

@@ -422,6 +422,8 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(cells_group.get(), "patch_index", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.cells.patch_index);
 
   Hdf5Handle gas_group(openOrCreateGroup(state_group.get(), "gas_cells"));
+  writeDataset1d(gas_group.get(), "gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.gas_cells.gas_cell_id);
+  writeDataset1d(gas_group.get(), "parent_particle_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.gas_cells.parent_particle_id);
   writeDataset1d(gas_group.get(), "density_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.density_code);
   writeDataset1d(gas_group.get(), "pressure_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.pressure_code);
   writeDataset1d(gas_group.get(), "internal_energy_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.internal_energy_code);
@@ -552,6 +554,15 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
   state.cells.patch_index = readDataset1dAligned<std::uint32_t>(cells_group.get(), "patch_index", H5T_NATIVE_UINT32);
 
   Hdf5Handle gas_group(H5Gopen2(state_group.get(), "gas_cells", H5P_DEFAULT));
+  if (H5Lexists(gas_group.get(), "gas_cell_id", H5P_DEFAULT) > 0 &&
+      H5Lexists(gas_group.get(), "parent_particle_id", H5P_DEFAULT) > 0) {
+    state.gas_cells.gas_cell_id =
+        readDataset1dAligned<std::uint64_t>(gas_group.get(), "gas_cell_id", H5T_NATIVE_UINT64);
+    state.gas_cells.parent_particle_id =
+        readDataset1dAligned<std::uint64_t>(gas_group.get(), "parent_particle_id", H5T_NATIVE_UINT64);
+  } else {
+    throw std::runtime_error("restart is missing gas-cell identity datasets gas_cell_id/parent_particle_id");
+  }
   state.gas_cells.density_code = readDataset1dAligned<double>(gas_group.get(), "density_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.pressure_code = readDataset1dAligned<double>(gas_group.get(), "pressure_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.internal_energy_code = readDataset1dAligned<double>(gas_group.get(), "internal_energy_code", H5T_NATIVE_DOUBLE);
@@ -742,6 +753,8 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.cells.time_bin);
   append_any_vec(state.cells.patch_index);
 
+  append_any_vec(state.gas_cells.gas_cell_id);
+  append_any_vec(state.gas_cells.parent_particle_id);
   append_any_vec(state.gas_cells.density_code);
   append_any_vec(state.gas_cells.pressure_code);
   append_any_vec(state.gas_cells.internal_energy_code);

@@ -117,6 +117,8 @@ bool CellSoa::isConsistent() const noexcept {
 }
 
 void GasCellSidecar::resize(std::size_t count) {
+  gas_cell_id.resize(count);
+  parent_particle_id.resize(count);
   density_code.resize(count);
   pressure_code.resize(count);
   internal_energy_code.resize(count);
@@ -131,7 +133,8 @@ std::size_t GasCellSidecar::size() const noexcept { return density_code.size(); 
 
 bool GasCellSidecar::isConsistent() const noexcept {
   const std::size_t expected = density_code.size();
-  return pressure_code.size() == expected && internal_energy_code.size() == expected &&
+  return gas_cell_id.size() == expected && parent_particle_id.size() == expected &&
+         pressure_code.size() == expected && internal_energy_code.size() == expected &&
          temperature_code.size() == expected && sound_speed_code.size() == expected &&
          recon_gradient_x.size() == expected && recon_gradient_y.size() == expected &&
          recon_gradient_z.size() == expected;

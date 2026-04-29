@@ -143,6 +143,22 @@ void test_softening_priority_invariants() {
     assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.111) < 1.0e-15);
   }
 
+  // Materialized per-particle values are not authoritative overrides when an override mask is present.
+  {
+    const std::array<double, 3> materialized_eps{0.333, 0.222, 0.111};
+    const std::array<std::uint8_t, 3> override_mask{1U, 0U, 0U};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = source_species,
+        .source_particle_epsilon_comoving = materialized_eps,
+        .source_particle_epsilon_override_mask = override_mask,
+        .target_particle_epsilon_comoving = {},
+        .species_policy = species_policy,
+    };
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(0, global_policy, view) - 0.333) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(1, global_policy, view) - 0.040) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
+  }
+
   // Diagnostics are observers only.
   SimulationState state = seedStateWithSelectiveOverrides();
   const auto before = state.particle_sidecar.gravity_softening_comoving;
@@ -251,6 +267,9 @@ void test_softening_override_restart_roundtrip() {
       .source_particle_epsilon_comoving = std::span<const double>(
           restored.state.particle_sidecar.gravity_softening_comoving.data(),
           restored.state.particle_sidecar.gravity_softening_comoving.size()),
+      .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
+          restored.state.particle_sidecar.has_gravity_softening_override.data(),
+          restored.state.particle_sidecar.has_gravity_softening_override.size()),
       .target_particle_epsilon_comoving = {},
       .species_policy = species_policy,
   };

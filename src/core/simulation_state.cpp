@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
+#include <unordered_set>
 
 namespace cosmosim::core {
 
@@ -258,14 +259,67 @@ void debugAssertNoStaleParticleIndices(const SimulationState& state) {
   check_indices(state.tracers.particle_index, "tracers");
 }
 
+void refreshGasCellIdentityFromParticleOrder(SimulationState& state) {
+  const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+  if (state.cells.size() != gas_globals.size() || state.gas_cells.size() != gas_globals.size()) {
+    throw std::runtime_error(
+        "refreshGasCellIdentityFromParticleOrder: gas-cell count must match canonical gas-particle count");
+  }
+  state.gas_cells.gas_cell_id.resize(gas_globals.size());
+  state.gas_cells.parent_particle_id.resize(gas_globals.size());
+  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
+    const std::uint32_t particle_index = gas_globals[cell_index];
+    const std::uint64_t particle_id = state.particle_sidecar.particle_id[particle_index];
+    state.gas_cells.gas_cell_id[cell_index] = particle_id;
+    state.gas_cells.parent_particle_id[cell_index] = particle_id;
+  }
+  state.bumpCellIndexGeneration();
+}
+
+bool gasCellIdentityMatchesParticleOrder(const SimulationState& state) {
+  const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+  if (state.cells.size() != gas_globals.size() || state.gas_cells.size() != gas_globals.size()) {
+    return false;
+  }
+  if (state.gas_cells.gas_cell_id.size() != gas_globals.size() ||
+      state.gas_cells.parent_particle_id.size() != gas_globals.size()) {
+    return false;
+  }
+  std::unordered_set<std::uint64_t> seen_ids;
+  seen_ids.reserve(gas_globals.size());
+  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
+    const std::uint32_t particle_index = gas_globals[cell_index];
+    if (particle_index >= state.particles.size()) {
+      return false;
+    }
+    const std::uint64_t expected_particle_id = state.particle_sidecar.particle_id[particle_index];
+    if (state.gas_cells.parent_particle_id[cell_index] != expected_particle_id ||
+        state.gas_cells.gas_cell_id[cell_index] != expected_particle_id) {
+      return false;
+    }
+    if (!seen_ids.insert(state.gas_cells.gas_cell_id[cell_index]).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void SimulationState::refreshGasCellIdentityFromParticleOrder() {
+  cosmosim::core::refreshGasCellIdentityFromParticleOrder(*this);
+}
+
+bool SimulationState::gasCellIdentityMatchesParticleOrder() const {
+  return cosmosim::core::gasCellIdentityMatchesParticleOrder(*this);
+}
+
 void debugAssertGasCellIdentityContract(const SimulationState& state) {
   const std::size_t gas_particle_count = state.particle_species_index.count(ParticleSpecies::kGas);
   if (gas_particle_count == 0) {
     return;
   }
-  if (state.cells.size() != gas_particle_count || state.gas_cells.size() != gas_particle_count) {
+  if (!gasCellIdentityMatchesParticleOrder(state)) {
     throw std::runtime_error(
-        "debugAssertGasCellIdentityContract: temporary contract requires local 1:1 gas particles and gas cells");
+        "debugAssertGasCellIdentityContract: gas-cell identity lanes must match canonical gas-particle ordering");
   }
 }
 

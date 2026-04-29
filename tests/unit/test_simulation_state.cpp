@@ -10,11 +10,11 @@
 int main() {
   static_assert(
       sizeof(cosmosim::core::GravityParticleKernelView) ==
-          sizeof(std::span<std::uint32_t>) + (7 * sizeof(std::span<double>)),
+          sizeof(std::span<std::uint32_t>) + (7 * sizeof(std::span<double>)) + sizeof(std::uint64_t),
       "GravityParticleKernelView hot contract changed: unexpected extra field(s)");
   static_assert(
       sizeof(cosmosim::core::HydroCellKernelView) ==
-          sizeof(std::span<std::uint32_t>) + (6 * sizeof(std::span<double>)),
+          sizeof(std::span<std::uint32_t>) + (6 * sizeof(std::span<double>)) + sizeof(std::uint64_t),
       "HydroCellKernelView hot contract changed: unexpected extra field(s)");
 
   cosmosim::core::SimulationState state;

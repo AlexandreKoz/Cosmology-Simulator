@@ -884,12 +884,20 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       softening_view.source_particle_epsilon_comoving.size() != pos_x_comoving.size()) {
     throw std::invalid_argument("TreePM source softening sidecar size must match source particle count");
   }
+  if (!softening_view.source_particle_epsilon_override_mask.empty() &&
+      softening_view.source_particle_epsilon_override_mask.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument("TreePM source softening override mask size must match source particle count");
+  }
   if (!softening_view.source_species_tag.empty() && softening_view.source_species_tag.size() != pos_x_comoving.size()) {
     throw std::invalid_argument("TreePM source species sidecar size must match source particle count");
   }
   if (!softening_view.target_particle_epsilon_comoving.empty() &&
       softening_view.target_particle_epsilon_comoving.size() != accumulator.active_particle_index.size()) {
     throw std::invalid_argument("TreePM target softening sidecar size must match active-set size");
+  }
+  if (!softening_view.target_particle_epsilon_override_mask.empty() &&
+      softening_view.target_particle_epsilon_override_mask.size() != accumulator.active_particle_index.size()) {
+    throw std::invalid_argument("TreePM target softening override mask size must match active-set size");
   }
   std::vector<std::uint32_t> stack;
   stack.reserve(256);
