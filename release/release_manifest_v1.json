@@ -5,9 +5,9 @@
   "release_date_utc": "2026-04-08",
   "source_version": "0.1.0",
   "naming_rule_version": "lower_snake_v1",
-  "snapshot_schema": "gadget_arepo_v1",
-  "restart_schema": "cosmosim_restart_v3",
-  "provenance_schema": "provenance_v1",
+  "snapshot_schema": "gadget_arepo_v4",
+  "restart_schema": "cosmosim_restart_v5",
+  "provenance_schema": "provenance_v4",
   "config_schema": "param_txt_v1",
   "supported_modes": [
     "zoom_in",

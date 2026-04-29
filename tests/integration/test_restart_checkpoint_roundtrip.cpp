@@ -455,6 +455,7 @@ void testRestartRoundtrip() {
       std::filesystem::temp_directory_path() / "cosmosim_restart_legacy_softening_compat.hdf5";
   cosmosim::core::SimulationState legacy_softening_state = state;
   legacy_softening_state.particle_sidecar.gravity_softening_comoving.clear();
+  legacy_softening_state.particle_sidecar.has_gravity_softening_override.clear();
   cosmosim::io::RestartWritePayload legacy_softening_payload = payload;
   legacy_softening_payload.state = &legacy_softening_state;
   legacy_softening_payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");

@@ -55,7 +55,7 @@ cosmosim_harness <config.param.txt>
 
 - Normalized, typed configuration is required before run execution.
 - The runtime writes `normalized_config.param.txt` into the run directory after config loading succeeds.
-- Provenance output is mandatory for release reference runs (`provenance_v1`).
-- Snapshot schema compatibility: `gadget_arepo_v1`.
-- Restart schema compatibility: `cosmosim_restart_v4`.
+- Provenance output is mandatory for release reference runs (`provenance_v4`).
+- Snapshot schema compatibility: `gadget_arepo_v4`.
+- Restart schema compatibility: `cosmosim_restart_v5`.
 - Release metadata schema and packaging manifest: `release_manifest_v1`.

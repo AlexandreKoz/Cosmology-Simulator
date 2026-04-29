@@ -4,9 +4,9 @@ _Date: 2026-04-26 (UTC)_
 
 ## Stage 0 status
 
-**Status: NOT CLOSED (fail).**
+**Status: CLOSURE CANDIDATE AFTER P0-09/P0-10 REPAIR; full local certification still required.**
 
-Stage 0 remains blocked until the failing invariant/contract tests listed below are repaired and re-validated on required preset paths.
+This repair pass removes the documented P0-09/P0-10 closure blockers found in the prior gate. Full Stage 0 closure still requires successful local completion of the listed CPU, HDF5, and PM+HDF5+FFTW preset suites on a normal development machine.
 
 ## Scope and ownership freeze summary
 
@@ -128,4 +128,39 @@ cmake --preset cpu-only-debug
 cmake --build --preset build-cpu-debug
 ctest --preset test-cpu-debug --output-on-failure -R "time|scheduler|active|particle|sidecar|species|migration|reorder"
 ctest --preset test-cpu-debug --output-on-failure
+```
+
+## Follow-up repair pass — P0-09 through P0-10 restart/gate closure hardening
+
+This pass targets the remaining Stage 0 restart/reload and consolidation-gate blockers only. It does not add new physics, solvers, or performance features.
+
+Changes made:
+
+- Restored the missing `tests/unit` and `tests/validation` source files referenced by `CMakeLists.txt`, eliminating a configure-time test-registry/source-tree drift blocker in the uploaded archive.
+- Repaired `integration_softening_ownership_invariants` restart payload construction so the restart writer receives a valid normalized config hash, matching `ProvenanceRecord::config_hash_hex`, and a valid single-rank `DistributedRestartState` instead of tripping the continuation-metadata guard.
+- Hardened the legacy softening compatibility round-trip by clearing both the optional softening value lane and the authoritative override-mask lane when constructing the legacy payload.
+- Aligned docs, release manifest, and gate checks with the current runtime schemas: snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v5`, and provenance `provenance_v4`.
+- Updated the runtime app smoke gate to check the canonical axis-aware normalized key `treepm_pm_grid_nx = 24` rather than the deprecated scalar alias `treepm_pm_grid = 24`.
+
+Validation evidence from this sandbox:
+
+- `cmake --preset cpu-only-debug` completed successfully after restoring the missing test sources.
+- `cmake --preset hdf5-debug` reached the normal configure/generate phase with HDF5 detected (`1.14.5`), but the sandbox command timed out after configure output and before a complete build/test cycle could be certified.
+- Targeted build attempts for schema tests began compiling normally but exceeded the sandbox wall-time limit without producing compiler diagnostics.
+
+Required local certification commands remain:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure -R "runtime|truth|timestep|scheduler|active|particle|sidecar|species|gas|hydro|softening|config|restart|checkpoint|provenance"
+ctest --preset test-cpu-debug --output-on-failure
+
+cmake --preset hdf5-debug
+cmake --build --preset build-hdf5-debug
+ctest --preset test-hdf5-debug --output-on-failure
+
+cmake --preset pm-hdf5-fftw-debug
+cmake --build --preset build-pm-hdf5-fftw-debug
+ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
 ```

@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v4`) persists:
+The restart schema (`cosmosim_restart_v5`) persists:
 
 - full `SimulationState` hot/cold SoA lanes,
 - `StateMetadata` blob,
@@ -20,8 +20,8 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`4`).
-- `v3` restart files are intentionally rejected because they omit explicit distributed TreePM continuation metadata.
+- Current compatibility policy: exact version match (`5`).
+- `v4` restart files are intentionally rejected because they omit explicit Stage 0 runtime-truth lanes added after distributed TreePM continuation metadata.
 
 ## Atomic write semantics
 

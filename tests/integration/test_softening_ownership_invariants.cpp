@@ -245,7 +245,16 @@ void test_softening_override_restart_roundtrip() {
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\n[mode]\nmode = zoom_in\n";
-  payload.normalized_config_hash_hex = "a";
+  payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.distributed_gravity_state.schema_version = 2;
+  payload.distributed_gravity_state.world_size = 1;
+  payload.distributed_gravity_state.pm_grid_nx = 4;
+  payload.distributed_gravity_state.pm_grid_ny = 4;
+  payload.distributed_gravity_state.pm_grid_nz = 4;
+  payload.distributed_gravity_state.owning_rank_by_item.assign(state.particles.size(), 0);
+  payload.distributed_gravity_state.pm_slab_begin_x_by_rank = {0};
+  payload.distributed_gravity_state.pm_slab_end_x_by_rank = {4};
 
   const std::filesystem::path restart_path =
       std::filesystem::temp_directory_path() / "cosmosim_softening_ownership_roundtrip.hdf5";

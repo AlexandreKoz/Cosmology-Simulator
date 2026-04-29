@@ -161,7 +161,7 @@ When changing snapshot/restart/provenance fields:
 
 ## Compatibility notes (2026-04-20)
 
-- Snapshot schema was intentionally bumped to `gadget_arepo_v3` (`schema_version = 4`)
+- Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
 - Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state.

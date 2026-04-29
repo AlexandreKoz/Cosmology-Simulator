@@ -8,7 +8,7 @@ set(runtime_smoke_run_dir "${runtime_smoke_run_root}/runtime_app_smoke")
 file(REMOVE_RECURSE "${runtime_smoke_root}")
 file(MAKE_DIRECTORY "${runtime_smoke_root}")
 
-file(WRITE "${runtime_smoke_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 1\ngravity_solver = treepm\nhydro_solver = godunov_fv\ntreepm_pm_grid = 24\ntreepm_asmth_cells = 1.5\ntreepm_rcut_cells = 5.5\ntreepm_assignment_scheme = cic\ntreepm_enable_window_deconvolution = true\ntreepm_update_cadence_steps = 1\n\n[analysis]\nenable_diagnostics = true\nenable_halo_workflow = false\nrun_health_interval_steps = 1\nscience_light_interval_steps = 1\nscience_heavy_interval_steps = 4\n\n[output]\nrun_name = runtime_app_smoke\noutput_directory = ${runtime_smoke_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 1\nwrite_restarts = true\n\n[units]\ncoordinate_frame = comoving\n")
+file(WRITE "${runtime_smoke_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 1\ngravity_solver = treepm\nhydro_solver = godunov_fv\ntreepm_pm_grid_nx = 24\ntreepm_asmth_cells = 1.5\ntreepm_rcut_cells = 5.5\ntreepm_assignment_scheme = cic\ntreepm_enable_window_deconvolution = true\ntreepm_update_cadence_steps = 1\n\n[analysis]\nenable_diagnostics = true\nenable_halo_workflow = false\nrun_health_interval_steps = 1\nscience_light_interval_steps = 1\nscience_heavy_interval_steps = 4\n\n[output]\nrun_name = runtime_app_smoke\noutput_directory = ${runtime_smoke_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 1\nwrite_restarts = true\n\n[units]\ncoordinate_frame = comoving\n")
 
 execute_process(
   COMMAND "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_smoke_config}"
@@ -51,8 +51,8 @@ if(NOT runtime_ops MATCHES "config.freeze")
 endif()
 
 file(READ "${runtime_smoke_run_dir}/normalized_config.param.txt" runtime_normalized)
-if(NOT runtime_normalized MATCHES "treepm_pm_grid = 24")
-  message(FATAL_ERROR "runtime smoke normalized config must preserve numerics.treepm_pm_grid")
+if(NOT runtime_normalized MATCHES "treepm_pm_grid_nx = 24")
+  message(FATAL_ERROR "runtime smoke normalized config must preserve canonical numerics.treepm_pm_grid_nx")
 endif()
 if(NOT runtime_normalized MATCHES "treepm_asmth_cells = 1.5")
   message(FATAL_ERROR "runtime smoke normalized config must preserve numerics.treepm_asmth_cells")
