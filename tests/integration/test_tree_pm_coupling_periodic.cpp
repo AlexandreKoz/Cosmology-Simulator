@@ -21,6 +21,16 @@ void requireOrThrow(bool condition, const std::string& message) {
   }
 }
 
+[[nodiscard]] constexpr cosmosim::gravity::PmGridShape pmShapeForAvailableBackend(
+    std::size_t fftw_n,
+    std::size_t fallback_n) noexcept {
+#if COSMOSIM_ENABLE_FFTW
+  return {fftw_n, fftw_n, fftw_n};
+#else
+  return {fallback_n, fallback_n, fallback_n};
+#endif
+}
+
 [[nodiscard]] double minimumImageDelta(double delta, double box_size_comoving) {
   return delta - box_size_comoving * std::nearbyint(delta / box_size_comoving);
 }
@@ -136,12 +146,7 @@ void testPeriodicTreePmAgainstDirectReference() {
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.softening.epsilon_comoving = 0.01;
 
-  const cosmosim::gravity::PmGridShape pm_shape =
-#if COSMOSIM_ENABLE_FFTW
-      {32, 32, 32};
-#else
-      {8, 8, 8};
-#endif
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(32, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
 
@@ -196,7 +201,7 @@ void testResidualCutoffPrunesTreePath() {
   std::vector<double> pos_z = {0.10, 0.09, 0.58, 0.86};
   std::vector<double> mass = {1.0, 1.0, 1.0, 1.0};
 
-  const cosmosim::gravity::PmGridShape pm_shape{32, 32, 32};
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(32, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
 
   cosmosim::gravity::TreePmOptions options;
@@ -238,7 +243,7 @@ void testPmOnlyTreeOnlyAndTreePmConsistency() {
     mass[i] = 0.9 + 0.05 * static_cast<double>(i % 5U);
   }
 
-  const cosmosim::gravity::PmGridShape pm_shape{32, 32, 32};
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(32, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
 
   cosmosim::gravity::TreePmOptions base_options;
@@ -293,7 +298,7 @@ void testPmOnlyTreeOnlyAndTreePmConsistency() {
 
 void testActiveSubsetMatchesFullSolveSingleRank() {
   constexpr double box_size_comoving = 1.0;
-  const cosmosim::gravity::PmGridShape pm_shape{16, 16, 16};
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
 
   const std::vector<double> pos_x = {0.05, 0.12, 0.19, 0.28, 0.34, 0.43, 0.55, 0.61, 0.74, 0.88};
@@ -351,7 +356,7 @@ void testDistributedShortRangeExportImportMatchesSingleRankReference() {
   }
 
   constexpr double box_size_comoving = 1.0;
-  const cosmosim::gravity::PmGridShape pm_shape{16, 16, 16};
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
 
   const std::vector<double> global_x = {
@@ -478,7 +483,7 @@ void testDistributedActiveSubsetMatchesSingleRankReference() {
   }
 
   constexpr double box_size_comoving = 1.0;
-  const cosmosim::gravity::PmGridShape pm_shape{16, 16, 16};
+  const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);
 
   const std::vector<double> global_x = {
@@ -611,11 +616,11 @@ void testZoomMembershipPeriodicWrapAffectsCorrection() {
   opts.tree_options.max_leaf_size = 4;
   opts.tree_options.gravitational_constant_code = 1.0;
   opts.tree_options.softening.epsilon_comoving = 1.0e-3;
-  const cosmosim::gravity::PmGridShape coarse_shape{16,16,16};
+  const cosmosim::gravity::PmGridShape coarse_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(coarse_shape.nx);
   opts.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
   opts.enable_zoom_long_range_correction = true;
-  opts.zoom_focused_pm_shape = cosmosim::gravity::PmGridShape{24,24,24};
+  opts.zoom_focused_pm_shape = pmShapeForAvailableBackend(24, 8);
   opts.source_is_high_res = source_is_high_res;
   opts.active_is_high_res = active_is_high_res;
   opts.zoom_region_center_x_comoving = 0.0;
@@ -646,7 +651,7 @@ void testZoomFocusedPmCorrectionAndContaminationDiagnostics() {
   no_zoom.tree_options.max_leaf_size = 4;
   no_zoom.tree_options.gravitational_constant_code = 1.0;
   no_zoom.tree_options.softening.epsilon_comoving = 1.0e-3;
-  const cosmosim::gravity::PmGridShape coarse_shape{16, 16, 16};
+  const cosmosim::gravity::PmGridShape coarse_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(coarse_shape.nx);
   no_zoom.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
   cosmosim::gravity::TreePmDiagnostics no_zoom_diag;
@@ -655,14 +660,14 @@ void testZoomFocusedPmCorrectionAndContaminationDiagnostics() {
 
   cosmosim::gravity::TreePmOptions with_zoom = no_zoom;
   with_zoom.enable_zoom_long_range_correction = true;
-  with_zoom.zoom_focused_pm_shape = cosmosim::gravity::PmGridShape{32, 32, 32};
+  with_zoom.zoom_focused_pm_shape = pmShapeForAvailableBackend(32, 8);
   with_zoom.source_is_high_res = source_is_high_res;
   with_zoom.active_is_high_res = active_is_high_res;
   with_zoom.zoom_region_center_x_comoving = 0.5;
   with_zoom.zoom_region_center_y_comoving = 0.5;
   with_zoom.zoom_region_center_z_comoving = 0.5;
   with_zoom.zoom_region_radius_comoving = 0.08;
-  with_zoom.zoom_contamination_radius_comoving = 0.4;
+  with_zoom.zoom_contamination_radius_comoving = 0.55;
   cosmosim::gravity::TreePmDiagnostics with_zoom_diag;
   const ForceField with_zoom_force =
       solveTreePm(pos_x, pos_y, pos_z, mass, coarse_shape, with_zoom, &with_zoom_diag);

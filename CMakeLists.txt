@@ -479,6 +479,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_pm_solver tests/unit/test_pm_solver.cpp)
   target_link_libraries(test_unit_pm_solver PRIVATE cosmosim_gravity)
   add_test(NAME unit_pm_solver COMMAND test_unit_pm_solver)
+  set_tests_properties(unit_pm_solver PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
   add_executable(test_unit_tree_gravity tests/unit/test_tree_gravity.cpp)
   target_link_libraries(test_unit_tree_gravity PRIVATE cosmosim_gravity)

@@ -339,6 +339,7 @@ void testActiveSetAuthority() {
   assert(stale_descriptor_threw);
 
   scheduler.requestBinTransition(2, 0);
+  scheduler.endSubstep();
 
   const auto active1 = scheduler.beginSubstep();
   const std::vector<std::uint32_t> expected1{0, 2, 4};
