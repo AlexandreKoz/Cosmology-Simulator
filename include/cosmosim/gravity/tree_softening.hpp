@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 
 namespace cosmosim::gravity {
 
@@ -37,12 +38,22 @@ struct TreeSofteningView {
     const TreeSofteningPolicy& fallback,
     const TreeSofteningView& view) {
   if (!view.source_particle_epsilon_comoving.empty()) {
-    if (view.source_particle_epsilon_override_mask.empty() ||
-        view.source_particle_epsilon_override_mask[source_index] != 0U) {
-      return view.source_particle_epsilon_comoving[source_index];
+    if (source_index >= view.source_particle_epsilon_comoving.size()) {
+      throw std::out_of_range("source softening index out of range");
+    }
+    if (!view.source_particle_epsilon_override_mask.empty()) {
+      if (source_index >= view.source_particle_epsilon_override_mask.size()) {
+        throw std::invalid_argument("source softening override mask has incompatible size");
+      }
+      if (view.source_particle_epsilon_override_mask[source_index] != 0U) {
+        return view.source_particle_epsilon_comoving[source_index];
+      }
     }
   }
   if (view.species_policy.enabled && !view.source_species_tag.empty()) {
+    if (source_index >= view.source_species_tag.size()) {
+      throw std::out_of_range("source species index out of range");
+    }
     const std::size_t species = static_cast<std::size_t>(view.source_species_tag[source_index]);
     if (species < view.species_policy.epsilon_comoving_by_species.size()) {
       return view.species_policy.epsilon_comoving_by_species[species];
@@ -56,9 +67,16 @@ struct TreeSofteningView {
     const TreeSofteningPolicy& fallback,
     const TreeSofteningView& view) {
   if (!view.target_particle_epsilon_comoving.empty()) {
-    if (view.target_particle_epsilon_override_mask.empty() ||
-        view.target_particle_epsilon_override_mask[target_active_slot] != 0U) {
-      return view.target_particle_epsilon_comoving[target_active_slot];
+    if (target_active_slot >= view.target_particle_epsilon_comoving.size()) {
+      throw std::out_of_range("target softening index out of range");
+    }
+    if (!view.target_particle_epsilon_override_mask.empty()) {
+      if (target_active_slot >= view.target_particle_epsilon_override_mask.size()) {
+        throw std::invalid_argument("target softening override mask has incompatible size");
+      }
+      if (view.target_particle_epsilon_override_mask[target_active_slot] != 0U) {
+        return view.target_particle_epsilon_comoving[target_active_slot];
+      }
     }
   }
   return fallback.epsilon_comoving;

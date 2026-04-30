@@ -119,7 +119,8 @@ class StepOrchestrator {
       const LambdaCdmBackground* cosmology_background,
       TransientStepWorkspace* workspace = nullptr,
       const ModePolicy* mode_policy = nullptr,
-      ProfilerSession* profiler_session = nullptr) const;
+      ProfilerSession* profiler_session = nullptr,
+      std::optional<std::uint64_t> expected_scheduler_tick = std::nullopt) const;
 
  private:
   StageScheduler m_scheduler;
@@ -263,6 +264,16 @@ class HierarchicalTimeBinScheduler {
 void debugAssertActiveSetDescriptorFresh(
     const ActiveSetDescriptor& active_set,
     const SimulationState& state);
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state,
+    std::uint64_t expected_scheduler_tick);
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state,
+    const HierarchicalTimeBinScheduler& scheduler);
 
 [[nodiscard]] TimeBinMappingResult mapDtToTimeBin(double dt_time_code, const TimeStepLimits& limits);
 [[nodiscard]] double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits);

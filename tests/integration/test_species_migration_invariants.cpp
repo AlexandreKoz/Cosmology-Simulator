@@ -261,6 +261,25 @@ void test_species_migration_rejects_inbound_sidecar_mismatch() {
   }
   assert(threw);
   assert(state.validateOwnershipInvariants());
+
+  ParticleMigrationRecord invalid_softening_override;
+  invalid_softening_override.particle_id = 8803;
+  invalid_softening_override.species_tag = speciesTag(ParticleSpecies::kDarkMatter);
+  invalid_softening_override.owning_rank = 0;
+  invalid_softening_override.mass_code = 1.0;
+  invalid_softening_override.time_bin = 0;
+  invalid_softening_override.has_gravity_softening_value = false;
+  invalid_softening_override.has_gravity_softening_override = true;
+
+  commit.inbound_records = {invalid_softening_override};
+  threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+  assert(state.validateOwnershipInvariants());
 }
 
 void test_species_migration_rejects_duplicate_final_particle_ids() {
@@ -347,6 +366,9 @@ void test_species_migration_softening_timestep_invariants() {
       .source_species_tag = std::span<const std::uint32_t>(state.particle_sidecar.species_tag.data(), state.particle_sidecar.species_tag.size()),
       .source_particle_epsilon_comoving = std::span<const double>(state.particle_sidecar.gravity_softening_comoving.data(),
                                                                   state.particle_sidecar.gravity_softening_comoving.size()),
+      .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
+          state.particle_sidecar.has_gravity_softening_override.data(),
+          state.particle_sidecar.has_gravity_softening_override.size()),
       .target_particle_epsilon_comoving = std::span<const double>(),
       .species_policy = {.epsilon_comoving_by_species = {0.002, 0.004, 0.008, 0.016, 0.032}, .enabled = true},
   };

@@ -319,7 +319,16 @@ void testActiveSetAuthority() {
   assert(descriptor.particles_from_scheduler);
   assert(descriptor.has_generation_metadata);
   assert(descriptor.source_scheduler_tick == scheduler.currentTick());
-  cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state);
+  cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state, scheduler);
+
+  bool stale_scheduler_threw = false;
+  try {
+    cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state, scheduler.currentTick() + 1U);
+  } catch (const std::runtime_error&) {
+    stale_scheduler_threw = true;
+  }
+  assert(stale_scheduler_threw);
+
   state.bumpParticleIndexGeneration();
   bool stale_descriptor_threw = false;
   try {
@@ -330,7 +339,6 @@ void testActiveSetAuthority() {
   assert(stale_descriptor_threw);
 
   scheduler.requestBinTransition(2, 0);
-  scheduler.endSubstep();
 
   const auto active1 = scheduler.beginSubstep();
   const std::vector<std::uint32_t> expected1{0, 2, 4};

@@ -129,12 +129,29 @@ void test_softening_priority_invariants() {
     assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
   }
 
+  // Materialized per-particle values without an override mask are diagnostic/default mirrors,
+  // not per-particle override authority.
+  {
+    const std::array<double, 3> materialized_eps{0.333, 0.222, 0.111};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = source_species,
+        .source_particle_epsilon_comoving = materialized_eps,
+        .target_particle_epsilon_comoving = {},
+        .species_policy = species_policy,
+    };
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(0, global_policy, view) - 0.030) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(1, global_policy, view) - 0.040) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
+  }
+
   // Per-particle override precedence.
   {
     const std::array<double, 3> per_particle_eps{0.333, 0.222, 0.111};
+    const std::array<std::uint8_t, 3> override_mask{1U, 1U, 1U};
     const cosmosim::gravity::TreeSofteningView view{
         .source_species_tag = source_species,
         .source_particle_epsilon_comoving = per_particle_eps,
+        .source_particle_epsilon_override_mask = override_mask,
         .target_particle_epsilon_comoving = {},
         .species_policy = species_policy,
     };

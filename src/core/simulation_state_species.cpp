@@ -285,6 +285,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       throw std::invalid_argument(
           "commitParticleMigration: inbound tracer sidecar fields do not match species tag");
     }
+    if (inbound.has_gravity_softening_override && !inbound.has_gravity_softening_value) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound softening override requires an explicit softening value");
+    }
   };
 
   std::unordered_set<std::uint64_t> final_particle_ids;

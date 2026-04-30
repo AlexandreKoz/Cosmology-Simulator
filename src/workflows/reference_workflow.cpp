@@ -2285,7 +2285,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           background.has_value() ? &background.value() : nullptr,
           &workspace,
           &mode_policy,
-          &profiler);
+          &profiler,
+          scheduler.currentTick());
 
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;

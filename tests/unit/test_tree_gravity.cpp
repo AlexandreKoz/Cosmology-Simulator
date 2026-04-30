@@ -159,9 +159,11 @@ void testPairSofteningUsesMaxRule() {
   const std::vector<double> mass{2.0, 3.0};
   const std::vector<std::uint32_t> species_tag{0U, 1U};
   const std::vector<double> target_eps{0.2, 0.01};
+  const std::vector<std::uint8_t> target_eps_mask{1U, 1U};
   cosmosim::gravity::TreeSofteningView softening_view{
       .source_species_tag = species_tag,
       .target_particle_epsilon_comoving = target_eps,
+      .target_particle_epsilon_override_mask = target_eps_mask,
       .species_policy = {.epsilon_comoving_by_species = {0.04, 0.15, 0.0, 0.0, 0.0}, .enabled = true},
   };
 

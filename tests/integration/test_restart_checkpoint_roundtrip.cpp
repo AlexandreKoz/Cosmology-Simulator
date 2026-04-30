@@ -40,6 +40,7 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.particles.time_bin[i] = static_cast<std::uint8_t>(i % 2);
   }
   state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005, 0.006};
+  state.particle_sidecar.has_gravity_softening_override = {1U, 1U, 1U, 1U, 1U, 1U};
   state.particle_sidecar.species_tag = {
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
@@ -163,6 +164,9 @@ void assertSofteningPriorityResolution(const cosmosim::core::SimulationState& st
       .source_particle_epsilon_comoving = std::span<const double>(
           state.particle_sidecar.gravity_softening_comoving.data(),
           state.particle_sidecar.gravity_softening_comoving.size()),
+      .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
+          state.particle_sidecar.has_gravity_softening_override.data(),
+          state.particle_sidecar.has_gravity_softening_override.size()),
       .target_particle_epsilon_comoving = {},
       .species_policy = species_softening,
   };

@@ -108,7 +108,7 @@ ActiveSetDescriptor makeSchedulerActiveSetDescriptor(
       .source_cell_index_generation = state.cellIndexGeneration(),
       .source_scheduler_tick = scheduler.currentTick(),
   };
-  debugAssertActiveSetDescriptorFresh(descriptor, state);
+  debugAssertActiveSetDescriptorFresh(descriptor, state, scheduler);
   return descriptor;
 }
 
@@ -133,6 +133,24 @@ void debugAssertActiveSetDescriptorFresh(
       throw std::out_of_range("ActiveSetDescriptor contains stale cell index");
     }
   }
+}
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state,
+    std::uint64_t expected_scheduler_tick) {
+  debugAssertActiveSetDescriptorFresh(active_set, state);
+  if ((active_set.particles_from_scheduler || active_set.cells_from_scheduler) &&
+      active_set.source_scheduler_tick != expected_scheduler_tick) {
+    throw std::runtime_error("ActiveSetDescriptor scheduler tick is stale");
+  }
+}
+
+void debugAssertActiveSetDescriptorFresh(
+    const ActiveSetDescriptor& active_set,
+    const SimulationState& state,
+    const HierarchicalTimeBinScheduler& scheduler) {
+  debugAssertActiveSetDescriptorFresh(active_set, state, scheduler.currentTick());
 }
 
 std::vector<IntegrationStage> StageScheduler::schedule(
@@ -169,11 +187,16 @@ void StepOrchestrator::executeSingleStep(
     const LambdaCdmBackground* cosmology_background,
     TransientStepWorkspace* workspace,
     const ModePolicy* mode_policy,
-    ProfilerSession* profiler_session) const {
+    ProfilerSession* profiler_session,
+    std::optional<std::uint64_t> expected_scheduler_tick) const {
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("dt_time_code must be positive");
   }
-  debugAssertActiveSetDescriptorFresh(active_set, state);
+  if (expected_scheduler_tick.has_value()) {
+    debugAssertActiveSetDescriptorFresh(active_set, state, *expected_scheduler_tick);
+  } else {
+    debugAssertActiveSetDescriptorFresh(active_set, state);
+  }
 
   COSMOSIM_PROFILE_SCOPE(profiler_session, "step_orchestrator.execute_single_step");
 

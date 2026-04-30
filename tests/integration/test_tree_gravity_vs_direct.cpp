@@ -202,12 +202,17 @@ void testMixedSpeciesSofteningAgainstDirect() {
     species_tag[i] = static_cast<std::uint32_t>(i % 3U);
   }
   std::vector<double> source_override(species_tag.size(), 0.0);
+  std::vector<std::uint8_t> source_override_mask(species_tag.size(), 0U);
   source_override[5] = 0.03;
+  source_override_mask[5] = 1U;
   source_override[14] = 0.05;
+  source_override_mask[14] = 1U;
   std::vector<double> target_override(dist.active.size(), 0.0);
+  std::vector<std::uint8_t> target_override_mask(dist.active.size(), 0U);
   for (std::size_t i = 0; i < target_override.size(); ++i) {
     if ((i % 7U) == 0U) {
       target_override[i] = 0.04;
+      target_override_mask[i] = 1U;
     }
   }
 
@@ -220,7 +225,9 @@ void testMixedSpeciesSofteningAgainstDirect() {
   cosmosim::gravity::TreeSofteningView softening_view{
       .source_species_tag = species_tag,
       .source_particle_epsilon_comoving = source_override,
+      .source_particle_epsilon_override_mask = source_override_mask,
       .target_particle_epsilon_comoving = target_override,
+      .target_particle_epsilon_override_mask = target_override_mask,
       .species_policy = {.epsilon_comoving_by_species = {0.001, 0.01, 0.02, 0.0, 0.0}, .enabled = true},
   };
 
