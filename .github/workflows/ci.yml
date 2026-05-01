@@ -143,7 +143,9 @@ jobs:
           cmake --preset mpi-release
           cmake --build --preset build-mpi-release
       - name: Run MPI smoke tests
-        run: ctest --preset test-mpi-release -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart" --output-junit ci_artifacts/ctest-mpi-release.xml
+        run: |
+          mkdir -p ci_artifacts
+          ctest --preset test-mpi-release -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart" --output-junit ci_artifacts/ctest-mpi-release.xml
       - name: Upload MPI artifacts
         uses: actions/upload-artifact@v4
         with:

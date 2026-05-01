@@ -26,12 +26,18 @@ required_presets=(
   "cpu-only-debug"
   "hdf5-debug"
   "pm-hdf5-fftw-debug"
+  "mpi-hdf5-fftw-debug"
+  "mpi-release"
   "build-cpu-debug"
   "build-hdf5-debug"
   "build-pm-hdf5-fftw-debug"
+  "build-mpi-hdf5-fftw-debug"
+  "build-mpi-release"
   "test-cpu-debug"
   "test-hdf5-debug"
   "test-pm-hdf5-fftw-debug"
+  "test-mpi-hdf5-fftw-debug"
+  "test-mpi-release"
 )
 
 preset_list="$(cmake --list-presets=all 2>&1)"

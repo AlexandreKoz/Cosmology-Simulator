@@ -13,7 +13,6 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "COSMOSIM_PRESET_NAME": "${presetName}",
-        "CMAKE_CXX_STANDARD": "20",
         "COSMOSIM_ENABLE_TESTS": "ON",
         "COSMOSIM_ENABLE_BENCHMARKS": "ON",
         "COSMOSIM_ENABLE_MPI": "OFF",
