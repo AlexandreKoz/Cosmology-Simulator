@@ -52,7 +52,7 @@ jobs:
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
             test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
-            apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev"
+            apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev"
             run_bench: "0"
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +105,7 @@ jobs:
       - name: Install dependencies for explicit feature-path gates
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev
+          sudo apt-get install -y g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev libfftw3-mpi-dev
       - name: Run infrastructure gate bundle
         run: bash ./scripts/ci/enforce_infra_gates.sh ci_artifacts/infrastructure_gates
       - name: Upload infrastructure gate report

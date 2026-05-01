@@ -494,8 +494,8 @@ class PmSolver::Impl {
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           MPI_COMM_WORLD,
           decomposition_mode == core::PmDecompositionMode::kPencil
-              ? (FFTW_MEASURE | FFTW_MPI_TRANSPOSED_OUT)
-              : FFTW_MEASURE);
+              ? (COSMOSIM_FFTW_PLANNER_FLAGS | FFTW_MPI_TRANSPOSED_OUT)
+              : COSMOSIM_FFTW_PLANNER_FLAGS);
       plan.inverse_plan = fftw_mpi_plan_dft_c2r_3d(
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
@@ -504,8 +504,8 @@ class PmSolver::Impl {
           plan.real.data(),
           MPI_COMM_WORLD,
           decomposition_mode == core::PmDecompositionMode::kPencil
-              ? (FFTW_MEASURE | FFTW_MPI_TRANSPOSED_IN)
-              : FFTW_MEASURE);
+              ? (COSMOSIM_FFTW_PLANNER_FLAGS | FFTW_MPI_TRANSPOSED_IN)
+              : COSMOSIM_FFTW_PLANNER_FLAGS);
     } else
 #endif
     {
@@ -522,14 +522,14 @@ class PmSolver::Impl {
           static_cast<int>(m_shape.nz),
           plan.real.data(),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
-          FFTW_MEASURE);
+          COSMOSIM_FFTW_PLANNER_FLAGS);
       plan.inverse_plan = fftw_plan_dft_c2r_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),
           static_cast<int>(m_shape.nz),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           plan.real.data(),
-          FFTW_MEASURE);
+          COSMOSIM_FFTW_PLANNER_FLAGS);
     }
     if (plan.forward_plan == nullptr || plan.inverse_plan == nullptr) {
       throw std::runtime_error("Failed to create FFTW plans for PM solver");

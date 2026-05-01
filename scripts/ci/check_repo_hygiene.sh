@@ -48,6 +48,22 @@ for preset in "${required_presets[@]}"; do
   fi
 done
 
+
+
+echo "[hygiene] checking FFTW MPI CI dependency wiring"
+if ! grep -Fq 'configure_preset: mpi-hdf5-fftw-debug' .github/workflows/ci.yml; then
+  echo "[hygiene] ERROR: mpi-hdf5-fftw-debug CI row is missing" >&2
+  exit 1
+fi
+if ! grep -Fq 'libfftw3-mpi-dev' .github/workflows/ci.yml; then
+  echo "[hygiene] ERROR: CI FFTW MPI paths must install libfftw3-mpi-dev, not only libfftw3-dev" >&2
+  exit 1
+fi
+if ! grep -Fq 'REQUIRE_MPI' cmake/cosmosim_find_fftw.cmake; then
+  echo "[hygiene] ERROR: FFTW discovery must expose a REQUIRE_MPI path for distributed PM presets" >&2
+  exit 1
+fi
+
 echo "[hygiene] repository hygiene checks passed"
 
 echo "[hygiene] checking CI shell script syntax"

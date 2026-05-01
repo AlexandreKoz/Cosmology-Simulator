@@ -53,6 +53,18 @@ option(COSMOSIM_ENABLE_BENCHMARKS "Build benchmark/profiling hooks" ON)
 option(COSMOSIM_ENABLE_PROFILING "Enable built-in profiling instrumentation" ON)
 option(COSMOSIM_ENABLE_LTO "Enable interprocedural optimization (LTO)" OFF)
 
+set(COSMOSIM_FFTW_PLAN_RIGOR
+    "ESTIMATE"
+    CACHE STRING "FFTW planner rigor for PM plans: ESTIMATE, MEASURE, PATIENT, or EXHAUSTIVE")
+set_property(CACHE COSMOSIM_FFTW_PLAN_RIGOR PROPERTY STRINGS ESTIMATE MEASURE PATIENT EXHAUSTIVE)
+set(_cosmosim_valid_fftw_plan_rigors ESTIMATE MEASURE PATIENT EXHAUSTIVE)
+if(NOT COSMOSIM_FFTW_PLAN_RIGOR IN_LIST _cosmosim_valid_fftw_plan_rigors)
+  message(FATAL_ERROR
+    "COSMOSIM_FFTW_PLAN_RIGOR='${COSMOSIM_FFTW_PLAN_RIGOR}' is invalid; "
+    "expected one of: ${_cosmosim_valid_fftw_plan_rigors}")
+endif()
+set(COSMOSIM_FFTW_PLANNER_FLAGS "FFTW_${COSMOSIM_FFTW_PLAN_RIGOR}")
+
 set(COSMOSIM_CTEST_DEFAULT_TIMEOUT_SECONDS
     "120"
     CACHE STRING "Default timeout in seconds for ordinary CosmoSim CTest tests")
@@ -153,7 +165,11 @@ if(COSMOSIM_ENABLE_HDF5)
 endif()
 
 if(COSMOSIM_ENABLE_FFTW)
-  cosmosim_find_fftw(COSMOSIM_FFTW_TARGET)
+  if(COSMOSIM_ENABLE_MPI)
+    cosmosim_find_fftw(COSMOSIM_FFTW_TARGET REQUIRE_MPI)
+  else()
+    cosmosim_find_fftw(COSMOSIM_FFTW_TARGET)
+  endif()
 endif()
 
 if(COSMOSIM_ENABLE_CUDA)
@@ -325,14 +341,10 @@ if(COSMOSIM_ENABLE_HDF5)
 endif()
 
 if(COSMOSIM_ENABLE_FFTW)
+  target_compile_definitions(cosmosim_gravity PRIVATE COSMOSIM_FFTW_PLANNER_FLAGS=${COSMOSIM_FFTW_PLANNER_FLAGS})
   target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_TARGET})
   if(COSMOSIM_ENABLE_MPI)
-    if(NOT "${COSMOSIM_FFTW_MPI_TARGET}" STREQUAL "")
-      target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_MPI_TARGET})
-    else()
-      message(FATAL_ERROR
-        "COSMOSIM_ENABLE_MPI=ON with COSMOSIM_ENABLE_FFTW=ON requires FFTW MPI library (fftw3_mpi).")
-    endif()
+    target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_MPI_TARGET})
   endif()
 endif()
 
