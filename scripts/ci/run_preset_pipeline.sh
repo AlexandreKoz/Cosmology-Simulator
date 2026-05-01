@@ -23,12 +23,24 @@ failed_phase=""
 message="ok"
 
 ctest_junit="$artifact_dir/ctest-${test_preset}.xml"
-configure_cmd="cmake --preset ${configure_preset}"
-build_cmd="cmake --build --preset ${build_preset}"
+ctest_timeout_seconds="${COSMOSIM_CI_CTEST_TIMEOUT_SECONDS:-300}"
+build_parallelism="${COSMOSIM_CI_BUILD_PARALLEL:-2}"
+
 if [[ "$test_regex" == "-" ]]; then
-  test_cmd="ctest --preset ${test_preset} --output-junit ${ctest_junit}"
+  ctest_selection_regex="-"
 else
-  test_cmd="ctest --preset ${test_preset} -R '${test_regex}' --output-junit ${ctest_junit}"
+  # CI matrix scopes are intended to be exact test-name sets.  Anchor the
+  # selection so a broad substring cannot accidentally pull in a slow or stale
+  # neighbor test and turn the job into a timeout hunt.
+  ctest_selection_regex="^(${test_regex})$"
+fi
+
+configure_cmd="cmake --fresh --preset ${configure_preset}"
+build_cmd="cmake --build --preset ${build_preset} --parallel ${build_parallelism}"
+if [[ "$ctest_selection_regex" == "-" ]]; then
+  test_cmd="ctest --preset ${test_preset} --output-on-failure --timeout ${ctest_timeout_seconds} --output-junit ${ctest_junit}"
+else
+  test_cmd="ctest --preset ${test_preset} -R '${ctest_selection_regex}' --output-on-failure --timeout ${ctest_timeout_seconds} --output-junit ${ctest_junit}"
 fi
 feature_copy_cmd="cp build/${configure_preset}/cosmosim_feature_summary.txt ${artifact_dir}/cosmosim_feature_summary-${configure_preset}.txt"
 metadata_copy_cmd="cp build/${configure_preset}/cosmosim_build_metadata.json ${artifact_dir}/cosmosim_build_metadata-${configure_preset}.json"
@@ -80,13 +92,13 @@ require_expected_tests_registered() {
   return 0
 }
 
-if run_cmd "configure" "$configure_cmd" cmake --preset "$configure_preset" \
-  && run_cmd "build" "$build_cmd" cmake --build --preset "$build_preset" \
+if run_cmd "configure" "$configure_cmd" cmake --fresh --preset "$configure_preset" \
+  && run_cmd "build" "$build_cmd" cmake --build --preset "$build_preset" --parallel "$build_parallelism" \
   && require_expected_tests_registered; then
   if [[ "$test_regex" == "-" ]]; then
-    run_cmd "test" "$test_cmd" ctest --preset "$test_preset" --output-junit "$ctest_junit"
+    run_cmd "test" "$test_cmd" ctest --preset "$test_preset" --output-on-failure --timeout "$ctest_timeout_seconds" --output-junit "$ctest_junit"
   else
-    run_cmd "test" "$test_cmd" ctest --preset "$test_preset" -R "$test_regex" --output-junit "$ctest_junit"
+    run_cmd "test" "$test_cmd" ctest --preset "$test_preset" -R "$ctest_selection_regex" --output-on-failure --timeout "$ctest_timeout_seconds" --output-junit "$ctest_junit"
   fi
 fi
 
@@ -126,6 +138,9 @@ print(json.dumps({
   "build_preset": "${build_preset}",
   "test_preset": "${test_preset}",
   "test_scope": "${test_regex}",
+  "ctest_selection_regex": "${ctest_selection_regex}",
+  "ctest_timeout_seconds": "${ctest_timeout_seconds}",
+  "build_parallelism": "${build_parallelism}",
   "artifact_dir": "${artifact_dir}",
   "status": "${status}",
   "failed_phase": "${failed_phase}",

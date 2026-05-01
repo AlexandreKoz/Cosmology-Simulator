@@ -145,7 +145,7 @@ jobs:
       - name: Run MPI smoke tests
         run: |
           mkdir -p ci_artifacts
-          ctest --preset test-mpi-release -R "unit_parallel_distributed_memory|integration_parallel_two_rank_restart" --output-junit ci_artifacts/ctest-mpi-release.xml
+          ctest --preset test-mpi-release -R "^(unit_parallel_distributed_memory|integration_parallel_two_rank_restart)$" --output-on-failure --timeout 300 --output-junit ci_artifacts/ctest-mpi-release.xml
       - name: Upload MPI artifacts
         uses: actions/upload-artifact@v4
         with:

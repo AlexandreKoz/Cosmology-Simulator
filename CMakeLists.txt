@@ -16,6 +16,32 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+function(cosmosim_require_cxx20 target_name)
+  # Prefer compile features when CMake knows the compiler feature table.
+  # Some CI/container toolchains report a valid compiler but leave
+  # CMAKE_CXX_COMPILE_FEATURES empty; falling back to target properties keeps
+  # the C++20 contract without making configure fail before tests can run.
+  if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    target_compile_features(${target_name} PUBLIC cxx_std_20)
+  else()
+    set_target_properties(${target_name} PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS OFF)
+  endif()
+endfunction()
+
+function(cosmosim_require_private_cxx20 target_name)
+  if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    target_compile_features(${target_name} PRIVATE cxx_std_20)
+  else()
+    set_target_properties(${target_name} PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS OFF)
+  endif()
+endfunction()
+
 option(COSMOSIM_ENABLE_MPI "Enable MPI backend" OFF)
 option(COSMOSIM_ENABLE_HDF5 "Enable HDF5 I/O backend" OFF)
 option(COSMOSIM_ENABLE_FFTW "Enable FFTW backend" OFF)
@@ -26,6 +52,61 @@ option(COSMOSIM_ENABLE_TESTS "Build unit and integration tests" ON)
 option(COSMOSIM_ENABLE_BENCHMARKS "Build benchmark/profiling hooks" ON)
 option(COSMOSIM_ENABLE_PROFILING "Enable built-in profiling instrumentation" ON)
 option(COSMOSIM_ENABLE_LTO "Enable interprocedural optimization (LTO)" OFF)
+
+set(COSMOSIM_CTEST_DEFAULT_TIMEOUT_SECONDS
+    "120"
+    CACHE STRING "Default timeout in seconds for ordinary CosmoSim CTest tests")
+set(COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS
+    "300"
+    CACHE STRING "Timeout in seconds for long validation, MPI, I/O, and TreePM CTest tests")
+
+function(cosmosim_apply_test_defaults)
+  get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
+  foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)
+    get_property(cosmosim_existing_labels TEST ${cosmosim_test_name} PROPERTY LABELS)
+    if(NOT cosmosim_existing_labels)
+      set(cosmosim_existing_labels "")
+    endif()
+
+    if(cosmosim_test_name MATCHES "^unit_")
+      list(APPEND cosmosim_existing_labels unit)
+    elseif(cosmosim_test_name MATCHES "^integration_")
+      list(APPEND cosmosim_existing_labels integration)
+    elseif(cosmosim_test_name MATCHES "^validation_")
+      list(APPEND cosmosim_existing_labels validation)
+    elseif(cosmosim_test_name MATCHES "^python_")
+      list(APPEND cosmosim_existing_labels python)
+    endif()
+
+    if(cosmosim_test_name MATCHES "mpi|two_rank|three_rank")
+      list(APPEND cosmosim_existing_labels mpi)
+    endif()
+    if(cosmosim_test_name MATCHES "runtime_app_smoke")
+      list(APPEND cosmosim_existing_labels runtime smoke)
+    endif()
+
+    set(cosmosim_timeout "${COSMOSIM_CTEST_DEFAULT_TIMEOUT_SECONDS}")
+    if(cosmosim_test_name MATCHES "mpi|three_rank|two_rank|validation_|reference_workflow|tree_pm|pm_periodic|snapshot|restart|runtime_app_smoke")
+      set(cosmosim_timeout "${COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS}")
+    endif()
+
+    set_tests_properties(${cosmosim_test_name}
+      PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        TIMEOUT "${cosmosim_timeout}")
+
+    if(cosmosim_test_name MATCHES "three_rank")
+      set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 3)
+    elseif(cosmosim_test_name MATCHES "two_rank")
+      set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 2)
+    endif()
+
+    if(cosmosim_existing_labels)
+      list(REMOVE_DUPLICATES cosmosim_existing_labels)
+      set_tests_properties(${cosmosim_test_name} PROPERTIES LABELS "${cosmosim_existing_labels}")
+    endif()
+  endforeach()
+endfunction()
 
 # Backward-compatibility aliases for earlier build toggles.
 if(DEFINED COSMOSIM_BUILD_TESTS)
@@ -133,7 +214,7 @@ target_include_directories(cosmosim_core
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src)
 
-target_compile_features(cosmosim_core PUBLIC cxx_std_20)
+cosmosim_require_cxx20(cosmosim_core)
 
 target_compile_definitions(cosmosim_core
   PUBLIC
@@ -212,7 +293,7 @@ foreach(module_lib IN LISTS COSMOSIM_MODULE_LIBS)
     PRIVATE
       ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(${module_lib} PUBLIC cosmosim_core)
-  target_compile_features(${module_lib} PUBLIC cxx_std_20)
+  cosmosim_require_cxx20(${module_lib})
 
   if(COSMOSIM_ENABLE_LTO)
     set_property(TARGET ${module_lib} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -272,7 +353,7 @@ target_link_libraries(cosmosim_harness PRIVATE cosmosim_all)
 if(COSMOSIM_ENABLE_PYTHON)
   pybind11_add_module(_cosmosim MODULE src/python_bindings.cpp)
   target_link_libraries(_cosmosim PRIVATE cosmosim_all)
-  target_compile_features(_cosmosim PRIVATE cxx_std_20)
+  cosmosim_require_private_cxx20(_cosmosim)
 
   set_target_properties(_cosmosim PROPERTIES
     OUTPUT_NAME "_cosmosim"
@@ -693,32 +774,6 @@ if(COSMOSIM_ENABLE_TESTS)
       PROPERTIES LABELS "validation;gravity;mpi")
   endif()
 
-
-  get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
-  foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)
-    get_property(cosmosim_existing_labels TEST ${cosmosim_test_name} PROPERTY LABELS)
-    if(NOT cosmosim_existing_labels)
-      set(cosmosim_existing_labels "")
-    endif()
-
-    if(cosmosim_test_name MATCHES "^unit_")
-      list(APPEND cosmosim_existing_labels unit)
-    elseif(cosmosim_test_name MATCHES "^integration_")
-      list(APPEND cosmosim_existing_labels integration)
-    elseif(cosmosim_test_name MATCHES "^validation_")
-      list(APPEND cosmosim_existing_labels validation)
-    endif()
-
-    if(cosmosim_test_name MATCHES "runtime_app_smoke")
-      list(APPEND cosmosim_existing_labels runtime smoke)
-    endif()
-
-    if(cosmosim_existing_labels)
-      list(REMOVE_DUPLICATES cosmosim_existing_labels)
-      set_tests_properties(${cosmosim_test_name} PROPERTIES LABELS "${cosmosim_existing_labels}")
-    endif()
-  endforeach()
-
   if(COSMOSIM_ENABLE_PYTHON)
     add_test(
       NAME python_bindings_smoke
@@ -730,6 +785,8 @@ if(COSMOSIM_ENABLE_TESTS)
         COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${CMAKE_BINARY_DIR}/python ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python/test_snapshot_diagnostic_integration.py)
     endif()
   endif()
+
+  cosmosim_apply_test_defaults()
 endif()
 
 if(COSMOSIM_ENABLE_BENCHMARKS)
