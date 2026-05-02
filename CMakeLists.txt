@@ -344,7 +344,11 @@ if(COSMOSIM_ENABLE_FFTW)
   target_compile_definitions(cosmosim_gravity PRIVATE COSMOSIM_FFTW_PLANNER_FLAGS=${COSMOSIM_FFTW_PLANNER_FLAGS})
   target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_TARGET})
   if(COSMOSIM_ENABLE_MPI)
-    target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_MPI_TARGET})
+    # pm_solver.cpp includes mpi.h/fftw3-mpi.h and calls MPI collectives in
+    # distributed slab paths. Link MPI directly here instead of relying on an
+    # FFTW imported target to propagate MPI's include and link interfaces;
+    # distro/pkg-config FFTW MPI targets are not consistent about doing so.
+    target_link_libraries(cosmosim_gravity PUBLIC MPI::MPI_CXX ${COSMOSIM_FFTW_MPI_TARGET})
   endif()
 endif()
 

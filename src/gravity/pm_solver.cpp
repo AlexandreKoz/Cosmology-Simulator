@@ -27,8 +27,8 @@
 #if COSMOSIM_ENABLE_FFTW
 #include <fftw3.h>
 #if COSMOSIM_ENABLE_MPI
-#include <fftw3-mpi.h>
 #include <mpi.h>
+#include <fftw3-mpi.h>
 #endif
 #endif
 

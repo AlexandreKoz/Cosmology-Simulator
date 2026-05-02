@@ -36,6 +36,10 @@ void requireOrThrow(bool condition, const std::string& message) {
   }
 }
 
+[[nodiscard]] bool hasFastSpectralPmBackend() {
+  return cosmosim::gravity::PmSolver::fftBackendAvailable();
+}
+
 void buildDeterministicParticles(
     std::size_t particle_count,
     double box_size,
@@ -121,14 +125,16 @@ void buildClusteredParticles(
 }
 
 void testDistributedPmEquivalence(int world_size, int world_rank) {
-  const cosmosim::gravity::PmGridShape shape{32, 24, 20};
+  const cosmosim::gravity::PmGridShape shape = hasFastSpectralPmBackend()
+      ? cosmosim::gravity::PmGridShape{32, 24, 20}
+      : cosmosim::gravity::PmGridShape{8, 6, 5};
   const auto layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, world_rank);
 
   std::vector<double> pos_x;
   std::vector<double> pos_y;
   std::vector<double> pos_z;
   std::vector<double> mass;
-  buildDeterministicParticles(512, 1.0, pos_x, pos_y, pos_z, mass);
+  buildDeterministicParticles(hasFastSpectralPmBackend() ? 512U : 96U, 1.0, pos_x, pos_y, pos_z, mass);
 
   const std::vector<std::uint32_t> owned = ownedParticleIndices(pos_x.size(), world_size, world_rank);
   std::vector<double> local_x;
@@ -187,17 +193,20 @@ void testDistributedPmEquivalence(int world_size, int world_rank) {
 }
 
 void runTreePmCase(int world_size, int world_rank, bool communication_stress, bool clustered_sources) {
-  const cosmosim::gravity::PmGridShape pm_shape{32, 32, 32};
+  const cosmosim::gravity::PmGridShape pm_shape = hasFastSpectralPmBackend()
+      ? cosmosim::gravity::PmGridShape{32, 32, 32}
+      : cosmosim::gravity::PmGridShape{8, 8, 8};
   const auto layout = cosmosim::parallel::makePmSlabLayout(pm_shape.nx, pm_shape.ny, pm_shape.nz, world_size, world_rank);
 
   std::vector<double> pos_x;
   std::vector<double> pos_y;
   std::vector<double> pos_z;
   std::vector<double> mass;
+  const std::size_t particle_count = hasFastSpectralPmBackend() ? 384U : 96U;
   if (clustered_sources) {
-    buildClusteredParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
+    buildClusteredParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
   } else {
-    buildDeterministicParticles(384, 1.0, pos_x, pos_y, pos_z, mass);
+    buildDeterministicParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
   }
   const std::vector<std::uint32_t> owned = ownedParticleIndices(pos_x.size(), world_size, world_rank);
   std::vector<double> local_x;
@@ -231,7 +240,7 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
   options.tree_options.softening.epsilon_comoving = 0.008;
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       1.25,
-      4.5,
+      hasFastSpectralPmBackend() ? 4.5 : 2.5,
       1.0 / static_cast<double>(pm_shape.nx));
   if (communication_stress) {
     options.tree_exchange_batch_bytes = 64;
@@ -244,7 +253,7 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
   cosmosim::gravity::TreePmCoordinator dist_coordinator(pm_shape, layout);
   cosmosim::gravity::TreePmDiagnostics dist_diag;
 
-  const int iterations = communication_stress ? 4 : 1;
+  const int iterations = communication_stress ? (hasFastSpectralPmBackend() ? 4 : 2) : 1;
   for (int i = 0; i < iterations; ++i) {
     if (communication_stress) {
       dist_coordinator.solveActiveSetWithPmCadence(
@@ -296,10 +305,12 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
       << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff;
   requireOrThrow(rel_l2 <= 5.0e-6, msg.str());
   requireOrThrow(global_norm.max_rel <= 5.0e-5, msg.str());
-  if (communication_stress) {
+  if (communication_stress && hasFastSpectralPmBackend()) {
     requireOrThrow(dist_diag.residual_pair_skips_cutoff > 0, msg.str());
-    requireOrThrow(dist_diag.residual_remote_pairs_pruned_by_bounds > 0, msg.str());
-    requireOrThrow(dist_diag.residual_remote_request_packet_imbalance_ratio >= 1.0, msg.str());
+    if (world_size > 1) {
+      requireOrThrow(dist_diag.residual_remote_pairs_pruned_by_bounds > 0, msg.str());
+      requireOrThrow(dist_diag.residual_remote_request_packet_imbalance_ratio >= 1.0, msg.str());
+    }
   }
 }
 

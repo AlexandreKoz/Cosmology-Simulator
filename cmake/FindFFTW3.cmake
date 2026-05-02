@@ -67,10 +67,14 @@ endif()
 # through cosmosim_find_fftw(), which turns absence into a clear configure error.
 if(FFTW3_FOUND AND FFTW3_MPI_LIBRARY AND FFTW3_MPI_INCLUDE_DIR AND NOT TARGET FFTW3::fftw3_mpi)
   add_library(FFTW3::fftw3_mpi UNKNOWN IMPORTED)
+  set(_cosmosim_fftw3_mpi_link_libraries FFTW3::fftw3)
+  if(TARGET MPI::MPI_CXX)
+    list(APPEND _cosmosim_fftw3_mpi_link_libraries MPI::MPI_CXX)
+  endif()
   set_target_properties(FFTW3::fftw3_mpi PROPERTIES
     IMPORTED_LOCATION "${FFTW3_MPI_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_MPI_INCLUDE_DIR}"
-    INTERFACE_LINK_LIBRARIES FFTW3::fftw3)
+    INTERFACE_LINK_LIBRARIES "${_cosmosim_fftw3_mpi_link_libraries}")
 endif()
 
 mark_as_advanced(

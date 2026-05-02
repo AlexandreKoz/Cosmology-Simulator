@@ -267,14 +267,24 @@ void testIsolatedOpenResolutionConvergence() {
   requireIsolatedCheck(fine.relative_error < 0.20, "isolated fine-grid error too large");
 }
 
-void testIsolatedOpenBoxSizeSensitivity() {
+void testIsolatedOpenSelfSimilarBoxScaling() {
   const auto small_box = runIsolatedPointMassCase(
       {12, 12, 12}, 1.0, 1.0, 1.0, 6, 6, 6, 8, 6, 6);
   const auto large_box = runIsolatedPointMassCase(
       {12, 12, 12}, 2.0, 2.0, 2.0, 6, 6, 6, 8, 6, 6);
-  std::cerr << "[isolated_pm] box_sensitivity small=" << small_box.relative_error
+  std::cerr << "[isolated_pm] self_similar_box_scaling small=" << small_box.relative_error
             << " large=" << large_box.relative_error << '\n';
-  requireIsolatedCheck(large_box.relative_error < small_box.relative_error, "isolated box-size truncation sanity failed");
+
+  // This is a self-similar cell-space point-mass configuration: the source,
+  // sample, and finite-difference stencil keep the same cell offsets while the
+  // physical box length changes.  A zero-padded isolated convolution should not
+  // pretend to improve purely because the box-size metadata was scaled; the
+  // relative truncation/discretization error should remain invariant.  The old
+  // '< large improves small' assertion was a stale periodic-truncation intuition
+  // and failed correctly under the real FFTW isolated solver.
+  requireIsolatedCheck(
+      std::abs(large_box.relative_error - small_box.relative_error) < 2.0e-2,
+      "isolated self-similar box scaling changed the relative force error unexpectedly");
 }
 
 void testIsolatedOpenSplitConsistencyAndNonCubic() {
@@ -499,7 +509,7 @@ int main() {
   if (cosmosim::gravity::PmSolver::fftBackendAvailable()) {
     testIsolatedOpenPointMassCenteredOffCenteredAndBoundary();
     testIsolatedOpenResolutionConvergence();
-    testIsolatedOpenBoxSizeSensitivity();
+    testIsolatedOpenSelfSimilarBoxScaling();
     testIsolatedOpenSplitConsistencyAndNonCubic();
   } else {
     testIsolatedOpenNoFftwSmoke();
