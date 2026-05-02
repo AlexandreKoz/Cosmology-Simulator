@@ -170,10 +170,22 @@ int main() {
     invalid_restart_state.pm_slab_begin_x_by_rank[static_cast<std::size_t>(rank)] = slab.begin_x;
     invalid_restart_state.pm_slab_end_x_by_rank[static_cast<std::size_t>(rank)] = slab.end_x;
   }
+  const cosmosim::parallel::MpiContext runtime_context(
+      /*is_enabled=*/world_size > 1,
+      world_size,
+      world_rank);
   const auto compatibility = cosmosim::parallel::evaluateDistributedRestartCompatibility(
       invalid_restart_state,
       cosmosim::parallel::buildDistributedExecutionTopology(
-          world_size, world_rank, /*gpu_devices=*/0, "slab", 16, 16, 16));
+          /*global_nx=*/16,
+          /*global_ny=*/16,
+          /*global_nz=*/16,
+          runtime_context,
+          /*mpi_ranks_expected=*/world_size,
+          /*configured_gpu_devices=*/0,
+          /*cuda_runtime_available=*/false,
+          /*visible_device_count=*/0,
+          /*pm_decomposition_mode=*/"slab"));
   assert(!compatibility.compatible());
   assert(!compatibility.pm_cadence_steps_match);
   assert(!compatibility.gravity_kick_state_match);
