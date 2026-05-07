@@ -40,17 +40,22 @@ cosmosim::core::SimulationState makeGasContractState() {
 
 std::unordered_map<std::uint64_t, double> densityByGasParticleId(const cosmosim::core::SimulationState& state) {
   std::unordered_map<std::uint64_t, double> by_id;
-  const auto gas_globals = state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas);
-  assert(gas_globals.size() == state.cells.size());
+  cosmosim::core::requireParticleBoundGasCellContract(state, "densityByGasParticleId");
   for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
-    by_id.emplace(state.particle_sidecar.particle_id[gas_globals[cell]], state.gas_cells.density_code[cell]);
+    by_id.emplace(
+        cosmosim::core::parentParticleIdForGasCellRow(state, static_cast<std::uint32_t>(cell)),
+        state.gas_cells.density_code[cell]);
   }
   return by_id;
 }
 
 void test_gas_cell_identity_invariants() {
   cosmosim::core::SimulationState state = makeGasContractState();
-  cosmosim::core::debugAssertGasCellIdentityContract(state);
+  cosmosim::core::requireParticleBoundGasCellContract(state, "test_gas_cell_identity_invariants");
+  assert(state.parentParticleIdForGasCellRow(0) == 100);
+  assert(state.parentParticleIdForGasCellRow(1) == 101);
+  assert(state.gasCellRowForParticleId(102) == 2);
+  assert(state.gasParticleIndexForCellRow(1) == 2);
 
   const auto baseline_density = densityByGasParticleId(state);
   assert(baseline_density.at(100) == 100.0);
@@ -105,14 +110,19 @@ void test_gas_cell_reorder_resize_invariants() {
 
   bool contract_threw = false;
   try {
-    cosmosim::core::debugAssertGasCellIdentityContract(state);
+    cosmosim::core::requireParticleBoundGasCellContract(state, "test resized gas state");
   } catch (const std::runtime_error&) {
     contract_threw = true;
   }
   assert(contract_threw);
 
-  // Active extraction remains available as a generic cell view; contract checks are explicit.
-  (void)cosmosim::core::buildHydroCellKernelView(state, active_cell, workspace);
+  bool active_view_threw = false;
+  try {
+    (void)cosmosim::core::buildHydroCellKernelView(state, active_cell, workspace);
+  } catch (const std::runtime_error&) {
+    active_view_threw = true;
+  }
+  assert(active_view_threw);
 }
 
 }  // namespace

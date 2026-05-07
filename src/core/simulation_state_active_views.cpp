@@ -205,6 +205,9 @@ HydroCellKernelView buildHydroCellKernelView(
     const SimulationState& state,
     std::span<const std::uint32_t> active_cell_indices,
     TransientStepWorkspace& workspace) {
+  if (!active_cell_indices.empty()) {
+    requireParticleBoundGasCellContract(state, "buildHydroCellKernelView");
+  }
   workspace.hydro_cell_index.resize(active_cell_indices.size());
   workspace.hydro_cell_center_x_comoving.resize(active_cell_indices.size());
   workspace.hydro_cell_center_y_comoving.resize(active_cell_indices.size());
@@ -249,6 +252,9 @@ HydroCellKernelView buildHydroCellKernelView(
 }
 
 void scatterHydroCellKernelView(const HydroCellKernelView& view, SimulationState& state) {
+  if (view.size() > 0) {
+    requireParticleBoundGasCellContract(state, "scatterHydroCellKernelView");
+  }
   if (view.source_cell_index_generation != state.cellIndexGeneration()) {
     throw std::runtime_error("scatterHydroCellKernelView: stale cell view generation");
   }

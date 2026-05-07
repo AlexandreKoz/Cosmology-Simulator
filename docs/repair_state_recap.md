@@ -5,6 +5,22 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Particle-bound gas-cell contract hardening (2026-05-07 UTC)
+
+Validation commands for this repair:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_gas_cell_identity_invariants test_integration_species_migration_invariants
+ctest --preset test-cpu-debug --output-on-failure -R "gas|hydro|migration|reorder|restart"
+cmake --build --preset build-hdf5-debug -j4
+ctest --preset test-hdf5-debug --output-on-failure -R "restart|roundtrip|gas"
+```
+
+- Replaced hidden gas count/cell row assumptions in core active hydro views and reference workflow gas consumers with `requireParticleBoundGasCellContract(...)`, plus named row/ID helpers for parent-particle ID lookup and gas-particle row lookup.
+- Strengthened gas identity tests to cover helper seams, hydro active-view contract rejection after invalid cell resize, forbidden gas-relative reorder, and migration/compaction rebuild of hydro fields by gas particle ID.
+- Reproducibility impact: no solver numerics or HDF5/restart schema changed. The repair fails earlier when gas-cell identity lanes are stale, preserving deterministic gas field attachment by particle ID across reorder/migration/restart boundaries.
+
+
 ## 0) Per-particle gravity softening transform/restart guardrail hardening (2026-05-07 UTC)
 
 Commands:

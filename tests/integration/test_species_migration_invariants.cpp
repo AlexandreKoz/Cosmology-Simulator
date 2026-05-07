@@ -383,6 +383,93 @@ void test_species_migration_softening_timestep_invariants() {
   assert(state.particle_sidecar.hasGravitySofteningOverride(reordered_index));
 }
 
+
+void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
+  SimulationState state;
+  state.resizeParticles(4);
+  state.resizeCells(3);
+  state.particle_sidecar.gravity_softening_comoving.resize(4);
+
+  const std::array<std::uint64_t, 4> ids{501, 900, 502, 503};
+  const std::array<std::uint32_t, 4> species{
+      speciesTag(ParticleSpecies::kGas),
+      speciesTag(ParticleSpecies::kDarkMatter),
+      speciesTag(ParticleSpecies::kGas),
+      speciesTag(ParticleSpecies::kGas)};
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.particle_id[i] = ids[i];
+    state.particle_sidecar.species_tag[i] = species[i];
+    state.particle_sidecar.owning_rank[i] = 0;
+    state.particle_sidecar.sfc_key[i] = static_cast<std::uint64_t>(100 + i);
+    state.particles.mass_code[i] = 1.0 + static_cast<double>(i);
+    state.particles.time_bin[i] = static_cast<std::uint8_t>(i);
+    state.particle_sidecar.gravity_softening_comoving[i] = 0.01;
+  }
+  state.species.count_by_species = {1, 3, 0, 0, 0};
+  state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
+  for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
+    state.cells.mass_code[cell] = 10.0 + static_cast<double>(cell);
+    state.gas_cells.density_code[cell] = 1000.0 + static_cast<double>(cell);
+    state.gas_cells.internal_energy_code[cell] = 2000.0 + static_cast<double>(cell);
+  }
+  cosmosim::core::requireParticleBoundGasCellContract(state, "migration gas fixture");
+
+  struct GasFieldRecord {
+    double mass_code = 0.0;
+    double density_code = 0.0;
+    double internal_energy_code = 0.0;
+  };
+  std::unordered_map<std::uint64_t, GasFieldRecord> gas_fields_by_id;
+  for (std::uint32_t cell = 0; cell < state.cells.size(); ++cell) {
+    gas_fields_by_id.emplace(
+        state.parentParticleIdForGasCellRow(cell),
+        GasFieldRecord{
+            .mass_code = state.cells.mass_code[cell],
+            .density_code = state.gas_cells.density_code[cell],
+            .internal_energy_code = state.gas_cells.internal_energy_code[cell],
+        });
+  }
+
+  const std::uint32_t outbound_index = findParticleIndexById(state, 502);
+  std::array<std::uint32_t, 1> outbound{outbound_index};
+  auto records = state.packParticleMigrationRecords(outbound);
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {outbound_index};
+  commit.inbound_records = records;
+  state.commitParticleMigration(commit);
+
+  const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+  cosmosim::core::CellSoa rebuilt_cells;
+  cosmosim::core::GasCellSidecar rebuilt_gas;
+  rebuilt_cells.resize(gas_globals.size());
+  rebuilt_gas.resize(gas_globals.size());
+  for (std::size_t cell = 0; cell < gas_globals.size(); ++cell) {
+    const std::uint64_t gas_id = state.particle_sidecar.particle_id[gas_globals[cell]];
+    const auto found = gas_fields_by_id.find(gas_id);
+    assert(found != gas_fields_by_id.end());
+    rebuilt_cells.mass_code[cell] = found->second.mass_code;
+    rebuilt_gas.density_code[cell] = found->second.density_code;
+    rebuilt_gas.internal_energy_code[cell] = found->second.internal_energy_code;
+    rebuilt_gas.gas_cell_id[cell] = gas_id;
+    rebuilt_gas.parent_particle_id[cell] = gas_id;
+  }
+  state.cells = std::move(rebuilt_cells);
+  state.gas_cells = std::move(rebuilt_gas);
+  state.bumpCellIndexGeneration();
+
+  cosmosim::core::requireParticleBoundGasCellContract(state, "migration gas rebuild");
+  assert(state.gasCellRowForParticleId(501) == 0);
+  assert(state.gasCellRowForParticleId(503) == 1);
+  assert(state.gasCellRowForParticleId(502) == 2);
+  assert(state.gas_cells.density_code[state.gasCellRowForParticleId(501)] == 1000.0);
+  assert(state.gas_cells.density_code[state.gasCellRowForParticleId(503)] == 1002.0);
+  assert(state.gas_cells.density_code[state.gasCellRowForParticleId(502)] == 1001.0);
+  assert(state.gas_cells.internal_energy_code[state.gasCellRowForParticleId(502)] == 2001.0);
+  assert(state.validateOwnershipInvariants());
+}
+
 }  // namespace
 
 int main() {
@@ -392,5 +479,6 @@ int main() {
   test_species_migration_preserves_materialized_softening_without_promoting_default_to_override();
   test_species_migration_rejects_inbound_sidecar_mismatch();
   test_species_migration_rejects_duplicate_final_particle_ids();
+  test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id();
   return 0;
 }

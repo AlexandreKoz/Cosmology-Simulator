@@ -325,6 +325,10 @@ class SimulationState {
   void rebuildSpeciesIndex();
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
+  void requireParticleBoundGasCellContract(std::string_view caller) const;
+  [[nodiscard]] std::uint64_t parentParticleIdForGasCellRow(std::uint32_t cell_index) const;
+  [[nodiscard]] std::uint32_t gasCellRowForParticleId(std::uint64_t particle_id) const;
+  [[nodiscard]] std::uint32_t gasParticleIndexForCellRow(std::uint32_t cell_index) const;
 
   [[nodiscard]] ParticleTransferPacket packSpeciesTransferPacket(ParticleSpecies species_tag) const;
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
@@ -557,7 +561,16 @@ void debugAssertSpeciesSidecarOwnershipInvariants(const SimulationState& state);
 // Rebuild/check the temporary gas identity lanes from canonical gas-particle ordering.
 void refreshGasCellIdentityFromParticleOrder(SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMatchesParticleOrder(const SimulationState& state);
-// Debug guard: enforce temporary gas ownership contract (local 1:1 gas particle <-> gas cell rows).
+// Stage-0 named gas ownership contract (temporary and auditable): local gas cells
+// are particle-bound finite-volume carriers. The stable identity anchor is the gas
+// particle ID; cell_index/host_cell_index are local transient rows and must be
+// validated before hydro kernels or migration remaps use positional gas ordering.
+void requireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller);
+[[nodiscard]] std::uint64_t parentParticleIdForGasCellRow(const SimulationState& state, std::uint32_t cell_index);
+[[nodiscard]] std::uint32_t gasCellRowForParticleId(const SimulationState& state, std::uint64_t particle_id);
+[[nodiscard]] std::uint32_t gasParticleIndexForCellRow(const SimulationState& state, std::uint32_t cell_index);
+// Backward-compatible debug alias for existing call sites; new code should use
+// requireParticleBoundGasCellContract with a caller-specific error prefix.
 void debugAssertGasCellIdentityContract(const SimulationState& state);
 
 }  // namespace cosmosim::core
