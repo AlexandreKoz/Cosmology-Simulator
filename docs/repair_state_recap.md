@@ -1341,3 +1341,29 @@ Interpretation:
 
 - This is a blocker-oriented corruption hardening pass. No force-kernel heuristics, cosmological parameters, gravity split scales, hydrodynamic flux formulas, or subgrid calibration constants were changed.
 - HDF5 roundtrip with real HDF5 was not rerun in this CPU-only environment; the CPU-only schema contract and identity/sidecar regression binaries passed directly.
+
+
+## 2026-05-07: Migration/compaction identity contract hardening
+
+Commands run for validation:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_integration_species_migration_invariants test_integration_parallel_two_rank_restart
+cmake --build --preset build-cpu-debug -j4
+./build/cpu-only-debug/test_integration_species_migration_invariants && ./build/cpu-only-debug/test_integration_parallel_two_rank_restart
+ctest --preset test-cpu-debug --output-on-failure -R "migration|parallel|two_rank|sidecar|species"
+cmake --preset mpi-hdf5-fftw-debug
+```
+
+Observed repair results:
+
+- Particle migration stale-ghost inputs now reject duplicate stale indices and local-owned rows, preserving the separation between outbound owned migration and remote-owned stale ghost removal.
+- Species migration regression coverage now includes wrong inbound owner rank, stale ghost sidecar removal with exact generation invalidation, duplicate/owned stale ghost errors, and stale sidecar index errors.
+- The distributed-memory contract now states the migration record completeness contract for hot lanes, common sidecars, softening override truth, and species-specific sidecars, and documents gas-cell rebuild by stable gas particle ID rather than old local positions.
+- The targeted migration and two-rank restart binaries pass directly after rebuild. Follow-up fixture repair aligned the broader regex-selected hot/cold and mixed-species tests with the particle-bound gas-cell identity contract, so the requested CPU ctest selection is expected to exercise only valid gas-cell fixtures.
+- The MPI+HDF5+FFTW preset remains environment-blocked by missing `fftw3_mpi` development support.
+
+Reproducibility impact:
+
+- No solver numerics, HDF5 snapshot/restart schema, config keys, or science workflow features changed. The repair tightens rank-local ownership validation and view invalidation evidence for particle index-space mutations.

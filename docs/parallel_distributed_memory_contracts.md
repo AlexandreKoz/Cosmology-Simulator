@@ -84,14 +84,18 @@ Current scaffolding behavior keeps only the receive-side ghost staging indices i
 
 For particle ownership migration in `core::SimulationState`:
 
-- `packParticleMigrationRecords(local_indices)` packs authoritative hot fields and sidecar metadata for requested local rows, including species-specific sidecar payloads when the species tag requires them.
+- `ParticleMigrationRecord` is a schema-like identity-preserving transform contract. A record carries the persistent hot lanes (`position_*`, `velocity_*`, `mass_code`, `time_bin`), common cold metadata (`particle_id`, `sfc_key`, `species_tag`, `particle_flags`, `owning_rank`), materialized gravity-softening values plus the authoritative override mask, and the complete star, black-hole, or tracer sidecar payload required by the record species.
+- `packParticleMigrationRecords(local_indices)` packs authoritative hot fields and sidecar metadata for requested local rows, including species-specific sidecar payloads when the species tag requires them. Missing required sidecar rows are hard errors, because silently migrating only hot lanes would corrupt `{particle_id -> sidecar payload}` identity.
 - `commitParticleMigration(...)` is the explicit ownership synchronization point:
   - outbound-owned rows are removed,
-  - stale ghost/import rows are removed,
+  - stale ghost/import rows are removed only when their local `owning_rank` is remote from `world_rank`; duplicate stale-ghost indices are rejected,
   - inbound authoritative rows are appended with `owning_rank == world_rank`,
-  - species sidecars are rebuilt with remapped particle indices,
-  - species counts and species index are rebuilt.
-- Ownership is never committed mid-walk/mid-exchange by this contract; commit must run at a phase boundary.
+  - final local particle IDs are checked for uniqueness across kept plus inbound rows,
+  - species sidecars are rebuilt from the post-commit `species_tag` ledger with remapped particle indices,
+  - species counts and `ParticleSpeciesIndex` are rebuilt from `species_tag`,
+  - the particle-index generation counter is bumped once for the index-space mutation.
+- Gas-cell state is not keyed by old local particle positions during ownership compaction. The reference workflow snapshots gas records by stable gas particle ID, commits particle ownership, then rebuilds cells/gas sidecars by the post-commit gas particle IDs and remaps host-cell references through `{old cell -> particle ID -> new cell}`.
+- Ownership is never committed mid-walk/mid-exchange by this contract; commit must run at a phase boundary so stale active/kernel views are invalidated before further scatter.
 
 ## 3) Deterministic reduction contract
 

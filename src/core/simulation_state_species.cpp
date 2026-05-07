@@ -253,6 +253,12 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     if (index >= particle_count) {
       throw std::out_of_range("commitParticleMigration: stale ghost index out of range");
     }
+    if (stale_ghost_mask[index] != 0U) {
+      throw std::invalid_argument("commitParticleMigration: duplicate stale ghost index");
+    }
+    if (particle_sidecar.owning_rank[index] == static_cast<std::uint32_t>(commit.world_rank)) {
+      throw std::invalid_argument("commitParticleMigration: stale ghost index is owned by committing rank");
+    }
     stale_ghost_mask[index] = 1U;
   }
 
