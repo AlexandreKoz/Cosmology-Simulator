@@ -2,6 +2,8 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -243,6 +245,7 @@ void test_particle_resize_identity_invariants() {
     state.particles.position_x_comoving[i] = 50.0 + static_cast<double>(i);
     state.particles.mass_code[i] = 500.0 + static_cast<double>(i);
     state.particle_sidecar.gravity_softening_comoving[i] = 0.5 + static_cast<double>(i);
+    assert(!state.particle_sidecar.hasGravitySofteningOverride(i));
   }
   rebuildSpeciesLedger(state);
 
@@ -251,6 +254,16 @@ void test_particle_resize_identity_invariants() {
   compactFront(state, 5);
   assert(state.particles.size() == 5);
   assert(state.particle_sidecar.gravity_softening_comoving.size() == 5);
+  assertParticleIdentityInvariant(state, baseline);
+
+  state.resizeParticles(8);
+  for (std::size_t i = 5; i < 8; ++i) {
+    state.particle_sidecar.particle_id[i] = 950 + i;
+    state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter);
+    state.particle_sidecar.gravity_softening_comoving[i] = 0.75 + static_cast<double>(i);
+    assert(!state.particle_sidecar.hasGravitySofteningOverride(i));
+  }
+  rebuildSpeciesLedger(state);
   assertParticleIdentityInvariant(state, baseline);
 }
 
@@ -296,6 +309,47 @@ void test_particle_reorder_sidecar_invariants() {
 
   compactFront(state, 4);
   assertParticleIdentityInvariant(state, baseline);
+}
+
+void test_randomized_reorder_sparse_softening_overrides() {
+  constexpr std::size_t kParticleCount = 64;
+  SimulationState state;
+  state.resizeParticles(kParticleCount);
+  state.particle_sidecar.gravity_softening_comoving.resize(kParticleCount, 0.0);
+
+  for (std::size_t i = 0; i < kParticleCount; ++i) {
+    state.particle_sidecar.particle_id[i] = 10'000U + static_cast<std::uint64_t>(i);
+    state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter);
+    state.particle_sidecar.particle_flags[i] = static_cast<std::uint32_t>(100U + i);
+    state.particle_sidecar.owning_rank[i] = 0;
+    state.particle_sidecar.sfc_key[i] = 50'000U - static_cast<std::uint64_t>(37U * i);
+    state.particles.time_bin[i] = static_cast<std::uint8_t>((i * 7U) % 8U);
+    state.particles.position_x_comoving[i] = 0.125 * static_cast<double>(i);
+    state.particles.mass_code[i] = 2.0 + static_cast<double>(i);
+    state.particle_sidecar.gravity_softening_comoving[i] = 0.010 + 1.0e-4 * static_cast<double>(i);
+    if ((i % 11U) == 0U || (i % 17U) == 3U) {
+      state.particle_sidecar.setGravitySofteningOverride(i, 0.250 + 1.0e-3 * static_cast<double>(i));
+    }
+  }
+  rebuildSpeciesLedger(state);
+  const auto baseline = captureParticleIdentity(state);
+
+  std::mt19937 rng(0xC05A2026U);
+  for (int trial = 0; trial < 32; ++trial) {
+    std::vector<std::uint32_t> permutation(kParticleCount);
+    std::iota(permutation.begin(), permutation.end(), 0U);
+    std::shuffle(permutation.begin(), permutation.end(), rng);
+
+    cosmosim::core::ParticleReorderMap map;
+    map.new_to_old_index = permutation;
+    map.old_to_new_index.resize(kParticleCount);
+    for (std::size_t new_index = 0; new_index < permutation.size(); ++new_index) {
+      map.old_to_new_index[permutation[new_index]] = static_cast<std::uint32_t>(new_index);
+    }
+
+    cosmosim::core::reorderParticles(state, map);
+    assertParticleIdentityInvariant(state, baseline);
+  }
 }
 
 void test_particle_stale_view_invalidation() {
@@ -345,6 +399,7 @@ void test_particle_stale_view_invalidation() {
 int main() {
   test_particle_resize_identity_invariants();
   test_particle_reorder_sidecar_invariants();
+  test_randomized_reorder_sparse_softening_overrides();
   test_particle_stale_view_invalidation();
   return 0;
 }

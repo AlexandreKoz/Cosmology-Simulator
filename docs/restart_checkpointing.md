@@ -96,9 +96,11 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Missing optional per-particle softening override dataset
-  (`/state/particle_sidecar/gravity_softening_comoving`) is accepted as a legacy path and
-  interpreted as “no per-particle overrides present”.
+- Missing optional per-particle softening lanes are accepted only as a legacy no-override path.
+  `/state/particle_sidecar/has_gravity_softening_override` is the authoritative mask;
+  `/state/particle_sidecar/gravity_softening_comoving` stores the matching epsilon values.
+  A value lane without the mask is treated as a materialized default/diagnostic mirror, not as
+  override truth, so restart continuation cannot silently promote every particle to an override.
 
 ## Parallel and scale-up note
 

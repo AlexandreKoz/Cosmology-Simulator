@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -176,6 +177,44 @@ void test_softening_priority_invariants() {
     assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
   }
 
+  // Source/target override masks must not silently truncate relative to value lanes.
+  {
+    const std::array<double, 3> source_eps{0.333, 0.222, 0.111};
+    const std::array<std::uint8_t, 2> short_source_mask{1U, 1U};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = source_species,
+        .source_particle_epsilon_comoving = source_eps,
+        .source_particle_epsilon_override_mask = short_source_mask,
+        .target_particle_epsilon_comoving = {},
+        .species_policy = species_policy,
+    };
+    bool source_mismatch_threw = false;
+    try {
+      (void)cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view);
+    } catch (const std::invalid_argument&) {
+      source_mismatch_threw = true;
+    }
+    assert(source_mismatch_threw);
+  }
+  {
+    const std::array<double, 3> target_eps{0.444, 0.555, 0.666};
+    const std::array<std::uint8_t, 2> short_target_mask{1U, 1U};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = source_species,
+        .source_particle_epsilon_comoving = {},
+        .target_particle_epsilon_comoving = target_eps,
+        .target_particle_epsilon_override_mask = short_target_mask,
+        .species_policy = species_policy,
+    };
+    bool target_mismatch_threw = false;
+    try {
+      (void)cosmosim::gravity::resolveTargetSofteningEpsilon(2, global_policy, view);
+    } catch (const std::invalid_argument&) {
+      target_mismatch_threw = true;
+    }
+    assert(target_mismatch_threw);
+  }
+
   // Diagnostics are observers only.
   SimulationState state = seedStateWithSelectiveOverrides();
   const auto before = state.particle_sidecar.gravity_softening_comoving;
@@ -263,6 +302,8 @@ void test_softening_override_restart_roundtrip() {
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\n[mode]\nmode = zoom_in\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
+  state.metadata.run_name = "softening_ownership_roundtrip";
+  state.metadata.normalized_config_hash_hex = payload.normalized_config_hash_hex;
   payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
   payload.distributed_gravity_state.schema_version = 2;
   payload.distributed_gravity_state.world_size = 1;
