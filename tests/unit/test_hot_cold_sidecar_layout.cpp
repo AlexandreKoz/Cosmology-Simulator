@@ -63,22 +63,31 @@ int main() {
   cosmosim::core::scatterGravityParticleKernelView(gravity_view, state);
   assert(state.particles.velocity_x_peculiar[active_particles[1]] == gravity_view.velocity_x_peculiar[1]);
 
-  state.resizeCells(3);
+  cosmosim::core::SimulationState hydro_state;
+  hydro_state.resizeParticles(3);
+  hydro_state.resizeCells(3);
+  hydro_state.species.count_by_species = {0, 3, 0, 0, 0};
   for (std::size_t i = 0; i < 3; ++i) {
-    state.cells.center_x_comoving[i] = static_cast<double>(i);
-    state.cells.center_y_comoving[i] = static_cast<double>(i);
-    state.cells.center_z_comoving[i] = static_cast<double>(i);
-    state.cells.mass_code[i] = 1.0;
-    state.cells.patch_index[i] = 0;
-    state.gas_cells.density_code[i] = 10.0 + static_cast<double>(i);
-    state.gas_cells.pressure_code[i] = 20.0 + static_cast<double>(i);
+    hydro_state.particle_sidecar.particle_id[i] = 900 + i;
+    hydro_state.particle_sidecar.species_tag[i] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    hydro_state.particle_sidecar.owning_rank[i] = 0;
+    hydro_state.cells.center_x_comoving[i] = static_cast<double>(i);
+    hydro_state.cells.center_y_comoving[i] = static_cast<double>(i);
+    hydro_state.cells.center_z_comoving[i] = static_cast<double>(i);
+    hydro_state.cells.mass_code[i] = 1.0;
+    hydro_state.cells.patch_index[i] = 0;
+    hydro_state.gas_cells.density_code[i] = 10.0 + static_cast<double>(i);
+    hydro_state.gas_cells.pressure_code[i] = 20.0 + static_cast<double>(i);
   }
+  hydro_state.rebuildSpeciesIndex();
+  assert(hydro_state.validateOwnershipInvariants());
 
   const std::array<std::uint32_t, 2> active_cells{0, 1};
-  auto hydro_view = cosmosim::core::buildHydroCellKernelView(state, active_cells, workspace);
+  auto hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_state, active_cells, workspace);
   hydro_view.density_code[0] = 99.0;
-  cosmosim::core::scatterHydroCellKernelView(hydro_view, state);
-  assert(state.gas_cells.density_code[0] == 99.0);
+  cosmosim::core::scatterHydroCellKernelView(hydro_view, hydro_state);
+  assert(hydro_state.gas_cells.density_code[0] == 99.0);
 
   bool threw = false;
   try {

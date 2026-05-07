@@ -327,6 +327,96 @@ void test_species_migration_rejects_duplicate_final_particle_ids() {
   assert(state.validateOwnershipInvariants());
 }
 
+void test_species_migration_rejects_wrong_inbound_owner_rank() {
+  SimulationState state;
+  seedState(state);
+
+  ParticleMigrationRecord wrong_owner;
+  wrong_owner.particle_id = 8811;
+  wrong_owner.species_tag = speciesTag(ParticleSpecies::kDarkMatter);
+  wrong_owner.owning_rank = 1;
+  wrong_owner.mass_code = 1.0;
+  wrong_owner.time_bin = 0;
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.inbound_records = {wrong_owner};
+
+  bool threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+  assert(state.validateOwnershipInvariants());
+}
+
+void test_species_migration_removes_stale_ghost_sidecar_rows_once() {
+  SimulationState state;
+  seedState(state);
+
+  const std::uint32_t stale_star_index = findParticleIndexById(state, 1103);
+  state.particle_sidecar.owning_rank[stale_star_index] = 1;
+  const std::uint64_t generation_before = state.particleIndexGeneration();
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.stale_local_ghost_indices = {stale_star_index};
+  state.commitParticleMigration(commit);
+
+  assert(state.particleIndexGeneration() == generation_before + 1);
+  assert(state.star_particles.size() == 0);
+  assert((state.species.count_by_species == std::array<std::uint64_t, 5>{1, 2, 0, 1, 1}));
+  assert(state.validateOwnershipInvariants());
+}
+
+void test_species_migration_rejects_owned_or_duplicate_stale_ghost_indices() {
+  SimulationState state;
+  seedState(state);
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.stale_local_ghost_indices = {findParticleIndexById(state, 1103)};
+
+  bool threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+  assert(state.validateOwnershipInvariants());
+
+  const std::uint32_t remote_bh_index = findParticleIndexById(state, 1105);
+  state.particle_sidecar.owning_rank[remote_bh_index] = 1;
+  commit.stale_local_ghost_indices = {remote_bh_index, remote_bh_index};
+  threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_species_migration_rejects_stale_sidecar_indices_before_commit() {
+  SimulationState state;
+  seedState(state);
+  state.tracers.particle_index[0] = static_cast<std::uint32_t>(state.particles.size() + 8);
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+
+  bool threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void test_species_migration_softening_timestep_invariants() {
   SimulationState state;
   seedState(state);
@@ -479,6 +569,10 @@ int main() {
   test_species_migration_preserves_materialized_softening_without_promoting_default_to_override();
   test_species_migration_rejects_inbound_sidecar_mismatch();
   test_species_migration_rejects_duplicate_final_particle_ids();
+  test_species_migration_rejects_wrong_inbound_owner_rank();
+  test_species_migration_removes_stale_ghost_sidecar_rows_once();
+  test_species_migration_rejects_owned_or_duplicate_stale_ghost_indices();
+  test_species_migration_rejects_stale_sidecar_indices_before_commit();
   test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id();
   return 0;
 }

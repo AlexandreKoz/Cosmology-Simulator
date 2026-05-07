@@ -12,9 +12,9 @@ int main() {
   state.resizeCells(2);
   state.resizePatches(1);
 
-  state.species.count_by_species = {2, 1, 2, 1, 1};
+  state.species.count_by_species = {1, 2, 2, 1, 1};
 
-  const std::array<std::uint32_t, 7> species_tags{0, 0, 1, 2, 2, 3, 4};
+  const std::array<std::uint32_t, 7> species_tags{0, 1, 1, 2, 2, 3, 4};
   for (std::size_t i = 0; i < species_tags.size(); ++i) {
     state.particle_sidecar.particle_id[i] = 3000 + i;
     state.particle_sidecar.species_tag[i] = species_tags[i];
