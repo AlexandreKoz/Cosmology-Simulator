@@ -202,12 +202,14 @@ void updateAdaptiveTimeBins(
       ? std::cbrt(box_volume / static_cast<double>(state.cells.size()))
       : std::cbrt(box_volume / std::max<double>(static_cast<double>(state.particles.size()), 1.0));
   const auto species_softening = speciesSofteningByTag(config);
-  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  if (state.cells.size() > 0) {
+    core::requireParticleBoundGasCellContract(state, "adaptive time-bin update");
+  }
   const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
   for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
     core::TimeStepCriteriaRegistry registry;
-    if (element_index < state.cells.size() && element_index < gas_globals.size()) {
-      const std::uint32_t gas_index = gas_globals[element_index];
+    if (element_index < state.cells.size()) {
+      const std::uint32_t gas_index = core::gasParticleIndexForCellRow(state, element_index);
       const double vx = state.particles.velocity_x_peculiar[gas_index];
       const double vy = state.particles.velocity_y_peculiar[gas_index];
       const double vz = state.particles.velocity_z_peculiar[gas_index];
@@ -299,12 +301,9 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
 [[nodiscard]] std::unordered_map<std::uint64_t, GasCellMigrationRecord> collectLocalGasCellRecords(
     const core::SimulationState& state,
     std::span<const std::uint32_t> gas_particle_indices) {
-  core::debugAssertGasCellIdentityContract(state);
+  core::requireParticleBoundGasCellContract(state, "collectLocalGasCellRecords");
   std::unordered_map<std::uint64_t, GasCellMigrationRecord> records;
   const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-  if (state.cells.size() != gas_globals.size()) {
-    throw std::runtime_error("gas cell count must match local gas particle count when collecting migration records");
-  }
   std::vector<std::uint8_t> keep_mask(state.particles.size(), 0U);
   for (const std::uint32_t particle_index : gas_particle_indices) {
     if (particle_index >= state.particles.size()) {
@@ -339,14 +338,10 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
 }
 
 [[nodiscard]] std::vector<std::uint64_t> gasParticleIdByOldCellIndex(const core::SimulationState& state) {
-  core::debugAssertGasCellIdentityContract(state);
-  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-  if (state.cells.size() != gas_globals.size()) {
-    throw std::runtime_error("gas cell count must match local gas particle count when capturing host-cell mapping");
-  }
+  core::requireParticleBoundGasCellContract(state, "gasParticleIdByOldCellIndex");
   std::vector<std::uint64_t> cell_particle_ids(state.cells.size(), 0ULL);
-  for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
-    cell_particle_ids[cell_index] = state.particle_sidecar.particle_id[gas_globals[cell_index]];
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    cell_particle_ids[cell_index] = core::parentParticleIdForGasCellRow(state, static_cast<std::uint32_t>(cell_index));
   }
   return cell_particle_ids;
 }
@@ -892,12 +887,12 @@ void initializeSchedulerBins(
   const std::uint8_t default_bin = scheduler.maxBin() > 0 ? 1U : 0U;
   scheduler.reset(scheduler_count, default_bin, 0);
 
-  const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  if (cell_count > 0) {
+    core::requireParticleBoundGasCellContract(state, "initialize reference scheduler gas cells");
+  }
   for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
     scheduler.setElementBin(cell_index, 0U, scheduler.currentTick());
-    if (cell_index < gas_globals.size()) {
-      scheduler.setElementBin(gas_globals[cell_index], 0U, scheduler.currentTick());
-    }
+    scheduler.setElementBin(core::gasParticleIndexForCellRow(state, cell_index), 0U, scheduler.currentTick());
   }
 }
 
@@ -956,9 +951,11 @@ class DriftCallback final : public core::IntegrationCallback {
           context.state.particles.velocity_z_peculiar[particle_index] * dt * inv_a;
     }
 
-    const auto gas_globals = context.state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-    for (std::uint32_t cell_index = 0; cell_index < context.state.cells.size() && cell_index < gas_globals.size(); ++cell_index) {
-      const std::uint32_t gas_particle_index = gas_globals[cell_index];
+    if (context.state.cells.size() > 0) {
+      core::requireParticleBoundGasCellContract(context.state, "drift callback");
+    }
+    for (std::uint32_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
+      const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, cell_index);
       context.state.cells.center_x_comoving[cell_index] = context.state.particles.position_x_comoving[gas_particle_index];
       context.state.cells.center_y_comoving[cell_index] = context.state.particles.position_y_comoving[gas_particle_index];
       context.state.cells.center_z_comoving[cell_index] = context.state.particles.position_z_comoving[gas_particle_index];
@@ -1408,9 +1405,11 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_particle_accel_z[particle_index] = m_active_accel_z[active_slot];
     }
 
-    const auto gas_globals = context.state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-    for (std::size_t cell_index = 0; cell_index < context.state.cells.size() && cell_index < gas_globals.size(); ++cell_index) {
-      const int active_slot = m_active_slot_by_particle[gas_globals[cell_index]];
+    if (context.state.cells.size() > 0) {
+      core::requireParticleBoundGasCellContract(context.state, "gravity callback gas-cell acceleration sync");
+    }
+    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
+      const int active_slot = m_active_slot_by_particle[core::gasParticleIndexForCellRow(context.state, static_cast<std::uint32_t>(cell_index))];
       if (active_slot < 0) {
         continue;
       }
@@ -1683,17 +1682,14 @@ class HydroStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    const auto gas_globals = context.state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
-    if (gas_globals.size() < context.state.cells.size()) {
-      throw std::runtime_error("hydro callback requires one gas particle per gas cell in the current state model");
-    }
+    core::requireParticleBoundGasCellContract(context.state, "hydro callback");
 
     rebuildGeometryIfNeeded(context.state.cells.size(), context.integrator_state.dt_time_code);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
 
     m_conserved.resize(context.state.cells.size());
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::uint32_t gas_particle_index = gas_globals[cell_index];
+      const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, static_cast<std::uint32_t>(cell_index));
       const double rho = std::max(context.state.gas_cells.density_code[cell_index], k_density_floor);
       double pressure = context.state.gas_cells.pressure_code[cell_index];
       if (pressure <= 0.0) {
@@ -1753,7 +1749,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
         nullptr);
 
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::uint32_t gas_particle_index = gas_globals[cell_index];
+      const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, static_cast<std::uint32_t>(cell_index));
       const hydro::HydroPrimitiveState primitive =
           hydro::HydroCoreSolver::primitiveFromConserved(m_conserved.loadCell(cell_index), k_gamma_adiabatic);
       context.state.gas_cells.density_code[cell_index] = primitive.rho_comoving;

@@ -9,7 +9,7 @@ This document defines the persistent and transient memory contract for simulatio
 - `ParticleSoa`: shared gravity-hot particle skeleton (`pos_*_comoving`, `vel_*_peculiar`, `mass_code`, `time_bin`).
 - `ParticleSidecar`: shared metadata (`particle_id`, species tags, flags, rank ownership).
 - `CellSoa`: gas-cell gravity skeleton (`center_*_comoving`, `mass_code`, `time_bin`, `patch_index`).
-- `GasCellSidecar`: thermodynamics and hydro reconstruction sidecar (`density_code`, `pressure_code`, gradients, etc.).
+- `GasCellSidecar`: thermodynamics and hydro reconstruction sidecar (`density_code`, `pressure_code`, gradients, etc.) plus the temporary particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
 - `StarParticleSidecar`, `BlackHoleParticleSidecar`, `TracerParticleSidecar`: species-cold metadata blocks keyed by global particle index.
 - `PatchSoa`: AMR patch descriptors and contiguous cell ranges.
 - `SpeciesContainer`: explicit species accounting ledger.
@@ -51,8 +51,25 @@ storage.
 
 `buildGravityParticleKernelView` / `scatterGravityParticleKernelView` and
 `buildHydroCellKernelView` / `scatterHydroCellKernelView` provide explicit read/write compact views
-for gravity-hot and hydro-active loops. This keeps solver kernels independent from full-state layout
-and centralizes scatter/update semantics.
+for gravity-hot and hydro-active loops. Hydro active-view build/scatter paths validate the temporary
+particle-bound gas-cell contract before solver kernels run; they may carry transient `cell_index` rows
+for scatter, but they must not infer stable particle identity from those rows without the named contract
+helpers. This keeps solver kernels independent from full-state layout and centralizes scatter/update semantics.
+
+## Temporary gas-cell ownership contract
+
+Stage-0 gas cells are particle-bound finite-volume carriers. Until AMR or moving-mesh decoupling is
+implemented, any path that consumes local gas-cell rows must pass `requireParticleBoundGasCellContract(...)`:
+
+- local `CellSoa` rows, `GasCellSidecar` rows, and local gas-particle rows have equal counts;
+- `GasCellSidecar::gas_cell_id[cell]` and `parent_particle_id[cell]` equal the parent gas particle ID;
+- `parentParticleIdForGasCellRow(...)` maps transient cell rows to stable gas particle IDs;
+- `gasCellRowForParticleId(...)` maps stable gas particle IDs back to transient local rows after rebuild;
+- migration/compaction must rebuild hydro fields by gas particle ID before hydro kernels resume.
+
+This is an explicit quarantine of the current 1:1 assumption, not an AMR design. Future many-cells-per-particle
+or cell-without-particle layouts should replace the helper implementations and contract, not add positional
+assumptions to workflow or solver code.
 
 ## Layout policy and reorder contract
 

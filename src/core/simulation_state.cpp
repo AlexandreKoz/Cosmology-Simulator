@@ -242,10 +242,8 @@ void reorderParticles(
     throw std::invalid_argument("reorderParticles: inconsistent reorder map");
   }
   if (state.cells.size() > 0) {
+    requireParticleBoundGasCellContract(state, "reorderParticles");
     const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
-    if (gas_globals.size() != state.cells.size()) {
-      throw std::runtime_error("reorderParticles: gas-cell identity contract violated before reorder");
-    }
     std::vector<std::uint64_t> gas_particle_ids_old;
     gas_particle_ids_old.reserve(gas_globals.size());
     for (const auto gas_global : gas_globals) {
@@ -366,15 +364,74 @@ bool SimulationState::gasCellIdentityMatchesParticleOrder() const {
   return cosmosim::core::gasCellIdentityMatchesParticleOrder(*this);
 }
 
-void debugAssertGasCellIdentityContract(const SimulationState& state) {
+void requireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller) {
   const std::size_t gas_particle_count = state.particle_species_index.count(ParticleSpecies::kGas);
-  if (gas_particle_count == 0) {
+  const std::size_t cell_count = state.cells.size();
+  const std::size_t gas_cell_count = state.gas_cells.size();
+  if (cell_count == 0 && gas_cell_count == 0) {
     return;
   }
-  if (!gasCellIdentityMatchesParticleOrder(state)) {
-    throw std::runtime_error(
-        "debugAssertGasCellIdentityContract: gas-cell identity lanes must match canonical gas-particle ordering");
+  if (cell_count != gas_cell_count) {
+    throw std::runtime_error(std::string(caller) +
+        ": particle-bound gas-cell contract violated: CellSoa row count does not match GasCellSidecar row count");
   }
+  if (gas_particle_count != cell_count) {
+    throw std::runtime_error(std::string(caller) +
+        ": particle-bound gas-cell contract violated: local gas particle count must equal local gas cell row count; "
+        "gas particle IDs are the stable identity anchors and cell_index is only a transient local row");
+  }
+  if (!gasCellIdentityMatchesParticleOrder(state)) {
+    throw std::runtime_error(std::string(caller) +
+        ": particle-bound gas-cell contract violated: gas_cell_id and parent_particle_id lanes must equal the "
+        "canonical gas particle IDs in local gas-cell row order");
+  }
+}
+
+std::uint64_t parentParticleIdForGasCellRow(const SimulationState& state, std::uint32_t cell_index) {
+  requireParticleBoundGasCellContract(state, "parentParticleIdForGasCellRow");
+  if (cell_index >= state.cells.size()) {
+    throw std::out_of_range("parentParticleIdForGasCellRow: cell index out of range");
+  }
+  return state.gas_cells.parent_particle_id[cell_index];
+}
+
+std::uint32_t gasCellRowForParticleId(const SimulationState& state, std::uint64_t particle_id) {
+  requireParticleBoundGasCellContract(state, "gasCellRowForParticleId");
+  for (std::uint32_t cell_index = 0; cell_index < state.gas_cells.parent_particle_id.size(); ++cell_index) {
+    if (state.gas_cells.parent_particle_id[cell_index] == particle_id) {
+      return cell_index;
+    }
+  }
+  throw std::out_of_range("gasCellRowForParticleId: gas particle ID is not attached to a local gas-cell row");
+}
+
+std::uint32_t gasParticleIndexForCellRow(const SimulationState& state, std::uint32_t cell_index) {
+  requireParticleBoundGasCellContract(state, "gasParticleIndexForCellRow");
+  if (cell_index >= state.cells.size()) {
+    throw std::out_of_range("gasParticleIndexForCellRow: cell index out of range");
+  }
+  const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+  return gas_globals[cell_index];
+}
+
+void SimulationState::requireParticleBoundGasCellContract(std::string_view caller) const {
+  cosmosim::core::requireParticleBoundGasCellContract(*this, caller);
+}
+
+std::uint64_t SimulationState::parentParticleIdForGasCellRow(std::uint32_t cell_index) const {
+  return cosmosim::core::parentParticleIdForGasCellRow(*this, cell_index);
+}
+
+std::uint32_t SimulationState::gasCellRowForParticleId(std::uint64_t particle_id) const {
+  return cosmosim::core::gasCellRowForParticleId(*this, particle_id);
+}
+
+std::uint32_t SimulationState::gasParticleIndexForCellRow(std::uint32_t cell_index) const {
+  return cosmosim::core::gasParticleIndexForCellRow(*this, cell_index);
+}
+
+void debugAssertGasCellIdentityContract(const SimulationState& state) {
+  requireParticleBoundGasCellContract(state, "debugAssertGasCellIdentityContract");
 }
 
 }  // namespace cosmosim::core

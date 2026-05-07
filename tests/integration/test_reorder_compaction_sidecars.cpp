@@ -571,7 +571,8 @@ void test_particle_stale_view_invalidation() {
   }
   assert(stale_particle_view_threw);
 
-  state.resizeCells(3);
+  state.resizeCells(2);
+  state.refreshGasCellIdentityFromParticleOrder();
   for (std::size_t i = 0; i < state.cells.size(); ++i) {
     state.cells.center_x_comoving[i] = static_cast<double>(i);
     state.cells.center_y_comoving[i] = static_cast<double>(i);
@@ -581,7 +582,7 @@ void test_particle_stale_view_invalidation() {
     state.gas_cells.pressure_code[i] = 3.0;
   }
 
-  std::vector<std::uint32_t> active_cells{0U, 2U};
+  std::vector<std::uint32_t> active_cells{0U, 1U};
   auto hydro_view = cosmosim::core::buildHydroCellKernelView(state, active_cells, workspace);
   state.resizeCells(2);
 

@@ -1,5 +1,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <exception>
+
 namespace cosmosim::core {
 
 void SimulationState::resizeParticles(std::size_t count) {
@@ -35,9 +37,10 @@ bool SimulationState::validateOwnershipInvariants() const {
     return false;
   }
 
-  const auto gas_count = particle_species_index.count(ParticleSpecies::kGas);
-  if (gas_count > 0 && gas_count == cells.size()) {
-    if (!gasCellIdentityMatchesParticleOrder()) {
+  if (cells.size() > 0) {
+    try {
+      cosmosim::core::requireParticleBoundGasCellContract(*this, "validateOwnershipInvariants");
+    } catch (const std::exception&) {
       return false;
     }
   }
