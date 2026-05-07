@@ -5,6 +5,32 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Transform fuzz/invariant harness hardening (2026-05-07 UTC)
+
+Validation commands for this repair:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_hot_cold_sidecar_layout test_integration_reorder_compaction_sidecars test_integration_species_migration_invariants test_integration_transform_fuzz_invariants
+ctest --preset test-cpu-debug --output-on-failure -R "fuzz|reorder|migration|sidecar|stale"
+ctest --preset test-cpu-debug --output-on-failure -R "fuzz|reorder|migration|sidecar|stale"
+cmake --preset hdf5-debug
+cmake --build --preset build-hdf5-debug -j4 --target test_integration_transform_fuzz_invariants
+ctest --preset test-hdf5-debug --output-on-failure -R "transform_fuzz"
+```
+
+Observed:
+
+- Added a fixed-seed transform fuzz integration harness that composes random reorder, active-view materialization, deterministic compaction, sparse sidecar migration commit, gas-state rebuild by particle ID, and HDF5 restart roundtrip when HDF5 is enabled.
+- The harness uses particle-ID keyed oracles for common particle lanes, nonmonotonic IDs, SFC keys, time bins, sparse gravity-softening overrides, and all current species sidecar families (stars, black holes, tracers).
+- Added negative stale active-view scatter checks after reorder and compaction so stale row-index views fail loudly instead of silently corrupting transformed rows.
+- Registered a short default integration run plus a longer `validation`-labeled run of the same deterministic harness.
+
+Reproducibility impact:
+
+- Deterministic behavior is strengthened by fixed seeds, deterministic failure context (`seed`/`trial`/stage), particle-ID keyed comparisons after every transform, and two identical CPU CTest runs. No solver numerics, restart schema version, HDF5 dataset names, output naming, normalized-config generation, scheduling semantics, or rank coordination behavior changed.
+
+
 ## 0) Particle-bound gas-cell contract hardening (2026-05-07 UTC)
 
 Validation commands for this repair:
