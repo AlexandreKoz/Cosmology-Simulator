@@ -220,6 +220,31 @@ Reproducibility impact:
 - Deterministic behavior is preserved and made louder on contract violations; no hydro solver numerics or physics models were changed.
 
 
+## 0) Sidecar reorder full-payload semantics hardening (2026-05-07 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_integration_reorder_compaction_sidecars test_unit_hot_cold_sidecar_layout
+cmake --build --preset build-cpu-debug -j4
+ctest --preset test-cpu-debug --output-on-failure -R "reorder|sidecar|hot_cold|species"
+rg "particle_index" src include tests
+```
+
+Observed:
+
+- Refactored `reorderParticles(...)` species sidecar synchronization through typed row-lane visitors so star, black-hole, and tracer scalar lanes plus stellar channel arrays move as complete rows under `SidecarSyncMode::kMoveWithParent`.
+- Preserved default `SidecarSyncMode::kUseParentIndirection` semantics: row order is stable and only `particle_index` is remapped to the post-reorder parent index.
+- Added a post-reorder defensive guard (`debugAssertSpeciesSidecarOwnershipInvariants`) enforcing exactly one sidecar row for each eligible star/BH/tracer parent and no sidecar row attached to ineligible species.
+- Expanded integration coverage with adversarial reverse permutation, explicit move-vs-indirection comparison, and randomized reorder-mode fuzzing over `kByTimeBin`, `kBySfcKey`, and `kBySpecies` while checking full payload identity by particle ID.
+- Audited `particle_index` references with ripgrep; reorder entry points remain centralized through `reorderParticles(...)`, while physics modules only read/write sidecar parent indices during creation/evolution paths.
+
+Reproducibility impact:
+
+- Deterministic reorder behavior is preserved and made more auditable. No solver numerics, restart schema, HDF5 payload schema, or MPI/GPU ownership contracts were changed.
+
+
 ## 0) Particle ordering/resize/reorder sidecar invariants (2026-04-25 UTC)
 
 Commands:

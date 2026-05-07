@@ -84,12 +84,15 @@ Debug/test enforcement helpers:
 2. Sidecar synchronization policy (`SidecarSyncPolicy`) must be explicit per sidecar lane; default is parent-indirection remap.
 3. Any reorder/migration changing particle indices requires `rebuildSpeciesIndex` before species-index consumers execute.
 4. `debugAssertNoStaleParticleIndices` should be used in debug/repair paths when reorder/migration risk stale sidecar indices.
-5. `SidecarSyncMode::kMoveWithParent` requires full-row movement for each species sidecar payload, not only `particle_index` remapping.
-6. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
-7. Temporary safety guard: `reorderParticles` must fail loudly if it would change the relative gas-particle order while gas cells exist (unless a gas-cell ID-based rebuild follows in the same repair path).
-8. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
-9. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
-10. Species migration that changes sidecar family (e.g., star->gas, BH->gas, gas->star/tracer) must drop obsolete sidecar rows and initialize required destination sidecar rows in the same commit boundary.
+5. `SidecarSyncMode::kMoveWithParent` requires full-row movement for each species sidecar payload, not only `particle_index` remapping; after row movement, `particle_index` is remapped exactly once through `old_to_new_index`.
+6. The default `SidecarSyncMode::kUseParentIndirection` keeps sidecar row order stable and remaps only `particle_index`; payload identity remains keyed by the parent particle ID, not by pre-reorder row number.
+7. Reorder implementations must use typed sidecar lane visitors so scalar and array-channel lanes move together. Future module sidecars may register only an explicit row-move/remap contract; ad-hoc edits to one metadata lane are forbidden.
+8. `debugAssertSpeciesSidecarOwnershipInvariants(...)` is the defensive post-reorder guard for exactly one eligible sidecar row and zero ineligible rows.
+9. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped.
+10. Temporary safety guard: `reorderParticles` must fail loudly if it would change the relative gas-particle order while gas cells exist (unless a gas-cell ID-based rebuild follows in the same repair path).
+11. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
+12. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
+13. Species migration that changes sidecar family (e.g., star->gas, BH->gas, gas->star/tracer) must drop obsolete sidecar rows and initialize required destination sidecar rows in the same commit boundary.
 
 ### F. Softening override priority and preservation
 

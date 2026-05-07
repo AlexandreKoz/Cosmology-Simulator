@@ -552,6 +552,8 @@ void reorderParticles(
 
 // Debug guard: throw on any species sidecar index no longer owned by particles.
 void debugAssertNoStaleParticleIndices(const SimulationState& state);
+// Debug guard: require exactly one row for each star/BH/tracer particle and no rows on other species.
+void debugAssertSpeciesSidecarOwnershipInvariants(const SimulationState& state);
 // Rebuild/check the temporary gas identity lanes from canonical gas-particle ordering.
 void refreshGasCellIdentityFromParticleOrder(SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMatchesParticleOrder(const SimulationState& state);
