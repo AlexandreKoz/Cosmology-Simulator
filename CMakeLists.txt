@@ -544,6 +544,12 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_species_migration_invariants PRIVATE cosmosim_core cosmosim_gravity)
   add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
 
+  add_executable(test_integration_transform_fuzz_invariants tests/integration/test_transform_fuzz_invariants.cpp)
+  target_link_libraries(test_integration_transform_fuzz_invariants PRIVATE cosmosim_all)
+  add_test(NAME integration_transform_fuzz_invariants COMMAND test_integration_transform_fuzz_invariants)
+  add_test(NAME validation_transform_fuzz_invariants_long COMMAND test_integration_transform_fuzz_invariants --long)
+  set_tests_properties(validation_transform_fuzz_invariants_long PROPERTIES LABELS "validation;integration;fuzz")
+
   add_executable(test_integration_softening_ownership_invariants tests/integration/test_softening_ownership_invariants.cpp)
   target_link_libraries(test_integration_softening_ownership_invariants PRIVATE cosmosim_all)
   add_test(NAME integration_softening_ownership_invariants COMMAND test_integration_softening_ownership_invariants)
