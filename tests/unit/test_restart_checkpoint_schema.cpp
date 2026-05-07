@@ -1,5 +1,6 @@
 #include <cassert>
 #include <stdexcept>
+#include <string_view>
 
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
@@ -8,13 +9,24 @@
 
 int main() {
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v5");
-  assert(schema.version == 5);
-  assert(cosmosim::io::isRestartSchemaCompatible(5));
-  assert(!cosmosim::io::isRestartSchemaCompatible(4));
+  assert(schema.name == "cosmosim_restart_v6");
+  assert(schema.version == 6);
+  assert(cosmosim::io::isRestartSchemaCompatible(6));
+  assert(!cosmosim::io::isRestartSchemaCompatible(5));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
+  bool saw_softening = false;
+  bool saw_gas_identity = false;
+  bool saw_species_sidecars = false;
+  for (const std::string_view item : checklist) {
+    saw_softening = saw_softening || item == "particle_identity_and_softening_override_lanes";
+    saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
+    saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
+  }
+  assert(saw_softening);
+  assert(saw_gas_identity);
+  assert(saw_species_sidecars);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;
@@ -60,6 +72,21 @@ int main() {
   integrator_state.time_bins.active_bin = 1;
   const std::uint64_t hash_after = cosmosim::io::restartPayloadIntegrityHash(payload);
   assert(hash_before != hash_after);
+
+  integrator_state.time_bins.active_bin = 0;
+  const std::uint64_t hash_restored = cosmosim::io::restartPayloadIntegrityHash(payload);
+  state.particle_sidecar.setGravitySofteningOverride(0, 0.125);
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
+  const std::uint64_t hash_with_softening = cosmosim::io::restartPayloadIntegrityHash(payload);
+  state.sidecars.upsert(cosmosim::core::ModuleSidecarBlock{
+      .module_name = "hash_probe",
+      .schema_version = 1,
+      .payload = {std::byte{0xAA}}});
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_with_softening);
+  const std::uint64_t hash_with_sidecar = cosmosim::io::restartPayloadIntegrityHash(payload);
+  payload.distributed_gravity_state.decomposition_epoch = 1;
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_with_sidecar);
+  payload.distributed_gravity_state.decomposition_epoch = 0;
 
   bool missing_metadata_threw = false;
   try {

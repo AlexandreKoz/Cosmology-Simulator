@@ -396,22 +396,18 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.species_tag);
   writeDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.particle_flags);
   writeDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.owning_rank);
-  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
-    writeDataset1d(
-        particle_sidecar_group.get(),
-        "gravity_softening_comoving",
-        H5T_IEEE_F64LE,
-        H5T_NATIVE_DOUBLE,
-        state.particle_sidecar.gravity_softening_comoving);
-  }
-  if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
-    writeDataset1d(
-        particle_sidecar_group.get(),
-        "has_gravity_softening_override",
-        H5T_STD_U8LE,
-        H5T_NATIVE_UINT8,
-        state.particle_sidecar.has_gravity_softening_override);
-  }
+  writeDataset1d(
+      particle_sidecar_group.get(),
+      "gravity_softening_comoving",
+      H5T_IEEE_F64LE,
+      H5T_NATIVE_DOUBLE,
+      state.particle_sidecar.gravity_softening_comoving);
+  writeDataset1d(
+      particle_sidecar_group.get(),
+      "has_gravity_softening_override",
+      H5T_STD_U8LE,
+      H5T_NATIVE_UINT8,
+      state.particle_sidecar.has_gravity_softening_override);
 
   Hdf5Handle cells_group(openOrCreateGroup(state_group.get(), "cells"));
   writeDataset1d(cells_group.get(), "center_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.cells.center_x_comoving);
@@ -531,19 +527,11 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "particle_flags", H5T_NATIVE_UINT32);
   state.particle_sidecar.owning_rank =
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "owning_rank", H5T_NATIVE_UINT32);
-  if (H5Lexists(particle_sidecar_group.get(), "gravity_softening_comoving", H5P_DEFAULT) > 0) {
-    state.particle_sidecar.gravity_softening_comoving =
-        readDataset1dAligned<double>(particle_sidecar_group.get(), "gravity_softening_comoving", H5T_NATIVE_DOUBLE);
-  } else {
-    state.particle_sidecar.gravity_softening_comoving.clear();
-  }
-  if (H5Lexists(particle_sidecar_group.get(), "has_gravity_softening_override", H5P_DEFAULT) > 0) {
-    state.particle_sidecar.has_gravity_softening_override =
-        readDataset1dAligned<std::uint8_t>(
-            particle_sidecar_group.get(), "has_gravity_softening_override", H5T_NATIVE_UINT8);
-  } else {
-    state.particle_sidecar.has_gravity_softening_override.clear();
-  }
+  state.particle_sidecar.gravity_softening_comoving =
+      readDataset1dAligned<double>(particle_sidecar_group.get(), "gravity_softening_comoving", H5T_NATIVE_DOUBLE);
+  state.particle_sidecar.has_gravity_softening_override =
+      readDataset1dAligned<std::uint8_t>(
+          particle_sidecar_group.get(), "has_gravity_softening_override", H5T_NATIVE_UINT8);
 
   Hdf5Handle cells_group(H5Gopen2(state_group.get(), "cells", H5P_DEFAULT));
   state.cells.center_x_comoving = readDataset1dAligned<double>(cells_group.get(), "center_x_comoving", H5T_NATIVE_DOUBLE);
@@ -672,6 +660,9 @@ bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
   static const std::vector<std::string_view> checklist = {
       "simulation_state_lanes_and_metadata",
+      "particle_identity_and_softening_override_lanes",
+      "gas_cell_identity_lanes",
+      "species_specific_sidecars",
       "module_sidecars_with_schema_versions",
       "integrator_state",
       "scheduler_persistent_state",
@@ -691,6 +682,9 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
       payload.normalized_config_hash_hex,
       payload.provenance,
       "restart payload");
+  if (!payload.state->validateOwnershipInvariants()) {
+    throw std::invalid_argument("restart payload state failed ownership invariant validation");
+  }
   if (payload.distributed_gravity_state.world_size <= 0) {
     throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
   }
@@ -712,14 +706,15 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
 
   std::uint64_t hash = k_offset_basis;
 
-  const auto append_string = [&hash](const std::string& value) {
-    hash = fnv1aAppend(hash, {reinterpret_cast<const std::byte*>(value.data()), value.size()});
-  };
-
   const auto append_u64 = [&hash](std::uint64_t value) {
     const std::array<std::byte, sizeof(std::uint64_t)> bytes =
         std::bit_cast<std::array<std::byte, sizeof(std::uint64_t)>>(value);
     hash = fnv1aAppend(hash, bytes);
+  };
+
+  const auto append_string = [&hash, &append_u64](const std::string& value) {
+    append_u64(static_cast<std::uint64_t>(value.size()));
+    hash = fnv1aAppend(hash, {reinterpret_cast<const std::byte*>(value.data()), value.size()});
   };
 
   append_string(payload.normalized_config_text);
@@ -727,7 +722,12 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_string(core::serializeProvenanceRecord(payload.provenance));
   append_string(payload.state->metadata.serialize());
 
-  const auto append_any_vec = [&hash](const auto& values) { hash = fnv1aAppend(hash, asBytesSpan(values)); };
+  const auto append_any_vec = [&hash, &append_u64](const auto& values) {
+    const auto bytes = asBytesSpan(values);
+    append_u64(static_cast<std::uint64_t>(values.size()));
+    append_u64(static_cast<std::uint64_t>(bytes.size()));
+    hash = fnv1aAppend(hash, bytes);
+  };
 
   const core::SimulationState& state = *payload.state;
   append_any_vec(state.particles.position_x_comoving);

@@ -34,7 +34,8 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
 
 ## Dataset aliasing and compatibility
 
-- Canonical export writes `/PartTypeX` groups.
+- Canonical export writes `/PartTypeX` groups and standard GADGET/AREPO dataset names (`Coordinates`, `Velocities`, `Masses`, `ParticleIDs`) without renaming them.
+- Additional CosmoSim diagnostic/continuation mirrors, such as per-particle softening and tracer host-coupling lanes, remain optional schema-versioned additions under the current `gadget_arepo_v4` metadata.
 - Optional alias hard links `/ParticleTypeX` are written for tolerant downstream readers.
 - Reader accepts aliases for common fields:
   - `Coordinates|Position|POS`

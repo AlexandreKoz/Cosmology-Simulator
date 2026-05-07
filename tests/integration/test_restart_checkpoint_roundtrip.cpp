@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -147,6 +148,40 @@ std::vector<std::uint64_t> schedulerActiveIdsFromPersistentState(
   scheduler_probe.importPersistentState(persistent_state);
   const auto active = scheduler_probe.beginSubstep();
   return particleIdsForIndices(state, active);
+}
+
+void fillRestartPayload(
+    cosmosim::io::RestartWritePayload& payload,
+    cosmosim::core::SimulationState& state,
+    cosmosim::core::IntegratorState& integrator_state,
+    cosmosim::core::HierarchicalTimeBinScheduler& scheduler) {
+  payload.state = &state;
+  payload.integrator_state = &integrator_state;
+  payload.scheduler = &scheduler;
+  payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
+  payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance.gravity_softening_policy = "comoving_fixed";
+  payload.provenance.gravity_softening_kernel = "plummer";
+  payload.provenance.gravity_softening_epsilon_kpc_comoving = 2.0;
+  payload.provenance.gravity_pm_fft_backend = "fftw3";
+  payload.distributed_gravity_state.schema_version = 2;
+  payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;
+  payload.distributed_gravity_state.world_size = 1;
+  payload.distributed_gravity_state.pm_grid_nx = 32;
+  payload.distributed_gravity_state.pm_grid_ny = 32;
+  payload.distributed_gravity_state.pm_grid_nz = 32;
+  payload.distributed_gravity_state.pm_decomposition_mode = "slab";
+  payload.distributed_gravity_state.gravity_kick_opportunity = 9;
+  payload.distributed_gravity_state.pm_update_cadence_steps = 3;
+  payload.distributed_gravity_state.long_range_field_version = 4;
+  payload.distributed_gravity_state.last_long_range_refresh_opportunity = 9;
+  payload.distributed_gravity_state.long_range_field_built_step_index = integrator_state.step_index;
+  payload.distributed_gravity_state.long_range_field_built_scale_factor = integrator_state.current_scale_factor;
+  payload.distributed_gravity_state.long_range_restart_policy = "deterministic_rebuild";
+  payload.distributed_gravity_state.owning_rank_by_item.assign(state.particles.size(), 0);
+  payload.distributed_gravity_state.pm_slab_begin_x_by_rank = {0};
+  payload.distributed_gravity_state.pm_slab_end_x_by_rank = {32};
 }
 
 void assertSofteningPriorityResolution(const cosmosim::core::SimulationState& state) {
@@ -455,6 +490,22 @@ void testRestartRoundtrip() {
   assert(missing_field_named || integrity_guard_rejected);
   std::filesystem::remove(missing_required_path);
 
+  const std::filesystem::path missing_softening_mask_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_softening_mask.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(missing_softening_mask_path, payload);
+  hid_t missing_softening_file = H5Fopen(missing_softening_mask_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(missing_softening_file >= 0);
+  assert(H5Ldelete(missing_softening_file, "/state/particle_sidecar/has_gravity_softening_override", H5P_DEFAULT) >= 0);
+  H5Fclose(missing_softening_file);
+  bool missing_softening_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(missing_softening_mask_path);
+  } catch (const std::runtime_error& error) {
+    missing_softening_threw = std::string(error.what()).find("has_gravity_softening_override") != std::string::npos;
+  }
+  assert(missing_softening_threw);
+  std::filesystem::remove(missing_softening_mask_path);
+
   const std::filesystem::path legacy_softening_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_legacy_softening_compat.hdf5";
   cosmosim::core::SimulationState legacy_softening_state = state;
@@ -505,9 +556,69 @@ void testRestartRoundtrip() {
 #endif
 }
 
+void testRestartAfterReorderAndMigration() {
+#if COSMOSIM_ENABLE_HDF5
+  cosmosim::core::SimulationState state;
+  populateState(state);
+
+  state.particle_sidecar.sfc_key = {10, 20, 21, 22, 1, 2};
+  const auto reorder = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
+  cosmosim::core::reorderParticles(state, reorder);
+  assert(state.validateOwnershipInvariants());
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.current_time_code = 0.25;
+  integrator_state.current_scale_factor = 0.5;
+  integrator_state.dt_time_code = 0.002;
+  integrator_state.step_index = 88;
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(state.particles.size(), 2, 10);
+
+  cosmosim::io::RestartWritePayload reorder_payload;
+  fillRestartPayload(reorder_payload, state, integrator_state, scheduler);
+  const auto expected_density_by_id = gasDensityByParticleId(state);
+  const std::filesystem::path reorder_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_after_reorder.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(reorder_path, reorder_payload);
+  const auto reordered_restore = cosmosim::io::readRestartCheckpointHdf5(reorder_path);
+  assert(reordered_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
+  assert(reordered_restore.state.star_particles.particle_index == state.star_particles.particle_index);
+  assert(reordered_restore.state.black_holes.particle_index == state.black_holes.particle_index);
+  assert(gasDensityByParticleId(reordered_restore.state) == expected_density_by_id);
+  assert(reordered_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
+  std::filesystem::remove(reorder_path);
+
+  const std::uint32_t black_hole_index = state.black_holes.particle_index[0];
+  auto migrated_records = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{black_hole_index});
+  assert(migrated_records.size() == 1);
+  migrated_records[0].owning_rank = 0;
+  cosmosim::core::ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {black_hole_index};
+  commit.inbound_records = migrated_records;
+  state.commitParticleMigration(commit);
+  assert(state.validateOwnershipInvariants());
+  scheduler.reset(state.particles.size(), 2, 12);
+
+  cosmosim::io::RestartWritePayload migration_payload;
+  fillRestartPayload(migration_payload, state, integrator_state, scheduler);
+  const std::filesystem::path migration_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_after_migration.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(migration_path, migration_payload);
+  const auto migration_restore = cosmosim::io::readRestartCheckpointHdf5(migration_path);
+  assert(migration_restore.state.validateOwnershipInvariants());
+  assert(migration_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
+  assert(migration_restore.state.black_holes.particle_index == state.black_holes.particle_index);
+  assert(migration_restore.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  assert(migration_restore.distributed_gravity_state.owning_rank_by_item == migration_payload.distributed_gravity_state.owning_rank_by_item);
+  std::filesystem::remove(migration_path);
+#endif
+}
+
 }  // namespace
 
 int main() {
   testRestartRoundtrip();
+  testRestartAfterReorderAndMigration();
   return 0;
 }

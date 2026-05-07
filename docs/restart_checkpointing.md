@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v5`) persists:
+The restart schema (`cosmosim_restart_v6`) persists:
 
 - full `SimulationState` hot/cold SoA lanes,
 - `StateMetadata` blob,
@@ -12,7 +12,7 @@ The restart schema (`cosmosim_restart_v5`) persists:
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
 - distributed TreePM continuation state (`distributed_gravity_state`, schema-versioned),
 - normalized config text/hash and provenance payload,
-- payload integrity hash (FNV-1a 64-bit).
+- payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
 
@@ -20,8 +20,8 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`5`).
-- `v4` restart files are intentionally rejected because they omit explicit Stage 0 runtime-truth lanes added after distributed TreePM continuation metadata.
+- Current compatibility policy: exact version match (`6`).
+- `v5` and older restart files are intentionally rejected because they can omit exact sidecar truth lanes required by v6, including materialized softening override mask/value datasets.
 
 ## Atomic write semantics
 
@@ -33,7 +33,7 @@ behavior on filesystems where `rename` is atomic.
 ## Integrity and provenance
 
 - `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance.
-- The hash covers particle lanes, sidecars, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
+- The hash covers particle lanes, sidecars, gas-cell identity lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
   `active_flag`, `pending_bin_index`), and the full serialized provenance payload.
 - Because gravity TreePM metadata now lives in `ProvenanceRecord`, restart artifacts carry
@@ -65,13 +65,16 @@ The checklist exposed by `exactRestartCompletenessChecklist()` and enforced by
 restart write/read checks is:
 
 1. `simulation_state_lanes_and_metadata`
-2. `module_sidecars_with_schema_versions`
-3. `integrator_state`
-4. `scheduler_persistent_state`
-5. `distributed_gravity_state`
-6. `normalized_config_text_and_hash`
-7. `provenance_record`
-8. `payload_integrity_hash_and_hex`
+2. `particle_identity_and_softening_override_lanes`
+3. `gas_cell_identity_lanes`
+4. `species_specific_sidecars`
+5. `module_sidecars_with_schema_versions`
+6. `integrator_state`
+7. `scheduler_persistent_state`
+8. `distributed_gravity_state`
+9. `normalized_config_text_and_hash`
+10. `provenance_record`
+11. `payload_integrity_hash_and_hex`
 
 `validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 
@@ -96,11 +99,7 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Missing optional per-particle softening lanes are accepted only as a legacy no-override path.
-  `/state/particle_sidecar/has_gravity_softening_override` is the authoritative mask;
-  `/state/particle_sidecar/gravity_softening_comoving` stores the matching epsilon values.
-  A value lane without the mask is treated as a materialized default/diagnostic mirror, not as
-  override truth, so restart continuation cannot silently promote every particle to an override.
+- The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note
 
