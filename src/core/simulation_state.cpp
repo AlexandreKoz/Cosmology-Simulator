@@ -97,11 +97,21 @@ ParticleReorderMap buildParticleReorderMap(const SimulationState& state, Particl
 
 template <typename T>
 void reorderAlignedVector(AlignedVector<T>& values, std::span<const std::uint32_t> new_to_old_index) {
+  if (values.size() != new_to_old_index.size()) {
+    throw std::invalid_argument("reorderAlignedVector: permutation length must match lane length");
+  }
   AlignedVector<T> reordered(values.size());
   for (std::size_t i = 0; i < new_to_old_index.size(); ++i) {
     reordered[i] = values[new_to_old_index[i]];
   }
   values.swap(reordered);
+}
+
+template <typename T>
+void reorderOptionalParentLane(AlignedVector<T>& values, std::span<const std::uint32_t> new_to_old_index) {
+  if (!values.empty()) {
+    reorderAlignedVector(values, new_to_old_index);
+  }
 }
 
 std::vector<std::uint32_t> buildSidecarRowOrderByParent(
@@ -124,6 +134,104 @@ std::vector<std::uint32_t> buildSidecarRowOrderByParent(
                std::tuple{old_to_new_index[rhs_particle], rhs};
       });
   return row_order;
+}
+
+template <typename Visitor>
+void visitStarSidecarLanes(StarParticleSidecar& sidecar, Visitor&& visitor) {
+  visitor(sidecar.particle_index);
+  visitor(sidecar.formation_scale_factor);
+  visitor(sidecar.birth_mass_code);
+  visitor(sidecar.metallicity_mass_fraction);
+  visitor(sidecar.stellar_age_years_last);
+  visitor(sidecar.stellar_returned_mass_cumulative_code);
+  visitor(sidecar.stellar_returned_metals_cumulative_code);
+  visitor(sidecar.stellar_feedback_energy_cumulative_erg);
+  for (std::size_t channel = 0; channel < sidecar.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    visitor(sidecar.stellar_returned_mass_channel_cumulative_code[channel]);
+    visitor(sidecar.stellar_returned_metals_channel_cumulative_code[channel]);
+    visitor(sidecar.stellar_feedback_energy_channel_cumulative_erg[channel]);
+  }
+}
+
+template <typename Visitor>
+void visitBlackHoleSidecarLanes(BlackHoleParticleSidecar& sidecar, Visitor&& visitor) {
+  visitor(sidecar.particle_index);
+  visitor(sidecar.host_cell_index);
+  visitor(sidecar.subgrid_mass_code);
+  visitor(sidecar.accretion_rate_code);
+  visitor(sidecar.feedback_energy_code);
+  visitor(sidecar.eddington_ratio);
+  visitor(sidecar.cumulative_accreted_mass_code);
+  visitor(sidecar.cumulative_feedback_energy_code);
+  visitor(sidecar.duty_cycle_active_time_code);
+  visitor(sidecar.duty_cycle_total_time_code);
+}
+
+template <typename Visitor>
+void visitTracerSidecarLanes(TracerParticleSidecar& sidecar, Visitor&& visitor) {
+  visitor(sidecar.particle_index);
+  visitor(sidecar.parent_particle_id);
+  visitor(sidecar.injection_step);
+  visitor(sidecar.host_cell_index);
+  visitor(sidecar.mass_fraction_of_host);
+  visitor(sidecar.last_host_mass_code);
+  visitor(sidecar.cumulative_exchanged_mass_code);
+}
+
+template <typename Sidecar, typename LaneVisitor>
+void moveSidecarRowsWithParent(
+    Sidecar& sidecar,
+    std::span<const std::uint32_t> old_to_new_index,
+    LaneVisitor&& visit_lanes) {
+  const auto row_order = buildSidecarRowOrderByParent(sidecar.particle_index, old_to_new_index);
+  visit_lanes(sidecar, [&](auto& lane) { reorderAlignedVector(lane, row_order); });
+}
+
+void remapSidecarParticleIndex(
+    AlignedVector<std::uint32_t>& particle_index,
+    std::span<const std::uint32_t> old_to_new_index) {
+  for (auto& index : particle_index) {
+    if (index >= old_to_new_index.size()) {
+      throw std::out_of_range("reorderParticles: sidecar particle index out of range");
+    }
+    index = old_to_new_index[index];
+  }
+}
+
+void syncStarSidecarRows(
+    StarParticleSidecar& sidecar,
+    std::span<const std::uint32_t> old_to_new_index,
+    SidecarSyncMode mode) {
+  if (mode == SidecarSyncMode::kMoveWithParent) {
+    moveSidecarRowsWithParent(sidecar, old_to_new_index, [](StarParticleSidecar& lanes, auto&& visitor) {
+      visitStarSidecarLanes(lanes, visitor);
+    });
+  }
+  remapSidecarParticleIndex(sidecar.particle_index, old_to_new_index);
+}
+
+void syncBlackHoleSidecarRows(
+    BlackHoleParticleSidecar& sidecar,
+    std::span<const std::uint32_t> old_to_new_index,
+    SidecarSyncMode mode) {
+  if (mode == SidecarSyncMode::kMoveWithParent) {
+    moveSidecarRowsWithParent(sidecar, old_to_new_index, [](BlackHoleParticleSidecar& lanes, auto&& visitor) {
+      visitBlackHoleSidecarLanes(lanes, visitor);
+    });
+  }
+  remapSidecarParticleIndex(sidecar.particle_index, old_to_new_index);
+}
+
+void syncTracerSidecarRows(
+    TracerParticleSidecar& sidecar,
+    std::span<const std::uint32_t> old_to_new_index,
+    SidecarSyncMode mode) {
+  if (mode == SidecarSyncMode::kMoveWithParent) {
+    moveSidecarRowsWithParent(sidecar, old_to_new_index, [](TracerParticleSidecar& lanes, auto&& visitor) {
+      visitTracerSidecarLanes(lanes, visitor);
+    });
+  }
+  remapSidecarParticleIndex(sidecar.particle_index, old_to_new_index);
 }
 
 void reorderParticles(
@@ -172,76 +280,15 @@ void reorderParticles(
   reorderAlignedVector(state.particle_sidecar.species_tag, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.particle_flags, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.owning_rank, new_to_old_index);
-  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
-    reorderAlignedVector(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
-  }
-  if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
-    reorderAlignedVector(state.particle_sidecar.has_gravity_softening_override, new_to_old_index);
-  }
+  reorderOptionalParentLane(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.has_gravity_softening_override, new_to_old_index);
 
-  auto remap_sidecar_index = [&](AlignedVector<std::uint32_t>& particle_index) {
-    for (auto& index : particle_index) {
-      if (index >= reorder_map.old_to_new_index.size()) {
-        throw std::out_of_range("reorderParticles: sidecar particle index out of range");
-      }
-      index = reorder_map.old_to_new_index[index];
-    }
-  };
-
-  if (sync_policy.star_particles == SidecarSyncMode::kMoveWithParent) {
-    const auto row_order =
-        buildSidecarRowOrderByParent(state.star_particles.particle_index, reorder_map.old_to_new_index);
-    reorderAlignedVector(state.star_particles.particle_index, row_order);
-    reorderAlignedVector(state.star_particles.formation_scale_factor, row_order);
-    reorderAlignedVector(state.star_particles.birth_mass_code, row_order);
-    reorderAlignedVector(state.star_particles.metallicity_mass_fraction, row_order);
-    reorderAlignedVector(state.star_particles.stellar_age_years_last, row_order);
-    reorderAlignedVector(state.star_particles.stellar_returned_mass_cumulative_code, row_order);
-    reorderAlignedVector(state.star_particles.stellar_returned_metals_cumulative_code, row_order);
-    reorderAlignedVector(state.star_particles.stellar_feedback_energy_cumulative_erg, row_order);
-    for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size();
-         ++channel) {
-      reorderAlignedVector(state.star_particles.stellar_returned_mass_channel_cumulative_code[channel], row_order);
-      reorderAlignedVector(state.star_particles.stellar_returned_metals_channel_cumulative_code[channel], row_order);
-      reorderAlignedVector(state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel], row_order);
-    }
-    remap_sidecar_index(state.star_particles.particle_index);
-  } else {
-    remap_sidecar_index(state.star_particles.particle_index);
-  }
-  if (sync_policy.black_holes == SidecarSyncMode::kMoveWithParent) {
-    const auto row_order =
-        buildSidecarRowOrderByParent(state.black_holes.particle_index, reorder_map.old_to_new_index);
-    reorderAlignedVector(state.black_holes.particle_index, row_order);
-    reorderAlignedVector(state.black_holes.host_cell_index, row_order);
-    reorderAlignedVector(state.black_holes.subgrid_mass_code, row_order);
-    reorderAlignedVector(state.black_holes.accretion_rate_code, row_order);
-    reorderAlignedVector(state.black_holes.feedback_energy_code, row_order);
-    reorderAlignedVector(state.black_holes.eddington_ratio, row_order);
-    reorderAlignedVector(state.black_holes.cumulative_accreted_mass_code, row_order);
-    reorderAlignedVector(state.black_holes.cumulative_feedback_energy_code, row_order);
-    reorderAlignedVector(state.black_holes.duty_cycle_active_time_code, row_order);
-    reorderAlignedVector(state.black_holes.duty_cycle_total_time_code, row_order);
-    remap_sidecar_index(state.black_holes.particle_index);
-  } else {
-    remap_sidecar_index(state.black_holes.particle_index);
-  }
-  if (sync_policy.tracers == SidecarSyncMode::kMoveWithParent) {
-    const auto row_order =
-        buildSidecarRowOrderByParent(state.tracers.particle_index, reorder_map.old_to_new_index);
-    reorderAlignedVector(state.tracers.particle_index, row_order);
-    reorderAlignedVector(state.tracers.parent_particle_id, row_order);
-    reorderAlignedVector(state.tracers.injection_step, row_order);
-    reorderAlignedVector(state.tracers.host_cell_index, row_order);
-    reorderAlignedVector(state.tracers.mass_fraction_of_host, row_order);
-    reorderAlignedVector(state.tracers.last_host_mass_code, row_order);
-    reorderAlignedVector(state.tracers.cumulative_exchanged_mass_code, row_order);
-    remap_sidecar_index(state.tracers.particle_index);
-  } else {
-    remap_sidecar_index(state.tracers.particle_index);
-  }
+  syncStarSidecarRows(state.star_particles, reorder_map.old_to_new_index, sync_policy.star_particles);
+  syncBlackHoleSidecarRows(state.black_holes, reorder_map.old_to_new_index, sync_policy.black_holes);
+  syncTracerSidecarRows(state.tracers, reorder_map.old_to_new_index, sync_policy.tracers);
 
   state.rebuildSpeciesIndex();
+  debugAssertSpeciesSidecarOwnershipInvariants(state);
   state.bumpParticleIndexGeneration();
 }
 
@@ -257,6 +304,13 @@ void debugAssertNoStaleParticleIndices(const SimulationState& state) {
   check_indices(state.star_particles.particle_index, "star_particles");
   check_indices(state.black_holes.particle_index, "black_holes");
   check_indices(state.tracers.particle_index, "tracers");
+}
+
+void debugAssertSpeciesSidecarOwnershipInvariants(const SimulationState& state) {
+  if (!state.validateOwnershipInvariants()) {
+    throw std::runtime_error(
+        "debugAssertSpeciesSidecarOwnershipInvariants: species sidecars must be one-to-one with eligible parents");
+  }
 }
 
 void refreshGasCellIdentityFromParticleOrder(SimulationState& state) {

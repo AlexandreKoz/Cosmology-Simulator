@@ -69,14 +69,27 @@ The solver-facing state is split into three ownership classes:
 - `ParticleReorderMode::kBySfcKey`
 - `ParticleReorderMode::kBySpecies`
 
-`reorderParticles(...)` applies the same permutation to all hot arrays and parent-aligned metadata
-lanes. Species sidecars use explicit `SidecarSyncPolicy`:
+`reorderParticles(...)` is the only allowed particle reorder API. It applies the same
+permutation to all hot arrays and parent-aligned metadata lanes, then synchronizes species sidecars
+through the explicit `SidecarSyncPolicy`:
 
-- `kUseParentIndirection` (default): preserve sidecar row order and remap `particle_index`.
-- `kMoveWithParent`: reorder sidecar rows with the parent permutation.
+- `kUseParentIndirection` (default): preserve sidecar row order and remap only `particle_index`
+  through `old_to_new_index`, so the row remains attached to the same physical parent ID without
+  moving cold payload lanes.
+- `kMoveWithParent`: move the complete species sidecar row with the parent order, including all
+  scalar payload lanes and fixed channel arrays, then remap `particle_index` exactly once to the
+  post-reorder global index.
+
+Ad-hoc partial sidecar reorders are forbidden. New built-in species sidecar fields must be added to
+the typed row-movement helpers in `src/core/simulation_state.cpp` and covered by payload-identity
+regression tests. Future module sidecars must expose a small, auditable reorder contract equivalent
+to "move full rows" or "remap parent indices" rather than mutating `particle_index` metadata in
+isolation.
 
 `debugAssertNoStaleParticleIndices(...)` is a debug-oriented guard that throws if any species sidecar
-index is stale after reorder or compaction passes.
+index is stale after reorder or compaction passes. `debugAssertSpeciesSidecarOwnershipInvariants(...)`
+adds the stricter row-ownership check: exactly one sidecar row for each eligible star/black-hole/tracer
+particle and no species sidecar rows attached to ineligible particles.
 
 ## Reproducibility and schema implications
 

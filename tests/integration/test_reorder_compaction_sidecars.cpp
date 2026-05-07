@@ -24,7 +24,37 @@ struct ParticleIdentityRecord {
   bool has_softening_override = false;
 };
 
-[[nodiscard]] std::unordered_map<std::uint64_t, ParticleIdentityRecord> captureParticleIdentity(const SimulationState& state) {
+struct SpeciesSidecarIdentityRecord {
+  std::uint32_t species_tag = 0;
+  double formation_scale_factor = 0.0;
+  double birth_mass_code = 0.0;
+  double metallicity_mass_fraction = 0.0;
+  double stellar_age_years_last = 0.0;
+  double stellar_returned_mass_cumulative_code = 0.0;
+  double stellar_returned_metals_cumulative_code = 0.0;
+  double stellar_feedback_energy_cumulative_erg = 0.0;
+  std::array<double, 3> stellar_returned_mass_channel_cumulative_code{};
+  std::array<double, 3> stellar_returned_metals_channel_cumulative_code{};
+  std::array<double, 3> stellar_feedback_energy_channel_cumulative_erg{};
+  std::uint32_t bh_host_cell_index = 0;
+  double bh_subgrid_mass_code = 0.0;
+  double bh_accretion_rate_code = 0.0;
+  double bh_feedback_energy_code = 0.0;
+  double bh_eddington_ratio = 0.0;
+  double bh_cumulative_accreted_mass_code = 0.0;
+  double bh_cumulative_feedback_energy_code = 0.0;
+  double bh_duty_cycle_active_time_code = 0.0;
+  double bh_duty_cycle_total_time_code = 0.0;
+  std::uint64_t tracer_parent_particle_id = 0;
+  std::uint64_t tracer_injection_step = 0;
+  std::uint32_t tracer_host_cell_index = 0;
+  double tracer_mass_fraction_of_host = 0.0;
+  double tracer_last_host_mass_code = 0.0;
+  double tracer_cumulative_exchanged_mass_code = 0.0;
+};
+
+[[nodiscard]] std::unordered_map<std::uint64_t, ParticleIdentityRecord> captureParticleIdentity(
+    const SimulationState& state) {
   std::unordered_map<std::uint64_t, ParticleIdentityRecord> map;
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     map[state.particle_sidecar.particle_id[i]] = ParticleIdentityRecord{
@@ -37,6 +67,57 @@ struct ParticleIdentityRecord {
                          : state.particle_sidecar.gravity_softening_comoving[i],
         .has_softening_override = state.particle_sidecar.hasGravitySofteningOverride(i),
     };
+  }
+  return map;
+}
+
+[[nodiscard]] std::unordered_map<std::uint64_t, SpeciesSidecarIdentityRecord> captureSpeciesSidecarIdentity(
+    const SimulationState& state) {
+  std::unordered_map<std::uint64_t, SpeciesSidecarIdentityRecord> map;
+  for (std::size_t row = 0; row < state.star_particles.size(); ++row) {
+    const auto particle = state.star_particles.particle_index[row];
+    auto& record = map[state.particle_sidecar.particle_id[particle]];
+    record.species_tag = static_cast<std::uint32_t>(ParticleSpecies::kStar);
+    record.formation_scale_factor = state.star_particles.formation_scale_factor[row];
+    record.birth_mass_code = state.star_particles.birth_mass_code[row];
+    record.metallicity_mass_fraction = state.star_particles.metallicity_mass_fraction[row];
+    record.stellar_age_years_last = state.star_particles.stellar_age_years_last[row];
+    record.stellar_returned_mass_cumulative_code = state.star_particles.stellar_returned_mass_cumulative_code[row];
+    record.stellar_returned_metals_cumulative_code = state.star_particles.stellar_returned_metals_cumulative_code[row];
+    record.stellar_feedback_energy_cumulative_erg = state.star_particles.stellar_feedback_energy_cumulative_erg[row];
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+      record.stellar_returned_mass_channel_cumulative_code[channel] =
+          state.star_particles.stellar_returned_mass_channel_cumulative_code[channel][row];
+      record.stellar_returned_metals_channel_cumulative_code[channel] =
+          state.star_particles.stellar_returned_metals_channel_cumulative_code[channel][row];
+      record.stellar_feedback_energy_channel_cumulative_erg[channel] =
+          state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel][row];
+    }
+  }
+  for (std::size_t row = 0; row < state.black_holes.size(); ++row) {
+    const auto particle = state.black_holes.particle_index[row];
+    auto& record = map[state.particle_sidecar.particle_id[particle]];
+    record.species_tag = static_cast<std::uint32_t>(ParticleSpecies::kBlackHole);
+    record.bh_host_cell_index = state.black_holes.host_cell_index[row];
+    record.bh_subgrid_mass_code = state.black_holes.subgrid_mass_code[row];
+    record.bh_accretion_rate_code = state.black_holes.accretion_rate_code[row];
+    record.bh_feedback_energy_code = state.black_holes.feedback_energy_code[row];
+    record.bh_eddington_ratio = state.black_holes.eddington_ratio[row];
+    record.bh_cumulative_accreted_mass_code = state.black_holes.cumulative_accreted_mass_code[row];
+    record.bh_cumulative_feedback_energy_code = state.black_holes.cumulative_feedback_energy_code[row];
+    record.bh_duty_cycle_active_time_code = state.black_holes.duty_cycle_active_time_code[row];
+    record.bh_duty_cycle_total_time_code = state.black_holes.duty_cycle_total_time_code[row];
+  }
+  for (std::size_t row = 0; row < state.tracers.size(); ++row) {
+    const auto particle = state.tracers.particle_index[row];
+    auto& record = map[state.particle_sidecar.particle_id[particle]];
+    record.species_tag = static_cast<std::uint32_t>(ParticleSpecies::kTracer);
+    record.tracer_parent_particle_id = state.tracers.parent_particle_id[row];
+    record.tracer_injection_step = state.tracers.injection_step[row];
+    record.tracer_host_cell_index = state.tracers.host_cell_index[row];
+    record.tracer_mass_fraction_of_host = state.tracers.mass_fraction_of_host[row];
+    record.tracer_last_host_mass_code = state.tracers.last_host_mass_code[row];
+    record.tracer_cumulative_exchanged_mass_code = state.tracers.cumulative_exchanged_mass_code[row];
   }
   return map;
 }
@@ -210,6 +291,56 @@ void compactFront(SimulationState& state, std::size_t keep_count) {
   cosmosim::core::debugAssertNoStaleParticleIndices(state);
 }
 
+void assertSpeciesSidecarIdentityInvariant(
+    const SimulationState& state,
+    const std::unordered_map<std::uint64_t, SpeciesSidecarIdentityRecord>& expected) {
+  const auto observed = captureSpeciesSidecarIdentity(state);
+  assert(observed.size() == expected.size());
+  for (const auto& [particle_id, record] : expected) {
+    const auto it = observed.find(particle_id);
+    assert(it != observed.end());
+    const auto& got = it->second;
+    assert(got.species_tag == record.species_tag);
+    if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
+      assert(got.formation_scale_factor == record.formation_scale_factor);
+      assert(got.birth_mass_code == record.birth_mass_code);
+      assert(got.metallicity_mass_fraction == record.metallicity_mass_fraction);
+      assert(got.stellar_age_years_last == record.stellar_age_years_last);
+      assert(got.stellar_returned_mass_cumulative_code == record.stellar_returned_mass_cumulative_code);
+      assert(got.stellar_returned_metals_cumulative_code == record.stellar_returned_metals_cumulative_code);
+      assert(got.stellar_feedback_energy_cumulative_erg == record.stellar_feedback_energy_cumulative_erg);
+      for (std::size_t channel = 0; channel < 3; ++channel) {
+        assert(got.stellar_returned_mass_channel_cumulative_code[channel] ==
+               record.stellar_returned_mass_channel_cumulative_code[channel]);
+        assert(got.stellar_returned_metals_channel_cumulative_code[channel] ==
+               record.stellar_returned_metals_channel_cumulative_code[channel]);
+        assert(got.stellar_feedback_energy_channel_cumulative_erg[channel] ==
+               record.stellar_feedback_energy_channel_cumulative_erg[channel]);
+      }
+    } else if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) {
+      assert(got.bh_host_cell_index == record.bh_host_cell_index);
+      assert(got.bh_subgrid_mass_code == record.bh_subgrid_mass_code);
+      assert(got.bh_accretion_rate_code == record.bh_accretion_rate_code);
+      assert(got.bh_feedback_energy_code == record.bh_feedback_energy_code);
+      assert(got.bh_eddington_ratio == record.bh_eddington_ratio);
+      assert(got.bh_cumulative_accreted_mass_code == record.bh_cumulative_accreted_mass_code);
+      assert(got.bh_cumulative_feedback_energy_code == record.bh_cumulative_feedback_energy_code);
+      assert(got.bh_duty_cycle_active_time_code == record.bh_duty_cycle_active_time_code);
+      assert(got.bh_duty_cycle_total_time_code == record.bh_duty_cycle_total_time_code);
+    } else if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kTracer)) {
+      assert(got.tracer_parent_particle_id == record.tracer_parent_particle_id);
+      assert(got.tracer_injection_step == record.tracer_injection_step);
+      assert(got.tracer_host_cell_index == record.tracer_host_cell_index);
+      assert(got.tracer_mass_fraction_of_host == record.tracer_mass_fraction_of_host);
+      assert(got.tracer_last_host_mass_code == record.tracer_last_host_mass_code);
+      assert(got.tracer_cumulative_exchanged_mass_code == record.tracer_cumulative_exchanged_mass_code);
+    } else {
+      assert(false);
+    }
+  }
+  cosmosim::core::debugAssertSpeciesSidecarOwnershipInvariants(state);
+}
+
 void assertParticleIdentityInvariant(
     const SimulationState& state,
     const std::unordered_map<std::uint64_t, ParticleIdentityRecord>& expected) {
@@ -271,10 +402,12 @@ void test_particle_reorder_sidecar_invariants() {
   SimulationState state;
   seedSyntheticState(state);
   const auto baseline = captureParticleIdentity(state);
+  const auto sidecar_baseline = captureSpeciesSidecarIdentity(state);
 
   const auto canonical = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySpecies);
   cosmosim::core::reorderParticles(state, canonical);
   assertParticleIdentityInvariant(state, baseline);
+  assertSpeciesSidecarIdentityInvariant(state, sidecar_baseline);
 
   const std::size_t n = state.particles.size();
   cosmosim::core::ParticleReorderMap reverse;
@@ -293,6 +426,7 @@ void test_particle_reorder_sidecar_invariants() {
   cosmosim::core::reorderParticles(state, reverse, move_sidecars);
 
   assertParticleIdentityInvariant(state, baseline);
+  assertSpeciesSidecarIdentityInvariant(state, sidecar_baseline);
 
   for (std::size_t row = 0; row < state.star_particles.size(); ++row) {
     const auto parent = state.star_particles.particle_index[row];
@@ -309,6 +443,72 @@ void test_particle_reorder_sidecar_invariants() {
 
   compactFront(state, 4);
   assertParticleIdentityInvariant(state, baseline);
+}
+
+void test_use_parent_indirection_preserves_rows_and_remaps_parents() {
+  SimulationState moved;
+  seedSyntheticState(moved);
+  SimulationState indirect = moved;
+  const auto sidecar_baseline = captureSpeciesSidecarIdentity(moved);
+
+  const std::size_t n = moved.particles.size();
+  cosmosim::core::ParticleReorderMap reverse;
+  reverse.new_to_old_index.resize(n);
+  reverse.old_to_new_index.resize(n);
+  for (std::size_t new_index = 0; new_index < n; ++new_index) {
+    const auto old_index = static_cast<std::uint32_t>(n - 1U - new_index);
+    reverse.new_to_old_index[new_index] = old_index;
+    reverse.old_to_new_index[old_index] = static_cast<std::uint32_t>(new_index);
+  }
+
+  const auto indirect_star_birth_row0 = indirect.star_particles.birth_mass_code[0];
+  const auto indirect_star_birth_row1 = indirect.star_particles.birth_mass_code[1];
+  cosmosim::core::reorderParticles(indirect, reverse);
+  assert(indirect.star_particles.birth_mass_code[0] == indirect_star_birth_row0);
+  assert(indirect.star_particles.birth_mass_code[1] == indirect_star_birth_row1);
+  assertSpeciesSidecarIdentityInvariant(indirect, sidecar_baseline);
+
+  cosmosim::core::SidecarSyncPolicy move_sidecars;
+  move_sidecars.star_particles = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+  move_sidecars.black_holes = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+  move_sidecars.tracers = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+  cosmosim::core::reorderParticles(moved, reverse, move_sidecars);
+  assert(moved.star_particles.birth_mass_code[0] == indirect_star_birth_row1);
+  assert(moved.star_particles.birth_mass_code[1] == indirect_star_birth_row0);
+  assertSpeciesSidecarIdentityInvariant(moved, sidecar_baseline);
+}
+
+void test_randomized_reorder_modes_preserve_sidecar_payload_identity() {
+  constexpr std::array modes{
+      cosmosim::core::ParticleReorderMode::kByTimeBin,
+      cosmosim::core::ParticleReorderMode::kBySfcKey,
+      cosmosim::core::ParticleReorderMode::kBySpecies,
+  };
+
+  for (const auto mode : modes) {
+    SimulationState state;
+    seedSyntheticState(state);
+    const auto sidecar_baseline = captureSpeciesSidecarIdentity(state);
+
+    cosmosim::core::SidecarSyncPolicy move_sidecars;
+    move_sidecars.star_particles = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+    move_sidecars.black_holes = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+    move_sidecars.tracers = cosmosim::core::SidecarSyncMode::kMoveWithParent;
+
+    std::mt19937 rng(0x51DECAFU + static_cast<unsigned>(mode));
+    for (int trial = 0; trial < 24; ++trial) {
+      for (std::size_t i = 0; i < state.particles.size(); ++i) {
+        state.particles.time_bin[i] = static_cast<std::uint8_t>(rng() % 8U);
+        state.particle_sidecar.sfc_key[i] = static_cast<std::uint64_t>(rng());
+      }
+      const auto particle_baseline = captureParticleIdentity(state);
+      const auto map = cosmosim::core::buildParticleReorderMap(state, mode);
+      cosmosim::core::reorderParticles(
+          state, map, (trial % 2 == 0) ? move_sidecars : cosmosim::core::SidecarSyncPolicy{});
+      assertParticleIdentityInvariant(state, particle_baseline);
+      assertSpeciesSidecarIdentityInvariant(state, sidecar_baseline);
+    }
+  }
 }
 
 void test_randomized_reorder_sparse_softening_overrides() {
@@ -399,6 +599,8 @@ void test_particle_stale_view_invalidation() {
 int main() {
   test_particle_resize_identity_invariants();
   test_particle_reorder_sidecar_invariants();
+  test_use_parent_indirection_preserves_rows_and_remaps_parents();
+  test_randomized_reorder_modes_preserve_sidecar_payload_identity();
   test_randomized_reorder_sparse_softening_overrides();
   test_particle_stale_view_invalidation();
   return 0;
