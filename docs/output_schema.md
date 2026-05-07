@@ -60,8 +60,8 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 | Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes |
 
 Additive softening sidecar persistence:
-- Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units).
-- Restart `/state/particle_sidecar/gravity_softening_comoving` (`float64`, optional; per-particle, comoving units).
+- Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.
+- Restart `/state/particle_sidecar/gravity_softening_comoving` (`float64`, optional; per-particle, comoving units) and `/state/particle_sidecar/has_gravity_softening_override` (`uint8`, optional) are exact-continuation lanes. The mask is the authority for per-particle override truth; a value lane without a mask is a materialized default/diagnostic mirror and does not create overrides.
 
 Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
 restart is execution-resume oriented.
@@ -164,7 +164,7 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state.
+- Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state. Exact continuation requires the value lane and authoritative `has_gravity_softening_override` mask to round-trip together when overrides are present; legacy files without the mask are interpreted as containing no explicit overrides.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
 - Restart schema is `cosmosim_restart_v5`; distributed TreePM state is persisted under restart-only

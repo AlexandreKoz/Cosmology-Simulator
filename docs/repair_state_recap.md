@@ -4,6 +4,32 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+
+## 0) Per-particle gravity softening transform/restart guardrail hardening (2026-05-07 UTC)
+
+Commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_integration_softening_ownership_invariants test_integration_reorder_compaction_sidecars test_integration_species_migration_invariants
+ctest --preset test-cpu-debug --output-on-failure -R "softening|reorder|migration|sidecar"
+cmake --preset hdf5-debug
+cmake --build --preset build-hdf5-debug -j4
+ctest --preset test-hdf5-debug --output-on-failure -R "restart|snapshot|softening"
+```
+
+Observed:
+
+- Added deterministic randomized reorder stress coverage for sparse per-particle gravity softening overrides, using particle ID as the oracle after every permutation.
+- Extended resize/compaction coverage to prove newly grown rows do not become overrides and retained particle IDs preserve `{has_override, epsilon}` through shrink/regrow cycles.
+- Extended Tree softening view coverage so mismatched source/target override masks fail loudly instead of silently truncating override authority.
+- Fixed the HDF5 softening ownership restart test payload metadata so the restart reader validates the normalized-config hash lane before comparing softening value/mask roundtrip state.
+- Documented that `has_gravity_softening_override` is the authoritative restart lane; value-only softening lanes are diagnostics/default mirrors and do not create overrides.
+
+Reproducibility impact:
+
+- Deterministic behavior is preserved. This pass adds regression coverage and documentation for existing softening ownership semantics; it does not alter solver numerics, restart dataset names, output naming, normalized config generation, scheduling, or rank coordination.
+
 ## 0) Stage 1 runtime transform audit freeze (2026-05-06 UTC)
 
 Commands:
