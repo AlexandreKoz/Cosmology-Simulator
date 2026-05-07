@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v5`
-- `version = 5`
+- `name = cosmosim_restart_v6`
+- `version = 6`
 
 Restart payload includes:
 
@@ -164,10 +164,10 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v5`, version `5`, because restart payloads persist optional particle softening sidecar state. Exact continuation requires the value lane and authoritative `has_gravity_softening_override` mask to round-trip together when overrides are present; legacy files without the mask are interpreted as containing no explicit overrides.
+- Restart schema version/name are now `cosmosim_restart_v6`, version `6`, because restart payloads require exact particle softening sidecar dataset presence and length-delimited integrity hashing for runtime-truth lanes. Exact continuation requires the value lane and authoritative `has_gravity_softening_override` mask to round-trip together; files without those datasets are rejected rather than interpreted as implicit defaults.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v5`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v6`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.
 - Provenance payload now includes additive zoom-gravity metadata and contamination-radius contract keys;

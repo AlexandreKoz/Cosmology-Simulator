@@ -1367,3 +1367,10 @@ Observed repair results:
 Reproducibility impact:
 
 - No solver numerics, HDF5 snapshot/restart schema, config keys, or science workflow features changed. The repair tightens rank-local ownership validation and view invalidation evidence for particle index-space mutations.
+
+## 2026-05-07 Restart sidecar exactness repair
+
+- Restart schema is now `cosmosim_restart_v6`: readers reject v5 and older files unless a future explicit compatibility importer is added and tested.
+- Restart HDF5 always writes and requires the particle softening value and authoritative override-mask datasets, preserving exact sidecar presence instead of silently defaulting missing lanes.
+- Restart payload integrity hashing now length-delimits strings and vector byte lanes and continues to cover particle identity, gas identity, species sidecars, module sidecars with schema versions, scheduler/integrator state, normalized config/provenance, and distributed gravity continuation metadata.
+- Reproducibility impact: restart continuation is stricter and more auditable; old files missing v6 runtime-truth lanes are rejected rather than resumed with inferred defaults. Snapshot canonical GADGET/AREPO dataset names remain unchanged.

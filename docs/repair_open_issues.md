@@ -15,7 +15,7 @@ _Date captured: 2026-04-14 (UTC)_
 | P0-10-STAGE0-GATE-028 | Closure candidate | Stage 0 closure gate | P0-09/P0-10 repair applied: missing test sources restored, schema drift repaired, runtime smoke normalized-config check aligned, and softening restart payload metadata fixed. Full closure still requires local completion of CPU/HDF5/PM preset suites. | Run the full command bundle from `docs/repair/stage0_runtime_truth_freeze.md`; mark Stage 0 closed after those suites pass locally. |
 | P32-SOFTENING-PROVENANCE-029 | Closed | Softening + restart/provenance contract | Targeted CPU and HDF5 validation now pass for softening ownership, reorder/sidecar preservation, migration preservation, restart, and snapshot schema coverage; `integration_softening_ownership_invariants` builds a valid restart payload with matching normalized config hash/provenance hash and single-rank distributed restart state. | Continue to include `ctest --preset test-hdf5-debug --output-on-failure -R "restart|snapshot|softening"` in release-gate evidence. |
 | P33-APP-CONFIG-ROUNDTRIP-030 | Closed pending local full-suite certification | Runtime app normalized config contract | `integration_runtime_app_smoke` now checks canonical axis-aware normalized config key `treepm_pm_grid_nx = 24`, matching the documented normalized-config contract. | Re-run runtime app smoke, config examples, and config parser tests locally. |
-| P34-RELEASE-SCHEMA-DRIFT-031 | Closed pending local full-suite certification | Release/docs schema metadata drift | Release manifest, docs scaffold, and release readiness checks now agree on snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v5`, and provenance `provenance_v4`. | Re-run docs scaffold, release readiness, and snapshot/restart schema tests locally. |
+| P34-RELEASE-SCHEMA-DRIFT-031 | Closed pending local full-suite certification | Release/docs schema metadata drift | Release manifest, docs scaffold, and release readiness checks now agree on snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v6`, and provenance `provenance_v4`. | Re-run docs scaffold, release readiness, and snapshot/restart schema tests locally. |
 | P35-PM-VALIDATION-CONTRACT-032 | Open | PM isolated/coupling/validation contract | PM preset still fails `unit_pm_solver`, `integration_tree_pm_coupling_periodic`, and `validation_phase2_mpi_gravity_single_rank` contract checks. | Repair PM contract expectations and re-run `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "unit_pm_solver|integration_tree_pm_coupling_periodic|validation_phase2_mpi_gravity_single_rank"`. |
 
 
@@ -137,3 +137,8 @@ Additional validation limitation for this pass:
 - Multi-rank scaling evidence in the audited artifact set remains baseline-only and non-certifying (`phase2_baseline_scaling_summary.json`); checked-in CSV artifacts currently cover `np1` only.
 
 Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.md`).
+
+## 2026-05-07 restart sidecar exactness status
+
+- Closed P0 blocker for v6 restart sidecar exactness in the HDF5 path: missing softening mask/value datasets and older restart schema versions are rejected, and targeted reorder/migration roundtrip tests cover identity-aligned sidecars.
+- Remaining compatibility work, if needed, must be an explicit legacy importer with documented migration semantics and tests; no silent v5 compatibility is allowed.
