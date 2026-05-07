@@ -4,6 +4,30 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 0) Stage 1 runtime transform audit freeze (2026-05-06 UTC)
+
+Commands:
+
+```bash
+git status --short
+rg -n "SimulationState|sidecar|ownership|runtime truth|reorder|migration|gas|restart|snapshot|softening" tests include src docs/architecture docs/repair -g '*.{cpp,hpp,md,txt,cmake}'
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_simulation_state
+cmake --build --preset build-cpu-debug -j4
+ctest --preset test-cpu-debug --output-on-failure -R "simulation_state|ownership|runtime|truth"
+```
+
+Observed:
+
+- Added `docs/repair/stage1_runtime_transform_audit.md` as a documentation-only mutation-map proof for particle, gas-cell, species-sidecar, restart, snapshot, migration, and reorder paths.
+- Classified Stage 1 P0 targets 1.1, 1.2, and 1.3 from the prompt scope because no separate in-repository Stage 1 target list was found by `rg`.
+- No code, build registration, solver behavior, SoA layout, restart schema, snapshot schema, or HDF5 dataset names were changed.
+- The required targeted `ctest` regex initially selected integration executables that had not been built by the narrower `test_unit_simulation_state` target; after a full `cmake --build --preset build-cpu-debug -j4`, the same regex passed 3/3.
+
+Reproducibility impact:
+
+- Deterministic behavior unchanged. This pass records audit evidence and current mutation authority only; no runtime behavior, output naming, normalized config, provenance, scheduler, restart, snapshot, or physics numerics changed.
+
 ## 0) Stage 0 consolidation gate and runtime-truth freeze (P0-10, 2026-04-26 UTC)
 
 Commands:
