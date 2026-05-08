@@ -147,6 +147,23 @@ struct ReductionAgreementPolicy {
   double relative_tolerance = 0.0;
 };
 
+
+struct LocalOwnershipIdentitySummary {
+  std::uint64_t local_owned_count = 0;
+  std::uint64_t local_particle_id_sum = 0;
+  std::uint64_t local_particle_id_xor = 0;
+  bool local_particle_ids_unique = true;
+};
+
+[[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
+    std::span<const std::uint64_t> local_particle_ids);
+
+[[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
+    const LocalOwnershipIdentitySummary& reduced_global_summary,
+    std::uint64_t expected_global_count,
+    std::uint64_t expected_particle_id_sum,
+    std::uint64_t expected_particle_id_xor);
+
 [[nodiscard]] double deterministicRankOrderedSum(std::span<const double> per_rank_values);
 [[nodiscard]] ReductionAgreement compareReductionAgreement(
     std::span<const double> per_rank_values,

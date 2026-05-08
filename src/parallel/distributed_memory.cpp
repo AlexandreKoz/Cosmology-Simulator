@@ -10,6 +10,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <unordered_set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -458,6 +459,33 @@ void validateGhostExchangePlan(const GhostExchangePlan& plan) {
         i,
         plan.recv_local_indices_by_neighbor[i]);
   }
+}
+
+
+LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(std::span<const std::uint64_t> local_particle_ids) {
+  LocalOwnershipIdentitySummary summary;
+  summary.local_owned_count = static_cast<std::uint64_t>(local_particle_ids.size());
+  std::unordered_set<std::uint64_t> seen;
+  seen.reserve(local_particle_ids.size());
+  for (const std::uint64_t particle_id : local_particle_ids) {
+    summary.local_particle_id_sum += particle_id;
+    summary.local_particle_id_xor ^= particle_id;
+    if (!seen.insert(particle_id).second) {
+      summary.local_particle_ids_unique = false;
+    }
+  }
+  return summary;
+}
+
+bool partitionIdentityMatchesGeneratedSet(
+    const LocalOwnershipIdentitySummary& reduced_global_summary,
+    std::uint64_t expected_global_count,
+    std::uint64_t expected_particle_id_sum,
+    std::uint64_t expected_particle_id_xor) {
+  return reduced_global_summary.local_particle_ids_unique &&
+      reduced_global_summary.local_owned_count == expected_global_count &&
+      reduced_global_summary.local_particle_id_sum == expected_particle_id_sum &&
+      reduced_global_summary.local_particle_id_xor == expected_particle_id_xor;
 }
 
 double deterministicRankOrderedSum(std::span<const double> per_rank_values) {

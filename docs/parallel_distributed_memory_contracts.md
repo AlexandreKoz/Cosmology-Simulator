@@ -221,3 +221,37 @@ Current policy is explicitly fixed to `deterministic_rebuild`:
 
 This reporting is used for continuation debugging and avoids opaque restart failures when
 rank layout/config drifts between write and resume.
+
+## Distributed ownership identity reductions (P1 correctness floor)
+
+Distributed workflow tests must prove partitioned ownership rather than accepting replicated state.
+Each rank now emits a local ownership identity summary over the rank-local authoritative particle-ID
+lane:
+
+- `local_owned_count`: number of locally owned particle rows after compaction/restart.
+- `local_particle_id_sum`: unsigned sum of local authoritative particle IDs.
+- `local_particle_id_xor`: bitwise XOR of local authoritative particle IDs.
+- `local_particle_ids_unique`: local duplicate-ID rejection signal.
+
+MPI tests reduce these summaries with `SUM` for counts and ID sums and `BXOR` for ID XORs, then
+compare the reduced tuple with the generated initial-condition identity tuple. A two-rank test is
+not considered distributed-correct if all ranks hold the full generated data set: replicated ranks
+would over-count `local_owned_count` and `local_particle_id_sum`, and even-count replication would
+zero or otherwise alter the XOR. The local duplicate flag is reduced across ranks before report-level
+identity status is marked green.
+
+These reductions are correctness checks only. They do not introduce mature load balancing, pencil FFT,
+or performance-tuned migration scheduling. They harden identity and ownership determinism for the
+current slab/TreePM path while preserving the long-range restart policy of deterministic rebuild.
+
+## Reproducibility impact of this repair
+
+The repair does not alter solver numerics, force kernels, PM decomposition policy, or restart payload
+schema version. It adds auditable report fields and reduced identity checks around the existing
+rank-local compacted state:
+
+- restart long-range PM continuation remains `deterministic_rebuild`;
+- restart metadata still carries `owning_rank_by_item` and PM slab ownership tables;
+- rank-local particle IDs are summarized deterministically using integer count/sum/xor reductions;
+- partition-vs-replication detection is a test/report invariant, not a scheduling or load-balancing
+  behavior change.

@@ -53,6 +53,8 @@ struct ReferenceWorkflowReport {
   std::uint64_t global_particle_id_sum = 0;
   std::uint64_t local_particle_id_xor = 0;
   std::uint64_t global_particle_id_xor = 0;
+  bool local_particle_ids_unique = true;
+  bool global_particle_partition_identity_match = false;
   int world_size = 1;
   int world_rank = 0;
   std::uint64_t treepm_long_range_refresh_count = 0;
