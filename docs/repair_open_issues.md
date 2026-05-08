@@ -155,3 +155,8 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 ## 2026-05-08 notes
 
 - P2 AMR/moving-mesh gas ownership readiness now has an RFC and isolated `GasCellIdentityMap` API guard. Remaining blocker: promotion to production requires explicit restart schema versioning, compatibility behavior, docs updates in `docs/output_schema.md`, and hydro remap tests keyed by stable `gas_cell_id`.
+
+## 2026-05-08 Stage 1 runtime-truth gate status
+
+- Closed CI-discipline gap for CPU-runnable P0 runtime-truth repairs: the P0 suite now has an exact CTest preset, labels, a label/feature-gating audit test, and one local/CI script under `scripts/ci/`.
+- Feature-specific closure remains dependency-bound: HDF5, FFTW, MPI, CUDA, and Python presets are explicit and should fail at configure time when requested dependencies are absent; CPU-only Stage 1 success must not be reported as feature-path closure.

@@ -266,7 +266,22 @@
       },
       "filter": {
         "include": {
-          "name": "runtime|truth|timestep|scheduler|active|particle|sidecar|species|gas|hydro|softening|config|restart|checkpoint|provenance"
+          "name": "^(unit_simulation_state|unit_gas_cell_identity_invariants|unit_hot_cold_sidecar_layout|integration_reorder_compaction_sidecars|integration_species_migration_invariants|integration_transform_fuzz_invariants|integration_softening_ownership_invariants|integration_hierarchical_time_bins|integration_hierarchical_timestep_regression|integration_parallel_two_rank_restart|unit_snapshot_hdf5_schema|unit_restart_checkpoint_schema|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip|integration_provenance_roundtrip|integration_runtime_truth_ctest_labels)$"
+        }
+      },
+      "description": "Compatibility alias for the CPU-only Stage-1 P0 runtime-truth gate."
+    },
+    {
+      "name": "test-stage1-runtime-truth-cpu-debug",
+      "configurePreset": "cpu-only-debug",
+      "displayName": "Stage 1 runtime-truth CPU P0 gate",
+      "description": "Runs the dependency-free P0 runtime-truth repair suite: softening, sidecar, gas, migration, restart, provenance, scheduler, active views, and CTest label audit.",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "name": "^(unit_simulation_state|unit_gas_cell_identity_invariants|unit_hot_cold_sidecar_layout|integration_reorder_compaction_sidecars|integration_species_migration_invariants|integration_transform_fuzz_invariants|integration_softening_ownership_invariants|integration_hierarchical_time_bins|integration_hierarchical_timestep_regression|integration_parallel_two_rank_restart|unit_snapshot_hdf5_schema|unit_restart_checkpoint_schema|integration_snapshot_hdf5_roundtrip|integration_restart_checkpoint_roundtrip|integration_provenance_roundtrip|integration_runtime_truth_ctest_labels)$"
         }
       }
     }

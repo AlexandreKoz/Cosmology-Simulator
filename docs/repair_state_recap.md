@@ -1462,3 +1462,26 @@ Reproducibility impact:
 
 - No solver numerics, config keys, restart schema version, or HDF5 dataset layout changed.
 - Restart long-range PM policy remains deterministic rebuild; the repair adds deterministic integer identity reductions around existing rank-local state.
+
+## 2026-05-08: Stage 1 runtime-truth CI gate consolidation
+
+Commands planned for validation:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4
+ctest --preset test-stage0-runtime-truth-cpu-debug --output-on-failure
+ctest --preset test-stage1-runtime-truth-cpu-debug --output-on-failure
+./scripts/ci/run_stage1_runtime_truth_gate.sh ci_artifacts/stage1_runtime_truth
+```
+
+Observed repair scope:
+
+- Added explicit `runtime_truth`/`p0` CTest labels and subsystem labels for the CPU-runnable Stage 1 suite covering softening, sidecar, gas identity, migration, restart, provenance, scheduler mirrors, and active views.
+- Added `integration_runtime_truth_ctest_labels` to audit P0 registration/labels and to fail CPU-only builds if feature-gated HDF5 app-smoke, MPI multi-rank, CUDA, or Python tests are registered while their feature is disabled.
+- Added `test-stage1-runtime-truth-cpu-debug` and kept `test-stage0-runtime-truth-cpu-debug` as a compatibility alias over the same exact P0 test-name set.
+- Added `scripts/ci/run_stage1_runtime_truth_gate.sh` and a manifest row so local and CI runs have one documented dependency-free Stage 1 gate command.
+
+Reproducibility impact:
+
+- Test registration, labels, presets, scripts, and documentation only. No solver numerics, HDF5 schema names, restart schema versions, normalized config dumps, provenance payload contents, output naming, deterministic scheduling behavior, or SoA/hot-cold state layout changed.
