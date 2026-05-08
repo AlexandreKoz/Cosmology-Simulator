@@ -354,6 +354,9 @@ struct ActiveIndexSet {
 
 struct ParticleActiveView {
   // Compact contiguous particle spans materialized in the transient workspace.
+  // Read-only active views are transient mirrors only: they never own persistent truth
+  // and consumers can compare the captured generation with SimulationState before
+  // using a view across any structural transform.
   std::span<const std::uint64_t> particle_id;
   std::span<const std::uint32_t> species_tag;
   std::span<const double> position_x_comoving;
@@ -363,12 +366,16 @@ struct ParticleActiveView {
   std::span<const double> velocity_y_peculiar;
   std::span<const double> velocity_z_peculiar;
   std::span<const double> mass_code;
+  std::uint64_t source_particle_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
 };
 
 struct CellActiveView {
   // Compact contiguous cell spans materialized in the transient workspace.
+  // Read-only active views are transient mirrors only: they never own persistent truth
+  // and consumers can compare the captured generation with SimulationState before
+  // using a view across any structural transform or gas-cell rebuild.
   std::span<const double> center_x_comoving;
   std::span<const double> center_y_comoving;
   std::span<const double> center_z_comoving;
@@ -376,6 +383,7 @@ struct CellActiveView {
   std::span<const std::uint32_t> patch_index;
   std::span<const double> density_code;
   std::span<const double> pressure_code;
+  std::uint64_t source_cell_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
 };
@@ -479,7 +487,9 @@ class MonotonicScratchAllocator final : public ScratchAllocator {
 };
 
 struct TransientStepWorkspace {
-  // Compact particle active-set buffers.
+  // Compact particle active-set buffers. These are reusable transient mirrors,
+  // not persistent owners; clear() drops sizes but intentionally preserves
+  // capacity so repeated hot-loop materialization does not churn allocations.
   AlignedVector<std::uint64_t> particle_id;
   AlignedVector<std::uint32_t> particle_species_tag;
   AlignedVector<double> particle_position_x_comoving;
@@ -491,7 +501,8 @@ struct TransientStepWorkspace {
   AlignedVector<double> particle_mass_code;
   AlignedVector<std::uint32_t> gravity_particle_index;
 
-  // Compact read/write hydro kernel buffers.
+  // Compact read/write hydro kernel buffers. These carry only allowed hot lanes
+  // in HydroCellKernelView and are scattered only after cell-generation checks.
   AlignedVector<std::uint32_t> hydro_cell_index;
   AlignedVector<double> hydro_cell_center_x_comoving;
   AlignedVector<double> hydro_cell_center_y_comoving;
@@ -500,7 +511,8 @@ struct TransientStepWorkspace {
   AlignedVector<double> hydro_cell_density_code;
   AlignedVector<double> hydro_cell_pressure_code;
 
-  // Compact cell active-set buffers.
+  // Compact cell active-set buffers. These are reusable transient mirrors,
+  // not persistent owners; patch/identity metadata remains outside mutable hot views.
   AlignedVector<double> cell_center_x_comoving;
   AlignedVector<double> cell_center_y_comoving;
   AlignedVector<double> cell_center_z_comoving;

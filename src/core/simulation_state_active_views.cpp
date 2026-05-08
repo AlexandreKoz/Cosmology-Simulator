@@ -83,6 +83,7 @@ ParticleActiveView buildParticleActiveView(
       .velocity_y_peculiar = workspace.particle_velocity_y_peculiar,
       .velocity_z_peculiar = workspace.particle_velocity_z_peculiar,
       .mass_code = workspace.particle_mass_code,
+      .source_particle_index_generation = state.particleIndexGeneration(),
   };
 }
 
@@ -120,6 +121,7 @@ CellActiveView buildCellActiveView(
       .patch_index = workspace.cell_patch_index,
       .density_code = workspace.cell_density_code,
       .pressure_code = workspace.cell_pressure_code,
+      .source_cell_index_generation = state.cellIndexGeneration(),
   };
 }
 
@@ -252,11 +254,11 @@ HydroCellKernelView buildHydroCellKernelView(
 }
 
 void scatterHydroCellKernelView(const HydroCellKernelView& view, SimulationState& state) {
-  if (view.size() > 0) {
-    requireParticleBoundGasCellContract(state, "scatterHydroCellKernelView");
-  }
   if (view.source_cell_index_generation != state.cellIndexGeneration()) {
     throw std::runtime_error("scatterHydroCellKernelView: stale cell view generation");
+  }
+  if (view.size() > 0) {
+    requireParticleBoundGasCellContract(state, "scatterHydroCellKernelView");
   }
   for (std::size_t i = 0; i < view.size(); ++i) {
     const auto destination = view.cell_index[i];
