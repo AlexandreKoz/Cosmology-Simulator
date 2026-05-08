@@ -1300,7 +1300,7 @@ Observed:
 - Tree gravity now resolves softening at source/target with optional sidecars (species table and per-particle overrides) and uses an explicit pair rule `epsilon_pair = max(epsilon_i, epsilon_j)` across leaf P2P and accepted-node multipole paths.
 - TreePM short-range residual uses the same pair law for local and distributed remote request/response paths (request packet now carries target epsilon).
 - Optional per-particle softening sidecar persistence is added to snapshot (`/PartTypeN/GravitySofteningComoving`) and restart (`/state/particle_sidecar/gravity_softening_comoving`) paths.
-- Schema versions are intentionally bumped for additive axis-aware PM metadata: snapshot `gadget_arepo_v4`, provenance `provenance_v4`, while restart remains `cosmosim_restart_v5`.
+- Schema versions are intentionally bumped for additive axis-aware PM metadata: snapshot `gadget_arepo_v4`, provenance `provenance_v4`, while restart remains `cosmosim_restart_v6`.
 
 Interpretation:
 
@@ -1327,6 +1327,19 @@ Interpretation:
 - This is infrastructure repair for distributed maturity and observability under clustered loads; no force-kernel heuristics, dropped contributions, or mid-kick ownership repartitioning were introduced.
 - Remaining maturity limits are tracked in `docs/repair_open_issues.md` (see open entry for clustered decomposition/short-range scheduling limits).
 
+
+
+## 2026-05-08 — Preset alias and schema-drift gate repair
+
+- Root cause for the failed `cmake --preset cpu-debug` command was a naming drift: build/test presets used `build-cpu-debug` and `test-cpu-debug`, but the configure preset existed only as `cpu-only-debug`. Added `cpu-debug` as a compatibility configure alias that maps to the canonical CPU-only debug build directory and metadata.
+- Root cause for the docs/schema gate failure was stale restart-schema literals in release artifacts and gate checks after the runtime schema moved to `cosmosim_restart_v6`. Updated the release manifest, release docs, and release readiness check to the current restart schema.
+- Reproducibility impact: no solver, snapshot, restart payload, HDF5 layout, or normalized-config behavior changed; this repair only aligns preset names and schema documentation/tests with existing runtime truth.
+
+## 2026-05-08 — Gas-cell identity seam RFC and isolated API guard
+
+- Added `docs/architecture/gas_cell_identity_map_rfc.md` to define the proposed `GasCellIdentityMap` seam for future AMR/moving-mesh gas-cell ownership without changing production hydro or restart behavior.
+- Added an isolated core API shape that validates unique stable `gas_cell_id` and unique transient `local_cell_row` while allowing multiple gas cells to share an optional parent particle or have no parent.
+- Preserved the current P0 particle-bound gas contract: production hydro/restart paths still rely on `requireParticleBoundGasCellContract(...)` until an explicit schema migration and solver remap test plan replaces it.
 
 ## 2026-04-20: Phase 3 gravity evidence campaign scaffolding
 

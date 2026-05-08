@@ -34,6 +34,18 @@
       }
     },
     {
+      "name": "cpu-debug",
+      "inherits": [
+        "cpu-only-debug"
+      ],
+      "displayName": "CPU Debug (compat alias)",
+      "description": "Compatibility alias for the canonical cpu-only-debug configure preset used by build-cpu-debug/test-cpu-debug.",
+      "binaryDir": "${sourceDir}/build/cpu-only-debug",
+      "cacheVariables": {
+        "COSMOSIM_PRESET_NAME": "cpu-only-debug"
+      }
+    },
+    {
       "name": "hdf5-debug",
       "inherits": [
         "cpu-only-debug"

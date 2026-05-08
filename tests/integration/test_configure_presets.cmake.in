@@ -19,6 +19,7 @@ ${preset_stderr}")
 endfunction()
 
 require_preset_configure(cpu-only-debug)
+require_preset_configure(cpu-debug)
 
 if(current_build_has_hdf5)
   require_preset_configure(hdf5-debug)

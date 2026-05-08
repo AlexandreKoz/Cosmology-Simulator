@@ -12,6 +12,7 @@ This document defines the persistent and transient memory contract for simulatio
 - `GasCellSidecar`: thermodynamics and hydro reconstruction sidecar (`density_code`, `pressure_code`, gradients, etc.) plus the temporary particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
 - `StarParticleSidecar`, `BlackHoleParticleSidecar`, `TracerParticleSidecar`: species-cold metadata blocks keyed by global particle index.
 - `PatchSoa`: AMR patch descriptors and contiguous cell ranges.
+- `GasCellIdentityMap`: proposed, isolated identity seam for future AMR/moving-mesh decoupling. It is not yet stored as production state; see `docs/architecture/gas_cell_identity_map_rfc.md`.
 - `SpeciesContainer`: explicit species accounting ledger.
 - `ParticleSpeciesIndex`: explicit local/global species indexing map for branch-light species iteration.
 - `StateMetadata`: schema/provenance-sensitive run metadata.
@@ -70,6 +71,15 @@ implemented, any path that consumes local gas-cell rows must pass `requirePartic
 This is an explicit quarantine of the current 1:1 assumption, not an AMR design. Future many-cells-per-particle
 or cell-without-particle layouts should replace the helper implementations and contract, not add positional
 assumptions to workflow or solver code.
+
+## Future decoupled gas-cell identity seam
+
+`GasCellIdentityMap` is the documented next-step seam for AMR/moving-mesh readiness. It can represent multiple
+gas cells with the same optional parent particle, gas cells without a parent particle, stable patch ownership, and
+a transient `local_cell_row` mapping. Its current use is intentionally limited to isolated validation tests so it
+does not duplicate production authority or alter hydro/restart behavior. Promotion to production requires the
+restart-schema migration plan in `docs/architecture/gas_cell_identity_map_rfc.md`, plus tests proving hydro state
+remaps by stable `gas_cell_id` rather than particle index or row position.
 
 ## Layout policy and reorder contract
 

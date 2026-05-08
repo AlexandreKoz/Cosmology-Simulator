@@ -21,6 +21,7 @@ Optional dependencies are feature-gated and preset-driven:
 | Preset | Intended use |
 |---|---|
 | `cpu-only-debug` | Default local development and most CI-facing checks |
+| `cpu-debug` | Compatibility configure alias for `cpu-only-debug`, matching the `build-cpu-debug`/`test-cpu-debug` shorthand |
 | `cpu-only-release` | Performance sanity on CPU-only builds |
 | `hdf5-debug` | Snapshot/restart/provenance schema and I/O work |
 | `pm-hdf5-fftw-debug` | PM/TreePM validation with HDF5+FFTW |

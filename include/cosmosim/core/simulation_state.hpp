@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -151,6 +152,30 @@ struct TracerParticleSidecar {
   void resize(std::size_t count);
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] bool isConsistent() const noexcept;
+};
+
+struct GasCellIdentityRecord {
+  // Design-seam record for future AMR/moving-mesh gas ownership.
+  // gas_cell_id is the stable identity and must not be derived from a particle row index.
+  std::uint64_t gas_cell_id = 0;
+  std::optional<std::uint64_t> parent_particle_id;
+  std::uint64_t owning_patch_id = 0;
+  std::uint32_t local_cell_row = 0;
+};
+
+class GasCellIdentityMap {
+ public:
+  // Isolated identity seam: not wired into production hydro/restart until schema migration is explicit.
+  void assign(std::vector<GasCellIdentityRecord> records);
+  [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
+  [[nodiscard]] std::span<const GasCellIdentityRecord> records() const noexcept;
+  [[nodiscard]] const GasCellIdentityRecord* findByGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] const GasCellIdentityRecord* findByLocalRow(std::uint32_t local_cell_row) const noexcept;
+
+ private:
+  std::vector<GasCellIdentityRecord> m_records;
 };
 
 struct PatchSoa {
