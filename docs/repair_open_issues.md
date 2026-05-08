@@ -144,3 +144,9 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 
 - Closed P0 blocker for v6 restart sidecar exactness in the HDF5 path: missing softening mask/value datasets and older restart schema versions are rejected, and targeted reorder/migration roundtrip tests cover identity-aligned sidecars.
 - Remaining compatibility work, if needed, must be an explicit legacy importer with documented migration semantics and tests; no silent v5 compatibility is allowed.
+
+## 2026-05-08 distributed ownership floor status
+
+- P1 distributed ownership correctness floor is partially hardened in code by rank-local ID uniqueness summaries and reduced count/sum/xor partition checks in the reference workflow MPI path.
+- Mature load balancing, pencil FFT, and production migration scheduling remain out of scope for this repair cycle.
+- MPI+HDF5+FFTW closure remains dependent on the validation environment providing MPI FFTW (`fftw3_mpi`) and HDF5-enabled MPI presets; if unavailable, the MPI command bundle must be reported as environment-blocked rather than silently passed.

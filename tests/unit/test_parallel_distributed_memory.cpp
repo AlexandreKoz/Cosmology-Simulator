@@ -634,6 +634,46 @@ void testPmSlabLayoutRoundTripAndCellOwnership() {
   assert(cosmosim::parallel::pmOwnerRankForGlobalCell(10, 6, 4, 3, 9, 5, 3) == 2);
 }
 
+
+void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
+  const std::vector<std::uint64_t> rank0_ids = {1, 2, 3};
+  const std::vector<std::uint64_t> rank1_ids = {4, 5, 6};
+  const auto rank0 = cosmosim::parallel::summarizeLocalOwnedParticleIds(rank0_ids);
+  const auto rank1 = cosmosim::parallel::summarizeLocalOwnedParticleIds(rank1_ids);
+  const cosmosim::parallel::LocalOwnershipIdentitySummary reduced{
+      .local_owned_count = rank0.local_owned_count + rank1.local_owned_count,
+      .local_particle_id_sum = rank0.local_particle_id_sum + rank1.local_particle_id_sum,
+      .local_particle_id_xor = rank0.local_particle_id_xor ^ rank1.local_particle_id_xor,
+      .local_particle_ids_unique = rank0.local_particle_ids_unique && rank1.local_particle_ids_unique,
+  };
+  assert(cosmosim::parallel::partitionIdentityMatchesGeneratedSet(
+      reduced,
+      /*expected_global_count=*/6,
+      /*expected_particle_id_sum=*/21,
+      /*expected_particle_id_xor=*/(1ULL ^ 2ULL ^ 3ULL ^ 4ULL ^ 5ULL ^ 6ULL)));
+
+  const std::vector<std::uint64_t> duplicate_ids = {7, 8, 7};
+  const auto duplicate = cosmosim::parallel::summarizeLocalOwnedParticleIds(duplicate_ids);
+  assert(!duplicate.local_particle_ids_unique);
+  assert(!cosmosim::parallel::partitionIdentityMatchesGeneratedSet(
+      duplicate,
+      /*expected_global_count=*/3,
+      /*expected_particle_id_sum=*/22,
+      /*expected_particle_id_xor=*/8ULL));
+
+  const cosmosim::parallel::LocalOwnershipIdentitySummary replicated_two_rank{
+      .local_owned_count = 12,
+      .local_particle_id_sum = 42,
+      .local_particle_id_xor = 0,
+      .local_particle_ids_unique = true,
+  };
+  assert(!cosmosim::parallel::partitionIdentityMatchesGeneratedSet(
+      replicated_two_rank,
+      /*expected_global_count=*/6,
+      /*expected_particle_id_sum=*/21,
+      /*expected_particle_id_xor=*/(1ULL ^ 2ULL ^ 3ULL ^ 4ULL ^ 5ULL ^ 6ULL)));
+}
+
 }  // namespace
 
 int main() {
@@ -650,6 +690,7 @@ int main() {
   testGhostExchangePlanValidationDriftRejection();
   testReductionAgreementPolicyModes();
   testRankConfigConsensus();
+  testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates();
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();
   testDistributedExecutionTopologyCpuOnly();

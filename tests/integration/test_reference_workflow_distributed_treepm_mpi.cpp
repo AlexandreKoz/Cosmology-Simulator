@@ -80,6 +80,8 @@ int main() {
   assert(report.global_cell_count == 6ULL);
   assert(report.global_particle_id_sum == (42ULL * 43ULL) / 2ULL);
   assert(report.global_particle_id_xor == xorRangeOneToN(42ULL));
+  assert(report.local_particle_ids_unique);
+  assert(report.global_particle_partition_identity_match);
   assert(report.treepm_update_cadence_steps == 2);
   assert(report.treepm_long_range_refresh_count == 2);
   assert(report.treepm_long_range_reuse_count == 2);
@@ -224,6 +226,18 @@ int main() {
   std::uint64_t reduced_id_xor = 0ULL;
   MPI_Allreduce(&local_id_xor, &reduced_id_xor, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
   assert(reduced_id_xor == report.global_particle_id_xor);
+
+  const cosmosim::parallel::LocalOwnershipIdentitySummary reduced_identity{
+      .local_owned_count = reduced_particle_count,
+      .local_particle_id_sum = reduced_id_sum,
+      .local_particle_id_xor = reduced_id_xor,
+      .local_particle_ids_unique = report.local_particle_ids_unique,
+  };
+  assert(cosmosim::parallel::partitionIdentityMatchesGeneratedSet(
+      reduced_identity,
+      /*expected_global_count=*/42ULL,
+      /*expected_particle_id_sum=*/(42ULL * 43ULL) / 2ULL,
+      /*expected_particle_id_xor=*/xorRangeOneToN(42ULL)));
 
   MPI_Finalize();
 #endif

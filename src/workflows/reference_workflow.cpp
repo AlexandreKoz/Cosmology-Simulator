@@ -2107,10 +2107,26 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
     report.local_particle_id_sum = computeParticleIdSum(state);
     report.local_particle_id_xor = computeParticleIdXor(state);
+    const auto local_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    report.local_particle_ids_unique = local_identity.local_particle_ids_unique;
     report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
     report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
     report.global_particle_id_sum = mpi_context.allreduceSumUint64(report.local_particle_id_sum);
     report.global_particle_id_xor = mpi_context.allreduceXorUint64(report.local_particle_id_xor);
+    const bool all_ranks_have_unique_local_ids =
+        mpi_context.allreduceSumUint64(report.local_particle_ids_unique ? 1ULL : 0ULL) ==
+        static_cast<std::uint64_t>(mpi_context.worldSize());
+    const parallel::LocalOwnershipIdentitySummary reduced_identity{
+        .local_owned_count = report.global_particle_count,
+        .local_particle_id_sum = report.global_particle_id_sum,
+        .local_particle_id_xor = report.global_particle_id_xor,
+        .local_particle_ids_unique = all_ranks_have_unique_local_ids,
+    };
+    report.global_particle_partition_identity_match = parallel::partitionIdentityMatchesGeneratedSet(
+        reduced_identity,
+        report.global_particle_count,
+        report.global_particle_id_sum,
+        report.global_particle_id_xor);
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "parallel.ownership.partition_summary",
         .severity = core::RuntimeEventSeverity::kInfo,
@@ -2128,7 +2144,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     {"local_particle_id_sum", std::to_string(report.local_particle_id_sum)},
                     {"global_particle_id_sum", std::to_string(report.global_particle_id_sum)},
                     {"local_particle_id_xor", std::to_string(report.local_particle_id_xor)},
-                    {"global_particle_id_xor", std::to_string(report.global_particle_id_xor)}},
+                    {"global_particle_id_xor", std::to_string(report.global_particle_id_xor)},
+                    {"local_particle_ids_unique", report.local_particle_ids_unique ? "true" : "false"},
+                    {"global_particle_partition_identity_match",
+                     report.global_particle_partition_identity_match ? "true" : "false"}},
     });
 
     core::CosmologyBackgroundConfig background_config;
@@ -2308,10 +2327,26 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
     report.local_particle_id_sum = computeParticleIdSum(state);
     report.local_particle_id_xor = computeParticleIdXor(state);
+    const auto final_local_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    report.local_particle_ids_unique = final_local_identity.local_particle_ids_unique;
     report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
     report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
     report.global_particle_id_sum = mpi_context.allreduceSumUint64(report.local_particle_id_sum);
     report.global_particle_id_xor = mpi_context.allreduceXorUint64(report.local_particle_id_xor);
+    const bool final_all_ranks_have_unique_local_ids =
+        mpi_context.allreduceSumUint64(report.local_particle_ids_unique ? 1ULL : 0ULL) ==
+        static_cast<std::uint64_t>(mpi_context.worldSize());
+    const parallel::LocalOwnershipIdentitySummary final_reduced_identity{
+        .local_owned_count = report.global_particle_count,
+        .local_particle_id_sum = report.global_particle_id_sum,
+        .local_particle_id_xor = report.global_particle_id_xor,
+        .local_particle_ids_unique = final_all_ranks_have_unique_local_ids,
+    };
+    report.global_particle_partition_identity_match = parallel::partitionIdentityMatchesGeneratedSet(
+        final_reduced_identity,
+        report.global_particle_count,
+        report.global_particle_id_sum,
+        report.global_particle_id_xor);
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();
     report.treepm_cadence_records.assign(
@@ -2337,6 +2372,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     {"global_particle_id_sum", std::to_string(report.global_particle_id_sum)},
                     {"local_particle_id_xor", std::to_string(report.local_particle_id_xor)},
                     {"global_particle_id_xor", std::to_string(report.global_particle_id_xor)},
+                    {"local_particle_ids_unique", report.local_particle_ids_unique ? "true" : "false"},
+                    {"global_particle_partition_identity_match",
+                     report.global_particle_partition_identity_match ? "true" : "false"},
                     {"final_state_digest", std::to_string(report.final_state_digest)}},
     });
     flushCommonArtifacts(m_frozen_config, profiler, report);

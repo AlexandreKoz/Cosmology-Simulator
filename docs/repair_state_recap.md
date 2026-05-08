@@ -1425,3 +1425,27 @@ Reproducibility impact:
 - Restart HDF5 always writes and requires the particle softening value and authoritative override-mask datasets, preserving exact sidecar presence instead of silently defaulting missing lanes.
 - Restart payload integrity hashing now length-delimits strings and vector byte lanes and continues to cover particle identity, gas identity, species sidecars, module sidecars with schema versions, scheduler/integrator state, normalized config/provenance, and distributed gravity continuation metadata.
 - Reproducibility impact: restart continuation is stricter and more auditable; old files missing v6 runtime-truth lanes are rejected rather than resumed with inferred defaults. Snapshot canonical GADGET/AREPO dataset names remain unchanged.
+
+## 2026-05-08: Distributed ownership identity reduction floor
+
+Commands planned for validation:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4 --target test_unit_parallel_distributed_memory test_integration_reference_workflow_distributed_treepm_mpi test_integration_parallel_two_rank_restart
+./build/cpu-only-debug/test_unit_parallel_distributed_memory
+ctest --preset test-cpu-debug --output-on-failure -R "parallel|distributed|two_rank|restart"
+cmake --preset mpi-hdf5-fftw-debug && cmake --build --preset build-mpi-hdf5-fftw-debug -j4 && ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure -R "mpi|distributed|two_rank|restart"
+```
+
+Observed repair scope:
+
+- Added a distributed ownership identity summary helper for rank-local authoritative particle IDs.
+- Reference workflow reports now expose local duplicate-ID status and a reduced partition identity check for count/sum/xor auditing.
+- Distributed TreePM MPI regression assertions now check the report-level identity status and independently compare reduced identity tuples to the generated IC set.
+- Documentation now distinguishes correctness-first identity reductions from mature load balancing or pencil-FFT work.
+
+Reproducibility impact:
+
+- No solver numerics, config keys, restart schema version, or HDF5 dataset layout changed.
+- Restart long-range PM policy remains deterministic rebuild; the repair adds deterministic integer identity reductions around existing rank-local state.
