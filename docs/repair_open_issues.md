@@ -150,3 +150,8 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 - P1 distributed ownership correctness floor is partially hardened in code by rank-local ID uniqueness summaries and reduced count/sum/xor partition checks in the reference workflow MPI path.
 - Mature load balancing, pencil FFT, and production migration scheduling remain out of scope for this repair cycle.
 - MPI+HDF5+FFTW closure remains dependent on the validation environment providing MPI FFTW (`fftw3_mpi`) and HDF5-enabled MPI presets; if unavailable, the MPI command bundle must be reported as environment-blocked rather than silently passed.
+
+
+## 2026-05-08 notes
+
+- P2 AMR/moving-mesh gas ownership readiness now has an RFC and isolated `GasCellIdentityMap` API guard. Remaining blocker: promotion to production requires explicit restart schema versioning, compatibility behavior, docs updates in `docs/output_schema.md`, and hydro remap tests keyed by stable `gas_cell_id`.

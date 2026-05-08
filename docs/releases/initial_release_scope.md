@@ -57,5 +57,5 @@ cosmosim_harness <config.param.txt>
 - The runtime writes `normalized_config.param.txt` into the run directory after config loading succeeds.
 - Provenance output is mandatory for release reference runs (`provenance_v4`).
 - Snapshot schema compatibility: `gadget_arepo_v4`.
-- Restart schema compatibility: `cosmosim_restart_v5`.
+- Restart schema compatibility: `cosmosim_restart_v6`.
 - Release metadata schema and packaging manifest: `release_manifest_v1`.

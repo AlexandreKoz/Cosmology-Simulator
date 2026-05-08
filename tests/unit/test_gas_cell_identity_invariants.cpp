@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -125,10 +126,65 @@ void test_gas_cell_reorder_resize_invariants() {
   assert(active_view_threw);
 }
 
+
+void test_decoupled_gas_cell_identity_map_api_shape() {
+  cosmosim::core::GasCellIdentityMap map;
+  map.assign({
+      {.gas_cell_id = 9001, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
+      {.gas_cell_id = 9002, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 1},
+      {.gas_cell_id = 9100, .parent_particle_id = std::nullopt, .owning_patch_id = 8, .local_cell_row = 2},
+  });
+
+  assert(map.size() == 3);
+  assert(map.isConsistent());
+
+  const auto* first_child = map.findByGasCellId(9001);
+  assert(first_child != nullptr);
+  assert(first_child->parent_particle_id.has_value());
+  assert(*first_child->parent_particle_id == 100);
+  assert(first_child->owning_patch_id == 7);
+  assert(first_child->local_cell_row == 0);
+
+  const auto* second_child = map.findByGasCellId(9002);
+  assert(second_child != nullptr);
+  assert(second_child->parent_particle_id.has_value());
+  assert(*second_child->parent_particle_id == 100);
+  assert(second_child->local_cell_row == 1);
+
+  const auto* parentless = map.findByLocalRow(2);
+  assert(parentless != nullptr);
+  assert(parentless->gas_cell_id == 9100);
+  assert(!parentless->parent_particle_id.has_value());
+  assert(parentless->owning_patch_id == 8);
+
+  bool duplicate_cell_id_threw = false;
+  try {
+    map.assign({
+        {.gas_cell_id = 9001, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
+        {.gas_cell_id = 9001, .parent_particle_id = 101, .owning_patch_id = 7, .local_cell_row = 1},
+    });
+  } catch (const std::invalid_argument&) {
+    duplicate_cell_id_threw = true;
+  }
+  assert(duplicate_cell_id_threw);
+
+  bool duplicate_local_row_threw = false;
+  try {
+    map.assign({
+        {.gas_cell_id = 9201, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
+        {.gas_cell_id = 9202, .parent_particle_id = 101, .owning_patch_id = 8, .local_cell_row = 0},
+    });
+  } catch (const std::invalid_argument&) {
+    duplicate_local_row_threw = true;
+  }
+  assert(duplicate_local_row_threw);
+}
+
 }  // namespace
 
 int main() {
   test_gas_cell_identity_invariants();
   test_gas_cell_reorder_resize_invariants();
+  test_decoupled_gas_cell_identity_map_api_shape();
   return 0;
 }

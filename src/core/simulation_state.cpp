@@ -7,10 +7,62 @@
 #include <numeric>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 #include <vector>
 #include <unordered_set>
 
 namespace cosmosim::core {
+
+
+void GasCellIdentityMap::assign(std::vector<GasCellIdentityRecord> records) {
+  GasCellIdentityMap candidate;
+  candidate.m_records = std::move(records);
+  if (!candidate.isConsistent()) {
+    throw std::invalid_argument(
+        "GasCellIdentityMap.assign: gas_cell_id and local_cell_row must each be unique stable mappings");
+  }
+  m_records = std::move(candidate.m_records);
+}
+
+std::size_t GasCellIdentityMap::size() const noexcept { return m_records.size(); }
+
+bool GasCellIdentityMap::empty() const noexcept { return m_records.empty(); }
+
+bool GasCellIdentityMap::isConsistent() const noexcept {
+  std::unordered_set<std::uint64_t> gas_cell_ids;
+  std::unordered_set<std::uint32_t> local_rows;
+  gas_cell_ids.reserve(m_records.size());
+  local_rows.reserve(m_records.size());
+  for (const auto& record : m_records) {
+    if (!gas_cell_ids.insert(record.gas_cell_id).second) {
+      return false;
+    }
+    if (!local_rows.insert(record.local_cell_row).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::span<const GasCellIdentityRecord> GasCellIdentityMap::records() const noexcept { return m_records; }
+
+const GasCellIdentityRecord* GasCellIdentityMap::findByGasCellId(std::uint64_t gas_cell_id) const noexcept {
+  for (const auto& record : m_records) {
+    if (record.gas_cell_id == gas_cell_id) {
+      return &record;
+    }
+  }
+  return nullptr;
+}
+
+const GasCellIdentityRecord* GasCellIdentityMap::findByLocalRow(std::uint32_t local_cell_row) const noexcept {
+  for (const auto& record : m_records) {
+    if (record.local_cell_row == local_cell_row) {
+      return &record;
+    }
+  }
+  return nullptr;
+}
 
 bool ParticleReorderMap::isConsistent(std::size_t particle_count) const noexcept {
   if (old_to_new_index.size() != particle_count || new_to_old_index.size() != particle_count) {
