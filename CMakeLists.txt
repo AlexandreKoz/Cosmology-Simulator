@@ -72,6 +72,20 @@ set(COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS
     "300"
     CACHE STRING "Timeout in seconds for long validation, MPI, I/O, and TreePM CTest tests")
 
+function(cosmosim_append_test_labels test_name)
+  get_property(cosmosim_existing_labels TEST ${test_name} PROPERTY LABELS)
+  if(NOT cosmosim_existing_labels)
+    set(cosmosim_existing_labels "")
+  endif()
+  list(APPEND cosmosim_existing_labels ${ARGN})
+  list(REMOVE_DUPLICATES cosmosim_existing_labels)
+  set_tests_properties(${test_name} PROPERTIES LABELS "${cosmosim_existing_labels}")
+endfunction()
+
+function(cosmosim_mark_runtime_truth_test test_name)
+  cosmosim_append_test_labels(${test_name} runtime_truth p0 ${ARGN})
+endfunction()
+
 function(cosmosim_apply_test_defaults)
   get_property(cosmosim_registered_tests DIRECTORY PROPERTY TESTS)
   foreach(cosmosim_test_name IN LISTS cosmosim_registered_tests)
@@ -90,8 +104,11 @@ function(cosmosim_apply_test_defaults)
       list(APPEND cosmosim_existing_labels python)
     endif()
 
-    if(cosmosim_test_name MATCHES "mpi|two_rank|three_rank")
+    if(cosmosim_test_name MATCHES "mpi")
       list(APPEND cosmosim_existing_labels mpi)
+    endif()
+    if(cosmosim_test_name MATCHES "two_rank|three_rank|distributed")
+      list(APPEND cosmosim_existing_labels distributed)
     endif()
     if(cosmosim_test_name MATCHES "runtime_app_smoke")
       list(APPEND cosmosim_existing_labels runtime smoke)
@@ -426,9 +443,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_simulation_state tests/unit/test_simulation_state.cpp)
   target_link_libraries(test_unit_simulation_state PRIVATE cosmosim_all)
   add_test(NAME unit_simulation_state COMMAND test_unit_simulation_state)
+  cosmosim_mark_runtime_truth_test(unit_simulation_state active_views scheduler gas sidecar migration)
   add_executable(test_unit_gas_cell_identity_invariants tests/unit/test_gas_cell_identity_invariants.cpp)
   target_link_libraries(test_unit_gas_cell_identity_invariants PRIVATE cosmosim_all)
   add_test(NAME unit_gas_cell_identity_invariants COMMAND test_unit_gas_cell_identity_invariants)
+  cosmosim_mark_runtime_truth_test(unit_gas_cell_identity_invariants gas sidecar)
 
   add_executable(test_unit_config_parser tests/unit/test_config_parser.cpp)
   target_link_libraries(test_unit_config_parser PRIVATE cosmosim_all)
@@ -461,6 +480,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_hot_cold_sidecar_layout tests/unit/test_hot_cold_sidecar_layout.cpp)
   target_link_libraries(test_unit_hot_cold_sidecar_layout PRIVATE cosmosim_core)
   add_test(NAME unit_hot_cold_sidecar_layout COMMAND test_unit_hot_cold_sidecar_layout)
+  cosmosim_mark_runtime_truth_test(unit_hot_cold_sidecar_layout sidecar)
 
 
   add_executable(test_unit_parallel_distributed_memory tests/unit/test_parallel_distributed_memory.cpp)
@@ -539,20 +559,24 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_reorder_compaction_sidecars tests/integration/test_reorder_compaction_sidecars.cpp)
   target_link_libraries(test_integration_reorder_compaction_sidecars PRIVATE cosmosim_core)
   add_test(NAME integration_reorder_compaction_sidecars COMMAND test_integration_reorder_compaction_sidecars)
+  cosmosim_mark_runtime_truth_test(integration_reorder_compaction_sidecars sidecar active_views)
 
   add_executable(test_integration_species_migration_invariants tests/integration/test_species_migration_invariants.cpp)
   target_link_libraries(test_integration_species_migration_invariants PRIVATE cosmosim_core cosmosim_gravity)
   add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
+  cosmosim_mark_runtime_truth_test(integration_species_migration_invariants migration sidecar)
 
   add_executable(test_integration_transform_fuzz_invariants tests/integration/test_transform_fuzz_invariants.cpp)
   target_link_libraries(test_integration_transform_fuzz_invariants PRIVATE cosmosim_all)
   add_test(NAME integration_transform_fuzz_invariants COMMAND test_integration_transform_fuzz_invariants)
+  cosmosim_mark_runtime_truth_test(integration_transform_fuzz_invariants migration sidecar gas softening active_views)
   add_test(NAME validation_transform_fuzz_invariants_long COMMAND test_integration_transform_fuzz_invariants --long)
   set_tests_properties(validation_transform_fuzz_invariants_long PROPERTIES LABELS "validation;integration;fuzz")
 
   add_executable(test_integration_softening_ownership_invariants tests/integration/test_softening_ownership_invariants.cpp)
   target_link_libraries(test_integration_softening_ownership_invariants PRIVATE cosmosim_all)
   add_test(NAME integration_softening_ownership_invariants COMMAND test_integration_softening_ownership_invariants)
+  cosmosim_mark_runtime_truth_test(integration_softening_ownership_invariants softening sidecar)
 
 
   add_executable(test_integration_profiling_mini_run tests/integration/test_profiling_mini_run.cpp)
@@ -566,10 +590,12 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_hierarchical_time_bins tests/integration/test_hierarchical_time_bins.cpp)
   target_link_libraries(test_integration_hierarchical_time_bins PRIVATE cosmosim_core)
   add_test(NAME integration_hierarchical_time_bins COMMAND test_integration_hierarchical_time_bins)
+  cosmosim_mark_runtime_truth_test(integration_hierarchical_time_bins scheduler)
 
   add_executable(test_integration_hierarchical_timestep_regression tests/integration/test_hierarchical_timestep_regression.cpp)
   target_link_libraries(test_integration_hierarchical_timestep_regression PRIVATE cosmosim_core)
   add_test(NAME integration_hierarchical_timestep_regression COMMAND test_integration_hierarchical_timestep_regression)
+  cosmosim_mark_runtime_truth_test(integration_hierarchical_timestep_regression scheduler)
 
 
   add_executable(test_unit_analysis_diagnostics tests/unit/test_analysis_diagnostics.cpp)
@@ -601,6 +627,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_parallel_two_rank_restart tests/integration/test_parallel_two_rank_restart.cpp)
   target_link_libraries(test_integration_parallel_two_rank_restart PRIVATE cosmosim_parallel cosmosim_core)
   add_test(NAME integration_parallel_two_rank_restart COMMAND test_integration_parallel_two_rank_restart)
+  cosmosim_mark_runtime_truth_test(integration_parallel_two_rank_restart restart scheduler)
 
   add_executable(test_integration_hydro_sod_like tests/integration/test_hydro_sod_like.cpp)
   target_link_libraries(test_integration_hydro_sod_like PRIVATE cosmosim_hydro)
@@ -644,11 +671,13 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_snapshot_hdf5_schema tests/unit/test_snapshot_hdf5_schema.cpp)
   target_link_libraries(test_unit_snapshot_hdf5_schema PRIVATE cosmosim_io)
   add_test(NAME unit_snapshot_hdf5_schema COMMAND test_unit_snapshot_hdf5_schema)
+  cosmosim_mark_runtime_truth_test(unit_snapshot_hdf5_schema snapshot)
 
 
   add_executable(test_unit_restart_checkpoint_schema tests/unit/test_restart_checkpoint_schema.cpp)
   target_link_libraries(test_unit_restart_checkpoint_schema PRIVATE cosmosim_io)
   add_test(NAME unit_restart_checkpoint_schema COMMAND test_unit_restart_checkpoint_schema)
+  cosmosim_mark_runtime_truth_test(unit_restart_checkpoint_schema restart provenance)
 
   add_executable(test_unit_tree_pm_split_kernel tests/unit/test_tree_pm_split_kernel.cpp)
   target_link_libraries(test_unit_tree_pm_split_kernel PRIVATE cosmosim_gravity)
@@ -672,6 +701,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_snapshot_hdf5_roundtrip tests/integration/test_snapshot_hdf5_roundtrip.cpp)
   target_link_libraries(test_integration_snapshot_hdf5_roundtrip PRIVATE cosmosim_all)
   add_test(NAME integration_snapshot_hdf5_roundtrip COMMAND test_integration_snapshot_hdf5_roundtrip)
+  cosmosim_mark_runtime_truth_test(integration_snapshot_hdf5_roundtrip snapshot sidecar)
   add_executable(test_integration_tracer_advection tests/integration/test_tracer_advection.cpp)
   target_link_libraries(test_integration_tracer_advection PRIVATE cosmosim_all)
   add_test(NAME integration_tracer_advection COMMAND test_integration_tracer_advection)
@@ -680,6 +710,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_restart_checkpoint_roundtrip tests/integration/test_restart_checkpoint_roundtrip.cpp)
   target_link_libraries(test_integration_restart_checkpoint_roundtrip PRIVATE cosmosim_all)
   add_test(NAME integration_restart_checkpoint_roundtrip COMMAND test_integration_restart_checkpoint_roundtrip)
+  cosmosim_mark_runtime_truth_test(integration_restart_checkpoint_roundtrip restart provenance gas sidecar scheduler)
 
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
@@ -691,6 +722,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_provenance_roundtrip tests/integration/test_provenance_roundtrip.cpp)
   target_link_libraries(test_integration_provenance_roundtrip PRIVATE cosmosim_core)
   add_test(NAME integration_provenance_roundtrip COMMAND test_integration_provenance_roundtrip)
+  cosmosim_mark_runtime_truth_test(integration_provenance_roundtrip provenance)
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_feature_summary.cmake.in"
@@ -726,6 +758,14 @@ if(COSMOSIM_ENABLE_TESTS)
     @ONLY)
   add_test(NAME integration_release_readiness_artifacts
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_release_readiness_artifacts.cmake")
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_truth_ctest_labels.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_runtime_truth_ctest_labels.cmake"
+    @ONLY)
+  add_test(NAME integration_runtime_truth_ctest_labels
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_truth_ctest_labels.cmake")
+  cosmosim_mark_runtime_truth_test(integration_runtime_truth_ctest_labels ci labels)
 
 
   if(COSMOSIM_ENABLE_HDF5)

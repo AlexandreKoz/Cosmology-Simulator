@@ -66,3 +66,56 @@ Any intentional baseline drift must be committed by updating this contract with 
 - MPI and GPU paths are optional in default hosted CI to keep turnaround affordable.
 - Regression checks rely on curated scientific tests plus metadata contract checks; this is not a substitute for full validation campaigns.
 - Benchmark outputs are archived as profiling sentinels only and must not be interpreted as correctness proof.
+
+## Stage 1 runtime-truth CPU P0 gate
+
+The dependency-free Stage 1 runtime-truth gate is the local and CI entry point for runtime-truth repair closure. It is intentionally CPU-only: it must configure, build, and run without HDF5, FFTW, MPI, CUDA, or Python being enabled.
+
+One-command local gate:
+
+```bash
+./scripts/ci/run_stage1_runtime_truth_gate.sh ci_artifacts/stage1_runtime_truth
+```
+
+Equivalent expanded commands:
+
+```bash
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j4
+ctest --preset test-stage1-runtime-truth-cpu-debug --output-on-failure
+```
+
+Compatibility preset retained for earlier repair notes:
+
+```bash
+ctest --preset test-stage0-runtime-truth-cpu-debug --output-on-failure
+```
+
+The Stage 1 P0 suite is registered explicitly rather than selected by broad substrings. The suite covers:
+
+- active views and scheduler mirrors: `unit_simulation_state`, `integration_hierarchical_time_bins`, `integration_hierarchical_timestep_regression`;
+- gas identity and sidecar layout: `unit_gas_cell_identity_invariants`, `unit_hot_cold_sidecar_layout`, `integration_reorder_compaction_sidecars`;
+- migration/transform invariants: `integration_species_migration_invariants`, `integration_transform_fuzz_invariants`;
+- softening ownership: `integration_softening_ownership_invariants`;
+- snapshot/restart/provenance contracts runnable in CPU-only mode: `unit_snapshot_hdf5_schema`, `unit_restart_checkpoint_schema`, `integration_snapshot_hdf5_roundtrip`, `integration_restart_checkpoint_roundtrip`, `integration_provenance_roundtrip`;
+- CTest registration audit and optional-feature negative check: `integration_runtime_truth_ctest_labels`.
+
+Expected gate behavior:
+
+- `test-stage1-runtime-truth-cpu-debug` runs only the P0 runtime-truth list above.
+- Every P0 runtime-truth test has the `runtime_truth` and `p0` CTest labels plus a subsystem label such as `softening`, `sidecar`, `gas`, `migration`, `restart`, `provenance`, `scheduler`, or `active_views`.
+- CPU-only builds do not register HDF5 app-smoke, CUDA, Python, or MPI multi-rank tests; `integration_runtime_truth_ctest_labels` fails if those feature-gated tests appear while their feature option is disabled.
+- Feature-enabled presets still fail during configure when their requested dependency is missing because the CMake feature options use required dependency discovery (`MPI`, `HDF5`, `FFTW`, `CUDAToolkit`, `Python3`, and `pybind11`).
+
+Feature-specific gates remain explicit and dependency-correct:
+
+```bash
+./scripts/ci/run_preset_pipeline.sh hdf5-debug build-hdf5-debug test-hdf5-debug \
+  unit_snapshot_hdf5_schema\|unit_restart_checkpoint_schema\|integration_snapshot_hdf5_roundtrip\|integration_restart_checkpoint_roundtrip \
+  ci_artifacts/hdf5_runtime_truth 0
+./scripts/ci/run_preset_pipeline.sh pm-hdf5-fftw-debug build-pm-hdf5-fftw-debug test-pm-hdf5-fftw-debug \
+  unit_pm_solver\|integration_pm_periodic_mode\|integration_tree_pm_coupling_periodic \
+  ci_artifacts/pm_hdf5_fftw 0
+```
+
+Do not commit `build/` directories, `ci_artifacts/`, CTest XML, or generated feature/metadata outputs. Archive them only as CI artifacts.

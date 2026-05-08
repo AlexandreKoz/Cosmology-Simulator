@@ -129,3 +129,15 @@ Observed result:
 - After `cmake --build --preset build-cpu-debug -j4`, the same `ctest --preset test-cpu-debug --output-on-failure -R "simulation_state|ownership|runtime|truth"` passed 3/3.
 
 Reproducibility impact: documentation-only audit. No normalized config dumps, provenance payloads, restart/snapshot schemas, output naming, deterministic scheduling behavior, solver numerics, or SoA/hot-cold layouts are changed.
+
+## CI gate consolidation update: runtime-truth repair suite
+
+The Stage 1 P0 runtime-truth tests are now registered with explicit `runtime_truth`/`p0` CTest labels and subsystem labels for softening, sidecar, gas, migration, restart, provenance, scheduler, and active-view failures. The dependency-free local/CI closeout command is:
+
+```bash
+./scripts/ci/run_stage1_runtime_truth_gate.sh ci_artifacts/stage1_runtime_truth
+```
+
+The script expands to `cmake --fresh --preset cpu-only-debug`, `cmake --build --preset build-cpu-debug`, and `ctest --preset test-stage1-runtime-truth-cpu-debug` over the exact P0 test list; it also validates the build metadata contract. The `integration_runtime_truth_ctest_labels` audit test verifies that P0 tests are registered and labeled and that feature-gated MPI/CUDA/Python/HDF5 app-smoke tests are absent from CPU-only builds rather than silently passing in a disabled feature configuration.
+
+Reproducibility impact: CI/test registration only. No normalized config dumps, provenance payloads, restart/snapshot schemas, output naming, deterministic scheduling behavior, solver numerics, or SoA/hot-cold layouts are changed.

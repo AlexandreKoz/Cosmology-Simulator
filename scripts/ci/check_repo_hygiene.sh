@@ -70,5 +70,6 @@ echo "[hygiene] checking CI shell script syntax"
 bash -n ./scripts/ci/run_preset_pipeline.sh
 bash -n ./scripts/ci/enforce_infra_gates.sh
 bash -n ./scripts/ci/run_reproducibility_gate.sh
+bash -n ./scripts/ci/run_stage1_runtime_truth_gate.sh
 
 exit 0
