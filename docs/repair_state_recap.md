@@ -5,6 +5,31 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) Active-view lifetime, generation, and workspace reuse hardening (2026-05-07 UTC)
+
+Validation commands for this repair:
+
+```bash
+cmake --build --preset build-cpu-debug -j4 --target test_unit_simulation_state test_unit_hot_cold_sidecar_layout test_integration_reorder_compaction_sidecars test_unit_tree_pm_split_kernel
+ctest --preset test-cpu-debug --output-on-failure -R "unit_simulation_state|integration_reorder_compaction_sidecars|unit_hot_cold_sidecar_layout"
+ctest --preset test-cpu-debug --output-on-failure -R "active|stale|kernel|hot_cold|workspace"
+```
+
+Observed:
+
+- Added generation stamps to read-only particle and cell active views, matching the existing mutable kernel-view scatter generation guards.
+- Kept active/kernel view storage as `TransientStepWorkspace` scratch mirrors only, with comments documenting non-ownership, allowed mutable hot lanes, and forbidden metadata lanes.
+- Extended regression coverage for stale particle scatter after migration, stale hydro scatter after gas-cell identity rebuild, and workspace clear/reuse preserving capacity without exposing stale rows.
+
+Migration note:
+
+- Callers should continue to construct active views through `buildParticleActiveView` and `buildCellActiveView`; aggregate/manual construction must initialize the new source-generation field to preserve stale-view auditability. No config keys, snapshot/restart payloads, or solver inputs migrate.
+
+Reproducibility impact:
+
+- Deterministic behavior is strengthened: stale compact views now carry auditable source generations across read-only and mutable active paths, and mutable scatter continues to fail before row-index writes after structural transforms. No solver numerics, restart/HDF5 schema, output naming, normalized-config generation, rank coordination, or persistent ownership semantics changed.
+
+
 ## 0) Transform fuzz/invariant harness hardening (2026-05-07 UTC)
 
 Validation commands for this repair:

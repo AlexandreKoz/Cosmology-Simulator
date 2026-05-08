@@ -559,6 +559,7 @@ void test_particle_stale_view_invalidation() {
   cosmosim::core::TransientStepWorkspace workspace;
   std::vector<std::uint32_t> active{0U, 1U, 2U};
   auto gravity_view = cosmosim::core::buildGravityParticleKernelView(state, active, workspace);
+  assert(gravity_view.source_particle_index_generation == state.particleIndexGeneration());
 
   const auto reorder = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
   cosmosim::core::reorderParticles(state, reorder);
@@ -570,6 +571,24 @@ void test_particle_stale_view_invalidation() {
     stale_particle_view_threw = true;
   }
   assert(stale_particle_view_threw);
+
+  SimulationState migrated_state;
+  seedSyntheticState(migrated_state);
+  auto migrated_view = cosmosim::core::buildGravityParticleKernelView(migrated_state, active, workspace);
+  auto records = migrated_state.packParticleMigrationRecords(std::span<const std::uint32_t>(active.data(), 1));
+  cosmosim::core::ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {active.front()};
+  commit.inbound_records = records;
+  migrated_state.commitParticleMigration(commit);
+
+  bool stale_migration_view_threw = false;
+  try {
+    cosmosim::core::scatterGravityParticleKernelView(migrated_view, migrated_state);
+  } catch (const std::runtime_error&) {
+    stale_migration_view_threw = true;
+  }
+  assert(stale_migration_view_threw);
 
   state.resizeCells(2);
   state.refreshGasCellIdentityFromParticleOrder();
@@ -584,7 +603,8 @@ void test_particle_stale_view_invalidation() {
 
   std::vector<std::uint32_t> active_cells{0U, 1U};
   auto hydro_view = cosmosim::core::buildHydroCellKernelView(state, active_cells, workspace);
-  state.resizeCells(2);
+  assert(hydro_view.source_cell_index_generation == state.cellIndexGeneration());
+  state.refreshGasCellIdentityFromParticleOrder();
 
   bool stale_cell_view_threw = false;
   try {

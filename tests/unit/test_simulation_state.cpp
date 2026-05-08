@@ -69,6 +69,10 @@ int main() {
     state.gas_cells.recon_gradient_z[i] = 0.03;
   }
 
+  const cosmosim::core::SimulationState cell_fixture = state;
+  state.resizeCells(0);
+  state.resizePatches(0);
+
   state.rebuildSpeciesIndex();
   assert(state.particle_species_index.count(cosmosim::core::ParticleSpecies::kDarkMatter) == 2);
   assert(state.particle_species_index.count(cosmosim::core::ParticleSpecies::kStar) == 3);
@@ -107,12 +111,14 @@ int main() {
   const std::array<std::uint32_t, 2> particle_indices{1, 3};
   auto particle_view = cosmosim::core::buildParticleActiveView(state, particle_indices, workspace);
   assert(particle_view.size() == 2);
+  assert(particle_view.source_particle_index_generation == state.particleIndexGeneration());
   assert(particle_view.particle_id[0] == 1001);
   assert(particle_view.position_x_comoving[1] == 3.0);
 
   const std::array<std::uint32_t, 1> cell_indices{2};
-  auto cell_view = cosmosim::core::buildCellActiveView(state, cell_indices, workspace);
+  auto cell_view = cosmosim::core::buildCellActiveView(cell_fixture, cell_indices, workspace);
   assert(cell_view.size() == 1);
+  assert(cell_view.source_cell_index_generation == cell_fixture.cellIndexGeneration());
   assert(cell_view.density_code[0] == 12.0);
 
   const std::array<std::uint32_t, 2> kernel_particle_indices{0, 2};
@@ -126,15 +132,60 @@ int main() {
   assert(state.particles.mass_code[2] == 8.0);
   assert(state.particle_sidecar.particle_id == particle_id_before);
 
+  cosmosim::core::SimulationState hydro_fixture;
+  hydro_fixture.resizeParticles(3);
+  hydro_fixture.resizeCells(3);
+  hydro_fixture.resizePatches(1);
+  hydro_fixture.patches.patch_id[0] = 7;
+  hydro_fixture.patches.first_cell[0] = 0;
+  hydro_fixture.patches.cell_count[0] = 3;
+  for (std::size_t i = 0; i < 3; ++i) {
+    hydro_fixture.particle_sidecar.particle_id[i] = 2000 + i;
+    hydro_fixture.particle_sidecar.species_tag[i] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    hydro_fixture.particle_sidecar.owning_rank[i] = 0;
+    hydro_fixture.cells.center_x_comoving[i] = cell_fixture.cells.center_x_comoving[i];
+    hydro_fixture.cells.center_y_comoving[i] = cell_fixture.cells.center_y_comoving[i];
+    hydro_fixture.cells.center_z_comoving[i] = cell_fixture.cells.center_z_comoving[i];
+    hydro_fixture.cells.mass_code[i] = cell_fixture.cells.mass_code[i];
+    hydro_fixture.cells.patch_index[i] = 0;
+    hydro_fixture.gas_cells.density_code[i] = cell_fixture.gas_cells.density_code[i];
+    hydro_fixture.gas_cells.pressure_code[i] = cell_fixture.gas_cells.pressure_code[i];
+  }
+  hydro_fixture.species.count_by_species = {0, 3, 0, 0, 0};
+  hydro_fixture.rebuildSpeciesIndex();
   const std::array<std::uint32_t, 2> kernel_cell_indices{0, 1};
-  auto hydro_view = cosmosim::core::buildHydroCellKernelView(state, kernel_cell_indices, workspace);
+  auto hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_fixture, kernel_cell_indices, workspace);
   hydro_view.center_x_comoving[1] = 44.0;
   hydro_view.density_code[0] = 55.0;
   hydro_view.pressure_code[1] = 66.0;
-  cosmosim::core::scatterHydroCellKernelView(hydro_view, state);
-  assert(state.cells.center_x_comoving[1] == 44.0);
-  assert(state.gas_cells.density_code[0] == 55.0);
-  assert(state.gas_cells.pressure_code[1] == 66.0);
+  cosmosim::core::scatterHydroCellKernelView(hydro_view, hydro_fixture);
+  assert(hydro_fixture.cells.center_x_comoving[1] == 44.0);
+  assert(hydro_fixture.gas_cells.density_code[0] == 55.0);
+  assert(hydro_fixture.gas_cells.pressure_code[1] == 66.0);
+
+  {
+    // test_workspace_reuse_preserves_capacity_without_exposing_stale_rows:
+    // clear() releases view sizes and scratch offsets, but keeps vector capacity for hot-loop reuse.
+    cosmosim::core::TransientStepWorkspace reuse_workspace;
+    const std::array<std::uint32_t, 3> wide_particles{0, 1, 2};
+    const auto wide_view = cosmosim::core::buildGravityParticleKernelView(state, wide_particles, reuse_workspace);
+    assert(wide_view.size() == wide_particles.size());
+    const auto particle_capacity = reuse_workspace.particle_position_x_comoving.capacity();
+    const auto index_capacity = reuse_workspace.gravity_particle_index.capacity();
+    reuse_workspace.clear();
+    assert(reuse_workspace.particle_position_x_comoving.empty());
+    assert(reuse_workspace.gravity_particle_index.empty());
+    assert(reuse_workspace.particle_position_x_comoving.capacity() == particle_capacity);
+    assert(reuse_workspace.gravity_particle_index.capacity() == index_capacity);
+    const std::array<std::uint32_t, 1> narrow_particles{4};
+    const auto narrow_view =
+        cosmosim::core::buildGravityParticleKernelView(state, narrow_particles, reuse_workspace);
+    assert(narrow_view.size() == narrow_particles.size());
+    assert(reuse_workspace.particle_position_x_comoving.capacity() == particle_capacity);
+    assert(reuse_workspace.gravity_particle_index.capacity() == index_capacity);
+    assert(narrow_view.particle_index[0] == narrow_particles[0]);
+  }
 
   {
     // test_active_set_cache_invalidation: stale compact views fail loudly on index-space mutation.
@@ -158,7 +209,14 @@ int main() {
 
   {
     cosmosim::core::SimulationState cell_state;
+    cell_state.resizeParticles(3);
     cell_state.resizeCells(3);
+    cell_state.species.count_by_species = {0, 3, 0, 0, 0};
+    for (std::size_t i = 0; i < cell_state.particles.size(); ++i) {
+      cell_state.particle_sidecar.particle_id[i] = 8000 + i;
+      cell_state.particle_sidecar.species_tag[i] =
+          static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    }
     for (std::size_t i = 0; i < cell_state.cells.size(); ++i) {
       cell_state.cells.center_x_comoving[i] = static_cast<double>(100 + i);
       cell_state.cells.center_y_comoving[i] = static_cast<double>(110 + i);
@@ -167,6 +225,7 @@ int main() {
       cell_state.gas_cells.density_code[i] = static_cast<double>(140 + i);
       cell_state.gas_cells.pressure_code[i] = static_cast<double>(150 + i);
     }
+    cell_state.rebuildSpeciesIndex();
     cosmosim::core::TransientStepWorkspace stale_workspace;
     const std::array<std::uint32_t, 2> stale_cell_indices{0, 1};
     auto stale_hydro_view = cosmosim::core::buildHydroCellKernelView(cell_state, stale_cell_indices, stale_workspace);
@@ -187,18 +246,24 @@ int main() {
     derivation_state.resizeCells(2);
     for (std::size_t i = 0; i < derivation_state.particles.size(); ++i) {
       derivation_state.particle_sidecar.particle_id[i] = 4000 + i;
+      derivation_state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(
+          i < derivation_state.cells.size() ? cosmosim::core::ParticleSpecies::kGas
+                                            : cosmosim::core::ParticleSpecies::kDarkMatter);
       derivation_state.particles.position_x_comoving[i] = static_cast<double>(10 + i);
       derivation_state.particles.mass_code[i] = static_cast<double>(20 + i);
     }
+    derivation_state.species.count_by_species = {2, 2, 0, 0, 0};
     for (std::size_t i = 0; i < derivation_state.cells.size(); ++i) {
       derivation_state.cells.center_x_comoving[i] = static_cast<double>(30 + i);
       derivation_state.gas_cells.density_code[i] = static_cast<double>(40 + i);
     }
+    derivation_state.rebuildSpeciesIndex();
     const std::array<std::uint32_t, 2> authoritative_particle_indices{1, 3};
     const std::array<std::uint32_t, 1> authoritative_cell_indices{1};
     cosmosim::core::TransientStepWorkspace derivation_workspace;
     const auto particle_active =
         cosmosim::core::buildParticleActiveView(derivation_state, authoritative_particle_indices, derivation_workspace);
+    assert(particle_active.source_particle_index_generation == derivation_state.particleIndexGeneration());
     const auto gravity_active =
         cosmosim::core::buildGravityParticleKernelView(
             derivation_state,
@@ -210,6 +275,7 @@ int main() {
 
     const auto cell_active =
         cosmosim::core::buildCellActiveView(derivation_state, authoritative_cell_indices, derivation_workspace);
+    assert(cell_active.source_cell_index_generation == derivation_state.cellIndexGeneration());
     const auto hydro_active =
         cosmosim::core::buildHydroCellKernelView(derivation_state, authoritative_cell_indices, derivation_workspace);
     assert(hydro_active.size() == cell_active.size());
@@ -258,6 +324,7 @@ int main() {
   assert(outbound_records.size() == 1);
   assert(outbound_records[0].particle_id == 1003);
   outbound_records[0].owning_rank = 0;
+  state.particle_sidecar.owning_rank[1] = 1;
 
   cosmosim::core::ParticleMigrationRecord inbound_record;
   inbound_record.particle_id = 9090;
