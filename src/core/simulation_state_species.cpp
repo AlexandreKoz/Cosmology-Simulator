@@ -269,7 +269,12 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     }
   }
 
-  auto require_inbound_sidecar_contract = [](const ParticleMigrationRecord& inbound) {
+  const bool destination_expects_softening_value =
+      !particle_sidecar.gravity_softening_comoving.empty() ||
+      !particle_sidecar.has_gravity_softening_override.empty();
+
+  auto require_inbound_sidecar_contract = [destination_expects_softening_value](
+                                           const ParticleMigrationRecord& inbound) {
     if (!isValidSpeciesTag(inbound.species_tag)) {
       throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
     }
@@ -290,6 +295,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     if (inbound.has_tracer_fields != requires_tracer_fields) {
       throw std::invalid_argument(
           "commitParticleMigration: inbound tracer sidecar fields do not match species tag");
+    }
+    if (destination_expects_softening_value && !inbound.has_gravity_softening_value) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound record is missing required softening value for destination sidecar");
     }
     if (inbound.has_gravity_softening_override && !inbound.has_gravity_softening_value) {
       throw std::invalid_argument(

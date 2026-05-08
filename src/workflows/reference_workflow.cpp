@@ -390,12 +390,14 @@ void rebuildLocalGasStateFromParticleIds(
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
     if (old_cell_index >= old_cell_particle_id.size()) {
-      return std::uint32_t{0};
+      throw std::runtime_error(
+          "rebuildLocalGasStateFromParticleIds: sidecar host_cell_index does not refer to an old gas cell");
     }
     const std::uint64_t host_particle_id = old_cell_particle_id[old_cell_index];
     const auto found = new_cell_index_by_particle_id.find(host_particle_id);
     if (found == new_cell_index_by_particle_id.end()) {
-      return std::uint32_t{0};
+      throw std::runtime_error(
+          "rebuildLocalGasStateFromParticleIds: sidecar host gas cell was removed during ownership compaction");
     }
     return found->second;
   };
@@ -1245,15 +1247,20 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_cell_accel_z.assign(context.state.cells.size(), 0.0);
     }
     const gravity::TreeSofteningView softening_view{
-        .source_species_tag = std::span<const std::uint32_t>(context.state.particle_sidecar.species_tag.data(), context.state.particle_sidecar.species_tag.size()),
+        .source_species_tag = std::span<const std::uint32_t>(m_local_source_species_tag.data(), m_local_source_species_tag.size()),
         .source_particle_epsilon_comoving = std::span<const double>(
-            context.state.particle_sidecar.gravity_softening_comoving.empty() ? nullptr : context.state.particle_sidecar.gravity_softening_comoving.data(),
-            context.state.particle_sidecar.gravity_softening_comoving.size()),
+            m_local_source_softening_comoving.empty() ? nullptr : m_local_source_softening_comoving.data(),
+            m_local_source_softening_comoving.size()),
         .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
-            context.state.particle_sidecar.has_gravity_softening_override.empty() ? nullptr : context.state.particle_sidecar.has_gravity_softening_override.data(),
-            context.state.particle_sidecar.has_gravity_softening_override.size()),
-        .target_particle_epsilon_comoving = std::span<const double>(),
-        .target_particle_epsilon_override_mask = std::span<const std::uint8_t>(),
+            m_local_source_softening_override_mask.empty() ? nullptr : m_local_source_softening_override_mask.data(),
+            m_local_source_softening_override_mask.size()),
+        .target_species_tag = std::span<const std::uint32_t>(m_active_target_species_tag.data(), m_active_target_species_tag.size()),
+        .target_particle_epsilon_comoving = std::span<const double>(
+            m_active_target_softening_comoving.empty() ? nullptr : m_active_target_softening_comoving.data(),
+            m_active_target_softening_comoving.size()),
+        .target_particle_epsilon_override_mask = std::span<const std::uint8_t>(
+            m_active_target_softening_override_mask.empty() ? nullptr : m_active_target_softening_override_mask.data(),
+            m_active_target_softening_override_mask.size()),
         .species_policy = m_tree_pm_species_softening,
     };
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
@@ -1581,7 +1588,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_local_source_y.clear();
     m_local_source_z.clear();
     m_local_source_mass.clear();
+    m_local_source_species_tag.clear();
+    m_local_source_softening_comoving.clear();
+    m_local_source_softening_override_mask.clear();
     m_local_to_global.clear();
+    const bool has_softening_values = !state.particle_sidecar.gravity_softening_comoving.empty();
+    const bool has_softening_masks = !state.particle_sidecar.has_gravity_softening_override.empty();
     for (std::size_t global_index = 0; global_index < particle_count; ++global_index) {
       if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
         continue;
@@ -1592,10 +1604,21 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_local_source_y.push_back(state.particles.position_y_comoving[global_index]);
       m_local_source_z.push_back(state.particles.position_z_comoving[global_index]);
       m_local_source_mass.push_back(state.particles.mass_code[global_index]);
+      m_local_source_species_tag.push_back(state.particle_sidecar.species_tag[global_index]);
+      if (has_softening_values) {
+        m_local_source_softening_comoving.push_back(state.particle_sidecar.gravity_softening_comoving[global_index]);
+      }
+      if (has_softening_masks) {
+        m_local_source_softening_override_mask.push_back(
+            state.particle_sidecar.hasGravitySofteningOverride(global_index) ? 1U : 0U);
+      }
     }
 
     m_local_active_indices.clear();
     m_local_active_global_indices.clear();
+    m_active_target_species_tag.clear();
+    m_active_target_softening_comoving.clear();
+    m_active_target_softening_override_mask.clear();
     for (const std::uint32_t global_index : active_particles) {
       if (global_index >= particle_count) {
         throw std::out_of_range("gravity callback active particle index out of range");
@@ -1604,8 +1627,16 @@ class GravityStageCallback final : public core::IntegrationCallback {
       if (local_index < 0) {
         continue;
       }
-      m_local_active_indices.push_back(static_cast<std::uint32_t>(local_index));
+      const auto local_u32 = static_cast<std::uint32_t>(local_index);
+      m_local_active_indices.push_back(local_u32);
       m_local_active_global_indices.push_back(global_index);
+      m_active_target_species_tag.push_back(m_local_source_species_tag[local_u32]);
+      if (has_softening_values) {
+        m_active_target_softening_comoving.push_back(m_local_source_softening_comoving[local_u32]);
+      }
+      if (has_softening_masks) {
+        m_active_target_softening_override_mask.push_back(m_local_source_softening_override_mask[local_u32]);
+      }
     }
   }
 
@@ -1637,6 +1668,12 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_local_source_y;
   std::vector<double> m_local_source_z;
   std::vector<double> m_local_source_mass;
+  std::vector<std::uint32_t> m_local_source_species_tag;
+  std::vector<double> m_local_source_softening_comoving;
+  std::vector<std::uint8_t> m_local_source_softening_override_mask;
+  std::vector<std::uint32_t> m_active_target_species_tag;
+  std::vector<double> m_active_target_softening_comoving;
+  std::vector<std::uint8_t> m_active_target_softening_override_mask;
   std::vector<std::uint8_t> m_source_is_high_res;
   std::vector<std::uint8_t> m_active_is_high_res;
   std::vector<std::uint32_t> m_local_to_global;

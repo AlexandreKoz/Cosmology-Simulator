@@ -308,6 +308,10 @@ void TreeGravitySolver::evaluateActiveSet(
       softening_view.target_particle_epsilon_override_mask.size() != active_particle_index.size()) {
     throw std::invalid_argument("Tree gravity target softening override mask size must match active-set size");
   }
+  if (!softening_view.target_species_tag.empty() &&
+      softening_view.target_species_tag.size() != active_particle_index.size()) {
+    throw std::invalid_argument("Tree gravity target species sidecar size must match active-set size");
+  }
 
   const auto traversal_start = std::chrono::steady_clock::now();
   std::uint64_t accepted_nodes = 0;
@@ -326,7 +330,8 @@ void TreeGravitySolver::evaluateActiveSet(
     const double px = pos_x_comoving[particle_index];
     const double py = pos_y_comoving[particle_index];
     const double pz = pos_z_comoving[particle_index];
-    const double target_softening_comoving = resolveTargetSofteningEpsilon(active_i, options.softening, softening_view);
+    const double target_softening_comoving =
+        resolveTargetSofteningEpsilon(active_i, particle_index, options.softening, softening_view);
 
     double ax = 0.0;
     double ay = 0.0;

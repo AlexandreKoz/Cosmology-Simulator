@@ -6,7 +6,7 @@ Scope: baseline audit freeze for particle, gas-cell, species-sidecar, restart, s
 
 ## Audit commands and files inspected
 
-- `git status --short` returned clean before edits.
+- Baseline archive did not include `.git/` metadata in the reviewed zip; mutation-map proof therefore used source/diff inspection rather than repository status claims.
 - Source/doc sweep used `rg` for `SimulationState`, sidecar, ownership, runtime-truth, reorder, migration, restart, snapshot, gas, and softening terms across `tests`, `include`, `src`, and architecture/repair docs.
 - Targeted source reads covered:
   - `include/cosmosim/core/simulation_state.hpp`
@@ -141,3 +141,13 @@ The Stage 1 P0 runtime-truth tests are now registered with explicit `runtime_tru
 The script expands to `cmake --fresh --preset cpu-only-debug`, `cmake --build --preset build-cpu-debug`, and `ctest --preset test-stage1-runtime-truth-cpu-debug` over the exact P0 test list; it also validates the build metadata contract. The `integration_runtime_truth_ctest_labels` audit test verifies that P0 tests are registered and labeled and that feature-gated MPI/CUDA/Python/HDF5 app-smoke tests are absent from CPU-only builds rather than silently passing in a disabled feature configuration.
 
 Reproducibility impact: CI/test registration only. No normalized config dumps, provenance payloads, restart/snapshot schemas, output naming, deterministic scheduling behavior, solver numerics, or SoA/hot-cold layouts are changed.
+
+## Follow-up repair note for prompt 0-4 verification pass
+
+The post-Codex verification pass found three concrete Stage-1 gaps and this repair applies them:
+
+1. **TreePM target softening closure.** `TreeSofteningView` now has active-target species lanes and a target resolver that can fall back through active-target species, source-indexed active target overrides/species, and finally the scalar global fallback. `ReferenceWorkflow` now builds compact owned source softening/species sidecars and active-target sidecars instead of passing full-state particle sidecars into compact TreePM source views.
+2. **Gas host-cell remap fail-fast behavior.** `rebuildLocalGasStateFromParticleIds` no longer maps invalid or removed black-hole/tracer host cells to cell zero. Invalid host remaps now throw, preventing silent attachment to the wrong gas cell after ownership compaction.
+3. **Migration softening completeness.** `commitParticleMigration` now rejects inbound records that omit a softening value when the destination state carries a softening sidecar or override mask. Ownership migration records must carry the runtime-truth softening lane into such states.
+
+The temporary particle-bound gas-cell contract remains intentionally named and asserted rather than replaced with AMR/moving-mesh semantics in this Stage-1 repair.

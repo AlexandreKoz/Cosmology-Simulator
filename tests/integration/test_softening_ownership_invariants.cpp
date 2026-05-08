@@ -177,6 +177,52 @@ void test_softening_priority_invariants() {
     assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
   }
 
+  // Target softening must obey the same override -> species -> global priority as sources.
+  {
+    const std::array<std::uint32_t, 3> target_species{
+        speciesTag(ParticleSpecies::kDarkMatter),
+        speciesTag(ParticleSpecies::kBlackHole),
+        99U};
+    const std::array<double, 3> target_eps{0.777, 0.888, 0.999};
+    const std::array<std::uint8_t, 3> target_mask{0U, 1U, 0U};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = source_species,
+        .source_particle_epsilon_comoving = {},
+        .source_particle_epsilon_override_mask = {},
+        .target_species_tag = target_species,
+        .target_particle_epsilon_comoving = target_eps,
+        .target_particle_epsilon_override_mask = target_mask,
+        .species_policy = species_policy,
+    };
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(0, global_policy, view) - 0.020) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(1, global_policy, view) - 0.888) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(2, global_policy, view) - 0.125) < 1.0e-15);
+  }
+
+  // Compact active-set targets may resolve through source-indexed sidecar lanes when explicit
+  // active-slot target lanes are absent. This is the TreePM workflow path for owned compact views.
+  {
+    const std::array<std::uint32_t, 4> compact_source_species{
+        speciesTag(ParticleSpecies::kDarkMatter),
+        speciesTag(ParticleSpecies::kGas),
+        speciesTag(ParticleSpecies::kBlackHole),
+        speciesTag(ParticleSpecies::kTracer)};
+    const std::array<double, 4> compact_source_eps{0.011, 0.022, 0.333, 0.044};
+    const std::array<std::uint8_t, 4> compact_source_mask{0U, 0U, 1U, 0U};
+    const cosmosim::gravity::TreeSofteningView view{
+        .source_species_tag = compact_source_species,
+        .source_particle_epsilon_comoving = compact_source_eps,
+        .source_particle_epsilon_override_mask = compact_source_mask,
+        .target_species_tag = {},
+        .target_particle_epsilon_comoving = {},
+        .target_particle_epsilon_override_mask = {},
+        .species_policy = species_policy,
+    };
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(0, 1, global_policy, view) - 0.030) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(1, 2, global_policy, view) - 0.333) < 1.0e-15);
+    assert(std::abs(cosmosim::gravity::resolveTargetSofteningEpsilon(2, 3, global_policy, view) - 0.060) < 1.0e-15);
+  }
+
   // Source/target override masks must not silently truncate relative to value lanes.
   {
     const std::array<double, 3> source_eps{0.333, 0.222, 0.111};

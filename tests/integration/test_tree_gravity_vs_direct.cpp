@@ -72,7 +72,7 @@ void directSumAccelerationWithSofteningView(
     const double tx = pos_x[target];
     const double ty = pos_y[target];
     const double tz = pos_z[target];
-    const double target_eps = cosmosim::gravity::resolveTargetSofteningEpsilon(i, options.softening, softening_view);
+    const double target_eps = cosmosim::gravity::resolveTargetSofteningEpsilon(i, target, options.softening, softening_view);
     double acc_x = 0.0;
     double acc_y = 0.0;
     double acc_z = 0.0;

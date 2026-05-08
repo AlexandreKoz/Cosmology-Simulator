@@ -899,6 +899,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       softening_view.target_particle_epsilon_override_mask.size() != accumulator.active_particle_index.size()) {
     throw std::invalid_argument("TreePM target softening override mask size must match active-set size");
   }
+  if (!softening_view.target_species_tag.empty() &&
+      softening_view.target_species_tag.size() != accumulator.active_particle_index.size()) {
+    throw std::invalid_argument("TreePM target species sidecar size must match active-set size");
+  }
   std::vector<std::uint32_t> stack;
   stack.reserve(256);
 
@@ -1034,7 +1038,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double px = pos_x_comoving[particle_index];
       const double py = pos_y_comoving[particle_index];
       const double pz = pos_z_comoving[particle_index];
-      const double target_softening = resolveTargetSofteningEpsilon(active_i, options.tree_options.softening, softening_view);
+      const double target_softening =
+          resolveTargetSofteningEpsilon(active_i, particle_index, options.tree_options.softening, softening_view);
       const auto local_accel = evaluateTargetAgainstLocalTree(px, py, pz, particle_index, true, target_softening);
       accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
     }
@@ -1113,7 +1118,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const double py = pos_y_comoving[particle_index];
         const double pz = pos_z_comoving[particle_index];
         const double target_softening =
-            resolveTargetSofteningEpsilon(batch_begin + batch_slot, options.tree_options.softening, softening_view);
+            resolveTargetSofteningEpsilon(
+                batch_begin + batch_slot, particle_index, options.tree_options.softening, softening_view);
         for (int peer = 0; peer < mpi_world_size; ++peer) {
           if (peer == mpi_world_rank) {
             continue;
@@ -1176,7 +1182,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
         const std::uint32_t particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
         const double target_softening =
-            resolveTargetSofteningEpsilon(batch_begin + batch_slot, options.tree_options.softening, softening_view);
+            resolveTargetSofteningEpsilon(
+                batch_begin + batch_slot, particle_index, options.tree_options.softening, softening_view);
         const auto local_accel = evaluateTargetAgainstLocalTree(
             pos_x_comoving[particle_index],
             pos_y_comoving[particle_index],

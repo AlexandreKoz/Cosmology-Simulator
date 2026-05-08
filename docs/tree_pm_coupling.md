@@ -30,7 +30,7 @@ Residual tree forces use the existing tree softening policy (`TreeSofteningPolic
 The effective pair softening is the same as the tree solver:
 
 - source epsilon resolution: per-particle sidecar -> species epsilon table -> scalar fallback,
-- target epsilon resolution: per-active-target sidecar -> scalar fallback,
+- target epsilon resolution: per-active-target override -> active-target species table -> source-indexed active target fallback -> scalar fallback,
 - pair rule: `epsilon_pair = max(epsilon_source, epsilon_target)`.
 
 - `a_SR = a_tree_softened * F_SR(r)`

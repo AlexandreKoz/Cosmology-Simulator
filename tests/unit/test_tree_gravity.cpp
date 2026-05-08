@@ -182,6 +182,36 @@ void testPairSofteningUsesMaxRule() {
   assert(std::abs(ax[1] - expected_a1) < k_tolerance);
 }
 
+
+void testTargetSpeciesSofteningFallback() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.gravitational_constant_code = 1.0;
+  options.max_leaf_size = 1;
+  options.softening.epsilon_comoving = 0.02;
+
+  const std::vector<double> pos_x{0.0, 1.0};
+  const std::vector<double> pos_y{0.0, 0.0};
+  const std::vector<double> pos_z{0.0, 0.0};
+  const std::vector<double> mass{2.0, 3.0};
+  const std::vector<std::uint32_t> species_tag{0U, 1U};
+  const cosmosim::gravity::TreeSofteningView softening_view{
+      .source_species_tag = species_tag,
+      .species_policy = {.epsilon_comoving_by_species = {0.04, 0.15, 0.0, 0.0, 0.0}, .enabled = true},
+  };
+
+  solver.build(pos_x, pos_y, pos_z, mass, options, nullptr, softening_view);
+  const std::vector<std::uint32_t> active{1U};
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(1, 0.0);
+  std::vector<double> az(1, 0.0);
+  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, nullptr, softening_view);
+
+  const double pair_eps = cosmosim::gravity::combineSofteningPairEpsilon(0.04, 0.15);
+  const double expected = -mass[0] * cosmosim::gravity::softenedInvR3(1.0, pair_eps);
+  assert(std::abs(ax[0] - expected) < k_tolerance);
+}
+
 }  // namespace
 
 int main() {
@@ -191,5 +221,6 @@ int main() {
   testMultipoleAccumulation();
   testMacCriteriaAreAvailable();
   testPairSofteningUsesMaxRule();
+  testTargetSpeciesSofteningFallback();
   return 0;
 }

@@ -49,8 +49,10 @@ Softening source/target resolution order:
 
 Target resolution order:
 
-1. active-target per-particle sidecar (if provided),
-2. scalar global fallback.
+1. active-target per-particle sidecar and override mask (if provided),
+2. active-target species table lookup (if provided),
+3. source-indexed per-particle override and species fallback when the target is an active slot into the compact source view,
+4. scalar global fallback.
 
 Pairwise effective softening law (used by both P2P and accepted-node multipoles):
 

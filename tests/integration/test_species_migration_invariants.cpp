@@ -278,6 +278,22 @@ void test_species_migration_rejects_inbound_sidecar_mismatch() {
   } catch (const std::invalid_argument&) {
     threw = true;
   }
+  ParticleMigrationRecord missing_materialized_softening;
+  missing_materialized_softening.particle_id = 8804;
+  missing_materialized_softening.species_tag = speciesTag(ParticleSpecies::kDarkMatter);
+  missing_materialized_softening.owning_rank = 0;
+  missing_materialized_softening.mass_code = 1.0;
+  missing_materialized_softening.time_bin = 0;
+  missing_materialized_softening.has_gravity_softening_value = false;
+  missing_materialized_softening.has_gravity_softening_override = false;
+
+  commit.inbound_records = {missing_materialized_softening};
+  threw = false;
+  try {
+    state.commitParticleMigration(commit);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
   assert(threw);
   assert(state.validateOwnershipInvariants());
 }
