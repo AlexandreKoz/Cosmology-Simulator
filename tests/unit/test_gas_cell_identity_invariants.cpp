@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -129,6 +130,8 @@ void test_gas_cell_reorder_resize_invariants() {
 
 void test_decoupled_gas_cell_identity_map_api_shape() {
   cosmosim::core::GasCellIdentityMap map;
+  assert(map.generation() == 0);
+
   map.assign({
       {.gas_cell_id = 9001, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
       {.gas_cell_id = 9002, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 1},
@@ -136,7 +139,10 @@ void test_decoupled_gas_cell_identity_map_api_shape() {
   });
 
   assert(map.size() == 3);
+  assert(map.generation() == 1);
   assert(map.isConsistent());
+  assert(map.coversDenseLocalRows(3));
+  map.requireCoversDenseLocalRows(3, "test_decoupled_gas_cell_identity_map_api_shape");
 
   const auto* first_child = map.findByGasCellId(9001);
   assert(first_child != nullptr);
@@ -144,6 +150,8 @@ void test_decoupled_gas_cell_identity_map_api_shape() {
   assert(*first_child->parent_particle_id == 100);
   assert(first_child->owning_patch_id == 7);
   assert(first_child->local_cell_row == 0);
+  assert(map.rowForGasCellId(9002).has_value());
+  assert(*map.rowForGasCellId(9002) == 1);
 
   const auto* second_child = map.findByGasCellId(9002);
   assert(second_child != nullptr);
@@ -156,6 +164,13 @@ void test_decoupled_gas_cell_identity_map_api_shape() {
   assert(parentless->gas_cell_id == 9100);
   assert(!parentless->parent_particle_id.has_value());
   assert(parentless->owning_patch_id == 8);
+  assert(map.gasCellIdForLocalRow(2).has_value());
+  assert(*map.gasCellIdForLocalRow(2) == 9100);
+
+  const auto parent_rows = map.rowsForParentParticleId(100);
+  assert((parent_rows == std::vector<std::uint32_t>{0, 1}));
+  const auto patch_rows = map.rowsForPatch(7);
+  assert((patch_rows == std::vector<std::uint32_t>{0, 1}));
 
   bool duplicate_cell_id_threw = false;
   try {
@@ -167,6 +182,7 @@ void test_decoupled_gas_cell_identity_map_api_shape() {
     duplicate_cell_id_threw = true;
   }
   assert(duplicate_cell_id_threw);
+  assert(map.generation() == 1);
 
   bool duplicate_local_row_threw = false;
   try {
@@ -178,6 +194,56 @@ void test_decoupled_gas_cell_identity_map_api_shape() {
     duplicate_local_row_threw = true;
   }
   assert(duplicate_local_row_threw);
+
+  bool zero_cell_id_threw = false;
+  try {
+    map.assign({
+        {.gas_cell_id = 0, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
+    });
+  } catch (const std::invalid_argument&) {
+    zero_cell_id_threw = true;
+  }
+  assert(zero_cell_id_threw);
+
+  cosmosim::core::GasCellIdentityMap sparse_rows;
+  sparse_rows.assign({
+      {.gas_cell_id = 9301, .parent_particle_id = 100, .owning_patch_id = 7, .local_cell_row = 0},
+      {.gas_cell_id = 9302, .parent_particle_id = 101, .owning_patch_id = 7, .local_cell_row = 2},
+  });
+  assert(!sparse_rows.coversDenseLocalRows(2));
+  bool dense_rows_threw = false;
+  try {
+    sparse_rows.requireCoversDenseLocalRows(2, "sparse_rows");
+  } catch (const std::runtime_error&) {
+    dense_rows_threw = true;
+  }
+  assert(dense_rows_threw);
+
+  map.clear();
+  assert(map.empty());
+  assert(map.generation() == 2);
+}
+
+void test_gas_cell_identity_map_row_remap_by_stable_id() {
+  cosmosim::core::GasCellIdentityMap old_map;
+  old_map.assign({
+      {.gas_cell_id = 7001, .parent_particle_id = 11, .owning_patch_id = 4, .local_cell_row = 0},
+      {.gas_cell_id = 7002, .parent_particle_id = 11, .owning_patch_id = 4, .local_cell_row = 1},
+      {.gas_cell_id = 7003, .parent_particle_id = 12, .owning_patch_id = 5, .local_cell_row = 2},
+  });
+
+  cosmosim::core::GasCellIdentityMap new_map;
+  new_map.assign({
+      {.gas_cell_id = 7003, .parent_particle_id = 12, .owning_patch_id = 5, .local_cell_row = 0},
+      {.gas_cell_id = 7001, .parent_particle_id = 11, .owning_patch_id = 4, .local_cell_row = 1},
+      {.gas_cell_id = 7999, .parent_particle_id = std::nullopt, .owning_patch_id = 6, .local_cell_row = 2},
+  });
+
+  const auto new_to_old = cosmosim::core::buildGasCellNewToOldRowMap(old_map, new_map);
+  assert(new_to_old.size() == 3);
+  assert(new_to_old[0] == 2);
+  assert(new_to_old[1] == 0);
+  assert(new_to_old[2] == cosmosim::core::kInvalidGasCellRow);
 }
 
 }  // namespace
@@ -186,5 +252,6 @@ int main() {
   test_gas_cell_identity_invariants();
   test_gas_cell_reorder_resize_invariants();
   test_decoupled_gas_cell_identity_map_api_shape();
+  test_gas_cell_identity_map_row_remap_by_stable_id();
   return 0;
 }

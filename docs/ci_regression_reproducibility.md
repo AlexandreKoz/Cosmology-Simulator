@@ -81,9 +81,14 @@ Equivalent expanded commands:
 
 ```bash
 cmake --preset cpu-only-debug
-cmake --build --preset build-cpu-debug -j4
+cmake --build --preset build-cpu-debug -j4 --target stage1_runtime_truth_targets
 ctest --preset test-stage1-runtime-truth-cpu-debug --output-on-failure
 ```
+
+The helper intentionally builds the `stage1_runtime_truth_targets` aggregate target instead of every benchmark,
+validation executable, optional-feature smoke test, and unrelated integration binary. This keeps the P0 runtime-truth
+gate scoped to the exact tests it runs while still letting full-presets and release gates build the complete project.
+`run_preset_pipeline.sh` honors `COSMOSIM_CI_BUILD_TARGETS` for the same reason; unset it to force a full target build.
 
 Compatibility preset retained for earlier repair notes:
 
@@ -103,6 +108,8 @@ The Stage 1 P0 suite is registered explicitly rather than selected by broad subs
 Expected gate behavior:
 
 - `test-stage1-runtime-truth-cpu-debug` runs only the P0 runtime-truth list above.
+- `stage1_runtime_truth_targets` depends on the compiled executables required by that list; the CMake-script label audit
+  is registered as a CTest and checked during the test phase.
 - Every P0 runtime-truth test has the `runtime_truth` and `p0` CTest labels plus a subsystem label such as `softening`, `sidecar`, `gas`, `migration`, `restart`, `provenance`, `scheduler`, or `active_views`.
 - CPU-only builds do not register HDF5 app-smoke, CUDA, Python, or MPI multi-rank tests; `integration_runtime_truth_ctest_labels` fails if those feature-gated tests appear while their feature option is disabled.
 - Feature-enabled presets still fail during configure when their requested dependency is missing because the CMake feature options use required dependency discovery (`MPI`, `HDF5`, `FFTW`, `CUDAToolkit`, `Python3`, and `pybind11`).

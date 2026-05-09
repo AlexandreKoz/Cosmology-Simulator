@@ -60,7 +60,11 @@ run_gate() {
   local metadata_cmd="python3 ./scripts/ci/check_build_metadata.py ${gate_artifact_dir}/cosmosim_build_metadata-${configure_preset}.json ${metadata_expectation} ${configure_preset}"
 
   local pipeline_status_path="$gate_artifact_dir/preset_pipeline_report-${configure_preset}.json"
-  if ! bash ./scripts/ci/run_preset_pipeline.sh \
+  local build_target_scope=""
+  if [[ "$gate_id" == "stage1_runtime_truth_cpu_p0" ]]; then
+    build_target_scope="stage1_runtime_truth_targets"
+  fi
+  if ! COSMOSIM_CI_BUILD_TARGETS="$build_target_scope" bash ./scripts/ci/run_preset_pipeline.sh \
       "$configure_preset" \
       "$build_preset" \
       "$test_preset" \

@@ -25,6 +25,7 @@ message="ok"
 ctest_junit="$artifact_dir/ctest-${test_preset}.xml"
 ctest_timeout_seconds="${COSMOSIM_CI_CTEST_TIMEOUT_SECONDS:-300}"
 build_parallelism="${COSMOSIM_CI_BUILD_PARALLEL:-2}"
+read -r -a build_targets <<< "${COSMOSIM_CI_BUILD_TARGETS:-}"
 
 if [[ "$test_regex" == "-" ]]; then
   ctest_selection_regex="-"
@@ -36,7 +37,11 @@ else
 fi
 
 configure_cmd="cmake --fresh --preset ${configure_preset}"
-build_cmd="cmake --build --preset ${build_preset} --parallel ${build_parallelism}"
+if [[ "${#build_targets[@]}" -gt 0 ]]; then
+  build_cmd="cmake --build --preset ${build_preset} --parallel ${build_parallelism} --target ${build_targets[*]}"
+else
+  build_cmd="cmake --build --preset ${build_preset} --parallel ${build_parallelism}"
+fi
 if [[ "$ctest_selection_regex" == "-" ]]; then
   test_cmd="ctest --preset ${test_preset} --output-on-failure --timeout ${ctest_timeout_seconds} --output-junit ${ctest_junit}"
 else
@@ -92,8 +97,13 @@ require_expected_tests_registered() {
   return 0
 }
 
+build_command=(cmake --build --preset "$build_preset" --parallel "$build_parallelism")
+if [[ "${#build_targets[@]}" -gt 0 ]]; then
+  build_command+=(--target "${build_targets[@]}")
+fi
+
 if run_cmd "configure" "$configure_cmd" cmake --fresh --preset "$configure_preset" \
-  && run_cmd "build" "$build_cmd" cmake --build --preset "$build_preset" --parallel "$build_parallelism" \
+  && run_cmd "build" "$build_cmd" "${build_command[@]}" \
   && require_expected_tests_registered; then
   if [[ "$test_regex" == "-" ]]; then
     run_cmd "test" "$test_cmd" ctest --preset "$test_preset" --output-on-failure --timeout "$ctest_timeout_seconds" --output-junit "$ctest_junit"
@@ -141,6 +151,7 @@ print(json.dumps({
   "ctest_selection_regex": "${ctest_selection_regex}",
   "ctest_timeout_seconds": "${ctest_timeout_seconds}",
   "build_parallelism": "${build_parallelism}",
+  "build_targets": "${COSMOSIM_CI_BUILD_TARGETS:-}",
   "artifact_dir": "${artifact_dir}",
   "status": "${status}",
   "failed_phase": "${failed_phase}",

@@ -9,6 +9,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cosmosim::core {
@@ -17,51 +18,167 @@ namespace cosmosim::core {
 void GasCellIdentityMap::assign(std::vector<GasCellIdentityRecord> records) {
   GasCellIdentityMap candidate;
   candidate.m_records = std::move(records);
-  if (!candidate.isConsistent()) {
+  if (!candidate.rebuildLookupTables()) {
     throw std::invalid_argument(
-        "GasCellIdentityMap.assign: gas_cell_id and local_cell_row must each be unique stable mappings");
+        "GasCellIdentityMap.assign: gas_cell_id must be nonzero and gas_cell_id/local_cell_row must be unique");
   }
+
   m_records = std::move(candidate.m_records);
+  m_index_by_gas_cell_id = std::move(candidate.m_index_by_gas_cell_id);
+  m_index_by_local_row = std::move(candidate.m_index_by_local_row);
+  ++m_generation;
+}
+
+void GasCellIdentityMap::clear() noexcept {
+  m_records.clear();
+  m_index_by_gas_cell_id.clear();
+  m_index_by_local_row.clear();
+  ++m_generation;
 }
 
 std::size_t GasCellIdentityMap::size() const noexcept { return m_records.size(); }
 
 bool GasCellIdentityMap::empty() const noexcept { return m_records.empty(); }
 
-bool GasCellIdentityMap::isConsistent() const noexcept {
-  std::unordered_set<std::uint64_t> gas_cell_ids;
-  std::unordered_set<std::uint32_t> local_rows;
-  gas_cell_ids.reserve(m_records.size());
-  local_rows.reserve(m_records.size());
-  for (const auto& record : m_records) {
-    if (!gas_cell_ids.insert(record.gas_cell_id).second) {
+std::uint64_t GasCellIdentityMap::generation() const noexcept { return m_generation; }
+
+bool GasCellIdentityMap::rebuildLookupTables() noexcept {
+  m_index_by_gas_cell_id.clear();
+  m_index_by_local_row.clear();
+  m_index_by_gas_cell_id.reserve(m_records.size());
+  m_index_by_local_row.reserve(m_records.size());
+
+  for (std::size_t index = 0; index < m_records.size(); ++index) {
+    const auto& record = m_records[index];
+    if (record.gas_cell_id == 0U) {
       return false;
     }
-    if (!local_rows.insert(record.local_cell_row).second) {
+    if (!m_index_by_gas_cell_id.emplace(record.gas_cell_id, index).second) {
+      return false;
+    }
+    if (!m_index_by_local_row.emplace(record.local_cell_row, index).second) {
       return false;
     }
   }
   return true;
 }
 
+bool GasCellIdentityMap::isConsistent() const noexcept {
+  if (m_index_by_gas_cell_id.size() != m_records.size() || m_index_by_local_row.size() != m_records.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < m_records.size(); ++index) {
+    const auto& record = m_records[index];
+    if (record.gas_cell_id == 0U) {
+      return false;
+    }
+    const auto gas_it = m_index_by_gas_cell_id.find(record.gas_cell_id);
+    if (gas_it == m_index_by_gas_cell_id.end() || gas_it->second != index) {
+      return false;
+    }
+    const auto row_it = m_index_by_local_row.find(record.local_cell_row);
+    if (row_it == m_index_by_local_row.end() || row_it->second != index) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool GasCellIdentityMap::coversDenseLocalRows(std::size_t cell_count) const noexcept {
+  if (m_records.size() != cell_count) {
+    return false;
+  }
+  for (std::size_t row = 0; row < cell_count; ++row) {
+    if (m_index_by_local_row.find(static_cast<std::uint32_t>(row)) == m_index_by_local_row.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void GasCellIdentityMap::requireCoversDenseLocalRows(std::size_t cell_count, std::string_view caller) const {
+  if (!isConsistent()) {
+    throw std::runtime_error(std::string(caller) + ": GasCellIdentityMap is internally inconsistent");
+  }
+  if (!coversDenseLocalRows(cell_count)) {
+    throw std::runtime_error(
+        std::string(caller) + ": GasCellIdentityMap does not cover exactly the dense local cell rows [0, cell_count)");
+  }
+}
+
 std::span<const GasCellIdentityRecord> GasCellIdentityMap::records() const noexcept { return m_records; }
 
 const GasCellIdentityRecord* GasCellIdentityMap::findByGasCellId(std::uint64_t gas_cell_id) const noexcept {
-  for (const auto& record : m_records) {
-    if (record.gas_cell_id == gas_cell_id) {
-      return &record;
-    }
+  const auto it = m_index_by_gas_cell_id.find(gas_cell_id);
+  if (it == m_index_by_gas_cell_id.end()) {
+    return nullptr;
   }
-  return nullptr;
+  return &m_records[it->second];
 }
 
 const GasCellIdentityRecord* GasCellIdentityMap::findByLocalRow(std::uint32_t local_cell_row) const noexcept {
+  const auto it = m_index_by_local_row.find(local_cell_row);
+  if (it == m_index_by_local_row.end()) {
+    return nullptr;
+  }
+  return &m_records[it->second];
+}
+
+std::optional<std::uint32_t> GasCellIdentityMap::rowForGasCellId(std::uint64_t gas_cell_id) const noexcept {
+  const auto* record = findByGasCellId(gas_cell_id);
+  if (record == nullptr) {
+    return std::nullopt;
+  }
+  return record->local_cell_row;
+}
+
+std::optional<std::uint64_t> GasCellIdentityMap::gasCellIdForLocalRow(std::uint32_t local_cell_row) const noexcept {
+  const auto* record = findByLocalRow(local_cell_row);
+  if (record == nullptr) {
+    return std::nullopt;
+  }
+  return record->gas_cell_id;
+}
+
+std::vector<std::uint32_t> GasCellIdentityMap::rowsForParentParticleId(std::uint64_t parent_particle_id) const {
+  std::vector<std::uint32_t> rows;
   for (const auto& record : m_records) {
-    if (record.local_cell_row == local_cell_row) {
-      return &record;
+    if (record.parent_particle_id.has_value() && *record.parent_particle_id == parent_particle_id) {
+      rows.push_back(record.local_cell_row);
     }
   }
-  return nullptr;
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+std::vector<std::uint32_t> GasCellIdentityMap::rowsForPatch(std::uint64_t owning_patch_id) const {
+  std::vector<std::uint32_t> rows;
+  for (const auto& record : m_records) {
+    if (record.owning_patch_id == owning_patch_id) {
+      rows.push_back(record.local_cell_row);
+    }
+  }
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+std::vector<std::uint32_t> buildGasCellNewToOldRowMap(
+    const GasCellIdentityMap& old_map,
+    const GasCellIdentityMap& new_map) {
+  if (!old_map.isConsistent() || !new_map.isConsistent()) {
+    throw std::runtime_error("buildGasCellNewToOldRowMap: inconsistent gas-cell identity map");
+  }
+
+  std::vector<std::uint32_t> new_to_old(new_map.size(), kInvalidGasCellRow);
+  for (const auto& new_record : new_map.records()) {
+    if (new_record.local_cell_row >= new_to_old.size()) {
+      throw std::runtime_error("buildGasCellNewToOldRowMap: new map has non-dense local rows");
+    }
+    if (const auto old_row = old_map.rowForGasCellId(new_record.gas_cell_id); old_row.has_value()) {
+      new_to_old[new_record.local_cell_row] = *old_row;
+    }
+  }
+  return new_to_old;
 }
 
 bool ParticleReorderMap::isConsistent(std::size_t particle_count) const noexcept {

@@ -32,13 +32,14 @@ stage1_tests=(
 
 test_regex="$(IFS='|'; echo "${stage1_tests[*]}")"
 
-bash ./scripts/ci/run_preset_pipeline.sh \
-  cpu-only-debug \
-  build-cpu-debug \
-  test-stage1-runtime-truth-cpu-debug \
-  "$test_regex" \
-  "$artifact_dir" \
-  0
+COSMOSIM_CI_BUILD_TARGETS="${COSMOSIM_CI_BUILD_TARGETS:-stage1_runtime_truth_targets}" \
+  bash ./scripts/ci/run_preset_pipeline.sh \
+    cpu-only-debug \
+    build-cpu-debug \
+    test-stage1-runtime-truth-cpu-debug \
+    "$test_regex" \
+    "$artifact_dir" \
+    0
 
 python3 ./scripts/ci/check_build_metadata.py \
   "$artifact_dir/cosmosim_build_metadata-cpu-only-debug.json" \
@@ -52,4 +53,5 @@ test_preset=test-stage1-runtime-truth-cpu-debug
 checked_tests=$(IFS=,; echo "${stage1_tests[*]}")
 metadata_contract=validation/reference/ci_build_metadata_expectations_v1.json
 optional_dependency_negative_check=integration_runtime_truth_ctest_labels
+build_target_scope=${COSMOSIM_CI_BUILD_TARGETS:-stage1_runtime_truth_targets}
 REPORT

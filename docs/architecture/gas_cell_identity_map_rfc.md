@@ -29,9 +29,17 @@ contains:
   not a patch row index.
 - `local_cell_row`: transient local row into `CellSoa`/`GasCellSidecar` storage for the current rank/layout.
 
-The current minimal implementation only validates uniqueness of `gas_cell_id` and `local_cell_row`, exposes
-read-only records, and supports lookup by stable gas-cell ID or local row. It is deliberately not stored inside
-`SimulationState` yet, so it cannot shadow the authoritative production gas contract or affect solver paths.
+The current implementation validates nonzero unique `gas_cell_id` values and unique `local_cell_row` values,
+rebuilds lookup tables atomically during `assign(...)`, exposes read-only records, supports lookup by stable gas-cell
+ID or local row, and carries a monotonic `generation()` counter. The generation counter is already present so a
+future production promotion can make hydro views and restart writers reject stale row mappings exactly as particle and
+cell active views do today. It is deliberately not stored inside `SimulationState` yet, so it cannot shadow the
+authoritative production gas contract or affect solver paths.
+
+The seam also provides `coversDenseLocalRows(cell_count)` / `requireCoversDenseLocalRows(...)` and
+`buildGasCellNewToOldRowMap(old_map, new_map)`. These utilities are intentionally small but not toy behavior: they
+let tests represent cell split/reorder/new-cell cases and prove that remapping is keyed by stable `gas_cell_id`, with
+new cells marked by `kInvalidGasCellRow` so callers must deliberately initialize conserved hydro state.
 
 ## Ownership and invalidation rules
 
@@ -41,14 +49,15 @@ ownership component under `core/`. No hydro module should maintain an independen
 When the seam is promoted to production, these invalidation rules must be enforced before any solver use:
 
 1. Any operation that changes cell count, local row ordering, AMR patch ownership, moving-mesh connectivity, or
-   rank ownership invalidates `local_cell_row` mappings.
+   rank ownership invalidates `local_cell_row` mappings and must advance the identity-map generation.
 2. Such operations must rebuild the identity map before hydro kernels or restart writers consume gas rows.
 3. Hydro remapping must key conserved state by `gas_cell_id` first and only use `local_cell_row` for local SoA
-   scatter/gather after validation.
+   scatter/gather after `requireCoversDenseLocalRows(...)` succeeds.
 4. Parent-particle relationships are lineage metadata only. Multiple gas cells may share one parent particle,
    and a gas cell may have no parent particle.
-5. Patch ownership changes must update `owning_patch_id` and rank transfer payloads in the same auditable
-   commit as row remapping.
+5. Patch ownership changes must update `owning_patch_id`, row maps, and rank transfer payloads in the same
+   auditable commit as row remapping.
+6. `gas_cell_id == 0` is reserved as an uninitialized sentinel and must not be accepted into a production map.
 
 ## Migration plan
 

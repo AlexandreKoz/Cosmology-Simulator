@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -154,9 +155,12 @@ struct TracerParticleSidecar {
   [[nodiscard]] bool isConsistent() const noexcept;
 };
 
+inline constexpr std::uint32_t kInvalidGasCellRow = std::numeric_limits<std::uint32_t>::max();
+
 struct GasCellIdentityRecord {
   // Design-seam record for future AMR/moving-mesh gas ownership.
   // gas_cell_id is the stable identity and must not be derived from a particle row index.
+  // A zero gas_cell_id is reserved as an uninitialized sentinel and is rejected by GasCellIdentityMap.
   std::uint64_t gas_cell_id = 0;
   std::optional<std::uint64_t> parent_particle_id;
   std::uint64_t owning_patch_id = 0;
@@ -166,17 +170,39 @@ struct GasCellIdentityRecord {
 class GasCellIdentityMap {
  public:
   // Isolated identity seam: not wired into production hydro/restart until schema migration is explicit.
+  // The map owns one validated row-space for gas-cell identity. Lookup indices are rebuilt atomically on
+  // assign(), and generation() changes after every successful mutation so future production views can
+  // reject stale local-row mappings.
   void assign(std::vector<GasCellIdentityRecord> records);
+  void clear() noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] std::uint64_t generation() const noexcept;
   [[nodiscard]] bool isConsistent() const noexcept;
+  [[nodiscard]] bool coversDenseLocalRows(std::size_t cell_count) const noexcept;
+  void requireCoversDenseLocalRows(std::size_t cell_count, std::string_view caller) const;
   [[nodiscard]] std::span<const GasCellIdentityRecord> records() const noexcept;
   [[nodiscard]] const GasCellIdentityRecord* findByGasCellId(std::uint64_t gas_cell_id) const noexcept;
   [[nodiscard]] const GasCellIdentityRecord* findByLocalRow(std::uint32_t local_cell_row) const noexcept;
+  [[nodiscard]] std::optional<std::uint32_t> rowForGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> gasCellIdForLocalRow(std::uint32_t local_cell_row) const noexcept;
+  [[nodiscard]] std::vector<std::uint32_t> rowsForParentParticleId(std::uint64_t parent_particle_id) const;
+  [[nodiscard]] std::vector<std::uint32_t> rowsForPatch(std::uint64_t owning_patch_id) const;
 
  private:
+  bool rebuildLookupTables() noexcept;
+
   std::vector<GasCellIdentityRecord> m_records;
+  std::unordered_map<std::uint64_t, std::size_t> m_index_by_gas_cell_id;
+  std::unordered_map<std::uint32_t, std::size_t> m_index_by_local_row;
+  std::uint64_t m_generation = 0;
 };
+
+// Build a dense new-row -> old-row remapping by stable gas_cell_id. New cells that are absent from
+// old_map are marked with kInvalidGasCellRow so callers must deliberately initialize their hydro state.
+[[nodiscard]] std::vector<std::uint32_t> buildGasCellNewToOldRowMap(
+    const GasCellIdentityMap& old_map,
+    const GasCellIdentityMap& new_map);
 
 struct PatchSoa {
   // AMR patch descriptors and contiguous cell ranges [first_cell, first_cell + cell_count).

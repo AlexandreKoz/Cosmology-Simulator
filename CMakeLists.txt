@@ -445,7 +445,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME unit_simulation_state COMMAND test_unit_simulation_state)
   cosmosim_mark_runtime_truth_test(unit_simulation_state active_views scheduler gas sidecar migration)
   add_executable(test_unit_gas_cell_identity_invariants tests/unit/test_gas_cell_identity_invariants.cpp)
-  target_link_libraries(test_unit_gas_cell_identity_invariants PRIVATE cosmosim_all)
+  target_link_libraries(test_unit_gas_cell_identity_invariants PRIVATE cosmosim_core)
   add_test(NAME unit_gas_cell_identity_invariants COMMAND test_unit_gas_cell_identity_invariants)
   cosmosim_mark_runtime_truth_test(unit_gas_cell_identity_invariants gas sidecar)
 
@@ -766,6 +766,24 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_runtime_truth_ctest_labels
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_truth_ctest_labels.cmake")
   cosmosim_mark_runtime_truth_test(integration_runtime_truth_ctest_labels ci labels)
+
+  add_custom_target(stage1_runtime_truth_targets
+      DEPENDS
+        test_unit_simulation_state
+        test_unit_gas_cell_identity_invariants
+        test_unit_hot_cold_sidecar_layout
+        test_integration_reorder_compaction_sidecars
+        test_integration_species_migration_invariants
+        test_integration_transform_fuzz_invariants
+        test_integration_softening_ownership_invariants
+        test_integration_hierarchical_time_bins
+        test_integration_hierarchical_timestep_regression
+        test_integration_parallel_two_rank_restart
+        test_unit_snapshot_hdf5_schema
+        test_unit_restart_checkpoint_schema
+        test_integration_snapshot_hdf5_roundtrip
+        test_integration_restart_checkpoint_roundtrip
+        test_integration_provenance_roundtrip)
 
 
   if(COSMOSIM_ENABLE_HDF5)
