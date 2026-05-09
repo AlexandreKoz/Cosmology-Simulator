@@ -151,3 +151,24 @@ The post-Codex verification pass found three concrete Stage-1 gaps and this repa
 3. **Migration softening completeness.** `commitParticleMigration` now rejects inbound records that omit a softening value when the destination state carries a softening sidecar or override mask. Ownership migration records must carry the runtime-truth softening lane into such states.
 
 The temporary particle-bound gas-cell contract remains intentionally named and asserted rather than replaced with AMR/moving-mesh semantics in this Stage-1 repair.
+
+## Prompt 5-8 repair addendum — 2026-05-08
+
+This follow-up pass tightened the post-P0 hardening layer from prompts 5 through 8.
+
+- Restart exactness: reference workflow restart verification now uses a full runtime-state equality check across particle hot lanes, particle sidecar lanes, gas-cell identity and hydro fields, patch state, star/BH/tracer sidecars, species ledgers, module sidecar payloads, scheduler state, and distributed gravity metadata. A restart is no longer considered roundtrip-ok merely because counts, particle IDs, and rank ownership match.
+- Payload integrity: module sidecar payload length is now included explicitly in the restart integrity hash before hashing payload bytes, preventing boundary ambiguity between adjacent module payloads.
+- Restart tests: the restart roundtrip fixture now contains a tracer particle in addition to dark matter, gas, star, and black-hole state, and asserts the softening override mask and tracer sidecar lanes after restart and migration/restart.
+- Transform fuzzing and active views: the hot/cold layout test now verifies workspace capacity preservation across `TransientStepWorkspace::clear()` and stale scatter rejection after particle and cell index-space mutation.
+- Distributed ownership floor: local/global ownership identity summaries now include a particle-ID square-sum invariant in addition to count, sum, XOR, and local uniqueness. Reference workflow compares reduced rank-local identity against the pre-partition generated IC identity, not against its own reduced values.
+- Ghost-vs-migration payload separation: `GhostExchangeBuffer` is explicitly restricted to ghost-refresh payloads when used with transfer descriptors. Ownership migration must use `ParticleMigrationRecord`; attempts to pack/unpack ghost payloads under ownership-migration intent now throw.
+
+Validation performed in this pass:
+
+```text
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug -j1 --target test_unit_parallel_distributed_memory test_unit_hot_cold_sidecar_layout test_unit_restart_checkpoint_schema test_integration_restart_checkpoint_roundtrip test_integration_transform_fuzz_invariants
+ctest --preset test-cpu-debug --output-on-failure -R "parallel_distributed_memory|hot_cold|transform_fuzz|restart_checkpoint"
+```
+
+The targeted CPU tests passed. The full Stage-1 CI helper was started with a fresh build but exceeded the interactive container timeout before completing the full repository build; no full green all-target CI claim is made here.

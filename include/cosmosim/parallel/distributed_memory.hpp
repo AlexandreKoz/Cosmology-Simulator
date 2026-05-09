@@ -151,12 +151,20 @@ struct ReductionAgreementPolicy {
 struct LocalOwnershipIdentitySummary {
   std::uint64_t local_owned_count = 0;
   std::uint64_t local_particle_id_sum = 0;
+  std::uint64_t local_particle_id_square_sum = 0;
   std::uint64_t local_particle_id_xor = 0;
   bool local_particle_ids_unique = true;
 };
 
 [[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
     std::span<const std::uint64_t> local_particle_ids);
+
+[[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
+    const LocalOwnershipIdentitySummary& reduced_global_summary,
+    std::uint64_t expected_global_count,
+    std::uint64_t expected_particle_id_sum,
+    std::uint64_t expected_particle_id_square_sum,
+    std::uint64_t expected_particle_id_xor);
 
 [[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,
@@ -225,11 +233,23 @@ class GhostExchangeBuffer {
       const GhostExchangeBufferSoA& source,
       std::span<const std::uint32_t> local_indices);
 
+  void packFrom(
+      const GhostTransferDescriptor& descriptor,
+      const GhostExchangeBufferSoA& source,
+      std::span<const std::uint32_t> local_indices);
+
   void unpackAppendTo(GhostExchangeBufferSoA& destination) const;
+
+  void unpackAppendTo(
+      const GhostTransferDescriptor& descriptor,
+      GhostExchangeBufferSoA& destination) const;
 
  private:
   std::vector<std::uint8_t> m_bytes;
 };
+
+[[nodiscard]] std::size_t ghostRefreshPayloadRecordBytes() noexcept;
+void validateGhostRefreshPayloadDescriptor(const GhostTransferDescriptor& descriptor);
 
 struct DistributedRestartState {
   std::uint32_t schema_version = 2;

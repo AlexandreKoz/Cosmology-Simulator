@@ -804,6 +804,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   for (const core::ModuleSidecarBlock* block : ordered_sidecars) {
     append_string(block->module_name);
     append_u64(static_cast<std::uint64_t>(block->schema_version));
+    append_u64(static_cast<std::uint64_t>(block->payload.size()));
     hash = fnv1aAppend(hash, std::span<const std::byte>(block->payload.data(), block->payload.size()));
   }
 

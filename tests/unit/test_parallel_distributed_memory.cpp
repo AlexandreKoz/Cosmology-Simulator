@@ -245,6 +245,47 @@ void testExplicitOwnedVsGhostContracts() {
   cosmosim::parallel::validateGhostExchangePlan(plan);
 }
 
+void testGhostExchangeBufferRejectsOwnershipMigrationIntent() {
+  cosmosim::parallel::GhostExchangeBufferSoA source;
+  source.entity_id = {11, 12};
+  source.density_code = {1.0, 2.0};
+  source.velocity_x_code = {3.0, 4.0};
+  source.pressure_code = {5.0, 6.0};
+
+  cosmosim::parallel::GhostTransferDescriptor ghost_descriptor;
+  ghost_descriptor.role = cosmosim::parallel::GhostTransferRole::kOutboundSend;
+  ghost_descriptor.intent = cosmosim::parallel::GhostTransferIntent::kGhostRefreshRequest;
+  ghost_descriptor.peer_rank = 1;
+  ghost_descriptor.expected_post_transfer_residency = cosmosim::parallel::LocalIndexResidency::kGhost;
+  ghost_descriptor.local_indices = {0, 1};
+
+  cosmosim::parallel::GhostExchangeBuffer buffer;
+  buffer.packFrom(ghost_descriptor, source, ghost_descriptor.local_indices);
+  assert(buffer.byteSize() == sizeof(std::uint64_t) +
+      2U * cosmosim::parallel::ghostRefreshPayloadRecordBytes());
+
+  cosmosim::parallel::GhostExchangeBufferSoA destination;
+  buffer.unpackAppendTo(ghost_descriptor, destination);
+  assert(destination.entity_id == source.entity_id);
+
+  ghost_descriptor.intent = cosmosim::parallel::GhostTransferIntent::kOwnershipMigrationSend;
+  bool migration_pack_threw = false;
+  try {
+    buffer.packFrom(ghost_descriptor, source, ghost_descriptor.local_indices);
+  } catch (const std::invalid_argument&) {
+    migration_pack_threw = true;
+  }
+  assert(migration_pack_threw);
+
+  bool migration_unpack_threw = false;
+  try {
+    buffer.unpackAppendTo(ghost_descriptor, destination);
+  } catch (const std::invalid_argument&) {
+    migration_unpack_threw = true;
+  }
+  assert(migration_unpack_threw);
+}
+
 void testRestartStateRejectsMissingOrDuplicateOwnershipEntries() {
   {
     bool threw = false;
@@ -643,6 +684,7 @@ void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
   const cosmosim::parallel::LocalOwnershipIdentitySummary reduced{
       .local_owned_count = rank0.local_owned_count + rank1.local_owned_count,
       .local_particle_id_sum = rank0.local_particle_id_sum + rank1.local_particle_id_sum,
+      .local_particle_id_square_sum = rank0.local_particle_id_square_sum + rank1.local_particle_id_square_sum,
       .local_particle_id_xor = rank0.local_particle_id_xor ^ rank1.local_particle_id_xor,
       .local_particle_ids_unique = rank0.local_particle_ids_unique && rank1.local_particle_ids_unique,
   };
@@ -650,6 +692,7 @@ void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
       reduced,
       /*expected_global_count=*/6,
       /*expected_particle_id_sum=*/21,
+      /*expected_particle_id_square_sum=*/91,
       /*expected_particle_id_xor=*/(1ULL ^ 2ULL ^ 3ULL ^ 4ULL ^ 5ULL ^ 6ULL)));
 
   const std::vector<std::uint64_t> duplicate_ids = {7, 8, 7};
@@ -672,6 +715,21 @@ void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
       /*expected_global_count=*/6,
       /*expected_particle_id_sum=*/21,
       /*expected_particle_id_xor=*/(1ULL ^ 2ULL ^ 3ULL ^ 4ULL ^ 5ULL ^ 6ULL)));
+
+  const cosmosim::parallel::LocalOwnershipIdentitySummary same_sum_xor_wrong_square{
+      .local_owned_count = 4,
+      .local_particle_id_sum = 10,
+      .local_particle_id_square_sum = 26,
+      .local_particle_id_xor = (1ULL ^ 2ULL ^ 3ULL ^ 4ULL),
+      .local_particle_ids_unique = true,
+  };
+  assert(!cosmosim::parallel::partitionIdentityMatchesGeneratedSet(
+      same_sum_xor_wrong_square,
+      /*expected_global_count=*/4,
+      /*expected_particle_id_sum=*/10,
+      /*expected_particle_id_square_sum=*/30,
+      /*expected_particle_id_xor=*/(1ULL ^ 2ULL ^ 3ULL ^ 4ULL)));
+
 }
 
 }  // namespace
@@ -683,6 +741,7 @@ int main() {
   testGravityAwareDecompositionTracksInteractionCost();
   testClusteredGravityAwareDecompositionImprovesWeightedImbalance();
   testExplicitOwnedVsGhostContracts();
+  testGhostExchangeBufferRejectsOwnershipMigrationIntent();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testDistributedRestartCompatibilityReporting();
   testGhostTransferInvariantFailures();

@@ -469,6 +469,7 @@ LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(std::span<const std
   seen.reserve(local_particle_ids.size());
   for (const std::uint64_t particle_id : local_particle_ids) {
     summary.local_particle_id_sum += particle_id;
+    summary.local_particle_id_square_sum += particle_id * particle_id;
     summary.local_particle_id_xor ^= particle_id;
     if (!seen.insert(particle_id).second) {
       summary.local_particle_ids_unique = false;
@@ -481,11 +482,26 @@ bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,
     std::uint64_t expected_global_count,
     std::uint64_t expected_particle_id_sum,
+    std::uint64_t expected_particle_id_square_sum,
     std::uint64_t expected_particle_id_xor) {
   return reduced_global_summary.local_particle_ids_unique &&
       reduced_global_summary.local_owned_count == expected_global_count &&
       reduced_global_summary.local_particle_id_sum == expected_particle_id_sum &&
+      reduced_global_summary.local_particle_id_square_sum == expected_particle_id_square_sum &&
       reduced_global_summary.local_particle_id_xor == expected_particle_id_xor;
+}
+
+bool partitionIdentityMatchesGeneratedSet(
+    const LocalOwnershipIdentitySummary& reduced_global_summary,
+    std::uint64_t expected_global_count,
+    std::uint64_t expected_particle_id_sum,
+    std::uint64_t expected_particle_id_xor) {
+  return partitionIdentityMatchesGeneratedSet(
+      reduced_global_summary,
+      expected_global_count,
+      expected_particle_id_sum,
+      reduced_global_summary.local_particle_id_square_sum,
+      expected_particle_id_xor);
 }
 
 double deterministicRankOrderedSum(std::span<const double> per_rank_values) {
@@ -583,6 +599,21 @@ RankConfigConsensus evaluateRankConfigConsensus(std::span<const RankConfigDigest
   return consensus;
 }
 
+std::size_t ghostRefreshPayloadRecordBytes() noexcept {
+  return ghostExchangeRecordBytes();
+}
+
+void validateGhostRefreshPayloadDescriptor(const GhostTransferDescriptor& descriptor) {
+  if (descriptor.intent != GhostTransferIntent::kGhostRefreshRequest &&
+      descriptor.intent != GhostTransferIntent::kGhostRefreshReceiveStaging) {
+    throw std::invalid_argument(
+        "GhostExchangeBuffer carries ghost-refresh payloads only; ownership migration must use ParticleMigrationRecord");
+  }
+  if (descriptor.expected_post_transfer_residency != LocalIndexResidency::kGhost) {
+    throw std::invalid_argument("ghost-refresh payload descriptor must produce ghost residency");
+  }
+}
+
 bool GhostExchangeBufferSoA::isConsistent() const noexcept {
   return entity_id.size() == density_code.size() && entity_id.size() == velocity_x_code.size() &&
          entity_id.size() == pressure_code.size();
@@ -612,6 +643,18 @@ void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::sp
     appendPod<double>(m_bytes, source.velocity_x_code[index]);
     appendPod<double>(m_bytes, source.pressure_code[index]);
   }
+}
+
+void GhostExchangeBuffer::packFrom(
+    const GhostTransferDescriptor& descriptor,
+    const GhostExchangeBufferSoA& source,
+    std::span<const std::uint32_t> local_indices) {
+  validateGhostRefreshPayloadDescriptor(descriptor);
+  if (descriptor.local_indices.size() != local_indices.size() ||
+      !std::equal(descriptor.local_indices.begin(), descriptor.local_indices.end(), local_indices.begin())) {
+    throw std::invalid_argument("ghost descriptor indices must match packed local indices");
+  }
+  packFrom(source, local_indices);
 }
 
 void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) const {
@@ -645,6 +688,13 @@ void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) co
   if (offset != m_bytes.size()) {
     throw std::runtime_error("ghost buffer decode found trailing bytes");
   }
+}
+
+void GhostExchangeBuffer::unpackAppendTo(
+    const GhostTransferDescriptor& descriptor,
+    GhostExchangeBufferSoA& destination) const {
+  validateGhostRefreshPayloadDescriptor(descriptor);
+  unpackAppendTo(destination);
 }
 
 std::string DistributedRestartState::serialize() const {

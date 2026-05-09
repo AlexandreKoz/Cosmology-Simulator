@@ -255,3 +255,11 @@ rank-local compacted state:
 - rank-local particle IDs are summarized deterministically using integer count/sum/xor reductions;
 - partition-vs-replication detection is a test/report invariant, not a scheduling or load-balancing
   behavior change.
+
+## Ghost refresh payloads are not ownership migration records
+
+`GhostExchangeBuffer` carries the narrow ghost-refresh payload shape only: entity ID plus the small hydro-style ghost fields used by the current exchange path. It is not an ownership-transfer schema. Descriptor-aware `packFrom()` and `unpackAppendTo()` calls therefore reject `kOwnershipMigrationSend` and `kOwnershipMigrationReceiveStaging` intents.
+
+Persistent ownership migration must continue to use `core::ParticleMigrationRecord`, because that record carries authoritative runtime-truth lanes: particle hot state, particle identity metadata, softening value/mask, species tag, owning rank, and species-specific sidecar payloads. Any future distributed ownership packet must either be exactly this schema or a versioned superset with tests proving sidecar, softening, restart, and gas-cell identity preservation.
+
+Partition correctness checks now use count, particle-ID sum, particle-ID square sum, particle-ID XOR, and local uniqueness. The reference workflow compares reduced rank-local identity against the generated pre-partition IC identity. Passing by comparing a rank-reduced partition summary to itself is forbidden because it cannot detect replicated-state success.

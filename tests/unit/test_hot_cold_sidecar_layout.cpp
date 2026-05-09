@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
 
@@ -63,6 +64,27 @@ int main() {
   cosmosim::core::scatterGravityParticleKernelView(gravity_view, state);
   assert(state.particles.velocity_x_peculiar[active_particles[1]] == gravity_view.velocity_x_peculiar[1]);
 
+  const std::size_t gravity_capacity_before_clear = workspace.particle_position_x_comoving.capacity();
+  const std::size_t gravity_index_capacity_before_clear = workspace.gravity_particle_index.capacity();
+  workspace.clear();
+  assert(workspace.particle_position_x_comoving.capacity() >= gravity_capacity_before_clear);
+  assert(workspace.gravity_particle_index.capacity() >= gravity_index_capacity_before_clear);
+  const std::array<std::uint32_t, 2> repeated_particles{1, 3};
+  auto repeated_gravity_view = cosmosim::core::buildGravityParticleKernelView(state, repeated_particles, workspace);
+  assert(repeated_gravity_view.source_particle_index_generation == state.particleIndexGeneration());
+  assert(workspace.particle_position_x_comoving.capacity() >= gravity_capacity_before_clear);
+
+  bool stale_particle_threw = false;
+  auto stale_after_resize_view = repeated_gravity_view;
+  state.resizeParticles(state.particles.size() + 1U);
+  try {
+    cosmosim::core::scatterGravityParticleKernelView(stale_after_resize_view, state);
+  } catch (const std::runtime_error&) {
+    stale_particle_threw = true;
+  }
+  assert(stale_particle_threw);
+  state.resizeParticles(6);
+
   cosmosim::core::SimulationState hydro_state;
   hydro_state.resizeParticles(3);
   hydro_state.resizeCells(3);
@@ -88,6 +110,19 @@ int main() {
   hydro_view.density_code[0] = 99.0;
   cosmosim::core::scatterHydroCellKernelView(hydro_view, hydro_state);
   assert(hydro_state.gas_cells.density_code[0] == 99.0);
+
+  const std::size_t hydro_capacity_before_clear = workspace.hydro_cell_density_code.capacity();
+  workspace.clear();
+  assert(workspace.hydro_cell_density_code.capacity() >= hydro_capacity_before_clear);
+  auto stale_hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_state, active_cells, workspace);
+  hydro_state.resizeCells(hydro_state.cells.size() + 1U);
+  bool stale_cell_threw = false;
+  try {
+    cosmosim::core::scatterHydroCellKernelView(stale_hydro_view, hydro_state);
+  } catch (const std::runtime_error&) {
+    stale_cell_threw = true;
+  }
+  assert(stale_cell_threw);
 
   bool threw = false;
   try {

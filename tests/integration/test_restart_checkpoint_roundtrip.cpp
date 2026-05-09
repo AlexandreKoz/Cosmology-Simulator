@@ -21,11 +21,11 @@
 namespace {
 
 void populateState(cosmosim::core::SimulationState& state) {
-  state.resizeParticles(6);
+  state.resizeParticles(7);
   state.resizeCells(3);
   state.resizePatches(1);
 
-  state.species.count_by_species = {1, 3, 1, 1, 0};
+  state.species.count_by_species = {1, 3, 1, 1, 1};
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     state.particle_sidecar.particle_id[i] = 100 + i;
     state.particle_sidecar.sfc_key[i] = 200 + i;
@@ -40,15 +40,16 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.particles.mass_code[i] = 10.0 + static_cast<double>(i);
     state.particles.time_bin[i] = static_cast<std::uint8_t>(i % 2);
   }
-  state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005, 0.006};
-  state.particle_sidecar.has_gravity_softening_override = {1U, 1U, 1U, 1U, 1U, 1U};
+  state.particle_sidecar.gravity_softening_comoving = {0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007};
+  state.particle_sidecar.has_gravity_softening_override = {1U, 1U, 1U, 1U, 1U, 1U, 1U};
   state.particle_sidecar.species_tag = {
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar),
-      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kBlackHole)};
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kBlackHole),
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kTracer)};
 
   state.star_particles.resize(1);
   state.star_particles.particle_index[0] = 4;
@@ -80,7 +81,14 @@ void populateState(cosmosim::core::SimulationState& state) {
   state.black_holes.duty_cycle_active_time_code[0] = 4.0;
   state.black_holes.duty_cycle_total_time_code[0] = 5.0;
 
-  state.tracers.resize(0);
+  state.tracers.resize(1);
+  state.tracers.particle_index[0] = 6;
+  state.tracers.parent_particle_id[0] = state.particle_sidecar.particle_id[1];
+  state.tracers.injection_step[0] = 1234;
+  state.tracers.host_cell_index[0] = 1;
+  state.tracers.mass_fraction_of_host[0] = 0.125;
+  state.tracers.last_host_mass_code[0] = 22.5;
+  state.tracers.cumulative_exchanged_mass_code[0] = 0.75;
 
   for (std::size_t i = 0; i < state.cells.size(); ++i) {
     state.cells.center_x_comoving[i] = 0.5 * static_cast<double>(i + 1);
@@ -297,6 +305,7 @@ void testRestartRoundtrip() {
   assert(restored.state.particle_sidecar.particle_flags == state.particle_sidecar.particle_flags);
   assert(restored.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank);
   assert(restored.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  assert(restored.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
   assert(restored.state.star_particles.particle_index == state.star_particles.particle_index);
   assert(restored.state.star_particles.formation_scale_factor == state.star_particles.formation_scale_factor);
   assert(restored.state.star_particles.birth_mass_code == state.star_particles.birth_mass_code);
@@ -340,11 +349,19 @@ void testRestartRoundtrip() {
   assert(
       restored.state.black_holes.duty_cycle_total_time_code ==
       state.black_holes.duty_cycle_total_time_code);
+  assert(restored.state.tracers.particle_index == state.tracers.particle_index);
+  assert(restored.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
+  assert(restored.state.tracers.injection_step == state.tracers.injection_step);
+  assert(restored.state.tracers.host_cell_index == state.tracers.host_cell_index);
+  assert(restored.state.tracers.mass_fraction_of_host == state.tracers.mass_fraction_of_host);
+  assert(restored.state.tracers.last_host_mass_code == state.tracers.last_host_mass_code);
+  assert(restored.state.tracers.cumulative_exchanged_mass_code == state.tracers.cumulative_exchanged_mass_code);
   assert(restored.state.species.count_by_species == state.species.count_by_species);
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kDarkMatter).size() == 1);
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas).size() == 3);
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kStar).size() == 1);
   assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kBlackHole).size() == 1);
+  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kTracer).size() == 1);
   assert(gasDensityByParticleId(restored.state) == gas_density_before);
   assert(restored.state.gasCellIdentityMatchesParticleOrder());
   assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
@@ -610,6 +627,10 @@ void testRestartAfterReorderAndMigration() {
   assert(migration_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
   assert(migration_restore.state.black_holes.particle_index == state.black_holes.particle_index);
   assert(migration_restore.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  assert(migration_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
+  assert(migration_restore.state.tracers.particle_index == state.tracers.particle_index);
+  assert(migration_restore.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
+  assert(migration_restore.state.tracers.host_cell_index == state.tracers.host_cell_index);
   assert(migration_restore.distributed_gravity_state.owning_rank_by_item == migration_payload.distributed_gravity_state.owning_rank_by_item);
   std::filesystem::remove(migration_path);
 #endif

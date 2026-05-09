@@ -105,3 +105,9 @@ Compatibility policy for legacy restart payloads is explicit:
 
 The current implementation is single-rank write/read but keeps explicit scheduler/rank-related sidecars,
 which preserves a direct path to coordinated rank-safe checkpointing in future MPI modes.
+
+## Runtime-state exactness check for reference workflow restart verification
+
+The reference workflow now treats restart verification as exact runtime-state continuation, not a count-only smoke test. The verification path compares all restart-authoritative state families: particle hot SoA lanes, particle metadata/softening override lanes, gas-cell identity and hydro fields, patch state, star/black-hole/tracer sidecars, species count ledgers, opaque module sidecar payloads, scheduler state, provenance/config metadata, and distributed gravity restart metadata.
+
+Module sidecar payload length is explicitly included in the restart payload integrity hash before payload bytes. This preserves hash boundary clarity across adjacent module payloads and makes omitted or reshaped module truth detectable by the hash.
