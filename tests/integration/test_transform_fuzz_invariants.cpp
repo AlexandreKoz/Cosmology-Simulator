@@ -613,8 +613,16 @@ void rebuildGasStateByParticleId(SimulationState& state, const std::string& cont
 void verifyRestartRoundTripIfEnabled(SimulationState state, const TransformOracle& oracle, const std::string& context) {
 #if COSMOSIM_ENABLE_HDF5
   cosmosim::core::IntegratorState integrator_state;
-  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  std::uint8_t scheduler_max_bin = 0;
+  for (const auto bin : state.particles.time_bin) {
+    scheduler_max_bin = std::max(scheduler_max_bin, bin);
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(scheduler_max_bin);
   scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0, 0);
+  for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(state.particles.size()); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
 
   cosmosim::io::RestartWritePayload payload;
   payload.state = &state;

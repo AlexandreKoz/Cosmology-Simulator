@@ -517,6 +517,19 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
     throw std::invalid_argument("TimeBinPersistentState arrays must have matching sizes");
   }
 
+  for (std::size_t element_index = 0; element_index < persistent_state.bin_index.size(); ++element_index) {
+    if (persistent_state.bin_index[element_index] > persistent_state.max_bin) {
+      throw std::invalid_argument("TimeBinPersistentState bin_index exceeds max_bin");
+    }
+    if (persistent_state.active_flag[element_index] > 1U) {
+      throw std::invalid_argument("TimeBinPersistentState active_flag must be 0 or 1");
+    }
+    const bool pending_is_unset = persistent_state.pending_bin_index[element_index] == k_unset_pending_bin;
+    if (!pending_is_unset && persistent_state.pending_bin_index[element_index] > persistent_state.max_bin) {
+      throw std::invalid_argument("TimeBinPersistentState pending_bin_index exceeds max_bin");
+    }
+  }
+
   m_current_tick = persistent_state.current_tick;
   m_max_bin = persistent_state.max_bin;
   m_hot.bin_index = persistent_state.bin_index;

@@ -57,7 +57,7 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 |---|---|
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
-| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes |
+| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. |
 
 Additive softening sidecar persistence:
 - Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.

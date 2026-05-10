@@ -56,7 +56,81 @@ template <typename VectorLike>
   return {reinterpret_cast<const std::byte*>(values.data()), values.size() * sizeof(ValueType)};
 }
 
+void validateSchedulerPersistentStateForRestart(
+    const core::TimeBinPersistentState& scheduler_state,
+    std::size_t expected_particle_count,
+    std::string_view context) {
+  if (scheduler_state.bin_index.size() != scheduler_state.next_activation_tick.size() ||
+      scheduler_state.bin_index.size() != scheduler_state.active_flag.size() ||
+      scheduler_state.bin_index.size() != scheduler_state.pending_bin_index.size()) {
+    throw std::invalid_argument(std::string(context) + ": scheduler persistent arrays must have matching sizes");
+  }
+  if (scheduler_state.bin_index.size() != expected_particle_count) {
+    throw std::invalid_argument(
+        std::string(context) + ": scheduler bin_index count must match particle time-bin mirror count");
+  }
+  for (std::size_t i = 0; i < scheduler_state.bin_index.size(); ++i) {
+    if (scheduler_state.bin_index[i] > scheduler_state.max_bin) {
+      throw std::invalid_argument(std::string(context) + ": scheduler bin_index exceeds max_bin");
+    }
+    if (scheduler_state.active_flag[i] > 1U) {
+      throw std::invalid_argument(std::string(context) + ": scheduler active_flag must be 0 or 1");
+    }
+    const bool pending_is_unset =
+        scheduler_state.pending_bin_index[i] == core::HierarchicalTimeBinScheduler::k_unset_pending_bin;
+    if (!pending_is_unset && scheduler_state.pending_bin_index[i] > scheduler_state.max_bin) {
+      throw std::invalid_argument(std::string(context) + ": scheduler pending_bin_index exceeds max_bin");
+    }
+  }
+}
+
+void validateRestartTimeBinMirrorsAgainstScheduler(
+    const core::SimulationState& state,
+    const core::TimeBinPersistentState& scheduler_state,
+    std::string_view context) {
+  validateSchedulerPersistentStateForRestart(scheduler_state, state.particles.size(), context);
+  if (state.particles.time_bin.size() != scheduler_state.bin_index.size()) {
+    throw std::invalid_argument(
+        std::string(context) + ": particle time_bin mirror length must match scheduler bin_index length");
+  }
+  for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
+    if (state.particles.time_bin[i] != scheduler_state.bin_index[i]) {
+      throw std::invalid_argument(
+          std::string(context) + ": particle time_bin mirror is stale relative to scheduler bin_index");
+    }
+  }
+
+  // The v6 restart schema has one particle scheduler lane. Cell time_bin remains a
+  // derived state mirror; if a future/fixture scheduler payload is exactly cell-sized,
+  // validate it as a mirror too, but do not treat cells as a fallback authority.
+  if (!state.cells.time_bin.empty() && scheduler_state.bin_index.size() == state.cells.time_bin.size()) {
+    for (std::size_t i = 0; i < state.cells.time_bin.size(); ++i) {
+      if (state.cells.time_bin[i] != scheduler_state.bin_index[i]) {
+        throw std::invalid_argument(
+            std::string(context) + ": cell time_bin mirror is stale relative to scheduler bin_index");
+      }
+    }
+  }
+}
+
+void rebuildRestartTimeBinMirrorsFromScheduler(
+    core::SimulationState& state,
+    const core::TimeBinPersistentState& scheduler_state) {
+  if (state.particles.time_bin.size() != scheduler_state.bin_index.size()) {
+    throw std::invalid_argument("restart reader: particle time_bin mirror length must match scheduler bin_index length");
+  }
+  for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
+    state.particles.time_bin[i] = scheduler_state.bin_index[i];
+  }
+  if (!state.cells.time_bin.empty() && scheduler_state.bin_index.size() == state.cells.time_bin.size()) {
+    for (std::size_t i = 0; i < state.cells.time_bin.size(); ++i) {
+      state.cells.time_bin[i] = scheduler_state.bin_index[i];
+    }
+  }
+}
+
 #if COSMOSIM_ENABLE_HDF5
+
 class Hdf5Handle {
  public:
   explicit Hdf5Handle(hid_t handle = -1) : m_handle(handle) {}
@@ -693,6 +767,11 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   if (!payload.state->validateOwnershipInvariants()) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
   }
+  const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  validateRestartTimeBinMirrorsAgainstScheduler(
+      *payload.state,
+      scheduler_state_for_validation,
+      "restart payload");
   if (payload.distributed_gravity_state.world_size <= 0) {
     throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
   }
@@ -825,7 +904,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.active_bin));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.max_bin));
 
-  const core::TimeBinPersistentState scheduler_state = payload.scheduler->exportPersistentState();
+  const core::TimeBinPersistentState& scheduler_state = scheduler_state_for_validation;
   append_u64(scheduler_state.current_tick);
   append_u64(static_cast<std::uint64_t>(scheduler_state.max_bin));
   append_any_vec(scheduler_state.bin_index);
@@ -862,6 +941,10 @@ void writeRestartCheckpointHdf5(
   if (!payload.state->validateOwnershipInvariants()) {
     throw std::invalid_argument("cannot checkpoint invalid simulation state");
   }
+  validateRestartTimeBinMirrorsAgainstScheduler(
+      *payload.state,
+      payload.scheduler->exportPersistentState(),
+      "restart writer");
 
   std::filesystem::create_directories(output_path.parent_path());
   const std::filesystem::path temporary_path = output_path.string() + policy.temporary_suffix;
@@ -990,6 +1073,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.scheduler_state.active_flag = readDataset1d<std::uint8_t>(scheduler_group.get(), "active_flag", H5T_NATIVE_UINT8);
   result.scheduler_state.pending_bin_index =
       readDataset1d<std::uint8_t>(scheduler_group.get(), "pending_bin_index", H5T_NATIVE_UINT8);
+  validateRestartTimeBinMirrorsAgainstScheduler(result.state, result.scheduler_state, "restart reader");
+  rebuildRestartTimeBinMirrorsFromScheduler(result.state, result.scheduler_state);
   readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;

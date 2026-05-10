@@ -32,10 +32,10 @@ behavior on filesystems where `rename` is atomic.
 
 ## Integrity and provenance
 
-- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance.
+- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority.
 - The hash covers particle lanes, sidecars, gas-cell identity lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
-  `active_flag`, `pending_bin_index`), and the full serialized provenance payload.
+  `active_flag`, `pending_bin_index`), and the full serialized provenance payload. State `time_bin` arrays remain hash inputs for corruption detection, but restart continuation imports scheduler state and rebuilds mirrors rather than treating mirrors as fallback authority.
 - Because gravity TreePM metadata now lives in `ProvenanceRecord`, restart artifacts carry
   and integrity-protect the exact PM controls (`pm_grid`, assignment, deconvolution,
   `asmth_cells`, `rcut_cells`, cadence), derived scales (`Δmesh`, `r_s`, `r_cut`),
@@ -92,6 +92,7 @@ Restart round-trip invariant coverage now explicitly checks that:
 - particle IDs and canonical particle order survive reload,
 - species counts/index reconstruction and gas identity-by-particle-ID survive reload,
 - scheduler persistent state survives and reconstructs the same active set at resume tick,
+- particle `time_bin` mirrors are rejected when stale and rebuilt from scheduler state on successful read,
 - per-particle softening overrides survive and continue to take precedence over species/global defaults,
 - normalized config text/hash and provenance config hash remain aligned after reload.
 
@@ -99,6 +100,7 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
+- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. This is a v6 compatibility check, not a schema bump.
 - The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note
