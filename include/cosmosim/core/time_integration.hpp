@@ -360,6 +360,50 @@ void debugAssertActiveSetDescriptorFresh(
     const SimulationState& state,
     const HierarchicalTimeBinScheduler& scheduler);
 
+struct TimeBinSchedulerIdentityRecord {
+  // Full scheduler authority for one physical element identity. Migration packets
+  // may carry time_bin as a diagnostic mirror, but exact continuation requires
+  // these scheduler-owned lanes matched by stable particle_id/gas_cell_id.
+  std::uint64_t element_id = 0;
+  std::uint8_t bin_index = 0;
+  std::uint64_t next_activation_tick = 0;
+  std::uint8_t pending_bin_index = HierarchicalTimeBinScheduler::k_unset_pending_bin;
+};
+
+[[nodiscard]] std::vector<TimeBinSchedulerIdentityRecord> exportParticleSchedulerIdentityRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> particle_indices);
+
+[[nodiscard]] TimeBinPersistentState remapSchedulerPersistentStateByParticleId(
+    const TimeBinPersistentState& source_state,
+    std::span<const std::uint64_t> source_particle_ids,
+    std::span<const std::uint64_t> destination_particle_ids);
+
+void remapSchedulerByParticleId(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const std::uint64_t> source_particle_ids,
+    std::span<const std::uint64_t> destination_particle_ids);
+
+void remapSchedulerByParticleReorderMap(
+    HierarchicalTimeBinScheduler& scheduler,
+    const ParticleReorderMap& reorder_map);
+
+[[nodiscard]] TimeBinPersistentState rebuildSchedulerPersistentStateFromIdentityRecords(
+    std::uint64_t current_tick,
+    std::uint8_t max_bin,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    std::span<const std::uint64_t> destination_element_ids);
+
+void rebuildSchedulerFromParticleIdentityRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    std::span<const std::uint64_t> destination_particle_ids);
+
+void syncGasCellTimeBinMirrorsFromParticleScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state);
+
 [[nodiscard]] TimeBinMappingResult mapDtToTimeBin(double dt_time_code, const TimeStepLimits& limits);
 [[nodiscard]] double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits);
 enum class TimeBinMirrorDomain : std::uint8_t {

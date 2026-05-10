@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace cosmosim::core {
@@ -985,6 +986,203 @@ double binIndexToDt(std::uint8_t bin_index, const TimeStepLimits& limits) {
   return limits.min_dt_time_code * static_cast<double>(powerOfTwo(std::min(bin_index, limits.max_bin)));
 }
 
+
+namespace {
+
+void validatePersistentStateShapeForRemap(
+    const TimeBinPersistentState& state,
+    std::size_t expected_size,
+    std::string_view caller) {
+  if (state.bin_index.size() != expected_size || state.next_activation_tick.size() != expected_size ||
+      state.active_flag.size() != expected_size || state.pending_bin_index.size() != expected_size) {
+    throw std::invalid_argument(std::string(caller) + ": scheduler persistent state size does not match identity lane");
+  }
+}
+
+[[nodiscard]] std::unordered_map<std::uint64_t, std::size_t> buildUniqueIdentityIndex(
+    std::span<const std::uint64_t> ids,
+    std::string_view caller) {
+  std::unordered_map<std::uint64_t, std::size_t> index_by_id;
+  index_by_id.reserve(ids.size());
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    if (ids[i] == 0U) {
+      throw std::invalid_argument(std::string(caller) + ": zero identity is not a valid scheduler remap key");
+    }
+    if (!index_by_id.emplace(ids[i], i).second) {
+      throw std::invalid_argument(std::string(caller) + ": duplicate stable identity in scheduler remap keys");
+    }
+  }
+  return index_by_id;
+}
+
+}  // namespace
+
+std::vector<TimeBinSchedulerIdentityRecord> exportParticleSchedulerIdentityRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> particle_indices) {
+  const auto persistent = scheduler.exportPersistentState();
+  validatePersistentStateShapeForRemap(
+      persistent,
+      state.particles.size(),
+      "exportParticleSchedulerIdentityRecords");
+  std::vector<TimeBinSchedulerIdentityRecord> records;
+  records.reserve(particle_indices.size());
+  for (const std::uint32_t particle_index : particle_indices) {
+    if (particle_index >= state.particles.size()) {
+      throw std::out_of_range("exportParticleSchedulerIdentityRecords: particle index out of range");
+    }
+    records.push_back(TimeBinSchedulerIdentityRecord{
+        .element_id = state.particle_sidecar.particle_id[particle_index],
+        .bin_index = persistent.bin_index[particle_index],
+        .next_activation_tick = persistent.next_activation_tick[particle_index],
+        .pending_bin_index = persistent.pending_bin_index[particle_index],
+    });
+  }
+  return records;
+}
+
+TimeBinPersistentState remapSchedulerPersistentStateByParticleId(
+    const TimeBinPersistentState& source_state,
+    std::span<const std::uint64_t> source_particle_ids,
+    std::span<const std::uint64_t> destination_particle_ids) {
+  validatePersistentStateShapeForRemap(
+      source_state,
+      source_particle_ids.size(),
+      "remapSchedulerPersistentStateByParticleId");
+  const auto source_index_by_id =
+      buildUniqueIdentityIndex(source_particle_ids, "remapSchedulerPersistentStateByParticleId");
+  (void)buildUniqueIdentityIndex(
+      destination_particle_ids,
+      "remapSchedulerPersistentStateByParticleId");
+
+  TimeBinPersistentState remapped;
+  remapped.current_tick = source_state.current_tick;
+  remapped.max_bin = source_state.max_bin;
+  remapped.bin_index.resize(destination_particle_ids.size());
+  remapped.next_activation_tick.resize(destination_particle_ids.size());
+  remapped.active_flag.assign(destination_particle_ids.size(), 0U);
+  remapped.pending_bin_index.resize(destination_particle_ids.size());
+
+  for (std::size_t new_index = 0; new_index < destination_particle_ids.size(); ++new_index) {
+    const auto found = source_index_by_id.find(destination_particle_ids[new_index]);
+    if (found == source_index_by_id.end()) {
+      throw std::invalid_argument(
+          "remapSchedulerPersistentStateByParticleId: missing scheduler authority for destination particle_id");
+    }
+    const std::size_t old_index = found->second;
+    remapped.bin_index[new_index] = source_state.bin_index[old_index];
+    remapped.next_activation_tick[new_index] = source_state.next_activation_tick[old_index];
+    remapped.pending_bin_index[new_index] = source_state.pending_bin_index[old_index];
+  }
+  return remapped;
+}
+
+void remapSchedulerByParticleId(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const std::uint64_t> source_particle_ids,
+    std::span<const std::uint64_t> destination_particle_ids) {
+  scheduler.importPersistentState(remapSchedulerPersistentStateByParticleId(
+      scheduler.exportPersistentState(),
+      source_particle_ids,
+      destination_particle_ids));
+}
+
+void remapSchedulerByParticleReorderMap(
+    HierarchicalTimeBinScheduler& scheduler,
+    const ParticleReorderMap& reorder_map) {
+  const auto source_state = scheduler.exportPersistentState();
+  if (!reorder_map.isConsistent(source_state.bin_index.size())) {
+    throw std::invalid_argument("remapSchedulerByParticleReorderMap: inconsistent reorder map for scheduler");
+  }
+  TimeBinPersistentState remapped;
+  remapped.current_tick = source_state.current_tick;
+  remapped.max_bin = source_state.max_bin;
+  remapped.bin_index.resize(source_state.bin_index.size());
+  remapped.next_activation_tick.resize(source_state.bin_index.size());
+  remapped.active_flag.assign(source_state.bin_index.size(), 0U);
+  remapped.pending_bin_index.resize(source_state.bin_index.size());
+  for (std::size_t new_index = 0; new_index < reorder_map.new_to_old_index.size(); ++new_index) {
+    const std::uint32_t old_index = reorder_map.new_to_old_index[new_index];
+    remapped.bin_index[new_index] = source_state.bin_index[old_index];
+    remapped.next_activation_tick[new_index] = source_state.next_activation_tick[old_index];
+    remapped.pending_bin_index[new_index] = source_state.pending_bin_index[old_index];
+  }
+  scheduler.importPersistentState(remapped);
+}
+
+TimeBinPersistentState rebuildSchedulerPersistentStateFromIdentityRecords(
+    std::uint64_t current_tick,
+    std::uint8_t max_bin,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    std::span<const std::uint64_t> destination_element_ids) {
+  std::unordered_map<std::uint64_t, TimeBinSchedulerIdentityRecord> record_by_id;
+  record_by_id.reserve(records.size());
+  for (const auto& record : records) {
+    if (record.element_id == 0U) {
+      throw std::invalid_argument("rebuildSchedulerPersistentStateFromIdentityRecords: zero element_id is invalid");
+    }
+    if (record.bin_index > max_bin) {
+      throw std::invalid_argument("rebuildSchedulerPersistentStateFromIdentityRecords: bin_index exceeds max_bin");
+    }
+    if (record.pending_bin_index != HierarchicalTimeBinScheduler::k_unset_pending_bin &&
+        record.pending_bin_index > max_bin) {
+      throw std::invalid_argument("rebuildSchedulerPersistentStateFromIdentityRecords: pending_bin_index exceeds max_bin");
+    }
+    if (!record_by_id.emplace(record.element_id, record).second) {
+      throw std::invalid_argument("rebuildSchedulerPersistentStateFromIdentityRecords: duplicate scheduler identity record");
+    }
+  }
+  (void)buildUniqueIdentityIndex(destination_element_ids, "rebuildSchedulerPersistentStateFromIdentityRecords");
+
+  TimeBinPersistentState rebuilt;
+  rebuilt.current_tick = current_tick;
+  rebuilt.max_bin = max_bin;
+  rebuilt.bin_index.resize(destination_element_ids.size());
+  rebuilt.next_activation_tick.resize(destination_element_ids.size());
+  rebuilt.active_flag.assign(destination_element_ids.size(), 0U);
+  rebuilt.pending_bin_index.resize(destination_element_ids.size());
+  for (std::size_t row = 0; row < destination_element_ids.size(); ++row) {
+    const auto found = record_by_id.find(destination_element_ids[row]);
+    if (found == record_by_id.end()) {
+      throw std::invalid_argument(
+          "rebuildSchedulerPersistentStateFromIdentityRecords: ParticleMigrationRecord::time_bin mirror is not scheduler authority");
+    }
+    rebuilt.bin_index[row] = found->second.bin_index;
+    rebuilt.next_activation_tick[row] = found->second.next_activation_tick;
+    rebuilt.pending_bin_index[row] = found->second.pending_bin_index;
+  }
+  return rebuilt;
+}
+
+void rebuildSchedulerFromParticleIdentityRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    std::span<const std::uint64_t> destination_particle_ids) {
+  scheduler.importPersistentState(rebuildSchedulerPersistentStateFromIdentityRecords(
+      scheduler.currentTick(),
+      scheduler.maxBin(),
+      records,
+      destination_particle_ids));
+}
+
+void syncGasCellTimeBinMirrorsFromParticleScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state) {
+  if (state.cells.size() == 0) {
+    return;
+  }
+  requireParticleBoundGasCellContract(state, "syncGasCellTimeBinMirrorsFromParticleScheduler");
+  const auto persistent = scheduler.exportPersistentState();
+  if (persistent.bin_index.size() < state.particles.size()) {
+    throw std::invalid_argument("syncGasCellTimeBinMirrorsFromParticleScheduler: scheduler lacks particle bin entries");
+  }
+  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint32_t particle_index = gasParticleIndexForCellRow(state, cell_index);
+    state.cells.time_bin[cell_index] = persistent.bin_index[particle_index];
+  }
+}
+
 void syncTimeBinMirrorsFromScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     SimulationState& state,
@@ -999,12 +1197,7 @@ void syncTimeBinMirrorsFromScheduler(
     }
   };
   auto sync_cells = [&]() {
-    if (persistent.bin_index.size() < state.cells.size()) {
-      throw std::invalid_argument("syncTimeBinMirrorsFromScheduler: scheduler lacks cell bin entries");
-    }
-    for (std::size_t i = 0; i < state.cells.size(); ++i) {
-      state.cells.time_bin[i] = persistent.bin_index[i];
-    }
+    syncGasCellTimeBinMirrorsFromParticleScheduler(scheduler, state);
   };
 
   switch (domain) {
@@ -1038,11 +1231,20 @@ bool timeBinMirrorsMatchScheduler(
     return true;
   };
   auto cells_match = [&]() {
-    if (hot.bin_index.size() < state.cells.size()) {
+    if (state.cells.size() == 0) {
+      return true;
+    }
+    try {
+      requireParticleBoundGasCellContract(state, "timeBinMirrorsMatchScheduler");
+    } catch (const std::exception&) {
       return false;
     }
-    for (std::size_t i = 0; i < state.cells.size(); ++i) {
-      if (state.cells.time_bin[i] != hot.bin_index[i]) {
+    if (hot.bin_index.size() < state.particles.size()) {
+      return false;
+    }
+    for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
+      const std::uint32_t particle_index = gasParticleIndexForCellRow(state, i);
+      if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
         return false;
       }
     }
@@ -1088,7 +1290,7 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     throw_particle(static_cast<std::uint32_t>(hot.bin_index.size()));
   }
   if ((domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
-      hot.bin_index.size() < state.cells.size()) {
+      hot.bin_index.size() < state.particles.size()) {
     throw_cell(static_cast<std::uint32_t>(hot.bin_index.size()));
   }
   if (domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) {
@@ -1099,8 +1301,12 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     }
   }
   if (domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) {
+    if (state.cells.size() > 0) {
+      requireParticleBoundGasCellContract(state, "debugAssertTimeBinMirrorAuthorityInvariant");
+    }
     for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
-      if (state.cells.time_bin[i] != hot.bin_index[i]) {
+      const std::uint32_t particle_index = gasParticleIndexForCellRow(state, i);
+      if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
         throw_cell(i);
       }
     }
