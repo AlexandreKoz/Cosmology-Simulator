@@ -1519,3 +1519,15 @@ Reproducibility impact:
 - Root cause for the HDF5 restart roundtrip abort was a malformed reorder fixture: `state.particle_sidecar.sfc_key` was reassigned with six entries for a seven-particle state, so `reorderAlignedVector` correctly rejected the lane/permutation length mismatch before restart assertions could complete.
 - HDF5 missing-field checks now preflight dataset existence before `H5Dopen2`, preserving explicit missing-dataset exceptions for required v6 fields (`pending_bin_index`, `has_gravity_softening_override`) without emitting misleading HDF5 diagnostics in negative tests.
 - Reproducibility impact: no restart schema or compatibility semantics changed; this only fixes fixture lane cardinality and makes missing required-field diagnostics deterministic.
+
+## 2026-05-10 Hierarchical timestep invariant traps
+
+- Added scheduler-owned runtime invariant checks around substep begin/end, candidate reconciliation, bin-transition commit, active-set descriptor consumption, restart timestep-state import/export validation, time-bin mirror consumption, and PM cadence refresh commits.
+- Bad states now fail with deterministic context strings carrying the source label, element index, current integer tick, bin, next activation tick, placeholder integrator step/time context, and PM sync context where relevant.
+- Added CPU debug tests for early activation, illegal bin jumps, skipped PM refresh commits, stale mirror use, invalid restart timestep payloads, active-set mismatch, and local/global synchronization-boundary violations.
+- Reproducibility impact: no solver numerics, config keys, restart schema version, HDF5 dataset layout, normalized config dumps, provenance payloads, or output naming changed. The patch hardens deterministic scheduler-state validation and turns previously silent invalid multirate states into immediate test-visible failures.
+
+## 2026-05-10 PM validation residual cutoff contract repair
+
+- Fixed the PM+HDF5+FFTW validation residual-cutoff gate so `validation_phase2_mpi_gravity_single_rank` accepts either internal-node cutoff pruning or leaf pair cutoff skips as deterministic evidence that the TreePM residual cutoff path was exercised.
+- Reproducibility impact: validation-only contract alignment; no solver numerics, restart/schema payloads, config keys, provenance, output naming, or runtime scheduling behavior changed.
