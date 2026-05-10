@@ -567,3 +567,33 @@ A final integration/coherence audit was run against the Phase 3 contract surface
 - `docs/repair_state_recap.md`
 - `docs/repair_open_issues.md`
 - `docs/releases/known_issues.md`
+
+
+## 2026-05-10 — ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014: Freeze timestep owner before Stage 2 repairs
+
+### Status
+Accepted (infrastructure audit)
+
+### Context
+Stage 2 timestep repair has multiple existing timestep-related lanes: the hierarchical scheduler hot state, state `time_bin` mirrors, integrator metadata, restart scheduler payloads, migration/reorder preservation lanes, and TreePM cadence counters. Without a pre-change ownership map, any repair could create split-brain timestep truth.
+
+### Decision
+- Adopt `core::HierarchicalTimeBinScheduler` as the intended owner for per-element discrete timestep truth: committed bin, pending transition, activation tick, active flag/cache for the current scheduler substep, and scheduler integer tick.
+- Treat `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors derived from scheduler persistent state, including in restart payloads.
+- Treat `core::IntegratorState` as the owner for global continuous time/step scalars only; its time-bin context is metadata and must not become per-element authority.
+- Keep TreePM PM cadence state owned by the gravity workflow callback and serialized as distributed restart/provenance cadence state; `gravity_kick_opportunity` is a kick-stage counter, not a scheduler tick.
+- Publish the detailed inventory and unsafe hidden-state list in `docs/architecture/stage2_timestep_ownership_audit.md` before behavior-changing Stage 2 work.
+
+### Consequences
+- Positive: later Stage 2 patches have a single authority target for scheduler legality, bin commit, activation, mirror sync, restart, and transform repair.
+- Positive: restart scheduler state, state mirrors, active-set descriptors, structural transforms, and PM cadence are explicitly separated.
+- Required follow-up: behavior-changing repairs must add assertions/tests for mirror freshness, structural-transform scheduler rebuild/reimport, and restart read-side scheduler/mirror compatibility before claiming closure.
+- Tradeoff: this ADR classifies existing ambiguous lanes as mirrors or unsafe hidden state without fixing them in this documentation-only patch.
+
+### Evidence references
+- `docs/architecture/stage2_timestep_ownership_audit.md`
+- `include/cosmosim/core/time_integration.hpp`
+- `src/core/time_integration.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `src/io/restart_checkpoint.cpp`
+- `include/cosmosim/parallel/distributed_memory.hpp`

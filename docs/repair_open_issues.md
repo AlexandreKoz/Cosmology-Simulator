@@ -160,3 +160,10 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 
 - Closed CI-discipline gap for CPU-runnable P0 runtime-truth repairs: the P0 suite now has an exact CTest preset, labels, a label/feature-gating audit test, and one local/CI script under `scripts/ci/`.
 - Feature-specific closure remains dependency-bound: HDF5, FFTW, MPI, CUDA, and Python presets are explicit and should fail at configure time when requested dependencies are absent; CPU-only Stage 1 success must not be reported as feature-path closure.
+
+
+## Stage 2 timestep ownership follow-ups (opened 2026-05-10)
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P35-STAGE2-TIMESTEP-OWNERSHIP-032 | Open | Hierarchical timestep authority | Audit classifies scheduler state as authority and state `time_bin` lanes as mirrors, but production guardrails do not yet enforce mirror freshness at every restart/transform boundary. | Add behavior-preserving assertions/tests for scheduler-vs-mirror freshness, structural-transform scheduler rebuild/reimport, and restart read-side scheduler/mirror compatibility before Stage 2 behavior repairs claim closure. |

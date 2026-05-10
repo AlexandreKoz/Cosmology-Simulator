@@ -14,7 +14,8 @@ set(required_docs
   "@CMAKE_SOURCE_DIR@/docs/releases/known_issues.md"
   "@CMAKE_SOURCE_DIR@/docs/releases/release_checklist.md"
   "@CMAKE_SOURCE_DIR@/docs/architecture/overview.md"
-  "@CMAKE_SOURCE_DIR@/docs/architecture/developer_workflow_contract.md")
+  "@CMAKE_SOURCE_DIR@/docs/architecture/developer_workflow_contract.md"
+  "@CMAKE_SOURCE_DIR@/docs/architecture/stage2_timestep_ownership_audit.md")
 
 foreach(doc_file IN LISTS required_docs)
   if(NOT EXISTS "${doc_file}")
@@ -53,3 +54,23 @@ file(READ "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md" release_notes_doc)
 if(NOT release_notes_doc MATCHES "release_manifest_v1")
   message(FATAL_ERROR "Release notes must mention release_manifest_v1")
 endif()
+
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/architecture/stage2_timestep_ownership_audit.md" stage2_timestep_audit_doc)
+foreach(required_term
+    "HierarchicalTimeBinScheduler"
+    "ParticleSoa::time_bin"
+    "CellSoa::time_bin"
+    "pending_bin_index"
+    "next_activation_tick"
+    "ActiveSetDescriptor"
+    "gravity_kick_opportunity"
+    "pm_update_cadence_steps"
+    "restart"
+    "migration"
+    "reorder"
+    "compaction")
+  if(NOT stage2_timestep_audit_doc MATCHES "${required_term}")
+    message(FATAL_ERROR "Stage 2 timestep ownership audit must classify ${required_term}")
+  endif()
+endforeach()
