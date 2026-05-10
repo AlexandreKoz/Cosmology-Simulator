@@ -1485,3 +1485,10 @@ Observed repair scope:
 Reproducibility impact:
 
 - Test registration, labels, presets, scripts, and documentation only. No solver numerics, HDF5 schema names, restart schema versions, normalized config dumps, provenance payload contents, output naming, deterministic scheduling behavior, or SoA/hot-cold state layout changed.
+
+
+## 2026-05-10 — Stage 2 timestep ownership audit
+
+- Added `docs/architecture/stage2_timestep_ownership_audit.md` as the pre-repair inventory for timestep ownership lanes, serialization classifications, mutation paths, unsafe hidden state, and follow-up repair prompts.
+- Recorded `ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014` in `docs/architecture/decision_log.md`: the hierarchical scheduler is the intended per-element timestep authority; state `time_bin` arrays are mirrors; integrator time-bin context is metadata; TreePM cadence remains owned by the gravity workflow callback/distributed restart cadence state.
+- No solver math, restart schema, output schema, or runtime behavior changed in this audit patch.
