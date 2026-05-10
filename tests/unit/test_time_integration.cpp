@@ -141,8 +141,8 @@ void testHierarchicalSchedulerTransitions() {
   auto active = scheduler.beginSubstep();
   assert(active.size() == 4);
 
-  scheduler.requestBinTransition(0, 0);
-  scheduler.requestBinTransition(1, 3);
+  scheduler.submitCandidateBin(0, 0, cosmosim::core::TimeStepCandidateSource::kUserClamp);
+  scheduler.submitCandidateBin(1, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
 
   const auto& hot = scheduler.hotMetadata();
@@ -153,7 +153,7 @@ void testHierarchicalSchedulerTransitions() {
   assert(active.size() == 1);
   assert(active[0] == 0);
 
-  scheduler.requestBinTransition(0, 3);
+  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
   const auto illegal_before = scheduler.diagnostics().illegal_transition_attempts;
   assert(illegal_before >= 1);
@@ -165,7 +165,7 @@ void testHierarchicalSchedulerTransitions() {
 
   active = scheduler.beginSubstep();
   assert(!active.empty() && active[0] == 0);
-  scheduler.requestBinTransition(0, 3);
+  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
 
   assert(scheduler.hotMetadata().bin_index[0] == 3);
@@ -226,8 +226,8 @@ void testTimestepBinReassignmentAndRestartRoundTrip() {
   scheduler.reset(5, 1, 0);
 
   scheduler.beginSubstep();
-  scheduler.requestBinTransition(0, 0);
-  scheduler.requestBinTransition(3, 2);
+  scheduler.submitCandidateBin(0, 0, cosmosim::core::TimeStepCandidateSource::kUserClamp);
+  scheduler.submitCandidateBin(3, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
 
   while (scheduler.currentTick() < 4) {
@@ -236,7 +236,7 @@ void testTimestepBinReassignmentAndRestartRoundTrip() {
   }
 
   scheduler.beginSubstep();
-  scheduler.requestBinTransition(0, 2);
+  scheduler.submitCandidateBin(0, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
 
   const auto saved = scheduler.exportPersistentState();
@@ -338,7 +338,7 @@ void testActiveSetAuthority() {
   }
   assert(stale_descriptor_threw);
 
-  scheduler.requestBinTransition(2, 0);
+  scheduler.submitCandidateBin(2, 0, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
 
   const auto active1 = scheduler.beginSubstep();
@@ -382,6 +382,87 @@ void testActiveSetNoCompetingBuilders() {
   scheduler.endSubstep();
 }
 
+
+void testHydroGravityCandidateReconciliation() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(3, 3, 0);
+  const cosmosim::core::TimeStepLimits limits{
+      .min_dt_time_code = 0.125,
+      .max_dt_time_code = 1.0,
+      .max_bin = 3,
+  };
+
+  scheduler.submitCandidateTimeStep(0, 1.0, limits, cosmosim::core::TimeStepCandidateSource::kHydroCfl, "hydro_coarse");
+  scheduler.submitCandidateTimeStep(0, 0.125, limits, cosmosim::core::TimeStepCandidateSource::kGravityAcceleration, "gravity_fine");
+  scheduler.submitCandidateTimeStep(1, 0.5, limits, cosmosim::core::TimeStepCandidateSource::kHydroCfl, "hydro_mid");
+
+  const auto reconciliation = scheduler.reconcileCandidateTransitions();
+  assert(reconciliation.submitted_candidates == 3);
+  assert(reconciliation.elements_with_candidates == 2);
+  assert(reconciliation.committed_transition_requests == 2);
+
+  scheduler.beginSubstep();
+  scheduler.endSubstep();
+  const auto& hot = scheduler.hotMetadata();
+  assert(hot.bin_index[0] == 0);
+  assert(hot.bin_index[1] == 2);
+  assert(hot.bin_index[2] == 3);
+}
+
+void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1);
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 1.0;
+  std::vector<std::uint32_t> active_particles{0};
+  cosmosim::core::ActiveSetDescriptor untrusted{
+      .particle_indices = active_particles,
+      .particles_are_subset = true,
+  };
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  bool threw = false;
+  try {
+    orchestrator.executeSingleStep(state, integrator_state, untrusted, nullptr, nullptr, nullptr, nullptr, 0);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testPmSynchronizationCadencePreservesRefreshBoundaries() {
+  cosmosim::core::PmSynchronizationState pm_sync;
+  pm_sync.reset(3);
+
+  const auto first = pm_sync.registerKickOpportunity(10, 0.5, false);
+  assert(first.gravity_kick_opportunity == 1);
+  assert(first.refresh_long_range_field);
+  assert(first.field_version == 1);
+  pm_sync.commitRefresh(first);
+  assert(pm_sync.fieldVersion() == 1);
+  assert(pm_sync.lastRefreshOpportunity() == 1);
+
+  const auto reuse1 = pm_sync.registerKickOpportunity(11, 0.6, true);
+  assert(reuse1.gravity_kick_opportunity == 2);
+  assert(!reuse1.refresh_long_range_field);
+  assert(reuse1.field_version == 1);
+  const auto reuse2 = pm_sync.registerKickOpportunity(12, 0.7, true);
+  assert(reuse2.gravity_kick_opportunity == 3);
+  assert(!reuse2.refresh_long_range_field);
+  assert(reuse2.last_refresh_opportunity == 1);
+
+  const auto refresh = pm_sync.registerKickOpportunity(13, 0.8, true);
+  assert(refresh.gravity_kick_opportunity == 4);
+  assert(refresh.refresh_long_range_field);
+  assert(refresh.field_version == 2);
+  assert(refresh.last_refresh_opportunity == 4);
+  assert(refresh.field_built_step_index == 13);
+  pm_sync.commitRefresh(refresh);
+  assert(pm_sync.fieldVersion() == 2);
+  assert(pm_sync.lastRefreshOpportunity() == 4);
+  assert(std::abs(pm_sync.lastRefreshScaleFactor() - 0.8) < k_tolerance);
+}
+
 }  // namespace
 
 int main() {
@@ -395,5 +476,8 @@ int main() {
   testTimestepBinReorderIdentitySurvival();
   testActiveSetAuthority();
   testActiveSetNoCompetingBuilders();
+  testHydroGravityCandidateReconciliation();
+  testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected();
+  testPmSynchronizationCadencePreservesRefreshBoundaries();
   return 0;
 }

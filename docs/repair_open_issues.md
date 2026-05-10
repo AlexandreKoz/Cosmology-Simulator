@@ -167,3 +167,9 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
 | P35-STAGE2-TIMESTEP-OWNERSHIP-032 | Open | Hierarchical timestep authority | Audit classifies scheduler state as authority and state `time_bin` lanes as mirrors, but production guardrails do not yet enforce mirror freshness at every restart/transform boundary. | Add behavior-preserving assertions/tests for scheduler-vs-mirror freshness, structural-transform scheduler rebuild/reimport, and restart read-side scheduler/mirror compatibility before Stage 2 behavior repairs claim closure. |
+
+## 2026-05-10 Scheduler ownership residuals
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P36-SCHEDULER-SPAWN-OWNERSHIP-033 | Open | Particle creation + scheduler authority | Star-formation and black-hole creation no longer copy cell mirror bins into new particle mirror lanes, but production creation paths still need an explicit scheduler-owned element registration policy before spawned particles can participate in hierarchical activation without a rebuild. | Add scheduler element-registration/import APIs with tests covering spawned particles, mirror refresh, and restart continuity. |

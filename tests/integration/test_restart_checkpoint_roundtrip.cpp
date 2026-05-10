@@ -236,7 +236,7 @@ void testRestartRoundtrip() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
   scheduler.reset(6, 2, 8);
   scheduler.setElementBin(1, 1, scheduler.currentTick());
-  scheduler.requestBinTransition(4, 3);
+  scheduler.submitCandidateBin(4, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.beginSubstep();
   scheduler.endSubstep();
   const std::vector<std::uint64_t> expected_active_particle_ids =
@@ -578,7 +578,7 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::core::SimulationState state;
   populateState(state);
 
-  state.particle_sidecar.sfc_key = {10, 20, 21, 22, 1, 2};
+  state.particle_sidecar.sfc_key = {10, 20, 21, 22, 1, 2, 23};
   const auto reorder = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
   cosmosim::core::reorderParticles(state, reorder);
   assert(state.validateOwnershipInvariants());

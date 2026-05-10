@@ -228,12 +228,17 @@ void updateAdaptiveTimeBins(
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
       });
-      const auto mapped_bin = core::mapDtToTimeBin(
-          core::combineTimeStepCriteria(element_index, registry.hooks(), limits.max_dt_time_code),
-          limits).bin_index;
-      scheduler.requestBinTransition(element_index, mapped_bin);
+      const double cfl_dt = registry.hooks().cfl_hook(element_index);
+      const double gravity_dt = registry.hooks().gravity_hook(element_index);
+      scheduler.submitCandidateTimeStep(
+          element_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "cell_hydro_cfl");
+      scheduler.submitCandidateTimeStep(
+          element_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "cell_gravity_acceleration");
       if (gas_index < scheduler.elementCount()) {
-        scheduler.requestBinTransition(gas_index, mapped_bin);
+        scheduler.submitCandidateTimeStep(
+            gas_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_particle_hydro_cfl");
+        scheduler.submitCandidateTimeStep(
+            gas_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "gas_particle_gravity_acceleration");
       }
       continue;
     }
@@ -257,8 +262,18 @@ void updateAdaptiveTimeBins(
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
       });
-      const double desired_dt = core::combineTimeStepCriteria(element_index, registry.hooks(), limits.max_dt_time_code);
-      scheduler.requestBinTransition(element_index, core::mapDtToTimeBin(desired_dt, limits).bin_index);
+      scheduler.submitCandidateTimeStep(
+          element_index,
+          registry.hooks().cfl_hook(element_index),
+          limits,
+          core::TimeStepCandidateSource::kHydroCfl,
+          "particle_speed_cfl");
+      scheduler.submitCandidateTimeStep(
+          element_index,
+          registry.hooks().gravity_hook(element_index),
+          limits,
+          core::TimeStepCandidateSource::kGravityAcceleration,
+          "particle_gravity_acceleration");
     }
   }
 }
@@ -1180,6 +1195,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (m_runtime_topology.usesCuda()) {
       m_pm_backend += "+cuda_cic";
     }
+    m_pm_sync_state.reset(std::max<std::uint64_t>(m_pm_update_cadence_steps, 1ULL));
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
@@ -1187,15 +1203,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] const gravity::PmGridShape& pmGridShape() const noexcept { return m_pm_grid_shape; }
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
   [[nodiscard]] std::uint64_t longRangeReuseCount() const noexcept { return m_long_range_reuse_count; }
-  [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_update_cadence_steps); }
+  [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_sync_state.cadenceSteps()); }
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
-  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_gravity_kick_opportunity; }
-  [[nodiscard]] std::uint64_t longRangeFieldVersion() const noexcept { return m_long_range_field_version; }
-  [[nodiscard]] std::uint64_t lastLongRangeRefreshOpportunity() const noexcept { return m_last_long_range_refresh_opportunity; }
-  [[nodiscard]] std::uint64_t lastLongRangeRefreshStepIndex() const noexcept { return m_last_long_range_refresh_step_index; }
-  [[nodiscard]] double lastLongRangeRefreshScaleFactor() const noexcept { return m_last_long_range_refresh_scale_factor; }
+  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_pm_sync_state.gravityKickOpportunity(); }
+  [[nodiscard]] std::uint64_t longRangeFieldVersion() const noexcept { return m_pm_sync_state.fieldVersion(); }
+  [[nodiscard]] std::uint64_t lastLongRangeRefreshOpportunity() const noexcept { return m_pm_sync_state.lastRefreshOpportunity(); }
+  [[nodiscard]] std::uint64_t lastLongRangeRefreshStepIndex() const noexcept { return m_pm_sync_state.lastRefreshStepIndex(); }
+  [[nodiscard]] double lastLongRangeRefreshScaleFactor() const noexcept { return m_pm_sync_state.lastRefreshScaleFactor(); }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -1249,26 +1265,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     const std::size_t particle_count = context.state.particles.size();
 
-    // Contract: kick-opportunity cadence metadata is rank-global and must advance
-    // identically on every gravity kick stage, even if a rank has no active targets.
-    ++m_gravity_kick_opportunity;
-    requireKickConsensus(m_gravity_kick_opportunity, "gravity_kick_opportunity");
-
-    const bool refresh_long_range_local = !m_has_long_range_field ||
-        ((m_gravity_kick_opportunity - m_last_long_range_refresh_opportunity) >= m_pm_update_cadence_steps);
-    const std::uint64_t refresh_vote = refresh_long_range_local ? 1ULL : 0ULL;
-    const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
-    if (refresh_vote_sum != 0ULL && refresh_vote_sum != world_size) {
-      throw std::runtime_error(
-          "TreePM long-range cadence decision diverged across ranks: refresh_vote_sum=" +
-          std::to_string(refresh_vote_sum) + ", world_size=" + std::to_string(world_size));
-    }
-    const bool refresh_long_range = (refresh_vote_sum == world_size);
-    if (refresh_long_range != refresh_long_range_local) {
-      throw std::runtime_error(
-          "TreePM long-range cadence local decision drifted from rank consensus");
-    }
-
     rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
@@ -1317,18 +1313,34 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
 
+    // Scheduler-owned PM sync state advances kick opportunities and decides refresh
+    // legality; the gravity callback only consumes the resulting execution event.
+    const core::PmSyncEvent sync_event = m_pm_sync_state.registerKickOpportunity(
+        context.integrator_state.step_index,
+        m_tree_pm_options.pm_options.scale_factor,
+        m_has_long_range_field);
+    requireKickConsensus(sync_event.gravity_kick_opportunity, "gravity_kick_opportunity");
+    const std::uint64_t refresh_vote = sync_event.refresh_long_range_field ? 1ULL : 0ULL;
+    const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
+    if (refresh_vote_sum != 0ULL && refresh_vote_sum != world_size) {
+      throw std::runtime_error(
+          "TreePM long-range cadence decision diverged across ranks: refresh_vote_sum=" +
+          std::to_string(refresh_vote_sum) + ", world_size=" + std::to_string(world_size));
+    }
+    const bool refresh_long_range = (refresh_vote_sum == world_size);
+    if (refresh_long_range != sync_event.refresh_long_range_field) {
+      throw std::runtime_error(
+          "TreePM long-range cadence local decision drifted from rank consensus");
+    }
+
     PmLongRangeKickDecision decision{
         .sync_surface = toPmSyncSurface(context.stage),
-        .gravity_kick_opportunity = m_gravity_kick_opportunity,
+        .gravity_kick_opportunity = sync_event.gravity_kick_opportunity,
         .refresh_long_range_field = refresh_long_range,
-        .field_version = refresh_long_range ? (m_long_range_field_version + 1U) : m_long_range_field_version,
-        .last_refresh_opportunity = refresh_long_range ? m_gravity_kick_opportunity : m_last_long_range_refresh_opportunity,
-        .field_built_step_index = refresh_long_range
-            ? context.integrator_state.step_index
-            : m_last_long_range_refresh_step_index,
-        .field_built_scale_factor = refresh_long_range
-            ? m_tree_pm_options.pm_options.scale_factor
-            : m_last_long_range_refresh_scale_factor,
+        .field_version = sync_event.field_version,
+        .last_refresh_opportunity = sync_event.last_refresh_opportunity,
+        .field_built_step_index = sync_event.field_built_step_index,
+        .field_built_scale_factor = sync_event.field_built_scale_factor,
     };
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
@@ -1381,16 +1393,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
         allow_heavy_reference_checks);
 
     if (decision.refresh_long_range_field) {
+      m_pm_sync_state.commitRefresh(sync_event);
       m_has_long_range_field = true;
-      m_long_range_field_version = decision.field_version;
-      m_last_long_range_refresh_opportunity = decision.last_refresh_opportunity;
-      m_last_long_range_refresh_step_index = decision.field_built_step_index;
-      m_last_long_range_refresh_scale_factor = decision.field_built_scale_factor;
       ++m_long_range_refresh_count;
     } else {
       ++m_long_range_reuse_count;
     }
-    m_last_committed_field_version = m_long_range_field_version;
+    m_last_committed_field_version = m_pm_sync_state.fieldVersion();
 
     const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
         context.state.particles.size() - m_local_active_global_indices.size());
@@ -1422,11 +1431,11 @@ class GravityStageCallback final : public core::IntegrationCallback {
               : "PM long-range field reused for gravity kick",
           .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
                       {"pm_sync_surface", std::string(pmSyncSurfaceName(decision.sync_surface))},
-                      {"gravity_kick_opportunity", std::to_string(m_gravity_kick_opportunity)},
-                      {"field_version", std::to_string(m_long_range_field_version)},
-                      {"field_built_step_index", std::to_string(m_last_long_range_refresh_step_index)},
-                      {"field_built_scale_factor", std::to_string(m_last_long_range_refresh_scale_factor)},
-                      {"pm_update_cadence_steps", std::to_string(m_pm_update_cadence_steps)},
+                      {"gravity_kick_opportunity", std::to_string(m_pm_sync_state.gravityKickOpportunity())},
+                      {"field_version", std::to_string(m_pm_sync_state.fieldVersion())},
+                      {"field_built_step_index", std::to_string(m_pm_sync_state.lastRefreshStepIndex())},
+                      {"field_built_scale_factor", std::to_string(m_pm_sync_state.lastRefreshScaleFactor())},
+                      {"pm_update_cadence_steps", std::to_string(m_pm_sync_state.cadenceSteps())},
                       {"pm_grid", std::to_string(m_pm_grid_shape.nx) + "x" + std::to_string(m_pm_grid_shape.ny) +
                               "x" + std::to_string(m_pm_grid_shape.nz)},
                       {"pm_assignment_scheme", m_pm_assignment_scheme},
@@ -1591,17 +1600,17 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
 
     ++summary.cheap_checks_executed;
-    if (m_last_long_range_refresh_opportunity > m_gravity_kick_opportunity ||
-        m_long_range_field_version < m_last_committed_field_version) {
+    if (m_pm_sync_state.lastRefreshOpportunity() > m_pm_sync_state.gravityKickOpportunity() ||
+        m_pm_sync_state.fieldVersion() < m_last_committed_field_version) {
       ++summary.illegal_sync_state_count;
       failFatal("gravity sync-state regressed across kick opportunities");
     }
     if (decision.refresh_long_range_field) {
-      if (decision.field_version != m_long_range_field_version + 1U) {
+      if (decision.field_version != m_pm_sync_state.fieldVersion() + 1U) {
         ++summary.illegal_sync_state_count;
         failFatal("refresh decision must increment field_version by exactly one");
       }
-    } else if (decision.field_version != m_long_range_field_version) {
+    } else if (decision.field_version != m_pm_sync_state.fieldVersion()) {
       ++summary.illegal_sync_state_count;
       failFatal("reuse decision must not mutate field_version");
     }
@@ -1741,6 +1750,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   const core::ModePolicy& m_mode_policy;
   parallel::DistributedExecutionTopology m_runtime_topology{};
   std::uint64_t m_pm_update_cadence_steps = 1;
+  core::PmSynchronizationState m_pm_sync_state;
   gravity::PmGridShape m_pm_grid_shape{};
   double m_mesh_spacing_x_mpc_comoving = 0.0;
   double m_mesh_spacing_y_mpc_comoving = 0.0;
@@ -1782,11 +1792,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<std::uint32_t> m_local_active_global_indices;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
   bool m_has_long_range_field = false;
-  std::uint64_t m_gravity_kick_opportunity = 0;
-  std::uint64_t m_last_long_range_refresh_opportunity = 0;
-  std::uint64_t m_last_long_range_refresh_step_index = 0;
-  double m_last_long_range_refresh_scale_factor = 1.0;
-  std::uint64_t m_long_range_field_version = 0;
   std::uint64_t m_last_committed_field_version = 0;
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;

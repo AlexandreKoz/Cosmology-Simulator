@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -158,6 +159,66 @@ struct TimeBinMappingResult {
   bool clipped_to_max = false;
 };
 
+// Auditable labels attached to solver timestep criteria before scheduler reconciliation.
+enum class TimeStepCandidateSource : std::uint8_t {
+  kHydroCfl = 0,
+  kGravityAcceleration = 1,
+  kSourceTerm = 2,
+  kUserClamp = 3,
+};
+
+[[nodiscard]] std::string_view timeStepCandidateSourceName(TimeStepCandidateSource source);
+
+struct TimeStepCandidateSubmission {
+  std::uint32_t element_index = 0;
+  double dt_time_code = 0.0;
+  TimeStepCandidateSource source = TimeStepCandidateSource::kUserClamp;
+  std::string label;
+};
+
+struct TimeStepReconciliationResult {
+  std::uint32_t submitted_candidates = 0;
+  std::uint32_t elements_with_candidates = 0;
+  std::uint32_t committed_transition_requests = 0;
+  std::uint32_t clipped_to_min_dt = 0;
+  std::uint32_t clipped_to_max_dt = 0;
+};
+
+struct PmSyncEvent {
+  std::uint64_t gravity_kick_opportunity = 0;
+  bool refresh_long_range_field = false;
+  std::uint64_t field_version = 0;
+  std::uint64_t last_refresh_opportunity = 0;
+  std::uint64_t field_built_step_index = 0;
+  double field_built_scale_factor = 1.0;
+};
+
+// Scheduler-owned PM cadence state. Gravity callbacks execute the solver, but cadence
+// legality and refresh boundaries are represented here to avoid free-floating PM truth.
+class PmSynchronizationState {
+ public:
+  void reset(std::uint64_t cadence_steps = 1);
+  [[nodiscard]] PmSyncEvent registerKickOpportunity(
+      std::uint64_t step_index,
+      double scale_factor,
+      bool has_long_range_field);
+  void commitRefresh(const PmSyncEvent& event);
+
+  [[nodiscard]] std::uint64_t cadenceSteps() const noexcept { return m_cadence_steps; }
+  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_gravity_kick_opportunity; }
+  [[nodiscard]] std::uint64_t fieldVersion() const noexcept { return m_field_version; }
+  [[nodiscard]] std::uint64_t lastRefreshOpportunity() const noexcept { return m_last_refresh_opportunity; }
+  [[nodiscard]] std::uint64_t lastRefreshStepIndex() const noexcept { return m_last_refresh_step_index; }
+  [[nodiscard]] double lastRefreshScaleFactor() const noexcept { return m_last_refresh_scale_factor; }
+
+ private:
+  std::uint64_t m_cadence_steps = 1;
+  std::uint64_t m_gravity_kick_opportunity = 0;
+  std::uint64_t m_last_refresh_opportunity = 0;
+  std::uint64_t m_field_version = 0;
+  std::uint64_t m_last_refresh_step_index = 0;
+  double m_last_refresh_scale_factor = 1.0;
+};
 
 // Persisted scheduler state required for exact restart continuation.
 struct TimeBinPersistentState {
@@ -219,7 +280,18 @@ class HierarchicalTimeBinScheduler {
 
   void reset(std::uint32_t element_count, std::uint8_t initial_bin, std::uint64_t start_tick = 0);
   void setElementBin(std::uint32_t element_index, std::uint8_t bin_index, std::uint64_t current_tick);
-  void requestBinTransition(std::uint32_t element_index, std::uint8_t target_bin);
+  void submitCandidateTimeStep(
+      std::uint32_t element_index,
+      double dt_time_code,
+      const TimeStepLimits& limits,
+      TimeStepCandidateSource source,
+      std::string_view label = {});
+  void submitCandidateBin(
+      std::uint32_t element_index,
+      std::uint8_t target_bin,
+      TimeStepCandidateSource source,
+      std::string_view label = {});
+  [[nodiscard]] TimeStepReconciliationResult reconcileCandidateTransitions();
 
   [[nodiscard]] std::span<const std::uint32_t> activeElements() const noexcept;
 
@@ -244,6 +316,7 @@ class HierarchicalTimeBinScheduler {
   void eraseFromBin(std::uint32_t element_index, std::uint8_t bin_index);
   void insertIntoBin(std::uint32_t element_index, std::uint8_t bin_index);
   void rebuildActiveSet();
+  void requestBinTransition(std::uint32_t element_index, std::uint8_t target_bin);
   void applyPendingTransitions();
 
   std::uint64_t m_current_tick = 0;
@@ -253,6 +326,9 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::size_t> m_position_in_bin;
   std::vector<std::uint32_t> m_active_elements;
   TimeBinDiagnostics m_diagnostics;
+  std::vector<std::uint8_t> m_candidate_bin_index;
+  std::vector<std::string> m_candidate_label;
+  TimeStepReconciliationResult m_last_reconciliation;
 };
 
 [[nodiscard]] ActiveSetDescriptor makeSchedulerActiveSetDescriptor(

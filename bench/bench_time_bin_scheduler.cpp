@@ -29,7 +29,7 @@ int main() {
       if ((element & 15U) == 0U) {
         const auto current_bin = scheduler.hotMetadata().bin_index[element];
         const auto target = static_cast<std::uint8_t>((current_bin == 0U) ? 1U : current_bin - 1U);
-        scheduler.requestBinTransition(element, target);
+        scheduler.submitCandidateBin(element, target, cosmosim::core::TimeStepCandidateSource::kUserClamp);
       }
     }
 

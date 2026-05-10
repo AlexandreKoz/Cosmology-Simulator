@@ -63,6 +63,65 @@ constexpr std::array<IntegrationStage, 7> k_kick_drift_kick_order = {
 
 }  // namespace
 
+std::string_view timeStepCandidateSourceName(TimeStepCandidateSource source) {
+  switch (source) {
+    case TimeStepCandidateSource::kHydroCfl:
+      return "hydro_cfl";
+    case TimeStepCandidateSource::kGravityAcceleration:
+      return "gravity_acceleration";
+    case TimeStepCandidateSource::kSourceTerm:
+      return "source_term";
+    case TimeStepCandidateSource::kUserClamp:
+      return "user_clamp";
+  }
+  return "unknown";
+}
+
+void PmSynchronizationState::reset(std::uint64_t cadence_steps) {
+  if (cadence_steps == 0) {
+    throw std::invalid_argument("PM synchronization cadence must be >= 1");
+  }
+  m_cadence_steps = cadence_steps;
+  m_gravity_kick_opportunity = 0;
+  m_last_refresh_opportunity = 0;
+  m_field_version = 0;
+  m_last_refresh_step_index = 0;
+  m_last_refresh_scale_factor = 1.0;
+}
+
+PmSyncEvent PmSynchronizationState::registerKickOpportunity(
+    std::uint64_t step_index,
+    double scale_factor,
+    bool has_long_range_field) {
+  ++m_gravity_kick_opportunity;
+  const bool refresh = !has_long_range_field ||
+      ((m_gravity_kick_opportunity - m_last_refresh_opportunity) >= m_cadence_steps);
+  return PmSyncEvent{
+      .gravity_kick_opportunity = m_gravity_kick_opportunity,
+      .refresh_long_range_field = refresh,
+      .field_version = refresh ? (m_field_version + 1U) : m_field_version,
+      .last_refresh_opportunity = refresh ? m_gravity_kick_opportunity : m_last_refresh_opportunity,
+      .field_built_step_index = refresh ? step_index : m_last_refresh_step_index,
+      .field_built_scale_factor = refresh ? scale_factor : m_last_refresh_scale_factor,
+  };
+}
+
+void PmSynchronizationState::commitRefresh(const PmSyncEvent& event) {
+  if (!event.refresh_long_range_field) {
+    return;
+  }
+  if (event.gravity_kick_opportunity != m_gravity_kick_opportunity) {
+    throw std::runtime_error("PM synchronization event does not match current kick opportunity");
+  }
+  if (event.field_version != m_field_version + 1U) {
+    throw std::runtime_error("PM synchronization field version transition is illegal");
+  }
+  m_field_version = event.field_version;
+  m_last_refresh_opportunity = event.last_refresh_opportunity;
+  m_last_refresh_step_index = event.field_built_step_index;
+  m_last_refresh_scale_factor = event.field_built_scale_factor;
+}
+
 std::string_view integrationStageName(IntegrationStage stage) {
   switch (stage) {
     case IntegrationStage::kGravityKickPre:
@@ -140,6 +199,9 @@ void debugAssertActiveSetDescriptorFresh(
     const SimulationState& state,
     std::uint64_t expected_scheduler_tick) {
   debugAssertActiveSetDescriptorFresh(active_set, state);
+  if (!active_set.has_generation_metadata || !active_set.particles_from_scheduler) {
+    throw std::runtime_error("ActiveSetDescriptor must carry scheduler provenance before solver callbacks");
+  }
   if ((active_set.particles_from_scheduler || active_set.cells_from_scheduler) &&
       active_set.source_scheduler_tick != expected_scheduler_tick) {
     throw std::runtime_error("ActiveSetDescriptor scheduler tick is stale");
@@ -279,6 +341,9 @@ void HierarchicalTimeBinScheduler::reset(
   m_hot.next_activation_tick.assign(element_count, m_current_tick);
   m_hot.active_flag.assign(element_count, 0);
   m_hot.pending_bin_index.assign(element_count, k_unset_pending_bin);
+  m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
+  m_candidate_label.assign(element_count, {});
+  m_last_reconciliation = {};
 
   m_position_in_bin.resize(element_count, 0);
   m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
@@ -324,6 +389,65 @@ void HierarchicalTimeBinScheduler::setElementBin(
       (current_tick % period_ticks == 0) ? current_tick : ((current_tick / period_ticks) * period_ticks + period_ticks);
 }
 
+void HierarchicalTimeBinScheduler::submitCandidateTimeStep(
+    std::uint32_t element_index,
+    double dt_time_code,
+    const TimeStepLimits& limits,
+    TimeStepCandidateSource source,
+    std::string_view label) {
+  const auto mapped = mapDtToTimeBin(dt_time_code, limits);
+  submitCandidateBin(element_index, mapped.bin_index, source, label);
+  if (mapped.clipped_to_min) {
+    ++m_last_reconciliation.clipped_to_min_dt;
+  }
+  if (mapped.clipped_to_max) {
+    ++m_last_reconciliation.clipped_to_max_dt;
+  }
+}
+
+void HierarchicalTimeBinScheduler::submitCandidateBin(
+    std::uint32_t element_index,
+    std::uint8_t target_bin,
+    TimeStepCandidateSource source,
+    std::string_view label) {
+  if (element_index >= m_hot.size()) {
+    throw std::out_of_range("element_index out of range");
+  }
+  if (m_candidate_bin_index.size() != m_hot.size()) {
+    m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
+    m_candidate_label.assign(m_hot.size(), {});
+  }
+  const std::uint8_t clamped = clampBin(target_bin);
+  ++m_last_reconciliation.submitted_candidates;
+  if (m_candidate_bin_index[element_index] == k_unset_pending_bin || clamped < m_candidate_bin_index[element_index]) {
+    m_candidate_bin_index[element_index] = clamped;
+    m_candidate_label[element_index] = label.empty()
+        ? std::string(timeStepCandidateSourceName(source))
+        : std::string(label);
+  }
+}
+
+TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTransitions() {
+  if (m_candidate_bin_index.size() != m_hot.size()) {
+    m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
+    m_candidate_label.assign(m_hot.size(), {});
+  }
+  TimeStepReconciliationResult result = m_last_reconciliation;
+  for (std::uint32_t element = 0; element < m_candidate_bin_index.size(); ++element) {
+    const std::uint8_t candidate = m_candidate_bin_index[element];
+    if (candidate == k_unset_pending_bin) {
+      continue;
+    }
+    ++result.elements_with_candidates;
+    requestBinTransition(element, candidate);
+    ++result.committed_transition_requests;
+    m_candidate_bin_index[element] = k_unset_pending_bin;
+    m_candidate_label[element].clear();
+  }
+  m_last_reconciliation = {};
+  return result;
+}
+
 void HierarchicalTimeBinScheduler::requestBinTransition(
     std::uint32_t element_index,
     std::uint8_t target_bin) {
@@ -360,6 +484,7 @@ std::span<const std::uint32_t> HierarchicalTimeBinScheduler::beginSubstep() {
 }
 
 void HierarchicalTimeBinScheduler::endSubstep() {
+  (void)reconcileCandidateTransitions();
   applyPendingTransitions();
   for (const std::uint32_t element : m_active_elements) {
     const std::uint8_t bin = m_hot.bin_index[element];
@@ -398,6 +523,9 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   m_hot.next_activation_tick = persistent_state.next_activation_tick;
   m_hot.active_flag = persistent_state.active_flag;
   m_hot.pending_bin_index = persistent_state.pending_bin_index;
+  m_candidate_bin_index.assign(m_hot.bin_index.size(), k_unset_pending_bin);
+  m_candidate_label.assign(m_hot.bin_index.size(), {});
+  m_last_reconciliation = {};
 
   m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
   m_position_in_bin.assign(m_hot.bin_index.size(), 0);

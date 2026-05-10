@@ -203,8 +203,6 @@ StarFormationStepReport StarFormationModel::apply(
     state.particles.velocity_y_peculiar[particle_index] = 0.0;
     state.particles.velocity_z_peculiar[particle_index] = 0.0;
     state.particles.mass_code[particle_index] = transfer_mass;
-    state.particles.time_bin[particle_index] = state.cells.time_bin[cell_index];
-
     state.particle_sidecar.particle_id[particle_index] = next_particle_id++;
     state.particle_sidecar.sfc_key[particle_index] = state.particle_sidecar.particle_id[particle_index];
     state.particle_sidecar.species_tag[particle_index] =

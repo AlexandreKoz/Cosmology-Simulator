@@ -214,18 +214,26 @@ void writeDataset1d(
 
 template <typename T>
 [[nodiscard]] std::vector<T> readDataset1d(hid_t group, std::string_view name, hid_t memory_type) {
-  Hdf5Handle dataset(H5Dopen2(group, std::string(name).c_str(), H5P_DEFAULT));
+  const std::string dataset_name(name);
+  const htri_t exists = H5Lexists(group, dataset_name.c_str(), H5P_DEFAULT);
+  if (exists < 0) {
+    throw std::runtime_error("failed checking dataset presence: " + dataset_name);
+  }
+  if (exists == 0) {
+    throw std::runtime_error("missing dataset: " + dataset_name);
+  }
+  Hdf5Handle dataset(H5Dopen2(group, dataset_name.c_str(), H5P_DEFAULT));
   if (!dataset.valid()) {
-    throw std::runtime_error("missing dataset: " + std::string(name));
+    throw std::runtime_error("missing dataset: " + dataset_name);
   }
   Hdf5Handle space(H5Dget_space(dataset.get()));
   hsize_t dims[1] = {0};
   if (H5Sget_simple_extent_ndims(space.get()) != 1 || H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1) {
-    throw std::runtime_error("unexpected rank for dataset: " + std::string(name));
+    throw std::runtime_error("unexpected rank for dataset: " + dataset_name);
   }
   std::vector<T> values(static_cast<std::size_t>(dims[0]));
   if (!values.empty() && H5Dread(dataset.get(), memory_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) < 0) {
-    throw std::runtime_error("failed reading dataset: " + std::string(name));
+    throw std::runtime_error("failed reading dataset: " + dataset_name);
   }
   return values;
 }

@@ -6,7 +6,15 @@
 
 int main() {
   cosmosim::core::SimulationState state;
+  state.resizeParticles(8);
   state.resizeCells(8);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.particle_id[i] = 1000 + i;
+    state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+  }
+  state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 8;
+  state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   for (std::size_t i = 0; i < state.cells.size(); ++i) {
     state.cells.center_x_comoving[i] = static_cast<double>(i);
     state.cells.mass_code[i] = 2.0;
