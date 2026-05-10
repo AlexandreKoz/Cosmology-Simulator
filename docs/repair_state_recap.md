@@ -1492,3 +1492,17 @@ Reproducibility impact:
 - Added `docs/architecture/stage2_timestep_ownership_audit.md` as the pre-repair inventory for timestep ownership lanes, serialization classifications, mutation paths, unsafe hidden state, and follow-up repair prompts.
 - Recorded `ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014` in `docs/architecture/decision_log.md`: the hierarchical scheduler is the intended per-element timestep authority; state `time_bin` arrays are mirrors; integrator time-bin context is metadata; TreePM cadence remains owned by the gravity workflow callback/distributed restart cadence state.
 - No solver math, restart schema, output schema, or runtime behavior changed in this audit patch.
+
+## 2026-05-10 Scheduler timestep authority repair
+
+- Hierarchical scheduler APIs now accept labelled candidate timestep/bin submissions and reconcile them before legal transition commit; production adaptive hydro/gravity criteria submit constraints instead of mutating pending bin transitions directly.
+- `StepOrchestrator` now rejects expected-scheduler-tick execution when active-set descriptors lack scheduler provenance, so production solver callbacks cannot consume mirror-derived active sets silently.
+- PM long-range cadence decisions are represented by scheduler-owned synchronization state (`PmSynchronizationState`), preserving cadence > 1 refresh boundaries while leaving gravity force execution in the gravity callback.
+- Reproducibility impact: integer timeline authority remains in scheduler metadata; particle/cell `time_bin` lanes remain mirrors refreshed after scheduler commit. No snapshot/restart schema or config keys changed.
+- Validation note: CPU-only Stage 1 runtime-truth tests and the full CPU debug preset pass after aligning tracer/star-formation/black-hole/simulation-state-pipeline fixtures with the particle-bound gas-cell identity contract.
+
+## 2026-05-10 Restart/HDF5 regression follow-up
+
+- Root cause for the HDF5 restart roundtrip abort was a malformed reorder fixture: `state.particle_sidecar.sfc_key` was reassigned with six entries for a seven-particle state, so `reorderAlignedVector` correctly rejected the lane/permutation length mismatch before restart assertions could complete.
+- HDF5 missing-field checks now preflight dataset existence before `H5Dopen2`, preserving explicit missing-dataset exceptions for required v6 fields (`pending_bin_index`, `has_gravity_softening_override`) without emitting misleading HDF5 diagnostics in negative tests.
+- Reproducibility impact: no restart schema or compatibility semantics changed; this only fixes fixture lane cardinality and makes missing required-field diagnostics deterministic.

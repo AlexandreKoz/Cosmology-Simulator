@@ -6,7 +6,13 @@
 
 int main() {
   cosmosim::core::SimulationState state;
+  state.resizeParticles(1);
   state.resizeCells(1);
+  state.particle_sidecar.particle_id[0] = 1000;
+  state.particle_sidecar.species_tag[0] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+  state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 1;
+  state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   state.cells.center_x_comoving[0] = 0.0;
   state.cells.center_y_comoving[0] = 0.0;
   state.cells.center_z_comoving[0] = 0.0;

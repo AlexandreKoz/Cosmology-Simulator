@@ -11,16 +11,15 @@ int main() {
   state.resizeCells(4);
   state.resizePatches(1);
 
-  state.species.count_by_species = {2, 2, 2, 1, 1};
+  state.species.count_by_species = {0, 4, 2, 1, 1};
 
   for (std::size_t i = 0; i < 8; ++i) {
     state.particle_sidecar.particle_id[i] = 100000 + i;
     state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(
-        (i < 2) ? cosmosim::core::ParticleSpecies::kDarkMatter
-                : (i < 4) ? cosmosim::core::ParticleSpecies::kGas
-                          : (i < 6) ? cosmosim::core::ParticleSpecies::kStar
-                                    : (i == 6) ? cosmosim::core::ParticleSpecies::kBlackHole
-                                               : cosmosim::core::ParticleSpecies::kTracer);
+        (i < 4) ? cosmosim::core::ParticleSpecies::kGas
+                : (i < 6) ? cosmosim::core::ParticleSpecies::kStar
+                          : (i == 6) ? cosmosim::core::ParticleSpecies::kBlackHole
+                                     : cosmosim::core::ParticleSpecies::kTracer);
     state.particles.position_x_comoving[i] = static_cast<double>(i);
     state.particles.position_y_comoving[i] = static_cast<double>(i) * 2.0;
     state.particles.position_z_comoving[i] = static_cast<double>(i) * 3.0;
@@ -72,6 +71,7 @@ int main() {
   }
 
   state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   assert(state.validateOwnershipInvariants());
 
   cosmosim::core::ActiveIndexSet active_set;

@@ -14,5 +14,6 @@ Use this checklist for repair-scoped PRs.
 - [ ] Patch adds targeted tests for the repaired invariant, or explicitly names the existing tests that already cover it.
 - [ ] Public interface changes under `include/cosmosim/**` include same-patch docs updates and migration notes.
 - [ ] Performance-sensitive changes do not introduce hidden full-state scans, cold-field contamination, or unnecessary copies; profiling/benchmark evidence is included when relevant.
+- [ ] Timestep repairs keep scheduler/integrator metadata as the only authority: solvers submit labelled candidates only, active sets carry scheduler provenance, and particle/cell time-bin lanes are refreshed mirrors only.
 - [ ] `docs/repair_state_recap.md`, `docs/repair_open_issues.md`, and `docs/architecture/decision_log.md` are updated when assumptions, blockers, or architecture decisions changed.
 - [ ] Diff avoids cosmetic-only refactors unrelated to repair objective.
