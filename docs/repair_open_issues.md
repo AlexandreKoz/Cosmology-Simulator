@@ -179,3 +179,10 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
 | P37-HIERARCHICAL-TIMESTEP-INVARIANTS-034 | Closed | Scheduler/debug invariants | Runtime checks now trap early activation, illegal sync-boundary bin transitions, skipped PM refresh commits, stale mirrors/descriptors, invalid restart timestep state, active-set mismatches, and non-monotonic tick overflow with deterministic context. | Feature-path closure still depends on HDF5/FFTW/MPI presets in environments with those dependencies available; CPU-only surrogate scheduler tests are in `test_unit_time_integration`. |
+
+
+## 2026-05-10 scheduler identity exchange follow-up
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P38-SCHEDULER-MPI-IDENTITY-035 | Open | MPI migration + scheduler authority | Local structural transforms now have stable-ID scheduler remap/rebuild helpers, but multi-rank migration does not yet have a fully specified scheduler identity-record exchange and rank-coordinated tick/max-bin contract. | Define and implement distributed scheduler identity payload exchange, compatibility checks, and MPI tests before claiming multi-rank exact scheduler continuation. |

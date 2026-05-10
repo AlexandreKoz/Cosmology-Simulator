@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,51 @@ bool throwsWithContext(const std::function<void()>& action, const std::string& r
     return std::string(ex.what()).find(required_context) != std::string::npos;
   }
   return false;
+}
+
+
+void initializeParticleIdsAndGasCells(
+    cosmosim::core::SimulationState& state,
+    const std::vector<std::uint32_t>& gas_particle_rows) {
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.particle_id[i] = 1000 + i;
+    state.particle_sidecar.sfc_key[i] = i;
+    state.particle_sidecar.species_tag[i] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+    state.particle_sidecar.particle_flags[i] = 0;
+    state.particle_sidecar.owning_rank[i] = 0;
+  }
+  state.species.count_by_species = {};
+  state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = state.particles.size();
+  for (const auto row : gas_particle_rows) {
+    state.particle_sidecar.species_tag[row] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    --state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)];
+    ++state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)];
+  }
+  state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
+}
+
+std::vector<std::uint64_t> particleIdsForRows(
+    const cosmosim::core::SimulationState& state,
+    std::span<const std::uint32_t> rows) {
+  std::vector<std::uint64_t> ids;
+  ids.reserve(rows.size());
+  for (const auto row : rows) {
+    ids.push_back(state.particle_sidecar.particle_id[row]);
+  }
+  return ids;
+}
+
+std::vector<std::uint64_t> activeParticleIdsAtCurrentTick(
+    const cosmosim::core::HierarchicalTimeBinScheduler& scheduler,
+    const cosmosim::core::SimulationState& state) {
+  const auto persistent = scheduler.exportPersistentState();
+  cosmosim::core::HierarchicalTimeBinScheduler probe(persistent.max_bin);
+  probe.importPersistentState(persistent);
+  const auto active = probe.beginSubstep();
+  auto ids = particleIdsForRows(state, active);
+  std::sort(ids.begin(), ids.end());
+  return ids;
 }
 
 class StageRecorder final : public cosmosim::core::IntegrationCallback {
@@ -191,6 +238,7 @@ void testTimestepBinAuthorityInvariant() {
   cosmosim::core::SimulationState state;
   state.resizeParticles(4);
   state.resizeCells(2);
+  initializeParticleIdsAndGasCells(state, {0, 1});
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     state.particles.time_bin[i] = 0;
   }
@@ -359,6 +407,7 @@ void testActiveSetNoCompetingBuilders() {
   cosmosim::core::SimulationState state;
   state.resizeParticles(6);
   state.resizeCells(2);
+  initializeParticleIdsAndGasCells(state, {0, 1});
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     state.particles.time_bin[i] = 0;
   }
@@ -524,6 +573,112 @@ void testLocalGlobalSyncBoundaryViolationTrap() {
   assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "synchronization boundary"));
 }
 
+
+void testSchedulerReorderRemapPreservesActiveParticleIds() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(5);
+  initializeParticleIdsAndGasCells(state, {});
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.sfc_key[i] = static_cast<std::uint64_t>(50 - i);
+  }
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(5, 1, 0);
+  scheduler.setElementBin(1, 0, scheduler.currentTick());
+  scheduler.setElementBin(3, 0, scheduler.currentTick());
+  scheduler.setElementBin(4, 2, scheduler.currentTick());
+  const std::vector<std::uint64_t> old_ids(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
+  const auto before_active_ids = activeParticleIdsAtCurrentTick(scheduler, state);
+
+  const auto reorder = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
+  cosmosim::core::reorderParticles(state, reorder);
+  const std::vector<std::uint64_t> new_ids(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
+  cosmosim::core::remapSchedulerByParticleId(scheduler, old_ids, new_ids);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+
+  const auto after_active_ids = activeParticleIdsAtCurrentTick(scheduler, state);
+  assert(after_active_ids == before_active_ids);
+}
+
+void testSchedulerCompactionRemapPreservesActiveParticleIds() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(6);
+  initializeParticleIdsAndGasCells(state, {});
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(6, 2, 0);
+  scheduler.setElementBin(0, 0, scheduler.currentTick());
+  scheduler.setElementBin(2, 0, scheduler.currentTick());
+  scheduler.setElementBin(5, 1, scheduler.currentTick());
+  const std::vector<std::uint64_t> old_ids(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
+  const auto before_active_ids = activeParticleIdsAtCurrentTick(scheduler, state);
+
+  cosmosim::core::ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {1, 4};
+  state.commitParticleMigration(commit);
+  const std::vector<std::uint64_t> compacted_ids(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
+  cosmosim::core::remapSchedulerByParticleId(scheduler, old_ids, compacted_ids);
+
+  std::vector<std::uint64_t> expected;
+  for (const auto id : before_active_ids) {
+    if (id != 1001 && id != 1004) {
+      expected.push_back(id);
+    }
+  }
+  assert(activeParticleIdsAtCurrentTick(scheduler, state) == expected);
+}
+
+void testGasCellMirrorSyncUsesParentParticleIdentity() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  state.resizeCells(2);
+  initializeParticleIdsAndGasCells(state, {1, 3});
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(4, 0, 0);
+  scheduler.setElementBin(0, 3, scheduler.currentTick());
+  scheduler.setElementBin(1, 2, scheduler.currentTick());
+  scheduler.setElementBin(2, 1, scheduler.currentTick());
+  scheduler.setElementBin(3, 1, scheduler.currentTick());
+
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+  assert(state.cells.time_bin[0] == 2);
+  assert(state.cells.time_bin[1] == 1);
+  assert(cosmosim::core::timeBinMirrorsMatchScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells));
+}
+
+void testMigrationRequiresSchedulerIdentityRecords() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(2, 0, 0);
+  scheduler.setElementBin(0, 1, scheduler.currentTick());
+  std::vector<cosmosim::core::TimeBinSchedulerIdentityRecord> only_kept{
+      {.element_id = 1000, .bin_index = 1, .next_activation_tick = 0, .pending_bin_index = cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin}};
+  const std::vector<std::uint64_t> destination_ids{1000, 2000};
+  assert(throwsWithContext(
+      [&]() { cosmosim::core::rebuildSchedulerFromParticleIdentityRecords(scheduler, only_kept, destination_ids); },
+      "time_bin mirror is not scheduler authority"));
+}
+
+void testRestartActiveIdEquivalenceWithPendingTransitions() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  initializeParticleIdsAndGasCells(state, {});
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(4, 1, 0);
+  scheduler.setElementBin(0, 0, scheduler.currentTick());
+  scheduler.setElementBin(1, 2, scheduler.currentTick());
+  scheduler.setElementBin(2, 3, scheduler.currentTick());
+  scheduler.setElementBin(3, 1, scheduler.currentTick());
+  scheduler.submitCandidateBin(3, 0, cosmosim::core::TimeStepCandidateSource::kUserClamp, "restart_pending");
+  (void)scheduler.reconcileCandidateTransitions();
+
+  const auto saved = scheduler.exportPersistentState();
+  cosmosim::core::HierarchicalTimeBinScheduler restored(saved.max_bin);
+  restored.importPersistentState(saved);
+  assert(activeParticleIdsAtCurrentTick(restored, state) == activeParticleIdsAtCurrentTick(scheduler, state));
+}
+
 void testPmSynchronizationCadencePreservesRefreshBoundaries() {
   cosmosim::core::PmSynchronizationState pm_sync;
   pm_sync.reset(3);
@@ -568,6 +723,11 @@ int main() {
   testTimestepBinAuthorityInvariant();
   testTimestepBinReassignmentAndRestartRoundTrip();
   testTimestepBinReorderIdentitySurvival();
+  testSchedulerReorderRemapPreservesActiveParticleIds();
+  testSchedulerCompactionRemapPreservesActiveParticleIds();
+  testGasCellMirrorSyncUsesParentParticleIdentity();
+  testMigrationRequiresSchedulerIdentityRecords();
+  testRestartActiveIdEquivalenceWithPendingTransitions();
   testActiveSetAuthority();
   testActiveSetNoCompetingBuilders();
   testHydroGravityCandidateReconciliation();

@@ -1531,3 +1531,9 @@ Reproducibility impact:
 
 - Fixed the PM+HDF5+FFTW validation residual-cutoff gate so `validation_phase2_mpi_gravity_single_rank` accepts either internal-node cutoff pruning or leaf pair cutoff skips as deterministic evidence that the TreePM residual cutoff path was exercised.
 - Reproducibility impact: validation-only contract alignment; no solver numerics, restart/schema payloads, config keys, provenance, output naming, or runtime scheduling behavior changed.
+
+## 2026-05-10 structural-transform scheduler remap repair
+
+- Added stable-identity scheduler remap/rebuild helpers for particle reorder, compaction/migration-style row rebuilds, and scheduler identity-record imports. Gas-cell time-bin mirror refresh now resolves parent particle identity instead of assuming cell rows and scheduler rows are positionally coupled.
+- Reproducibility impact: deterministic activation by `particle_id` is preserved across local structural transforms when callers use the remap/rebuild helpers. No solver numerics, config keys, restart schema version, HDF5 dataset layout, normalized config dumps, provenance payloads, or output naming changed. The repair tightens failure behavior: missing scheduler identity records now throw instead of silently trusting `time_bin` mirrors.
+- Future MPI note: local helpers do not claim fully distributed scheduler migration. Multi-rank exact continuation still requires exchanging full scheduler identity records with migrating particles and coordinating scheduler tick/max-bin metadata across ranks.
