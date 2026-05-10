@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -61,6 +62,66 @@ constexpr std::array<IntegrationStage, 7> k_kick_drift_kick_order = {
   return value;
 }
 
+[[nodiscard]] std::string timeBinContextMessage(
+    std::string_view invariant,
+    std::string_view source_label,
+    std::uint64_t current_tick,
+    std::uint32_t element_index,
+    std::uint8_t bin,
+    std::uint64_t next_activation_tick,
+    std::uint64_t integrator_step = 0,
+    double integrator_time = 0.0,
+    std::string_view pm_sync_state = "n/a") {
+  std::ostringstream out;
+  out << "time-bin invariant failure: " << invariant
+      << "; source=" << source_label
+      << "; element=" << element_index
+      << "; current_tick=" << current_tick
+      << "; bin=" << static_cast<unsigned>(bin)
+      << "; next_activation_tick=" << next_activation_tick
+      << "; integrator_step=" << integrator_step
+      << "; integrator_time=" << integrator_time
+      << "; pm_sync=" << pm_sync_state;
+  return out.str();
+}
+
+[[nodiscard]] std::string schedulerContextMessage(
+    std::string_view invariant,
+    std::string_view source_label,
+    std::uint64_t current_tick,
+    std::uint64_t integrator_step = 0,
+    double integrator_time = 0.0,
+    std::string_view pm_sync_state = "n/a") {
+  std::ostringstream out;
+  out << "scheduler invariant failure: " << invariant
+      << "; source=" << source_label
+      << "; current_tick=" << current_tick
+      << "; integrator_step=" << integrator_step
+      << "; integrator_time=" << integrator_time
+      << "; pm_sync=" << pm_sync_state;
+  return out.str();
+}
+
+[[nodiscard]] std::string pmContextMessage(
+    std::string_view invariant,
+    std::string_view source_label,
+    const PmSyncEvent& event,
+    std::uint64_t cadence_steps,
+    std::uint64_t current_field_version) {
+  std::ostringstream out;
+  out << "PM synchronization invariant failure: " << invariant
+      << "; source=" << source_label
+      << "; opportunity=" << event.gravity_kick_opportunity
+      << "; cadence_steps=" << cadence_steps
+      << "; refresh=" << (event.refresh_long_range_field ? "true" : "false")
+      << "; event_field_version=" << event.field_version
+      << "; current_field_version=" << current_field_version
+      << "; last_refresh_opportunity=" << event.last_refresh_opportunity
+      << "; field_built_step=" << event.field_built_step_index
+      << "; field_built_scale_factor=" << event.field_built_scale_factor;
+  return out.str();
+}
+
 }  // namespace
 
 std::string_view timeStepCandidateSourceName(TimeStepCandidateSource source) {
@@ -87,16 +148,35 @@ void PmSynchronizationState::reset(std::uint64_t cadence_steps) {
   m_field_version = 0;
   m_last_refresh_step_index = 0;
   m_last_refresh_scale_factor = 1.0;
+  m_refresh_commit_pending = false;
+  m_pending_refresh_opportunity = 0;
+  m_pending_refresh_field_version = 0;
 }
 
 PmSyncEvent PmSynchronizationState::registerKickOpportunity(
     std::uint64_t step_index,
     double scale_factor,
     bool has_long_range_field) {
+  if (m_refresh_commit_pending) {
+    PmSyncEvent pending{
+        .gravity_kick_opportunity = m_pending_refresh_opportunity,
+        .refresh_long_range_field = true,
+        .field_version = m_pending_refresh_field_version,
+        .last_refresh_opportunity = m_pending_refresh_opportunity,
+        .field_built_step_index = m_last_refresh_step_index,
+        .field_built_scale_factor = m_last_refresh_scale_factor,
+    };
+    throw std::runtime_error(pmContextMessage(
+        "previous refresh event was not committed before next kick opportunity",
+        "PmSynchronizationState::registerKickOpportunity",
+        pending,
+        m_cadence_steps,
+        m_field_version));
+  }
   ++m_gravity_kick_opportunity;
   const bool refresh = !has_long_range_field ||
       ((m_gravity_kick_opportunity - m_last_refresh_opportunity) >= m_cadence_steps);
-  return PmSyncEvent{
+  PmSyncEvent event{
       .gravity_kick_opportunity = m_gravity_kick_opportunity,
       .refresh_long_range_field = refresh,
       .field_version = refresh ? (m_field_version + 1U) : m_field_version,
@@ -104,22 +184,49 @@ PmSyncEvent PmSynchronizationState::registerKickOpportunity(
       .field_built_step_index = refresh ? step_index : m_last_refresh_step_index,
       .field_built_scale_factor = refresh ? scale_factor : m_last_refresh_scale_factor,
   };
+  if (event.refresh_long_range_field) {
+    m_refresh_commit_pending = true;
+    m_pending_refresh_opportunity = event.gravity_kick_opportunity;
+    m_pending_refresh_field_version = event.field_version;
+  }
+  return event;
 }
 
 void PmSynchronizationState::commitRefresh(const PmSyncEvent& event) {
   if (!event.refresh_long_range_field) {
     return;
   }
-  if (event.gravity_kick_opportunity != m_gravity_kick_opportunity) {
-    throw std::runtime_error("PM synchronization event does not match current kick opportunity");
+  if (!m_refresh_commit_pending || event.gravity_kick_opportunity != m_pending_refresh_opportunity) {
+    throw std::runtime_error(pmContextMessage(
+        "refresh event does not match pending kick opportunity",
+        "PmSynchronizationState::commitRefresh",
+        event,
+        m_cadence_steps,
+        m_field_version));
   }
-  if (event.field_version != m_field_version + 1U) {
-    throw std::runtime_error("PM synchronization field version transition is illegal");
+  if (event.gravity_kick_opportunity != m_gravity_kick_opportunity) {
+    throw std::runtime_error(pmContextMessage(
+        "event does not match current kick opportunity",
+        "PmSynchronizationState::commitRefresh",
+        event,
+        m_cadence_steps,
+        m_field_version));
+  }
+  if (event.field_version != m_field_version + 1U || event.field_version != m_pending_refresh_field_version) {
+    throw std::runtime_error(pmContextMessage(
+        "field version transition is illegal",
+        "PmSynchronizationState::commitRefresh",
+        event,
+        m_cadence_steps,
+        m_field_version));
   }
   m_field_version = event.field_version;
   m_last_refresh_opportunity = event.last_refresh_opportunity;
   m_last_refresh_step_index = event.field_built_step_index;
   m_last_refresh_scale_factor = event.field_built_scale_factor;
+  m_refresh_commit_pending = false;
+  m_pending_refresh_opportunity = 0;
+  m_pending_refresh_field_version = 0;
 }
 
 std::string_view integrationStageName(IntegrationStage stage) {
@@ -176,20 +283,38 @@ void debugAssertActiveSetDescriptorFresh(
     const SimulationState& state) {
   if (active_set.has_generation_metadata &&
       active_set.source_particle_index_generation != state.particleIndexGeneration()) {
-    throw std::runtime_error("ActiveSetDescriptor particle generation is stale");
+    throw std::runtime_error(schedulerContextMessage(
+        "ActiveSetDescriptor particle generation is stale",
+        "debugAssertActiveSetDescriptorFresh",
+        active_set.source_scheduler_tick));
   }
   if (active_set.has_generation_metadata &&
       active_set.source_cell_index_generation != state.cellIndexGeneration()) {
-    throw std::runtime_error("ActiveSetDescriptor cell generation is stale");
+    throw std::runtime_error(schedulerContextMessage(
+        "ActiveSetDescriptor cell generation is stale",
+        "debugAssertActiveSetDescriptorFresh",
+        active_set.source_scheduler_tick));
   }
   for (const std::uint32_t particle_index : active_set.particle_indices) {
     if (particle_index >= state.particles.size()) {
-      throw std::out_of_range("ActiveSetDescriptor contains stale particle index");
+      throw std::out_of_range(timeBinContextMessage(
+          "ActiveSetDescriptor contains stale particle index",
+          "debugAssertActiveSetDescriptorFresh",
+          active_set.source_scheduler_tick,
+          particle_index,
+          0,
+          active_set.source_scheduler_tick));
     }
   }
   for (const std::uint32_t cell_index : active_set.cell_indices) {
     if (cell_index >= state.cells.size()) {
-      throw std::out_of_range("ActiveSetDescriptor contains stale cell index");
+      throw std::out_of_range(timeBinContextMessage(
+          "ActiveSetDescriptor contains stale cell index",
+          "debugAssertActiveSetDescriptorFresh",
+          active_set.source_scheduler_tick,
+          cell_index,
+          0,
+          active_set.source_scheduler_tick));
     }
   }
 }
@@ -200,11 +325,17 @@ void debugAssertActiveSetDescriptorFresh(
     std::uint64_t expected_scheduler_tick) {
   debugAssertActiveSetDescriptorFresh(active_set, state);
   if (!active_set.has_generation_metadata || !active_set.particles_from_scheduler) {
-    throw std::runtime_error("ActiveSetDescriptor must carry scheduler provenance before solver callbacks");
+    throw std::runtime_error(schedulerContextMessage(
+        "ActiveSetDescriptor must carry scheduler provenance before solver callbacks",
+        "debugAssertActiveSetDescriptorFresh",
+        expected_scheduler_tick));
   }
   if ((active_set.particles_from_scheduler || active_set.cells_from_scheduler) &&
       active_set.source_scheduler_tick != expected_scheduler_tick) {
-    throw std::runtime_error("ActiveSetDescriptor scheduler tick is stale");
+    throw std::runtime_error(schedulerContextMessage(
+        "ActiveSetDescriptor scheduler tick is stale",
+        "debugAssertActiveSetDescriptorFresh",
+        expected_scheduler_tick));
   }
 }
 
@@ -213,6 +344,16 @@ void debugAssertActiveSetDescriptorFresh(
     const SimulationState& state,
     const HierarchicalTimeBinScheduler& scheduler) {
   debugAssertActiveSetDescriptorFresh(active_set, state, scheduler.currentTick());
+  if (active_set.particles_from_scheduler) {
+    const auto active = scheduler.activeElements();
+    if (active.size() != active_set.particle_indices.size() ||
+        !std::equal(active.begin(), active.end(), active_set.particle_indices.begin())) {
+      throw std::runtime_error(schedulerContextMessage(
+          "ActiveSetDescriptor particle indices do not match scheduler active set",
+          "debugAssertActiveSetDescriptorFresh",
+          scheduler.currentTick()));
+    }
+  }
 }
 
 std::vector<IntegrationStage> StageScheduler::schedule(
@@ -344,6 +485,7 @@ void HierarchicalTimeBinScheduler::reset(
   m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
   m_candidate_label.assign(element_count, {});
   m_last_reconciliation = {};
+  m_substep_open = false;
 
   m_position_in_bin.resize(element_count, 0);
   m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
@@ -439,6 +581,10 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
       continue;
     }
     ++result.elements_with_candidates;
+    validateTransitionRequest(
+        element,
+        candidate,
+        m_candidate_label[element].empty() ? "HierarchicalTimeBinScheduler::reconcileCandidateTransitions" : m_candidate_label[element]);
     requestBinTransition(element, candidate);
     ++result.committed_transition_requests;
     m_candidate_bin_index[element] = k_unset_pending_bin;
@@ -454,6 +600,7 @@ void HierarchicalTimeBinScheduler::requestBinTransition(
   if (element_index >= m_hot.size()) {
     throw std::out_of_range("element_index out of range");
   }
+  validateTransitionRequest(element_index, target_bin, "HierarchicalTimeBinScheduler::requestBinTransition");
   m_hot.pending_bin_index[element_index] = clampBin(target_bin);
 }
 
@@ -479,11 +626,26 @@ std::uint64_t HierarchicalTimeBinScheduler::binPeriodTicks(std::uint8_t bin_inde
 }
 
 std::span<const std::uint32_t> HierarchicalTimeBinScheduler::beginSubstep() {
+  if (m_substep_open) {
+    throw std::runtime_error(schedulerContextMessage(
+        "beginSubstep called while a substep is already open",
+        "HierarchicalTimeBinScheduler::beginSubstep",
+        m_current_tick));
+  }
+  validateInternalState("HierarchicalTimeBinScheduler::beginSubstep");
   rebuildActiveSet();
+  m_substep_open = true;
+  validateInternalState("HierarchicalTimeBinScheduler::beginSubstep.active_set_created");
   return m_active_elements;
 }
 
 void HierarchicalTimeBinScheduler::endSubstep() {
+  if (!m_substep_open) {
+    throw std::runtime_error(schedulerContextMessage(
+        "endSubstep called without an open substep",
+        "HierarchicalTimeBinScheduler::endSubstep",
+        m_current_tick));
+  }
   (void)reconcileCandidateTransitions();
   applyPendingTransitions();
   for (const std::uint32_t element : m_active_elements) {
@@ -492,7 +654,15 @@ void HierarchicalTimeBinScheduler::endSubstep() {
     m_hot.next_activation_tick[element] = m_current_tick + period_ticks;
     m_hot.active_flag[element] = 0;
   }
+  if (m_current_tick == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::runtime_error(schedulerContextMessage(
+        "global integer time cannot advance monotonically without overflowing",
+        "HierarchicalTimeBinScheduler::endSubstep",
+        m_current_tick));
+  }
   ++m_current_tick;
+  m_substep_open = false;
+  validateInternalState("HierarchicalTimeBinScheduler::endSubstep.committed");
 }
 
 const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noexcept { return m_hot; }
@@ -500,6 +670,7 @@ const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noex
 const TimeBinDiagnostics& HierarchicalTimeBinScheduler::diagnostics() const noexcept { return m_diagnostics; }
 
 TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() const {
+  validateInternalState("HierarchicalTimeBinScheduler::exportPersistentState");
   TimeBinPersistentState persistent_state;
   persistent_state.current_tick = m_current_tick;
   persistent_state.max_bin = m_max_bin;
@@ -552,11 +723,114 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   }
 
   m_active_elements.clear();
+  m_substep_open = false;
   m_diagnostics = {};
   m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   for (std::size_t bin = 0; bin < m_elements_by_bin.size(); ++bin) {
     m_diagnostics.occupancy_by_bin[bin] = static_cast<std::uint32_t>(m_elements_by_bin[bin].size());
+  }
+  validateInternalState("HierarchicalTimeBinScheduler::importPersistentState");
+}
+
+void HierarchicalTimeBinScheduler::validateInternalState(std::string_view source_label) const {
+  if (m_hot.bin_index.size() != m_hot.next_activation_tick.size() ||
+      m_hot.bin_index.size() != m_hot.active_flag.size() ||
+      m_hot.bin_index.size() != m_hot.pending_bin_index.size()) {
+    throw std::runtime_error(schedulerContextMessage(
+        "hot metadata arrays have mismatched sizes",
+        source_label,
+        m_current_tick));
+  }
+  if (m_position_in_bin.size() != m_hot.size()) {
+    throw std::runtime_error(schedulerContextMessage(
+        "bin-position mirror size does not match hot metadata",
+        source_label,
+        m_current_tick));
+  }
+  for (std::uint32_t element = 0; element < m_hot.size(); ++element) {
+    const std::uint8_t bin = m_hot.bin_index[element];
+    const std::uint64_t next_tick = m_hot.next_activation_tick[element];
+    if (bin > m_max_bin) {
+      throw std::runtime_error(timeBinContextMessage(
+          "bin exceeds scheduler max_bin",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+    if (m_hot.active_flag[element] > 1U) {
+      throw std::runtime_error(timeBinContextMessage(
+          "active flag is not boolean",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+    if (!m_substep_open && m_hot.active_flag[element] != 0U) {
+      throw std::runtime_error(timeBinContextMessage(
+          "stale active flag outside an open substep",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+    const std::uint64_t period = binPeriodTicks(bin);
+    if (next_tick < m_current_tick) {
+      throw std::runtime_error(timeBinContextMessage(
+          "next activation tick is behind the global scheduler tick",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+    if (next_tick > m_current_tick && next_tick % period != 0U) {
+      throw std::runtime_error(timeBinContextMessage(
+          "future next activation tick is not aligned to bin period",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+    const std::uint8_t pending = m_hot.pending_bin_index[element];
+    if (pending != k_unset_pending_bin && pending > m_max_bin) {
+      throw std::runtime_error(timeBinContextMessage(
+          "pending bin exceeds scheduler max_bin",
+          source_label,
+          m_current_tick,
+          element,
+          bin,
+          next_tick));
+    }
+  }
+}
+
+void HierarchicalTimeBinScheduler::validateTransitionRequest(
+    std::uint32_t element_index,
+    std::uint8_t target_bin,
+    std::string_view source_label) const {
+  if (element_index >= m_hot.size()) {
+    throw std::out_of_range("element_index out of range");
+  }
+  const std::uint8_t old_bin = m_hot.bin_index[element_index];
+  const std::uint8_t new_bin = clampBin(target_bin);
+  const std::uint64_t next_tick = m_hot.next_activation_tick[element_index];
+  const bool element_is_currently_active =
+      next_tick == m_current_tick && isBinActiveAtTick(old_bin, m_current_tick);
+  const std::uint64_t new_period = binPeriodTicks(new_bin);
+  if (element_is_currently_active && m_current_tick % new_period != 0U) {
+    throw std::runtime_error(timeBinContextMessage(
+        "bin transition violates current synchronization boundary",
+        source_label,
+        m_current_tick,
+        element_index,
+        old_bin,
+        next_tick));
   }
 }
 
@@ -658,7 +932,13 @@ void HierarchicalTimeBinScheduler::applyPendingTransitions() {
     const std::uint64_t new_period = binPeriodTicks(new_bin);
     if (m_current_tick % new_period != 0) {
       ++m_diagnostics.illegal_transition_attempts;
-      continue;
+      throw std::runtime_error(timeBinContextMessage(
+          "pending bin transition violates current synchronization boundary",
+          "HierarchicalTimeBinScheduler::applyPendingTransitions",
+          m_current_tick,
+          element,
+          old_bin,
+          m_hot.next_activation_tick[element]));
     }
 
     eraseFromBin(element, old_bin);
@@ -745,24 +1025,24 @@ bool timeBinMirrorsMatchScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     const SimulationState& state,
     TimeBinMirrorDomain domain) {
-  const auto persistent = scheduler.exportPersistentState();
+  const auto& hot = scheduler.hotMetadata();
   auto particles_match = [&]() {
-    if (persistent.bin_index.size() < state.particles.size()) {
+    if (hot.bin_index.size() < state.particles.size()) {
       return false;
     }
     for (std::size_t i = 0; i < state.particles.size(); ++i) {
-      if (state.particles.time_bin[i] != persistent.bin_index[i]) {
+      if (state.particles.time_bin[i] != hot.bin_index[i]) {
         return false;
       }
     }
     return true;
   };
   auto cells_match = [&]() {
-    if (persistent.bin_index.size() < state.cells.size()) {
+    if (hot.bin_index.size() < state.cells.size()) {
       return false;
     }
     for (std::size_t i = 0; i < state.cells.size(); ++i) {
-      if (state.cells.time_bin[i] != persistent.bin_index[i]) {
+      if (state.cells.time_bin[i] != hot.bin_index[i]) {
         return false;
       }
     }
@@ -784,11 +1064,49 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     const HierarchicalTimeBinScheduler& scheduler,
     const SimulationState& state,
     TimeBinMirrorDomain domain) {
-  if (!timeBinMirrorsMatchScheduler(scheduler, state, domain)) {
-    throw std::runtime_error(
-        "time-bin mirror authority invariant violated: state mirrors diverged from scheduler authority");
+  const auto& hot = scheduler.hotMetadata();
+  const auto throw_particle = [&](std::uint32_t index) {
+    throw std::runtime_error(timeBinContextMessage(
+        "time_bin mirror authority invariant violated for particle mirror",
+        "debugAssertTimeBinMirrorAuthorityInvariant",
+        scheduler.currentTick(),
+        index,
+        index < hot.bin_index.size() ? hot.bin_index[index] : 0,
+        index < hot.next_activation_tick.size() ? hot.next_activation_tick[index] : scheduler.currentTick()));
+  };
+  const auto throw_cell = [&](std::uint32_t index) {
+    throw std::runtime_error(timeBinContextMessage(
+        "time_bin mirror authority invariant violated for cell mirror",
+        "debugAssertTimeBinMirrorAuthorityInvariant",
+        scheduler.currentTick(),
+        index,
+        index < hot.bin_index.size() ? hot.bin_index[index] : 0,
+        index < hot.next_activation_tick.size() ? hot.next_activation_tick[index] : scheduler.currentTick()));
+  };
+  if ((domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
+      hot.bin_index.size() < state.particles.size()) {
+    throw_particle(static_cast<std::uint32_t>(hot.bin_index.size()));
+  }
+  if ((domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
+      hot.bin_index.size() < state.cells.size()) {
+    throw_cell(static_cast<std::uint32_t>(hot.bin_index.size()));
+  }
+  if (domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) {
+    for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+      if (state.particles.time_bin[i] != hot.bin_index[i]) {
+        throw_particle(i);
+      }
+    }
+  }
+  if (domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) {
+    for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
+      if (state.cells.time_bin[i] != hot.bin_index[i]) {
+        throw_cell(i);
+      }
+    }
   }
 }
+
 double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl) {
   if (input.cell_width_code <= 0.0) {
     throw std::invalid_argument("cell_width_code must be positive");

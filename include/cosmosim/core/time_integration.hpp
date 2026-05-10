@@ -218,6 +218,9 @@ class PmSynchronizationState {
   std::uint64_t m_field_version = 0;
   std::uint64_t m_last_refresh_step_index = 0;
   double m_last_refresh_scale_factor = 1.0;
+  bool m_refresh_commit_pending = false;
+  std::uint64_t m_pending_refresh_opportunity = 0;
+  std::uint64_t m_pending_refresh_field_version = 0;
 };
 
 // Persisted scheduler state required for exact restart continuation.
@@ -318,6 +321,11 @@ class HierarchicalTimeBinScheduler {
   void rebuildActiveSet();
   void requestBinTransition(std::uint32_t element_index, std::uint8_t target_bin);
   void applyPendingTransitions();
+  void validateInternalState(std::string_view source_label) const;
+  void validateTransitionRequest(
+      std::uint32_t element_index,
+      std::uint8_t target_bin,
+      std::string_view source_label) const;
 
   std::uint64_t m_current_tick = 0;
   std::uint8_t m_max_bin = 0;
@@ -329,6 +337,7 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::uint8_t> m_candidate_bin_index;
   std::vector<std::string> m_candidate_label;
   TimeStepReconciliationResult m_last_reconciliation;
+  bool m_substep_open = false;
 };
 
 [[nodiscard]] ActiveSetDescriptor makeSchedulerActiveSetDescriptor(

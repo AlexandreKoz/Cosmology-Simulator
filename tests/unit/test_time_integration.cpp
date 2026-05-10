@@ -1,8 +1,10 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "cosmosim/core/time_integration.hpp"
@@ -11,6 +13,15 @@
 namespace {
 
 constexpr double k_tolerance = 1.0e-12;
+
+bool throwsWithContext(const std::function<void()>& action, const std::string& required_context) {
+  try {
+    action();
+  } catch (const std::exception& ex) {
+    return std::string(ex.what()).find(required_context) != std::string::npos;
+  }
+  return false;
+}
 
 class StageRecorder final : public cosmosim::core::IntegrationCallback {
  public:
@@ -153,10 +164,7 @@ void testHierarchicalSchedulerTransitions() {
   assert(active.size() == 1);
   assert(active[0] == 0);
 
-  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.endSubstep();
-  const auto illegal_before = scheduler.diagnostics().illegal_transition_attempts;
-  assert(illegal_before >= 1);
 
   while (scheduler.currentTick() < 8) {
     scheduler.beginSubstep();
@@ -430,6 +438,92 @@ void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
   assert(threw);
 }
 
+void testInvalidEarlyActivationTrap() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(2, 2, 0);
+  auto state = scheduler.exportPersistentState();
+  state.current_tick = 1;
+  state.next_activation_tick[0] = 0;
+  cosmosim::core::HierarchicalTimeBinScheduler restored(state.max_bin);
+  assert(throwsWithContext([&]() { restored.importPersistentState(state); }, "element=0"));
+}
+
+void testInvalidBinJumpTrap() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(1, 0, 0);
+  scheduler.beginSubstep();
+  scheduler.endSubstep();
+  scheduler.beginSubstep();
+  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp, "illegal_jump_test");
+  assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "illegal_jump_test"));
+}
+
+void testSkippedPmSyncTrap() {
+  cosmosim::core::PmSynchronizationState pm_sync;
+  pm_sync.reset(2);
+  const auto event = pm_sync.registerKickOpportunity(4, 0.5, false);
+  assert(event.refresh_long_range_field);
+  assert(throwsWithContext([&]() { (void)pm_sync.registerKickOpportunity(5, 0.6, true); }, "previous refresh event"));
+}
+
+void testStaleMirrorUseTrap() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2);
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(1);
+  scheduler.reset(2, 0, 0);
+  scheduler.setElementBin(1, 1, scheduler.currentTick());
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  state.particles.time_bin[1] = 0;
+  assert(throwsWithContext(
+      [&]() {
+        cosmosim::core::debugAssertTimeBinMirrorAuthorityInvariant(
+            scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticles);
+      },
+      "time_bin mirror"));
+}
+
+void testInvalidRestartTimestepStateTrap() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(1, 1, 0);
+  auto state = scheduler.exportPersistentState();
+  state.active_flag[0] = 1;
+  cosmosim::core::HierarchicalTimeBinScheduler restored(state.max_bin);
+  assert(throwsWithContext([&]() { restored.importPersistentState(state); }, "active flag"));
+}
+
+void testActiveSetMismatchTrap() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(1);
+  scheduler.reset(2, 0, 0);
+  const auto active = scheduler.beginSubstep();
+  (void)active;
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2);
+  std::vector<std::uint32_t> mismatched{1, 0};
+  cosmosim::core::ActiveSetDescriptor descriptor{
+      .particle_indices = mismatched,
+      .particles_are_subset = false,
+      .particles_from_scheduler = true,
+      .has_generation_metadata = true,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+      .source_cell_index_generation = state.cellIndexGeneration(),
+      .source_scheduler_tick = scheduler.currentTick(),
+  };
+  assert(throwsWithContext(
+      [&]() { cosmosim::core::debugAssertActiveSetDescriptorFresh(descriptor, state, scheduler); },
+      "do not match scheduler active set"));
+  scheduler.endSubstep();
+}
+
+void testLocalGlobalSyncBoundaryViolationTrap() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(1, 0, 0);
+  scheduler.beginSubstep();
+  scheduler.endSubstep();
+  scheduler.beginSubstep();
+  scheduler.submitCandidateBin(0, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp, "local_global_boundary_test");
+  assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "synchronization boundary"));
+}
+
 void testPmSynchronizationCadencePreservesRefreshBoundaries() {
   cosmosim::core::PmSynchronizationState pm_sync;
   pm_sync.reset(3);
@@ -478,6 +572,13 @@ int main() {
   testActiveSetNoCompetingBuilders();
   testHydroGravityCandidateReconciliation();
   testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected();
+  testInvalidEarlyActivationTrap();
+  testInvalidBinJumpTrap();
+  testSkippedPmSyncTrap();
+  testStaleMirrorUseTrap();
+  testInvalidRestartTimestepStateTrap();
+  testActiveSetMismatchTrap();
+  testLocalGlobalSyncBoundaryViolationTrap();
   testPmSynchronizationCadencePreservesRefreshBoundaries();
   return 0;
 }

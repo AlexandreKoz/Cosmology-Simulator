@@ -16,7 +16,7 @@ _Date captured: 2026-04-14 (UTC)_
 | P32-SOFTENING-PROVENANCE-029 | Closed | Softening + restart/provenance contract | Targeted CPU and HDF5 validation now pass for softening ownership, reorder/sidecar preservation, migration preservation, restart, and snapshot schema coverage; `integration_softening_ownership_invariants` builds a valid restart payload with matching normalized config hash/provenance hash and single-rank distributed restart state. | Continue to include `ctest --preset test-hdf5-debug --output-on-failure -R "restart|snapshot|softening"` in release-gate evidence. |
 | P33-APP-CONFIG-ROUNDTRIP-030 | Closed pending local full-suite certification | Runtime app normalized config contract | `integration_runtime_app_smoke` now checks canonical axis-aware normalized config key `treepm_pm_grid_nx = 24`, matching the documented normalized-config contract. | Re-run runtime app smoke, config examples, and config parser tests locally. |
 | P34-RELEASE-SCHEMA-DRIFT-031 | Closed pending local full-suite certification | Release/docs schema metadata drift | Release manifest, docs scaffold, and release readiness checks now agree on snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v6`, and provenance `provenance_v4`. | Re-run docs scaffold, release readiness, and snapshot/restart schema tests locally. |
-| P35-PM-VALIDATION-CONTRACT-032 | Open | PM isolated/coupling/validation contract | PM preset still fails `unit_pm_solver`, `integration_tree_pm_coupling_periodic`, and `validation_phase2_mpi_gravity_single_rank` contract checks. | Repair PM contract expectations and re-run `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R "unit_pm_solver|integration_tree_pm_coupling_periodic|validation_phase2_mpi_gravity_single_rank"`. |
+| P35-PM-VALIDATION-CONTRACT-032 | Closed | PM isolated/coupling/validation contract | PM+HDF5+FFTW validation now accepts either internal-node residual pruning or leaf-pair cutoff skips as cutoff traversal evidence, matching the TreePM diagnostic contract and closing the single-rank residual-cutoff expectation mismatch. | Full PM+HDF5+FFTW preset is green with `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure`; MPI+FFTW remains environment-blocked when `fftw3_mpi` is unavailable. |
 
 
 ## Current blocker ledger after dependency-enabled validation
@@ -134,7 +134,7 @@ Additional validation limitation for this pass:
 - `cmake --preset mpi-hdf5-fftw-debug` fails in this environment because `fftw3_mpi` is unavailable; distributed MPI+FFTW command bundle cannot be executed end-to-end in this cycle.
 - `ctest --test-dir build/pm-hdf5-fftw-debug -R "integration_reference_workflow" --output-on-failure` fails with `runtime workflow schema compatibility validation failed`.
 - `ctest --test-dir build/pm-hdf5-fftw-debug -R "integration_tree_pm_coupling_periodic" --output-on-failure` fails with `expected at least one low-res contaminant`.
-- `ctest --test-dir build/pm-hdf5-fftw-debug -R "validation_phase2_mpi_gravity_single_rank" --output-on-failure` fails in communication-stress mode due residual-cutoff expectation mismatch.
+- `validation_phase2_mpi_gravity_single_rank` residual-cutoff expectation mismatch is repaired; cutoff traversal evidence now accepts internal-node pruning or leaf-pair cutoff skips.
 - `validation/artifacts/research_grade/phase3/correctness/power_spectrum_consistency.json` remains blocked (`missing_diagnostics_inputs`), so Phase 3 correctness/force-accuracy envelope is not fully evidenced.
 - Multi-rank scaling evidence in the audited artifact set remains baseline-only and non-certifying (`phase2_baseline_scaling_summary.json`); checked-in CSV artifacts currently cover `np1` only.
 
@@ -173,3 +173,9 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
 | P36-SCHEDULER-SPAWN-OWNERSHIP-033 | Open | Particle creation + scheduler authority | Star-formation and black-hole creation no longer copy cell mirror bins into new particle mirror lanes, but production creation paths still need an explicit scheduler-owned element registration policy before spawned particles can participate in hierarchical activation without a rebuild. | Add scheduler element-registration/import APIs with tests covering spawned particles, mirror refresh, and restart continuity. |
+
+## 2026-05-10 hierarchical timestep invariant status
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P37-HIERARCHICAL-TIMESTEP-INVARIANTS-034 | Closed | Scheduler/debug invariants | Runtime checks now trap early activation, illegal sync-boundary bin transitions, skipped PM refresh commits, stale mirrors/descriptors, invalid restart timestep state, active-set mismatches, and non-monotonic tick overflow with deterministic context. | Feature-path closure still depends on HDF5/FFTW/MPI presets in environments with those dependencies available; CPU-only surrogate scheduler tests are in `test_unit_time_integration`. |
