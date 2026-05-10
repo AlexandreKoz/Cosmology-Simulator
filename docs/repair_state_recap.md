@@ -5,6 +5,19 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 0) HDF5 preset smoke/restart gate repair (2026-05-10 UTC)
+
+- Fixed the HDF5 runtime smoke fixture to provide the complete axis-aware TreePM grid triplet after the config contract started rejecting partial `treepm_pm_grid_n{xyz}` input.
+- Fixed the Phase 2 restart-continuation validation fixture to set `snapshot_interval_steps = 1`, ensuring the three-step validation run actually reaches the restart write/read gate instead of inheriting the default 64-step cadence.
+- Reproducibility impact: this is test/config wiring only; no solver numerics, restart schema, normalized config generation, or scheduler authority semantics changed.
+
+## 0) Stage 2 timestep duplicate-lane reclassification and restart guards (2026-05-10 UTC)
+
+- Enforced scheduler-owned restart truth for timestep bins: restart hash/write/read paths now validate particle `time_bin` mirrors against scheduler `bin_index`, reject stale mirrors, validate scheduler schema arrays, and rebuild mirrors from scheduler state on read.
+- Reclassified migration/transfer `time_bin` fields as derived mirrors with scheduler remap/rebuild contracts, and expanded Stage 2 audit/output-schema docs with the full bin/cadence/kick-opportunity/field-version lane inventory.
+- Added tests for stale restart mirror rejection, restart mirror rebuild, migration/reorder mirror consistency by stable IDs, scheduler import schema validation, and diagnostics not mutating scheduler truth.
+- Reproducibility impact: exact restart continuation is strengthened without a schema bump; solver numerics, output names, normalized config dumps, and PM cadence semantics are unchanged.
+
 ## 0) Active-view lifetime, generation, and workspace reuse hardening (2026-05-07 UTC)
 
 Validation commands for this repair:

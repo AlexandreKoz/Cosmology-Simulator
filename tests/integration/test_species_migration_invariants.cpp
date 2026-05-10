@@ -516,6 +516,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   state.refreshGasCellIdentityFromParticleOrder();
   for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
     state.cells.mass_code[cell] = 10.0 + static_cast<double>(cell);
+    state.cells.time_bin[cell] = static_cast<std::uint8_t>(cell + 1U);
     state.gas_cells.density_code[cell] = 1000.0 + static_cast<double>(cell);
     state.gas_cells.internal_energy_code[cell] = 2000.0 + static_cast<double>(cell);
   }
@@ -523,6 +524,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
 
   struct GasFieldRecord {
     double mass_code = 0.0;
+    std::uint8_t time_bin = 0;
     double density_code = 0.0;
     double internal_energy_code = 0.0;
   };
@@ -532,6 +534,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
         state.parentParticleIdForGasCellRow(cell),
         GasFieldRecord{
             .mass_code = state.cells.mass_code[cell],
+            .time_bin = state.cells.time_bin[cell],
             .density_code = state.gas_cells.density_code[cell],
             .internal_energy_code = state.gas_cells.internal_energy_code[cell],
         });
@@ -556,6 +559,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
     const auto found = gas_fields_by_id.find(gas_id);
     assert(found != gas_fields_by_id.end());
     rebuilt_cells.mass_code[cell] = found->second.mass_code;
+    rebuilt_cells.time_bin[cell] = found->second.time_bin;
     rebuilt_gas.density_code[cell] = found->second.density_code;
     rebuilt_gas.internal_energy_code[cell] = found->second.internal_energy_code;
     rebuilt_gas.gas_cell_id[cell] = gas_id;
@@ -572,6 +576,9 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   assert(state.gas_cells.density_code[state.gasCellRowForParticleId(501)] == 1000.0);
   assert(state.gas_cells.density_code[state.gasCellRowForParticleId(503)] == 1002.0);
   assert(state.gas_cells.density_code[state.gasCellRowForParticleId(502)] == 1001.0);
+  assert(state.cells.time_bin[state.gasCellRowForParticleId(501)] == 1U);
+  assert(state.cells.time_bin[state.gasCellRowForParticleId(503)] == 3U);
+  assert(state.cells.time_bin[state.gasCellRowForParticleId(502)] == 2U);
   assert(state.gas_cells.internal_energy_code[state.gasCellRowForParticleId(502)] == 2001.0);
   assert(state.validateOwnershipInvariants());
 }

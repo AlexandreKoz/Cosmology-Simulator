@@ -36,6 +36,8 @@ struct ParticleSoa {
   AlignedVector<double> velocity_y_peculiar;
   AlignedVector<double> velocity_z_peculiar;
   AlignedVector<double> mass_code;
+  // Derived mirror of scheduler bin_index for diagnostics/I/O compatibility;
+  // exact restart uses scheduler state.
   AlignedVector<std::uint8_t> time_bin;
 
   void resize(std::size_t count);
@@ -73,6 +75,8 @@ struct CellSoa {
   AlignedVector<double> center_y_comoving;
   AlignedVector<double> center_z_comoving;
   AlignedVector<double> mass_code;
+  // Derived mirror of scheduler bin_index for diagnostics/I/O compatibility;
+  // not persistent authority.
   AlignedVector<std::uint8_t> time_bin;
   AlignedVector<std::uint32_t> patch_index;
 
@@ -281,6 +285,9 @@ struct ParticleTransferPacket {
   AlignedVector<double> velocity_y_peculiar;
   AlignedVector<double> velocity_z_peculiar;
   AlignedVector<double> mass_code;
+  // Derived timestep mirror copied from scheduler authority for transfer locality only.
+  // Receiver-side scheduler remap/rebuild must validate or overwrite this lane
+  // before exact continuation.
   AlignedVector<std::uint8_t> time_bin;
   AlignedVector<std::uint32_t> owning_rank;
 };
@@ -332,6 +339,10 @@ struct ParticleMigrationRecord {
   double velocity_y_peculiar = 0.0;
   double velocity_z_peculiar = 0.0;
   double mass_code = 0.0;
+  // Derived timestep mirror copied with the migrating particle. It is not
+  // scheduler authority;
+  // destination ranks must remap/rebuild scheduler state by stable particle_id
+  // before restart/output.
   std::uint8_t time_bin = 0;
   bool has_gravity_softening_value = false;
   bool has_gravity_softening_override = false;

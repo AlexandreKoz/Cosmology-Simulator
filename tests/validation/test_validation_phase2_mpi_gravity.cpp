@@ -337,6 +337,7 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
   stream << "output_directory = integration_outputs\n";
   stream << "output_stem = snapshot\n";
   stream << "restart_stem = restart\n";
+  stream << "snapshot_interval_steps = 1\n";
   stream << "write_restarts = true\n\n";
   stream << "[parallel]\n";
   stream << "mpi_ranks_expected = " << world_size << "\n";

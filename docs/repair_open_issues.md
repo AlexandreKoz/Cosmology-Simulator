@@ -166,7 +166,7 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
-| P35-STAGE2-TIMESTEP-OWNERSHIP-032 | Open | Hierarchical timestep authority | Audit classifies scheduler state as authority and state `time_bin` lanes as mirrors, but production guardrails do not yet enforce mirror freshness at every restart/transform boundary. | Add behavior-preserving assertions/tests for scheduler-vs-mirror freshness, structural-transform scheduler rebuild/reimport, and restart read-side scheduler/mirror compatibility before Stage 2 behavior repairs claim closure. |
+| P35-STAGE2-TIMESTEP-OWNERSHIP-032 | Closed | Hierarchical timestep authority | Restart writer/hash/read now reject stale particle time-bin mirrors against scheduler `bin_index`, reader rebuilds mirrors from scheduler authority after validation, migration/transfer fields are documented as mirrors, and reorder/migration tests exercise stable-ID mirror preservation. | Remaining scheduler ownership work moved to P36 for new particle registration; no additional restart mirror guard is open for existing v6 lanes. |
 
 ## 2026-05-10 Scheduler ownership residuals
 

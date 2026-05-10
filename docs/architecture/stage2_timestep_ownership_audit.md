@@ -106,3 +106,40 @@ Inspected code surfaces include:
 ## Reproducibility impact
 
 This audit is documentation-only and does not change deterministic behavior, output naming, normalized config dumps, restart schemas, or solver math. Its intended reproducibility impact is to prevent later Stage 2 changes from weakening exact restart continuation: scheduler persistent state remains the only per-element timestep authority, state arrays remain mirrors, and PM cadence state remains tied to gravity kick opportunities.
+
+## Stage 2 duplicate-lane reclassification update (2026-05-10)
+
+This patch converts the audit from documentation-only into an enforced restart/migration contract without changing solver math or bumping the v6 restart schema. The compatibility behavior is: existing v6 restart files remain accepted only when the serialized state `time_bin` mirrors agree with `/scheduler/bin_index`; stale mirrors are rejected before the payload hash is used as a substitute authority. On successful read, particle mirrors are rebuilt from scheduler state so downstream diagnostics cannot accidentally consume pre-read cache contents.
+
+### Exhaustive duplicate-looking lane classification
+
+| Lane family / search term | Concrete lane(s) | Classification after this patch | Guard / contract |
+| --- | --- | --- | --- |
+| `time_bin` | `ParticleSoa::time_bin` | Derived mirror / diagnostic / I/O compatibility lane | Restart writer/hash/read require equality with `/scheduler/bin_index`; reader rewrites from scheduler after validation. Structural transforms may move the mirror with the particle but cannot make it authority. |
+| `time_bin` | `CellSoa::time_bin` | Derived mirror / diagnostic / I/O compatibility lane | v6 restart has one particle scheduler lane; cell mirrors remain explicitly non-authoritative. If a fixture/future scheduler lane is cell-sized, restart validation treats cell values as mirrors and rejects conflicts. |
+| `time_bin` | `ParticleTransferPacket::time_bin` | Transfer-local mirror | Header comments mark it copied from scheduler authority for locality only; receiver must remap/rebuild scheduler state before exact continuation. |
+| `time_bin` | `ParticleMigrationRecord::time_bin` | Migration mirror with scheduler-remap contract | Header comments mark it non-authoritative; destination ranks preserve it only as a stale-use-detectable mirror keyed by stable `particle_id`. |
+| `bin_index` | `TimeBinHotMetadata::bin_index`, `TimeBinPersistentState::bin_index`, restart `/scheduler/bin_index` | Scheduler-owned persistent authority | Restart validation requires length match with particle mirrors and rejects values above `max_bin`; hash includes this lane and mirrors, so stale files cannot be accepted silently. |
+| `next_activation_tick` | `TimeBinHotMetadata::next_activation_tick`, `TimeBinPersistentState::next_activation_tick`, restart `/scheduler/next_activation_tick` | Scheduler-owned persistent authority | Import/restart validation requires matching array length; reader imports this lane before any mirror rebuild. |
+| `active_flag` | `TimeBinHotMetadata::active_flag`, `TimeBinPersistentState::active_flag`, restart `/scheduler/active_flag` | Scheduler-owned active-set cache for current tick | Import/restart validation requires matching length and values in `{0,1}`; diagnostics may read counts but are not authority. |
+| `pending_bin_index` | `TimeBinHotMetadata::pending_bin_index`, `TimeBinPersistentState::pending_bin_index`, restart `/scheduler/pending_bin_index` | Scheduler-owned pending transition lane | Import/restart validation requires matching length and either `k_unset_pending_bin` or a value no larger than `max_bin`. |
+| `active_bin` | `IntegratorState::time_bins.active_bin`, restart `/integrator/time_bins_active_bin` | Integrator metadata mirror / diagnostic context | Hash remains unchanged and includes it for v6 compatibility, but activation legality is still derived only from scheduler state. |
+| `max_bin` | `IntegratorState::time_bins.max_bin` | Integrator metadata mirror / diagnostic context | Retained for compatibility; scheduler `max_bin` is authoritative for per-element legality. |
+| `max_bin` | `HierarchicalTimeBinScheduler::m_max_bin`, `TimeBinPersistentState::max_bin`, restart `/scheduler/max_bin` | Scheduler-owned persistent authority | Import/restart validation rejects out-of-range `bin_index`/`pending_bin_index`; no clamping on import conflicts. |
+| `cadence` | TreePM config/provenance `gravity_treepm_update_cadence_steps`; `PmKickCadenceController::m_cadence_steps`; distributed restart `pm_update_cadence_steps` | PM cadence authority, separate from scheduler ticks | Existing distributed cadence consistency checks remain the continuation authority for long-range PM reuse; no timestep mirror can override it. |
+| kick-opportunity | `gravity_kick_opportunity`, `last_long_range_refresh_opportunity`, `PmKickCadenceController` counters | PM long-range field continuation authority | Serialized in distributed gravity restart/provenance lanes and intentionally not mapped to scheduler substep ticks. |
+| field-version lane | `long_range_field_version`, provenance restart field-version mirrors | PM long-range field metadata authority / diagnostic mirror depending on payload | Existing restart compatibility checks retain deterministic-rebuild policy and version/refresh coherence; hash calculation still includes distributed gravity state. |
+
+### Restart writer/reader/hash audit result
+
+- Writer and integrity-hash calculation now run the same scheduler/mirror conflict check before producing a hash or file. This prevents the hash from blessing stale state mirrors.
+- Reader order is now: read state lanes, read scheduler state, validate scheduler schema, reject mirror conflicts, rebuild mirrors from scheduler authority, then verify the payload integrity hash from the rebuilt canonical payload.
+- Hash coverage is not weakened: state mirror bytes and scheduler bytes remain inputs, so files with matching but corrupted mirrors still require a matching hash and scheduler payload.
+
+### Structural transform impact
+
+Reorder and migration continue to preserve `time_bin` values with stable particle/cell identity, but the preserved values are explicitly mirrors. New tests exercise nontrivial ID movement for particle migration/reorder and gas-cell rebuild by stable `particle_id`/`gas_cell_id` lanes so success cannot depend on unchanged row order.
+
+### Reproducibility impact
+
+Deterministic restart behavior is strengthened. Exact restart continuation now has one persistent per-particle timestep authority (`TimeBinPersistentState` imported into `HierarchicalTimeBinScheduler`); particle/cell mirrors are rebuildable caches, and stale-use is detectable at write and read boundaries. No solver numerics, output dataset names, normalized configuration dumps, PM cadence semantics, or schema version numbers changed.

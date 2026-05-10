@@ -149,6 +149,16 @@ std::vector<std::uint64_t> particleIdsForIndices(
   return ids;
 }
 
+
+void assertParticleTimeBinsMatchScheduler(
+    const cosmosim::core::SimulationState& state,
+    const cosmosim::core::TimeBinPersistentState& scheduler_state) {
+  assert(state.particles.time_bin.size() == scheduler_state.bin_index.size());
+  for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
+    assert(state.particles.time_bin[i] == scheduler_state.bin_index[i]);
+  }
+}
+
 std::vector<std::uint64_t> schedulerActiveIdsFromPersistentState(
     const cosmosim::core::SimulationState& state,
     const cosmosim::core::TimeBinPersistentState& persistent_state) {
@@ -234,11 +244,12 @@ void testRestartRoundtrip() {
   integrator_state.time_bins.max_bin = 3;
 
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
-  scheduler.reset(6, 2, 8);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 8);
   scheduler.setElementBin(1, 1, scheduler.currentTick());
   scheduler.submitCandidateBin(4, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.beginSubstep();
   scheduler.endSubstep();
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
   const std::vector<std::uint64_t> expected_active_particle_ids =
       schedulerActiveIdsFromPersistentState(state, scheduler.exportPersistentState());
 
@@ -381,6 +392,7 @@ void testRestartRoundtrip() {
   assert(restored.scheduler_state.next_activation_tick == original_scheduler_state.next_activation_tick);
   assert(restored.scheduler_state.active_flag == original_scheduler_state.active_flag);
   assert(restored.scheduler_state.pending_bin_index == original_scheduler_state.pending_bin_index);
+  assertParticleTimeBinsMatchScheduler(restored.state, restored.scheduler_state);
   assert(restored.normalized_config_hash_hex == payload.normalized_config_hash_hex);
   assert(restored.normalized_config_text == payload.normalized_config_text);
   assert(restored.provenance.config_hash_hex == payload.provenance.config_hash_hex);
@@ -444,6 +456,39 @@ void testRestartRoundtrip() {
   assert(resumed_scheduler.currentTick() == scheduler.currentTick());
   const auto resumed_active = resumed_scheduler.beginSubstep();
   assert(particleIdsForIndices(restored.state, resumed_active) == expected_active_particle_ids);
+
+  cosmosim::core::SimulationState stale_state = state;
+  stale_state.particles.time_bin[0] = static_cast<std::uint8_t>(stale_state.particles.time_bin[0] ^ 1U);
+  cosmosim::io::RestartWritePayload stale_payload = payload;
+  stale_payload.state = &stale_state;
+  bool stale_writer_threw = false;
+  try {
+    (void)cosmosim::io::restartPayloadIntegrityHash(stale_payload);
+  } catch (const std::invalid_argument&) {
+    stale_writer_threw = true;
+  }
+  assert(stale_writer_threw);
+
+  const std::filesystem::path stale_mirror_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_stale_timebin_mirror.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(stale_mirror_path, payload);
+  hid_t stale_file = H5Fopen(stale_mirror_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(stale_file >= 0);
+  hid_t stale_dataset = H5Dopen2(stale_file, "/state/particles/time_bin", H5P_DEFAULT);
+  assert(stale_dataset >= 0);
+  std::vector<std::uint8_t> stale_bins(state.particles.time_bin.begin(), state.particles.time_bin.end());
+  stale_bins[0] = static_cast<std::uint8_t>(stale_bins[0] ^ 1U);
+  assert(H5Dwrite(stale_dataset, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, stale_bins.data()) >= 0);
+  H5Dclose(stale_dataset);
+  H5Fclose(stale_file);
+  bool stale_reader_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(stale_mirror_path);
+  } catch (const std::invalid_argument&) {
+    stale_reader_threw = true;
+  }
+  assert(stale_reader_threw);
+  std::filesystem::remove(stale_mirror_path);
 
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(tamper_file >= 0);
@@ -589,7 +634,8 @@ void testRestartAfterReorderAndMigration() {
   integrator_state.dt_time_code = 0.002;
   integrator_state.step_index = 88;
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
-  scheduler.reset(state.particles.size(), 2, 10);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 10);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
 
   cosmosim::io::RestartWritePayload reorder_payload;
   fillRestartPayload(reorder_payload, state, integrator_state, scheduler);
@@ -598,6 +644,7 @@ void testRestartAfterReorderAndMigration() {
       std::filesystem::temp_directory_path() / "cosmosim_restart_after_reorder.hdf5";
   cosmosim::io::writeRestartCheckpointHdf5(reorder_path, reorder_payload);
   const auto reordered_restore = cosmosim::io::readRestartCheckpointHdf5(reorder_path);
+  assertParticleTimeBinsMatchScheduler(reordered_restore.state, reordered_restore.scheduler_state);
   assert(reordered_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
   assert(reordered_restore.state.star_particles.particle_index == state.star_particles.particle_index);
   assert(reordered_restore.state.black_holes.particle_index == state.black_holes.particle_index);
@@ -615,7 +662,8 @@ void testRestartAfterReorderAndMigration() {
   commit.inbound_records = migrated_records;
   state.commitParticleMigration(commit);
   assert(state.validateOwnershipInvariants());
-  scheduler.reset(state.particles.size(), 2, 12);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 12);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
 
   cosmosim::io::RestartWritePayload migration_payload;
   fillRestartPayload(migration_payload, state, integrator_state, scheduler);
@@ -624,6 +672,7 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::io::writeRestartCheckpointHdf5(migration_path, migration_payload);
   const auto migration_restore = cosmosim::io::readRestartCheckpointHdf5(migration_path);
   assert(migration_restore.state.validateOwnershipInvariants());
+  assertParticleTimeBinsMatchScheduler(migration_restore.state, migration_restore.scheduler_state);
   assert(migration_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
   assert(migration_restore.state.black_holes.particle_index == state.black_holes.particle_index);
   assert(migration_restore.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
