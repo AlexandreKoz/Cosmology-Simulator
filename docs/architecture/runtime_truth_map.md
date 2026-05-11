@@ -85,15 +85,16 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 ### Storage locations (current truth)
 
-- Per-particle timestep bin: `SimulationState::particles.time_bin`.
-- Per-cell timestep bin: `SimulationState::cells.time_bin`.
-- Integrator coarse state: `IntegratorState::{current_time_code,current_scale_factor,dt_time_code,step_index,scheme,time_bins}`.
 - Scheduler authoritative bin timeline: `HierarchicalTimeBinScheduler` internals (`m_hot`, `m_elements_by_bin`, `m_active_elements`, `m_current_tick`).
+- Scheduler-owned PM cadence truth: `PmSynchronizationState` (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
+- Per-particle timestep bin mirror: `SimulationState::particles.time_bin`.
+- Per-cell timestep bin mirror: `SimulationState::cells.time_bin`.
+- Integrator coarse state and metadata mirror: `IntegratorState::{current_time_code,current_scale_factor,dt_time_code,step_index,scheme,time_bins}`.
 
 ### Mutation paths
 
 - Scheduler mutates bin/tick truth via `reset`, `setElementBin`, `requestBinTransition`, `beginSubstep` + `endSubstep`.
-- Runtime bin adaptation mutates pending transitions in `updateAdaptiveTimeBins(...)`.
+- Runtime bin adaptation submits labeled criteria candidates in `updateAdaptiveTimeBins(...)`; scheduler reconciliation owns pending-transition mutation and commit.
 - State mirrors refreshed from scheduler in `syncTimeBinMirrorsFromScheduler(...)`.
 - Mirror drift detection is now explicit via `timeBinMirrorsMatchScheduler(...)` / `debugAssertTimeBinMirrorAuthorityInvariant(...)`.
 - Restart load mutates integrator/scheduler via `readRestartCheckpointHdf5(...)` and `importPersistentState(...)`.
@@ -101,7 +102,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ### Read paths
 
 - Active element extraction for stepping: `scheduler.beginSubstep()`.
-- Stage execution uses `ActiveSetDescriptor` built from scheduler active elements.
+- Stage execution uses `ActiveSetDescriptor` built from scheduler active elements, stamped with scheduler tick/state-generation provenance.
 - Diagnostics/provenance read bin distribution via scheduler diagnostics and metadata payload fields.
 
 ### Serialization paths
@@ -114,22 +115,24 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 ### Cache/mirror/view classification
 
-- `SimulationState::{particles.time_bin,cells.time_bin}` is a mirror of scheduler truth during workflow execution (rebuilt from scheduler each substep).
+- `SimulationState::{particles.time_bin,cells.time_bin}` is a mirror of scheduler truth during workflow execution (rebuilt from scheduler after scheduler commit).
+- In particle-bound gas states, `CellSoa::time_bin` maps through the parent gas particle scheduler entry; it is not independently authoritative when `cells.size() != particles.size()`.
 - `IntegratorState::time_bins` is metadata-level mirror and not sufficient alone to reconstruct scheduler occupancy/membership.
 
 ### Reorder/resize/migration behavior
 
-- Particle reorder/migration physically carries particle `time_bin` with moved rows.
-- Gas cell rebuild from gas-particle IDs carries cell `time_bin` through `GasCellMigrationRecord`.
+- Particle reorder/migration physically carries particle `time_bin` as a mirror with moved rows, but exact scheduler continuation requires scheduler remap/rebuild helpers keyed by stable particle identity.
+- Gas cell rebuild from gas-particle IDs carries cell `time_bin` through `GasCellMigrationRecord` as a diagnostic/compatibility mirror; scheduler identity records are required for authoritative continuation.
 
 ### Restart/reload behavior
 
 - Restart restores exact scheduler persistent vectors and verifies payload integrity.
+- Restart validation rejects stale particle and parent-particle-mapped cell `time_bin` mirrors before import; successful reads rebuild mirrors from scheduler authority.
 - Post-read scheduler can be reconstructed exactly (subject to schema compatibility and integrity checks).
 
-### Ambiguity/duplication
+### Ownership decision
 
-- **Ambiguous authority by design**: runtime has three lanes for bin-like info (`scheduler hot metadata`, `state particle/cell time_bin`, `integrator_state.time_bins`); workflow currently treats scheduler as authority and syncs state arrays after each substep.
+- **Single live authority**: Stage 2 assigns timestep-bin membership, activation, active-set construction, and PM cadence ownership to scheduler objects (`HierarchicalTimeBinScheduler` and `PmSynchronizationState`). State `time_bin` lanes, migration records, restart mirrors, and `IntegratorState::time_bins` are mirrors/metadata only. Any future path that consumes mirrors as scheduling authority must be rejected or documented as a new ADR-backed schema/interface change.
 
 ### Tests covering this domain
 

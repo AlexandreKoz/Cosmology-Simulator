@@ -56,6 +56,53 @@ if(NOT release_notes_doc MATCHES "release_manifest_v1")
 endif()
 
 
+file(READ "@CMAKE_SOURCE_DIR@/docs/time_integration.md" time_integration_doc)
+foreach(required_term
+    "Stage 2 timestep authority contract"
+    "Scheduler authority and mirror policy"
+    "Candidate criteria flow"
+    "Active-set construction flow"
+    "Invariant framework"
+    "PmSynchronizationState"
+    "ParticleSoa::time_bin"
+    "CellSoa::time_bin"
+    "makeSchedulerActiveSetDescriptor")
+  if(NOT time_integration_doc MATCHES "${required_term}")
+    message(FATAL_ERROR "Time integration guide must document Stage 2 scheduler authority term: ${required_term}")
+  endif()
+endforeach()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/architecture/decision_log.md" decision_log_doc)
+if(NOT decision_log_doc MATCHES "ADR-INFRA-STAGE2-TIMESTEP-AUTHORITY-015")
+  message(FATAL_ERROR "Architecture decision log must record the Stage 2 timestep authority ownership decision")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/architecture/runtime_truth_map.md" runtime_truth_map_doc)
+if(NOT runtime_truth_map_doc MATCHES "Single live authority")
+  message(FATAL_ERROR "Runtime truth map must classify Stage 2 timestep ownership as single live authority")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/treepm_phase3_contract.md" treepm_phase3_contract_doc)
+if(NOT treepm_phase3_contract_doc MATCHES "Stage 2 scheduler-authority hardening is infrastructure evidence, not Phase 3 closure")
+  message(FATAL_ERROR "Phase 3 contract must preserve Stage 2/Phase 3 claim boundary")
+endif()
+
+file(READ "@CMAKE_SOURCE_DIR@/docs/releases/initial_release_scope.md" release_scope_doc)
+file(READ "@CMAKE_SOURCE_DIR@/RELEASE_NOTES.md" stage2_release_notes_doc)
+if(NOT release_scope_doc MATCHES "not claim.*Phase 3")
+  message(FATAL_ERROR "Release scope must avoid claiming Phase 3 closure from Stage 2 evidence")
+endif()
+if(NOT stage2_release_notes_doc MATCHES "not.*claim.*Phase 3")
+  message(FATAL_ERROR "Release notes must avoid claiming Phase 3 closure from Stage 2 evidence")
+endif()
+if(release_scope_doc MATCHES "Hierarchical TreePM multirate synchronization is production-proven")
+  message(FATAL_ERROR "Release scope must not claim production-proven Phase 3 multirate TreePM sync")
+endif()
+if(stage2_release_notes_doc MATCHES "Hierarchical TreePM multirate synchronization is production-proven")
+  message(FATAL_ERROR "Release notes must not claim production-proven Phase 3 multirate TreePM sync")
+endif()
+
+
 file(READ "@CMAKE_SOURCE_DIR@/docs/architecture/stage2_timestep_ownership_audit.md" stage2_timestep_audit_doc)
 foreach(required_term
     "HierarchicalTimeBinScheduler"

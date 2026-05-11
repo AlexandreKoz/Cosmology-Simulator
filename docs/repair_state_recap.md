@@ -5,6 +5,20 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 2026-05-11 Stage 2 authority documentation synchronization
+
+- Synchronized implementation-facing docs, runtime truth map, restart/schema language, ADR entries, repair-state notes, release scope, and release notes around the Stage 2 owner model: scheduler objects own timestep bins, active-set construction, and PM cadence legality; public `time_bin` lanes remain mirrors.
+- Added a docs-scaffold regression so future edits must keep the scheduler authority contract, mirror policy, candidate criteria flow, active-set construction flow, invariant framework, and forbidden Phase 3 production-claim language present in docs/release artifacts.
+- Reproducibility impact: documentation/test-scaffold only. No solver numerics, restart schema fields/version, HDF5 dataset layout, normalized config dumps, provenance format, output naming, or deterministic scheduler behavior changed. Restart behavior remains the documented v6 compatibility tightening that rejects stale mirrors and rebuilds valid mirrors from scheduler authority.
+- Command evidence in this cycle:
+  - `cmake --preset cpu-only-debug` → pass.
+  - `cmake --build --preset build-cpu-debug` → pass.
+  - `ctest --preset test-stage1-runtime-truth-cpu-debug --output-on-failure` → pass (17/17).
+  - `ctest --preset test-cpu-debug --output-on-failure` → pass (77/77).
+  - `cmake --preset hdf5-debug`, `cmake --build --preset build-hdf5-debug`, `ctest --preset test-hdf5-debug --output-on-failure` → pass (78/78 HDF5 tests).
+  - `cmake --preset pm-hdf5-fftw-debug`, `cmake --build --preset build-pm-hdf5-fftw-debug`, `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure` → pass (78/78 PM+HDF5+FFTW tests).
+  - `cmake --preset mpi-hdf5-fftw-debug` → environment-blocked by missing `fftw3_mpi`; no MPI+HDF5+FFTW closure is claimed.
+
 ## 0) HDF5 preset smoke/restart gate repair (2026-05-10 UTC)
 
 - Fixed the HDF5 runtime smoke fixture to provide the complete axis-aware TreePM grid triplet after the config contract started rejecting partial `treepm_pm_grid_n{xyz}` input.
@@ -1503,7 +1517,7 @@ Reproducibility impact:
 ## 2026-05-10 — Stage 2 timestep ownership audit
 
 - Added `docs/architecture/stage2_timestep_ownership_audit.md` as the pre-repair inventory for timestep ownership lanes, serialization classifications, mutation paths, unsafe hidden state, and follow-up repair prompts.
-- Recorded `ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014` in `docs/architecture/decision_log.md`: the hierarchical scheduler is the intended per-element timestep authority; state `time_bin` arrays are mirrors; integrator time-bin context is metadata; TreePM cadence remains owned by the gravity workflow callback/distributed restart cadence state.
+- Recorded `ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014` in `docs/architecture/decision_log.md`: the hierarchical scheduler is the intended per-element timestep authority; state `time_bin` arrays are mirrors; integrator time-bin context is metadata; the pre-repair audit classified TreePM cadence as a gravity workflow/distributed restart lane; the 2026-05-11 ADR refines live cadence authority to `PmSynchronizationState` while keeping restart/provenance cadence fields serialized metadata.
 - No solver math, restart schema, output schema, or runtime behavior changed in this audit patch.
 
 ## 2026-05-10 Scheduler timestep authority repair

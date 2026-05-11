@@ -66,6 +66,11 @@ Additive softening sidecar persistence:
 Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
 restart is execution-resume oriented.
 
+
+## Stage 2 timestep-authority schema note (2026-05-11)
+
+The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v6` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+
 ## 3) Provenance payload
 
 `ProvenanceRecord` persists:

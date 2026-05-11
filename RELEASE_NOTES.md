@@ -23,6 +23,11 @@ This initial serious release is scoped to desktop-first and small-cluster-first 
 
 The shipped executable `cosmosim_harness` is a real config-driven runtime application in this release. A valid `param.txt` now produces a concrete run directory outcome, including normalized config and operational reporting artifacts, rather than only printing a banner.
 
+
+### Stage 2 / Phase 3 claim boundary
+
+Stage 2 timestep-authority repair evidence is limited to infrastructure invariants: scheduler-owned timestep bins, active-set provenance, restart mirror validation, and PM cadence legality. These release notes do **not** claim production-proven Phase 3 hierarchical TreePM multirate synchronization, distributed scaling certification, or Phase 3 closure.
+
 ### Schema and provenance commitments in this release
 
 - Snapshot schema family remains `gadget_arepo_v4` for external interoperability.

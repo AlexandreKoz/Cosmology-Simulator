@@ -194,3 +194,22 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 | --- | --- | --- | --- | --- |
 | P39-STAGE2-GATE-INCLUSION-036 | Closed | CI/runtime-truth gates | Stage 2 scheduler-authority tests existed but the strongest CPU runtime-truth preset did not explicitly include `unit_time_integration`, and there was no Stage 2-named preset for scheduler authority, split-brain removal, PM sync legality, and restart equivalence. | `unit_time_integration` is now marked `runtime_truth;p0` with scheduler/restart/treepm labels, the label audit requires it, Stage 0/1 runtime-truth presets include it, and `test-stage2-runtime-truth-cpu-debug` names the Stage 2 critical gate directly. |
 | P40-STAGE2-HDF5-RESTART-NEGATIVE-037 | Closed | Restart schema validation | Restart HDF5 roundtrip covered stale particle `time_bin` mirrors and payload-hash tamper, but did not corrupt a persisted scheduler hot lane directly. | `integration_restart_checkpoint_roundtrip` now mutates `/scheduler/active_flag` to an invalid value in-file and requires `readRestartCheckpointHdf5` to reject it before exact continuation is accepted. |
+
+
+## 2026-05-11 Stage 2 documentation/release anti-drift status
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P41-STAGE2-DOC-RELEASE-ANTI-DRIFT-038 | Closed | Docs/release claim discipline | Stage 2 timestep authority docs, restart/schema language, runtime truth map, ADR, repair-state docs, release notes, and docs scaffold now agree that scheduler objects own timestep truth and PM cadence legality while `time_bin` lanes are mirrors. | Keep `integration_docs_scaffold` green whenever changing Stage 2/Phase 3 language; do not claim Phase 3 multirate TreePM production closure without the hard-gate evidence in `docs/treepm_phase3_contract.md`. |
+
+Command evidence for the documentation synchronization patch:
+
+- `cmake --preset cpu-only-debug` → pass.
+- `cmake --build --preset build-cpu-debug` → pass.
+- `ctest --preset test-stage1-runtime-truth-cpu-debug --output-on-failure` → pass (17/17).
+- `ctest --preset test-cpu-debug --output-on-failure` → pass (77/77).
+- `cmake --preset hdf5-debug`, `cmake --build --preset build-hdf5-debug`, `ctest --preset test-hdf5-debug --output-on-failure` → pass (78/78).
+- `cmake --preset pm-hdf5-fftw-debug`, `cmake --build --preset build-pm-hdf5-fftw-debug`, `ctest --preset test-pm-hdf5-fftw-debug --output-on-failure` → pass (78/78).
+- `cmake --preset mpi-hdf5-fftw-debug` → blocked by missing `fftw3_mpi`; no MPI+HDF5+FFTW closure is claimed.
+
+Remaining blockers are unchanged: P36 spawned-particle scheduler registration, P38 distributed scheduler identity exchange, and dependency-enabled MPI+HDF5+FFTW feature-path evidence are still required before broader closure claims.

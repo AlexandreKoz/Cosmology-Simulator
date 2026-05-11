@@ -15,10 +15,10 @@ cosmosim_harness <config.param.txt>
 
 ## Numerical architecture in scope
 
-- TreePM gravity.
+- TreePM gravity within the documented Phase 1/2 evidence envelope; this release does not claim Phase 3 multirate TreePM closure.
 - Finite-volume Godunov hydrodynamics in comoving variables.
 - Patch-based AMR.
-- Hierarchical timestepping.
+- Hierarchical timestepping infrastructure with scheduler-owned timestep authority; production-proven Phase 3 hierarchical TreePM synchronization remains future work.
 - Modular baryonic physics (cooling/heating, star formation, stellar feedback, stellar evolution, black-hole AGN as documented below).
 - HDF5-centered interoperability path where enabled.
 
@@ -33,6 +33,11 @@ cosmosim_harness <config.param.txt>
 
 - PM/TreePM FFTW validation via `pm-hdf5-fftw-debug` when FFTW is installed.
 - MPI build coverage via `mpi-release`, but this release does **not** claim mandatory multi-process production validation in the default gate.
+
+
+### Stage 2 timestep authority evidence
+
+The release documentation recognizes Stage 2 scheduler-authority hardening as infrastructure evidence: scheduler-owned timestep bins, active-set provenance, restart mirror validation, and PM cadence legality are covered by CPU-runnable runtime-truth tests. This evidence must not be reworded as Phase 3 production closure; distributed multirate TreePM accuracy and scaling certification require the Phase 3 hard gate.
 
 ### Experimental path (not validated for production science)
 
