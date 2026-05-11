@@ -186,3 +186,10 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
 | P38-SCHEDULER-MPI-IDENTITY-035 | Open | MPI migration + scheduler authority | Local structural transforms now have stable-ID scheduler remap/rebuild helpers, but multi-rank migration does not yet have a fully specified scheduler identity-record exchange and rank-coordinated tick/max-bin contract. | Define and implement distributed scheduler identity payload exchange, compatibility checks, and MPI tests before claiming multi-rank exact scheduler continuation. |
+
+## 2026-05-11 Stage 2 verification status
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| P39-STAGE2-GATE-INCLUSION-036 | Closed | CI/runtime-truth gates | Stage 2 scheduler-authority tests existed but the strongest CPU runtime-truth preset did not explicitly include `unit_time_integration`, and there was no Stage 2-named preset for scheduler authority, split-brain removal, PM sync legality, and restart equivalence. | `unit_time_integration` is now marked `runtime_truth;p0` with scheduler/restart/treepm labels, the label audit requires it, Stage 0/1 runtime-truth presets include it, and `test-stage2-runtime-truth-cpu-debug` names the Stage 2 critical gate directly. |
+| P40-STAGE2-HDF5-RESTART-NEGATIVE-037 | Closed | Restart schema validation | Restart HDF5 roundtrip covered stale particle `time_bin` mirrors and payload-hash tamper, but did not corrupt a persisted scheduler hot lane directly. | `integration_restart_checkpoint_roundtrip` now mutates `/scheduler/active_flag` to an invalid value in-file and requires `readRestartCheckpointHdf5` to reject it before exact continuation is accepted. |
