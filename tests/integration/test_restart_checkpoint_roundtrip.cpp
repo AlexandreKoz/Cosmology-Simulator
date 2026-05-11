@@ -249,7 +249,8 @@ void testRestartRoundtrip() {
   scheduler.submitCandidateBin(4, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   scheduler.beginSubstep();
   scheduler.endSubstep();
-  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
   const std::vector<std::uint64_t> expected_active_particle_ids =
       schedulerActiveIdsFromPersistentState(state, scheduler.exportPersistentState());
 
@@ -660,7 +661,8 @@ void testRestartAfterReorderAndMigration() {
   integrator_state.step_index = 88;
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
   scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 10);
-  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
   cosmosim::io::RestartWritePayload reorder_payload;
   fillRestartPayload(reorder_payload, state, integrator_state, scheduler);
@@ -688,7 +690,8 @@ void testRestartAfterReorderAndMigration() {
   state.commitParticleMigration(commit);
   assert(state.validateOwnershipInvariants());
   scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 12);
-  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
   cosmosim::io::RestartWritePayload migration_payload;
   fillRestartPayload(migration_payload, state, integrator_state, scheduler);

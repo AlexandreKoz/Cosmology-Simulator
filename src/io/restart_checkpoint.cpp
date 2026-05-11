@@ -100,14 +100,23 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
     }
   }
 
-  // The v6 restart schema has one particle scheduler lane. Cell time_bin remains a
-  // derived state mirror; if a future/fixture scheduler payload is exactly cell-sized,
-  // validate it as a mirror too, but do not treat cells as a fallback authority.
-  if (!state.cells.time_bin.empty() && scheduler_state.bin_index.size() == state.cells.time_bin.size()) {
-    for (std::size_t i = 0; i < state.cells.time_bin.size(); ++i) {
-      if (state.cells.time_bin[i] != scheduler_state.bin_index[i]) {
+  // The v6 restart schema has one scheduler lane keyed by particle rows. Cell
+  // time_bin is still a derived mirror, but particle-bound gas cells must validate
+  // through their stable parent-particle identity even when gas cell and total
+  // particle counts differ. Otherwise a restart payload could carry a stale cell
+  // mirror that bypasses exact-size validation and later masquerades as timestep
+  // truth in hydro diagnostics.
+  if (!state.cells.time_bin.empty()) {
+    core::requireParticleBoundGasCellContract(state, context);
+    for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+      const std::uint32_t particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+      if (particle_index >= scheduler_state.bin_index.size()) {
         throw std::invalid_argument(
-            std::string(context) + ": cell time_bin mirror is stale relative to scheduler bin_index");
+            std::string(context) + ": cell time_bin parent particle is outside scheduler bin_index");
+      }
+      if (state.cells.time_bin[cell_index] != scheduler_state.bin_index[particle_index]) {
+        throw std::invalid_argument(
+            std::string(context) + ": cell time_bin mirror is stale relative to parent-particle scheduler bin_index");
       }
     }
   }
@@ -122,9 +131,14 @@ void rebuildRestartTimeBinMirrorsFromScheduler(
   for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
     state.particles.time_bin[i] = scheduler_state.bin_index[i];
   }
-  if (!state.cells.time_bin.empty() && scheduler_state.bin_index.size() == state.cells.time_bin.size()) {
-    for (std::size_t i = 0; i < state.cells.time_bin.size(); ++i) {
-      state.cells.time_bin[i] = scheduler_state.bin_index[i];
+  if (!state.cells.time_bin.empty()) {
+    core::requireParticleBoundGasCellContract(state, "restart reader");
+    for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+      const std::uint32_t particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+      if (particle_index >= scheduler_state.bin_index.size()) {
+        throw std::invalid_argument("restart reader: cell time_bin parent particle is outside scheduler bin_index");
+      }
+      state.cells.time_bin[cell_index] = scheduler_state.bin_index[particle_index];
     }
   }
 }

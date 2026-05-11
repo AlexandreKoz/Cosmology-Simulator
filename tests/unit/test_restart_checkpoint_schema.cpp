@@ -122,5 +122,46 @@ int main() {
   }
   assert(text_hash_mismatch_threw);
 
+  {
+    cosmosim::core::SimulationState gas_state;
+    gas_state.resizeParticles(4);
+    gas_state.resizeCells(2);
+    gas_state.resizePatches(0);
+    gas_state.species.count_by_species = {2, 2, 0, 0, 0};
+    for (std::size_t i = 0; i < gas_state.particles.size(); ++i) {
+      gas_state.particle_sidecar.particle_id[i] = 900 + i;
+      gas_state.particle_sidecar.owning_rank[i] = 0;
+      gas_state.particle_sidecar.species_tag[i] =
+          i < 2 ? static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter)
+                : static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    }
+    gas_state.rebuildSpeciesIndex();
+    gas_state.refreshGasCellIdentityFromParticleOrder();
+
+    cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(2);
+    gas_scheduler.reset(4, 0, 0);
+    gas_scheduler.setElementBin(2, 1, 0);
+    gas_scheduler.setElementBin(3, 2, 0);
+    cosmosim::core::syncTimeBinMirrorsFromScheduler(
+        gas_scheduler,
+        gas_state,
+        cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+
+    cosmosim::io::RestartWritePayload gas_payload = payload;
+    gas_payload.state = &gas_state;
+    gas_payload.scheduler = &gas_scheduler;
+    gas_payload.distributed_gravity_state.owning_rank_by_item = {0, 0, 0, 0};
+    assert(cosmosim::io::restartPayloadIntegrityHash(gas_payload) != 0);
+
+    gas_state.cells.time_bin[0] = 0;
+    bool stale_cell_mirror_threw = false;
+    try {
+      (void)cosmosim::io::restartPayloadIntegrityHash(gas_payload);
+    } catch (const std::invalid_argument&) {
+      stale_cell_mirror_threw = true;
+    }
+    assert(stale_cell_mirror_threw);
+  }
+
   return 0;
 }

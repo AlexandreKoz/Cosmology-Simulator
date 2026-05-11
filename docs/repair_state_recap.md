@@ -1544,3 +1544,10 @@ Reproducibility impact:
 - Promoted `unit_time_integration` into the runtime-truth/P0 label set and added `test-stage2-runtime-truth-cpu-debug` so the scheduler authority, split-brain removal, PM sync legality, restart equivalence, and CTest label audit tests have an explicit CPU-runnable preset gate.
 - Extended the HDF5 restart roundtrip negative coverage to corrupt `/scheduler/active_flag` in-file and require restart reader rejection, complementing stale mirror and payload-hash tamper checks.
 - Reproducibility impact: no solver numerics, config keys, restart schema version, dataset layout, normalized config output, provenance payload, or deterministic scheduling semantics changed. The repair only tightens test registration and negative restart validation coverage.
+
+## 32) 2026-05-11 Stage 2 adversarial timestep restart mirror audit
+
+- Reviewed Stage 2 timestep authority surfaces with hostile searches for writable timestep references, active-set construction from mirrors, stale cache bypasses, restart/migration transforms, and AGENTS/code-review guardrails.
+- Patched the blocker restart loophole where particle-bound gas-cell `CellSoa::time_bin` mirrors were validated only when scheduler `bin_index` happened to be cell-sized. Restart validation/import now maps each cell through its parent gas particle and scheduler `bin_index`, preserving scheduler authority for mixed particle/gas states.
+- Reproducibility impact: no solver behavior, schema fields, normalized config, or provenance format changed. Existing restart v6 payloads with stale gas-cell timestep mirrors now fail fast instead of importing fake mirror truth; valid payloads rebuild cell mirrors deterministically from scheduler state.
+- Added the adversarial review artifact at `docs/architecture/stage2_adversarial_timestep_review.md` and documented the compatibility tightening in `docs/output_schema.md`.
