@@ -490,6 +490,31 @@ void testRestartRoundtrip() {
   assert(stale_reader_threw);
   std::filesystem::remove(stale_mirror_path);
 
+  const std::filesystem::path invalid_scheduler_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_invalid_scheduler_active_flag.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(invalid_scheduler_path, payload);
+  hid_t invalid_scheduler_file = H5Fopen(invalid_scheduler_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(invalid_scheduler_file >= 0);
+  hid_t invalid_active_dataset = H5Dopen2(invalid_scheduler_file, "/scheduler/active_flag", H5P_DEFAULT);
+  assert(invalid_active_dataset >= 0);
+  const auto scheduler_state_for_invalid_file = scheduler.exportPersistentState();
+  std::vector<std::uint8_t> invalid_active_flags(scheduler_state_for_invalid_file.active_flag.begin(),
+                                                 scheduler_state_for_invalid_file.active_flag.end());
+  invalid_active_flags[0] = 2;
+  assert(H5Dwrite(
+             invalid_active_dataset, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, invalid_active_flags.data()) >=
+         0);
+  H5Dclose(invalid_active_dataset);
+  H5Fclose(invalid_scheduler_file);
+  bool invalid_scheduler_reader_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(invalid_scheduler_path);
+  } catch (const std::invalid_argument&) {
+    invalid_scheduler_reader_threw = true;
+  }
+  assert(invalid_scheduler_reader_threw);
+  std::filesystem::remove(invalid_scheduler_path);
+
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(tamper_file >= 0);
   hid_t tamper_attr = H5Aopen(tamper_file, "payload_integrity_hash", H5P_DEFAULT);

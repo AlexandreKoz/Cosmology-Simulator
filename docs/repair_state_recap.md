@@ -1537,3 +1537,10 @@ Reproducibility impact:
 - Added stable-identity scheduler remap/rebuild helpers for particle reorder, compaction/migration-style row rebuilds, and scheduler identity-record imports. Gas-cell time-bin mirror refresh now resolves parent particle identity instead of assuming cell rows and scheduler rows are positionally coupled.
 - Reproducibility impact: deterministic activation by `particle_id` is preserved across local structural transforms when callers use the remap/rebuild helpers. No solver numerics, config keys, restart schema version, HDF5 dataset layout, normalized config dumps, provenance payloads, or output naming changed. The repair tightens failure behavior: missing scheduler identity records now throw instead of silently trusting `time_bin` mirrors.
 - Future MPI note: local helpers do not claim fully distributed scheduler migration. Multi-rank exact continuation still requires exchanging full scheduler identity records with migrating particles and coordinating scheduler tick/max-bin metadata across ranks.
+
+## 2026-05-11 Stage 2 verification gate hardening
+
+- Re-audited Stage 2 scheduler authority coverage for direct timestep mirror writes, scheduler hot metadata, next activation, active flags, current ticks, integrator time-bin metadata, PM cadence fields, restart hash/read validation, and docs/ADR consistency.
+- Promoted `unit_time_integration` into the runtime-truth/P0 label set and added `test-stage2-runtime-truth-cpu-debug` so the scheduler authority, split-brain removal, PM sync legality, restart equivalence, and CTest label audit tests have an explicit CPU-runnable preset gate.
+- Extended the HDF5 restart roundtrip negative coverage to corrupt `/scheduler/active_flag` in-file and require restart reader rejection, complementing stale mirror and payload-hash tamper checks.
+- Reproducibility impact: no solver numerics, config keys, restart schema version, dataset layout, normalized config output, provenance payload, or deterministic scheduling semantics changed. The repair only tightens test registration and negative restart validation coverage.

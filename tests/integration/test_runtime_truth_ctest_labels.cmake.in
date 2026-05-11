@@ -34,6 +34,7 @@ function(require_test_absent_when_feature_disabled test_name feature_name featur
 endfunction()
 
 require_registered_runtime_truth_test(unit_simulation_state runtime_truth p0 active_views scheduler gas sidecar migration unit)
+require_registered_runtime_truth_test(unit_time_integration runtime_truth p0 scheduler restart treepm unit)
 require_registered_runtime_truth_test(unit_gas_cell_identity_invariants runtime_truth p0 gas sidecar unit)
 require_registered_runtime_truth_test(unit_hot_cold_sidecar_layout runtime_truth p0 sidecar unit)
 require_registered_runtime_truth_test(integration_reorder_compaction_sidecars runtime_truth p0 sidecar active_views integration)

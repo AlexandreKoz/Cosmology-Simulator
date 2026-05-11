@@ -469,6 +469,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_time_integration tests/unit/test_time_integration.cpp)
   target_link_libraries(test_unit_time_integration PRIVATE cosmosim_core)
   add_test(NAME unit_time_integration COMMAND test_unit_time_integration)
+  cosmosim_mark_runtime_truth_test(unit_time_integration scheduler restart treepm)
 
   add_executable(test_unit_simulation_mode tests/unit/test_simulation_mode.cpp)
   target_link_libraries(test_unit_simulation_mode PRIVATE cosmosim_core)
