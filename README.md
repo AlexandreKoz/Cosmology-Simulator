@@ -20,6 +20,11 @@ The flagship science target is physically credible zoom-in galaxy formation from
   - Prompt/review contract for Codex + human contributors: [`docs/architecture/developer_workflow_contract.md`](docs/architecture/developer_workflow_contract.md)
   - Contribution rules: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
+
+## Current maturity boundary
+
+Stage 2 timestep-authority repairs document scheduler-owned timestep bins, scheduler-built active sets, restart mirror validation, and PM cadence legality as infrastructure invariants. This is not a claim that Phase 3 hierarchical TreePM multirate synchronization is production-proven; Phase 3 closure remains gated by the evidence contract in [`docs/treepm_phase3_contract.md`](docs/treepm_phase3_contract.md).
+
 ## Repository layout
 
 - `include/cosmosim/` — public API headers by module.

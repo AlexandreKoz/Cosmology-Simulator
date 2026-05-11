@@ -1,5 +1,35 @@
 # Architecture decision log
 
+## 2026-05-11 — ADR-INFRA-STAGE2-TIMESTEP-AUTHORITY-015: Scheduler-owned timestep truth and claim discipline
+
+### Status
+Accepted (Stage 2 infrastructure ownership decision)
+
+### Context
+Stage 2 repair hardened timestep-bin authority after audits found that scheduler hot metadata, public `ParticleSoa::time_bin` / `CellSoa::time_bin` lanes, restart payload mirrors, migration records, and TreePM cadence metadata could drift in documentation and release language. Project guardrails require public-interface documentation, explicit restart/schema behavior, and command-backed closure evidence in the same patch.
+
+### Decision
+- `HierarchicalTimeBinScheduler` is the only live authority for timestep-bin membership, next activation, active flags, pending transitions, and scheduler-built active sets.
+- `PmSynchronizationState` is the scheduler-owned authority for PM kick-opportunity cadence, field-version, and refresh-commit legality.
+- `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration/transfer `time_bin` records, restart state copies, and `IntegratorState::time_bins` are mirrors or metadata. They may be serialized and validated for corruption, but may not be used as fallback scheduling authority.
+- Particle-bound gas-cell mirrors must be validated and rebuilt through the parent gas particle scheduler entry, not by assuming cell rows and scheduler rows are equal-sized.
+- Documentation and release notes must distinguish CPU-runnable Stage 2 scheduler-authority evidence from unproven Phase 3 multirate TreePM production claims.
+
+### Consequences
+- Positive: implementation, restart/schema docs, runtime truth map, and release language now present one Stage 2 owner model.
+- Positive: stale mirror acceptance is treated as a restart compatibility failure, while valid v6 payload fields and schema version remain unchanged.
+- Positive: Phase 3 language remains evidence-gated; Stage 2 scheduler authority does not imply production-proven hierarchical TreePM multirate synchronization.
+- Tradeoff: new particle-registration, distributed scheduler identity exchange, and full PM/MPI/HDF5 evidence remain explicit follow-up blockers instead of closure claims.
+
+### Evidence references
+- `docs/time_integration.md`
+- `docs/restart_checkpointing.md`
+- `docs/output_schema.md`
+- `docs/architecture/runtime_truth_map.md`
+- `docs/repair_state_recap.md`
+- `docs/repair_open_issues.md`
+- `tests/integration/test_docs_scaffold.cmake.in`
+
 ## 2026-04-26 — ADR-INFRA-STAGE0-GATE-014: Stage 0 consolidation gate remains open (runtime-truth freeze not yet closed)
 
 ### Status
@@ -572,7 +602,7 @@ A final integration/coherence audit was run against the Phase 3 contract surface
 ## 2026-05-10 — ADR-INFRA-STAGE2-TIMESTEP-OWNERSHIP-014: Freeze timestep owner before Stage 2 repairs
 
 ### Status
-Accepted (infrastructure audit)
+Accepted (infrastructure audit; PM cadence ownership refined by ADR-INFRA-STAGE2-TIMESTEP-AUTHORITY-015)
 
 ### Context
 Stage 2 timestep repair has multiple existing timestep-related lanes: the hierarchical scheduler hot state, state `time_bin` mirrors, integrator metadata, restart scheduler payloads, migration/reorder preservation lanes, and TreePM cadence counters. Without a pre-change ownership map, any repair could create split-brain timestep truth.
@@ -581,7 +611,7 @@ Stage 2 timestep repair has multiple existing timestep-related lanes: the hierar
 - Adopt `core::HierarchicalTimeBinScheduler` as the intended owner for per-element discrete timestep truth: committed bin, pending transition, activation tick, active flag/cache for the current scheduler substep, and scheduler integer tick.
 - Treat `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors derived from scheduler persistent state, including in restart payloads.
 - Treat `core::IntegratorState` as the owner for global continuous time/step scalars only; its time-bin context is metadata and must not become per-element authority.
-- Keep TreePM PM cadence state owned by the gravity workflow callback and serialized as distributed restart/provenance cadence state; `gravity_kick_opportunity` is a kick-stage counter, not a scheduler tick.
+- Freeze the pre-repair audit finding that TreePM PM cadence was serialized through the gravity workflow/distributed restart cadence state; ADR-INFRA-STAGE2-TIMESTEP-AUTHORITY-015 refines the live ownership decision by assigning PM kick-opportunity cadence and refresh-commit legality to `PmSynchronizationState`, while `gravity_kick_opportunity` remains a kick-stage counter rather than a scheduler tick.
 - Publish the detailed inventory and unsafe hidden-state list in `docs/architecture/stage2_timestep_ownership_audit.md` before behavior-changing Stage 2 work.
 
 ### Consequences

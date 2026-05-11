@@ -69,6 +69,47 @@ Both kick surfaces use the same PM sync contract above.
 - Restart policy is `deterministic_rebuild`: PM mesh field values are not checkpointed; after resume, the first kick opportunity refreshes/rebuilds the long-range PM field before reuse can occur.
 - Cadence metadata remains auditable across restart boundaries via distributed restart state and provenance fields.
 
+
+## Stage 2 timestep authority contract
+
+Stage 2 uses a single-owner timestep model: `HierarchicalTimeBinScheduler` is the only live authority for per-element bin assignment, next activation, active flags, pending transitions, active-set construction, and PM kick cadence metadata. Solver callbacks may propose timestep candidates and consume scheduler-built active sets, but they must not treat `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration records, or restart mirrors as authority.
+
+### Scheduler authority and mirror policy
+
+- Authoritative live lanes: `HierarchicalTimeBinScheduler` hot metadata (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`) and `PmSynchronizationState` cadence fields (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
+- Derived mirrors: `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration/transfer `time_bin` payloads, and serialized restart state mirrors are diagnostic or compatibility mirrors only. They are refreshed from scheduler state with `syncTimeBinMirrorsFromScheduler(...)` and may be validated for corruption, but they are never fallback scheduling truth.
+- Cell mirrors in particle-bound gas states map through the parent gas particle identity (`gasParticleIndexForCellRow(...)`), so a cell row count mismatch is not a reason to trust `CellSoa::time_bin` independently.
+- Active-set descriptors for hierarchical execution must be constructed from scheduler output (`makeSchedulerActiveSetDescriptor(...)`) and must carry scheduler tick/generation provenance before solver callbacks consume them.
+
+### Candidate criteria flow
+
+1. Physics modules compute local candidate timesteps through typed criteria hooks such as CFL, gravity acceleration, source-term, or user-clamp hooks.
+2. Candidates are submitted to the scheduler with an auditable `TimeStepCandidateSource` label.
+3. `mapDtToTimeBin(...)` normalizes physical `dt` proposals into the integer power-of-two bin hierarchy using the configured `TimeStepLimits`.
+4. `reconcileCandidateTransitions()` conservatively keeps the finest submitted bin per element, validates synchronization legality, and records clipping/candidate counters.
+5. Pending transitions are committed only at scheduler-controlled substep boundaries; invalid destination synchronization fails fast rather than being silently clipped or delegated to mirrors.
+
+### Active-set construction flow
+
+1. `beginSubstep()` validates scheduler internals and rebuilds the compact active list from scheduler `bin_index` and `next_activation_tick`.
+2. The workflow splits the scheduler active element list into particle/cell subsets as needed for callbacks.
+3. `makeSchedulerActiveSetDescriptor(...)` stamps scheduler tick and state-generation provenance and validates that descriptor indices still match scheduler activity.
+4. `StepOrchestrator::executeSingleStep(...)` runs the canonical KDK stage order and checks descriptor freshness when hierarchical callers pass an expected scheduler tick.
+5. `endSubstep()` reconciles candidates, applies legal pending transitions, clears active flags, advances the integer tick, and only then are public `time_bin` mirrors refreshed from scheduler truth.
+
+### Invariant framework
+
+The Stage 2 invariant framework intentionally traps split-brain timestep ownership before solver callbacks can consume it:
+
+- scheduler metadata arrays must remain same-sized, in-range, and internally consistent;
+- active flags are scheduler caches for an open substep, not serialized live authority;
+- active-set descriptors must match scheduler active elements and source generations;
+- restart import must validate scheduler lanes and reject stale particle or cell `time_bin` mirrors before rebuilding mirrors from scheduler state;
+- PM refresh events must be committed before the next kick opportunity can be registered;
+- distributed PM cadence decisions remain rank-consensus metadata, but current evidence does not make Phase 3 multirate TreePM synchronization production-proven.
+
+This contract changes documentation and test guardrails only. It does not change restart schema fields, solver numerics, normalized config output, provenance format, or deterministic scheduling semantics.
+
 ## Hierarchical integer timeline bins
 
 `HierarchicalTimeBinScheduler` implements power-of-two integer bins (`dt_bin = dt_min * 2^bin`) and maintains:

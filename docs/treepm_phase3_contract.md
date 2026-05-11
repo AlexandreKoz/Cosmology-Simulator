@@ -33,6 +33,11 @@ The following statements are true in the current tree and are treated as baselin
 7. **Validation evidence is strong for Phase 1/2 baseline correctness contracts**, including MPI distributed Phase 2 agreement gates, but this evidence is **not sufficient to claim Phase 3 closure**.
 8. **Current scaling artifacts are performance evidence only** and are explicitly not mature strong/weak scaling certification.
 
+
+## Stage 2 boundary note (2026-05-11)
+
+Stage 2 scheduler-authority hardening is infrastructure evidence, not Phase 3 closure. The current code and tests establish scheduler-owned timestep bins, active-set provenance, restart mirror validation, and PM cadence legality traps. They do not establish a production-proven multirate TreePM accuracy envelope, large-rank scaling certification, or final Phase 3 synchronization closure.
+
 ## Phase 3 scope (what must be added)
 
 Phase 3 in this repository is defined as a maturity step from Phase 2 distributed correctness toward integrator-grade, evidence-backed production behavior.
