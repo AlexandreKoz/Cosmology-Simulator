@@ -2430,18 +2430,16 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
 
       core::TransientStepWorkspace workspace;
-      const core::ActiveSetDescriptor active_set = core::makeSchedulerActiveSetDescriptor(
-          scheduler, state, active_particles, active_cells);
-
-      orchestrator.executeSingleStep(
+      orchestrator.executeSchedulerSubstep(
           state,
           integrator_state,
-          active_set,
+          scheduler,
+          active_particles,
+          active_cells,
           background.has_value() ? &background.value() : nullptr,
           &workspace,
           &mode_policy,
-          &profiler,
-          scheduler.currentTick());
+          &profiler);
 
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;

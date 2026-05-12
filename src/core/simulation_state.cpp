@@ -239,9 +239,9 @@ ParticleReorderMap buildParticleReorderMap(const SimulationState& state, Particl
 
   const auto key_comp = [&](std::uint32_t lhs, std::uint32_t rhs) {
     if (mode == ParticleReorderMode::kByTimeBin) {
-      const auto lhs_key = state.particles.time_bin[lhs];
-      const auto rhs_key = state.particles.time_bin[rhs];
-      return std::tuple{lhs_key, lhs} < std::tuple{rhs_key, rhs};
+      throw std::invalid_argument(
+          "buildParticleReorderMap(kByTimeBin): time-bin ordering requires scheduler authority; "
+          "use buildParticleReorderMapByScheduler(state, scheduler) instead of derived time_bin mirrors");
     }
     if (mode == ParticleReorderMode::kBySfcKey) {
       const auto lhs_key = state.particle_sidecar.sfc_key[lhs];

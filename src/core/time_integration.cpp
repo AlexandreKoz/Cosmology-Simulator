@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -230,6 +231,54 @@ void PmSynchronizationState::commitRefresh(const PmSyncEvent& event) {
   m_pending_refresh_field_version = 0;
 }
 
+
+PmSynchronizationPersistentState PmSynchronizationState::exportPersistentState() const {
+  return PmSynchronizationPersistentState{
+      .cadence_steps = m_cadence_steps,
+      .gravity_kick_opportunity = m_gravity_kick_opportunity,
+      .last_refresh_opportunity = m_last_refresh_opportunity,
+      .field_version = m_field_version,
+      .last_refresh_step_index = m_last_refresh_step_index,
+      .last_refresh_scale_factor = m_last_refresh_scale_factor,
+      .refresh_commit_pending = m_refresh_commit_pending,
+      .pending_refresh_opportunity = m_pending_refresh_opportunity,
+      .pending_refresh_field_version = m_pending_refresh_field_version,
+  };
+}
+
+void PmSynchronizationState::importPersistentState(const PmSynchronizationPersistentState& persistent_state) {
+  if (persistent_state.cadence_steps == 0) {
+    throw std::invalid_argument("PmSynchronizationState::importPersistentState: cadence_steps must be >= 1");
+  }
+  if (persistent_state.last_refresh_opportunity > persistent_state.gravity_kick_opportunity) {
+    throw std::invalid_argument(
+        "PmSynchronizationState::importPersistentState: last refresh opportunity is ahead of current kick opportunity");
+  }
+  if (persistent_state.refresh_commit_pending) {
+    if (persistent_state.pending_refresh_opportunity == 0 ||
+        persistent_state.pending_refresh_opportunity != persistent_state.gravity_kick_opportunity ||
+        persistent_state.pending_refresh_field_version != persistent_state.field_version + 1U) {
+      throw std::invalid_argument(
+          "PmSynchronizationState::importPersistentState: pending refresh metadata is inconsistent");
+    }
+  } else if (persistent_state.pending_refresh_opportunity != 0 ||
+             persistent_state.pending_refresh_field_version != 0) {
+    throw std::invalid_argument(
+        "PmSynchronizationState::importPersistentState: nonzero pending refresh metadata without pending refresh");
+  }
+
+  m_cadence_steps = persistent_state.cadence_steps;
+  m_gravity_kick_opportunity = persistent_state.gravity_kick_opportunity;
+  m_last_refresh_opportunity = persistent_state.last_refresh_opportunity;
+  m_field_version = persistent_state.field_version;
+  m_last_refresh_step_index = persistent_state.last_refresh_step_index;
+  m_last_refresh_scale_factor = persistent_state.last_refresh_scale_factor;
+  m_refresh_commit_pending = persistent_state.refresh_commit_pending;
+  m_pending_refresh_opportunity = persistent_state.pending_refresh_opportunity;
+  m_pending_refresh_field_version = persistent_state.pending_refresh_field_version;
+}
+
+
 std::string_view integrationStageName(IntegrationStage stage) {
   switch (stage) {
     case IntegrationStage::kGravityKickPre:
@@ -277,6 +326,30 @@ ActiveSetDescriptor makeSchedulerActiveSetDescriptor(
   };
   debugAssertActiveSetDescriptorFresh(descriptor, state, scheduler);
   return descriptor;
+}
+
+ParticleReorderMap buildParticleReorderMapByScheduler(
+    const SimulationState& state,
+    const HierarchicalTimeBinScheduler& scheduler) {
+  if (scheduler.elementCount() != state.particles.size()) {
+    throw std::invalid_argument(
+        "buildParticleReorderMapByScheduler: scheduler element count must match particle count");
+  }
+  const auto& hot = scheduler.hotMetadata();
+  ParticleReorderMap reorder_map;
+  reorder_map.new_to_old_index.resize(state.particles.size());
+  std::iota(reorder_map.new_to_old_index.begin(), reorder_map.new_to_old_index.end(), 0U);
+  std::stable_sort(
+      reorder_map.new_to_old_index.begin(),
+      reorder_map.new_to_old_index.end(),
+      [&](std::uint32_t lhs, std::uint32_t rhs) {
+        return std::tuple{hot.bin_index[lhs], lhs} < std::tuple{hot.bin_index[rhs], rhs};
+      });
+  reorder_map.old_to_new_index.resize(state.particles.size());
+  for (std::size_t new_index = 0; new_index < reorder_map.new_to_old_index.size(); ++new_index) {
+    reorder_map.old_to_new_index[reorder_map.new_to_old_index[new_index]] = static_cast<std::uint32_t>(new_index);
+  }
+  return reorder_map;
 }
 
 void debugAssertActiveSetDescriptorFresh(
@@ -399,6 +472,11 @@ void StepOrchestrator::executeSingleStep(
   if (expected_scheduler_tick.has_value()) {
     debugAssertActiveSetDescriptorFresh(active_set, state, *expected_scheduler_tick);
   } else {
+    if (active_set.particles_from_scheduler || active_set.cells_from_scheduler) {
+      throw std::invalid_argument(
+          "StepOrchestrator::executeSingleStep: scheduler-derived active sets require explicit scheduler tick; "
+          "use executeSchedulerSubstep or pass expected_scheduler_tick");
+    }
     debugAssertActiveSetDescriptorFresh(active_set, state);
   }
 
@@ -469,6 +547,33 @@ void TimeStepCriteriaRegistry::registerUserClampHook(CriteriaHook hook) {
 }
 
 const TimeStepCriteriaHooks& TimeStepCriteriaRegistry::hooks() const noexcept { return m_hooks; }
+
+
+void StepOrchestrator::executeSchedulerSubstep(
+    SimulationState& state,
+    IntegratorState& integrator_state,
+    const HierarchicalTimeBinScheduler& scheduler,
+    std::span<const std::uint32_t> active_particle_indices,
+    std::span<const std::uint32_t> active_cell_indices,
+    const LambdaCdmBackground* cosmology_background,
+    TransientStepWorkspace* workspace,
+    const ModePolicy* mode_policy,
+    ProfilerSession* profiler_session) const {
+  const ActiveSetDescriptor active_set = makeSchedulerActiveSetDescriptor(
+      scheduler,
+      state,
+      active_particle_indices,
+      active_cell_indices);
+  executeSingleStep(
+      state,
+      integrator_state,
+      active_set,
+      cosmology_background,
+      workspace,
+      mode_policy,
+      profiler_session,
+      scheduler.currentTick());
+}
 
 HierarchicalTimeBinScheduler::HierarchicalTimeBinScheduler(std::uint8_t max_bin) : m_max_bin(max_bin) {}
 

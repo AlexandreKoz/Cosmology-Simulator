@@ -487,6 +487,75 @@ void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
   assert(threw);
 }
 
+void testOrchestratorRejectsSchedulerActiveSetWithoutTick() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2);
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(1);
+  scheduler.reset(2, 0, 0);
+  const auto active = scheduler.beginSubstep();
+  const auto active_set = cosmosim::core::makeSchedulerActiveSetDescriptor(scheduler, state, active);
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 1.0;
+  cosmosim::core::StepOrchestrator orchestrator;
+  assert(throwsWithContext(
+      [&]() { orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr); },
+      "scheduler-derived active sets require explicit scheduler tick"));
+
+  orchestrator.executeSchedulerSubstep(state, integrator_state, scheduler, active, {}, nullptr);
+  scheduler.endSubstep();
+}
+
+void testSchedulerBackedTimeBinReorderIgnoresStaleMirrors() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(4, 0, 0);
+  scheduler.setElementBin(0, 3, 0);
+  scheduler.setElementBin(1, 1, 0);
+  scheduler.setElementBin(2, 2, 0);
+  scheduler.setElementBin(3, 0, 0);
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particles.time_bin[i] = 0;  // Deliberately stale mirror: production reorder must not consume it.
+  }
+
+  bool legacy_mirror_reorder_threw = false;
+  try {
+    (void)cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kByTimeBin);
+  } catch (const std::invalid_argument&) {
+    legacy_mirror_reorder_threw = true;
+  }
+  assert(legacy_mirror_reorder_threw);
+
+  const auto reorder = cosmosim::core::buildParticleReorderMapByScheduler(state, scheduler);
+  assert(reorder.isConsistent(state.particles.size()));
+  assert(reorder.new_to_old_index[0] == 3);
+  assert(reorder.new_to_old_index[1] == 1);
+  assert(reorder.new_to_old_index[2] == 2);
+  assert(reorder.new_to_old_index[3] == 0);
+}
+
+void testPmSynchronizationPersistentRoundTrip() {
+  cosmosim::core::PmSynchronizationState pm_sync;
+  pm_sync.reset(2);
+  const auto first = pm_sync.registerKickOpportunity(7, 0.25, false);
+  pm_sync.commitRefresh(first);
+  (void)pm_sync.registerKickOpportunity(8, 0.5, true);
+  const auto pending = pm_sync.registerKickOpportunity(9, 0.75, true);
+  assert(pending.refresh_long_range_field);
+
+  const auto saved = pm_sync.exportPersistentState();
+  cosmosim::core::PmSynchronizationState restored;
+  restored.importPersistentState(saved);
+  assert(restored.cadenceSteps() == 2);
+  assert(restored.gravityKickOpportunity() == pm_sync.gravityKickOpportunity());
+  assert(restored.fieldVersion() == pm_sync.fieldVersion());
+  assert(restored.refreshCommitPending());
+  restored.commitRefresh(pending);
+  assert(restored.fieldVersion() == 2);
+  assert(restored.lastRefreshOpportunity() == pending.last_refresh_opportunity);
+}
+
 void testInvalidEarlyActivationTrap() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
   scheduler.reset(2, 2, 0);
@@ -732,6 +801,9 @@ int main() {
   testActiveSetNoCompetingBuilders();
   testHydroGravityCandidateReconciliation();
   testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected();
+  testOrchestratorRejectsSchedulerActiveSetWithoutTick();
+  testSchedulerBackedTimeBinReorderIgnoresStaleMirrors();
+  testPmSynchronizationPersistentRoundTrip();
   testInvalidEarlyActivationTrap();
   testInvalidBinJumpTrap();
   testSkippedPmSyncTrap();

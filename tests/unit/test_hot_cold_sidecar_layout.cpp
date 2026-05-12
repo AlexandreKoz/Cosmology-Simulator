@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_integration.hpp"
 
 int main() {
   cosmosim::core::SimulationState state;
@@ -38,9 +39,23 @@ int main() {
 
   state.rebuildSpeciesIndex();
 
-  const auto reorder_map = cosmosim::core::buildParticleReorderMap(
-      state,
-      cosmosim::core::ParticleReorderMode::kByTimeBin);
+  bool mirror_reorder_threw = false;
+  try {
+    (void)cosmosim::core::buildParticleReorderMap(
+        state,
+        cosmosim::core::ParticleReorderMode::kByTimeBin);
+  } catch (const std::invalid_argument&) {
+    mirror_reorder_threw = true;
+  }
+  assert(mirror_reorder_threw);
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0, 0);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, time_bins[i], 0);
+  }
+  cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  const auto reorder_map = cosmosim::core::buildParticleReorderMapByScheduler(state, scheduler);
   assert(reorder_map.isConsistent(state.particles.size()));
 
   const auto old_star_first_id = state.particle_sidecar.particle_id[state.star_particles.particle_index[0]];

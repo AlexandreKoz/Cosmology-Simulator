@@ -17,6 +17,8 @@
 
 namespace cosmosim::core {
 
+class HierarchicalTimeBinScheduler;
+
 // Explicit step stage contract shared by gravity, hydro, physics, analysis, and I/O modules.
 enum class IntegrationStage : std::uint8_t {
   kGravityKickPre = 0,
@@ -123,6 +125,17 @@ class StepOrchestrator {
       ProfilerSession* profiler_session = nullptr,
       std::optional<std::uint64_t> expected_scheduler_tick = std::nullopt) const;
 
+  void executeSchedulerSubstep(
+      SimulationState& state,
+      IntegratorState& integrator_state,
+      const HierarchicalTimeBinScheduler& scheduler,
+      std::span<const std::uint32_t> active_particle_indices,
+      std::span<const std::uint32_t> active_cell_indices,
+      const LambdaCdmBackground* cosmology_background,
+      TransientStepWorkspace* workspace = nullptr,
+      const ModePolicy* mode_policy = nullptr,
+      ProfilerSession* profiler_session = nullptr) const;
+
  private:
   StageScheduler m_scheduler;
   std::vector<IntegrationCallback*> m_callbacks;
@@ -193,6 +206,20 @@ struct PmSyncEvent {
   double field_built_scale_factor = 1.0;
 };
 
+// Restartable PM-cadence authority. The TreePM solver may own field buffers, but
+// this state owns the legality of long-range refresh opportunities across restarts.
+struct PmSynchronizationPersistentState {
+  std::uint64_t cadence_steps = 1;
+  std::uint64_t gravity_kick_opportunity = 0;
+  std::uint64_t last_refresh_opportunity = 0;
+  std::uint64_t field_version = 0;
+  std::uint64_t last_refresh_step_index = 0;
+  double last_refresh_scale_factor = 1.0;
+  bool refresh_commit_pending = false;
+  std::uint64_t pending_refresh_opportunity = 0;
+  std::uint64_t pending_refresh_field_version = 0;
+};
+
 // Scheduler-owned PM cadence state. Gravity callbacks execute the solver, but cadence
 // legality and refresh boundaries are represented here to avoid free-floating PM truth.
 class PmSynchronizationState {
@@ -210,6 +237,10 @@ class PmSynchronizationState {
   [[nodiscard]] std::uint64_t lastRefreshOpportunity() const noexcept { return m_last_refresh_opportunity; }
   [[nodiscard]] std::uint64_t lastRefreshStepIndex() const noexcept { return m_last_refresh_step_index; }
   [[nodiscard]] double lastRefreshScaleFactor() const noexcept { return m_last_refresh_scale_factor; }
+  [[nodiscard]] bool refreshCommitPending() const noexcept { return m_refresh_commit_pending; }
+
+  [[nodiscard]] PmSynchronizationPersistentState exportPersistentState() const;
+  void importPersistentState(const PmSynchronizationPersistentState& persistent_state);
 
  private:
   std::uint64_t m_cadence_steps = 1;
@@ -359,6 +390,31 @@ void debugAssertActiveSetDescriptorFresh(
     const ActiveSetDescriptor& active_set,
     const SimulationState& state,
     const HierarchicalTimeBinScheduler& scheduler);
+
+// Scheduler-backed reorder by rung. This is the only production-safe time-bin
+// ordering path: it consumes scheduler authority directly instead of public
+// particle/cell mirrors.
+[[nodiscard]] ParticleReorderMap buildParticleReorderMapByScheduler(
+    const SimulationState& state,
+    const HierarchicalTimeBinScheduler& scheduler);
+
+
+// Stable scheduler identity namespace. Current production scheduling is particle-row
+// backed, with gas cells treated as particle-bound finite-volume carriers. Future AMR
+// patches or mesh cells must enter through an explicit kind/stable_id pair rather
+// than by overloading local row indices.
+enum class ScheduledElementKind : std::uint8_t {
+  kParticle = 0,
+  kParticleBoundGasCell = 1,
+  kAmrPatch = 2,
+};
+
+struct ScheduledElementKey {
+  ScheduledElementKind kind = ScheduledElementKind::kParticle;
+  std::uint64_t stable_id = 0;
+
+  [[nodiscard]] friend bool operator==(const ScheduledElementKey&, const ScheduledElementKey&) = default;
+};
 
 struct TimeBinSchedulerIdentityRecord {
   // Full scheduler authority for one physical element identity. Migration packets
