@@ -14,15 +14,52 @@
 namespace cosmosim::core {
 namespace {
 
-constexpr std::array<IntegrationStage, 7> k_kick_drift_kick_order = {
+constexpr std::array<IntegrationStage, 8> k_kick_drift_kick_order = {
     IntegrationStage::kGravityKickPre,
     IntegrationStage::kDrift,
+    IntegrationStage::kForceRefresh,
     IntegrationStage::kHydroUpdate,
     IntegrationStage::kSourceTerms,
     IntegrationStage::kGravityKickPost,
     IntegrationStage::kAnalysisHooks,
     IntegrationStage::kOutputCheck,
 };
+
+[[nodiscard]] double redshiftFromScaleFactor(double scale_factor) {
+  if (scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be positive");
+  }
+  return 1.0 / scale_factor - 1.0;
+}
+
+[[nodiscard]] double midpointIntegrateCosmicTime(
+    const LambdaCdmBackground& background,
+    double scale_factor_begin,
+    double scale_factor_end,
+    std::uint32_t midpoint_samples) {
+  if (scale_factor_begin <= 0.0 || scale_factor_end <= 0.0) {
+    throw std::invalid_argument("scale factors must be positive for cosmic-time integral");
+  }
+  if (scale_factor_end < scale_factor_begin) {
+    throw std::invalid_argument("scale_factor_end must be >= scale_factor_begin");
+  }
+  const std::uint32_t samples = std::max<std::uint32_t>(midpoint_samples, 1U);
+  const double delta_a = (scale_factor_end - scale_factor_begin) / static_cast<double>(samples);
+  if (delta_a == 0.0) {
+    return 0.0;
+  }
+
+  double accum = 0.0;
+  for (std::uint32_t i = 0; i < samples; ++i) {
+    const double a_mid = scale_factor_begin + (static_cast<double>(i) + 0.5) * delta_a;
+    accum += 1.0 / (a_mid * background.hubbleSi(a_mid));
+  }
+  return accum * delta_a;
+}
+
+[[nodiscard]] std::size_t timestepSourceIndex(TimeStepCandidateSource source) noexcept {
+  return static_cast<std::size_t>(source);
+}
 
 [[nodiscard]] double midpointIntegrateDriftLike(
     const LambdaCdmBackground& background,
@@ -132,12 +169,100 @@ std::string_view timeStepCandidateSourceName(TimeStepCandidateSource source) {
       return "hydro_cfl";
     case TimeStepCandidateSource::kGravityAcceleration:
       return "gravity_acceleration";
+    case TimeStepCandidateSource::kCosmologyExpansion:
+      return "cosmology_expansion";
     case TimeStepCandidateSource::kSourceTerm:
       return "source_term";
     case TimeStepCandidateSource::kUserClamp:
       return "user_clamp";
   }
   return "unknown";
+}
+
+std::string_view stepBoundaryKindName(StepBoundaryKind kind) {
+  switch (kind) {
+    case StepBoundaryKind::kLocalActiveBinStep:
+      return "local_active_bin_step";
+    case StepBoundaryKind::kGlobalSynchronizationPoint:
+      return "global_synchronization_point";
+    case StepBoundaryKind::kPmRefreshPoint:
+      return "pm_refresh_point";
+    case StepBoundaryKind::kSnapshotPoint:
+      return "snapshot_point";
+    case StepBoundaryKind::kCheckpointPoint:
+      return "checkpoint_point";
+  }
+  return "unknown";
+}
+
+bool isRestartSafeBoundary(StepBoundaryKind kind) noexcept {
+  return kind == StepBoundaryKind::kGlobalSynchronizationPoint ||
+         kind == StepBoundaryKind::kSnapshotPoint ||
+         kind == StepBoundaryKind::kCheckpointPoint;
+}
+
+bool isOutputSafeBoundary(StepBoundaryKind kind) noexcept {
+  return kind == StepBoundaryKind::kGlobalSynchronizationPoint ||
+         kind == StepBoundaryKind::kSnapshotPoint ||
+         kind == StepBoundaryKind::kCheckpointPoint;
+}
+
+CosmologicalTimeline::CosmologicalTimeline(const LambdaCdmBackground* background) : m_background(background) {}
+
+CosmologicalStepFactors CosmologicalTimeline::prepareStep(
+    double current_time_code,
+    double current_scale_factor,
+    double dt_time_code) const {
+  if (dt_time_code <= 0.0) {
+    throw std::invalid_argument("dt_time_code must be positive");
+  }
+  if (current_scale_factor <= 0.0) {
+    throw std::invalid_argument("current_scale_factor must be positive");
+  }
+
+  CosmologicalStepFactors step{};
+  step.cosmological = m_background != nullptr;
+  step.time_begin_code = current_time_code;
+  step.time_end_code = current_time_code + dt_time_code;
+  step.dt_time_code = dt_time_code;
+  step.scale_factor_begin = current_scale_factor;
+  step.redshift_begin = redshiftFromScaleFactor(current_scale_factor);
+
+  if (m_background == nullptr) {
+    step.scale_factor_midpoint = current_scale_factor;
+    step.scale_factor_end = current_scale_factor;
+    step.redshift_end = step.redshift_begin;
+    step.drift_factor_code = dt_time_code;
+    step.first_kick_factor_code = 0.5 * dt_time_code;
+    step.second_kick_factor_code = 0.5 * dt_time_code;
+    step.hubble_drag_factor = 1.0;
+    return step;
+  }
+
+  step.hubble_begin_code = m_background->hubbleSi(current_scale_factor);
+  step.scale_factor_midpoint = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, 0.5 * dt_time_code);
+  step.scale_factor_end = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, dt_time_code);
+  step.redshift_end = redshiftFromScaleFactor(step.scale_factor_end);
+  step.hubble_end_code = m_background->hubbleSi(step.scale_factor_end);
+  step.drift_factor_code = computeComovingDriftFactor(*m_background, step.scale_factor_begin, step.scale_factor_end, 64);
+  step.first_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_begin, step.scale_factor_midpoint, 64);
+  step.second_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_midpoint, step.scale_factor_end, 64);
+  step.hubble_drag_factor = computeHubbleDragFactor(step.scale_factor_begin, step.scale_factor_end);
+  return step;
+}
+
+void CosmologicalTimeline::commitStep(IntegratorState& integrator_state, const CosmologicalStepFactors& step) const {
+  if (integrator_state.inside_kdk_step) {
+    throw std::runtime_error("CosmologicalTimeline::commitStep called while integrator is marked inside a KDK step");
+  }
+  integrator_state.current_time_code = step.time_end_code;
+  integrator_state.current_scale_factor = step.scale_factor_end;
+  integrator_state.current_redshift = step.redshift_end;
+  integrator_state.current_hubble_rate_code = step.hubble_end_code;
+  integrator_state.last_drift_factor_code = step.drift_factor_code;
+  integrator_state.last_first_kick_factor_code = step.first_kick_factor_code;
+  integrator_state.last_second_kick_factor_code = step.second_kick_factor_code;
+  ++integrator_state.step_index;
 }
 
 void PmSynchronizationState::reset(std::uint64_t cadence_steps) {
@@ -285,6 +410,8 @@ std::string_view integrationStageName(IntegrationStage stage) {
       return "gravity_kick_pre";
     case IntegrationStage::kDrift:
       return "drift";
+    case IntegrationStage::kForceRefresh:
+      return "force_refresh";
     case IntegrationStage::kHydroUpdate:
       return "hydro_update";
     case IntegrationStage::kSourceTerms:
@@ -492,6 +619,18 @@ void StepOrchestrator::executeSingleStep(
     profiler_session->counters().addCount("step_invocations", 1);
   }
 
+  const StepBoundaryState boundary = classifyStepBoundary(
+      state,
+      active_set,
+      expected_scheduler_tick.has_value());
+  CosmologicalTimeline timeline(cosmology_background);
+  const CosmologicalStepFactors timeline_step = timeline.prepareStep(
+      integrator_state.current_time_code,
+      integrator_state.current_scale_factor,
+      integrator_state.dt_time_code);
+  integrator_state.current_boundary_kind = boundary.kind;
+  integrator_state.inside_kdk_step = true;
+
   StepContext context{
       .state = state,
       .integrator_state = integrator_state,
@@ -500,6 +639,8 @@ void StepOrchestrator::executeSingleStep(
       .cosmology_background = cosmology_background,
       .mode_policy = mode_policy,
       .profiler_session = profiler_session,
+      .timeline_step = timeline_step,
+      .boundary = boundary,
       .stage = IntegrationStage::kGravityKickPre,
   };
 
@@ -526,14 +667,10 @@ void StepOrchestrator::executeSingleStep(
     }
   }
 
-  integrator_state.current_time_code += integrator_state.dt_time_code;
-  if (cosmology_background != nullptr) {
-    integrator_state.current_scale_factor = advanceScaleFactorEuler(
-        *cosmology_background,
-        integrator_state.current_scale_factor,
-        integrator_state.dt_time_code);
-  }
-  ++integrator_state.step_index;
+  integrator_state.inside_kdk_step = false;
+  integrator_state.last_completed_boundary_kind = boundary.kind;
+  integrator_state.last_completed_restart_safe = boundary.restart_safe;
+  timeline.commitStep(integrator_state, timeline_step);
 }
 
 void TimeStepCriteriaRegistry::registerCflHook(CriteriaHook hook) { m_hooks.cfl_hook = std::move(hook); }
@@ -589,6 +726,7 @@ void HierarchicalTimeBinScheduler::reset(
   m_hot.active_flag.assign(element_count, 0);
   m_hot.pending_bin_index.assign(element_count, k_unset_pending_bin);
   m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
+  m_candidate_source.assign(element_count, TimeStepCandidateSource::kUserClamp);
   m_candidate_label.assign(element_count, {});
   m_last_reconciliation = {};
   m_substep_open = false;
@@ -609,6 +747,45 @@ void HierarchicalTimeBinScheduler::reset(
   m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.occupancy_by_bin[clamped_bin] = element_count;
+}
+
+void HierarchicalTimeBinScheduler::appendElements(
+    std::uint32_t new_element_count,
+    std::uint8_t initial_bin,
+    std::uint64_t first_activation_tick) {
+  if (new_element_count == 0U) {
+    return;
+  }
+  const std::uint8_t clamped_bin = clampBin(initial_bin);
+  const std::uint32_t old_count = static_cast<std::uint32_t>(m_hot.size());
+  const std::uint32_t total_count = old_count + new_element_count;
+  if (total_count < old_count) {
+    throw std::overflow_error("HierarchicalTimeBinScheduler::appendElements element count overflow");
+  }
+
+  m_hot.bin_index.resize(total_count, clamped_bin);
+  m_hot.next_activation_tick.resize(total_count, first_activation_tick);
+  m_hot.active_flag.resize(total_count, 0);
+  m_hot.pending_bin_index.resize(total_count, k_unset_pending_bin);
+  m_position_in_bin.resize(total_count, 0);
+  m_candidate_bin_index.resize(total_count, k_unset_pending_bin);
+  m_candidate_source.resize(total_count, TimeStepCandidateSource::kUserClamp);
+  m_candidate_label.resize(total_count);
+
+  if (m_elements_by_bin.empty()) {
+    m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
+  }
+  for (std::uint32_t element = old_count; element < total_count; ++element) {
+    auto& members = m_elements_by_bin[clamped_bin];
+    m_position_in_bin[element] = members.size();
+    members.push_back(element);
+  }
+  if (m_diagnostics.occupancy_by_bin.size() != static_cast<std::size_t>(m_max_bin) + 1U) {
+    m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
+    m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
+  }
+  m_diagnostics.occupancy_by_bin[clamped_bin] += new_element_count;
+  validateInternalState("HierarchicalTimeBinScheduler::appendElements");
 }
 
 void HierarchicalTimeBinScheduler::setElementBin(
@@ -663,12 +840,14 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
   }
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
+    m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
     m_candidate_label.assign(m_hot.size(), {});
   }
   const std::uint8_t clamped = clampBin(target_bin);
   ++m_last_reconciliation.submitted_candidates;
   if (m_candidate_bin_index[element_index] == k_unset_pending_bin || clamped < m_candidate_bin_index[element_index]) {
     m_candidate_bin_index[element_index] = clamped;
+    m_candidate_source[element_index] = source;
     m_candidate_label[element_index] = label.empty()
         ? std::string(timeStepCandidateSourceName(source))
         : std::string(label);
@@ -678,6 +857,7 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
 TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTransitions() {
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
+    m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
     m_candidate_label.assign(m_hot.size(), {});
   }
   TimeStepReconciliationResult result = m_last_reconciliation;
@@ -687,6 +867,14 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
       continue;
     }
     ++result.elements_with_candidates;
+    const std::size_t source_index = timestepSourceIndex(m_candidate_source[element]);
+    if (source_index < result.limiting_candidates_by_source.size()) {
+      ++result.limiting_candidates_by_source[source_index];
+      if (result.limiting_candidates_by_source[source_index] >
+          result.limiting_candidates_by_source[timestepSourceIndex(result.dominant_limiting_source)]) {
+        result.dominant_limiting_source = m_candidate_source[element];
+      }
+    }
     validateTransitionRequest(
         element,
         candidate,
@@ -694,6 +882,7 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
     requestBinTransition(element, candidate);
     ++result.committed_transition_requests;
     m_candidate_bin_index[element] = k_unset_pending_bin;
+    m_candidate_source[element] = TimeStepCandidateSource::kUserClamp;
     m_candidate_label[element].clear();
   }
   m_last_reconciliation = {};
@@ -814,6 +1003,7 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   m_hot.active_flag = persistent_state.active_flag;
   m_hot.pending_bin_index = persistent_state.pending_bin_index;
   m_candidate_bin_index.assign(m_hot.bin_index.size(), k_unset_pending_bin);
+  m_candidate_source.assign(m_hot.bin_index.size(), TimeStepCandidateSource::kUserClamp);
   m_candidate_label.assign(m_hot.bin_index.size(), {});
   m_last_reconciliation = {};
 
@@ -1482,14 +1672,73 @@ double computeScaleFactorRate(const LambdaCdmBackground& background, double scal
   return scale_factor * background.hubbleSi(scale_factor);
 }
 
-double advanceScaleFactorEuler(
+double computeCosmologyExpansionTimeStep(
     const LambdaCdmBackground& background,
     double scale_factor,
-    double dt_time_code) {
+    double max_delta_ln_a,
+    double max_hubble_time_fraction) {
+  if (scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be positive");
+  }
+  if (max_delta_ln_a <= 0.0 || max_hubble_time_fraction <= 0.0) {
+    throw std::invalid_argument("cosmology timestep limits must be positive");
+  }
+  const double hubble = background.hubbleSi(scale_factor);
+  if (hubble <= 0.0) {
+    throw std::invalid_argument("H(a) must be positive");
+  }
+  return std::min(max_delta_ln_a / hubble, max_hubble_time_fraction / hubble);
+}
+
+double advanceScaleFactorByCosmicTime(
+    const LambdaCdmBackground& background,
+    double scale_factor,
+    double dt_time_code,
+    std::uint32_t midpoint_samples) {
+  if (scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be positive");
+  }
   if (dt_time_code < 0.0) {
     throw std::invalid_argument("dt_time_code must be non-negative");
   }
-  return scale_factor + dt_time_code * computeScaleFactorRate(background, scale_factor);
+  if (dt_time_code == 0.0) {
+    return scale_factor;
+  }
+
+  double lo = scale_factor;
+  double hi = scale_factor * 1.001;
+  if (hi <= lo) {
+    hi = lo + 1.0e-12;
+  }
+
+  const std::uint32_t samples = std::max<std::uint32_t>(midpoint_samples, 8U);
+  for (std::uint32_t iter = 0; iter < 256U; ++iter) {
+    const double covered = midpointIntegrateCosmicTime(background, scale_factor, hi, samples);
+    if (covered >= dt_time_code) {
+      break;
+    }
+    lo = hi;
+    hi *= 2.0;
+    if (!std::isfinite(hi) || hi > 1.0e12) {
+      throw std::runtime_error("failed to bracket FLRW scale-factor advance");
+    }
+  }
+
+  if (midpointIntegrateCosmicTime(background, scale_factor, hi, samples) < dt_time_code) {
+    throw std::runtime_error("failed to bracket FLRW scale-factor advance");
+  }
+
+  lo = scale_factor;
+  for (std::uint32_t iter = 0; iter < 96U; ++iter) {
+    const double mid = 0.5 * (lo + hi);
+    const double covered = midpointIntegrateCosmicTime(background, scale_factor, mid, samples);
+    if (covered < dt_time_code) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return 0.5 * (lo + hi);
 }
 
 double estimateDeltaTimeFromScaleFactorStep(
@@ -1499,12 +1748,7 @@ double estimateDeltaTimeFromScaleFactorStep(
   if (delta_scale_factor < 0.0) {
     throw std::invalid_argument("delta_scale_factor must be non-negative");
   }
-
-  const double rate = computeScaleFactorRate(background, scale_factor);
-  if (rate <= 0.0) {
-    throw std::invalid_argument("scale-factor rate must be positive");
-  }
-  return delta_scale_factor / rate;
+  return midpointIntegrateCosmicTime(background, scale_factor, scale_factor + delta_scale_factor, 64);
 }
 
 double computeComovingDriftFactor(
@@ -1532,6 +1776,40 @@ double computeHubbleDragFactor(double scale_factor_begin, double scale_factor_en
   }
 
   return scale_factor_begin / scale_factor_end;
+}
+
+StepBoundaryState classifyStepBoundary(
+    const SimulationState& state,
+    const ActiveSetDescriptor& active_set,
+    bool scheduler_owned_substep) {
+  const bool particle_subset = active_set.hasParticleSubset(state.particles.size());
+  const bool cell_subset = active_set.hasCellSubset(state.cells.size());
+  const bool local = scheduler_owned_substep && (particle_subset || cell_subset);
+  StepBoundaryState boundary{};
+  boundary.kind = local ? StepBoundaryKind::kLocalActiveBinStep : StepBoundaryKind::kGlobalSynchronizationPoint;
+  boundary.local_substep = local;
+  boundary.restart_safe = !local;
+  boundary.output_safe = !local;
+  boundary.pm_refresh_allowed = true;
+  return boundary;
+}
+
+void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state) {
+  if (integrator_state.inside_kdk_step || !integrator_state.last_completed_restart_safe ||
+      !isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+    throw std::runtime_error(
+        "snapshot output requested at unsafe integration boundary: " +
+        std::string(stepBoundaryKindName(integrator_state.last_completed_boundary_kind)));
+  }
+}
+
+void assertCanWriteCheckpointAtBoundary(const IntegratorState& integrator_state) {
+  if (integrator_state.inside_kdk_step || !integrator_state.last_completed_restart_safe ||
+      !isRestartSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+    throw std::runtime_error(
+        "checkpoint output requested at unsafe integration boundary: " +
+        std::string(stepBoundaryKindName(integrator_state.last_completed_boundary_kind)));
+  }
 }
 
 }  // namespace cosmosim::core

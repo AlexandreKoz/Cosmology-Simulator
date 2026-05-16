@@ -912,8 +912,17 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(payload.integrator_state->step_index);
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_time_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_scale_factor));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_redshift));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_hubble_rate_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->dt_time_code));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_drift_factor_code));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_first_kick_factor_code));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_second_kick_factor_code));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->scheme));
+  append_u64(static_cast<std::uint64_t>(payload.integrator_state->current_boundary_kind));
+  append_u64(static_cast<std::uint64_t>(payload.integrator_state->last_completed_boundary_kind));
+  append_u64(payload.integrator_state->inside_kdk_step ? 1ull : 0ull);
+  append_u64(payload.integrator_state->last_completed_restart_safe ? 1ull : 0ull);
   append_u64(payload.integrator_state->time_bins.hierarchical_enabled ? 1ull : 0ull);
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.active_bin));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.max_bin));
@@ -989,9 +998,18 @@ void writeRestartCheckpointHdf5(
   Hdf5Handle integrator_group(openOrCreateGroup(file.get(), "/integrator"));
   writeScalarF64Attribute(integrator_group.get(), "current_time_code", payload.integrator_state->current_time_code);
   writeScalarF64Attribute(integrator_group.get(), "current_scale_factor", payload.integrator_state->current_scale_factor);
+  writeScalarF64Attribute(integrator_group.get(), "current_redshift", payload.integrator_state->current_redshift);
+  writeScalarF64Attribute(integrator_group.get(), "current_hubble_rate_code", payload.integrator_state->current_hubble_rate_code);
   writeScalarF64Attribute(integrator_group.get(), "dt_time_code", payload.integrator_state->dt_time_code);
+  writeScalarF64Attribute(integrator_group.get(), "last_drift_factor_code", payload.integrator_state->last_drift_factor_code);
+  writeScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code", payload.integrator_state->last_first_kick_factor_code);
+  writeScalarF64Attribute(integrator_group.get(), "last_second_kick_factor_code", payload.integrator_state->last_second_kick_factor_code);
   writeScalarU64Attribute(integrator_group.get(), "step_index", payload.integrator_state->step_index);
   writeScalarU32Attribute(integrator_group.get(), "scheme", static_cast<std::uint32_t>(payload.integrator_state->scheme));
+  writeScalarU32Attribute(integrator_group.get(), "current_boundary_kind", static_cast<std::uint32_t>(payload.integrator_state->current_boundary_kind));
+  writeScalarU32Attribute(integrator_group.get(), "last_completed_boundary_kind", static_cast<std::uint32_t>(payload.integrator_state->last_completed_boundary_kind));
+  writeScalarU32Attribute(integrator_group.get(), "inside_kdk_step", payload.integrator_state->inside_kdk_step ? 1U : 0U);
+  writeScalarU32Attribute(integrator_group.get(), "last_completed_restart_safe", payload.integrator_state->last_completed_restart_safe ? 1U : 0U);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_hierarchical", payload.integrator_state->time_bins.hierarchical_enabled ? 1U : 0U);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_active_bin", payload.integrator_state->time_bins.active_bin);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_max_bin", payload.integrator_state->time_bins.max_bin);
@@ -1067,10 +1085,22 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   Hdf5Handle integrator_group(H5Gopen2(file.get(), "/integrator", H5P_DEFAULT));
   result.integrator_state.current_time_code = readScalarF64Attribute(integrator_group.get(), "current_time_code");
   result.integrator_state.current_scale_factor = readScalarF64Attribute(integrator_group.get(), "current_scale_factor");
+  result.integrator_state.current_redshift = readScalarF64Attribute(integrator_group.get(), "current_redshift");
+  result.integrator_state.current_hubble_rate_code = readScalarF64Attribute(integrator_group.get(), "current_hubble_rate_code");
   result.integrator_state.dt_time_code = readScalarF64Attribute(integrator_group.get(), "dt_time_code");
+  result.integrator_state.last_drift_factor_code = readScalarF64Attribute(integrator_group.get(), "last_drift_factor_code");
+  result.integrator_state.last_first_kick_factor_code = readScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code");
+  result.integrator_state.last_second_kick_factor_code = readScalarF64Attribute(integrator_group.get(), "last_second_kick_factor_code");
   result.integrator_state.step_index = readScalarU64Attribute(integrator_group.get(), "step_index");
   result.integrator_state.scheme =
       static_cast<core::TimeStepScheme>(readScalarU32Attribute(integrator_group.get(), "scheme"));
+  result.integrator_state.current_boundary_kind =
+      static_cast<core::StepBoundaryKind>(readScalarU32Attribute(integrator_group.get(), "current_boundary_kind"));
+  result.integrator_state.last_completed_boundary_kind =
+      static_cast<core::StepBoundaryKind>(readScalarU32Attribute(integrator_group.get(), "last_completed_boundary_kind"));
+  result.integrator_state.inside_kdk_step = readScalarU32Attribute(integrator_group.get(), "inside_kdk_step") != 0U;
+  result.integrator_state.last_completed_restart_safe =
+      readScalarU32Attribute(integrator_group.get(), "last_completed_restart_safe") != 0U;
   result.integrator_state.time_bins.hierarchical_enabled =
       readScalarU32Attribute(integrator_group.get(), "time_bins_hierarchical") != 0;
   result.integrator_state.time_bins.active_bin =

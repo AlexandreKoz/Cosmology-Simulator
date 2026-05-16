@@ -124,8 +124,20 @@ void testCosmologyHelpers() {
 
   const double delta_a = 1.0e-4;
   const double dt = cosmosim::core::estimateDeltaTimeFromScaleFactorStep(background, a0, delta_a);
-  const double a_next = cosmosim::core::advanceScaleFactorEuler(background, a0, dt);
-  assert(std::abs(a_next - (a0 + delta_a)) / delta_a < 1.0e-12);
+  const double a_next = cosmosim::core::advanceScaleFactorByCosmicTime(background, a0, dt, 128);
+  assert(std::abs(a_next - (a0 + delta_a)) / delta_a < 2.0e-8);
+
+  const cosmosim::core::CosmologicalTimeline timeline(&background);
+  const auto step = timeline.prepareStep(0.0, a0, dt);
+  assert(step.cosmological);
+  assert(step.scale_factor_end > a0);
+  assert(step.redshift_end < step.redshift_begin);
+  assert(step.drift_factor_code > 0.0);
+  assert(step.first_kick_factor_code > 0.0);
+  assert(step.second_kick_factor_code > 0.0);
+  assert(std::abs((step.first_kick_factor_code + step.second_kick_factor_code) -
+                  cosmosim::core::computeComovingKickFactor(background, a0, step.scale_factor_end, 128)) /
+         (step.first_kick_factor_code + step.second_kick_factor_code) < 1.0e-5);
 }
 
 void testActiveSubsetDetection() {
@@ -748,6 +760,30 @@ void testRestartActiveIdEquivalenceWithPendingTransitions() {
   assert(activeParticleIdsAtCurrentTick(restored, state) == activeParticleIdsAtCurrentTick(scheduler, state));
 }
 
+void testBoundarySafetyClassification() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  std::vector<std::uint32_t> active = {0, 2};
+  cosmosim::core::ActiveSetDescriptor local_active{
+      .particle_indices = active,
+      .particles_are_subset = true,
+  };
+  const auto local_boundary = cosmosim::core::classifyStepBoundary(state, local_active, true);
+  assert(local_boundary.kind == cosmosim::core::StepBoundaryKind::kLocalActiveBinStep);
+  assert(!local_boundary.restart_safe);
+  assert(!local_boundary.output_safe);
+
+  cosmosim::core::IntegratorState unsafe_state;
+  unsafe_state.last_completed_boundary_kind = local_boundary.kind;
+  unsafe_state.last_completed_restart_safe = false;
+  assert(throwsWithContext([&]() { cosmosim::core::assertCanWriteCheckpointAtBoundary(unsafe_state); }, "unsafe integration boundary"));
+
+  cosmosim::core::ActiveSetDescriptor global_active{};
+  const auto global_boundary = cosmosim::core::classifyStepBoundary(state, global_active, false);
+  assert(global_boundary.kind == cosmosim::core::StepBoundaryKind::kGlobalSynchronizationPoint);
+  assert(global_boundary.restart_safe);
+}
+
 void testPmSynchronizationCadencePreservesRefreshBoundaries() {
   cosmosim::core::PmSynchronizationState pm_sync;
   pm_sync.reset(3);
@@ -811,6 +847,7 @@ int main() {
   testInvalidRestartTimestepStateTrap();
   testActiveSetMismatchTrap();
   testLocalGlobalSyncBoundaryViolationTrap();
+  testBoundarySafetyClassification();
   testPmSynchronizationCadencePreservesRefreshBoundaries();
   return 0;
 }

@@ -60,29 +60,29 @@ int main() {
   assert(report.config_compatible);
   assert(report.schema_compatible);
   assert(report.canonical_stage_order);
-  assert(report.stage_sequence.size() == 14);
+  assert(report.stage_sequence.size() == cosmosim::core::StageScheduler::kickDriftKickOrder().size() * 2U);
   assert(report.stage_sequence.front() == "gravity_kick_pre");
   assert(report.stage_sequence.back() == "output_check");
   assert(report.completed_steps == 2);
   assert(report.world_size == 1);
   assert(report.world_rank == 0);
-  assert(report.local_particle_count == 42);
-  assert(report.global_particle_count == 42);
+  assert(report.local_particle_count == 45);
+  assert(report.global_particle_count == 45);
   assert(report.local_cell_count == 6);
   assert(report.global_cell_count == 6);
-  assert(report.local_particle_id_sum == (42ULL * 43ULL) / 2ULL);
-  assert(report.global_particle_id_sum == (42ULL * 43ULL) / 2ULL);
-  assert(report.local_particle_id_xor == xorRangeOneToN(42));
-  assert(report.global_particle_id_xor == xorRangeOneToN(42));
+  assert(report.local_particle_id_sum == (45ULL * 46ULL) / 2ULL);
+  assert(report.global_particle_id_sum == (45ULL * 46ULL) / 2ULL);
+  assert(report.local_particle_id_xor == xorRangeOneToN(45));
+  assert(report.global_particle_id_xor == xorRangeOneToN(45));
   assert(report.treepm_pm_grid == 9);
   assert(report.treepm_pm_grid_nx == 9);
   assert(report.treepm_pm_grid_ny == 9);
   assert(report.treepm_pm_grid_nz == 9);
   assert(report.treepm_pm_grid_shape == "9x9x9");
   assert(report.treepm_update_cadence_steps == 1);
-  assert(report.treepm_long_range_refresh_count == 4);
+  assert(report.treepm_long_range_refresh_count == 3);
   assert(report.treepm_long_range_reuse_count == 0);
-  assert(report.treepm_cadence_records.size() == 4);
+  assert(report.treepm_cadence_records.size() == 3);
   for (const auto& record : report.treepm_cadence_records) {
     assert(record.refreshed_long_range_field);
     assert(record.field_built_step_index == record.step_index);
@@ -120,7 +120,7 @@ int main() {
   assert(tsc_report.completed_steps == 2);
   assert(tsc_report.treepm_pm_grid == 9);
   assert(tsc_report.treepm_pm_grid_shape == "9x9x9");
-  assert(tsc_report.treepm_long_range_refresh_count == 4);
+  assert(tsc_report.treepm_long_range_refresh_count == 3);
   assert(tsc_report.treepm_long_range_reuse_count == 0);
 
   const std::string cadence_two_config =
@@ -136,13 +136,13 @@ int main() {
   assert(cadence_two_report_a.completed_steps == 2);
   assert(cadence_two_report_a.treepm_update_cadence_steps == 2);
   assert(cadence_two_report_a.treepm_long_range_refresh_count == 2);
-  assert(cadence_two_report_a.treepm_long_range_reuse_count == 2);
-  assert(cadence_two_report_a.treepm_cadence_records.size() == 4);
-  const std::vector<std::uint64_t> expected_field_versions{1, 1, 2, 2};
-  const std::vector<std::uint64_t> expected_field_built_steps{0, 0, 1, 1};
-  const std::vector<bool> expected_refresh_flags{true, false, true, false};
+  assert(cadence_two_report_a.treepm_long_range_reuse_count == 1);
+  assert(cadence_two_report_a.treepm_cadence_records.size() == 3);
+  const std::vector<std::uint64_t> expected_field_versions{1, 1, 2};
+  const std::vector<std::uint64_t> expected_field_built_steps{0, 0, 1};
+  const std::vector<bool> expected_refresh_flags{true, false, true};
   const std::vector<std::string> expected_stage_names{
-      "gravity_kick_pre", "gravity_kick_post", "gravity_kick_pre", "gravity_kick_post"};
+      "gravity_kick_pre", "force_refresh", "force_refresh"};
   for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
     const auto& record = cadence_two_report_a.treepm_cadence_records[i];
     assert(record.stage_name == expected_stage_names[i]);

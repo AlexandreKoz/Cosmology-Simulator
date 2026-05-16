@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -206,6 +207,19 @@ void updateAdaptiveTimeBins(
     core::requireParticleBoundGasCellContract(state, "adaptive time-bin update");
   }
   const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+  std::optional<double> cosmology_dt;
+  if (integrator_state.current_scale_factor > 0.0 && config.cosmology.hubble_param > 0.0) {
+    core::CosmologyBackgroundConfig background_config;
+    background_config.hubble_param = config.cosmology.hubble_param;
+    background_config.omega_matter = config.cosmology.omega_matter;
+    background_config.omega_lambda = config.cosmology.omega_lambda;
+    const core::LambdaCdmBackground background(background_config);
+    cosmology_dt = core::computeCosmologyExpansionTimeStep(
+        background,
+        integrator_state.current_scale_factor,
+        1.0e-2,
+        1.0e-2);
+  }
   for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
     core::TimeStepCriteriaRegistry registry;
     if (element_index < state.cells.size()) {
@@ -234,11 +248,19 @@ void updateAdaptiveTimeBins(
           element_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "cell_hydro_cfl");
       scheduler.submitCandidateTimeStep(
           element_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "cell_gravity_acceleration");
+      if (cosmology_dt.has_value()) {
+        scheduler.submitCandidateTimeStep(
+            element_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "cell_cosmology_expansion");
+      }
       if (gas_index < scheduler.elementCount()) {
         scheduler.submitCandidateTimeStep(
             gas_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_particle_hydro_cfl");
         scheduler.submitCandidateTimeStep(
             gas_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "gas_particle_gravity_acceleration");
+        if (cosmology_dt.has_value()) {
+          scheduler.submitCandidateTimeStep(
+              gas_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "gas_particle_cosmology_expansion");
+        }
       }
       continue;
     }
@@ -274,6 +296,14 @@ void updateAdaptiveTimeBins(
           limits,
           core::TimeStepCandidateSource::kGravityAcceleration,
           "particle_gravity_acceleration");
+      if (cosmology_dt.has_value()) {
+        scheduler.submitCandidateTimeStep(
+            element_index,
+            *cosmology_dt,
+            limits,
+            core::TimeStepCandidateSource::kCosmologyExpansion,
+            "particle_cosmology_expansion");
+      }
     }
   }
 }
@@ -1010,6 +1040,26 @@ void initializeSchedulerBins(
   }
 }
 
+void ensureSchedulerCoversState(
+    const core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& scheduler) {
+  const std::size_t required_size = std::max(state.particles.size(), state.cells.size());
+  if (required_size > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("reference workflow scheduler element count exceeds uint32 range");
+  }
+  const std::uint32_t required_count = static_cast<std::uint32_t>(required_size);
+  if (required_count <= scheduler.elementCount()) {
+    return;
+  }
+
+  const std::uint8_t new_element_bin = scheduler.maxBin() > 0 ? 1U : 0U;
+  const std::uint64_t first_activation_tick = scheduler.currentTick() + 1U;
+  scheduler.appendElements(
+      required_count - scheduler.elementCount(),
+      new_element_bin,
+      first_activation_tick);
+}
+
 void syncTimeBinsFromScheduler(
     const core::HierarchicalTimeBinScheduler& scheduler,
     core::SimulationState& state) {
@@ -1041,10 +1091,7 @@ class DriftCallback final : public core::IntegrationCallback {
       return;
     }
 
-    const double dt = context.integrator_state.dt_time_code;
-    const double inv_a = (context.integrator_state.current_scale_factor > 0.0)
-        ? (1.0 / context.integrator_state.current_scale_factor)
-        : 1.0;
+    const double drift_factor = context.timeline_step.drift_factor_code;
     parallel::MpiContext mpi_context;
     const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
     for (const std::uint32_t particle_index : context.active_set.particle_indices) {
@@ -1058,11 +1105,11 @@ class DriftCallback final : public core::IntegrationCallback {
         continue;
       }
       context.state.particles.position_x_comoving[particle_index] +=
-          context.state.particles.velocity_x_peculiar[particle_index] * dt * inv_a;
+          context.state.particles.velocity_x_peculiar[particle_index] * drift_factor;
       context.state.particles.position_y_comoving[particle_index] +=
-          context.state.particles.velocity_y_peculiar[particle_index] * dt * inv_a;
+          context.state.particles.velocity_y_peculiar[particle_index] * drift_factor;
       context.state.particles.position_z_comoving[particle_index] +=
-          context.state.particles.velocity_z_peculiar[particle_index] * dt * inv_a;
+          context.state.particles.velocity_z_peculiar[particle_index] * drift_factor;
     }
 
     if (context.state.cells.size() > 0) {
@@ -1094,7 +1141,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
   enum class PmSyncSurface : std::uint8_t {
     kKickPre = 0,
-    kKickPost = 1,
+    kForceRefresh = 1,
+    kKickPost = 2,
   };
 
   struct PmLongRangeKickDecision {
@@ -1225,16 +1273,21 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (stage == core::IntegrationStage::kGravityKickPre) {
       return PmSyncSurface::kKickPre;
     }
+    if (stage == core::IntegrationStage::kForceRefresh) {
+      return PmSyncSurface::kForceRefresh;
+    }
     if (stage == core::IntegrationStage::kGravityKickPost) {
       return PmSyncSurface::kKickPost;
     }
-    throw std::invalid_argument("TreePM sync surface is only defined on gravity kick stages");
+    throw std::invalid_argument("TreePM sync surface is only defined on legal gravity force-refresh/kick stages");
   }
 
   [[nodiscard]] static std::string_view pmSyncSurfaceName(PmSyncSurface surface) {
     switch (surface) {
       case PmSyncSurface::kKickPre:
         return "kick_pre";
+      case PmSyncSurface::kForceRefresh:
+        return "force_refresh";
       case PmSyncSurface::kKickPost:
         return "kick_post";
     }
@@ -1242,8 +1295,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
   void onStage(core::StepContext& context) override {
-    if (context.stage != core::IntegrationStage::kGravityKickPre &&
-        context.stage != core::IntegrationStage::kGravityKickPost) {
+    const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
+        context.stage == core::IntegrationStage::kGravityKickPost;
+    const bool needs_initial_force_bootstrap = context.stage == core::IntegrationStage::kGravityKickPre && !m_force_cache_valid;
+    const bool is_force_refresh_stage = context.stage == core::IntegrationStage::kForceRefresh || needs_initial_force_bootstrap;
+    if (!is_kick_stage && !is_force_refresh_stage) {
+      return;
+    }
+    if (is_kick_stage && !is_force_refresh_stage) {
+      applyCachedKick(context);
       return;
     }
 
@@ -1503,12 +1563,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
       });
     }
 
-    const double kick_factor = 0.5 * context.integrator_state.dt_time_code;
-    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
-      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
-      context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_active_accel_x[active_slot];
-      context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_active_accel_y[active_slot];
-      context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_active_accel_z[active_slot];
+    m_force_cache_valid = true;
+    if (is_kick_stage) {
+      applyActiveKickFromFreshForce(context);
     }
 
     for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
@@ -1533,6 +1590,47 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
  private:
+  [[nodiscard]] static double kickFactorForStage(const core::StepContext& context) {
+    if (context.stage == core::IntegrationStage::kGravityKickPre) {
+      return context.timeline_step.first_kick_factor_code;
+    }
+    if (context.stage == core::IntegrationStage::kGravityKickPost) {
+      return context.timeline_step.second_kick_factor_code;
+    }
+    throw std::invalid_argument("gravity kick factor requested outside KDK kick stage");
+  }
+
+  void applyActiveKickFromFreshForce(core::StepContext& context) {
+    const double kick_factor = kickFactorForStage(context);
+    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
+      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
+      context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_active_accel_x[active_slot];
+      context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_active_accel_y[active_slot];
+      context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_active_accel_z[active_slot];
+    }
+  }
+
+  void applyCachedKick(core::StepContext& context) {
+    if (!m_force_cache_valid) {
+      throw std::runtime_error("gravity kick requested before a coherent force-refresh boundary");
+    }
+    const std::size_t particle_count = context.state.particles.size();
+    if (m_particle_accel_x.size() != particle_count ||
+        m_particle_accel_y.size() != particle_count ||
+        m_particle_accel_z.size() != particle_count) {
+      m_particle_accel_x.resize(particle_count, 0.0);
+      m_particle_accel_y.resize(particle_count, 0.0);
+      m_particle_accel_z.resize(particle_count, 0.0);
+    }
+    rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
+    const double kick_factor = kickFactorForStage(context);
+    for (const std::uint32_t particle_index : m_local_active_global_indices) {
+      context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_particle_accel_x[particle_index];
+      context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_particle_accel_y[particle_index];
+      context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_particle_accel_z[particle_index];
+    }
+  }
+
   void emitGravityEvent(
       core::StepContext& context,
       core::RuntimeEventSeverity severity,
@@ -1795,6 +1893,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_last_committed_field_version = 0;
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;
+  bool m_force_cache_valid = false;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
 
@@ -2029,6 +2128,14 @@ void maybeWriteOutputs(
   }
   if ((integrator_state.step_index % static_cast<std::uint64_t>(config.output.snapshot_interval_steps)) != 0U) {
     return;
+  }
+  if (!integrator_state.last_completed_restart_safe ||
+      !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+    return;
+  }
+  core::assertCanWriteSnapshotAtBoundary(integrator_state);
+  if (config.output.write_restarts) {
+    core::assertCanWriteCheckpointAtBoundary(integrator_state);
   }
 
   io::SnapshotWritePayload snapshot_payload;
@@ -2406,6 +2513,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         {},
         {},
         {});
+    ensureSchedulerCoversState(state, scheduler);
 
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
@@ -2454,6 +2562,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           gravity_callback.cellAccelX(),
           gravity_callback.cellAccelY(),
           gravity_callback.cellAccelZ());
+      ensureSchedulerCoversState(state, scheduler);
       scheduler.endSubstep();
       syncTimeBinsFromScheduler(scheduler, state);
       maybeWriteOutputs(m_frozen_config, config, state, integrator_state, scheduler, gravity_callback, report, profiler, options.write_outputs);

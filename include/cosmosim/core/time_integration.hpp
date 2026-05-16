@@ -18,16 +18,18 @@
 namespace cosmosim::core {
 
 class HierarchicalTimeBinScheduler;
+struct IntegratorState;
 
 // Explicit step stage contract shared by gravity, hydro, physics, analysis, and I/O modules.
 enum class IntegrationStage : std::uint8_t {
   kGravityKickPre = 0,
   kDrift = 1,
-  kHydroUpdate = 2,
-  kSourceTerms = 3,
-  kGravityKickPost = 4,
-  kAnalysisHooks = 5,
-  kOutputCheck = 6,
+  kForceRefresh = 2,
+  kHydroUpdate = 3,
+  kSourceTerms = 4,
+  kGravityKickPost = 5,
+  kAnalysisHooks = 6,
+  kOutputCheck = 7,
 };
 
 [[nodiscard]] std::string_view integrationStageName(IntegrationStage stage);
@@ -35,6 +37,61 @@ enum class IntegrationStage : std::uint8_t {
 // Baseline stepping family; hierarchical bins can reuse the same stage contract.
 enum class TimeStepScheme : std::uint8_t {
   kKickDriftKick = 0,
+};
+
+// Explicit integration-boundary classes distinguish local active-bin work from
+// globally coherent restart/output points and legal PM-refresh surfaces.
+enum class StepBoundaryKind : std::uint8_t {
+  kLocalActiveBinStep = 0,
+  kGlobalSynchronizationPoint = 1,
+  kPmRefreshPoint = 2,
+  kSnapshotPoint = 3,
+  kCheckpointPoint = 4,
+};
+
+[[nodiscard]] std::string_view stepBoundaryKindName(StepBoundaryKind kind);
+[[nodiscard]] bool isRestartSafeBoundary(StepBoundaryKind kind) noexcept;
+[[nodiscard]] bool isOutputSafeBoundary(StepBoundaryKind kind) noexcept;
+
+struct StepBoundaryState {
+  StepBoundaryKind kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+  bool restart_safe = true;
+  bool output_safe = true;
+  bool pm_refresh_allowed = true;
+  bool local_substep = false;
+};
+
+struct CosmologicalStepFactors {
+  bool cosmological = false;
+  double time_begin_code = 0.0;
+  double time_end_code = 0.0;
+  double dt_time_code = 0.0;
+  double scale_factor_begin = 1.0;
+  double scale_factor_midpoint = 1.0;
+  double scale_factor_end = 1.0;
+  double redshift_begin = 0.0;
+  double redshift_end = 0.0;
+  double hubble_begin_code = 0.0;
+  double hubble_end_code = 0.0;
+  double drift_factor_code = 0.0;
+  double first_kick_factor_code = 0.0;
+  double second_kick_factor_code = 0.0;
+  double hubble_drag_factor = 1.0;
+};
+
+class CosmologicalTimeline {
+ public:
+  explicit CosmologicalTimeline(const LambdaCdmBackground* background = nullptr);
+
+  [[nodiscard]] CosmologicalStepFactors prepareStep(
+      double current_time_code,
+      double current_scale_factor,
+      double dt_time_code) const;
+
+  void commitStep(IntegratorState& integrator_state, const CosmologicalStepFactors& step) const;
+
+ private:
+  const LambdaCdmBackground* m_background = nullptr;
 };
 
 // Hierarchical stepping metadata kept outside particle arrays for auditable ownership.
@@ -48,7 +105,16 @@ struct TimeBinContext {
 struct IntegratorState {
   double current_time_code = 0.0;
   double current_scale_factor = 1.0;
+  double current_redshift = 0.0;
+  double current_hubble_rate_code = 0.0;
   double dt_time_code = 0.0;
+  double last_drift_factor_code = 0.0;
+  double last_first_kick_factor_code = 0.0;
+  double last_second_kick_factor_code = 0.0;
+  StepBoundaryKind current_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+  StepBoundaryKind last_completed_boundary_kind = StepBoundaryKind::kCheckpointPoint;
+  bool inside_kdk_step = false;
+  bool last_completed_restart_safe = true;
   std::uint64_t step_index = 0;
   TimeStepScheme scheme = TimeStepScheme::kKickDriftKick;
   TimeBinContext time_bins;
@@ -83,6 +149,8 @@ struct StepContext {
   const LambdaCdmBackground* cosmology_background = nullptr;
   const ModePolicy* mode_policy = nullptr;
   ProfilerSession* profiler_session = nullptr;
+  CosmologicalStepFactors timeline_step;
+  StepBoundaryState boundary;
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
 
@@ -176,8 +244,9 @@ struct TimeBinMappingResult {
 enum class TimeStepCandidateSource : std::uint8_t {
   kHydroCfl = 0,
   kGravityAcceleration = 1,
-  kSourceTerm = 2,
-  kUserClamp = 3,
+  kCosmologyExpansion = 2,
+  kSourceTerm = 3,
+  kUserClamp = 4,
 };
 
 [[nodiscard]] std::string_view timeStepCandidateSourceName(TimeStepCandidateSource source);
@@ -195,6 +264,8 @@ struct TimeStepReconciliationResult {
   std::uint32_t committed_transition_requests = 0;
   std::uint32_t clipped_to_min_dt = 0;
   std::uint32_t clipped_to_max_dt = 0;
+  std::array<std::uint32_t, 5> limiting_candidates_by_source{};
+  TimeStepCandidateSource dominant_limiting_source = TimeStepCandidateSource::kUserClamp;
 };
 
 struct PmSyncEvent {
@@ -313,6 +384,7 @@ class HierarchicalTimeBinScheduler {
   explicit HierarchicalTimeBinScheduler(std::uint8_t max_bin = 0);
 
   void reset(std::uint32_t element_count, std::uint8_t initial_bin, std::uint64_t start_tick = 0);
+  void appendElements(std::uint32_t new_element_count, std::uint8_t initial_bin, std::uint64_t first_activation_tick);
   void setElementBin(std::uint32_t element_index, std::uint8_t bin_index, std::uint64_t current_tick);
   void submitCandidateTimeStep(
       std::uint32_t element_index,
@@ -366,6 +438,7 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::uint32_t> m_active_elements;
   TimeBinDiagnostics m_diagnostics;
   std::vector<std::uint8_t> m_candidate_bin_index;
+  std::vector<TimeStepCandidateSource> m_candidate_source;
   std::vector<std::string> m_candidate_label;
   TimeStepReconciliationResult m_last_reconciliation;
   bool m_substep_open = false;
@@ -489,14 +562,21 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     const TimeStepCriteriaHooks& hooks,
     double fallback_dt_time_code);
 
+[[nodiscard]] double computeCosmologyExpansionTimeStep(
+    const LambdaCdmBackground& background,
+    double scale_factor,
+    double max_delta_ln_a,
+    double max_hubble_time_fraction);
+
 // da/dt = a H(a) for standard FLRW backgrounds.
 [[nodiscard]] double computeScaleFactorRate(const LambdaCdmBackground& background, double scale_factor);
 
-// Forward-Euler helper used by baseline tests and scheduler scaffolding.
-[[nodiscard]] double advanceScaleFactorEuler(
+// Production scale-factor evolution: invert the FLRW time integral dt = integral da/(a H(a)).
+[[nodiscard]] double advanceScaleFactorByCosmicTime(
     const LambdaCdmBackground& background,
     double scale_factor,
-    double dt_time_code);
+    double dt_time_code,
+    std::uint32_t midpoint_samples = 64);
 
 // dt estimate for an intended delta-a increment around the current scale factor.
 [[nodiscard]] double estimateDeltaTimeFromScaleFactorStep(
@@ -520,5 +600,13 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
 
 // Hubble drag factor for dv/dt = -H(a) v over [a0, a1].
 [[nodiscard]] double computeHubbleDragFactor(double scale_factor_begin, double scale_factor_end);
+
+[[nodiscard]] StepBoundaryState classifyStepBoundary(
+    const SimulationState& state,
+    const ActiveSetDescriptor& active_set,
+    bool scheduler_owned_substep);
+
+void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state);
+void assertCanWriteCheckpointAtBoundary(const IntegratorState& integrator_state);
 
 }  // namespace cosmosim::core
