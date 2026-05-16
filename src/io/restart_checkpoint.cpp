@@ -914,6 +914,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_scale_factor));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_redshift));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->current_hubble_rate_code));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->time_si_per_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->dt_time_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_drift_factor_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_first_kick_factor_code));
@@ -1000,6 +1001,7 @@ void writeRestartCheckpointHdf5(
   writeScalarF64Attribute(integrator_group.get(), "current_scale_factor", payload.integrator_state->current_scale_factor);
   writeScalarF64Attribute(integrator_group.get(), "current_redshift", payload.integrator_state->current_redshift);
   writeScalarF64Attribute(integrator_group.get(), "current_hubble_rate_code", payload.integrator_state->current_hubble_rate_code);
+  writeScalarF64Attribute(integrator_group.get(), "time_si_per_code", payload.integrator_state->time_si_per_code);
   writeScalarF64Attribute(integrator_group.get(), "dt_time_code", payload.integrator_state->dt_time_code);
   writeScalarF64Attribute(integrator_group.get(), "last_drift_factor_code", payload.integrator_state->last_drift_factor_code);
   writeScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code", payload.integrator_state->last_first_kick_factor_code);
@@ -1087,6 +1089,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.integrator_state.current_scale_factor = readScalarF64Attribute(integrator_group.get(), "current_scale_factor");
   result.integrator_state.current_redshift = readScalarF64Attribute(integrator_group.get(), "current_redshift");
   result.integrator_state.current_hubble_rate_code = readScalarF64Attribute(integrator_group.get(), "current_hubble_rate_code");
+  result.integrator_state.time_si_per_code = readScalarF64Attribute(integrator_group.get(), "time_si_per_code");
   result.integrator_state.dt_time_code = readScalarF64Attribute(integrator_group.get(), "dt_time_code");
   result.integrator_state.last_drift_factor_code = readScalarF64Attribute(integrator_group.get(), "last_drift_factor_code");
   result.integrator_state.last_first_kick_factor_code = readScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code");

@@ -103,6 +103,10 @@ struct CosmologyConfig {
 struct NumericsConfig {
   double time_begin_code = 0.0;
   double time_end_code = 1.0;
+  double cosmology_initial_scale_factor = 1.0;
+  double cosmology_max_delta_ln_a = 1.0e-2;
+  double cosmology_max_hubble_time_fraction = 1.0e-2;
+  double source_max_fractional_change = 0.1;
   int max_global_steps = 1024;
   int hierarchical_max_rung = 12;
   int amr_max_level = 10;

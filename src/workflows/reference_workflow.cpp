@@ -24,10 +24,12 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/cosmology.hpp"
+#include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/core/units.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
@@ -217,9 +219,43 @@ void updateAdaptiveTimeBins(
     cosmology_dt = core::computeCosmologyExpansionTimeStep(
         background,
         integrator_state.current_scale_factor,
-        1.0e-2,
-        1.0e-2);
+        config.numerics.cosmology_max_delta_ln_a,
+        config.numerics.cosmology_max_hubble_time_fraction,
+        integrator_state.time_si_per_code);
   }
+  const auto star_formation_dt_for_cell = [&](std::uint32_t cell_index) -> std::optional<double> {
+    if (!config.physics.enable_star_formation || cell_index >= state.cells.size() || cell_index >= state.gas_cells.size()) {
+      return std::nullopt;
+    }
+    const double gas_mass = state.cells.mass_code[cell_index];
+    const double rho = state.gas_cells.density_code[cell_index];
+    const double temperature = state.gas_cells.temperature_code[cell_index];
+    if (gas_mass <= 0.0 || rho < config.physics.sf_density_threshold_code ||
+        temperature > config.physics.sf_temperature_threshold_k || config.physics.sf_epsilon_ff <= 0.0) {
+      return std::nullopt;
+    }
+    const double t_ff = std::sqrt(3.0 * core::constants::k_pi /
+        (32.0 * core::constants::k_newton_g_si * std::max(rho, 1.0e-30)));
+    return std::max(1.0e-12, config.numerics.source_max_fractional_change * t_ff / config.physics.sf_epsilon_ff);
+  };
+  const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
+    if (!config.physics.enable_black_hole_agn || particle_index >= state.particle_sidecar.species_tag.size() ||
+        state.particle_sidecar.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
+      return std::nullopt;
+    }
+    for (std::size_t bh_index = 0; bh_index < state.black_holes.size(); ++bh_index) {
+      if (state.black_holes.particle_index[bh_index] != particle_index) {
+        continue;
+      }
+      const double mass = std::max(state.black_holes.subgrid_mass_code[bh_index], 1.0e-30);
+      const double mdot = std::max(state.black_holes.accretion_rate_code[bh_index], 0.0);
+      if (mdot <= 0.0) {
+        return std::nullopt;
+      }
+      return std::max(1.0e-12, config.numerics.source_max_fractional_change * mass / mdot);
+    }
+    return std::nullopt;
+  };
   for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
     core::TimeStepCriteriaRegistry registry;
     if (element_index < state.cells.size()) {
@@ -252,6 +288,10 @@ void updateAdaptiveTimeBins(
         scheduler.submitCandidateTimeStep(
             element_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "cell_cosmology_expansion");
       }
+      if (const auto source_dt = star_formation_dt_for_cell(element_index); source_dt.has_value()) {
+        scheduler.submitCandidateTimeStep(
+            element_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "cell_star_formation_source");
+      }
       if (gas_index < scheduler.elementCount()) {
         scheduler.submitCandidateTimeStep(
             gas_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_particle_hydro_cfl");
@@ -260,6 +300,10 @@ void updateAdaptiveTimeBins(
         if (cosmology_dt.has_value()) {
           scheduler.submitCandidateTimeStep(
               gas_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "gas_particle_cosmology_expansion");
+        }
+        if (const auto source_dt = star_formation_dt_for_cell(element_index); source_dt.has_value()) {
+          scheduler.submitCandidateTimeStep(
+              gas_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_particle_star_formation_source");
         }
       }
       continue;
@@ -303,6 +347,14 @@ void updateAdaptiveTimeBins(
             limits,
             core::TimeStepCandidateSource::kCosmologyExpansion,
             "particle_cosmology_expansion");
+      }
+      if (const auto source_dt = black_hole_dt_for_particle(element_index); source_dt.has_value()) {
+        scheduler.submitCandidateTimeStep(
+            element_index,
+            *source_dt,
+            limits,
+            core::TimeStepCandidateSource::kSourceTerm,
+            "particle_black_hole_source");
       }
     }
   }
@@ -2284,6 +2336,21 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
   return runImpl(&output_root_override, options);
 }
 
+core::StepBoundaryKind requestedBoundaryForCompletedStep(
+    const core::SimulationConfig& config,
+    const ReferenceWorkflowOptions& options,
+    std::uint64_t next_step_index) {
+  if (!options.write_outputs || config.output.snapshot_interval_steps <= 0) {
+    return core::StepBoundaryKind::kGlobalSynchronizationPoint;
+  }
+  if ((next_step_index % static_cast<std::uint64_t>(config.output.snapshot_interval_steps)) != 0U) {
+    return core::StepBoundaryKind::kGlobalSynchronizationPoint;
+  }
+  return config.output.write_restarts
+      ? core::StepBoundaryKind::kCheckpointPoint
+      : core::StepBoundaryKind::kSnapshotPoint;
+}
+
 ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const std::filesystem::path* output_root_override,
     const ReferenceWorkflowOptions& options) const {
@@ -2412,11 +2479,24 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     initializeSchedulerBins(state, scheduler);
     syncTimeBinsFromScheduler(scheduler, state);
 
+    const core::UnitSystem runtime_units = core::makeUnitSystem(
+        config.units.length_unit,
+        config.units.mass_unit,
+        config.units.velocity_unit);
+
     core::IntegratorState integrator_state;
     integrator_state.step_index = options.step_index;
     integrator_state.current_time_code = config.numerics.time_begin_code;
-    integrator_state.current_scale_factor =
-        (background.has_value() && config.numerics.time_begin_code > 0.0) ? config.numerics.time_begin_code : 1.0;
+    integrator_state.time_si_per_code = runtime_units.timeSiPerCode();
+    integrator_state.current_scale_factor = background.has_value()
+        ? config.numerics.cosmology_initial_scale_factor
+        : 1.0;
+    integrator_state.current_redshift = (integrator_state.current_scale_factor > 0.0)
+        ? (1.0 / integrator_state.current_scale_factor - 1.0)
+        : 0.0;
+    integrator_state.current_hubble_rate_code = background.has_value()
+        ? background->hubbleSi(integrator_state.current_scale_factor) * integrator_state.time_si_per_code
+        : 0.0;
     integrator_state.dt_time_code = options.dt_time_code > 0.0
         ? options.dt_time_code
         : std::max(
@@ -2538,6 +2618,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
 
       core::TransientStepWorkspace workspace;
+      const core::StepBoundaryKind requested_boundary = requestedBoundaryForCompletedStep(
+          config,
+          options,
+          integrator_state.step_index + 1U);
       orchestrator.executeSchedulerSubstep(
           state,
           integrator_state,
@@ -2547,7 +2631,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           background.has_value() ? &background.value() : nullptr,
           &workspace,
           &mode_policy,
-          &profiler);
+          &profiler,
+          requested_boundary);
 
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;

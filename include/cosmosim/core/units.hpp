@@ -24,6 +24,11 @@ struct UnitSystem {
   [[nodiscard]] double velocityCodeToSi(double velocity_code) const;
   [[nodiscard]] double velocitySiToCode(double velocity_si) const;
 
+  // Derived code-time unit: length unit divided by velocity unit, in SI seconds.
+  [[nodiscard]] double timeSiPerCode() const;
+  [[nodiscard]] double timeCodeToSi(double time_code) const;
+  [[nodiscard]] double timeSiToCode(double time_si) const;
+
   [[nodiscard]] double densityCodeToSi(double density_code) const;
   [[nodiscard]] double densitySiToCode(double density_si) const;
 

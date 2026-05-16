@@ -77,6 +77,18 @@ double UnitSystem::velocityCodeToSi(double velocity_code) const {
 
 double UnitSystem::velocitySiToCode(double velocity_si) const { return velocity_si / velocity_si_per_code; }
 
+double UnitSystem::timeSiPerCode() const {
+  return length_si_per_code / velocity_si_per_code;
+}
+
+double UnitSystem::timeCodeToSi(double time_code) const {
+  return time_code * timeSiPerCode();
+}
+
+double UnitSystem::timeSiToCode(double time_si) const {
+  return time_si / timeSiPerCode();
+}
+
 double UnitSystem::densityCodeToSi(double density_code) const {
   const double density_si_per_code = mass_si_per_code / (length_si_per_code * length_si_per_code * length_si_per_code);
   return density_code * density_si_per_code;

@@ -207,7 +207,12 @@ bool isOutputSafeBoundary(StepBoundaryKind kind) noexcept {
          kind == StepBoundaryKind::kCheckpointPoint;
 }
 
-CosmologicalTimeline::CosmologicalTimeline(const LambdaCdmBackground* background) : m_background(background) {}
+CosmologicalTimeline::CosmologicalTimeline(const LambdaCdmBackground* background, double time_si_per_code)
+    : m_background(background), m_time_si_per_code(time_si_per_code) {
+  if (m_time_si_per_code <= 0.0 || !std::isfinite(m_time_si_per_code)) {
+    throw std::invalid_argument("CosmologicalTimeline: time_si_per_code must be finite and positive");
+  }
+}
 
 CosmologicalStepFactors CosmologicalTimeline::prepareStep(
     double current_time_code,
@@ -225,6 +230,8 @@ CosmologicalStepFactors CosmologicalTimeline::prepareStep(
   step.time_begin_code = current_time_code;
   step.time_end_code = current_time_code + dt_time_code;
   step.dt_time_code = dt_time_code;
+  step.time_si_per_code = m_time_si_per_code;
+  step.dt_time_si = dt_time_code * m_time_si_per_code;
   step.scale_factor_begin = current_scale_factor;
   step.redshift_begin = redshiftFromScaleFactor(current_scale_factor);
 
@@ -239,14 +246,14 @@ CosmologicalStepFactors CosmologicalTimeline::prepareStep(
     return step;
   }
 
-  step.hubble_begin_code = m_background->hubbleSi(current_scale_factor);
-  step.scale_factor_midpoint = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, 0.5 * dt_time_code);
-  step.scale_factor_end = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, dt_time_code);
+  step.hubble_begin_code = m_background->hubbleSi(current_scale_factor) * m_time_si_per_code;
+  step.scale_factor_midpoint = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, 0.5 * step.dt_time_si);
+  step.scale_factor_end = advanceScaleFactorByCosmicTime(*m_background, current_scale_factor, step.dt_time_si);
   step.redshift_end = redshiftFromScaleFactor(step.scale_factor_end);
-  step.hubble_end_code = m_background->hubbleSi(step.scale_factor_end);
-  step.drift_factor_code = computeComovingDriftFactor(*m_background, step.scale_factor_begin, step.scale_factor_end, 64);
-  step.first_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_begin, step.scale_factor_midpoint, 64);
-  step.second_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_midpoint, step.scale_factor_end, 64);
+  step.hubble_end_code = m_background->hubbleSi(step.scale_factor_end) * m_time_si_per_code;
+  step.drift_factor_code = computeComovingDriftFactor(*m_background, step.scale_factor_begin, step.scale_factor_end, 64) / m_time_si_per_code;
+  step.first_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_begin, step.scale_factor_midpoint, 64) / m_time_si_per_code;
+  step.second_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_midpoint, step.scale_factor_end, 64) / m_time_si_per_code;
   step.hubble_drag_factor = computeHubbleDragFactor(step.scale_factor_begin, step.scale_factor_end);
   return step;
 }
@@ -259,6 +266,7 @@ void CosmologicalTimeline::commitStep(IntegratorState& integrator_state, const C
   integrator_state.current_scale_factor = step.scale_factor_end;
   integrator_state.current_redshift = step.redshift_end;
   integrator_state.current_hubble_rate_code = step.hubble_end_code;
+  integrator_state.time_si_per_code = step.time_si_per_code;
   integrator_state.last_drift_factor_code = step.drift_factor_code;
   integrator_state.last_first_kick_factor_code = step.first_kick_factor_code;
   integrator_state.last_second_kick_factor_code = step.second_kick_factor_code;
@@ -592,7 +600,8 @@ void StepOrchestrator::executeSingleStep(
     TransientStepWorkspace* workspace,
     const ModePolicy* mode_policy,
     ProfilerSession* profiler_session,
-    std::optional<std::uint64_t> expected_scheduler_tick) const {
+    std::optional<std::uint64_t> expected_scheduler_tick,
+    StepBoundaryKind requested_boundary_kind) const {
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("dt_time_code must be positive");
   }
@@ -622,8 +631,9 @@ void StepOrchestrator::executeSingleStep(
   const StepBoundaryState boundary = classifyStepBoundary(
       state,
       active_set,
-      expected_scheduler_tick.has_value());
-  CosmologicalTimeline timeline(cosmology_background);
+      expected_scheduler_tick.has_value(),
+      requested_boundary_kind);
+  CosmologicalTimeline timeline(cosmology_background, integrator_state.time_si_per_code);
   const CosmologicalStepFactors timeline_step = timeline.prepareStep(
       integrator_state.current_time_code,
       integrator_state.current_scale_factor,
@@ -651,6 +661,13 @@ void StepOrchestrator::executeSingleStep(
 
   for (const auto stage : ordered_stages) {
     context.stage = stage;
+    context.boundary = boundary;
+    if (stage == IntegrationStage::kForceRefresh) {
+      context.boundary.kind = StepBoundaryKind::kPmRefreshPoint;
+      context.boundary.pm_refresh_allowed = true;
+    } else if (stage == IntegrationStage::kOutputCheck) {
+      context.boundary.kind = requested_boundary_kind;
+    }
     const std::string stage_name = "stage." + std::string(integrationStageName(stage));
     COSMOSIM_PROFILE_SCOPE(profiler_session, stage_name);
     if (profiler_session != nullptr) {
@@ -695,7 +712,8 @@ void StepOrchestrator::executeSchedulerSubstep(
     const LambdaCdmBackground* cosmology_background,
     TransientStepWorkspace* workspace,
     const ModePolicy* mode_policy,
-    ProfilerSession* profiler_session) const {
+    ProfilerSession* profiler_session,
+    StepBoundaryKind requested_boundary_kind) const {
   const ActiveSetDescriptor active_set = makeSchedulerActiveSetDescriptor(
       scheduler,
       state,
@@ -709,7 +727,8 @@ void StepOrchestrator::executeSchedulerSubstep(
       workspace,
       mode_policy,
       profiler_session,
-      scheduler.currentTick());
+      scheduler.currentTick(),
+      requested_boundary_kind);
 }
 
 HierarchicalTimeBinScheduler::HierarchicalTimeBinScheduler(std::uint8_t max_bin) : m_max_bin(max_bin) {}
@@ -1676,18 +1695,21 @@ double computeCosmologyExpansionTimeStep(
     const LambdaCdmBackground& background,
     double scale_factor,
     double max_delta_ln_a,
-    double max_hubble_time_fraction) {
+    double max_hubble_time_fraction,
+    double time_si_per_code) {
   if (scale_factor <= 0.0) {
     throw std::invalid_argument("scale_factor must be positive");
   }
-  if (max_delta_ln_a <= 0.0 || max_hubble_time_fraction <= 0.0) {
-    throw std::invalid_argument("cosmology timestep limits must be positive");
+  if (max_delta_ln_a <= 0.0 || max_hubble_time_fraction <= 0.0 ||
+      time_si_per_code <= 0.0 || !std::isfinite(time_si_per_code)) {
+    throw std::invalid_argument("cosmology timestep limits and time_si_per_code must be positive");
   }
   const double hubble = background.hubbleSi(scale_factor);
   if (hubble <= 0.0) {
     throw std::invalid_argument("H(a) must be positive");
   }
-  return std::min(max_delta_ln_a / hubble, max_hubble_time_fraction / hubble);
+  const double dt_si = std::min(max_delta_ln_a / hubble, max_hubble_time_fraction / hubble);
+  return dt_si / time_si_per_code;
 }
 
 double advanceScaleFactorByCosmicTime(
@@ -1781,16 +1803,27 @@ double computeHubbleDragFactor(double scale_factor_begin, double scale_factor_en
 StepBoundaryState classifyStepBoundary(
     const SimulationState& state,
     const ActiveSetDescriptor& active_set,
-    bool scheduler_owned_substep) {
+    bool scheduler_owned_substep,
+    StepBoundaryKind requested_kind) {
   const bool particle_subset = active_set.hasParticleSubset(state.particles.size());
   const bool cell_subset = active_set.hasCellSubset(state.cells.size());
   const bool local = scheduler_owned_substep && (particle_subset || cell_subset);
   StepBoundaryState boundary{};
-  boundary.kind = local ? StepBoundaryKind::kLocalActiveBinStep : StepBoundaryKind::kGlobalSynchronizationPoint;
   boundary.local_substep = local;
-  boundary.restart_safe = !local;
-  boundary.output_safe = !local;
-  boundary.pm_refresh_allowed = true;
+  if (local) {
+    boundary.kind = StepBoundaryKind::kLocalActiveBinStep;
+    boundary.restart_safe = false;
+    boundary.output_safe = false;
+    boundary.pm_refresh_allowed = requested_kind == StepBoundaryKind::kPmRefreshPoint;
+    return boundary;
+  }
+  boundary.kind = requested_kind;
+  boundary.restart_safe = isRestartSafeBoundary(requested_kind);
+  boundary.output_safe = isOutputSafeBoundary(requested_kind);
+  boundary.pm_refresh_allowed = requested_kind == StepBoundaryKind::kGlobalSynchronizationPoint ||
+      requested_kind == StepBoundaryKind::kPmRefreshPoint ||
+      requested_kind == StepBoundaryKind::kCheckpointPoint ||
+      requested_kind == StepBoundaryKind::kSnapshotPoint;
   return boundary;
 }
 

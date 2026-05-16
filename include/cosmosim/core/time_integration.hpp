@@ -66,6 +66,8 @@ struct CosmologicalStepFactors {
   double time_begin_code = 0.0;
   double time_end_code = 0.0;
   double dt_time_code = 0.0;
+  double time_si_per_code = 1.0;
+  double dt_time_si = 0.0;
   double scale_factor_begin = 1.0;
   double scale_factor_midpoint = 1.0;
   double scale_factor_end = 1.0;
@@ -81,7 +83,7 @@ struct CosmologicalStepFactors {
 
 class CosmologicalTimeline {
  public:
-  explicit CosmologicalTimeline(const LambdaCdmBackground* background = nullptr);
+  explicit CosmologicalTimeline(const LambdaCdmBackground* background = nullptr, double time_si_per_code = 1.0);
 
   [[nodiscard]] CosmologicalStepFactors prepareStep(
       double current_time_code,
@@ -92,6 +94,7 @@ class CosmologicalTimeline {
 
  private:
   const LambdaCdmBackground* m_background = nullptr;
+  double m_time_si_per_code = 1.0;
 };
 
 // Hierarchical stepping metadata kept outside particle arrays for auditable ownership.
@@ -107,6 +110,7 @@ struct IntegratorState {
   double current_scale_factor = 1.0;
   double current_redshift = 0.0;
   double current_hubble_rate_code = 0.0;
+  double time_si_per_code = 1.0;
   double dt_time_code = 0.0;
   double last_drift_factor_code = 0.0;
   double last_first_kick_factor_code = 0.0;
@@ -191,7 +195,8 @@ class StepOrchestrator {
       TransientStepWorkspace* workspace = nullptr,
       const ModePolicy* mode_policy = nullptr,
       ProfilerSession* profiler_session = nullptr,
-      std::optional<std::uint64_t> expected_scheduler_tick = std::nullopt) const;
+      std::optional<std::uint64_t> expected_scheduler_tick = std::nullopt,
+      StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
 
   void executeSchedulerSubstep(
       SimulationState& state,
@@ -202,7 +207,8 @@ class StepOrchestrator {
       const LambdaCdmBackground* cosmology_background,
       TransientStepWorkspace* workspace = nullptr,
       const ModePolicy* mode_policy = nullptr,
-      ProfilerSession* profiler_session = nullptr) const;
+      ProfilerSession* profiler_session = nullptr,
+      StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
 
  private:
   StageScheduler m_scheduler;
@@ -566,7 +572,8 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     const LambdaCdmBackground& background,
     double scale_factor,
     double max_delta_ln_a,
-    double max_hubble_time_fraction);
+    double max_hubble_time_fraction,
+    double time_si_per_code = 1.0);
 
 // da/dt = a H(a) for standard FLRW backgrounds.
 [[nodiscard]] double computeScaleFactorRate(const LambdaCdmBackground& background, double scale_factor);
@@ -604,7 +611,8 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
 [[nodiscard]] StepBoundaryState classifyStepBoundary(
     const SimulationState& state,
     const ActiveSetDescriptor& active_set,
-    bool scheduler_owned_substep);
+    bool scheduler_owned_substep,
+    StepBoundaryKind requested_kind = StepBoundaryKind::kGlobalSynchronizationPoint);
 
 void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state);
 void assertCanWriteCheckpointAtBoundary(const IntegratorState& integrator_state);

@@ -523,6 +523,10 @@ struct ConfigKeySpec {
       {"cosmology.box_size", "50.0"},
       {"numerics.time_begin_code", "0.0"},
       {"numerics.time_end_code", "1.0"},
+      {"numerics.cosmology_initial_scale_factor", "1.0"},
+      {"numerics.cosmology_max_delta_ln_a", "1.0e-2"},
+      {"numerics.cosmology_max_hubble_time_fraction", "1.0e-2"},
+      {"numerics.source_max_fractional_change", "0.1"},
       {"numerics.max_global_steps", "1024"},
       {"numerics.hierarchical_max_rung", "12"},
       {"numerics.amr_max_level", "10"},
@@ -655,6 +659,13 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.numerics.time_end_code <= config.numerics.time_begin_code) {
     throw ConfigError("numerics.time_end_code must be greater than numerics.time_begin_code");
+  }
+  if (config.numerics.cosmology_initial_scale_factor <= 0.0 ||
+      config.numerics.cosmology_max_delta_ln_a <= 0.0 ||
+      config.numerics.cosmology_max_hubble_time_fraction <= 0.0 ||
+      config.numerics.source_max_fractional_change <= 0.0 ||
+      config.numerics.source_max_fractional_change > 1.0) {
+    throw ConfigError("numerics cosmology/source timestep limits must be positive; source_max_fractional_change must be <= 1");
   }
   if (config.numerics.max_global_steps <= 0) {
     throw ConfigError("numerics.max_global_steps must be > 0");
@@ -845,6 +856,10 @@ void validateConfig(const SimulationConfig& config) {
   stream << "\n[numerics]\n";
   stream << "time_begin_code = " << frozen.config.numerics.time_begin_code << '\n';
   stream << "time_end_code = " << frozen.config.numerics.time_end_code << '\n';
+  stream << "cosmology_initial_scale_factor = " << frozen.config.numerics.cosmology_initial_scale_factor << '\n';
+  stream << "cosmology_max_delta_ln_a = " << frozen.config.numerics.cosmology_max_delta_ln_a << '\n';
+  stream << "cosmology_max_hubble_time_fraction = " << frozen.config.numerics.cosmology_max_hubble_time_fraction << '\n';
+  stream << "source_max_fractional_change = " << frozen.config.numerics.source_max_fractional_change << '\n';
   stream << "max_global_steps = " << frozen.config.numerics.max_global_steps << '\n';
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
@@ -1123,6 +1138,18 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.time_end_code = parseFloating(
       requireString(entries, consumed, "numerics.time_end_code", "1.0"),
       "numerics.time_end_code");
+  frozen.config.numerics.cosmology_initial_scale_factor = parseFloating(
+      requireString(entries, consumed, "numerics.cosmology_initial_scale_factor", defaultFor("numerics.cosmology_initial_scale_factor")),
+      "numerics.cosmology_initial_scale_factor");
+  frozen.config.numerics.cosmology_max_delta_ln_a = parseFloating(
+      requireString(entries, consumed, "numerics.cosmology_max_delta_ln_a", defaultFor("numerics.cosmology_max_delta_ln_a")),
+      "numerics.cosmology_max_delta_ln_a");
+  frozen.config.numerics.cosmology_max_hubble_time_fraction = parseFloating(
+      requireString(entries, consumed, "numerics.cosmology_max_hubble_time_fraction", defaultFor("numerics.cosmology_max_hubble_time_fraction")),
+      "numerics.cosmology_max_hubble_time_fraction");
+  frozen.config.numerics.source_max_fractional_change = parseFloating(
+      requireString(entries, consumed, "numerics.source_max_fractional_change", defaultFor("numerics.source_max_fractional_change")),
+      "numerics.source_max_fractional_change");
   frozen.config.numerics.max_global_steps = static_cast<int>(parseNumber<long>(
       requireString(entries, consumed, "numerics.max_global_steps", "1024"),
       "numerics.max_global_steps"));

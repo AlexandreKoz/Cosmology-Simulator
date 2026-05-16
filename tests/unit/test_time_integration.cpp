@@ -140,6 +140,30 @@ void testCosmologyHelpers() {
          (step.first_kick_factor_code + step.second_kick_factor_code) < 1.0e-5);
 }
 
+
+void testCosmologicalTimelineConvertsSiIntegralsToCodeTime() {
+  cosmosim::core::CosmologyBackgroundConfig cfg;
+  cfg.hubble_param = 0.7;
+  cfg.omega_matter = 1.0;
+  cfg.omega_lambda = 0.0;
+  cfg.omega_radiation = 0.0;
+  cfg.omega_curvature = 0.0;
+  const cosmosim::core::LambdaCdmBackground background(cfg);
+
+  const double a0 = 0.5;
+  const double dt_si = cosmosim::core::estimateDeltaTimeFromScaleFactorStep(background, a0, 1.0e-4);
+  const double time_si_per_code = 10.0;
+  const cosmosim::core::CosmologicalTimeline timeline(&background, time_si_per_code);
+  const auto step = timeline.prepareStep(0.0, a0, dt_si / time_si_per_code);
+
+  assert(std::abs(step.dt_time_si - dt_si) / dt_si < 1.0e-14);
+  assert(std::abs(step.hubble_begin_code - background.hubbleSi(a0) * time_si_per_code) <
+         1.0e-15 * background.hubbleSi(a0) * time_si_per_code);
+  assert(std::abs(step.drift_factor_code * time_si_per_code -
+                  cosmosim::core::computeComovingDriftFactor(background, a0, step.scale_factor_end, 128)) /
+         (step.drift_factor_code * time_si_per_code) < 1.0e-5);
+}
+
 void testActiveSubsetDetection() {
   std::vector<std::uint32_t> active_particles = {0, 2, 4};
   std::vector<std::uint32_t> active_cells = {1, 3};
@@ -782,6 +806,25 @@ void testBoundarySafetyClassification() {
   const auto global_boundary = cosmosim::core::classifyStepBoundary(state, global_active, false);
   assert(global_boundary.kind == cosmosim::core::StepBoundaryKind::kGlobalSynchronizationPoint);
   assert(global_boundary.restart_safe);
+
+  const auto checkpoint_boundary = cosmosim::core::classifyStepBoundary(
+      state,
+      global_active,
+      false,
+      cosmosim::core::StepBoundaryKind::kCheckpointPoint);
+  assert(checkpoint_boundary.kind == cosmosim::core::StepBoundaryKind::kCheckpointPoint);
+  assert(checkpoint_boundary.restart_safe);
+  assert(checkpoint_boundary.output_safe);
+
+  const auto pm_boundary = cosmosim::core::classifyStepBoundary(
+      state,
+      global_active,
+      false,
+      cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+  assert(pm_boundary.kind == cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+  assert(!pm_boundary.restart_safe);
+  assert(!pm_boundary.output_safe);
+  assert(pm_boundary.pm_refresh_allowed);
 }
 
 void testPmSynchronizationCadencePreservesRefreshBoundaries() {
@@ -822,6 +865,7 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
 int main() {
   testKickDriftKickOrdering();
   testCosmologyHelpers();
+  testCosmologicalTimelineConvertsSiIntegralsToCodeTime();
   testActiveSubsetDetection();
   testTimeBinMappingAndCriteria();
   testHierarchicalSchedulerTransitions();
