@@ -52,8 +52,10 @@ BlackHoleAgnModel::BlackHoleAgnModel(BlackHoleAgnConfig config) : m_config(std::
     throw std::invalid_argument("BlackHoleAgnModel: efficiencies must be in physically conservative bounds");
   }
   if (m_config.proton_mass_si <= 0.0 || m_config.thomson_cross_section_si <= 0.0 ||
-      m_config.newton_g_si <= 0.0 || m_config.speed_of_light_si <= 0.0) {
-    throw std::invalid_argument("BlackHoleAgnModel: constants must be > 0");
+      m_config.newton_g_si <= 0.0 || m_config.speed_of_light_si <= 0.0 ||
+      m_config.proton_mass_code <= 0.0 || m_config.thomson_cross_section_code <= 0.0 ||
+      m_config.newton_g_code <= 0.0 || m_config.speed_of_light_code <= 0.0) {
+    throw std::invalid_argument("BlackHoleAgnModel: SI and code-unit constants must be > 0");
   }
 }
 
@@ -84,18 +86,18 @@ BlackHoleRates BlackHoleAgnModel::computeAccretionRates(
   const double denom = std::pow(std::max(cs2 + v2, k_speed_floor * k_speed_floor), 1.5);
 
   rates.mdot_bondi_code =
-      m_config.alpha_bondi * 4.0 * core::constants::k_pi * m_config.newton_g_si * m_config.newton_g_si *
+      m_config.alpha_bondi * 4.0 * core::constants::k_pi * m_config.newton_g_code * m_config.newton_g_code *
       mass * mass * rho / denom;
 
   rates.mdot_edd_code =
-      4.0 * core::constants::k_pi * m_config.newton_g_si * mass * m_config.proton_mass_si /
-      (m_config.epsilon_r * m_config.thomson_cross_section_si * m_config.speed_of_light_si);
+      4.0 * core::constants::k_pi * m_config.newton_g_code * mass * m_config.proton_mass_code /
+      (m_config.epsilon_r * m_config.thomson_cross_section_code * m_config.speed_of_light_code);
 
   rates.mdot_acc_code = m_config.use_eddington_cap ? std::min(rates.mdot_bondi_code, rates.mdot_edd_code)
                                                     : rates.mdot_bondi_code;
   rates.eddington_ratio = rates.mdot_acc_code / std::max(rates.mdot_edd_code, k_time_floor);
   rates.feedback_power_code = m_config.epsilon_f * m_config.epsilon_r * rates.mdot_acc_code *
-                              m_config.speed_of_light_si * m_config.speed_of_light_si;
+                              m_config.speed_of_light_code * m_config.speed_of_light_code;
   return rates;
 }
 

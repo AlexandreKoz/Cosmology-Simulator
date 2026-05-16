@@ -62,6 +62,9 @@ StarFormationModel::StarFormationModel(StarFormationConfig config) : m_config(st
   if (m_config.min_star_particle_mass_code <= 0.0) {
     throw std::invalid_argument("StarFormationModel: min_star_particle_mass_code must be > 0");
   }
+  if (m_config.newton_g_code <= 0.0 || !std::isfinite(m_config.newton_g_code)) {
+    throw std::invalid_argument("StarFormationModel: newton_g_code must be finite and > 0");
+  }
 }
 
 const StarFormationConfig& StarFormationModel::config() const noexcept {
@@ -86,7 +89,7 @@ bool StarFormationModel::isEligible(const StarFormationCellInput& cell) const {
 
 double StarFormationModel::freeFallTimeCode(double gas_density_code) const {
   const double safe_density = std::max(gas_density_code, k_density_floor);
-  return std::sqrt(3.0 * core::constants::k_pi / (32.0 * core::constants::k_newton_g_si * safe_density));
+  return std::sqrt(3.0 * core::constants::k_pi / (32.0 * m_config.newton_g_code * safe_density));
 }
 
 double StarFormationModel::sfrDensityRateCode(double gas_density_code) const {
@@ -250,6 +253,7 @@ core::ModuleSidecarBlock StarFormationModel::buildMetadataSidecar(const StarForm
   stream << "min_star_particle_mass_code=" << m_config.min_star_particle_mass_code << "\n";
   stream << "stochastic_spawning=" << (m_config.stochastic_spawning ? "true" : "false") << "\n";
   stream << "random_seed=" << m_config.random_seed << "\n";
+  stream << "newton_g_code=" << m_config.newton_g_code << "\n";
   stream << "scanned_cells=" << counters.scanned_cells << "\n";
   stream << "eligible_cells=" << counters.eligible_cells << "\n";
   stream << "spawn_events=" << counters.spawn_events << "\n";

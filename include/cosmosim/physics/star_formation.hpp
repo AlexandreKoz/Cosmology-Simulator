@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
@@ -22,6 +23,7 @@ struct StarFormationConfig {
   double min_star_particle_mass_code = 0.1;
   bool stochastic_spawning = true;
   std::uint64_t random_seed = 123456789ull;
+  double newton_g_code = core::constants::k_newton_g_si;
   std::uint32_t metadata_schema_version = 1;
 };
 

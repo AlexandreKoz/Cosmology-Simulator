@@ -27,6 +27,10 @@ struct BlackHoleAgnConfig {
   double thomson_cross_section_si = 6.6524587321e-29;
   double newton_g_si = core::constants::k_newton_g_si;
   double speed_of_light_si = core::constants::k_speed_of_light_si;
+  double proton_mass_code = 1.67262192369e-27;
+  double thomson_cross_section_code = 6.6524587321e-29;
+  double newton_g_code = core::constants::k_newton_g_si;
+  double speed_of_light_code = core::constants::k_speed_of_light_si;
   std::uint32_t metadata_schema_version = 1;
 };
 

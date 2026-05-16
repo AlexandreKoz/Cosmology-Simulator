@@ -89,6 +89,33 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   return gravity::TreePmCoordinator(pm_grid_shape, layout);
 }
 
+
+[[nodiscard]] double newtonGCodeFromUnits(const core::UnitSystem& units) {
+  return core::constants::k_newton_g_si * units.mass_si_per_code * units.timeSiPerCode() * units.timeSiPerCode() /
+      (units.length_si_per_code * units.length_si_per_code * units.length_si_per_code);
+}
+
+[[nodiscard]] physics::StarFormationConfig makeRuntimeStarFormationConfig(
+    const core::PhysicsConfig& physics_config,
+    const core::UnitSystem& units) {
+  physics::StarFormationConfig config = physics::makeStarFormationConfig(physics_config);
+  config.newton_g_code = newtonGCodeFromUnits(units);
+  return config;
+}
+
+[[nodiscard]] physics::BlackHoleAgnConfig makeRuntimeBlackHoleAgnConfig(
+    const core::PhysicsConfig& physics_config,
+    const core::UnitSystem& units) {
+  physics::BlackHoleAgnConfig config = physics::makeBlackHoleAgnConfig(physics_config);
+  config.proton_mass_code = config.proton_mass_si / units.mass_si_per_code;
+  config.thomson_cross_section_code = config.thomson_cross_section_si /
+      (units.length_si_per_code * units.length_si_per_code);
+  config.newton_g_code = config.newton_g_si * units.mass_si_per_code * units.timeSiPerCode() * units.timeSiPerCode() /
+      (units.length_si_per_code * units.length_si_per_code * units.length_si_per_code);
+  config.speed_of_light_code = config.speed_of_light_si / units.velocity_si_per_code;
+  return config;
+}
+
 [[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
   switch (mode) {
     case core::PmDecompositionMode::kSlab:
@@ -209,6 +236,11 @@ void updateAdaptiveTimeBins(
     core::requireParticleBoundGasCellContract(state, "adaptive time-bin update");
   }
   const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+  const core::UnitSystem runtime_units = core::makeUnitSystem(
+      config.units.length_unit,
+      config.units.mass_unit,
+      config.units.velocity_unit);
+  const double newton_g_code = newtonGCodeFromUnits(runtime_units);
   std::optional<double> cosmology_dt;
   if (integrator_state.current_scale_factor > 0.0 && config.cosmology.hubble_param > 0.0) {
     core::CosmologyBackgroundConfig background_config;
@@ -234,9 +266,9 @@ void updateAdaptiveTimeBins(
         temperature > config.physics.sf_temperature_threshold_k || config.physics.sf_epsilon_ff <= 0.0) {
       return std::nullopt;
     }
-    const double t_ff = std::sqrt(3.0 * core::constants::k_pi /
-        (32.0 * core::constants::k_newton_g_si * std::max(rho, 1.0e-30)));
-    return std::max(1.0e-12, config.numerics.source_max_fractional_change * t_ff / config.physics.sf_epsilon_ff);
+    const double t_ff_code = std::sqrt(3.0 * core::constants::k_pi /
+        (32.0 * newton_g_code * std::max(rho, 1.0e-30)));
+    return std::max(1.0e-12, config.numerics.source_max_fractional_change * t_ff_code / config.physics.sf_epsilon_ff);
   };
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
     if (!config.physics.enable_black_hole_agn || particle_index >= state.particle_sidecar.species_tag.size() ||
@@ -2157,7 +2189,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
   std::size_t m_cached_cell_count = 0;
 };
 
-void maybeWriteOutputs(
+bool maybeWriteOutputs(
     const core::FrozenConfig& frozen_config,
     const core::SimulationConfig& config,
     const core::SimulationState& state,
@@ -2166,9 +2198,11 @@ void maybeWriteOutputs(
     const GravityStageCallback& gravity_callback,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
-    bool write_outputs_enabled) {
-  if (!write_outputs_enabled) {
-    return;
+    bool write_outputs_enabled,
+    bool snapshot_due,
+    bool checkpoint_due) {
+  if (!write_outputs_enabled || !snapshot_due) {
+    return false;
   }
 
 #if !COSMOSIM_ENABLE_HDF5
@@ -2176,17 +2210,14 @@ void maybeWriteOutputs(
       "runtime outputs requested, but this build lacks HDF5 support. Reconfigure with COSMOSIM_ENABLE_HDF5=ON.");
 #else
   if (integrator_state.step_index == 0) {
-    return;
-  }
-  if ((integrator_state.step_index % static_cast<std::uint64_t>(config.output.snapshot_interval_steps)) != 0U) {
-    return;
+    return false;
   }
   if (!integrator_state.last_completed_restart_safe ||
       !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
-    return;
+    return false;
   }
   core::assertCanWriteSnapshotAtBoundary(integrator_state);
-  if (config.output.write_restarts) {
+  if (checkpoint_due) {
     core::assertCanWriteCheckpointAtBoundary(integrator_state);
   }
 
@@ -2212,7 +2243,7 @@ void maybeWriteOutputs(
       .payload = {{"path", report.snapshot_path.string()}},
   });
 
-  if (config.output.write_restarts) {
+  if (checkpoint_due) {
     io::RestartWritePayload restart_payload;
     restart_payload.state = &state;
     restart_payload.integrator_state = &integrator_state;
@@ -2314,6 +2345,7 @@ void maybeWriteOutputs(
         .payload = {{"path", report.restart_path.string()}},
     });
   }
+  return true;
 #endif
 }
 
@@ -2336,19 +2368,34 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
   return runImpl(&output_root_override, options);
 }
 
-core::StepBoundaryKind requestedBoundaryForCompletedStep(
+struct PendingOutputBoundary {
+  bool snapshot_due = false;
+  bool checkpoint_due = false;
+};
+
+void latchOutputRequestForCompletedStep(
     const core::SimulationConfig& config,
     const ReferenceWorkflowOptions& options,
-    std::uint64_t next_step_index) {
+    std::uint64_t next_step_index,
+    PendingOutputBoundary& pending) {
   if (!options.write_outputs || config.output.snapshot_interval_steps <= 0) {
-    return core::StepBoundaryKind::kGlobalSynchronizationPoint;
+    return;
   }
   if ((next_step_index % static_cast<std::uint64_t>(config.output.snapshot_interval_steps)) != 0U) {
-    return core::StepBoundaryKind::kGlobalSynchronizationPoint;
+    return;
   }
-  return config.output.write_restarts
-      ? core::StepBoundaryKind::kCheckpointPoint
-      : core::StepBoundaryKind::kSnapshotPoint;
+  pending.snapshot_due = true;
+  pending.checkpoint_due = pending.checkpoint_due || config.output.write_restarts;
+}
+
+[[nodiscard]] core::StepBoundaryKind requestedBoundaryForPendingOutput(const PendingOutputBoundary& pending) {
+  if (pending.checkpoint_due) {
+    return core::StepBoundaryKind::kCheckpointPoint;
+  }
+  if (pending.snapshot_due) {
+    return core::StepBoundaryKind::kSnapshotPoint;
+  }
+  return core::StepBoundaryKind::kGlobalSynchronizationPoint;
 }
 
 ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
@@ -2570,9 +2617,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
-        physics::StarFormationModel(physics::makeStarFormationConfig(config.physics)));
+        physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)));
     physics::BlackHoleAgnCallback bh_callback(
-        physics::BlackHoleAgnModel(physics::makeBlackHoleAgnConfig(config.physics)));
+        physics::BlackHoleAgnModel(makeRuntimeBlackHoleAgnConfig(config.physics, runtime_units)));
 
     orchestrator.registerCallback(stage_audit);
     orchestrator.registerCallback(drift_callback);
@@ -2597,6 +2644,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
+    PendingOutputBoundary pending_output;
     while (integrator_state.step_index < target_step_index &&
            integrator_state.current_time_code < config.numerics.time_end_code) {
       const std::span<const std::uint32_t> active_scheduler_elements = scheduler.beginSubstep();
@@ -2618,10 +2666,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
 
       core::TransientStepWorkspace workspace;
-      const core::StepBoundaryKind requested_boundary = requestedBoundaryForCompletedStep(
+      latchOutputRequestForCompletedStep(
           config,
           options,
-          integrator_state.step_index + 1U);
+          integrator_state.step_index + 1U,
+          pending_output);
+      const core::StepBoundaryKind requested_boundary = requestedBoundaryForPendingOutput(pending_output);
       orchestrator.executeSchedulerSubstep(
           state,
           integrator_state,
@@ -2650,7 +2700,21 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       ensureSchedulerCoversState(state, scheduler);
       scheduler.endSubstep();
       syncTimeBinsFromScheduler(scheduler, state);
-      maybeWriteOutputs(m_frozen_config, config, state, integrator_state, scheduler, gravity_callback, report, profiler, options.write_outputs);
+      const bool output_flushed = maybeWriteOutputs(
+          m_frozen_config,
+          config,
+          state,
+          integrator_state,
+          scheduler,
+          gravity_callback,
+          report,
+          profiler,
+          options.write_outputs,
+          pending_output.snapshot_due,
+          pending_output.checkpoint_due);
+      if (output_flushed) {
+        pending_output = {};
+      }
     }
 
     report.completed_steps = integrator_state.step_index - options.step_index;
