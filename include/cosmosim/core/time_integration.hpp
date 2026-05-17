@@ -76,8 +76,14 @@ struct CosmologicalStepFactors {
   double hubble_begin_code = 0.0;
   double hubble_end_code = 0.0;
   double drift_factor_code = 0.0;
+  // Particle velocity lanes named velocity_*_peculiar store physical peculiar
+  // velocities u = a dx/dt.  The KDK kick sub-operators therefore apply the
+  // exact homogeneous Hubble drag u <- (a_begin/a_end) u and a distinct
+  // force kick for comoving acceleration kernels, not the drift integral.
   double first_kick_factor_code = 0.0;
   double second_kick_factor_code = 0.0;
+  double first_hubble_drag_factor = 1.0;
+  double second_hubble_drag_factor = 1.0;
   double hubble_drag_factor = 1.0;
 };
 
@@ -115,6 +121,8 @@ struct IntegratorState {
   double last_drift_factor_code = 0.0;
   double last_first_kick_factor_code = 0.0;
   double last_second_kick_factor_code = 0.0;
+  double last_first_hubble_drag_factor = 1.0;
+  double last_second_hubble_drag_factor = 1.0;
   StepBoundaryKind current_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
   StepBoundaryKind last_completed_boundary_kind = StepBoundaryKind::kCheckpointPoint;
   bool inside_kdk_step = false;

@@ -135,9 +135,16 @@ void testCosmologyHelpers() {
   assert(step.drift_factor_code > 0.0);
   assert(step.first_kick_factor_code > 0.0);
   assert(step.second_kick_factor_code > 0.0);
-  assert(std::abs((step.first_kick_factor_code + step.second_kick_factor_code) -
+  assert(step.first_hubble_drag_factor < 1.0);
+  assert(step.second_hubble_drag_factor < 1.0);
+  assert(std::abs(step.first_hubble_drag_factor * step.second_hubble_drag_factor - step.hubble_drag_factor) < 1.0e-12);
+  assert(step.first_kick_factor_code < step.drift_factor_code);
+  assert(step.second_kick_factor_code < step.drift_factor_code);
+  const double combined_force_response =
+      step.second_hubble_drag_factor * step.first_kick_factor_code + step.second_kick_factor_code;
+  assert(std::abs(combined_force_response -
                   cosmosim::core::computeComovingKickFactor(background, a0, step.scale_factor_end, 128)) /
-         (step.first_kick_factor_code + step.second_kick_factor_code) < 1.0e-5);
+         combined_force_response < 1.0e-5);
 }
 
 
@@ -162,6 +169,8 @@ void testCosmologicalTimelineConvertsSiIntegralsToCodeTime() {
   assert(std::abs(step.drift_factor_code * time_si_per_code -
                   cosmosim::core::computeComovingDriftFactor(background, a0, step.scale_factor_end, 128)) /
          (step.drift_factor_code * time_si_per_code) < 1.0e-5);
+  assert(std::abs(step.first_hubble_drag_factor * step.second_hubble_drag_factor -
+                  cosmosim::core::computeHubbleDragFactor(a0, step.scale_factor_end)) < 1.0e-12);
 }
 
 void testActiveSubsetDetection() {

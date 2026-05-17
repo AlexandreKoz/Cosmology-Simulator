@@ -244,6 +244,8 @@ void testRestartRoundtrip() {
   integrator_state.last_drift_factor_code = 0.25;
   integrator_state.last_first_kick_factor_code = 0.125;
   integrator_state.last_second_kick_factor_code = 0.126;
+  integrator_state.last_first_hubble_drag_factor = 0.997;
+  integrator_state.last_second_hubble_drag_factor = 0.996;
   integrator_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
   integrator_state.last_completed_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
   integrator_state.last_completed_restart_safe = true;
@@ -397,6 +399,8 @@ void testRestartRoundtrip() {
   assert(std::abs(restored.integrator_state.last_drift_factor_code - integrator_state.last_drift_factor_code) < 1.0e-15);
   assert(std::abs(restored.integrator_state.last_first_kick_factor_code - integrator_state.last_first_kick_factor_code) < 1.0e-15);
   assert(std::abs(restored.integrator_state.last_second_kick_factor_code - integrator_state.last_second_kick_factor_code) < 1.0e-15);
+  assert(std::abs(restored.integrator_state.last_first_hubble_drag_factor - integrator_state.last_first_hubble_drag_factor) < 1.0e-15);
+  assert(std::abs(restored.integrator_state.last_second_hubble_drag_factor - integrator_state.last_second_hubble_drag_factor) < 1.0e-15);
   assert(restored.integrator_state.last_completed_boundary_kind == integrator_state.last_completed_boundary_kind);
   assert(restored.integrator_state.last_completed_restart_safe == integrator_state.last_completed_restart_safe);
   assert(restored.integrator_state.scheme == integrator_state.scheme);

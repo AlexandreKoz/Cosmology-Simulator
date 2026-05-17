@@ -242,6 +242,8 @@ CosmologicalStepFactors CosmologicalTimeline::prepareStep(
     step.drift_factor_code = dt_time_code;
     step.first_kick_factor_code = 0.5 * dt_time_code;
     step.second_kick_factor_code = 0.5 * dt_time_code;
+    step.first_hubble_drag_factor = 1.0;
+    step.second_hubble_drag_factor = 1.0;
     step.hubble_drag_factor = 1.0;
     return step;
   }
@@ -254,6 +256,8 @@ CosmologicalStepFactors CosmologicalTimeline::prepareStep(
   step.drift_factor_code = computeComovingDriftFactor(*m_background, step.scale_factor_begin, step.scale_factor_end, 64) / m_time_si_per_code;
   step.first_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_begin, step.scale_factor_midpoint, 64) / m_time_si_per_code;
   step.second_kick_factor_code = computeComovingKickFactor(*m_background, step.scale_factor_midpoint, step.scale_factor_end, 64) / m_time_si_per_code;
+  step.first_hubble_drag_factor = computeHubbleDragFactor(step.scale_factor_begin, step.scale_factor_midpoint);
+  step.second_hubble_drag_factor = computeHubbleDragFactor(step.scale_factor_midpoint, step.scale_factor_end);
   step.hubble_drag_factor = computeHubbleDragFactor(step.scale_factor_begin, step.scale_factor_end);
   return step;
 }
@@ -270,6 +274,8 @@ void CosmologicalTimeline::commitStep(IntegratorState& integrator_state, const C
   integrator_state.last_drift_factor_code = step.drift_factor_code;
   integrator_state.last_first_kick_factor_code = step.first_kick_factor_code;
   integrator_state.last_second_kick_factor_code = step.second_kick_factor_code;
+  integrator_state.last_first_hubble_drag_factor = step.first_hubble_drag_factor;
+  integrator_state.last_second_hubble_drag_factor = step.second_hubble_drag_factor;
   ++integrator_state.step_index;
 }
 
@@ -1786,7 +1792,19 @@ double computeComovingKickFactor(
     double scale_factor_begin,
     double scale_factor_end,
     std::uint32_t midpoint_samples) {
-  return midpointIntegrateDriftLike(background, scale_factor_begin, scale_factor_end, midpoint_samples);
+  if (scale_factor_end <= 0.0) {
+    throw std::invalid_argument("scale_factor_end must be positive for peculiar-velocity kick integral");
+  }
+
+  // The runtime velocity arrays store physical peculiar velocities u = a dx/dt,
+  // while TreePM returns the scale-free comoving Newtonian acceleration kernel A.
+  // Holding A fixed over a kick substep gives
+  //   du/dt + H u = A/a^2,
+  // hence u_1 = (a_0/a_1) u_0 + A/a_1 * integral(dt/a).
+  // The Hubble-drag factor is tracked separately; this returns only the A
+  // multiplier.  For short steps it reduces to dt/a^2 in code units.
+  return midpointIntegrateDriftLike(background, scale_factor_begin, scale_factor_end, midpoint_samples) /
+      scale_factor_end;
 }
 
 double computeHubbleDragFactor(double scale_factor_begin, double scale_factor_end) {

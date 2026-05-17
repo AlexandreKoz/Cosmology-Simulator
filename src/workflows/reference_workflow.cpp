@@ -1386,6 +1386,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (!is_kick_stage && !is_force_refresh_stage) {
       return;
     }
+    if (context.stage == core::IntegrationStage::kForceRefresh &&
+        (!context.boundary.pm_refresh_allowed || context.boundary.kind != core::StepBoundaryKind::kPmRefreshPoint)) {
+      throw std::runtime_error("TreePM force refresh reached an illegal integration boundary");
+    }
     if (is_kick_stage && !is_force_refresh_stage) {
       applyCachedKick(context);
       return;
@@ -1684,13 +1688,45 @@ class GravityStageCallback final : public core::IntegrationCallback {
     throw std::invalid_argument("gravity kick factor requested outside KDK kick stage");
   }
 
+  [[nodiscard]] static double hubbleDragFactorForStage(const core::StepContext& context) {
+    if (context.stage == core::IntegrationStage::kGravityKickPre) {
+      return context.timeline_step.first_hubble_drag_factor;
+    }
+    if (context.stage == core::IntegrationStage::kGravityKickPost) {
+      return context.timeline_step.second_hubble_drag_factor;
+    }
+    throw std::invalid_argument("Hubble drag factor requested outside KDK kick stage");
+  }
+
+  static void applyPeculiarVelocityKick(
+      core::SimulationState& state,
+      std::uint32_t particle_index,
+      double accel_x_code,
+      double accel_y_code,
+      double accel_z_code,
+      double kick_factor_code,
+      double hubble_drag_factor) {
+    state.particles.velocity_x_peculiar[particle_index] =
+        hubble_drag_factor * state.particles.velocity_x_peculiar[particle_index] + kick_factor_code * accel_x_code;
+    state.particles.velocity_y_peculiar[particle_index] =
+        hubble_drag_factor * state.particles.velocity_y_peculiar[particle_index] + kick_factor_code * accel_y_code;
+    state.particles.velocity_z_peculiar[particle_index] =
+        hubble_drag_factor * state.particles.velocity_z_peculiar[particle_index] + kick_factor_code * accel_z_code;
+  }
+
   void applyActiveKickFromFreshForce(core::StepContext& context) {
     const double kick_factor = kickFactorForStage(context);
+    const double hubble_drag = hubbleDragFactorForStage(context);
     for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
       const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
-      context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_active_accel_x[active_slot];
-      context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_active_accel_y[active_slot];
-      context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_active_accel_z[active_slot];
+      applyPeculiarVelocityKick(
+          context.state,
+          particle_index,
+          m_active_accel_x[active_slot],
+          m_active_accel_y[active_slot],
+          m_active_accel_z[active_slot],
+          kick_factor,
+          hubble_drag);
     }
   }
 
@@ -1708,10 +1744,16 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
     rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
     const double kick_factor = kickFactorForStage(context);
+    const double hubble_drag = hubbleDragFactorForStage(context);
     for (const std::uint32_t particle_index : m_local_active_global_indices) {
-      context.state.particles.velocity_x_peculiar[particle_index] += kick_factor * m_particle_accel_x[particle_index];
-      context.state.particles.velocity_y_peculiar[particle_index] += kick_factor * m_particle_accel_y[particle_index];
-      context.state.particles.velocity_z_peculiar[particle_index] += kick_factor * m_particle_accel_z[particle_index];
+      applyPeculiarVelocityKick(
+          context.state,
+          particle_index,
+          m_particle_accel_x[particle_index],
+          m_particle_accel_y[particle_index],
+          m_particle_accel_z[particle_index],
+          kick_factor,
+          hubble_drag);
     }
   }
 

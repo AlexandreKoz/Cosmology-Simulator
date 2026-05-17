@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_integration.hpp"
 
 namespace {
 
@@ -502,7 +503,17 @@ void test_randomized_reorder_modes_preserve_sidecar_payload_identity() {
         state.particle_sidecar.sfc_key[i] = static_cast<std::uint64_t>(rng());
       }
       const auto particle_baseline = captureParticleIdentity(state);
-      const auto map = cosmosim::core::buildParticleReorderMap(state, mode);
+      cosmosim::core::ParticleReorderMap map;
+      if (mode == cosmosim::core::ParticleReorderMode::kByTimeBin) {
+        cosmosim::core::HierarchicalTimeBinScheduler scheduler(7);
+        scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0, 0);
+        for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+          scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+        }
+        map = cosmosim::core::buildParticleReorderMapByScheduler(state, scheduler);
+      } else {
+        map = cosmosim::core::buildParticleReorderMap(state, mode);
+      }
       cosmosim::core::reorderParticles(
           state, map, (trial % 2 == 0) ? move_sidecars : cosmosim::core::SidecarSyncPolicy{});
       assertParticleIdentityInvariant(state, particle_baseline);

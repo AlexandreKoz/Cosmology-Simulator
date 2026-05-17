@@ -919,6 +919,8 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_drift_factor_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_first_kick_factor_code));
   append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_second_kick_factor_code));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_first_hubble_drag_factor));
+  append_u64(std::bit_cast<std::uint64_t>(payload.integrator_state->last_second_hubble_drag_factor));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->scheme));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->current_boundary_kind));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->last_completed_boundary_kind));
@@ -1006,6 +1008,8 @@ void writeRestartCheckpointHdf5(
   writeScalarF64Attribute(integrator_group.get(), "last_drift_factor_code", payload.integrator_state->last_drift_factor_code);
   writeScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code", payload.integrator_state->last_first_kick_factor_code);
   writeScalarF64Attribute(integrator_group.get(), "last_second_kick_factor_code", payload.integrator_state->last_second_kick_factor_code);
+  writeScalarF64Attribute(integrator_group.get(), "last_first_hubble_drag_factor", payload.integrator_state->last_first_hubble_drag_factor);
+  writeScalarF64Attribute(integrator_group.get(), "last_second_hubble_drag_factor", payload.integrator_state->last_second_hubble_drag_factor);
   writeScalarU64Attribute(integrator_group.get(), "step_index", payload.integrator_state->step_index);
   writeScalarU32Attribute(integrator_group.get(), "scheme", static_cast<std::uint32_t>(payload.integrator_state->scheme));
   writeScalarU32Attribute(integrator_group.get(), "current_boundary_kind", static_cast<std::uint32_t>(payload.integrator_state->current_boundary_kind));
@@ -1094,6 +1098,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.integrator_state.last_drift_factor_code = readScalarF64Attribute(integrator_group.get(), "last_drift_factor_code");
   result.integrator_state.last_first_kick_factor_code = readScalarF64Attribute(integrator_group.get(), "last_first_kick_factor_code");
   result.integrator_state.last_second_kick_factor_code = readScalarF64Attribute(integrator_group.get(), "last_second_kick_factor_code");
+  result.integrator_state.last_first_hubble_drag_factor = readScalarF64Attribute(integrator_group.get(), "last_first_hubble_drag_factor");
+  result.integrator_state.last_second_hubble_drag_factor = readScalarF64Attribute(integrator_group.get(), "last_second_hubble_drag_factor");
   result.integrator_state.step_index = readScalarU64Attribute(integrator_group.get(), "step_index");
   result.integrator_state.scheme =
       static_cast<core::TimeStepScheme>(readScalarU32Attribute(integrator_group.get(), "scheme"));

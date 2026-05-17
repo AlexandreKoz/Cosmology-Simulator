@@ -9,10 +9,10 @@
 
 int main() {
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v8");
-  assert(schema.version == 8);
-  assert(cosmosim::io::isRestartSchemaCompatible(8));
-  assert(!cosmosim::io::isRestartSchemaCompatible(7));
+  assert(schema.name == "cosmosim_restart_v9");
+  assert(schema.version == 9);
+  assert(cosmosim::io::isRestartSchemaCompatible(9));
+  assert(!cosmosim::io::isRestartSchemaCompatible(8));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
