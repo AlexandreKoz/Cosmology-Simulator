@@ -61,6 +61,18 @@ struct StepBoundaryState {
   bool local_substep = false;
 };
 
+// Integrator-issued TreePM refresh directive.  Gravity callbacks may own solver
+// buffers, but they must consume this placement contract instead of inventing
+// legal refresh surfaces internally.  Local-bin force-refresh surfaces require a
+// coherent predicted source view because inactive particles are not physically
+// drifted in the persistent state during the local substep.
+struct PmRefreshDirective {
+  bool force_refresh_surface = false;
+  bool cadence_opportunity_allowed = false;
+  bool initial_cache_bootstrap_allowed = false;
+  bool requires_predicted_inactive_sources = false;
+};
+
 struct CosmologicalStepFactors {
   bool cosmological = false;
   double time_begin_code = 0.0;
@@ -163,6 +175,7 @@ struct StepContext {
   ProfilerSession* profiler_session = nullptr;
   CosmologicalStepFactors timeline_step;
   StepBoundaryState boundary;
+  PmRefreshDirective pm_refresh_directive;
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
 

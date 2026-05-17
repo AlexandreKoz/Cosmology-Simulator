@@ -1382,13 +1382,20 @@ class GravityStageCallback final : public core::IntegrationCallback {
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
         context.stage == core::IntegrationStage::kGravityKickPost;
     const bool needs_initial_force_bootstrap = context.stage == core::IntegrationStage::kGravityKickPre && !m_force_cache_valid;
-    const bool is_force_refresh_stage = context.stage == core::IntegrationStage::kForceRefresh || needs_initial_force_bootstrap;
+    if (needs_initial_force_bootstrap && !context.pm_refresh_directive.initial_cache_bootstrap_allowed) {
+      throw std::runtime_error(
+          "TreePM initial force bootstrap requested outside an integrator-authorized global boundary");
+    }
+    const bool is_force_refresh_stage = context.pm_refresh_directive.force_refresh_surface || needs_initial_force_bootstrap;
     if (!is_kick_stage && !is_force_refresh_stage) {
       return;
     }
-    if (context.stage == core::IntegrationStage::kForceRefresh &&
+    if (context.pm_refresh_directive.force_refresh_surface &&
         (!context.boundary.pm_refresh_allowed || context.boundary.kind != core::StepBoundaryKind::kPmRefreshPoint)) {
       throw std::runtime_error("TreePM force refresh reached an illegal integration boundary");
+    }
+    if (context.stage == core::IntegrationStage::kForceRefresh && !context.pm_refresh_directive.force_refresh_surface) {
+      throw std::runtime_error("TreePM force-refresh stage lacks an integrator-issued PM refresh directive");
     }
     if (is_kick_stage && !is_force_refresh_stage) {
       applyCachedKick(context);
@@ -1413,7 +1420,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     const std::size_t particle_count = context.state.particles.size();
 
-    rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
+    const double predicted_inactive_source_drift = context.pm_refresh_directive.requires_predicted_inactive_sources
+        ? context.timeline_step.drift_factor_code
+        : 0.0;
+    rebuildOwnedParticleCompactView(
+        context.state,
+        context.active_set.particle_indices,
+        predicted_inactive_source_drift);
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
@@ -1461,8 +1474,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
 
+    if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
+      throw std::runtime_error(
+          "TreePM attempted to advance PM cadence without an integrator-issued refresh opportunity");
+    }
     // Scheduler-owned PM sync state advances kick opportunities and decides refresh
-    // legality; the gravity callback only consumes the resulting execution event.
+    // legality; the gravity callback consumes the integrator-issued refresh
+    // directive and executes the solver on that legal surface only.
     const core::PmSyncEvent sync_event = m_pm_sync_state.registerKickOpportunity(
         context.integrator_state.step_index,
         m_tree_pm_options.pm_options.scale_factor,
@@ -1601,6 +1619,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"pm_fft_backend", m_pm_backend},
                       {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
                       {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
+                      {"predicted_inactive_source_particles", std::to_string(m_source_predicted_inactive_count)},
+                      {"predicted_inactive_sources_required",
+                          context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{
@@ -1910,7 +1931,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
   }
 
-  void rebuildOwnedParticleCompactView(const core::SimulationState& state, std::span<const std::uint32_t> active_particles) {
+  void rebuildOwnedParticleCompactView(
+      const core::SimulationState& state,
+      std::span<const std::uint32_t> active_particles,
+      double inactive_source_drift_factor_code = 0.0) {
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
     m_owned_local_index_by_global.assign(particle_count, -1);
@@ -1922,17 +1946,53 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_local_source_softening_comoving.clear();
     m_local_source_softening_override_mask.clear();
     m_local_to_global.clear();
+    m_source_predicted_inactive_count = 0;
+
+    std::vector<std::uint8_t> active_mask;
+    const bool predict_inactive_sources = inactive_source_drift_factor_code != 0.0;
+    if (predict_inactive_sources) {
+      if (!std::isfinite(inactive_source_drift_factor_code)) {
+        throw std::invalid_argument("inactive source drift factor must be finite");
+      }
+      active_mask.assign(particle_count, 0U);
+      for (const std::uint32_t global_index : active_particles) {
+        if (global_index >= particle_count) {
+          throw std::out_of_range("gravity callback active particle index out of range");
+        }
+        active_mask[global_index] = 1U;
+      }
+    }
+
+    const bool periodic_sources =
+        m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kPeriodic;
+    const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
+    const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
+    const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
     const bool has_softening_values = !state.particle_sidecar.gravity_softening_comoving.empty();
     const bool has_softening_masks = !state.particle_sidecar.has_gravity_softening_override.empty();
     for (std::size_t global_index = 0; global_index < particle_count; ++global_index) {
       if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
         continue;
       }
+      double source_x = state.particles.position_x_comoving[global_index];
+      double source_y = state.particles.position_y_comoving[global_index];
+      double source_z = state.particles.position_z_comoving[global_index];
+      if (predict_inactive_sources && active_mask[global_index] == 0U) {
+        source_x += state.particles.velocity_x_peculiar[global_index] * inactive_source_drift_factor_code;
+        source_y += state.particles.velocity_y_peculiar[global_index] * inactive_source_drift_factor_code;
+        source_z += state.particles.velocity_z_peculiar[global_index] * inactive_source_drift_factor_code;
+        ++m_source_predicted_inactive_count;
+      }
+      if (periodic_sources) {
+        source_x = wrapPeriodicPosition(source_x, box_size_x);
+        source_y = wrapPeriodicPosition(source_y, box_size_y);
+        source_z = wrapPeriodicPosition(source_z, box_size_z);
+      }
       m_owned_local_index_by_global[global_index] = static_cast<int>(m_local_to_global.size());
       m_local_to_global.push_back(static_cast<std::uint32_t>(global_index));
-      m_local_source_x.push_back(state.particles.position_x_comoving[global_index]);
-      m_local_source_y.push_back(state.particles.position_y_comoving[global_index]);
-      m_local_source_z.push_back(state.particles.position_z_comoving[global_index]);
+      m_local_source_x.push_back(source_x);
+      m_local_source_y.push_back(source_y);
+      m_local_source_z.push_back(source_z);
       m_local_source_mass.push_back(state.particles.mass_code[global_index]);
       m_local_source_species_tag.push_back(state.particle_sidecar.species_tag[global_index]);
       if (has_softening_values) {
@@ -2020,6 +2080,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;
   bool m_force_cache_valid = false;
+  std::uint64_t m_source_predicted_inactive_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
 

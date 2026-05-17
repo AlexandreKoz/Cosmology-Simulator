@@ -668,9 +668,17 @@ void StepOrchestrator::executeSingleStep(
   for (const auto stage : ordered_stages) {
     context.stage = stage;
     context.boundary = boundary;
-    if (stage == IntegrationStage::kForceRefresh) {
+    context.pm_refresh_directive = {};
+    if (stage == IntegrationStage::kGravityKickPre) {
+      context.pm_refresh_directive.initial_cache_bootstrap_allowed = !boundary.local_substep;
+      context.pm_refresh_directive.cadence_opportunity_allowed =
+          context.pm_refresh_directive.initial_cache_bootstrap_allowed;
+    } else if (stage == IntegrationStage::kForceRefresh) {
       context.boundary.kind = StepBoundaryKind::kPmRefreshPoint;
       context.boundary.pm_refresh_allowed = true;
+      context.pm_refresh_directive.force_refresh_surface = true;
+      context.pm_refresh_directive.cadence_opportunity_allowed = true;
+      context.pm_refresh_directive.requires_predicted_inactive_sources = boundary.local_substep;
     } else if (stage == IntegrationStage::kOutputCheck) {
       context.boundary.kind = requested_boundary_kind;
     }
