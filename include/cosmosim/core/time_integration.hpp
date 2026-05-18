@@ -71,6 +71,14 @@ struct PmRefreshDirective {
   bool cadence_opportunity_allowed = false;
   bool initial_cache_bootstrap_allowed = false;
   bool requires_predicted_inactive_sources = false;
+  bool has_sync_event = false;
+  bool refresh_long_range_field = false;
+  bool solver_executed = false;
+  std::uint64_t gravity_kick_opportunity = 0;
+  std::uint64_t field_version = 0;
+  std::uint64_t last_refresh_opportunity = 0;
+  std::uint64_t field_built_step_index = 0;
+  double field_built_scale_factor = 1.0;
 };
 
 struct CosmologicalStepFactors {
@@ -122,6 +130,64 @@ struct TimeBinContext {
   std::uint8_t max_bin = 0;
 };
 
+struct PmSyncEvent {
+  std::uint64_t gravity_kick_opportunity = 0;
+  bool refresh_long_range_field = false;
+  std::uint64_t field_version = 0;
+  std::uint64_t last_refresh_opportunity = 0;
+  std::uint64_t field_built_step_index = 0;
+  double field_built_scale_factor = 1.0;
+};
+
+// Restartable PM-cadence authority. The TreePM solver may own field buffers, but
+// this state owns the legality of long-range refresh opportunities across restarts.
+struct PmSynchronizationPersistentState {
+  std::uint64_t cadence_steps = 1;
+  std::uint64_t gravity_kick_opportunity = 0;
+  std::uint64_t last_refresh_opportunity = 0;
+  std::uint64_t field_version = 0;
+  std::uint64_t last_refresh_step_index = 0;
+  double last_refresh_scale_factor = 1.0;
+  bool refresh_commit_pending = false;
+  std::uint64_t pending_refresh_opportunity = 0;
+  std::uint64_t pending_refresh_field_version = 0;
+};
+
+// Scheduler-owned PM cadence state. Gravity callbacks execute the solver, but cadence
+// legality and refresh boundaries are represented here to avoid free-floating PM truth.
+class PmSynchronizationState {
+ public:
+  void reset(std::uint64_t cadence_steps = 1);
+  [[nodiscard]] PmSyncEvent registerKickOpportunity(
+      std::uint64_t step_index,
+      double scale_factor,
+      bool has_long_range_field);
+  void commitRefresh(const PmSyncEvent& event);
+
+  [[nodiscard]] std::uint64_t cadenceSteps() const noexcept { return m_cadence_steps; }
+  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_gravity_kick_opportunity; }
+  [[nodiscard]] std::uint64_t fieldVersion() const noexcept { return m_field_version; }
+  [[nodiscard]] std::uint64_t lastRefreshOpportunity() const noexcept { return m_last_refresh_opportunity; }
+  [[nodiscard]] std::uint64_t lastRefreshStepIndex() const noexcept { return m_last_refresh_step_index; }
+  [[nodiscard]] double lastRefreshScaleFactor() const noexcept { return m_last_refresh_scale_factor; }
+  [[nodiscard]] bool refreshCommitPending() const noexcept { return m_refresh_commit_pending; }
+
+  [[nodiscard]] PmSynchronizationPersistentState exportPersistentState() const;
+  void importPersistentState(const PmSynchronizationPersistentState& persistent_state);
+
+ private:
+  std::uint64_t m_cadence_steps = 1;
+  std::uint64_t m_gravity_kick_opportunity = 0;
+  std::uint64_t m_last_refresh_opportunity = 0;
+  std::uint64_t m_field_version = 0;
+  std::uint64_t m_last_refresh_step_index = 0;
+  double m_last_refresh_scale_factor = 1.0;
+  bool m_refresh_commit_pending = false;
+  std::uint64_t m_pending_refresh_opportunity = 0;
+  std::uint64_t m_pending_refresh_field_version = 0;
+};
+
+
 // Persistent integrator state tracked by the orchestrator.
 struct IntegratorState {
   double current_time_code = 0.0;
@@ -142,6 +208,9 @@ struct IntegratorState {
   std::uint64_t step_index = 0;
   TimeStepScheme scheme = TimeStepScheme::kKickDriftKick;
   TimeBinContext time_bins;
+  PmSynchronizationState pm_sync_state;
+  bool pm_refresh_enabled = false;
+  bool pm_long_range_field_valid = false;
 };
 
 // Explicit compact active-set descriptor with optional subset spans.
@@ -293,63 +362,6 @@ struct TimeStepReconciliationResult {
   std::uint32_t clipped_to_max_dt = 0;
   std::array<std::uint32_t, 5> limiting_candidates_by_source{};
   TimeStepCandidateSource dominant_limiting_source = TimeStepCandidateSource::kUserClamp;
-};
-
-struct PmSyncEvent {
-  std::uint64_t gravity_kick_opportunity = 0;
-  bool refresh_long_range_field = false;
-  std::uint64_t field_version = 0;
-  std::uint64_t last_refresh_opportunity = 0;
-  std::uint64_t field_built_step_index = 0;
-  double field_built_scale_factor = 1.0;
-};
-
-// Restartable PM-cadence authority. The TreePM solver may own field buffers, but
-// this state owns the legality of long-range refresh opportunities across restarts.
-struct PmSynchronizationPersistentState {
-  std::uint64_t cadence_steps = 1;
-  std::uint64_t gravity_kick_opportunity = 0;
-  std::uint64_t last_refresh_opportunity = 0;
-  std::uint64_t field_version = 0;
-  std::uint64_t last_refresh_step_index = 0;
-  double last_refresh_scale_factor = 1.0;
-  bool refresh_commit_pending = false;
-  std::uint64_t pending_refresh_opportunity = 0;
-  std::uint64_t pending_refresh_field_version = 0;
-};
-
-// Scheduler-owned PM cadence state. Gravity callbacks execute the solver, but cadence
-// legality and refresh boundaries are represented here to avoid free-floating PM truth.
-class PmSynchronizationState {
- public:
-  void reset(std::uint64_t cadence_steps = 1);
-  [[nodiscard]] PmSyncEvent registerKickOpportunity(
-      std::uint64_t step_index,
-      double scale_factor,
-      bool has_long_range_field);
-  void commitRefresh(const PmSyncEvent& event);
-
-  [[nodiscard]] std::uint64_t cadenceSteps() const noexcept { return m_cadence_steps; }
-  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_gravity_kick_opportunity; }
-  [[nodiscard]] std::uint64_t fieldVersion() const noexcept { return m_field_version; }
-  [[nodiscard]] std::uint64_t lastRefreshOpportunity() const noexcept { return m_last_refresh_opportunity; }
-  [[nodiscard]] std::uint64_t lastRefreshStepIndex() const noexcept { return m_last_refresh_step_index; }
-  [[nodiscard]] double lastRefreshScaleFactor() const noexcept { return m_last_refresh_scale_factor; }
-  [[nodiscard]] bool refreshCommitPending() const noexcept { return m_refresh_commit_pending; }
-
-  [[nodiscard]] PmSynchronizationPersistentState exportPersistentState() const;
-  void importPersistentState(const PmSynchronizationPersistentState& persistent_state);
-
- private:
-  std::uint64_t m_cadence_steps = 1;
-  std::uint64_t m_gravity_kick_opportunity = 0;
-  std::uint64_t m_last_refresh_opportunity = 0;
-  std::uint64_t m_field_version = 0;
-  std::uint64_t m_last_refresh_step_index = 0;
-  double m_last_refresh_scale_factor = 1.0;
-  bool m_refresh_commit_pending = false;
-  std::uint64_t m_pending_refresh_opportunity = 0;
-  std::uint64_t m_pending_refresh_field_version = 0;
 };
 
 // Persisted scheduler state required for exact restart continuation.

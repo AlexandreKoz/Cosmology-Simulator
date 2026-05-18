@@ -9,10 +9,10 @@
 
 int main() {
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v9");
-  assert(schema.version == 9);
-  assert(cosmosim::io::isRestartSchemaCompatible(9));
-  assert(!cosmosim::io::isRestartSchemaCompatible(8));
+  assert(schema.name == "cosmosim_restart_v10");
+  assert(schema.version == 10);
+  assert(cosmosim::io::isRestartSchemaCompatible(10));
+  assert(!cosmosim::io::isRestartSchemaCompatible(9));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
@@ -20,7 +20,7 @@ int main() {
   bool saw_gas_identity = false;
   bool saw_species_sidecars = false;
   for (const std::string_view item : checklist) {
-    saw_softening = saw_softening || item == "particle_identity_and_softening_override_lanes";
+    saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
   }

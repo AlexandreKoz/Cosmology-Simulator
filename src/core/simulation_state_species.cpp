@@ -125,6 +125,8 @@ ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecie
   packet.mass_code.resize(indices.size());
   packet.time_bin.resize(indices.size());
   packet.owning_rank.resize(indices.size());
+  packet.last_drift_time_code.resize(indices.size());
+  packet.last_drift_scale_factor.resize(indices.size());
 
   for (std::size_t i = 0; i < indices.size(); ++i) {
     const auto source = indices[i];
@@ -138,6 +140,8 @@ ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecie
     packet.mass_code[i] = particles.mass_code[source];
     packet.time_bin[i] = particles.time_bin[source];
     packet.owning_rank[i] = particle_sidecar.owning_rank[source];
+    packet.last_drift_time_code[i] = particle_sidecar.last_drift_time_code[source];
+    packet.last_drift_scale_factor[i] = particle_sidecar.last_drift_scale_factor[source];
   }
 
   return packet;
@@ -160,6 +164,8 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
     record.species_tag = particle_sidecar.species_tag[index];
     record.particle_flags = particle_sidecar.particle_flags[index];
     record.owning_rank = particle_sidecar.owning_rank[index];
+    record.last_drift_time_code = particle_sidecar.last_drift_time_code[index];
+    record.last_drift_scale_factor = particle_sidecar.last_drift_scale_factor[index];
     record.position_x_comoving = particles.position_x_comoving[index];
     record.position_y_comoving = particles.position_y_comoving[index];
     record.position_z_comoving = particles.position_z_comoving[index];
@@ -376,6 +382,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     new_sidecar.species_tag[write_index] = particle_sidecar.species_tag[i];
     new_sidecar.particle_flags[write_index] = particle_sidecar.particle_flags[i];
     new_sidecar.owning_rank[write_index] = particle_sidecar.owning_rank[i];
+    new_sidecar.last_drift_time_code[write_index] = particle_sidecar.last_drift_time_code[i];
+    new_sidecar.last_drift_scale_factor[write_index] = particle_sidecar.last_drift_scale_factor[i];
     if (has_softening_sidecar) {
       new_sidecar.gravity_softening_comoving[write_index] =
           particle_sidecar.gravity_softening_comoving.empty() ? 0.0 : particle_sidecar.gravity_softening_comoving[i];
@@ -400,6 +408,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     new_sidecar.species_tag[write_index] = inbound.species_tag;
     new_sidecar.particle_flags[write_index] = inbound.particle_flags;
     new_sidecar.owning_rank[write_index] = inbound.owning_rank;
+    new_sidecar.last_drift_time_code[write_index] = inbound.last_drift_time_code;
+    new_sidecar.last_drift_scale_factor[write_index] = inbound.last_drift_scale_factor;
     if (has_softening_sidecar && inbound.has_gravity_softening_value) {
       new_sidecar.gravity_softening_comoving[write_index] = inbound.gravity_softening_comoving;
     }

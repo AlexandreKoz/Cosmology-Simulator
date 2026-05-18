@@ -447,6 +447,8 @@ void reorderParticles(
   reorderAlignedVector(state.particle_sidecar.species_tag, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.particle_flags, new_to_old_index);
   reorderAlignedVector(state.particle_sidecar.owning_rank, new_to_old_index);
+  reorderAlignedVector(state.particle_sidecar.last_drift_time_code, new_to_old_index);
+  reorderAlignedVector(state.particle_sidecar.last_drift_scale_factor, new_to_old_index);
   reorderOptionalParentLane(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
   reorderOptionalParentLane(state.particle_sidecar.has_gravity_softening_override, new_to_old_index);
 

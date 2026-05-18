@@ -492,6 +492,8 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.species_tag);
   writeDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.particle_flags);
   writeDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.owning_rank);
+  writeDataset1d(particle_sidecar_group.get(), "last_drift_time_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_time_code);
+  writeDataset1d(particle_sidecar_group.get(), "last_drift_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_scale_factor);
   writeDataset1d(
       particle_sidecar_group.get(),
       "gravity_softening_comoving",
@@ -623,6 +625,10 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "particle_flags", H5T_NATIVE_UINT32);
   state.particle_sidecar.owning_rank =
       readDataset1dAligned<std::uint32_t>(particle_sidecar_group.get(), "owning_rank", H5T_NATIVE_UINT32);
+  state.particle_sidecar.last_drift_time_code =
+      readDataset1dAligned<double>(particle_sidecar_group.get(), "last_drift_time_code", H5T_NATIVE_DOUBLE);
+  state.particle_sidecar.last_drift_scale_factor =
+      readDataset1dAligned<double>(particle_sidecar_group.get(), "last_drift_scale_factor", H5T_NATIVE_DOUBLE);
   state.particle_sidecar.gravity_softening_comoving =
       readDataset1dAligned<double>(particle_sidecar_group.get(), "gravity_softening_comoving", H5T_NATIVE_DOUBLE);
   state.particle_sidecar.has_gravity_softening_override =
@@ -756,11 +762,12 @@ bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
   static const std::vector<std::string_view> checklist = {
       "simulation_state_lanes_and_metadata",
-      "particle_identity_and_softening_override_lanes",
+      "particle_identity_softening_and_drift_epoch_lanes",
       "gas_cell_identity_lanes",
       "species_specific_sidecars",
       "module_sidecars_with_schema_versions",
       "integrator_state",
+      "integrator_owned_pm_sync_state",
       "scheduler_persistent_state",
       "distributed_gravity_state",
       "normalized_config_text_and_hash",
@@ -844,6 +851,8 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.particle_sidecar.species_tag);
   append_any_vec(state.particle_sidecar.particle_flags);
   append_any_vec(state.particle_sidecar.owning_rank);
+  append_any_vec(state.particle_sidecar.last_drift_time_code);
+  append_any_vec(state.particle_sidecar.last_drift_scale_factor);
   append_any_vec(state.particle_sidecar.gravity_softening_comoving);
   append_any_vec(state.particle_sidecar.has_gravity_softening_override);
 
@@ -929,6 +938,17 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(payload.integrator_state->time_bins.hierarchical_enabled ? 1ull : 0ull);
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.active_bin));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.max_bin));
+  append_u64(payload.integrator_state->pm_long_range_field_valid ? 1ull : 0ull);
+  const core::PmSynchronizationPersistentState pm_sync_state = payload.integrator_state->pm_sync_state.exportPersistentState();
+  append_u64(pm_sync_state.cadence_steps);
+  append_u64(pm_sync_state.gravity_kick_opportunity);
+  append_u64(pm_sync_state.last_refresh_opportunity);
+  append_u64(pm_sync_state.field_version);
+  append_u64(pm_sync_state.last_refresh_step_index);
+  append_u64(std::bit_cast<std::uint64_t>(pm_sync_state.last_refresh_scale_factor));
+  append_u64(pm_sync_state.refresh_commit_pending ? 1ull : 0ull);
+  append_u64(pm_sync_state.pending_refresh_opportunity);
+  append_u64(pm_sync_state.pending_refresh_field_version);
 
   const core::TimeBinPersistentState& scheduler_state = scheduler_state_for_validation;
   append_u64(scheduler_state.current_tick);
@@ -1019,6 +1039,17 @@ void writeRestartCheckpointHdf5(
   writeScalarU32Attribute(integrator_group.get(), "time_bins_hierarchical", payload.integrator_state->time_bins.hierarchical_enabled ? 1U : 0U);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_active_bin", payload.integrator_state->time_bins.active_bin);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_max_bin", payload.integrator_state->time_bins.max_bin);
+  writeScalarU32Attribute(integrator_group.get(), "pm_long_range_field_valid", payload.integrator_state->pm_long_range_field_valid ? 1U : 0U);
+  const core::PmSynchronizationPersistentState pm_sync_state = payload.integrator_state->pm_sync_state.exportPersistentState();
+  writeScalarU64Attribute(integrator_group.get(), "pm_cadence_steps", pm_sync_state.cadence_steps);
+  writeScalarU64Attribute(integrator_group.get(), "pm_gravity_kick_opportunity", pm_sync_state.gravity_kick_opportunity);
+  writeScalarU64Attribute(integrator_group.get(), "pm_last_refresh_opportunity", pm_sync_state.last_refresh_opportunity);
+  writeScalarU64Attribute(integrator_group.get(), "pm_field_version", pm_sync_state.field_version);
+  writeScalarU64Attribute(integrator_group.get(), "pm_last_refresh_step_index", pm_sync_state.last_refresh_step_index);
+  writeScalarF64Attribute(integrator_group.get(), "pm_last_refresh_scale_factor", pm_sync_state.last_refresh_scale_factor);
+  writeScalarU32Attribute(integrator_group.get(), "pm_refresh_commit_pending", pm_sync_state.refresh_commit_pending ? 1U : 0U);
+  writeScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_opportunity", pm_sync_state.pending_refresh_opportunity);
+  writeScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_field_version", pm_sync_state.pending_refresh_field_version);
 
   const core::TimeBinPersistentState scheduler_state = payload.scheduler->exportPersistentState();
   Hdf5Handle scheduler_group(openOrCreateGroup(file.get(), "/scheduler"));
@@ -1116,6 +1147,19 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       static_cast<std::uint8_t>(readScalarU32Attribute(integrator_group.get(), "time_bins_active_bin"));
   result.integrator_state.time_bins.max_bin =
       static_cast<std::uint8_t>(readScalarU32Attribute(integrator_group.get(), "time_bins_max_bin"));
+  result.integrator_state.pm_long_range_field_valid =
+      readScalarU32Attribute(integrator_group.get(), "pm_long_range_field_valid") != 0U;
+  core::PmSynchronizationPersistentState pm_sync_state;
+  pm_sync_state.cadence_steps = readScalarU64Attribute(integrator_group.get(), "pm_cadence_steps");
+  pm_sync_state.gravity_kick_opportunity = readScalarU64Attribute(integrator_group.get(), "pm_gravity_kick_opportunity");
+  pm_sync_state.last_refresh_opportunity = readScalarU64Attribute(integrator_group.get(), "pm_last_refresh_opportunity");
+  pm_sync_state.field_version = readScalarU64Attribute(integrator_group.get(), "pm_field_version");
+  pm_sync_state.last_refresh_step_index = readScalarU64Attribute(integrator_group.get(), "pm_last_refresh_step_index");
+  pm_sync_state.last_refresh_scale_factor = readScalarF64Attribute(integrator_group.get(), "pm_last_refresh_scale_factor");
+  pm_sync_state.refresh_commit_pending = readScalarU32Attribute(integrator_group.get(), "pm_refresh_commit_pending") != 0U;
+  pm_sync_state.pending_refresh_opportunity = readScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_opportunity");
+  pm_sync_state.pending_refresh_field_version = readScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_field_version");
+  result.integrator_state.pm_sync_state.importPersistentState(pm_sync_state);
 
   Hdf5Handle scheduler_group(H5Gopen2(file.get(), "/scheduler", H5P_DEFAULT));
   result.scheduler_state.current_tick = readScalarU64Attribute(scheduler_group.get(), "current_tick");

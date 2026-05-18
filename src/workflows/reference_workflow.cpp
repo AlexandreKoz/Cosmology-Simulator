@@ -1327,7 +1327,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (m_runtime_topology.usesCuda()) {
       m_pm_backend += "+cuda_cic";
     }
-    m_pm_sync_state.reset(std::max<std::uint64_t>(m_pm_update_cadence_steps, 1ULL));
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
@@ -1335,15 +1334,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] const gravity::PmGridShape& pmGridShape() const noexcept { return m_pm_grid_shape; }
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
   [[nodiscard]] std::uint64_t longRangeReuseCount() const noexcept { return m_long_range_reuse_count; }
-  [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_sync_state.cadenceSteps()); }
+  [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_update_cadence_steps); }
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
-  [[nodiscard]] std::uint64_t gravityKickOpportunity() const noexcept { return m_pm_sync_state.gravityKickOpportunity(); }
-  [[nodiscard]] std::uint64_t longRangeFieldVersion() const noexcept { return m_pm_sync_state.fieldVersion(); }
-  [[nodiscard]] std::uint64_t lastLongRangeRefreshOpportunity() const noexcept { return m_pm_sync_state.lastRefreshOpportunity(); }
-  [[nodiscard]] std::uint64_t lastLongRangeRefreshStepIndex() const noexcept { return m_pm_sync_state.lastRefreshStepIndex(); }
-  [[nodiscard]] double lastLongRangeRefreshScaleFactor() const noexcept { return m_pm_sync_state.lastRefreshScaleFactor(); }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -1420,13 +1414,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     const std::size_t particle_count = context.state.particles.size();
 
-    const double predicted_inactive_source_drift = context.pm_refresh_directive.requires_predicted_inactive_sources
-        ? context.timeline_step.drift_factor_code
-        : 0.0;
     rebuildOwnedParticleCompactView(
-        context.state,
+        context,
         context.active_set.particle_indices,
-        predicted_inactive_source_drift);
+        context.pm_refresh_directive.requires_predicted_inactive_sources);
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
@@ -1478,13 +1469,19 @@ class GravityStageCallback final : public core::IntegrationCallback {
       throw std::runtime_error(
           "TreePM attempted to advance PM cadence without an integrator-issued refresh opportunity");
     }
-    // Scheduler-owned PM sync state advances kick opportunities and decides refresh
-    // legality; the gravity callback consumes the integrator-issued refresh
-    // directive and executes the solver on that legal surface only.
-    const core::PmSyncEvent sync_event = m_pm_sync_state.registerKickOpportunity(
-        context.integrator_state.step_index,
-        m_tree_pm_options.pm_options.scale_factor,
-        m_has_long_range_field);
+    // The integrator owns PM cadence state and issues this concrete event.
+    // Gravity may only execute the solver against the provided directive.
+    if (!context.pm_refresh_directive.has_sync_event) {
+      throw std::runtime_error("TreePM force-refresh execution requires an integrator-owned PM sync event");
+    }
+    const core::PmSyncEvent sync_event{
+        .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+        .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+        .field_version = context.pm_refresh_directive.field_version,
+        .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+        .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+        .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+    };
     requireKickConsensus(sync_event.gravity_kick_opportunity, "gravity_kick_opportunity");
     const std::uint64_t refresh_vote = sync_event.refresh_long_range_field ? 1ULL : 0ULL;
     const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
@@ -1559,13 +1556,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
         allow_heavy_reference_checks);
 
     if (decision.refresh_long_range_field) {
-      m_pm_sync_state.commitRefresh(sync_event);
       m_has_long_range_field = true;
       ++m_long_range_refresh_count;
     } else {
       ++m_long_range_reuse_count;
     }
-    m_last_committed_field_version = m_pm_sync_state.fieldVersion();
+    context.pm_refresh_directive.solver_executed = true;
+    m_last_committed_field_version = decision.field_version;
 
     const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
         context.state.particles.size() - m_local_active_global_indices.size());
@@ -1597,11 +1594,11 @@ class GravityStageCallback final : public core::IntegrationCallback {
               : "PM long-range field reused for gravity kick",
           .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
                       {"pm_sync_surface", std::string(pmSyncSurfaceName(decision.sync_surface))},
-                      {"gravity_kick_opportunity", std::to_string(m_pm_sync_state.gravityKickOpportunity())},
-                      {"field_version", std::to_string(m_pm_sync_state.fieldVersion())},
-                      {"field_built_step_index", std::to_string(m_pm_sync_state.lastRefreshStepIndex())},
-                      {"field_built_scale_factor", std::to_string(m_pm_sync_state.lastRefreshScaleFactor())},
-                      {"pm_update_cadence_steps", std::to_string(m_pm_sync_state.cadenceSteps())},
+                      {"gravity_kick_opportunity", std::to_string(context.integrator_state.pm_sync_state.gravityKickOpportunity())},
+                      {"field_version", std::to_string(context.integrator_state.pm_sync_state.fieldVersion())},
+                      {"field_built_step_index", std::to_string(context.integrator_state.pm_sync_state.lastRefreshStepIndex())},
+                      {"field_built_scale_factor", std::to_string(context.integrator_state.pm_sync_state.lastRefreshScaleFactor())},
+                      {"pm_update_cadence_steps", std::to_string(context.integrator_state.pm_sync_state.cadenceSteps())},
                       {"pm_grid", std::to_string(m_pm_grid_shape.nx) + "x" + std::to_string(m_pm_grid_shape.ny) +
                               "x" + std::to_string(m_pm_grid_shape.nz)},
                       {"pm_assignment_scheme", m_pm_assignment_scheme},
@@ -1763,7 +1760,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_particle_accel_y.resize(particle_count, 0.0);
       m_particle_accel_z.resize(particle_count, 0.0);
     }
-    rebuildOwnedParticleCompactView(context.state, context.active_set.particle_indices);
+    rebuildOwnedParticleCompactView(context, context.active_set.particle_indices, false);
     const double kick_factor = kickFactorForStage(context);
     const double hubble_drag = hubbleDragFactorForStage(context);
     for (const std::uint32_t particle_index : m_local_active_global_indices) {
@@ -1845,17 +1842,17 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
 
     ++summary.cheap_checks_executed;
-    if (m_pm_sync_state.lastRefreshOpportunity() > m_pm_sync_state.gravityKickOpportunity() ||
-        m_pm_sync_state.fieldVersion() < m_last_committed_field_version) {
+    if (context.integrator_state.pm_sync_state.lastRefreshOpportunity() > context.integrator_state.pm_sync_state.gravityKickOpportunity() ||
+        context.integrator_state.pm_sync_state.fieldVersion() < m_last_committed_field_version) {
       ++summary.illegal_sync_state_count;
       failFatal("gravity sync-state regressed across kick opportunities");
     }
     if (decision.refresh_long_range_field) {
-      if (decision.field_version != m_pm_sync_state.fieldVersion() + 1U) {
+      if (decision.field_version != context.integrator_state.pm_sync_state.fieldVersion() + 1U) {
         ++summary.illegal_sync_state_count;
         failFatal("refresh decision must increment field_version by exactly one");
       }
-    } else if (decision.field_version != m_pm_sync_state.fieldVersion()) {
+    } else if (decision.field_version != context.integrator_state.pm_sync_state.fieldVersion()) {
       ++summary.illegal_sync_state_count;
       failFatal("reuse decision must not mutate field_version");
     }
@@ -1932,9 +1929,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
   void rebuildOwnedParticleCompactView(
-      const core::SimulationState& state,
+      const core::StepContext& context,
       std::span<const std::uint32_t> active_particles,
-      double inactive_source_drift_factor_code = 0.0) {
+      bool predict_inactive_sources = false) {
+    const core::SimulationState& state = context.state;
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
     m_owned_local_index_by_global.assign(particle_count, -1);
@@ -1949,10 +1947,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_source_predicted_inactive_count = 0;
 
     std::vector<std::uint8_t> active_mask;
-    const bool predict_inactive_sources = inactive_source_drift_factor_code != 0.0;
     if (predict_inactive_sources) {
-      if (!std::isfinite(inactive_source_drift_factor_code)) {
-        throw std::invalid_argument("inactive source drift factor must be finite");
+      if (state.particle_sidecar.last_drift_time_code.size() != particle_count ||
+          state.particle_sidecar.last_drift_scale_factor.size() != particle_count) {
+        throw std::runtime_error("PM source prediction requires per-particle drift epoch sidecars");
       }
       active_mask.assign(particle_count, 0U);
       for (const std::uint32_t global_index : active_particles) {
@@ -1978,9 +1976,25 @@ class GravityStageCallback final : public core::IntegrationCallback {
       double source_y = state.particles.position_y_comoving[global_index];
       double source_z = state.particles.position_z_comoving[global_index];
       if (predict_inactive_sources && active_mask[global_index] == 0U) {
-        source_x += state.particles.velocity_x_peculiar[global_index] * inactive_source_drift_factor_code;
-        source_y += state.particles.velocity_y_peculiar[global_index] * inactive_source_drift_factor_code;
-        source_z += state.particles.velocity_z_peculiar[global_index] * inactive_source_drift_factor_code;
+        const double source_time = state.particle_sidecar.last_drift_time_code[global_index];
+        const double source_scale = state.particle_sidecar.last_drift_scale_factor[global_index];
+        if (source_time > context.timeline_step.time_end_code + 1.0e-12 || source_scale <= 0.0) {
+          throw std::runtime_error("inactive PM source has an invalid or future drift epoch");
+        }
+        double inactive_drift_factor = context.timeline_step.time_end_code - source_time;
+        if (context.cosmology_background != nullptr) {
+          inactive_drift_factor = core::computeComovingDriftFactor(
+              *context.cosmology_background,
+              source_scale,
+              context.timeline_step.scale_factor_end,
+              64) / context.timeline_step.time_si_per_code;
+        }
+        if (!std::isfinite(inactive_drift_factor) || inactive_drift_factor < -1.0e-14) {
+          throw std::runtime_error("inactive PM source prediction produced an invalid drift factor");
+        }
+        source_x += state.particles.velocity_x_peculiar[global_index] * inactive_drift_factor;
+        source_y += state.particles.velocity_y_peculiar[global_index] * inactive_drift_factor;
+        source_z += state.particles.velocity_z_peculiar[global_index] * inactive_drift_factor;
         ++m_source_predicted_inactive_count;
       }
       if (periodic_sources) {
@@ -2034,7 +2048,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
   const core::ModePolicy& m_mode_policy;
   parallel::DistributedExecutionTopology m_runtime_topology{};
   std::uint64_t m_pm_update_cadence_steps = 1;
-  core::PmSynchronizationState m_pm_sync_state;
   gravity::PmGridShape m_pm_grid_shape{};
   double m_mesh_spacing_x_mpc_comoving = 0.0;
   double m_mesh_spacing_y_mpc_comoving = 0.0;
@@ -2363,17 +2376,18 @@ bool maybeWriteOutputs(
     restart_payload.distributed_gravity_state.pm_grid_nz = gravity_callback.pmGridShape().nz;
     restart_payload.distributed_gravity_state.pm_decomposition_mode =
         pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
-    restart_payload.distributed_gravity_state.gravity_kick_opportunity = gravity_callback.gravityKickOpportunity();
+    restart_payload.distributed_gravity_state.gravity_kick_opportunity =
+        integrator_state.pm_sync_state.gravityKickOpportunity();
     restart_payload.distributed_gravity_state.pm_update_cadence_steps =
-        static_cast<std::uint64_t>(gravity_callback.pmCadenceSteps());
+        integrator_state.pm_sync_state.cadenceSteps();
     restart_payload.distributed_gravity_state.long_range_field_version =
-        gravity_callback.longRangeFieldVersion();
+        integrator_state.pm_sync_state.fieldVersion();
     restart_payload.distributed_gravity_state.last_long_range_refresh_opportunity =
-        gravity_callback.lastLongRangeRefreshOpportunity();
+        integrator_state.pm_sync_state.lastRefreshOpportunity();
     restart_payload.distributed_gravity_state.long_range_field_built_step_index =
-        gravity_callback.lastLongRangeRefreshStepIndex();
+        integrator_state.pm_sync_state.lastRefreshStepIndex();
     restart_payload.distributed_gravity_state.long_range_field_built_scale_factor =
-        gravity_callback.lastLongRangeRefreshScaleFactor();
+        integrator_state.pm_sync_state.lastRefreshScaleFactor();
     restart_payload.distributed_gravity_state.long_range_restart_policy = "deterministic_rebuild";
     restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particle_sidecar.owning_rank.size());
     for (const std::uint32_t owner : state.particle_sidecar.owning_rank) {
@@ -2655,6 +2669,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                   static_cast<double>(std::max(config.numerics.max_global_steps, 1)));
     integrator_state.time_bins.hierarchical_enabled = true;
     integrator_state.time_bins.max_bin = scheduler.maxBin();
+    integrator_state.pm_refresh_enabled = true;
+    integrator_state.pm_sync_state.reset(static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)));
+    for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+      state.particle_sidecar.last_drift_time_code[particle_index] = integrator_state.current_time_code;
+      state.particle_sidecar.last_drift_scale_factor[particle_index] = integrator_state.current_scale_factor;
+    }
 
     core::StepOrchestrator orchestrator;
     StageAuditCallback stage_audit(&report.stage_sequence);
@@ -2670,7 +2690,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.treepm_pm_grid_nz = gravity_callback.pmGridShape().nz;
     report.treepm_pm_grid_shape = std::to_string(report.treepm_pm_grid_nx) + "x" +
         std::to_string(report.treepm_pm_grid_ny) + "x" + std::to_string(report.treepm_pm_grid_nz);
-    report.treepm_update_cadence_steps = gravity_callback.pmCadenceSteps();
+    report.treepm_update_cadence_steps = static_cast<int>(integrator_state.pm_sync_state.cadenceSteps());
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "gravity.treepm_setup",
         .severity = core::RuntimeEventSeverity::kInfo,

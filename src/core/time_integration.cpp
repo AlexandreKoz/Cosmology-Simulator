@@ -671,17 +671,44 @@ void StepOrchestrator::executeSingleStep(
     context.pm_refresh_directive = {};
     if (stage == IntegrationStage::kGravityKickPre) {
       context.pm_refresh_directive.initial_cache_bootstrap_allowed = !boundary.local_substep;
-      context.pm_refresh_directive.cadence_opportunity_allowed =
-          context.pm_refresh_directive.initial_cache_bootstrap_allowed;
+      if (integrator_state.pm_refresh_enabled && context.pm_refresh_directive.initial_cache_bootstrap_allowed &&
+          !integrator_state.pm_long_range_field_valid) {
+        const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
+            integrator_state.step_index,
+            timeline_step.scale_factor_begin,
+            integrator_state.pm_long_range_field_valid);
+        context.pm_refresh_directive.cadence_opportunity_allowed = true;
+        context.pm_refresh_directive.has_sync_event = true;
+        context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
+        context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
+        context.pm_refresh_directive.field_version = event.field_version;
+        context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
+        context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
+        context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
+      }
     } else if (stage == IntegrationStage::kForceRefresh) {
       context.boundary.kind = StepBoundaryKind::kPmRefreshPoint;
       context.boundary.pm_refresh_allowed = true;
       context.pm_refresh_directive.force_refresh_surface = true;
       context.pm_refresh_directive.cadence_opportunity_allowed = true;
       context.pm_refresh_directive.requires_predicted_inactive_sources = boundary.local_substep;
+      if (integrator_state.pm_refresh_enabled) {
+        const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
+            integrator_state.step_index,
+            timeline_step.scale_factor_end,
+            integrator_state.pm_long_range_field_valid);
+        context.pm_refresh_directive.has_sync_event = true;
+        context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
+        context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
+        context.pm_refresh_directive.field_version = event.field_version;
+        context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
+        context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
+        context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
+      }
     } else if (stage == IntegrationStage::kOutputCheck) {
       context.boundary.kind = requested_boundary_kind;
     }
+    const std::size_t particle_count_before_stage = state.particles.size();
     const std::string stage_name = "stage." + std::string(integrationStageName(stage));
     COSMOSIM_PROFILE_SCOPE(profiler_session, stage_name);
     if (profiler_session != nullptr) {
@@ -694,6 +721,50 @@ void StepOrchestrator::executeSingleStep(
       callback->onStage(context);
       if (profiler_session != nullptr) {
         profiler_session->counters().addCount(callback_phase + ".invocations", 1);
+      }
+    }
+    if ((stage == IntegrationStage::kForceRefresh ||
+         (stage == IntegrationStage::kGravityKickPre && context.pm_refresh_directive.has_sync_event)) &&
+        context.pm_refresh_directive.has_sync_event) {
+      if (!context.pm_refresh_directive.solver_executed) {
+        throw std::runtime_error("integrator-issued PM refresh directive was not consumed by a TreePM callback");
+      }
+      if (context.pm_refresh_directive.refresh_long_range_field) {
+        const PmSyncEvent event{
+            .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+            .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+            .field_version = context.pm_refresh_directive.field_version,
+            .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+            .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+            .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+        };
+        integrator_state.pm_sync_state.commitRefresh(event);
+        integrator_state.pm_long_range_field_valid = true;
+      } else if (!integrator_state.pm_long_range_field_valid) {
+        throw std::runtime_error("PM sync reused a long-range field before the integrator marked one valid");
+      }
+    }
+    if (stage == IntegrationStage::kDrift &&
+        state.particle_sidecar.last_drift_time_code.size() == state.particles.size() &&
+        state.particle_sidecar.last_drift_scale_factor.size() == state.particles.size()) {
+      for (const std::uint32_t particle_index : active_set.particle_indices) {
+        if (particle_index >= state.particle_sidecar.last_drift_time_code.size()) {
+          throw std::out_of_range("drift epoch update particle index out of range");
+        }
+        state.particle_sidecar.last_drift_time_code[particle_index] = timeline_step.time_end_code;
+        state.particle_sidecar.last_drift_scale_factor[particle_index] = timeline_step.scale_factor_end;
+      }
+    } else if (stage == IntegrationStage::kDrift && !state.particle_sidecar.last_drift_time_code.empty()) {
+      throw std::runtime_error("particle drift-time sidecar is partially sized before drift epoch update");
+    }
+    if (stage == IntegrationStage::kSourceTerms && state.particles.size() > particle_count_before_stage) {
+      if (state.particle_sidecar.last_drift_time_code.size() != state.particles.size() ||
+          state.particle_sidecar.last_drift_scale_factor.size() != state.particles.size()) {
+        throw std::runtime_error("particle drift-time sidecar is not sized after source-term mutation");
+      }
+      for (std::size_t particle_index = particle_count_before_stage; particle_index < state.particles.size(); ++particle_index) {
+        state.particle_sidecar.last_drift_time_code[particle_index] = timeline_step.time_end_code;
+        state.particle_sidecar.last_drift_scale_factor[particle_index] = timeline_step.scale_factor_end;
       }
     }
   }

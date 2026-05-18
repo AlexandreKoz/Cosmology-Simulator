@@ -53,6 +53,10 @@ struct ParticleSidecar {
   AlignedVector<std::uint32_t> species_tag;
   AlignedVector<std::uint32_t> particle_flags;
   AlignedVector<std::uint32_t> owning_rank;
+  // Authoritative particle-position epoch used to predict inactive TreePM sources
+  // without mutating persistent particle state during local active-bin refreshes.
+  AlignedVector<double> last_drift_time_code;
+  AlignedVector<double> last_drift_scale_factor;
   // Optional per-particle gravity softening value sidecar (comoving code units).
   // has_gravity_softening_override is the authoritative override mask. A populated
   // value vector without a populated mask is a materialized diagnostic/default mirror,
@@ -290,6 +294,8 @@ struct ParticleTransferPacket {
   // before exact continuation.
   AlignedVector<std::uint8_t> time_bin;
   AlignedVector<std::uint32_t> owning_rank;
+  AlignedVector<double> last_drift_time_code;
+  AlignedVector<double> last_drift_scale_factor;
 };
 
 struct StarParticleMigrationFields {
@@ -344,6 +350,8 @@ struct ParticleMigrationRecord {
   // destination ranks must remap/rebuild scheduler state by stable particle_id
   // before restart/output.
   std::uint8_t time_bin = 0;
+  double last_drift_time_code = 0.0;
+  double last_drift_scale_factor = 1.0;
   bool has_gravity_softening_value = false;
   bool has_gravity_softening_override = false;
   double gravity_softening_comoving = 0.0;

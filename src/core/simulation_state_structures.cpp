@@ -1,5 +1,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <cmath>
+
 namespace cosmosim::core {
 
 void ParticleSoa::resize(std::size_t count) {
@@ -29,6 +31,12 @@ void ParticleSidecar::resize(std::size_t count) {
   species_tag.resize(count);
   particle_flags.resize(count);
   owning_rank.resize(count);
+  const std::size_t old_drift_size = last_drift_time_code.size();
+  last_drift_time_code.resize(count, 0.0);
+  last_drift_scale_factor.resize(count, 1.0);
+  for (std::size_t i = old_drift_size; i < count; ++i) {
+    last_drift_scale_factor[i] = 1.0;
+  }
   if (!gravity_softening_comoving.empty()) {
     gravity_softening_comoving.resize(count);
   }
@@ -46,10 +54,17 @@ bool ParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_id.size();
   if (sfc_key.size() != expected || species_tag.size() != expected || particle_flags.size() != expected ||
       owning_rank.size() != expected ||
+      last_drift_time_code.size() != expected || last_drift_scale_factor.size() != expected ||
       (!gravity_softening_comoving.empty() && gravity_softening_comoving.size() != expected) ||
       (!has_gravity_softening_override.empty() && has_gravity_softening_override.size() != expected) ||
       (!has_gravity_softening_override.empty() && gravity_softening_comoving.empty())) {
     return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(last_drift_time_code[i]) || !std::isfinite(last_drift_scale_factor[i]) ||
+        last_drift_scale_factor[i] <= 0.0) {
+      return false;
+    }
   }
   for (const auto flag : has_gravity_softening_override) {
     if (flag > 1U) {
