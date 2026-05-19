@@ -31,6 +31,49 @@ enum class IntegrationStage : std::uint8_t {
   kAnalysisHooks = 6,
   kOutputCheck = 7,
 };
+enum class StageDataDomain : std::uint16_t {
+  kNone = 0,
+  kParticles = 1U << 0U,
+  kGasCells = 1U << 1U,
+  kMeshCells = 1U << 2U,
+  kGhostCells = 1U << 3U,
+  kPmField = 1U << 4U,
+  kTreeState = 1U << 5U,
+  kOutputState = 1U << 6U,
+  kRestartState = 1U << 7U,
+  kDiagnostics = 1U << 8U,
+};
+[[nodiscard]] constexpr StageDataDomain operator|(StageDataDomain lhs, StageDataDomain rhs) noexcept {
+  return static_cast<StageDataDomain>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+[[nodiscard]] constexpr bool hasStageDataDomain(StageDataDomain value, StageDataDomain mask) noexcept {
+  return (static_cast<std::uint16_t>(value) & static_cast<std::uint16_t>(mask)) != 0U;
+}
+enum class StageSyncRequirement : std::uint8_t { kNone = 0, kLocalOnly = 1, kPmRefreshBoundary = 2, kGlobal = 3 };
+enum class StageActiveSetFamily : std::uint8_t {
+  kNone = 0,
+  kAllParticles = 1,
+  kActiveParticles = 2,
+  kGasCells = 3,
+  kMeshCells = 4,
+  kGhostCells = 5,
+  kOutputState = 6,
+  kRestartState = 7,
+};
+enum class StageSafety : std::uint8_t { kUnsafe = 0, kSafe = 1 };
+enum class StageSubsystem : std::uint8_t { kCore = 0, kGravity = 1, kHydro = 2, kSources = 3, kAnalysis = 4, kOutput = 5 };
+struct StageContract {
+  IntegrationStage stage = IntegrationStage::kGravityKickPre;
+  StageDataDomain required_inputs = StageDataDomain::kNone;
+  StageDataDomain mutated_state = StageDataDomain::kNone;
+  StageDataDomain produced_outputs = StageDataDomain::kNone;
+  StageDataDomain allowed_side_effects = StageDataDomain::kNone;
+  StageSyncRequirement sync_requirements = StageSyncRequirement::kNone;
+  StageActiveSetFamily active_set_family = StageActiveSetFamily::kNone;
+  StageSafety restart_safety = StageSafety::kUnsafe;
+  StageSafety output_safety = StageSafety::kUnsafe;
+  StageSubsystem owner = StageSubsystem::kCore;
+};
 
 [[nodiscard]] std::string_view integrationStageName(IntegrationStage stage);
 [[nodiscard]] constexpr std::size_t integrationStageCount() noexcept { return 8; }
@@ -262,6 +305,7 @@ class IntegrationCallback {
 
   [[nodiscard]] virtual std::string_view callbackName() const = 0;
   [[nodiscard]] virtual std::span<const IntegrationStage> integrationStages() const = 0;
+  [[nodiscard]] virtual std::span<const StageContract> stageContracts() const { return {}; }
   virtual void onStage(StepContext& context) = 0;
 };
 
@@ -285,6 +329,10 @@ class StepOrchestrator {
   void registerCallback(IntegrationCallback& callback);
   [[nodiscard]] std::size_t callbackCount() const noexcept;
   [[nodiscard]] std::span<IntegrationCallback* const> handlersFor(IntegrationStage stage) const noexcept;
+  [[nodiscard]] std::span<const StageContract> contractsFor(IntegrationStage stage) const noexcept;
+  [[nodiscard]] std::optional<StageContract> contractForHandlerStage(
+      const IntegrationCallback& callback,
+      IntegrationStage stage) const noexcept;
 
   void executeSingleStep(
       SimulationState& state,
@@ -312,6 +360,7 @@ class StepOrchestrator {
  private:
   StageScheduler m_scheduler;
   std::array<std::vector<IntegrationCallback*>, integrationStageCount()> m_handlers_by_stage;
+  std::array<std::vector<StageContract>, integrationStageCount()> m_contracts_by_stage;
   std::size_t m_callback_count = 0;
 };
 

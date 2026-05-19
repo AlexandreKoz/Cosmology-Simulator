@@ -75,10 +75,13 @@ std::vector<std::uint64_t> activeParticleIdsAtCurrentTick(
 class SingleStageRecorder final : public cosmosim::core::IntegrationCallback {
  public:
   SingleStageRecorder(std::string_view name, cosmosim::core::IntegrationStage stage, std::vector<std::string>* order)
-      : name(name), stage(stage), order(order) {}
+      : name(name), stage(stage), order(order) {
+    contract.stage = stage;
+  }
 
   std::string_view callbackName() const override { return name; }
   std::span<const cosmosim::core::IntegrationStage> integrationStages() const override { return {&stage, 1}; }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return {&contract, 1}; }
 
   void onStage(cosmosim::core::StepContext& context) override {
     assert(context.stage == stage);
@@ -91,6 +94,18 @@ class SingleStageRecorder final : public cosmosim::core::IntegrationCallback {
 
   std::string_view name;
   cosmosim::core::IntegrationStage stage;
+  cosmosim::core::StageContract contract{
+      .stage = cosmosim::core::IntegrationStage::kDrift,
+      .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+      .mutated_state = cosmosim::core::StageDataDomain::kDiagnostics,
+      .produced_outputs = cosmosim::core::StageDataDomain::kDiagnostics,
+      .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+      .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+      .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+      .restart_safety = cosmosim::core::StageSafety::kSafe,
+      .output_safety = cosmosim::core::StageSafety::kSafe,
+      .owner = cosmosim::core::StageSubsystem::kCore,
+  };
   std::vector<std::string>* order = nullptr;
   int invocations = 0;
   std::vector<cosmosim::core::IntegrationStage> observed;
@@ -112,10 +127,21 @@ class StageRecorder final : public cosmosim::core::IntegrationCallback {
     };
     return stages;
   }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
 
   void onStage(cosmosim::core::StepContext& context) override { observed_stages.push_back(context.stage); }
 
   std::vector<cosmosim::core::IntegrationStage> observed_stages;
+  std::array<cosmosim::core::StageContract, 8> contracts{{
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .required_inputs = cosmosim::core::StageDataDomain::kParticles, .mutated_state = cosmosim::core::StageDataDomain::kPmField, .produced_outputs = cosmosim::core::StageDataDomain::kPmField, .allowed_side_effects = cosmosim::core::StageDataDomain::kPmField, .sync_requirements = cosmosim::core::StageSyncRequirement::kGlobal, .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kDrift, .required_inputs = cosmosim::core::StageDataDomain::kParticles, .mutated_state = cosmosim::core::StageDataDomain::kParticles, .produced_outputs = cosmosim::core::StageDataDomain::kParticles, .allowed_side_effects = cosmosim::core::StageDataDomain::kNone, .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly, .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kCore},
+      {.stage = cosmosim::core::IntegrationStage::kForceRefresh, .required_inputs = cosmosim::core::StageDataDomain::kPmField, .mutated_state = cosmosim::core::StageDataDomain::kPmField, .produced_outputs = cosmosim::core::StageDataDomain::kPmField, .allowed_side_effects = cosmosim::core::StageDataDomain::kPmField, .sync_requirements = cosmosim::core::StageSyncRequirement::kPmRefreshBoundary, .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kHydroUpdate, .required_inputs = cosmosim::core::StageDataDomain::kGasCells, .mutated_state = cosmosim::core::StageDataDomain::kGasCells, .produced_outputs = cosmosim::core::StageDataDomain::kGasCells, .allowed_side_effects = cosmosim::core::StageDataDomain::kNone, .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly, .active_set_family = cosmosim::core::StageActiveSetFamily::kGasCells, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kHydro},
+      {.stage = cosmosim::core::IntegrationStage::kSourceTerms, .required_inputs = cosmosim::core::StageDataDomain::kParticles, .mutated_state = cosmosim::core::StageDataDomain::kParticles, .produced_outputs = cosmosim::core::StageDataDomain::kParticles, .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics, .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly, .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kSources},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost, .required_inputs = cosmosim::core::StageDataDomain::kParticles, .mutated_state = cosmosim::core::StageDataDomain::kParticles, .produced_outputs = cosmosim::core::StageDataDomain::kParticles, .allowed_side_effects = cosmosim::core::StageDataDomain::kNone, .sync_requirements = cosmosim::core::StageSyncRequirement::kGlobal, .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kAnalysisHooks, .required_inputs = cosmosim::core::StageDataDomain::kDiagnostics, .mutated_state = cosmosim::core::StageDataDomain::kDiagnostics, .produced_outputs = cosmosim::core::StageDataDomain::kDiagnostics, .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics, .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly, .active_set_family = cosmosim::core::StageActiveSetFamily::kNone, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kAnalysis},
+      {.stage = cosmosim::core::IntegrationStage::kOutputCheck, .required_inputs = cosmosim::core::StageDataDomain::kOutputState, .mutated_state = cosmosim::core::StageDataDomain::kOutputState, .produced_outputs = cosmosim::core::StageDataDomain::kOutputState, .allowed_side_effects = cosmosim::core::StageDataDomain::kOutputState, .sync_requirements = cosmosim::core::StageSyncRequirement::kGlobal, .active_set_family = cosmosim::core::StageActiveSetFamily::kOutputState, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe, .owner = cosmosim::core::StageSubsystem::kOutput},
+  }};
 };
 
 void testKickDriftKickOrdering() {
@@ -157,6 +183,7 @@ void testStageBoundDispatch() {
 
   assert(orchestrator.callbackCount() == 3U);
   assert(orchestrator.handlersFor(cosmosim::core::IntegrationStage::kDrift).size() == 2U);
+  assert(orchestrator.contractsFor(cosmosim::core::IntegrationStage::kDrift).size() == 2U);
   assert(orchestrator.handlersFor(cosmosim::core::IntegrationStage::kHydroUpdate).empty());
 
   orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);

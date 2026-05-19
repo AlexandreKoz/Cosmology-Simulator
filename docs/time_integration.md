@@ -23,6 +23,7 @@ Any new `IntegrationCallback` implementation must provide:
 
 - `callbackName()` for profiling and diagnostics;
 - `integrationStages()` returning the small typed stage set the handler is allowed to receive;
+- `stageContracts()` returning a typed `StageContract` entry for each declared stage (required inputs, mutable domains, outputs, side effects, sync requirement, active-set family, restart/output safety, and owning subsystem);
 - `onStage(...)` logic that assumes the declared stage contract and throws/asserts on impossible off-stage direct calls instead of returning silently.
 
 Existing code that previously registered a broad callback and checked `context.stage` internally must split the behavior into explicit stage declarations or return the exact small stage set needed by the handler. No config keys, snapshot/restart payloads, or solver numerics migrate for this interface repair.
