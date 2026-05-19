@@ -144,6 +144,39 @@ class StageRecorder final : public cosmosim::core::IntegrationCallback {
   }};
 };
 
+class PmDirectiveRecorder final : public cosmosim::core::IntegrationCallback {
+ public:
+  std::string_view callbackName() const override { return "pm_directive_recorder"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{
+        cosmosim::core::IntegrationStage::kGravityKickPre,
+        cosmosim::core::IntegrationStage::kForceRefresh,
+    };
+    return stages;
+  }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+  void onStage(cosmosim::core::StepContext& context) override {
+    if (context.stage == cosmosim::core::IntegrationStage::kGravityKickPre) {
+      kick_pre = context.pm_refresh_directive;
+      if (context.pm_refresh_directive.has_sync_event) {
+        context.pm_refresh_directive.solver_executed = true;
+      }
+    } else if (context.stage == cosmosim::core::IntegrationStage::kForceRefresh) {
+      force_refresh = context.pm_refresh_directive;
+      if (context.pm_refresh_directive.has_sync_event) {
+        context.pm_refresh_directive.solver_executed = true;
+      }
+    }
+  }
+
+  std::array<cosmosim::core::StageContract, 2> contracts{{
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kForceRefresh, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+  }};
+  cosmosim::core::PmRefreshDirective kick_pre{};
+  cosmosim::core::PmRefreshDirective force_refresh{};
+};
+
 void testKickDriftKickOrdering() {
   cosmosim::core::SimulationState state;
   cosmosim::core::IntegratorState integrator_state;
@@ -163,6 +196,26 @@ void testKickDriftKickOrdering() {
     assert(recorder.observed_stages[i] == expected[i]);
   }
   assert(cosmosim::core::isCanonicalIntegrationStageOrder(recorder.observed_stages));
+}
+
+void testPmRefreshDirectiveCapturesReasonAndForceEvalTime() {
+  cosmosim::core::SimulationState state;
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 0.25;
+  integrator_state.pm_refresh_enabled = true;
+  integrator_state.pm_long_range_field_valid = false;
+  integrator_state.current_scale_factor = 1.0;
+
+  PmDirectiveRecorder recorder;
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(recorder);
+  orchestrator.executeSingleStep(state, integrator_state, cosmosim::core::ActiveSetDescriptor{}, nullptr, nullptr);
+
+  assert(recorder.kick_pre.reason == cosmosim::core::PmRefreshDirective::Reason::kInitialForceBootstrap);
+  assert(recorder.kick_pre.force_evaluation_scale_factor > 0.0);
+  assert(recorder.force_refresh.reason == cosmosim::core::PmRefreshDirective::Reason::kScheduledForceRefreshStage);
+  assert(recorder.force_refresh.force_refresh_surface);
+  assert(recorder.force_refresh.force_evaluation_scale_factor >= recorder.kick_pre.force_evaluation_scale_factor);
 }
 
 
@@ -970,6 +1023,7 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
 
 int main() {
   testKickDriftKickOrdering();
+  testPmRefreshDirectiveCapturesReasonAndForceEvalTime();
   testStageBoundDispatch();
   testCosmologyHelpers();
   testCosmologicalTimelineConvertsSiIntegralsToCodeTime();

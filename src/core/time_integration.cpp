@@ -733,6 +733,8 @@ void StepOrchestrator::executeSingleStep(
       context.pm_refresh_directive.initial_cache_bootstrap_allowed = !boundary.local_substep;
       if (integrator_state.pm_refresh_enabled && context.pm_refresh_directive.initial_cache_bootstrap_allowed &&
           !integrator_state.pm_long_range_field_valid) {
+        context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kInitialForceBootstrap;
+        context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_begin;
         const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
             integrator_state.step_index,
             timeline_step.scale_factor_begin,
@@ -752,6 +754,8 @@ void StepOrchestrator::executeSingleStep(
       context.pm_refresh_directive.force_refresh_surface = true;
       context.pm_refresh_directive.cadence_opportunity_allowed = true;
       context.pm_refresh_directive.requires_predicted_inactive_sources = boundary.local_substep;
+      context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kScheduledForceRefreshStage;
+      context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_end;
       if (integrator_state.pm_refresh_enabled) {
         const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
             integrator_state.step_index,
