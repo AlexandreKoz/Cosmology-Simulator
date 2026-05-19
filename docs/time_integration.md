@@ -8,13 +8,24 @@ The authoritative per-step stage order is:
 
 1. `gravity_kick_pre`
 2. `drift`
-3. `hydro_update`
-4. `source_terms`
-5. `gravity_kick_post`
-6. `analysis_hooks`
-7. `output_check`
+3. `force_refresh`
+4. `hydro_update`
+5. `source_terms`
+6. `gravity_kick_post`
+7. `analysis_hooks`
+8. `output_check`
 
-The scheduler (`StageScheduler`) owns this ordering and solver modules interact via `IntegrationCallback` implementations. This keeps gravity/hydro/source/output sequencing explicit and auditable.
+The scheduler (`StageScheduler`) owns this ordering and solver modules interact via stage-bound `IntegrationCallback` implementations. Each callback must declare its exact `integrationStages()` set during registration; `StepOrchestrator` stores handlers in per-stage buckets and dispatches only the bucket for the active stage in stable registration order. Production callbacks must treat any off-stage direct invocation as a contract violation rather than silently self-filtering. This keeps gravity/hydro/source/output sequencing explicit and auditable, prevents solvers from receiving irrelevant stages, and avoids per-stage broadcast scans in the hot path.
+
+### Callback migration note
+
+Any new `IntegrationCallback` implementation must provide:
+
+- `callbackName()` for profiling and diagnostics;
+- `integrationStages()` returning the small typed stage set the handler is allowed to receive;
+- `onStage(...)` logic that assumes the declared stage contract and throws/asserts on impossible off-stage direct calls instead of returning silently.
+
+Existing code that previously registered a broad callback and checked `context.stage` internally must split the behavior into explicit stage declarations or return the exact small stage set needed by the handler. No config keys, snapshot/restart payloads, or solver numerics migrate for this interface repair.
 
 ### TreePM long-range PM kick operator contract (distributed TreePM runtime)
 
@@ -51,9 +62,10 @@ For each global step:
 
 1. `K_PM+Tree^pre` on active set at sync surface `kick_pre`
 2. `D` drift on active set
-3. hydro/source stages
-4. `K_PM+Tree^post` on active set at sync surface `kick_post`
-5. analysis/output stages
+3. `force_refresh` PM cadence/field refresh surface
+4. hydro/source stages
+5. `K_PM+Tree^post` on active set at sync surface `kick_post`
+6. analysis/output stages
 
 Both kick surfaces use the same PM sync contract above.
 

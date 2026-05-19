@@ -1,6 +1,7 @@
 #include "cosmosim/physics/star_formation.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -290,9 +291,14 @@ StarFormationCallback::StarFormationCallback(StarFormationModel model, std::uint
 
 std::string_view StarFormationCallback::callbackName() const { return "star_formation_callback"; }
 
+std::span<const core::IntegrationStage> StarFormationCallback::integrationStages() const {
+  static constexpr std::array stages{core::IntegrationStage::kSourceTerms};
+  return stages;
+}
+
 void StarFormationCallback::onStage(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kSourceTerms) {
-    return;
+    throw std::logic_error("star formation handler received an unregistered stage");
   }
 
   const std::size_t cell_count = context.state.cells.size();

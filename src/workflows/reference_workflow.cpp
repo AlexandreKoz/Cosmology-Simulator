@@ -52,6 +52,24 @@ constexpr double k_pressure_floor = 1.0e-10;
 constexpr double k_density_floor = 1.0e-10;
 constexpr std::size_t k_default_generated_particle_axis = 6;
 
+constexpr std::array<core::IntegrationStage, core::integrationStageCount()> k_all_integration_stages = {
+    core::IntegrationStage::kGravityKickPre,
+    core::IntegrationStage::kDrift,
+    core::IntegrationStage::kForceRefresh,
+    core::IntegrationStage::kHydroUpdate,
+    core::IntegrationStage::kSourceTerms,
+    core::IntegrationStage::kGravityKickPost,
+    core::IntegrationStage::kAnalysisHooks,
+    core::IntegrationStage::kOutputCheck,
+};
+constexpr std::array<core::IntegrationStage, 1> k_drift_stage = {core::IntegrationStage::kDrift};
+constexpr std::array<core::IntegrationStage, 3> k_gravity_stages = {
+    core::IntegrationStage::kGravityKickPre,
+    core::IntegrationStage::kForceRefresh,
+    core::IntegrationStage::kGravityKickPost,
+};
+constexpr std::array<core::IntegrationStage, 1> k_hydro_stage = {core::IntegrationStage::kHydroUpdate};
+
 [[nodiscard]] gravity::PmAssignmentScheme toPmAssignmentScheme(
     core::TreePmAssignmentScheme assignment_scheme) {
   switch (assignment_scheme) {
@@ -1157,6 +1175,9 @@ class StageAuditCallback final : public core::IntegrationCallback {
       : m_stage_sequence(stage_sequence) {}
 
   [[nodiscard]] std::string_view callbackName() const override { return "stage_audit"; }
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override {
+    return k_all_integration_stages;
+  }
 
   void onStage(core::StepContext& context) override {
     m_stage_sequence->push_back(std::string(core::integrationStageName(context.stage)));
@@ -1169,10 +1190,11 @@ class StageAuditCallback final : public core::IntegrationCallback {
 class DriftCallback final : public core::IntegrationCallback {
  public:
   [[nodiscard]] std::string_view callbackName() const override { return "drift"; }
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_drift_stage; }
 
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kDrift) {
-      return;
+      throw std::logic_error("drift handler received an unregistered stage");
     }
 
     const double drift_factor = context.timeline_step.drift_factor_code;
@@ -1330,6 +1352,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_gravity_stages; }
   [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_shape.nx; }
   [[nodiscard]] const gravity::PmGridShape& pmGridShape() const noexcept { return m_pm_grid_shape; }
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
@@ -1382,7 +1405,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
     const bool is_force_refresh_stage = context.pm_refresh_directive.force_refresh_surface || needs_initial_force_bootstrap;
     if (!is_kick_stage && !is_force_refresh_stage) {
-      return;
+      throw std::logic_error("gravity handler received an unregistered stage");
     }
     if (context.pm_refresh_directive.force_refresh_surface &&
         (!context.boundary.pm_refresh_allowed || context.boundary.kind != core::StepBoundaryKind::kPmRefreshPoint)) {
@@ -2114,9 +2137,13 @@ class HydroStageCallback final : public core::IntegrationCallback {
         }) {}
 
   [[nodiscard]] std::string_view callbackName() const override { return "hydro"; }
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_hydro_stage; }
 
   void onStage(core::StepContext& context) override {
-    if (context.stage != core::IntegrationStage::kHydroUpdate || context.state.cells.size() == 0) {
+    if (context.stage != core::IntegrationStage::kHydroUpdate) {
+      throw std::logic_error("hydro handler received an unregistered stage");
+    }
+    if (context.state.cells.size() == 0) {
       return;
     }
 

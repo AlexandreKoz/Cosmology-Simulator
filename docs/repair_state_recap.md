@@ -5,6 +5,13 @@ _Date captured: 2026-04-07 (UTC)_
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 
+## 2026-05-19 Stage-bound orchestrator dispatch repair
+
+- Replaced authoritative callback broadcast with per-stage handler buckets: handlers now declare typed `IntegrationStage` sets at registration, and `StepOrchestrator` dispatches only the active stage bucket in stable registration order.
+- Converted production gravity, drift, hydro, source, tracer, and diagnostics handlers away from silent off-stage self-filtering; impossible direct off-stage calls now fail as contract violations while legitimate same-stage no-op conditions remain unchanged.
+- Reproducibility impact: deterministic handler order is preserved by registration order within each stage, solver numerics and KDK stage order are unchanged, and no config keys, normalized config dumps, output naming, rank coordination, or snapshot/restart schemas changed. The dispatch path is more auditable and prevents irrelevant-stage delivery by construction.
+
+
 ## 2026-05-11 Stage 2 authority documentation synchronization
 
 - Synchronized implementation-facing docs, runtime truth map, restart/schema language, ADR entries, repair-state notes, release scope, and release notes around the Stage 2 owner model: scheduler objects own timestep bins, active-set construction, and PM cadence legality; public `time_bin` lanes remain mirrors.

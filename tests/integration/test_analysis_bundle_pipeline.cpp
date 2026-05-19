@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,10 @@ namespace {
 class NoopCallback final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "noop"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{cosmosim::core::IntegrationStage::kAnalysisHooks};
+    return stages;
+  }
   void onStage(cosmosim::core::StepContext& /*context*/) override {}
 };
 

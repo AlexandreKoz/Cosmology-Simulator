@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -70,9 +71,47 @@ std::vector<std::uint64_t> activeParticleIdsAtCurrentTick(
   return ids;
 }
 
+
+class SingleStageRecorder final : public cosmosim::core::IntegrationCallback {
+ public:
+  SingleStageRecorder(std::string_view name, cosmosim::core::IntegrationStage stage, std::vector<std::string>* order)
+      : name(name), stage(stage), order(order) {}
+
+  std::string_view callbackName() const override { return name; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override { return {&stage, 1}; }
+
+  void onStage(cosmosim::core::StepContext& context) override {
+    assert(context.stage == stage);
+    ++invocations;
+    observed.push_back(context.stage);
+    if (order != nullptr) {
+      order->push_back(std::string(name));
+    }
+  }
+
+  std::string_view name;
+  cosmosim::core::IntegrationStage stage;
+  std::vector<std::string>* order = nullptr;
+  int invocations = 0;
+  std::vector<cosmosim::core::IntegrationStage> observed;
+};
+
 class StageRecorder final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "stage_recorder"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{
+        cosmosim::core::IntegrationStage::kGravityKickPre,
+        cosmosim::core::IntegrationStage::kDrift,
+        cosmosim::core::IntegrationStage::kForceRefresh,
+        cosmosim::core::IntegrationStage::kHydroUpdate,
+        cosmosim::core::IntegrationStage::kSourceTerms,
+        cosmosim::core::IntegrationStage::kGravityKickPost,
+        cosmosim::core::IntegrationStage::kAnalysisHooks,
+        cosmosim::core::IntegrationStage::kOutputCheck,
+    };
+    return stages;
+  }
 
   void onStage(cosmosim::core::StepContext& context) override { observed_stages.push_back(context.stage); }
 
@@ -98,6 +137,37 @@ void testKickDriftKickOrdering() {
     assert(recorder.observed_stages[i] == expected[i]);
   }
   assert(cosmosim::core::isCanonicalIntegrationStageOrder(recorder.observed_stages));
+}
+
+
+void testStageBoundDispatch() {
+  cosmosim::core::SimulationState state;
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 1.0;
+
+  std::vector<std::string> order;
+  SingleStageRecorder drift_first("drift_first", cosmosim::core::IntegrationStage::kDrift, &order);
+  SingleStageRecorder source("source", cosmosim::core::IntegrationStage::kSourceTerms, &order);
+  SingleStageRecorder drift_second("drift_second", cosmosim::core::IntegrationStage::kDrift, &order);
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(drift_first);
+  orchestrator.registerCallback(source);
+  orchestrator.registerCallback(drift_second);
+
+  assert(orchestrator.callbackCount() == 3U);
+  assert(orchestrator.handlersFor(cosmosim::core::IntegrationStage::kDrift).size() == 2U);
+  assert(orchestrator.handlersFor(cosmosim::core::IntegrationStage::kHydroUpdate).empty());
+
+  orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);
+
+  assert(drift_first.invocations == 1);
+  assert(drift_second.invocations == 1);
+  assert(source.invocations == 1);
+  assert(drift_first.observed.front() == cosmosim::core::IntegrationStage::kDrift);
+  assert(drift_second.observed.front() == cosmosim::core::IntegrationStage::kDrift);
+  assert(source.observed.front() == cosmosim::core::IntegrationStage::kSourceTerms);
+  assert((order == std::vector<std::string>{"drift_first", "drift_second", "source"}));
 }
 
 void testCosmologyHelpers() {
@@ -873,6 +943,7 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
 
 int main() {
   testKickDriftKickOrdering();
+  testStageBoundDispatch();
   testCosmologyHelpers();
   testCosmologicalTimelineConvertsSiIntegralsToCodeTime();
   testActiveSubsetDetection();

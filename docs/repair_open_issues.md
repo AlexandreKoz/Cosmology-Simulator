@@ -2,6 +2,13 @@
 
 _Date captured: 2026-04-14 (UTC)_
 
+## 2026-05-19 Stage 4 orchestrator dispatch status
+
+| ID | Status | Area | Finding | Resolution / Remaining action |
+| --- | --- | --- | --- | --- |
+| P41-STAGE4-ORCHESTRATOR-DISPATCH-041 | Closed | Runtime orchestrator dispatch | The production orchestrator broadcast every stage to every callback, relying on callback-side self-filtering. | Repaired with typed per-stage handler registration and dispatch buckets, debug/contract failures for impossible off-stage direct calls, targeted unit coverage for registered-only delivery, unregistered stage absence, and deterministic per-stage order. Continue to reject future production broadcast/self-filter orchestration. |
+
+
 ## Stage 0 gate status update (2026-04-26 UTC)
 
 - **Stage 0 status: NOT CLOSED.**

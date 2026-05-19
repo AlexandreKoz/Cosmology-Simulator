@@ -33,6 +33,10 @@ enum class IntegrationStage : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view integrationStageName(IntegrationStage stage);
+[[nodiscard]] constexpr std::size_t integrationStageCount() noexcept { return 8; }
+[[nodiscard]] constexpr std::size_t integrationStageIndex(IntegrationStage stage) noexcept {
+  return static_cast<std::size_t>(stage);
+}
 
 // Baseline stepping family; hierarchical bins can reuse the same stage contract.
 enum class TimeStepScheme : std::uint8_t {
@@ -248,12 +252,16 @@ struct StepContext {
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
 
-// Callback interface implemented by gravity, hydro, source, analysis, and output modules.
+// Stage-bound handler interface implemented by gravity, hydro, source, analysis, and output modules.
+// Ownership stays with the caller; StepOrchestrator stores non-owning pointers in
+// deterministic registration order.  Each handler declares the exact stage set it
+// may receive, and production dispatch only iterates the current stage bucket.
 class IntegrationCallback {
  public:
   virtual ~IntegrationCallback() = default;
 
   [[nodiscard]] virtual std::string_view callbackName() const = 0;
+  [[nodiscard]] virtual std::span<const IntegrationStage> integrationStages() const = 0;
   virtual void onStage(StepContext& context) = 0;
 };
 
@@ -276,6 +284,7 @@ class StepOrchestrator {
 
   void registerCallback(IntegrationCallback& callback);
   [[nodiscard]] std::size_t callbackCount() const noexcept;
+  [[nodiscard]] std::span<IntegrationCallback* const> handlersFor(IntegrationStage stage) const noexcept;
 
   void executeSingleStep(
       SimulationState& state,
@@ -302,7 +311,8 @@ class StepOrchestrator {
 
  private:
   StageScheduler m_scheduler;
-  std::vector<IntegrationCallback*> m_callbacks;
+  std::array<std::vector<IntegrationCallback*>, integrationStageCount()> m_handlers_by_stage;
+  std::size_t m_callback_count = 0;
 };
 
 // Hot metadata sidecar for element-local time-bin ownership and scheduling state.
