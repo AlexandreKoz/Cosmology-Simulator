@@ -943,6 +943,37 @@ void testRestartActiveIdEquivalenceWithPendingTransitions() {
   assert(activeParticleIdsAtCurrentTick(restored, state) == activeParticleIdsAtCurrentTick(scheduler, state));
 }
 
+
+void testOutputBoundaryRequiresSafeContracts() {
+  cosmosim::core::SimulationState state;
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 1.0;
+
+  class UnsafeOutputCallback final : public cosmosim::core::IntegrationCallback {
+   public:
+    std::string_view callbackName() const override { return "unsafe_output_boundary"; }
+    std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+      static constexpr std::array stages{cosmosim::core::IntegrationStage::kOutputCheck};
+      return stages;
+    }
+    std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+    void onStage(cosmosim::core::StepContext&) override {}
+
+    std::array<cosmosim::core::StageContract, 1> contracts{{
+        {.stage = cosmosim::core::IntegrationStage::kOutputCheck,
+         .restart_safety = cosmosim::core::StageSafety::kUnsafe,
+         .output_safety = cosmosim::core::StageSafety::kSafe,
+         .owner = cosmosim::core::StageSubsystem::kOutput},
+    }};
+  } callback;
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(callback);
+  assert(throwsWithContext(
+      [&]() { orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr); },
+      "output boundary callback must declare output-safe and restart-safe contract"));
+}
+
 void testBoundarySafetyClassification() {
   cosmosim::core::SimulationState state;
   state.resizeParticles(4);
@@ -1052,6 +1083,7 @@ int main() {
   testInvalidRestartTimestepStateTrap();
   testActiveSetMismatchTrap();
   testLocalGlobalSyncBoundaryViolationTrap();
+  testOutputBoundaryRequiresSafeContracts();
   testBoundarySafetyClassification();
   testPmSynchronizationCadencePreservesRefreshBoundaries();
   return 0;
