@@ -114,6 +114,11 @@ struct StepBoundaryState {
 // coherent predicted source view because inactive particles are not physically
 // drifted in the persistent state during the local substep.
 struct PmRefreshDirective {
+  enum class Reason : std::uint8_t {
+    kNone = 0,
+    kInitialForceBootstrap = 1,
+    kScheduledForceRefreshStage = 2,
+  };
   bool force_refresh_surface = false;
   bool cadence_opportunity_allowed = false;
   bool initial_cache_bootstrap_allowed = false;
@@ -126,6 +131,8 @@ struct PmRefreshDirective {
   std::uint64_t last_refresh_opportunity = 0;
   std::uint64_t field_built_step_index = 0;
   double field_built_scale_factor = 1.0;
+  double force_evaluation_scale_factor = 1.0;
+  Reason reason = Reason::kNone;
 };
 
 struct CosmologicalStepFactors {

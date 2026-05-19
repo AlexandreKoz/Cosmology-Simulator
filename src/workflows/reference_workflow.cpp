@@ -1394,6 +1394,17 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
     return "unknown";
   }
+  [[nodiscard]] static std::string_view pmRefreshReasonName(core::PmRefreshDirective::Reason reason) {
+    switch (reason) {
+      case core::PmRefreshDirective::Reason::kNone:
+        return "none";
+      case core::PmRefreshDirective::Reason::kInitialForceBootstrap:
+        return "initial_force_bootstrap";
+      case core::PmRefreshDirective::Reason::kScheduledForceRefreshStage:
+        return "scheduled_force_refresh_stage";
+    }
+    return "unknown";
+  }
 
   void onStage(core::StepContext& context) override {
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
@@ -1642,6 +1653,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"predicted_inactive_source_particles", std::to_string(m_source_predicted_inactive_count)},
                       {"predicted_inactive_sources_required",
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
+                      {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
+                      {"pm_refresh_force_eval_scale_factor", std::to_string(context.pm_refresh_directive.force_evaluation_scale_factor)},
                       {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{

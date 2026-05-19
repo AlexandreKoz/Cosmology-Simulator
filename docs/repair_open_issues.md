@@ -220,3 +220,7 @@ Command evidence for the documentation synchronization patch:
 - `cmake --preset mpi-hdf5-fftw-debug` → blocked by missing `fftw3_mpi`; no MPI+HDF5+FFTW closure is claimed.
 
 Remaining blockers are unchanged: P36 spawned-particle scheduler registration, P38 distributed scheduler identity exchange, and dependency-enabled MPI+HDF5+FFTW feature-path evidence are still required before broader closure claims.
+
+## 2026-05-19 PM refresh stage-diagnostic update
+
+No issue status changes in this patch. Open blockers remain P38 distributed scheduler identity exchange and dependency-enabled MPI+HDF5+FFTW feature-path evidence.

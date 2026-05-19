@@ -1572,3 +1572,10 @@ Reproducibility impact:
 - Patched the blocker restart loophole where particle-bound gas-cell `CellSoa::time_bin` mirrors were validated only when scheduler `bin_index` happened to be cell-sized. Restart validation/import now maps each cell through its parent gas particle and scheduler `bin_index`, preserving scheduler authority for mixed particle/gas states.
 - Reproducibility impact: no solver behavior, schema fields, normalized config, or provenance format changed. Existing restart v6 payloads with stale gas-cell timestep mirrors now fail fast instead of importing fake mirror truth; valid payloads rebuild cell mirrors deterministically from scheduler state.
 - Added the adversarial review artifact at `docs/architecture/stage2_adversarial_timestep_review.md` and documented the compatibility tightening in `docs/output_schema.md`.
+
+## 2026-05-19 PM refresh first-class stage diagnostics hardening
+
+- Extended integrator-owned `PmRefreshDirective` metadata so PM refresh diagnostics now include explicit refresh reason (`initial_force_bootstrap` vs `scheduled_force_refresh_stage`) and explicit PM force-evaluation scale factor from the KDK stage boundary.
+- Wired the new directive fields at orchestrator stage dispatch points (`kGravityKickPre`, `kForceRefresh`) and propagated them into TreePM runtime events for stage-auditable PM cadence evidence.
+- Added a targeted unit test to prove both explicit PM refresh reasons are emitted through stage dispatch and carry force-evaluation context.
+- Reproducibility impact: no solver numerics, no config keys, no restart schema changes, and no output naming changes. This is observability/legality hardening of existing integrator-owned PM cadence behavior.
