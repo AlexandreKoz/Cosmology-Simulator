@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,10 @@ namespace {
 class CountingCallback final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "counting_callback"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{cosmosim::core::IntegrationStage::kHydroUpdate};
+    return stages;
+  }
 
   void onStage(cosmosim::core::StepContext& context) override {
     ++stage_calls;
@@ -56,7 +61,7 @@ void testMiniRunProfileReportGeneration() {
   cosmosim::core::ProfilerSession profiler(true);
   orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr, nullptr, &profiler);
 
-  assert(callback.stage_calls == cosmosim::core::StageScheduler::kickDriftKickOrder().size());
+  assert(callback.stage_calls == 1U);
   assert(callback.hydro_stage_calls == 1);
 
   assert(profiler.counters().count("step_invocations") == 1);

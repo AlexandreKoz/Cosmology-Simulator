@@ -98,6 +98,7 @@ class StarFormationCallback final : public core::IntegrationCallback {
   explicit StarFormationCallback(StarFormationModel model, std::uint32_t rank_local_seed_offset = 0);
 
   [[nodiscard]] std::string_view callbackName() const override;
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override;
   void onStage(core::StepContext& context) override;
 
   void setVelocityDivergenceCode(std::span<const double> velocity_divergence_code);

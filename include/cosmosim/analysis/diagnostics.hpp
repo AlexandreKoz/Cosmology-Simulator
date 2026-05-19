@@ -152,6 +152,7 @@ class DiagnosticsCallback final : public core::IntegrationCallback {
   explicit DiagnosticsCallback(core::SimulationConfig config);
 
   [[nodiscard]] std::string_view callbackName() const override;
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override;
   void onStage(core::StepContext& context) override;
 
   [[nodiscard]] const DiagnosticsTiming& timing() const noexcept;

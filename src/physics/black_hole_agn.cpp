@@ -1,6 +1,7 @@
 #include "cosmosim/physics/black_hole_agn.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -262,9 +263,14 @@ BlackHoleAgnCallback::BlackHoleAgnCallback(BlackHoleAgnModel model) : m_model(st
 
 std::string_view BlackHoleAgnCallback::callbackName() const { return "black_hole_agn_callback"; }
 
+std::span<const core::IntegrationStage> BlackHoleAgnCallback::integrationStages() const {
+  static constexpr std::array stages{core::IntegrationStage::kSourceTerms};
+  return stages;
+}
+
 void BlackHoleAgnCallback::onStage(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kSourceTerms) {
-    return;
+    throw std::logic_error("black-hole AGN handler received an unregistered stage");
   }
   m_last_step_report =
       m_model.apply(context.state, m_seed_candidates, context.integrator_state.dt_time_code, context.integrator_state.step_index);

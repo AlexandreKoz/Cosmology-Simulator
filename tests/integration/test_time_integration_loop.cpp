@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -12,12 +13,15 @@ namespace {
 class GravityKickMock final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "gravity_kick_mock"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{cosmosim::core::IntegrationStage::kGravityKickPre,
+                                       cosmosim::core::IntegrationStage::kGravityKickPost};
+    return stages;
+  }
 
   void onStage(cosmosim::core::StepContext& context) override {
-    if (context.stage != cosmosim::core::IntegrationStage::kGravityKickPre &&
-        context.stage != cosmosim::core::IntegrationStage::kGravityKickPost) {
-      return;
-    }
+    assert(context.stage == cosmosim::core::IntegrationStage::kGravityKickPre ||
+           context.stage == cosmosim::core::IntegrationStage::kGravityKickPost);
 
     auto& state = context.state;
     const double kick = 0.25 * context.integrator_state.dt_time_code;
@@ -30,12 +34,15 @@ class GravityKickMock final : public cosmosim::core::IntegrationCallback {
 class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "active_subset_kick_mock"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{cosmosim::core::IntegrationStage::kGravityKickPre,
+                                       cosmosim::core::IntegrationStage::kGravityKickPost};
+    return stages;
+  }
 
   void onStage(cosmosim::core::StepContext& context) override {
-    if (context.stage != cosmosim::core::IntegrationStage::kGravityKickPre &&
-        context.stage != cosmosim::core::IntegrationStage::kGravityKickPost) {
-      return;
-    }
+    assert(context.stage == cosmosim::core::IntegrationStage::kGravityKickPre ||
+           context.stage == cosmosim::core::IntegrationStage::kGravityKickPost);
     ++kick_stage_invocations;
     kicked_particles_per_stage.push_back(context.active_set.particle_indices.size());
 

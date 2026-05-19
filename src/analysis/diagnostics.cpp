@@ -592,8 +592,16 @@ DiagnosticsCallback::DiagnosticsCallback(core::SimulationConfig config)
 
 std::string_view DiagnosticsCallback::callbackName() const { return "analysis_diagnostics"; }
 
+std::span<const core::IntegrationStage> DiagnosticsCallback::integrationStages() const {
+  static constexpr std::array stages{core::IntegrationStage::kAnalysisHooks};
+  return stages;
+}
+
 void DiagnosticsCallback::onStage(core::StepContext& context) {
-  if (context.stage != core::IntegrationStage::kAnalysisHooks || !m_config.analysis.enable_diagnostics) {
+  if (context.stage != core::IntegrationStage::kAnalysisHooks) {
+    throw std::logic_error("analysis diagnostics handler received an unregistered stage");
+  }
+  if (!m_config.analysis.enable_diagnostics) {
     return;
   }
 

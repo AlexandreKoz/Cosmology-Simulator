@@ -98,6 +98,7 @@ class BlackHoleAgnCallback final : public core::IntegrationCallback {
   explicit BlackHoleAgnCallback(BlackHoleAgnModel model);
 
   [[nodiscard]] std::string_view callbackName() const override;
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override;
   void onStage(core::StepContext& context) override;
 
   void setSeedCandidates(std::span<const BlackHoleSeedCandidate> seed_candidates);

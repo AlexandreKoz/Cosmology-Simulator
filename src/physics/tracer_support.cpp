@@ -1,6 +1,7 @@
 #include "cosmosim/physics/tracer_support.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
@@ -138,15 +139,18 @@ TracerCallback::TracerCallback(TracerModel model) : m_model(std::move(model)) {}
 
 std::string_view TracerCallback::callbackName() const { return "tracer_support"; }
 
+std::span<const cosmosim::core::IntegrationStage> TracerCallback::integrationStages() const {
+  static constexpr std::array stages{cosmosim::core::IntegrationStage::kSourceTerms};
+  return stages;
+}
+
 void TracerCallback::onStage(cosmosim::core::StepContext& context) {
+  if (context.stage != cosmosim::core::IntegrationStage::kSourceTerms) {
+    throw std::logic_error("tracer handler received an unregistered stage");
+  }
 #if !COSMOSIM_ENABLE_TRACERS
-  static_cast<void>(context);
   m_last_counters = {};
 #else
-  if (context.stage != cosmosim::core::IntegrationStage::kSourceTerms) {
-    return;
-  }
-
   if (!m_model.config().enabled) {
     m_last_counters = {};
     return;

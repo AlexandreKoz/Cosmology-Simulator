@@ -594,9 +594,36 @@ bool isCanonicalIntegrationStageOrder(std::span<const IntegrationStage> ordered_
 
 StepOrchestrator::StepOrchestrator(StageScheduler scheduler) : m_scheduler(std::move(scheduler)) {}
 
-void StepOrchestrator::registerCallback(IntegrationCallback& callback) { m_callbacks.push_back(&callback); }
+void StepOrchestrator::registerCallback(IntegrationCallback& callback) {
+  const auto stages = callback.integrationStages();
+  if (stages.empty()) {
+    throw std::invalid_argument("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares no stages");
+  }
+  for (const IntegrationStage stage : stages) {
+    const std::size_t index = integrationStageIndex(stage);
+    if (index >= m_handlers_by_stage.size()) {
+      throw std::out_of_range("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares an invalid stage");
+    }
+    auto& handlers = m_handlers_by_stage[index];
+    if (std::find(handlers.begin(), handlers.end(), &callback) != handlers.end()) {
+      throw std::invalid_argument(
+          "IntegrationCallback '" + std::string(callback.callbackName()) + "' declares a duplicate stage");
+    }
+    handlers.push_back(&callback);
+  }
+  ++m_callback_count;
+}
 
-std::size_t StepOrchestrator::callbackCount() const noexcept { return m_callbacks.size(); }
+std::size_t StepOrchestrator::callbackCount() const noexcept { return m_callback_count; }
+
+std::span<IntegrationCallback* const> StepOrchestrator::handlersFor(IntegrationStage stage) const noexcept {
+  const std::size_t index = integrationStageIndex(stage);
+  if (index >= m_handlers_by_stage.size()) {
+    return {};
+  }
+  const auto& handlers = m_handlers_by_stage[index];
+  return {handlers.data(), handlers.size()};
+}
 
 void StepOrchestrator::executeSingleStep(
     SimulationState& state,
@@ -715,7 +742,7 @@ void StepOrchestrator::executeSingleStep(
       profiler_session->counters().addCount(stage_name + ".invocations", 1);
     }
 
-    for (auto* callback : m_callbacks) {
+    for (auto* callback : handlersFor(stage)) {
       const std::string callback_phase = "callback." + std::string(callback->callbackName());
       COSMOSIM_PROFILE_SCOPE(profiler_session, callback_phase);
       callback->onStage(context);
