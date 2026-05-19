@@ -250,6 +250,56 @@ void testStageBoundDispatch() {
   assert((order == std::vector<std::string>{"drift_first", "drift_second", "source"}));
 }
 
+
+void testRegisterCallbackRejectsExtraUnregisteredStageContract() {
+  class MismatchCallback final : public cosmosim::core::IntegrationCallback {
+   public:
+    std::string_view callbackName() const override { return "mismatch_callback"; }
+    std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+      static constexpr std::array stages{cosmosim::core::IntegrationStage::kDrift};
+      return stages;
+    }
+    std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+    void onStage(cosmosim::core::StepContext&) override {}
+
+    std::array<cosmosim::core::StageContract, 2> contracts{{
+        {.stage = cosmosim::core::IntegrationStage::kDrift, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+        {.stage = cosmosim::core::IntegrationStage::kSourceTerms, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+    }};
+  } callback;
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  assert(throwsWithContext(
+      [&]() { orchestrator.registerCallback(callback); },
+      "must declare exactly one executable contract for each registered stage"));
+}
+
+void testRegisterCallbackRejectsDuplicateStageContracts() {
+  class DuplicateCallback final : public cosmosim::core::IntegrationCallback {
+   public:
+    std::string_view callbackName() const override { return "duplicate_contract_callback"; }
+    std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+      static constexpr std::array stages{
+          cosmosim::core::IntegrationStage::kDrift,
+          cosmosim::core::IntegrationStage::kSourceTerms,
+      };
+      return stages;
+    }
+    std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+    void onStage(cosmosim::core::StepContext&) override {}
+
+    std::array<cosmosim::core::StageContract, 2> contracts{{
+        {.stage = cosmosim::core::IntegrationStage::kDrift, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+        {.stage = cosmosim::core::IntegrationStage::kDrift, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+    }};
+  } callback;
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  assert(throwsWithContext(
+      [&]() { orchestrator.registerCallback(callback); },
+      "duplicate executable contracts"));
+}
+
 void testCosmologyHelpers() {
   cosmosim::core::CosmologyBackgroundConfig cfg;
   cfg.hubble_param = 0.7;
@@ -1056,6 +1106,8 @@ int main() {
   testKickDriftKickOrdering();
   testPmRefreshDirectiveCapturesReasonAndForceEvalTime();
   testStageBoundDispatch();
+  testRegisterCallbackRejectsExtraUnregisteredStageContract();
+  testRegisterCallbackRejectsDuplicateStageContracts();
   testCosmologyHelpers();
   testCosmologicalTimelineConvertsSiIntegralsToCodeTime();
   testActiveSubsetDetection();

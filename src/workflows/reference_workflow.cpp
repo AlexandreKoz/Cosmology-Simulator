@@ -1178,12 +1178,23 @@ class StageAuditCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override {
     return k_all_integration_stages;
   }
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
 
   void onStage(core::StepContext& context) override {
     m_stage_sequence->push_back(std::string(core::integrationStageName(context.stage)));
   }
 
  private:
+  static constexpr std::array<core::StageContract, 8> m_contracts{{
+      {.stage = core::IntegrationStage::kGravityKickPre, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kDrift, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kForceRefresh, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kHydroUpdate, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kSourceTerms, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kGravityKickPost, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kAnalysisHooks, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kOutputCheck, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+  }};
   std::vector<std::string>* m_stage_sequence = nullptr;
 };
 
@@ -1191,6 +1202,7 @@ class DriftCallback final : public core::IntegrationCallback {
  public:
   [[nodiscard]] std::string_view callbackName() const override { return "drift"; }
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_drift_stage; }
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
 
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kDrift) {
@@ -1228,6 +1240,11 @@ class DriftCallback final : public core::IntegrationCallback {
       context.state.cells.center_z_comoving[cell_index] = context.state.particles.position_z_comoving[gas_particle_index];
     }
   }
+
+ private:
+  static constexpr std::array<core::StageContract, 1> m_contracts{{
+      {.stage = core::IntegrationStage::kDrift, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+  }};
 };
 
 class GravityStageCallback final : public core::IntegrationCallback {

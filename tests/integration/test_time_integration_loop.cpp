@@ -18,6 +18,7 @@ class GravityKickMock final : public cosmosim::core::IntegrationCallback {
                                        cosmosim::core::IntegrationStage::kGravityKickPost};
     return stages;
   }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
 
   void onStage(cosmosim::core::StepContext& context) override {
     assert(context.stage == cosmosim::core::IntegrationStage::kGravityKickPre ||
@@ -29,6 +30,11 @@ class GravityKickMock final : public cosmosim::core::IntegrationCallback {
       state.particles.velocity_x_peculiar[i] += kick;
     }
   }
+
+  static constexpr std::array<cosmosim::core::StageContract, 2> contracts{{
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+  }};
 };
 
 class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
@@ -39,6 +45,7 @@ class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
                                        cosmosim::core::IntegrationStage::kGravityKickPost};
     return stages;
   }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
 
   void onStage(cosmosim::core::StepContext& context) override {
     assert(context.stage == cosmosim::core::IntegrationStage::kGravityKickPre ||
@@ -52,6 +59,10 @@ class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
     }
   }
 
+  static constexpr std::array<cosmosim::core::StageContract, 2> contracts{{
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+  }};
   int kick_stage_invocations = 0;
   std::vector<std::size_t> kicked_particles_per_stage;
 };
