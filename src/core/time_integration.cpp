@@ -596,8 +596,12 @@ StepOrchestrator::StepOrchestrator(StageScheduler scheduler) : m_scheduler(std::
 
 void StepOrchestrator::registerCallback(IntegrationCallback& callback) {
   const auto stages = callback.integrationStages();
+  const auto contracts = callback.stageContracts();
   if (stages.empty()) {
     throw std::invalid_argument("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares no stages");
+  }
+  if (contracts.empty()) {
+    throw std::invalid_argument("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares no stage contracts");
   }
   for (const IntegrationStage stage : stages) {
     const std::size_t index = integrationStageIndex(stage);
@@ -605,11 +609,20 @@ void StepOrchestrator::registerCallback(IntegrationCallback& callback) {
       throw std::out_of_range("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares an invalid stage");
     }
     auto& handlers = m_handlers_by_stage[index];
+    auto& stage_contracts = m_contracts_by_stage[index];
     if (std::find(handlers.begin(), handlers.end(), &callback) != handlers.end()) {
       throw std::invalid_argument(
           "IntegrationCallback '" + std::string(callback.callbackName()) + "' declares a duplicate stage");
     }
     handlers.push_back(&callback);
+    const auto contract_it = std::find_if(contracts.begin(), contracts.end(), [stage](const StageContract& contract) {
+      return contract.stage == stage;
+    });
+    if (contract_it == contracts.end()) {
+      throw std::invalid_argument(
+          "IntegrationCallback '" + std::string(callback.callbackName()) + "' is missing a contract for stage");
+    }
+    stage_contracts.push_back(*contract_it);
   }
   ++m_callback_count;
 }
@@ -623,6 +636,26 @@ std::span<IntegrationCallback* const> StepOrchestrator::handlersFor(IntegrationS
   }
   const auto& handlers = m_handlers_by_stage[index];
   return {handlers.data(), handlers.size()};
+}
+std::span<const StageContract> StepOrchestrator::contractsFor(IntegrationStage stage) const noexcept {
+  const std::size_t index = integrationStageIndex(stage);
+  if (index >= m_contracts_by_stage.size()) {
+    return {};
+  }
+  const auto& contracts = m_contracts_by_stage[index];
+  return {contracts.data(), contracts.size()};
+}
+std::optional<StageContract> StepOrchestrator::contractForHandlerStage(
+    const IntegrationCallback& callback,
+    IntegrationStage stage) const noexcept {
+  const auto handlers = handlersFor(stage);
+  const auto contracts = contractsFor(stage);
+  for (std::size_t i = 0; i < handlers.size() && i < contracts.size(); ++i) {
+    if (handlers[i] == &callback) {
+      return contracts[i];
+    }
+  }
+  return std::nullopt;
 }
 
 void StepOrchestrator::executeSingleStep(
@@ -743,6 +776,17 @@ void StepOrchestrator::executeSingleStep(
     }
 
     for (auto* callback : handlersFor(stage)) {
+      const auto contract = contractForHandlerStage(*callback, stage);
+      if (!contract.has_value()) {
+        throw std::runtime_error("registered callback missing executable stage contract");
+      }
+      if (contract->stage != stage) {
+        throw std::runtime_error("stage contract metadata mismatch for dispatched callback");
+      }
+      if (stage == IntegrationStage::kOutputCheck &&
+          (contract->output_safety != StageSafety::kSafe || contract->restart_safety != StageSafety::kSafe)) {
+        throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
+      }
       const std::string callback_phase = "callback." + std::string(callback->callbackName());
       COSMOSIM_PROFILE_SCOPE(profiler_session, callback_phase);
       callback->onStage(context);
