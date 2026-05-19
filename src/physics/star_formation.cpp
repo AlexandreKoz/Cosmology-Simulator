@@ -296,6 +296,15 @@ std::span<const core::IntegrationStage> StarFormationCallback::integrationStages
   return stages;
 }
 
+std::span<const core::StageContract> StarFormationCallback::stageContracts() const {
+  static constexpr std::array contracts{core::StageContract{
+      .stage = core::IntegrationStage::kSourceTerms,
+      .restart_safety = core::StageSafety::kSafe,
+      .output_safety = core::StageSafety::kSafe,
+  }};
+  return contracts;
+}
+
 void StarFormationCallback::onStage(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kSourceTerms) {
     throw std::logic_error("star formation handler received an unregistered stage");

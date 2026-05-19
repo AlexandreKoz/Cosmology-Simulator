@@ -603,6 +603,27 @@ void StepOrchestrator::registerCallback(IntegrationCallback& callback) {
   if (contracts.empty()) {
     throw std::invalid_argument("IntegrationCallback '" + std::string(callback.callbackName()) + "' declares no stage contracts");
   }
+  if (contracts.size() != stages.size()) {
+    throw std::invalid_argument(
+        "IntegrationCallback '" + std::string(callback.callbackName()) +
+        "' must declare exactly one executable contract for each registered stage");
+  }
+  for (std::size_t i = 0; i < contracts.size(); ++i) {
+    const auto stage = contracts[i].stage;
+    const bool stage_registered = std::find(stages.begin(), stages.end(), stage) != stages.end();
+    if (!stage_registered) {
+      throw std::invalid_argument(
+          "IntegrationCallback '" + std::string(callback.callbackName()) +
+          "' declares a stage contract for an unregistered stage");
+    }
+    if (std::find_if(contracts.begin(), contracts.begin() + static_cast<std::ptrdiff_t>(i),
+                     [stage](const StageContract& existing) { return existing.stage == stage; }) !=
+        contracts.begin() + static_cast<std::ptrdiff_t>(i)) {
+      throw std::invalid_argument(
+          "IntegrationCallback '" + std::string(callback.callbackName()) +
+          "' declares duplicate executable contracts for the same stage");
+    }
+  }
   for (const IntegrationStage stage : stages) {
     const std::size_t index = integrationStageIndex(stage);
     if (index >= m_handlers_by_stage.size()) {
