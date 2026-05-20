@@ -32,8 +32,24 @@ class GravityKickMock final : public cosmosim::core::IntegrationCallback {
   }
 
   static constexpr std::array<cosmosim::core::StageContract, 2> contracts{{
-      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
-      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+       .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+       .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+       .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+       .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
   }};
 };
 
@@ -60,8 +76,24 @@ class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
   }
 
   static constexpr std::array<cosmosim::core::StageContract, 2> contracts{{
-      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
-      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+       .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+       .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPost,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+       .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+       .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
   }};
   int kick_stage_invocations = 0;
   std::vector<std::size_t> kicked_particles_per_stage;

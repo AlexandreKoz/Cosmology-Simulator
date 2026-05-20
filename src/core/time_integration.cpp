@@ -25,6 +25,98 @@ constexpr std::array<IntegrationStage, 8> k_kick_drift_kick_order = {
     IntegrationStage::kOutputCheck,
 };
 
+
+[[nodiscard]] std::string stageContractErrorPrefix(std::string_view callback_name, IntegrationStage stage) {
+  return "IntegrationCallback '" + std::string(callback_name) + "' stage contract for '" +
+      std::string(integrationStageName(stage)) + "' ";
+}
+
+void validateStageContractShape(std::string_view callback_name, const StageContract& contract) {
+  const auto prefix = stageContractErrorPrefix(callback_name, contract.stage);
+
+  if (contract.owner != StageSubsystem::kAnalysis && contract.required_inputs == StageDataDomain::kNone) {
+    throw std::invalid_argument(prefix + "must declare required_inputs");
+  }
+  if (contract.owner != StageSubsystem::kAnalysis && contract.produced_outputs == StageDataDomain::kNone) {
+    throw std::invalid_argument(prefix + "must declare produced_outputs");
+  }
+  if (contract.owner != StageSubsystem::kAnalysis && contract.stage != IntegrationStage::kOutputCheck &&
+      contract.mutated_state == StageDataDomain::kNone) {
+    throw std::invalid_argument(prefix + "must declare mutated_state");
+  }
+  if (contract.owner != StageSubsystem::kAnalysis && contract.stage != IntegrationStage::kOutputCheck &&
+      contract.active_set_family == StageActiveSetFamily::kNone) {
+    throw std::invalid_argument(prefix + "must declare active_set_family");
+  }
+  if (contract.stage == IntegrationStage::kOutputCheck) {
+    if (contract.sync_requirements != StageSyncRequirement::kGlobal) {
+      throw std::invalid_argument(prefix + "must require a global output boundary");
+    }
+    if (contract.active_set_family != StageActiveSetFamily::kOutputState) {
+      throw std::invalid_argument(prefix + "must use the output-state active-set family");
+    }
+    if (contract.restart_safety != StageSafety::kSafe || contract.output_safety != StageSafety::kSafe) {
+      throw std::invalid_argument(prefix + "must be restart-safe and output-safe");
+    }
+  }
+  if (contract.owner == StageSubsystem::kGravity && contract.stage == IntegrationStage::kForceRefresh &&
+      contract.sync_requirements != StageSyncRequirement::kForceEvaluation) {
+    throw std::invalid_argument(prefix + "must declare force-evaluation synchronization");
+  }
+}
+
+void validateRuntimeStageContract(
+    const StageContract& contract,
+    const StepContext& context,
+    bool require_output_safe_boundary) {
+  if (contract.stage != context.stage) {
+    throw std::runtime_error("stage contract metadata mismatch for dispatched callback");
+  }
+  if (require_output_safe_boundary &&
+      (contract.output_safety != StageSafety::kSafe || contract.restart_safety != StageSafety::kSafe)) {
+    throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
+  }
+  if (contract.stage == IntegrationStage::kOutputCheck) {
+    if (!context.boundary.output_safe || !context.boundary.restart_safe) {
+      throw std::runtime_error("output boundary stage reached an unsafe integration boundary");
+    }
+    if (context.integrator_state.inside_kdk_step) {
+      throw std::runtime_error("output boundary stage reached an open KDK step");
+    }
+  }
+  if (contract.sync_requirements == StageSyncRequirement::kPmRefreshBoundary &&
+      (!context.boundary.pm_refresh_allowed || context.boundary.local_substep)) {
+    throw std::runtime_error("PM-refresh-boundary contract reached an illegal local integration step");
+  }
+}
+
+void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_view phase) {
+  const auto& directive = context.pm_refresh_directive;
+  if (directive.refresh_long_range_field && !directive.has_sync_event) {
+    throw std::runtime_error("PM refresh directive requested long-range refresh without a sync event at " + std::string(phase));
+  }
+  if (directive.has_sync_event) {
+    if (directive.sync_stage == PmSyncStage::kNone) {
+      throw std::runtime_error("PM refresh directive sync event has no typed PM sync stage at " + std::string(phase));
+    }
+    if (!directive.cadence_opportunity_allowed) {
+      throw std::runtime_error("PM sync event reached a non-cadence opportunity at " + std::string(phase));
+    }
+    if (!context.boundary.pm_refresh_allowed || context.boundary.local_substep) {
+      throw std::runtime_error("PM sync event reached an illegal local integration boundary at " + std::string(phase));
+    }
+    if (!std::isfinite(directive.force_evaluation_scale_factor) || directive.force_evaluation_scale_factor <= 0.0) {
+      throw std::runtime_error("PM sync event has invalid force-evaluation scale factor at " + std::string(phase));
+    }
+  } else if (directive.sync_stage != PmSyncStage::kNone) {
+    throw std::runtime_error("typed PM sync stage was set without a sync event at " + std::string(phase));
+  }
+  if (context.boundary.local_substep &&
+      (directive.has_sync_event || directive.refresh_long_range_field || directive.cadence_opportunity_allowed)) {
+    throw std::runtime_error("local active-bin step attempted to authorize PM long-range synchronization at " + std::string(phase));
+  }
+}
+
 [[nodiscard]] double redshiftFromScaleFactor(double scale_factor) {
   if (scale_factor <= 0.0) {
     throw std::invalid_argument("scale_factor must be positive");
@@ -623,6 +715,7 @@ void StepOrchestrator::registerCallback(IntegrationCallback& callback) {
           "IntegrationCallback '" + std::string(callback.callbackName()) +
           "' declares duplicate executable contracts for the same stage");
     }
+    validateStageContractShape(callback.callbackName(), contracts[i]);
   }
   for (const IntegrationStage stage : stages) {
     const std::size_t index = integrationStageIndex(stage);
@@ -693,16 +786,12 @@ void StepOrchestrator::dispatchStageHandlers(
     if (!contract.has_value()) {
       throw std::runtime_error("registered callback missing executable stage contract");
     }
-    if (contract->stage != context.stage) {
-      throw std::runtime_error("stage contract metadata mismatch for dispatched callback");
-    }
-    if (require_output_safe_boundary &&
-        (contract->output_safety != StageSafety::kSafe || contract->restart_safety != StageSafety::kSafe)) {
-      throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
-    }
+    validateRuntimeStageContract(*contract, context, require_output_safe_boundary);
+    validatePmRefreshDirectiveLegality(context, std::string("before callback ") + std::string(callback->callbackName()));
     const std::string callback_phase = "callback." + std::string(callback->callbackName());
     COSMOSIM_PROFILE_SCOPE(context.profiler_session, callback_phase);
     callback->onStage(context);
+    validatePmRefreshDirectiveLegality(context, std::string("after callback ") + std::string(callback->callbackName()));
     if (context.profiler_session != nullptr) {
       context.profiler_session->counters().addCount(callback_phase + ".invocations", 1);
     }
@@ -827,6 +916,7 @@ void StepOrchestrator::executeSingleStep(
             integrator_state.pm_long_range_field_valid);
         context.pm_refresh_directive.cadence_opportunity_allowed = true;
         context.pm_refresh_directive.has_sync_event = true;
+        context.pm_refresh_directive.sync_stage = PmSyncStage::kInitialLongRangeBootstrap;
         context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
         context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
         context.pm_refresh_directive.field_version = event.field_version;
@@ -847,6 +937,7 @@ void StepOrchestrator::executeSingleStep(
             timeline_step.scale_factor_end,
             integrator_state.pm_long_range_field_valid);
         context.pm_refresh_directive.has_sync_event = true;
+        context.pm_refresh_directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
         context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
         context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
         context.pm_refresh_directive.field_version = event.field_version;

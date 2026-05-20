@@ -170,8 +170,26 @@ class PmDirectiveRecorder final : public cosmosim::core::IntegrationCallback {
   }
 
   std::array<cosmosim::core::StageContract, 2> contracts{{
-      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
-      {.stage = cosmosim::core::IntegrationStage::kForceRefresh, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+      {.stage = cosmosim::core::IntegrationStage::kGravityKickPre,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+       .mutated_state = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kDiagnostics,
+       .produced_outputs = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kGlobal,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kAllParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
+      {.stage = cosmosim::core::IntegrationStage::kForceRefresh,
+       .required_inputs = cosmosim::core::StageDataDomain::kParticles | cosmosim::core::StageDataDomain::kPmField,
+       .mutated_state = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kTreeState | cosmosim::core::StageDataDomain::kDiagnostics,
+       .produced_outputs = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kTreeState | cosmosim::core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kForceEvaluation,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kGravity},
   }};
   cosmosim::core::PmRefreshDirective kick_pre{};
   cosmosim::core::PmRefreshDirective force_refresh{};
@@ -217,8 +235,10 @@ void testPmRefreshDirectiveCapturesReasonAndForceEvalTime() {
   orchestrator.executeSingleStep(state, integrator_state, cosmosim::core::ActiveSetDescriptor{}, nullptr, nullptr);
 
   assert(recorder.kick_pre.reason == cosmosim::core::PmRefreshDirective::Reason::kInitialForceBootstrap);
+  assert(recorder.kick_pre.sync_stage == cosmosim::core::PmSyncStage::kInitialLongRangeBootstrap);
   assert(recorder.kick_pre.force_evaluation_scale_factor > 0.0);
   assert(recorder.force_refresh.reason == cosmosim::core::PmRefreshDirective::Reason::kScheduledForceRefreshStage);
+  assert(recorder.force_refresh.sync_stage == cosmosim::core::PmSyncStage::kScheduledLongRangeRefresh);
   assert(recorder.force_refresh.force_refresh_surface);
   assert(recorder.force_refresh.force_evaluation_scale_factor >= recorder.kick_pre.force_evaluation_scale_factor);
 }
@@ -270,6 +290,7 @@ void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
   assert(recorder.force_refresh.requires_predicted_inactive_sources);
   assert(!recorder.force_refresh.cadence_opportunity_allowed);
   assert(!recorder.force_refresh.has_sync_event);
+  assert(recorder.force_refresh.sync_stage == cosmosim::core::PmSyncStage::kNone);
   assert(!recorder.force_refresh.refresh_long_range_field);
 }
 
@@ -344,8 +365,24 @@ void testRegisterCallbackRejectsDuplicateStageContracts() {
     void onStage(cosmosim::core::StepContext&) override {}
 
     std::array<cosmosim::core::StageContract, 2> contracts{{
-        {.stage = cosmosim::core::IntegrationStage::kDrift, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
-        {.stage = cosmosim::core::IntegrationStage::kDrift, .restart_safety = cosmosim::core::StageSafety::kSafe, .output_safety = cosmosim::core::StageSafety::kSafe},
+        {.stage = cosmosim::core::IntegrationStage::kDrift,
+         .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+         .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+         .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+         .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+         .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+         .restart_safety = cosmosim::core::StageSafety::kSafe,
+         .output_safety = cosmosim::core::StageSafety::kSafe,
+         .owner = cosmosim::core::StageSubsystem::kCore},
+        {.stage = cosmosim::core::IntegrationStage::kDrift,
+         .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+         .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+         .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+         .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+         .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+         .restart_safety = cosmosim::core::StageSafety::kSafe,
+         .output_safety = cosmosim::core::StageSafety::kSafe,
+         .owner = cosmosim::core::StageSubsystem::kCore},
     }};
   } callback;
 
@@ -353,6 +390,108 @@ void testRegisterCallbackRejectsDuplicateStageContracts() {
   assert(throwsWithContext(
       [&]() { orchestrator.registerCallback(callback); },
       "duplicate executable contracts"));
+}
+
+
+void testRegisterCallbackRejectsIncompleteExecutableContract() {
+  class IncompleteContractCallback final : public cosmosim::core::IntegrationCallback {
+   public:
+    std::string_view callbackName() const override { return "incomplete_contract_callback"; }
+    std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+      static constexpr std::array stages{cosmosim::core::IntegrationStage::kDrift};
+      return stages;
+    }
+    std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+    void onStage(cosmosim::core::StepContext&) override {}
+
+    std::array<cosmosim::core::StageContract, 1> contracts{{
+        {.stage = cosmosim::core::IntegrationStage::kDrift,
+         .restart_safety = cosmosim::core::StageSafety::kSafe,
+         .output_safety = cosmosim::core::StageSafety::kSafe,
+         .owner = cosmosim::core::StageSubsystem::kCore},
+    }};
+  } callback;
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  assert(throwsWithContext(
+      [&]() { orchestrator.registerCallback(callback); },
+      "must declare required_inputs"));
+}
+
+void testLocalPmSyncEventIsHardRejectedAfterHandlerMutation() {
+  class IllegalPmSyncCallback final : public cosmosim::core::IntegrationCallback {
+   public:
+    std::string_view callbackName() const override { return "illegal_pm_sync_callback"; }
+    std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+      static constexpr std::array stages{cosmosim::core::IntegrationStage::kForceRefresh};
+      return stages;
+    }
+    std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
+    void onStage(cosmosim::core::StepContext& context) override {
+      context.pm_refresh_directive.has_sync_event = true;
+      context.pm_refresh_directive.refresh_long_range_field = true;
+      context.pm_refresh_directive.cadence_opportunity_allowed = true;
+      context.pm_refresh_directive.sync_stage = cosmosim::core::PmSyncStage::kScheduledLongRangeRefresh;
+      context.pm_refresh_directive.force_evaluation_scale_factor = 1.0;
+      context.pm_refresh_directive.solver_executed = true;
+    }
+
+    std::array<cosmosim::core::StageContract, 1> contracts{{
+        {.stage = cosmosim::core::IntegrationStage::kForceRefresh,
+         .required_inputs = cosmosim::core::StageDataDomain::kParticles | cosmosim::core::StageDataDomain::kPmField,
+         .mutated_state = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kTreeState | cosmosim::core::StageDataDomain::kDiagnostics,
+         .produced_outputs = cosmosim::core::StageDataDomain::kPmField | cosmosim::core::StageDataDomain::kTreeState | cosmosim::core::StageDataDomain::kDiagnostics,
+         .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+         .sync_requirements = cosmosim::core::StageSyncRequirement::kForceEvaluation,
+         .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+         .restart_safety = cosmosim::core::StageSafety::kUnsafe,
+         .output_safety = cosmosim::core::StageSafety::kUnsafe,
+         .owner = cosmosim::core::StageSubsystem::kGravity},
+    }};
+  } callback;
+
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+  std::vector<std::uint32_t> active_particles{0, 2};
+  cosmosim::core::ActiveSetDescriptor local_active{
+      .particle_indices = active_particles,
+      .particles_are_subset = true,
+      .particles_from_scheduler = true,
+      .has_generation_metadata = true,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+      .source_cell_index_generation = state.cellIndexGeneration(),
+      .source_scheduler_tick = 9,
+  };
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 0.125;
+  integrator_state.pm_refresh_enabled = true;
+  integrator_state.pm_long_range_field_valid = true;
+  integrator_state.pm_sync_state.importPersistentState(cosmosim::core::PmSynchronizationPersistentState{
+      .cadence_steps = 1,
+      .gravity_kick_opportunity = 4,
+      .last_refresh_opportunity = 4,
+      .field_version = 3,
+      .last_refresh_step_index = 8,
+      .last_refresh_scale_factor = 1.0,
+  });
+
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(callback);
+  assert(throwsWithContext(
+      [&]() {
+        orchestrator.executeSingleStep(
+            state,
+            integrator_state,
+            local_active,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            std::uint64_t{9},
+            cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+      },
+      "PM sync event reached an illegal local integration boundary"));
 }
 
 void testCosmologyHelpers() {
@@ -1066,6 +1205,12 @@ void testOutputBoundaryRequiresSafeContracts() {
 
     std::array<cosmosim::core::StageContract, 1> contracts{{
         {.stage = cosmosim::core::IntegrationStage::kOutputCheck,
+         .required_inputs = cosmosim::core::StageDataDomain::kOutputState,
+         .mutated_state = cosmosim::core::StageDataDomain::kOutputState,
+         .produced_outputs = cosmosim::core::StageDataDomain::kOutputState,
+         .allowed_side_effects = cosmosim::core::StageDataDomain::kOutputState,
+         .sync_requirements = cosmosim::core::StageSyncRequirement::kGlobal,
+         .active_set_family = cosmosim::core::StageActiveSetFamily::kOutputState,
          .restart_safety = cosmosim::core::StageSafety::kUnsafe,
          .output_safety = cosmosim::core::StageSafety::kSafe,
          .owner = cosmosim::core::StageSubsystem::kOutput},
@@ -1073,17 +1218,9 @@ void testOutputBoundaryRequiresSafeContracts() {
   } callback;
 
   cosmosim::core::StepOrchestrator orchestrator;
-  orchestrator.registerCallback(callback);
-  orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);
   assert(throwsWithContext(
-      [&]() {
-        orchestrator.executeOutputBoundary(
-            state,
-            integrator_state,
-            nullptr,
-            cosmosim::core::StepBoundaryKind::kGlobalSynchronizationPoint);
-      },
-      "output boundary callback must declare output-safe and restart-safe contract"));
+      [&]() { orchestrator.registerCallback(callback); },
+      "must be restart-safe and output-safe"));
 }
 
 void testBoundarySafetyClassification() {
@@ -1172,6 +1309,8 @@ int main() {
   testStageBoundDispatch();
   testRegisterCallbackRejectsExtraUnregisteredStageContract();
   testRegisterCallbackRejectsDuplicateStageContracts();
+  testRegisterCallbackRejectsIncompleteExecutableContract();
+  testLocalPmSyncEventIsHardRejectedAfterHandlerMutation();
   testCosmologyHelpers();
   testCosmologicalTimelineConvertsSiIntegralsToCodeTime();
   testActiveSubsetDetection();

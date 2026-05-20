@@ -117,6 +117,12 @@ struct StepBoundaryState {
   bool local_substep = false;
 };
 
+enum class PmSyncStage : std::uint8_t {
+  kNone = 0,
+  kInitialLongRangeBootstrap = 1,
+  kScheduledLongRangeRefresh = 2,
+};
+
 // Integrator-issued TreePM refresh directive.  Gravity callbacks may own solver
 // buffers, but they must consume this placement contract instead of inventing
 // legal refresh surfaces internally.  Local-bin force-refresh surfaces require a
@@ -135,6 +141,7 @@ struct PmRefreshDirective {
   bool has_sync_event = false;
   bool refresh_long_range_field = false;
   bool solver_executed = false;
+  PmSyncStage sync_stage = PmSyncStage::kNone;
   std::uint64_t gravity_kick_opportunity = 0;
   std::uint64_t field_version = 0;
   std::uint64_t last_refresh_opportunity = 0;
@@ -321,7 +328,7 @@ class IntegrationCallback {
 
   [[nodiscard]] virtual std::string_view callbackName() const = 0;
   [[nodiscard]] virtual std::span<const IntegrationStage> integrationStages() const = 0;
-  [[nodiscard]] virtual std::span<const StageContract> stageContracts() const { return {}; }
+  [[nodiscard]] virtual std::span<const StageContract> stageContracts() const = 0;
   virtual void onStage(StepContext& context) = 0;
 };
 
