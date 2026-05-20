@@ -49,7 +49,16 @@ enum class StageDataDomain : std::uint16_t {
 [[nodiscard]] constexpr bool hasStageDataDomain(StageDataDomain value, StageDataDomain mask) noexcept {
   return (static_cast<std::uint16_t>(value) & static_cast<std::uint16_t>(mask)) != 0U;
 }
-enum class StageSyncRequirement : std::uint8_t { kNone = 0, kLocalOnly = 1, kPmRefreshBoundary = 2, kGlobal = 3 };
+enum class StageSyncRequirement : std::uint8_t {
+  kNone = 0,
+  kLocalOnly = 1,
+  kPmRefreshBoundary = 2,
+  kGlobal = 3,
+  // Force/acceleration evaluation may run on local active sets.  A PM long-range
+  // refresh is a stricter sub-event and is authorized separately through
+  // PmRefreshDirective only at legal global PM-refresh boundaries.
+  kForceEvaluation = 4,
+};
 enum class StageActiveSetFamily : std::uint8_t {
   kNone = 0,
   kAllParticles = 1,
@@ -372,6 +381,8 @@ class StepOrchestrator {
 
  private:
   StageScheduler m_scheduler;
+  void dispatchStageHandlers(StepContext& context, bool require_output_safe_boundary) const;
+
   std::array<std::vector<IntegrationCallback*>, integrationStageCount()> m_handlers_by_stage;
   std::array<std::vector<StageContract>, integrationStageCount()> m_contracts_by_stage;
   std::size_t m_callback_count = 0;

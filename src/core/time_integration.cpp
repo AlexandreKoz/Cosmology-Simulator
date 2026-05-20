@@ -679,6 +679,36 @@ std::optional<StageContract> StepOrchestrator::contractForHandlerStage(
   return std::nullopt;
 }
 
+void StepOrchestrator::dispatchStageHandlers(
+    StepContext& context,
+    bool require_output_safe_boundary) const {
+  const std::string stage_name = "stage." + std::string(integrationStageName(context.stage));
+  COSMOSIM_PROFILE_SCOPE(context.profiler_session, stage_name);
+  if (context.profiler_session != nullptr) {
+    context.profiler_session->counters().addCount(stage_name + ".invocations", 1);
+  }
+
+  for (auto* callback : handlersFor(context.stage)) {
+    const auto contract = contractForHandlerStage(*callback, context.stage);
+    if (!contract.has_value()) {
+      throw std::runtime_error("registered callback missing executable stage contract");
+    }
+    if (contract->stage != context.stage) {
+      throw std::runtime_error("stage contract metadata mismatch for dispatched callback");
+    }
+    if (require_output_safe_boundary &&
+        (contract->output_safety != StageSafety::kSafe || contract->restart_safety != StageSafety::kSafe)) {
+      throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
+    }
+    const std::string callback_phase = "callback." + std::string(callback->callbackName());
+    COSMOSIM_PROFILE_SCOPE(context.profiler_session, callback_phase);
+    callback->onStage(context);
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->counters().addCount(callback_phase + ".invocations", 1);
+    }
+  }
+}
+
 void StepOrchestrator::executeOutputBoundary(
     SimulationState& state,
     IntegratorState& integrator_state,
@@ -708,29 +738,7 @@ void StepOrchestrator::executeOutputBoundary(
       .stage = IntegrationStage::kOutputCheck,
   };
 
-  const std::string stage_name = "stage." + std::string(integrationStageName(IntegrationStage::kOutputCheck));
-  COSMOSIM_PROFILE_SCOPE(profiler_session, stage_name);
-  if (profiler_session != nullptr) {
-    profiler_session->counters().addCount(stage_name + ".invocations", 1);
-  }
-
-  for (auto* callback : handlersFor(IntegrationStage::kOutputCheck)) {
-    const auto contract = contractForHandlerStage(*callback, IntegrationStage::kOutputCheck);
-    if (!contract.has_value()) {
-      throw std::runtime_error("registered output callback missing executable stage contract");
-    }
-    if (contract->stage != IntegrationStage::kOutputCheck ||
-        contract->output_safety != StageSafety::kSafe ||
-        contract->restart_safety != StageSafety::kSafe) {
-      throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
-    }
-    const std::string callback_phase = "callback." + std::string(callback->callbackName());
-    COSMOSIM_PROFILE_SCOPE(profiler_session, callback_phase);
-    callback->onStage(context);
-    if (profiler_session != nullptr) {
-      profiler_session->counters().addCount(callback_phase + ".invocations", 1);
-    }
-  }
+  dispatchStageHandlers(context, true);
 }
 
 void StepOrchestrator::executeSingleStep(
@@ -848,31 +856,7 @@ void StepOrchestrator::executeSingleStep(
       }
     }
     const std::size_t particle_count_before_stage = state.particles.size();
-    const std::string stage_name = "stage." + std::string(integrationStageName(stage));
-    COSMOSIM_PROFILE_SCOPE(profiler_session, stage_name);
-    if (profiler_session != nullptr) {
-      profiler_session->counters().addCount(stage_name + ".invocations", 1);
-    }
-
-    for (auto* callback : handlersFor(stage)) {
-      const auto contract = contractForHandlerStage(*callback, stage);
-      if (!contract.has_value()) {
-        throw std::runtime_error("registered callback missing executable stage contract");
-      }
-      if (contract->stage != stage) {
-        throw std::runtime_error("stage contract metadata mismatch for dispatched callback");
-      }
-      if (stage == IntegrationStage::kOutputCheck &&
-          (contract->output_safety != StageSafety::kSafe || contract->restart_safety != StageSafety::kSafe)) {
-        throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
-      }
-      const std::string callback_phase = "callback." + std::string(callback->callbackName());
-      COSMOSIM_PROFILE_SCOPE(profiler_session, callback_phase);
-      callback->onStage(context);
-      if (profiler_session != nullptr) {
-        profiler_session->counters().addCount(callback_phase + ".invocations", 1);
-      }
-    }
+    dispatchStageHandlers(context, false);
     if ((stage == IntegrationStage::kForceRefresh ||
          (stage == IntegrationStage::kGravityKickPre && context.pm_refresh_directive.has_sync_event)) &&
         context.pm_refresh_directive.has_sync_event) {

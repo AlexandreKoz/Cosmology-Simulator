@@ -1794,7 +1794,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
        .mutated_state = core::StageDataDomain::kPmField | core::StageDataDomain::kTreeState | core::StageDataDomain::kDiagnostics,
        .produced_outputs = core::StageDataDomain::kPmField | core::StageDataDomain::kTreeState | core::StageDataDomain::kDiagnostics,
        .allowed_side_effects = core::StageDataDomain::kDiagnostics,
-       .sync_requirements = core::StageSyncRequirement::kPmRefreshBoundary,
+       .sync_requirements = core::StageSyncRequirement::kForceEvaluation,
        .active_set_family = core::StageActiveSetFamily::kActiveParticles,
        .restart_safety = core::StageSafety::kUnsafe,
        .output_safety = core::StageSafety::kUnsafe,
