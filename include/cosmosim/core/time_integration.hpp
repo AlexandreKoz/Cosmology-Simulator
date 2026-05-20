@@ -341,6 +341,12 @@ class StepOrchestrator {
       const IntegrationCallback& callback,
       IntegrationStage stage) const noexcept;
 
+  void executeOutputBoundary(
+      SimulationState& state,
+      IntegratorState& integrator_state,
+      ProfilerSession* profiler_session = nullptr,
+      StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
+
   void executeSingleStep(
       SimulationState& state,
       IntegratorState& integrator_state,

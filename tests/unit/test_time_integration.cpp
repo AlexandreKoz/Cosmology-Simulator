@@ -188,6 +188,11 @@ void testKickDriftKickOrdering() {
 
   const cosmosim::core::ActiveSetDescriptor active_set{};
   orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr);
+  orchestrator.executeOutputBoundary(
+      state,
+      integrator_state,
+      nullptr,
+      cosmosim::core::StepBoundaryKind::kGlobalSynchronizationPoint);
 
   const auto expected = cosmosim::core::StageScheduler::kickDriftKickOrder();
   assert(cosmosim::core::isCanonicalIntegrationStageOrder(expected));
@@ -216,6 +221,56 @@ void testPmRefreshDirectiveCapturesReasonAndForceEvalTime() {
   assert(recorder.force_refresh.reason == cosmosim::core::PmRefreshDirective::Reason::kScheduledForceRefreshStage);
   assert(recorder.force_refresh.force_refresh_surface);
   assert(recorder.force_refresh.force_evaluation_scale_factor >= recorder.kick_pre.force_evaluation_scale_factor);
+}
+
+
+void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(4);
+
+  std::vector<std::uint32_t> active_particles{0, 2};
+  cosmosim::core::ActiveSetDescriptor local_active{
+      .particle_indices = active_particles,
+      .particles_are_subset = true,
+      .particles_from_scheduler = true,
+      .has_generation_metadata = true,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+      .source_cell_index_generation = state.cellIndexGeneration(),
+      .source_scheduler_tick = 7,
+  };
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.dt_time_code = 0.125;
+  integrator_state.pm_refresh_enabled = true;
+  integrator_state.pm_long_range_field_valid = true;
+  integrator_state.pm_sync_state.importPersistentState(cosmosim::core::PmSynchronizationPersistentState{
+      .cadence_steps = 1,
+      .gravity_kick_opportunity = 3,
+      .last_refresh_opportunity = 3,
+      .field_version = 2,
+      .last_refresh_step_index = 6,
+      .last_refresh_scale_factor = 1.0,
+  });
+
+  PmDirectiveRecorder recorder;
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(recorder);
+  orchestrator.executeSingleStep(
+      state,
+      integrator_state,
+      local_active,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      std::uint64_t{7},
+      cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+
+  assert(recorder.force_refresh.force_refresh_surface);
+  assert(recorder.force_refresh.requires_predicted_inactive_sources);
+  assert(!recorder.force_refresh.cadence_opportunity_allowed);
+  assert(!recorder.force_refresh.has_sync_event);
+  assert(!recorder.force_refresh.refresh_long_range_field);
 }
 
 
@@ -1019,8 +1074,15 @@ void testOutputBoundaryRequiresSafeContracts() {
 
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(callback);
+  orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);
   assert(throwsWithContext(
-      [&]() { orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr); },
+      [&]() {
+        orchestrator.executeOutputBoundary(
+            state,
+            integrator_state,
+            nullptr,
+            cosmosim::core::StepBoundaryKind::kGlobalSynchronizationPoint);
+      },
       "output boundary callback must declare output-safe and restart-safe contract"));
 }
 
@@ -1036,6 +1098,7 @@ void testBoundarySafetyClassification() {
   assert(local_boundary.kind == cosmosim::core::StepBoundaryKind::kLocalActiveBinStep);
   assert(!local_boundary.restart_safe);
   assert(!local_boundary.output_safe);
+  assert(!local_boundary.pm_refresh_allowed);
 
   cosmosim::core::IntegratorState unsafe_state;
   unsafe_state.last_completed_boundary_kind = local_boundary.kind;
@@ -1105,6 +1168,7 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
 int main() {
   testKickDriftKickOrdering();
   testPmRefreshDirectiveCapturesReasonAndForceEvalTime();
+  testLocalForceRefreshDoesNotIssuePmSyncEvent();
   testStageBoundDispatch();
   testRegisterCallbackRejectsExtraUnregisteredStageContract();
   testRegisterCallbackRejectsDuplicateStageContracts();

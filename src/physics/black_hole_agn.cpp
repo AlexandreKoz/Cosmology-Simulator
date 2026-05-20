@@ -268,6 +268,22 @@ std::span<const core::IntegrationStage> BlackHoleAgnCallback::integrationStages(
   return stages;
 }
 
+std::span<const core::StageContract> BlackHoleAgnCallback::stageContracts() const {
+  static constexpr std::array contracts{core::StageContract{
+      .stage = core::IntegrationStage::kSourceTerms,
+      .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells,
+      .mutated_state = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells | core::StageDataDomain::kDiagnostics,
+      .produced_outputs = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells | core::StageDataDomain::kDiagnostics,
+      .allowed_side_effects = core::StageDataDomain::kDiagnostics,
+      .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+      .active_set_family = core::StageActiveSetFamily::kActiveParticles,
+      .restart_safety = core::StageSafety::kUnsafe,
+      .output_safety = core::StageSafety::kUnsafe,
+      .owner = core::StageSubsystem::kSources,
+  }};
+  return contracts;
+}
+
 void BlackHoleAgnCallback::onStage(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kSourceTerms) {
     throw std::logic_error("black-hole AGN handler received an unregistered stage");

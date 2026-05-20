@@ -679,6 +679,60 @@ std::optional<StageContract> StepOrchestrator::contractForHandlerStage(
   return std::nullopt;
 }
 
+void StepOrchestrator::executeOutputBoundary(
+    SimulationState& state,
+    IntegratorState& integrator_state,
+    ProfilerSession* profiler_session,
+    StepBoundaryKind requested_boundary_kind) const {
+  if (integrator_state.inside_kdk_step) {
+    throw std::runtime_error("output boundary dispatch requested inside an open KDK step");
+  }
+
+  ActiveSetDescriptor output_active_set{};
+  const StepBoundaryState boundary = classifyStepBoundary(
+      state,
+      output_active_set,
+      false,
+      requested_boundary_kind);
+
+  StepContext context{
+      .state = state,
+      .integrator_state = integrator_state,
+      .active_set = output_active_set,
+      .workspace = nullptr,
+      .cosmology_background = nullptr,
+      .mode_policy = nullptr,
+      .profiler_session = profiler_session,
+      .timeline_step = {},
+      .boundary = boundary,
+      .stage = IntegrationStage::kOutputCheck,
+  };
+
+  const std::string stage_name = "stage." + std::string(integrationStageName(IntegrationStage::kOutputCheck));
+  COSMOSIM_PROFILE_SCOPE(profiler_session, stage_name);
+  if (profiler_session != nullptr) {
+    profiler_session->counters().addCount(stage_name + ".invocations", 1);
+  }
+
+  for (auto* callback : handlersFor(IntegrationStage::kOutputCheck)) {
+    const auto contract = contractForHandlerStage(*callback, IntegrationStage::kOutputCheck);
+    if (!contract.has_value()) {
+      throw std::runtime_error("registered output callback missing executable stage contract");
+    }
+    if (contract->stage != IntegrationStage::kOutputCheck ||
+        contract->output_safety != StageSafety::kSafe ||
+        contract->restart_safety != StageSafety::kSafe) {
+      throw std::runtime_error("output boundary callback must declare output-safe and restart-safe contract");
+    }
+    const std::string callback_phase = "callback." + std::string(callback->callbackName());
+    COSMOSIM_PROFILE_SCOPE(profiler_session, callback_phase);
+    callback->onStage(context);
+    if (profiler_session != nullptr) {
+      profiler_session->counters().addCount(callback_phase + ".invocations", 1);
+    }
+  }
+}
+
 void StepOrchestrator::executeSingleStep(
     SimulationState& state,
     IntegratorState& integrator_state,
@@ -747,6 +801,9 @@ void StepOrchestrator::executeSingleStep(
   }
 
   for (const auto stage : ordered_stages) {
+    if (stage == IntegrationStage::kOutputCheck) {
+      continue;
+    }
     context.stage = stage;
     context.boundary = boundary;
     context.pm_refresh_directive = {};
@@ -770,14 +827,13 @@ void StepOrchestrator::executeSingleStep(
         context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
       }
     } else if (stage == IntegrationStage::kForceRefresh) {
-      context.boundary.kind = StepBoundaryKind::kPmRefreshPoint;
-      context.boundary.pm_refresh_allowed = true;
       context.pm_refresh_directive.force_refresh_surface = true;
-      context.pm_refresh_directive.cadence_opportunity_allowed = true;
       context.pm_refresh_directive.requires_predicted_inactive_sources = boundary.local_substep;
       context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kScheduledForceRefreshStage;
       context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_end;
-      if (integrator_state.pm_refresh_enabled) {
+      const bool legal_pm_refresh_boundary = boundary.pm_refresh_allowed && !boundary.local_substep;
+      context.pm_refresh_directive.cadence_opportunity_allowed = legal_pm_refresh_boundary;
+      if (integrator_state.pm_refresh_enabled && legal_pm_refresh_boundary) {
         const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
             integrator_state.step_index,
             timeline_step.scale_factor_end,
@@ -790,8 +846,6 @@ void StepOrchestrator::executeSingleStep(
         context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
         context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
       }
-    } else if (stage == IntegrationStage::kOutputCheck) {
-      context.boundary.kind = requested_boundary_kind;
     }
     const std::size_t particle_count_before_stage = state.particles.size();
     const std::string stage_name = "stage." + std::string(integrationStageName(stage));
@@ -2007,7 +2061,7 @@ StepBoundaryState classifyStepBoundary(
     boundary.kind = StepBoundaryKind::kLocalActiveBinStep;
     boundary.restart_safe = false;
     boundary.output_safe = false;
-    boundary.pm_refresh_allowed = requested_kind == StepBoundaryKind::kPmRefreshPoint;
+    boundary.pm_refresh_allowed = false;
     return boundary;
   }
   boundary.kind = requested_kind;

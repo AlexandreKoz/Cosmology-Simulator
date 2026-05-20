@@ -52,6 +52,7 @@ class TracerCallback final : public cosmosim::core::IntegrationCallback {
 
   [[nodiscard]] std::string_view callbackName() const override;
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override;
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override;
   void onStage(cosmosim::core::StepContext& context) override;
 
   [[nodiscard]] const TracerUpdateCounters& lastUpdateCounters() const noexcept;

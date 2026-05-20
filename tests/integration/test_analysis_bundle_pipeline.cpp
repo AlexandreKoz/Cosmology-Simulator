@@ -18,7 +18,21 @@ class NoopCallback final : public cosmosim::core::IntegrationCallback {
     static constexpr std::array stages{cosmosim::core::IntegrationStage::kAnalysisHooks};
     return stages;
   }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override { return contracts; }
   void onStage(cosmosim::core::StepContext& /*context*/) override {}
+
+  std::array<cosmosim::core::StageContract, 1> contracts{{
+      {.stage = cosmosim::core::IntegrationStage::kAnalysisHooks,
+       .required_inputs = cosmosim::core::StageDataDomain::kDiagnostics,
+       .mutated_state = cosmosim::core::StageDataDomain::kDiagnostics,
+       .produced_outputs = cosmosim::core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+       .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = cosmosim::core::StageActiveSetFamily::kNone,
+       .restart_safety = cosmosim::core::StageSafety::kSafe,
+       .output_safety = cosmosim::core::StageSafety::kSafe,
+       .owner = cosmosim::core::StageSubsystem::kAnalysis},
+  }};
 };
 
 }  // namespace

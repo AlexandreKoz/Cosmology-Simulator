@@ -1186,14 +1186,14 @@ class StageAuditCallback final : public core::IntegrationCallback {
 
  private:
   static constexpr std::array<core::StageContract, 8> m_contracts{{
-      {.stage = core::IntegrationStage::kGravityKickPre, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kDrift, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kForceRefresh, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kHydroUpdate, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kSourceTerms, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kGravityKickPost, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kAnalysisHooks, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
-      {.stage = core::IntegrationStage::kOutputCheck, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kGravityKickPre, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kDrift, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kForceRefresh, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kHydroUpdate, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kSourceTerms, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kGravityKickPost, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kNone, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kAnalysisHooks, .required_inputs = core::StageDataDomain::kDiagnostics, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kLocalOnly, .active_set_family = core::StageActiveSetFamily::kNone, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
+      {.stage = core::IntegrationStage::kOutputCheck, .required_inputs = core::StageDataDomain::kOutputState, .mutated_state = core::StageDataDomain::kDiagnostics, .produced_outputs = core::StageDataDomain::kDiagnostics, .allowed_side_effects = core::StageDataDomain::kDiagnostics, .sync_requirements = core::StageSyncRequirement::kGlobal, .active_set_family = core::StageActiveSetFamily::kOutputState, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe, .owner = core::StageSubsystem::kAnalysis},
   }};
   std::vector<std::string>* m_stage_sequence = nullptr;
 };
@@ -1243,7 +1243,16 @@ class DriftCallback final : public core::IntegrationCallback {
 
  private:
   static constexpr std::array<core::StageContract, 1> m_contracts{{
-      {.stage = core::IntegrationStage::kDrift, .restart_safety = core::StageSafety::kSafe, .output_safety = core::StageSafety::kSafe},
+      {.stage = core::IntegrationStage::kDrift,
+       .required_inputs = core::StageDataDomain::kParticles,
+       .mutated_state = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells,
+       .produced_outputs = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells,
+       .allowed_side_effects = core::StageDataDomain::kNone,
+       .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = core::StageSafety::kUnsafe,
+       .output_safety = core::StageSafety::kUnsafe,
+       .owner = core::StageSubsystem::kCore},
   }};
 };
 
@@ -1370,6 +1379,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
   [[nodiscard]] std::string_view callbackName() const override { return "gravity"; }
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_gravity_stages; }
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
   [[nodiscard]] std::size_t pmGridSize() const noexcept { return m_pm_grid_shape.nx; }
   [[nodiscard]] const gravity::PmGridShape& pmGridShape() const noexcept { return m_pm_grid_shape; }
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
@@ -1435,9 +1445,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (!is_kick_stage && !is_force_refresh_stage) {
       throw std::logic_error("gravity handler received an unregistered stage");
     }
-    if (context.pm_refresh_directive.force_refresh_surface &&
-        (!context.boundary.pm_refresh_allowed || context.boundary.kind != core::StepBoundaryKind::kPmRefreshPoint)) {
-      throw std::runtime_error("TreePM force refresh reached an illegal integration boundary");
+    if (context.pm_refresh_directive.has_sync_event &&
+        context.pm_refresh_directive.refresh_long_range_field &&
+        !context.boundary.pm_refresh_allowed) {
+      throw std::runtime_error("TreePM long-range PM refresh reached an illegal integration boundary");
     }
     if (context.stage == core::IntegrationStage::kForceRefresh && !context.pm_refresh_directive.force_refresh_surface) {
       throw std::runtime_error("TreePM force-refresh stage lacks an integrator-issued PM refresh directive");
@@ -1516,46 +1527,64 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.scale_factor = 1.0;
     }
 
-    if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
-      throw std::runtime_error(
-          "TreePM attempted to advance PM cadence without an integrator-issued refresh opportunity");
-    }
-    // The integrator owns PM cadence state and issues this concrete event.
-    // Gravity may only execute the solver against the provided directive.
-    if (!context.pm_refresh_directive.has_sync_event) {
-      throw std::runtime_error("TreePM force-refresh execution requires an integrator-owned PM sync event");
-    }
-    const core::PmSyncEvent sync_event{
-        .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
-        .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
-        .field_version = context.pm_refresh_directive.field_version,
-        .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
-        .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
-        .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
-    };
-    requireKickConsensus(sync_event.gravity_kick_opportunity, "gravity_kick_opportunity");
-    const std::uint64_t refresh_vote = sync_event.refresh_long_range_field ? 1ULL : 0ULL;
-    const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
-    if (refresh_vote_sum != 0ULL && refresh_vote_sum != world_size) {
-      throw std::runtime_error(
-          "TreePM long-range cadence decision diverged across ranks: refresh_vote_sum=" +
-          std::to_string(refresh_vote_sum) + ", world_size=" + std::to_string(world_size));
-    }
-    const bool refresh_long_range = (refresh_vote_sum == world_size);
-    if (refresh_long_range != sync_event.refresh_long_range_field) {
-      throw std::runtime_error(
-          "TreePM long-range cadence local decision drifted from rank consensus");
-    }
-
+    // The integrator owns PM cadence state.  At legal global PM-refresh
+    // boundaries it issues a concrete sync event; local active-bin force
+    // evaluations may recompute short-range forces only and must reuse the
+    // already-valid long-range field without advancing PM cadence truth.
     PmLongRangeKickDecision decision{
         .sync_surface = toPmSyncSurface(context.stage),
-        .gravity_kick_opportunity = sync_event.gravity_kick_opportunity,
-        .refresh_long_range_field = refresh_long_range,
-        .field_version = sync_event.field_version,
-        .last_refresh_opportunity = sync_event.last_refresh_opportunity,
-        .field_built_step_index = sync_event.field_built_step_index,
-        .field_built_scale_factor = sync_event.field_built_scale_factor,
+        .gravity_kick_opportunity = context.integrator_state.pm_sync_state.gravityKickOpportunity(),
+        .refresh_long_range_field = false,
+        .field_version = context.integrator_state.pm_sync_state.fieldVersion(),
+        .last_refresh_opportunity = context.integrator_state.pm_sync_state.lastRefreshOpportunity(),
+        .field_built_step_index = context.integrator_state.pm_sync_state.lastRefreshStepIndex(),
+        .field_built_scale_factor = context.integrator_state.pm_sync_state.lastRefreshScaleFactor(),
     };
+
+    if (context.pm_refresh_directive.has_sync_event) {
+      if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
+        throw std::runtime_error(
+            "TreePM received a PM sync event outside an integrator-authorized refresh opportunity");
+      }
+      const core::PmSyncEvent sync_event{
+          .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+          .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+          .field_version = context.pm_refresh_directive.field_version,
+          .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+          .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+          .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+      };
+      requireKickConsensus(sync_event.gravity_kick_opportunity, "gravity_kick_opportunity");
+      const std::uint64_t refresh_vote = sync_event.refresh_long_range_field ? 1ULL : 0ULL;
+      const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
+      if (refresh_vote_sum != 0ULL && refresh_vote_sum != world_size) {
+        throw std::runtime_error(
+            "TreePM long-range cadence decision diverged across ranks: refresh_vote_sum=" +
+            std::to_string(refresh_vote_sum) + ", world_size=" + std::to_string(world_size));
+      }
+      const bool refresh_long_range = (refresh_vote_sum == world_size);
+      if (refresh_long_range != sync_event.refresh_long_range_field) {
+        throw std::runtime_error(
+            "TreePM long-range cadence local decision drifted from rank consensus");
+      }
+
+      decision.gravity_kick_opportunity = sync_event.gravity_kick_opportunity;
+      decision.refresh_long_range_field = refresh_long_range;
+      decision.field_version = sync_event.field_version;
+      decision.last_refresh_opportunity = sync_event.last_refresh_opportunity;
+      decision.field_built_step_index = sync_event.field_built_step_index;
+      decision.field_built_scale_factor = sync_event.field_built_scale_factor;
+    } else {
+      if (!context.integrator_state.pm_long_range_field_valid || decision.field_version == 0U) {
+        throw std::runtime_error(
+            "TreePM local force refresh attempted before a valid long-range PM field existed");
+      }
+      if (context.pm_refresh_directive.cadence_opportunity_allowed) {
+        throw std::runtime_error(
+            "TreePM cadence opportunity was declared without an accompanying integrator-owned PM sync event");
+      }
+    }
+
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
 
@@ -1749,6 +1778,39 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
 
  private:
+  static constexpr std::array<core::StageContract, 3> m_contracts{{
+      {.stage = core::IntegrationStage::kGravityKickPre,
+       .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kPmField,
+       .mutated_state = core::StageDataDomain::kParticles | core::StageDataDomain::kDiagnostics,
+       .produced_outputs = core::StageDataDomain::kParticles | core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = core::StageDataDomain::kDiagnostics,
+       .sync_requirements = core::StageSyncRequirement::kGlobal,
+       .active_set_family = core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = core::StageSafety::kUnsafe,
+       .output_safety = core::StageSafety::kUnsafe,
+       .owner = core::StageSubsystem::kGravity},
+      {.stage = core::IntegrationStage::kForceRefresh,
+       .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kPmField | core::StageDataDomain::kTreeState,
+       .mutated_state = core::StageDataDomain::kPmField | core::StageDataDomain::kTreeState | core::StageDataDomain::kDiagnostics,
+       .produced_outputs = core::StageDataDomain::kPmField | core::StageDataDomain::kTreeState | core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = core::StageDataDomain::kDiagnostics,
+       .sync_requirements = core::StageSyncRequirement::kPmRefreshBoundary,
+       .active_set_family = core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = core::StageSafety::kUnsafe,
+       .output_safety = core::StageSafety::kUnsafe,
+       .owner = core::StageSubsystem::kGravity},
+      {.stage = core::IntegrationStage::kGravityKickPost,
+       .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kPmField,
+       .mutated_state = core::StageDataDomain::kParticles | core::StageDataDomain::kDiagnostics,
+       .produced_outputs = core::StageDataDomain::kParticles | core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = core::StageDataDomain::kDiagnostics,
+       .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = core::StageActiveSetFamily::kActiveParticles,
+       .restart_safety = core::StageSafety::kUnsafe,
+       .output_safety = core::StageSafety::kUnsafe,
+       .owner = core::StageSubsystem::kGravity},
+  }};
+
   [[nodiscard]] static double kickFactorForStage(const core::StepContext& context) {
     if (context.stage == core::IntegrationStage::kGravityKickPre) {
       return context.timeline_step.first_kick_factor_code;
@@ -2168,6 +2230,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
   [[nodiscard]] std::string_view callbackName() const override { return "hydro"; }
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_hydro_stage; }
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
 
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
@@ -2260,6 +2323,19 @@ class HydroStageCallback final : public core::IntegrationCallback {
   }
 
  private:
+  static constexpr std::array<core::StageContract, 1> m_contracts{{
+      {.stage = core::IntegrationStage::kHydroUpdate,
+       .required_inputs = core::StageDataDomain::kGasCells | core::StageDataDomain::kParticles,
+       .mutated_state = core::StageDataDomain::kGasCells | core::StageDataDomain::kParticles,
+       .produced_outputs = core::StageDataDomain::kGasCells | core::StageDataDomain::kParticles,
+       .allowed_side_effects = core::StageDataDomain::kNone,
+       .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+       .active_set_family = core::StageActiveSetFamily::kGasCells,
+       .restart_safety = core::StageSafety::kUnsafe,
+       .output_safety = core::StageSafety::kUnsafe,
+       .owner = core::StageSubsystem::kHydro},
+  }};
+
   void rebuildGeometryIfNeeded(std::size_t cell_count, double dt_time_code) {
     if (m_cached_cell_count == cell_count && cell_count > 0) {
       return;
@@ -2572,6 +2648,84 @@ void latchOutputRequestForCompletedStep(
   return core::StepBoundaryKind::kGlobalSynchronizationPoint;
 }
 
+class OutputBoundaryCallback final : public core::IntegrationCallback {
+ public:
+  OutputBoundaryCallback(
+      const core::FrozenConfig& frozen_config,
+      const core::SimulationConfig& config,
+      const core::HierarchicalTimeBinScheduler& scheduler,
+      const GravityStageCallback& gravity_callback,
+      ReferenceWorkflowReport& report,
+      core::ProfilerSession& profiler,
+      PendingOutputBoundary& pending_output,
+      bool write_outputs_enabled)
+      : m_frozen_config(frozen_config),
+        m_config(config),
+        m_scheduler(scheduler),
+        m_gravity_callback(gravity_callback),
+        m_report(report),
+        m_profiler(profiler),
+        m_pending_output(pending_output),
+        m_write_outputs_enabled(write_outputs_enabled) {}
+
+  [[nodiscard]] std::string_view callbackName() const override { return "output_boundary"; }
+  [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override {
+    static constexpr std::array stages{core::IntegrationStage::kOutputCheck};
+    return stages;
+  }
+  [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
+
+  void onStage(core::StepContext& context) override {
+    if (context.stage != core::IntegrationStage::kOutputCheck) {
+      throw std::logic_error("output boundary handler received an unregistered stage");
+    }
+    if (!m_pending_output.snapshot_due && !m_pending_output.checkpoint_due) {
+      return;
+    }
+    if (!context.boundary.output_safe || !context.boundary.restart_safe) {
+      return;
+    }
+    const bool output_flushed = maybeWriteOutputs(
+        m_frozen_config,
+        m_config,
+        context.state,
+        context.integrator_state,
+        m_scheduler,
+        m_gravity_callback,
+        m_report,
+        m_profiler,
+        m_write_outputs_enabled,
+        m_pending_output.snapshot_due,
+        m_pending_output.checkpoint_due);
+    if (output_flushed) {
+      m_pending_output = {};
+    }
+  }
+
+ private:
+  static constexpr std::array<core::StageContract, 1> m_contracts{{
+      {.stage = core::IntegrationStage::kOutputCheck,
+       .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells | core::StageDataDomain::kOutputState | core::StageDataDomain::kRestartState,
+       .mutated_state = core::StageDataDomain::kOutputState | core::StageDataDomain::kRestartState | core::StageDataDomain::kDiagnostics,
+       .produced_outputs = core::StageDataDomain::kOutputState | core::StageDataDomain::kRestartState | core::StageDataDomain::kDiagnostics,
+       .allowed_side_effects = core::StageDataDomain::kOutputState | core::StageDataDomain::kRestartState | core::StageDataDomain::kDiagnostics,
+       .sync_requirements = core::StageSyncRequirement::kGlobal,
+       .active_set_family = core::StageActiveSetFamily::kOutputState,
+       .restart_safety = core::StageSafety::kSafe,
+       .output_safety = core::StageSafety::kSafe,
+       .owner = core::StageSubsystem::kOutput},
+  }};
+
+  const core::FrozenConfig& m_frozen_config;
+  const core::SimulationConfig& m_config;
+  const core::HierarchicalTimeBinScheduler& m_scheduler;
+  const GravityStageCallback& m_gravity_callback;
+  ReferenceWorkflowReport& m_report;
+  core::ProfilerSession& m_profiler;
+  PendingOutputBoundary& m_pending_output;
+  bool m_write_outputs_enabled = false;
+};
+
 ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const std::filesystem::path* output_root_override,
     const ReferenceWorkflowOptions& options) const {
@@ -2733,6 +2887,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       state.particle_sidecar.last_drift_scale_factor[particle_index] = integrator_state.current_scale_factor;
     }
 
+    PendingOutputBoundary pending_output;
+
     core::StepOrchestrator orchestrator;
     StageAuditCallback stage_audit(&report.stage_sequence);
     DriftCallback drift_callback;
@@ -2800,6 +2956,15 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)));
     physics::BlackHoleAgnCallback bh_callback(
         physics::BlackHoleAgnModel(makeRuntimeBlackHoleAgnConfig(config.physics, runtime_units)));
+    OutputBoundaryCallback output_boundary_callback(
+        m_frozen_config,
+        config,
+        scheduler,
+        gravity_callback,
+        report,
+        profiler,
+        pending_output,
+        options.write_outputs);
 
     orchestrator.registerCallback(stage_audit);
     orchestrator.registerCallback(drift_callback);
@@ -2808,6 +2973,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     orchestrator.registerCallback(star_formation_callback);
     orchestrator.registerCallback(bh_callback);
     orchestrator.registerCallback(diagnostics_callback);
+    orchestrator.registerCallback(output_boundary_callback);
 
     updateAdaptiveTimeBins(
         state,
@@ -2824,7 +2990,6 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
-    PendingOutputBoundary pending_output;
     while (integrator_state.step_index < target_step_index &&
            integrator_state.current_time_code < config.numerics.time_end_code) {
       const std::span<const std::uint32_t> active_scheduler_elements = scheduler.beginSubstep();
@@ -2880,21 +3045,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       ensureSchedulerCoversState(state, scheduler);
       scheduler.endSubstep();
       syncTimeBinsFromScheduler(scheduler, state);
-      const bool output_flushed = maybeWriteOutputs(
-          m_frozen_config,
-          config,
+      orchestrator.executeOutputBoundary(
           state,
           integrator_state,
-          scheduler,
-          gravity_callback,
-          report,
-          profiler,
-          options.write_outputs,
-          pending_output.snapshot_due,
-          pending_output.checkpoint_due);
-      if (output_flushed) {
-        pending_output = {};
-      }
+          &profiler,
+          requested_boundary);
     }
 
     report.completed_steps = integrator_state.step_index - options.step_index;

@@ -597,6 +597,22 @@ std::span<const core::IntegrationStage> DiagnosticsCallback::integrationStages()
   return stages;
 }
 
+std::span<const core::StageContract> DiagnosticsCallback::stageContracts() const {
+  static constexpr std::array contracts{core::StageContract{
+      .stage = core::IntegrationStage::kAnalysisHooks,
+      .required_inputs = core::StageDataDomain::kParticles | core::StageDataDomain::kGasCells,
+      .mutated_state = core::StageDataDomain::kDiagnostics,
+      .produced_outputs = core::StageDataDomain::kDiagnostics,
+      .allowed_side_effects = core::StageDataDomain::kDiagnostics,
+      .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+      .active_set_family = core::StageActiveSetFamily::kNone,
+      .restart_safety = core::StageSafety::kSafe,
+      .output_safety = core::StageSafety::kSafe,
+      .owner = core::StageSubsystem::kAnalysis,
+  }};
+  return contracts;
+}
+
 void DiagnosticsCallback::onStage(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kAnalysisHooks) {
     throw std::logic_error("analysis diagnostics handler received an unregistered stage");

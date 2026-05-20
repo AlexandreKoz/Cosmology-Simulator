@@ -144,6 +144,22 @@ std::span<const cosmosim::core::IntegrationStage> TracerCallback::integrationSta
   return stages;
 }
 
+std::span<const cosmosim::core::StageContract> TracerCallback::stageContracts() const {
+  static constexpr std::array contracts{cosmosim::core::StageContract{
+      .stage = cosmosim::core::IntegrationStage::kSourceTerms,
+      .required_inputs = cosmosim::core::StageDataDomain::kParticles | cosmosim::core::StageDataDomain::kGasCells,
+      .mutated_state = cosmosim::core::StageDataDomain::kParticles | cosmosim::core::StageDataDomain::kDiagnostics,
+      .produced_outputs = cosmosim::core::StageDataDomain::kParticles | cosmosim::core::StageDataDomain::kDiagnostics,
+      .allowed_side_effects = cosmosim::core::StageDataDomain::kDiagnostics,
+      .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+      .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+      .restart_safety = cosmosim::core::StageSafety::kUnsafe,
+      .output_safety = cosmosim::core::StageSafety::kUnsafe,
+      .owner = cosmosim::core::StageSubsystem::kSources,
+  }};
+  return contracts;
+}
+
 void TracerCallback::onStage(cosmosim::core::StepContext& context) {
   if (context.stage != cosmosim::core::IntegrationStage::kSourceTerms) {
     throw std::logic_error("tracer handler received an unregistered stage");
