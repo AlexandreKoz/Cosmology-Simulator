@@ -37,6 +37,9 @@ restart_stem = restart
 )";
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(config_text, "unit_case");
+  assert(frozen.raw_text == config_text);
+  assert(frozen.user_config.source_name == "unit_case");
+  assert(!frozen.user_config.entries.empty());
   assert(frozen.config.cosmology.box_size_mpc_comoving == 50.0);
   assert(frozen.config.numerics.gravity_softening_kpc_comoving == 2.5);
   assert(frozen.config.mode.zoom_high_res_region);
@@ -256,6 +259,7 @@ void testDeprecatedAliasesAndCanonicalCollision() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(alias_only, "alias_only");
   assert(frozen.config.mode.mode == cosmosim::core::SimulationMode::kIsolatedGalaxy);
   assert(!frozen.provenance.deprecation_warnings.empty());
+  assert(!frozen.user_config.alias_resolution_notes.empty());
 
   const std::string conflicting = "mode = zoom_in\nmode.mode = cosmo_cube\n";
   bool threw = false;

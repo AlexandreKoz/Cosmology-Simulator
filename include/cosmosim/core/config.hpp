@@ -260,7 +260,7 @@ struct CompatibilityConfig {
   bool allow_unknown_keys = false;
 };
 
-struct SimulationConfig {
+struct NormalizedConfig {
   int schema_version = 1;
   CosmologyConfig cosmology;
   NumericsConfig numerics;
@@ -280,8 +280,24 @@ struct ProvenanceMetadata {
   std::vector<std::string> deprecation_warnings;
 };
 
+struct UserConfigEntry {
+  std::string canonical_key;
+  std::string value;
+  std::string source_key;
+  int source_line = 0;
+  bool from_alias = false;
+};
+
+struct UserConfig {
+  std::string source_name;
+  std::vector<UserConfigEntry> entries;
+  std::vector<std::string> alias_resolution_notes;
+};
+
 struct FrozenConfig {
-  SimulationConfig config;
+  UserConfig user_config;
+  NormalizedConfig config;
+  std::string raw_text;
   std::string normalized_text;
   ProvenanceMetadata provenance;
 };
@@ -331,5 +347,7 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);
 [[nodiscard]] std::string coolingModelToString(CoolingModel model);
+
+using SimulationConfig = NormalizedConfig;
 
 }  // namespace cosmosim::core

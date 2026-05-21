@@ -1000,11 +1000,14 @@ void validateConfig(const SimulationConfig& config) {
 
 [[nodiscard]] FrozenConfig normalizeValidateFreeze(
     const std::map<std::string, ParsedEntry>& parsed_entries,
+    const std::string& raw_text,
     const std::string& source_name,
     const ParseOptions& options) {
   std::map<std::string, ParsedEntry> entries = parsed_entries;
   std::set<std::string> consumed;
   FrozenConfig frozen;
+  frozen.raw_text = raw_text;
+  frozen.user_config.source_name = source_name;
   frozen.provenance.source_name = source_name;
 
   for (const auto& [legacy_key, canonical_key] : deprecatedAliasRegistry()) {
@@ -1018,8 +1021,10 @@ void validateConfig(const SimulationConfig& config) {
     }
     entries.emplace(canonical_key, it->second);
     consumed.insert(legacy_key);
-    frozen.provenance.deprecation_warnings.push_back(
-        "deprecated key '" + legacy_key + "' mapped to '" + canonical_key + "'");
+    const std::string note =
+        "deprecated key '" + legacy_key + "' mapped to '" + canonical_key + "'";
+    frozen.provenance.deprecation_warnings.push_back(note);
+    frozen.user_config.alias_resolution_notes.push_back(note);
   }
 
   frozen.config.schema_version = static_cast<int>(parseNumber<long>(
@@ -1481,6 +1486,17 @@ void validateConfig(const SimulationConfig& config) {
       "compatibility.allow_unknown_keys");
   frozen.config.compatibility.allow_unknown_keys = options.allow_unknown_keys || compatible_by_file;
 
+
+
+  for (const auto& [key, entry] : entries) {
+    UserConfigEntry user_entry;
+    user_entry.canonical_key = key;
+    user_entry.value = trim(entry.value);
+    user_entry.source_key = key;
+    user_entry.source_line = entry.line_number;
+    frozen.user_config.entries.push_back(std::move(user_entry));
+  }
+
   validateConfig(frozen.config);
 
   std::vector<std::string> unknown;
@@ -1539,7 +1555,7 @@ FrozenConfig loadFrozenConfigFromString(
     const std::string& source_name,
     const ParseOptions& options) {
   const auto entries = parseEntries(config_text);
-  return normalizeValidateFreeze(entries, source_name, options);
+  return normalizeValidateFreeze(entries, config_text, source_name, options);
 }
 
 DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
