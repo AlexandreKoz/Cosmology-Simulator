@@ -2,6 +2,13 @@
 
 _Date captured: 2026-04-14 (UTC)_
 
+## 2026-05-21 Stage 5 config-contract audit status
+
+| ID | Status | Area | Finding | Resolution / Remaining action |
+| --- | --- | --- | --- | --- |
+| S5-00-CONFIG-CONTRACT-AUDIT | Open | Config contract hardening plan | Stage 5 needed a concise implementation map naming mixed raw/normalized/derived/runtime lanes, risky call sites, and entrypoints that must remain frozen-config-only. | Added `docs/repair/stage5_config_contract_audit_map.md` with file-by-file patch map and ordered follow-up prompts (S5-01..S5-04). Next prompts should implement targeted guards/tests without broad refactor churn. |
+
+
 ## 2026-05-19 Stage 4 orchestrator dispatch status
 
 | ID | Status | Area | Finding | Resolution / Remaining action |

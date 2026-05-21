@@ -4,6 +4,13 @@ _Date captured: 2026-04-07 (UTC)_
 
 This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
+## 2026-05-21 Stage 5 config-contract audit map (S5-00)
+
+- Added `docs/repair/stage5_config_contract_audit_map.md` as a compact file-by-file implementation map for Stage 5 config contract hardening.
+- Enumerated raw input boundary, normalized typed contract, derived runtime projection, runtime entrypoints, alias-boundary constraints, and riskiest mixed-lane call sites to sequence follow-up prompts without implementation churn.
+- Reproducibility impact: documentation-only; no solver numerics, config keys, normalized-config emission, provenance hash logic, snapshot/restart schema, output naming, or rank coordination behavior changed.
+
+
 
 ## 2026-05-19 Stage-bound orchestrator dispatch repair
 
