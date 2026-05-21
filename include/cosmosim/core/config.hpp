@@ -101,9 +101,15 @@ struct CosmologyConfig {
 };
 
 struct NumericsConfig {
-  double time_begin_code = 0.0;
-  double time_end_code = 1.0;
-  double cosmology_initial_scale_factor = 1.0;
+  double a_begin = 1.0;
+  double a_end = 1.0;
+  double z_begin = 0.0;
+  double z_end = 0.0;
+  double t_code_begin = 0.0;
+  double t_code_end = 1.0;
+  double t_phys_begin = 0.0;
+  double t_phys_end = 0.0;
+  std::string integrator_time_variable = "a";
   double cosmology_max_delta_ln_a = 1.0e-2;
   double cosmology_max_hubble_time_fraction = 1.0e-2;
   double source_max_fractional_change = 0.1;

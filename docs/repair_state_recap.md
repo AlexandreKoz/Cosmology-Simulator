@@ -1586,3 +1586,5 @@ Reproducibility impact:
 - Wired the new directive fields at orchestrator stage dispatch points (`kGravityKickPre`, `kForceRefresh`) and propagated them into TreePM runtime events for stage-auditable PM cadence evidence.
 - Added a targeted unit test to prove both explicit PM refresh reasons are emitted through stage dispatch and carry force-evaluation context.
 - Reproducibility impact: no solver numerics, no config keys, no restart schema changes, and no output naming changes. This is observability/legality hardening of existing integrator-owned PM cadence behavior.
+
+- S5-02: normalized numerics time/cosmology keys now use canonical names (`a_*`, `z_*`, `t_code_*`, `t_phys_*`, `integrator_time_variable`); legacy ambiguous keys remain UserConfig aliases only.

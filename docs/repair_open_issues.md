@@ -231,3 +231,5 @@ Remaining blockers are unchanged: P36 spawned-particle scheduler registration, P
 ## 2026-05-19 PM refresh stage-diagnostic update
 
 No issue status changes in this patch. Open blockers remain P38 distributed scheduler identity exchange and dependency-enabled MPI+HDF5+FFTW feature-path evidence.
+
+- S5-02 follow-up: monitor downstream configs still using legacy aliases and migrate examples to canonical keys.
