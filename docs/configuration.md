@@ -90,14 +90,16 @@ The concrete run directory is:
 
 ## `[numerics]`
 
-- `time_begin_code`, `time_end_code`
+- `t_code_begin`, `t_code_end`
+- `a_begin`, `a_end`, `z_begin`, `z_end`, `t_phys_begin`, `t_phys_end`, `integrator_time_variable`
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
 - `gravity_softening` / `gravity_softening_kpc_comoving`
 - `gravity_solver`, `hydro_solver`
 
 Time/scale semantics (anti-ambiguity contract):
 
-- `time_begin_code` / `time_end_code` are code-time boundaries for integration bookkeeping.
+- `t_code_begin` / `t_code_end` are code-time boundaries for integration bookkeeping.
+- Legacy `time_begin_code`/`time_end_code` and `initial_scale_factor`/`initial_redshift` are accepted only as user-input aliases.
 - They are not redshift keys and not SI physical-time keys.
 - Runtime cosmological scale-factor authority is `IntegratorState.current_scale_factor` (restart-continuation lane), while redshift remains a derived diagnostic (`z = 1/a - 1` when `a>0`).
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):

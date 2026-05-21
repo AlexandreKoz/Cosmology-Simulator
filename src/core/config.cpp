@@ -521,9 +521,15 @@ struct ConfigKeySpec {
       {"cosmology.box_size_y", "50.0"},
       {"cosmology.box_size_z", "50.0"},
       {"cosmology.box_size", "50.0"},
-      {"numerics.time_begin_code", "0.0"},
-      {"numerics.time_end_code", "1.0"},
-      {"numerics.cosmology_initial_scale_factor", "1.0"},
+      {"numerics.a_begin", "1.0"},
+      {"numerics.a_end", "1.0"},
+      {"numerics.z_begin", "0.0"},
+      {"numerics.z_end", "0.0"},
+      {"numerics.t_code_begin", "0.0"},
+      {"numerics.t_code_end", "1.0"},
+      {"numerics.t_phys_begin", "0.0"},
+      {"numerics.t_phys_end", "0.0"},
+      {"numerics.integrator_time_variable", "a"},
       {"numerics.cosmology_max_delta_ln_a", "1.0e-2"},
       {"numerics.cosmology_max_hubble_time_fraction", "1.0e-2"},
       {"numerics.source_max_fractional_change", "0.1"},
@@ -637,9 +643,13 @@ struct ConfigKeySpec {
       {"omega0", "cosmology.omega_matter"},
       {"omegalambda", "cosmology.omega_lambda"},
       {"hubbleparam", "cosmology.hubble_param"},
-      {"timemax", "numerics.time_end_code"},
+      {"timemax", "numerics.t_code_end"},
       {"mode", "mode.mode"},
       {"run_name", "output.run_name"},
+      {"numerics.initial_scale_factor", "numerics.a_begin"},
+      {"numerics.initial_redshift", "numerics.z_begin"},
+      {"numerics.time_begin_code", "numerics.t_code_begin"},
+      {"numerics.time_end_code", "numerics.t_code_end"},
   };
   return aliases;
 }
@@ -657,10 +667,10 @@ void validateConfig(const SimulationConfig& config) {
   if (config.schema_version != 1) {
     throw ConfigError("schema_version must be 1 for this build");
   }
-  if (config.numerics.time_end_code <= config.numerics.time_begin_code) {
-    throw ConfigError("numerics.time_end_code must be greater than numerics.time_begin_code");
+  if (config.numerics.t_code_end <= config.numerics.t_code_begin) {
+    throw ConfigError("numerics.t_code_end must be greater than numerics.t_code_begin");
   }
-  if (config.numerics.cosmology_initial_scale_factor <= 0.0 ||
+  if (config.numerics.a_begin <= 0.0 ||
       config.numerics.cosmology_max_delta_ln_a <= 0.0 ||
       config.numerics.cosmology_max_hubble_time_fraction <= 0.0 ||
       config.numerics.source_max_fractional_change <= 0.0 ||
@@ -854,9 +864,15 @@ void validateConfig(const SimulationConfig& config) {
   stream << "box_size_y = " << frozen.config.cosmology.box_size_y_mpc_comoving << " mpc\n";
   stream << "box_size_z = " << frozen.config.cosmology.box_size_z_mpc_comoving << " mpc\n";
   stream << "\n[numerics]\n";
-  stream << "time_begin_code = " << frozen.config.numerics.time_begin_code << '\n';
-  stream << "time_end_code = " << frozen.config.numerics.time_end_code << '\n';
-  stream << "cosmology_initial_scale_factor = " << frozen.config.numerics.cosmology_initial_scale_factor << '\n';
+  stream << "a_begin = " << frozen.config.numerics.a_begin << '\n';
+  stream << "a_end = " << frozen.config.numerics.a_end << '\n';
+  stream << "z_begin = " << frozen.config.numerics.z_begin << '\n';
+  stream << "z_end = " << frozen.config.numerics.z_end << '\n';
+  stream << "t_code_begin = " << frozen.config.numerics.t_code_begin << '\n';
+  stream << "t_code_end = " << frozen.config.numerics.t_code_end << '\n';
+  stream << "t_phys_begin = " << frozen.config.numerics.t_phys_begin << '\n';
+  stream << "t_phys_end = " << frozen.config.numerics.t_phys_end << '\n';
+  stream << "integrator_time_variable = " << frozen.config.numerics.integrator_time_variable << '\n';
   stream << "cosmology_max_delta_ln_a = " << frozen.config.numerics.cosmology_max_delta_ln_a << '\n';
   stream << "cosmology_max_hubble_time_fraction = " << frozen.config.numerics.cosmology_max_hubble_time_fraction << '\n';
   stream << "source_max_fractional_change = " << frozen.config.numerics.source_max_fractional_change << '\n';
@@ -1137,15 +1153,37 @@ void validateConfig(const SimulationConfig& config) {
   }
   frozen.config.cosmology.box_size_mpc_comoving = frozen.config.cosmology.box_size_x_mpc_comoving;
 
-  frozen.config.numerics.time_begin_code = parseFloating(
-      requireString(entries, consumed, "numerics.time_begin_code", "0.0"),
-      "numerics.time_begin_code");
-  frozen.config.numerics.time_end_code = parseFloating(
-      requireString(entries, consumed, "numerics.time_end_code", "1.0"),
-      "numerics.time_end_code");
-  frozen.config.numerics.cosmology_initial_scale_factor = parseFloating(
-      requireString(entries, consumed, "numerics.cosmology_initial_scale_factor", defaultFor("numerics.cosmology_initial_scale_factor")),
-      "numerics.cosmology_initial_scale_factor");
+  frozen.config.numerics.a_begin = parseFloating(
+      requireString(entries, consumed, "numerics.a_begin", defaultFor("numerics.a_begin")),
+      "numerics.a_begin");
+  frozen.config.numerics.a_end = parseFloating(
+      requireString(entries, consumed, "numerics.a_end", defaultFor("numerics.a_end")),
+      "numerics.a_end");
+  frozen.config.numerics.z_begin = parseFloating(
+      requireString(entries, consumed, "numerics.z_begin", defaultFor("numerics.z_begin")),
+      "numerics.z_begin");
+  frozen.config.numerics.z_end = parseFloating(
+      requireString(entries, consumed, "numerics.z_end", defaultFor("numerics.z_end")),
+      "numerics.z_end");
+  frozen.config.numerics.t_code_begin = parseFloating(
+      requireString(entries, consumed, "numerics.t_code_begin", defaultFor("numerics.t_code_begin")),
+      "numerics.t_code_begin");
+  frozen.config.numerics.t_code_end = parseFloating(
+      requireString(entries, consumed, "numerics.t_code_end", defaultFor("numerics.t_code_end")),
+      "numerics.t_code_end");
+  frozen.config.numerics.t_phys_begin = parseFloating(
+      requireString(entries, consumed, "numerics.t_phys_begin", defaultFor("numerics.t_phys_begin")),
+      "numerics.t_phys_begin");
+  frozen.config.numerics.t_phys_end = parseFloating(
+      requireString(entries, consumed, "numerics.t_phys_end", defaultFor("numerics.t_phys_end")),
+      "numerics.t_phys_end");
+  frozen.config.numerics.integrator_time_variable = toLower(requireString(entries, consumed, "numerics.integrator_time_variable", defaultFor("numerics.integrator_time_variable")));
+  if (entries.contains("numerics.a_begin") && entries.contains("numerics.z_begin")) {
+    const double expected = 1.0 / (1.0 + frozen.config.numerics.z_begin);
+    if (std::abs(expected - frozen.config.numerics.a_begin) > 1e-10) {
+      throw ConfigError("numerics.a_begin conflicts with numerics.z_begin at path numerics");
+    }
+  }
   frozen.config.numerics.cosmology_max_delta_ln_a = parseFloating(
       requireString(entries, consumed, "numerics.cosmology_max_delta_ln_a", defaultFor("numerics.cosmology_max_delta_ln_a")),
       "numerics.cosmology_max_delta_ln_a");
@@ -1561,9 +1599,9 @@ FrozenConfig loadFrozenConfigFromString(
 DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
   const SimulationConfig& config = frozen_config.config;
 
-  if (!(config.numerics.time_end_code > config.numerics.time_begin_code)) {
+  if (!(config.numerics.t_code_end > config.numerics.t_code_begin)) {
     throw ConfigError(
-        "derived runtime config requires numerics.time_end_code > numerics.time_begin_code");
+        "derived runtime config requires numerics.t_code_end > numerics.t_code_begin");
   }
   if (config.cosmology.box_size_x_mpc_comoving <= 0.0 ||
       config.cosmology.box_size_y_mpc_comoving <= 0.0 ||
@@ -1585,8 +1623,8 @@ DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
   };
 
   DerivedRuntimeConfig derived;
-  derived.time_begin_code = config.numerics.time_begin_code;
-  derived.time_end_code = config.numerics.time_end_code;
+  derived.time_begin_code = config.numerics.t_code_begin;
+  derived.time_end_code = config.numerics.t_code_end;
   derived.box_size_mpc_comoving = {
       config.cosmology.box_size_x_mpc_comoving,
       config.cosmology.box_size_y_mpc_comoving,

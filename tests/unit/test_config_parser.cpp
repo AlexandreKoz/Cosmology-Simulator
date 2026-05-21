@@ -27,8 +27,8 @@ omega_matter = 0.31
 omega_lambda = 0.69
 
 [numerics]
-time_begin_code = 0.0
-time_end_code = 1.0
+t_code_begin = 0.0
+t_code_end = 1.0
 gravity_softening = 2.5 kpc
 
 [output]
@@ -202,8 +202,8 @@ box_size_x = 70 mpc
 box_size_y = 50 mpc
 box_size_z = 30 mpc
 [numerics]
-time_begin_code = 0.125
-time_end_code = 0.875
+t_code_begin = 0.125
+t_code_end = 0.875
 gravity_softening = 1.0 kpc
 gravity_softening_gas = 0.5 kpc
 gravity_softening_black_hole = 0.05 kpc
@@ -229,7 +229,7 @@ treepm_pm_grid_nz = 12
   assert(derived.normalized_config_hash == frozen.provenance.config_hash);
   assert(derived.normalized_config_hash_hex == frozen.provenance.config_hash_hex);
 
-  const std::string bad_time = "[mode]\nmode = zoom_in\n[numerics]\ntime_begin_code = 1.0\ntime_end_code = 0.5\n";
+  const std::string bad_time = "[mode]\nmode = zoom_in\n[numerics]\nt_code_begin = 1.0\nt_code_end = 0.5\n";
   bool threw = false;
   try {
     const auto bad = cosmosim::core::loadFrozenConfigFromString(bad_time, "derived_runtime_bad_time");

@@ -1116,7 +1116,7 @@ void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::Simula
   state.metadata.restart_stem = frozen_config.config.output.restart_stem;
   state.metadata.scale_factor = (state.metadata.scale_factor > 0.0)
       ? state.metadata.scale_factor
-      : std::max(1.0, frozen_config.config.numerics.time_begin_code);
+      : std::max(1.0, frozen_config.config.numerics.t_code_begin);
   state.rebuildSpeciesIndex();
 }
 
@@ -2744,7 +2744,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       .severity = core::RuntimeEventSeverity::kInfo,
       .subsystem = "core.config",
       .step_index = options.step_index,
-      .simulation_time_code = config.numerics.time_begin_code,
+      .simulation_time_code = config.numerics.t_code_begin,
       .scale_factor = 1.0,
       .message = "frozen configuration accepted for runtime workflow",
       .payload = {{"schema_version", std::to_string(config.schema_version)},
@@ -2821,7 +2821,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .severity = core::RuntimeEventSeverity::kInfo,
         .subsystem = "parallel.ownership",
         .step_index = options.step_index,
-        .simulation_time_code = config.numerics.time_begin_code,
+        .simulation_time_code = config.numerics.t_code_begin,
         .scale_factor = 1.0,
         .message = "initial ownership-partition summary recorded",
         .payload = {{"world_size", std::to_string(report.world_size)},
@@ -2861,10 +2861,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     core::IntegratorState integrator_state;
     integrator_state.step_index = options.step_index;
-    integrator_state.current_time_code = config.numerics.time_begin_code;
+    integrator_state.current_time_code = config.numerics.t_code_begin;
     integrator_state.time_si_per_code = runtime_units.timeSiPerCode();
     integrator_state.current_scale_factor = background.has_value()
-        ? config.numerics.cosmology_initial_scale_factor
+        ? config.numerics.a_begin
         : 1.0;
     integrator_state.current_redshift = (integrator_state.current_scale_factor > 0.0)
         ? (1.0 / integrator_state.current_scale_factor - 1.0)
@@ -2876,7 +2876,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? options.dt_time_code
         : std::max(
               1.0e-6,
-              (config.numerics.time_end_code - config.numerics.time_begin_code) /
+              (config.numerics.t_code_end - config.numerics.t_code_begin) /
                   static_cast<double>(std::max(config.numerics.max_global_steps, 1)));
     integrator_state.time_bins.hierarchical_enabled = true;
     integrator_state.time_bins.max_bin = scheduler.maxBin();
@@ -2991,7 +2991,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
     while (integrator_state.step_index < target_step_index &&
-           integrator_state.current_time_code < config.numerics.time_end_code) {
+           integrator_state.current_time_code < config.numerics.t_code_end) {
       const std::span<const std::uint32_t> active_scheduler_elements = scheduler.beginSubstep();
       std::vector<std::uint32_t> active_particles;
       std::vector<std::uint32_t> active_cells;
