@@ -22,6 +22,13 @@ struct ParsedEntry {
   int line_number = 0;
 };
 
+struct SectionRequirement {
+  std::string name;
+  std::vector<std::string> required_fields;
+};
+
+[[nodiscard]] const std::map<std::string, std::string>& deprecatedAliasRegistry();
+
 [[nodiscard]] std::string trim(const std::string& input) {
   const auto begin = std::find_if_not(input.begin(), input.end(), [](unsigned char c) {
     return std::isspace(c) != 0;
@@ -131,6 +138,69 @@ struct ParsedEntry {
   }
 
   return entries;
+}
+
+[[nodiscard]] std::set<std::string> inputSections(const std::map<std::string, ParsedEntry>& entries) {
+  std::set<std::string> sections;
+  for (const auto& [key, _] : entries) {
+    const std::size_t dot = key.find('.');
+    if (dot == std::string::npos) {
+      continue;
+    }
+    sections.insert(key.substr(0, dot));
+  }
+  return sections;
+}
+
+[[nodiscard]] const std::vector<SectionRequirement>& executableSchemaRequirements() {
+  static const std::vector<SectionRequirement> requirements = {
+      {"mode", {"mode.mode"}},
+  };
+  return requirements;
+}
+
+void validateRequiredSchema(const std::map<std::string, ParsedEntry>& entries) {
+  const std::set<std::string> sections = inputSections(entries);
+  for (const SectionRequirement& requirement : executableSchemaRequirements()) {
+    const bool has_legacy_mode_root = (requirement.name == "mode" && entries.contains("mode"));
+    if (!sections.contains(requirement.name) && !has_legacy_mode_root) {
+      throw ConfigError("missing required section '" + requirement.name + "'");
+    }
+    for (const std::string& field : requirement.required_fields) {
+      const bool has_legacy_mode_field = (field == "mode.mode" && entries.contains("mode"));
+      if (!entries.contains(field) && !has_legacy_mode_field) {
+        throw ConfigError("missing required field '" + field + "'");
+      }
+    }
+  }
+}
+
+void applyDeprecatedAliases(
+    std::map<std::string, ParsedEntry>& entries,
+    std::set<std::string>& consumed,
+    FrozenConfig& frozen) {
+  for (const auto& [legacy_key, canonical_key] : deprecatedAliasRegistry()) {
+    const auto legacy_it = entries.find(legacy_key);
+    if (legacy_it == entries.end()) {
+      continue;
+    }
+    const auto canonical_it = entries.find(canonical_key);
+    if (canonical_it != entries.end()) {
+      if (trim(canonical_it->second.value) != trim(legacy_it->second.value)) {
+        throw ConfigError(
+            "alias conflict at path '" + canonical_key + "': keys '" + legacy_key + "' and '" +
+            canonical_key + "' provide different values");
+      }
+      throw ConfigError("deprecated key '" + legacy_key + "' cannot be combined with '" +
+                        canonical_key + "'");
+    }
+    entries.emplace(canonical_key, legacy_it->second);
+    consumed.insert(legacy_key);
+    const std::string note =
+        "deprecated key '" + legacy_key + "' mapped to '" + canonical_key + "'";
+    frozen.provenance.deprecation_warnings.push_back(note);
+    frozen.user_config.alias_resolution_notes.push_back(note);
+  }
 }
 
 [[nodiscard]] bool parseBool(const std::string& value, const std::string& key) {
@@ -1025,23 +1095,8 @@ void validateConfig(const SimulationConfig& config) {
   frozen.raw_text = raw_text;
   frozen.user_config.source_name = source_name;
   frozen.provenance.source_name = source_name;
-
-  for (const auto& [legacy_key, canonical_key] : deprecatedAliasRegistry()) {
-    const auto it = entries.find(legacy_key);
-    if (it == entries.end()) {
-      continue;
-    }
-    if (entries.contains(canonical_key)) {
-      throw ConfigError("deprecated key '" + legacy_key + "' cannot be combined with '" +
-                        canonical_key + "'");
-    }
-    entries.emplace(canonical_key, it->second);
-    consumed.insert(legacy_key);
-    const std::string note =
-        "deprecated key '" + legacy_key + "' mapped to '" + canonical_key + "'";
-    frozen.provenance.deprecation_warnings.push_back(note);
-    frozen.user_config.alias_resolution_notes.push_back(note);
-  }
+  validateRequiredSchema(entries);
+  applyDeprecatedAliases(entries, consumed, frozen);
 
   frozen.config.schema_version = static_cast<int>(parseNumber<long>(
       requireString(entries, consumed, "schema_version", "1"), "schema_version"));

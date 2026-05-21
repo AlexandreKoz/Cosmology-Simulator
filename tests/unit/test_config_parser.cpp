@@ -57,6 +57,26 @@ void testDuplicateKeyFails() {
   assert(threw);
 }
 
+void testRequiredSectionAndFieldFailures() {
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString("[numerics]\nt_code_begin=0\nt_code_end=1\n", "missing_mode");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nic_file=ics.hdf5\n[numerics]\nt_code_begin=0\nt_code_end=1\n[output]\noutput_stem=s\n",
+        "missing_required_field");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testMissingValueFails() {
   const std::string config_text = "mode.mode = zoom_in\noutput.output_stem =\n";
   bool threw = false;
@@ -82,6 +102,18 @@ void testUnknownKeysFailUnlessCompatibilityEnabled() {
       "mode.mode = zoom_in\ncompatibility.allow_unknown_keys = true\nfoo.bar = 1\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(compat_text, "compat_unknown");
   assert(frozen.config.compatibility.allow_unknown_keys);
+}
+
+void testAliasConflictFails() {
+  const std::string config_text =
+      "mode.mode = zoom_in\nnumerics.initial_redshift = 2.0\nnumerics.z_begin = 3.0\n";
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(config_text, "alias_conflict");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
 }
 
 void testInvalidEnumFails() {
@@ -619,8 +651,10 @@ zoom_focused_pm_grid_nz = 16
 int main() {
   testCommentsWhitespaceSectionsAndUnits();
   testDuplicateKeyFails();
+  testRequiredSectionAndFieldFailures();
   testMissingValueFails();
   testUnknownKeysFailUnlessCompatibilityEnabled();
+  testAliasConflictFails();
   testInvalidEnumFails();
   testInvalidTypedPolicyEnumsFail();
   testBoundaryModeValidation();
