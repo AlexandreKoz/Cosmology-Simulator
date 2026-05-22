@@ -632,12 +632,24 @@ void writeGadgetArepoSnapshotHdf5(
   Hdf5Handle provenance_group(
       H5Gcreate2(file.get(), std::string(schema.provenance_group).c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeScalarStringAttribute(provenance_group.get(), "schema_version", payload.provenance.schema_version);
+  writeScalarStringAttribute(provenance_group.get(), "config_schema_name", payload.provenance.config_schema_name);
+  writeScalarStringAttribute(
+      provenance_group.get(), "config_schema_version", payload.provenance.config_schema_version);
   writeScalarStringAttribute(provenance_group.get(), "git_sha", payload.provenance.git_sha.empty() ? payload.git_sha : payload.provenance.git_sha);
   writeScalarStringAttribute(provenance_group.get(), "compiler_id", payload.provenance.compiler_id);
   writeScalarStringAttribute(provenance_group.get(), "compiler_version", payload.provenance.compiler_version);
   writeScalarStringAttribute(provenance_group.get(), "build_preset", payload.provenance.build_preset);
   writeScalarStringAttribute(provenance_group.get(), "enabled_features", payload.provenance.enabled_features);
   writeScalarStringAttribute(provenance_group.get(), "config_hash_hex", payload.provenance.config_hash_hex);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "normalized_config_hash_hex",
+      payload.provenance.normalized_config_hash_hex.empty() ? payload.provenance.config_hash_hex
+                                                            : payload.provenance.normalized_config_hash_hex);
+  writeScalarStringAttribute(provenance_group.get(), "raw_input_config", payload.provenance.raw_input_config);
+  writeScalarStringAttribute(provenance_group.get(), "normalized_config", payload.provenance.normalized_config);
+  writeScalarStringAttribute(
+      provenance_group.get(), "derived_runtime_state", payload.provenance.derived_runtime_state);
   writeScalarStringAttribute(provenance_group.get(), "timestamp_utc", payload.provenance.timestamp_utc);
   writeScalarStringAttribute(provenance_group.get(), "hardware_summary", payload.provenance.hardware_summary);
   writeScalarUint32Attribute(
@@ -1052,12 +1064,21 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   Hdf5Handle provenance_group(H5Gopen2(file.get(), std::string(schema.provenance_group).c_str(), H5P_DEFAULT));
   if (provenance_group.valid()) {
     readScalarStringAttribute(provenance_group.get(), "schema_version", result.provenance.schema_version);
+    readScalarStringAttribute(provenance_group.get(), "config_schema_name", result.provenance.config_schema_name);
+    readScalarStringAttribute(
+        provenance_group.get(), "config_schema_version", result.provenance.config_schema_version);
     readScalarStringAttribute(provenance_group.get(), "git_sha", result.provenance.git_sha);
     readScalarStringAttribute(provenance_group.get(), "compiler_id", result.provenance.compiler_id);
     readScalarStringAttribute(provenance_group.get(), "compiler_version", result.provenance.compiler_version);
     readScalarStringAttribute(provenance_group.get(), "build_preset", result.provenance.build_preset);
     readScalarStringAttribute(provenance_group.get(), "enabled_features", result.provenance.enabled_features);
     readScalarStringAttribute(provenance_group.get(), "config_hash_hex", result.provenance.config_hash_hex);
+    readScalarStringAttribute(
+        provenance_group.get(), "normalized_config_hash_hex", result.provenance.normalized_config_hash_hex);
+    readScalarStringAttribute(provenance_group.get(), "raw_input_config", result.provenance.raw_input_config);
+    readScalarStringAttribute(provenance_group.get(), "normalized_config", result.provenance.normalized_config);
+    readScalarStringAttribute(
+        provenance_group.get(), "derived_runtime_state", result.provenance.derived_runtime_state);
     readScalarStringAttribute(provenance_group.get(), "timestamp_utc", result.provenance.timestamp_utc);
     readScalarStringAttribute(provenance_group.get(), "hardware_summary", result.provenance.hardware_summary);
     std::uint32_t gravity_pm_grid = 0;

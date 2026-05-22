@@ -233,3 +233,5 @@ Remaining blockers are unchanged: P36 spawned-particle scheduler registration, P
 No issue status changes in this patch. Open blockers remain P38 distributed scheduler identity exchange and dependency-enabled MPI+HDF5+FFTW feature-path evidence.
 
 - S5-02 follow-up: monitor downstream configs still using legacy aliases and migrate examples to canonical keys.
+
+| S5-04-PROVENANCE-VERSIONING | Closed | Provenance/schema auditability | Provenance lacked explicit config schema identity and separate raw/normalized/derived runtime payload capture in snapshot/restart metadata. | Added `provenance_v5` fields for config schema identity, normalized hash, and audit payloads with deterministic serialization/roundtrip coverage updates. |

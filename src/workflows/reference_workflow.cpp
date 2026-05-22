@@ -715,6 +715,22 @@ void seedParticleOwnershipFromPmSlabs(
     const core::SimulationConfig& config) {
   core::ProvenanceRecord record = core::makeProvenanceRecord(
       frozen_config.provenance.config_hash_hex, frozen_config.provenance.source_name);
+  record.config_schema_name = "cosmosim_config";
+  record.config_schema_version = std::to_string(frozen_config.config.schema_version);
+  record.raw_input_config = frozen_config.raw_text;
+  record.normalized_config = frozen_config.normalized_text;
+  {
+    std::ostringstream derived;
+    derived << "time_begin_code=" << config.numerics.t_code_begin << '\n';
+    derived << "time_end_code=" << config.numerics.t_code_end << '\n';
+    derived << "box_size_x_mpc_comoving=" << config.cosmology.box_size_x_mpc_comoving << '\n';
+    derived << "box_size_y_mpc_comoving=" << config.cosmology.box_size_y_mpc_comoving << '\n';
+    derived << "box_size_z_mpc_comoving=" << config.cosmology.box_size_z_mpc_comoving << '\n';
+    derived << "treepm_pm_grid_nx=" << config.numerics.treepm_pm_grid_nx << '\n';
+    derived << "treepm_pm_grid_ny=" << config.numerics.treepm_pm_grid_ny << '\n';
+    derived << "treepm_pm_grid_nz=" << config.numerics.treepm_pm_grid_nz << '\n';
+    record.derived_runtime_state = derived.str();
+  }
   const double dx = config.cosmology.box_size_x_mpc_comoving /
       static_cast<double>(config.numerics.treepm_pm_grid_nx);
   const double dy = config.cosmology.box_size_y_mpc_comoving /
