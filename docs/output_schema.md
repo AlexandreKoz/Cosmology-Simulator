@@ -75,7 +75,10 @@ The Stage 2 scheduler-authority documentation synchronization does not change sn
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v4`)
+- schema tag (`provenance_v5`)
+- config schema identity (`config_schema_name`, `config_schema_version`)
+- audit payloads (`raw_input_config`, `normalized_config`, `derived_runtime_state`)
+- deterministic normalized config hash (`normalized_config_hash_hex`)
 - build identity (`git_sha`, compiler id/version, build preset, feature flags)
 - deterministic config hash
 - UTC timestamp and hardware summary

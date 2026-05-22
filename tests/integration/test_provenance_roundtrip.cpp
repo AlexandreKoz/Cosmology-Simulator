@@ -15,6 +15,12 @@ int main() {
   in.build_preset = "test_preset";
   in.enabled_features = "mpi=0,hdf5=0,fftw=0,cuda=0,python=0";
   in.config_hash_hex = "0011223344556677";
+  in.normalized_config_hash_hex = "0011223344556677";
+  in.config_schema_name = "cosmosim_config";
+  in.config_schema_version = "1";
+  in.raw_input_config = "schema_version = 1\nmode = zoom_in\n";
+  in.normalized_config = "schema_version = 1\nmode.mode = zoom_in\n";
+  in.derived_runtime_state = "time_begin_code=0\ntime_end_code=1\n";
   in.timestamp_utc = "2026-04-05T00:00:00Z";
   in.hardware_summary = "logical_threads=8";
   in.author_rank = 0;
@@ -50,6 +56,12 @@ int main() {
   assert(out.build_preset == in.build_preset);
   assert(out.enabled_features == in.enabled_features);
   assert(out.config_hash_hex == in.config_hash_hex);
+  assert(out.normalized_config_hash_hex == in.normalized_config_hash_hex);
+  assert(out.config_schema_name == in.config_schema_name);
+  assert(out.config_schema_version == in.config_schema_version);
+  assert(out.raw_input_config == in.raw_input_config);
+  assert(out.normalized_config == in.normalized_config);
+  assert(out.derived_runtime_state == in.derived_runtime_state);
   assert(out.timestamp_utc == in.timestamp_utc);
   assert(out.hardware_summary == in.hardware_summary);
   assert(out.author_rank == in.author_rank);

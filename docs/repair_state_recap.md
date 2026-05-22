@@ -1,3 +1,9 @@
+## 2026-05-21 Stage 5 provenance schema/version audit hardening (S5-04)
+
+- Bumped provenance payload contract to `provenance_v5` with explicit config schema identity and auditable raw/normalized/derived runtime payload fields.
+- Wired snapshot provenance metadata to carry `config_schema_name`, `config_schema_version`, `normalized_config_hash_hex`, and raw/normalized/derived config/state payloads.
+- Reproducibility impact: strengthens replay auditability without changing solver numerics; normalized hash remains derived from normalized config only.
+
 # Repair state recap (post-repair audit snapshot)
 
 _Date captured: 2026-04-07 (UTC)_

@@ -10,13 +10,19 @@ namespace cosmosim::core {
 
 // Canonical provenance payload written alongside run outputs.
 struct ProvenanceRecord {
-  std::string schema_version = "provenance_v4";
+  std::string schema_version = "provenance_v5";
+  std::string config_schema_name = "cosmosim_config";
+  std::string config_schema_version = "1";
   std::string git_sha = "unknown";
   std::string compiler_id = "unknown";
   std::string compiler_version = "unknown";
   std::string build_preset = "manual";
   std::string enabled_features;
   std::string config_hash_hex;
+  std::string normalized_config_hash_hex;
+  std::string raw_input_config;
+  std::string normalized_config;
+  std::string derived_runtime_state;
   std::string timestamp_utc;
   std::string hardware_summary;
   int author_rank = 0;

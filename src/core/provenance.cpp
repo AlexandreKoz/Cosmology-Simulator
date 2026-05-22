@@ -47,6 +47,43 @@ namespace {
   return stream.str();
 }
 
+[[nodiscard]] std::string escapeMultiline(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text) {
+    if (c == '\\') {
+      out += "\\\\";
+    } else if (c == '\n') {
+      out += "\\n";
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+[[nodiscard]] std::string unescapeMultiline(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '\\' && i + 1 < text.size()) {
+      const char next = text[i + 1];
+      if (next == 'n') {
+        out.push_back('\n');
+        ++i;
+        continue;
+      }
+      if (next == '\\') {
+        out.push_back('\\');
+        ++i;
+        continue;
+      }
+    }
+    out.push_back(text[i]);
+  }
+  return out;
+}
+
 }  // namespace
 
 std::string collectCompilerId() {
@@ -120,6 +157,7 @@ ProvenanceRecord makeProvenanceRecord(
                             ",cuda=" + std::to_string(COSMOSIM_ENABLE_CUDA) +
                             ",python=" + std::to_string(COSMOSIM_ENABLE_PYTHON);
   record.config_hash_hex = config_hash_hex;
+  record.normalized_config_hash_hex = config_hash_hex;
   record.timestamp_utc = utcTimestampNowIso8601();
   record.hardware_summary = collectHardwareSummary();
   record.author_rank = rank;
@@ -130,12 +168,18 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   std::ostringstream stream;
   stream << std::setprecision(std::numeric_limits<double>::max_digits10);
   stream << "schema_version=" << record.schema_version << '\n';
+  stream << "config_schema_name=" << record.config_schema_name << '\n';
+  stream << "config_schema_version=" << record.config_schema_version << '\n';
   stream << "git_sha=" << record.git_sha << '\n';
   stream << "compiler_id=" << record.compiler_id << '\n';
   stream << "compiler_version=" << record.compiler_version << '\n';
   stream << "build_preset=" << record.build_preset << '\n';
   stream << "enabled_features=" << record.enabled_features << '\n';
   stream << "config_hash_hex=" << record.config_hash_hex << '\n';
+  stream << "normalized_config_hash_hex=" << record.normalized_config_hash_hex << '\n';
+  stream << "raw_input_config=" << escapeMultiline(record.raw_input_config) << '\n';
+  stream << "normalized_config=" << escapeMultiline(record.normalized_config) << '\n';
+  stream << "derived_runtime_state=" << escapeMultiline(record.derived_runtime_state) << '\n';
   stream << "timestamp_utc=" << record.timestamp_utc << '\n';
   stream << "hardware_summary=" << record.hardware_summary << '\n';
   stream << "author_rank=" << record.author_rank << '\n';
@@ -196,6 +240,10 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
     const std::string value = trim(line.substr(pos + 1));
     if (key == "schema_version") {
       record.schema_version = value;
+    } else if (key == "config_schema_name") {
+      record.config_schema_name = value;
+    } else if (key == "config_schema_version") {
+      record.config_schema_version = value;
     } else if (key == "git_sha") {
       record.git_sha = value;
     } else if (key == "compiler_id") {
@@ -208,6 +256,14 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.enabled_features = value;
     } else if (key == "config_hash_hex") {
       record.config_hash_hex = value;
+    } else if (key == "normalized_config_hash_hex") {
+      record.normalized_config_hash_hex = value;
+    } else if (key == "raw_input_config") {
+      record.raw_input_config = unescapeMultiline(value);
+    } else if (key == "normalized_config") {
+      record.normalized_config = unescapeMultiline(value);
+    } else if (key == "derived_runtime_state") {
+      record.derived_runtime_state = unescapeMultiline(value);
     } else if (key == "timestamp_utc") {
       record.timestamp_utc = value;
     } else if (key == "hardware_summary") {
@@ -296,6 +352,9 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
     record.gravity_treepm_mesh_spacing_x_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
     record.gravity_treepm_mesh_spacing_y_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
     record.gravity_treepm_mesh_spacing_z_mpc_comoving = record.gravity_treepm_mesh_spacing_mpc_comoving;
+  }
+  if (record.normalized_config_hash_hex.empty()) {
+    record.normalized_config_hash_hex = record.config_hash_hex;
   }
   return record;
 }
