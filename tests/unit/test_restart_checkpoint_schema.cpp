@@ -98,6 +98,21 @@ int main() {
   }
   assert(missing_metadata_threw);
 
+
+
+  bool provenance_hash_message_threw = false;
+  try {
+    cosmosim::io::RestartWritePayload invalid_metadata = payload;
+    invalid_metadata.provenance.normalized_config_hash_hex.clear();
+    invalid_metadata.provenance.config_hash_hex.clear();
+    (void)cosmosim::io::restartPayloadIntegrityHash(invalid_metadata);
+  } catch (const std::invalid_argument& ex) {
+    const std::string message = ex.what();
+    provenance_hash_message_threw =
+        message.find("provenance.normalized_config_hash_hex or provenance.config_hash_hex") != std::string::npos;
+  }
+  assert(provenance_hash_message_threw);
+
   bool mismatched_metadata_threw = false;
   try {
     cosmosim::io::RestartWritePayload invalid_metadata = payload;

@@ -22,7 +22,7 @@ void validateContinuationMetadata(
   }
   if (provenance.normalized_config_hash_hex.empty() && provenance.config_hash_hex.empty()) {
     throw std::invalid_argument(
-        std::string(context_label) + " requires provenance.normalized_config_hash_hex");
+        std::string(context_label) + " requires provenance.normalized_config_hash_hex or provenance.config_hash_hex");
   }
 
   const std::string computed_hash_hex = core::stableConfigHashHex(normalized_config_text);
@@ -36,7 +36,7 @@ void validateContinuationMetadata(
   if (provenance_hash != normalized_config_hash_hex) {
     throw std::invalid_argument(
         std::string(context_label) +
-        " provenance.normalized_config_hash_hex does not match normalized_config_hash_hex");
+        " provenance.(normalized_config_hash_hex|config_hash_hex) does not match normalized_config_hash_hex");
   }
 }
 
