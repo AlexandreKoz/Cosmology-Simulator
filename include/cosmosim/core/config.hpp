@@ -86,6 +86,13 @@ enum class CoolingModel {
   kPrimordialMetalLine,
 };
 
+enum class IntegratorTimeVariable {
+  kScaleFactor,
+  kLogScaleFactor,
+  kCodeTime,
+  kPhysicalTime,
+};
+
 struct CosmologyConfig {
   double omega_matter = 0.315;
   double omega_lambda = 0.685;
@@ -109,7 +116,7 @@ struct NumericsConfig {
   double t_code_end = 1.0;
   double t_phys_begin = 0.0;
   double t_phys_end = 0.0;
-  std::string integrator_time_variable = "a";
+  IntegratorTimeVariable integrator_time_variable = IntegratorTimeVariable::kScaleFactor;
   double cosmology_max_delta_ln_a = 1.0e-2;
   double cosmology_max_hubble_time_fraction = 1.0e-2;
   double source_max_fractional_change = 0.1;
@@ -309,8 +316,8 @@ struct FrozenConfig {
 };
 
 struct DerivedRuntimeConfig {
-  double time_begin_code = 0.0;
-  double time_end_code = 1.0;
+  double t_code_begin = 0.0;
+  double t_code_end = 1.0;
   std::array<double, 3> box_size_mpc_comoving{};
   std::array<int, 3> treepm_pm_grid_shape{};
   std::array<double, 5> gravity_softening_kpc_comoving_by_species{};
@@ -337,6 +344,7 @@ class ConfigError : public std::runtime_error {
     const ParseOptions& options = {});
 
 [[nodiscard]] DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config);
+[[nodiscard]] std::string serializeDerivedRuntimeConfig(const DerivedRuntimeConfig& derived_config);
 
 void writeNormalizedConfigSnapshot(
     const FrozenConfig& frozen_config,
@@ -353,6 +361,7 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);
 [[nodiscard]] std::string coolingModelToString(CoolingModel model);
+[[nodiscard]] std::string integratorTimeVariableToString(IntegratorTimeVariable variable);
 
 using SimulationConfig = NormalizedConfig;
 

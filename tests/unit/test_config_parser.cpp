@@ -245,8 +245,8 @@ treepm_pm_grid_nz = 12
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "derived_runtime");
   const auto derived = cosmosim::core::deriveRuntimeConfig(frozen);
-  assert(derived.time_begin_code == 0.125);
-  assert(derived.time_end_code == 0.875);
+  assert(derived.t_code_begin == 0.125);
+  assert(derived.t_code_end == 0.875);
   assert(derived.box_size_mpc_comoving[0] == 70.0);
   assert(derived.box_size_mpc_comoving[1] == 50.0);
   assert(derived.box_size_mpc_comoving[2] == 30.0);
@@ -341,6 +341,7 @@ mode = zoom_in
 uv_background_model = fg20
 self_shielding_model = rahmati13_like
 cooling_model = primordial_metal_line
+metal_line_table_path = resources/cooling/metal_line.tbl
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "cooling_good");
   assert(frozen.config.physics.uv_background_model == cosmosim::core::UvBackgroundModel::kFg20);
@@ -646,6 +647,99 @@ zoom_focused_pm_grid_nz = 16
   assert(threw);
 }
 
+
+void testCosmologyScaleFactorRedshiftCanonicalizationAndValidation() {
+  const auto z_only = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\nz_begin = 2.0\nz_end = 1.0\n",
+      "z_only");
+  assert(std::abs(z_only.config.numerics.a_begin - (1.0 / 3.0)) < 1.0e-12);
+  assert(std::abs(z_only.config.numerics.a_end - 0.5) < 1.0e-12);
+  assert(z_only.normalized_text.find("a_begin = 0.333333") != std::string::npos);
+
+  const auto a_only = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.25\na_end = 0.5\n",
+      "a_only");
+  assert(std::abs(a_only.config.numerics.z_begin - 3.0) < 1.0e-12);
+  assert(std::abs(a_only.config.numerics.z_end - 1.0) < 1.0e-12);
+
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\na_begin = 1.0\nz_begin = 2.0\n",
+        "az_conflict");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\nz_begin = -1.0\n",
+        "bad_z");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testIntegratorTimeVariableIsTypedAndCanonical() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = ln_a\n",
+      "typed_integrator");
+  assert(frozen.config.numerics.integrator_time_variable ==
+      cosmosim::core::IntegratorTimeVariable::kLogScaleFactor);
+  assert(frozen.normalized_text.find("integrator_time_variable = ln_a") != std::string::npos);
+
+  const auto alias = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = a\n",
+      "typed_integrator_alias");
+  assert(alias.config.numerics.integrator_time_variable ==
+      cosmosim::core::IntegratorTimeVariable::kScaleFactor);
+  assert(alias.normalized_text.find("integrator_time_variable = scale_factor") != std::string::npos);
+
+  bool threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = banana\n",
+        "bad_integrator_variable");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testAdversarialPhysicsAndCosmologyDependenciesFail() {
+  const char* cases[] = {
+      "[mode]\nmode = zoom_in\n[cosmology]\nomega_matter = 0.1\nomega_baryon = 0.2\n",
+      "[mode]\nmode = zoom_in\n[numerics]\nt_phys_begin = 10\nt_phys_end = 1\n",
+      "[mode]\nmode = zoom_in\n[physics]\nenable_star_formation = false\nenable_feedback = true\n",
+      "[mode]\nmode = zoom_in\n[physics]\nenable_feedback = false\nenable_black_hole_agn = true\n",
+      "[mode]\nmode = zoom_in\n[physics]\ncooling_model = primordial_metal_line\nmetal_line_table_path =\n",
+  };
+  for (const char* config_text : cases) {
+    bool threw = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(config_text, "adversarial_dependency");
+    } catch (const cosmosim::core::ConfigError&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+}
+
+void testDerivedRuntimeSerializationUsesCanonicalNames() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\nt_code_begin = 0.25\nt_code_end = 0.75\n",
+      "derived_canonical_names");
+  const std::string serialized =
+      cosmosim::core::serializeDerivedRuntimeConfig(cosmosim::core::deriveRuntimeConfig(frozen));
+  assert(serialized.find("t_code_begin=0.25") != std::string::npos);
+  assert(serialized.find("t_code_end=0.75") != std::string::npos);
+  assert(serialized.find("time_begin_code") == std::string::npos);
+  assert(serialized.find("time_end_code") == std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -674,5 +768,9 @@ int main() {
   testBlackHoleAgnConfigKeysAndValidation();
   testTracerConfigKeysAndValidation();
   testZoomLongRangeStrategyValidationAndRoundtrip();
+  testCosmologyScaleFactorRedshiftCanonicalizationAndValidation();
+  testIntegratorTimeVariableIsTypedAndCanonical();
+  testAdversarialPhysicsAndCosmologyDependenciesFail();
+  testDerivedRuntimeSerializationUsesCanonicalNames();
   return 0;
 }

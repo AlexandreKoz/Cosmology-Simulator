@@ -129,7 +129,7 @@ Ownership map for config-derived values used in runtime pathways:
 
 Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
 
-- `numerics.time_begin_code` and `numerics.time_end_code` are **code-time domain scalars**, not redshift or physical seconds.
+- `numerics.t_code_begin` and `numerics.t_code_end` are **code-time domain scalars**, not redshift, scale factor, or physical seconds; legacy `time_begin_code`/`time_end_code` names are accepted only at the UserConfig input boundary.
 - `IntegratorState.current_scale_factor` is the cosmological scale factor `a`; continuation/restart must carry this runtime lane explicitly.
 - Redshift is diagnostic-only derived metadata (`z = 1/a - 1` when `a>0`), not a persisted runtime authority lane.
 - In non-cosmological modes, scale factor fallback is treated as a runtime compatibility lane and must not be interpreted as physical-time truth.

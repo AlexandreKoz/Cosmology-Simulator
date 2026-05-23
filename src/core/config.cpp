@@ -6,6 +6,7 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -514,6 +515,88 @@ template <typename T>
   throw ConfigError("key 'physics.cooling_model': invalid value '" + value + "'");
 }
 
+[[nodiscard]] IntegratorTimeVariable parseIntegratorTimeVariable(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "scale_factor" || lower == "a") {
+    return IntegratorTimeVariable::kScaleFactor;
+  }
+  if (lower == "ln_a" || lower == "log_scale_factor") {
+    return IntegratorTimeVariable::kLogScaleFactor;
+  }
+  if (lower == "t_code" || lower == "code_time") {
+    return IntegratorTimeVariable::kCodeTime;
+  }
+  if (lower == "t_phys" || lower == "physical_time") {
+    return IntegratorTimeVariable::kPhysicalTime;
+  }
+  throw ConfigError(
+      "key 'numerics.integrator_time_variable': invalid value '" + value +
+      "' (supported: scale_factor, ln_a, t_code, t_phys)");
+}
+
+[[nodiscard]] double redshiftToScaleFactor(double z, const std::string& key) {
+  if (!std::isfinite(z) || z <= -1.0) {
+    throw ConfigError("key '" + key + "': redshift must be finite and > -1");
+  }
+  return 1.0 / (1.0 + z);
+}
+
+[[nodiscard]] double scaleFactorToRedshift(double a, const std::string& key) {
+  if (!std::isfinite(a) || a <= 0.0) {
+    throw ConfigError("key '" + key + "': scale factor must be finite and > 0");
+  }
+  return (1.0 / a) - 1.0;
+}
+
+void validateScaleRedshiftPair(double a, double z, const std::string& a_key, const std::string& z_key) {
+  const double expected_a = redshiftToScaleFactor(z, z_key);
+  if (!std::isfinite(a) || a <= 0.0) {
+    throw ConfigError("key '" + a_key + "': scale factor must be finite and > 0");
+  }
+  const double tolerance = 16.0 * std::numeric_limits<double>::epsilon() *
+      std::max({1.0, std::abs(a), std::abs(expected_a)});
+  if (std::abs(expected_a - a) > tolerance) {
+    throw ConfigError("keys '" + a_key + "' and '" + z_key +
+                      "' are inconsistent: expected " + a_key + " = 1/(1+" + z_key + ")");
+  }
+}
+
+void normalizeScaleRedshiftPair(
+    std::map<std::string, ParsedEntry>& entries,
+    std::set<std::string>& consumed,
+    const std::string& a_key,
+    const std::string& z_key,
+    double default_a,
+    double default_z,
+    double& out_a,
+    double& out_z) {
+  const bool has_a = entries.contains(a_key);
+  const bool has_z = entries.contains(z_key);
+
+  if (has_a && has_z) {
+    out_a = parseFloating(requireString(entries, consumed, a_key, std::to_string(default_a)), a_key);
+    out_z = parseFloating(requireString(entries, consumed, z_key, std::to_string(default_z)), z_key);
+    validateScaleRedshiftPair(out_a, out_z, a_key, z_key);
+    return;
+  }
+
+  if (has_z) {
+    out_z = parseFloating(requireString(entries, consumed, z_key, std::to_string(default_z)), z_key);
+    out_a = redshiftToScaleFactor(out_z, z_key);
+    return;
+  }
+
+  if (has_a) {
+    out_a = parseFloating(requireString(entries, consumed, a_key, std::to_string(default_a)), a_key);
+    out_z = scaleFactorToRedshift(out_a, a_key);
+    return;
+  }
+
+  out_a = default_a;
+  out_z = default_z;
+  validateScaleRedshiftPair(out_a, out_z, a_key, z_key);
+}
+
 [[nodiscard]] AnalysisConfig::DiagnosticsExecutionPolicy parseDiagnosticsExecutionPolicy(
     const std::string& value) {
   const std::string lower = toLower(trim(value));
@@ -599,7 +682,7 @@ struct ConfigKeySpec {
       {"numerics.t_code_end", "1.0"},
       {"numerics.t_phys_begin", "0.0"},
       {"numerics.t_phys_end", "0.0"},
-      {"numerics.integrator_time_variable", "a"},
+      {"numerics.integrator_time_variable", "scale_factor"},
       {"numerics.cosmology_max_delta_ln_a", "1.0e-2"},
       {"numerics.cosmology_max_hubble_time_fraction", "1.0e-2"},
       {"numerics.source_max_fractional_change", "0.1"},
@@ -740,8 +823,20 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.t_code_end <= config.numerics.t_code_begin) {
     throw ConfigError("numerics.t_code_end must be greater than numerics.t_code_begin");
   }
-  if (config.numerics.a_begin <= 0.0 ||
-      config.numerics.cosmology_max_delta_ln_a <= 0.0 ||
+  if (config.numerics.t_phys_end < config.numerics.t_phys_begin) {
+    throw ConfigError("numerics.t_phys_end must be greater than or equal to numerics.t_phys_begin");
+  }
+  validateScaleRedshiftPair(
+      config.numerics.a_begin,
+      config.numerics.z_begin,
+      "numerics.a_begin",
+      "numerics.z_begin");
+  validateScaleRedshiftPair(
+      config.numerics.a_end,
+      config.numerics.z_end,
+      "numerics.a_end",
+      "numerics.z_end");
+  if (config.numerics.cosmology_max_delta_ln_a <= 0.0 ||
       config.numerics.cosmology_max_hubble_time_fraction <= 0.0 ||
       config.numerics.source_max_fractional_change <= 0.0 ||
       config.numerics.source_max_fractional_change > 1.0) {
@@ -780,8 +875,15 @@ void validateConfig(const SimulationConfig& config) {
   if (config.analysis.halo_fof_min_group_size < 2) {
     throw ConfigError("analysis.halo_fof_min_group_size must be >= 2");
   }
-  if (config.cosmology.omega_matter <= 0.0 || config.cosmology.omega_lambda < 0.0) {
-    throw ConfigError("cosmology requires omega_matter > 0 and omega_lambda >= 0");
+  if (config.cosmology.omega_matter <= 0.0 || config.cosmology.omega_lambda < 0.0 ||
+      config.cosmology.omega_baryon < 0.0 || config.cosmology.hubble_param <= 0.0 ||
+      config.cosmology.sigma8 <= 0.0 || config.cosmology.scalar_index_ns <= 0.0) {
+    throw ConfigError(
+        "cosmology requires omega_matter > 0, omega_lambda >= 0, omega_baryon >= 0, "
+        "hubble_param > 0, sigma8 > 0, and scalar_index_ns > 0");
+  }
+  if (config.cosmology.omega_baryon > config.cosmology.omega_matter) {
+    throw ConfigError("cosmology.omega_baryon must be <= cosmology.omega_matter");
   }
   auto requireOptionalPositiveSoftening = [](double value, const char* key) {
     if (value == 0.0) {
@@ -793,6 +895,19 @@ void validateConfig(const SimulationConfig& config) {
   requireOptionalPositiveSoftening(config.numerics.gravity_softening_star_kpc_comoving, "numerics.gravity_softening_star");
   requireOptionalPositiveSoftening(config.numerics.gravity_softening_black_hole_kpc_comoving, "numerics.gravity_softening_black_hole");
   requireOptionalPositiveSoftening(config.numerics.gravity_softening_tracer_kpc_comoving, "numerics.gravity_softening_tracer");
+  if (config.physics.enable_feedback && !config.physics.enable_star_formation) {
+    throw ConfigError(
+        "physics.enable_feedback requires physics.enable_star_formation=true or an explicit future external-source policy");
+  }
+  if (config.physics.enable_black_hole_agn && !config.physics.enable_feedback) {
+    throw ConfigError("physics.enable_black_hole_agn requires physics.enable_feedback=true");
+  }
+  if (config.physics.enable_cooling &&
+      config.physics.cooling_model == CoolingModel::kPrimordialMetalLine &&
+      trim(config.physics.metal_line_table_path).empty()) {
+    throw ConfigError(
+        "physics.cooling_model=primordial_metal_line requires physics.metal_line_table_path");
+  }
   if (config.physics.temperature_floor_k <= 0.0) {
     throw ConfigError("physics.temperature_floor_k must be > 0");
   }
@@ -942,7 +1057,8 @@ void validateConfig(const SimulationConfig& config) {
   stream << "t_code_end = " << frozen.config.numerics.t_code_end << '\n';
   stream << "t_phys_begin = " << frozen.config.numerics.t_phys_begin << '\n';
   stream << "t_phys_end = " << frozen.config.numerics.t_phys_end << '\n';
-  stream << "integrator_time_variable = " << frozen.config.numerics.integrator_time_variable << '\n';
+  stream << "integrator_time_variable = "
+         << integratorTimeVariableToString(frozen.config.numerics.integrator_time_variable) << '\n';
   stream << "cosmology_max_delta_ln_a = " << frozen.config.numerics.cosmology_max_delta_ln_a << '\n';
   stream << "cosmology_max_hubble_time_fraction = " << frozen.config.numerics.cosmology_max_hubble_time_fraction << '\n';
   stream << "source_max_fractional_change = " << frozen.config.numerics.source_max_fractional_change << '\n';
@@ -1208,18 +1324,24 @@ void validateConfig(const SimulationConfig& config) {
   }
   frozen.config.cosmology.box_size_mpc_comoving = frozen.config.cosmology.box_size_x_mpc_comoving;
 
-  frozen.config.numerics.a_begin = parseFloating(
-      requireString(entries, consumed, "numerics.a_begin", defaultFor("numerics.a_begin")),
-      "numerics.a_begin");
-  frozen.config.numerics.a_end = parseFloating(
-      requireString(entries, consumed, "numerics.a_end", defaultFor("numerics.a_end")),
-      "numerics.a_end");
-  frozen.config.numerics.z_begin = parseFloating(
-      requireString(entries, consumed, "numerics.z_begin", defaultFor("numerics.z_begin")),
-      "numerics.z_begin");
-  frozen.config.numerics.z_end = parseFloating(
-      requireString(entries, consumed, "numerics.z_end", defaultFor("numerics.z_end")),
-      "numerics.z_end");
+  normalizeScaleRedshiftPair(
+      entries,
+      consumed,
+      "numerics.a_begin",
+      "numerics.z_begin",
+      parseFloating(defaultFor("numerics.a_begin"), "numerics.a_begin"),
+      parseFloating(defaultFor("numerics.z_begin"), "numerics.z_begin"),
+      frozen.config.numerics.a_begin,
+      frozen.config.numerics.z_begin);
+  normalizeScaleRedshiftPair(
+      entries,
+      consumed,
+      "numerics.a_end",
+      "numerics.z_end",
+      parseFloating(defaultFor("numerics.a_end"), "numerics.a_end"),
+      parseFloating(defaultFor("numerics.z_end"), "numerics.z_end"),
+      frozen.config.numerics.a_end,
+      frozen.config.numerics.z_end);
   frozen.config.numerics.t_code_begin = parseFloating(
       requireString(entries, consumed, "numerics.t_code_begin", defaultFor("numerics.t_code_begin")),
       "numerics.t_code_begin");
@@ -1232,13 +1354,11 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.t_phys_end = parseFloating(
       requireString(entries, consumed, "numerics.t_phys_end", defaultFor("numerics.t_phys_end")),
       "numerics.t_phys_end");
-  frozen.config.numerics.integrator_time_variable = toLower(requireString(entries, consumed, "numerics.integrator_time_variable", defaultFor("numerics.integrator_time_variable")));
-  if (entries.contains("numerics.a_begin") && entries.contains("numerics.z_begin")) {
-    const double expected = 1.0 / (1.0 + frozen.config.numerics.z_begin);
-    if (std::abs(expected - frozen.config.numerics.a_begin) > 1e-10) {
-      throw ConfigError("numerics.a_begin conflicts with numerics.z_begin at path numerics");
-    }
-  }
+  frozen.config.numerics.integrator_time_variable = parseIntegratorTimeVariable(requireString(
+      entries,
+      consumed,
+      "numerics.integrator_time_variable",
+      defaultFor("numerics.integrator_time_variable")));
   frozen.config.numerics.cosmology_max_delta_ln_a = parseFloating(
       requireString(entries, consumed, "numerics.cosmology_max_delta_ln_a", defaultFor("numerics.cosmology_max_delta_ln_a")),
       "numerics.cosmology_max_delta_ln_a");
@@ -1678,8 +1798,8 @@ DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
   };
 
   DerivedRuntimeConfig derived;
-  derived.time_begin_code = config.numerics.t_code_begin;
-  derived.time_end_code = config.numerics.t_code_end;
+  derived.t_code_begin = config.numerics.t_code_begin;
+  derived.t_code_end = config.numerics.t_code_end;
   derived.box_size_mpc_comoving = {
       config.cosmology.box_size_x_mpc_comoving,
       config.cosmology.box_size_y_mpc_comoving,
@@ -1697,6 +1817,31 @@ DerivedRuntimeConfig deriveRuntimeConfig(const FrozenConfig& frozen_config) {
   derived.normalized_config_hash = frozen_config.provenance.config_hash;
   derived.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
   return derived;
+}
+
+std::string serializeDerivedRuntimeConfig(const DerivedRuntimeConfig& derived_config) {
+  std::ostringstream stream;
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+  stream << "t_code_begin=" << derived_config.t_code_begin << '\n';
+  stream << "t_code_end=" << derived_config.t_code_end << '\n';
+  stream << "box_size_x_mpc_comoving=" << derived_config.box_size_mpc_comoving[0] << '\n';
+  stream << "box_size_y_mpc_comoving=" << derived_config.box_size_mpc_comoving[1] << '\n';
+  stream << "box_size_z_mpc_comoving=" << derived_config.box_size_mpc_comoving[2] << '\n';
+  stream << "treepm_pm_grid_nx=" << derived_config.treepm_pm_grid_shape[0] << '\n';
+  stream << "treepm_pm_grid_ny=" << derived_config.treepm_pm_grid_shape[1] << '\n';
+  stream << "treepm_pm_grid_nz=" << derived_config.treepm_pm_grid_shape[2] << '\n';
+  stream << "gravity_softening_dark_matter_kpc_comoving="
+         << derived_config.gravity_softening_kpc_comoving_by_species[0] << '\n';
+  stream << "gravity_softening_gas_kpc_comoving="
+         << derived_config.gravity_softening_kpc_comoving_by_species[1] << '\n';
+  stream << "gravity_softening_star_kpc_comoving="
+         << derived_config.gravity_softening_kpc_comoving_by_species[2] << '\n';
+  stream << "gravity_softening_black_hole_kpc_comoving="
+         << derived_config.gravity_softening_kpc_comoving_by_species[3] << '\n';
+  stream << "gravity_softening_tracer_kpc_comoving="
+         << derived_config.gravity_softening_kpc_comoving_by_species[4] << '\n';
+  stream << "normalized_config_hash_hex=" << derived_config.normalized_config_hash_hex << '\n';
+  return stream.str();
 }
 
 void writeNormalizedConfigSnapshot(
@@ -1826,6 +1971,20 @@ std::string coolingModelToString(CoolingModel model) {
       return "primordial_metal_line";
   }
   throw ConfigError("unhandled CoolingModel enum value during serialization");
+}
+
+std::string integratorTimeVariableToString(IntegratorTimeVariable variable) {
+  switch (variable) {
+    case IntegratorTimeVariable::kScaleFactor:
+      return "scale_factor";
+    case IntegratorTimeVariable::kLogScaleFactor:
+      return "ln_a";
+    case IntegratorTimeVariable::kCodeTime:
+      return "t_code";
+    case IntegratorTimeVariable::kPhysicalTime:
+      return "t_phys";
+  }
+  throw ConfigError("unhandled IntegratorTimeVariable enum value during serialization");
 }
 
 }  // namespace cosmosim::core

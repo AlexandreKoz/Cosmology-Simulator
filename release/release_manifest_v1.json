@@ -6,8 +6,8 @@
   "source_version": "0.1.0",
   "naming_rule_version": "lower_snake_v1",
   "snapshot_schema": "gadget_arepo_v4",
-  "restart_schema": "cosmosim_restart_v6",
-  "provenance_schema": "provenance_v4",
+  "restart_schema": "cosmosim_restart_v10",
+  "provenance_schema": "provenance_v5",
   "config_schema": "param_txt_v1",
   "supported_modes": [
     "zoom_in",

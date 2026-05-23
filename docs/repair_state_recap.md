@@ -1323,7 +1323,7 @@ Observed:
 - Restart schema bumped to `cosmosim_restart_v4` with explicit `/distributed_gravity/state` payload (`parallel::DistributedRestartState`, schema_version=2).
 - Distributed continuation payload now persists decomposition epoch, owning-rank table, PM slab layout metadata, gravity-kick cadence state, long-range field refresh/version metadata, and explicit `long_range_restart_policy`.
 - Policy is explicit and enforced: `deterministic_rebuild` (cached long-range PM field arrays are not serialized; continuation rebuilds deterministically on cadence refresh).
-- Provenance schema bumped to `provenance_v4` to add axis-aware PM grid and mesh-spacing metadata while preserving legacy scalar aliases for compatibility.
+- Provenance schema bumped to `provenance_v5` to add axis-aware PM grid and mesh-spacing metadata while preserving legacy scalar aliases for compatibility.
 - Added typed compatibility diagnostics (`evaluateDistributedRestartCompatibility`) plus negative mismatch coverage.
 
 Interpretation:
@@ -1347,7 +1347,7 @@ Observed:
 - Tree gravity now resolves softening at source/target with optional sidecars (species table and per-particle overrides) and uses an explicit pair rule `epsilon_pair = max(epsilon_i, epsilon_j)` across leaf P2P and accepted-node multipole paths.
 - TreePM short-range residual uses the same pair law for local and distributed remote request/response paths (request packet now carries target epsilon).
 - Optional per-particle softening sidecar persistence is added to snapshot (`/PartTypeN/GravitySofteningComoving`) and restart (`/state/particle_sidecar/gravity_softening_comoving`) paths.
-- Schema versions are intentionally bumped for additive axis-aware PM metadata: snapshot `gadget_arepo_v4`, provenance `provenance_v4`, while restart remains `cosmosim_restart_v6`.
+- Schema versions are intentionally bumped for additive axis-aware PM metadata: snapshot `gadget_arepo_v4`, provenance `provenance_v5`, while restart remains `cosmosim_restart_v10`.
 
 Interpretation:
 
@@ -1379,7 +1379,7 @@ Interpretation:
 ## 2026-05-08 — Preset alias and schema-drift gate repair
 
 - Root cause for the failed `cmake --preset cpu-debug` command was a naming drift: build/test presets used `build-cpu-debug` and `test-cpu-debug`, but the configure preset existed only as `cpu-only-debug`. Added `cpu-debug` as a compatibility configure alias that maps to the canonical CPU-only debug build directory and metadata.
-- Root cause for the docs/schema gate failure was stale restart-schema literals in release artifacts and gate checks after the runtime schema moved to `cosmosim_restart_v6`. Updated the release manifest, release docs, and release readiness check to the current restart schema.
+- Root cause for the docs/schema gate failure was stale restart-schema literals in release artifacts and gate checks after the runtime schema moved to `cosmosim_restart_v10`. Updated the release manifest, release docs, and release readiness check to the current restart schema.
 - Reproducibility impact: no solver, snapshot, restart payload, HDF5 layout, or normalized-config behavior changed; this repair only aligns preset names and schema documentation/tests with existing runtime truth.
 
 ## 2026-05-08 — Gas-cell identity seam RFC and isolated API guard
@@ -1481,7 +1481,7 @@ Reproducibility impact:
 
 ## 2026-05-07 Restart sidecar exactness repair
 
-- Restart schema is now `cosmosim_restart_v6`: readers reject v5 and older files unless a future explicit compatibility importer is added and tested.
+- Restart schema is now `cosmosim_restart_v10`: readers reject v5 and older files unless a future explicit compatibility importer is added and tested.
 - Restart HDF5 always writes and requires the particle softening value and authoritative override-mask datasets, preserving exact sidecar presence instead of silently defaulting missing lanes.
 - Restart payload integrity hashing now length-delimits strings and vector byte lanes and continues to cover particle identity, gas identity, species sidecars, module sidecars with schema versions, scheduler/integrator state, normalized config/provenance, and distributed gravity continuation metadata.
 - Reproducibility impact: restart continuation is stricter and more auditable; old files missing v6 runtime-truth lanes are rejected rather than resumed with inferred defaults. Snapshot canonical GADGET/AREPO dataset names remain unchanged.

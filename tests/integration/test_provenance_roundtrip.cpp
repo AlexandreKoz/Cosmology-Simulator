@@ -20,7 +20,7 @@ int main() {
   in.config_schema_version = "1";
   in.raw_input_config = "schema_version = 1\nmode = zoom_in\n";
   in.normalized_config = "schema_version = 1\nmode.mode = zoom_in\n";
-  in.derived_runtime_state = "time_begin_code=0\ntime_end_code=1\n";
+  in.derived_runtime_state = "t_code_begin=0\nt_code_end=1\n";
   in.timestamp_utc = "2026-04-05T00:00:00Z";
   in.hardware_summary = "logical_threads=8";
   in.author_rank = 0;

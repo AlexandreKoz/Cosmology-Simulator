@@ -139,7 +139,7 @@ Changes made:
 - Restored the missing `tests/unit` and `tests/validation` source files referenced by `CMakeLists.txt`, eliminating a configure-time test-registry/source-tree drift blocker in the uploaded archive.
 - Repaired `integration_softening_ownership_invariants` restart payload construction so the restart writer receives a valid normalized config hash, matching `ProvenanceRecord::config_hash_hex`, and a valid single-rank `DistributedRestartState` instead of tripping the continuation-metadata guard.
 - Hardened the legacy softening compatibility round-trip by clearing both the optional softening value lane and the authoritative override-mask lane when constructing the legacy payload.
-- Aligned docs, release manifest, and gate checks with the current runtime schemas: snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v6`, and provenance `provenance_v4`.
+- Aligned docs, release manifest, and gate checks with the current runtime schemas: snapshot `gadget_arepo_v4`, restart `cosmosim_restart_v10`, and provenance `provenance_v5`.
 - Updated the runtime app smoke gate to check the canonical axis-aware normalized key `treepm_pm_grid_nx = 24` rather than the deprecated scalar alias `treepm_pm_grid = 24`.
 
 Validation evidence from this sandbox:
