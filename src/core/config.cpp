@@ -4,13 +4,16 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
@@ -230,20 +233,36 @@ template <typename T>
 
 [[nodiscard]] double parseFloating(const std::string& value, const std::string& key) {
   const std::string trimmed = trim(value);
+  if (trimmed.empty()) {
+    throw ConfigError("key '" + key + "': invalid finite floating-point value '" + value + "'");
+  }
   char* consumed = nullptr;
   const double number = std::strtod(trimmed.c_str(), &consumed);
-  if (consumed != trimmed.c_str() + static_cast<std::ptrdiff_t>(trimmed.size())) {
-    throw ConfigError("key '" + key + "': invalid floating-point value '" + value + "'");
+  if (consumed != trimmed.c_str() + static_cast<std::ptrdiff_t>(trimmed.size()) ||
+      !std::isfinite(number)) {
+    throw ConfigError("key '" + key + "': invalid finite floating-point value '" + value + "'");
   }
   return number;
+}
+
+void requireFinite(double value, const std::string& key) {
+  if (!std::isfinite(value)) {
+    throw ConfigError("key '" + key + "': value must be finite");
+  }
+}
+
+void requireAllFinite(std::initializer_list<std::pair<double, const char*>> values) {
+  for (const auto& [value, key] : values) {
+    requireFinite(value, key);
+  }
 }
 
 [[nodiscard]] std::pair<double, std::string> splitMagnitudeUnit(const std::string& value) {
   std::istringstream stream(value);
   double magnitude = 0.0;
   stream >> magnitude;
-  if (stream.fail()) {
-    throw ConfigError("invalid value '" + value + "': expected numeric magnitude");
+  if (stream.fail() || !std::isfinite(magnitude)) {
+    throw ConfigError("invalid value '" + value + "': expected finite numeric magnitude");
   }
 
   std::string unit;
@@ -820,6 +839,71 @@ void validateConfig(const SimulationConfig& config) {
   if (config.schema_version != 1) {
     throw ConfigError("schema_version must be 1 for this build");
   }
+
+  requireAllFinite({
+      {config.cosmology.omega_matter, "cosmology.omega_matter"},
+      {config.cosmology.omega_lambda, "cosmology.omega_lambda"},
+      {config.cosmology.omega_baryon, "cosmology.omega_baryon"},
+      {config.cosmology.hubble_param, "cosmology.hubble_param"},
+      {config.cosmology.sigma8, "cosmology.sigma8"},
+      {config.cosmology.scalar_index_ns, "cosmology.scalar_index_ns"},
+      {config.cosmology.box_size_x_mpc_comoving, "cosmology.box_size_x"},
+      {config.cosmology.box_size_y_mpc_comoving, "cosmology.box_size_y"},
+      {config.cosmology.box_size_z_mpc_comoving, "cosmology.box_size_z"},
+      {config.cosmology.box_size_mpc_comoving, "cosmology.box_size"},
+      {config.numerics.a_begin, "numerics.a_begin"},
+      {config.numerics.a_end, "numerics.a_end"},
+      {config.numerics.z_begin, "numerics.z_begin"},
+      {config.numerics.z_end, "numerics.z_end"},
+      {config.numerics.t_code_begin, "numerics.t_code_begin"},
+      {config.numerics.t_code_end, "numerics.t_code_end"},
+      {config.numerics.t_phys_begin, "numerics.t_phys_begin"},
+      {config.numerics.t_phys_end, "numerics.t_phys_end"},
+      {config.numerics.cosmology_max_delta_ln_a, "numerics.cosmology_max_delta_ln_a"},
+      {config.numerics.cosmology_max_hubble_time_fraction, "numerics.cosmology_max_hubble_time_fraction"},
+      {config.numerics.source_max_fractional_change, "numerics.source_max_fractional_change"},
+      {config.numerics.gravity_softening_kpc_comoving, "numerics.gravity_softening"},
+      {config.numerics.gravity_softening_gas_kpc_comoving, "numerics.gravity_softening_gas"},
+      {config.numerics.gravity_softening_dark_matter_kpc_comoving, "numerics.gravity_softening_dark_matter"},
+      {config.numerics.gravity_softening_star_kpc_comoving, "numerics.gravity_softening_star"},
+      {config.numerics.gravity_softening_black_hole_kpc_comoving, "numerics.gravity_softening_black_hole"},
+      {config.numerics.gravity_softening_tracer_kpc_comoving, "numerics.gravity_softening_tracer"},
+      {config.numerics.treepm_asmth_cells, "numerics.treepm_asmth_cells"},
+      {config.numerics.treepm_rcut_cells, "numerics.treepm_rcut_cells"},
+      {config.mode.zoom_region_center_x_mpc_comoving, "mode.zoom_region_center_x"},
+      {config.mode.zoom_region_center_y_mpc_comoving, "mode.zoom_region_center_y"},
+      {config.mode.zoom_region_center_z_mpc_comoving, "mode.zoom_region_center_z"},
+      {config.mode.zoom_region_radius_mpc_comoving, "mode.zoom_region_radius"},
+      {config.mode.zoom_contamination_radius_mpc_comoving, "mode.zoom_contamination_radius"},
+      {config.physics.temperature_floor_k, "physics.temperature_floor_k"},
+      {config.physics.sf_density_threshold_code, "physics.sf_density_threshold_code"},
+      {config.physics.sf_temperature_threshold_k, "physics.sf_temperature_threshold_k"},
+      {config.physics.sf_min_converging_flow_rate_code, "physics.sf_min_converging_flow_rate_code"},
+      {config.physics.sf_epsilon_ff, "physics.sf_epsilon_ff"},
+      {config.physics.sf_min_star_particle_mass_code, "physics.sf_min_star_particle_mass_code"},
+      {config.physics.fb_epsilon_thermal, "physics.fb_epsilon_thermal"},
+      {config.physics.fb_epsilon_kinetic, "physics.fb_epsilon_kinetic"},
+      {config.physics.fb_epsilon_momentum, "physics.fb_epsilon_momentum"},
+      {config.physics.fb_sn_energy_erg_per_mass_code, "physics.fb_sn_energy_erg_per_mass_code"},
+      {config.physics.fb_momentum_code_per_mass_code, "physics.fb_momentum_code_per_mass_code"},
+      {config.physics.fb_delayed_cooling_time_code, "physics.fb_delayed_cooling_time_code"},
+      {config.physics.fb_stochastic_event_probability, "physics.fb_stochastic_event_probability"},
+      {config.physics.stellar_evolution_hubble_time_years, "physics.stellar_evolution_hubble_time_years"},
+      {config.physics.bh_seed_halo_mass_threshold_code, "physics.bh_seed_halo_mass_threshold_code"},
+      {config.physics.bh_seed_mass_code, "physics.bh_seed_mass_code"},
+      {config.physics.bh_alpha_bondi, "physics.bh_alpha_bondi"},
+      {config.physics.bh_epsilon_r, "physics.bh_epsilon_r"},
+      {config.physics.bh_epsilon_f, "physics.bh_epsilon_f"},
+      {config.physics.bh_feedback_coupling_efficiency, "physics.bh_feedback_coupling_efficiency"},
+      {config.physics.bh_duty_cycle_active_edd_ratio_threshold, "physics.bh_duty_cycle_active_edd_ratio_threshold"},
+      {config.physics.bh_proton_mass_si, "physics.bh_proton_mass_si"},
+      {config.physics.bh_thomson_cross_section_si, "physics.bh_thomson_cross_section_si"},
+      {config.physics.bh_newton_g_si, "physics.bh_newton_g_si"},
+      {config.physics.bh_speed_of_light_si, "physics.bh_speed_of_light_si"},
+      {config.physics.tracer_min_host_mass_code, "physics.tracer_min_host_mass_code"},
+      {config.analysis.halo_fof_linking_length_factor, "analysis.halo_fof_linking_length_factor"},
+  });
+
   if (config.numerics.t_code_end <= config.numerics.t_code_begin) {
     throw ConfigError("numerics.t_code_end must be greater than numerics.t_code_begin");
   }
@@ -836,6 +920,16 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.z_end,
       "numerics.a_end",
       "numerics.z_end");
+  if (config.numerics.a_end < config.numerics.a_begin) {
+    throw ConfigError(
+        "numerics.a_end must be >= numerics.a_begin for forward cosmological integration; "
+        "reverse integration requires an explicit future config mode");
+  }
+  if (config.numerics.z_end > config.numerics.z_begin) {
+    throw ConfigError(
+        "numerics.z_end must be <= numerics.z_begin for forward cosmological integration; "
+        "reverse integration requires an explicit future config mode");
+  }
   if (config.numerics.cosmology_max_delta_ln_a <= 0.0 ||
       config.numerics.cosmology_max_hubble_time_fraction <= 0.0 ||
       config.numerics.source_max_fractional_change <= 0.0 ||
@@ -1752,6 +1846,13 @@ void validateConfig(const SimulationConfig& config) {
 }  // namespace
 
 ConfigError::ConfigError(const std::string& message) : std::runtime_error(message) {}
+
+SimulationConfig makeUnvalidatedSimulationConfigForTests() {
+  return SimulationConfig(SimulationConfig::ConstructionToken{});
+}
+
+FrozenConfig::FrozenConfig()
+    : config(SimulationConfig::ConstructionToken{}) {}
 
 FrozenConfig loadFrozenConfigFromFile(const std::filesystem::path& path, const ParseOptions& options) {
   std::ifstream input(path);

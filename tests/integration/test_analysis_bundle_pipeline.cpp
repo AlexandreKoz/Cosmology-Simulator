@@ -38,7 +38,7 @@ class NoopCallback final : public cosmosim::core::IntegrationCallback {
 }  // namespace
 
 int main() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.output_directory = "test_outputs";
   config.output.run_name = "integration_analysis";
   config.cosmology.box_size_mpc_comoving = 1.0;

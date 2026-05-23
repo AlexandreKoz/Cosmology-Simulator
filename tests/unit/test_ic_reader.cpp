@@ -16,7 +16,7 @@
 namespace {
 
 void testGeneratedIsolatedIcSpeciesAndOwnership() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "unit_ic_reader";
 
   const cosmosim::io::IcReadResult result =
@@ -30,7 +30,7 @@ void testGeneratedIsolatedIcSpeciesAndOwnership() {
 }
 
 void testGeneratedConverterDefaultAudit() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   const cosmosim::io::IcReadResult result = cosmosim::io::convertGeneratedIsolatedIcToState(config, 4);
 
   assert(result.state.particles.size() == 20);
@@ -39,7 +39,7 @@ void testGeneratedConverterDefaultAudit() {
 
 void testHdf5GateBehavior() {
 #if COSMOSIM_ENABLE_HDF5
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   bool threw = false;
   try {
     const auto result = cosmosim::io::readGadgetArepoHdf5Ic("/definitely/missing/file.hdf5", config);
@@ -49,7 +49,7 @@ void testHdf5GateBehavior() {
   }
   assert(threw);
 #else
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   bool threw = false;
   try {
     const auto result = cosmosim::io::readGadgetArepoHdf5Ic("ics.hdf5", config);
@@ -163,7 +163,7 @@ std::filesystem::path writeMinimalIcFile(bool include_density) {
 }
 
 void testHdf5GasThermoMapping() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "ic_reader_hdf5_gas_mapping";
   const std::filesystem::path path = writeMinimalIcFile(true);
 
@@ -191,7 +191,7 @@ void testHdf5GasThermoMapping() {
 }
 
 void testHdf5GasOptionalDensityMissingBehavior() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "ic_reader_hdf5_optional";
   const std::filesystem::path path = writeMinimalIcFile(false);
 

@@ -8,7 +8,7 @@
 namespace {
 
 void testModePolicyDefaultsAndValidation() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.mode = cosmosim::core::SimulationMode::kCosmoCube;
   config.mode.hydro_boundary = cosmosim::core::ModeHydroBoundary::kAuto;
   config.mode.gravity_boundary = cosmosim::core::ModeGravityBoundary::kAuto;
@@ -20,7 +20,7 @@ void testModePolicyDefaultsAndValidation() {
 }
 
 void testInvalidModeOverrideFailsValidation() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.mode = cosmosim::core::SimulationMode::kZoomIn;
   config.mode.hydro_boundary = cosmosim::core::ModeHydroBoundary::kOpen;
 

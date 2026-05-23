@@ -15,7 +15,7 @@ void requireOrThrow(bool condition, const std::string& message) {
 }
 
 void testPeriodicToyRunPolicyAndGhosts() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.mode = cosmosim::core::SimulationMode::kCosmoCube;
   config.mode.hydro_boundary = cosmosim::core::ModeHydroBoundary::kPeriodic;
   config.mode.gravity_boundary = cosmosim::core::ModeGravityBoundary::kPeriodic;
@@ -45,7 +45,7 @@ void testPeriodicToyRunPolicyAndGhosts() {
 }
 
 void testIsolatedToyRunPolicyAndGhosts() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.mode = cosmosim::core::SimulationMode::kIsolatedGalaxy;
   config.mode.hydro_boundary = cosmosim::core::ModeHydroBoundary::kOpen;
   config.mode.gravity_boundary = cosmosim::core::ModeGravityBoundary::kIsolatedMonopole;
@@ -97,7 +97,7 @@ void testIsolatedToyRunPolicyAndGhosts() {
 }
 
 void testModeValidationRejectsBoundaryMismatch() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.mode = cosmosim::core::SimulationMode::kCosmoCube;
   config.mode.hydro_boundary = cosmosim::core::ModeHydroBoundary::kPeriodic;
   config.mode.gravity_boundary = cosmosim::core::ModeGravityBoundary::kIsolatedMonopole;

@@ -12,7 +12,7 @@ int main() {
   constexpr std::size_t k_cell_count = 2000;
   constexpr int k_step_count = 16;
 
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.output_directory = "bench_outputs";
   config.output.run_name = "analysis_overhead";
   config.cosmology.box_size_mpc_comoving = 10.0;

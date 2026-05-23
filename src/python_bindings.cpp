@@ -110,36 +110,28 @@ PYBIND11_MODULE(_cosmosim, module) {
       .value("isolated_cluster", SimulationMode::kIsolatedCluster);
 
   py::class_<SimulationConfig>(module, "SimulationConfig")
-      .def(py::init<>())
-      .def_readwrite("schema_version", &SimulationConfig::schema_version)
-      .def_property(
+      .def_readonly("schema_version", &SimulationConfig::schema_version)
+      .def_property_readonly(
           "mode",
-          [](const SimulationConfig& config) { return config.mode.mode; },
-          [](SimulationConfig& config, SimulationMode mode) { config.mode.mode = mode; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.mode.mode; })
+      .def_property_readonly(
           "box_size_mpc_comov",
-          [](const SimulationConfig& config) { return config.cosmology.box_size_mpc_comoving; },
-          [](SimulationConfig& config, double value) { config.cosmology.box_size_mpc_comoving = value; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.cosmology.box_size_mpc_comoving; })
+      .def_property_readonly(
           "box_size_x_mpc_comov",
-          [](const SimulationConfig& config) { return config.cosmology.box_size_x_mpc_comoving; },
-          [](SimulationConfig& config, double value) { config.cosmology.box_size_x_mpc_comoving = value; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.cosmology.box_size_x_mpc_comoving; })
+      .def_property_readonly(
           "box_size_y_mpc_comov",
-          [](const SimulationConfig& config) { return config.cosmology.box_size_y_mpc_comoving; },
-          [](SimulationConfig& config, double value) { config.cosmology.box_size_y_mpc_comoving = value; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.cosmology.box_size_y_mpc_comoving; })
+      .def_property_readonly(
           "box_size_z_mpc_comov",
-          [](const SimulationConfig& config) { return config.cosmology.box_size_z_mpc_comoving; },
-          [](SimulationConfig& config, double value) { config.cosmology.box_size_z_mpc_comoving = value; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.cosmology.box_size_z_mpc_comoving; })
+      .def_property_readonly(
           "output_directory",
-          [](const SimulationConfig& config) { return config.output.output_directory; },
-          [](SimulationConfig& config, const std::string& value) { config.output.output_directory = value; })
-      .def_property(
+          [](const SimulationConfig& config) { return config.output.output_directory; })
+      .def_property_readonly(
           "run_name",
-          [](const SimulationConfig& config) { return config.output.run_name; },
-          [](SimulationConfig& config, const std::string& value) { config.output.run_name = value; });
+          [](const SimulationConfig& config) { return config.output.run_name; });
 
   py::class_<FrozenConfig>(module, "FrozenConfig")
       .def_readonly("config", &FrozenConfig::config)
@@ -233,35 +225,45 @@ PYBIND11_MODULE(_cosmosim, module) {
       py::arg("path"));
 
   module.def(
+      "load_frozen_config_from_string",
+      [](const std::string& config_text, const std::string& source_name) {
+        return cosmosim::core::loadFrozenConfigFromString(config_text, source_name, {});
+      },
+      py::arg("config_text"),
+      py::arg("source_name") = "python-inline-config");
+
+  module.def(
       "read_snapshot",
-      [](const std::filesystem::path& path, const SimulationConfig& config) {
-        return cosmosim::io::readGadgetArepoSnapshotHdf5(path, config, {});
+      [](const std::filesystem::path& path, const FrozenConfig& frozen_config) {
+        return cosmosim::io::readGadgetArepoSnapshotHdf5(path, frozen_config.config, {});
       },
       py::arg("path"),
-      py::arg("config"));
+      py::arg("frozen_config"));
 
   module.def(
       "write_snapshot",
       [](const std::filesystem::path& path,
          const SimulationState& state,
-         const SimulationConfig& config,
-         const std::string& normalized_config_text,
+         const FrozenConfig& frozen_config,
          const std::string& git_sha) {
         cosmosim::io::SnapshotWritePayload payload;
         payload.state = &state;
-        payload.config = &config;
-        payload.normalized_config_text = normalized_config_text;
+        payload.config = &frozen_config.config;
+        payload.normalized_config_text = frozen_config.normalized_text;
         payload.git_sha = git_sha;
         payload.provenance = cosmosim::core::makeProvenanceRecord(
-            cosmosim::core::stableConfigHashHex(normalized_config_text),
+            frozen_config.provenance.config_hash_hex,
             git_sha,
             0);
+        payload.provenance.raw_input_config = frozen_config.raw_text;
+        payload.provenance.normalized_config = frozen_config.normalized_text;
+        payload.provenance.derived_runtime_state = cosmosim::core::serializeDerivedRuntimeConfig(
+            cosmosim::core::deriveRuntimeConfig(frozen_config));
         cosmosim::io::writeGadgetArepoSnapshotHdf5(path, payload, {});
       },
       py::arg("path"),
       py::arg("state"),
-      py::arg("config"),
-      py::arg("normalized_config_text"),
+      py::arg("frozen_config"),
       py::arg("git_sha") = "unknown");
 
   module.def(

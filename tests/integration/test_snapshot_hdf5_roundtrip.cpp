@@ -72,7 +72,7 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
 }
 
 void testRoundtripMixedSpeciesSnapshot() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "snapshot_roundtrip";
   config.cosmology.box_size_x_mpc_comoving = 10.0;
   config.cosmology.box_size_y_mpc_comoving = 8.0;
@@ -258,7 +258,7 @@ void testRoundtripMixedSpeciesSnapshot() {
 }
 
 void testMassTableFallbackSnapshotImport() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
 #if COSMOSIM_ENABLE_HDF5
   const std::filesystem::path snapshot_path =
       std::filesystem::temp_directory_path() / "cosmosim_snapshot_mass_table_only.hdf5";

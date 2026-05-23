@@ -30,7 +30,7 @@ void buildSyntheticState(cosmosim::core::SimulationState& state, std::size_t par
 }
 
 void runCase(bool use_compression) {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   cosmosim::core::SimulationState state;
   constexpr std::size_t particle_count = 1u << 18;
   buildSyntheticState(state, particle_count);

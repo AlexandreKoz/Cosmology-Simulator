@@ -273,7 +273,19 @@ struct CompatibilityConfig {
   bool allow_unknown_keys = false;
 };
 
-struct NormalizedConfig {
+struct SimulationConfig final {
+ private:
+  struct ConstructionToken {};
+  explicit SimulationConfig(ConstructionToken) {}
+
+ public:
+  SimulationConfig() = delete;
+  SimulationConfig(const SimulationConfig&) = default;
+  SimulationConfig(SimulationConfig&&) noexcept = default;
+  SimulationConfig& operator=(const SimulationConfig&) = default;
+  SimulationConfig& operator=(SimulationConfig&&) noexcept = default;
+  ~SimulationConfig() = default;
+
   int schema_version = 1;
   CosmologyConfig cosmology;
   NumericsConfig numerics;
@@ -284,7 +296,15 @@ struct NormalizedConfig {
   UnitsConfig units;
   ModeConfig mode;
   CompatibilityConfig compatibility;
+
+ private:
+  friend struct FrozenConfig;
+  friend SimulationConfig makeUnvalidatedSimulationConfigForTests();
 };
+
+using NormalizedConfig = SimulationConfig;
+
+[[nodiscard]] SimulationConfig makeUnvalidatedSimulationConfigForTests();
 
 struct ProvenanceMetadata {
   std::string source_name;
@@ -308,6 +328,8 @@ struct UserConfig {
 };
 
 struct FrozenConfig {
+  FrozenConfig();
+
   UserConfig user_config;
   NormalizedConfig config;
   std::string raw_text;
@@ -362,7 +384,5 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);
 [[nodiscard]] std::string coolingModelToString(CoolingModel model);
 [[nodiscard]] std::string integratorTimeVariableToString(IntegratorTimeVariable variable);
-
-using SimulationConfig = NormalizedConfig;
 
 }  // namespace cosmosim::core

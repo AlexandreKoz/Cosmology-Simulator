@@ -1,11 +1,16 @@
 #include <cassert>
 #include <cmath>
 #include <string>
+#include <type_traits>
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/provenance.hpp"
 
 namespace {
+
+static_assert(!std::is_default_constructible_v<cosmosim::core::SimulationConfig>,
+              "SimulationConfig must not be publicly default-constructible; use FrozenConfig normalization");
+static_assert(std::is_copy_constructible_v<cosmosim::core::SimulationConfig>);
 
 void testCommentsWhitespaceSectionsAndUnits() {
   const std::string config_text = R"(
@@ -728,6 +733,33 @@ void testAdversarialPhysicsAndCosmologyDependenciesFail() {
   }
 }
 
+
+void testFiniteNumericAndForwardCosmologyContract() {
+  const char* cases[] = {
+      "[mode]\nmode = zoom_in\n[cosmology]\nomega_matter = inf\n",
+      "[mode]\nmode = zoom_in\n[cosmology]\nhubble_param = nan\n",
+      "[mode]\nmode = zoom_in\n[cosmology]\nbox_size = inf mpc\n",
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 1.0\na_end = 0.5\n",
+      "[mode]\nmode = zoom_in\n[numerics]\nz_begin = 0.0\nz_end = 1.0\n",
+      "[mode]\nmode = zoom_in\n[physics]\nfb_epsilon_thermal = nan\n",
+      "[mode]\nmode = zoom_in\n[analysis]\nhalo_fof_linking_length_factor = inf\n",
+  };
+  for (const char* config_text : cases) {
+    bool threw = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(config_text, "finite_forward_contract");
+    } catch (const cosmosim::core::ConfigError&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  const auto forward = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.25\na_end = 1.0\n",
+      "forward_cosmology_ok");
+  assert(forward.config.numerics.a_end >= forward.config.numerics.a_begin);
+}
+
 void testDerivedRuntimeSerializationUsesCanonicalNames() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\nt_code_begin = 0.25\nt_code_end = 0.75\n",
@@ -771,6 +803,7 @@ int main() {
   testCosmologyScaleFactorRedshiftCanonicalizationAndValidation();
   testIntegratorTimeVariableIsTypedAndCanonical();
   testAdversarialPhysicsAndCosmologyDependenciesFail();
+  testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
   return 0;
 }

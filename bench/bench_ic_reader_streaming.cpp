@@ -6,7 +6,7 @@
 #include "cosmosim/io/ic_reader.hpp"
 
 int main() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "bench_ic_reader";
 
   constexpr std::size_t iterations = 40;

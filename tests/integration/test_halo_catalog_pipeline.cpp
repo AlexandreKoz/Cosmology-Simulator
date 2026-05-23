@@ -32,7 +32,7 @@ cosmosim::core::SimulationState makePipelineState() {
 }  // namespace
 
 int main() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.output_directory = "test_outputs";
   config.output.run_name = "integration_halo";
   config.analysis.enable_halo_workflow = true;

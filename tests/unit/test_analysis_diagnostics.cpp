@@ -9,7 +9,7 @@
 namespace {
 
 cosmosim::core::SimulationConfig makeConfig() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "unit_analysis";
   config.output.output_directory = "test_outputs";
   config.cosmology.box_size_mpc_comoving = 1.0;

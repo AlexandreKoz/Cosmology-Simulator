@@ -9,8 +9,10 @@ import cosmosim
 
 class SnapshotDiagnosticIntegrationTest(unittest.TestCase):
     def test_roundtrip_snapshot_and_health(self) -> None:
-        config = cosmosim.SimulationConfig()
-        config.run_name = "python_bindings_test"
+        frozen = cosmosim.load_frozen_config_from_string(
+            "schema_version = 1\n\n[mode]\nmode = zoom_in\n\n[output]\nrun_name = python_bindings_test\n"
+        )
+        config = frozen.config
 
         with tempfile.TemporaryDirectory(prefix="cosmosim_py_") as tmp_dir:
             snapshot_path = pathlib.Path(tmp_dir) / "snapshot_python_000.hdf5"
@@ -18,12 +20,11 @@ class SnapshotDiagnosticIntegrationTest(unittest.TestCase):
             cosmosim.write_snapshot(
                 snapshot_path,
                 state,
-                config,
-                normalized_config_text="schema_version = 1\n",
+                frozen,
                 git_sha="testsha",
             )
 
-            loaded = cosmosim.read_snapshot(snapshot_path, config)
+            loaded = cosmosim.read_snapshot(snapshot_path, frozen)
             self.assertEqual(loaded.state.particle_count, 32)
 
             summary = cosmosim.summarize_run_health(loaded, config)

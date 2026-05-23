@@ -44,7 +44,7 @@ cosmosim::core::SimulationState makeTwoGroupState() {
 }
 
 void testFofFindsTwoGroups() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "unit_halo";
   config.cosmology.box_size_mpc_comoving = 1.0;
 

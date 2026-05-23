@@ -265,7 +265,7 @@ void test_softening_priority_invariants() {
   SimulationState state = seedStateWithSelectiveOverrides();
   const auto before = state.particle_sidecar.gravity_softening_comoving;
 
-  cosmosim::core::SimulationConfig cfg;
+  auto cfg = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   cfg.analysis.enable_diagnostics = true;
   cosmosim::analysis::DiagnosticsEngine engine(cfg);
   const auto health = engine.computeRunHealth(state);

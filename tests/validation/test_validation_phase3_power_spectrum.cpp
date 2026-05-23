@@ -19,7 +19,7 @@ void requireOrThrow(bool condition, const std::string& message) {
 }
 
 cosmosim::core::SimulationConfig makeConfig(int mesh_n) {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "validation_phase3_power_spectrum";
   config.output.output_directory = "validation_outputs";
   config.cosmology.box_size_mpc_comoving = 1.0;

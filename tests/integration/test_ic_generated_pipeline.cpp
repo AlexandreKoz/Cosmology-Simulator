@@ -3,7 +3,7 @@
 #include "cosmosim/cosmosim.hpp"
 
 int main() {
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "integration_ic_generated";
   config.units.length_unit = "kpc";
 

@@ -7,8 +7,8 @@ The Python module exposes a **stable, high-value analysis surface** for post-pro
 Initial public bindings:
 
 - `load_frozen_config(path)`
-- `read_snapshot(path, config)`
-- `write_snapshot(path, state, config, normalized_config_text, git_sha="unknown")`
+- `read_snapshot(path, frozen_config)`
+- `write_snapshot(path, state, frozen_config, git_sha="unknown")`
 - `make_uniform_dark_matter_state(particle_count, mass_code, box_size_mpc_comov)`
 - `DiagnosticsEngine.compute_run_health(...)`
 
@@ -60,4 +60,4 @@ Core engine libraries remain buildable with `COSMOSIM_ENABLE_PYTHON=OFF`.
 - No snapshot schema changes were introduced.
 - No config key changes were introduced.
 - No restart schema changes were introduced.
-- `write_snapshot(...)` requires explicit normalized config text to keep provenance auditable.
+- `write_snapshot(...)` requires a `FrozenConfig` so raw input, normalized text, normalized hash, and derived runtime provenance stay coupled.

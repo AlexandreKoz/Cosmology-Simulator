@@ -7,7 +7,8 @@ import cosmosim
 
 class BindingsSmokeTest(unittest.TestCase):
     def test_import_and_state_views(self) -> None:
-        config = cosmosim.SimulationConfig()
+        frozen = cosmosim.load_frozen_config_from_string("schema_version = 1\n\n[mode]\nmode = zoom_in\n")
+        config = frozen.config
         self.assertEqual(config.schema_version, 1)
 
         state = cosmosim.make_uniform_dark_matter_state(8, 2.5, 10.0)

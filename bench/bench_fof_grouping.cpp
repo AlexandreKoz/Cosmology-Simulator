@@ -8,7 +8,7 @@ int main() {
   constexpr std::uint32_t k_particle_count = 4096;
   const auto setup_start = std::chrono::steady_clock::now();
 
-  cosmosim::core::SimulationConfig config;
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "bench_fof";
   config.cosmology.box_size_mpc_comoving = 50.0;
   config.analysis.halo_fof_linking_length_factor = 0.2;

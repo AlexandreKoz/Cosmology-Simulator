@@ -100,7 +100,7 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
     }
   }
 
-  // The v6 restart schema has one scheduler lane keyed by particle rows. Cell
+  // The current restart schema has one scheduler lane keyed by particle rows. Cell
   // time_bin is still a derived mirror, but particle-bound gas cells must validate
   // through their stable parent-particle identity even when gas cell and total
   // particle counts differ. Otherwise a restart payload could carry a stale cell
