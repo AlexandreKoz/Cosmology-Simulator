@@ -2,12 +2,27 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <stdexcept>
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
 
+template <typename T>
+concept HasPersistentAccelerationLanes = requires(T lane_owner) {
+  lane_owner.acceleration_x_comoving;
+  lane_owner.acceleration_y_comoving;
+  lane_owner.acceleration_z_comoving;
+};
+
 int main() {
+  static_assert(
+      std::is_same_v<decltype(cosmosim::core::SimulationState{}.particles), cosmosim::core::ParticleSoa>,
+      "SimulationState::particles must remain the authoritative persistent particle hot-lane owner");
+  static_assert(
+      !HasPersistentAccelerationLanes<cosmosim::core::ParticleSoa>,
+      "Persistent acceleration lanes are forbidden in ParticleSoa; acceleration must remain transient scratch/output");
+
   static_assert(
       sizeof(cosmosim::core::GravityParticleKernelView) ==
           sizeof(std::span<std::uint32_t>) + (7 * sizeof(std::span<double>)) + sizeof(std::uint64_t),

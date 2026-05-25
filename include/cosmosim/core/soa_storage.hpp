@@ -192,8 +192,11 @@ enum class ParticleSoaField : std::uint8_t {
   kUInt,
 };
 
-// Canonical particle-oriented field pack used by modules that need SoA without
-// hand-rolling N separate vectors. Field names intentionally mirror common IC
+// Reusable particle-oriented SoA utility used by modules/tests that need compact
+// aligned field packs without hand-rolling N separate vectors.
+// This is not SimulationState runtime authority and must remain an adapter/
+// substrate type rather than a competing persistent particle owner.
+// Field names intentionally mirror common IC
 // / runtime naming (`pos_*`, `vel_*`, `mass`, `id`, `rho`, `u_int`).
 class ParticleSoaStorage {
  public:

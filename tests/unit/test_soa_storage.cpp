@@ -3,12 +3,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 #include <vector>
 #include <utility>
 
+#include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/soa_storage.hpp"
 
 int main() {
+  static_assert(
+      !std::is_same_v<cosmosim::core::ParticleSoaStorage, cosmosim::core::ParticleSoa>,
+      "ParticleSoaStorage must remain a reusable adapter substrate, not runtime particle truth");
+
   cosmosim::core::ParticleSoaStorage storage;
   storage.reserve(16);
   storage.resize(8);
