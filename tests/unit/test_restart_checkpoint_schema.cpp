@@ -13,13 +13,21 @@ concept ExposesParticleSoaStorageMember = requires(T payload) {
   payload.particle_soa_storage;
 };
 
+template <typename T>
+concept ExposesTransientWorkspaceMember = requires(T payload) {
+  payload.transient_workspace;
+};
+
 int main() {
   static_assert(
-      std::is_same_v<decltype(cosmosim::io::RestartWritePayload{}.state), const cosmosim::core::SimulationState*>,
+      std::is_same_v<decltype(cosmosim::io::RestartWritePayload{}.persistent_state.simulation_state), const cosmosim::core::SimulationState*>,
       "Restart payload must serialize canonical SimulationState ownership root");
   static_assert(
       !ExposesParticleSoaStorageMember<cosmosim::io::RestartWritePayload>,
       "Restart payload must not expose ParticleSoaStorage as persistent restart truth");
+  static_assert(
+      !ExposesTransientWorkspaceMember<cosmosim::io::RestartWritePayload>,
+      "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
   assert(schema.name == "cosmosim_restart_v10");
@@ -66,7 +74,7 @@ int main() {
   scheduler.reset(1, 0, 0);
 
   cosmosim::io::RestartWritePayload payload;
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "mode = toy\n";
@@ -176,7 +184,7 @@ int main() {
         cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
     cosmosim::io::RestartWritePayload gas_payload = payload;
-    gas_payload.state = &gas_state;
+    gas_payload.persistent_state.simulation_state = &gas_state;
     gas_payload.scheduler = &gas_scheduler;
     gas_payload.distributed_gravity_state.owning_rank_by_item = {0, 0, 0, 0};
     assert(cosmosim::io::restartPayloadIntegrityHash(gas_payload) != 0);

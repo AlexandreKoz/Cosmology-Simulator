@@ -28,8 +28,15 @@ struct RestartWritePolicy {
   std::string temporary_suffix = ".tmp";
 };
 
+struct RestartPersistentStateView {
+  // Narrow restart-serialization root: persistent-only state ownership path.
+  // TransientStepWorkspace/HydroScratch/PM/MPI/output scratch are intentionally
+  // outside this view so restart traversal cannot accidentally serialize them.
+  const core::SimulationState* simulation_state = nullptr;
+};
+
 struct RestartWritePayload {
-  const core::SimulationState* state = nullptr;
+  RestartPersistentStateView persistent_state;
   const core::IntegratorState* integrator_state = nullptr;
   const core::HierarchicalTimeBinScheduler* scheduler = nullptr;
   core::ProvenanceRecord provenance;

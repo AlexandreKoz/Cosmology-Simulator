@@ -5,7 +5,7 @@
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
 The restart schema (`cosmosim_restart_v10`) persists:
 
-- full `SimulationState` hot/cold SoA lanes,
+- full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
 - `IntegratorState`,
@@ -15,6 +15,8 @@ The restart schema (`cosmosim_restart_v10`) persists:
 - payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
+
+Restart write payloads now carry `RestartPersistentStateView` (`persistent_state.simulation_state`) rather than a broad ad-hoc object pointer. This creates an explicit outer-boundary guard: transient runtime owners such as `TransientStepWorkspace`, `HydroScratchBuffers`, PM work arrays, TreePM traversal scratch, MPI send/recv buffers, and output staging buffers are out-of-scope for restart traversal by type.
 
 ## File format and compatibility
 
