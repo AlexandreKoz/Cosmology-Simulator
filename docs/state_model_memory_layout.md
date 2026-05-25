@@ -84,6 +84,17 @@ does not duplicate production authority or alter hydro/restart behavior. Promoti
 restart-schema migration plan in `docs/architecture/gas_cell_identity_map_rfc.md`, plus tests proving hydro state
 remaps by stable `gas_cell_id` rather than particle index or row position.
 
+## Hot/cold ownership contract (Stage 6.2)
+
+| Ownership class | Authoritative structures | Allowed contents | Forbidden in hot kernel views |
+| --- | --- | --- | --- |
+| Particle hot lanes | `ParticleSoa`, `GravityParticleKernelView` | `position_[xyz]_comoving`, `velocity_[xyz]_peculiar`, `mass_code`, transient `particle_index` scatter key | `particle_id`, species tag, owning rank, flags, SFC key, module state |
+| Particle cold metadata | `ParticleSidecar` + species sidecars | IDs, species tags, ownership, flags, SFC, provenance-adjacent bookkeeping, optional per-species/module payloads | mutation from gravity/hydro hot-view scatter paths |
+| Gas/cell hot lanes | `CellSoa`, `HydroCellKernelView` | `center_[xyz]_comoving`, `mass_code`, `density_code`, `pressure_code`, transient `cell_index` scatter key | gas identity metadata (`gas_cell_id`, `parent_particle_id`), patch metadata, reconstruction gradients |
+| Transient scratch | `TransientStepWorkspace`, reconstruction/work arrays | active-list mirrors, kernel gather/scatter buffers, temporary reconstruction/face work | restart truth or persistent ownership |
+
+The unit contract tests now assert that gravity/hydro hot-view scatter updates only allowed hot lanes and leaves cold sidecars untouched.
+
 ## Layout policy and reorder contract
 
 The solver-facing state is split into three ownership classes:

@@ -73,11 +73,18 @@ int main() {
 
   cosmosim::core::TransientStepWorkspace workspace;
   const std::array<std::uint32_t, 3> active_particles{0, 2, 4};
+
+  const auto particle_id_before_hot = state.particle_sidecar.particle_id;
+  const auto species_before_hot = state.particle_sidecar.species_tag;
+  const auto owning_rank_before_hot = state.particle_sidecar.owning_rank;
   auto gravity_view = cosmosim::core::buildGravityParticleKernelView(state, active_particles, workspace);
   assert(gravity_view.size() == 3);
   gravity_view.velocity_x_peculiar[1] += 2.0;
   cosmosim::core::scatterGravityParticleKernelView(gravity_view, state);
   assert(state.particles.velocity_x_peculiar[active_particles[1]] == gravity_view.velocity_x_peculiar[1]);
+  assert(state.particle_sidecar.particle_id == particle_id_before_hot);
+  assert(state.particle_sidecar.species_tag == species_before_hot);
+  assert(state.particle_sidecar.owning_rank == owning_rank_before_hot);
 
   const std::size_t gravity_capacity_before_clear = workspace.particle_position_x_comoving.capacity();
   const std::size_t gravity_index_capacity_before_clear = workspace.gravity_particle_index.capacity();
@@ -121,10 +128,20 @@ int main() {
   assert(hydro_state.validateOwnershipInvariants());
 
   const std::array<std::uint32_t, 2> active_cells{0, 1};
+  const auto gas_cell_id_before_hot = hydro_state.gas_cells.gas_cell_id;
+  const auto parent_particle_id_before_hot = hydro_state.gas_cells.parent_particle_id;
+  const auto recon_x_before_hot = hydro_state.gas_cells.recon_gradient_x;
+  const auto recon_y_before_hot = hydro_state.gas_cells.recon_gradient_y;
+  const auto recon_z_before_hot = hydro_state.gas_cells.recon_gradient_z;
   auto hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_state, active_cells, workspace);
   hydro_view.density_code[0] = 99.0;
   cosmosim::core::scatterHydroCellKernelView(hydro_view, hydro_state);
   assert(hydro_state.gas_cells.density_code[0] == 99.0);
+  assert(hydro_state.gas_cells.gas_cell_id == gas_cell_id_before_hot);
+  assert(hydro_state.gas_cells.parent_particle_id == parent_particle_id_before_hot);
+  assert(hydro_state.gas_cells.recon_gradient_x == recon_x_before_hot);
+  assert(hydro_state.gas_cells.recon_gradient_y == recon_y_before_hot);
+  assert(hydro_state.gas_cells.recon_gradient_z == recon_z_before_hot);
 
   const std::size_t hydro_capacity_before_clear = workspace.hydro_cell_density_code.capacity();
   workspace.clear();
