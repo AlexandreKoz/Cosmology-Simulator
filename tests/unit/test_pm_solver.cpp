@@ -509,6 +509,34 @@ void testPoissonPlanCachingForStableSlabLayout() {
   assert(plan_count_after_first == 1U);
 }
 
+void testActivePmTargetViewExtentValidation() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  std::vector<std::uint32_t> active{0, 1};
+  std::vector<double> x{0.1, 0.2};
+  std::vector<double> y{0.1, 0.2};
+  std::vector<double> z{0.1, 0.2};
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(2, 0.0);
+  std::vector<double> az(2, 0.0);
+  bool threw = false;
+  try {
+    solver.interpolateForces(
+        grid,
+        cosmosim::gravity::PmSolver::PmForceTargetView{active, x, y, z, ax, ay, az},
+        options,
+        nullptr);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -529,6 +557,7 @@ int main() {
   testSingleRankSlabLayoutStorageEquivalence();
   testPartialSlabStorageRejectsSingleRankSolverPath();
   testPoissonPlanCachingForStableSlabLayout();
+  testActivePmTargetViewExtentValidation();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();

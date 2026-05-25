@@ -122,6 +122,23 @@ class PmGridStorage {
 
 class PmSolver {
  public:
+  struct PmMassSourceView {
+    std::span<const double> pos_x_comoving;
+    std::span<const double> pos_y_comoving;
+    std::span<const double> pos_z_comoving;
+    std::span<const double> mass_code;
+  };
+
+  struct PmForceTargetView {
+    std::span<const std::uint32_t> active_particle_index;
+    std::span<const double> pos_x_comoving;
+    std::span<const double> pos_y_comoving;
+    std::span<const double> pos_z_comoving;
+    std::span<double> accel_x_comoving;
+    std::span<double> accel_y_comoving;
+    std::span<double> accel_z_comoving;
+  };
+
   explicit PmSolver(PmGridShape shape);
   ~PmSolver();
   PmSolver(PmSolver&&) noexcept;
@@ -130,6 +147,12 @@ class PmSolver {
   PmSolver& operator=(const PmSolver&) = delete;
 
   [[nodiscard]] const PmGridShape& shape() const;
+
+  void assignDensity(
+      PmGridStorage& grid,
+      const PmMassSourceView& source_view,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
 
   void assignDensity(
       PmGridStorage& grid,
@@ -152,6 +175,12 @@ class PmSolver {
   // available for direct mesh inspection and interpolation.
   void solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
   void solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
+
+  void interpolateForces(
+      const PmGridStorage& grid,
+      const PmForceTargetView& target_view,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
 
   void interpolateForces(
       const PmGridStorage& grid,
