@@ -1,5 +1,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <algorithm>
+
 namespace cosmosim::core {
 
 void ActiveIndexSet::clear() {
@@ -171,6 +173,41 @@ GravityParticleKernelView buildGravityParticleKernelView(
       active_particle_indices,
       workspace.particle_velocity_z_peculiar);
   gatherSpan<double>(state.particles.mass_code, active_particle_indices, workspace.particle_mass_code);
+  return GravityParticleKernelView{
+      .particle_index = workspace.gravity_particle_index,
+      .position_x_comoving = workspace.particle_position_x_comoving,
+      .position_y_comoving = workspace.particle_position_y_comoving,
+      .position_z_comoving = workspace.particle_position_z_comoving,
+      .velocity_x_peculiar = workspace.particle_velocity_x_peculiar,
+      .velocity_y_peculiar = workspace.particle_velocity_y_peculiar,
+      .velocity_z_peculiar = workspace.particle_velocity_z_peculiar,
+      .mass_code = workspace.particle_mass_code,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+  };
+}
+
+GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
+    const SimulationState& state,
+    TransientStepWorkspace& workspace) {
+  workspace.gravity_particle_index.resize(state.particles.size());
+  workspace.particle_position_x_comoving.resize(state.particles.size());
+  workspace.particle_position_y_comoving.resize(state.particles.size());
+  workspace.particle_position_z_comoving.resize(state.particles.size());
+  workspace.particle_velocity_x_peculiar.resize(state.particles.size());
+  workspace.particle_velocity_y_peculiar.resize(state.particles.size());
+  workspace.particle_velocity_z_peculiar.resize(state.particles.size());
+  workspace.particle_mass_code.resize(state.particles.size());
+
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    workspace.gravity_particle_index[i] = static_cast<std::uint32_t>(i);
+  }
+  std::copy(state.particles.position_x_comoving.begin(), state.particles.position_x_comoving.end(), workspace.particle_position_x_comoving.begin());
+  std::copy(state.particles.position_y_comoving.begin(), state.particles.position_y_comoving.end(), workspace.particle_position_y_comoving.begin());
+  std::copy(state.particles.position_z_comoving.begin(), state.particles.position_z_comoving.end(), workspace.particle_position_z_comoving.begin());
+  std::copy(state.particles.velocity_x_peculiar.begin(), state.particles.velocity_x_peculiar.end(), workspace.particle_velocity_x_peculiar.begin());
+  std::copy(state.particles.velocity_y_peculiar.begin(), state.particles.velocity_y_peculiar.end(), workspace.particle_velocity_y_peculiar.begin());
+  std::copy(state.particles.velocity_z_peculiar.begin(), state.particles.velocity_z_peculiar.end(), workspace.particle_velocity_z_peculiar.begin());
+  std::copy(state.particles.mass_code.begin(), state.particles.mass_code.end(), workspace.particle_mass_code.begin());
   return GravityParticleKernelView{
       .particle_index = workspace.gravity_particle_index,
       .position_x_comoving = workspace.particle_position_x_comoving,

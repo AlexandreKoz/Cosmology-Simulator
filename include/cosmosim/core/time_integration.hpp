@@ -308,6 +308,8 @@ struct StepContext {
   SimulationState& state;
   IntegratorState& integrator_state;
   ActiveSetDescriptor active_set;
+  GravityParticleKernelView active_gravity_particles;
+  bool has_active_gravity_particles = false;
   TransientStepWorkspace* workspace = nullptr;
   const LambdaCdmBackground* cosmology_background = nullptr;
   const ModePolicy* mode_policy = nullptr;

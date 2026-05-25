@@ -818,6 +818,8 @@ void StepOrchestrator::executeOutputBoundary(
       .state = state,
       .integrator_state = integrator_state,
       .active_set = output_active_set,
+      .active_gravity_particles = {},
+      .has_active_gravity_particles = false,
       .workspace = nullptr,
       .cosmology_background = nullptr,
       .mode_policy = nullptr,
@@ -883,6 +885,8 @@ void StepOrchestrator::executeSingleStep(
       .state = state,
       .integrator_state = integrator_state,
       .active_set = active_set,
+      .active_gravity_particles = {},
+      .has_active_gravity_particles = false,
       .workspace = workspace,
       .cosmology_background = cosmology_background,
       .mode_policy = mode_policy,
@@ -904,6 +908,24 @@ void StepOrchestrator::executeSingleStep(
     context.stage = stage;
     context.boundary = boundary;
     context.pm_refresh_directive = {};
+    context.has_active_gravity_particles = false;
+    context.active_gravity_particles = {};
+    if (stage == IntegrationStage::kDrift || stage == IntegrationStage::kGravityKickPre ||
+        stage == IntegrationStage::kGravityKickPost) {
+      if (workspace == nullptr) {
+        throw std::runtime_error(
+            "drift/kick stages require TransientStepWorkspace for compact active gravity views");
+      }
+      if (active_set.hasParticleSubset(state.particles.size())) {
+        context.active_gravity_particles = buildGravityParticleKernelView(
+            state,
+            active_set.particle_indices,
+            *workspace);
+      } else {
+        context.active_gravity_particles = buildGravityParticleKernelViewAllParticles(state, *workspace);
+      }
+      context.has_active_gravity_particles = true;
+    }
     if (stage == IntegrationStage::kGravityKickPre) {
       context.pm_refresh_directive.initial_cache_bootstrap_allowed = !boundary.local_substep;
       if (integrator_state.pm_refresh_enabled && context.pm_refresh_directive.initial_cache_bootstrap_allowed &&
