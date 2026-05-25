@@ -28,7 +28,10 @@ enum class ParticleSpecies : std::uint8_t {
 };
 
 struct ParticleSoa {
-  // Shared gravity-hot particle fields; species-specific cold data must live in sidecars.
+  // Authoritative owner for persistent gravity-hot particle truth in SimulationState.
+  // Ownership lanes: position_*_comoving, velocity_*_peculiar, mass_code.
+  // Deliberately no persistent acceleration lane: force accelerations are transient
+  // kernel/workspace outputs and must not become a second persistent truth vector.
   AlignedVector<double> position_x_comoving;
   AlignedVector<double> position_y_comoving;
   AlignedVector<double> position_z_comoving;
@@ -46,12 +49,15 @@ struct ParticleSoa {
 };
 
 struct ParticleSidecar {
-  // Shared metadata sidecar: IDs, species ownership, and rank ownership.
+  // Authoritative persistent metadata owner for particle IDs/species/rank and
+  // ownership-adjacent particle metadata outside gravity-hot lanes.
   AlignedVector<std::uint64_t> particle_id;
   // Space-filling-curve key used for locality-preserving reorder/grouping.
   AlignedVector<std::uint64_t> sfc_key;
+  // Authoritative species-tag ownership lane.
   AlignedVector<std::uint32_t> species_tag;
   AlignedVector<std::uint32_t> particle_flags;
+  // Authoritative owning-rank lane for distributed ownership truth.
   AlignedVector<std::uint32_t> owning_rank;
   // Authoritative particle-position epoch used to predict inactive TreePM sources
   // without mutating persistent particle state during local active-bin refreshes.

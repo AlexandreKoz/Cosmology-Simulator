@@ -1,13 +1,26 @@
 #include <cassert>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 
+template <typename T>
+concept ExposesParticleSoaStorageMember = requires(T payload) {
+  payload.particle_soa_storage;
+};
+
 int main() {
+  static_assert(
+      std::is_same_v<decltype(cosmosim::io::RestartWritePayload{}.state), const cosmosim::core::SimulationState*>,
+      "Restart payload must serialize canonical SimulationState ownership root");
+  static_assert(
+      !ExposesParticleSoaStorageMember<cosmosim::io::RestartWritePayload>,
+      "Restart payload must not expose ParticleSoaStorage as persistent restart truth");
+
   const auto& schema = cosmosim::io::restartSchema();
   assert(schema.name == "cosmosim_restart_v10");
   assert(schema.version == 10);

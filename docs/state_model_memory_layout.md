@@ -7,6 +7,9 @@ This document defines the persistent and transient memory contract for simulatio
 `SimulationState` is the single ownership root for persistent run state:
 
 - `ParticleSoa`: shared gravity-hot particle skeleton (`pos_*_comoving`, `vel_*_peculiar`, `mass_code`, `time_bin`).
+  `ParticleSoa` is the only authoritative persistent owner of particle hot lanes in runtime state.
+  Persistent acceleration arrays are intentionally absent; acceleration/force outputs are transient
+  kernel/workspace products and are not restart truth.
 - `ParticleSidecar`: shared metadata (`particle_id`, species tags, flags, rank ownership).
 - `CellSoa`: gas-cell gravity skeleton (`center_*_comoving`, `mass_code`, `time_bin`, `patch_index`).
 - `GasCellSidecar`: thermodynamics and hydro reconstruction sidecar (`density_code`, `pressure_code`, gradients, etc.) plus the temporary particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
@@ -140,7 +143,7 @@ field-keyed typed span access, and gather/scatter helpers for active kernels:
 
 - `SoaFieldArray<T>`: aligned contiguous field storage with explicit `size`, `capacity`,
   `reserve`, `resize`, `swapErase`, and stable compaction.
-- `ParticleSoaStorage`: canonical particle-oriented field pack (`pos_*`, `vel_*`, `mass`, `id`,
+- `ParticleSoaStorage`: reusable particle-oriented field pack (`pos_*`, `vel_*`, `mass`, `id`,
   `rho`, `u_int`) with typed access via `ParticleSoaField`.
 - `gatherSpan` / `scatterSpan`: index-driven data movement for active kernels.
 
@@ -150,3 +153,5 @@ Schema/provenance implications:
 2. Canonical external naming remains unchanged in configuration and restart metadata.
 3. The substrate keeps host-side semantics compatible with future device mirrors by using
    per-field contiguous arrays and explicit logical sizes.
+4. `ParticleSoaStorage` is utility/test substrate only; it is not authoritative runtime
+   particle truth and must not replace `SimulationState::particles` + sidecars.
