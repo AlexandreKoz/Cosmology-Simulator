@@ -271,7 +271,7 @@ HydroCoreSolver::HydroCoreSolver(double adiabatic_index) : m_adiabatic_index(adi
 double HydroCoreSolver::adiabaticIndex() const { return m_adiabatic_index; }
 
 void HydroScratchBuffers::resize(std::size_t cell_count, std::size_t active_face_count) {
-  cell_delta.assign(cell_count, HydroConservedState{});
+  cell_delta.resize(cell_count);
   left_states.resize(active_face_count);
   right_states.resize(active_face_count);
   fluxes.resize(active_face_count);
@@ -361,18 +361,18 @@ void HydroCoreSolver::advancePatchWithScratch(
     HydroScratchBuffers& scratch,
     HydroPrimitiveCacheSoa* primitive_cache,
     HydroProfileEvent* profile) const {
-  std::vector<std::size_t> full_cells(conserved.size());
-  for (std::size_t i = 0; i < full_cells.size(); ++i) {
-    full_cells[i] = i;
+  scratch.full_active_cells.resize(conserved.size());
+  for (std::size_t i = 0; i < scratch.full_active_cells.size(); ++i) {
+    scratch.full_active_cells[i] = i;
   }
-  std::vector<std::size_t> full_faces(geometry.faces.size());
-  for (std::size_t i = 0; i < full_faces.size(); ++i) {
-    full_faces[i] = i;
+  scratch.full_active_faces.resize(geometry.faces.size());
+  for (std::size_t i = 0; i < scratch.full_active_faces.size(); ++i) {
+    scratch.full_active_faces[i] = i;
   }
   advancePatchActiveSetWithScratch(
       conserved,
       geometry,
-      HydroActiveSetView{.active_cells = full_cells, .active_faces = full_faces},
+      HydroActiveSetView{.active_cells = scratch.full_active_cells, .active_faces = scratch.full_active_faces},
       update,
       reconstruction,
       riemann_solver,
@@ -428,6 +428,21 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   validateAdvanceInputs(conserved, geometry, update, source_context, m_adiabatic_index);
   validateActiveSet(active_set, conserved, geometry);
   scratch.resize(conserved.size(), active_set.active_faces.size());
+  scratch.touched_cells.clear();
+  scratch.touched_cells.reserve(active_set.active_faces.size() * 2U + active_set.active_cells.size());
+  for (std::size_t cell_index : active_set.active_cells) {
+    scratch.cell_delta[cell_index] = HydroConservedState{};
+    scratch.touched_cells.push_back(cell_index);
+  }
+  for (std::size_t face_index : active_set.active_faces) {
+    const HydroFace& face = geometry.faces[face_index];
+    scratch.cell_delta[face.owner_cell] = HydroConservedState{};
+    scratch.touched_cells.push_back(face.owner_cell);
+    if (face.neighbor_cell != k_invalid_cell_index) {
+      scratch.cell_delta[face.neighbor_cell] = HydroConservedState{};
+      scratch.touched_cells.push_back(face.neighbor_cell);
+    }
+  }
   if (primitive_cache != nullptr) {
     fillPrimitiveCache(conserved, active_set, m_adiabatic_index, *primitive_cache);
   }

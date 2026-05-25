@@ -169,10 +169,14 @@ struct HydroProfileEvent {
 };
 
 struct HydroScratchBuffers {
+  // Transient per-step workspaces. None of these arrays are restart-authoritative.
   std::vector<HydroConservedState> cell_delta;
   std::vector<HydroPrimitiveState> left_states;
   std::vector<HydroPrimitiveState> right_states;
   std::vector<HydroConservedState> fluxes;
+  std::vector<std::size_t> touched_cells;
+  std::vector<std::size_t> full_active_cells;
+  std::vector<std::size_t> full_active_faces;
 
   void resize(std::size_t cell_count, std::size_t active_face_count);
 };
