@@ -617,6 +617,9 @@ struct TransientStepWorkspace {
     const SimulationState& state,
     std::span<const std::uint32_t> active_particle_indices,
     TransientStepWorkspace& workspace);
+[[nodiscard]] GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
+    const SimulationState& state,
+    TransientStepWorkspace& workspace);
 
 void scatterGravityParticleKernelView(
     const GravityParticleKernelView& view,

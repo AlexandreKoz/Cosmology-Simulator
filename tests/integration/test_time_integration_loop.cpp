@@ -101,13 +101,14 @@ class ActiveSubsetKickMock final : public cosmosim::core::IntegrationCallback {
 
 void runNoPhysicsLoop() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.dt_time_code = 0.1;
   integrator_state.current_scale_factor = 1.0;
 
   cosmosim::core::StepOrchestrator orchestrator;
   for (int step = 0; step < 5; ++step) {
-    orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);
+    orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, &workspace);
   }
 
   assert(std::abs(integrator_state.current_time_code - 0.5) < 1.0e-12);
@@ -117,6 +118,7 @@ void runNoPhysicsLoop() {
 
 void runGravityOnlyLoop() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   state.resizeParticles(4);
 
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
@@ -138,7 +140,7 @@ void runGravityOnlyLoop() {
   orchestrator.registerCallback(gravity_kick);
 
   for (int step = 0; step < 4; ++step) {
-    orchestrator.executeSingleStep(state, integrator_state, {}, &background, nullptr);
+    orchestrator.executeSingleStep(state, integrator_state, {}, &background, &workspace);
   }
 
   // Two kick stages per step with 0.25*dt each => net velocity increment per step is 0.5*dt.
@@ -153,6 +155,7 @@ void runGravityOnlyLoop() {
 
 void runStarFormationSourceTermLoop() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   state.resizeCells(4);
   for (std::size_t i = 0; i < state.cells.size(); ++i) {
     state.cells.center_x_comoving[i] = static_cast<double>(i);
@@ -193,7 +196,7 @@ void runStarFormationSourceTermLoop() {
       .cells_are_subset = true,
   };
   for (int step = 0; step < 3; ++step) {
-    orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr);
+    orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace);
   }
 
   double gas_mass_after = 0.0;
@@ -215,6 +218,7 @@ void runStarFormationSourceTermLoop() {
 
 void runActiveSubsetKickContractLoop() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   state.resizeParticles(6);
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     state.particles.velocity_x_peculiar[i] = 0.0;
@@ -233,7 +237,7 @@ void runActiveSubsetKickContractLoop() {
   ActiveSubsetKickMock subset_kick;
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(subset_kick);
-  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace);
 
   assert(subset_kick.kick_stage_invocations == 2);
   assert(subset_kick.kicked_particles_per_stage.size() == 2);

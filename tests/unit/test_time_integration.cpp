@@ -198,6 +198,7 @@ class PmDirectiveRecorder final : public cosmosim::core::IntegrationCallback {
 void testKickDriftKickOrdering() {
   cosmosim::core::SimulationState state;
   cosmosim::core::IntegratorState integrator_state;
+  cosmosim::core::TransientStepWorkspace workspace;
   integrator_state.dt_time_code = 1.0;
 
   StageRecorder recorder;
@@ -205,7 +206,7 @@ void testKickDriftKickOrdering() {
   orchestrator.registerCallback(recorder);
 
   const cosmosim::core::ActiveSetDescriptor active_set{};
-  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace);
   orchestrator.executeOutputBoundary(
       state,
       integrator_state,
@@ -224,6 +225,7 @@ void testKickDriftKickOrdering() {
 void testPmRefreshDirectiveCapturesReasonAndForceEvalTime() {
   cosmosim::core::SimulationState state;
   cosmosim::core::IntegratorState integrator_state;
+  cosmosim::core::TransientStepWorkspace workspace;
   integrator_state.dt_time_code = 0.25;
   integrator_state.pm_refresh_enabled = true;
   integrator_state.pm_long_range_field_valid = false;
@@ -232,7 +234,7 @@ void testPmRefreshDirectiveCapturesReasonAndForceEvalTime() {
   PmDirectiveRecorder recorder;
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(recorder);
-  orchestrator.executeSingleStep(state, integrator_state, cosmosim::core::ActiveSetDescriptor{}, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, cosmosim::core::ActiveSetDescriptor{}, nullptr, &workspace);
 
   assert(recorder.kick_pre.reason == cosmosim::core::PmRefreshDirective::Reason::kInitialForceBootstrap);
   assert(recorder.kick_pre.sync_stage == cosmosim::core::PmSyncStage::kInitialLongRangeBootstrap);
@@ -273,6 +275,7 @@ void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
   });
 
   PmDirectiveRecorder recorder;
+  cosmosim::core::TransientStepWorkspace workspace;
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(recorder);
   orchestrator.executeSingleStep(
@@ -280,7 +283,7 @@ void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
       integrator_state,
       local_active,
       nullptr,
-      nullptr,
+      &workspace,
       nullptr,
       nullptr,
       std::uint64_t{7},
@@ -298,6 +301,7 @@ void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
 void testStageBoundDispatch() {
   cosmosim::core::SimulationState state;
   cosmosim::core::IntegratorState integrator_state;
+  cosmosim::core::TransientStepWorkspace workspace;
   integrator_state.dt_time_code = 1.0;
 
   std::vector<std::string> order;
@@ -315,7 +319,7 @@ void testStageBoundDispatch() {
   assert(orchestrator.contractsFor(cosmosim::core::IntegrationStage::kDrift).size() == 2U);
   assert(orchestrator.handlersFor(cosmosim::core::IntegrationStage::kHydroUpdate).empty());
 
-  orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, {}, nullptr, &workspace);
 
   assert(drift_first.invocations == 1);
   assert(drift_second.invocations == 1);
@@ -477,6 +481,7 @@ void testLocalPmSyncEventIsHardRejectedAfterHandlerMutation() {
   });
 
   cosmosim::core::StepOrchestrator orchestrator;
+  cosmosim::core::TransientStepWorkspace workspace;
   orchestrator.registerCallback(callback);
   assert(throwsWithContext(
       [&]() {
@@ -485,7 +490,7 @@ void testLocalPmSyncEventIsHardRejectedAfterHandlerMutation() {
             integrator_state,
             local_active,
             nullptr,
-            nullptr,
+            &workspace,
             nullptr,
             nullptr,
             std::uint64_t{9},
@@ -907,6 +912,7 @@ void testHydroGravityCandidateReconciliation() {
 
 void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   state.resizeParticles(1);
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.dt_time_code = 1.0;
@@ -919,7 +925,7 @@ void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
   cosmosim::core::StepOrchestrator orchestrator;
   bool threw = false;
   try {
-    orchestrator.executeSingleStep(state, integrator_state, untrusted, nullptr, nullptr, nullptr, nullptr, 0);
+    orchestrator.executeSingleStep(state, integrator_state, untrusted, nullptr, &workspace, nullptr, nullptr, 0);
   } catch (const std::runtime_error&) {
     threw = true;
   }
@@ -928,6 +934,7 @@ void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
 
 void testOrchestratorRejectsSchedulerActiveSetWithoutTick() {
   cosmosim::core::SimulationState state;
+  cosmosim::core::TransientStepWorkspace workspace;
   state.resizeParticles(2);
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(1);
   scheduler.reset(2, 0, 0);
@@ -938,10 +945,10 @@ void testOrchestratorRejectsSchedulerActiveSetWithoutTick() {
   integrator_state.dt_time_code = 1.0;
   cosmosim::core::StepOrchestrator orchestrator;
   assert(throwsWithContext(
-      [&]() { orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr); },
+      [&]() { orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace); },
       "scheduler-derived active sets require explicit scheduler tick"));
 
-  orchestrator.executeSchedulerSubstep(state, integrator_state, scheduler, active, {}, nullptr);
+  orchestrator.executeSchedulerSubstep(state, integrator_state, scheduler, active, {}, nullptr, &workspace);
   scheduler.endSubstep();
 }
 
