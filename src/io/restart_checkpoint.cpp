@@ -777,7 +777,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  if (payload.state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
+  if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
   validateContinuationMetadata(
@@ -785,18 +785,18 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
       payload.normalized_config_hash_hex,
       payload.provenance,
       "restart payload");
-  if (!payload.state->validateOwnershipInvariants()) {
+  if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
   }
   const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
   validateRestartTimeBinMirrorsAgainstScheduler(
-      *payload.state,
+      *payload.persistent_state.simulation_state,
       scheduler_state_for_validation,
       "restart payload");
   if (payload.distributed_gravity_state.world_size <= 0) {
     throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
   }
-  if (payload.distributed_gravity_state.owning_rank_by_item.size() != payload.state->particles.size()) {
+  if (payload.distributed_gravity_state.owning_rank_by_item.size() != payload.persistent_state.simulation_state->particles.size()) {
     throw std::invalid_argument(
         "restart payload distributed_gravity_state.owning_rank_by_item must match particle count");
   }
@@ -828,7 +828,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_string(payload.normalized_config_text);
   append_string(payload.normalized_config_hash_hex);
   append_string(core::serializeProvenanceRecord(payload.provenance));
-  append_string(payload.state->metadata.serialize());
+  append_string(payload.persistent_state.simulation_state->metadata.serialize());
 
   const auto append_any_vec = [&hash, &append_u64](const auto& values) {
     const auto bytes = asBytesSpan(values);
@@ -837,7 +837,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
     hash = fnv1aAppend(hash, bytes);
   };
 
-  const core::SimulationState& state = *payload.state;
+  const core::SimulationState& state = *payload.persistent_state.simulation_state;
   append_any_vec(state.particles.position_x_comoving);
   append_any_vec(state.particles.position_y_comoving);
   append_any_vec(state.particles.position_z_comoving);
@@ -976,7 +976,7 @@ void writeRestartCheckpointHdf5(
   (void)policy;
   throw std::runtime_error("restart checkpoint requires COSMOSIM_ENABLE_HDF5=ON");
 #else
-  if (payload.state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
+  if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart write payload must include state, integrator_state, and scheduler");
   }
   validateContinuationMetadata(
@@ -984,11 +984,11 @@ void writeRestartCheckpointHdf5(
       payload.normalized_config_hash_hex,
       payload.provenance,
       "restart writer");
-  if (!payload.state->validateOwnershipInvariants()) {
+  if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("cannot checkpoint invalid simulation state");
   }
   validateRestartTimeBinMirrorsAgainstScheduler(
-      *payload.state,
+      *payload.persistent_state.simulation_state,
       payload.scheduler->exportPersistentState(),
       "restart writer");
 
@@ -1016,7 +1016,7 @@ void writeRestartCheckpointHdf5(
       std::string(shared_names.provenance_record_dataset),
       core::serializeProvenanceRecord(payload.provenance));
 
-  writeStateGroup(file.get(), *payload.state);
+  writeStateGroup(file.get(), *payload.persistent_state.simulation_state);
 
   Hdf5Handle integrator_group(openOrCreateGroup(file.get(), "/integrator"));
   writeScalarF64Attribute(integrator_group.get(), "current_time_code", payload.integrator_state->current_time_code);
@@ -1175,7 +1175,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;
-  verify_payload.state = &result.state;
+  verify_payload.persistent_state.simulation_state = &result.state;
   verify_payload.integrator_state = &result.integrator_state;
   core::HierarchicalTimeBinScheduler verify_scheduler(result.scheduler_state.max_bin);
   verify_scheduler.importPersistentState(result.scheduler_state);

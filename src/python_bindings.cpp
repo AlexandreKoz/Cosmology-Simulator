@@ -247,7 +247,7 @@ PYBIND11_MODULE(_cosmosim, module) {
          const FrozenConfig& frozen_config,
          const std::string& git_sha) {
         cosmosim::io::SnapshotWritePayload payload;
-        payload.state = &state;
+        payload.persistent_state.simulation_state = &state;
         payload.config = &frozen_config.config;
         payload.normalized_config_text = frozen_config.normalized_text;
         payload.git_sha = git_sha;

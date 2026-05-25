@@ -2477,7 +2477,7 @@ bool maybeWriteOutputs(
   }
 
   io::SnapshotWritePayload snapshot_payload;
-  snapshot_payload.state = &state;
+  snapshot_payload.persistent_state.simulation_state = &state;
   snapshot_payload.config = &config;
   snapshot_payload.normalized_config_text = frozen_config.normalized_text;
   snapshot_payload.provenance =
@@ -2500,7 +2500,7 @@ bool maybeWriteOutputs(
 
   if (checkpoint_due) {
     io::RestartWritePayload restart_payload;
-    restart_payload.state = &state;
+    restart_payload.persistent_state.simulation_state = &state;
     restart_payload.integrator_state = &integrator_state;
     restart_payload.scheduler = &scheduler;
     restart_payload.provenance =

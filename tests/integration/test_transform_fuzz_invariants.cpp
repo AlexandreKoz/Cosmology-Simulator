@@ -625,7 +625,7 @@ void verifyRestartRoundTripIfEnabled(SimulationState state, const TransformOracl
   cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
 
   cosmosim::io::RestartWritePayload payload;
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\n[mode]\nmode = zoom_in\n[fuzz]\nseed = fixed\n";

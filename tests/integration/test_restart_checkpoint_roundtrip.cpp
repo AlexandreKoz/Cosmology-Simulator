@@ -173,7 +173,7 @@ void fillRestartPayload(
     cosmosim::core::SimulationState& state,
     cosmosim::core::IntegratorState& integrator_state,
     cosmosim::core::HierarchicalTimeBinScheduler& scheduler) {
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
@@ -266,7 +266,7 @@ void testRestartRoundtrip() {
       schedulerActiveIdsFromPersistentState(state, scheduler.exportPersistentState());
 
   cosmosim::io::RestartWritePayload payload;
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
@@ -483,7 +483,7 @@ void testRestartRoundtrip() {
   cosmosim::core::SimulationState stale_state = state;
   stale_state.particles.time_bin[0] = static_cast<std::uint8_t>(stale_state.particles.time_bin[0] ^ 1U);
   cosmosim::io::RestartWritePayload stale_payload = payload;
-  stale_payload.state = &stale_state;
+  stale_payload.persistent_state.simulation_state = &stale_state;
   bool stale_writer_threw = false;
   try {
     (void)cosmosim::io::restartPayloadIntegrityHash(stale_payload);
@@ -622,7 +622,7 @@ void testRestartRoundtrip() {
   legacy_softening_state.particle_sidecar.gravity_softening_comoving.clear();
   legacy_softening_state.particle_sidecar.has_gravity_softening_override.clear();
   cosmosim::io::RestartWritePayload legacy_softening_payload = payload;
-  legacy_softening_payload.state = &legacy_softening_state;
+  legacy_softening_payload.persistent_state.simulation_state = &legacy_softening_state;
   legacy_softening_payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
   legacy_softening_payload.provenance.gravity_softening_policy = payload.provenance.gravity_softening_policy;
   legacy_softening_payload.provenance.gravity_softening_kernel = payload.provenance.gravity_softening_kernel;
