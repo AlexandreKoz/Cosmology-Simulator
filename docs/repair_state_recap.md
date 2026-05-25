@@ -1,3 +1,10 @@
+
+## 2026-05-25 Stage 6 memory accounting infrastructure by subsystem (S6-07)
+
+- Added central `core::MemoryReport` accounting API with subsystem categories, persistent/transient split, capacity-based owned-byte semantics, and explicit uncertainty notes for external allocations.
+- Wired `ProfilerSession` optional memory report attachment so diagnostics can carry machine-readable memory budgets without making restart payloads depend on allocator internals.
+- Reproducibility impact: observational diagnostics only; solver numerics, config normalization, output naming, and restart truth are unchanged.
+
 ## 2026-05-21 Stage 5 provenance schema/version audit hardening (S5-04)
 
 - Bumped provenance payload contract to `provenance_v5` with explicit config schema identity and auditable raw/normalized/derived runtime payload fields.

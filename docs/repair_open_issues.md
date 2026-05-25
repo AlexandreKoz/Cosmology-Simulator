@@ -1,3 +1,10 @@
+
+## 2026-05-25 Stage 6 memory accounting status
+
+| ID | Status | Area | Finding | Resolution / Remaining action |
+| --- | --- | --- | --- | --- |
+| S6-07-MEMORY-ACCOUNTING | Open | Runtime memory diagnostics | Core now reports capacity-based owned bytes for SimulationState/workspace lanes and keeps unknown external allocations explicit, but tree/PM/MPI/IO subsystems still need direct report hooks for concrete owned buffers. | Keep central API stable; add per-subsystem report hooks to replace unknown estimates when each module exposes ownership details. |
+
 # Repair open issues (P01–P19 freeze ledger)
 
 _Date captured: 2026-04-14 (UTC)_

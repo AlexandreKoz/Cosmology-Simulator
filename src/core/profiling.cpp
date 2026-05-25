@@ -230,6 +230,12 @@ void ProfilerSession::recordEvent(RuntimeEvent event) { m_events.push_back(std::
 
 const std::vector<RuntimeEvent>& ProfilerSession::events() const noexcept { return m_events; }
 
+void ProfilerSession::setMemoryReport(MemoryReport report) { m_memory_report = std::move(report); }
+
+const MemoryReport* ProfilerSession::memoryReport() const noexcept {
+  return m_memory_report.has_value() ? &(*m_memory_report) : nullptr;
+}
+
 void ProfilerSession::reset() {
   m_nodes.clear();
   m_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
@@ -237,6 +243,7 @@ void ProfilerSession::reset() {
   m_counters.reset();
   m_allocator_stats.reset();
   m_events.clear();
+  m_memory_report.reset();
 }
 
 std::size_t ProfilerSession::findOrCreateChild(std::size_t parent_index, std::string_view phase_name) {

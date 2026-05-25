@@ -238,7 +238,8 @@ add_library(cosmosim_core STATIC
   src/core/soa_storage.cpp
   src/core/simulation_mode.cpp
   src/core/time_integration.cpp
-  src/core/profiling.cpp)
+  src/core/profiling.cpp
+  src/core/memory_accounting.cpp)
 
 target_include_directories(cosmosim_core
   PUBLIC
@@ -465,6 +466,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_profiling tests/unit/test_profiling.cpp)
   target_link_libraries(test_unit_profiling PRIVATE cosmosim_core)
   add_test(NAME unit_profiling COMMAND test_unit_profiling)
+
+  add_executable(test_unit_memory_accounting tests/unit/test_memory_accounting.cpp)
+  target_link_libraries(test_unit_memory_accounting PRIVATE cosmosim_core)
+  add_test(NAME unit_memory_accounting COMMAND test_unit_memory_accounting)
 
   add_executable(test_unit_time_integration tests/unit/test_time_integration.cpp)
   target_link_libraries(test_unit_time_integration PRIVATE cosmosim_core)
