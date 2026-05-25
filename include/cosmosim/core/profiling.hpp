@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 
 namespace cosmosim::core {
 
@@ -97,6 +98,8 @@ class ProfilerSession {
   [[nodiscard]] std::size_t rootNodeIndex() const noexcept;
   void recordEvent(RuntimeEvent event);
   [[nodiscard]] const std::vector<RuntimeEvent>& events() const noexcept;
+  void setMemoryReport(MemoryReport report);
+  [[nodiscard]] const MemoryReport* memoryReport() const noexcept;
 
   void reset();
 
@@ -113,6 +116,7 @@ class ProfilerSession {
   CounterRegistry m_counters;
   AllocatorStats m_allocator_stats;
   std::vector<RuntimeEvent> m_events;
+  std::optional<MemoryReport> m_memory_report;
 
   [[nodiscard]] std::size_t findOrCreateChild(std::size_t parent_index, std::string_view phase_name);
 };
