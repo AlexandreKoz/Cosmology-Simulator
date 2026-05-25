@@ -281,6 +281,26 @@ void TreeGravitySolver::build(
 }
 
 void TreeGravitySolver::evaluateActiveSet(
+    const TreeGravitySourceView& source_view,
+    const TreeGravityTargetView& target_view,
+    const TreeGravityOptions& options,
+    TreeGravityProfile* profile,
+    const TreeSofteningView& softening_view) const {
+  evaluateActiveSet(
+      source_view.pos_x_comoving,
+      source_view.pos_y_comoving,
+      source_view.pos_z_comoving,
+      source_view.mass_code,
+      target_view.active_particle_index,
+      target_view.accel_x_comoving,
+      target_view.accel_y_comoving,
+      target_view.accel_z_comoving,
+      options,
+      profile,
+      softening_view);
+}
+
+void TreeGravitySolver::evaluateActiveSet(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,

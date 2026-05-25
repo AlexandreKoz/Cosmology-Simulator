@@ -1024,6 +1024,21 @@ const PmGridShape& PmSolver::shape() const {
 
 void PmSolver::assignDensity(
     PmGridStorage& grid,
+    const PmMassSourceView& source_view,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) const {
+  assignDensity(
+      grid,
+      source_view.pos_x_comoving,
+      source_view.pos_y_comoving,
+      source_view.pos_z_comoving,
+      source_view.mass_code,
+      options,
+      profile);
+}
+
+void PmSolver::assignDensity(
+    PmGridStorage& grid,
     std::span<const double> pos_x,
     std::span<const double> pos_y,
     std::span<const double> pos_z,
@@ -1573,6 +1588,29 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
       profile->bytes_moved += static_cast<std::uint64_t>(5U * grid.localCellCount() * sizeof(double));
     }
   }
+}
+
+void PmSolver::interpolateForces(
+    const PmGridStorage& grid,
+    const PmForceTargetView& target_view,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) const {
+  const std::size_t active_count = target_view.active_particle_index.size();
+  if (active_count != target_view.pos_x_comoving.size() || active_count != target_view.pos_y_comoving.size() ||
+      active_count != target_view.pos_z_comoving.size() || active_count != target_view.accel_x_comoving.size() ||
+      active_count != target_view.accel_y_comoving.size() || active_count != target_view.accel_z_comoving.size()) {
+    throw std::invalid_argument("PmSolver::interpolateForces active target view extents must match");
+  }
+  interpolateForces(
+      grid,
+      target_view.pos_x_comoving,
+      target_view.pos_y_comoving,
+      target_view.pos_z_comoving,
+      target_view.accel_x_comoving,
+      target_view.accel_y_comoving,
+      target_view.accel_z_comoving,
+      options,
+      profile);
 }
 
 void PmSolver::interpolateForces(

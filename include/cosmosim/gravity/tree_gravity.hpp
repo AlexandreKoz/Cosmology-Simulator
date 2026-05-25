@@ -71,6 +71,20 @@ struct TreeNodeSoa {
 
 class TreeGravitySolver {
  public:
+  struct TreeGravitySourceView {
+    std::span<const double> pos_x_comoving;
+    std::span<const double> pos_y_comoving;
+    std::span<const double> pos_z_comoving;
+    std::span<const double> mass_code;
+  };
+
+  struct TreeGravityTargetView {
+    std::span<const std::uint32_t> active_particle_index;
+    std::span<double> accel_x_comoving;
+    std::span<double> accel_y_comoving;
+    std::span<double> accel_z_comoving;
+  };
+
   TreeGravitySolver() = default;
 
   void build(
@@ -81,6 +95,13 @@ class TreeGravitySolver {
       const TreeGravityOptions& options,
       TreeGravityProfile* profile = nullptr,
       const TreeSofteningView& softening_view = {});
+
+  void evaluateActiveSet(
+      const TreeGravitySourceView& source_view,
+      const TreeGravityTargetView& target_view,
+      const TreeGravityOptions& options,
+      TreeGravityProfile* profile = nullptr,
+      const TreeSofteningView& softening_view = {}) const;
 
   void evaluateActiveSet(
       std::span<const double> pos_x_comoving,
