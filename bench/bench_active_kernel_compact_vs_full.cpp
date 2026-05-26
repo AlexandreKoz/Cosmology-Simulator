@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
 int main() {
@@ -59,15 +60,41 @@ int main() {
   const auto compact_us =
       std::chrono::duration_cast<std::chrono::microseconds>(compact_end - compact_begin).count();
 
+  const auto compact_drift_begin = std::chrono::steady_clock::now();
+  for (int repeat = 0; repeat < 20; ++repeat) {
+    for (std::size_t i = 0; i < compact_view.size(); ++i) {
+      compact_view.position_x_comoving[i] += compact_view.velocity_x_peculiar[i] * 1.0e-3;
+      compact_view.position_y_comoving[i] += compact_view.velocity_y_peculiar[i] * 1.0e-3;
+      compact_view.position_z_comoving[i] += compact_view.velocity_z_peculiar[i] * 1.0e-3;
+      compact_view.velocity_x_peculiar[i] += compact_view.mass_code[i] * 1.0e-5;
+    }
+    cosmosim::core::scatterGravityParticleKernelView(compact_view, state);
+    compact_view = cosmosim::core::buildGravityParticleKernelView(state, active_indices, workspace);
+  }
+  const auto compact_drift_end = std::chrono::steady_clock::now();
+  const auto compact_drift_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(compact_drift_end - compact_drift_begin).count();
+
+  volatile std::uint64_t memory_checksum = 0;
+  const auto mem_begin = std::chrono::steady_clock::now();
+  for (int repeat = 0; repeat < 200; ++repeat) {
+    const auto report = cosmosim::core::collectSimulationMemoryReport(state, &workspace);
+    memory_checksum += report.totals.persistent_total_bytes + report.totals.transient_total_bytes;
+  }
+  const auto mem_end = std::chrono::steady_clock::now();
+  const auto mem_us = std::chrono::duration_cast<std::chrono::microseconds>(mem_end - mem_begin).count();
+
   const std::size_t full_bytes_per_particle = sizeof(double) * 8U + sizeof(std::uint8_t);
   const std::size_t compact_bytes_per_particle = sizeof(double) * 7U + sizeof(std::uint32_t);
 
   std::cout << "active_count=" << active_indices.size() << '\n';
   std::cout << "full_sweep_us=" << full_us << '\n';
   std::cout << "compact_sweep_us=" << compact_us << '\n';
+  std::cout << "compact_drift_kick_us=" << compact_drift_us << '\n';
+  std::cout << "memory_report_overhead_us=" << mem_us << '\n';
   std::cout << "full_bytes_touched=" << (active_indices.size() * full_bytes_per_particle) << '\n';
   std::cout << "compact_bytes_touched=" << (active_indices.size() * compact_bytes_per_particle) << '\n';
-  std::cout << "checksums=" << full_checksum << "," << compact_checksum << '\n';
+  std::cout << "checksums=" << full_checksum << "," << compact_checksum << "," << memory_checksum << '\n';
 
   return 0;
 }
