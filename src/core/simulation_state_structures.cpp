@@ -139,9 +139,6 @@ void GasCellSidecar::resize(std::size_t count) {
   internal_energy_code.resize(count);
   temperature_code.resize(count);
   sound_speed_code.resize(count);
-  recon_gradient_x.resize(count);
-  recon_gradient_y.resize(count);
-  recon_gradient_z.resize(count);
 }
 
 std::size_t GasCellSidecar::size() const noexcept { return density_code.size(); }
@@ -150,9 +147,7 @@ bool GasCellSidecar::isConsistent() const noexcept {
   const std::size_t expected = density_code.size();
   return gas_cell_id.size() == expected && parent_particle_id.size() == expected &&
          pressure_code.size() == expected && internal_energy_code.size() == expected &&
-         temperature_code.size() == expected && sound_speed_code.size() == expected &&
-         recon_gradient_x.size() == expected && recon_gradient_y.size() == expected &&
-         recon_gradient_z.size() == expected;
+         temperature_code.size() == expected && sound_speed_code.size() == expected;
 }
 
 void StarParticleSidecar::resize(std::size_t count) {

@@ -200,6 +200,9 @@ enum class ParticleSoaField : std::uint8_t {
 // / runtime naming (`pos_*`, `vel_*`, `mass`, `id`, `rho`, `u_int`).
 class ParticleSoaStorage {
  public:
+  static constexpr bool k_owns_persistent_particle_truth = false;
+  static constexpr bool k_is_restart_serializable = false;
+
   // Resize every particle lane to the same logical row count.
   void resize(std::size_t count);
   // Reserve capacity in every particle lane at once.

@@ -2,12 +2,26 @@
 #include <cassert>
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
+namespace {
+
+template <typename T>
+concept HasPersistentReconstructionGradientLane = requires(T gas) {
+  gas.recon_gradient_x;
+  gas.recon_gradient_y;
+  gas.recon_gradient_z;
+};
+
+}  // namespace
+
 int main() {
+  static_assert(!HasPersistentReconstructionGradientLane<cosmosim::core::GasCellSidecar>);
+  static_assert(std::is_same_v<decltype(cosmosim::core::SimulationState{}.gas_cells), cosmosim::core::GasCellSidecar>);
   cosmosim::core::SimulationState state;
   state.resizeParticles(6);
   state.species.count_by_species = {2, 0, 2, 1, 1};
@@ -130,22 +144,22 @@ int main() {
   const std::array<std::uint32_t, 2> active_cells{0, 1};
   const auto gas_cell_id_before_hot = hydro_state.gas_cells.gas_cell_id;
   const auto parent_particle_id_before_hot = hydro_state.gas_cells.parent_particle_id;
-  const auto recon_x_before_hot = hydro_state.gas_cells.recon_gradient_x;
-  const auto recon_y_before_hot = hydro_state.gas_cells.recon_gradient_y;
-  const auto recon_z_before_hot = hydro_state.gas_cells.recon_gradient_z;
   auto hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_state, active_cells, workspace);
   hydro_view.density_code[0] = 99.0;
   cosmosim::core::scatterHydroCellKernelView(hydro_view, hydro_state);
   assert(hydro_state.gas_cells.density_code[0] == 99.0);
   assert(hydro_state.gas_cells.gas_cell_id == gas_cell_id_before_hot);
   assert(hydro_state.gas_cells.parent_particle_id == parent_particle_id_before_hot);
-  assert(hydro_state.gas_cells.recon_gradient_x == recon_x_before_hot);
-  assert(hydro_state.gas_cells.recon_gradient_y == recon_y_before_hot);
-  assert(hydro_state.gas_cells.recon_gradient_z == recon_z_before_hot);
+  workspace.hydro_recon_gradient_x = {1.0, 2.0, 3.0};
+  workspace.hydro_recon_gradient_y = {4.0, 5.0, 6.0};
+  workspace.hydro_recon_gradient_z = {7.0, 8.0, 9.0};
 
   const std::size_t hydro_capacity_before_clear = workspace.hydro_cell_density_code.capacity();
+  const std::size_t recon_capacity_before_clear = workspace.hydro_recon_gradient_x.capacity();
   workspace.clear();
   assert(workspace.hydro_cell_density_code.capacity() >= hydro_capacity_before_clear);
+  assert(workspace.hydro_recon_gradient_x.capacity() >= recon_capacity_before_clear);
+  assert(workspace.hydro_recon_gradient_x.empty());
   auto stale_hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_state, active_cells, workspace);
   hydro_state.resizeCells(hydro_state.cells.size() + 1U);
   bool stale_cell_threw = false;

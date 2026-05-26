@@ -42,6 +42,10 @@ void TransientStepWorkspace::clear() {
   cell_density_code.clear();
   cell_pressure_code.clear();
 
+  hydro_recon_gradient_x.clear();
+  hydro_recon_gradient_y.clear();
+  hydro_recon_gradient_z.clear();
+
   scratch.reset();
 }
 

@@ -15,8 +15,8 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  std::string name = "cosmosim_restart_v10";
-  std::uint32_t version = 10;
+  std::string name = "cosmosim_restart_v11";
+  std::uint32_t version = 11;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();

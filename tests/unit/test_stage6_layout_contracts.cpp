@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 #include "cosmosim/core/simulation_state.hpp"
 
@@ -28,11 +29,23 @@ concept HasPersistentAccelerationLane = requires(T p) {
   p.acceleration_x_comoving;
 };
 
+template <typename T>
+concept HasPersistentGasReconstructionGradientLane = requires(T gas) {
+  gas.recon_gradient_x;
+  gas.recon_gradient_y;
+  gas.recon_gradient_z;
+};
+
 }  // namespace
 
 int main() {
   static_assert(HasCanonicalOwners<cosmosim::core::SimulationState>);
+  static_assert(cosmosim::core::k_is_canonical_particle_state_owner_v<cosmosim::core::SimulationState>);
+  static_assert(!cosmosim::core::k_is_canonical_particle_state_owner_v<cosmosim::core::ParticleSoaStorage>);
+  static_assert(!cosmosim::core::ParticleSoaStorage::k_owns_persistent_particle_truth);
+  static_assert(!cosmosim::core::ParticleSoaStorage::k_is_restart_serializable);
   static_assert(!HasPersistentAccelerationLane<cosmosim::core::ParticleSoa>);
+  static_assert(!HasPersistentGasReconstructionGradientLane<cosmosim::core::GasCellSidecar>);
   static_assert(std::is_same_v<decltype(cosmosim::core::SimulationState{}.particles), cosmosim::core::ParticleSoa>);
 
   cosmosim::core::SimulationState state;

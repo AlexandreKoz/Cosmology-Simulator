@@ -47,7 +47,7 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 Gas identity field classes:
 - **Stable identity field:** gas particle ID (`particle_sidecar.particle_id` for gas species rows).
 - **Persistent owner-mutable hydro sidecar fields:** `density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`.
-- **Persistent reconstruction sidecar fields (not identity):** `recon_gradient_{x,y,z}`.
+- **Transient reconstruction scratch (not identity/restart truth):** reconstruction gradients live in hydro/transient workspaces, not `GasCellSidecar`.
 - **Scratch/transient hydro extraction fields:** `HydroCellKernelView` gathered active-cell buffers in `TransientStepWorkspace`; these are not persistence or identity authority.
 
 ### C. Mutation authority table

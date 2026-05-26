@@ -96,7 +96,8 @@ struct CellSoa {
 };
 
 struct GasCellSidecar {
-  // Gas-cell thermodynamic and reconstruction state excluded from gravity-hot paths.
+  // Persistent gas-cell identity and thermodynamic state excluded from gravity-hot paths.
+  // Reconstruction gradients are transient hydro/workspace scratch, not restart truth.
   // Stage-0 gas identity contract: gas cells are currently particle-bound finite-volume
   // carriers. gas_cell_id and parent_particle_id are persistent identity lanes and must
   // match the canonical gas-particle ordering whenever local gas cells exist.
@@ -107,9 +108,6 @@ struct GasCellSidecar {
   AlignedVector<double> internal_energy_code;
   AlignedVector<double> temperature_code;
   AlignedVector<double> sound_speed_code;
-  AlignedVector<double> recon_gradient_x;
-  AlignedVector<double> recon_gradient_y;
-  AlignedVector<double> recon_gradient_z;
 
   void resize(std::size_t count);
   [[nodiscard]] std::size_t size() const noexcept;
@@ -420,6 +418,12 @@ class SimulationState {
   std::uint64_t m_cell_index_generation = 0;
 };
 
+template <typename T>
+inline constexpr bool k_is_canonical_particle_state_owner_v = false;
+
+template <>
+inline constexpr bool k_is_canonical_particle_state_owner_v<SimulationState> = true;
+
 struct ActiveIndexSet {
   // Per-step compact active index lists assembled by scheduler/rung logic.
   std::vector<std::uint32_t> particle_indices;
@@ -596,6 +600,12 @@ struct TransientStepWorkspace {
   AlignedVector<std::uint32_t> cell_patch_index;
   AlignedVector<double> cell_density_code;
   AlignedVector<double> cell_pressure_code;
+
+  // Transient hydro reconstruction-gradient scratch. These lanes are derived
+  // inside hydro reconstruction/source staging and are never restart truth.
+  AlignedVector<double> hydro_recon_gradient_x;
+  AlignedVector<double> hydro_recon_gradient_y;
+  AlignedVector<double> hydro_recon_gradient_z;
 
   // Monotonic scratch arena reused between steps via reset().
   MonotonicScratchAllocator scratch;

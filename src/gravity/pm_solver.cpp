@@ -1597,20 +1597,60 @@ void PmSolver::interpolateForces(
     PmProfileEvent* profile) const {
   const std::size_t active_count = target_view.active_particle_index.size();
   if (active_count != target_view.pos_x_comoving.size() || active_count != target_view.pos_y_comoving.size() ||
-      active_count != target_view.pos_z_comoving.size() || active_count != target_view.accel_x_comoving.size() ||
-      active_count != target_view.accel_y_comoving.size() || active_count != target_view.accel_z_comoving.size()) {
-    throw std::invalid_argument("PmSolver::interpolateForces active target view extents must match");
+      active_count != target_view.pos_z_comoving.size()) {
+    throw std::invalid_argument("PmSolver::interpolateForces active target coordinate view extents must match");
   }
-  interpolateForces(
-      grid,
-      target_view.pos_x_comoving,
-      target_view.pos_y_comoving,
-      target_view.pos_z_comoving,
-      target_view.accel_x_comoving,
-      target_view.accel_y_comoving,
-      target_view.accel_z_comoving,
-      options,
-      profile);
+
+  switch (target_view.output_layout) {
+    case PmForceOutputLayout::kCompactActive: {
+      if (active_count != target_view.accel_x_comoving.size() ||
+          active_count != target_view.accel_y_comoving.size() ||
+          active_count != target_view.accel_z_comoving.size()) {
+        throw std::invalid_argument("PmSolver::interpolateForces compact active output extents must match active count");
+      }
+      interpolateForces(
+          grid,
+          target_view.pos_x_comoving,
+          target_view.pos_y_comoving,
+          target_view.pos_z_comoving,
+          target_view.accel_x_comoving,
+          target_view.accel_y_comoving,
+          target_view.accel_z_comoving,
+          options,
+          profile);
+      return;
+    }
+    case PmForceOutputLayout::kIndexedGlobal: {
+      for (const std::uint32_t particle_index : target_view.active_particle_index) {
+        if (particle_index >= target_view.accel_x_comoving.size() ||
+            particle_index >= target_view.accel_y_comoving.size() ||
+            particle_index >= target_view.accel_z_comoving.size()) {
+          throw std::out_of_range("PmSolver::interpolateForces indexed active particle output index out of range");
+        }
+      }
+      std::vector<double> compact_ax(active_count, 0.0);
+      std::vector<double> compact_ay(active_count, 0.0);
+      std::vector<double> compact_az(active_count, 0.0);
+      interpolateForces(
+          grid,
+          target_view.pos_x_comoving,
+          target_view.pos_y_comoving,
+          target_view.pos_z_comoving,
+          compact_ax,
+          compact_ay,
+          compact_az,
+          options,
+          profile);
+      for (std::size_t active_i = 0; active_i < active_count; ++active_i) {
+        const std::uint32_t particle_index = target_view.active_particle_index[active_i];
+        target_view.accel_x_comoving[particle_index] = compact_ax[active_i];
+        target_view.accel_y_comoving[particle_index] = compact_ay[active_i];
+        target_view.accel_z_comoving[particle_index] = compact_az[active_i];
+      }
+      return;
+    }
+  }
+  throw std::invalid_argument("PmSolver::interpolateForces unknown PM force output layout");
 }
 
 void PmSolver::interpolateForces(

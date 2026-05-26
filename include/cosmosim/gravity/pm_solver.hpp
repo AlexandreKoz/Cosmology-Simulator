@@ -129,6 +129,14 @@ class PmSolver {
     std::span<const double> mass_code;
   };
 
+  enum class PmForceOutputLayout : std::uint8_t {
+    // Output spans are compact and have the same length/order as active_particle_index.
+    kCompactActive = 0,
+    // Output spans are global particle lanes; active_particle_index scatters compact PM
+    // interpolation results into the selected rows only.
+    kIndexedGlobal = 1,
+  };
+
   struct PmForceTargetView {
     std::span<const std::uint32_t> active_particle_index;
     std::span<const double> pos_x_comoving;
@@ -137,6 +145,7 @@ class PmSolver {
     std::span<double> accel_x_comoving;
     std::span<double> accel_y_comoving;
     std::span<double> accel_z_comoving;
+    PmForceOutputLayout output_layout = PmForceOutputLayout::kCompactActive;
   };
 
   explicit PmSolver(PmGridShape shape);

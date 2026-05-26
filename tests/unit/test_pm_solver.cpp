@@ -509,6 +509,53 @@ void testPoissonPlanCachingForStableSlabLayout() {
   assert(plan_count_after_first == 1U);
 }
 
+
+void testIndexedGlobalPmTargetViewWritesOnlyActiveRows() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+
+  std::fill(grid.force_x().begin(), grid.force_x().end(), 1.0);
+  std::fill(grid.force_y().begin(), grid.force_y().end(), 2.0);
+  std::fill(grid.force_z().begin(), grid.force_z().end(), 3.0);
+
+  std::vector<std::uint32_t> active{2, 4};
+  std::vector<double> x{0.15, 0.65};
+  std::vector<double> y{0.25, 0.75};
+  std::vector<double> z{0.35, 0.85};
+  std::vector<double> ax(6, -1.0);
+  std::vector<double> ay(6, -2.0);
+  std::vector<double> az(6, -3.0);
+
+  solver.interpolateForces(
+      grid,
+      cosmosim::gravity::PmSolver::PmForceTargetView{
+          .active_particle_index = active,
+          .pos_x_comoving = x,
+          .pos_y_comoving = y,
+          .pos_z_comoving = z,
+          .accel_x_comoving = ax,
+          .accel_y_comoving = ay,
+          .accel_z_comoving = az,
+          .output_layout = cosmosim::gravity::PmSolver::PmForceOutputLayout::kIndexedGlobal},
+      options,
+      nullptr);
+
+  assert(ax[2] == 1.0);
+  assert(ay[2] == 2.0);
+  assert(az[2] == 3.0);
+  assert(ax[4] == 1.0);
+  assert(ay[4] == 2.0);
+  assert(az[4] == 3.0);
+  assert(ax[0] == -1.0);
+  assert(ay[1] == -2.0);
+  assert(az[5] == -3.0);
+}
+
 void testActivePmTargetViewExtentValidation() {
   const cosmosim::gravity::PmGridShape shape{8, 8, 8};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -557,6 +604,7 @@ int main() {
   testSingleRankSlabLayoutStorageEquivalence();
   testPartialSlabStorageRejectsSingleRankSolverPath();
   testPoissonPlanCachingForStableSlabLayout();
+  testIndexedGlobalPmTargetViewWritesOnlyActiveRows();
   testActivePmTargetViewExtentValidation();
   testTreePmBuildGate();
   testExecutionPolicyValidation();

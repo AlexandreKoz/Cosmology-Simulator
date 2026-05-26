@@ -424,9 +424,6 @@ struct GasCellMigrationRecord {
   double internal_energy_code = 0.0;
   double temperature_code = 0.0;
   double sound_speed_code = 0.0;
-  double recon_gradient_x = 0.0;
-  double recon_gradient_y = 0.0;
-  double recon_gradient_z = 0.0;
 };
 
 static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
@@ -476,9 +473,6 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
     record.internal_energy_code = state.gas_cells.internal_energy_code[cell_index];
     record.temperature_code = state.gas_cells.temperature_code[cell_index];
     record.sound_speed_code = state.gas_cells.sound_speed_code[cell_index];
-    record.recon_gradient_x = state.gas_cells.recon_gradient_x[cell_index];
-    record.recon_gradient_y = state.gas_cells.recon_gradient_y[cell_index];
-    record.recon_gradient_z = state.gas_cells.recon_gradient_z[cell_index];
     records.emplace(record.particle_id, record);
   }
   return records;
@@ -525,9 +519,6 @@ void rebuildLocalGasStateFromParticleIds(
     rebuilt_gas.internal_energy_code[cell_index] = record.internal_energy_code;
     rebuilt_gas.temperature_code[cell_index] = record.temperature_code;
     rebuilt_gas.sound_speed_code[cell_index] = record.sound_speed_code;
-    rebuilt_gas.recon_gradient_x[cell_index] = record.recon_gradient_x;
-    rebuilt_gas.recon_gradient_y[cell_index] = record.recon_gradient_y;
-    rebuilt_gas.recon_gradient_z[cell_index] = record.recon_gradient_z;
     new_cell_index_by_particle_id.emplace(particle_id, static_cast<std::uint32_t>(cell_index));
   }
 
@@ -962,9 +953,6 @@ void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value,
       restored.gas_cells.internal_energy_code == reference.gas_cells.internal_energy_code &&
       restored.gas_cells.temperature_code == reference.gas_cells.temperature_code &&
       restored.gas_cells.sound_speed_code == reference.gas_cells.sound_speed_code &&
-      restored.gas_cells.recon_gradient_x == reference.gas_cells.recon_gradient_x &&
-      restored.gas_cells.recon_gradient_y == reference.gas_cells.recon_gradient_y &&
-      restored.gas_cells.recon_gradient_z == reference.gas_cells.recon_gradient_z &&
       restored.patches.patch_id == reference.patches.patch_id &&
       restored.patches.level == reference.patches.level &&
       restored.patches.first_cell == reference.patches.first_cell &&

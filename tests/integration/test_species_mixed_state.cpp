@@ -63,9 +63,6 @@ int main() {
     state.gas_cells.internal_energy_code[i] = 3.0 + static_cast<double>(i);
     state.gas_cells.temperature_code[i] = 100.0;
     state.gas_cells.sound_speed_code[i] = 1.0;
-    state.gas_cells.recon_gradient_x[i] = 0.0;
-    state.gas_cells.recon_gradient_y[i] = 0.0;
-    state.gas_cells.recon_gradient_z[i] = 0.0;
   }
 
   state.rebuildSpeciesIndex();

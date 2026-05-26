@@ -14,6 +14,9 @@ int main() {
   static_assert(
       !std::is_same_v<cosmosim::core::ParticleSoaStorage, cosmosim::core::ParticleSoa>,
       "ParticleSoaStorage must remain a reusable adapter substrate, not runtime particle truth");
+  static_assert(!cosmosim::core::ParticleSoaStorage::k_owns_persistent_particle_truth);
+  static_assert(!cosmosim::core::ParticleSoaStorage::k_is_restart_serializable);
+  static_assert(!cosmosim::core::k_is_canonical_particle_state_owner_v<cosmosim::core::ParticleSoaStorage>);
 
   cosmosim::core::ParticleSoaStorage storage;
   storage.reserve(16);

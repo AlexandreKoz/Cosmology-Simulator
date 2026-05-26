@@ -12,7 +12,7 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 
 ## 2) SoA / AoS / adapter patterns
 - **SoA dominant lanes:** `ParticleSoa`, `ParticleSidecar`, `CellSoa`, `GasCellSidecar`, species sidecars (`include/cosmosim/core/simulation_state.hpp`).
-- **Generic SoA adapter:** `ParticleSoaStorage` and field enum adapters (`include/cosmosim/core/soa_storage.hpp`) used in tests/benches and some module paths as a packed SoA façade.
+- **Generic SoA adapter:** `ParticleSoaStorage` and field enum adapters (`include/cosmosim/core/soa_storage.hpp`) used only by tests/benches as a packed SoA utility façade; it exposes `k_owns_persistent_particle_truth=false` and `k_is_restart_serializable=false`.
 - **AoS in hydro math kernels:** `HydroPrimitiveState`, `HydroConservedState`, `HydroFaceFlux` are per-item structs; vectorized storage exists via hydro SoA/cache wrappers in `hydro_core_solver`.
 - **Adapters/views:** active-set builders in `src/core/simulation_state_active_views.cpp` map sparse global rows to compact workspace spans and read-only/read-write view structs.
 
@@ -24,7 +24,7 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 
 ## 4) Persistent fields (restart-authoritative intent)
 - Particle hot/canonical lanes: positions, velocities, mass, scheduler mirror `time_bin` (mirror only), ids/species/flags/owning rank, drift-epoch lanes, softening-override lanes.
-- Gas/cell/piecewise persistent lanes: cell centers/mass/patch/time-bin mirror, gas thermodynamic lanes and gradients, patch topology ranges.
+- Gas/cell/piecewise persistent lanes: cell centers/mass/patch/time-bin mirror, gas identity/thermodynamic lanes; reconstruction gradients are transient scratch, patch topology ranges.
 - Species sidecars: star/BH/tracer persistent bookkeeping lanes.
 - Integrator + scheduler persisted state and provenance/config metadata are explicit restart payload members.
 
@@ -35,7 +35,7 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 - Active descriptor metadata freshness fields (`source_generation`, etc.) are derived runtime-only descriptors.
 
 ## 6) Restart serialization fields (current)
-- Restart payload and schema are centralized in `io/restart_checkpoint.*` with explicit schema/version contract (`cosmosim_restart_v10`).
+- Restart payload and schema are centralized in `io/restart_checkpoint.*` with explicit schema/version contract (`cosmosim_restart_v11`).
 - Serialized families include simulation state lanes, species sidecars, module sidecars, integrator state, scheduler persistent state, distributed gravity restart state, normalized config, provenance, integrity hash.
 - Docs explicitly state cached PM long-range field arrays are **not** serialized; policy is deterministic rebuild on resume.
 
@@ -51,7 +51,7 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 - Physics modules (stellar, BH, tracers) often accept global state + active indices; hot-path access narrowing is incomplete.
 
 ## 9) Duplicated or ambiguous ownership risks
-- `ParticleSoaStorage` overlaps conceptually with `SimulationState::particles` lane ownership (adapter vs canonical owner ambiguity in some call sites).
+- `ParticleSoaStorage` is explicitly quarantined as utility/test storage; current call sites are tests/benchmarks only.
 - `time_bin` mirrors exist on particle/cell SoA while scheduler `bin_index` is authority; drift risk exists if mirror refresh discipline regresses.
 - Gas identity has both `gas_cells` parent-particle lanes and `GasCellIdentityMap`; comments indicate seam not fully wired everywhere (intentional migration seam).
 - Optional/module sidecars can duplicate derived counters/metadata unless invariants are consistently documented and tested.
@@ -87,6 +87,6 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 - At-risk surfaces for accidental serialization creep: module sidecar payload expansion, distributed-gravity temporary caches, any new workspace lanes added near restart payload builders.
 
 ## Unknowns requiring explicit verification in later prompts
-- Exact call-site count where `ParticleSoaStorage` is used as truth vs adapter is not yet fully enumerated.
+- ParticleSoaStorage call sites were enumerated during the 6.0-6.4 repair pass: tests and benchmarks only, no production runtime truth use.
 - Some gravity/hydro hot loops still need line-level audit to quantify broad-state dereference frequency.
 - GPU/CUDA parity for active-view narrowing requires dedicated review path (`pm_cuda_kernels.cu` + CUDA benches/tests).

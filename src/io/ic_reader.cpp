@@ -354,9 +354,6 @@ IcReadResult buildGeneratedIsolatedIc(
     result.state.gas_cells.internal_energy_code[i] = 1.5;
     result.state.gas_cells.temperature_code[i] = 1.0e4;
     result.state.gas_cells.sound_speed_code[i] = 1.0;
-    result.state.gas_cells.recon_gradient_x[i] = 0.0;
-    result.state.gas_cells.recon_gradient_y[i] = 0.0;
-    result.state.gas_cells.recon_gradient_z[i] = 0.0;
   }
 
   for (std::size_t i = 0; i < dark_matter_particle_count; ++i, ++global_index) {
@@ -595,9 +592,6 @@ IcReadResult readGadgetArepoHdf5Ic(
           result.state.gas_cells.pressure_code[cell_i] = 0.0;
           result.state.gas_cells.temperature_code[cell_i] = 0.0;
           result.state.gas_cells.sound_speed_code[cell_i] = 0.0;
-          result.state.gas_cells.recon_gradient_x[cell_i] = 0.0;
-          result.state.gas_cells.recon_gradient_y[cell_i] = 0.0;
-          result.state.gas_cells.recon_gradient_z[cell_i] = 0.0;
         }
       }
     }

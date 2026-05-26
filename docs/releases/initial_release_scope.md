@@ -62,5 +62,5 @@ The release documentation recognizes Stage 2 scheduler-authority hardening as in
 - The runtime writes `normalized_config.param.txt` into the run directory after config loading succeeds.
 - Provenance output is mandatory for release reference runs (`provenance_v5`).
 - Snapshot schema compatibility: `gadget_arepo_v4`.
-- Restart schema compatibility: `cosmosim_restart_v10`.
+- Restart schema compatibility: `cosmosim_restart_v11`.
 - Release metadata schema and packaging manifest: `release_manifest_v1`.

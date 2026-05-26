@@ -523,9 +523,6 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(gas_group.get(), "internal_energy_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.internal_energy_code);
   writeDataset1d(gas_group.get(), "temperature_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.temperature_code);
   writeDataset1d(gas_group.get(), "sound_speed_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.sound_speed_code);
-  writeDataset1d(gas_group.get(), "recon_gradient_x", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.recon_gradient_x);
-  writeDataset1d(gas_group.get(), "recon_gradient_y", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.recon_gradient_y);
-  writeDataset1d(gas_group.get(), "recon_gradient_z", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.recon_gradient_z);
 
   Hdf5Handle patches_group(openOrCreateGroup(state_group.get(), "patches"));
   writeDataset1d(patches_group.get(), "patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.patches.patch_id);
@@ -658,9 +655,6 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
   state.gas_cells.internal_energy_code = readDataset1dAligned<double>(gas_group.get(), "internal_energy_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.temperature_code = readDataset1dAligned<double>(gas_group.get(), "temperature_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.sound_speed_code = readDataset1dAligned<double>(gas_group.get(), "sound_speed_code", H5T_NATIVE_DOUBLE);
-  state.gas_cells.recon_gradient_x = readDataset1dAligned<double>(gas_group.get(), "recon_gradient_x", H5T_NATIVE_DOUBLE);
-  state.gas_cells.recon_gradient_y = readDataset1dAligned<double>(gas_group.get(), "recon_gradient_y", H5T_NATIVE_DOUBLE);
-  state.gas_cells.recon_gradient_z = readDataset1dAligned<double>(gas_group.get(), "recon_gradient_z", H5T_NATIVE_DOUBLE);
 
   Hdf5Handle patches_group(H5Gopen2(state_group.get(), "patches", H5P_DEFAULT));
   state.patches.patch_id = readDataset1dAligned<std::uint64_t>(patches_group.get(), "patch_id", H5T_NATIVE_UINT64);
@@ -870,9 +864,6 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.gas_cells.internal_energy_code);
   append_any_vec(state.gas_cells.temperature_code);
   append_any_vec(state.gas_cells.sound_speed_code);
-  append_any_vec(state.gas_cells.recon_gradient_x);
-  append_any_vec(state.gas_cells.recon_gradient_y);
-  append_any_vec(state.gas_cells.recon_gradient_z);
 
   append_any_vec(state.patches.patch_id);
   append_any_vec(state.patches.level);

@@ -12,7 +12,7 @@ This document defines the persistent and transient memory contract for simulatio
   kernel/workspace products and are not restart truth.
 - `ParticleSidecar`: shared metadata (`particle_id`, species tags, flags, rank ownership).
 - `CellSoa`: gas-cell gravity skeleton (`center_*_comoving`, `mass_code`, `time_bin`, `patch_index`).
-- `GasCellSidecar`: thermodynamics and hydro reconstruction sidecar (`density_code`, `pressure_code`, gradients, etc.) plus the temporary particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
+- `GasCellSidecar`: persistent gas identity and thermodynamic sidecar (`density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`) plus the particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Hydro transient reconstruction gradients are transient scratch, not restart truth. Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
 - `StarParticleSidecar`, `BlackHoleParticleSidecar`, `TracerParticleSidecar`: species-cold metadata blocks keyed by global particle index.
 - `PatchSoa`: AMR patch descriptors and contiguous cell ranges.
 - `GasCellIdentityMap`: proposed, isolated identity seam for future AMR/moving-mesh decoupling. It is not yet stored as production state; see `docs/architecture/gas_cell_identity_map_rfc.md`.
@@ -90,7 +90,7 @@ remaps by stable `gas_cell_id` rather than particle index or row position.
 | --- | --- | --- | --- |
 | Particle hot lanes | `ParticleSoa`, `GravityParticleKernelView` | `position_[xyz]_comoving`, `velocity_[xyz]_peculiar`, `mass_code`, transient `particle_index` scatter key | `particle_id`, species tag, owning rank, flags, SFC key, module state |
 | Particle cold metadata | `ParticleSidecar` + species sidecars | IDs, species tags, ownership, flags, SFC, provenance-adjacent bookkeeping, optional per-species/module payloads | mutation from gravity/hydro hot-view scatter paths |
-| Gas/cell hot lanes | `CellSoa`, `HydroCellKernelView` | `center_[xyz]_comoving`, `mass_code`, `density_code`, `pressure_code`, transient `cell_index` scatter key | gas identity metadata (`gas_cell_id`, `parent_particle_id`), patch metadata, reconstruction gradients |
+| Gas/cell hot lanes | `CellSoa`, `HydroCellKernelView` | `center_[xyz]_comoving`, `mass_code`, `density_code`, `pressure_code`, transient `cell_index` scatter key | gas identity metadata (`gas_cell_id`, `parent_particle_id`), patch metadata, transient reconstruction gradients |
 | Transient scratch | `TransientStepWorkspace`, reconstruction/work arrays | active-list mirrors, kernel gather/scatter buffers, temporary reconstruction/face work | restart truth or persistent ownership |
 
 The unit contract tests now assert that gravity/hydro hot-view scatter updates only allowed hot lanes and leaves cold sidecars untouched.

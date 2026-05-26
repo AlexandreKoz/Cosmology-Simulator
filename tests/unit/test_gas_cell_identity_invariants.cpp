@@ -32,7 +32,7 @@ cosmosim::core::SimulationState makeGasContractState() {
     state.gas_cells.density_code[cell] = 100.0 + static_cast<double>(cell);
     state.gas_cells.pressure_code[cell] = 200.0 + static_cast<double>(cell);
     state.gas_cells.internal_energy_code[cell] = 300.0 + static_cast<double>(cell);
-    state.gas_cells.recon_gradient_x[cell] = 0.5 + static_cast<double>(cell);
+    state.gas_cells.sound_speed_code[cell] = 0.5 + static_cast<double>(cell);
   }
 
   state.rebuildSpeciesIndex();
@@ -74,7 +74,7 @@ void test_gas_cell_identity_invariants() {
   assert(state.gas_cells.density_code[0] == 555.0);
   assert(state.gas_cells.pressure_code[2] == 777.0);
   // Reconstruction scratch lanes are persistent sidecar fields and are not part of HydroCellKernelView.
-  assert(state.gas_cells.recon_gradient_x[0] == 0.5);
+  assert(state.gas_cells.sound_speed_code[0] == 0.5);
   assert(state.gas_cells.internal_energy_code[2] == 302.0);
 }
 

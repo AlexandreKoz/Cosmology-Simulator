@@ -103,9 +103,6 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.gas_cells.internal_energy_code[i] = 50.0 + static_cast<double>(i);
     state.gas_cells.temperature_code[i] = 60.0 + static_cast<double>(i);
     state.gas_cells.sound_speed_code[i] = 70.0 + static_cast<double>(i);
-    state.gas_cells.recon_gradient_x[i] = 0.0;
-    state.gas_cells.recon_gradient_y[i] = 0.0;
-    state.gas_cells.recon_gradient_z[i] = 0.0;
   }
 
   state.patches.patch_id[0] = 11;

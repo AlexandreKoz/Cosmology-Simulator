@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v10`
-- `version = 10`
+- `name = cosmosim_restart_v11`
+- `version = 11`
 
 Restart payload includes:
 
@@ -69,7 +69,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v10` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v11` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
 
 ## 3) Provenance payload
 
@@ -172,10 +172,10 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v10`, version `10`, because restart payloads require exact particle softening sidecar dataset presence and length-delimited integrity hashing for runtime-truth lanes. Exact continuation requires the value lane and authoritative `has_gravity_softening_override` mask to round-trip together; files without those datasets are rejected rather than interpreted as implicit defaults.
+- Restart schema version/name are now `cosmosim_restart_v11`, version `11`, because restart payloads require exact particle softening sidecar dataset presence and length-delimited integrity hashing for runtime-truth lanes. Exact continuation requires the value lane and authoritative `has_gravity_softening_override` mask to round-trip together; files without those datasets are rejected rather than interpreted as implicit defaults.
 - Restart contract enforcement was tightened: missing continuation-critical metadata
   now fails fast with explicit errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v10`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v11`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Restart v6 compatibility behavior is tightened without changing payload fields: non-empty
   `CellSoa::time_bin` mirrors must match the scheduler `bin_index` of each gas cell's

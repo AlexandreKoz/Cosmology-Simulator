@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v10`) persists:
+The restart schema (`cosmosim_restart_v11`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -22,7 +22,7 @@ Restart write payloads now carry `RestartPersistentStateView` (`persistent_state
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`6`).
+- Current compatibility policy: exact version match (`11`).
 - `v5` and older restart files are intentionally rejected because they can omit exact sidecar truth lanes required by v6, including materialized softening override mask/value datasets.
 
 ## Atomic write semantics
@@ -103,7 +103,7 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This is a v6 compatibility check, not a schema bump, and no restart dataset or schema version changes in the Stage 2 authority-documentation patch.
+- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v11 after Stage 6 removed transient hydro reconstruction gradients from restart truth.
 - The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note
