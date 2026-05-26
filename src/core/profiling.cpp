@@ -93,6 +93,16 @@ void writeEventJson(std::ostream& out, const RuntimeEvent& event, int indent_lev
   out << indent << "}";
 }
 
+void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int indent_level) {
+  const std::string indent(static_cast<std::size_t>(indent_level), ' ');
+  const std::string field_indent(static_cast<std::size_t>(indent_level + 2), ' ');
+  out << indent << "{\n";
+  out << field_indent << "\"persistent_total_bytes\": " << report.totals.persistent_total_bytes << ",\n";
+  out << field_indent << "\"transient_total_bytes\": " << report.totals.transient_total_bytes << ",\n";
+  out << field_indent << "\"unknown_external_allocations\": true\n";
+  out << indent << "}";
+}
+
 void writeNodeJson(std::ostream& out, const std::vector<ProfileNode>& nodes, std::size_t node_index, int indent_level) {
   const ProfileNode& node = nodes.at(node_index);
   const std::string indent(static_cast<std::size_t>(indent_level), ' ');
@@ -291,6 +301,11 @@ void writeProfilerReportJson(const ProfilerSession& session, const std::filesyst
   out << "    \"peak_live_bytes\": " << allocator.peak_live_bytes << ",\n";
   out << "    \"live_bytes\": " << allocator.live_bytes << "\n";
   out << "  },\n";
+  if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
+    out << "  \"memory_report\": ";
+    writeMemoryReportJson(out, *report, 2);
+    out << ",\n";
+  }
 
   out << "  \"counters\": {";
   bool first = true;
@@ -369,6 +384,11 @@ void writeOperationalReportJson(
   out << "    \"fatal_count\": " << fatal_count << ",\n";
   out << "    \"status\": \"" << (fatal_count > 0 || error_count > 0 ? "error" : "ok") << "\"\n";
   out << "  },\n";
+  if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
+    out << "  \"memory_report\": ";
+    writeMemoryReportJson(out, *report, 2);
+    out << ",\n";
+  }
   out << "  \"events\": [";
   if (!session.events().empty()) {
     out << "\n";

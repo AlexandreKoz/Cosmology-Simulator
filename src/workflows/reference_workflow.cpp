@@ -2780,6 +2780,22 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     io::IcReadResult ic_result = loadInitialConditions(m_frozen_config);
     core::SimulationState state = std::move(ic_result.state);
+    profiler.setMemoryReport(core::collectSimulationMemoryReport(state));
+    const core::MemoryReport* startup_memory_report = profiler.memoryReport();
+    if (startup_memory_report != nullptr) {
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "memory.startup_snapshot",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "core.memory",
+          .step_index = options.step_index,
+          .simulation_time_code = config.numerics.t_code_begin,
+          .scale_factor = 1.0,
+          .message = "startup memory accounting snapshot from owned host buffers",
+          .payload = {{"persistent_total_bytes", std::to_string(startup_memory_report->totals.persistent_total_bytes)},
+                      {"transient_total_bytes", std::to_string(startup_memory_report->totals.transient_total_bytes)},
+                      {"unknown_external_allocations", "true"}},
+      });
+    }
     finalizeStateMetadata(m_frozen_config, state);
     maybeInitializeParticleSofteningFromSpeciesPolicy(state, config);
     const auto expected_global_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
