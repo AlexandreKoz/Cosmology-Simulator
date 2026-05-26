@@ -67,13 +67,14 @@ void testMiniRunProfileReportGeneration() {
 
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.dt_time_code = 0.01;
+  cosmosim::core::TransientStepWorkspace workspace;
 
   CountingCallback callback;
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(callback);
 
   cosmosim::core::ProfilerSession profiler(true);
-  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr, nullptr, &profiler);
+  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace, nullptr, &profiler);
 
   assert(callback.stage_calls == 1U);
   assert(callback.hydro_stage_calls == 1);

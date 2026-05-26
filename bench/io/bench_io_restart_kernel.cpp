@@ -62,7 +62,7 @@ int main() {
   scheduler.reset(static_cast<std::uint32_t>(k_particle_count), 0, 0);
 
   cosmosim::io::RestartWritePayload payload;
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "mode=zoom_in\n";

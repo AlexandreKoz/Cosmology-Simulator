@@ -36,6 +36,7 @@ void testTracerMassTracksHostAcrossOrchestratorStep() {
 
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.dt_time_code = 0.1;
+  cosmosim::core::TransientStepWorkspace workspace;
 
   // Mimic conservative host-cell exchange from hydro/source terms before tracer update.
   state.cells.mass_code[0] = 4.0;
@@ -47,7 +48,7 @@ void testTracerMassTracksHostAcrossOrchestratorStep() {
       .cells_are_subset = true,
   };
 
-  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace, nullptr);
 
 #if COSMOSIM_ENABLE_TRACERS
   assert(std::abs(state.particles.mass_code[0] - 2.0) < 1.0e-12);

@@ -104,6 +104,7 @@ int main() {
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.current_scale_factor = 0.5;
   integrator_state.dt_time_code = 0.01;
+  cosmosim::core::TransientStepWorkspace workspace;
 
   std::vector<std::uint32_t> particle_indices(state.particles.size());
   std::vector<std::uint32_t> cell_indices(state.cells.size());
@@ -121,8 +122,8 @@ int main() {
       .cells_are_subset = false,
   };
 
-  orchestrator.executeSingleStep(state, integrator_state, active, nullptr, nullptr, nullptr);
-  orchestrator.executeSingleStep(state, integrator_state, active, nullptr, nullptr, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, active, nullptr, &workspace, nullptr);
+  orchestrator.executeSingleStep(state, integrator_state, active, nullptr, &workspace, nullptr);
 
   const std::filesystem::path diagnostics_dir = output_root / "diagnostics";
   assert(std::filesystem::exists(diagnostics_dir));
