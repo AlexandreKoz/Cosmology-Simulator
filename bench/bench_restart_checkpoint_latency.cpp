@@ -58,7 +58,7 @@ int main() {
   scheduler.reset(static_cast<std::uint32_t>(particle_count), 0);
 
   cosmosim::io::RestartWritePayload payload;
-  payload.state = &state;
+  payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = cosmo_cube\n";

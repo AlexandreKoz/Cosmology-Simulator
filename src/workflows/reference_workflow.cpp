@@ -2477,7 +2477,7 @@ bool maybeWriteOutputs(
   }
 
   io::SnapshotWritePayload snapshot_payload;
-  snapshot_payload.persistent_state.simulation_state = &state;
+  snapshot_payload.state = &state;
   snapshot_payload.config = &config;
   snapshot_payload.normalized_config_text = frozen_config.normalized_text;
   snapshot_payload.provenance =
