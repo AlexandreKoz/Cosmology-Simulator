@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "bench/reporting/bench_report.hpp"
+#include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 
@@ -113,6 +114,31 @@ int main() {
   tree_report.addField("accepted_nodes", tree_profile.accepted_nodes);
   tree_report.addField("particle_particle_interactions", tree_profile.particle_particle_interactions);
   tree_report.addField("targets_per_second", tree_targets_per_second);
+
+  cosmosim::core::SimulationState compact_state;
+  compact_state.resizeParticles(k_particle_count);
+  for (std::size_t i = 0; i < k_particle_count; ++i) {
+    compact_state.particles.position_x_comoving[i] = particles.pos_x_comov[i];
+    compact_state.particles.position_y_comoving[i] = particles.pos_y_comov[i];
+    compact_state.particles.position_z_comoving[i] = particles.pos_z_comov[i];
+    compact_state.particles.mass_code[i] = particles.mass_code[i];
+    compact_state.particles.velocity_x_peculiar[i] = 0.0;
+    compact_state.particles.velocity_y_peculiar[i] = 0.0;
+    compact_state.particles.velocity_z_peculiar[i] = 0.0;
+    compact_state.particle_sidecar.particle_id[i] = i + 1;
+    compact_state.particle_sidecar.species_tag[i] = 0;
+    compact_state.particle_sidecar.owning_rank[i] = 0;
+  }
+  cosmosim::core::TransientStepWorkspace workspace;
+  const auto view_begin = cosmosim::bench::BenchmarkClock::now();
+  for (std::size_t iter = 0; iter < execution.measurement_iterations; ++iter) {
+    const auto view = cosmosim::core::buildGravityParticleKernelView(compact_state, active_index, workspace);
+    (void)view.mass_code.size();
+  }
+  const auto view_end = cosmosim::bench::BenchmarkClock::now();
+  tree_report.addField(
+      "active_view_build_ms",
+      cosmosim::bench::BenchmarkClock::millisecondsBetween(view_begin, view_end));
   tree_report.write();
 
   cosmosim::bench::BenchmarkReporter pm_report("bench_gravity_pm_kernel");
