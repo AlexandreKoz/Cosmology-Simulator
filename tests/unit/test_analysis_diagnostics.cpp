@@ -105,6 +105,9 @@ void testDerivedDiagnosticsSanity() {
   assert(bundle.xy_slice_density_code.size() == 16);
   assert(!bundle.records.empty());
   assert(bundle.records.front().name == "run_health_counters");
+
+  assert(bundle.memory_report.totals.persistent_total_bytes > 0);
+  assert(bundle.memory_report.totals.transient_total_bytes == 0);
 }
 
 void testProvisionalHeavyDiagnosticsRequireExplicitPolicy() {
@@ -165,6 +168,20 @@ void testProvisionalHeavyDiagnosticsRequireExplicitPolicy() {
     }
   }
   assert(!found_heavy_bundle);
+
+  bool found_memory_key = false;
+  for (const auto& entry : std::filesystem::directory_iterator(output_root / "diagnostics")) {
+    if (entry.path().extension() != ".json") { continue; }
+    std::ifstream in(entry.path());
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (text.find("\"memory_report\"") != std::string::npos &&
+        text.find("\"persistent_total_bytes\"") != std::string::npos &&
+        text.find("\"transient_total_bytes\"") != std::string::npos) {
+      found_memory_key = true;
+      break;
+    }
+  }
+  assert(found_memory_key);
 
   std::filesystem::remove_all(output_root);
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
 namespace cosmosim::analysis {
@@ -93,6 +94,7 @@ struct DiagnosticsBundle {
   std::vector<double> xy_projection_density_code;
   std::size_t quicklook_grid_n = 0;
   std::string quicklook_projection_csv_path;
+  core::MemoryReport memory_report;
 };
 
 struct DiagnosticsTiming {

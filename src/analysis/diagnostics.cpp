@@ -377,6 +377,7 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
   bundle.diagnostic_class = diagnostic_class;
   bundle.diagnostics_execution_policy = m_config.analysis.diagnostics_execution_policy;
   bundle.health = computeRunHealth(state);
+  bundle.memory_report = core::collectSimulationMemoryReport(state);
   bundle.records.push_back(DiagnosticRecord{
       .name = "run_health_counters",
       .tier = DiagnosticTier::kInfrastructureHealth,
@@ -486,6 +487,26 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
       << ", \"non_finite_cells\": " << bundle.health.non_finite_cells
       << ", \"non_finite_gravity_softening\": " << bundle.health.non_finite_gravity_softening
       << ", \"non_positive_particle_mass\": " << bundle.health.non_positive_particle_mass << "},\n";
+
+  out << "  \"memory_report\": {\n";
+  out << "    \"persistent_total_bytes\": " << bundle.memory_report.totals.persistent_total_bytes << ",\n";
+  out << "    \"transient_total_bytes\": " << bundle.memory_report.totals.transient_total_bytes << ",\n";
+  out << "    \"subsystems\": [";
+  for (std::size_t i = 0; i < static_cast<std::size_t>(core::MemorySubsystem::kCount); ++i) {
+    const auto subsystem = static_cast<core::MemorySubsystem>(i);
+    out << (i == 0 ? "\n" : ",\n");
+    out << "      {\"name\": \"" << core::memorySubsystemLabel(subsystem)
+        << "\", \"persistent_bytes\": " << bundle.memory_report.totals.persistent_by_subsystem[i]
+        << ", \"transient_bytes\": " << bundle.memory_report.totals.transient_by_subsystem[i] << "}";
+  }
+  out << "\n    ],\n";
+  out << "    \"notes\": [";
+  for (std::size_t i = 0; i < bundle.memory_report.notes.size(); ++i) {
+    out << (i == 0 ? "\n" : ",\n");
+    out << "      \"" << bundle.memory_report.notes[i] << "\"";
+  }
+  out << "\n    ]\n";
+  out << "  },\n";
   out << "  \"diagnostic_records\": [";
   for (std::size_t i = 0; i < bundle.records.size(); ++i) {
     const auto& record = bundle.records[i];

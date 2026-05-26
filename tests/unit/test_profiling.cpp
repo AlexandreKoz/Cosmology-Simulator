@@ -126,6 +126,26 @@ void testOperationalEventReportWriter() {
   std::filesystem::remove(path);
 }
 
+
+void testOperationalReportIncludesMemoryAccounting() {
+  cosmosim::core::ProfilerSession session(true);
+  cosmosim::core::MemoryReport report;
+  report.totals.persistent_total_bytes = 1024;
+  report.totals.transient_total_bytes = 256;
+  report.notes.push_back("unknown external allocations are not fully tracked");
+  session.setMemoryReport(std::move(report));
+
+  const auto path = std::filesystem::temp_directory_path() / "cosmosim_operational_events_memory_unit.json";
+  cosmosim::core::writeOperationalReportJson(session, path, "unit_memory", "beadfeed");
+
+  std::ifstream in(path);
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  assert(text.find("\"memory_report\"") != std::string::npos);
+  assert(text.find("\"persistent_total_bytes\": 1024") != std::string::npos);
+  assert(text.find("\"transient_total_bytes\": 256") != std::string::npos);
+  std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -133,5 +153,6 @@ int main() {
   testCounterAndAllocatorAggregation();
   testJsonAndCsvReportWriters();
   testOperationalEventReportWriter();
+  testOperationalReportIncludesMemoryAccounting();
   return 0;
 }
