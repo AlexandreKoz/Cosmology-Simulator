@@ -480,6 +480,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME unit_stage6_source_diagnostics_views COMMAND test_unit_stage6_source_diagnostics_views)
   cosmosim_mark_runtime_truth_test(unit_stage6_source_diagnostics_views active_views sidecar)
 
+  add_executable(test_unit_stage6_final_acceptance tests/unit/test_stage6_final_acceptance.cpp)
+  target_link_libraries(test_unit_stage6_final_acceptance PRIVATE cosmosim_all)
+  add_test(NAME unit_stage6_final_acceptance COMMAND test_unit_stage6_final_acceptance)
+  cosmosim_mark_runtime_truth_test(unit_stage6_final_acceptance active_views sidecar restart memory diagnostics)
+
   add_executable(test_unit_time_integration tests/unit/test_time_integration.cpp)
   target_link_libraries(test_unit_time_integration PRIVATE cosmosim_core)
   add_test(NAME unit_time_integration COMMAND test_unit_time_integration)
@@ -945,6 +950,9 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
   add_executable(bench_profiling_overhead bench/bench_profiling_overhead.cpp)
   target_link_libraries(bench_profiling_overhead PRIVATE cosmosim_core)
 
+  add_executable(bench_memory_accounting_overhead bench/bench_memory_accounting_overhead.cpp)
+  target_link_libraries(bench_memory_accounting_overhead PRIVATE cosmosim_core)
+
   add_executable(bench_scheduler_overhead bench/bench_scheduler_overhead.cpp)
   add_executable(bench_analysis_diagnostics_overhead bench/bench_analysis_diagnostics_overhead.cpp)
   add_executable(bench_fof_grouping bench/bench_fof_grouping.cpp)
@@ -1027,6 +1035,14 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_validation_ladder bench/bench_validation_ladder.cpp)
   target_link_libraries(bench_validation_ladder PRIVATE cosmosim_all)
+
+  add_custom_target(stage6_benchmarks
+    DEPENDS
+      bench_active_kernel_compact_vs_full
+      bench_gravity_kernels
+      bench_hydro_kernels
+      bench_memory_accounting_overhead
+      bench_profiling_overhead)
 
   if(COSMOSIM_ENABLE_PYTHON AND COSMOSIM_ENABLE_HDF5)
     add_custom_target(bench_python_snapshot_access
