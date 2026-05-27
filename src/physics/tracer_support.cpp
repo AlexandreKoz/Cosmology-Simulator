@@ -66,29 +66,27 @@ void TracerModel::inject(cosmosim::core::SimulationState& state, const TracerInj
   state.sidecars.upsert(std::move(sidecar));
 }
 
-TracerUpdateCounters TracerModel::updateMassFromHostCells(
-    cosmosim::core::SimulationState& state,
-    std::span<const std::uint32_t> active_cell_indices) const {
+TracerUpdateCounters TracerModel::updateMassFromHostCellsView(TracerHostMassView view) const {
   TracerUpdateCounters counters;
   if (!m_config.enabled || !m_config.track_mass) {
     return counters;
   }
 
   std::vector<std::uint8_t> active_cell_mask;
-  if (!active_cell_indices.empty()) {
-    active_cell_mask.assign(state.cells.size(), 0U);
-    for (const std::uint32_t cell_index : active_cell_indices) {
+  if (!view.active_cell_indices.empty()) {
+    active_cell_mask.assign(view.host_mass_code.size(), 0U);
+    for (const std::uint32_t cell_index : view.active_cell_indices) {
       if (cell_index < active_cell_mask.size()) {
         active_cell_mask[cell_index] = 1U;
       }
     }
   }
 
-  for (std::size_t tracer_row = 0; tracer_row < state.tracers.size(); ++tracer_row) {
-    const std::uint32_t tracer_particle_index = state.tracers.particle_index[tracer_row];
-    const std::uint32_t host_cell_index = state.tracers.host_cell_index[tracer_row];
+  for (std::size_t tracer_row = 0; tracer_row < view.tracer_particle_index.size(); ++tracer_row) {
+    const std::uint32_t tracer_particle_index = view.tracer_particle_index[tracer_row];
+    const std::uint32_t host_cell_index = view.host_cell_index[tracer_row];
 
-    if (host_cell_index >= state.cells.size() || tracer_particle_index >= state.particles.size()) {
+    if (host_cell_index >= view.host_mass_code.size() || tracer_particle_index >= view.particle_mass_code.size()) {
       ++counters.skipped_invalid_host;
       continue;
     }
@@ -97,24 +95,41 @@ TracerUpdateCounters TracerModel::updateMassFromHostCells(
       continue;
     }
 
-    const double host_mass_code = state.cells.mass_code[host_cell_index];
+    const double host_mass_code = view.host_mass_code[host_cell_index];
     if (host_mass_code <= m_config.min_host_mass_code) {
       ++counters.skipped_low_host_mass;
       continue;
     }
 
-    const double new_tracer_mass_code = state.tracers.mass_fraction_of_host[tracer_row] * host_mass_code;
-    const double old_tracer_mass_code = state.particles.mass_code[tracer_particle_index];
+    const double new_tracer_mass_code = view.mass_fraction_of_host[tracer_row] * host_mass_code;
+    const double old_tracer_mass_code = view.particle_mass_code[tracer_particle_index];
 
-    state.particles.mass_code[tracer_particle_index] = new_tracer_mass_code;
-    state.tracers.cumulative_exchanged_mass_code[tracer_row] +=
+    view.particle_mass_code[tracer_particle_index] = new_tracer_mass_code;
+    view.cumulative_exchanged_mass_code[tracer_row] +=
         std::abs(new_tracer_mass_code - old_tracer_mass_code);
-    state.tracers.last_host_mass_code[tracer_row] = host_mass_code;
+    view.last_host_mass_code[tracer_row] = host_mass_code;
 
     ++counters.updated_tracers;
     counters.cumulative_absolute_mass_delta_code +=
         std::abs(new_tracer_mass_code - old_tracer_mass_code);
   }
+  return counters;
+}
+
+TracerUpdateCounters TracerModel::updateMassFromHostCells(
+    cosmosim::core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_indices) const {
+  TracerHostMassView view{
+      .active_cell_indices = active_cell_indices,
+      .tracer_particle_index = state.tracers.particle_index,
+      .host_cell_index = state.tracers.host_cell_index,
+      .mass_fraction_of_host = state.tracers.mass_fraction_of_host,
+      .last_host_mass_code = state.tracers.last_host_mass_code,
+      .cumulative_exchanged_mass_code = state.tracers.cumulative_exchanged_mass_code,
+      .host_mass_code = state.cells.mass_code,
+      .particle_mass_code = state.particles.mass_code,
+  };
+  TracerUpdateCounters counters = updateMassFromHostCellsView(view);
 
   std::ostringstream sidecar_text;
   sidecar_text << "updated_tracers=" << counters.updated_tracers << '\n';

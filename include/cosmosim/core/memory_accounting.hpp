@@ -33,6 +33,7 @@ struct MemoryEntry {
   std::string label;
   std::uint64_t owned_capacity_bytes = 0;
   std::uint64_t referenced_bytes = 0;
+  std::uint64_t high_water_bytes = 0;
   bool estimate_only = false;
   std::string uncertainty_note;
 };
@@ -40,14 +41,30 @@ struct MemoryEntry {
 struct MemoryTotals {
   std::array<std::uint64_t, static_cast<std::size_t>(MemorySubsystem::kCount)> persistent_by_subsystem{};
   std::array<std::uint64_t, static_cast<std::size_t>(MemorySubsystem::kCount)> transient_by_subsystem{};
+  std::array<std::uint64_t, static_cast<std::size_t>(MemorySubsystem::kCount)> unknown_by_subsystem{};
   std::uint64_t persistent_total_bytes = 0;
   std::uint64_t transient_total_bytes = 0;
+  std::uint64_t unknown_total_bytes = 0;
 };
 
 struct MemoryReport {
   std::vector<MemoryEntry> entries;
   MemoryTotals totals;
   std::vector<std::string> notes;
+};
+
+struct MemoryBudgetEstimateInput {
+  std::uint64_t particle_capacity = 0;
+  std::uint64_t gas_cell_capacity = 0;
+  std::uint64_t star_capacity = 0;
+  std::uint64_t black_hole_capacity = 0;
+  std::uint64_t tracer_capacity = 0;
+  std::uint64_t active_particle_capacity = 0;
+  std::uint64_t active_cell_capacity = 0;
+  std::uint64_t tree_node_capacity = 0;
+  std::uint64_t pm_grid_cells = 0;
+  std::uint64_t mpi_exchange_particle_capacity = 0;
+  std::uint64_t output_buffer_bytes = 0;
 };
 
 class MemoryReportBuilder {
@@ -76,6 +93,8 @@ template <typename T>
 [[nodiscard]] MemoryReport collectSimulationMemoryReport(
     const SimulationState& state,
     const TransientStepWorkspace* workspace = nullptr);
+
+[[nodiscard]] MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input);
 
 [[nodiscard]] std::string formatMemoryReportHumanReadable(const MemoryReport& report);
 

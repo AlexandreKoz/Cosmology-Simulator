@@ -36,6 +36,19 @@ struct StarFormationCellInput {
   double metallicity_mass_fraction = 0.0;
 };
 
+
+struct StarFormationRuntimeView {
+  std::span<const std::uint32_t> active_cell_indices;
+  std::span<const double> center_x_comoving;
+  std::span<const double> center_y_comoving;
+  std::span<const double> center_z_comoving;
+  std::span<double> gas_mass_code;
+  std::span<double> gas_density_code;
+  std::span<const double> gas_temperature_k;
+  std::span<const double> velocity_divergence_code;
+  std::span<const double> metallicity_mass_fraction;
+};
+
 struct StarFormationCounters {
   std::uint64_t scanned_cells = 0;
   std::uint64_t eligible_cells = 0;
@@ -72,6 +85,14 @@ class StarFormationModel {
   [[nodiscard]] StarFormationCellOutcome sampleCellOutcome(
       const StarFormationCellInput& cell,
       double dt_code,
+      std::uint64_t step_index,
+      std::uint32_t rank_local_seed_offset = 0) const;
+
+  [[nodiscard]] StarFormationStepReport applyFromView(
+      core::SimulationState& state,
+      StarFormationRuntimeView view,
+      double dt_code,
+      double scale_factor,
       std::uint64_t step_index,
       std::uint32_t rank_local_seed_offset = 0) const;
 

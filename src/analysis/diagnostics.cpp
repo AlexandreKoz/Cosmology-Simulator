@@ -97,52 +97,83 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
 
 DiagnosticsEngine::DiagnosticsEngine(core::SimulationConfig config) : m_config(std::move(config)) {}
 
-RunHealthCounters DiagnosticsEngine::computeRunHealth(const core::SimulationState& state) const {
-  RunHealthCounters counters;
-  counters.particle_count = static_cast<std::uint64_t>(state.particles.size());
-  counters.cell_count = static_cast<std::uint64_t>(state.cells.size());
-  counters.star_count = static_cast<std::uint64_t>(state.star_particles.size());
-  counters.ownership_invariants_ok = state.validateOwnershipInvariants();
-  counters.unique_particle_ids_ok = state.validateUniqueParticleIds();
-  counters.gravity_softening_sidecar_size_ok =
-      state.particle_sidecar.gravity_softening_comoving.empty() ||
-      state.particle_sidecar.gravity_softening_comoving.size() == state.particles.size();
+DiagnosticsStateView buildDiagnosticsStateView(const core::SimulationState& state) {
+  return DiagnosticsStateView{
+      .particles = ParticleDiagnosticsView{
+          .position_x_comoving = state.particles.position_x_comoving,
+          .position_y_comoving = state.particles.position_y_comoving,
+          .position_z_comoving = state.particles.position_z_comoving,
+          .velocity_x_peculiar = state.particles.velocity_x_peculiar,
+          .velocity_y_peculiar = state.particles.velocity_y_peculiar,
+          .velocity_z_peculiar = state.particles.velocity_z_peculiar,
+          .mass_code = state.particles.mass_code,
+          .species_tag = state.particle_sidecar.species_tag,
+          .gravity_softening_comoving = state.particle_sidecar.gravity_softening_comoving,
+      },
+      .gas_cells = GasDiagnosticsView{
+          .center_x_comoving = state.cells.center_x_comoving,
+          .center_y_comoving = state.cells.center_y_comoving,
+          .center_z_comoving = state.cells.center_z_comoving,
+          .mass_code = state.cells.mass_code,
+          .density_code = state.gas_cells.density_code,
+      },
+      .stars = StarFormationHistoryView{
+          .formation_scale_factor = state.star_particles.formation_scale_factor,
+          .birth_mass_code = state.star_particles.birth_mass_code,
+      },
+      .particle_count = static_cast<std::uint64_t>(state.particles.size()),
+      .cell_count = static_cast<std::uint64_t>(state.cells.size()),
+      .star_count = static_cast<std::uint64_t>(state.star_particles.size()),
+      .ownership_invariants_ok = state.validateOwnershipInvariants(),
+      .unique_particle_ids_ok = state.validateUniqueParticleIds(),
+  };
+}
 
-  for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    if (!finite3(
-            state.particles.position_x_comoving[i],
-            state.particles.position_y_comoving[i],
-            state.particles.position_z_comoving[i]) ||
-        !finite3(
-            state.particles.velocity_x_peculiar[i],
-            state.particles.velocity_y_peculiar[i],
-            state.particles.velocity_z_peculiar[i]) ||
-        !std::isfinite(state.particles.mass_code[i])) {
+RunHealthCounters DiagnosticsEngine::computeRunHealth(const DiagnosticsStateView& view) const {
+  RunHealthCounters counters;
+  counters.particle_count = view.particle_count;
+  counters.cell_count = view.cell_count;
+  counters.star_count = view.star_count;
+  counters.ownership_invariants_ok = view.ownership_invariants_ok;
+  counters.unique_particle_ids_ok = view.unique_particle_ids_ok;
+  counters.gravity_softening_sidecar_size_ok =
+      view.particles.gravity_softening_comoving.empty() ||
+      view.particles.gravity_softening_comoving.size() == view.particles.mass_code.size();
+
+  for (std::size_t i = 0; i < view.particles.mass_code.size(); ++i) {
+    if (!finite3(view.particles.position_x_comoving[i], view.particles.position_y_comoving[i],
+                 view.particles.position_z_comoving[i]) ||
+        !finite3(view.particles.velocity_x_peculiar[i], view.particles.velocity_y_peculiar[i],
+                 view.particles.velocity_z_peculiar[i]) ||
+        !std::isfinite(view.particles.mass_code[i])) {
       ++counters.non_finite_particles;
     }
-    if (state.particles.mass_code[i] <= 0.0) {
+    if (view.particles.mass_code[i] <= 0.0) {
       ++counters.non_positive_particle_mass;
     }
   }
 
-  for (std::size_t i = 0; i < state.cells.size(); ++i) {
-    if (!finite3(state.cells.center_x_comoving[i], state.cells.center_y_comoving[i], state.cells.center_z_comoving[i]) ||
-        !std::isfinite(state.cells.mass_code[i]) || !std::isfinite(state.gas_cells.density_code[i])) {
+  for (std::size_t i = 0; i < view.gas_cells.mass_code.size(); ++i) {
+    if (!finite3(view.gas_cells.center_x_comoving[i], view.gas_cells.center_y_comoving[i],
+                 view.gas_cells.center_z_comoving[i]) ||
+        !std::isfinite(view.gas_cells.mass_code[i]) || !std::isfinite(view.gas_cells.density_code[i])) {
       ++counters.non_finite_cells;
     }
   }
-  for (std::size_t i = 0; i < state.particle_sidecar.gravity_softening_comoving.size(); ++i) {
-    const double softening = state.particle_sidecar.gravity_softening_comoving[i];
+  for (const double softening : view.particles.gravity_softening_comoving) {
     if (!std::isfinite(softening) || softening < 0.0) {
       ++counters.non_finite_gravity_softening;
     }
   }
-
   return counters;
 }
 
+RunHealthCounters DiagnosticsEngine::computeRunHealth(const core::SimulationState& state) const {
+  return computeRunHealth(buildDiagnosticsStateView(state));
+}
+
 std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
-    const core::SimulationState& state,
+    const ParticleDiagnosticsView& particles,
     std::size_t mesh_n,
     std::size_t bin_count) const {
   if (mesh_n == 0 || bin_count == 0) {
@@ -156,19 +187,19 @@ std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
 
   std::vector<double> mass_density(mesh_count, 0.0);
   double total_mass = 0.0;
-  for (std::size_t p = 0; p < state.particles.size(); ++p) {
-    const double wrapped_x = std::fmod(std::fmod(state.particles.position_x_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
+  for (std::size_t p = 0; p < particles.mass_code.size(); ++p) {
+    const double wrapped_x = std::fmod(std::fmod(particles.position_x_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
                                        box_size_mpc_comov);
-    const double wrapped_y = std::fmod(std::fmod(state.particles.position_y_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
+    const double wrapped_y = std::fmod(std::fmod(particles.position_y_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
                                        box_size_mpc_comov);
-    const double wrapped_z = std::fmod(std::fmod(state.particles.position_z_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
+    const double wrapped_z = std::fmod(std::fmod(particles.position_z_comoving[p], box_size_mpc_comov) + box_size_mpc_comov,
                                        box_size_mpc_comov);
 
     const std::size_t ix = std::min(mesh_n - 1, static_cast<std::size_t>(wrapped_x / cell_size));
     const std::size_t iy = std::min(mesh_n - 1, static_cast<std::size_t>(wrapped_y / cell_size));
     const std::size_t iz = std::min(mesh_n - 1, static_cast<std::size_t>(wrapped_z / cell_size));
 
-    const double mass = state.particles.mass_code[p];
+    const double mass = particles.mass_code[p];
     mass_density[flatten(ix, iy, iz, mesh_n)] += mass / cell_volume;
     total_mass += mass;
   }
@@ -245,18 +276,25 @@ std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
   return bins;
 }
 
-std::vector<StarFormationHistoryBin> DiagnosticsEngine::computeStarFormationHistory(
+std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
     const core::SimulationState& state,
+    std::size_t mesh_n,
+    std::size_t bin_count) const {
+  return computePowerSpectrum(buildDiagnosticsStateView(state).particles, mesh_n, bin_count);
+}
+
+std::vector<StarFormationHistoryBin> DiagnosticsEngine::computeStarFormationHistory(
+    const StarFormationHistoryView& stars,
     std::size_t bin_count) const {
   if (bin_count == 0) {
     throw std::invalid_argument("sf history requires bin_count > 0");
   }
 
   std::vector<double> mass_sum(bin_count, 0.0);
-  for (std::size_t i = 0; i < state.star_particles.size(); ++i) {
-    const double a = std::clamp(state.star_particles.formation_scale_factor[i], 0.0, 1.0);
+  for (std::size_t i = 0; i < stars.birth_mass_code.size(); ++i) {
+    const double a = std::clamp(stars.formation_scale_factor[i], 0.0, 1.0);
     const std::size_t bin = std::min(bin_count - 1, static_cast<std::size_t>(a * static_cast<double>(bin_count)));
-    mass_sum[bin] += state.star_particles.birth_mass_code[i];
+    mass_sum[bin] += stars.birth_mass_code[i];
   }
 
   std::vector<StarFormationHistoryBin> result;
@@ -270,18 +308,24 @@ std::vector<StarFormationHistoryBin> DiagnosticsEngine::computeStarFormationHist
   return result;
 }
 
-AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const core::SimulationState& state) const {
+std::vector<StarFormationHistoryBin> DiagnosticsEngine::computeStarFormationHistory(
+    const core::SimulationState& state,
+    std::size_t bin_count) const {
+  return computeStarFormationHistory(buildDiagnosticsStateView(state).stars, bin_count);
+}
+
+AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const ParticleDiagnosticsView& particles) const {
   AngularMomentumBudget budget;
-  for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const double mass = state.particles.mass_code[i];
+  for (std::size_t i = 0; i < particles.mass_code.size(); ++i) {
+    const double mass = particles.mass_code[i];
     const std::array<double, 3> r = {
-        state.particles.position_x_comoving[i],
-        state.particles.position_y_comoving[i],
-        state.particles.position_z_comoving[i]};
+        particles.position_x_comoving[i],
+        particles.position_y_comoving[i],
+        particles.position_z_comoving[i]};
     const std::array<double, 3> v = {
-        state.particles.velocity_x_peculiar[i],
-        state.particles.velocity_y_peculiar[i],
-        state.particles.velocity_z_peculiar[i]};
+        particles.velocity_x_peculiar[i],
+        particles.velocity_y_peculiar[i],
+        particles.velocity_z_peculiar[i]};
 
     const std::array<double, 3> l = {
         mass * (r[1] * v[2] - r[2] * v[1]),
@@ -292,7 +336,7 @@ AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const core
       budget.total_l_code[j] += l[j];
     }
 
-    const auto species = static_cast<core::ParticleSpecies>(state.particle_sidecar.species_tag[i]);
+    const auto species = static_cast<core::ParticleSpecies>(particles.species_tag[i]);
     std::array<double, 3>* target = nullptr;
     switch (species) {
       case core::ParticleSpecies::kDarkMatter:
@@ -319,8 +363,12 @@ AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const core
   return budget;
 }
 
+AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const core::SimulationState& state) const {
+  return computeAngularMomentumBudget(buildDiagnosticsStateView(state).particles);
+}
+
 std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
-    const core::SimulationState& state,
+    const GasDiagnosticsView& gas_cells,
     std::size_t grid_n) const {
   const double box = m_config.cosmology.box_size_mpc_comoving;
   const double dz_half = box / static_cast<double>(grid_n) * 0.5;
@@ -329,16 +377,16 @@ std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
 
   std::vector<double> slice(grid_n * grid_n, 0.0);
   std::vector<std::uint32_t> count(grid_n * grid_n, 0);
-  for (std::size_t i = 0; i < state.cells.size(); ++i) {
-    const double z = state.cells.center_z_comoving[i];
+  for (std::size_t i = 0; i < gas_cells.mass_code.size(); ++i) {
+    const double z = gas_cells.center_z_comoving[i];
     if (std::abs(z - z_mid) > dz_half) {
       continue;
     }
 
-    const std::size_t ix = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(state.cells.center_x_comoving[i], box) + box, box) / cell_size));
-    const std::size_t iy = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(state.cells.center_y_comoving[i], box) + box, box) / cell_size));
+    const std::size_t ix = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_x_comoving[i], box) + box, box) / cell_size));
+    const std::size_t iy = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_y_comoving[i], box) + box, box) / cell_size));
     const std::size_t idx = flatten2(ix, iy, grid_n);
-    slice[idx] += state.gas_cells.density_code[i];
+    slice[idx] += gas_cells.density_code[i];
     ++count[idx];
   }
 
@@ -350,20 +398,32 @@ std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
   return slice;
 }
 
-std::vector<double> DiagnosticsEngine::computeGasXyProjectionDensity(
+std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
     const core::SimulationState& state,
+    std::size_t grid_n) const {
+  return computeGasXySliceDensity(buildDiagnosticsStateView(state).gas_cells, grid_n);
+}
+
+std::vector<double> DiagnosticsEngine::computeGasXyProjectionDensity(
+    const GasDiagnosticsView& gas_cells,
     std::size_t grid_n) const {
   const double box = m_config.cosmology.box_size_mpc_comoving;
   const double cell_size = box / static_cast<double>(grid_n);
 
   std::vector<double> projection(grid_n * grid_n, 0.0);
-  for (std::size_t i = 0; i < state.cells.size(); ++i) {
-    const std::size_t ix = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(state.cells.center_x_comoving[i], box) + box, box) / cell_size));
-    const std::size_t iy = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(state.cells.center_y_comoving[i], box) + box, box) / cell_size));
-    projection[flatten2(ix, iy, grid_n)] += state.gas_cells.density_code[i];
+  for (std::size_t i = 0; i < gas_cells.mass_code.size(); ++i) {
+    const std::size_t ix = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_x_comoving[i], box) + box, box) / cell_size));
+    const std::size_t iy = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_y_comoving[i], box) + box, box) / cell_size));
+    projection[flatten2(ix, iy, grid_n)] += gas_cells.density_code[i];
   }
 
   return projection;
+}
+
+std::vector<double> DiagnosticsEngine::computeGasXyProjectionDensity(
+    const core::SimulationState& state,
+    std::size_t grid_n) const {
+  return computeGasXyProjectionDensity(buildDiagnosticsStateView(state).gas_cells, grid_n);
 }
 
 DiagnosticsBundle DiagnosticsEngine::generateBundle(

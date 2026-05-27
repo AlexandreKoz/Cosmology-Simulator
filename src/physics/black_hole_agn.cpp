@@ -102,6 +102,62 @@ BlackHoleRates BlackHoleAgnModel::computeAccretionRates(
   return rates;
 }
 
+BlackHoleAgnCounters BlackHoleAgnModel::applyAccretionFromView(
+    BlackHoleAgnAccretionView view,
+    double dt_code) const {
+  BlackHoleAgnCounters counters;
+  if (!m_config.enabled || dt_code <= 0.0) {
+    return counters;
+  }
+
+  for (const std::uint32_t bh_local_index : view.active_black_hole_indices) {
+    ++counters.scanned_bh;
+    if (bh_local_index >= view.particle_index.size() || bh_local_index >= view.host_cell_index.size() ||
+        bh_local_index >= view.subgrid_mass_code.size()) {
+      continue;
+    }
+    const std::uint32_t particle_index = view.particle_index[bh_local_index];
+    const std::uint32_t host_cell_index = view.host_cell_index[bh_local_index];
+    if (particle_index >= view.particle_mass_code.size() || host_cell_index >= view.gas_density_code.size() ||
+        host_cell_index >= view.gas_sound_speed_code.size() || host_cell_index >= view.gas_internal_energy_code.size()) {
+      continue;
+    }
+
+    ++counters.active_bh;
+    const BlackHoleRates rates = computeAccretionRates(
+        view.subgrid_mass_code[bh_local_index],
+        view.gas_density_code[host_cell_index],
+        view.gas_sound_speed_code[host_cell_index],
+        0.0);
+
+    const double delta_mass = std::max(rates.mdot_acc_code * dt_code, 0.0);
+    const double delta_feedback_energy = std::max(rates.feedback_power_code * dt_code, 0.0);
+    const double delta_feedback_deposited = delta_feedback_energy * m_config.feedback_coupling_efficiency;
+
+    view.accretion_rate_code[bh_local_index] = rates.mdot_acc_code;
+    view.feedback_energy_code[bh_local_index] = delta_feedback_energy;
+    view.eddington_ratio[bh_local_index] = rates.eddington_ratio;
+    view.subgrid_mass_code[bh_local_index] += delta_mass;
+    view.cumulative_accreted_mass_code[bh_local_index] += delta_mass;
+    view.cumulative_feedback_energy_code[bh_local_index] += delta_feedback_energy;
+    view.duty_cycle_total_time_code[bh_local_index] += dt_code;
+
+    if (rates.eddington_ratio >= m_config.duty_cycle_active_edd_ratio_threshold) {
+      view.duty_cycle_active_time_code[bh_local_index] += dt_code;
+      counters.integrated_duty_cycle_active_time_code += dt_code;
+    }
+    counters.integrated_duty_cycle_total_time_code += dt_code;
+
+    view.gas_internal_energy_code[host_cell_index] += delta_feedback_deposited;
+    view.particle_mass_code[particle_index] = view.subgrid_mass_code[bh_local_index];
+
+    counters.integrated_accreted_mass_code += delta_mass;
+    counters.integrated_feedback_energy_code += delta_feedback_energy;
+    counters.deposited_feedback_energy_code += delta_feedback_deposited;
+  }
+  return counters;
+}
+
 BlackHoleAgnStepReport BlackHoleAgnModel::apply(
     core::SimulationState& state,
     std::span<const BlackHoleSeedCandidate> seed_candidates,
@@ -113,51 +169,35 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
     return report;
   }
 
-  for (std::size_t bh_local_index = 0; bh_local_index < state.black_holes.size(); ++bh_local_index) {
-    ++report.counters.scanned_bh;
-    const std::uint32_t particle_index = state.black_holes.particle_index[bh_local_index];
-    const std::uint32_t host_cell_index = state.black_holes.host_cell_index[bh_local_index];
-    if (particle_index >= state.particles.size() || host_cell_index >= state.gas_cells.size()) {
-      continue;
-    }
-
-    ++report.counters.active_bh;
-    const BlackHoleRates rates = computeAccretionRates(
-        state.black_holes.subgrid_mass_code[bh_local_index],
-        state.gas_cells.density_code[host_cell_index],
-        state.gas_cells.sound_speed_code[host_cell_index],
-        0.0);
-
-    const double delta_mass = std::max(rates.mdot_acc_code * dt_code, 0.0);
-    const double delta_feedback_energy = std::max(rates.feedback_power_code * dt_code, 0.0);
-    const double delta_feedback_deposited = delta_feedback_energy * m_config.feedback_coupling_efficiency;
-
-    state.black_holes.accretion_rate_code[bh_local_index] = rates.mdot_acc_code;
-    state.black_holes.feedback_energy_code[bh_local_index] = delta_feedback_energy;
-    state.black_holes.eddington_ratio[bh_local_index] = rates.eddington_ratio;
-    state.black_holes.subgrid_mass_code[bh_local_index] += delta_mass;
-    state.black_holes.cumulative_accreted_mass_code[bh_local_index] += delta_mass;
-    state.black_holes.cumulative_feedback_energy_code[bh_local_index] += delta_feedback_energy;
-    state.black_holes.duty_cycle_total_time_code[bh_local_index] += dt_code;
-
-    if (rates.eddington_ratio >= m_config.duty_cycle_active_edd_ratio_threshold) {
-      state.black_holes.duty_cycle_active_time_code[bh_local_index] += dt_code;
-      report.counters.integrated_duty_cycle_active_time_code += dt_code;
-    }
-    report.counters.integrated_duty_cycle_total_time_code += dt_code;
-
-    // We deposit feedback energy to host-cell internal energy in the same frame as internal_energy_code.
-    if (host_cell_index < state.gas_cells.internal_energy_code.size()) {
-      state.gas_cells.internal_energy_code[host_cell_index] += delta_feedback_deposited;
-    }
-
-    report.counters.integrated_accreted_mass_code += delta_mass;
-    report.counters.integrated_feedback_energy_code += delta_feedback_energy;
-    report.counters.deposited_feedback_energy_code += delta_feedback_deposited;
-
-    // Keep gravity-hot particle mass synchronized with BH subgrid mass for restart consistency.
-    state.particles.mass_code[particle_index] = state.black_holes.subgrid_mass_code[bh_local_index];
+  std::vector<std::uint32_t> active_black_hole_indices(state.black_holes.size());
+  for (std::size_t i = 0; i < active_black_hole_indices.size(); ++i) {
+    active_black_hole_indices[i] = static_cast<std::uint32_t>(i);
   }
+  BlackHoleAgnAccretionView accretion_view{
+      .active_black_hole_indices = active_black_hole_indices,
+      .particle_index = state.black_holes.particle_index,
+      .host_cell_index = state.black_holes.host_cell_index,
+      .subgrid_mass_code = state.black_holes.subgrid_mass_code,
+      .accretion_rate_code = state.black_holes.accretion_rate_code,
+      .feedback_energy_code = state.black_holes.feedback_energy_code,
+      .eddington_ratio = state.black_holes.eddington_ratio,
+      .cumulative_accreted_mass_code = state.black_holes.cumulative_accreted_mass_code,
+      .cumulative_feedback_energy_code = state.black_holes.cumulative_feedback_energy_code,
+      .duty_cycle_active_time_code = state.black_holes.duty_cycle_active_time_code,
+      .duty_cycle_total_time_code = state.black_holes.duty_cycle_total_time_code,
+      .gas_density_code = state.gas_cells.density_code,
+      .gas_sound_speed_code = state.gas_cells.sound_speed_code,
+      .gas_internal_energy_code = state.gas_cells.internal_energy_code,
+      .particle_mass_code = state.particles.mass_code,
+  };
+  BlackHoleAgnCounters accretion_counters = applyAccretionFromView(accretion_view, dt_code);
+  report.counters.scanned_bh += accretion_counters.scanned_bh;
+  report.counters.active_bh += accretion_counters.active_bh;
+  report.counters.integrated_accreted_mass_code += accretion_counters.integrated_accreted_mass_code;
+  report.counters.integrated_feedback_energy_code += accretion_counters.integrated_feedback_energy_code;
+  report.counters.deposited_feedback_energy_code += accretion_counters.deposited_feedback_energy_code;
+  report.counters.integrated_duty_cycle_active_time_code += accretion_counters.integrated_duty_cycle_active_time_code;
+  report.counters.integrated_duty_cycle_total_time_code += accretion_counters.integrated_duty_cycle_total_time_code;
 
   std::uint64_t next_particle_id = nextParticleId(state);
   for (const BlackHoleSeedCandidate& candidate : seed_candidates) {

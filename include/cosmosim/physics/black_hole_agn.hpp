@@ -48,6 +48,25 @@ struct BlackHoleRates {
   double feedback_power_code = 0.0;
 };
 
+
+struct BlackHoleAgnAccretionView {
+  std::span<const std::uint32_t> active_black_hole_indices;
+  std::span<const std::uint32_t> particle_index;
+  std::span<const std::uint32_t> host_cell_index;
+  std::span<double> subgrid_mass_code;
+  std::span<double> accretion_rate_code;
+  std::span<double> feedback_energy_code;
+  std::span<double> eddington_ratio;
+  std::span<double> cumulative_accreted_mass_code;
+  std::span<double> cumulative_feedback_energy_code;
+  std::span<double> duty_cycle_active_time_code;
+  std::span<double> duty_cycle_total_time_code;
+  std::span<const double> gas_density_code;
+  std::span<const double> gas_sound_speed_code;
+  std::span<double> gas_internal_energy_code;
+  std::span<double> particle_mass_code;
+};
+
 struct BlackHoleAgnCounters {
   std::uint64_t scanned_bh = 0;
   std::uint64_t active_bh = 0;
@@ -78,6 +97,10 @@ class BlackHoleAgnModel {
       double gas_density_code,
       double sound_speed_code,
       double relative_velocity_code) const;
+
+  [[nodiscard]] BlackHoleAgnCounters applyAccretionFromView(
+      BlackHoleAgnAccretionView view,
+      double dt_code) const;
 
   [[nodiscard]] BlackHoleAgnStepReport apply(
       core::SimulationState& state,

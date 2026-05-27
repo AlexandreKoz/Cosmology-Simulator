@@ -100,22 +100,23 @@ StellarFeedbackBudget StellarFeedbackModel::computeBudget(
 }
 
 std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
-    const core::SimulationState& state,
+    const StellarFeedbackGeometryView& geometry_view,
     std::uint32_t particle_index) const {
-  if (particle_index >= state.particles.size() || state.cells.size() == 0) {
+  if (particle_index >= geometry_view.particle_position_x_comoving.size() ||
+      geometry_view.cell_center_x_comoving.empty()) {
     return {};
   }
 
-  const double px = state.particles.position_x_comoving[particle_index];
-  const double py = state.particles.position_y_comoving[particle_index];
-  const double pz = state.particles.position_z_comoving[particle_index];
+  const double px = geometry_view.particle_position_x_comoving[particle_index];
+  const double py = geometry_view.particle_position_y_comoving[particle_index];
+  const double pz = geometry_view.particle_position_z_comoving[particle_index];
 
   std::vector<WeightedCellDistance> distances;
-  distances.reserve(state.cells.size());
-  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const double dx = state.cells.center_x_comoving[cell_index] - px;
-    const double dy = state.cells.center_y_comoving[cell_index] - py;
-    const double dz = state.cells.center_z_comoving[cell_index] - pz;
+  distances.reserve(geometry_view.cell_center_x_comoving.size());
+  for (std::uint32_t cell_index = 0; cell_index < geometry_view.cell_center_x_comoving.size(); ++cell_index) {
+    const double dx = geometry_view.cell_center_x_comoving[cell_index] - px;
+    const double dy = geometry_view.cell_center_y_comoving[cell_index] - py;
+    const double dz = geometry_view.cell_center_z_comoving[cell_index] - pz;
     const double d2 = dx * dx + dy * dy + dz * dz;
     distances.push_back(WeightedCellDistance{.cell_index = cell_index, .distance2 = d2, .dx = dx, .dy = dy, .dz = dz});
   }
@@ -150,9 +151,25 @@ std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
   return targets;
 }
 
-StellarFeedbackStepReport StellarFeedbackModel::apply(
+std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
+    const core::SimulationState& state,
+    std::uint32_t particle_index) const {
+  const StellarFeedbackGeometryView geometry_view{
+      .particle_position_x_comoving = state.particles.position_x_comoving,
+      .particle_position_y_comoving = state.particles.position_y_comoving,
+      .particle_position_z_comoving = state.particles.position_z_comoving,
+      .cell_center_x_comoving = state.cells.center_x_comoving,
+      .cell_center_y_comoving = state.cells.center_y_comoving,
+      .cell_center_z_comoving = state.cells.center_z_comoving,
+  };
+  return selectTargets(geometry_view, particle_index);
+}
+
+StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     core::SimulationState& state,
     StellarFeedbackModuleState& module_state,
+    const StellarFeedbackGeometryView& geometry_view,
+    StellarFeedbackDepositionView deposition_view,
     std::span<const std::uint32_t> active_star_indices,
     std::span<const double> returned_mass_delta_code,
     std::span<const double> returned_metals_delta_code,
@@ -214,7 +231,7 @@ StellarFeedbackStepReport StellarFeedbackModel::apply(
       star_report.stochastic_event_fired = stochasticEventFires(star_index, step_seed);
     }
 
-    std::vector<StellarFeedbackTarget> targets = selectTargets(state, particle_index);
+    std::vector<StellarFeedbackTarget> targets = selectTargets(geometry_view, particle_index);
     star_report.target_count = targets.size();
     report.counters.target_cells_visited += targets.size();
 
@@ -235,18 +252,18 @@ StellarFeedbackStepReport StellarFeedbackModel::apply(
         const double kinetic_add = star_report.budget.kinetic_energy_erg * weight;
         const double momentum_add = star_report.budget.momentum_budget_code * weight;
 
-        state.cells.mass_code[cell_index] += mass_add;
-        state.gas_cells.density_code[cell_index] += mass_add;
+        deposition_view.cell_mass_code[cell_index] += mass_add;
+        deposition_view.gas_density_code[cell_index] += mass_add;
 
         if (m_config.variant == StellarFeedbackVariant::kDelayedCooling) {
           star_report.delayed_cooling_applied = true;
           star_report.unresolved_thermal_energy_erg += thermal_add;
         } else {
-          state.gas_cells.internal_energy_code[cell_index] += thermal_add;
+          deposition_view.gas_internal_energy_code[cell_index] += thermal_add;
           star_report.deposited_thermal_energy_erg += thermal_add;
         }
 
-        state.gas_cells.internal_energy_code[cell_index] += kinetic_add;
+        deposition_view.gas_internal_energy_code[cell_index] += kinetic_add;
         star_report.deposited_kinetic_energy_erg += kinetic_add;
 
         // Momentum storage is intentionally sidecar-only for now since gas velocity fields are not in CellSoa.
@@ -279,6 +296,33 @@ StellarFeedbackStepReport StellarFeedbackModel::apply(
 
   state.sidecars.upsert(buildMetadataSidecar(report));
   return report;
+}
+
+
+
+StellarFeedbackStepReport StellarFeedbackModel::apply(
+    core::SimulationState& state,
+    StellarFeedbackModuleState& module_state,
+    std::span<const std::uint32_t> active_star_indices,
+    std::span<const double> returned_mass_delta_code,
+    std::span<const double> returned_metals_delta_code,
+    double dt_code) const {
+  const StellarFeedbackGeometryView geometry_view{
+      .particle_position_x_comoving = state.particles.position_x_comoving,
+      .particle_position_y_comoving = state.particles.position_y_comoving,
+      .particle_position_z_comoving = state.particles.position_z_comoving,
+      .cell_center_x_comoving = state.cells.center_x_comoving,
+      .cell_center_y_comoving = state.cells.center_y_comoving,
+      .cell_center_z_comoving = state.cells.center_z_comoving,
+  };
+  StellarFeedbackDepositionView deposition_view{
+      .cell_mass_code = state.cells.mass_code,
+      .gas_density_code = state.gas_cells.density_code,
+      .gas_internal_energy_code = state.gas_cells.internal_energy_code,
+  };
+  return applyWithViews(
+      state, module_state, geometry_view, deposition_view, active_star_indices,
+      returned_mass_delta_code, returned_metals_delta_code, dt_code);
 }
 
 core::ModuleSidecarBlock StellarFeedbackModel::buildMetadataSidecar(const StellarFeedbackStepReport& report) const {

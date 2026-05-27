@@ -23,6 +23,18 @@ struct TracerInjectionRequest {
   double injected_mass_code = 0.0;
 };
 
+
+struct TracerHostMassView {
+  std::span<const std::uint32_t> active_cell_indices;
+  std::span<const std::uint32_t> tracer_particle_index;
+  std::span<const std::uint32_t> host_cell_index;
+  std::span<const double> mass_fraction_of_host;
+  std::span<double> last_host_mass_code;
+  std::span<double> cumulative_exchanged_mass_code;
+  std::span<const double> host_mass_code;
+  std::span<double> particle_mass_code;
+};
+
 struct TracerUpdateCounters {
   std::uint64_t updated_tracers = 0;
   std::uint64_t skipped_inactive_host = 0;
@@ -37,6 +49,8 @@ class TracerModel {
 
   [[nodiscard]] const TracerConfig& config() const noexcept;
   void inject(cosmosim::core::SimulationState& state, const TracerInjectionRequest& request) const;
+
+  [[nodiscard]] TracerUpdateCounters updateMassFromHostCellsView(TracerHostMassView view) const;
 
   [[nodiscard]] TracerUpdateCounters updateMassFromHostCells(
       cosmosim::core::SimulationState& state,

@@ -475,6 +475,11 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_unit_memory_accounting PRIVATE cosmosim_core)
   add_test(NAME unit_memory_accounting COMMAND test_unit_memory_accounting)
 
+  add_executable(test_unit_stage6_source_diagnostics_views tests/unit/test_stage6_source_diagnostics_views.cpp)
+  target_link_libraries(test_unit_stage6_source_diagnostics_views PRIVATE cosmosim_all)
+  add_test(NAME unit_stage6_source_diagnostics_views COMMAND test_unit_stage6_source_diagnostics_views)
+  cosmosim_mark_runtime_truth_test(unit_stage6_source_diagnostics_views active_views sidecar)
+
   add_executable(test_unit_time_integration tests/unit/test_time_integration.cpp)
   target_link_libraries(test_unit_time_integration PRIVATE cosmosim_core)
   add_test(NAME unit_time_integration COMMAND test_unit_time_integration)

@@ -195,7 +195,7 @@ void writeScalarStringAttribute(hid_t location, std::string_view key, const std:
   if (!scalar_space.valid() || !string_type.valid()) {
     throw std::runtime_error("failed to create string attribute type");
   }
-  if (H5Tset_size(string_type.get(), value.size()) < 0 || H5Tset_strpad(string_type.get(), H5T_STR_NULLTERM) < 0) {
+  if (H5Tset_size(string_type.get(), std::max<std::size_t>(std::size_t{1}, value.size() + 1)) < 0 || H5Tset_strpad(string_type.get(), H5T_STR_NULLTERM) < 0) {
     throw std::runtime_error("failed to configure string attribute type");
   }
   Hdf5Handle attr(H5Acreate2(location, std::string(key).c_str(), string_type.get(), scalar_space.get(), H5P_DEFAULT, H5P_DEFAULT));

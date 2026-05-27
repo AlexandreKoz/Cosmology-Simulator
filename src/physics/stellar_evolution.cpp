@@ -296,52 +296,88 @@ StellarEvolutionStepReport StellarEvolutionBookkeeper::apply(
     std::span<const std::uint32_t> active_star_indices,
     double current_scale_factor,
     double dt_code) const {
+  StellarEvolutionRuntimeView view{
+      .active_star_indices = active_star_indices,
+      .particle_index = state.star_particles.particle_index,
+      .birth_mass_code = state.star_particles.birth_mass_code,
+      .formation_scale_factor = state.star_particles.formation_scale_factor,
+      .stellar_age_years_last = state.star_particles.stellar_age_years_last,
+      .stellar_returned_mass_cumulative_code = state.star_particles.stellar_returned_mass_cumulative_code,
+      .stellar_returned_metals_cumulative_code = state.star_particles.stellar_returned_metals_cumulative_code,
+      .stellar_feedback_energy_cumulative_erg = state.star_particles.stellar_feedback_energy_cumulative_erg,
+      .returned_mass_channel_cumulative_code = {
+          state.star_particles.stellar_returned_mass_channel_cumulative_code[0],
+          state.star_particles.stellar_returned_mass_channel_cumulative_code[1],
+          state.star_particles.stellar_returned_mass_channel_cumulative_code[2]},
+      .returned_metals_channel_cumulative_code = {
+          state.star_particles.stellar_returned_metals_channel_cumulative_code[0],
+          state.star_particles.stellar_returned_metals_channel_cumulative_code[1],
+          state.star_particles.stellar_returned_metals_channel_cumulative_code[2]},
+      .feedback_energy_channel_cumulative_erg = {
+          state.star_particles.stellar_feedback_energy_channel_cumulative_erg[0],
+          state.star_particles.stellar_feedback_energy_channel_cumulative_erg[1],
+          state.star_particles.stellar_feedback_energy_channel_cumulative_erg[2]},
+      .particle_mass_code = state.particles.mass_code,
+  };
+  StellarEvolutionStepReport report = applyFromView(view, current_scale_factor, dt_code);
+  state.sidecars.upsert(buildMetadataSidecar(report));
+  return report;
+}
+
+StellarEvolutionStepReport StellarEvolutionBookkeeper::applyFromView(
+    StellarEvolutionRuntimeView view,
+    double current_scale_factor,
+    double dt_code) const {
   StellarEvolutionStepReport report;
-  if (!m_config.enabled || dt_code <= 0.0 || state.star_particles.size() == 0) {
-    state.sidecars.upsert(buildMetadataSidecar(report));
+  if (!m_config.enabled || dt_code <= 0.0 || view.particle_index.empty()) {
     return report;
   }
 
   const double dt_years = std::max(dt_code * m_config.hubble_time_years, 0.0);
-  for (const std::uint32_t star_index : active_star_indices) {
+  for (const std::uint32_t star_index : view.active_star_indices) {
     ++report.counters.scanned_stars;
-    if (star_index >= state.star_particles.size()) {
+    if (star_index >= view.particle_index.size() || star_index >= view.birth_mass_code.size() ||
+        star_index >= view.formation_scale_factor.size() || star_index >= view.stellar_age_years_last.size() ||
+        star_index >= view.stellar_returned_mass_cumulative_code.size() ||
+        star_index >= view.stellar_returned_metals_cumulative_code.size() ||
+        star_index >= view.stellar_feedback_energy_cumulative_erg.size()) {
       continue;
     }
 
-    const std::uint32_t particle_index = state.star_particles.particle_index[star_index];
-    if (particle_index >= state.particles.size()) {
+    const std::uint32_t particle_index = view.particle_index[star_index];
+    if (particle_index >= view.particle_mass_code.size()) {
       continue;
     }
 
-    const double birth_mass = state.star_particles.birth_mass_code[star_index];
+    const double birth_mass = view.birth_mass_code[star_index];
     if (birth_mass <= k_mass_floor) {
       continue;
     }
 
-    const double age_begin_years = evaluateStarAgeYears(
-        state.star_particles.formation_scale_factor[star_index], current_scale_factor);
+    const double age_begin_years = evaluateStarAgeYears(view.formation_scale_factor[star_index], current_scale_factor);
     const double age_end_years = age_begin_years + dt_years;
     StellarEvolutionIntervalBudget interval = m_table.integrateInterval(age_begin_years, age_end_years, birth_mass);
 
-    const double mass_old = state.particles.mass_code[particle_index];
+    const double mass_old = view.particle_mass_code[particle_index];
     const double returned_mass = std::clamp(interval.returned_mass_code, 0.0, mass_old);
     const double mass_new = std::max(mass_old - returned_mass, 0.0);
     interval.returned_mass_code = returned_mass;
     interval.remnant_change_code = mass_old - mass_new - returned_mass;
 
-    state.particles.mass_code[particle_index] = mass_new;
-    state.star_particles.stellar_age_years_last[star_index] = age_end_years;
-    state.star_particles.stellar_returned_mass_cumulative_code[star_index] += returned_mass;
-    state.star_particles.stellar_returned_metals_cumulative_code[star_index] += interval.returned_metals_code;
-    state.star_particles.stellar_feedback_energy_cumulative_erg[star_index] += interval.feedback_energy_erg;
+    view.particle_mass_code[particle_index] = mass_new;
+    view.stellar_age_years_last[star_index] = age_end_years;
+    view.stellar_returned_mass_cumulative_code[star_index] += returned_mass;
+    view.stellar_returned_metals_cumulative_code[star_index] += interval.returned_metals_code;
+    view.stellar_feedback_energy_cumulative_erg[star_index] += interval.feedback_energy_erg;
     for (std::size_t channel = 0; channel < k_stellar_yield_channel_count; ++channel) {
-      state.star_particles.stellar_returned_mass_channel_cumulative_code[channel][star_index] +=
-          interval.returned_mass_channel_code[channel];
-      state.star_particles.stellar_returned_metals_channel_cumulative_code[channel][star_index] +=
-          interval.returned_metals_channel_code[channel];
-      state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel][star_index] +=
-          interval.feedback_energy_channel_erg[channel];
+      if (star_index >= view.returned_mass_channel_cumulative_code[channel].size() ||
+          star_index >= view.returned_metals_channel_cumulative_code[channel].size() ||
+          star_index >= view.feedback_energy_channel_cumulative_erg[channel].size()) {
+        continue;
+      }
+      view.returned_mass_channel_cumulative_code[channel][star_index] += interval.returned_mass_channel_code[channel];
+      view.returned_metals_channel_cumulative_code[channel][star_index] += interval.returned_metals_channel_code[channel];
+      view.feedback_energy_channel_cumulative_erg[channel][star_index] += interval.feedback_energy_channel_erg[channel];
     }
 
     ++report.counters.evolved_stars;
@@ -359,8 +395,6 @@ StellarEvolutionStepReport StellarEvolutionBookkeeper::apply(
         .interval = interval,
     });
   }
-
-  state.sidecars.upsert(buildMetadataSidecar(report));
   return report;
 }
 

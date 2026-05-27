@@ -79,6 +79,45 @@ struct RunHealthCounters {
   std::uint64_t non_positive_particle_mass = 0;
 };
 
+
+struct ParticleDiagnosticsView {
+  std::span<const double> position_x_comoving;
+  std::span<const double> position_y_comoving;
+  std::span<const double> position_z_comoving;
+  std::span<const double> velocity_x_peculiar;
+  std::span<const double> velocity_y_peculiar;
+  std::span<const double> velocity_z_peculiar;
+  std::span<const double> mass_code;
+  std::span<const std::uint32_t> species_tag;
+  std::span<const double> gravity_softening_comoving;
+};
+
+struct GasDiagnosticsView {
+  std::span<const double> center_x_comoving;
+  std::span<const double> center_y_comoving;
+  std::span<const double> center_z_comoving;
+  std::span<const double> mass_code;
+  std::span<const double> density_code;
+};
+
+struct StarFormationHistoryView {
+  std::span<const double> formation_scale_factor;
+  std::span<const double> birth_mass_code;
+};
+
+struct DiagnosticsStateView {
+  ParticleDiagnosticsView particles;
+  GasDiagnosticsView gas_cells;
+  StarFormationHistoryView stars;
+  std::uint64_t particle_count = 0;
+  std::uint64_t cell_count = 0;
+  std::uint64_t star_count = 0;
+  bool ownership_invariants_ok = false;
+  bool unique_particle_ids_ok = false;
+};
+
+[[nodiscard]] DiagnosticsStateView buildDiagnosticsStateView(const core::SimulationState& state);
+
 struct DiagnosticsBundle {
   std::uint64_t step_index = 0;
   double scale_factor = 1.0;
@@ -110,24 +149,40 @@ class DiagnosticsEngine {
  public:
   explicit DiagnosticsEngine(core::SimulationConfig config);
 
+  [[nodiscard]] RunHealthCounters computeRunHealth(const DiagnosticsStateView& view) const;
   [[nodiscard]] RunHealthCounters computeRunHealth(const core::SimulationState& state) const;
 
+  [[nodiscard]] std::vector<PowerSpectrumBin> computePowerSpectrum(
+      const ParticleDiagnosticsView& particles,
+      std::size_t mesh_n,
+      std::size_t bin_count) const;
   [[nodiscard]] std::vector<PowerSpectrumBin> computePowerSpectrum(
       const core::SimulationState& state,
       std::size_t mesh_n,
       std::size_t bin_count) const;
 
   [[nodiscard]] std::vector<StarFormationHistoryBin> computeStarFormationHistory(
+      const StarFormationHistoryView& stars,
+      std::size_t bin_count) const;
+  [[nodiscard]] std::vector<StarFormationHistoryBin> computeStarFormationHistory(
       const core::SimulationState& state,
       std::size_t bin_count) const;
 
   [[nodiscard]] AngularMomentumBudget computeAngularMomentumBudget(
+      const ParticleDiagnosticsView& particles) const;
+  [[nodiscard]] AngularMomentumBudget computeAngularMomentumBudget(
       const core::SimulationState& state) const;
 
+  [[nodiscard]] std::vector<double> computeGasXySliceDensity(
+      const GasDiagnosticsView& gas_cells,
+      std::size_t grid_n) const;
   [[nodiscard]] std::vector<double> computeGasXySliceDensity(
       const core::SimulationState& state,
       std::size_t grid_n) const;
 
+  [[nodiscard]] std::vector<double> computeGasXyProjectionDensity(
+      const GasDiagnosticsView& gas_cells,
+      std::size_t grid_n) const;
   [[nodiscard]] std::vector<double> computeGasXyProjectionDensity(
       const core::SimulationState& state,
       std::size_t grid_n) const;

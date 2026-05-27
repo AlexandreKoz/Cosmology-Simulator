@@ -148,11 +148,9 @@ StarFormationCellOutcome StarFormationModel::sampleCellOutcome(
   return outcome;
 }
 
-StarFormationStepReport StarFormationModel::apply(
+StarFormationStepReport StarFormationModel::applyFromView(
     core::SimulationState& state,
-    std::span<const std::uint32_t> active_cell_indices,
-    std::span<const double> velocity_divergence_code,
-    std::span<const double> metallicity_mass_fraction,
+    StarFormationRuntimeView view,
     double dt_code,
     double scale_factor,
     std::uint64_t step_index,
@@ -164,21 +162,23 @@ StarFormationStepReport StarFormationModel::apply(
   }
 
   std::uint64_t next_particle_id = nextParticleId(state);
-  for (const std::uint32_t cell_index : active_cell_indices) {
+  for (const std::uint32_t cell_index : view.active_cell_indices) {
     ++report.counters.scanned_cells;
-    if (cell_index >= state.cells.size() || cell_index >= state.gas_cells.size()) {
+    if (cell_index >= view.gas_mass_code.size() || cell_index >= view.gas_density_code.size() ||
+        cell_index >= view.gas_temperature_k.size() || cell_index >= view.center_x_comoving.size() ||
+        cell_index >= view.center_y_comoving.size() || cell_index >= view.center_z_comoving.size()) {
       continue;
     }
 
     StarFormationCellInput cell;
     cell.cell_index = cell_index;
-    cell.gas_mass_code = state.cells.mass_code[cell_index];
-    cell.gas_density_code = state.gas_cells.density_code[cell_index];
-    cell.gas_temperature_k = state.gas_cells.temperature_code[cell_index];
+    cell.gas_mass_code = view.gas_mass_code[cell_index];
+    cell.gas_density_code = view.gas_density_code[cell_index];
+    cell.gas_temperature_k = view.gas_temperature_k[cell_index];
     cell.velocity_divergence_code =
-        (cell_index < velocity_divergence_code.size()) ? velocity_divergence_code[cell_index] : 0.0;
+        (cell_index < view.velocity_divergence_code.size()) ? view.velocity_divergence_code[cell_index] : 0.0;
     cell.metallicity_mass_fraction =
-        (cell_index < metallicity_mass_fraction.size()) ? metallicity_mass_fraction[cell_index] : 0.0;
+        (cell_index < view.metallicity_mass_fraction.size()) ? view.metallicity_mass_fraction[cell_index] : 0.0;
 
     const StarFormationCellOutcome outcome = sampleCellOutcome(cell, dt_code, step_index, rank_local_seed_offset);
     if (!outcome.eligible) {
@@ -190,19 +190,19 @@ StarFormationStepReport StarFormationModel::apply(
       continue;
     }
 
-    const double gas_mass_before = state.cells.mass_code[cell_index];
-    const double gas_density_before = state.gas_cells.density_code[cell_index];
+    const double gas_mass_before = view.gas_mass_code[cell_index];
+    const double gas_density_before = view.gas_density_code[cell_index];
     const double transfer_mass = std::min(outcome.spawned_mass_code, gas_mass_before);
     const double transfer_fraction = transfer_mass / std::max(gas_mass_before, k_mass_floor);
 
-    state.cells.mass_code[cell_index] = std::max(gas_mass_before - transfer_mass, 0.0);
-    state.gas_cells.density_code[cell_index] = std::max(gas_density_before * (1.0 - transfer_fraction), 0.0);
+    view.gas_mass_code[cell_index] = std::max(gas_mass_before - transfer_mass, 0.0);
+    view.gas_density_code[cell_index] = std::max(gas_density_before * (1.0 - transfer_fraction), 0.0);
 
     const std::size_t particle_index = state.particles.size();
     state.resizeParticles(particle_index + 1);
-    state.particles.position_x_comoving[particle_index] = state.cells.center_x_comoving[cell_index];
-    state.particles.position_y_comoving[particle_index] = state.cells.center_y_comoving[cell_index];
-    state.particles.position_z_comoving[particle_index] = state.cells.center_z_comoving[cell_index];
+    state.particles.position_x_comoving[particle_index] = view.center_x_comoving[cell_index];
+    state.particles.position_y_comoving[particle_index] = view.center_y_comoving[cell_index];
+    state.particles.position_z_comoving[particle_index] = view.center_z_comoving[cell_index];
     state.particles.velocity_x_peculiar[particle_index] = 0.0;
     state.particles.velocity_y_peculiar[particle_index] = 0.0;
     state.particles.velocity_z_peculiar[particle_index] = 0.0;
@@ -242,6 +242,29 @@ StarFormationStepReport StarFormationModel::apply(
   state.rebuildSpeciesIndex();
   state.sidecars.upsert(buildMetadataSidecar(report.counters));
   return report;
+}
+
+StarFormationStepReport StarFormationModel::apply(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_indices,
+    std::span<const double> velocity_divergence_code,
+    std::span<const double> metallicity_mass_fraction,
+    double dt_code,
+    double scale_factor,
+    std::uint64_t step_index,
+    std::uint32_t rank_local_seed_offset) const {
+  StarFormationRuntimeView view{
+      .active_cell_indices = active_cell_indices,
+      .center_x_comoving = state.cells.center_x_comoving,
+      .center_y_comoving = state.cells.center_y_comoving,
+      .center_z_comoving = state.cells.center_z_comoving,
+      .gas_mass_code = state.cells.mass_code,
+      .gas_density_code = state.gas_cells.density_code,
+      .gas_temperature_k = state.gas_cells.temperature_code,
+      .velocity_divergence_code = velocity_divergence_code,
+      .metallicity_mass_fraction = metallicity_mass_fraction,
+  };
+  return applyFromView(state, view, dt_code, scale_factor, step_index, rank_local_seed_offset);
 }
 
 core::ModuleSidecarBlock StarFormationModel::buildMetadataSidecar(const StarFormationCounters& counters) const {

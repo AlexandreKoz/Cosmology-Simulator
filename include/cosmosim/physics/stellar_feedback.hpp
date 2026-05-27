@@ -41,6 +41,22 @@ struct StellarFeedbackConfig {
   std::uint32_t metadata_schema_version = 1;
 };
 
+
+struct StellarFeedbackGeometryView {
+  std::span<const double> particle_position_x_comoving;
+  std::span<const double> particle_position_y_comoving;
+  std::span<const double> particle_position_z_comoving;
+  std::span<const double> cell_center_x_comoving;
+  std::span<const double> cell_center_y_comoving;
+  std::span<const double> cell_center_z_comoving;
+};
+
+struct StellarFeedbackDepositionView {
+  std::span<double> cell_mass_code;
+  std::span<double> gas_density_code;
+  std::span<double> gas_internal_energy_code;
+};
+
 struct StellarFeedbackBudget {
   double source_mass_code = 0.0;
   double returned_mass_code = 0.0;
@@ -123,8 +139,21 @@ class StellarFeedbackModel {
       double returned_metals_code) const;
 
   [[nodiscard]] std::vector<StellarFeedbackTarget> selectTargets(
+      const StellarFeedbackGeometryView& geometry_view,
+      std::uint32_t particle_index) const;
+  [[nodiscard]] std::vector<StellarFeedbackTarget> selectTargets(
       const core::SimulationState& state,
       std::uint32_t particle_index) const;
+
+  [[nodiscard]] StellarFeedbackStepReport applyWithViews(
+      core::SimulationState& state,
+      StellarFeedbackModuleState& module_state,
+      const StellarFeedbackGeometryView& geometry_view,
+      StellarFeedbackDepositionView deposition_view,
+      std::span<const std::uint32_t> active_star_indices,
+      std::span<const double> returned_mass_delta_code,
+      std::span<const double> returned_metals_delta_code,
+      double dt_code) const;
 
   [[nodiscard]] StellarFeedbackStepReport apply(
       core::SimulationState& state,

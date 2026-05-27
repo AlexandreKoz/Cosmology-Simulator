@@ -94,6 +94,21 @@ struct StellarEvolutionStepReport {
   std::vector<StellarEvolutionStarBudget> budgets;
 };
 
+struct StellarEvolutionRuntimeView {
+  std::span<const std::uint32_t> active_star_indices;
+  std::span<const std::uint32_t> particle_index;
+  std::span<const double> birth_mass_code;
+  std::span<const double> formation_scale_factor;
+  std::span<double> stellar_age_years_last;
+  std::span<double> stellar_returned_mass_cumulative_code;
+  std::span<double> stellar_returned_metals_cumulative_code;
+  std::span<double> stellar_feedback_energy_cumulative_erg;
+  std::array<std::span<double>, k_stellar_yield_channel_count> returned_mass_channel_cumulative_code;
+  std::array<std::span<double>, k_stellar_yield_channel_count> returned_metals_channel_cumulative_code;
+  std::array<std::span<double>, k_stellar_yield_channel_count> feedback_energy_channel_cumulative_erg;
+  std::span<double> particle_mass_code;
+};
+
 class StellarEvolutionBookkeeper {
  public:
   StellarEvolutionBookkeeper(StellarEvolutionConfig config, StellarEvolutionTable table);
@@ -106,6 +121,11 @@ class StellarEvolutionBookkeeper {
   [[nodiscard]] StellarEvolutionStepReport apply(
       core::SimulationState& state,
       std::span<const std::uint32_t> active_star_indices,
+      double current_scale_factor,
+      double dt_code) const;
+
+  [[nodiscard]] StellarEvolutionStepReport applyFromView(
+      StellarEvolutionRuntimeView view,
       double current_scale_factor,
       double dt_code) const;
 
