@@ -225,17 +225,59 @@ void maybeInitializeParticleSofteningFromSpeciesPolicy(
   }
 }
 
-void updateAdaptiveTimeBins(
-    core::SimulationState& state,
-    core::HierarchicalTimeBinScheduler& scheduler,
-    const core::IntegratorState& integrator_state,
-    const core::SimulationConfig& config,
+struct AdaptiveTimeStepCriteriaStorage {
+  std::vector<std::uint32_t> gas_particle_index_by_cell;
+};
+
+[[nodiscard]] core::AdaptiveTimeStepCriteriaView buildAdaptiveTimeStepCriteriaView(
+    const core::SimulationState& state,
     std::span<const double> particle_accel_x,
     std::span<const double> particle_accel_y,
     std::span<const double> particle_accel_z,
     std::span<const double> cell_accel_x,
     std::span<const double> cell_accel_y,
-    std::span<const double> cell_accel_z) {
+    std::span<const double> cell_accel_z,
+    AdaptiveTimeStepCriteriaStorage& storage) {
+  if (state.cells.size() > 0) {
+    core::requireParticleBoundGasCellContract(state, "adaptive time-bin view construction");
+  }
+  storage.gas_particle_index_by_cell.clear();
+  storage.gas_particle_index_by_cell.reserve(state.cells.size());
+  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    storage.gas_particle_index_by_cell.push_back(core::gasParticleIndexForCellRow(state, cell_index));
+  }
+  return core::AdaptiveTimeStepCriteriaView{
+      .particles = core::TimeStepParticleCriteriaView{
+          .velocity_x_peculiar = state.particles.velocity_x_peculiar,
+          .velocity_y_peculiar = state.particles.velocity_y_peculiar,
+          .velocity_z_peculiar = state.particles.velocity_z_peculiar,
+          .species_tag = state.particle_sidecar.species_tag,
+          .gravity_softening_comoving = state.particle_sidecar.gravity_softening_comoving,
+          .accel_x_comoving = particle_accel_x,
+          .accel_y_comoving = particle_accel_y,
+          .accel_z_comoving = particle_accel_z,
+          .black_hole_particle_index = state.black_holes.particle_index,
+          .black_hole_subgrid_mass_code = state.black_holes.subgrid_mass_code,
+          .black_hole_accretion_rate_code = state.black_holes.accretion_rate_code,
+      },
+      .gas_cells = core::TimeStepGasCellCriteriaView{
+          .gas_particle_index_by_cell = storage.gas_particle_index_by_cell,
+          .cell_mass_code = state.cells.mass_code,
+          .density_code = state.gas_cells.density_code,
+          .temperature_code = state.gas_cells.temperature_code,
+          .sound_speed_code = state.gas_cells.sound_speed_code,
+          .accel_x_comoving = cell_accel_x,
+          .accel_y_comoving = cell_accel_y,
+          .accel_z_comoving = cell_accel_z,
+      },
+  };
+}
+
+void updateAdaptiveTimeBinsFromView(
+    const core::AdaptiveTimeStepCriteriaView& view,
+    core::HierarchicalTimeBinScheduler& scheduler,
+    const core::IntegratorState& integrator_state,
+    const core::SimulationConfig& config) {
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("adaptive time-bin update requires dt_time_code > 0");
   }
@@ -244,15 +286,25 @@ void updateAdaptiveTimeBins(
       .max_dt_time_code = integrator_state.dt_time_code * static_cast<double>(1ULL << scheduler.maxBin()),
       .max_bin = scheduler.maxBin(),
   };
-  const double box_volume =
-      config.cosmology.box_size_x_mpc_comoving * config.cosmology.box_size_y_mpc_comoving * config.cosmology.box_size_z_mpc_comoving;
-  const double cell_width = state.cells.size() > 0
-      ? std::cbrt(box_volume / static_cast<double>(state.cells.size()))
-      : std::cbrt(box_volume / std::max<double>(static_cast<double>(state.particles.size()), 1.0));
-  const auto species_softening = speciesSofteningByTag(config);
-  if (state.cells.size() > 0) {
-    core::requireParticleBoundGasCellContract(state, "adaptive time-bin update");
+  const std::size_t particle_count = view.particles.velocity_x_peculiar.size();
+  const std::size_t cell_count = view.gas_cells.cell_mass_code.size();
+  if (view.particles.velocity_y_peculiar.size() != particle_count ||
+      view.particles.velocity_z_peculiar.size() != particle_count ||
+      view.particles.species_tag.size() != particle_count) {
+    throw std::invalid_argument("particle timestep criteria view has mismatched extents");
   }
+  if (view.gas_cells.density_code.size() != cell_count ||
+      view.gas_cells.temperature_code.size() != cell_count ||
+      view.gas_cells.sound_speed_code.size() != cell_count ||
+      view.gas_cells.gas_particle_index_by_cell.size() != cell_count) {
+    throw std::invalid_argument("gas-cell timestep criteria view has mismatched extents");
+  }
+  const double box_volume = config.cosmology.box_size_x_mpc_comoving *
+      config.cosmology.box_size_y_mpc_comoving * config.cosmology.box_size_z_mpc_comoving;
+  const double cell_width = cell_count > 0
+      ? std::cbrt(box_volume / static_cast<double>(cell_count))
+      : std::cbrt(box_volume / std::max<double>(static_cast<double>(particle_count), 1.0));
+  const auto species_softening = speciesSofteningByTag(config);
   const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
   const core::UnitSystem runtime_units = core::makeUnitSystem(
       config.units.length_unit,
@@ -274,12 +326,12 @@ void updateAdaptiveTimeBins(
         integrator_state.time_si_per_code);
   }
   const auto star_formation_dt_for_cell = [&](std::uint32_t cell_index) -> std::optional<double> {
-    if (!config.physics.enable_star_formation || cell_index >= state.cells.size() || cell_index >= state.gas_cells.size()) {
+    if (!config.physics.enable_star_formation || cell_index >= cell_count) {
       return std::nullopt;
     }
-    const double gas_mass = state.cells.mass_code[cell_index];
-    const double rho = state.gas_cells.density_code[cell_index];
-    const double temperature = state.gas_cells.temperature_code[cell_index];
+    const double gas_mass = view.gas_cells.cell_mass_code[cell_index];
+    const double rho = view.gas_cells.density_code[cell_index];
+    const double temperature = view.gas_cells.temperature_code[cell_index];
     if (gas_mass <= 0.0 || rho < config.physics.sf_density_threshold_code ||
         temperature > config.physics.sf_temperature_threshold_k || config.physics.sf_epsilon_ff <= 0.0) {
       return std::nullopt;
@@ -289,16 +341,21 @@ void updateAdaptiveTimeBins(
     return std::max(1.0e-12, config.numerics.source_max_fractional_change * t_ff_code / config.physics.sf_epsilon_ff);
   };
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
-    if (!config.physics.enable_black_hole_agn || particle_index >= state.particle_sidecar.species_tag.size() ||
-        state.particle_sidecar.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
+    if (!config.physics.enable_black_hole_agn || particle_index >= view.particles.species_tag.size() ||
+        view.particles.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
       return std::nullopt;
     }
-    for (std::size_t bh_index = 0; bh_index < state.black_holes.size(); ++bh_index) {
-      if (state.black_holes.particle_index[bh_index] != particle_index) {
+    const std::size_t bh_count = view.particles.black_hole_particle_index.size();
+    if (view.particles.black_hole_subgrid_mass_code.size() != bh_count ||
+        view.particles.black_hole_accretion_rate_code.size() != bh_count) {
+      throw std::invalid_argument("black-hole timestep criteria view has mismatched extents");
+    }
+    for (std::size_t bh_index = 0; bh_index < bh_count; ++bh_index) {
+      if (view.particles.black_hole_particle_index[bh_index] != particle_index) {
         continue;
       }
-      const double mass = std::max(state.black_holes.subgrid_mass_code[bh_index], 1.0e-30);
-      const double mdot = std::max(state.black_holes.accretion_rate_code[bh_index], 0.0);
+      const double mass = std::max(view.particles.black_hole_subgrid_mass_code[bh_index], 1.0e-30);
+      const double mdot = std::max(view.particles.black_hole_accretion_rate_code[bh_index], 0.0);
       if (mdot <= 0.0) {
         return std::nullopt;
       }
@@ -308,22 +365,25 @@ void updateAdaptiveTimeBins(
   };
   for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
     core::TimeStepCriteriaRegistry registry;
-    if (element_index < state.cells.size()) {
-      const std::uint32_t gas_index = core::gasParticleIndexForCellRow(state, element_index);
-      const double vx = state.particles.velocity_x_peculiar[gas_index];
-      const double vy = state.particles.velocity_y_peculiar[gas_index];
-      const double vz = state.particles.velocity_z_peculiar[gas_index];
+    if (element_index < cell_count) {
+      const std::uint32_t gas_index = view.gas_cells.gas_particle_index_by_cell[element_index];
+      if (gas_index >= particle_count) {
+        throw std::out_of_range("gas-particle index in timestep criteria view is out of range");
+      }
+      const double vx = view.particles.velocity_x_peculiar[gas_index];
+      const double vy = view.particles.velocity_y_peculiar[gas_index];
+      const double vz = view.particles.velocity_z_peculiar[gas_index];
       const double flow_speed = std::sqrt(vx * vx + vy * vy + vz * vz);
-      const double sound_speed = std::max(state.gas_cells.sound_speed_code[element_index], 0.0);
+      const double sound_speed = std::max(view.gas_cells.sound_speed_code[element_index], 0.0);
       registry.registerCflHook([=](std::uint32_t) {
         return core::computeCflTimeStep({.cell_width_code = cell_width, .flow_speed_code = flow_speed, .sound_speed_code = sound_speed}, 0.4);
       });
-      const double ax = (element_index < cell_accel_x.size()) ? cell_accel_x[element_index] : 0.0;
-      const double ay = (element_index < cell_accel_y.size()) ? cell_accel_y[element_index] : 0.0;
-      const double az = (element_index < cell_accel_z.size()) ? cell_accel_z[element_index] : 0.0;
+      const double ax = (element_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[element_index] : 0.0;
+      const double ay = (element_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[element_index] : 0.0;
+      const double az = (element_index < view.gas_cells.accel_z_comoving.size()) ? view.gas_cells.accel_z_comoving[element_index] : 0.0;
       const double amag = std::sqrt(ax * ax + ay * ay + az * az);
-      const double eps = !state.particle_sidecar.gravity_softening_comoving.empty()
-          ? state.particle_sidecar.gravity_softening_comoving[gas_index]
+      const double eps = !view.particles.gravity_softening_comoving.empty()
+          ? view.particles.gravity_softening_comoving[gas_index]
           : species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)];
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
@@ -358,22 +418,22 @@ void updateAdaptiveTimeBins(
       }
       continue;
     }
-    if (element_index < state.particles.size()) {
-      const double vx = state.particles.velocity_x_peculiar[element_index];
-      const double vy = state.particles.velocity_y_peculiar[element_index];
-      const double vz = state.particles.velocity_z_peculiar[element_index];
+    if (element_index < particle_count) {
+      const double vx = view.particles.velocity_x_peculiar[element_index];
+      const double vy = view.particles.velocity_y_peculiar[element_index];
+      const double vz = view.particles.velocity_z_peculiar[element_index];
       const double speed = std::sqrt(vx * vx + vy * vy + vz * vz);
       registry.registerCflHook([=](std::uint32_t) {
         return (speed > 0.0) ? (0.4 * cell_width / speed) : std::numeric_limits<double>::infinity();
       });
-      const double ax = (element_index < particle_accel_x.size()) ? particle_accel_x[element_index] : 0.0;
-      const double ay = (element_index < particle_accel_y.size()) ? particle_accel_y[element_index] : 0.0;
-      const double az = (element_index < particle_accel_z.size()) ? particle_accel_z[element_index] : 0.0;
+      const double ax = (element_index < view.particles.accel_x_comoving.size()) ? view.particles.accel_x_comoving[element_index] : 0.0;
+      const double ay = (element_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[element_index] : 0.0;
+      const double az = (element_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[element_index] : 0.0;
       const double amag = std::sqrt(ax * ax + ay * ay + az * az);
-      const double eps = !state.particle_sidecar.gravity_softening_comoving.empty()
-          ? state.particle_sidecar.gravity_softening_comoving[element_index]
-          : ((static_cast<std::size_t>(state.particle_sidecar.species_tag[element_index]) < species_softening.epsilon_comoving_by_species.size())
-                ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(state.particle_sidecar.species_tag[element_index])]
+      const double eps = !view.particles.gravity_softening_comoving.empty()
+          ? view.particles.gravity_softening_comoving[element_index]
+          : ((static_cast<std::size_t>(view.particles.species_tag[element_index]) < species_softening.epsilon_comoving_by_species.size())
+                ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[element_index])]
                 : global_softening);
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
@@ -409,6 +469,31 @@ void updateAdaptiveTimeBins(
     }
   }
 }
+
+void updateAdaptiveTimeBins(
+    core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& scheduler,
+    const core::IntegratorState& integrator_state,
+    const core::SimulationConfig& config,
+    std::span<const double> particle_accel_x,
+    std::span<const double> particle_accel_y,
+    std::span<const double> particle_accel_z,
+    std::span<const double> cell_accel_x,
+    std::span<const double> cell_accel_y,
+    std::span<const double> cell_accel_z) {
+  AdaptiveTimeStepCriteriaStorage storage;
+  const core::AdaptiveTimeStepCriteriaView view = buildAdaptiveTimeStepCriteriaView(
+      state,
+      particle_accel_x,
+      particle_accel_y,
+      particle_accel_z,
+      cell_accel_x,
+      cell_accel_y,
+      cell_accel_z,
+      storage);
+  updateAdaptiveTimeBinsFromView(view, scheduler, integrator_state, config);
+}
+
 
 
 struct GasCellMigrationRecord {
@@ -1383,6 +1468,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     return m_cadence_records;
   }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
+  [[nodiscard]] core::MemoryReport memoryReport() const { return m_tree_pm_coordinator.memoryReport(); }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
@@ -2960,6 +3046,27 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             {"pm_fft_backend", gravity::PmSolver::fftBackendName()},
         },
     });
+    {
+      const std::array startup_reports{
+          core::collectSimulationMemoryReport(state),
+          gravity_callback.memoryReport()};
+      profiler.setMemoryReport(core::mergeMemoryReports(startup_reports));
+      const core::MemoryReport* runtime_memory_report = profiler.memoryReport();
+      if (runtime_memory_report != nullptr) {
+        profiler.recordEvent(core::RuntimeEvent{
+            .event_kind = "memory.runtime_startup_snapshot",
+            .severity = core::RuntimeEventSeverity::kInfo,
+            .subsystem = "core.memory",
+            .step_index = integrator_state.step_index,
+            .simulation_time_code = integrator_state.current_time_code,
+            .scale_factor = integrator_state.current_scale_factor,
+            .message = "startup memory accounting snapshot including gravity solver workspaces",
+            .payload = {{"persistent_total_bytes", std::to_string(runtime_memory_report->totals.persistent_total_bytes)},
+                        {"transient_total_bytes", std::to_string(runtime_memory_report->totals.transient_total_bytes)},
+                        {"unknown_total_bytes", std::to_string(runtime_memory_report->totals.unknown_total_bytes)}},
+        });
+      }
+    }
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
@@ -3039,6 +3146,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           &profiler,
           requested_boundary);
 
+      {
+        const std::array runtime_reports{
+            core::collectSimulationMemoryReport(state, &workspace),
+            gravity_callback.memoryReport()};
+        profiler.setMemoryReport(core::mergeMemoryReports(runtime_reports));
+      }
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;
       updateAdaptiveTimeBins(

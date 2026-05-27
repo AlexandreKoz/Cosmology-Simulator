@@ -7,6 +7,8 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace cosmosim::gravity {
@@ -207,6 +209,39 @@ void TreeNodeSoa::reserve(std::size_t count) {
   child_index.reserve(count * 8U);
   particle_begin.reserve(count);
   particle_count.reserve(count);
+}
+
+
+void TreeNodeSoa::appendMemoryReport(core::MemoryReportBuilder& builder) const {
+  const auto add = [&builder](std::string label, const auto& container) {
+    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kTree,
+                                       .lifetime = core::MemoryLifetime::kTransient,
+                                       .label = std::move(label),
+                                       .owned_capacity_bytes = bytes,
+                                       .high_water_bytes = bytes});
+  };
+  add("tree.nodes.center_x_comoving", center_x_comoving);
+  add("tree.nodes.center_y_comoving", center_y_comoving);
+  add("tree.nodes.center_z_comoving", center_z_comoving);
+  add("tree.nodes.half_size_comoving", half_size_comoving);
+  add("tree.nodes.mass_code", mass_code);
+  add("tree.nodes.com_x_comoving", com_x_comoving);
+  add("tree.nodes.com_y_comoving", com_y_comoving);
+  add("tree.nodes.com_z_comoving", com_z_comoving);
+  add("tree.nodes.quad_xx", quad_xx);
+  add("tree.nodes.quad_xy", quad_xy);
+  add("tree.nodes.quad_xz", quad_xz);
+  add("tree.nodes.quad_yy", quad_yy);
+  add("tree.nodes.quad_yz", quad_yz);
+  add("tree.nodes.quad_zz", quad_zz);
+  add("tree.nodes.softening_min_comoving", softening_min_comoving);
+  add("tree.nodes.softening_max_comoving", softening_max_comoving);
+  add("tree.nodes.child_base", child_base);
+  add("tree.nodes.child_count", child_count);
+  add("tree.nodes.child_index", child_index);
+  add("tree.nodes.particle_begin", particle_begin);
+  add("tree.nodes.particle_count", particle_count);
 }
 
 void TreeGravitySolver::build(

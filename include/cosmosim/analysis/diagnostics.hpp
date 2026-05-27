@@ -191,7 +191,8 @@ class DiagnosticsEngine {
       const core::SimulationState& state,
       std::uint64_t step_index,
       double scale_factor,
-      DiagnosticClass diagnostic_class) const;
+      DiagnosticClass diagnostic_class,
+      const core::TransientStepWorkspace* workspace = nullptr) const;
 
   void writeBundle(const DiagnosticsBundle& bundle) const;
   void enforceRetentionPolicy() const;

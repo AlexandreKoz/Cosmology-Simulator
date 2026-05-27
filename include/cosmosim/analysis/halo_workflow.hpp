@@ -7,6 +7,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 #include "cosmosim/core/config.hpp"
@@ -83,6 +84,21 @@ struct FofProfilingCounters {
   double linking_length_comov = 0.0;
 };
 
+struct HaloParticleView {
+  std::span<const double> position_x_comoving;
+  std::span<const double> position_y_comoving;
+  std::span<const double> position_z_comoving;
+  std::span<const double> velocity_x_peculiar;
+  std::span<const double> velocity_y_peculiar;
+  std::span<const double> velocity_z_peculiar;
+  std::span<const double> mass_code;
+  std::span<const std::uint32_t> species_tag;
+  std::span<const std::uint64_t> particle_id;
+  std::uint64_t normalized_config_hash = 0;
+};
+
+[[nodiscard]] HaloParticleView buildHaloParticleView(const core::SimulationState& state);
+
 struct HaloWorkflowReport {
   HaloCatalog catalog;
   MergerTreePlan tree_plan;
@@ -104,6 +120,13 @@ class HaloCatalogSchema {
 class FofHaloFinder {
  public:
   explicit FofHaloFinder(FofConfig config);
+
+  [[nodiscard]] HaloCatalog buildCatalogFromView(
+      const HaloParticleView& particles,
+      const core::SimulationConfig& config,
+      std::uint64_t snapshot_step_index,
+      double snapshot_scale_factor,
+      FofProfilingCounters* profiling = nullptr) const;
 
   [[nodiscard]] HaloCatalog buildCatalog(
       const core::SimulationState& state,

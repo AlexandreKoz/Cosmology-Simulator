@@ -1008,6 +1008,22 @@ void PmGridStorage::clear() {
   std::fill(m_force_z.begin(), m_force_z.end(), 0.0);
 }
 
+void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const {
+  const auto add = [&builder](std::string label, const auto& container) {
+    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kPmMesh,
+                                       .lifetime = core::MemoryLifetime::kTransient,
+                                       .label = std::move(label),
+                                       .owned_capacity_bytes = bytes,
+                                       .high_water_bytes = bytes});
+  };
+  add("pm_mesh.density", m_density);
+  add("pm_mesh.potential", m_potential);
+  add("pm_mesh.force_x", m_force_x);
+  add("pm_mesh.force_y", m_force_y);
+  add("pm_mesh.force_z", m_force_z);
+}
+
 PmSolver::PmSolver(PmGridShape shape) : m_shape(shape), m_impl(std::make_unique<Impl>(shape)) {
   if (!shape.isValid()) {
     throw std::invalid_argument("PM solver requires valid shape");

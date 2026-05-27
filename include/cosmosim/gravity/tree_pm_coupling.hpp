@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
@@ -90,6 +91,7 @@ class TreePmCoordinator {
 
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
   [[nodiscard]] bool ownsFullPmDomain() const noexcept;
+  [[nodiscard]] core::MemoryReport memoryReport() const;
 
   void solveActiveSetWithPmCadence(
       std::span<const double> pos_x_comoving,

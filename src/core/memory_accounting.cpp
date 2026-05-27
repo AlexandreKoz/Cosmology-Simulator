@@ -310,6 +310,24 @@ MemoryReport collectSimulationMemoryReport(const SimulationState& state, const T
   return report;
 }
 
+MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports) {
+  MemoryReportBuilder builder;
+  std::vector<std::string> notes;
+  for (const MemoryReport& report : reports) {
+    for (const MemoryEntry& entry : report.entries) {
+      if (entry.label == "category_present") {
+        continue;
+      }
+      builder.addEntry(entry);
+    }
+    notes.insert(notes.end(), report.notes.begin(), report.notes.end());
+  }
+  MemoryReport merged = std::move(builder).finish();
+  merged.notes = std::move(notes);
+  merged.notes.push_back("Merged runtime memory report; duplicate owners are avoided by subsystem-level append hooks.");
+  return merged;
+}
+
 MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input) {
   MemoryReportBuilder builder;
   const auto bytes = [](std::uint64_t count, std::uint64_t elem_bytes) { return count * elem_bytes; };

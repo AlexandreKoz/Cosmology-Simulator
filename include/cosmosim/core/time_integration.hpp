@@ -485,6 +485,39 @@ struct GravityTimeStepInput {
   double acceleration_magnitude_code = 0.0;
 };
 
+// Narrow runtime view consumed by adaptive timestep criteria. It is deliberately
+// smaller than SimulationState: criteria loops read only velocities, sound speed,
+// softening, source-module rates, and force-output spans needed to propose bins.
+struct TimeStepParticleCriteriaView {
+  std::span<const double> velocity_x_peculiar;
+  std::span<const double> velocity_y_peculiar;
+  std::span<const double> velocity_z_peculiar;
+  std::span<const std::uint32_t> species_tag;
+  std::span<const double> gravity_softening_comoving;
+  std::span<const double> accel_x_comoving;
+  std::span<const double> accel_y_comoving;
+  std::span<const double> accel_z_comoving;
+  std::span<const std::uint32_t> black_hole_particle_index;
+  std::span<const double> black_hole_subgrid_mass_code;
+  std::span<const double> black_hole_accretion_rate_code;
+};
+
+struct TimeStepGasCellCriteriaView {
+  std::span<const std::uint32_t> gas_particle_index_by_cell;
+  std::span<const double> cell_mass_code;
+  std::span<const double> density_code;
+  std::span<const double> temperature_code;
+  std::span<const double> sound_speed_code;
+  std::span<const double> accel_x_comoving;
+  std::span<const double> accel_y_comoving;
+  std::span<const double> accel_z_comoving;
+};
+
+struct AdaptiveTimeStepCriteriaView {
+  TimeStepParticleCriteriaView particles;
+  TimeStepGasCellCriteriaView gas_cells;
+};
+
 using CriteriaHook = std::function<double(std::uint32_t)>;
 
 struct TimeStepCriteriaHooks {

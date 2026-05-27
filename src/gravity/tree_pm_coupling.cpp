@@ -10,6 +10,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -486,6 +487,61 @@ const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
 
 bool TreePmCoordinator::ownsFullPmDomain() const noexcept {
   return m_grid.ownsFullDomain();
+}
+
+core::MemoryReport TreePmCoordinator::memoryReport() const {
+  core::MemoryReportBuilder builder;
+  m_grid.appendMemoryReport(builder);
+  m_tree_solver.nodes().appendMemoryReport(builder);
+  const auto add_active = [&builder](std::string label, const auto& container) {
+    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kActiveSets,
+                                       .lifetime = core::MemoryLifetime::kTransient,
+                                       .label = std::move(label),
+                                       .owned_capacity_bytes = bytes,
+                                       .high_water_bytes = bytes});
+  };
+  add_active("treepm.active_pos_x_comoving", m_active_pos_x_comoving);
+  add_active("treepm.active_pos_y_comoving", m_active_pos_y_comoving);
+  add_active("treepm.active_pos_z_comoving", m_active_pos_z_comoving);
+  add_active("treepm.active_pm_ax_comoving", m_active_pm_ax_comoving);
+  add_active("treepm.active_pm_ay_comoving", m_active_pm_ay_comoving);
+  add_active("treepm.active_pm_az_comoving", m_active_pm_az_comoving);
+  add_active("treepm.active_zoom_corr_ax_comoving", m_active_zoom_corr_ax_comoving);
+  add_active("treepm.active_zoom_corr_ay_comoving", m_active_zoom_corr_ay_comoving);
+  add_active("treepm.active_zoom_corr_az_comoving", m_active_zoom_corr_az_comoving);
+
+  const auto add_mpi = [&builder](std::string label, const auto& container) {
+    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kMpiBuffers,
+                                       .lifetime = core::MemoryLifetime::kTransient,
+                                       .label = std::move(label),
+                                       .owned_capacity_bytes = bytes,
+                                       .high_water_bytes = bytes});
+  };
+  add_mpi("treepm.exchange.send_counts", m_tree_exchange_workspace.send_counts);
+  add_mpi("treepm.exchange.recv_counts", m_tree_exchange_workspace.recv_counts);
+  add_mpi("treepm.exchange.send_displs", m_tree_exchange_workspace.send_displs);
+  add_mpi("treepm.exchange.recv_displs", m_tree_exchange_workspace.recv_displs);
+  add_mpi("treepm.exchange.send_payload", m_tree_exchange_workspace.send_payload);
+  add_mpi("treepm.exchange.recv_payload", m_tree_exchange_workspace.recv_payload);
+  add_mpi("treepm.exchange.response_send_payload", m_tree_exchange_workspace.response_send_payload);
+  add_mpi("treepm.exchange.response_recv_payload", m_tree_exchange_workspace.response_recv_payload);
+  add_mpi("treepm.exchange.remote_batch_ax", m_tree_exchange_workspace.remote_batch_ax);
+  add_mpi("treepm.exchange.remote_batch_ay", m_tree_exchange_workspace.remote_batch_ay);
+  add_mpi("treepm.exchange.remote_batch_az", m_tree_exchange_workspace.remote_batch_az);
+  add_mpi("treepm.exchange.expected_response_count", m_tree_exchange_workspace.expected_response_count);
+  add_mpi("treepm.exchange.received_response_count", m_tree_exchange_workspace.received_response_count);
+
+  builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kPmMesh,
+                                     .lifetime = core::MemoryLifetime::kUnknown,
+                                     .label = "pm_solver.external_fftw_or_cuda_plan_cache",
+                                     .estimate_only = true,
+                                     .uncertainty_note = "FFTW/cuFFT plan internals are backend-owned; cached plan count is reported elsewhere."});
+  core::MemoryReport report = std::move(builder).finish();
+  report.notes.push_back("TreePM report covers owned host mesh, tree-node, active-set, and exchange-buffer capacities.");
+  report.notes.push_back("FFTW/GPU library internals remain unknown unless a backend exposes exact allocation hooks.");
+  return report;
 }
 
 void TreePmCoordinator::solveActiveSet(

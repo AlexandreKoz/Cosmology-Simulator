@@ -430,14 +430,16 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
     const core::SimulationState& state,
     std::uint64_t step_index,
     double scale_factor,
-    DiagnosticClass diagnostic_class) const {
+    DiagnosticClass diagnostic_class,
+    const core::TransientStepWorkspace* workspace) const {
   DiagnosticsBundle bundle;
   bundle.step_index = step_index;
   bundle.scale_factor = scale_factor;
   bundle.diagnostic_class = diagnostic_class;
   bundle.diagnostics_execution_policy = m_config.analysis.diagnostics_execution_policy;
-  bundle.health = computeRunHealth(state);
-  bundle.memory_report = core::collectSimulationMemoryReport(state);
+  const DiagnosticsStateView view = buildDiagnosticsStateView(state);
+  bundle.health = computeRunHealth(view);
+  bundle.memory_report = core::collectSimulationMemoryReport(state, workspace);
   bundle.records.push_back(DiagnosticRecord{
       .name = "run_health_counters",
       .tier = DiagnosticTier::kInfrastructureHealth,
@@ -457,7 +459,7 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
 
   if (diagnostic_class == DiagnosticClass::kScienceLight || diagnostic_class == DiagnosticClass::kScienceHeavy) {
     bundle.star_formation_history =
-        computeStarFormationHistory(state, static_cast<std::size_t>(m_config.analysis.sf_history_bin_count));
+        computeStarFormationHistory(view.stars, static_cast<std::size_t>(m_config.analysis.sf_history_bin_count));
     bundle.records.push_back(DiagnosticRecord{
         .name = "star_formation_history",
         .tier = DiagnosticTier::kValidatedScience,
@@ -466,7 +468,7 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         .executed = true,
         .policy_note = "validated_lightweight_science",
     });
-    bundle.angular_momentum = computeAngularMomentumBudget(state);
+    bundle.angular_momentum = computeAngularMomentumBudget(view.particles);
     bundle.records.push_back(DiagnosticRecord{
         .name = "angular_momentum_budget",
         .tier = DiagnosticTier::kValidatedScience,
@@ -476,8 +478,8 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         .policy_note = "validated_lightweight_science",
     });
     bundle.quicklook_grid_n = static_cast<std::size_t>(m_config.analysis.quicklook_grid_n);
-    bundle.xy_slice_density_code = computeGasXySliceDensity(state, bundle.quicklook_grid_n);
-    bundle.xy_projection_density_code = computeGasXyProjectionDensity(state, bundle.quicklook_grid_n);
+    bundle.xy_slice_density_code = computeGasXySliceDensity(view.gas_cells, bundle.quicklook_grid_n);
+    bundle.xy_projection_density_code = computeGasXyProjectionDensity(view.gas_cells, bundle.quicklook_grid_n);
     bundle.records.push_back(DiagnosticRecord{
         .name = "gas_xy_slice_density",
         .tier = DiagnosticTier::kValidatedScience,
@@ -502,7 +504,7 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
          core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
     if (heavy_allowed) {
       bundle.power_spectrum = computePowerSpectrum(
-          state,
+          view.particles,
           static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
           static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count));
     }
@@ -731,7 +733,8 @@ void DiagnosticsCallback::runDiagnostics(core::StepContext& context, DiagnosticC
       context.state,
       context.integrator_state.step_index,
       context.integrator_state.current_scale_factor,
-      diagnostic_class);
+      diagnostic_class,
+      context.workspace);
   m_engine.writeBundle(bundle);
   const auto end = std::chrono::steady_clock::now();
   const double elapsed_ms =

@@ -28,18 +28,18 @@ namespace {
 }
 
 [[nodiscard]] double periodicDistanceSquared(
-    const core::SimulationState& state,
+    const HaloParticleView& particles,
     std::uint32_t i,
     std::uint32_t j,
     double box_size_comov) {
   const double dx = wrapPeriodicDelta(
-      state.particles.position_x_comoving[i] - state.particles.position_x_comoving[j],
+      particles.position_x_comoving[i] - particles.position_x_comoving[j],
       box_size_comov);
   const double dy = wrapPeriodicDelta(
-      state.particles.position_y_comoving[i] - state.particles.position_y_comoving[j],
+      particles.position_y_comoving[i] - particles.position_y_comoving[j],
       box_size_comov);
   const double dz = wrapPeriodicDelta(
-      state.particles.position_z_comoving[i] - state.particles.position_z_comoving[j],
+      particles.position_z_comoving[i] - particles.position_z_comoving[j],
       box_size_comov);
   return dx * dx + dy * dy + dz * dz;
 }
@@ -79,6 +79,21 @@ class DisjointSet {
 };
 
 }  // namespace
+
+HaloParticleView buildHaloParticleView(const core::SimulationState& state) {
+  return HaloParticleView{
+      .position_x_comoving = state.particles.position_x_comoving,
+      .position_y_comoving = state.particles.position_y_comoving,
+      .position_z_comoving = state.particles.position_z_comoving,
+      .velocity_x_peculiar = state.particles.velocity_x_peculiar,
+      .velocity_y_peculiar = state.particles.velocity_y_peculiar,
+      .velocity_z_peculiar = state.particles.velocity_z_peculiar,
+      .mass_code = state.particles.mass_code,
+      .species_tag = state.particle_sidecar.species_tag,
+      .particle_id = state.particle_sidecar.particle_id,
+      .normalized_config_hash = state.metadata.normalized_config_hash,
+  };
+}
 
 std::uint32_t HaloCatalogSchema::schemaVersion() noexcept { return 1; }
 
@@ -144,8 +159,8 @@ bool FofHaloFinder::includeSpecies(core::ParticleSpecies species) const noexcept
   return false;
 }
 
-HaloCatalog FofHaloFinder::buildCatalog(
-    const core::SimulationState& state,
+HaloCatalog FofHaloFinder::buildCatalogFromView(
+    const HaloParticleView& particles,
     const core::SimulationConfig& config,
     std::uint64_t snapshot_step_index,
     double snapshot_scale_factor,
@@ -155,13 +170,23 @@ HaloCatalog FofHaloFinder::buildCatalog(
   catalog.snapshot_step_index = snapshot_step_index;
   catalog.snapshot_scale_factor = snapshot_scale_factor;
   catalog.run_name = config.output.run_name;
-  catalog.normalized_config_hash = state.metadata.normalized_config_hash;
-  catalog.halo_id_by_particle.assign(state.particles.size(), k_unbound_halo_id);
+  catalog.normalized_config_hash = particles.normalized_config_hash;
+  catalog.halo_id_by_particle.assign(particles.mass_code.size(), k_unbound_halo_id);
 
   std::vector<std::uint32_t> candidate_indices;
-  candidate_indices.reserve(state.particles.size());
-  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
-    const auto species = static_cast<core::ParticleSpecies>(state.particle_sidecar.species_tag[i]);
+  candidate_indices.reserve(particles.mass_code.size());
+  if (particles.position_x_comoving.size() != particles.mass_code.size() ||
+      particles.position_y_comoving.size() != particles.mass_code.size() ||
+      particles.position_z_comoving.size() != particles.mass_code.size() ||
+      particles.velocity_x_peculiar.size() != particles.mass_code.size() ||
+      particles.velocity_y_peculiar.size() != particles.mass_code.size() ||
+      particles.velocity_z_peculiar.size() != particles.mass_code.size() ||
+      particles.species_tag.size() != particles.mass_code.size() ||
+      particles.particle_id.size() != particles.mass_code.size()) {
+    throw std::invalid_argument("halo particle view has mismatched extents");
+  }
+  for (std::uint32_t i = 0; i < particles.mass_code.size(); ++i) {
+    const auto species = static_cast<core::ParticleSpecies>(particles.species_tag[i]);
     if (includeSpecies(species)) {
       candidate_indices.push_back(i);
     }
@@ -189,7 +214,7 @@ HaloCatalog FofHaloFinder::buildCatalog(
   for (std::uint32_t a = 0; a < candidate_indices.size(); ++a) {
     for (std::uint32_t b = a + 1; b < candidate_indices.size(); ++b) {
       ++pair_checks;
-      const double r2 = periodicDistanceSquared(state, candidate_indices[a], candidate_indices[b], box_size_comov);
+      const double r2 = periodicDistanceSquared(particles, candidate_indices[a], candidate_indices[b], box_size_comov);
       if (r2 <= linking_length_sq && ds.unite(a, b)) {
         ++pair_links;
       }
@@ -211,16 +236,16 @@ HaloCatalog FofHaloFinder::buildCatalog(
     }
   }
 
-  std::sort(accepted_groups.begin(), accepted_groups.end(), [&state](const auto& left, const auto& right) {
-    const std::uint64_t left_min = *std::min_element(
+  std::sort(accepted_groups.begin(), accepted_groups.end(), [&particles](const auto& left, const auto& right) {
+    const std::uint32_t left_min = *std::min_element(
         left.begin(),
         left.end(),
-        [&state](std::uint32_t a, std::uint32_t b) { return state.particle_sidecar.particle_id[a] < state.particle_sidecar.particle_id[b]; });
-    const std::uint64_t right_min = *std::min_element(
+        [&particles](std::uint32_t a, std::uint32_t b) { return particles.particle_id[a] < particles.particle_id[b]; });
+    const std::uint32_t right_min = *std::min_element(
         right.begin(),
         right.end(),
-        [&state](std::uint32_t a, std::uint32_t b) { return state.particle_sidecar.particle_id[a] < state.particle_sidecar.particle_id[b]; });
-    return state.particle_sidecar.particle_id[left_min] < state.particle_sidecar.particle_id[right_min];
+        [&particles](std::uint32_t a, std::uint32_t b) { return particles.particle_id[a] < particles.particle_id[b]; });
+    return particles.particle_id[left_min] < particles.particle_id[right_min];
   });
 
   catalog.halos.reserve(accepted_groups.size());
@@ -237,15 +262,15 @@ HaloCatalog FofHaloFinder::buildCatalog(
 
     for (const std::uint32_t p : members) {
       catalog.halo_id_by_particle[p] = halo_id;
-      const double mass = state.particles.mass_code[p];
+      const double mass = particles.mass_code[p];
       entry.total_mass_code += mass;
-      entry.center_of_mass_comov[0] += mass * state.particles.position_x_comoving[p];
-      entry.center_of_mass_comov[1] += mass * state.particles.position_y_comoving[p];
-      entry.center_of_mass_comov[2] += mass * state.particles.position_z_comoving[p];
-      entry.bulk_velocity_peculiar[0] += mass * state.particles.velocity_x_peculiar[p];
-      entry.bulk_velocity_peculiar[1] += mass * state.particles.velocity_y_peculiar[p];
-      entry.bulk_velocity_peculiar[2] += mass * state.particles.velocity_z_peculiar[p];
-      entry.min_particle_id = std::min(entry.min_particle_id, state.particle_sidecar.particle_id[p]);
+      entry.center_of_mass_comov[0] += mass * particles.position_x_comoving[p];
+      entry.center_of_mass_comov[1] += mass * particles.position_y_comoving[p];
+      entry.center_of_mass_comov[2] += mass * particles.position_z_comoving[p];
+      entry.bulk_velocity_peculiar[0] += mass * particles.velocity_x_peculiar[p];
+      entry.bulk_velocity_peculiar[1] += mass * particles.velocity_y_peculiar[p];
+      entry.bulk_velocity_peculiar[2] += mass * particles.velocity_z_peculiar[p];
+      entry.min_particle_id = std::min(entry.min_particle_id, particles.particle_id[p]);
     }
 
     if (entry.total_mass_code > 0.0) {
@@ -275,6 +300,20 @@ HaloCatalog FofHaloFinder::buildCatalog(
   }
 
   return catalog;
+}
+
+HaloCatalog FofHaloFinder::buildCatalog(
+    const core::SimulationState& state,
+    const core::SimulationConfig& config,
+    std::uint64_t snapshot_step_index,
+    double snapshot_scale_factor,
+    FofProfilingCounters* profiling) const {
+  return buildCatalogFromView(
+      buildHaloParticleView(state),
+      config,
+      snapshot_step_index,
+      snapshot_scale_factor,
+      profiling);
 }
 
 MergerTreePlan MergerTreePlanner::buildPlan(const HaloCatalog& current, const HaloCatalog* previous) const {

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/execution_policy.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
@@ -109,6 +110,7 @@ class PmGridStorage {
 
   [[nodiscard]] std::size_t linearIndex(std::size_t ix, std::size_t iy, std::size_t iz) const;
   void clear();
+  void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
   PmGridShape m_shape;

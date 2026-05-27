@@ -11,11 +11,13 @@
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
+#include "cosmosim/analysis/halo_workflow.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/gravity/tree_pm_coupling.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/star_formation.hpp"
 #include "cosmosim/physics/stellar_evolution.hpp"
@@ -113,6 +115,23 @@ concept StellarEvolutionHasNarrowViewApi = requires(
   { model.applyFromView(view, scale_factor, dt_code) } -> std::same_as<cosmosim::physics::StellarEvolutionStepReport>;
 };
 
+template <typename T>
+concept ExposesAdaptiveTimeStepCriteriaView = requires(T view) {
+  view.particles.velocity_x_peculiar;
+  view.particles.accel_x_comoving;
+  view.gas_cells.gas_particle_index_by_cell;
+  view.gas_cells.sound_speed_code;
+};
+
+template <typename T>
+concept FofHasNarrowHaloViewApi = requires(
+    const T finder,
+    cosmosim::analysis::HaloParticleView view,
+    const cosmosim::core::SimulationConfig& config,
+    cosmosim::analysis::FofProfilingCounters* counters) {
+  { finder.buildCatalogFromView(view, config, 1, 1.0, counters) } -> std::same_as<cosmosim::analysis::HaloCatalog>;
+};
+
 void requireStage6CompileTimeContracts() {
   static_assert(cosmosim::core::k_is_canonical_particle_state_owner_v<cosmosim::core::SimulationState>);
   static_assert(!cosmosim::core::k_is_canonical_particle_state_owner_v<cosmosim::core::ParticleSoaStorage>);
@@ -136,6 +155,8 @@ void requireStage6CompileTimeContracts() {
   static_assert(BlackHoleAgnHasNarrowViewApi<cosmosim::physics::BlackHoleAgnModel>);
   static_assert(TracerHasNarrowViewApi<cosmosim::physics::TracerModel>);
   static_assert(StellarEvolutionHasNarrowViewApi<cosmosim::physics::StellarEvolutionBookkeeper>);
+  static_assert(ExposesAdaptiveTimeStepCriteriaView<cosmosim::core::AdaptiveTimeStepCriteriaView>);
+  static_assert(FofHasNarrowHaloViewApi<cosmosim::analysis::FofHaloFinder>);
 }
 
 cosmosim::core::SimulationState makeParticleState() {
@@ -318,6 +339,24 @@ void testDiagnosticsStateWrappersDelegateToNarrowViews() {
   }
 }
 
+
+void testTreePmRuntimeMemoryReportAccountsLiveSolverBuffers() {
+  cosmosim::gravity::TreePmCoordinator coordinator(cosmosim::gravity::PmGridShape{4, 4, 4});
+  const cosmosim::core::MemoryReport report = coordinator.memoryReport();
+  bool saw_pm_mesh = false;
+  bool saw_tree_category = false;
+  bool saw_mpi_buffers = false;
+  for (const auto& entry : report.entries) {
+    saw_pm_mesh = saw_pm_mesh || entry.label == "pm_mesh.density";
+    saw_tree_category = saw_tree_category || entry.subsystem == cosmosim::core::MemorySubsystem::kTree;
+    saw_mpi_buffers = saw_mpi_buffers || entry.label == "treepm.exchange.send_payload";
+  }
+  assert(saw_pm_mesh);
+  assert(saw_tree_category);
+  assert(saw_mpi_buffers);
+  assert(report.totals.transient_by_subsystem[cosmosim::core::memorySubsystemIndex(cosmosim::core::MemorySubsystem::kPmMesh)] > 0);
+}
+
 void testRestartPayloadHashIgnoresTransientScratchButCoversPersistentTruth() {
   cosmosim::core::SimulationState state = makeParticleState();
   cosmosim::core::IntegratorState integrator_state;
@@ -360,6 +399,7 @@ int main() {
   requireStage6CompileTimeContracts();
   testActiveKernelViewsRejectStaleGenerations();
   testMemoryReportsCoverStage6CategoriesWithoutCountingViewsAsOwners();
+  testTreePmRuntimeMemoryReportAccountsLiveSolverBuffers();
   testDiagnosticsStateWrappersDelegateToNarrowViews();
   testRestartPayloadHashIgnoresTransientScratchButCoversPersistentTruth();
   return 0;

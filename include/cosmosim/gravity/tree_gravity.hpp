@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/gravity/tree_ordering.hpp"
 #include "cosmosim/gravity/tree_softening.hpp"
 
@@ -67,6 +68,7 @@ struct TreeNodeSoa {
   [[nodiscard]] std::size_t size() const;
   void clear();
   void reserve(std::size_t count);
+  void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 };
 
 class TreeGravitySolver {

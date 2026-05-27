@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,6 +94,8 @@ template <typename T>
 [[nodiscard]] MemoryReport collectSimulationMemoryReport(
     const SimulationState& state,
     const TransientStepWorkspace* workspace = nullptr);
+
+[[nodiscard]] MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports);
 
 [[nodiscard]] MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input);
 
