@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v12`) persists:
+The restart schema (`cosmosim_restart_v13`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,

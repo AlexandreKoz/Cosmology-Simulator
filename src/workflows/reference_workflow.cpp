@@ -134,6 +134,63 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
   return config;
 }
 
+[[nodiscard]] io::StochasticPersistentState buildStochasticPersistentState(
+    const core::SimulationConfig& config,
+    const core::IntegratorState& integrator_state,
+    std::uint32_t rank_local_seed_offset) {
+  io::StochasticPersistentState stochastic_state;
+  if (config.physics.enable_star_formation && config.physics.sf_stochastic_spawning) {
+    stochastic_state.modules.push_back(io::StochasticModulePersistentState{
+        .module_name = "star_formation",
+        .schema_version = 1,
+        .rng_policy = "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)",
+        .random_seed = config.physics.sf_random_seed,
+        .rank_local_seed_offset = rank_local_seed_offset,
+        .last_committed_step_index = integrator_state.step_index,
+        .deterministic_from_serialized_inputs = true,
+    });
+  }
+  if (config.physics.enable_feedback && config.physics.fb_variant == core::FeedbackVariant::kStochastic) {
+    stochastic_state.modules.push_back(io::StochasticModulePersistentState{
+        .module_name = "stellar_feedback",
+        .schema_version = 1,
+        .rng_policy = "stateless_splitmix64(seed,step_index,star_index)",
+        .random_seed = config.physics.fb_random_seed,
+        .rank_local_seed_offset = rank_local_seed_offset,
+        .last_committed_step_index = integrator_state.step_index,
+        .deterministic_from_serialized_inputs = true,
+    });
+  }
+  return stochastic_state;
+}
+
+[[nodiscard]] bool stochasticStatesEquivalent(
+    io::StochasticPersistentState lhs,
+    io::StochasticPersistentState rhs) {
+  const auto less_by_name = [](
+      const io::StochasticModulePersistentState& a,
+      const io::StochasticModulePersistentState& b) {
+    return a.module_name < b.module_name;
+  };
+  std::sort(lhs.modules.begin(), lhs.modules.end(), less_by_name);
+  std::sort(rhs.modules.begin(), rhs.modules.end(), less_by_name);
+  if (lhs.modules.size() != rhs.modules.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.modules.size(); ++i) {
+    const auto& a = lhs.modules[i];
+    const auto& b = rhs.modules[i];
+    if (a.module_name != b.module_name || a.schema_version != b.schema_version ||
+        a.rng_policy != b.rng_policy || a.random_seed != b.random_seed ||
+        a.rank_local_seed_offset != b.rank_local_seed_offset ||
+        a.last_committed_step_index != b.last_committed_step_index ||
+        a.deterministic_from_serialized_inputs != b.deterministic_from_serialized_inputs) {
+      return false;
+    }
+  }
+  return true;
+}
+
 [[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
   switch (mode) {
     case core::PmDecompositionMode::kSlab:
@@ -2621,6 +2678,10 @@ bool maybeWriteOutputs(
     }
     restart_payload.output_cadence_state.snapshot_stem = config.output.output_stem;
     restart_payload.output_cadence_state.restart_stem = config.output.restart_stem;
+    restart_payload.stochastic_state = buildStochasticPersistentState(
+        config,
+        integrator_state,
+        static_cast<std::uint32_t>(std::max(gravity_callback.runtimeTopology().world_rank, 0)));
     restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particle_sidecar.owning_rank.size());
     for (const std::uint32_t owner : state.particle_sidecar.owning_rank) {
       restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(static_cast<int>(owner));
@@ -2687,6 +2748,7 @@ bool maybeWriteOutputs(
             restart_payload.output_cadence_state.next_snapshot_step_index &&
         restart_read.output_cadence_state.snapshot_stem == restart_payload.output_cadence_state.snapshot_stem &&
         restart_read.output_cadence_state.restart_stem == restart_payload.output_cadence_state.restart_stem &&
+        stochasticStatesEquivalent(restart_read.stochastic_state, restart_payload.stochastic_state) &&
         restart_rank_qualified_name &&
         compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{
@@ -3099,7 +3161,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
-        physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)));
+        physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)),
+        static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0)));
     physics::BlackHoleAgnCallback bh_callback(
         physics::BlackHoleAgnModel(makeRuntimeBlackHoleAgnConfig(config.physics, runtime_units)));
     OutputBoundaryCallback output_boundary_callback(

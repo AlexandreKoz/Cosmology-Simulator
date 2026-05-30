@@ -36,7 +36,7 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v12`
+- `name = cosmosim_restart_v13`
 - `version = 12`
 
 Restart payload includes:
@@ -69,7 +69,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v12` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v13` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
 
 ## 3) Provenance payload
 
@@ -172,9 +172,9 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v12`, version `12`, because Stage 8 restart files now declare explicit file-kind metadata and persist output cadence/counter state alongside scheduler/runtime truth.
+- Restart schema version/name are now `cosmosim_restart_v13`, version `13`, because Stage 8 restart files now declare explicit file-kind metadata and persist output cadence/counter state alongside scheduler/runtime truth.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v12`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v13`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Restart v6 compatibility behavior is tightened without changing payload fields: non-empty
   `CellSoa::time_bin` mirrors must match the scheduler `bin_index` of each gas cell's

@@ -30,9 +30,10 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v12");
-  assert(schema.version == 12);
-  assert(cosmosim::io::isRestartSchemaCompatible(12));
+  assert(schema.name == "cosmosim_restart_v13");
+  assert(schema.version == 13);
+  assert(cosmosim::io::isRestartSchemaCompatible(13));
+  assert(!cosmosim::io::isRestartSchemaCompatible(12));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
@@ -41,16 +42,19 @@ int main() {
   bool saw_gas_identity = false;
   bool saw_species_sidecars = false;
   bool saw_output_cadence = false;
+  bool saw_stochastic_state = false;
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
     saw_output_cadence = saw_output_cadence || item == "output_cadence_persistent_state";
+    saw_stochastic_state = saw_stochastic_state || item == "stochastic_module_persistent_state";
   }
   assert(saw_softening);
   assert(saw_gas_identity);
   assert(saw_species_sidecars);
   assert(saw_output_cadence);
+  assert(saw_stochastic_state);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;
@@ -108,6 +112,17 @@ int main() {
   payload.output_cadence_state.restart_stem = "restart";
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
   payload.output_cadence_state = {};
+  payload.stochastic_state.modules.push_back(cosmosim::io::StochasticModulePersistentState{
+      .module_name = "star_formation",
+      .schema_version = 1,
+      .rng_policy = "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)",
+      .random_seed = 123456789ull,
+      .rank_local_seed_offset = 2,
+      .last_committed_step_index = integrator_state.step_index,
+      .deterministic_from_serialized_inputs = true,
+  });
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
+  payload.stochastic_state = {};
   state.particle_sidecar.setGravitySofteningOverride(0, 0.125);
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
   const std::uint64_t hash_with_softening = cosmosim::io::restartPayloadIntegrityHash(payload);

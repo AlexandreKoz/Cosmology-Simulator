@@ -738,6 +738,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_restart_checkpoint_roundtrip COMMAND test_integration_restart_checkpoint_roundtrip)
   cosmosim_mark_runtime_truth_test(integration_restart_checkpoint_roundtrip restart provenance gas sidecar scheduler)
 
+  add_executable(test_integration_restart_equivalence_harness tests/integration/test_restart_equivalence_harness.cpp)
+  target_link_libraries(test_integration_restart_equivalence_harness PRIVATE cosmosim_all)
+  add_test(NAME integration_restart_equivalence_harness COMMAND test_integration_restart_equivalence_harness)
+  cosmosim_mark_runtime_truth_test(integration_restart_equivalence_harness restart scheduler output stochastic equivalence)
+
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
   add_test(NAME integration_tree_gravity_vs_direct COMMAND test_integration_tree_gravity_vs_direct)
@@ -809,6 +814,7 @@ if(COSMOSIM_ENABLE_TESTS)
         test_unit_restart_checkpoint_schema
         test_integration_snapshot_hdf5_roundtrip
         test_integration_restart_checkpoint_roundtrip
+        test_integration_restart_equivalence_harness
         test_integration_provenance_roundtrip)
 
 

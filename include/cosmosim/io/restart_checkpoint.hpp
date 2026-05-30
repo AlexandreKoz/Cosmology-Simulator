@@ -15,8 +15,8 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  std::string name = "cosmosim_restart_v12";
-  std::uint32_t version = 12;
+  std::string name = "cosmosim_restart_v13";
+  std::uint32_t version = 13;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -47,6 +47,20 @@ struct OutputCadencePersistentState {
   std::string restart_stem;
 };
 
+struct StochasticModulePersistentState {
+  std::string module_name;
+  std::uint32_t schema_version = 1;
+  std::string rng_policy;
+  std::uint64_t random_seed = 0;
+  std::uint32_t rank_local_seed_offset = 0;
+  std::uint64_t last_committed_step_index = 0;
+  bool deterministic_from_serialized_inputs = true;
+};
+
+struct StochasticPersistentState {
+  std::vector<StochasticModulePersistentState> modules;
+};
+
 struct RestartWritePayload {
   RestartPersistentStateView persistent_state;
   const core::IntegratorState* integrator_state = nullptr;
@@ -56,6 +70,7 @@ struct RestartWritePayload {
   std::string normalized_config_hash_hex;
   parallel::DistributedRestartState distributed_gravity_state;
   OutputCadencePersistentState output_cadence_state;
+  StochasticPersistentState stochastic_state;
 };
 
 struct RestartReadResult {
@@ -67,6 +82,7 @@ struct RestartReadResult {
   std::string normalized_config_hash_hex;
   parallel::DistributedRestartState distributed_gravity_state;
   OutputCadencePersistentState output_cadence_state;
+  StochasticPersistentState stochastic_state;
   std::uint64_t payload_hash = 0;
   std::string payload_hash_hex;
 };

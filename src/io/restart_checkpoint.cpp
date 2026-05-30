@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
 #include <span>
 
 #include "cosmosim/core/build_config.hpp"
@@ -163,6 +164,59 @@ void validateOutputCadenceStateForRestart(
     throw std::invalid_argument(
         std::string(context) + ": /output_cadence/@next_snapshot_step_index must be strictly after the restart step");
   }
+}
+
+void validateStochasticStateForRestart(
+    const StochasticPersistentState& stochastic_state,
+    const core::IntegratorState& integrator_state,
+    std::string_view context) {
+  std::vector<std::string> seen_modules;
+  seen_modules.reserve(stochastic_state.modules.size());
+  for (const StochasticModulePersistentState& module_state : stochastic_state.modules) {
+    if (module_state.module_name.empty()) {
+      throw std::invalid_argument(std::string(context) + ": /stochastic_state module_name must be non-empty");
+    }
+    if (module_state.module_name.find('/') != std::string::npos) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state/" + module_state.module_name +
+          " module_name must not contain '/'");
+    }
+    if (std::find(seen_modules.begin(), seen_modules.end(), module_state.module_name) != seen_modules.end()) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state duplicate module_name '" + module_state.module_name + "'");
+    }
+    seen_modules.push_back(module_state.module_name);
+    if (module_state.schema_version == 0) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state/" + module_state.module_name + "/@schema_version must be > 0");
+    }
+    if (module_state.rng_policy.empty()) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state/" + module_state.module_name + "/@rng_policy must be non-empty");
+    }
+    if (!module_state.deterministic_from_serialized_inputs) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state/" + module_state.module_name +
+          " declares non-deterministic RNG state, but stateful RNG engine serialization is not implemented");
+    }
+    if (module_state.last_committed_step_index != integrator_state.step_index) {
+      throw std::invalid_argument(
+          std::string(context) + ": /stochastic_state/" + module_state.module_name +
+          "/@last_committed_step_index must match /integrator/@step_index");
+    }
+  }
+}
+
+[[nodiscard]] std::vector<StochasticModulePersistentState> sortedStochasticModules(
+    const StochasticPersistentState& stochastic_state) {
+  std::vector<StochasticModulePersistentState> modules = stochastic_state.modules;
+  std::sort(
+      modules.begin(),
+      modules.end(),
+      [](const StochasticModulePersistentState& lhs, const StochasticModulePersistentState& rhs) {
+        return lhs.module_name < rhs.module_name;
+      });
+  return modules;
 }
 
 #if COSMOSIM_ENABLE_HDF5
@@ -438,6 +492,10 @@ void validateRestartCheckpointSchema(hid_t file) {
                                 "next_snapshot_step_index", "snapshot_stem", "restart_stem"}) {
     requireHdf5Attribute(output_group.get(), "/output_cadence", attr);
   }
+
+  Hdf5Handle stochastic_group = openRequiredGroup(file, "/stochastic_state");
+  requireHdf5Attribute(stochastic_group.get(), "/stochastic_state", "module_count");
+  requireHdf5Dataset1d(file, "/stochastic_state/module_names");
 
   requireHdf5Dataset1d(file, "/distributed_gravity/state");
 }
@@ -939,6 +997,65 @@ void writeOutputCadenceGroup(hid_t root, const OutputCadencePersistentState& out
   output_state.restart_stem = readScalarStringAttribute(group.get(), "restart_stem");
   return output_state;
 }
+
+void writeStochasticStateGroup(hid_t root, const StochasticPersistentState& stochastic_state) {
+  Hdf5Handle group(openOrCreateGroup(root, "/stochastic_state"));
+  const auto modules = sortedStochasticModules(stochastic_state);
+  writeScalarU32Attribute(group.get(), "module_count", static_cast<std::uint32_t>(modules.size()));
+  std::string module_names;
+  for (const StochasticModulePersistentState& module_state : modules) {
+    if (!module_names.empty()) {
+      module_names.push_back('\n');
+    }
+    module_names += module_state.module_name;
+    Hdf5Handle module_group(openOrCreateGroup(root, "/stochastic_state/" + module_state.module_name));
+    writeScalarU32Attribute(module_group.get(), "schema_version", module_state.schema_version);
+    writeScalarStringAttribute(module_group.get(), "rng_policy", module_state.rng_policy);
+    writeScalarU64Attribute(module_group.get(), "random_seed", module_state.random_seed);
+    writeScalarU32Attribute(module_group.get(), "rank_local_seed_offset", module_state.rank_local_seed_offset);
+    writeScalarU64Attribute(module_group.get(), "last_committed_step_index", module_state.last_committed_step_index);
+    writeScalarU32Attribute(
+        module_group.get(),
+        "deterministic_from_serialized_inputs",
+        module_state.deterministic_from_serialized_inputs ? 1U : 0U);
+  }
+  writeStringDataset(group.get(), "module_names", module_names);
+}
+
+[[nodiscard]] StochasticPersistentState readStochasticStateGroup(hid_t root) {
+  Hdf5Handle group(H5Gopen2(root, "/stochastic_state", H5P_DEFAULT));
+  if (!group.valid()) {
+    throw std::runtime_error("restart schema validation missing required group: /stochastic_state");
+  }
+  const std::string module_names_text = readStringDataset(group.get(), "module_names");
+  StochasticPersistentState stochastic_state;
+  std::istringstream module_names_stream(module_names_text);
+  std::string module_name;
+  while (std::getline(module_names_stream, module_name)) {
+    if (module_name.empty()) {
+      continue;
+    }
+    Hdf5Handle module_group(H5Gopen2(group.get(), module_name.c_str(), H5P_DEFAULT));
+    if (!module_group.valid()) {
+      throw std::runtime_error("restart schema validation missing required group: /stochastic_state/" + module_name);
+    }
+    StochasticModulePersistentState module_state;
+    module_state.module_name = module_name;
+    module_state.schema_version = readScalarU32Attribute(module_group.get(), "schema_version");
+    module_state.rng_policy = readScalarStringAttribute(module_group.get(), "rng_policy");
+    module_state.random_seed = readScalarU64Attribute(module_group.get(), "random_seed");
+    module_state.rank_local_seed_offset = readScalarU32Attribute(module_group.get(), "rank_local_seed_offset");
+    module_state.last_committed_step_index = readScalarU64Attribute(module_group.get(), "last_committed_step_index");
+    module_state.deterministic_from_serialized_inputs =
+        readScalarU32Attribute(module_group.get(), "deterministic_from_serialized_inputs") != 0U;
+    stochastic_state.modules.push_back(std::move(module_state));
+  }
+  const std::uint32_t module_count = readScalarU32Attribute(group.get(), "module_count");
+  if (module_count != stochastic_state.modules.size()) {
+    throw std::runtime_error("restart schema validation invalid /stochastic_state/@module_count");
+  }
+  return stochastic_state;
+}
 #endif
 
 }  // namespace
@@ -963,6 +1080,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "integrator_owned_pm_sync_state",
       "scheduler_persistent_state",
       "output_cadence_persistent_state",
+      "stochastic_module_persistent_state",
       "distributed_gravity_state",
       "normalized_config_text_and_hash",
       "provenance_record",
@@ -1008,6 +1126,8 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   }
   validateOutputCadenceStateForRestart(
       payload.output_cadence_state, *payload.integrator_state, "restart payload");
+  validateStochasticStateForRestart(
+      payload.stochastic_state, *payload.integrator_state, "restart payload");
 
   std::uint64_t hash = k_offset_basis;
 
@@ -1160,6 +1280,15 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_u64(payload.output_cadence_state.next_snapshot_step_index);
   append_string(payload.output_cadence_state.snapshot_stem);
   append_string(payload.output_cadence_state.restart_stem);
+  for (const StochasticModulePersistentState& module_state : sortedStochasticModules(payload.stochastic_state)) {
+    append_string(module_state.module_name);
+    append_u64(module_state.schema_version);
+    append_string(module_state.rng_policy);
+    append_u64(module_state.random_seed);
+    append_u64(module_state.rank_local_seed_offset);
+    append_u64(module_state.last_committed_step_index);
+    append_u64(module_state.deterministic_from_serialized_inputs ? 1ull : 0ull);
+  }
   append_string(payload.distributed_gravity_state.serialize());
 
   return hash;
@@ -1198,6 +1327,8 @@ void writeRestartCheckpointHdf5(
       "restart writer");
   validateOutputCadenceStateForRestart(
       payload.output_cadence_state, *payload.integrator_state, "restart writer");
+  validateStochasticStateForRestart(
+      payload.stochastic_state, *payload.integrator_state, "restart writer");
 
   std::filesystem::create_directories(output_path.parent_path());
   const std::filesystem::path temporary_path = output_path.string() + policy.temporary_suffix;
@@ -1278,6 +1409,7 @@ void writeRestartCheckpointHdf5(
       H5T_NATIVE_UINT8,
       scheduler_state.pending_bin_index);
   writeOutputCadenceGroup(file.get(), payload.output_cadence_state);
+  writeStochasticStateGroup(file.get(), payload.stochastic_state);
   writeDistributedGravityGroup(file.get(), payload.distributed_gravity_state);
 
   if (H5Fflush(file.get(), H5F_SCOPE_GLOBAL) < 0) {
@@ -1385,6 +1517,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   rebuildRestartTimeBinMirrorsFromScheduler(result.state, result.scheduler_state);
   result.output_cadence_state = readOutputCadenceGroup(file.get());
   validateOutputCadenceStateForRestart(result.output_cadence_state, result.integrator_state, "restart reader");
+  result.stochastic_state = readStochasticStateGroup(file.get());
+  validateStochasticStateForRestart(result.stochastic_state, result.integrator_state, "restart reader");
   readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;
@@ -1398,6 +1532,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.provenance = result.provenance;
   verify_payload.distributed_gravity_state = result.distributed_gravity_state;
   verify_payload.output_cadence_state = result.output_cadence_state;
+  verify_payload.stochastic_state = result.stochastic_state;
 
   const std::uint64_t computed_hash = restartPayloadIntegrityHash(verify_payload);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {

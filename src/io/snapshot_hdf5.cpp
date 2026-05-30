@@ -123,6 +123,11 @@ class Hdf5Handle {
   return H5Lexists(parent, path.c_str(), H5P_DEFAULT) > 0;
 }
 
+[[nodiscard]] bool hdf5AttributeExists(hid_t location, const std::string& key) {
+  const htri_t exists = H5Aexists(location, key.c_str());
+  return exists > 0;
+}
+
 void writeScalarStringAttribute(hid_t location, const std::string& key, std::string_view value) {
   Hdf5Handle scalar_space(H5Screate(H5S_SCALAR));
   if (!scalar_space.valid()) {
@@ -846,6 +851,19 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   }
 
   const auto& schema = gadgetArepoSchemaMap();
+  const auto& shared_names = sharedIoContractNames();
+  if (hdf5AttributeExists(file.get(), std::string(shared_names.file_kind_attribute))) {
+    readScalarStringAttribute(file.get(), std::string(shared_names.file_kind_attribute), result.report.file_kind);
+    if (result.report.file_kind == shared_names.restart_checkpoint_file_kind) {
+      throw std::runtime_error(
+          "snapshot reader rejected HDF5 file-kind '" + result.report.file_kind +
+          "'; expected science_snapshot or legacy GADGET/AREPO particle snapshot");
+    }
+  } else {
+    result.report.file_kind = "legacy_or_external_snapshot";
+  }
+  result.report.restart_compatible = false;
+
   Hdf5Handle header_group(H5Gopen2(file.get(), std::string(schema.header_group).c_str(), H5P_DEFAULT));
   if (!header_group.valid()) {
     throw std::runtime_error("snapshot missing " + std::string(schema.header_group));

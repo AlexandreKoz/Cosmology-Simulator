@@ -10,6 +10,7 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
+#include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
@@ -152,8 +153,11 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.state.validateUniqueParticleIds());
   assert(roundtrip.state.metadata.scale_factor == state.metadata.scale_factor);
   assert(roundtrip.normalized_config_text == payload.normalized_config_text);
+  const auto& shared_contract = cosmosim::io::sharedIoContractNames();
   assert(roundtrip.report.schema_name == schema.schema_name);
   assert(roundtrip.report.schema_version == schema.schema_version);
+  assert(roundtrip.report.file_kind == shared_contract.science_snapshot_file_kind);
+  assert(!roundtrip.report.restart_compatible);
   assert(roundtrip.provenance.schema_version == payload.provenance.schema_version);
   assert(roundtrip.provenance.git_sha == payload.provenance.git_sha);
   assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);

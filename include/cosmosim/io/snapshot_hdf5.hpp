@@ -68,6 +68,8 @@ struct SnapshotIoReport {
   std::size_t chunk_particle_count = 0;
   std::vector<std::string> present_aliases;
   std::vector<std::string> defaulted_fields;
+  std::string file_kind = "unknown";
+  bool restart_compatible = false;
 };
 
 struct SnapshotReadResult {

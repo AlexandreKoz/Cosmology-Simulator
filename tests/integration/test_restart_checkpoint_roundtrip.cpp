@@ -314,6 +314,24 @@ void testRestartRoundtrip() {
   payload.output_cadence_state.next_snapshot_step_index = 80;
   payload.output_cadence_state.snapshot_stem = "snapshot";
   payload.output_cadence_state.restart_stem = "restart";
+  payload.stochastic_state.modules.push_back(cosmosim::io::StochasticModulePersistentState{
+      .module_name = "star_formation",
+      .schema_version = 1,
+      .rng_policy = "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)",
+      .random_seed = 123456789ull,
+      .rank_local_seed_offset = 0,
+      .last_committed_step_index = integrator_state.step_index,
+      .deterministic_from_serialized_inputs = true,
+  });
+  payload.stochastic_state.modules.push_back(cosmosim::io::StochasticModulePersistentState{
+      .module_name = "stellar_feedback",
+      .schema_version = 1,
+      .rng_policy = "stateless_splitmix64(seed,step_index,star_index)",
+      .random_seed = 42424242ull,
+      .rank_local_seed_offset = 0,
+      .last_committed_step_index = integrator_state.step_index,
+      .deterministic_from_serialized_inputs = true,
+  });
 
   const std::filesystem::path checkpoint_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
@@ -479,6 +497,21 @@ void testRestartRoundtrip() {
   assert(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
   assert(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
   assert(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
+  assert(restored.stochastic_state.modules.size() == payload.stochastic_state.modules.size());
+  assert(restored.stochastic_state.modules[0].module_name == "star_formation");
+  assert(restored.stochastic_state.modules[0].schema_version == 1);
+  assert(restored.stochastic_state.modules[0].rng_policy == "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)");
+  assert(restored.stochastic_state.modules[0].random_seed == 123456789ull);
+  assert(restored.stochastic_state.modules[0].rank_local_seed_offset == 0);
+  assert(restored.stochastic_state.modules[0].last_committed_step_index == integrator_state.step_index);
+  assert(restored.stochastic_state.modules[0].deterministic_from_serialized_inputs);
+  assert(restored.stochastic_state.modules[1].module_name == "stellar_feedback");
+  assert(restored.stochastic_state.modules[1].schema_version == 1);
+  assert(restored.stochastic_state.modules[1].rng_policy == "stateless_splitmix64(seed,step_index,star_index)");
+  assert(restored.stochastic_state.modules[1].random_seed == 42424242ull);
+  assert(restored.stochastic_state.modules[1].rank_local_seed_offset == 0);
+  assert(restored.stochastic_state.modules[1].last_committed_step_index == integrator_state.step_index);
+  assert(restored.stochastic_state.modules[1].deterministic_from_serialized_inputs);
   assert(restored.state.sidecars.find("hydro") != nullptr);
   const cosmosim::core::ModuleSidecarBlock* hydro_sidecar = restored.state.sidecars.find("hydro");
   assert(hydro_sidecar->schema_version == 3);
