@@ -18,6 +18,13 @@ By design, this differs from GADGET/AREPO-style analysis snapshots where schedul
 
 Restart write payloads now carry `RestartPersistentStateView` (`persistent_state.simulation_state`) rather than a broad ad-hoc object pointer. This creates an explicit outer-boundary guard: transient runtime owners such as `TransientStepWorkspace`, `HydroScratchBuffers`, PM work arrays, TreePM traversal scratch, MPI send/recv buffers, and output staging buffers are out-of-scope for restart traversal by type.
 
+
+## Restart-safe boundary contract
+
+Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
+
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v11, so those states must not be serialized as persistent truth.
+
 ## File format and compatibility
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
@@ -52,6 +59,7 @@ behavior on filesystems where `rename` is atomic.
     `last_long_range_refresh_opportunity`, `long_range_field_built_step_index`,
     `long_range_field_built_scale_factor`),
   - restart long-range policy (`long_range_restart_policy`).
+  Distributed floating-point restart metadata is text-encoded with enough precision for exact read-back comparisons.
 - **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild`.
   Cached PM long-range field arrays are not serialized; on resume, PM long-range state is rebuilt
   deterministically on the next refresh opportunity. This is contractually explicit in restart payload + provenance.

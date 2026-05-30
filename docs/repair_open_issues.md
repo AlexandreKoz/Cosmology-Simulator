@@ -242,3 +242,7 @@ No issue status changes in this patch. Open blockers remain P38 distributed sche
 - S5-02 follow-up: monitor downstream configs still using legacy aliases and migrate examples to canonical keys.
 
 | S5-04-PROVENANCE-VERSIONING | Closed | Provenance/schema auditability | Provenance lacked explicit config schema identity and separate raw/normalized/derived runtime payload capture in snapshot/restart metadata. | Added `provenance_v5` fields for config schema identity, normalized hash, and audit payloads with deterministic serialization/roundtrip coverage updates. |
+
+## 2026-05-29 Stage 8 restart-boundary status
+
+No existing repair issue is closed by this patch. The new boundary contract blocks unsafe restart writes but does not implement intentionally represented half-step/local-substep restart; those states remain unsupported and must continue to fail loudly unless a future schema-versioned design serializes all required scheduler/phase state.

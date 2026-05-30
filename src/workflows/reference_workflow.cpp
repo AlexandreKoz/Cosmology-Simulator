@@ -2530,7 +2530,7 @@ bool maybeWriteOutputs(
     bool write_outputs_enabled,
     bool snapshot_due,
     bool checkpoint_due) {
-  if (!write_outputs_enabled || !snapshot_due) {
+  if (!write_outputs_enabled || (!snapshot_due && !checkpoint_due)) {
     return false;
   }
 
@@ -2541,36 +2541,41 @@ bool maybeWriteOutputs(
   if (integrator_state.step_index == 0) {
     return false;
   }
-  if (!integrator_state.last_completed_restart_safe ||
-      !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+  if (checkpoint_due) {
+    core::assertCanWriteCheckpointAtBoundary(integrator_state, scheduler.currentTick());
+  }
+  if (snapshot_due) {
+    core::assertCanWriteSnapshotAtBoundary(integrator_state);
+  }
+  if ((snapshot_due || checkpoint_due) && !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
     return false;
   }
-  core::assertCanWriteSnapshotAtBoundary(integrator_state);
-  if (checkpoint_due) {
-    core::assertCanWriteCheckpointAtBoundary(integrator_state);
-  }
 
-  io::SnapshotWritePayload snapshot_payload;
-  snapshot_payload.state = &state;
-  snapshot_payload.config = &config;
-  snapshot_payload.normalized_config_text = frozen_config.normalized_text;
-  snapshot_payload.provenance =
-      makeGravityAwareProvenanceRecord(frozen_config, config);
-  report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
-  io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
-  report.snapshot_roundtrip_executed = true;
-  const io::SnapshotReadResult snapshot_read = io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
-  report.snapshot_roundtrip_ok = snapshot_read.state.particles.size() == state.particles.size();
-  profiler.recordEvent(core::RuntimeEvent{
-      .event_kind = "snapshot.write.complete",
-      .severity = report.snapshot_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
-      .subsystem = "io.snapshot",
-      .step_index = integrator_state.step_index,
-      .simulation_time_code = integrator_state.current_time_code,
-      .scale_factor = integrator_state.current_scale_factor,
-      .message = "snapshot output written and verified",
-      .payload = {{"path", report.snapshot_path.string()}},
-  });
+  bool output_flushed = false;
+  if (snapshot_due) {
+    io::SnapshotWritePayload snapshot_payload;
+    snapshot_payload.state = &state;
+    snapshot_payload.config = &config;
+    snapshot_payload.normalized_config_text = frozen_config.normalized_text;
+    snapshot_payload.provenance =
+        makeGravityAwareProvenanceRecord(frozen_config, config);
+    report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
+    io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
+    report.snapshot_roundtrip_executed = true;
+    const io::SnapshotReadResult snapshot_read = io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
+    report.snapshot_roundtrip_ok = snapshot_read.state.particles.size() == state.particles.size();
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "snapshot.write.complete",
+        .severity = report.snapshot_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
+        .subsystem = "io.snapshot",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "snapshot output written and verified",
+        .payload = {{"path", report.snapshot_path.string()}},
+    });
+    output_flushed = true;
+  }
 
   if (checkpoint_due) {
     io::RestartWritePayload restart_payload;
@@ -2674,8 +2679,9 @@ bool maybeWriteOutputs(
         .message = "restart checkpoint written and verified",
         .payload = {{"path", report.restart_path.string()}},
     });
+    output_flushed = true;
   }
-  return true;
+  return output_flushed;
 #endif
 }
 
@@ -2763,6 +2769,9 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
       return;
     }
     if (!context.boundary.output_safe || !context.boundary.restart_safe) {
+      if (m_pending_output.checkpoint_due) {
+        core::assertCanWriteCheckpointAtBoundary(context.integrator_state, m_scheduler.currentTick());
+      }
       return;
     }
     const bool output_flushed = maybeWriteOutputs(
