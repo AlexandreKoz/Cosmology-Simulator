@@ -497,6 +497,20 @@ void validateRestartCheckpointSchema(hid_t file) {
   requireHdf5Attribute(stochastic_group.get(), "/stochastic_state", "module_count");
   requireHdf5Dataset1d(file, "/stochastic_state/module_names");
 
+  Hdf5Handle diagnostics_group = openRequiredGroup(file, "/restart_diagnostics");
+  for (std::string_view attr : {"restart_schema_name", "restart_schema_version", "current_boundary_kind",
+                                "last_completed_boundary_kind", "restart_safe", "step_index",
+                                "scheduler_current_tick", "scheduler_max_bin", "scheduler_element_count",
+                                "scheduler_active_count", "scheduler_pending_transition_count",
+                                "pm_cadence_steps", "pm_gravity_kick_opportunity", "pm_field_version",
+                                "pm_last_refresh_opportunity", "pm_last_refresh_step_index",
+                                "pm_refresh_commit_pending", "pm_long_range_field_valid", "output_enabled",
+                                "output_snapshot_due", "output_checkpoint_due",
+                                "output_last_completed_step_index", "output_next_snapshot_step_index",
+                                "stochastic_module_count"}) {
+    requireHdf5Attribute(diagnostics_group.get(), "/restart_diagnostics", attr);
+  }
+
   requireHdf5Dataset1d(file, "/distributed_gravity/state");
 }
 
@@ -1056,6 +1070,114 @@ void writeStochasticStateGroup(hid_t root, const StochasticPersistentState& stoc
   }
   return stochastic_state;
 }
+
+[[nodiscard]] RestartDiagnosticsSummary makeRestartDiagnosticsSummary(
+    const core::IntegratorState& integrator_state,
+    const core::TimeBinPersistentState& scheduler_state,
+    const OutputCadencePersistentState& output_state,
+    const StochasticPersistentState& stochastic_state) {
+  RestartDiagnosticsSummary diagnostics;
+  diagnostics.restart_schema_name = restartSchema().name;
+  diagnostics.restart_schema_version = restartSchema().version;
+  diagnostics.current_boundary_kind = std::string(core::stepBoundaryKindName(integrator_state.current_boundary_kind));
+  diagnostics.last_completed_boundary_kind =
+      std::string(core::stepBoundaryKindName(integrator_state.last_completed_boundary_kind));
+  diagnostics.restart_safe = !integrator_state.inside_kdk_step && integrator_state.last_completed_restart_safe &&
+      core::isRestartSafeBoundary(integrator_state.last_completed_boundary_kind);
+  diagnostics.step_index = integrator_state.step_index;
+  diagnostics.scheduler_current_tick = scheduler_state.current_tick;
+  diagnostics.scheduler_max_bin = scheduler_state.max_bin;
+  diagnostics.scheduler_element_count = scheduler_state.bin_index.size();
+  diagnostics.scheduler_active_count = static_cast<std::uint64_t>(
+      std::count(scheduler_state.active_flag.begin(), scheduler_state.active_flag.end(), static_cast<std::uint8_t>(1U)));
+  diagnostics.scheduler_pending_transition_count = static_cast<std::uint64_t>(std::count_if(
+      scheduler_state.pending_bin_index.begin(),
+      scheduler_state.pending_bin_index.end(),
+      [](std::uint8_t pending_bin) {
+        return pending_bin != core::HierarchicalTimeBinScheduler::k_unset_pending_bin;
+      }));
+
+  const core::PmSynchronizationPersistentState pm_sync_state =
+      integrator_state.pm_sync_state.exportPersistentState();
+  diagnostics.pm_cadence_steps = pm_sync_state.cadence_steps;
+  diagnostics.pm_gravity_kick_opportunity = pm_sync_state.gravity_kick_opportunity;
+  diagnostics.pm_field_version = pm_sync_state.field_version;
+  diagnostics.pm_last_refresh_opportunity = pm_sync_state.last_refresh_opportunity;
+  diagnostics.pm_last_refresh_step_index = pm_sync_state.last_refresh_step_index;
+  diagnostics.pm_refresh_commit_pending = pm_sync_state.refresh_commit_pending;
+  diagnostics.pm_long_range_field_valid = integrator_state.pm_long_range_field_valid;
+
+  diagnostics.output_enabled = output_state.output_enabled;
+  diagnostics.output_snapshot_due = output_state.snapshot_due;
+  diagnostics.output_checkpoint_due = output_state.checkpoint_due;
+  diagnostics.output_last_completed_step_index = output_state.last_completed_step_index;
+  diagnostics.output_next_snapshot_step_index = output_state.next_snapshot_step_index;
+  diagnostics.stochastic_module_count = stochastic_state.modules.size();
+  return diagnostics;
+}
+
+void writeRestartDiagnosticsGroup(hid_t root, const RestartDiagnosticsSummary& diagnostics) {
+  Hdf5Handle group(openOrCreateGroup(root, "/restart_diagnostics"));
+  writeScalarStringAttribute(group.get(), "restart_schema_name", diagnostics.restart_schema_name);
+  writeScalarU32Attribute(group.get(), "restart_schema_version", diagnostics.restart_schema_version);
+  writeScalarStringAttribute(group.get(), "current_boundary_kind", diagnostics.current_boundary_kind);
+  writeScalarStringAttribute(group.get(), "last_completed_boundary_kind", diagnostics.last_completed_boundary_kind);
+  writeScalarU32Attribute(group.get(), "restart_safe", diagnostics.restart_safe ? 1U : 0U);
+  writeScalarU64Attribute(group.get(), "step_index", diagnostics.step_index);
+  writeScalarU64Attribute(group.get(), "scheduler_current_tick", diagnostics.scheduler_current_tick);
+  writeScalarU32Attribute(group.get(), "scheduler_max_bin", diagnostics.scheduler_max_bin);
+  writeScalarU64Attribute(group.get(), "scheduler_element_count", diagnostics.scheduler_element_count);
+  writeScalarU64Attribute(group.get(), "scheduler_active_count", diagnostics.scheduler_active_count);
+  writeScalarU64Attribute(
+      group.get(), "scheduler_pending_transition_count", diagnostics.scheduler_pending_transition_count);
+  writeScalarU64Attribute(group.get(), "pm_cadence_steps", diagnostics.pm_cadence_steps);
+  writeScalarU64Attribute(group.get(), "pm_gravity_kick_opportunity", diagnostics.pm_gravity_kick_opportunity);
+  writeScalarU64Attribute(group.get(), "pm_field_version", diagnostics.pm_field_version);
+  writeScalarU64Attribute(group.get(), "pm_last_refresh_opportunity", diagnostics.pm_last_refresh_opportunity);
+  writeScalarU64Attribute(group.get(), "pm_last_refresh_step_index", diagnostics.pm_last_refresh_step_index);
+  writeScalarU32Attribute(group.get(), "pm_refresh_commit_pending", diagnostics.pm_refresh_commit_pending ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "pm_long_range_field_valid", diagnostics.pm_long_range_field_valid ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "output_enabled", diagnostics.output_enabled ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "output_snapshot_due", diagnostics.output_snapshot_due ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "output_checkpoint_due", diagnostics.output_checkpoint_due ? 1U : 0U);
+  writeScalarU64Attribute(group.get(), "output_last_completed_step_index", diagnostics.output_last_completed_step_index);
+  writeScalarU64Attribute(group.get(), "output_next_snapshot_step_index", diagnostics.output_next_snapshot_step_index);
+  writeScalarU64Attribute(group.get(), "stochastic_module_count", diagnostics.stochastic_module_count);
+}
+
+[[nodiscard]] RestartDiagnosticsSummary readRestartDiagnosticsGroup(hid_t root) {
+  Hdf5Handle group(H5Gopen2(root, "/restart_diagnostics", H5P_DEFAULT));
+  if (!group.valid()) {
+    throw std::runtime_error("restart schema validation missing required group: /restart_diagnostics");
+  }
+  RestartDiagnosticsSummary diagnostics;
+  diagnostics.restart_schema_name = readScalarStringAttribute(group.get(), "restart_schema_name");
+  diagnostics.restart_schema_version = readScalarU32Attribute(group.get(), "restart_schema_version");
+  diagnostics.current_boundary_kind = readScalarStringAttribute(group.get(), "current_boundary_kind");
+  diagnostics.last_completed_boundary_kind = readScalarStringAttribute(group.get(), "last_completed_boundary_kind");
+  diagnostics.restart_safe = readScalarU32Attribute(group.get(), "restart_safe") != 0U;
+  diagnostics.step_index = readScalarU64Attribute(group.get(), "step_index");
+  diagnostics.scheduler_current_tick = readScalarU64Attribute(group.get(), "scheduler_current_tick");
+  diagnostics.scheduler_max_bin = readScalarU32Attribute(group.get(), "scheduler_max_bin");
+  diagnostics.scheduler_element_count = readScalarU64Attribute(group.get(), "scheduler_element_count");
+  diagnostics.scheduler_active_count = readScalarU64Attribute(group.get(), "scheduler_active_count");
+  diagnostics.scheduler_pending_transition_count =
+      readScalarU64Attribute(group.get(), "scheduler_pending_transition_count");
+  diagnostics.pm_cadence_steps = readScalarU64Attribute(group.get(), "pm_cadence_steps");
+  diagnostics.pm_gravity_kick_opportunity = readScalarU64Attribute(group.get(), "pm_gravity_kick_opportunity");
+  diagnostics.pm_field_version = readScalarU64Attribute(group.get(), "pm_field_version");
+  diagnostics.pm_last_refresh_opportunity = readScalarU64Attribute(group.get(), "pm_last_refresh_opportunity");
+  diagnostics.pm_last_refresh_step_index = readScalarU64Attribute(group.get(), "pm_last_refresh_step_index");
+  diagnostics.pm_refresh_commit_pending = readScalarU32Attribute(group.get(), "pm_refresh_commit_pending") != 0U;
+  diagnostics.pm_long_range_field_valid = readScalarU32Attribute(group.get(), "pm_long_range_field_valid") != 0U;
+  diagnostics.output_enabled = readScalarU32Attribute(group.get(), "output_enabled") != 0U;
+  diagnostics.output_snapshot_due = readScalarU32Attribute(group.get(), "output_snapshot_due") != 0U;
+  diagnostics.output_checkpoint_due = readScalarU32Attribute(group.get(), "output_checkpoint_due") != 0U;
+  diagnostics.output_last_completed_step_index = readScalarU64Attribute(group.get(), "output_last_completed_step_index");
+  diagnostics.output_next_snapshot_step_index = readScalarU64Attribute(group.get(), "output_next_snapshot_step_index");
+  diagnostics.stochastic_module_count = readScalarU64Attribute(group.get(), "stochastic_module_count");
+  return diagnostics;
+}
 #endif
 
 }  // namespace
@@ -1081,6 +1203,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "scheduler_persistent_state",
       "output_cadence_persistent_state",
       "stochastic_module_persistent_state",
+      "restart_diagnostics_summary",
       "distributed_gravity_state",
       "normalized_config_text_and_hash",
       "provenance_record",
@@ -1410,6 +1533,13 @@ void writeRestartCheckpointHdf5(
       scheduler_state.pending_bin_index);
   writeOutputCadenceGroup(file.get(), payload.output_cadence_state);
   writeStochasticStateGroup(file.get(), payload.stochastic_state);
+  writeRestartDiagnosticsGroup(
+      file.get(),
+      makeRestartDiagnosticsSummary(
+          *payload.integrator_state,
+          scheduler_state,
+          payload.output_cadence_state,
+          payload.stochastic_state));
   writeDistributedGravityGroup(file.get(), payload.distributed_gravity_state);
 
   if (H5Fflush(file.get(), H5F_SCOPE_GLOBAL) < 0) {
@@ -1519,6 +1649,16 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   validateOutputCadenceStateForRestart(result.output_cadence_state, result.integrator_state, "restart reader");
   result.stochastic_state = readStochasticStateGroup(file.get());
   validateStochasticStateForRestart(result.stochastic_state, result.integrator_state, "restart reader");
+  result.diagnostics = readRestartDiagnosticsGroup(file.get());
+  if (result.diagnostics.restart_schema_name != restartSchema().name ||
+      result.diagnostics.restart_schema_version != restartSchema().version ||
+      result.diagnostics.step_index != result.integrator_state.step_index ||
+      result.diagnostics.scheduler_current_tick != result.scheduler_state.current_tick ||
+      result.diagnostics.scheduler_element_count != result.scheduler_state.bin_index.size() ||
+      result.diagnostics.output_last_completed_step_index != result.output_cadence_state.last_completed_step_index ||
+      result.diagnostics.stochastic_module_count != result.stochastic_state.modules.size()) {
+    throw std::runtime_error("restart diagnostics summary is inconsistent with authoritative restart state");
+  }
   readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;

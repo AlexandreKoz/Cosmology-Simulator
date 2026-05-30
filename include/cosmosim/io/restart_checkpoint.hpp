@@ -15,8 +15,8 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  std::string name = "cosmosim_restart_v13";
-  std::uint32_t version = 13;
+  std::string name = "cosmosim_restart_v14";
+  std::uint32_t version = 14;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -73,6 +73,34 @@ struct RestartWritePayload {
   StochasticPersistentState stochastic_state;
 };
 
+
+struct RestartDiagnosticsSummary {
+  std::string restart_schema_name;
+  std::uint32_t restart_schema_version = 0;
+  std::string current_boundary_kind;
+  std::string last_completed_boundary_kind;
+  bool restart_safe = false;
+  std::uint64_t step_index = 0;
+  std::uint64_t scheduler_current_tick = 0;
+  std::uint32_t scheduler_max_bin = 0;
+  std::uint64_t scheduler_element_count = 0;
+  std::uint64_t scheduler_active_count = 0;
+  std::uint64_t scheduler_pending_transition_count = 0;
+  std::uint64_t pm_cadence_steps = 0;
+  std::uint64_t pm_gravity_kick_opportunity = 0;
+  std::uint64_t pm_field_version = 0;
+  std::uint64_t pm_last_refresh_opportunity = 0;
+  std::uint64_t pm_last_refresh_step_index = 0;
+  bool pm_refresh_commit_pending = false;
+  bool pm_long_range_field_valid = false;
+  bool output_enabled = false;
+  bool output_snapshot_due = false;
+  bool output_checkpoint_due = false;
+  std::uint64_t output_last_completed_step_index = 0;
+  std::uint64_t output_next_snapshot_step_index = 0;
+  std::uint64_t stochastic_module_count = 0;
+};
+
 struct RestartReadResult {
   core::SimulationState state;
   core::IntegratorState integrator_state;
@@ -83,6 +111,7 @@ struct RestartReadResult {
   parallel::DistributedRestartState distributed_gravity_state;
   OutputCadencePersistentState output_cadence_state;
   StochasticPersistentState stochastic_state;
+  RestartDiagnosticsSummary diagnostics;
   std::uint64_t payload_hash = 0;
   std::string payload_hash_hex;
 };

@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v13`
-- `version = 12`
+- `name = cosmosim_restart_v14`
+- `version = 14`
 
 Restart payload includes:
 
@@ -48,6 +48,7 @@ Restart payload includes:
 - normalized config text and normalized config hash
 - provenance record
 - payload integrity hash
+- `/restart_diagnostics` audit metadata (schema/boundary/scheduler/PM/output/stochastic summaries; non-authoritative)
 
 Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 
@@ -57,7 +58,7 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 |---|---|
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
-| Restart-only (exact continuation state) | full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For particle-bound gas cells, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry, not by cell-row count equality. |
+| Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For particle-bound gas cells, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry, not by cell-row count equality. |
 
 Additive softening sidecar persistence:
 - Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.
@@ -69,7 +70,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-The Stage 2 scheduler-authority documentation synchronization does not change snapshot, restart, provenance, or diagnostics schemas. `cosmosim_restart_v13` remains the active restart schema. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. Stage 8 now advances the active restart schema to `cosmosim_restart_v14`. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
 
 ## 3) Provenance payload
 
@@ -172,9 +173,9 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v13`, version `13`, because Stage 8 restart files now declare explicit file-kind metadata and persist output cadence/counter state alongside scheduler/runtime truth.
+- Restart schema version/name are now `cosmosim_restart_v14`, version `14`, because Stage 8 restart files now declare explicit file-kind metadata, persist output cadence/counter state, and include compact `/restart_diagnostics` audit metadata alongside scheduler/runtime truth.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v13`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v14`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - Restart v6 compatibility behavior is tightened without changing payload fields: non-empty
   `CellSoa::time_bin` mirrors must match the scheduler `bin_index` of each gas cell's

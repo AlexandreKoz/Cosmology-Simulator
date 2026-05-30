@@ -30,10 +30,10 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v13");
-  assert(schema.version == 13);
-  assert(cosmosim::io::isRestartSchemaCompatible(13));
-  assert(!cosmosim::io::isRestartSchemaCompatible(12));
+  assert(schema.name == "cosmosim_restart_v14");
+  assert(schema.version == 14);
+  assert(cosmosim::io::isRestartSchemaCompatible(14));
+  assert(!cosmosim::io::isRestartSchemaCompatible(13));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
@@ -43,18 +43,21 @@ int main() {
   bool saw_species_sidecars = false;
   bool saw_output_cadence = false;
   bool saw_stochastic_state = false;
+  bool saw_restart_diagnostics = false;
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
     saw_output_cadence = saw_output_cadence || item == "output_cadence_persistent_state";
     saw_stochastic_state = saw_stochastic_state || item == "stochastic_module_persistent_state";
+    saw_restart_diagnostics = saw_restart_diagnostics || item == "restart_diagnostics_summary";
   }
   assert(saw_softening);
   assert(saw_gas_identity);
   assert(saw_species_sidecars);
   assert(saw_output_cadence);
   assert(saw_stochastic_state);
+  assert(saw_restart_diagnostics);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;

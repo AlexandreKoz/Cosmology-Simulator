@@ -2759,7 +2759,18 @@ bool maybeWriteOutputs(
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
         .message = "restart checkpoint written and verified",
-        .payload = {{"path", report.restart_path.string()}},
+        .payload = {{"path", report.restart_path.string()},
+                    {"restart_schema", io::restartSchema().name},
+                    {"restart_schema_version", std::to_string(io::restartSchema().version)},
+                    {"boundary_kind", std::string(core::stepBoundaryKindName(integrator_state.last_completed_boundary_kind))},
+                    {"scheduler_current_tick", std::to_string(scheduler.currentTick())},
+                    {"scheduler_max_bin", std::to_string(scheduler.maxBin())},
+                    {"pm_cadence_steps", std::to_string(integrator_state.pm_sync_state.cadenceSteps())},
+                    {"pm_gravity_kick_opportunity", std::to_string(integrator_state.pm_sync_state.gravityKickOpportunity())},
+                    {"pm_field_version", std::to_string(integrator_state.pm_sync_state.fieldVersion())},
+                    {"pm_long_range_field_valid", integrator_state.pm_long_range_field_valid ? "true" : "false"},
+                    {"output_next_snapshot_step_index", std::to_string(restart_payload.output_cadence_state.next_snapshot_step_index)},
+                    {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())}},
     });
     output_flushed = true;
   }

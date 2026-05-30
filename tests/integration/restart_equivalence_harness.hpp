@@ -336,6 +336,22 @@ inline void compareSimulationState(
   requireAlignedExact(lhs.particle_sidecar.particle_id, rhs.particle_sidecar.particle_id, "particle_id");
   requireAlignedExact(lhs.particle_sidecar.species_tag, rhs.particle_sidecar.species_tag, "species_tag");
   requireAlignedExact(lhs.particle_sidecar.owning_rank, rhs.particle_sidecar.owning_rank, "owning_rank");
+  if (lhs.cells.size() != rhs.cells.size() || lhs.gas_cells.size() != rhs.gas_cells.size()) {
+    failRestartEquivalence("gas cell count");
+  }
+  requireAlignedNear(lhs.cells.center_x_comoving, rhs.cells.center_x_comoving, tolerances.position_abs, "cell_center_x");
+  requireAlignedNear(lhs.cells.center_y_comoving, rhs.cells.center_y_comoving, tolerances.position_abs, "cell_center_y");
+  requireAlignedNear(lhs.cells.center_z_comoving, rhs.cells.center_z_comoving, tolerances.position_abs, "cell_center_z");
+  requireAlignedNear(lhs.cells.mass_code, rhs.cells.mass_code, tolerances.scalar_abs, "cell_mass");
+  requireAlignedExact(lhs.cells.time_bin, rhs.cells.time_bin, "cell_time_bin mirror");
+  requireAlignedExact(lhs.cells.patch_index, rhs.cells.patch_index, "cell_patch_index");
+  requireAlignedExact(lhs.gas_cells.gas_cell_id, rhs.gas_cells.gas_cell_id, "gas_cell_id");
+  requireAlignedExact(lhs.gas_cells.parent_particle_id, rhs.gas_cells.parent_particle_id, "gas_parent_particle_id");
+  requireAlignedNear(lhs.gas_cells.density_code, rhs.gas_cells.density_code, tolerances.scalar_abs, "gas_density");
+  requireAlignedNear(lhs.gas_cells.pressure_code, rhs.gas_cells.pressure_code, tolerances.scalar_abs, "gas_pressure");
+  requireAlignedNear(lhs.gas_cells.internal_energy_code, rhs.gas_cells.internal_energy_code, tolerances.scalar_abs, "gas_internal_energy");
+  requireAlignedNear(lhs.gas_cells.temperature_code, rhs.gas_cells.temperature_code, tolerances.scalar_abs, "gas_temperature");
+  requireAlignedNear(lhs.gas_cells.sound_speed_code, rhs.gas_cells.sound_speed_code, tolerances.scalar_abs, "gas_sound_speed");
   if (lhs.metadata.step_index != rhs.metadata.step_index) {
     failRestartEquivalence("state metadata step_index");
   }

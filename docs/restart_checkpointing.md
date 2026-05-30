@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v13`) persists:
+The restart schema (`cosmosim_restart_v14`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -14,6 +14,7 @@ The restart schema (`cosmosim_restart_v13`) persists:
 - normalized config text/hash and provenance payload,
 - output cadence persistence state for deterministic future snapshot/restart naming and cadence decisions,
 - root file-kind metadata (`cosmosim_file_kind=restart_checkpoint`),
+- compact `/restart_diagnostics` audit metadata,
 - payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
@@ -25,14 +26,19 @@ Restart write payloads now carry `RestartPersistentStateView` (`persistent_state
 
 Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
 
-Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v12, so those states must not be serialized as persistent truth.
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v14, so those states must not be serialized as persistent truth.
+
+
+## Restart diagnostics metadata
+
+Schema v14 adds a compact `/restart_diagnostics` group. It records the schema identity, current and last completed boundary kind, restart-safe decision, scheduler tick/bin/active/pending counts, PM cadence/field-version summary, output cadence summary, and stochastic module count. These fields are audit metadata only: authoritative continuation remains the serialized `SimulationState`, `IntegratorState`, scheduler arrays, output cadence state, stochastic state, distributed TreePM state, normalized config, provenance, and integrity hash.
 
 ## File format and compatibility
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`12`).
+- Current compatibility policy: exact version match (`14`).
 - `v5` and older restart files are intentionally rejected because they can omit exact sidecar truth lanes required by v6, including materialized softening override mask/value datasets.
 
 ## Atomic write semantics
@@ -114,7 +120,7 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v12 after Stage 6 removed transient hydro reconstruction gradients from restart truth.
+- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v14 after Stage 8 added restart diagnostics metadata without making diagnostics authoritative truth.
 - The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note

@@ -497,6 +497,24 @@ void testRestartRoundtrip() {
   assert(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
   assert(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
   assert(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
+  assert(restored.diagnostics.restart_schema_name == cosmosim::io::restartSchema().name);
+  assert(restored.diagnostics.restart_schema_version == cosmosim::io::restartSchema().version);
+  assert(restored.diagnostics.current_boundary_kind ==
+         std::string(cosmosim::core::stepBoundaryKindName(integrator_state.current_boundary_kind)));
+  assert(restored.diagnostics.last_completed_boundary_kind ==
+         std::string(cosmosim::core::stepBoundaryKindName(integrator_state.last_completed_boundary_kind)));
+  assert(restored.diagnostics.restart_safe);
+  assert(restored.diagnostics.step_index == integrator_state.step_index);
+  assert(restored.diagnostics.scheduler_current_tick == scheduler.currentTick());
+  assert(restored.diagnostics.scheduler_max_bin == scheduler.maxBin());
+  assert(restored.diagnostics.scheduler_element_count == state.particles.size());
+  assert(restored.diagnostics.pm_cadence_steps == integrator_state.pm_sync_state.cadenceSteps());
+  assert(restored.diagnostics.pm_gravity_kick_opportunity == integrator_state.pm_sync_state.gravityKickOpportunity());
+  assert(restored.diagnostics.pm_field_version == integrator_state.pm_sync_state.fieldVersion());
+  assert(restored.diagnostics.pm_long_range_field_valid == integrator_state.pm_long_range_field_valid);
+  assert(restored.diagnostics.output_enabled == payload.output_cadence_state.output_enabled);
+  assert(restored.diagnostics.output_next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
+  assert(restored.diagnostics.stochastic_module_count == payload.stochastic_state.modules.size());
   assert(restored.stochastic_state.modules.size() == payload.stochastic_state.modules.size());
   assert(restored.stochastic_state.modules[0].module_name == "star_formation");
   assert(restored.stochastic_state.modules[0].schema_version == 1);
