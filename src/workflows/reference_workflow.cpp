@@ -2607,6 +2607,20 @@ bool maybeWriteOutputs(
     restart_payload.distributed_gravity_state.long_range_field_built_scale_factor =
         integrator_state.pm_sync_state.lastRefreshScaleFactor();
     restart_payload.distributed_gravity_state.long_range_restart_policy = "deterministic_rebuild";
+    restart_payload.output_cadence_state.output_enabled = write_outputs_enabled;
+    restart_payload.output_cadence_state.write_restarts = config.output.write_restarts;
+    restart_payload.output_cadence_state.snapshot_due = false;
+    restart_payload.output_cadence_state.checkpoint_due = false;
+    restart_payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
+    restart_payload.output_cadence_state.snapshot_interval_steps =
+        static_cast<std::uint64_t>(std::max(config.output.snapshot_interval_steps, 0));
+    if (config.output.snapshot_interval_steps > 0) {
+      const std::uint64_t interval = static_cast<std::uint64_t>(config.output.snapshot_interval_steps);
+      restart_payload.output_cadence_state.next_snapshot_step_index =
+          ((integrator_state.step_index / interval) + 1U) * interval;
+    }
+    restart_payload.output_cadence_state.snapshot_stem = config.output.output_stem;
+    restart_payload.output_cadence_state.restart_stem = config.output.restart_stem;
     restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particle_sidecar.owning_rank.size());
     for (const std::uint32_t owner : state.particle_sidecar.owning_rank) {
       restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(static_cast<int>(owner));
@@ -2667,6 +2681,12 @@ bool maybeWriteOutputs(
             restart_payload.distributed_gravity_state.long_range_field_built_scale_factor) <= 1.0e-12 &&
         restart_read.distributed_gravity_state.long_range_restart_policy ==
             restart_payload.distributed_gravity_state.long_range_restart_policy &&
+        restart_read.output_cadence_state.output_enabled == restart_payload.output_cadence_state.output_enabled &&
+        restart_read.output_cadence_state.write_restarts == restart_payload.output_cadence_state.write_restarts &&
+        restart_read.output_cadence_state.next_snapshot_step_index ==
+            restart_payload.output_cadence_state.next_snapshot_step_index &&
+        restart_read.output_cadence_state.snapshot_stem == restart_payload.output_cadence_state.snapshot_stem &&
+        restart_read.output_cadence_state.restart_stem == restart_payload.output_cadence_state.restart_stem &&
         restart_rank_qualified_name &&
         compatibility.compatible();
     profiler.recordEvent(core::RuntimeEvent{

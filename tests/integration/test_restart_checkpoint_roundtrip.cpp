@@ -305,6 +305,15 @@ void testRestartRoundtrip() {
   payload.distributed_gravity_state.owning_rank_by_item.assign(state.particles.size(), 0);
   payload.distributed_gravity_state.pm_slab_begin_x_by_rank = {0};
   payload.distributed_gravity_state.pm_slab_end_x_by_rank = {32};
+  payload.output_cadence_state.output_enabled = true;
+  payload.output_cadence_state.write_restarts = true;
+  payload.output_cadence_state.snapshot_due = false;
+  payload.output_cadence_state.checkpoint_due = false;
+  payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
+  payload.output_cadence_state.snapshot_interval_steps = 5;
+  payload.output_cadence_state.next_snapshot_step_index = 80;
+  payload.output_cadence_state.snapshot_stem = "snapshot";
+  payload.output_cadence_state.restart_stem = "restart";
 
   const std::filesystem::path checkpoint_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
@@ -461,6 +470,15 @@ void testRestartRoundtrip() {
   assert(restored.distributed_gravity_state.owning_rank_by_item == payload.distributed_gravity_state.owning_rank_by_item);
   assert(restored.distributed_gravity_state.pm_slab_begin_x_by_rank == payload.distributed_gravity_state.pm_slab_begin_x_by_rank);
   assert(restored.distributed_gravity_state.pm_slab_end_x_by_rank == payload.distributed_gravity_state.pm_slab_end_x_by_rank);
+  assert(restored.output_cadence_state.output_enabled == payload.output_cadence_state.output_enabled);
+  assert(restored.output_cadence_state.write_restarts == payload.output_cadence_state.write_restarts);
+  assert(restored.output_cadence_state.snapshot_due == payload.output_cadence_state.snapshot_due);
+  assert(restored.output_cadence_state.checkpoint_due == payload.output_cadence_state.checkpoint_due);
+  assert(restored.output_cadence_state.last_completed_step_index == payload.output_cadence_state.last_completed_step_index);
+  assert(restored.output_cadence_state.snapshot_interval_steps == payload.output_cadence_state.snapshot_interval_steps);
+  assert(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
+  assert(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
+  assert(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
   assert(restored.state.sidecars.find("hydro") != nullptr);
   const cosmosim::core::ModuleSidecarBlock* hydro_sidecar = restored.state.sidecars.find("hydro");
   assert(hydro_sidecar->schema_version == 3);
@@ -591,10 +609,9 @@ void testRestartRoundtrip() {
     missing_required_error = error.what();
   }
   assert(missing_required_threw);
-  const bool missing_field_named = missing_required_error.find("pending_bin_index") != std::string::npos;
-  const bool integrity_guard_rejected =
-      missing_required_error.find("integrity hash mismatch") != std::string::npos;
-  assert(missing_field_named || integrity_guard_rejected);
+  const bool missing_field_named =
+      missing_required_error.find("/scheduler/pending_bin_index") != std::string::npos;
+  assert(missing_field_named);
   std::filesystem::remove(missing_required_path);
 
   const std::filesystem::path missing_softening_mask_path =

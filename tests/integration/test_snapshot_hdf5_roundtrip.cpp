@@ -10,6 +10,7 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
+#include "cosmosim/io/restart_checkpoint.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -119,6 +120,7 @@ void testRoundtripMixedSpeciesSnapshot() {
 
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   assert(inspect_file >= 0);
+  assert(H5Aexists(inspect_file, "cosmosim_file_kind") > 0);
   hid_t inspect_header = H5Gopen2(inspect_file, "/Header", H5P_DEFAULT);
   assert(inspect_header >= 0);
   double box_x = 0.0;
@@ -227,6 +229,17 @@ void testRoundtripMixedSpeciesSnapshot() {
                     roundtrip.state.particles.mass_code[i] * 0.001;
   }
   assert(checksum_in == checksum_out);
+
+  bool restart_reader_rejected_snapshot = false;
+  std::string restart_reader_error;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(snapshot_path);
+  } catch (const std::runtime_error& ex) {
+    restart_reader_rejected_snapshot = true;
+    restart_reader_error = ex.what();
+  }
+  assert(restart_reader_rejected_snapshot);
+  assert(restart_reader_error.find("science_snapshot") != std::string::npos);
 
   std::filesystem::remove(snapshot_path);
 #else

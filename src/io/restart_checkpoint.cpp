@@ -63,23 +63,23 @@ void validateSchedulerPersistentStateForRestart(
   if (scheduler_state.bin_index.size() != scheduler_state.next_activation_tick.size() ||
       scheduler_state.bin_index.size() != scheduler_state.active_flag.size() ||
       scheduler_state.bin_index.size() != scheduler_state.pending_bin_index.size()) {
-    throw std::invalid_argument(std::string(context) + ": scheduler persistent arrays must have matching sizes");
+    throw std::invalid_argument(std::string(context) + ": scheduler persistent arrays must have matching sizes at /scheduler/{bin_index,next_activation_tick,active_flag,pending_bin_index}");
   }
   if (scheduler_state.bin_index.size() != expected_particle_count) {
     throw std::invalid_argument(
-        std::string(context) + ": scheduler bin_index count must match particle time-bin mirror count");
+        std::string(context) + ": /scheduler/bin_index count must match /state/particles/time_bin count");
   }
   for (std::size_t i = 0; i < scheduler_state.bin_index.size(); ++i) {
     if (scheduler_state.bin_index[i] > scheduler_state.max_bin) {
-      throw std::invalid_argument(std::string(context) + ": scheduler bin_index exceeds max_bin");
+      throw std::invalid_argument(std::string(context) + ": /scheduler/bin_index exceeds /scheduler/@max_bin");
     }
     if (scheduler_state.active_flag[i] > 1U) {
-      throw std::invalid_argument(std::string(context) + ": scheduler active_flag must be 0 or 1");
+      throw std::invalid_argument(std::string(context) + ": /scheduler/active_flag must contain only 0 or 1");
     }
     const bool pending_is_unset =
         scheduler_state.pending_bin_index[i] == core::HierarchicalTimeBinScheduler::k_unset_pending_bin;
     if (!pending_is_unset && scheduler_state.pending_bin_index[i] > scheduler_state.max_bin) {
-      throw std::invalid_argument(std::string(context) + ": scheduler pending_bin_index exceeds max_bin");
+      throw std::invalid_argument(std::string(context) + ": /scheduler/pending_bin_index exceeds /scheduler/@max_bin");
     }
   }
 }
@@ -91,12 +91,12 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
   validateSchedulerPersistentStateForRestart(scheduler_state, state.particles.size(), context);
   if (state.particles.time_bin.size() != scheduler_state.bin_index.size()) {
     throw std::invalid_argument(
-        std::string(context) + ": particle time_bin mirror length must match scheduler bin_index length");
+        std::string(context) + ": /state/particles/time_bin length must match /scheduler/bin_index length");
   }
   for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
     if (state.particles.time_bin[i] != scheduler_state.bin_index[i]) {
       throw std::invalid_argument(
-          std::string(context) + ": particle time_bin mirror is stale relative to scheduler bin_index");
+          std::string(context) + ": /state/particles/time_bin is stale relative to /scheduler/bin_index");
     }
   }
 
@@ -112,11 +112,11 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
       const std::uint32_t particle_index = core::gasParticleIndexForCellRow(state, cell_index);
       if (particle_index >= scheduler_state.bin_index.size()) {
         throw std::invalid_argument(
-            std::string(context) + ": cell time_bin parent particle is outside scheduler bin_index");
+            std::string(context) + ": /state/cells/time_bin parent particle is outside /scheduler/bin_index");
       }
       if (state.cells.time_bin[cell_index] != scheduler_state.bin_index[particle_index]) {
         throw std::invalid_argument(
-            std::string(context) + ": cell time_bin mirror is stale relative to parent-particle scheduler bin_index");
+            std::string(context) + ": /state/cells/time_bin is stale relative to parent-particle /scheduler/bin_index");
       }
     }
   }
@@ -140,6 +140,28 @@ void rebuildRestartTimeBinMirrorsFromScheduler(
       }
       state.cells.time_bin[cell_index] = scheduler_state.bin_index[particle_index];
     }
+  }
+}
+
+void validateOutputCadenceStateForRestart(
+    const OutputCadencePersistentState& output_state,
+    const core::IntegratorState& integrator_state,
+    std::string_view context) {
+  if (!output_state.output_enabled) {
+    return;
+  }
+  if (output_state.snapshot_interval_steps == 0) {
+    throw std::invalid_argument(
+        std::string(context) + ": /output_cadence/@snapshot_interval_steps must be > 0 when output is enabled");
+  }
+  if (output_state.last_completed_step_index != integrator_state.step_index) {
+    throw std::invalid_argument(
+        std::string(context) + ": /output_cadence/@last_completed_step_index must match /integrator/@step_index");
+  }
+  if (output_state.next_snapshot_step_index != 0 &&
+      output_state.next_snapshot_step_index <= output_state.last_completed_step_index) {
+    throw std::invalid_argument(
+        std::string(context) + ": /output_cadence/@next_snapshot_step_index must be strictly after the restart step");
   }
 }
 
@@ -270,6 +292,154 @@ void writeScalarF64Attribute(hid_t location, std::string_view key, double value)
     throw std::runtime_error("failed reading f64 attribute: " + std::string(key));
   }
   return value;
+}
+
+[[nodiscard]] bool hdf5LinkExists(hid_t root, std::string_view path) {
+  return H5Lexists(root, std::string(path).c_str(), H5P_DEFAULT) > 0;
+}
+
+[[nodiscard]] bool hdf5AttributeExists(hid_t location, std::string_view key) {
+  return H5Aexists(location, std::string(key).c_str()) > 0;
+}
+
+void requireHdf5Link(hid_t root, std::string_view path) {
+  if (!hdf5LinkExists(root, path)) {
+    throw std::runtime_error("restart schema validation missing required path: " + std::string(path));
+  }
+}
+
+Hdf5Handle openRequiredGroup(hid_t root, std::string_view path) {
+  requireHdf5Link(root, path);
+  Hdf5Handle group(H5Gopen2(root, std::string(path).c_str(), H5P_DEFAULT));
+  if (!group.valid()) {
+    throw std::runtime_error("restart schema validation expected group at path: " + std::string(path));
+  }
+  return group;
+}
+
+void requireHdf5Attribute(hid_t location, std::string_view location_path, std::string_view key) {
+  if (!hdf5AttributeExists(location, key)) {
+    throw std::runtime_error(
+        "restart schema validation missing required attribute: " + std::string(location_path) + "/@" +
+        std::string(key));
+  }
+}
+
+void requireHdf5Dataset1d(hid_t root, std::string_view path) {
+  requireHdf5Link(root, path);
+  Hdf5Handle dataset(H5Dopen2(root, std::string(path).c_str(), H5P_DEFAULT));
+  if (!dataset.valid()) {
+    throw std::runtime_error("restart schema validation expected dataset at path: " + std::string(path));
+  }
+  Hdf5Handle space(H5Dget_space(dataset.get()));
+  if (!space.valid() || H5Sget_simple_extent_ndims(space.get()) != 1) {
+    throw std::runtime_error("restart schema validation expected 1D dataset at path: " + std::string(path));
+  }
+}
+
+void validateFileKindAttribute(
+    hid_t file,
+    std::string_view expected_kind,
+    std::string_view reader_label) {
+  const auto& shared_names = sharedIoContractNames();
+  if (!hdf5AttributeExists(file, shared_names.file_kind_attribute)) {
+    std::string hint;
+    if (hdf5LinkExists(file, "/Header")) {
+      hint = "; file appears to be a science snapshot, not a restart checkpoint";
+    }
+    throw std::runtime_error(
+        std::string(reader_label) + " missing required file-kind attribute /@" +
+        std::string(shared_names.file_kind_attribute) + hint);
+  }
+  const std::string file_kind = readScalarStringAttribute(file, shared_names.file_kind_attribute);
+  if (file_kind != expected_kind) {
+    throw std::runtime_error(
+        std::string(reader_label) + " rejected HDF5 file-kind '" + file_kind + "'; expected '" +
+        std::string(expected_kind) + "'");
+  }
+}
+
+void validateRestartCheckpointSchema(hid_t file) {
+  const auto& shared_names = sharedIoContractNames();
+  validateFileKindAttribute(file, shared_names.restart_checkpoint_file_kind, "restart reader");
+
+  requireHdf5Attribute(file, "/", "restart_schema_name");
+  requireHdf5Attribute(file, "/", "restart_schema_version");
+  requireHdf5Attribute(file, "/", "normalized_config_hash_hex");
+  requireHdf5Attribute(file, "/", "payload_integrity_hash_hex");
+  requireHdf5Attribute(file, "/", "payload_integrity_hash");
+  requireHdf5Dataset1d(file, "/normalized_config_text");
+  requireHdf5Dataset1d(file, "/provenance_record");
+
+  requireHdf5Dataset1d(file, "/state/state_metadata");
+  requireHdf5Dataset1d(file, "/state/particles/position_x_comoving");
+  requireHdf5Dataset1d(file, "/state/particles/position_y_comoving");
+  requireHdf5Dataset1d(file, "/state/particles/position_z_comoving");
+  requireHdf5Dataset1d(file, "/state/particles/velocity_x_peculiar");
+  requireHdf5Dataset1d(file, "/state/particles/velocity_y_peculiar");
+  requireHdf5Dataset1d(file, "/state/particles/velocity_z_peculiar");
+  requireHdf5Dataset1d(file, "/state/particles/mass_code");
+  requireHdf5Dataset1d(file, "/state/particles/time_bin");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/particle_id");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/sfc_key");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/species_tag");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/particle_flags");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/owning_rank");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/last_drift_time_code");
+  requireHdf5Dataset1d(file, "/state/particle_sidecar/last_drift_scale_factor");
+  requireHdf5Dataset1d(file, "/state/cells/center_x_comoving");
+  requireHdf5Dataset1d(file, "/state/cells/center_y_comoving");
+  requireHdf5Dataset1d(file, "/state/cells/center_z_comoving");
+  requireHdf5Dataset1d(file, "/state/cells/mass_code");
+  requireHdf5Dataset1d(file, "/state/cells/time_bin");
+  requireHdf5Dataset1d(file, "/state/cells/patch_index");
+  requireHdf5Dataset1d(file, "/state/gas_cells/gas_cell_id");
+  requireHdf5Dataset1d(file, "/state/gas_cells/parent_particle_id");
+  requireHdf5Dataset1d(file, "/state/gas_cells/density_code");
+  requireHdf5Dataset1d(file, "/state/gas_cells/pressure_code");
+  requireHdf5Dataset1d(file, "/state/gas_cells/internal_energy_code");
+  requireHdf5Dataset1d(file, "/state/gas_cells/temperature_code");
+  requireHdf5Dataset1d(file, "/state/gas_cells/sound_speed_code");
+  requireHdf5Dataset1d(file, "/state/patches/patch_id");
+  requireHdf5Dataset1d(file, "/state/patches/level");
+  requireHdf5Dataset1d(file, "/state/patches/first_cell");
+  requireHdf5Dataset1d(file, "/state/patches/cell_count");
+  requireHdf5Dataset1d(file, "/state/species_count_by_species");
+  requireHdf5Link(file, "/state/module_sidecars");
+  requireHdf5Dataset1d(file, "/state/module_sidecar_names");
+
+  Hdf5Handle integrator_group = openRequiredGroup(file, "/integrator");
+  for (std::string_view attr : {"current_time_code", "current_scale_factor", "current_redshift",
+                                "current_hubble_rate_code", "time_si_per_code", "dt_time_code",
+                                "last_drift_factor_code", "last_first_kick_factor_code",
+                                "last_second_kick_factor_code", "last_first_hubble_drag_factor",
+                                "last_second_hubble_drag_factor", "step_index", "scheme",
+                                "current_boundary_kind", "last_completed_boundary_kind", "inside_kdk_step",
+                                "last_completed_restart_safe", "time_bins_hierarchical", "time_bins_active_bin",
+                                "time_bins_max_bin", "pm_long_range_field_valid", "pm_cadence_steps",
+                                "pm_gravity_kick_opportunity", "pm_last_refresh_opportunity",
+                                "pm_field_version", "pm_last_refresh_step_index",
+                                "pm_last_refresh_scale_factor", "pm_refresh_commit_pending",
+                                "pm_pending_refresh_opportunity", "pm_pending_refresh_field_version"}) {
+    requireHdf5Attribute(integrator_group.get(), "/integrator", attr);
+  }
+
+  Hdf5Handle scheduler_group = openRequiredGroup(file, "/scheduler");
+  requireHdf5Attribute(scheduler_group.get(), "/scheduler", "current_tick");
+  requireHdf5Attribute(scheduler_group.get(), "/scheduler", "max_bin");
+  requireHdf5Dataset1d(file, "/scheduler/bin_index");
+  requireHdf5Dataset1d(file, "/scheduler/next_activation_tick");
+  requireHdf5Dataset1d(file, "/scheduler/active_flag");
+  requireHdf5Dataset1d(file, "/scheduler/pending_bin_index");
+
+  Hdf5Handle output_group = openRequiredGroup(file, "/output_cadence");
+  for (std::string_view attr : {"output_enabled", "write_restarts", "snapshot_due", "checkpoint_due",
+                                "last_completed_step_index", "snapshot_interval_steps",
+                                "next_snapshot_step_index", "snapshot_stem", "restart_stem"}) {
+    requireHdf5Attribute(output_group.get(), "/output_cadence", attr);
+  }
+
+  requireHdf5Dataset1d(file, "/distributed_gravity/state");
 }
 
 template <typename T>
@@ -740,6 +910,35 @@ void readDistributedGravityGroup(hid_t root, parallel::DistributedRestartState& 
   Hdf5Handle group(H5Gopen2(root, "/distributed_gravity", H5P_DEFAULT));
   distributed_state = parallel::DistributedRestartState::deserialize(readStringDataset(group.get(), "state"));
 }
+
+
+void writeOutputCadenceGroup(hid_t root, const OutputCadencePersistentState& output_state) {
+  Hdf5Handle group(openOrCreateGroup(root, "/output_cadence"));
+  writeScalarU32Attribute(group.get(), "output_enabled", output_state.output_enabled ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "write_restarts", output_state.write_restarts ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "snapshot_due", output_state.snapshot_due ? 1U : 0U);
+  writeScalarU32Attribute(group.get(), "checkpoint_due", output_state.checkpoint_due ? 1U : 0U);
+  writeScalarU64Attribute(group.get(), "last_completed_step_index", output_state.last_completed_step_index);
+  writeScalarU64Attribute(group.get(), "snapshot_interval_steps", output_state.snapshot_interval_steps);
+  writeScalarU64Attribute(group.get(), "next_snapshot_step_index", output_state.next_snapshot_step_index);
+  writeScalarStringAttribute(group.get(), "snapshot_stem", output_state.snapshot_stem);
+  writeScalarStringAttribute(group.get(), "restart_stem", output_state.restart_stem);
+}
+
+[[nodiscard]] OutputCadencePersistentState readOutputCadenceGroup(hid_t root) {
+  Hdf5Handle group(H5Gopen2(root, "/output_cadence", H5P_DEFAULT));
+  OutputCadencePersistentState output_state;
+  output_state.output_enabled = readScalarU32Attribute(group.get(), "output_enabled") != 0U;
+  output_state.write_restarts = readScalarU32Attribute(group.get(), "write_restarts") != 0U;
+  output_state.snapshot_due = readScalarU32Attribute(group.get(), "snapshot_due") != 0U;
+  output_state.checkpoint_due = readScalarU32Attribute(group.get(), "checkpoint_due") != 0U;
+  output_state.last_completed_step_index = readScalarU64Attribute(group.get(), "last_completed_step_index");
+  output_state.snapshot_interval_steps = readScalarU64Attribute(group.get(), "snapshot_interval_steps");
+  output_state.next_snapshot_step_index = readScalarU64Attribute(group.get(), "next_snapshot_step_index");
+  output_state.snapshot_stem = readScalarStringAttribute(group.get(), "snapshot_stem");
+  output_state.restart_stem = readScalarStringAttribute(group.get(), "restart_stem");
+  return output_state;
+}
 #endif
 
 }  // namespace
@@ -763,6 +962,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "integrator_state",
       "integrator_owned_pm_sync_state",
       "scheduler_persistent_state",
+      "output_cadence_persistent_state",
       "distributed_gravity_state",
       "normalized_config_text_and_hash",
       "provenance_record",
@@ -806,6 +1006,8 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
     throw std::invalid_argument(
         "restart payload distributed_gravity_state.long_range_restart_policy must be deterministic_rebuild");
   }
+  validateOutputCadenceStateForRestart(
+      payload.output_cadence_state, *payload.integrator_state, "restart payload");
 
   std::uint64_t hash = k_offset_basis;
 
@@ -949,6 +1151,15 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(scheduler_state.next_activation_tick);
   append_any_vec(scheduler_state.active_flag);
   append_any_vec(scheduler_state.pending_bin_index);
+  append_u64(payload.output_cadence_state.output_enabled ? 1ull : 0ull);
+  append_u64(payload.output_cadence_state.write_restarts ? 1ull : 0ull);
+  append_u64(payload.output_cadence_state.snapshot_due ? 1ull : 0ull);
+  append_u64(payload.output_cadence_state.checkpoint_due ? 1ull : 0ull);
+  append_u64(payload.output_cadence_state.last_completed_step_index);
+  append_u64(payload.output_cadence_state.snapshot_interval_steps);
+  append_u64(payload.output_cadence_state.next_snapshot_step_index);
+  append_string(payload.output_cadence_state.snapshot_stem);
+  append_string(payload.output_cadence_state.restart_stem);
   append_string(payload.distributed_gravity_state.serialize());
 
   return hash;
@@ -985,6 +1196,8 @@ void writeRestartCheckpointHdf5(
       *payload.persistent_state.simulation_state,
       scheduler_state_for_validation,
       "restart writer");
+  validateOutputCadenceStateForRestart(
+      payload.output_cadence_state, *payload.integrator_state, "restart writer");
 
   std::filesystem::create_directories(output_path.parent_path());
   const std::filesystem::path temporary_path = output_path.string() + policy.temporary_suffix;
@@ -994,13 +1207,14 @@ void writeRestartCheckpointHdf5(
     throw std::runtime_error("failed to create temporary restart file: " + temporary_path.string());
   }
 
+  const auto& shared_names = sharedIoContractNames();
+  writeScalarStringAttribute(
+      file.get(), shared_names.file_kind_attribute, std::string(shared_names.restart_checkpoint_file_kind));
   writeScalarStringAttribute(file.get(), "restart_schema_name", restartSchema().name);
   writeScalarU32Attribute(file.get(), "restart_schema_version", restartSchema().version);
   writeScalarStringAttribute(file.get(), "normalized_config_hash_hex", payload.normalized_config_hash_hex);
   writeScalarStringAttribute(file.get(), "payload_integrity_hash_hex", restartPayloadIntegrityHashHex(payload));
   writeScalarU64Attribute(file.get(), "payload_integrity_hash", restartPayloadIntegrityHash(payload));
-
-  const auto& shared_names = sharedIoContractNames();
   writeStringDataset(
       file.get(),
       std::string(shared_names.normalized_config_text_dataset),
@@ -1063,6 +1277,7 @@ void writeRestartCheckpointHdf5(
       H5T_STD_U8LE,
       H5T_NATIVE_UINT8,
       scheduler_state.pending_bin_index);
+  writeOutputCadenceGroup(file.get(), payload.output_cadence_state);
   writeDistributedGravityGroup(file.get(), payload.distributed_gravity_state);
 
   if (H5Fflush(file.get(), H5F_SCOPE_GLOBAL) < 0) {
@@ -1091,6 +1306,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   if (!file.valid()) {
     throw std::runtime_error("failed to open restart checkpoint: " + input_path.string());
   }
+
+  validateRestartCheckpointSchema(file.get());
 
   RestartReadResult result;
   const std::string schema_name = readScalarStringAttribute(file.get(), "restart_schema_name");
@@ -1166,6 +1383,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       readDataset1d<std::uint8_t>(scheduler_group.get(), "pending_bin_index", H5T_NATIVE_UINT8);
   validateRestartTimeBinMirrorsAgainstScheduler(result.state, result.scheduler_state, "restart reader");
   rebuildRestartTimeBinMirrorsFromScheduler(result.state, result.scheduler_state);
+  result.output_cadence_state = readOutputCadenceGroup(file.get());
+  validateOutputCadenceStateForRestart(result.output_cadence_state, result.integrator_state, "restart reader");
   readDistributedGravityGroup(file.get(), result.distributed_gravity_state);
 
   RestartWritePayload verify_payload;
@@ -1178,6 +1397,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.normalized_config_text = result.normalized_config_text;
   verify_payload.provenance = result.provenance;
   verify_payload.distributed_gravity_state = result.distributed_gravity_state;
+  verify_payload.output_cadence_state = result.output_cadence_state;
 
   const std::uint64_t computed_hash = restartPayloadIntegrityHash(verify_payload);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {

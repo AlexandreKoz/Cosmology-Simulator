@@ -13,6 +13,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/version.hpp"
+#include "cosmosim/io/io_contract.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -615,6 +616,9 @@ void writeGadgetArepoSnapshotHdf5(
   }
 
   const auto& schema = gadgetArepoSchemaMap();
+  const auto& shared_names = sharedIoContractNames();
+  writeScalarStringAttribute(
+      file.get(), std::string(shared_names.file_kind_attribute), shared_names.science_snapshot_file_kind);
   Hdf5Handle header_group(H5Gcreate2(file.get(), std::string(schema.header_group).c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   if (!header_group.valid()) {
     throw std::runtime_error("failed creating /Header group");

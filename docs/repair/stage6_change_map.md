@@ -35,7 +35,7 @@ Scope: repository reconnaissance only (no production refactor in this patch).
 - Active descriptor metadata freshness fields (`source_generation`, etc.) are derived runtime-only descriptors.
 
 ## 6) Restart serialization fields (current)
-- Restart payload and schema are centralized in `io/restart_checkpoint.*` with explicit schema/version contract (`cosmosim_restart_v11`).
+- Restart payload and schema are centralized in `io/restart_checkpoint.*` with explicit schema/version contract (`cosmosim_restart_v12`).
 - Serialized families include simulation state lanes, species sidecars, module sidecars, integrator state, scheduler persistent state, distributed gravity restart state, normalized config, provenance, integrity hash.
 - Docs explicitly state cached PM long-range field arrays are **not** serialized; policy is deterministic rebuild on resume.
 

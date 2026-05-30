@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v11`) persists:
+The restart schema (`cosmosim_restart_v12`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -12,6 +12,8 @@ The restart schema (`cosmosim_restart_v11`) persists:
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
 - distributed TreePM continuation state (`distributed_gravity_state`, schema-versioned),
 - normalized config text/hash and provenance payload,
+- output cadence persistence state for deterministic future snapshot/restart naming and cadence decisions,
+- root file-kind metadata (`cosmosim_file_kind=restart_checkpoint`),
 - payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
@@ -23,13 +25,14 @@ Restart write payloads now carry `RestartPersistentStateView` (`persistent_state
 
 Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
 
-Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v11, so those states must not be serialized as persistent truth.
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v12, so those states must not be serialized as persistent truth.
 
 ## File format and compatibility
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
+- Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`11`).
+- Current compatibility policy: exact version match (`12`).
 - `v5` and older restart files are intentionally rejected because they can omit exact sidecar truth lanes required by v6, including materialized softening override mask/value datasets.
 
 ## Atomic write semantics
@@ -44,7 +47,7 @@ behavior on filesystems where `rename` is atomic.
 - `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority. For particle-bound gas cells, derived cell `time_bin` mirrors are validated through each cell's parent gas particle scheduler entry rather than by cell-row count equality.
 - The hash covers particle lanes, sidecars, gas-cell identity lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
-  `active_flag`, `pending_bin_index`), and the full serialized provenance payload. State `time_bin` arrays remain hash inputs for corruption detection, but restart continuation imports scheduler state and rebuilds mirrors rather than treating mirrors as fallback authority.
+  `active_flag`, `pending_bin_index`), output cadence persistence fields, and the full serialized provenance payload. State `time_bin` arrays remain hash inputs for corruption detection, but restart continuation imports scheduler state and rebuilds mirrors rather than treating mirrors as fallback authority.
 - Because gravity TreePM metadata now lives in `ProvenanceRecord`, restart artifacts carry
   and integrity-protect the exact PM controls (`pm_grid`, assignment, deconvolution,
   `asmth_cells`, `rcut_cells`, cadence), derived scales (`Δmesh`, `r_s`, `r_cut`),
@@ -111,7 +114,7 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v11 after Stage 6 removed transient hydro reconstruction gradients from restart truth.
+- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v12 after Stage 6 removed transient hydro reconstruction gradients from restart truth.
 - The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note

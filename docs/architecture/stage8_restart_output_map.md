@@ -4,7 +4,7 @@ This note records repository reconnaissance for Stage 8. It is an audit artifact
 
 ## 1. Repository inspection summary
 
-Inspected restart, snapshot, scheduler, workflow, PM cadence, provenance/config, stochastic source-term, and existing test paths using `find`, `rg`, and direct `sed` reads. The current code already separates ordinary GADGET/AREPO-style snapshots from CosmoSim restart checkpoints: restart I/O uses `cosmosim_restart_v11` in `include/cosmosim/io/restart_checkpoint.hpp` and `src/io/restart_checkpoint.cpp`, while snapshot I/O uses `gadget_arepo_v4` in `include/cosmosim/io/snapshot_hdf5.hpp` and `src/io/snapshot_hdf5.cpp`.
+Inspected restart, snapshot, scheduler, workflow, PM cadence, provenance/config, stochastic source-term, and existing test paths using `find`, `rg`, and direct `sed` reads. The current code already separates ordinary GADGET/AREPO-style snapshots from CosmoSim restart checkpoints: restart I/O uses `cosmosim_restart_v12` in `include/cosmosim/io/restart_checkpoint.hpp` and `src/io/restart_checkpoint.cpp`, while snapshot I/O uses `gadget_arepo_v4` in `include/cosmosim/io/snapshot_hdf5.hpp` and `src/io/snapshot_hdf5.cpp`.
 
 Key architectural fact: `SimulationState::particles.time_bin` and `SimulationState::cells.time_bin` are diagnostic/compatibility mirrors, not scheduler authority. Exact continuation authority is `HierarchicalTimeBinScheduler` plus `IntegratorState`.
 

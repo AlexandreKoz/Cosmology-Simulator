@@ -30,24 +30,27 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v11");
-  assert(schema.version == 11);
-  assert(cosmosim::io::isRestartSchemaCompatible(11));
-  assert(!cosmosim::io::isRestartSchemaCompatible(10));
+  assert(schema.name == "cosmosim_restart_v12");
+  assert(schema.version == 12);
+  assert(cosmosim::io::isRestartSchemaCompatible(12));
+  assert(!cosmosim::io::isRestartSchemaCompatible(11));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
   bool saw_softening = false;
   bool saw_gas_identity = false;
   bool saw_species_sidecars = false;
+  bool saw_output_cadence = false;
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
+    saw_output_cadence = saw_output_cadence || item == "output_cadence_persistent_state";
   }
   assert(saw_softening);
   assert(saw_gas_identity);
   assert(saw_species_sidecars);
+  assert(saw_output_cadence);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;
@@ -96,6 +99,15 @@ int main() {
 
   integrator_state.time_bins.active_bin = 0;
   const std::uint64_t hash_restored = cosmosim::io::restartPayloadIntegrityHash(payload);
+  payload.output_cadence_state.output_enabled = true;
+  payload.output_cadence_state.write_restarts = true;
+  payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
+  payload.output_cadence_state.snapshot_interval_steps = 4;
+  payload.output_cadence_state.next_snapshot_step_index = 4;
+  payload.output_cadence_state.snapshot_stem = "snapshot";
+  payload.output_cadence_state.restart_stem = "restart";
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
+  payload.output_cadence_state = {};
   state.particle_sidecar.setGravitySofteningOverride(0, 0.125);
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
   const std::uint64_t hash_with_softening = cosmosim::io::restartPayloadIntegrityHash(payload);
