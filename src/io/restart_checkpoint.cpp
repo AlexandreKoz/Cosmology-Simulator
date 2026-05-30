@@ -783,6 +783,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
   }
   const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  core::assertCanWriteCheckpointAtBoundary(*payload.integrator_state, scheduler_state_for_validation.current_tick);
   validateRestartTimeBinMirrorsAgainstScheduler(
       *payload.persistent_state.simulation_state,
       scheduler_state_for_validation,
@@ -978,9 +979,11 @@ void writeRestartCheckpointHdf5(
   if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("cannot checkpoint invalid simulation state");
   }
+  const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  core::assertCanWriteCheckpointAtBoundary(*payload.integrator_state, scheduler_state_for_validation.current_tick);
   validateRestartTimeBinMirrorsAgainstScheduler(
       *payload.persistent_state.simulation_state,
-      payload.scheduler->exportPersistentState(),
+      scheduler_state_for_validation,
       "restart writer");
 
   std::filesystem::create_directories(output_path.parent_path());

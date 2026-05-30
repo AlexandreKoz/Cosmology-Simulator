@@ -1601,3 +1601,8 @@ Reproducibility impact:
 - Reproducibility impact: no solver numerics, no config keys, no restart schema changes, and no output naming changes. This is observability/legality hardening of existing integrator-owned PM cadence behavior.
 
 - S5-02: normalized numerics time/cosmology keys now use canonical names (`a_*`, `z_*`, `t_code_*`, `t_phys_*`, `integrator_time_variable`); legacy ambiguous keys remain UserConfig aliases only.
+
+## 2026-05-29 Stage 8 restart-safe boundary contract
+
+- Restart checkpoint requests now use an explicit `RestartBoundaryDecision` contract before hash/write traversal. Unsafe KDK half-steps, local active-bin substeps, non-restart-safe boundary kinds, and uncommitted PM refresh transitions fail with deterministic diagnostics instead of being silently skipped or serialized.
+- Reproducibility impact: no solver numerics, config keys, restart schema version, HDF5 dataset names, normalized config dumps, provenance payloads, or output naming changed. Exact continuation is hardened by preventing invalid phase states from becoming restart truth.

@@ -2171,6 +2171,71 @@ StepBoundaryState classifyStepBoundary(
   return boundary;
 }
 
+RestartBoundaryDecision evaluateRestartBoundary(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick) {
+  const PmSynchronizationPersistentState pm_sync_state =
+      integrator_state.pm_sync_state.exportPersistentState();
+  const bool current_local_substep =
+      integrator_state.current_boundary_kind == StepBoundaryKind::kLocalActiveBinStep;
+  const bool last_completed_local_substep =
+      integrator_state.last_completed_boundary_kind == StepBoundaryKind::kLocalActiveBinStep;
+  const bool local_substep_active =
+      current_local_substep || last_completed_local_substep;
+  const bool pm_refresh_legal = !pm_sync_state.refresh_commit_pending;
+
+  RestartBoundaryDecision decision{
+      .current_boundary_kind = integrator_state.current_boundary_kind,
+      .last_completed_boundary_kind = integrator_state.last_completed_boundary_kind,
+      .inside_kdk_step = integrator_state.inside_kdk_step,
+      .last_completed_restart_safe = integrator_state.last_completed_restart_safe,
+      .local_substep_active = local_substep_active,
+      .pm_refresh_legal = pm_refresh_legal,
+      .pm_refresh_commit_pending = pm_sync_state.refresh_commit_pending,
+      .step_index = integrator_state.step_index,
+      .scheduler_tick = scheduler_tick,
+  };
+  decision.restart_safe = !decision.inside_kdk_step &&
+      decision.last_completed_restart_safe &&
+      !decision.local_substep_active &&
+      decision.pm_refresh_legal &&
+      isRestartSafeBoundary(decision.last_completed_boundary_kind);
+
+  std::ostringstream out;
+  out << "restart boundary " << (decision.restart_safe ? "safe" : "unsafe")
+      << "; current_boundary_kind=" << stepBoundaryKindName(decision.current_boundary_kind)
+      << "; last_completed_boundary_kind=" << stepBoundaryKindName(decision.last_completed_boundary_kind)
+      << "; inside_kdk_step=" << (decision.inside_kdk_step ? "true" : "false")
+      << "; last_completed_restart_safe=" << (decision.last_completed_restart_safe ? "true" : "false")
+      << "; local_substep_active=" << (decision.local_substep_active ? "true" : "false")
+      << "; pm_refresh_legal=" << (decision.pm_refresh_legal ? "true" : "false")
+      << "; pm_refresh_commit_pending=" << (decision.pm_refresh_commit_pending ? "true" : "false")
+      << "; step_index=" << decision.step_index;
+  if (decision.scheduler_tick.has_value()) {
+    out << "; scheduler_tick=" << *decision.scheduler_tick;
+  } else {
+    out << "; scheduler_tick=n/a";
+  }
+  if (decision.inside_kdk_step) {
+    out << "; reason=half-step restart is not represented or reloadable";
+  } else if (decision.local_substep_active) {
+    out << "; reason=local active-bin substep restart is not represented or reloadable";
+  } else if (!decision.pm_refresh_legal) {
+    out << "; reason=PM refresh transition has an uncommitted long-range field update";
+  } else if (!decision.last_completed_restart_safe ||
+             !isRestartSafeBoundary(decision.last_completed_boundary_kind)) {
+    out << "; reason=last completed integration boundary is not a restart-safe global checkpoint boundary";
+  }
+  decision.diagnostic = out.str();
+  return decision;
+}
+
+bool canWriteRestart(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick) {
+  return evaluateRestartBoundary(integrator_state, scheduler_tick).restart_safe;
+}
+
 void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state) {
   if (integrator_state.inside_kdk_step || !integrator_state.last_completed_restart_safe ||
       !isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
@@ -2180,12 +2245,12 @@ void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state) {
   }
 }
 
-void assertCanWriteCheckpointAtBoundary(const IntegratorState& integrator_state) {
-  if (integrator_state.inside_kdk_step || !integrator_state.last_completed_restart_safe ||
-      !isRestartSafeBoundary(integrator_state.last_completed_boundary_kind)) {
-    throw std::runtime_error(
-        "checkpoint output requested at unsafe integration boundary: " +
-        std::string(stepBoundaryKindName(integrator_state.last_completed_boundary_kind)));
+void assertCanWriteCheckpointAtBoundary(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick) {
+  const RestartBoundaryDecision decision = evaluateRestartBoundary(integrator_state, scheduler_tick);
+  if (!decision.restart_safe) {
+    throw std::runtime_error("restart checkpoint requested at unsafe integration boundary: " + decision.diagnostic);
   }
 }
 

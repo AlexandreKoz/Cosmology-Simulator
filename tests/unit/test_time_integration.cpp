@@ -1245,9 +1245,25 @@ void testBoundarySafetyClassification() {
   assert(!local_boundary.pm_refresh_allowed);
 
   cosmosim::core::IntegratorState unsafe_state;
+  unsafe_state.current_boundary_kind = local_boundary.kind;
   unsafe_state.last_completed_boundary_kind = local_boundary.kind;
   unsafe_state.last_completed_restart_safe = false;
-  assert(throwsWithContext([&]() { cosmosim::core::assertCanWriteCheckpointAtBoundary(unsafe_state); }, "unsafe integration boundary"));
+  const auto local_restart_decision = cosmosim::core::evaluateRestartBoundary(unsafe_state, 7);
+  assert(!local_restart_decision.restart_safe);
+  assert(local_restart_decision.local_substep_active);
+  assert(local_restart_decision.diagnostic.find("local_substep_active=true") != std::string::npos);
+  assert(local_restart_decision.diagnostic.find("scheduler_tick=7") != std::string::npos);
+  assert(throwsWithContext([&]() { cosmosim::core::assertCanWriteCheckpointAtBoundary(unsafe_state, 7); }, "local active-bin substep restart is not represented"));
+
+  cosmosim::core::IntegratorState half_step_state;
+  half_step_state.inside_kdk_step = true;
+  half_step_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  half_step_state.last_completed_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  half_step_state.last_completed_restart_safe = true;
+  const auto half_step_decision = cosmosim::core::evaluateRestartBoundary(half_step_state);
+  assert(!half_step_decision.restart_safe);
+  assert(half_step_decision.diagnostic.find("inside_kdk_step=true") != std::string::npos);
+  assert(throwsWithContext([&]() { cosmosim::core::assertCanWriteCheckpointAtBoundary(half_step_state); }, "half-step restart is not represented"));
 
   cosmosim::core::ActiveSetDescriptor global_active{};
   const auto global_boundary = cosmosim::core::classifyStepBoundary(state, global_active, false);
@@ -1262,6 +1278,15 @@ void testBoundarySafetyClassification() {
   assert(checkpoint_boundary.kind == cosmosim::core::StepBoundaryKind::kCheckpointPoint);
   assert(checkpoint_boundary.restart_safe);
   assert(checkpoint_boundary.output_safe);
+
+  cosmosim::core::IntegratorState checkpoint_state;
+  checkpoint_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  checkpoint_state.last_completed_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  checkpoint_state.last_completed_restart_safe = true;
+  const auto checkpoint_decision = cosmosim::core::evaluateRestartBoundary(checkpoint_state, 8);
+  assert(checkpoint_decision.restart_safe);
+  assert(cosmosim::core::canWriteRestart(checkpoint_state, 8));
+  assert(checkpoint_decision.diagnostic.find("restart boundary safe") != std::string::npos);
 
   const auto pm_boundary = cosmosim::core::classifyStepBoundary(
       state,

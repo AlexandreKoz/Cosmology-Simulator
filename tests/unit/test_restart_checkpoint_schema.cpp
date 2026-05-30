@@ -109,6 +109,24 @@ int main() {
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_with_sidecar);
   payload.distributed_gravity_state.decomposition_epoch = 0;
 
+  bool unsafe_half_step_payload_threw = false;
+  try {
+    cosmosim::core::IntegratorState half_step_integrator_state = integrator_state;
+    half_step_integrator_state.inside_kdk_step = true;
+    half_step_integrator_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+    half_step_integrator_state.last_completed_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+    half_step_integrator_state.last_completed_restart_safe = true;
+    cosmosim::io::RestartWritePayload unsafe_payload = payload;
+    unsafe_payload.integrator_state = &half_step_integrator_state;
+    (void)cosmosim::io::restartPayloadIntegrityHash(unsafe_payload);
+  } catch (const std::runtime_error& ex) {
+    const std::string message = ex.what();
+    unsafe_half_step_payload_threw =
+        message.find("inside_kdk_step=true") != std::string::npos &&
+        message.find("half-step restart is not represented") != std::string::npos;
+  }
+  assert(unsafe_half_step_payload_threw);
+
   bool missing_metadata_threw = false;
   try {
     cosmosim::io::RestartWritePayload invalid_metadata = payload;

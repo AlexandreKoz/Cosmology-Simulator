@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -699,6 +700,7 @@ void GhostExchangeBuffer::unpackAppendTo(
 
 std::string DistributedRestartState::serialize() const {
   std::ostringstream stream;
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10);
   stream << "schema_version=" << schema_version << '\n';
   stream << "decomposition_epoch=" << decomposition_epoch << '\n';
   stream << "world_size=" << world_size << '\n';

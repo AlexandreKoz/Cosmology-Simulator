@@ -117,6 +117,24 @@ struct StepBoundaryState {
   bool local_substep = false;
 };
 
+// Deterministic restart-boundary verdict. The diagnostic string is part of the
+// runtime contract for failed restart requests and must include enough phase,
+// scheduler, and PM-cadence context to explain why a checkpoint would not be
+// reloadable as persistent truth.
+struct RestartBoundaryDecision {
+  bool restart_safe = false;
+  StepBoundaryKind current_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+  StepBoundaryKind last_completed_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+  bool inside_kdk_step = false;
+  bool last_completed_restart_safe = false;
+  bool local_substep_active = false;
+  bool pm_refresh_legal = true;
+  bool pm_refresh_commit_pending = false;
+  std::uint64_t step_index = 0;
+  std::optional<std::uint64_t> scheduler_tick;
+  std::string diagnostic;
+};
+
 enum class PmSyncStage : std::uint8_t {
   kNone = 0,
   kInitialLongRangeBootstrap = 1,
@@ -772,7 +790,16 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     bool scheduler_owned_substep,
     StepBoundaryKind requested_kind = StepBoundaryKind::kGlobalSynchronizationPoint);
 
+[[nodiscard]] RestartBoundaryDecision evaluateRestartBoundary(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick = std::nullopt);
+[[nodiscard]] bool canWriteRestart(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick = std::nullopt);
+
 void assertCanWriteSnapshotAtBoundary(const IntegratorState& integrator_state);
-void assertCanWriteCheckpointAtBoundary(const IntegratorState& integrator_state);
+void assertCanWriteCheckpointAtBoundary(
+    const IntegratorState& integrator_state,
+    std::optional<std::uint64_t> scheduler_tick = std::nullopt);
 
 }  // namespace cosmosim::core
