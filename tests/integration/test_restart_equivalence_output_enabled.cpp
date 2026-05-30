@@ -20,6 +20,9 @@ int main() {
   assert(result.direct_output_cadence_state.next_snapshot_step_index == result.restarted_output_cadence_state.next_snapshot_step_index);
   assert(result.direct_output_cadence_state.snapshot_due == result.restarted_output_cadence_state.snapshot_due);
   assert(result.direct_output_cadence_state.checkpoint_due == result.restarted_output_cadence_state.checkpoint_due);
+  assert(!result.direct_output_events.snapshot_steps.empty());
+  assert(result.direct_output_events.snapshot_steps == result.restarted_output_events.snapshot_steps);
+  assert(result.direct_output_events.checkpoint_steps == result.restarted_output_events.checkpoint_steps);
   std::filesystem::remove(restart_path);
 #endif
   return 0;

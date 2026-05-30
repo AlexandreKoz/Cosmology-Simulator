@@ -8,6 +8,12 @@
 
 #include "cosmosim/cosmosim.hpp"
 
+[[nodiscard]] std::string readFile(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  assert(in.good());
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
 [[nodiscard]] std::uint64_t xorRangeOneToN(std::uint64_t n) {
   switch (n & 3ULL) {
     case 0ULL: return n;
@@ -163,6 +169,26 @@ int main() {
     assert(lhs.field_built_step_index == rhs.field_built_step_index);
     assert(lhs.refreshed_long_range_field == rhs.refreshed_long_range_field);
   }
+
+  const std::string restart_diagnostics_config =
+      buildConfigText(1, "reference_integration_test_restart_diagnostics", "cic") +
+      "snapshot_interval_steps = 1\n"
+      "write_restarts = true\n";
+  const cosmosim::core::FrozenConfig restart_diagnostics_frozen =
+      cosmosim::core::loadFrozenConfigFromString(
+          restart_diagnostics_config,
+          "test_reference_workflow_restart_diagnostics");
+  cosmosim::workflows::ReferenceWorkflowRunner restart_diagnostics_runner(restart_diagnostics_frozen);
+  const cosmosim::workflows::ReferenceWorkflowReport restart_diagnostics_report =
+      restart_diagnostics_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = true});
+  assert(restart_diagnostics_report.restart_roundtrip_executed);
+  assert(restart_diagnostics_report.restart_roundtrip_ok);
+  assert(std::filesystem::exists(restart_diagnostics_report.restart_path));
+  const std::string restart_diag_events_text = readFile(restart_diagnostics_report.operational_report_json_path);
+  assert(restart_diag_events_text.find("\"event_kind\": \"restart.write.complete\"") != std::string::npos);
+  assert(restart_diag_events_text.find("\"event_kind\": \"restart.read.complete\"") != std::string::npos);
+  assert(restart_diag_events_text.find("\"payload_hash_hex\"") != std::string::npos);
+  assert(restart_diag_events_text.find("\"scheduler_pending_transition_count\"") != std::string::npos);
 
   auto invalidGravityConfig = []() {
     std::stringstream cfg;

@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,23 @@ struct RestartEquivalenceTolerances {
   double scalar_abs = 1.0e-14;
 };
 
+struct RestartEquivalenceOutputEventLog {
+  std::vector<std::uint64_t> snapshot_steps;
+  std::vector<std::uint64_t> checkpoint_steps;
+};
+
+struct RestartEquivalenceStepContext {
+  core::SimulationState& state;
+  core::IntegratorState& integrator_state;
+  core::HierarchicalTimeBinScheduler& scheduler;
+  io::OutputCadencePersistentState& output_state;
+  io::StochasticPersistentState& stochastic_state;
+  std::span<const std::uint32_t> active_particle_indices;
+  double dt_code = 0.0;
+};
+
+using RestartEquivalenceStepKernel = std::function<void(RestartEquivalenceStepContext&)>;
+
 struct RestartEquivalenceScenario {
   core::SimulationState initial_state;
   core::IntegratorState initial_integrator_state;
@@ -32,6 +51,7 @@ struct RestartEquivalenceScenario {
   std::uint64_t restart_step = 4;
   std::filesystem::path restart_path;
   RestartEquivalenceTolerances tolerances;
+  RestartEquivalenceStepKernel step_kernel;
 };
 
 struct RestartEquivalenceResult {
@@ -45,6 +65,8 @@ struct RestartEquivalenceResult {
   io::OutputCadencePersistentState restarted_output_cadence_state;
   io::StochasticPersistentState direct_stochastic_state;
   io::StochasticPersistentState restarted_stochastic_state;
+  RestartEquivalenceOutputEventLog direct_output_events;
+  RestartEquivalenceOutputEventLog restarted_output_events;
 };
 
 inline void failRestartEquivalence(const std::string& message) {
@@ -135,22 +157,59 @@ inline void commitOutputCadenceForStep(
   }
 }
 
-inline void advanceToyRuntimeStep(
+inline void applyDefaultToyParticleStep(RestartEquivalenceStepContext& context) {
+  for (const std::uint32_t particle_index : context.active_particle_indices) {
+    const double weight = static_cast<double>(particle_index + 1U);
+    context.state.particles.velocity_x_peculiar[particle_index] += 0.001 * weight;
+    context.state.particles.velocity_y_peculiar[particle_index] -= 0.0005 * weight;
+    context.state.particles.velocity_z_peculiar[particle_index] += 0.00025 * weight;
+    context.state.particles.position_x_comoving[particle_index] +=
+        context.dt_code * context.state.particles.velocity_x_peculiar[particle_index];
+    context.state.particles.position_y_comoving[particle_index] +=
+        context.dt_code * context.state.particles.velocity_y_peculiar[particle_index];
+    context.state.particles.position_z_comoving[particle_index] +=
+        context.dt_code * context.state.particles.velocity_z_peculiar[particle_index];
+  }
+}
+
+inline void recordOutputEventsForStep(
+    const io::OutputCadencePersistentState& output_state,
+    std::uint64_t step_index,
+    RestartEquivalenceOutputEventLog* output_events) {
+  if (output_events == nullptr) {
+    return;
+  }
+  if (output_state.snapshot_due) {
+    output_events->snapshot_steps.push_back(step_index);
+  }
+  if (output_state.checkpoint_due) {
+    output_events->checkpoint_steps.push_back(step_index);
+  }
+}
+
+inline void advanceRuntimeStep(
     core::SimulationState& state,
     core::IntegratorState& integrator_state,
     core::HierarchicalTimeBinScheduler& scheduler,
     io::OutputCadencePersistentState& output_state,
-    io::StochasticPersistentState& stochastic_state) {
+    io::StochasticPersistentState& stochastic_state,
+    const RestartEquivalenceStepKernel& step_kernel,
+    RestartEquivalenceOutputEventLog* output_events) {
   auto active = scheduler.beginSubstep();
   const double dt_code = 0.03125;
-  for (const std::uint32_t particle_index : active) {
-    const double weight = static_cast<double>(particle_index + 1U);
-    state.particles.velocity_x_peculiar[particle_index] += 0.001 * weight;
-    state.particles.velocity_y_peculiar[particle_index] -= 0.0005 * weight;
-    state.particles.velocity_z_peculiar[particle_index] += 0.00025 * weight;
-    state.particles.position_x_comoving[particle_index] += dt_code * state.particles.velocity_x_peculiar[particle_index];
-    state.particles.position_y_comoving[particle_index] += dt_code * state.particles.velocity_y_peculiar[particle_index];
-    state.particles.position_z_comoving[particle_index] += dt_code * state.particles.velocity_z_peculiar[particle_index];
+  RestartEquivalenceStepContext context{
+      .state = state,
+      .integrator_state = integrator_state,
+      .scheduler = scheduler,
+      .output_state = output_state,
+      .stochastic_state = stochastic_state,
+      .active_particle_indices = active,
+      .dt_code = dt_code,
+  };
+  if (step_kernel) {
+    step_kernel(context);
+  } else {
+    applyDefaultToyParticleStep(context);
   }
   scheduler.endSubstep();
   ++integrator_state.step_index;
@@ -177,6 +236,7 @@ inline void advanceToyRuntimeStep(
   state.metadata.step_index = integrator_state.step_index;
   state.metadata.scale_factor = integrator_state.current_scale_factor;
   commitOutputCadenceForStep(output_state, integrator_state.step_index);
+  recordOutputEventsForStep(output_state, integrator_state.step_index, output_events);
   stochastic_state = committedStochasticStateForStep(stochastic_state, integrator_state.step_index);
   syncParticleTimeBinMirror(state, scheduler);
 }
@@ -225,9 +285,12 @@ inline void runSteps(
     core::HierarchicalTimeBinScheduler& scheduler,
     io::OutputCadencePersistentState& output_state,
     io::StochasticPersistentState& stochastic_state,
-    std::uint64_t step_count) {
+    std::uint64_t step_count,
+    const RestartEquivalenceStepKernel& step_kernel = {},
+    RestartEquivalenceOutputEventLog* output_events = nullptr) {
   for (std::uint64_t step = 0; step < step_count; ++step) {
-    advanceToyRuntimeStep(state, integrator_state, scheduler, output_state, stochastic_state);
+    advanceRuntimeStep(
+        state, integrator_state, scheduler, output_state, stochastic_state, step_kernel, output_events);
   }
 }
 
@@ -336,6 +399,8 @@ inline void compareSimulationState(
   requireAlignedExact(lhs.particle_sidecar.particle_id, rhs.particle_sidecar.particle_id, "particle_id");
   requireAlignedExact(lhs.particle_sidecar.species_tag, rhs.particle_sidecar.species_tag, "species_tag");
   requireAlignedExact(lhs.particle_sidecar.owning_rank, rhs.particle_sidecar.owning_rank, "owning_rank");
+  requireAlignedNear(lhs.particle_sidecar.gravity_softening_comoving, rhs.particle_sidecar.gravity_softening_comoving, tolerances.scalar_abs, "gravity_softening");
+  requireAlignedExact(lhs.particle_sidecar.has_gravity_softening_override, rhs.particle_sidecar.has_gravity_softening_override, "has_gravity_softening_override");
   if (lhs.cells.size() != rhs.cells.size() || lhs.gas_cells.size() != rhs.gas_cells.size()) {
     failRestartEquivalence("gas cell count");
   }
@@ -352,10 +417,33 @@ inline void compareSimulationState(
   requireAlignedNear(lhs.gas_cells.internal_energy_code, rhs.gas_cells.internal_energy_code, tolerances.scalar_abs, "gas_internal_energy");
   requireAlignedNear(lhs.gas_cells.temperature_code, rhs.gas_cells.temperature_code, tolerances.scalar_abs, "gas_temperature");
   requireAlignedNear(lhs.gas_cells.sound_speed_code, rhs.gas_cells.sound_speed_code, tolerances.scalar_abs, "gas_sound_speed");
+  if (lhs.star_particles.size() != rhs.star_particles.size()) {
+    failRestartEquivalence("star particle sidecar count");
+  }
+  requireAlignedExact(lhs.star_particles.particle_index, rhs.star_particles.particle_index, "star_particle_index");
+  requireAlignedNear(lhs.star_particles.formation_scale_factor, rhs.star_particles.formation_scale_factor, tolerances.scalar_abs, "star_formation_scale_factor");
+  requireAlignedNear(lhs.star_particles.birth_mass_code, rhs.star_particles.birth_mass_code, tolerances.scalar_abs, "star_birth_mass");
+  requireAlignedNear(lhs.star_particles.metallicity_mass_fraction, rhs.star_particles.metallicity_mass_fraction, tolerances.scalar_abs, "star_metallicity");
+  requireAlignedNear(lhs.star_particles.stellar_age_years_last, rhs.star_particles.stellar_age_years_last, tolerances.scalar_abs, "star_age_last");
+  requireAlignedNear(lhs.star_particles.stellar_returned_mass_cumulative_code, rhs.star_particles.stellar_returned_mass_cumulative_code, tolerances.scalar_abs, "star_returned_mass");
+  requireAlignedNear(lhs.star_particles.stellar_returned_metals_cumulative_code, rhs.star_particles.stellar_returned_metals_cumulative_code, tolerances.scalar_abs, "star_returned_metals");
+  requireAlignedNear(lhs.star_particles.stellar_feedback_energy_cumulative_erg, rhs.star_particles.stellar_feedback_energy_cumulative_erg, tolerances.scalar_abs, "star_feedback_energy");
+  for (std::size_t channel = 0; channel < lhs.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+    requireAlignedNear(lhs.star_particles.stellar_returned_mass_channel_cumulative_code[channel], rhs.star_particles.stellar_returned_mass_channel_cumulative_code[channel], tolerances.scalar_abs, "star_returned_mass_channel" + std::to_string(channel));
+    requireAlignedNear(lhs.star_particles.stellar_returned_metals_channel_cumulative_code[channel], rhs.star_particles.stellar_returned_metals_channel_cumulative_code[channel], tolerances.scalar_abs, "star_returned_metals_channel" + std::to_string(channel));
+    requireAlignedNear(lhs.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel], rhs.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel], tolerances.scalar_abs, "star_feedback_energy_channel" + std::to_string(channel));
+  }
   if (lhs.metadata.step_index != rhs.metadata.step_index) {
     failRestartEquivalence("state metadata step_index");
   }
   requireNear(lhs.metadata.scale_factor, rhs.metadata.scale_factor, tolerances.scalar_abs, "state metadata scale_factor");
+}
+
+inline void compareOutputEventLog(
+    const RestartEquivalenceOutputEventLog& lhs,
+    const RestartEquivalenceOutputEventLog& rhs) {
+  requireVectorEqual(lhs.snapshot_steps, rhs.snapshot_steps, "output snapshot event sequence");
+  requireVectorEqual(lhs.checkpoint_steps, rhs.checkpoint_steps, "output checkpoint event sequence");
 }
 
 inline RestartEquivalenceResult runRestartEquivalenceScenario(RestartEquivalenceScenario scenario) {
@@ -381,7 +469,9 @@ inline RestartEquivalenceResult runRestartEquivalenceScenario(RestartEquivalence
       direct_scheduler,
       result.direct_output_cadence_state,
       result.direct_stochastic_state,
-      scenario.total_steps);
+      scenario.total_steps,
+      scenario.step_kernel,
+      &result.direct_output_events);
   result.direct_scheduler_state = direct_scheduler.exportPersistentState();
 
   result.restarted_state = scenario.initial_state;
@@ -398,7 +488,9 @@ inline RestartEquivalenceResult runRestartEquivalenceScenario(RestartEquivalence
       restarted_scheduler,
       result.restarted_output_cadence_state,
       result.restarted_stochastic_state,
-      scenario.restart_step);
+      scenario.restart_step,
+      scenario.step_kernel,
+      &result.restarted_output_events);
 
   const io::RestartWritePayload payload = makeRestartEquivalencePayload(
       result.restarted_state,
@@ -420,13 +512,16 @@ inline RestartEquivalenceResult runRestartEquivalenceScenario(RestartEquivalence
       restarted_scheduler,
       result.restarted_output_cadence_state,
       result.restarted_stochastic_state,
-      scenario.total_steps - scenario.restart_step);
+      scenario.total_steps - scenario.restart_step,
+      scenario.step_kernel,
+      &result.restarted_output_events);
   result.restarted_scheduler_state = restarted_scheduler.exportPersistentState();
 
   compareSimulationState(result.direct_state, result.restarted_state, scenario.tolerances);
   compareIntegratorState(result.direct_integrator_state, result.restarted_integrator_state, scenario.tolerances);
   compareSchedulerState(result.direct_scheduler_state, result.restarted_scheduler_state);
   compareOutputCadenceState(result.direct_output_cadence_state, result.restarted_output_cadence_state);
+  compareOutputEventLog(result.direct_output_events, result.restarted_output_events);
   compareStochasticState(result.direct_stochastic_state, result.restarted_stochastic_state);
   return result;
 }

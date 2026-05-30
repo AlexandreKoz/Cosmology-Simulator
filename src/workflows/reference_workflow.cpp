@@ -2772,6 +2772,32 @@ bool maybeWriteOutputs(
                     {"output_next_snapshot_step_index", std::to_string(restart_payload.output_cadence_state.next_snapshot_step_index)},
                     {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())}},
     });
+    profiler.recordEvent(core::RuntimeEvent{
+        .event_kind = "restart.read.complete",
+        .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
+        .subsystem = "io.restart",
+        .step_index = restart_read.integrator_state.step_index,
+        .simulation_time_code = restart_read.integrator_state.current_time_code,
+        .scale_factor = restart_read.integrator_state.current_scale_factor,
+        .message = "restart checkpoint read and validated",
+        .payload = {{"path", report.restart_path.string()},
+                    {"restart_schema", restart_read.diagnostics.restart_schema_name},
+                    {"restart_schema_version", std::to_string(restart_read.diagnostics.restart_schema_version)},
+                    {"boundary_kind", restart_read.diagnostics.last_completed_boundary_kind},
+                    {"restart_safe", restart_read.diagnostics.restart_safe ? "true" : "false"},
+                    {"scheduler_current_tick", std::to_string(restart_read.diagnostics.scheduler_current_tick)},
+                    {"scheduler_max_bin", std::to_string(restart_read.diagnostics.scheduler_max_bin)},
+                    {"scheduler_element_count", std::to_string(restart_read.diagnostics.scheduler_element_count)},
+                    {"scheduler_active_count", std::to_string(restart_read.diagnostics.scheduler_active_count)},
+                    {"scheduler_pending_transition_count", std::to_string(restart_read.diagnostics.scheduler_pending_transition_count)},
+                    {"pm_cadence_steps", std::to_string(restart_read.diagnostics.pm_cadence_steps)},
+                    {"pm_gravity_kick_opportunity", std::to_string(restart_read.diagnostics.pm_gravity_kick_opportunity)},
+                    {"pm_field_version", std::to_string(restart_read.diagnostics.pm_field_version)},
+                    {"pm_long_range_field_valid", restart_read.diagnostics.pm_long_range_field_valid ? "true" : "false"},
+                    {"output_next_snapshot_step_index", std::to_string(restart_read.diagnostics.output_next_snapshot_step_index)},
+                    {"stochastic_module_count", std::to_string(restart_read.diagnostics.stochastic_module_count)},
+                    {"payload_hash_hex", restart_read.payload_hash_hex}},
+    });
     output_flushed = true;
   }
   return output_flushed;
