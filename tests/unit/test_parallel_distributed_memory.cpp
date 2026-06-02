@@ -80,6 +80,31 @@ void testMortonDecompositionInvariants() {
   assert(counted_particles == 8);
 }
 
+
+void testMortonDecompositionKeepsOneItemPerRankWhenPossible() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(4);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    items[i].entity_id = static_cast<std::uint64_t>(i + 1U);
+    items[i].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].x_comov = static_cast<double>(i) / 4.0;
+    items[i].work_units = 1.0;
+    items[i].memory_bytes = 128;
+  }
+
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = 4;
+  config.owned_particle_weight = 1.0;
+  config.work_weight = 1.0;
+
+  const auto plan = cosmosim::parallel::buildMortonSfcDecomposition(items, config);
+  assert(plan.ranges_by_rank.size() == 4);
+  for (std::size_t rank = 0; rank < 4; ++rank) {
+    assert(plan.ranges_by_rank[rank].end_sorted - plan.ranges_by_rank[rank].begin_sorted == 1U);
+    assert(plan.metrics.owned_particles_by_rank[rank] == 1U);
+    assert(plan.metrics.weighted_load_by_rank[rank] > 0.0);
+  }
+}
+
 void testGravityAwareDecompositionTracksInteractionCost() {
   std::vector<cosmosim::parallel::DecompositionItem> items(8);
   for (std::size_t i = 0; i < items.size(); ++i) {
@@ -223,6 +248,59 @@ void testExplicitComponentWorkModelAndDiagnostics() {
   assert(std::abs(total_gas - 24.0) < 1.0e-12);
   assert(std::abs(total_pm - 21.0) < 1.0e-12);
   assert(plan.metrics.weighted_imbalance_ratio >= 1.0);
+}
+
+
+void testExplicitBlockingGhostExchangePlanRequiresOwnedSendAndGhostReceive() {
+  const cosmosim::parallel::GhostLayerEpoch epoch{
+      .decomposition_epoch = 2,
+      .ghost_sync_epoch = 3,
+      .particle_index_generation = 4,
+  };
+  const std::vector<cosmosim::parallel::LocalGhostDescriptor> descriptors{
+      cosmosim::parallel::LocalGhostDescriptor{
+          .residency = cosmosim::parallel::LocalIndexResidency::kOwned,
+          .owning_rank = 0,
+          .particle_id = 10,
+          .epoch = epoch,
+      },
+      cosmosim::parallel::LocalGhostDescriptor{
+          .residency = cosmosim::parallel::LocalIndexResidency::kGhost,
+          .owning_rank = 1,
+          .particle_id = 20,
+          .epoch = epoch,
+      },
+  };
+  const std::vector<int> neighbors{1};
+  const std::vector<std::vector<std::uint32_t>> send{{0}};
+  const std::vector<std::vector<std::uint32_t>> recv{{1}};
+  const auto plan = cosmosim::parallel::buildExplicitGhostExchangePlan(
+      0,
+      neighbors,
+      send,
+      recv,
+      cosmosim::parallel::ghostRefreshPayloadRecordBytes(),
+      epoch);
+  cosmosim::parallel::validateBlockingGhostExchangeContracts(plan, descriptors, 0, epoch);
+  assert(plan.send_bytes == cosmosim::parallel::ghostRefreshPayloadRecordBytes());
+  assert(plan.recv_bytes == cosmosim::parallel::ghostRefreshPayloadRecordBytes());
+
+  cosmosim::parallel::GhostExchangeBufferSoA source;
+  source.epoch = epoch;
+  source.entity_id = {10};
+  source.density_code = {1.0};
+  source.velocity_x_code = {2.0};
+  source.pressure_code = {3.0};
+
+  bool threw = false;
+  try {
+    const cosmosim::parallel::MpiContext serial_context(false, 1, 0);
+    (void)cosmosim::parallel::executeBlockingGhostRefreshExchange(
+        serial_context, plan, descriptors, source, epoch);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
 }
 
 void testRestartStateRoundTrip() {
@@ -867,6 +945,7 @@ void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
 int main() {
   testGhostPackUnpackRoundTrip();
   testMortonDecompositionInvariants();
+  testMortonDecompositionKeepsOneItemPerRankWhenPossible();
   testRestartStateRoundTrip();
   testGravityAwareDecompositionTracksInteractionCost();
   testClusteredGravityAwareDecompositionImprovesWeightedImbalance();
@@ -875,6 +954,7 @@ int main() {
   testOwnershipDescriptorsAndGhostEpochContracts();
   testExchangeObjectDescriptorValidation();
   testGhostExchangeBufferRejectsOwnershipMigrationIntent();
+  testExplicitBlockingGhostExchangePlanRequiresOwnedSendAndGhostReceive();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testDistributedRestartCompatibilityReporting();
   testGhostTransferInvariantFailures();

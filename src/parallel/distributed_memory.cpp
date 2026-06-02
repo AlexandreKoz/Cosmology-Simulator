@@ -379,92 +379,70 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.metrics.gpu_occupancy_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.generic_work_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
 
-  const double total_load = std::accumulate(
-      keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
-  const double target_per_rank = (config.world_size > 0) ? total_load / static_cast<double>(config.world_size) : 0.0;
-
-  int current_rank = 0;
-  double current_prefix_load = 0.0;
-  std::size_t rank_begin = 0;
-
   for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
-    const std::size_t original_index = keyed[sorted_pos].index;
-    plan.sorted_indices[sorted_pos] = original_index;
-    plan.owning_rank_by_item[original_index] = current_rank;
-    plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += keyed[sorted_pos].weighted_load;
-    plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
-    if (items[original_index].kind == DecompositionEntityKind::kParticle) {
-      ++plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank)];
-    }
-    plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank)] +=
-        items[original_index].active_target_count_recent;
-    plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
-        items[original_index].remote_tree_interactions_recent;
-    addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank), keyed[sorted_pos].components, 1.0);
-    const double item_load = keyed[sorted_pos].weighted_load;
-    current_prefix_load += item_load;
-
-    if (current_rank + 1 >= config.world_size) {
-      continue;
-    }
-    if (sorted_pos + 1 >= keyed.size()) {
-      continue;
-    }
-
-    const std::size_t items_remaining = keyed.size() - (sorted_pos + 1U);
-    const std::size_t ranks_remaining = static_cast<std::size_t>(config.world_size - (current_rank + 1));
-    if (items_remaining < ranks_remaining) {
-      continue;
-    }
-
-    const double next_target_prefix = target_per_rank * static_cast<double>(current_rank + 1);
-    const bool crossed_target = current_prefix_load >= next_target_prefix;
-    const bool rank_has_multiple_items = sorted_pos > rank_begin;
-    if (!crossed_target || !rank_has_multiple_items) {
-      continue;
-    }
-
-    const double before_distance = std::abs((current_prefix_load - item_load) - next_target_prefix);
-    const double after_distance = std::abs(current_prefix_load - next_target_prefix);
-    const bool cut_before_current = before_distance < after_distance;
-    if (cut_before_current) {
-      plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{
-          .begin_sorted = rank_begin,
-          .end_sorted = sorted_pos};
-      ++current_rank;
-      rank_begin = sorted_pos;
-      plan.owning_rank_by_item[original_index] = current_rank;
-      plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank)] += item_load;
-      plan.metrics.weighted_load_by_rank[static_cast<std::size_t>(current_rank - 1)] -= item_load;
-      plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank)] += items[original_index].memory_bytes;
-      plan.metrics.memory_bytes_by_rank[static_cast<std::size_t>(current_rank - 1)] -= items[original_index].memory_bytes;
-      if (items[original_index].kind == DecompositionEntityKind::kParticle) {
-        ++plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank)];
-        --plan.metrics.owned_particles_by_rank[static_cast<std::size_t>(current_rank - 1)];
-      }
-      plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank)] +=
-          items[original_index].active_target_count_recent;
-      plan.metrics.active_targets_by_rank[static_cast<std::size_t>(current_rank - 1)] -=
-          items[original_index].active_target_count_recent;
-      plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
-          items[original_index].remote_tree_interactions_recent;
-      plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank - 1)] -=
-          items[original_index].remote_tree_interactions_recent;
-      addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank), keyed[sorted_pos].components, 1.0);
-      addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank - 1), keyed[sorted_pos].components, -1.0);
-      continue;
-    }
-
-    plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{
-        .begin_sorted = rank_begin,
-        .end_sorted = sorted_pos + 1U};
-    ++current_rank;
-    rank_begin = sorted_pos + 1U;
+    plan.sorted_indices[sorted_pos] = keyed[sorted_pos].index;
   }
 
-  plan.ranges_by_rank[static_cast<std::size_t>(current_rank)] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};
-  for (int rank = current_rank + 1; rank < config.world_size; ++rank) {
-    plan.ranges_by_rank[static_cast<std::size_t>(rank)] = RankRange{.begin_sorted = keyed.size(), .end_sorted = keyed.size()};
+  const double total_load = std::accumulate(
+      keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
+
+  if (!keyed.empty()) {
+    const std::size_t active_rank_count =
+        std::min<std::size_t>(static_cast<std::size_t>(config.world_size), keyed.size());
+    const double target_per_active_rank =
+        (active_rank_count > 0) ? total_load / static_cast<double>(active_rank_count) : 0.0;
+
+    std::size_t current_rank = 0;
+    std::size_t rank_begin = 0;
+    double cumulative_load = 0.0;
+
+    for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
+      cumulative_load += keyed[sorted_pos].weighted_load;
+      if (current_rank + 1 >= active_rank_count) {
+        continue;
+      }
+
+      const std::size_t items_remaining = keyed.size() - (sorted_pos + 1U);
+      const std::size_t ranks_remaining = active_rank_count - (current_rank + 1U);
+      const bool can_cut_after_current = (sorted_pos + 1U > rank_begin) && (items_remaining >= ranks_remaining);
+      if (!can_cut_after_current) {
+        continue;
+      }
+
+      const bool must_cut_to_keep_one_item_per_remaining_rank = items_remaining == ranks_remaining;
+      const double next_target_prefix = target_per_active_rank * static_cast<double>(current_rank + 1U);
+      const bool crossed_target = cumulative_load >= next_target_prefix;
+      if (!must_cut_to_keep_one_item_per_remaining_rank && !crossed_target) {
+        continue;
+      }
+
+      plan.ranges_by_rank[current_rank] = RankRange{
+          .begin_sorted = rank_begin,
+          .end_sorted = sorted_pos + 1U};
+      ++current_rank;
+      rank_begin = sorted_pos + 1U;
+    }
+
+    plan.ranges_by_rank[current_rank] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};
+    for (std::size_t rank = current_rank + 1U; rank < static_cast<std::size_t>(config.world_size); ++rank) {
+      plan.ranges_by_rank[rank] = RankRange{.begin_sorted = keyed.size(), .end_sorted = keyed.size()};
+    }
+
+    for (std::size_t rank = 0; rank < plan.ranges_by_rank.size(); ++rank) {
+      const RankRange range = plan.ranges_by_rank[rank];
+      for (std::size_t sorted_pos = range.begin_sorted; sorted_pos < range.end_sorted; ++sorted_pos) {
+        const std::size_t original_index = keyed[sorted_pos].index;
+        plan.owning_rank_by_item[original_index] = static_cast<int>(rank);
+        plan.metrics.weighted_load_by_rank[rank] += keyed[sorted_pos].weighted_load;
+        plan.metrics.memory_bytes_by_rank[rank] += items[original_index].memory_bytes;
+        if (items[original_index].kind == DecompositionEntityKind::kParticle) {
+          ++plan.metrics.owned_particles_by_rank[rank];
+        }
+        plan.metrics.active_targets_by_rank[rank] += items[original_index].active_target_count_recent;
+        plan.metrics.remote_tree_interactions_by_rank[rank] += items[original_index].remote_tree_interactions_recent;
+        addWorkComponentsToMetrics(plan.metrics, rank, keyed[sorted_pos].components, 1.0);
+      }
+    }
   }
 
   const auto max_load_it = std::max_element(plan.metrics.weighted_load_by_rank.begin(), plan.metrics.weighted_load_by_rank.end());
@@ -593,6 +571,65 @@ GhostExchangePlan buildGhostExchangePlan(
     });
   }
   return buildGhostExchangePlan(world_rank, descriptors, bytes_per_ghost);
+}
+
+GhostExchangePlan buildExplicitGhostExchangePlan(
+    int world_rank,
+    std::span<const int> neighbor_ranks,
+    std::span<const std::vector<std::uint32_t>> send_local_indices_by_neighbor,
+    std::span<const std::vector<std::uint32_t>> recv_local_indices_by_neighbor,
+    std::size_t bytes_per_ghost,
+    const GhostLayerEpoch& epoch,
+    bool enable_nonblocking_overlap) {
+  if (world_rank < 0) {
+    throw std::invalid_argument("world_rank must be non-negative");
+  }
+  if (bytes_per_ghost == 0) {
+    throw std::invalid_argument("bytes_per_ghost must be positive");
+  }
+  if (neighbor_ranks.size() != send_local_indices_by_neighbor.size() ||
+      neighbor_ranks.size() != recv_local_indices_by_neighbor.size()) {
+    throw std::invalid_argument("explicit ghost exchange plan container sizes must match");
+  }
+
+  GhostExchangePlan plan;
+  plan.neighbor_ranks.assign(neighbor_ranks.begin(), neighbor_ranks.end());
+  plan.send_local_indices_by_neighbor.assign(
+      send_local_indices_by_neighbor.begin(), send_local_indices_by_neighbor.end());
+  plan.recv_local_indices_by_neighbor.assign(
+      recv_local_indices_by_neighbor.begin(), recv_local_indices_by_neighbor.end());
+  plan.outbound_transfers.resize(neighbor_ranks.size());
+  plan.inbound_transfers.resize(neighbor_ranks.size());
+  plan.epoch = epoch;
+  plan.uses_blocking_exchange = true;
+  plan.nonblocking_overlap_enabled = enable_nonblocking_overlap;
+
+  for (std::size_t i = 0; i < neighbor_ranks.size(); ++i) {
+    if (neighbor_ranks[i] < 0 || neighbor_ranks[i] == world_rank) {
+      throw std::invalid_argument("explicit ghost exchange neighbor rank must be a remote non-negative rank");
+    }
+    plan.outbound_transfers[i] = GhostTransferDescriptor{
+        .role = GhostTransferRole::kOutboundSend,
+        .intent = GhostTransferIntent::kGhostRefreshRequest,
+        .peer_rank = neighbor_ranks[i],
+        .neighbor_slot = i,
+        .expected_post_transfer_residency = LocalIndexResidency::kGhost,
+        .local_indices = plan.send_local_indices_by_neighbor[i],
+    };
+    plan.inbound_transfers[i] = GhostTransferDescriptor{
+        .role = GhostTransferRole::kInboundReceive,
+        .intent = GhostTransferIntent::kGhostRefreshReceiveStaging,
+        .peer_rank = neighbor_ranks[i],
+        .neighbor_slot = i,
+        .expected_post_transfer_residency = LocalIndexResidency::kGhost,
+        .local_indices = plan.recv_local_indices_by_neighbor[i],
+    };
+    plan.send_bytes += static_cast<std::uint64_t>(plan.send_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+    plan.recv_bytes += static_cast<std::uint64_t>(plan.recv_local_indices_by_neighbor[i].size()) * bytes_per_ghost;
+  }
+
+  validateGhostExchangePlan(plan);
+  return plan;
 }
 
 void validateGhostExchangePlan(const GhostExchangePlan& plan) {
@@ -876,6 +913,12 @@ void requireFreshGhostExchangeView(
 void GhostExchangeBuffer::clear() { m_bytes.clear(); }
 
 std::size_t GhostExchangeBuffer::byteSize() const noexcept { return m_bytes.size(); }
+
+std::span<const std::uint8_t> GhostExchangeBuffer::encodedBytes() const noexcept { return m_bytes; }
+
+void GhostExchangeBuffer::replaceEncodedBytes(std::vector<std::uint8_t> bytes) {
+  m_bytes = std::move(bytes);
+}
 
 void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::span<const std::uint32_t> local_indices) {
   if (!source.isConsistent()) {
@@ -1358,6 +1401,87 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
+    const MpiContext& mpi_context,
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangeBufferSoA& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch) {
+  validateBlockingGhostExchangeContracts(
+      plan, local_ghost_descriptors, mpi_context.worldRank(), expected_epoch);
+  if (!authoritative_local_state.isConsistent()) {
+    throw std::invalid_argument("executeBlockingGhostRefreshExchange: authoritative local ghost payload state is inconsistent");
+  }
+
+  BlockingGhostExchangeResult result;
+  result.received_ghosts.epoch = expected_epoch;
+  if (plan.neighbor_ranks.empty()) {
+    return result;
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error(
+        "executeBlockingGhostRefreshExchange: non-empty ghost exchange requires MPI; serial path must have no neighbors");
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  constexpr int k_size_tag_base = 6810;
+  constexpr int k_payload_tag_base = 7810;
+  for (std::size_t slot = 0; slot < plan.neighbor_ranks.size(); ++slot) {
+    GhostExchangeBuffer send_buffer;
+    send_buffer.packFrom(
+        plan.outbound_transfers[slot],
+        authoritative_local_state,
+        plan.send_local_indices_by_neighbor[slot]);
+
+    const std::uint64_t send_size = static_cast<std::uint64_t>(send_buffer.byteSize());
+    std::uint64_t recv_size = 0;
+    const int peer_rank = plan.neighbor_ranks[slot];
+    MPI_Sendrecv(
+        &send_size,
+        1,
+        MPI_UINT64_T,
+        peer_rank,
+        k_size_tag_base + static_cast<int>(slot),
+        &recv_size,
+        1,
+        MPI_UINT64_T,
+        peer_rank,
+        k_size_tag_base + static_cast<int>(slot),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+
+    if (send_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        recv_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("executeBlockingGhostRefreshExchange: ghost payload exceeds MPI int count limit");
+    }
+
+    std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(recv_size));
+    const auto send_bytes = send_buffer.encodedBytes();
+    MPI_Sendrecv(
+        const_cast<std::uint8_t*>(send_bytes.data()),
+        static_cast<int>(send_bytes.size()),
+        MPI_BYTE,
+        peer_rank,
+        k_payload_tag_base + static_cast<int>(slot),
+        recv_bytes.data(),
+        static_cast<int>(recv_bytes.size()),
+        MPI_BYTE,
+        peer_rank,
+        k_payload_tag_base + static_cast<int>(slot),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+
+    GhostExchangeBuffer recv_buffer;
+    recv_buffer.replaceEncodedBytes(std::move(recv_bytes));
+    recv_buffer.unpackAppendTo(plan.inbound_transfers[slot], result.received_ghosts);
+    result.sent_bytes += send_size;
+    result.received_bytes += recv_size;
+  }
+  return result;
+#else
+  throw std::runtime_error("executeBlockingGhostRefreshExchange: MPI support is not compiled in");
+#endif
+}
 
 
 bool RankDeviceAssignment::isValid() const noexcept {

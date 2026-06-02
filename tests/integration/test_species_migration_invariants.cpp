@@ -549,27 +549,8 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   commit.inbound_records = records;
   state.commitParticleMigration(commit);
 
-  const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
-  cosmosim::core::CellSoa rebuilt_cells;
-  cosmosim::core::GasCellSidecar rebuilt_gas;
-  rebuilt_cells.resize(gas_globals.size());
-  rebuilt_gas.resize(gas_globals.size());
-  for (std::size_t cell = 0; cell < gas_globals.size(); ++cell) {
-    const std::uint64_t gas_id = state.particle_sidecar.particle_id[gas_globals[cell]];
-    const auto found = gas_fields_by_id.find(gas_id);
-    assert(found != gas_fields_by_id.end());
-    rebuilt_cells.mass_code[cell] = found->second.mass_code;
-    rebuilt_cells.time_bin[cell] = found->second.time_bin;
-    rebuilt_gas.density_code[cell] = found->second.density_code;
-    rebuilt_gas.internal_energy_code[cell] = found->second.internal_energy_code;
-    rebuilt_gas.gas_cell_id[cell] = gas_id;
-    rebuilt_gas.parent_particle_id[cell] = gas_id;
-  }
-  state.cells = std::move(rebuilt_cells);
-  state.gas_cells = std::move(rebuilt_gas);
-  state.bumpCellIndexGeneration();
-
-  cosmosim::core::requireParticleBoundGasCellContract(state, "migration gas rebuild");
+  (void)gas_fields_by_id;
+  cosmosim::core::requireParticleBoundGasCellContract(state, "migration gas commit");
   assert(state.gasCellRowForParticleId(501) == 0);
   assert(state.gasCellRowForParticleId(503) == 1);
   assert(state.gasCellRowForParticleId(502) == 2);

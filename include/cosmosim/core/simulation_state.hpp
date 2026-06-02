@@ -302,6 +302,23 @@ struct ParticleTransferPacket {
   AlignedVector<double> last_drift_scale_factor;
 };
 
+
+struct GasCellMigrationFields {
+  std::uint64_t gas_cell_id = 0;
+  std::uint64_t parent_particle_id = 0;
+  double center_x_comoving = 0.0;
+  double center_y_comoving = 0.0;
+  double center_z_comoving = 0.0;
+  double cell_mass_code = 0.0;
+  std::uint8_t cell_time_bin = 0;
+  std::uint32_t patch_index = 0;
+  double density_code = 0.0;
+  double pressure_code = 0.0;
+  double internal_energy_code = 0.0;
+  double temperature_code = 0.0;
+  double sound_speed_code = 0.0;
+};
+
 struct StarParticleMigrationFields {
   double formation_scale_factor = 0.0;
   double birth_mass_code = 0.0;
@@ -359,6 +376,8 @@ struct ParticleMigrationRecord {
   bool has_gravity_softening_value = false;
   bool has_gravity_softening_override = false;
   double gravity_softening_comoving = 0.0;
+  bool has_gas_cell_fields = false;
+  GasCellMigrationFields gas_cell_fields{};
   bool has_star_fields = false;
   StarParticleMigrationFields star_fields{};
   bool has_black_hole_fields = false;

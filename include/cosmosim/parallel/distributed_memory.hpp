@@ -200,6 +200,15 @@ struct GhostExchangePlan {
     std::span<const int> ghost_owner_rank_by_local_index,
     std::size_t bytes_per_ghost);
 
+[[nodiscard]] GhostExchangePlan buildExplicitGhostExchangePlan(
+    int world_rank,
+    std::span<const int> neighbor_ranks,
+    std::span<const std::vector<std::uint32_t>> send_local_indices_by_neighbor,
+    std::span<const std::vector<std::uint32_t>> recv_local_indices_by_neighbor,
+    std::size_t bytes_per_ghost,
+    const GhostLayerEpoch& epoch,
+    bool enable_nonblocking_overlap = false);
+
 void validateGhostExchangePlan(const GhostExchangePlan& plan);
 void validateGhostTransferAgainstResidency(
     const GhostTransferDescriptor& descriptor,
@@ -346,6 +355,9 @@ class GhostExchangeBuffer {
   void unpackAppendTo(
       const GhostTransferDescriptor& descriptor,
       GhostExchangeBufferSoA& destination) const;
+
+  [[nodiscard]] std::span<const std::uint8_t> encodedBytes() const noexcept;
+  void replaceEncodedBytes(std::vector<std::uint8_t> bytes);
 
  private:
   std::vector<std::uint8_t> m_bytes;
@@ -612,6 +624,19 @@ class MpiContext {
   int m_world_size = 1;
   int m_world_rank = 0;
 };
+
+struct BlockingGhostExchangeResult {
+  GhostExchangeBufferSoA received_ghosts;
+  std::uint64_t sent_bytes = 0;
+  std::uint64_t received_bytes = 0;
+};
+
+[[nodiscard]] BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
+    const MpiContext& mpi_context,
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangeBufferSoA& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch);
 
 struct RankDeviceAssignment {
   int requested_device_count = 0;

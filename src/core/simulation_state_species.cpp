@@ -183,7 +183,26 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
       record.has_gravity_softening_override = true;
     }
 
-    if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
+    if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+      if (cells.size() != 0 || gas_cells.size() != 0) {
+        requireParticleBoundGasCellContract("packParticleMigrationRecords");
+        const std::uint32_t row = gasCellRowForParticleId(record.particle_id);
+        record.has_gas_cell_fields = true;
+        record.gas_cell_fields.gas_cell_id = gas_cells.gas_cell_id[row];
+        record.gas_cell_fields.parent_particle_id = gas_cells.parent_particle_id[row];
+        record.gas_cell_fields.center_x_comoving = cells.center_x_comoving[row];
+        record.gas_cell_fields.center_y_comoving = cells.center_y_comoving[row];
+        record.gas_cell_fields.center_z_comoving = cells.center_z_comoving[row];
+        record.gas_cell_fields.cell_mass_code = cells.mass_code[row];
+        record.gas_cell_fields.cell_time_bin = cells.time_bin[row];
+        record.gas_cell_fields.patch_index = cells.patch_index[row];
+        record.gas_cell_fields.density_code = gas_cells.density_code[row];
+        record.gas_cell_fields.pressure_code = gas_cells.pressure_code[row];
+        record.gas_cell_fields.internal_energy_code = gas_cells.internal_energy_code[row];
+        record.gas_cell_fields.temperature_code = gas_cells.temperature_code[row];
+        record.gas_cell_fields.sound_speed_code = gas_cells.sound_speed_code[row];
+      }
+    } else if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
       const std::size_t row =
           findRequiredSidecarRow(star_particles.particle_index, index, "star_particles");
       record.has_star_fields = true;
@@ -278,18 +297,35 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   const bool destination_expects_softening_value =
       !particle_sidecar.gravity_softening_comoving.empty() ||
       !particle_sidecar.has_gravity_softening_override.empty();
+  const bool state_has_particle_bound_gas_state = cells.size() != 0 || gas_cells.size() != 0;
+  if (state_has_particle_bound_gas_state) {
+    requireParticleBoundGasCellContract("commitParticleMigration");
+  }
 
-  auto require_inbound_sidecar_contract = [destination_expects_softening_value](
+  auto require_inbound_sidecar_contract = [destination_expects_softening_value, state_has_particle_bound_gas_state](
                                            const ParticleMigrationRecord& inbound) {
     if (!isValidSpeciesTag(inbound.species_tag)) {
       throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
     }
 
     const auto species = static_cast<ParticleSpecies>(inbound.species_tag);
+    const bool requires_gas_cell_fields = species == ParticleSpecies::kGas &&
+        (state_has_particle_bound_gas_state || inbound.has_gas_cell_fields);
     const bool requires_star_fields = species == ParticleSpecies::kStar;
     const bool requires_black_hole_fields = species == ParticleSpecies::kBlackHole;
     const bool requires_tracer_fields = species == ParticleSpecies::kTracer;
 
+    if (inbound.has_gas_cell_fields != requires_gas_cell_fields) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound gas-cell hydro fields do not match species tag");
+    }
+    if (inbound.has_gas_cell_fields &&
+        (inbound.gas_cell_fields.gas_cell_id == 0 ||
+         inbound.gas_cell_fields.parent_particle_id != inbound.particle_id ||
+         inbound.gas_cell_fields.gas_cell_id != inbound.particle_id)) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound gas-cell identity must be anchored to the particle ID");
+    }
     if (inbound.has_star_fields != requires_star_fields) {
       throw std::invalid_argument(
           "commitParticleMigration: inbound star sidecar fields do not match species tag");
@@ -417,6 +453,79 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       new_sidecar.has_gravity_softening_override[write_index] = 1U;
     }
     ++write_index;
+  }
+
+  std::unordered_map<std::uint64_t, const ParticleMigrationRecord*> inbound_record_by_particle_id;
+  inbound_record_by_particle_id.reserve(commit.inbound_records.size());
+  bool has_inbound_gas_cell_fields = false;
+  for (const auto& inbound : commit.inbound_records) {
+    inbound_record_by_particle_id.emplace(inbound.particle_id, &inbound);
+    has_inbound_gas_cell_fields = has_inbound_gas_cell_fields || inbound.has_gas_cell_fields;
+  }
+
+  CellSoa rebuilt_cells;
+  GasCellSidecar rebuilt_gas_cells;
+  const bool rebuild_particle_bound_gas_state = state_has_particle_bound_gas_state || has_inbound_gas_cell_fields;
+  if (rebuild_particle_bound_gas_state) {
+    std::size_t gas_count = 0;
+    for (const auto tag : new_sidecar.species_tag) {
+      if (tag == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+        ++gas_count;
+      }
+    }
+    rebuilt_cells.resize(gas_count);
+    rebuilt_gas_cells.resize(gas_count);
+
+    std::size_t gas_write = 0;
+    for (std::size_t final_particle = 0; final_particle < final_count; ++final_particle) {
+      if (new_sidecar.species_tag[final_particle] != static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+        continue;
+      }
+      const std::uint64_t particle_id = new_sidecar.particle_id[final_particle];
+      const auto inbound_it = inbound_record_by_particle_id.find(particle_id);
+      if (inbound_it != inbound_record_by_particle_id.end()) {
+        const GasCellMigrationFields& gas = inbound_it->second->gas_cell_fields;
+        if (!inbound_it->second->has_gas_cell_fields) {
+          throw std::invalid_argument("commitParticleMigration: inbound gas particle lacks gas-cell payload");
+        }
+        rebuilt_cells.center_x_comoving[gas_write] = gas.center_x_comoving;
+        rebuilt_cells.center_y_comoving[gas_write] = gas.center_y_comoving;
+        rebuilt_cells.center_z_comoving[gas_write] = gas.center_z_comoving;
+        rebuilt_cells.mass_code[gas_write] = gas.cell_mass_code;
+        rebuilt_cells.time_bin[gas_write] = gas.cell_time_bin;
+        rebuilt_cells.patch_index[gas_write] = gas.patch_index;
+        rebuilt_gas_cells.gas_cell_id[gas_write] = gas.gas_cell_id;
+        rebuilt_gas_cells.parent_particle_id[gas_write] = gas.parent_particle_id;
+        rebuilt_gas_cells.density_code[gas_write] = gas.density_code;
+        rebuilt_gas_cells.pressure_code[gas_write] = gas.pressure_code;
+        rebuilt_gas_cells.internal_energy_code[gas_write] = gas.internal_energy_code;
+        rebuilt_gas_cells.temperature_code[gas_write] = gas.temperature_code;
+        rebuilt_gas_cells.sound_speed_code[gas_write] = gas.sound_speed_code;
+      } else {
+        if (!state_has_particle_bound_gas_state) {
+          throw std::invalid_argument("commitParticleMigration: kept gas particle has no local gas-cell state to preserve");
+        }
+        const std::uint32_t old_row = gasCellRowForParticleId(particle_id);
+        rebuilt_cells.center_x_comoving[gas_write] = cells.center_x_comoving[old_row];
+        rebuilt_cells.center_y_comoving[gas_write] = cells.center_y_comoving[old_row];
+        rebuilt_cells.center_z_comoving[gas_write] = cells.center_z_comoving[old_row];
+        rebuilt_cells.mass_code[gas_write] = cells.mass_code[old_row];
+        rebuilt_cells.time_bin[gas_write] = cells.time_bin[old_row];
+        rebuilt_cells.patch_index[gas_write] = cells.patch_index[old_row];
+        rebuilt_gas_cells.gas_cell_id[gas_write] = gas_cells.gas_cell_id[old_row];
+        rebuilt_gas_cells.parent_particle_id[gas_write] = gas_cells.parent_particle_id[old_row];
+        rebuilt_gas_cells.density_code[gas_write] = gas_cells.density_code[old_row];
+        rebuilt_gas_cells.pressure_code[gas_write] = gas_cells.pressure_code[old_row];
+        rebuilt_gas_cells.internal_energy_code[gas_write] = gas_cells.internal_energy_code[old_row];
+        rebuilt_gas_cells.temperature_code[gas_write] = gas_cells.temperature_code[old_row];
+        rebuilt_gas_cells.sound_speed_code[gas_write] = gas_cells.sound_speed_code[old_row];
+      }
+      if (rebuilt_gas_cells.gas_cell_id[gas_write] != particle_id ||
+          rebuilt_gas_cells.parent_particle_id[gas_write] != particle_id) {
+        throw std::invalid_argument("commitParticleMigration: rebuilt gas-cell identity drifted from particle ID");
+      }
+      ++gas_write;
+    }
   }
 
   auto rebuildStarSidecar = [&](StarParticleSidecar* destination) {
@@ -577,6 +686,11 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
 
   particles = std::move(new_particles);
   particle_sidecar = std::move(new_sidecar);
+  if (rebuild_particle_bound_gas_state) {
+    cells = std::move(rebuilt_cells);
+    gas_cells = std::move(rebuilt_gas_cells);
+    bumpCellIndexGeneration();
+  }
   star_particles = std::move(rebuilt_star);
   black_holes = std::move(rebuilt_black_holes);
   tracers = std::move(rebuilt_tracers);
