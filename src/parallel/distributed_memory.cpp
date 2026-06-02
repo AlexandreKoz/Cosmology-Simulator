@@ -61,7 +61,54 @@ namespace {
   return (expandBits3d(z) << 2U) | (expandBits3d(y) << 1U) | expandBits3d(x);
 }
 
-[[nodiscard]] double weightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
+[[nodiscard]] bool hasNonZeroComponentWeight(const DecompositionWeightCoefficients& weights) {
+  return weights.particle_count != 0.0 || weights.gas_cell != 0.0 || weights.tree_interaction != 0.0 ||
+      weights.pm_mesh != 0.0 || weights.amr_patch != 0.0 || weights.active_fraction != 0.0 ||
+      weights.memory_pressure != 0.0 || weights.gpu_occupancy != 0.0 || weights.generic_work != 0.0;
+}
+
+[[nodiscard]] DecompositionWorkComponents effectiveWorkComponents(const DecompositionItem& item) {
+  if (item.work_components.has_explicit_components) {
+    DecompositionWorkComponents components = item.work_components;
+    components.particle_count_cost = std::max(0.0, components.particle_count_cost);
+    components.gas_cell_cost = std::max(0.0, components.gas_cell_cost);
+    components.tree_interaction_cost = std::max(0.0, components.tree_interaction_cost);
+    components.pm_mesh_cost = std::max(0.0, components.pm_mesh_cost);
+    components.amr_patch_cost = std::max(0.0, components.amr_patch_cost);
+    components.active_fraction_cost = std::max(0.0, components.active_fraction_cost);
+    components.memory_pressure_cost = std::max(0.0, components.memory_pressure_cost);
+    components.gpu_occupancy_cost = std::max(0.0, components.gpu_occupancy_cost);
+    components.generic_work_cost = std::max(0.0, components.generic_work_cost);
+    return components;
+  }
+
+  DecompositionWorkComponents components;
+  components.particle_count_cost = (item.kind == DecompositionEntityKind::kParticle) ? 1.0 : 0.0;
+  components.gas_cell_cost = (item.kind == DecompositionEntityKind::kHydroCell) ? 1.0 : 0.0;
+  components.amr_patch_cost = (item.kind == DecompositionEntityKind::kAmrPatch) ? 1.0 : 0.0;
+  components.pm_mesh_cost = (item.kind == DecompositionEntityKind::kPmMeshCell) ? 1.0 : 0.0;
+  components.tree_interaction_cost = static_cast<double>(item.remote_tree_interactions_recent);
+  components.active_fraction_cost = static_cast<double>(item.active_target_count_recent);
+  components.memory_pressure_cost = static_cast<double>(item.memory_bytes);
+  components.generic_work_cost = std::max(0.0, item.work_units);
+  return components;
+}
+
+[[nodiscard]] double componentWeightedLoad(
+    const DecompositionWorkComponents& components,
+    const DecompositionWeightCoefficients& weights) {
+  return weights.particle_count * components.particle_count_cost +
+      weights.gas_cell * components.gas_cell_cost +
+      weights.tree_interaction * components.tree_interaction_cost +
+      weights.pm_mesh * components.pm_mesh_cost +
+      weights.amr_patch * components.amr_patch_cost +
+      weights.active_fraction * components.active_fraction_cost +
+      weights.memory_pressure * components.memory_pressure_cost +
+      weights.gpu_occupancy * components.gpu_occupancy_cost +
+      weights.generic_work * components.generic_work_cost;
+}
+
+[[nodiscard]] double legacyWeightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
   const double owned_particle_term =
       (item.kind == DecompositionEntityKind::kParticle) ? 1.0 : 0.0;
   const double active_target_term = static_cast<double>(item.active_target_count_recent);
@@ -72,6 +119,47 @@ namespace {
       config.active_target_weight * active_target_term +
       config.remote_tree_interaction_weight * remote_tree_term +
       config.work_weight * work_term + config.memory_weight * memory_term;
+}
+
+[[nodiscard]] double weightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
+  const DecompositionWorkComponents components = effectiveWorkComponents(item);
+  if (config.prefer_component_work_model &&
+      item.work_components.has_explicit_components && hasNonZeroComponentWeight(config.component_weights)) {
+    return std::max(0.0, componentWeightedLoad(components, config.component_weights));
+  }
+  const double legacy = legacyWeightedLoad(item, config);
+  if (legacy > 0.0) {
+    return legacy;
+  }
+  const double component_fallback = componentWeightedLoad(components, config.component_weights);
+  if (component_fallback > 0.0) {
+    return component_fallback;
+  }
+  return (item.kind == DecompositionEntityKind::kParticle) ? 1.0 : std::max(1.0, components.rawTotal());
+}
+
+void validateComponentWeights(const DecompositionWeightCoefficients& weights) {
+  if (weights.particle_count < 0.0 || weights.gas_cell < 0.0 || weights.tree_interaction < 0.0 ||
+      weights.pm_mesh < 0.0 || weights.amr_patch < 0.0 || weights.active_fraction < 0.0 ||
+      weights.memory_pressure < 0.0 || weights.gpu_occupancy < 0.0 || weights.generic_work < 0.0) {
+    throw std::invalid_argument("decomposition component weights must be non-negative");
+  }
+}
+
+void addWorkComponentsToMetrics(
+    LoadBalanceMetrics& metrics,
+    std::size_t rank,
+    const DecompositionWorkComponents& components,
+    double sign) {
+  metrics.particle_count_cost_by_rank[rank] += sign * components.particle_count_cost;
+  metrics.gas_cell_cost_by_rank[rank] += sign * components.gas_cell_cost;
+  metrics.tree_interaction_cost_by_rank[rank] += sign * components.tree_interaction_cost;
+  metrics.pm_mesh_cost_by_rank[rank] += sign * components.pm_mesh_cost;
+  metrics.amr_patch_cost_by_rank[rank] += sign * components.amr_patch_cost;
+  metrics.active_fraction_cost_by_rank[rank] += sign * components.active_fraction_cost;
+  metrics.memory_pressure_cost_by_rank[rank] += sign * components.memory_pressure_cost;
+  metrics.gpu_occupancy_cost_by_rank[rank] += sign * components.gpu_occupancy_cost;
+  metrics.generic_work_cost_by_rank[rank] += sign * components.generic_work_cost;
 }
 
 template <typename T>
@@ -187,6 +275,54 @@ void validateTransferDescriptor(
 
 }  // namespace
 
+bool GhostLayerEpoch::matches(const GhostLayerEpoch& expected) const noexcept {
+  return decomposition_epoch == expected.decomposition_epoch && ghost_sync_epoch == expected.ghost_sync_epoch &&
+      particle_index_generation == expected.particle_index_generation;
+}
+
+double DecompositionWorkComponents::rawTotal() const noexcept {
+  return particle_count_cost + gas_cell_cost + tree_interaction_cost + pm_mesh_cost + amr_patch_cost +
+      active_fraction_cost + memory_pressure_cost + gpu_occupancy_cost + generic_work_cost;
+}
+
+void validateOwnershipDescriptor(const OwnershipDescriptor& descriptor) {
+  if (descriptor.owner_rank < 0 || descriptor.local_rank < 0) {
+    throw std::invalid_argument("ownership descriptor ranks must be non-negative");
+  }
+  switch (descriptor.kind) {
+    case ExchangeObjectKind::kLocalParticle:
+      if (!descriptor.is_authoritative || !descriptor.is_mutable || descriptor.owner_rank != descriptor.local_rank) {
+        throw std::invalid_argument("local particle descriptor must be authoritative and mutable only on owner rank");
+      }
+      break;
+    case ExchangeObjectKind::kImportedGhostParticle:
+      if (descriptor.is_authoritative || descriptor.is_mutable || descriptor.owner_rank == descriptor.local_rank) {
+        throw std::invalid_argument("imported ghost particle descriptor must be non-authoritative read-only remote state");
+      }
+      break;
+    case ExchangeObjectKind::kTreePseudoParticle:
+      if (descriptor.is_authoritative || descriptor.is_mutable) {
+        throw std::invalid_argument("tree pseudo-particle descriptor must be derived read-only exchange state");
+      }
+      break;
+    case ExchangeObjectKind::kPmMeshCell:
+      if (!descriptor.is_authoritative || descriptor.owner_rank != descriptor.local_rank) {
+        throw std::invalid_argument("PM mesh cell descriptor must be authoritative on its owning mesh rank");
+      }
+      break;
+    case ExchangeObjectKind::kHydroGhostCell:
+      if (descriptor.is_authoritative || descriptor.is_mutable || descriptor.owner_rank == descriptor.local_rank) {
+        throw std::invalid_argument("hydro ghost cell descriptor must be read-only boundary state on consumer rank");
+      }
+      break;
+    case ExchangeObjectKind::kAmrPatchMetadata:
+      if (descriptor.is_mutable && descriptor.owner_rank != descriptor.local_rank) {
+        throw std::invalid_argument("remote AMR patch metadata cannot be mutable on non-owner rank");
+      }
+      break;
+  }
+}
+
 DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem> items, const DecompositionConfig& config) {
   if (config.world_size <= 0) {
     throw std::invalid_argument("world_size must be positive");
@@ -195,11 +331,13 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
       config.remote_tree_interaction_weight < 0.0 || config.work_weight < 0.0 || config.memory_weight < 0.0) {
     throw std::invalid_argument("decomposition weights must be non-negative");
   }
+  validateComponentWeights(config.component_weights);
 
   struct KeyedItem {
     std::size_t index = 0;
     std::uint64_t morton_key = 0;
     double weighted_load = 0.0;
+    DecompositionWorkComponents components{};
   };
 
   std::vector<KeyedItem> keyed(items.size());
@@ -211,6 +349,7 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
         .index = i,
         .morton_key = mortonKey3d(qx, qy, qz),
         .weighted_load = weightedLoad(items[i], config),
+        .components = effectiveWorkComponents(items[i]),
     };
   }
 
@@ -230,6 +369,15 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.metrics.owned_particles_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
   plan.metrics.active_targets_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
   plan.metrics.remote_tree_interactions_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+  plan.metrics.particle_count_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.gas_cell_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.tree_interaction_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.pm_mesh_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.amr_patch_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.active_fraction_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.memory_pressure_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.gpu_occupancy_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.generic_work_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
 
   const double total_load = std::accumulate(
       keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
@@ -252,6 +400,7 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
         items[original_index].active_target_count_recent;
     plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank)] +=
         items[original_index].remote_tree_interactions_recent;
+    addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank), keyed[sorted_pos].components, 1.0);
     const double item_load = keyed[sorted_pos].weighted_load;
     current_prefix_load += item_load;
 
@@ -301,6 +450,8 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
           items[original_index].remote_tree_interactions_recent;
       plan.metrics.remote_tree_interactions_by_rank[static_cast<std::size_t>(current_rank - 1)] -=
           items[original_index].remote_tree_interactions_recent;
+      addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank), keyed[sorted_pos].components, 1.0);
+      addWorkComponentsToMetrics(plan.metrics, static_cast<std::size_t>(current_rank - 1), keyed[sorted_pos].components, -1.0);
       continue;
     }
 
@@ -351,7 +502,15 @@ GhostExchangePlan buildGhostExchangePlan(
   std::vector<int> owners;
   owners.reserve(local_ghost_descriptors.size());
 
+  bool has_epoch = false;
+  GhostLayerEpoch common_epoch{};
   for (const LocalGhostDescriptor descriptor : local_ghost_descriptors) {
+    if (!has_epoch) {
+      common_epoch = descriptor.epoch;
+      has_epoch = true;
+    } else if (!descriptor.epoch.matches(common_epoch)) {
+      throw std::invalid_argument("ghost descriptors in one exchange plan must share a common epoch");
+    }
     if (descriptor.owning_rank < 0) {
       throw std::invalid_argument("ghost owner rank must be non-negative");
     }
@@ -367,6 +526,7 @@ GhostExchangePlan buildGhostExchangePlan(
     owners.push_back(descriptor.owning_rank);
   }
 
+  plan.epoch = common_epoch;
   std::sort(owners.begin(), owners.end());
   owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
@@ -436,6 +596,12 @@ GhostExchangePlan buildGhostExchangePlan(
 }
 
 void validateGhostExchangePlan(const GhostExchangePlan& plan) {
+  if (!plan.uses_blocking_exchange && !plan.nonblocking_overlap_enabled) {
+    throw std::invalid_argument("ghost exchange plan must expose either the default blocking path or an explicit overlap path");
+  }
+  if (plan.nonblocking_overlap_enabled && !plan.uses_blocking_exchange) {
+    throw std::invalid_argument("nonblocking ghost exchange overlap must share the blocking ownership contract");
+  }
   const std::size_t neighbor_count = plan.neighbor_ranks.size();
   if (plan.send_local_indices_by_neighbor.size() != neighbor_count ||
       plan.recv_local_indices_by_neighbor.size() != neighbor_count ||
@@ -459,6 +625,56 @@ void validateGhostExchangePlan(const GhostExchangePlan& plan) {
         plan.neighbor_ranks[i],
         i,
         plan.recv_local_indices_by_neighbor[i]);
+  }
+}
+
+void validateGhostTransferAgainstResidency(
+    const GhostTransferDescriptor& descriptor,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    int world_rank) {
+  if (world_rank < 0) {
+    throw std::invalid_argument("world_rank must be non-negative");
+  }
+  for (const std::uint32_t local_index : descriptor.local_indices) {
+    if (local_index >= local_ghost_descriptors.size()) {
+      throw std::out_of_range("ghost transfer descriptor local index out of residency table range");
+    }
+    const LocalGhostDescriptor local = local_ghost_descriptors[local_index];
+    if (descriptor.role == GhostTransferRole::kOutboundSend) {
+      if (local.residency != LocalIndexResidency::kOwned || local.owning_rank != world_rank) {
+        throw std::invalid_argument("outbound ghost or migration payload must be packed from authoritative local state");
+      }
+    } else {
+      if (descriptor.intent == GhostTransferIntent::kGhostRefreshReceiveStaging) {
+        if (local.residency != LocalIndexResidency::kGhost || local.owning_rank == world_rank) {
+          throw std::invalid_argument("ghost refresh receive staging must unpack into remote-owned ghost slots");
+        }
+      } else if (descriptor.intent == GhostTransferIntent::kOwnershipMigrationReceiveStaging) {
+        if (descriptor.expected_post_transfer_residency != LocalIndexResidency::kOwned) {
+          throw std::invalid_argument("ownership migration receive staging must produce owned local state");
+        }
+      }
+    }
+  }
+}
+
+void validateBlockingGhostExchangeContracts(
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    int world_rank,
+    const GhostLayerEpoch& expected_epoch) {
+  validateGhostExchangePlan(plan);
+  if (!plan.uses_blocking_exchange) {
+    throw std::invalid_argument("default ghost exchange path must be blocking and correctness-first");
+  }
+  if (!plan.epoch.matches(expected_epoch)) {
+    throw std::invalid_argument("ghost exchange plan epoch is stale for the current decomposition/sync generation");
+  }
+  for (const GhostTransferDescriptor& descriptor : plan.outbound_transfers) {
+    validateGhostTransferAgainstResidency(descriptor, local_ghost_descriptors, world_rank);
+  }
+  for (const GhostTransferDescriptor& descriptor : plan.inbound_transfers) {
+    validateGhostTransferAgainstResidency(descriptor, local_ghost_descriptors, world_rank);
   }
 }
 
@@ -621,6 +837,41 @@ bool GhostExchangeBufferSoA::isConsistent() const noexcept {
 }
 
 std::size_t GhostExchangeBufferSoA::size() const noexcept { return entity_id.size(); }
+
+std::size_t ReadOnlyGhostExchangeView::size() const noexcept { return entity_id.size(); }
+
+bool ReadOnlyGhostExchangeView::isConsistent() const noexcept {
+  return density_code.size() == entity_id.size() && velocity_x_code.size() == entity_id.size() &&
+      pressure_code.size() == entity_id.size();
+}
+
+bool ReadOnlyGhostExchangeView::isFresh(const GhostLayerEpoch& expected_epoch) const noexcept {
+  return epoch.matches(expected_epoch);
+}
+
+ReadOnlyGhostExchangeView makeReadOnlyGhostExchangeView(const GhostExchangeBufferSoA& storage) {
+  if (!storage.isConsistent()) {
+    throw std::invalid_argument("ghost storage must be component-consistent before building a read-only view");
+  }
+  return ReadOnlyGhostExchangeView{
+      .epoch = storage.epoch,
+      .entity_id = storage.entity_id,
+      .density_code = storage.density_code,
+      .velocity_x_code = storage.velocity_x_code,
+      .pressure_code = storage.pressure_code,
+  };
+}
+
+void requireFreshGhostExchangeView(
+    const ReadOnlyGhostExchangeView& view,
+    const GhostLayerEpoch& expected_epoch) {
+  if (!view.isConsistent()) {
+    throw std::invalid_argument("read-only ghost view component sizes are inconsistent");
+  }
+  if (!view.isFresh(expected_epoch)) {
+    throw std::invalid_argument("read-only ghost view is stale for the current exchange epoch");
+  }
+}
 
 void GhostExchangeBuffer::clear() { m_bytes.clear(); }
 
@@ -937,6 +1188,68 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
   return report;
 }
 
+PmMeshOwnershipDescriptor PmSlabLayout::ownershipDescriptor(
+    std::uint64_t decomposition_epoch,
+    std::string decomposition_mode) const {
+  PmMeshOwnershipDescriptor descriptor{
+      .decomposition_mode = std::move(decomposition_mode),
+      .owner_rank = world_rank,
+      .decomposition_epoch = decomposition_epoch,
+      .global_nx = global_nx,
+      .global_ny = global_ny,
+      .global_nz = global_nz,
+      .begin_x = owned_x.begin_x,
+      .end_x = owned_x.end_x,
+  };
+  validatePmMeshOwnershipDescriptor(descriptor);
+  return descriptor;
+}
+
+void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor) {
+  if (descriptor.decomposition_mode != "slab" && descriptor.decomposition_mode != "pencil") {
+    throw std::invalid_argument("PM mesh ownership descriptor has unsupported decomposition mode");
+  }
+  if (descriptor.owner_rank < 0) {
+    throw std::invalid_argument("PM mesh owner_rank must be non-negative");
+  }
+  if (descriptor.global_nx == 0 || descriptor.global_ny == 0 || descriptor.global_nz == 0) {
+    throw std::invalid_argument("PM mesh descriptor global dimensions must be positive");
+  }
+  if (descriptor.begin_x > descriptor.end_x || descriptor.end_x > descriptor.global_nx) {
+    throw std::invalid_argument("PM mesh x ownership range is invalid");
+  }
+}
+
+void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor) {
+  if (descriptor.source_rank < 0) {
+    throw std::invalid_argument("tree pseudo-particle source_rank must be non-negative");
+  }
+  if (!descriptor.derived_not_authoritative) {
+    throw std::invalid_argument("tree pseudo-particles must be marked as derived non-authoritative state");
+  }
+}
+
+void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor) {
+  if (descriptor.owner_rank < 0 || descriptor.consumer_rank < 0) {
+    throw std::invalid_argument("hydro ghost cell ranks must be non-negative");
+  }
+  if (descriptor.owner_rank == descriptor.consumer_rank) {
+    throw std::invalid_argument("hydro ghost cell must be consumed on a non-owner rank");
+  }
+  if (!descriptor.boundary_state_only) {
+    throw std::invalid_argument("hydro ghost cells are boundary exchange state, not authoritative conserved truth");
+  }
+}
+
+void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor) {
+  if (descriptor.owner_rank < 0 || descriptor.peer_rank < 0) {
+    throw std::invalid_argument("AMR patch exchange ranks must be non-negative");
+  }
+  if (!descriptor.metadata_only && descriptor.owner_rank != descriptor.peer_rank) {
+    throw std::invalid_argument("remote AMR patch exchange cannot mutate authoritative patch metadata");
+  }
+}
+
 void recordDistributedProfiling(
     core::ProfilerSession* profiler,
     const LoadBalanceMetrics& metrics,
@@ -954,6 +1267,18 @@ void recordDistributedProfiling(
                                           ? 0ULL
                                           : static_cast<std::uint64_t>(std::llround(metrics.weighted_imbalance_ratio * 1.0e6));
   profiler->counters().setCount("parallel.weighted_imbalance_ratio_ppm", imbalance_ppm);
+  auto record_component_total = [&](std::string_view name, const std::vector<double>& values) {
+    const double total = std::accumulate(values.begin(), values.end(), 0.0);
+    profiler->counters().setCount(std::string(name), static_cast<std::uint64_t>(std::llround(std::max(0.0, total))));
+  };
+  record_component_total("parallel.weight_component_particle_count", metrics.particle_count_cost_by_rank);
+  record_component_total("parallel.weight_component_gas_cell", metrics.gas_cell_cost_by_rank);
+  record_component_total("parallel.weight_component_tree_interaction", metrics.tree_interaction_cost_by_rank);
+  record_component_total("parallel.weight_component_pm_mesh", metrics.pm_mesh_cost_by_rank);
+  record_component_total("parallel.weight_component_amr_patch", metrics.amr_patch_cost_by_rank);
+  record_component_total("parallel.weight_component_active_fraction", metrics.active_fraction_cost_by_rank);
+  record_component_total("parallel.weight_component_memory_pressure", metrics.memory_pressure_cost_by_rank);
+  record_component_total("parallel.weight_component_gpu_occupancy", metrics.gpu_occupancy_cost_by_rank);
 
   const std::uint64_t bytes_moved = ghost_exchange_send_bytes + ghost_exchange_recv_bytes;
   profiler->addBytesMoved(bytes_moved);

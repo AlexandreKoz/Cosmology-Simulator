@@ -723,13 +723,17 @@ void applyInitialGravityAwareDecomposition(
     core::SimulationState& state,
     const core::SimulationConfig& config,
     int world_size,
-    int world_rank) {
+    int world_rank,
+    core::ProfilerSession* profiler) {
   if (world_size <= 1) {
     return;
   }
   constexpr std::size_t k_density_grid = 16;
   const std::size_t grid_cells = k_density_grid * k_density_grid * k_density_grid;
   std::vector<std::uint32_t> occupancy(grid_cells, 0U);
+  std::vector<std::uint32_t> active_occupancy(grid_cells, 0U);
+  std::vector<std::uint32_t> gas_occupancy(grid_cells, 0U);
+  std::vector<std::uint32_t> pm_x_occupancy(static_cast<std::size_t>(std::max(config.numerics.treepm_pm_grid_nx, 1)), 0U);
   const auto wrap = [](double x, double box) {
     if (box <= 0.0) {
       return x;
@@ -761,15 +765,61 @@ void applyInitialGravityAwareDecomposition(
         : 0U;
     return (ix * k_density_grid + iy) * k_density_grid + iz;
   };
+  const auto pm_x_index = [&](double x) {
+    const double box_x = config.cosmology.box_size_x_mpc_comoving;
+    const std::size_t nx = pm_x_occupancy.size();
+    if (box_x <= 0.0 || nx == 0) {
+      return std::size_t{0};
+    }
+    const double scaled = (wrap(x, box_x) / box_x) * static_cast<double>(nx);
+    return std::min<std::size_t>(nx - 1U, static_cast<std::size_t>(scaled));
+  };
+
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     const std::size_t cell = density_cell_index(
         state.particles.position_x_comoving[particle_index],
         state.particles.position_y_comoving[particle_index],
         state.particles.position_z_comoving[particle_index]);
     ++occupancy[cell];
+    if (!state.particles.time_bin.empty() && state.particles.time_bin[particle_index] == 0U) {
+      ++active_occupancy[cell];
+    }
+    if (state.particle_sidecar.species_tag[particle_index] == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
+      ++gas_occupancy[cell];
+    }
+    ++pm_x_occupancy[pm_x_index(state.particles.position_x_comoving[particle_index])];
   }
+
+  std::vector<std::uint32_t> patch_cell_count(state.patches.size(), 0U);
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+    if (patch_index < patch_cell_count.size()) {
+      ++patch_cell_count[patch_index];
+    }
+  }
+
+  const auto particle_memory_bytes = [&](std::uint32_t species_tag) {
+    std::uint64_t bytes = sizeof(double) * 7U + sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t) * 3U;
+    if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+      bytes += sizeof(double);
+    }
+    if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
+      bytes += sizeof(std::uint8_t);
+    }
+    if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
+      bytes += sizeof(double) * 8U + sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t);
+    } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kStar)) {
+      bytes += sizeof(std::uint32_t) + sizeof(double) * 13U;
+    } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
+      bytes += sizeof(std::uint32_t) * 2U + sizeof(double) * 8U;
+    } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kTracer)) {
+      bytes += sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t) * 2U + sizeof(double) * 3U;
+    }
+    return bytes;
+  };
+
   std::vector<parallel::DecompositionItem> items;
-  items.reserve(state.particles.size());
+  items.reserve(state.particles.size() + state.patches.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     parallel::DecompositionItem item;
     item.entity_id = state.particle_sidecar.particle_id[particle_index];
@@ -779,12 +829,73 @@ void applyInitialGravityAwareDecomposition(
     item.z_comov = state.particles.position_z_comoving[particle_index];
     const std::size_t density_cell = density_cell_index(item.x_comov, item.y_comov, item.z_comov);
     const std::uint32_t local_density = occupancy[density_cell];
-    item.active_target_count_recent = local_density;
-    item.remote_tree_interactions_recent = 0;
-    item.work_units = 1.0 + static_cast<double>(local_density);
-    item.memory_bytes = sizeof(double) * 7 + sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t) * 3;
+    const std::uint32_t local_active = active_occupancy[density_cell];
+    const std::uint32_t local_gas = gas_occupancy[density_cell];
+    const std::uint32_t pm_load = pm_x_occupancy[pm_x_index(item.x_comov)];
+    const std::uint32_t species_tag = state.particle_sidecar.species_tag[particle_index];
+    double amr_patch_cost = 0.0;
+    if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) && !state.cells.patch_index.empty()) {
+      try {
+        const std::uint32_t cell_row = state.gasCellRowForParticleId(item.entity_id);
+        if (cell_row < state.cells.patch_index.size()) {
+          const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+          if (patch_index < patch_cell_count.size()) {
+            amr_patch_cost = static_cast<double>(patch_cell_count[patch_index]);
+          }
+        }
+      } catch (const std::exception&) {
+        amr_patch_cost = 0.0;
+      }
+    }
+    const double local_density_d = static_cast<double>(std::max<std::uint32_t>(local_density, 1U));
+    item.active_target_count_recent = local_active;
+    item.remote_tree_interactions_recent = static_cast<std::uint64_t>(
+        std::llround(local_density_d * std::log2(local_density_d + 1.0)));
+    item.work_units = 1.0;
+    item.memory_bytes = particle_memory_bytes(species_tag);
+    item.work_components = parallel::DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .gas_cell_cost = (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas))
+            ? (1.0 + static_cast<double>(local_gas))
+            : 0.0,
+        .tree_interaction_cost = static_cast<double>(item.remote_tree_interactions_recent),
+        .pm_mesh_cost = static_cast<double>(pm_load),
+        .amr_patch_cost = amr_patch_cost,
+        .active_fraction_cost = static_cast<double>(local_active),
+        .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .gpu_occupancy_cost = 0.0,
+        .generic_work_cost = 1.0 + std::sqrt(local_density_d),
+        .has_explicit_components = true,
+    };
     items.push_back(item);
   }
+
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.cell_count[patch_index] == 0U) {
+      continue;
+    }
+    const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+    if (first_cell >= state.cells.size()) {
+      continue;
+    }
+    parallel::DecompositionItem patch_item;
+    patch_item.entity_id = state.patches.patch_id[patch_index];
+    patch_item.kind = parallel::DecompositionEntityKind::kAmrPatch;
+    patch_item.x_comov = state.cells.center_x_comoving[first_cell];
+    patch_item.y_comov = state.cells.center_y_comoving[first_cell];
+    patch_item.z_comov = state.cells.center_z_comoving[first_cell];
+    patch_item.memory_bytes = static_cast<std::uint64_t>(state.patches.cell_count[patch_index]) *
+        static_cast<std::uint64_t>(sizeof(double) * 8U + sizeof(std::uint32_t));
+    patch_item.work_components = parallel::DecompositionWorkComponents{
+        .amr_patch_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
+            (1.0 + static_cast<double>(std::max(state.patches.level[patch_index], 0))),
+        .memory_pressure_cost = static_cast<double>(patch_item.memory_bytes),
+        .generic_work_cost = static_cast<double>(state.patches.cell_count[patch_index]),
+        .has_explicit_components = true,
+    };
+    items.push_back(patch_item);
+  }
+
   parallel::DecompositionConfig decomposition_config;
   decomposition_config.world_size = world_size;
   decomposition_config.domain_x_min_comov = 0.0;
@@ -793,17 +904,41 @@ void applyInitialGravityAwareDecomposition(
   decomposition_config.domain_y_max_comov = config.cosmology.box_size_y_mpc_comoving;
   decomposition_config.domain_z_min_comov = 0.0;
   decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
-  decomposition_config.owned_particle_weight = 1.0;
-  decomposition_config.active_target_weight = 2.0;
-  decomposition_config.remote_tree_interaction_weight = 1.0;
-  decomposition_config.work_weight = 0.5;
-  decomposition_config.memory_weight = 0.1;
+  decomposition_config.owned_particle_weight = 0.0;
+  decomposition_config.active_target_weight = 0.0;
+  decomposition_config.remote_tree_interaction_weight = 0.0;
+  decomposition_config.work_weight = 0.0;
+  decomposition_config.memory_weight = 0.0;
+  decomposition_config.component_weights = parallel::DecompositionWeightCoefficients{
+      .particle_count = 1.0,
+      .gas_cell = 1.5,
+      .tree_interaction = 1.0,
+      .pm_mesh = 0.25,
+      .amr_patch = 1.0,
+      .active_fraction = 2.0,
+      .memory_pressure = 1.0 / (1024.0 * 1024.0),
+      .gpu_occupancy = 0.0,
+      .generic_work = 0.5,
+  };
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
-  for (std::size_t item_index = 0; item_index < items.size(); ++item_index) {
+  for (std::size_t item_index = 0; item_index < state.particles.size(); ++item_index) {
     state.particle_sidecar.owning_rank[item_index] = static_cast<std::uint32_t>(plan.owning_rank_by_item[item_index]);
+  }
+  parallel::recordDistributedProfiling(profiler, plan.metrics, 0, 0);
+  if (profiler != nullptr) {
+    profiler->recordEvent(core::RuntimeEvent{
+        .event_kind = "parallel.decomposition.work_weighted",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "parallel.domain_decomposition",
+        .message = "initial domain decomposition used explicit work-weight components",
+        .payload = {{"world_size", std::to_string(world_size)},
+                    {"item_count", std::to_string(items.size())},
+                    {"weighted_imbalance_ratio", std::to_string(plan.metrics.weighted_imbalance_ratio)},
+                    {"memory_imbalance_ratio", std::to_string(plan.metrics.memory_imbalance_ratio)}}});
   }
   compactStateToCurrentOwner(state, world_rank);
 }
+
 
 
 [[nodiscard]] double wrapPeriodicPosition(double position_comoving, double box_size_mpc_comoving) {
@@ -3009,7 +3144,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
         mpi_context.worldSize(),
         config.cosmology.box_size_x_mpc_comoving);
-    applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank());
+    applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank(), &profiler);
 
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());

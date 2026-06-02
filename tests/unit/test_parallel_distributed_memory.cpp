@@ -168,6 +168,63 @@ void testClusteredGravityAwareDecompositionImprovesWeightedImbalance() {
   assert(gravity_plan.owning_rank_by_item != baseline.owning_rank_by_item);
 }
 
+
+void testExplicitComponentWorkModelAndDiagnostics() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(6);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    items[i].entity_id = 500 + i;
+    items[i].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].x_comov = static_cast<double>(i) / 6.0;
+    items[i].y_comov = 0.1;
+    items[i].z_comov = 0.2;
+    items[i].work_components = cosmosim::parallel::DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .gas_cell_cost = (i >= 3) ? 8.0 : 0.0,
+        .tree_interaction_cost = (i >= 3) ? 64.0 : 4.0,
+        .pm_mesh_cost = (i % 2 == 0) ? 5.0 : 2.0,
+        .amr_patch_cost = (i == 5) ? 12.0 : 0.0,
+        .active_fraction_cost = (i >= 3) ? 6.0 : 1.0,
+        .memory_pressure_cost = (i >= 3) ? 2048.0 : 512.0,
+        .gpu_occupancy_cost = 0.0,
+        .generic_work_cost = 1.0,
+        .has_explicit_components = true,
+    };
+  }
+
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = 2;
+  config.owned_particle_weight = 0.0;
+  config.work_weight = 0.0;
+  config.memory_weight = 0.0;
+  config.component_weights = cosmosim::parallel::DecompositionWeightCoefficients{
+      .particle_count = 1.0,
+      .gas_cell = 1.5,
+      .tree_interaction = 1.0,
+      .pm_mesh = 0.25,
+      .amr_patch = 2.0,
+      .active_fraction = 2.0,
+      .memory_pressure = 1.0 / 1024.0,
+      .gpu_occupancy = 0.0,
+      .generic_work = 0.5,
+  };
+  const auto plan = cosmosim::parallel::buildMortonSfcDecomposition(items, config);
+  assert(plan.metrics.gas_cell_cost_by_rank.size() == 2);
+  assert(plan.metrics.tree_interaction_cost_by_rank.size() == 2);
+  assert(plan.metrics.pm_mesh_cost_by_rank.size() == 2);
+  double total_tree = 0.0;
+  double total_gas = 0.0;
+  double total_pm = 0.0;
+  for (std::size_t rank = 0; rank < 2; ++rank) {
+    total_tree += plan.metrics.tree_interaction_cost_by_rank[rank];
+    total_gas += plan.metrics.gas_cell_cost_by_rank[rank];
+    total_pm += plan.metrics.pm_mesh_cost_by_rank[rank];
+  }
+  assert(std::abs(total_tree - (3.0 * 4.0 + 3.0 * 64.0)) < 1.0e-12);
+  assert(std::abs(total_gas - 24.0) < 1.0e-12);
+  assert(std::abs(total_pm - 21.0) < 1.0e-12);
+  assert(plan.metrics.weighted_imbalance_ratio >= 1.0);
+}
+
 void testRestartStateRoundTrip() {
   cosmosim::parallel::DistributedRestartState in;
   in.schema_version = 2;
@@ -243,6 +300,79 @@ void testExplicitOwnedVsGhostContracts() {
   assert(plan.send_bytes == 0);
   assert(plan.recv_bytes == 2 * (sizeof(double) * 3 + sizeof(std::uint64_t)));
   cosmosim::parallel::validateGhostExchangePlan(plan);
+}
+
+
+void testOwnershipDescriptorsAndGhostEpochContracts() {
+  cosmosim::parallel::validateOwnershipDescriptor(cosmosim::parallel::OwnershipDescriptor{
+      .kind = cosmosim::parallel::ExchangeObjectKind::kLocalParticle,
+      .object_id = 1,
+      .owner_rank = 0,
+      .local_rank = 0,
+      .is_authoritative = true,
+      .is_mutable = true,
+  });
+
+  bool mutable_ghost_threw = false;
+  try {
+    cosmosim::parallel::validateOwnershipDescriptor(cosmosim::parallel::OwnershipDescriptor{
+        .kind = cosmosim::parallel::ExchangeObjectKind::kImportedGhostParticle,
+        .object_id = 2,
+        .owner_rank = 1,
+        .local_rank = 0,
+        .is_authoritative = false,
+        .is_mutable = true,
+    });
+  } catch (const std::invalid_argument&) {
+    mutable_ghost_threw = true;
+  }
+  assert(mutable_ghost_threw);
+
+  cosmosim::parallel::GhostExchangeBufferSoA ghosts;
+  ghosts.epoch = {.decomposition_epoch = 4, .ghost_sync_epoch = 9, .particle_index_generation = 11};
+  ghosts.entity_id = {10, 20};
+  ghosts.density_code = {1.0, 2.0};
+  ghosts.velocity_x_code = {0.5, 0.75};
+  ghosts.pressure_code = {3.0, 4.0};
+  const auto view = cosmosim::parallel::makeReadOnlyGhostExchangeView(ghosts);
+  cosmosim::parallel::requireFreshGhostExchangeView(view, ghosts.epoch);
+  bool stale_threw = false;
+  try {
+    cosmosim::parallel::requireFreshGhostExchangeView(
+        view,
+        {.decomposition_epoch = 5, .ghost_sync_epoch = 9, .particle_index_generation = 11});
+  } catch (const std::invalid_argument&) {
+    stale_threw = true;
+  }
+  assert(stale_threw);
+}
+
+void testExchangeObjectDescriptorValidation() {
+  const auto layout = cosmosim::parallel::makePmSlabLayout(12, 8, 4, 3, 1);
+  const auto descriptor = layout.ownershipDescriptor(/*decomposition_epoch=*/7);
+  assert(descriptor.owner_rank == 1);
+  assert(descriptor.begin_x == 4);
+  assert(descriptor.end_x == 8);
+  cosmosim::parallel::validateTreePseudoParticleDescriptor({
+      .pseudo_particle_id = 42,
+      .source_rank = 2,
+      .decomposition_epoch = 7,
+      .derived_not_authoritative = true,
+  });
+  cosmosim::parallel::validateHydroGhostCellDescriptor({
+      .gas_cell_id = 99,
+      .owner_rank = 1,
+      .consumer_rank = 0,
+      .hydro_sync_epoch = 3,
+      .boundary_state_only = true,
+  });
+  cosmosim::parallel::validateAmrPatchExchangeDescriptor({
+      .patch_id = 77,
+      .owner_rank = 1,
+      .peer_rank = 0,
+      .decomposition_epoch = 7,
+      .metadata_only = true,
+  });
 }
 
 void testGhostExchangeBufferRejectsOwnershipMigrationIntent() {
@@ -740,7 +870,10 @@ int main() {
   testRestartStateRoundTrip();
   testGravityAwareDecompositionTracksInteractionCost();
   testClusteredGravityAwareDecompositionImprovesWeightedImbalance();
+  testExplicitComponentWorkModelAndDiagnostics();
   testExplicitOwnedVsGhostContracts();
+  testOwnershipDescriptorsAndGhostEpochContracts();
+  testExchangeObjectDescriptorValidation();
   testGhostExchangeBufferRejectsOwnershipMigrationIntent();
   testRestartStateRejectsMissingOrDuplicateOwnershipEntries();
   testDistributedRestartCompatibilityReporting();

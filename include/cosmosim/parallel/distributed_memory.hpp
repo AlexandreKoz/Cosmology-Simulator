@@ -14,7 +14,36 @@ namespace cosmosim::parallel {
 
 enum class DecompositionEntityKind : std::uint8_t {
   kParticle = 0,
-  kAmrPatch = 1,
+  kHydroCell = 1,
+  kAmrPatch = 2,
+  kPmMeshCell = 3,
+};
+
+struct DecompositionWorkComponents {
+  double particle_count_cost = 0.0;
+  double gas_cell_cost = 0.0;
+  double tree_interaction_cost = 0.0;
+  double pm_mesh_cost = 0.0;
+  double amr_patch_cost = 0.0;
+  double active_fraction_cost = 0.0;
+  double memory_pressure_cost = 0.0;
+  double gpu_occupancy_cost = 0.0;
+  double generic_work_cost = 0.0;
+  bool has_explicit_components = false;
+
+  [[nodiscard]] double rawTotal() const noexcept;
+};
+
+struct DecompositionWeightCoefficients {
+  double particle_count = 1.0;
+  double gas_cell = 1.0;
+  double tree_interaction = 1.0;
+  double pm_mesh = 1.0;
+  double amr_patch = 1.0;
+  double active_fraction = 1.0;
+  double memory_pressure = 1.0;
+  double gpu_occupancy = 0.0;
+  double generic_work = 1.0;
 };
 
 struct DecompositionItem {
@@ -27,6 +56,7 @@ struct DecompositionItem {
   std::uint64_t remote_tree_interactions_recent = 0;
   double work_units = 1.0;
   std::uint64_t memory_bytes = 0;
+  DecompositionWorkComponents work_components{};
 };
 
 struct DecompositionConfig {
@@ -42,6 +72,8 @@ struct DecompositionConfig {
   double remote_tree_interaction_weight = 0.0;
   double work_weight = 0.0;
   double memory_weight = 0.0;
+  DecompositionWeightCoefficients component_weights{};
+  bool prefer_component_work_model = true;
 };
 
 struct RankRange {
@@ -55,6 +87,15 @@ struct LoadBalanceMetrics {
   std::vector<std::uint64_t> owned_particles_by_rank;
   std::vector<std::uint64_t> active_targets_by_rank;
   std::vector<std::uint64_t> remote_tree_interactions_by_rank;
+  std::vector<double> particle_count_cost_by_rank;
+  std::vector<double> gas_cell_cost_by_rank;
+  std::vector<double> tree_interaction_cost_by_rank;
+  std::vector<double> pm_mesh_cost_by_rank;
+  std::vector<double> amr_patch_cost_by_rank;
+  std::vector<double> active_fraction_cost_by_rank;
+  std::vector<double> memory_pressure_cost_by_rank;
+  std::vector<double> gpu_occupancy_cost_by_rank;
+  std::vector<double> generic_work_cost_by_rank;
   double mean_weighted_load = 0.0;
   double max_weighted_load = 0.0;
   double weighted_imbalance_ratio = 0.0;
@@ -79,9 +120,40 @@ enum class LocalIndexResidency : std::uint8_t {
   kGhost = 1,
 };
 
+enum class ExchangeObjectKind : std::uint8_t {
+  kLocalParticle = 0,
+  kImportedGhostParticle = 1,
+  kTreePseudoParticle = 2,
+  kPmMeshCell = 3,
+  kHydroGhostCell = 4,
+  kAmrPatchMetadata = 5,
+};
+
+struct OwnershipDescriptor {
+  ExchangeObjectKind kind = ExchangeObjectKind::kLocalParticle;
+  std::uint64_t object_id = 0;
+  int owner_rank = 0;
+  int local_rank = 0;
+  std::uint64_t decomposition_epoch = 0;
+  bool is_authoritative = true;
+  bool is_mutable = true;
+};
+
+void validateOwnershipDescriptor(const OwnershipDescriptor& descriptor);
+
+struct GhostLayerEpoch {
+  std::uint64_t decomposition_epoch = 0;
+  std::uint64_t ghost_sync_epoch = 0;
+  std::uint64_t particle_index_generation = 0;
+
+  [[nodiscard]] bool matches(const GhostLayerEpoch& expected) const noexcept;
+};
+
 struct LocalGhostDescriptor {
   LocalIndexResidency residency = LocalIndexResidency::kOwned;
   int owning_rank = 0;
+  std::uint64_t particle_id = 0;
+  GhostLayerEpoch epoch{};
 };
 
 enum class GhostTransferRole : std::uint8_t {
@@ -113,6 +185,9 @@ struct GhostExchangePlan {
   std::vector<GhostTransferDescriptor> inbound_transfers;
   std::uint64_t send_bytes = 0;
   std::uint64_t recv_bytes = 0;
+  GhostLayerEpoch epoch{};
+  bool uses_blocking_exchange = true;
+  bool nonblocking_overlap_enabled = false;
 };
 
 [[nodiscard]] GhostExchangePlan buildGhostExchangePlan(
@@ -126,6 +201,15 @@ struct GhostExchangePlan {
     std::size_t bytes_per_ghost);
 
 void validateGhostExchangePlan(const GhostExchangePlan& plan);
+void validateGhostTransferAgainstResidency(
+    const GhostTransferDescriptor& descriptor,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    int world_rank);
+void validateBlockingGhostExchangeContracts(
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    int world_rank,
+    const GhostLayerEpoch& expected_epoch);
 
 struct ReductionAgreement {
   double deterministic_baseline_sum = 0.0;
@@ -215,6 +299,7 @@ struct RankConfigConsensus {
     std::span<const RankConfigDigest> digests);
 
 struct GhostExchangeBufferSoA {
+  GhostLayerEpoch epoch{};
   std::vector<std::uint64_t> entity_id;
   std::vector<double> density_code;
   std::vector<double> velocity_x_code;
@@ -223,6 +308,24 @@ struct GhostExchangeBufferSoA {
   [[nodiscard]] bool isConsistent() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
 };
+
+struct ReadOnlyGhostExchangeView {
+  GhostLayerEpoch epoch{};
+  std::span<const std::uint64_t> entity_id;
+  std::span<const double> density_code;
+  std::span<const double> velocity_x_code;
+  std::span<const double> pressure_code;
+
+  [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
+  [[nodiscard]] bool isFresh(const GhostLayerEpoch& expected_epoch) const noexcept;
+};
+
+[[nodiscard]] ReadOnlyGhostExchangeView makeReadOnlyGhostExchangeView(
+    const GhostExchangeBufferSoA& storage);
+void requireFreshGhostExchangeView(
+    const ReadOnlyGhostExchangeView& view,
+    const GhostLayerEpoch& expected_epoch);
 
 class GhostExchangeBuffer {
  public:
@@ -308,6 +411,45 @@ struct PmSlabRange {
   }
 };
 
+struct PmMeshOwnershipDescriptor {
+  std::string decomposition_mode = "slab";
+  int owner_rank = 0;
+  std::uint64_t decomposition_epoch = 0;
+  std::size_t global_nx = 0;
+  std::size_t global_ny = 0;
+  std::size_t global_nz = 0;
+  std::size_t begin_x = 0;
+  std::size_t end_x = 0;
+};
+
+struct TreePseudoParticleDescriptor {
+  std::uint64_t pseudo_particle_id = 0;
+  int source_rank = 0;
+  std::uint64_t decomposition_epoch = 0;
+  bool derived_not_authoritative = true;
+};
+
+struct HydroGhostCellDescriptor {
+  std::uint64_t gas_cell_id = 0;
+  int owner_rank = 0;
+  int consumer_rank = 0;
+  std::uint64_t hydro_sync_epoch = 0;
+  bool boundary_state_only = true;
+};
+
+struct AmrPatchExchangeDescriptor {
+  std::uint64_t patch_id = 0;
+  int owner_rank = 0;
+  int peer_rank = 0;
+  std::uint64_t decomposition_epoch = 0;
+  bool metadata_only = true;
+};
+
+void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor);
+void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor);
+void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor);
+void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor);
+
 struct PmSlabLayout {
   std::size_t global_nx = 0;
   std::size_t global_ny = 0;
@@ -338,6 +480,9 @@ struct PmSlabLayout {
   [[nodiscard]] bool ownsFullDomain() const noexcept {
     return owned_x.begin_x == 0 && owned_x.end_x == global_nx;
   }
+  [[nodiscard]] PmMeshOwnershipDescriptor ownershipDescriptor(
+      std::uint64_t decomposition_epoch = 0,
+      std::string decomposition_mode = "slab") const;
 };
 
 [[nodiscard]] inline PmSlabRange pmOwnedXRangeForRank(std::size_t global_nx, int world_size, int rank) {
