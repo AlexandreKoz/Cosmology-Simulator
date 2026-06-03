@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <stdexcept>
 
 namespace cosmosim::core {
@@ -102,11 +103,73 @@ StateMetadata StateMetadata::deserialize(std::string_view text) {
   return metadata;
 }
 
-void ModuleSidecarRegistry::upsert(ModuleSidecarBlock block) {
+bool ModuleSidecarBlock::isParticleIndexed() const noexcept {
+  return particle_indexed || row_stride_bytes != 0U || !particle_id_by_row.empty();
+}
+
+std::size_t ModuleSidecarBlock::rowCount() const noexcept {
+  return particle_id_by_row.size();
+}
+
+std::span<const std::byte> ModuleSidecarBlock::rowPayload(std::size_t row) const {
+  if (!isParticleIndexed()) {
+    throw std::invalid_argument("ModuleSidecarBlock.rowPayload: block is not particle-indexed");
+  }
+  if (row >= particle_id_by_row.size()) {
+    throw std::out_of_range("ModuleSidecarBlock.rowPayload: row out of range");
+  }
+  const std::size_t stride = static_cast<std::size_t>(row_stride_bytes);
+  const std::size_t begin = row * stride;
+  if (stride == 0U || begin + stride > payload.size()) {
+    throw std::invalid_argument("ModuleSidecarBlock.rowPayload: invalid particle-indexed row layout");
+  }
+  return std::span<const std::byte>(payload.data() + begin, stride);
+}
+
+namespace {
+
+void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
   if (block.module_name.empty()) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: module_name cannot be empty");
   }
+  if (!block.isParticleIndexed()) {
+    if (block.row_stride_bytes != 0U || !block.particle_id_by_row.empty()) {
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: non-indexed block has particle row metadata");
+    }
+    return;
+  }
+
+  if (!block.particle_indexed) {
+    throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed sidecar must set particle_indexed=true");
+  }
+  if (block.row_stride_bytes == 0U) {
+    throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed sidecar row_stride_bytes must be positive");
+  }
+  const std::size_t stride = static_cast<std::size_t>(block.row_stride_bytes);
+  if (block.payload.size() != stride * block.particle_id_by_row.size()) {
+    throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed payload size must equal row_stride_bytes * row_count");
+  }
+  std::unordered_set<std::uint64_t> seen;
+  seen.reserve(block.particle_id_by_row.size());
+  for (const std::uint64_t particle_id : block.particle_id_by_row) {
+    if (particle_id == 0U) {
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: zero particle_id is invalid in particle-indexed sidecar");
+    }
+    if (!seen.insert(particle_id).second) {
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: duplicate particle_id in particle-indexed sidecar");
+    }
+  }
+}
+
+}  // namespace
+
+void ModuleSidecarRegistry::upsert(ModuleSidecarBlock block) {
+  validateModuleSidecarBlock(block);
   m_sidecars[block.module_name] = std::move(block);
+}
+
+void ModuleSidecarRegistry::clear() noexcept {
+  m_sidecars.clear();
 }
 
 const ModuleSidecarBlock* ModuleSidecarRegistry::find(std::string_view module_name) const {

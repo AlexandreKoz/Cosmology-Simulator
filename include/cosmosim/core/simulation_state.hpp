@@ -264,9 +264,28 @@ struct StateMetadata {
 };
 
 struct ModuleSidecarBlock {
-  // Opaque module payload with an independent schema version.
+  // Opaque module payload with an independent schema version. Non-particle-indexed
+  // blocks are run/module persistent state and are preserved as whole blocks.
   std::string module_name;
   std::uint32_t schema_version = 1;
+  std::vector<std::byte> payload;
+
+  // Optional particle-indexed row layout for module-owned persistent particle
+  // sidecars. When enabled, each row is keyed by stable particle_id and the
+  // corresponding byte slice must migrate with that particle.
+  bool particle_indexed = false;
+  std::uint32_t row_stride_bytes = 0;
+  std::vector<std::uint64_t> particle_id_by_row;
+
+  [[nodiscard]] bool isParticleIndexed() const noexcept;
+  [[nodiscard]] std::size_t rowCount() const noexcept;
+  [[nodiscard]] std::span<const std::byte> rowPayload(std::size_t row) const;
+};
+
+struct ModuleParticleSidecarPayload {
+  std::string module_name;
+  std::uint32_t schema_version = 1;
+  std::uint32_t row_stride_bytes = 0;
   std::vector<std::byte> payload;
 };
 
@@ -274,6 +293,7 @@ class ModuleSidecarRegistry {
  public:
   // Insert or replace sidecar payload for a module.
   void upsert(ModuleSidecarBlock block);
+  void clear() noexcept;
   [[nodiscard]] const ModuleSidecarBlock* find(std::string_view module_name) const;
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] std::vector<const ModuleSidecarBlock*> blocksSortedByName() const;
@@ -394,6 +414,7 @@ struct ParticleMigrationRecord {
   BlackHoleParticleMigrationFields black_hole_fields{};
   bool has_tracer_fields = false;
   TracerParticleMigrationFields tracer_fields{};
+  std::vector<ModuleParticleSidecarPayload> module_sidecar_payloads;
 };
 
 struct ParticleMigrationCommit {

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
@@ -615,6 +616,72 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   assert(state.validateOwnershipInvariants());
 }
 
+
+void test_particle_indexed_module_sidecars_migrate_with_particles() {
+  SimulationState state;
+  state.resizeParticles(3);
+  state.particle_sidecar.gravity_softening_comoving.resize(3);
+  const std::array<std::uint64_t, 3> ids{7001, 7002, 7003};
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    state.particle_sidecar.particle_id[i] = ids[i];
+    state.particle_sidecar.species_tag[i] = speciesTag(ParticleSpecies::kDarkMatter);
+    state.particle_sidecar.owning_rank[i] = 0;
+    state.particle_sidecar.sfc_key[i] = 100 + i;
+    state.particles.mass_code[i] = 1.0 + static_cast<double>(i);
+    state.particles.time_bin[i] = static_cast<std::uint8_t>(i);
+    state.particle_sidecar.gravity_softening_comoving[i] = 0.01;
+  }
+  state.species.count_by_species = {3, 0, 0, 0, 0};
+  state.rebuildSpeciesIndex();
+
+  cosmosim::core::ModuleSidecarBlock indexed;
+  indexed.module_name = "module_particle_payload";
+  indexed.schema_version = 3;
+  indexed.particle_indexed = true;
+  indexed.row_stride_bytes = 2;
+  indexed.particle_id_by_row = {7001, 7002, 7003};
+  indexed.payload = {
+      std::byte{0xA1}, std::byte{0xA2},
+      std::byte{0xB1}, std::byte{0xB2},
+      std::byte{0xC1}, std::byte{0xC2}};
+  state.sidecars.upsert(indexed);
+
+  cosmosim::core::ModuleSidecarBlock run_level;
+  run_level.module_name = "run_level_payload";
+  run_level.schema_version = 1;
+  run_level.payload = {std::byte{0x44}, std::byte{0x55}};
+  state.sidecars.upsert(run_level);
+
+  const std::array<std::uint32_t, 1> outbound{1};
+  auto records = state.packParticleMigrationRecords(outbound);
+  assert(records.size() == 1);
+  assert(records[0].module_sidecar_payloads.size() == 1);
+  assert(records[0].module_sidecar_payloads[0].module_name == "module_particle_payload");
+  assert(records[0].module_sidecar_payloads[0].schema_version == 3U);
+  assert(records[0].module_sidecar_payloads[0].payload[0] == std::byte{0xB1});
+  assert(records[0].module_sidecar_payloads[0].payload[1] == std::byte{0xB2});
+
+  ParticleMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_indices = {1};
+  commit.inbound_records = records;
+  state.commitParticleMigration(commit);
+
+  const auto* rebuilt = state.sidecars.find("module_particle_payload");
+  assert(rebuilt != nullptr);
+  assert(rebuilt->isParticleIndexed());
+  assert(rebuilt->particle_id_by_row == std::vector<std::uint64_t>({7001, 7003, 7002}));
+  assert(rebuilt->payload == std::vector<std::byte>({
+      std::byte{0xA1}, std::byte{0xA2},
+      std::byte{0xC1}, std::byte{0xC2},
+      std::byte{0xB1}, std::byte{0xB2}}));
+
+  const auto* preserved = state.sidecars.find("run_level_payload");
+  assert(preserved != nullptr);
+  assert(!preserved->isParticleIndexed());
+  assert(preserved->payload == std::vector<std::byte>({std::byte{0x44}, std::byte{0x55}}));
+}
+
 }  // namespace
 
 int main() {
@@ -630,5 +697,6 @@ int main() {
   test_species_migration_rejects_stale_sidecar_indices_before_commit();
   test_particle_migration_carries_scheduler_authority_fields();
   test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id();
+  test_particle_indexed_module_sidecars_migrate_with_particles();
   return 0;
 }

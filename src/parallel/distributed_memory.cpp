@@ -1419,6 +1419,65 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+GhostRefreshCommitReport commitBlockingGhostRefreshResult(
+    GhostExchangeBufferSoA& ghost_storage,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangePlan& plan,
+    const BlockingGhostExchangeResult& result,
+    const GhostLayerEpoch& expected_epoch) {
+  validateGhostExchangePlan(plan);
+  if (!plan.epoch.matches(expected_epoch)) {
+    throw std::invalid_argument("commitBlockingGhostRefreshResult: ghost exchange plan epoch is stale");
+  }
+  if (!ghost_storage.isConsistent() || !result.received_ghosts.isConsistent()) {
+    throw std::invalid_argument("commitBlockingGhostRefreshResult: ghost storage and result payloads must be component-consistent");
+  }
+  if (ghost_storage.size() < local_ghost_descriptors.size()) {
+    throw std::invalid_argument("commitBlockingGhostRefreshResult: ghost storage must expose one slot per local descriptor");
+  }
+  if (!result.received_ghosts.epoch.matches(expected_epoch)) {
+    throw std::invalid_argument("commitBlockingGhostRefreshResult: received ghost payload epoch is stale");
+  }
+
+  std::size_t expected_count = 0;
+  for (const auto& indices : plan.recv_local_indices_by_neighbor) {
+    expected_count += indices.size();
+  }
+  if (result.received_ghosts.size() != expected_count) {
+    throw std::invalid_argument("commitBlockingGhostRefreshResult: received payload count does not match plan receive slots");
+  }
+
+  GhostRefreshCommitReport report;
+  std::size_t result_row = 0;
+  for (std::size_t slot = 0; slot < plan.recv_local_indices_by_neighbor.size(); ++slot) {
+    for (const std::uint32_t local_index : plan.recv_local_indices_by_neighbor[slot]) {
+      if (local_index >= local_ghost_descriptors.size() || local_index >= ghost_storage.size()) {
+        throw std::out_of_range("commitBlockingGhostRefreshResult: receive slot index out of range");
+      }
+      const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
+      if (descriptor.residency != LocalIndexResidency::kGhost || descriptor.owning_rank != plan.neighbor_ranks[slot]) {
+        throw std::invalid_argument("commitBlockingGhostRefreshResult: receive slot is not a ghost owned by the exchange peer");
+      }
+      if (!descriptor.epoch.matches(expected_epoch)) {
+        throw std::invalid_argument("commitBlockingGhostRefreshResult: local ghost descriptor is stale");
+      }
+      if (result.received_ghosts.entity_id[result_row] != descriptor.particle_id) {
+        throw std::invalid_argument("commitBlockingGhostRefreshResult: received entity_id does not match ghost slot particle_id");
+      }
+      ghost_storage.entity_id[local_index] = result.received_ghosts.entity_id[result_row];
+      ghost_storage.density_code[local_index] = result.received_ghosts.density_code[result_row];
+      ghost_storage.velocity_x_code[local_index] = result.received_ghosts.velocity_x_code[result_row];
+      ghost_storage.pressure_code[local_index] = result.received_ghosts.pressure_code[result_row];
+      ++result_row;
+      ++report.updated_ghost_slots;
+    }
+  }
+  ghost_storage.epoch = expected_epoch;
+  report.committed_payload_bytes = static_cast<std::uint64_t>(report.updated_ghost_slots) *
+      static_cast<std::uint64_t>(ghostExchangeRecordBytes());
+  return report;
+}
+
 BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     const MpiContext& mpi_context,
     const GhostExchangePlan& plan,

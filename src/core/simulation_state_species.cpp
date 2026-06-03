@@ -3,8 +3,10 @@
 #include <array>
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cosmosim::core {
@@ -25,6 +27,28 @@ constexpr std::size_t k_species_count = 5;
     }
   }
   throw std::runtime_error(std::string("missing required sidecar row for particle migration: ") + sidecar_name);
+}
+
+[[nodiscard]] std::optional<std::size_t> findModuleSidecarRowByParticleId(
+    const ModuleSidecarBlock& block,
+    std::uint64_t particle_id) {
+  for (std::size_t row = 0; row < block.particle_id_by_row.size(); ++row) {
+    if (block.particle_id_by_row[row] == particle_id) {
+      return row;
+    }
+  }
+  return std::nullopt;
+}
+
+void appendModuleRowPayload(ModuleSidecarBlock* block, std::uint64_t particle_id, std::span<const std::byte> payload) {
+  if (!block->particle_indexed || block->row_stride_bytes == 0U) {
+    throw std::invalid_argument("appendModuleRowPayload: destination module sidecar is not particle-indexed");
+  }
+  if (payload.size() != static_cast<std::size_t>(block->row_stride_bytes)) {
+    throw std::invalid_argument("appendModuleRowPayload: payload row size does not match module sidecar stride");
+  }
+  block->particle_id_by_row.push_back(particle_id);
+  block->payload.insert(block->payload.end(), payload.begin(), payload.end());
 }
 }  // namespace
 
@@ -249,6 +273,23 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
       record.tracer_fields.cumulative_exchanged_mass_code = tracers.cumulative_exchanged_mass_code[row];
     }
 
+    for (const ModuleSidecarBlock* block : sidecars.blocksSortedByName()) {
+      if (!block->isParticleIndexed()) {
+        continue;
+      }
+      const auto row = findModuleSidecarRowByParticleId(*block, record.particle_id);
+      if (!row.has_value()) {
+        continue;
+      }
+      const auto row_payload = block->rowPayload(*row);
+      ModuleParticleSidecarPayload module_payload;
+      module_payload.module_name = block->module_name;
+      module_payload.schema_version = block->schema_version;
+      module_payload.row_stride_bytes = block->row_stride_bytes;
+      module_payload.payload.assign(row_payload.begin(), row_payload.end());
+      record.module_sidecar_payloads.push_back(std::move(module_payload));
+    }
+
     records.push_back(record);
   }
   return records;
@@ -362,6 +403,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       throw std::invalid_argument("commitParticleMigration: kept particles contain duplicate IDs");
     }
   }
+  std::unordered_map<std::string, std::unordered_map<std::uint64_t, const ModuleParticleSidecarPayload*>>
+      inbound_module_payloads_by_module;
   for (const auto& inbound : commit.inbound_records) {
     require_inbound_sidecar_contract(inbound);
     if (inbound.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
@@ -369,6 +412,33 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     }
     if (!final_particle_ids.insert(inbound.particle_id).second) {
       throw std::invalid_argument("commitParticleMigration: inbound record would create duplicate particle ID");
+    }
+
+    std::unordered_set<std::string> modules_seen_for_particle;
+    for (const ModuleParticleSidecarPayload& payload : inbound.module_sidecar_payloads) {
+      if (payload.module_name.empty()) {
+        throw std::invalid_argument("commitParticleMigration: module sidecar payload has empty module_name");
+      }
+      if (payload.row_stride_bytes == 0U ||
+          payload.payload.size() != static_cast<std::size_t>(payload.row_stride_bytes)) {
+        throw std::invalid_argument("commitParticleMigration: module sidecar payload row shape is invalid");
+      }
+      if (!modules_seen_for_particle.insert(payload.module_name).second) {
+        throw std::invalid_argument("commitParticleMigration: duplicate module sidecar payload for one particle");
+      }
+      if (const ModuleSidecarBlock* local_block = sidecars.find(payload.module_name)) {
+        if (!local_block->isParticleIndexed()) {
+          throw std::invalid_argument("commitParticleMigration: inbound particle module sidecar targets a non-particle-indexed local block");
+        }
+        if (local_block->schema_version != payload.schema_version ||
+            local_block->row_stride_bytes != payload.row_stride_bytes) {
+          throw std::invalid_argument("commitParticleMigration: inbound module sidecar schema or stride mismatch");
+        }
+      }
+      auto& rows_by_particle = inbound_module_payloads_by_module[payload.module_name];
+      if (!rows_by_particle.emplace(inbound.particle_id, &payload).second) {
+        throw std::invalid_argument("commitParticleMigration: duplicate inbound module sidecar payload for particle ID");
+      }
     }
   }
 
@@ -688,6 +758,75 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   rebuildBlackHoleSidecar(&rebuilt_black_holes);
   rebuildTracerSidecar(&rebuilt_tracers);
 
+  ModuleSidecarRegistry rebuilt_module_sidecars;
+  std::unordered_set<std::string> rebuilt_module_names;
+  auto append_particle_indexed_module_rows = [&](const ModuleSidecarBlock& source_block, ModuleSidecarBlock* destination) {
+    destination->module_name = source_block.module_name;
+    destination->schema_version = source_block.schema_version;
+    destination->particle_indexed = true;
+    destination->row_stride_bytes = source_block.row_stride_bytes;
+    destination->payload.clear();
+    destination->particle_id_by_row.clear();
+
+    const auto inbound_module_it = inbound_module_payloads_by_module.find(source_block.module_name);
+    for (std::size_t final_particle = 0; final_particle < final_count; ++final_particle) {
+      const std::uint64_t particle_id = new_sidecar.particle_id[final_particle];
+      if (inbound_module_it != inbound_module_payloads_by_module.end()) {
+        const auto payload_it = inbound_module_it->second.find(particle_id);
+        if (payload_it != inbound_module_it->second.end()) {
+          appendModuleRowPayload(destination, particle_id, payload_it->second->payload);
+          continue;
+        }
+      }
+      const auto source_row = findModuleSidecarRowByParticleId(source_block, particle_id);
+      if (source_row.has_value()) {
+        appendModuleRowPayload(destination, particle_id, source_block.rowPayload(*source_row));
+      }
+    }
+  };
+
+  for (const ModuleSidecarBlock* block : sidecars.blocksSortedByName()) {
+    if (!block->isParticleIndexed()) {
+      rebuilt_module_sidecars.upsert(*block);
+      rebuilt_module_names.insert(block->module_name);
+      continue;
+    }
+    ModuleSidecarBlock rebuilt_block;
+    append_particle_indexed_module_rows(*block, &rebuilt_block);
+    rebuilt_module_sidecars.upsert(std::move(rebuilt_block));
+    rebuilt_module_names.insert(block->module_name);
+  }
+
+  for (const auto& [module_name, payloads_by_particle] : inbound_module_payloads_by_module) {
+    if (rebuilt_module_names.contains(module_name)) {
+      continue;
+    }
+    if (payloads_by_particle.empty()) {
+      continue;
+    }
+    const ModuleParticleSidecarPayload* prototype = payloads_by_particle.begin()->second;
+    ModuleSidecarBlock rebuilt_block;
+    rebuilt_block.module_name = module_name;
+    rebuilt_block.schema_version = prototype->schema_version;
+    rebuilt_block.particle_indexed = true;
+    rebuilt_block.row_stride_bytes = prototype->row_stride_bytes;
+    for (const auto& [particle_id, payload] : payloads_by_particle) {
+      if (payload->schema_version != rebuilt_block.schema_version ||
+          payload->row_stride_bytes != rebuilt_block.row_stride_bytes) {
+        throw std::invalid_argument("commitParticleMigration: inbound module sidecar payloads disagree on schema or stride");
+      }
+    }
+    for (std::size_t final_particle = 0; final_particle < final_count; ++final_particle) {
+      const std::uint64_t particle_id = new_sidecar.particle_id[final_particle];
+      const auto payload_it = payloads_by_particle.find(particle_id);
+      if (payload_it != payloads_by_particle.end()) {
+        appendModuleRowPayload(&rebuilt_block, particle_id, payload_it->second->payload);
+      }
+    }
+    rebuilt_module_sidecars.upsert(std::move(rebuilt_block));
+    rebuilt_module_names.insert(module_name);
+  }
+
   particles = std::move(new_particles);
   particle_sidecar = std::move(new_sidecar);
   if (rebuild_particle_bound_gas_state) {
@@ -698,6 +837,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   star_particles = std::move(rebuilt_star);
   black_holes = std::move(rebuilt_black_holes);
   tracers = std::move(rebuilt_tracers);
+  sidecars = std::move(rebuilt_module_sidecars);
 
   species.count_by_species.fill(0);
   for (const auto tag : particle_sidecar.species_tag) {

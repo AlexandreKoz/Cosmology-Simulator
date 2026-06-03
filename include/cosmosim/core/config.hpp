@@ -241,6 +241,15 @@ struct ParallelConfig {
   int omp_threads = 1;
   int gpu_devices = 0;
   bool deterministic_reduction = true;
+  double decomposition_particle_count_weight = 1.0;
+  double decomposition_gas_cell_weight = 1.5;
+  double decomposition_tree_interaction_weight = 1.0;
+  double decomposition_pm_mesh_weight = 0.25;
+  double decomposition_amr_patch_weight = 1.0;
+  double decomposition_active_fraction_weight = 2.0;
+  double decomposition_memory_pressure_weight = 1.0 / (1024.0 * 1024.0);
+  double decomposition_gpu_occupancy_weight = 0.0;
+  double decomposition_generic_work_weight = 0.5;
 };
 
 struct UnitsConfig {

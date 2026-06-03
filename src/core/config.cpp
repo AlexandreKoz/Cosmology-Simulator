@@ -785,6 +785,15 @@ struct ConfigKeySpec {
       {"parallel.omp_threads", "1"},
       {"parallel.gpu_devices", "0"},
       {"parallel.deterministic_reduction", "true"},
+      {"parallel.decomposition_particle_count_weight", "1.0"},
+      {"parallel.decomposition_gas_cell_weight", "1.5"},
+      {"parallel.decomposition_tree_interaction_weight", "1.0"},
+      {"parallel.decomposition_pm_mesh_weight", "0.25"},
+      {"parallel.decomposition_amr_patch_weight", "1.0"},
+      {"parallel.decomposition_active_fraction_weight", "2.0"},
+      {"parallel.decomposition_memory_pressure_weight", "9.5367431640625e-7"},
+      {"parallel.decomposition_gpu_occupancy_weight", "0.0"},
+      {"parallel.decomposition_generic_work_weight", "0.5"},
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
@@ -947,6 +956,17 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.parallel.gpu_devices < 0) {
     throw ConfigError("parallel.gpu_devices must be >= 0");
+  }
+  if (config.parallel.decomposition_particle_count_weight < 0.0 ||
+      config.parallel.decomposition_gas_cell_weight < 0.0 ||
+      config.parallel.decomposition_tree_interaction_weight < 0.0 ||
+      config.parallel.decomposition_pm_mesh_weight < 0.0 ||
+      config.parallel.decomposition_amr_patch_weight < 0.0 ||
+      config.parallel.decomposition_active_fraction_weight < 0.0 ||
+      config.parallel.decomposition_memory_pressure_weight < 0.0 ||
+      config.parallel.decomposition_gpu_occupancy_weight < 0.0 ||
+      config.parallel.decomposition_generic_work_weight < 0.0) {
+    throw ConfigError("parallel decomposition work weights must be non-negative");
   }
   if (config.analysis.run_health_interval_steps <= 0 ||
       config.analysis.science_light_interval_steps <= 0 ||
@@ -1263,6 +1283,24 @@ void validateConfig(const SimulationConfig& config) {
   stream << "gpu_devices = " << frozen.config.parallel.gpu_devices << '\n';
   stream << "deterministic_reduction = "
          << (frozen.config.parallel.deterministic_reduction ? "true" : "false") << '\n';
+  stream << "decomposition_particle_count_weight = "
+         << frozen.config.parallel.decomposition_particle_count_weight << '\n';
+  stream << "decomposition_gas_cell_weight = "
+         << frozen.config.parallel.decomposition_gas_cell_weight << '\n';
+  stream << "decomposition_tree_interaction_weight = "
+         << frozen.config.parallel.decomposition_tree_interaction_weight << '\n';
+  stream << "decomposition_pm_mesh_weight = "
+         << frozen.config.parallel.decomposition_pm_mesh_weight << '\n';
+  stream << "decomposition_amr_patch_weight = "
+         << frozen.config.parallel.decomposition_amr_patch_weight << '\n';
+  stream << "decomposition_active_fraction_weight = "
+         << frozen.config.parallel.decomposition_active_fraction_weight << '\n';
+  stream << "decomposition_memory_pressure_weight = "
+         << frozen.config.parallel.decomposition_memory_pressure_weight << '\n';
+  stream << "decomposition_gpu_occupancy_weight = "
+         << frozen.config.parallel.decomposition_gpu_occupancy_weight << '\n';
+  stream << "decomposition_generic_work_weight = "
+         << frozen.config.parallel.decomposition_generic_work_weight << '\n';
   stream << "\n[analysis]\n";
   stream << "enable_diagnostics = " << (frozen.config.analysis.enable_diagnostics ? "true" : "false")
          << '\n';
@@ -1720,6 +1758,42 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.parallel.deterministic_reduction =
       parseBool(requireString(entries, consumed, "parallel.deterministic_reduction", "true"),
                 "parallel.deterministic_reduction");
+  frozen.config.parallel.decomposition_particle_count_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_particle_count_weight",
+                    defaultFor("parallel.decomposition_particle_count_weight")),
+      "parallel.decomposition_particle_count_weight");
+  frozen.config.parallel.decomposition_gas_cell_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_gas_cell_weight",
+                    defaultFor("parallel.decomposition_gas_cell_weight")),
+      "parallel.decomposition_gas_cell_weight");
+  frozen.config.parallel.decomposition_tree_interaction_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_tree_interaction_weight",
+                    defaultFor("parallel.decomposition_tree_interaction_weight")),
+      "parallel.decomposition_tree_interaction_weight");
+  frozen.config.parallel.decomposition_pm_mesh_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_pm_mesh_weight",
+                    defaultFor("parallel.decomposition_pm_mesh_weight")),
+      "parallel.decomposition_pm_mesh_weight");
+  frozen.config.parallel.decomposition_amr_patch_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_amr_patch_weight",
+                    defaultFor("parallel.decomposition_amr_patch_weight")),
+      "parallel.decomposition_amr_patch_weight");
+  frozen.config.parallel.decomposition_active_fraction_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_active_fraction_weight",
+                    defaultFor("parallel.decomposition_active_fraction_weight")),
+      "parallel.decomposition_active_fraction_weight");
+  frozen.config.parallel.decomposition_memory_pressure_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_memory_pressure_weight",
+                    defaultFor("parallel.decomposition_memory_pressure_weight")),
+      "parallel.decomposition_memory_pressure_weight");
+  frozen.config.parallel.decomposition_gpu_occupancy_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_gpu_occupancy_weight",
+                    defaultFor("parallel.decomposition_gpu_occupancy_weight")),
+      "parallel.decomposition_gpu_occupancy_weight");
+  frozen.config.parallel.decomposition_generic_work_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_generic_work_weight",
+                    defaultFor("parallel.decomposition_generic_work_weight")),
+      "parallel.decomposition_generic_work_weight");
 
   frozen.config.analysis.enable_diagnostics = parseBool(
       requireString(entries, consumed, "analysis.enable_diagnostics", "true"),

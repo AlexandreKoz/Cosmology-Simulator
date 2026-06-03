@@ -910,15 +910,15 @@ void applyInitialGravityAwareDecomposition(
   decomposition_config.work_weight = 0.0;
   decomposition_config.memory_weight = 0.0;
   decomposition_config.component_weights = parallel::DecompositionWeightCoefficients{
-      .particle_count = 1.0,
-      .gas_cell = 1.5,
-      .tree_interaction = 1.0,
-      .pm_mesh = 0.25,
-      .amr_patch = 1.0,
-      .active_fraction = 2.0,
-      .memory_pressure = 1.0 / (1024.0 * 1024.0),
-      .gpu_occupancy = 0.0,
-      .generic_work = 0.5,
+      .particle_count = config.parallel.decomposition_particle_count_weight,
+      .gas_cell = config.parallel.decomposition_gas_cell_weight,
+      .tree_interaction = config.parallel.decomposition_tree_interaction_weight,
+      .pm_mesh = config.parallel.decomposition_pm_mesh_weight,
+      .amr_patch = config.parallel.decomposition_amr_patch_weight,
+      .active_fraction = config.parallel.decomposition_active_fraction_weight,
+      .memory_pressure = config.parallel.decomposition_memory_pressure_weight,
+      .gpu_occupancy = config.parallel.decomposition_gpu_occupancy_weight,
+      .generic_work = config.parallel.decomposition_generic_work_weight,
   };
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
   for (std::size_t item_index = 0; item_index < state.particles.size(); ++item_index) {

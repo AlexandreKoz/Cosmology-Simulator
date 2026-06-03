@@ -992,6 +992,67 @@ void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
 
 }
 
+
+void testBlockingGhostRefreshResultCommitsIntoIndexedGhostSlots() {
+  const cosmosim::parallel::GhostLayerEpoch epoch{
+      .decomposition_epoch = 8, .ghost_sync_epoch = 3, .particle_index_generation = 5};
+  const std::vector<cosmosim::parallel::LocalGhostDescriptor> descriptors{
+      {.residency = cosmosim::parallel::LocalIndexResidency::kOwned,
+       .owning_rank = 0,
+       .particle_id = 11,
+       .epoch = epoch},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost,
+       .owning_rank = 1,
+       .particle_id = 22,
+       .epoch = epoch},
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost,
+       .owning_rank = 2,
+       .particle_id = 33,
+       .epoch = epoch},
+  };
+  const std::vector<int> neighbors{1, 2};
+  const std::vector<std::vector<std::uint32_t>> sends{{}, {}};
+  const std::vector<std::vector<std::uint32_t>> recvs{{1}, {2}};
+  const auto plan = cosmosim::parallel::buildExplicitGhostExchangePlan(
+      0,
+      neighbors,
+      sends,
+      recvs,
+      cosmosim::parallel::ghostRefreshPayloadRecordBytes(),
+      epoch);
+
+  cosmosim::parallel::GhostExchangeBufferSoA storage;
+  storage.epoch = epoch;
+  storage.entity_id = {11, 22, 33};
+  storage.density_code = {0.0, -1.0, -1.0};
+  storage.velocity_x_code = {0.0, -1.0, -1.0};
+  storage.pressure_code = {0.0, -1.0, -1.0};
+
+  cosmosim::parallel::BlockingGhostExchangeResult result;
+  result.received_ghosts.epoch = epoch;
+  result.received_ghosts.entity_id = {22, 33};
+  result.received_ghosts.density_code = {2.2, 3.3};
+  result.received_ghosts.velocity_x_code = {22.0, 33.0};
+  result.received_ghosts.pressure_code = {220.0, 330.0};
+
+  const auto report = cosmosim::parallel::commitBlockingGhostRefreshResult(
+      storage, descriptors, plan, result, epoch);
+  assert(report.updated_ghost_slots == 2U);
+  assert(storage.entity_id[0] == 11);
+  assert(storage.density_code[1] == 2.2);
+  assert(storage.velocity_x_code[2] == 33.0);
+  assert(storage.pressure_code[2] == 330.0);
+
+  result.received_ghosts.entity_id[1] = 44;
+  bool mismatch_threw = false;
+  try {
+    (void)cosmosim::parallel::commitBlockingGhostRefreshResult(storage, descriptors, plan, result, epoch);
+  } catch (const std::invalid_argument&) {
+    mismatch_threw = true;
+  }
+  assert(mismatch_threw);
+}
+
 }  // namespace
 
 int main() {
@@ -1016,6 +1077,7 @@ int main() {
   testRankConfigConsensus();
   testGhostExchangePairStableTagsIgnoreNeighborSlotOrder();
   testGhostUnpackRequiresDescriptorSlotCount();
+  testBlockingGhostRefreshResultCommitsIntoIndexedGhostSlots();
   testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates();
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();

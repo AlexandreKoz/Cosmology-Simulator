@@ -632,6 +632,18 @@ struct BlockingGhostExchangeResult {
   std::uint64_t received_bytes = 0;
 };
 
+struct GhostRefreshCommitReport {
+  std::size_t updated_ghost_slots = 0;
+  std::uint64_t committed_payload_bytes = 0;
+};
+
+[[nodiscard]] GhostRefreshCommitReport commitBlockingGhostRefreshResult(
+    GhostExchangeBufferSoA& ghost_storage,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangePlan& plan,
+    const BlockingGhostExchangeResult& result,
+    const GhostLayerEpoch& expected_epoch);
+
 [[nodiscard]] BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     const MpiContext& mpi_context,
     const GhostExchangePlan& plan,
