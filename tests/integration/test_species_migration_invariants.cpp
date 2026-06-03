@@ -490,6 +490,57 @@ void test_species_migration_softening_timestep_invariants() {
 }
 
 
+void test_particle_migration_carries_scheduler_authority_fields() {
+  SimulationState state;
+  seedState(state);
+
+  HierarchicalTimeBinScheduler scheduler(4);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0, 5);
+  for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(state.particles.size()); ++i) {
+    scheduler.setElementBin(i, static_cast<std::uint8_t>((i + 1U) % 4U), 5);
+  }
+  const std::uint32_t outbound_index = findParticleIndexById(state, 1105);
+  scheduler.submitCandidateBin(outbound_index, 1, cosmosim::core::TimeStepCandidateSource::kUserClamp, "migration-authority-test");
+  (void)scheduler.reconcileCandidateTransitions();
+
+  const std::array<std::uint32_t, 1> outbound{outbound_index};
+  auto records = state.packParticleMigrationRecords(outbound);
+  assert(!records[0].has_scheduler_fields);
+  cosmosim::core::attachSchedulerFieldsToParticleMigrationRecords(scheduler, state, outbound, records);
+  assert(records[0].has_scheduler_fields);
+  assert(records[0].scheduler_fields.bin_index == records[0].time_bin);
+  assert(records[0].scheduler_fields.pending_bin_index == 1U);
+
+  const std::array<std::uint64_t, 1> destination_ids{records[0].particle_id};
+  const auto rebuilt = cosmosim::core::rebuildSchedulerPersistentStateFromMigrationRecords(
+      scheduler.currentTick(), scheduler.maxBin(), records, destination_ids);
+  assert(rebuilt.bin_index.size() == 1);
+  assert(rebuilt.bin_index[0] == records[0].scheduler_fields.bin_index);
+  assert(rebuilt.next_activation_tick[0] == records[0].scheduler_fields.next_activation_tick);
+  assert(rebuilt.pending_bin_index[0] == 1U);
+
+  records[0].time_bin = static_cast<std::uint8_t>(records[0].time_bin + 1U);
+  bool stale_mirror_threw = false;
+  try {
+    (void)cosmosim::core::rebuildSchedulerPersistentStateFromMigrationRecords(
+        scheduler.currentTick(), scheduler.maxBin(), records, destination_ids);
+  } catch (const std::invalid_argument&) {
+    stale_mirror_threw = true;
+  }
+  assert(stale_mirror_threw);
+
+  records[0].time_bin = records[0].scheduler_fields.bin_index;
+  records[0].has_scheduler_fields = false;
+  bool missing_authority_threw = false;
+  try {
+    (void)cosmosim::core::rebuildSchedulerPersistentStateFromMigrationRecords(
+        scheduler.currentTick(), scheduler.maxBin(), records, destination_ids);
+  } catch (const std::invalid_argument&) {
+    missing_authority_threw = true;
+  }
+  assert(missing_authority_threw);
+}
+
 void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   SimulationState state;
   state.resizeParticles(4);
@@ -577,6 +628,7 @@ int main() {
   test_species_migration_removes_stale_ghost_sidecar_rows_once();
   test_species_migration_rejects_owned_or_duplicate_stale_ghost_indices();
   test_species_migration_rejects_stale_sidecar_indices_before_commit();
+  test_particle_migration_carries_scheduler_authority_fields();
   test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id();
   return 0;
 }

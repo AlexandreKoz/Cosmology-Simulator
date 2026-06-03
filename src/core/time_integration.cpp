@@ -1688,6 +1688,75 @@ std::vector<TimeBinSchedulerIdentityRecord> exportParticleSchedulerIdentityRecor
   return records;
 }
 
+void attachSchedulerFieldsToParticleMigrationRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> particle_indices,
+    std::span<ParticleMigrationRecord> records) {
+  if (particle_indices.size() != records.size()) {
+    throw std::invalid_argument(
+        "attachSchedulerFieldsToParticleMigrationRecords: particle_indices and records sizes must match");
+  }
+  const auto persistent = scheduler.exportPersistentState();
+  validatePersistentStateShapeForRemap(
+      persistent,
+      state.particles.size(),
+      "attachSchedulerFieldsToParticleMigrationRecords");
+  for (std::size_t i = 0; i < particle_indices.size(); ++i) {
+    const std::uint32_t particle_index = particle_indices[i];
+    if (particle_index >= state.particles.size()) {
+      throw std::out_of_range("attachSchedulerFieldsToParticleMigrationRecords: particle index out of range");
+    }
+    if (records[i].particle_id != state.particle_sidecar.particle_id[particle_index]) {
+      throw std::invalid_argument(
+          "attachSchedulerFieldsToParticleMigrationRecords: record particle_id does not match source particle index");
+    }
+    records[i].has_scheduler_fields = true;
+    records[i].scheduler_fields.bin_index = persistent.bin_index[particle_index];
+    records[i].scheduler_fields.next_activation_tick = persistent.next_activation_tick[particle_index];
+    records[i].scheduler_fields.pending_bin_index = persistent.pending_bin_index[particle_index];
+    records[i].time_bin = persistent.bin_index[particle_index];
+  }
+}
+
+TimeBinPersistentState rebuildSchedulerPersistentStateFromMigrationRecords(
+    std::uint64_t current_tick,
+    std::uint8_t max_bin,
+    std::span<const ParticleMigrationRecord> records,
+    std::span<const std::uint64_t> destination_element_ids) {
+  std::vector<TimeBinSchedulerIdentityRecord> identity_records;
+  identity_records.reserve(records.size());
+  for (const ParticleMigrationRecord& record : records) {
+    if (!record.has_scheduler_fields) {
+      throw std::invalid_argument(
+          "rebuildSchedulerPersistentStateFromMigrationRecords: migration record is missing scheduler authority fields");
+    }
+    if (record.scheduler_fields.bin_index != record.time_bin) {
+      throw std::invalid_argument(
+          "rebuildSchedulerPersistentStateFromMigrationRecords: time_bin mirror is stale relative to scheduler fields");
+    }
+    identity_records.push_back(TimeBinSchedulerIdentityRecord{
+        .element_id = record.particle_id,
+        .bin_index = record.scheduler_fields.bin_index,
+        .next_activation_tick = record.scheduler_fields.next_activation_tick,
+        .pending_bin_index = record.scheduler_fields.pending_bin_index,
+    });
+  }
+  return rebuildSchedulerPersistentStateFromIdentityRecords(
+      current_tick, max_bin, identity_records, destination_element_ids);
+}
+
+void rebuildSchedulerFromParticleMigrationRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const ParticleMigrationRecord> records,
+    std::span<const std::uint64_t> destination_particle_ids) {
+  scheduler.importPersistentState(rebuildSchedulerPersistentStateFromMigrationRecords(
+      scheduler.currentTick(),
+      scheduler.maxBin(),
+      records,
+      destination_particle_ids));
+}
+
 TimeBinPersistentState remapSchedulerPersistentStateByParticleId(
     const TimeBinPersistentState& source_state,
     std::span<const std::uint64_t> source_particle_ids,

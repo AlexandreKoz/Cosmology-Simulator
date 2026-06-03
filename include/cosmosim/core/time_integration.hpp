@@ -686,6 +686,23 @@ struct TimeBinSchedulerIdentityRecord {
     const SimulationState& state,
     std::span<const std::uint32_t> particle_indices);
 
+void attachSchedulerFieldsToParticleMigrationRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> particle_indices,
+    std::span<ParticleMigrationRecord> records);
+
+[[nodiscard]] TimeBinPersistentState rebuildSchedulerPersistentStateFromMigrationRecords(
+    std::uint64_t current_tick,
+    std::uint8_t max_bin,
+    std::span<const ParticleMigrationRecord> records,
+    std::span<const std::uint64_t> destination_element_ids);
+
+void rebuildSchedulerFromParticleMigrationRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const ParticleMigrationRecord> records,
+    std::span<const std::uint64_t> destination_particle_ids);
+
 [[nodiscard]] TimeBinPersistentState remapSchedulerPersistentStateByParticleId(
     const TimeBinPersistentState& source_state,
     std::span<const std::uint64_t> source_particle_ids,

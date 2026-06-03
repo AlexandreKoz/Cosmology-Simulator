@@ -346,6 +346,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       throw std::invalid_argument(
           "commitParticleMigration: inbound softening override requires an explicit softening value");
     }
+    if (inbound.has_scheduler_fields && inbound.scheduler_fields.bin_index != inbound.time_bin) {
+      throw std::invalid_argument(
+          "commitParticleMigration: inbound time_bin mirror is stale relative to scheduler migration fields");
+    }
   };
 
   std::unordered_set<std::uint64_t> final_particle_ids;

@@ -868,6 +868,16 @@ void validateGhostRefreshPayloadDescriptor(const GhostTransferDescriptor& descri
   }
 }
 
+int ghostExchangePairStableTag(int tag_base, int local_rank, int peer_rank) {
+  if (tag_base < 0 || local_rank < 0 || peer_rank < 0 || local_rank == peer_rank) {
+    throw std::invalid_argument("ghostExchangePairStableTag: invalid rank pair or tag base");
+  }
+  // MPI receive matching already constrains the source rank. A constant tag per
+  // ghost-exchange phase is therefore pair-stable for arbitrary local neighbor
+  // ordering and avoids slot-derived tag deadlocks.
+  return tag_base;
+}
+
 bool GhostExchangeBufferSoA::isConsistent() const noexcept {
   return entity_id.size() == density_code.size() && entity_id.size() == velocity_x_code.size() &&
          entity_id.size() == pressure_code.size();
@@ -989,6 +999,14 @@ void GhostExchangeBuffer::unpackAppendTo(
     const GhostTransferDescriptor& descriptor,
     GhostExchangeBufferSoA& destination) const {
   validateGhostRefreshPayloadDescriptor(descriptor);
+  if (m_bytes.size() < sizeof(std::uint64_t)) {
+    throw std::runtime_error("ghost buffer is too small");
+  }
+  std::size_t offset = 0;
+  const std::uint64_t encoded_count = readPod<std::uint64_t>(m_bytes, &offset);
+  if (encoded_count != descriptor.local_indices.size()) {
+    throw std::runtime_error("ghost buffer encoded count does not match receive descriptor slots");
+  }
   unpackAppendTo(destination);
 }
 
@@ -1412,6 +1430,9 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
   if (!authoritative_local_state.isConsistent()) {
     throw std::invalid_argument("executeBlockingGhostRefreshExchange: authoritative local ghost payload state is inconsistent");
   }
+  if (!authoritative_local_state.epoch.matches(expected_epoch)) {
+    throw std::invalid_argument("executeBlockingGhostRefreshExchange: authoritative local payload epoch is stale");
+  }
 
   BlockingGhostExchangeResult result;
   result.received_ghosts.epoch = expected_epoch;
@@ -1427,6 +1448,15 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
   constexpr int k_size_tag_base = 6810;
   constexpr int k_payload_tag_base = 7810;
   for (std::size_t slot = 0; slot < plan.neighbor_ranks.size(); ++slot) {
+    for (const std::uint32_t local_index : plan.send_local_indices_by_neighbor[slot]) {
+      if (local_index >= authoritative_local_state.size() || local_index >= local_ghost_descriptors.size()) {
+        throw std::out_of_range("executeBlockingGhostRefreshExchange: send descriptor index is outside local payload state");
+      }
+      if (authoritative_local_state.entity_id[local_index] != local_ghost_descriptors[local_index].particle_id) {
+        throw std::invalid_argument("executeBlockingGhostRefreshExchange: send payload entity_id does not match owned descriptor particle_id");
+      }
+    }
+
     GhostExchangeBuffer send_buffer;
     send_buffer.packFrom(
         plan.outbound_transfers[slot],
@@ -1441,12 +1471,12 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
         1,
         MPI_UINT64_T,
         peer_rank,
-        k_size_tag_base + static_cast<int>(slot),
+        ghostExchangePairStableTag(k_size_tag_base, mpi_context.worldRank(), peer_rank),
         &recv_size,
         1,
         MPI_UINT64_T,
         peer_rank,
-        k_size_tag_base + static_cast<int>(slot),
+        ghostExchangePairStableTag(k_size_tag_base, mpi_context.worldRank(), peer_rank),
         MPI_COMM_WORLD,
         MPI_STATUS_IGNORE);
 
@@ -1462,18 +1492,29 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
         static_cast<int>(send_bytes.size()),
         MPI_BYTE,
         peer_rank,
-        k_payload_tag_base + static_cast<int>(slot),
+        ghostExchangePairStableTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank),
         recv_bytes.data(),
         static_cast<int>(recv_bytes.size()),
         MPI_BYTE,
         peer_rank,
-        k_payload_tag_base + static_cast<int>(slot),
+        ghostExchangePairStableTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank),
         MPI_COMM_WORLD,
         MPI_STATUS_IGNORE);
 
     GhostExchangeBuffer recv_buffer;
     recv_buffer.replaceEncodedBytes(std::move(recv_bytes));
+    const std::size_t old_received_count = result.received_ghosts.size();
     recv_buffer.unpackAppendTo(plan.inbound_transfers[slot], result.received_ghosts);
+    for (std::size_t i = 0; i < plan.recv_local_indices_by_neighbor[slot].size(); ++i) {
+      const std::uint32_t local_index = plan.recv_local_indices_by_neighbor[slot][i];
+      if (local_index >= local_ghost_descriptors.size()) {
+        throw std::out_of_range("executeBlockingGhostRefreshExchange: receive descriptor index is outside residency table");
+      }
+      if (result.received_ghosts.entity_id[old_received_count + i] !=
+          local_ghost_descriptors[local_index].particle_id) {
+        throw std::invalid_argument("executeBlockingGhostRefreshExchange: received ghost entity_id does not match receive descriptor particle_id");
+      }
+    }
     result.sent_bytes += send_size;
     result.received_bytes += recv_size;
   }

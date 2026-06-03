@@ -353,6 +353,15 @@ struct TracerParticleMigrationFields {
   double cumulative_exchanged_mass_code = 0.0;
 };
 
+struct SchedulerMigrationFields {
+  // Scheduler-authoritative lanes for an element keyed by stable particle_id.
+  // time_bin in ParticleSoa remains a derived mirror; these fields are the
+  // migration payload needed to rebuild exact hierarchical-timestep state.
+  std::uint8_t bin_index = 0;
+  std::uint64_t next_activation_tick = 0;
+  std::uint8_t pending_bin_index = 0xFF;
+};
+
 struct ParticleMigrationRecord {
   std::uint64_t particle_id = 0;
   std::uint64_t sfc_key = 0;
@@ -366,11 +375,12 @@ struct ParticleMigrationRecord {
   double velocity_y_peculiar = 0.0;
   double velocity_z_peculiar = 0.0;
   double mass_code = 0.0;
-  // Derived timestep mirror copied with the migrating particle. It is not
-  // scheduler authority;
-  // destination ranks must remap/rebuild scheduler state by stable particle_id
-  // before restart/output.
+  // Derived timestep mirror copied with the migrating particle for diagnostics
+  // and legacy transfer consumers. Exact continuation must use scheduler_fields
+  // when has_scheduler_fields is true.
   std::uint8_t time_bin = 0;
+  bool has_scheduler_fields = false;
+  SchedulerMigrationFields scheduler_fields{};
   double last_drift_time_code = 0.0;
   double last_drift_scale_factor = 1.0;
   bool has_gravity_softening_value = false;

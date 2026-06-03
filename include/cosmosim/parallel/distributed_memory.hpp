@@ -365,6 +365,7 @@ class GhostExchangeBuffer {
 
 [[nodiscard]] std::size_t ghostRefreshPayloadRecordBytes() noexcept;
 void validateGhostRefreshPayloadDescriptor(const GhostTransferDescriptor& descriptor);
+[[nodiscard]] int ghostExchangePairStableTag(int tag_base, int local_rank, int peer_rank);
 
 struct DistributedRestartState {
   std::uint32_t schema_version = 2;

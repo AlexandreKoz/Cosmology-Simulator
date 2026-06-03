@@ -884,6 +884,58 @@ void testPmSlabLayoutRoundTripAndCellOwnership() {
 }
 
 
+void testGhostExchangePairStableTagsIgnoreNeighborSlotOrder() {
+  const int size_tag_02 = cosmosim::parallel::ghostExchangePairStableTag(6810, 0, 2);
+  const int size_tag_20 = cosmosim::parallel::ghostExchangePairStableTag(6810, 2, 0);
+  const int payload_tag_02 = cosmosim::parallel::ghostExchangePairStableTag(7810, 0, 2);
+  const int payload_tag_20 = cosmosim::parallel::ghostExchangePairStableTag(7810, 2, 0);
+  assert(size_tag_02 == size_tag_20);
+  assert(payload_tag_02 == payload_tag_20);
+  assert(size_tag_02 != payload_tag_02);
+
+  bool threw = false;
+  try {
+    (void)cosmosim::parallel::ghostExchangePairStableTag(6810, 3, 3);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testGhostUnpackRequiresDescriptorSlotCount() {
+  cosmosim::parallel::GhostExchangeBufferSoA source;
+  source.entity_id = {1, 2};
+  source.density_code = {3.0, 4.0};
+  source.velocity_x_code = {5.0, 6.0};
+  source.pressure_code = {7.0, 8.0};
+
+  cosmosim::parallel::GhostTransferDescriptor send_descriptor;
+  send_descriptor.role = cosmosim::parallel::GhostTransferRole::kOutboundSend;
+  send_descriptor.intent = cosmosim::parallel::GhostTransferIntent::kGhostRefreshRequest;
+  send_descriptor.peer_rank = 1;
+  send_descriptor.expected_post_transfer_residency = cosmosim::parallel::LocalIndexResidency::kGhost;
+  send_descriptor.local_indices = {0, 1};
+
+  cosmosim::parallel::GhostExchangeBuffer buffer;
+  buffer.packFrom(send_descriptor, source, send_descriptor.local_indices);
+
+  cosmosim::parallel::GhostTransferDescriptor recv_descriptor;
+  recv_descriptor.role = cosmosim::parallel::GhostTransferRole::kInboundReceive;
+  recv_descriptor.intent = cosmosim::parallel::GhostTransferIntent::kGhostRefreshReceiveStaging;
+  recv_descriptor.peer_rank = 1;
+  recv_descriptor.expected_post_transfer_residency = cosmosim::parallel::LocalIndexResidency::kGhost;
+  recv_descriptor.local_indices = {5};
+
+  cosmosim::parallel::GhostExchangeBufferSoA destination;
+  bool threw = false;
+  try {
+    buffer.unpackAppendTo(recv_descriptor, destination);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates() {
   const std::vector<std::uint64_t> rank0_ids = {1, 2, 3};
   const std::vector<std::uint64_t> rank1_ids = {4, 5, 6};
@@ -962,6 +1014,8 @@ int main() {
   testGhostExchangePlanValidationDriftRejection();
   testReductionAgreementPolicyModes();
   testRankConfigConsensus();
+  testGhostExchangePairStableTagsIgnoreNeighborSlotOrder();
+  testGhostUnpackRequiresDescriptorSlotCount();
   testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates();
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();
