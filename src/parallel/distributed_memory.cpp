@@ -11,6 +11,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
 #include <string>
@@ -228,7 +229,24 @@ void appendRankConfigMismatch(
 }
 
 [[nodiscard]] constexpr std::size_t ghostExchangeRecordBytes() {
-  return sizeof(std::uint64_t) + sizeof(double) * 3U;
+  // entity_id + position[3] + mass + density + velocity[3] + pressure + internal_energy.
+  return sizeof(std::uint64_t) + sizeof(double) * 10U;
+}
+
+[[nodiscard]] bool laneIsPresentOrEmpty(std::size_t size, std::size_t expected) noexcept {
+  return size == 0 || size == expected;
+}
+
+[[nodiscard]] double optionalLaneValue(const std::vector<double>& lane, std::size_t index) {
+  return lane.empty() ? 0.0 : lane[index];
+}
+
+void resizeOptionalLaneForCommit(std::vector<double>* lane, std::size_t size) {
+  if (lane->empty()) {
+    lane->assign(size, 0.0);
+  } else if (lane->size() != size) {
+    throw std::invalid_argument("ghost optional lane size does not match storage size");
+  }
 }
 
 void validateTransferDescriptor(
@@ -505,6 +523,7 @@ GhostExchangePlan buildGhostExchangePlan(
   }
 
   plan.epoch = common_epoch;
+  plan.exchange_sequence = common_epoch.ghost_sync_epoch;
   std::sort(owners.begin(), owners.end());
   owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
@@ -601,6 +620,7 @@ GhostExchangePlan buildExplicitGhostExchangePlan(
   plan.outbound_transfers.resize(neighbor_ranks.size());
   plan.inbound_transfers.resize(neighbor_ranks.size());
   plan.epoch = epoch;
+  plan.exchange_sequence = epoch.ghost_sync_epoch;
   plan.uses_blocking_exchange = true;
   plan.nonblocking_overlap_enabled = enable_nonblocking_overlap;
 
@@ -872,24 +892,69 @@ int ghostExchangePairStableTag(int tag_base, int local_rank, int peer_rank) {
   if (tag_base < 0 || local_rank < 0 || peer_rank < 0 || local_rank == peer_rank) {
     throw std::invalid_argument("ghostExchangePairStableTag: invalid rank pair or tag base");
   }
-  // MPI receive matching already constrains the source rank. A constant tag per
-  // ghost-exchange phase is therefore pair-stable for arbitrary local neighbor
-  // ordering and avoids slot-derived tag deadlocks.
+  // MPI receive matching constrains source and destination ranks. Keep this tag
+  // independent of local neighbor-slot order; sequence separation is provided by
+  // ghostExchangeSequencedTag for overlapping or repeated phases.
   return tag_base;
 }
 
+int ghostExchangeSequencedTag(
+    int tag_base,
+    int local_rank,
+    int peer_rank,
+    std::uint64_t exchange_sequence) {
+  constexpr int k_sequence_stride = 16;
+  constexpr int k_sequence_window = 64;
+  if (tag_base < 0) {
+    throw std::invalid_argument("ghostExchangeSequencedTag: tag_base must be non-negative");
+  }
+  const int phased_base = tag_base +
+      static_cast<int>(exchange_sequence % static_cast<std::uint64_t>(k_sequence_window)) * k_sequence_stride;
+  return ghostExchangePairStableTag(phased_base, local_rank, peer_rank);
+}
+
 bool GhostExchangeBufferSoA::isConsistent() const noexcept {
-  return entity_id.size() == density_code.size() && entity_id.size() == velocity_x_code.size() &&
-         entity_id.size() == pressure_code.size();
+  const std::size_t n = entity_id.size();
+  return laneIsPresentOrEmpty(position_x_comoving.size(), n) &&
+      laneIsPresentOrEmpty(position_y_comoving.size(), n) &&
+      laneIsPresentOrEmpty(position_z_comoving.size(), n) &&
+      laneIsPresentOrEmpty(mass_code.size(), n) &&
+      laneIsPresentOrEmpty(density_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_x_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_y_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_z_code.size(), n) &&
+      laneIsPresentOrEmpty(pressure_code.size(), n) &&
+      laneIsPresentOrEmpty(internal_energy_code.size(), n);
 }
 
 std::size_t GhostExchangeBufferSoA::size() const noexcept { return entity_id.size(); }
 
+bool GhostExchangeBufferSoA::hasGravityPayload() const noexcept {
+  const std::size_t n = entity_id.size();
+  return position_x_comoving.size() == n && position_y_comoving.size() == n &&
+      position_z_comoving.size() == n && mass_code.size() == n;
+}
+
+bool GhostExchangeBufferSoA::hasHydroPayload() const noexcept {
+  const std::size_t n = entity_id.size();
+  return density_code.size() == n && velocity_x_code.size() == n && velocity_y_code.size() == n &&
+      velocity_z_code.size() == n && pressure_code.size() == n && internal_energy_code.size() == n;
+}
+
 std::size_t ReadOnlyGhostExchangeView::size() const noexcept { return entity_id.size(); }
 
 bool ReadOnlyGhostExchangeView::isConsistent() const noexcept {
-  return density_code.size() == entity_id.size() && velocity_x_code.size() == entity_id.size() &&
-      pressure_code.size() == entity_id.size();
+  const std::size_t n = entity_id.size();
+  return laneIsPresentOrEmpty(position_x_comoving.size(), n) &&
+      laneIsPresentOrEmpty(position_y_comoving.size(), n) &&
+      laneIsPresentOrEmpty(position_z_comoving.size(), n) &&
+      laneIsPresentOrEmpty(mass_code.size(), n) &&
+      laneIsPresentOrEmpty(density_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_x_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_y_code.size(), n) &&
+      laneIsPresentOrEmpty(velocity_z_code.size(), n) &&
+      laneIsPresentOrEmpty(pressure_code.size(), n) &&
+      laneIsPresentOrEmpty(internal_energy_code.size(), n);
 }
 
 bool ReadOnlyGhostExchangeView::isFresh(const GhostLayerEpoch& expected_epoch) const noexcept {
@@ -903,9 +968,16 @@ ReadOnlyGhostExchangeView makeReadOnlyGhostExchangeView(const GhostExchangeBuffe
   return ReadOnlyGhostExchangeView{
       .epoch = storage.epoch,
       .entity_id = storage.entity_id,
+      .position_x_comoving = storage.position_x_comoving,
+      .position_y_comoving = storage.position_y_comoving,
+      .position_z_comoving = storage.position_z_comoving,
+      .mass_code = storage.mass_code,
       .density_code = storage.density_code,
       .velocity_x_code = storage.velocity_x_code,
+      .velocity_y_code = storage.velocity_y_code,
+      .velocity_z_code = storage.velocity_z_code,
       .pressure_code = storage.pressure_code,
+      .internal_energy_code = storage.internal_energy_code,
   };
 }
 
@@ -944,9 +1016,16 @@ void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::sp
     }
 
     appendPod<std::uint64_t>(m_bytes, source.entity_id[index]);
-    appendPod<double>(m_bytes, source.density_code[index]);
-    appendPod<double>(m_bytes, source.velocity_x_code[index]);
-    appendPod<double>(m_bytes, source.pressure_code[index]);
+    appendPod<double>(m_bytes, optionalLaneValue(source.position_x_comoving, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.position_y_comoving, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.position_z_comoving, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.mass_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.density_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.velocity_x_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.velocity_y_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.velocity_z_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.pressure_code, index));
+    appendPod<double>(m_bytes, optionalLaneValue(source.internal_energy_code, index));
   }
 }
 
@@ -978,16 +1057,31 @@ void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) co
     throw std::runtime_error("ghost buffer payload shape does not match encoded count");
   }
 
-  destination.entity_id.reserve(destination.entity_id.size() + static_cast<std::size_t>(count));
-  destination.density_code.reserve(destination.density_code.size() + static_cast<std::size_t>(count));
-  destination.velocity_x_code.reserve(destination.velocity_x_code.size() + static_cast<std::size_t>(count));
-  destination.pressure_code.reserve(destination.pressure_code.size() + static_cast<std::size_t>(count));
+  const std::size_t append_count = static_cast<std::size_t>(count);
+  destination.entity_id.reserve(destination.entity_id.size() + append_count);
+  destination.position_x_comoving.reserve(destination.position_x_comoving.size() + append_count);
+  destination.position_y_comoving.reserve(destination.position_y_comoving.size() + append_count);
+  destination.position_z_comoving.reserve(destination.position_z_comoving.size() + append_count);
+  destination.mass_code.reserve(destination.mass_code.size() + append_count);
+  destination.density_code.reserve(destination.density_code.size() + append_count);
+  destination.velocity_x_code.reserve(destination.velocity_x_code.size() + append_count);
+  destination.velocity_y_code.reserve(destination.velocity_y_code.size() + append_count);
+  destination.velocity_z_code.reserve(destination.velocity_z_code.size() + append_count);
+  destination.pressure_code.reserve(destination.pressure_code.size() + append_count);
+  destination.internal_energy_code.reserve(destination.internal_energy_code.size() + append_count);
 
   for (std::uint64_t i = 0; i < count; ++i) {
     destination.entity_id.push_back(readPod<std::uint64_t>(m_bytes, &offset));
+    destination.position_x_comoving.push_back(readPod<double>(m_bytes, &offset));
+    destination.position_y_comoving.push_back(readPod<double>(m_bytes, &offset));
+    destination.position_z_comoving.push_back(readPod<double>(m_bytes, &offset));
+    destination.mass_code.push_back(readPod<double>(m_bytes, &offset));
     destination.density_code.push_back(readPod<double>(m_bytes, &offset));
     destination.velocity_x_code.push_back(readPod<double>(m_bytes, &offset));
+    destination.velocity_y_code.push_back(readPod<double>(m_bytes, &offset));
+    destination.velocity_z_code.push_back(readPod<double>(m_bytes, &offset));
     destination.pressure_code.push_back(readPod<double>(m_bytes, &offset));
+    destination.internal_energy_code.push_back(readPod<double>(m_bytes, &offset));
   }
 
   if (offset != m_bytes.size()) {
@@ -1465,9 +1559,27 @@ GhostRefreshCommitReport commitBlockingGhostRefreshResult(
         throw std::invalid_argument("commitBlockingGhostRefreshResult: received entity_id does not match ghost slot particle_id");
       }
       ghost_storage.entity_id[local_index] = result.received_ghosts.entity_id[result_row];
-      ghost_storage.density_code[local_index] = result.received_ghosts.density_code[result_row];
-      ghost_storage.velocity_x_code[local_index] = result.received_ghosts.velocity_x_code[result_row];
-      ghost_storage.pressure_code[local_index] = result.received_ghosts.pressure_code[result_row];
+      const std::size_t storage_size = ghost_storage.size();
+      resizeOptionalLaneForCommit(&ghost_storage.position_x_comoving, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.position_y_comoving, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.position_z_comoving, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.mass_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.density_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.velocity_x_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.velocity_y_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.velocity_z_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.pressure_code, storage_size);
+      resizeOptionalLaneForCommit(&ghost_storage.internal_energy_code, storage_size);
+      ghost_storage.position_x_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_x_comoving, result_row);
+      ghost_storage.position_y_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_y_comoving, result_row);
+      ghost_storage.position_z_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_z_comoving, result_row);
+      ghost_storage.mass_code[local_index] = optionalLaneValue(result.received_ghosts.mass_code, result_row);
+      ghost_storage.density_code[local_index] = optionalLaneValue(result.received_ghosts.density_code, result_row);
+      ghost_storage.velocity_x_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_x_code, result_row);
+      ghost_storage.velocity_y_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_y_code, result_row);
+      ghost_storage.velocity_z_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_z_code, result_row);
+      ghost_storage.pressure_code[local_index] = optionalLaneValue(result.received_ghosts.pressure_code, result_row);
+      ghost_storage.internal_energy_code[local_index] = optionalLaneValue(result.received_ghosts.internal_energy_code, result_row);
       ++result_row;
       ++report.updated_ghost_slots;
     }
@@ -1476,6 +1588,186 @@ GhostRefreshCommitReport commitBlockingGhostRefreshResult(
   report.committed_payload_bytes = static_cast<std::uint64_t>(report.updated_ghost_slots) *
       static_cast<std::uint64_t>(ghostExchangeRecordBytes());
   return report;
+}
+
+
+BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
+    const MpiContext& mpi_context,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangeBufferSoA& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch) {
+  if (!authoritative_local_state.isConsistent()) {
+    throw std::invalid_argument(
+        "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload state is inconsistent");
+  }
+  if (!authoritative_local_state.epoch.matches(expected_epoch)) {
+    throw std::invalid_argument(
+        "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload epoch is stale");
+  }
+  if (authoritative_local_state.size() < local_ghost_descriptors.size()) {
+    throw std::invalid_argument(
+        "executeBlockingGhostRefreshExchangeFromDescriptors: payload state must expose one row per local descriptor");
+  }
+
+  const int world_rank = mpi_context.worldRank();
+  const int world_size = mpi_context.worldSize();
+  if (world_rank < 0 || world_size <= 0 || world_rank >= world_size) {
+    throw std::invalid_argument("executeBlockingGhostRefreshExchangeFromDescriptors: invalid MPI context");
+  }
+
+  std::unordered_map<std::uint64_t, std::uint32_t> owned_index_by_particle_id;
+  owned_index_by_particle_id.reserve(local_ghost_descriptors.size());
+  std::vector<std::vector<std::uint64_t>> requested_particle_ids_by_rank(static_cast<std::size_t>(world_size));
+  std::vector<std::vector<std::uint32_t>> recv_indices_by_rank(static_cast<std::size_t>(world_size));
+
+  for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
+    const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
+    if (!descriptor.epoch.matches(expected_epoch)) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: stale local ghost descriptor epoch");
+    }
+    if (descriptor.owning_rank < 0 || descriptor.owning_rank >= world_size) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: descriptor owning_rank outside MPI world");
+    }
+    if (authoritative_local_state.entity_id[local_index] != descriptor.particle_id) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: payload entity_id does not match descriptor particle_id");
+    }
+    if (descriptor.residency == LocalIndexResidency::kOwned) {
+      if (descriptor.owning_rank != world_rank) {
+        throw std::invalid_argument(
+            "executeBlockingGhostRefreshExchangeFromDescriptors: owned descriptor has nonlocal owner");
+      }
+      auto [_, inserted] = owned_index_by_particle_id.emplace(descriptor.particle_id, local_index);
+      if (!inserted) {
+        throw std::invalid_argument(
+            "executeBlockingGhostRefreshExchangeFromDescriptors: duplicate owned particle_id in descriptor table");
+      }
+    } else {
+      if (descriptor.owning_rank == world_rank) {
+        throw std::invalid_argument(
+            "executeBlockingGhostRefreshExchangeFromDescriptors: ghost descriptor is owned by local rank");
+      }
+      requested_particle_ids_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(descriptor.particle_id);
+      recv_indices_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(local_index);
+    }
+  }
+
+  const bool has_local_ghost_demands = std::any_of(
+      recv_indices_by_rank.begin(), recv_indices_by_rank.end(), [](const auto& rows) { return !rows.empty(); });
+  if (!mpi_context.isEnabled()) {
+    if (has_local_ghost_demands) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: non-empty ghost demand requires MPI");
+    }
+    return BlockingGhostRefreshExchange{
+        .plan = buildExplicitGhostExchangePlan(
+            world_rank,
+            std::span<const int>{},
+            std::span<const std::vector<std::uint32_t>>{},
+            std::span<const std::vector<std::uint32_t>>{},
+            ghostRefreshPayloadRecordBytes(),
+            expected_epoch),
+        .result = BlockingGhostExchangeResult{.received_ghosts = GhostExchangeBufferSoA{.epoch = expected_epoch}},
+    };
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  constexpr int k_request_count_tag_base = 4810;
+  constexpr int k_request_payload_tag_base = 5810;
+  std::vector<std::vector<std::uint32_t>> send_indices_by_rank(static_cast<std::size_t>(world_size));
+  for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
+    if (peer_rank == world_rank) {
+      continue;
+    }
+    const auto& request_ids = requested_particle_ids_by_rank[static_cast<std::size_t>(peer_rank)];
+    const std::uint64_t send_count = static_cast<std::uint64_t>(request_ids.size());
+    std::uint64_t recv_count = 0;
+    MPI_Sendrecv(
+        &send_count,
+        1,
+        MPI_UINT64_T,
+        peer_rank,
+        ghostExchangeSequencedTag(k_request_count_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
+        &recv_count,
+        1,
+        MPI_UINT64_T,
+        peer_rank,
+        ghostExchangeSequencedTag(k_request_count_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+
+    if (send_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        recv_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: ghost request count exceeds MPI int count limit");
+    }
+
+    std::vector<std::uint64_t> received_request_ids(static_cast<std::size_t>(recv_count));
+    MPI_Sendrecv(
+        const_cast<std::uint64_t*>(request_ids.data()),
+        static_cast<int>(request_ids.size()),
+        MPI_UINT64_T,
+        peer_rank,
+        ghostExchangeSequencedTag(k_request_payload_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
+        received_request_ids.data(),
+        static_cast<int>(received_request_ids.size()),
+        MPI_UINT64_T,
+        peer_rank,
+        ghostExchangeSequencedTag(k_request_payload_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+
+    auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+    send_rows.reserve(received_request_ids.size());
+    for (const std::uint64_t particle_id : received_request_ids) {
+      const auto it = owned_index_by_particle_id.find(particle_id);
+      if (it == owned_index_by_particle_id.end()) {
+        throw std::runtime_error(
+            "executeBlockingGhostRefreshExchangeFromDescriptors: peer requested a particle_id not owned by this rank");
+      }
+      send_rows.push_back(it->second);
+    }
+  }
+
+  std::vector<int> neighbor_ranks;
+  std::vector<std::vector<std::uint32_t>> send_indices_by_neighbor;
+  std::vector<std::vector<std::uint32_t>> recv_indices_by_neighbor;
+  for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
+    if (peer_rank == world_rank) {
+      continue;
+    }
+    const auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+    const auto& recv_rows = recv_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+    if (send_rows.empty() && recv_rows.empty()) {
+      continue;
+    }
+    neighbor_ranks.push_back(peer_rank);
+    send_indices_by_neighbor.push_back(send_rows);
+    recv_indices_by_neighbor.push_back(recv_rows);
+  }
+
+  BlockingGhostRefreshExchange exchange;
+  exchange.plan = buildExplicitGhostExchangePlan(
+      world_rank,
+      neighbor_ranks,
+      send_indices_by_neighbor,
+      recv_indices_by_neighbor,
+      ghostRefreshPayloadRecordBytes(),
+      expected_epoch);
+  exchange.plan.exchange_sequence = expected_epoch.ghost_sync_epoch;
+  exchange.result = executeBlockingGhostRefreshExchange(
+      mpi_context,
+      exchange.plan,
+      local_ghost_descriptors,
+      authoritative_local_state,
+      expected_epoch);
+  return exchange;
+#else
+  throw std::runtime_error(
+      "executeBlockingGhostRefreshExchangeFromDescriptors: MPI support is not compiled in");
+#endif
 }
 
 BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
@@ -1530,12 +1822,12 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
         1,
         MPI_UINT64_T,
         peer_rank,
-        ghostExchangePairStableTag(k_size_tag_base, mpi_context.worldRank(), peer_rank),
+        ghostExchangeSequencedTag(k_size_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
         &recv_size,
         1,
         MPI_UINT64_T,
         peer_rank,
-        ghostExchangePairStableTag(k_size_tag_base, mpi_context.worldRank(), peer_rank),
+        ghostExchangeSequencedTag(k_size_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
         MPI_COMM_WORLD,
         MPI_STATUS_IGNORE);
 
@@ -1551,12 +1843,12 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
         static_cast<int>(send_bytes.size()),
         MPI_BYTE,
         peer_rank,
-        ghostExchangePairStableTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank),
+        ghostExchangeSequencedTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
         recv_bytes.data(),
         static_cast<int>(recv_bytes.size()),
         MPI_BYTE,
         peer_rank,
-        ghostExchangePairStableTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank),
+        ghostExchangeSequencedTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
         MPI_COMM_WORLD,
         MPI_STATUS_IGNORE);
 

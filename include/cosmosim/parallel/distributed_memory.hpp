@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cosmosim/core/profiling.hpp"
@@ -186,6 +187,10 @@ struct GhostExchangePlan {
   std::uint64_t send_bytes = 0;
   std::uint64_t recv_bytes = 0;
   GhostLayerEpoch epoch{};
+  // Monotonic phase discriminator for future nonblocking/overlap layers.
+  // Blocking code derives it from GhostLayerEpoch::ghost_sync_epoch so rank-local
+  // neighbor ordering can never influence message matching.
+  std::uint64_t exchange_sequence = 0;
   bool uses_blocking_exchange = true;
   bool nonblocking_overlap_enabled = false;
 };
@@ -310,20 +315,39 @@ struct RankConfigConsensus {
 struct GhostExchangeBufferSoA {
   GhostLayerEpoch epoch{};
   std::vector<std::uint64_t> entity_id;
+  // Gravity/PM/tree-facing lanes. Empty optional lanes are encoded as zero only
+  // by legacy callers; production solver refreshes should populate them.
+  std::vector<double> position_x_comoving;
+  std::vector<double> position_y_comoving;
+  std::vector<double> position_z_comoving;
+  std::vector<double> mass_code;
+  // Hydro-facing boundary state lanes.
   std::vector<double> density_code;
   std::vector<double> velocity_x_code;
+  std::vector<double> velocity_y_code;
+  std::vector<double> velocity_z_code;
   std::vector<double> pressure_code;
+  std::vector<double> internal_energy_code;
 
   [[nodiscard]] bool isConsistent() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool hasGravityPayload() const noexcept;
+  [[nodiscard]] bool hasHydroPayload() const noexcept;
 };
 
 struct ReadOnlyGhostExchangeView {
   GhostLayerEpoch epoch{};
   std::span<const std::uint64_t> entity_id;
+  std::span<const double> position_x_comoving;
+  std::span<const double> position_y_comoving;
+  std::span<const double> position_z_comoving;
+  std::span<const double> mass_code;
   std::span<const double> density_code;
   std::span<const double> velocity_x_code;
+  std::span<const double> velocity_y_code;
+  std::span<const double> velocity_z_code;
   std::span<const double> pressure_code;
+  std::span<const double> internal_energy_code;
 
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] bool isConsistent() const noexcept;
@@ -366,6 +390,11 @@ class GhostExchangeBuffer {
 [[nodiscard]] std::size_t ghostRefreshPayloadRecordBytes() noexcept;
 void validateGhostRefreshPayloadDescriptor(const GhostTransferDescriptor& descriptor);
 [[nodiscard]] int ghostExchangePairStableTag(int tag_base, int local_rank, int peer_rank);
+[[nodiscard]] int ghostExchangeSequencedTag(
+    int tag_base,
+    int local_rank,
+    int peer_rank,
+    std::uint64_t exchange_sequence);
 
 struct DistributedRestartState {
   std::uint32_t schema_version = 2;
@@ -632,6 +661,11 @@ struct BlockingGhostExchangeResult {
   std::uint64_t received_bytes = 0;
 };
 
+struct BlockingGhostRefreshExchange {
+  GhostExchangePlan plan;
+  BlockingGhostExchangeResult result;
+};
+
 struct GhostRefreshCommitReport {
   std::size_t updated_ghost_slots = 0;
   std::uint64_t committed_payload_bytes = 0;
@@ -647,6 +681,17 @@ struct GhostRefreshCommitReport {
 [[nodiscard]] BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     const MpiContext& mpi_context,
     const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const GhostExchangeBufferSoA& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch);
+
+// Correctness-first high-level ghost refresh. Local ghost descriptors declare
+// which remote particle IDs this rank needs. The blocking path first exchanges
+// those demands, derives outbound send rows by matching peer requests against
+// authoritative owned local descriptors, then uses the same payload validation
+// and commit contract as explicit plans.
+[[nodiscard]] BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
+    const MpiContext& mpi_context,
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch);
