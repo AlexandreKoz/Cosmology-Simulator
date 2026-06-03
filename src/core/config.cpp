@@ -794,6 +794,15 @@ struct ConfigKeySpec {
       {"parallel.decomposition_memory_pressure_weight", "9.5367431640625e-7"},
       {"parallel.decomposition_gpu_occupancy_weight", "0.0"},
       {"parallel.decomposition_generic_work_weight", "0.5"},
+      {"parallel.decomposition_runtime_rebalance_enabled", "true"},
+      {"parallel.decomposition_rebalance_imbalance_trigger", "1.25"},
+      {"parallel.decomposition_rebalance_memory_trigger", "1.50"},
+      {"parallel.decomposition_rebalance_max_migrated_load_fraction", "0.25"},
+      {"parallel.decomposition_measured_tree_pair_weight", "1.0"},
+      {"parallel.decomposition_measured_pm_cell_weight", "1.0"},
+      {"parallel.decomposition_measured_amr_cell_weight", "1.0"},
+      {"parallel.decomposition_measured_hydro_face_weight", "1.0"},
+      {"parallel.decomposition_measured_wall_ms_weight", "1.0"},
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
@@ -965,8 +974,17 @@ void validateConfig(const SimulationConfig& config) {
       config.parallel.decomposition_active_fraction_weight < 0.0 ||
       config.parallel.decomposition_memory_pressure_weight < 0.0 ||
       config.parallel.decomposition_gpu_occupancy_weight < 0.0 ||
-      config.parallel.decomposition_generic_work_weight < 0.0) {
-    throw ConfigError("parallel decomposition work weights must be non-negative");
+      config.parallel.decomposition_generic_work_weight < 0.0 ||
+      config.parallel.decomposition_rebalance_imbalance_trigger < 1.0 ||
+      config.parallel.decomposition_rebalance_memory_trigger < 1.0 ||
+      config.parallel.decomposition_rebalance_max_migrated_load_fraction < 0.0 ||
+      config.parallel.decomposition_rebalance_max_migrated_load_fraction > 1.0 ||
+      config.parallel.decomposition_measured_tree_pair_weight < 0.0 ||
+      config.parallel.decomposition_measured_pm_cell_weight < 0.0 ||
+      config.parallel.decomposition_measured_amr_cell_weight < 0.0 ||
+      config.parallel.decomposition_measured_hydro_face_weight < 0.0 ||
+      config.parallel.decomposition_measured_wall_ms_weight < 0.0) {
+    throw ConfigError("parallel decomposition work/rebalance weights must be non-negative; rebalance triggers must be >= 1");
   }
   if (config.analysis.run_health_interval_steps <= 0 ||
       config.analysis.science_light_interval_steps <= 0 ||
@@ -1301,6 +1319,24 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.parallel.decomposition_gpu_occupancy_weight << '\n';
   stream << "decomposition_generic_work_weight = "
          << frozen.config.parallel.decomposition_generic_work_weight << '\n';
+  stream << "decomposition_runtime_rebalance_enabled = "
+         << (frozen.config.parallel.decomposition_runtime_rebalance_enabled ? "true" : "false") << '\n';
+  stream << "decomposition_rebalance_imbalance_trigger = "
+         << frozen.config.parallel.decomposition_rebalance_imbalance_trigger << '\n';
+  stream << "decomposition_rebalance_memory_trigger = "
+         << frozen.config.parallel.decomposition_rebalance_memory_trigger << '\n';
+  stream << "decomposition_rebalance_max_migrated_load_fraction = "
+         << frozen.config.parallel.decomposition_rebalance_max_migrated_load_fraction << '\n';
+  stream << "decomposition_measured_tree_pair_weight = "
+         << frozen.config.parallel.decomposition_measured_tree_pair_weight << '\n';
+  stream << "decomposition_measured_pm_cell_weight = "
+         << frozen.config.parallel.decomposition_measured_pm_cell_weight << '\n';
+  stream << "decomposition_measured_amr_cell_weight = "
+         << frozen.config.parallel.decomposition_measured_amr_cell_weight << '\n';
+  stream << "decomposition_measured_hydro_face_weight = "
+         << frozen.config.parallel.decomposition_measured_hydro_face_weight << '\n';
+  stream << "decomposition_measured_wall_ms_weight = "
+         << frozen.config.parallel.decomposition_measured_wall_ms_weight << '\n';
   stream << "\n[analysis]\n";
   stream << "enable_diagnostics = " << (frozen.config.analysis.enable_diagnostics ? "true" : "false")
          << '\n';
@@ -1794,6 +1830,42 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "parallel.decomposition_generic_work_weight",
                     defaultFor("parallel.decomposition_generic_work_weight")),
       "parallel.decomposition_generic_work_weight");
+  frozen.config.parallel.decomposition_runtime_rebalance_enabled = parseBool(
+      requireString(entries, consumed, "parallel.decomposition_runtime_rebalance_enabled",
+                    defaultFor("parallel.decomposition_runtime_rebalance_enabled")),
+      "parallel.decomposition_runtime_rebalance_enabled");
+  frozen.config.parallel.decomposition_rebalance_imbalance_trigger = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_rebalance_imbalance_trigger",
+                    defaultFor("parallel.decomposition_rebalance_imbalance_trigger")),
+      "parallel.decomposition_rebalance_imbalance_trigger");
+  frozen.config.parallel.decomposition_rebalance_memory_trigger = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_rebalance_memory_trigger",
+                    defaultFor("parallel.decomposition_rebalance_memory_trigger")),
+      "parallel.decomposition_rebalance_memory_trigger");
+  frozen.config.parallel.decomposition_rebalance_max_migrated_load_fraction = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_rebalance_max_migrated_load_fraction",
+                    defaultFor("parallel.decomposition_rebalance_max_migrated_load_fraction")),
+      "parallel.decomposition_rebalance_max_migrated_load_fraction");
+  frozen.config.parallel.decomposition_measured_tree_pair_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_measured_tree_pair_weight",
+                    defaultFor("parallel.decomposition_measured_tree_pair_weight")),
+      "parallel.decomposition_measured_tree_pair_weight");
+  frozen.config.parallel.decomposition_measured_pm_cell_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_measured_pm_cell_weight",
+                    defaultFor("parallel.decomposition_measured_pm_cell_weight")),
+      "parallel.decomposition_measured_pm_cell_weight");
+  frozen.config.parallel.decomposition_measured_amr_cell_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_measured_amr_cell_weight",
+                    defaultFor("parallel.decomposition_measured_amr_cell_weight")),
+      "parallel.decomposition_measured_amr_cell_weight");
+  frozen.config.parallel.decomposition_measured_hydro_face_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_measured_hydro_face_weight",
+                    defaultFor("parallel.decomposition_measured_hydro_face_weight")),
+      "parallel.decomposition_measured_hydro_face_weight");
+  frozen.config.parallel.decomposition_measured_wall_ms_weight = parseNumber<double>(
+      requireString(entries, consumed, "parallel.decomposition_measured_wall_ms_weight",
+                    defaultFor("parallel.decomposition_measured_wall_ms_weight")),
+      "parallel.decomposition_measured_wall_ms_weight");
 
   frozen.config.analysis.enable_diagnostics = parseBool(
       requireString(entries, consumed, "analysis.enable_diagnostics", "true"),

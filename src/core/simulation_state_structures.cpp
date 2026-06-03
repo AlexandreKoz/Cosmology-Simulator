@@ -236,13 +236,15 @@ void PatchSoa::resize(std::size_t count) {
   level.resize(count);
   first_cell.resize(count);
   cell_count.resize(count);
+  owning_rank.resize(count);
 }
 
 std::size_t PatchSoa::size() const noexcept { return patch_id.size(); }
 
 bool PatchSoa::isConsistent() const noexcept {
   const std::size_t expected = patch_id.size();
-  return level.size() == expected && first_cell.size() == expected && cell_count.size() == expected;
+  return level.size() == expected && first_cell.size() == expected && cell_count.size() == expected &&
+         owning_rank.size() == expected;
 }
 
 }  // namespace cosmosim::core

@@ -1053,6 +1053,70 @@ void testBlockingGhostRefreshResultCommitsIntoIndexedGhostSlots() {
   assert(mismatch_threw);
 }
 
+
+void testRuntimeFeedbackRaisesMeasuredCostComponents() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(2);
+  items[0].entity_id = 1;
+  items[0].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+  items[0].work_components = cosmosim::parallel::DecompositionWorkComponents{
+      .tree_interaction_cost = 10.0,
+      .pm_mesh_cost = 1.0,
+      .generic_work_cost = 1.0,
+      .has_explicit_components = true,
+  };
+  items[1].entity_id = 2;
+  items[1].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+  items[1].work_components = cosmosim::parallel::DecompositionWorkComponents{
+      .tree_interaction_cost = 1.0,
+      .pm_mesh_cost = 1.0,
+      .generic_work_cost = 1.0,
+      .has_explicit_components = true,
+  };
+  cosmosim::parallel::applyRuntimeDecompositionFeedback(
+      items,
+      cosmosim::parallel::DecompositionRuntimeMeasurements{
+          .tree_pair_evaluations_recent = 110,
+          .pm_mesh_cells_touched_recent = 20,
+          .tree_wall_ms_recent = 5.0,
+          .has_measurements = true,
+      },
+      cosmosim::parallel::DecompositionFeedbackCoefficients{});
+  assert(items[0].work_components.tree_interaction_cost > items[1].work_components.tree_interaction_cost);
+  assert(items[0].work_components.pm_mesh_cost > 1.0);
+  assert(items[1].work_components.generic_work_cost > 1.0);
+}
+
+void testRuntimeRebalancePlanProducesParticleAndPatchIntent() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(4);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    items[i].entity_id = 100 + i;
+    items[i].kind = (i == 3) ? cosmosim::parallel::DecompositionEntityKind::kAmrPatch
+                             : cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].current_owner_rank = 0;
+    items[i].x_comov = 0.1 + 0.2 * static_cast<double>(i);
+    items[i].work_components = cosmosim::parallel::DecompositionWorkComponents{
+        .particle_count_cost = (i == 3) ? 0.0 : 1.0,
+        .amr_patch_cost = (i == 3) ? 100.0 : 0.0,
+        .generic_work_cost = 1.0,
+        .has_explicit_components = true,
+    };
+  }
+  cosmosim::parallel::DecompositionConfig decomposition_config;
+  decomposition_config.world_size = 2;
+  decomposition_config.domain_x_min_comov = 0.0;
+  decomposition_config.domain_x_max_comov = 1.0;
+  decomposition_config.component_weights.generic_work = 1.0;
+  decomposition_config.component_weights.amr_patch = 1.0;
+  cosmosim::parallel::RuntimeRebalanceConfig rebalance_config;
+  rebalance_config.world_size = 2;
+  rebalance_config.imbalance_trigger_ratio = 1.0;
+  rebalance_config.memory_trigger_ratio = 10.0;
+  rebalance_config.max_migrated_load_fraction = 1.0;
+  const auto plan = cosmosim::parallel::buildRuntimeRebalancePlan(items, decomposition_config, rebalance_config);
+  assert(plan.should_rebalance);
+  assert(!plan.particle_migrations.empty() || !plan.amr_patch_ownership_updates.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1078,6 +1142,8 @@ int main() {
   testGhostExchangePairStableTagsIgnoreNeighborSlotOrder();
   testGhostUnpackRequiresDescriptorSlotCount();
   testBlockingGhostRefreshResultCommitsIntoIndexedGhostSlots();
+  testRuntimeFeedbackRaisesMeasuredCostComponents();
+  testRuntimeRebalancePlanProducesParticleAndPatchIntent();
   testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates();
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();

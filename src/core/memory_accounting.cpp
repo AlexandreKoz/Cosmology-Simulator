@@ -156,6 +156,7 @@ void accountPatchSoa(MemoryReportBuilder& builder, const PatchSoa& patches) {
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.level", patches.level);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.first_cell", patches.first_cell);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.cell_count", patches.cell_count);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.owning_rank", patches.owning_rank);
 }
 
 void accountModulePayloads(MemoryReportBuilder& builder, const ModuleSidecarRegistry& registry) {

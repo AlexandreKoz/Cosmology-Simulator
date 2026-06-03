@@ -771,6 +771,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(patches_group.get(), "level", H5T_STD_I32LE, H5T_NATIVE_INT32, state.patches.level);
   writeDataset1d(patches_group.get(), "first_cell", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.first_cell);
   writeDataset1d(patches_group.get(), "cell_count", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.cell_count);
+  writeDataset1d(patches_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.owning_rank);
 
   writeDataset1d(state_group.get(), "species_count_by_species", H5T_STD_U64LE, H5T_NATIVE_UINT64, std::vector<std::uint64_t>(state.species.count_by_species.begin(), state.species.count_by_species.end()));
 
@@ -914,6 +915,11 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
   state.patches.level = readDataset1dAligned<std::int32_t>(patches_group.get(), "level", H5T_NATIVE_INT32);
   state.patches.first_cell = readDataset1dAligned<std::uint32_t>(patches_group.get(), "first_cell", H5T_NATIVE_UINT32);
   state.patches.cell_count = readDataset1dAligned<std::uint32_t>(patches_group.get(), "cell_count", H5T_NATIVE_UINT32);
+  if (H5Lexists(patches_group.get(), "owning_rank", H5P_DEFAULT) > 0) {
+    state.patches.owning_rank = readDataset1dAligned<std::uint32_t>(patches_group.get(), "owning_rank", H5T_NATIVE_UINT32);
+  } else {
+    state.patches.owning_rank.assign(state.patches.patch_id.size(), 0U);
+  }
 
   const auto species_count = readDataset1d<std::uint64_t>(state_group.get(), "species_count_by_species", H5T_NATIVE_UINT64);
   if (species_count.size() != state.species.count_by_species.size()) {
@@ -1341,6 +1347,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_any_vec(state.patches.level);
   append_any_vec(state.patches.first_cell);
   append_any_vec(state.patches.cell_count);
+  append_any_vec(state.patches.owning_rank);
   append_any_vec(state.star_particles.particle_index);
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);

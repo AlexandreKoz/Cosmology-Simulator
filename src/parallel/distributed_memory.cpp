@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "cosmosim/core/build_config.hpp"
@@ -485,6 +486,188 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? (static_cast<double>(plan.metrics.max_memory_bytes) / mean_memory) : 0.0;
 
   return plan;
+}
+
+void applyRuntimeDecompositionFeedback(
+    std::span<DecompositionItem> items,
+    const DecompositionRuntimeMeasurements& measurements,
+    const DecompositionFeedbackCoefficients& coefficients) {
+  if (!measurements.has_measurements || items.empty()) {
+    return;
+  }
+  if (coefficients.measured_tree_pair < 0.0 || coefficients.measured_pm_cell < 0.0 ||
+      coefficients.measured_amr_cell < 0.0 || coefficients.measured_hydro_face < 0.0 ||
+      coefficients.measured_wall_ms < 0.0) {
+    throw std::invalid_argument("runtime decomposition feedback coefficients must be non-negative");
+  }
+
+  auto proxy_sum = [](std::span<DecompositionItem> entries, auto getter) {
+    double sum = 0.0;
+    for (const DecompositionItem& item : entries) {
+      sum += std::max(0.0, getter(effectiveWorkComponents(item)));
+    }
+    return sum;
+  };
+  const double tree_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return c.tree_interaction_cost; });
+  const double pm_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return c.pm_mesh_cost; });
+  const double amr_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return c.amr_patch_cost; });
+  const double gas_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return c.gas_cell_cost; });
+  const double memory_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return c.memory_pressure_cost; });
+  const double generic_proxy_sum = proxy_sum(items, [](const DecompositionWorkComponents& c) { return std::max(1.0, c.generic_work_cost); });
+
+  const double tree_total = coefficients.measured_tree_pair *
+      static_cast<double>(measurements.tree_pair_evaluations_recent) +
+      static_cast<double>(measurements.tree_remote_request_bytes_recent) / 1024.0;
+  const double pm_total = coefficients.measured_pm_cell *
+      static_cast<double>(measurements.pm_mesh_cells_touched_recent) +
+      static_cast<double>(measurements.pm_fft_transpose_bytes_recent) / 1024.0;
+  const double amr_total = coefficients.measured_amr_cell *
+      static_cast<double>(measurements.amr_patch_cells_updated_recent);
+  const double hydro_total = coefficients.measured_hydro_face *
+      static_cast<double>(measurements.hydro_face_fluxes_recent);
+  const double memory_total = static_cast<double>(measurements.ghost_exchange_bytes_recent);
+  const double wall_total = coefficients.measured_wall_ms *
+      (measurements.tree_wall_ms_recent + measurements.pm_wall_ms_recent + measurements.amr_wall_ms_recent +
+       measurements.hydro_wall_ms_recent);
+
+  auto distribute = [](double total, double proxy, double sum, std::size_t count) {
+    if (!(total > 0.0)) {
+      return 0.0;
+    }
+    if (sum > 0.0) {
+      return total * std::max(0.0, proxy) / sum;
+    }
+    return total / static_cast<double>(std::max<std::size_t>(count, 1U));
+  };
+
+  for (DecompositionItem& item : items) {
+    DecompositionWorkComponents components = effectiveWorkComponents(item);
+    components.tree_interaction_cost += distribute(tree_total, components.tree_interaction_cost, tree_proxy_sum, items.size());
+    components.pm_mesh_cost += distribute(pm_total, components.pm_mesh_cost, pm_proxy_sum, items.size());
+    components.amr_patch_cost += distribute(amr_total, components.amr_patch_cost, amr_proxy_sum, items.size());
+    components.gas_cell_cost += distribute(hydro_total, components.gas_cell_cost, gas_proxy_sum, items.size());
+    components.memory_pressure_cost += distribute(memory_total, components.memory_pressure_cost, memory_proxy_sum, items.size());
+    components.generic_work_cost += distribute(wall_total, std::max(1.0, components.generic_work_cost), generic_proxy_sum, items.size());
+    components.gpu_occupancy_cost += std::max(0.0, measurements.gpu_kernel_ms_recent) *
+        std::max(0.0, measurements.accelerator_occupancy_fraction_recent);
+    components.has_explicit_components = true;
+    item.work_components = components;
+  }
+}
+
+RuntimeRebalancePlan buildRuntimeRebalancePlan(
+    std::span<const DecompositionItem> items,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config) {
+  if (rebalance_config.world_size <= 0) {
+    throw std::invalid_argument("runtime rebalance world_size must be positive");
+  }
+  if (rebalance_config.imbalance_trigger_ratio < 1.0 || rebalance_config.memory_trigger_ratio < 1.0 ||
+      rebalance_config.max_migrated_load_fraction < 0.0 || rebalance_config.max_migrated_load_fraction > 1.0) {
+    throw std::invalid_argument("runtime rebalance thresholds are invalid");
+  }
+  if (decomposition_config.world_size != rebalance_config.world_size) {
+    throw std::invalid_argument("runtime rebalance config world_size must match decomposition world_size");
+  }
+  RuntimeRebalancePlan rebalance;
+  rebalance.target_decomposition = buildMortonSfcDecomposition(items, decomposition_config);
+  if (items.empty()) {
+    rebalance.reason = "empty_decomposition";
+    return rebalance;
+  }
+
+  const bool load_imbalanced = rebalance.target_decomposition.metrics.weighted_imbalance_ratio >=
+      rebalance_config.imbalance_trigger_ratio;
+  const bool memory_imbalanced = rebalance.target_decomposition.metrics.memory_imbalance_ratio >=
+      rebalance_config.memory_trigger_ratio;
+  if (!load_imbalanced && !memory_imbalanced) {
+    rebalance.reason = "below_rebalance_threshold";
+    return rebalance;
+  }
+
+  const double total_load = std::accumulate(
+      rebalance.target_decomposition.metrics.weighted_load_by_rank.begin(),
+      rebalance.target_decomposition.metrics.weighted_load_by_rank.end(),
+      0.0);
+  const double max_migrated_load = rebalance_config.max_migrated_load_fraction * std::max(0.0, total_load);
+
+  for (std::size_t item_index = 0; item_index < items.size(); ++item_index) {
+    const int old_owner = items[item_index].current_owner_rank;
+    const int new_owner = rebalance.target_decomposition.owning_rank_by_item[item_index];
+    if (old_owner < 0 || old_owner == new_owner) {
+      continue;
+    }
+    const double item_load = weightedLoad(items[item_index], decomposition_config);
+    if (items[item_index].kind == DecompositionEntityKind::kParticle && rebalance_config.allow_particle_migration) {
+      if (max_migrated_load > 0.0 && rebalance.migrated_load + item_load > max_migrated_load &&
+          !rebalance.particle_migrations.empty()) {
+        continue;
+      }
+      rebalance.particle_migrations.push_back(ParticleMigrationIntent{
+          .particle_id = items[item_index].entity_id,
+          .item_index = item_index,
+          .old_owner_rank = old_owner,
+          .new_owner_rank = new_owner,
+          .work_units = item_load,
+      });
+      rebalance.migrated_load += item_load;
+    } else if (items[item_index].kind == DecompositionEntityKind::kAmrPatch &&
+               rebalance_config.allow_amr_patch_reassignment) {
+      rebalance.amr_patch_ownership_updates.push_back(AmrPatchOwnershipUpdate{
+          .patch_id = items[item_index].entity_id,
+          .old_owner_rank = old_owner,
+          .new_owner_rank = new_owner,
+      });
+      rebalance.migrated_load += item_load;
+    }
+  }
+
+  rebalance.should_rebalance = !rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty();
+  rebalance.migrated_load_fraction = (total_load > 0.0) ? (rebalance.migrated_load / total_load) : 0.0;
+  rebalance.reason = load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
+      (load_imbalanced ? "load_imbalance" : "memory_imbalance");
+  return rebalance;
+}
+
+std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
+    const MpiContext& mpi_context,
+    std::span<const DecompositionItem> local_items) {
+  static_assert(std::is_trivially_copyable_v<DecompositionItem>);
+  if (mpi_context.worldSize() == 1) {
+    return std::vector<DecompositionItem>(local_items.begin(), local_items.end());
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("multi-rank decomposition item gather requires MPI to be enabled");
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int local_bytes = static_cast<int>(local_items.size_bytes());
+  std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
+  MPI_Allgather(&local_bytes, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  std::vector<int> displacements(recv_counts.size(), 0);
+  int total_bytes = 0;
+  for (std::size_t i = 0; i < recv_counts.size(); ++i) {
+    if (recv_counts[i] % static_cast<int>(sizeof(DecompositionItem)) != 0) {
+      throw std::runtime_error("decomposition item gather received a non-record-aligned byte count");
+    }
+    displacements[i] = total_bytes;
+    total_bytes += recv_counts[i];
+  }
+  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_bytes));
+  MPI_Allgatherv(
+      local_items.data(),
+      local_bytes,
+      MPI_BYTE,
+      recv_bytes.data(),
+      recv_counts.data(),
+      displacements.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  std::vector<DecompositionItem> gathered(static_cast<std::size_t>(total_bytes) / sizeof(DecompositionItem));
+  std::memcpy(gathered.data(), recv_bytes.data(), recv_bytes.size());
+  return gathered;
+#else
+  throw std::runtime_error("multi-rank decomposition item gather requires an MPI build");
+#endif
 }
 
 GhostExchangePlan buildGhostExchangePlan(
@@ -1434,6 +1617,59 @@ void recordDistributedProfiling(
   record_component_total("parallel.weight_component_active_fraction", metrics.active_fraction_cost_by_rank);
   record_component_total("parallel.weight_component_memory_pressure", metrics.memory_pressure_cost_by_rank);
   record_component_total("parallel.weight_component_gpu_occupancy", metrics.gpu_occupancy_cost_by_rank);
+
+  if (!metrics.weighted_load_by_rank.empty()) {
+    const auto max_rank_it = std::max_element(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end());
+    const std::size_t max_rank = static_cast<std::size_t>(std::distance(metrics.weighted_load_by_rank.begin(), max_rank_it));
+    profiler->counters().setCount("parallel.max_weighted_load_rank", static_cast<std::uint64_t>(max_rank));
+    profiler->counters().setCount(
+        "parallel.max_weighted_load",
+        static_cast<std::uint64_t>(std::llround(std::max(0.0, *max_rank_it))));
+
+    struct ComponentView {
+      std::string_view name;
+      const std::vector<double>* values;
+    };
+    const std::array<ComponentView, 9> components{{
+        {"particle_count", &metrics.particle_count_cost_by_rank},
+        {"gas_cell", &metrics.gas_cell_cost_by_rank},
+        {"tree_interaction", &metrics.tree_interaction_cost_by_rank},
+        {"pm_mesh", &metrics.pm_mesh_cost_by_rank},
+        {"amr_patch", &metrics.amr_patch_cost_by_rank},
+        {"active_fraction", &metrics.active_fraction_cost_by_rank},
+        {"memory_pressure", &metrics.memory_pressure_cost_by_rank},
+        {"gpu_occupancy", &metrics.gpu_occupancy_cost_by_rank},
+        {"generic_work", &metrics.generic_work_cost_by_rank},
+    }};
+    std::string_view dominant_component = "none";
+    double dominant_value = 0.0;
+    for (const ComponentView& component : components) {
+      if (component.values->size() <= max_rank) {
+        continue;
+      }
+      const double value = (*component.values)[max_rank];
+      if (value > dominant_value) {
+        dominant_value = value;
+        dominant_component = component.name;
+      }
+    }
+    profiler->counters().setCount(
+        "parallel.max_rank_dominant_component_cost",
+        static_cast<std::uint64_t>(std::llround(std::max(0.0, dominant_value))));
+    profiler->recordEvent(core::RuntimeEvent{
+        .event_kind = "parallel.decomposition.hotspot",
+        .severity = metrics.weighted_imbalance_ratio > 1.25 ? core::RuntimeEventSeverity::kWarning
+                                                            : core::RuntimeEventSeverity::kInfo,
+        .subsystem = "parallel.domain_decomposition",
+        .message = "domain decomposition load hotspot attribution",
+        .payload = {{"max_rank", std::to_string(max_rank)},
+                    {"max_rank_load", std::to_string(*max_rank_it)},
+                    {"mean_load", std::to_string(metrics.mean_weighted_load)},
+                    {"weighted_imbalance_ratio", std::to_string(metrics.weighted_imbalance_ratio)},
+                    {"memory_imbalance_ratio", std::to_string(metrics.memory_imbalance_ratio)},
+                    {"dominant_component", std::string(dominant_component)},
+                    {"dominant_component_cost", std::to_string(dominant_value)}}});
+  }
 
   const std::uint64_t bytes_moved = ghost_exchange_send_bytes + ghost_exchange_recv_bytes;
   profiler->addBytesMoved(bytes_moved);

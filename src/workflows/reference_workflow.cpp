@@ -719,6 +719,238 @@ void compactStateToCurrentOwner(
   rebuildLocalGasStateFromParticleIds(state, gas_records, old_cell_particle_id);
 }
 
+
+[[nodiscard]] parallel::DecompositionConfig makeWorkflowDecompositionConfig(
+    const core::SimulationConfig& config,
+    int world_size) {
+  parallel::DecompositionConfig decomposition_config;
+  decomposition_config.world_size = world_size;
+  decomposition_config.domain_x_min_comov = 0.0;
+  decomposition_config.domain_x_max_comov = config.cosmology.box_size_x_mpc_comoving;
+  decomposition_config.domain_y_min_comov = 0.0;
+  decomposition_config.domain_y_max_comov = config.cosmology.box_size_y_mpc_comoving;
+  decomposition_config.domain_z_min_comov = 0.0;
+  decomposition_config.domain_z_max_comov = config.cosmology.box_size_z_mpc_comoving;
+  decomposition_config.owned_particle_weight = 0.0;
+  decomposition_config.active_target_weight = 0.0;
+  decomposition_config.remote_tree_interaction_weight = 0.0;
+  decomposition_config.work_weight = 0.0;
+  decomposition_config.memory_weight = 0.0;
+  decomposition_config.component_weights = parallel::DecompositionWeightCoefficients{
+      .particle_count = config.parallel.decomposition_particle_count_weight,
+      .gas_cell = config.parallel.decomposition_gas_cell_weight,
+      .tree_interaction = config.parallel.decomposition_tree_interaction_weight,
+      .pm_mesh = config.parallel.decomposition_pm_mesh_weight,
+      .amr_patch = config.parallel.decomposition_amr_patch_weight,
+      .active_fraction = config.parallel.decomposition_active_fraction_weight,
+      .memory_pressure = config.parallel.decomposition_memory_pressure_weight,
+      .gpu_occupancy = config.parallel.decomposition_gpu_occupancy_weight,
+      .generic_work = config.parallel.decomposition_generic_work_weight,
+  };
+  return decomposition_config;
+}
+
+[[nodiscard]] parallel::DecompositionFeedbackCoefficients makeWorkflowFeedbackCoefficients(
+    const core::SimulationConfig& config) {
+  return parallel::DecompositionFeedbackCoefficients{
+      .measured_tree_pair = config.parallel.decomposition_measured_tree_pair_weight,
+      .measured_pm_cell = config.parallel.decomposition_measured_pm_cell_weight,
+      .measured_amr_cell = config.parallel.decomposition_measured_amr_cell_weight,
+      .measured_hydro_face = config.parallel.decomposition_measured_hydro_face_weight,
+      .measured_wall_ms = config.parallel.decomposition_measured_wall_ms_weight,
+  };
+}
+
+[[nodiscard]] std::uint64_t estimateParticleMemoryBytesForDecomposition(
+    const core::SimulationState& state,
+    std::uint32_t species_tag) {
+  std::uint64_t bytes = sizeof(double) * 7U + sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t) * 3U;
+  if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
+    bytes += sizeof(double);
+  }
+  if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
+    bytes += sizeof(std::uint8_t);
+  }
+  if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
+    bytes += sizeof(double) * 8U + sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t) * 2U;
+  } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kStar)) {
+    bytes += sizeof(std::uint32_t) + sizeof(double) * 13U;
+  } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
+    bytes += sizeof(std::uint32_t) * 2U + sizeof(double) * 8U;
+  } else if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kTracer)) {
+    bytes += sizeof(std::uint64_t) * 2U + sizeof(std::uint32_t) * 2U + sizeof(double) * 3U;
+  }
+  for (const core::ModuleSidecarBlock* block_ptr : state.sidecars.blocksSortedByName()) {
+    const core::ModuleSidecarBlock& block = *block_ptr;
+    if (!block.particle_indexed || block.row_stride_bytes == 0U) {
+      continue;
+    }
+    if ((block.required_species_mask & (1U << species_tag)) != 0U) {
+      bytes += block.row_stride_bytes;
+    }
+  }
+  return bytes;
+}
+
+[[nodiscard]] std::vector<parallel::DecompositionItem> buildRuntimeDecompositionItems(
+    const core::SimulationState& state,
+    const core::SimulationConfig& config,
+    int world_rank,
+    std::span<const std::uint32_t> active_particle_indices) {
+  std::vector<std::uint8_t> active_mask(state.particles.size(), 0U);
+  for (const std::uint32_t pidx : active_particle_indices) {
+    if (pidx < active_mask.size()) {
+      active_mask[pidx] = 1U;
+    }
+  }
+  std::vector<std::uint32_t> patch_cell_count(state.patches.size(), 0U);
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+    if (patch_index < patch_cell_count.size()) {
+      ++patch_cell_count[patch_index];
+    }
+  }
+
+  std::vector<parallel::DecompositionItem> items;
+  items.reserve(state.particles.size() + state.patches.size());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    const std::uint32_t species_tag = state.particle_sidecar.species_tag[particle_index];
+    parallel::DecompositionItem item;
+    item.entity_id = state.particle_sidecar.particle_id[particle_index];
+    item.kind = parallel::DecompositionEntityKind::kParticle;
+    item.current_owner_rank = state.particle_sidecar.owning_rank.empty()
+        ? world_rank
+        : static_cast<int>(state.particle_sidecar.owning_rank[particle_index]);
+    item.x_comov = state.particles.position_x_comoving[particle_index];
+    item.y_comov = state.particles.position_y_comoving[particle_index];
+    item.z_comov = state.particles.position_z_comoving[particle_index];
+    item.active_target_count_recent = active_mask[particle_index] != 0U ? 1U : 0U;
+    item.remote_tree_interactions_recent = 1U;
+    item.memory_bytes = estimateParticleMemoryBytesForDecomposition(state, species_tag);
+    double amr_patch_cost = 0.0;
+    if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) && !state.cells.patch_index.empty()) {
+      try {
+        const std::uint32_t cell_row = state.gasCellRowForParticleId(item.entity_id);
+        if (cell_row < state.cells.patch_index.size()) {
+          const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+          if (patch_index < patch_cell_count.size()) {
+            amr_patch_cost = static_cast<double>(patch_cell_count[patch_index]) *
+                (1.0 + static_cast<double>(std::max<std::int32_t>(state.patches.level[patch_index], 0)));
+          }
+        }
+      } catch (const std::exception&) {
+        amr_patch_cost = 0.0;
+      }
+    }
+    item.work_components = parallel::DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .gas_cell_cost = species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) ? 1.0 : 0.0,
+        .tree_interaction_cost = 1.0,
+        .pm_mesh_cost = 1.0,
+        .amr_patch_cost = amr_patch_cost,
+        .active_fraction_cost = static_cast<double>(item.active_target_count_recent),
+        .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .gpu_occupancy_cost = 0.0,
+        .generic_work_cost = 1.0,
+        .has_explicit_components = true,
+    };
+    items.push_back(item);
+  }
+
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.cell_count[patch_index] == 0U) {
+      continue;
+    }
+    const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+    if (first_cell >= state.cells.size()) {
+      continue;
+    }
+    parallel::DecompositionItem item;
+    item.entity_id = state.patches.patch_id[patch_index];
+    item.kind = parallel::DecompositionEntityKind::kAmrPatch;
+    item.current_owner_rank = state.patches.owning_rank.empty()
+        ? world_rank
+        : static_cast<int>(state.patches.owning_rank[patch_index]);
+    item.x_comov = state.cells.center_x_comoving[first_cell];
+    item.y_comov = state.cells.center_y_comoving[first_cell];
+    item.z_comov = state.cells.center_z_comoving[first_cell];
+    item.memory_bytes = static_cast<std::uint64_t>(state.patches.cell_count[patch_index]) *
+        static_cast<std::uint64_t>(sizeof(double) * 8U + sizeof(std::uint32_t) * 2U);
+    item.work_components = parallel::DecompositionWorkComponents{
+        .amr_patch_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
+            (1.0 + static_cast<double>(std::max<std::int32_t>(state.patches.level[patch_index], 0))),
+        .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .generic_work_cost = static_cast<double>(state.patches.cell_count[patch_index]),
+        .has_explicit_components = true,
+    };
+    items.push_back(item);
+  }
+  parallel::applyRuntimeDecompositionFeedback(items, parallel::DecompositionRuntimeMeasurements{}, makeWorkflowFeedbackCoefficients(config));
+  return items;
+}
+
+void recordRuntimeRebalanceDecision(
+    core::ProfilerSession* profiler,
+    const parallel::RuntimeRebalancePlan& rebalance,
+    std::uint64_t step_index) {
+  if (profiler == nullptr) {
+    return;
+  }
+  profiler->recordEvent(core::RuntimeEvent{
+      .event_kind = "parallel.decomposition.runtime_rebalance",
+      .severity = rebalance.should_rebalance ? core::RuntimeEventSeverity::kWarning : core::RuntimeEventSeverity::kInfo,
+      .subsystem = "parallel.domain_decomposition",
+      .step_index = step_index,
+      .message = rebalance.should_rebalance
+          ? "runtime work-weighted decomposition produced migration intent"
+          : "runtime work-weighted decomposition remained below rebalance threshold",
+      .payload = {{"reason", rebalance.reason},
+                  {"should_rebalance", rebalance.should_rebalance ? "true" : "false"},
+                  {"particle_migration_count", std::to_string(rebalance.particle_migrations.size())},
+                  {"amr_patch_ownership_update_count", std::to_string(rebalance.amr_patch_ownership_updates.size())},
+                  {"migrated_load_fraction", std::to_string(rebalance.migrated_load_fraction)},
+                  {"weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
+                  {"memory_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.memory_imbalance_ratio)}}});
+}
+
+void applyMeasuredRuntimeRebalancePlan(
+    core::SimulationState& state,
+    const core::SimulationConfig& config,
+    const parallel::MpiContext& mpi_context,
+    int world_rank,
+    const parallel::DecompositionRuntimeMeasurements& measurements,
+    std::span<const std::uint32_t> active_particle_indices,
+    core::ProfilerSession* profiler,
+    std::uint64_t step_index) {
+  if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
+    return;
+  }
+  auto local_items = buildRuntimeDecompositionItems(state, config, world_rank, active_particle_indices);
+  parallel::applyRuntimeDecompositionFeedback(local_items, measurements, makeWorkflowFeedbackCoefficients(config));
+  const std::vector<parallel::DecompositionItem> global_items =
+      parallel::gatherDecompositionItemsAcrossRanks(mpi_context, local_items);
+  parallel::RuntimeRebalanceConfig rebalance_config{
+      .world_size = mpi_context.worldSize(),
+      .imbalance_trigger_ratio = config.parallel.decomposition_rebalance_imbalance_trigger,
+      .memory_trigger_ratio = config.parallel.decomposition_rebalance_memory_trigger,
+      .max_migrated_load_fraction = config.parallel.decomposition_rebalance_max_migrated_load_fraction,
+      .allow_particle_migration = true,
+      .allow_amr_patch_reassignment = true,
+  };
+  const auto rebalance = parallel::buildRuntimeRebalancePlan(
+      global_items,
+      makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
+      rebalance_config);
+  for (const auto& update : rebalance.amr_patch_ownership_updates) {
+    for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+      if (state.patches.patch_id[patch_index] == update.patch_id) {
+        state.patches.owning_rank[patch_index] = static_cast<std::uint32_t>(update.new_owner_rank);
+      }
+    }
+  }
+  recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
+}
+
 void applyInitialGravityAwareDecomposition(
     core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -820,10 +1052,14 @@ void applyInitialGravityAwareDecomposition(
 
   std::vector<parallel::DecompositionItem> items;
   items.reserve(state.particles.size() + state.patches.size());
+  constexpr std::uint32_t k_invalid_patch_index = std::numeric_limits<std::uint32_t>::max();
+  std::vector<std::uint32_t> patch_index_by_item;
+  patch_index_by_item.reserve(state.particles.size() + state.patches.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     parallel::DecompositionItem item;
     item.entity_id = state.particle_sidecar.particle_id[particle_index];
     item.kind = parallel::DecompositionEntityKind::kParticle;
+    item.current_owner_rank = static_cast<int>(state.particle_sidecar.owning_rank[particle_index]);
     item.x_comov = state.particles.position_x_comoving[particle_index];
     item.y_comov = state.particles.position_y_comoving[particle_index];
     item.z_comov = state.particles.position_z_comoving[particle_index];
@@ -868,8 +1104,12 @@ void applyInitialGravityAwareDecomposition(
         .has_explicit_components = true,
     };
     items.push_back(item);
+    patch_index_by_item.push_back(k_invalid_patch_index);
   }
 
+  if (state.patches.owning_rank.size() != state.patches.size()) {
+    state.patches.owning_rank.assign(state.patches.size(), static_cast<std::uint32_t>(std::max(world_rank, 0)));
+  }
   for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
     if (state.patches.cell_count[patch_index] == 0U) {
       continue;
@@ -881,6 +1121,7 @@ void applyInitialGravityAwareDecomposition(
     parallel::DecompositionItem patch_item;
     patch_item.entity_id = state.patches.patch_id[patch_index];
     patch_item.kind = parallel::DecompositionEntityKind::kAmrPatch;
+    patch_item.current_owner_rank = static_cast<int>(state.patches.owning_rank[patch_index]);
     patch_item.x_comov = state.cells.center_x_comoving[first_cell];
     patch_item.y_comov = state.cells.center_y_comoving[first_cell];
     patch_item.z_comov = state.cells.center_z_comoving[first_cell];
@@ -894,6 +1135,7 @@ void applyInitialGravityAwareDecomposition(
         .has_explicit_components = true,
     };
     items.push_back(patch_item);
+    patch_index_by_item.push_back(static_cast<std::uint32_t>(patch_index));
   }
 
   parallel::DecompositionConfig decomposition_config;
@@ -923,6 +1165,12 @@ void applyInitialGravityAwareDecomposition(
   const auto plan = parallel::buildMortonSfcDecomposition(items, decomposition_config);
   for (std::size_t item_index = 0; item_index < state.particles.size(); ++item_index) {
     state.particle_sidecar.owning_rank[item_index] = static_cast<std::uint32_t>(plan.owning_rank_by_item[item_index]);
+  }
+  for (std::size_t item_index = 0; item_index < patch_index_by_item.size(); ++item_index) {
+    const std::uint32_t patch_index = patch_index_by_item[item_index];
+    if (patch_index != k_invalid_patch_index && patch_index < state.patches.owning_rank.size()) {
+      state.patches.owning_rank[patch_index] = static_cast<std::uint32_t>(plan.owning_rank_by_item[item_index]);
+    }
   }
   parallel::recordDistributedProfiling(profiler, plan.metrics, 0, 0);
   if (profiler != nullptr) {
@@ -1405,6 +1653,7 @@ void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value,
       restored.patches.level == reference.patches.level &&
       restored.patches.first_cell == reference.patches.first_cell &&
       restored.patches.cell_count == reference.patches.cell_count &&
+      restored.patches.owning_rank == reference.patches.owning_rank &&
       restored.star_particles.particle_index == reference.star_particles.particle_index &&
       restored.star_particles.formation_scale_factor == reference.star_particles.formation_scale_factor &&
       restored.star_particles.birth_mass_code == reference.star_particles.birth_mass_code &&
@@ -2061,6 +2310,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
             m_active_target_softening_override_mask.size()),
         .species_policy = m_tree_pm_species_softening,
     };
+    gravity::TreePmProfileEvent tree_pm_profile;
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
         m_local_source_x,
         m_local_source_y,
@@ -2069,9 +2319,39 @@ class GravityStageCallback final : public core::IntegrationCallback {
         accumulator,
         m_tree_pm_options,
         decision.refresh_long_range_field,
-        nullptr,
+        &tree_pm_profile,
         &m_last_tree_pm_diagnostics,
         softening_view);
+
+    const parallel::DecompositionRuntimeMeasurements decomposition_measurements{
+        .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations +
+            tree_pm_profile.tree_profile.particle_particle_interactions,
+        .tree_remote_request_bytes_recent = m_last_tree_pm_diagnostics.residual_remote_request_bytes +
+            m_last_tree_pm_diagnostics.residual_remote_response_bytes,
+        .pm_mesh_cells_touched_recent = static_cast<std::uint64_t>(m_tree_pm_coordinator.slabLayout().localCellCount()),
+        .pm_fft_transpose_bytes_recent = tree_pm_profile.pm_profile.fft_transpose_bytes,
+        .amr_patch_cells_updated_recent = static_cast<std::uint64_t>(context.state.cells.size()),
+        .hydro_face_fluxes_recent = 0,
+        .ghost_exchange_bytes_recent = gravity_ghost_refresh.sent_bytes + gravity_ghost_refresh.received_bytes,
+        .tree_wall_ms_recent = tree_pm_profile.tree_profile.build_ms + tree_pm_profile.tree_profile.multipole_ms +
+            tree_pm_profile.tree_profile.traversal_ms + tree_pm_profile.tree_short_range_ms,
+        .pm_wall_ms_recent = tree_pm_profile.pm_profile.assign_ms + tree_pm_profile.pm_profile.fft_forward_ms +
+            tree_pm_profile.pm_profile.poisson_ms + tree_pm_profile.pm_profile.gradient_ms +
+            tree_pm_profile.pm_profile.fft_inverse_ms + tree_pm_profile.pm_profile.fft_transpose_ms +
+            tree_pm_profile.pm_profile.interpolate_ms,
+        .gpu_kernel_ms_recent = tree_pm_profile.pm_profile.device_kernel_ms,
+        .accelerator_occupancy_fraction_recent = (tree_pm_profile.pm_profile.device_kernel_ms > 0.0) ? 1.0 : 0.0,
+        .has_measurements = true,
+    };
+    applyMeasuredRuntimeRebalancePlan(
+        context.state,
+        m_config,
+        mpi_context,
+        m_runtime_topology.world_rank,
+        decomposition_measurements,
+        context.active_set.particle_indices,
+        context.profiler_session,
+        context.integrator_state.step_index);
 
     const bool allow_heavy_reference_checks =
         m_config.analysis.diagnostics_execution_policy ==

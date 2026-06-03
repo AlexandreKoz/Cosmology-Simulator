@@ -224,6 +224,10 @@ struct PatchSoa {
   AlignedVector<std::int32_t> level;
   AlignedVector<std::uint32_t> first_cell;
   AlignedVector<std::uint32_t> cell_count;
+  // Authoritative AMR patch owner for distributed rebalancing. Patch payloads remain
+  // contiguous in CellSoa; this lane is the ownership contract used by load-balance
+  // planning and restart, not transient exchange scratch.
+  AlignedVector<std::uint32_t> owning_rank;
 
   void resize(std::size_t count);
   [[nodiscard]] std::size_t size() const noexcept;

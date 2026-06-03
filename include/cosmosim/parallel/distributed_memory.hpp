@@ -50,6 +50,7 @@ struct DecompositionWeightCoefficients {
 struct DecompositionItem {
   std::uint64_t entity_id = 0;
   DecompositionEntityKind kind = DecompositionEntityKind::kParticle;
+  int current_owner_rank = -1;
   double x_comov = 0.0;
   double y_comov = 0.0;
   double z_comov = 0.0;
@@ -115,6 +116,85 @@ struct DecompositionPlan {
 [[nodiscard]] DecompositionPlan buildMortonSfcDecomposition(
     std::span<const DecompositionItem> items,
     const DecompositionConfig& config);
+
+struct DecompositionRuntimeMeasurements {
+  // Measured feedback from the previous solver window. These are aggregate
+  // counters/timings that are distributed across decomposition units according
+  // to their existing spatial/proxy contribution. A zero/empty frame leaves
+  // proxy-only costs unchanged.
+  std::uint64_t tree_pair_evaluations_recent = 0;
+  std::uint64_t tree_remote_request_bytes_recent = 0;
+  std::uint64_t pm_mesh_cells_touched_recent = 0;
+  std::uint64_t pm_fft_transpose_bytes_recent = 0;
+  std::uint64_t amr_patch_cells_updated_recent = 0;
+  std::uint64_t hydro_face_fluxes_recent = 0;
+  std::uint64_t ghost_exchange_bytes_recent = 0;
+  double tree_wall_ms_recent = 0.0;
+  double pm_wall_ms_recent = 0.0;
+  double amr_wall_ms_recent = 0.0;
+  double hydro_wall_ms_recent = 0.0;
+  double gpu_kernel_ms_recent = 0.0;
+  double accelerator_occupancy_fraction_recent = 0.0;
+  bool has_measurements = false;
+};
+
+struct DecompositionFeedbackCoefficients {
+  double measured_tree_pair = 1.0;
+  double measured_pm_cell = 1.0;
+  double measured_amr_cell = 1.0;
+  double measured_hydro_face = 1.0;
+  double measured_wall_ms = 1.0;
+};
+
+void applyRuntimeDecompositionFeedback(
+    std::span<DecompositionItem> items,
+    const DecompositionRuntimeMeasurements& measurements,
+    const DecompositionFeedbackCoefficients& coefficients);
+
+struct RuntimeRebalanceConfig {
+  int world_size = 1;
+  double imbalance_trigger_ratio = 1.25;
+  double memory_trigger_ratio = 1.50;
+  double max_migrated_load_fraction = 0.25;
+  bool allow_particle_migration = true;
+  bool allow_amr_patch_reassignment = true;
+};
+
+struct ParticleMigrationIntent {
+  std::uint64_t particle_id = 0;
+  std::size_t item_index = 0;
+  int old_owner_rank = 0;
+  int new_owner_rank = 0;
+  double work_units = 0.0;
+};
+
+struct AmrPatchOwnershipUpdate {
+  std::uint64_t patch_id = 0;
+  int old_owner_rank = 0;
+  int new_owner_rank = 0;
+};
+
+class MpiContext;
+
+struct RuntimeRebalancePlan {
+  bool should_rebalance = false;
+  std::string reason;
+  DecompositionPlan target_decomposition{};
+  std::vector<ParticleMigrationIntent> particle_migrations;
+  std::vector<AmrPatchOwnershipUpdate> amr_patch_ownership_updates;
+  double migrated_load = 0.0;
+  double migrated_load_fraction = 0.0;
+};
+
+[[nodiscard]] RuntimeRebalancePlan buildRuntimeRebalancePlan(
+    std::span<const DecompositionItem> items,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config);
+
+[[nodiscard]] std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
+    const MpiContext& mpi_context,
+    std::span<const DecompositionItem> local_items);
+
 
 enum class LocalIndexResidency : std::uint8_t {
   kOwned = 0,

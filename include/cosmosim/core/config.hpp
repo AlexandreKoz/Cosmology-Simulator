@@ -250,6 +250,15 @@ struct ParallelConfig {
   double decomposition_memory_pressure_weight = 1.0 / (1024.0 * 1024.0);
   double decomposition_gpu_occupancy_weight = 0.0;
   double decomposition_generic_work_weight = 0.5;
+  bool decomposition_runtime_rebalance_enabled = true;
+  double decomposition_rebalance_imbalance_trigger = 1.25;
+  double decomposition_rebalance_memory_trigger = 1.50;
+  double decomposition_rebalance_max_migrated_load_fraction = 0.25;
+  double decomposition_measured_tree_pair_weight = 1.0;
+  double decomposition_measured_pm_cell_weight = 1.0;
+  double decomposition_measured_amr_cell_weight = 1.0;
+  double decomposition_measured_hydro_face_weight = 1.0;
+  double decomposition_measured_wall_ms_weight = 1.0;
 };
 
 struct UnitsConfig {
