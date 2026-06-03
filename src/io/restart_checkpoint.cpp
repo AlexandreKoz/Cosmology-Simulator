@@ -830,11 +830,22 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   for (const core::ModuleSidecarBlock* block : sidecar_blocks) {
     Hdf5Handle module_group(openOrCreateGroup(sidecars_group.get(), block->module_name));
     writeScalarU32Attribute(module_group.get(), "schema_version", block->schema_version);
+    writeScalarU32Attribute(module_group.get(), "particle_indexed", block->particle_indexed ? 1U : 0U);
+    writeScalarU32Attribute(module_group.get(), "row_stride_bytes", block->row_stride_bytes);
+    writeScalarU32Attribute(module_group.get(), "required_species_mask", block->required_species_mask);
     std::vector<std::uint8_t> payload(block->payload.size());
     for (std::size_t i = 0; i < block->payload.size(); ++i) {
       payload[i] = std::to_integer<std::uint8_t>(block->payload[i]);
     }
     writeDataset1d(module_group.get(), "payload", H5T_STD_U8LE, H5T_NATIVE_UINT8, payload);
+    if (block->isParticleIndexed()) {
+      writeDataset1d(
+          module_group.get(),
+          "particle_id_by_row",
+          H5T_STD_U64LE,
+          H5T_NATIVE_UINT64,
+          block->particle_id_by_row);
+    }
     module_names_text += block->module_name;
     module_names_text.push_back('\n');
   }
@@ -960,10 +971,25 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
     core::ModuleSidecarBlock block;
     block.module_name = module_name;
     block.schema_version = readScalarU32Attribute(module_group.get(), "schema_version");
+    if (hdf5AttributeExists(module_group.get(), "particle_indexed")) {
+      block.particle_indexed = readScalarU32Attribute(module_group.get(), "particle_indexed") != 0U;
+    }
+    if (hdf5AttributeExists(module_group.get(), "row_stride_bytes")) {
+      block.row_stride_bytes = readScalarU32Attribute(module_group.get(), "row_stride_bytes");
+    }
+    if (hdf5AttributeExists(module_group.get(), "required_species_mask")) {
+      block.required_species_mask = readScalarU32Attribute(module_group.get(), "required_species_mask");
+    }
     const auto payload_u8 = readDataset1d<std::uint8_t>(module_group.get(), "payload", H5T_NATIVE_UINT8);
     block.payload.resize(payload_u8.size());
     for (std::size_t i = 0; i < payload_u8.size(); ++i) {
       block.payload[i] = static_cast<std::byte>(payload_u8[i]);
+    }
+    if (block.particle_indexed || block.row_stride_bytes != 0U ||
+        hdf5LinkExists(module_group.get(), "particle_id_by_row")) {
+      block.particle_indexed = true;
+      block.particle_id_by_row =
+          readDataset1d<std::uint64_t>(module_group.get(), "particle_id_by_row", H5T_NATIVE_UINT64);
     }
     state.sidecars.upsert(std::move(block));
   }
@@ -1351,6 +1377,13 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   for (const core::ModuleSidecarBlock* block : ordered_sidecars) {
     append_string(block->module_name);
     append_u64(static_cast<std::uint64_t>(block->schema_version));
+    append_u64(block->particle_indexed ? 1ULL : 0ULL);
+    append_u64(static_cast<std::uint64_t>(block->row_stride_bytes));
+    append_u64(static_cast<std::uint64_t>(block->required_species_mask));
+    append_u64(static_cast<std::uint64_t>(block->particle_id_by_row.size()));
+    for (const std::uint64_t particle_id : block->particle_id_by_row) {
+      append_u64(particle_id);
+    }
     append_u64(static_cast<std::uint64_t>(block->payload.size()));
     hash = fnv1aAppend(hash, std::span<const std::byte>(block->payload.data(), block->payload.size()));
   }

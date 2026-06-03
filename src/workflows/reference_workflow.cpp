@@ -3367,6 +3367,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         expected_global_identity.local_particle_id_sum,
         expected_global_identity.local_particle_id_square_sum,
         expected_global_identity.local_particle_id_xor);
+    if (!report.global_particle_partition_identity_match) {
+      throw std::runtime_error(
+          "distributed ownership invariant failed after initial decomposition: duplicate, missing, or extra authoritative particle IDs");
+    }
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "parallel.ownership.partition_summary",
         .severity = core::RuntimeEventSeverity::kInfo,
@@ -3662,6 +3666,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         expected_global_identity.local_particle_id_sum,
         expected_global_identity.local_particle_id_square_sum,
         expected_global_identity.local_particle_id_xor);
+    if (!report.global_particle_partition_identity_match) {
+      throw std::runtime_error(
+          "distributed ownership invariant failed at run completion: duplicate, missing, or extra authoritative particle IDs");
+    }
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();
     report.treepm_cadence_records.assign(

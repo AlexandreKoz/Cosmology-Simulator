@@ -107,6 +107,14 @@ bool ModuleSidecarBlock::isParticleIndexed() const noexcept {
   return particle_indexed || row_stride_bytes != 0U || !particle_id_by_row.empty();
 }
 
+bool ModuleSidecarBlock::requiresSpecies(ParticleSpecies species) const noexcept {
+  const auto bit = static_cast<std::uint32_t>(species);
+  if (bit >= 32U) {
+    return false;
+  }
+  return (required_species_mask & (1U << bit)) != 0U;
+}
+
 std::size_t ModuleSidecarBlock::rowCount() const noexcept {
   return particle_id_by_row.size();
 }
@@ -136,6 +144,9 @@ void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
     if (block.row_stride_bytes != 0U || !block.particle_id_by_row.empty()) {
       throw std::invalid_argument("ModuleSidecarRegistry.upsert: non-indexed block has particle row metadata");
     }
+    if (block.required_species_mask != 0U) {
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: required_species_mask is valid only for particle-indexed sidecars");
+    }
     return;
   }
 
@@ -144,6 +155,15 @@ void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
   }
   if (block.row_stride_bytes == 0U) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed sidecar row_stride_bytes must be positive");
+  }
+  const std::uint32_t valid_species_mask =
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kGas)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kStar)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kTracer));
+  if ((block.required_species_mask & ~valid_species_mask) != 0U) {
+    throw std::invalid_argument("ModuleSidecarRegistry.upsert: required_species_mask contains invalid species bits");
   }
   const std::size_t stride = static_cast<std::size_t>(block.row_stride_bytes);
   if (block.payload.size() != stride * block.particle_id_by_row.size()) {

@@ -505,9 +505,7 @@ void test_particle_migration_carries_scheduler_authority_fields() {
   (void)scheduler.reconcileCandidateTransitions();
 
   const std::array<std::uint32_t, 1> outbound{outbound_index};
-  auto records = state.packParticleMigrationRecords(outbound);
-  assert(!records[0].has_scheduler_fields);
-  cosmosim::core::attachSchedulerFieldsToParticleMigrationRecords(scheduler, state, outbound, records);
+  auto records = state.packParticleMigrationRecords(outbound, scheduler);
   assert(records[0].has_scheduler_fields);
   assert(records[0].scheduler_fields.bin_index == records[0].time_bin);
   assert(records[0].scheduler_fields.pending_bin_index == 1U);

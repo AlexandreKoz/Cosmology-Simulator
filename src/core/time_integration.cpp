@@ -1719,6 +1719,15 @@ void attachSchedulerFieldsToParticleMigrationRecords(
   }
 }
 
+
+std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecords(
+    std::span<const std::uint32_t> local_indices,
+    const HierarchicalTimeBinScheduler& scheduler) const {
+  auto records = packParticleMigrationRecords(local_indices);
+  attachSchedulerFieldsToParticleMigrationRecords(scheduler, *this, local_indices, records);
+  return records;
+}
+
 TimeBinPersistentState rebuildSchedulerPersistentStateFromMigrationRecords(
     std::uint64_t current_tick,
     std::uint8_t max_bin,

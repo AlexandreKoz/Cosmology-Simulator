@@ -121,6 +121,23 @@ void populateState(cosmosim::core::SimulationState& state) {
   module_sidecar.payload = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
   state.sidecars.upsert(std::move(module_sidecar));
 
+  cosmosim::core::ModuleSidecarBlock indexed_module_sidecar;
+  indexed_module_sidecar.module_name = "chemistry";
+  indexed_module_sidecar.schema_version = 7;
+  indexed_module_sidecar.particle_indexed = true;
+  indexed_module_sidecar.row_stride_bytes = 2;
+  indexed_module_sidecar.required_species_mask =
+      1U << static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+  indexed_module_sidecar.particle_id_by_row = {101, 102, 103};
+  indexed_module_sidecar.payload = {
+      std::byte{0x10},
+      std::byte{0x11},
+      std::byte{0x12},
+      std::byte{0x13},
+      std::byte{0x14},
+      std::byte{0x15}};
+  state.sidecars.upsert(std::move(indexed_module_sidecar));
+
   state.rebuildSpeciesIndex();
   assert(state.validateOwnershipInvariants());
 }
@@ -537,6 +554,17 @@ void testRestartRoundtrip() {
   assert(hydro_sidecar->payload[0] == std::byte{0x01});
   assert(hydro_sidecar->payload[1] == std::byte{0x02});
   assert(hydro_sidecar->payload[2] == std::byte{0x03});
+  const cosmosim::core::ModuleSidecarBlock* chemistry_sidecar = restored.state.sidecars.find("chemistry");
+  assert(chemistry_sidecar != nullptr);
+  assert(chemistry_sidecar->schema_version == 7);
+  assert(chemistry_sidecar->particle_indexed);
+  assert(chemistry_sidecar->row_stride_bytes == 2);
+  assert(chemistry_sidecar->required_species_mask ==
+         (1U << static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas)));
+  assert((chemistry_sidecar->particle_id_by_row == std::vector<std::uint64_t>{101, 102, 103}));
+  assert(chemistry_sidecar->payload.size() == 6);
+  assert(chemistry_sidecar->payload[0] == std::byte{0x10});
+  assert(chemistry_sidecar->payload[5] == std::byte{0x15});
   assert(restored.payload_hash == cosmosim::io::restartPayloadIntegrityHash(payload));
   assert(restored.payload_hash_hex == cosmosim::io::restartPayloadIntegrityHashHex(payload));
 

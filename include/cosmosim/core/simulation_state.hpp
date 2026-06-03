@@ -18,6 +18,8 @@
 
 namespace cosmosim::core {
 
+class HierarchicalTimeBinScheduler;
+
 // Canonical species tags used in sidecar accounting and invariant checks.
 enum class ParticleSpecies : std::uint8_t {
   kDarkMatter = 0,
@@ -277,7 +279,13 @@ struct ModuleSidecarBlock {
   std::uint32_t row_stride_bytes = 0;
   std::vector<std::uint64_t> particle_id_by_row;
 
+  // Optional enforcement mask for particle-indexed sidecars. Bit i requires
+  // one module row for every authoritative particle whose species_tag == i.
+  // A zero mask means sparse rows are allowed.
+  std::uint32_t required_species_mask = 0;
+
   [[nodiscard]] bool isParticleIndexed() const noexcept;
+  [[nodiscard]] bool requiresSpecies(ParticleSpecies species) const noexcept;
   [[nodiscard]] std::size_t rowCount() const noexcept;
   [[nodiscard]] std::span<const std::byte> rowPayload(std::size_t row) const;
 };
@@ -286,6 +294,7 @@ struct ModuleParticleSidecarPayload {
   std::string module_name;
   std::uint32_t schema_version = 1;
   std::uint32_t row_stride_bytes = 0;
+  std::uint32_t required_species_mask = 0;
   std::vector<std::byte> payload;
 };
 
@@ -457,6 +466,9 @@ class SimulationState {
   [[nodiscard]] ParticleTransferPacket packSpeciesTransferPacket(ParticleSpecies species_tag) const;
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
       std::span<const std::uint32_t> local_indices) const;
+  [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
+      std::span<const std::uint32_t> local_indices,
+      const HierarchicalTimeBinScheduler& scheduler) const;
   void commitParticleMigration(const ParticleMigrationCommit& commit);
   [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
   [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
