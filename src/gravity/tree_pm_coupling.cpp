@@ -457,6 +457,64 @@ struct PeriodicInterval {
   return bounds;
 }
 
+[[nodiscard]] parallel::TreePseudoParticlePacket makeLocalTreePseudoParticlePacket(
+    int world_rank,
+    std::uint64_t decomposition_epoch,
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving,
+    std::span<const double> mass_code,
+    const PeriodicBoxLengths& box_lengths) {
+  const SourceDomainBoundsPacket bounds = computeLocalSourceBounds(
+      pos_x_comoving, pos_y_comoving, pos_z_comoving, box_lengths);
+  double mass_sum = 0.0;
+  double mass_x = 0.0;
+  double mass_y = 0.0;
+  double mass_z = 0.0;
+  for (std::size_t i = 0; i < mass_code.size(); ++i) {
+    const double mass = std::max(0.0, mass_code[i]);
+    mass_sum += mass;
+    mass_x += mass * pos_x_comoving[i];
+    mass_y += mass * pos_y_comoving[i];
+    mass_z += mass * pos_z_comoving[i];
+  }
+  const double inv_mass = (mass_sum > 0.0) ? (1.0 / mass_sum) : 0.0;
+  parallel::TreePseudoParticlePacket packet;
+  packet.descriptor = parallel::TreePseudoParticleDescriptor{
+      .pseudo_particle_id = (static_cast<std::uint64_t>(std::max(world_rank, 0)) << 32U) ^ decomposition_epoch,
+      .source_rank = world_rank,
+      .decomposition_epoch = decomposition_epoch,
+      .derived_not_authoritative = true,
+  };
+  packet.mass_code = mass_sum;
+  packet.center_x_comoving = mass_x * inv_mass;
+  packet.center_y_comoving = mass_y * inv_mass;
+  packet.center_z_comoving = mass_z * inv_mass;
+  packet.min_x_comoving = bounds.min_x_comoving;
+  packet.max_x_comoving = bounds.max_x_comoving;
+  packet.min_y_comoving = bounds.min_y_comoving;
+  packet.max_y_comoving = bounds.max_y_comoving;
+  packet.min_z_comoving = bounds.min_z_comoving;
+  packet.max_z_comoving = bounds.max_z_comoving;
+  packet.source_count = bounds.source_particle_count;
+  parallel::validateTreePseudoParticlePacket(packet);
+  return packet;
+}
+
+[[nodiscard]] SourceDomainBoundsPacket boundsFromTreePseudoParticlePacket(
+    const parallel::TreePseudoParticlePacket& packet) {
+  parallel::validateTreePseudoParticlePacket(packet);
+  SourceDomainBoundsPacket bounds;
+  bounds.min_x_comoving = packet.min_x_comoving;
+  bounds.max_x_comoving = packet.max_x_comoving;
+  bounds.min_y_comoving = packet.min_y_comoving;
+  bounds.max_y_comoving = packet.max_y_comoving;
+  bounds.min_z_comoving = packet.min_z_comoving;
+  bounds.max_z_comoving = packet.max_z_comoving;
+  bounds.source_particle_count = packet.source_count;
+  return bounds;
+}
+
 }  // namespace
 
 void TreePmForceAccumulatorView::reset() const {
@@ -487,6 +545,10 @@ const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
 
 bool TreePmCoordinator::ownsFullPmDomain() const noexcept {
   return m_grid.ownsFullDomain();
+}
+
+const parallel::PmSlabHaloExchangeResult& TreePmCoordinator::lastPmSlabHaloExchange() const noexcept {
+  return m_last_pm_slab_halo_exchange;
 }
 
 core::MemoryReport TreePmCoordinator::memoryReport() const {
@@ -605,6 +667,20 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         mass_code,
         pm_options,
         profile != nullptr ? &profile->pm_profile : nullptr);
+    m_last_pm_slab_halo_exchange = {};
+    if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
+      m_last_pm_slab_halo_exchange = parallel::executeBlockingPmSlabHaloExchange(
+          parallel::MpiContext{},
+          m_grid.slabLayout(),
+          m_grid.density(),
+          /*halo_depth_x=*/1,
+          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
+          /*exchange_sequence=*/static_cast<std::uint64_t>(profile != nullptr ? profile->pm_profile.fft_transpose_bytes : 0U));
+      if (profile != nullptr) {
+        profile->pm_profile.bytes_moved +=
+            m_last_pm_slab_halo_exchange.sent_bytes + m_last_pm_slab_halo_exchange.received_bytes;
+      }
+    }
     if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
       m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
     } else {
@@ -1137,17 +1213,24 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& expected_response_count = m_tree_exchange_workspace.expected_response_count;
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
-    SourceDomainBoundsPacket local_bounds =
-        computeLocalSourceBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving, box_lengths);
+    const parallel::TreePseudoParticlePacket local_pseudo_packet = makeLocalTreePseudoParticlePacket(
+        mpi_world_rank,
+        /*decomposition_epoch=*/0,
+        pos_x_comoving,
+        pos_y_comoving,
+        pos_z_comoving,
+        mass_code,
+        box_lengths);
+    const std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets =
+        parallel::executeBlockingTreePseudoParticleExchange(parallel::MpiContext{}, local_pseudo_packet);
+    if (peer_pseudo_packets.size() != static_cast<std::size_t>(mpi_world_size)) {
+      throw std::runtime_error("TreePM pseudo-particle exchange returned incomplete rank coverage");
+    }
     std::vector<SourceDomainBoundsPacket> peer_bounds(static_cast<std::size_t>(mpi_world_size));
-    MPI_Allgather(
-        &local_bounds,
-        static_cast<int>(sizeof(SourceDomainBoundsPacket)),
-        MPI_BYTE,
-        peer_bounds.data(),
-        static_cast<int>(sizeof(SourceDomainBoundsPacket)),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+    for (int peer = 0; peer < mpi_world_size; ++peer) {
+      peer_bounds[static_cast<std::size_t>(peer)] =
+          boundsFromTreePseudoParticlePacket(peer_pseudo_packets[static_cast<std::size_t>(peer)]);
+    }
 
     std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer(static_cast<std::size_t>(mpi_world_size));
 
@@ -1255,8 +1338,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         continue;
       }
 
-      MPI_Request request_exchange = MPI_REQUEST_NULL;
-      MPI_Ialltoallv(
+      MPI_Alltoallv(
           send_payload.data(),
           send_counts.data(),
           send_displs.data(),
@@ -1265,9 +1347,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           recv_counts.data(),
           recv_displs.data(),
           MPI_BYTE,
-          MPI_COMM_WORLD,
-          &request_exchange);
-      MPI_Wait(&request_exchange, MPI_STATUS_IGNORE);
+          MPI_COMM_WORLD);
 
       m_last_residual_stats.remote_request_batches += 1;
       m_last_residual_stats.remote_request_packets += static_cast<std::uint64_t>(total_send_bytes / sizeof(ShortRangeTargetRequestPacket));

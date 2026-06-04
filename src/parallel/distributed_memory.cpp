@@ -1629,6 +1629,28 @@ void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& de
   }
 }
 
+void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet) {
+  validateTreePseudoParticleDescriptor(packet.descriptor);
+  if (packet.source_count == 0 && packet.mass_code != 0.0) {
+    throw std::invalid_argument("empty tree pseudo-particle packet cannot carry non-zero mass");
+  }
+  if (packet.mass_code < 0.0 || !std::isfinite(packet.mass_code)) {
+    throw std::invalid_argument("tree pseudo-particle mass must be finite and non-negative");
+  }
+  const std::array values{packet.center_x_comoving, packet.center_y_comoving, packet.center_z_comoving,
+                          packet.min_x_comoving, packet.max_x_comoving, packet.min_y_comoving,
+                          packet.max_y_comoving, packet.min_z_comoving, packet.max_z_comoving};
+  for (const double value : values) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument("tree pseudo-particle packet contains non-finite geometry");
+    }
+  }
+  if (packet.min_x_comoving > packet.max_x_comoving || packet.min_y_comoving > packet.max_y_comoving ||
+      packet.min_z_comoving > packet.max_z_comoving) {
+    throw std::invalid_argument("tree pseudo-particle packet bounds are invalid");
+  }
+}
+
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor) {
   if (descriptor.owner_rank < 0 || descriptor.consumer_rank < 0) {
     throw std::invalid_argument("hydro ghost cell ranks must be non-negative");
@@ -1647,6 +1669,21 @@ void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descri
   }
   if (!descriptor.metadata_only && descriptor.owner_rank != descriptor.peer_rank) {
     throw std::invalid_argument("remote AMR patch exchange cannot mutate authoritative patch metadata");
+  }
+}
+
+void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record) {
+  if (record.owner_rank < 0) {
+    throw std::invalid_argument("AMR patch payload owner_rank must be non-negative");
+  }
+  if (record.patch_id == 0) {
+    throw std::invalid_argument("AMR patch payload patch_id must be non-zero");
+  }
+  if (record.cell_count == 0) {
+    throw std::invalid_argument("AMR patch payload cannot describe an empty patch");
+  }
+  if (!std::isfinite(record.cell_mass_sum_code) || !std::isfinite(record.gas_internal_energy_sum_code)) {
+    throw std::invalid_argument("AMR patch payload contains non-finite cell sums");
   }
 }
 
@@ -1811,6 +1848,181 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
+    const MpiContext& mpi_context,
+    const TreePseudoParticlePacket& local_packet) {
+  validateTreePseudoParticlePacket(local_packet);
+  if (local_packet.descriptor.source_rank != mpi_context.worldRank()) {
+    throw std::invalid_argument("tree pseudo-particle packet source rank does not match MPI context");
+  }
+  if (!mpi_context.isEnabled()) {
+    return {local_packet};
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  std::vector<TreePseudoParticlePacket> packets(static_cast<std::size_t>(mpi_context.worldSize()));
+  MPI_Allgather(
+      const_cast<TreePseudoParticlePacket*>(&local_packet),
+      static_cast<int>(sizeof(TreePseudoParticlePacket)),
+      MPI_BYTE,
+      packets.data(),
+      static_cast<int>(sizeof(TreePseudoParticlePacket)),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (int rank = 0; rank < mpi_context.worldSize(); ++rank) {
+    const TreePseudoParticlePacket& packet = packets[static_cast<std::size_t>(rank)];
+    validateTreePseudoParticlePacket(packet);
+    if (packet.descriptor.source_rank != rank) {
+      throw std::runtime_error("tree pseudo-particle exchange returned a packet with mismatched source rank");
+    }
+  }
+  return packets;
+#else
+  throw std::runtime_error("tree pseudo-particle exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchPayloadRecord> local_records,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const AmrPatchPayloadRecord& record : local_records) {
+    validateAmrPatchPayloadRecord(record);
+    if (record.owner_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("AMR patch payload exchange received a record not owned by this rank");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<AmrPatchPayloadRecord>(local_records.begin(), local_records.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    if (counts64[static_cast<std::size_t>(rank)] > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("AMR patch payload exchange count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(counts64[static_cast<std::size_t>(rank)] * sizeof(AmrPatchPayloadRecord));
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] = recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  if (total_records64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("AMR patch payload exchange total count exceeds MPI int limit");
+  }
+  std::vector<AmrPatchPayloadRecord> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<AmrPatchPayloadRecord*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(AmrPatchPayloadRecord)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const AmrPatchPayloadRecord& record : result) {
+    validateAmrPatchPayloadRecord(record);
+  }
+  return result;
+#else
+  throw std::runtime_error("AMR patch payload exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
+    const MpiContext& mpi_context,
+    const PmSlabLayout& layout,
+    std::span<const double> local_scalar_field,
+    std::size_t halo_depth_x,
+    bool periodic_x,
+    std::uint64_t exchange_sequence) {
+  if (!layout.isValid()) {
+    throw std::invalid_argument("PM slab halo exchange requires a valid slab layout");
+  }
+  if (layout.world_size != mpi_context.worldSize() || layout.world_rank != mpi_context.worldRank()) {
+    throw std::invalid_argument("PM slab halo exchange layout world metadata must match MPI context");
+  }
+  if (halo_depth_x == 0 || layout.world_size == 1) {
+    return {};
+  }
+  const std::size_t plane_size = layout.global_ny * layout.global_nz;
+  if (local_scalar_field.size() != layout.localCellCount()) {
+    throw std::invalid_argument("PM slab halo exchange field size does not match local slab cell count");
+  }
+  const std::size_t depth = std::min(halo_depth_x, layout.local_nx());
+  PmSlabHaloExchangeResult result;
+  result.halo_depth_x = depth;
+  const int left_peer = (layout.world_rank > 0) ? (layout.world_rank - 1) : (periodic_x ? layout.world_size - 1 : -1);
+  const int right_peer = (layout.world_rank + 1 < layout.world_size) ? (layout.world_rank + 1) : (periodic_x ? 0 : -1);
+  result.left_peer_rank = left_peer;
+  result.right_peer_rank = right_peer;
+  result.left_halo.assign(depth * plane_size, 0.0);
+  result.right_halo.assign(depth * plane_size, 0.0);
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("PM slab halo exchange requires MPI for distributed layouts");
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  std::vector<double> send_left(depth * plane_size, 0.0);
+  std::vector<double> send_right(depth * plane_size, 0.0);
+  std::copy_n(local_scalar_field.begin(), send_left.size(), send_left.begin());
+  std::copy_n(local_scalar_field.end() - static_cast<std::ptrdiff_t>(send_right.size()), send_right.size(), send_right.begin());
+  constexpr int k_pm_halo_tag_base = 8810;
+  constexpr int k_send_left_side = 0;
+  constexpr int k_send_right_side = 1;
+  const auto edge_index = [&](int peer) {
+    const int local = mpi_context.worldRank();
+    return (std::abs(local - peer) == 1) ? std::min(local, peer) : (layout.world_size - 1);
+  };
+  const auto side_tag = [&](int peer, int side) {
+    return k_pm_halo_tag_base + edge_index(peer) * 2 + side;
+  };
+  const auto sendrecv_planes = [&](int peer,
+                                   const std::vector<double>& send,
+                                   std::vector<double>& recv,
+                                   int send_side,
+                                   int recv_side) {
+    if (peer < 0) {
+      return;
+    }
+    MPI_Sendrecv(
+        const_cast<double*>(send.data()),
+        static_cast<int>(send.size()),
+        MPI_DOUBLE,
+        peer,
+        ghostExchangeSequencedTag(side_tag(peer, send_side), mpi_context.worldRank(), peer, exchange_sequence),
+        recv.data(),
+        static_cast<int>(recv.size()),
+        MPI_DOUBLE,
+        peer,
+        ghostExchangeSequencedTag(side_tag(peer, recv_side), mpi_context.worldRank(), peer, exchange_sequence),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+    result.sent_bytes += static_cast<std::uint64_t>(send.size() * sizeof(double));
+    result.received_bytes += static_cast<std::uint64_t>(recv.size() * sizeof(double));
+  };
+  // Send the left edge to the left peer and receive that peer's right edge as our left halo.
+  sendrecv_planes(left_peer, send_left, result.left_halo, k_send_left_side, k_send_right_side);
+  // Send the right edge to the right peer and receive that peer's left edge as our right halo.
+  sendrecv_planes(right_peer, send_right, result.right_halo, k_send_right_side, k_send_left_side);
+  return result;
+#else
+  throw std::runtime_error("PM slab halo exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
 GhostRefreshCommitReport commitBlockingGhostRefreshResult(
     GhostExchangeBufferSoA& ghost_storage,
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
@@ -1886,6 +2098,27 @@ GhostRefreshCommitReport commitBlockingGhostRefreshResult(
   report.committed_payload_bytes = static_cast<std::uint64_t>(report.updated_ghost_slots) *
       static_cast<std::uint64_t>(ghostExchangeRecordBytes());
   return report;
+}
+
+void invalidateGhostCache(GhostCacheLifecycle& lifecycle, const GhostLayerEpoch& next_epoch) {
+  lifecycle.epoch = next_epoch;
+  lifecycle.valid = false;
+  ++lifecycle.invalidation_count;
+}
+
+void markGhostCacheCommitted(GhostCacheLifecycle& lifecycle, const GhostLayerEpoch& committed_epoch) {
+  lifecycle.epoch = committed_epoch;
+  lifecycle.valid = true;
+  ++lifecycle.refresh_count;
+}
+
+void requireValidGhostCache(
+    const GhostCacheLifecycle& lifecycle,
+    const GhostLayerEpoch& expected_epoch,
+    std::string_view caller) {
+  if (!lifecycle.valid || !lifecycle.epoch.matches(expected_epoch)) {
+    throw std::runtime_error(std::string(caller) + ": stale or invalid ghost cache used by solver");
+  }
 }
 
 

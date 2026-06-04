@@ -1236,6 +1236,77 @@ void recordRuntimeRebalanceDecision(
                   {"target_memory_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.memory_imbalance_ratio)}}});
 }
 
+[[nodiscard]] std::vector<parallel::AmrPatchPayloadRecord> buildLocalAmrPatchPayloadRecords(
+    const core::SimulationState& state,
+    int world_rank) {
+  std::vector<parallel::AmrPatchPayloadRecord> records;
+  if (world_rank < 0 || state.patches.size() == 0) {
+    return records;
+  }
+  records.reserve(state.patches.size());
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
+      continue;
+    }
+    const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+    const std::uint32_t cell_count = state.patches.cell_count[patch_index];
+    if (cell_count == 0U) {
+      continue;
+    }
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > state.cells.size()) {
+      throw std::runtime_error("AMR patch payload build found a patch range outside CellSoa");
+    }
+    parallel::AmrPatchPayloadRecord record;
+    record.patch_id = state.patches.patch_id[patch_index];
+    record.owner_rank = world_rank;
+    record.level = static_cast<std::uint32_t>(std::max<std::int32_t>(state.patches.level[patch_index], 0));
+    record.first_cell = first_cell;
+    record.cell_count = cell_count;
+    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
+      const std::uint32_t cell_index = first_cell + offset;
+      record.cell_mass_sum_code += state.cells.mass_code[cell_index];
+      if (cell_index < state.gas_cells.internal_energy_code.size()) {
+        record.gas_internal_energy_sum_code += state.gas_cells.internal_energy_code[cell_index];
+      }
+    }
+    parallel::validateAmrPatchPayloadRecord(record);
+    records.push_back(record);
+  }
+  return records;
+}
+
+void exchangeAndValidateAmrPatchPayloads(
+    const core::SimulationState& state,
+    const parallel::MpiContext& mpi_context,
+    int world_rank,
+    std::uint64_t step_index,
+    core::ProfilerSession* profiler) {
+  const std::vector<parallel::AmrPatchPayloadRecord> local_records = buildLocalAmrPatchPayloadRecords(state, world_rank);
+  const std::vector<parallel::AmrPatchPayloadRecord> global_records = parallel::executeBlockingAmrPatchPayloadExchange(
+      mpi_context,
+      local_records,
+      step_index);
+  std::unordered_map<std::uint64_t, int> owner_by_patch_id;
+  owner_by_patch_id.reserve(global_records.size());
+  for (const parallel::AmrPatchPayloadRecord& record : global_records) {
+    const auto [it, inserted] = owner_by_patch_id.emplace(record.patch_id, record.owner_rank);
+    if (!inserted && it->second != record.owner_rank) {
+      throw std::runtime_error("AMR patch payload exchange detected duplicate authoritative patch ownership");
+    }
+  }
+  if (profiler != nullptr) {
+    profiler->recordEvent(core::RuntimeEvent{
+        .event_kind = "amr.patch_payload_exchange",
+        .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "amr.patch_exchange",
+        .step_index = step_index,
+        .message = "blocking AMR patch payload exchange validated authoritative patch ownership and cell summaries",
+        .payload = {{"local_patch_payloads", std::to_string(local_records.size())},
+                    {"global_patch_payloads", std::to_string(global_records.size())},
+                    {"payload_bytes", std::to_string(global_records.size() * sizeof(parallel::AmrPatchPayloadRecord))}}});
+  }
+}
+
 void applyMeasuredRuntimeRebalancePlan(
     core::SimulationState& state,
     core::HierarchicalTimeBinScheduler& scheduler,
@@ -1270,6 +1341,7 @@ void applyMeasuredRuntimeRebalancePlan(
       makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
       rebalance_config);
   if (!rebalance.should_rebalance) {
+    exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
     recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
     return;
   }
@@ -1392,6 +1464,8 @@ void applyMeasuredRuntimeRebalancePlan(
     core::rebuildSchedulerFromParticleMigrationRecords(scheduler, scheduler_records, destination_particle_ids);
     syncTimeBinsFromScheduler(scheduler, state);
   }
+
+  exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
 
   recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
   if (profiler != nullptr && (!outbound_local_indices.empty() || !inbound_records.empty())) {
@@ -1818,12 +1892,69 @@ struct SolverGhostRefreshReport {
   std::size_t committed_slots = 0;
 };
 
+struct HydroGhostConservedSnapshot {
+  std::vector<std::uint32_t> cell_indices;
+  std::vector<hydro::HydroConservedState> conserved_state;
+};
+
+struct HydroConservativeGhostSyncReport {
+  std::size_t restored_ghost_cells = 0;
+  double rejected_remote_delta_l1 = 0.0;
+};
+
+[[nodiscard]] HydroGhostConservedSnapshot snapshotHydroGhostConservedCells(
+    const core::SimulationState& state,
+    const hydro::HydroConservedStateSoa& conserved,
+    std::uint32_t world_rank) {
+  HydroGhostConservedSnapshot snapshot;
+  snapshot.cell_indices.reserve(state.cells.size());
+  snapshot.conserved_state.reserve(state.cells.size());
+  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+    if (state.particle_sidecar.owning_rank[gas_particle_index] == world_rank) {
+      continue;
+    }
+    snapshot.cell_indices.push_back(cell_index);
+    snapshot.conserved_state.push_back(conserved.loadCell(cell_index));
+  }
+  return snapshot;
+}
+
+[[nodiscard]] HydroConservativeGhostSyncReport restoreHydroGhostConservedCells(
+    hydro::HydroConservedStateSoa& conserved,
+    const HydroGhostConservedSnapshot& snapshot) {
+  if (snapshot.cell_indices.size() != snapshot.conserved_state.size()) {
+    throw std::invalid_argument("hydro ghost snapshot is inconsistent");
+  }
+  HydroConservativeGhostSyncReport report;
+  for (std::size_t i = 0; i < snapshot.cell_indices.size(); ++i) {
+    const std::uint32_t cell_index = snapshot.cell_indices[i];
+    if (cell_index >= conserved.size()) {
+      throw std::out_of_range("hydro ghost snapshot cell index is outside conserved state");
+    }
+    const hydro::HydroConservedState before = snapshot.conserved_state[i];
+    const hydro::HydroConservedState after = conserved.loadCell(cell_index);
+    report.rejected_remote_delta_l1 += std::abs(after.mass_density_comoving - before.mass_density_comoving);
+    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_x_comoving - before.momentum_density_x_comoving);
+    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_y_comoving - before.momentum_density_y_comoving);
+    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_z_comoving - before.momentum_density_z_comoving);
+    report.rejected_remote_delta_l1 += std::abs(after.total_energy_density_comoving - before.total_energy_density_comoving);
+    conserved.storeCell(cell_index, before);
+    ++report.restored_ghost_cells;
+  }
+  return report;
+}
+
 [[nodiscard]] SolverGhostRefreshReport refreshParticleGhostsForSolver(
     core::StepContext& context,
     const parallel::MpiContext& mpi_context,
-    std::string_view subsystem_name) {
+    std::string_view subsystem_name,
+    parallel::GhostCacheLifecycle* lifecycle = nullptr) {
   const int world_rank = mpi_context.worldRank();
   const parallel::GhostLayerEpoch epoch = makeRuntimeGhostLayerEpoch(context);
+  if (lifecycle != nullptr) {
+    parallel::invalidateGhostCache(*lifecycle, epoch);
+  }
   std::vector<parallel::LocalGhostDescriptor> descriptors = buildParticleGhostDescriptors(
       context.state, world_rank, epoch);
   parallel::GhostExchangeBufferSoA ghost_storage = buildParticleGhostPayloadState(context.state, epoch);
@@ -1832,6 +1963,10 @@ struct SolverGhostRefreshReport {
       mpi_context, descriptors, ghost_storage, epoch);
   const auto commit_report = parallel::commitBlockingGhostRefreshResult(
       ghost_storage, descriptors, exchange.plan, exchange.result, epoch);
+  if (lifecycle != nullptr) {
+    parallel::markGhostCacheCommitted(*lifecycle, epoch);
+    parallel::requireValidGhostCache(*lifecycle, epoch, std::string(subsystem_name));
+  }
   applyCommittedParticleGhostPayload(context.state, world_rank, descriptors, ghost_storage);
 
   if (context.profiler_session != nullptr) {
@@ -1849,6 +1984,8 @@ struct SolverGhostRefreshReport {
             {"received_bytes", std::to_string(exchange.result.received_bytes)},
             {"committed_ghost_slots", std::to_string(commit_report.updated_ghost_slots)},
             {"ghost_sync_epoch", std::to_string(epoch.ghost_sync_epoch)},
+            {"ghost_cache_refresh_count", lifecycle != nullptr ? std::to_string(lifecycle->refresh_count) : "0"},
+            {"ghost_cache_invalidation_count", lifecycle != nullptr ? std::to_string(lifecycle->invalidation_count) : "0"},
         },
     });
   }
@@ -2634,7 +2771,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     const std::size_t particle_count = context.state.particles.size();
 
     const SolverGhostRefreshReport gravity_ghost_refresh = refreshParticleGhostsForSolver(
-        context, mpi_context, "gravity.treepm");
+        context, mpi_context, "gravity.treepm", &m_ghost_cache_lifecycle);
 
     rebuildOwnedParticleCompactView(
         context,
@@ -3400,6 +3537,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;
   bool m_force_cache_valid = false;
+  parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
@@ -3436,7 +3574,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     parallel::MpiContext mpi_context;
     m_last_ghost_refresh = refreshParticleGhostsForSolver(
-        context, mpi_context, "hydro.godunov");
+        context, mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
     m_last_hydro_profile = {};
 
     core::requireParticleBoundGasCellContract(context.state, "hydro callback");
@@ -3462,6 +3600,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
       };
       m_conserved.storeCell(cell_index, hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
     }
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+    const HydroGhostConservedSnapshot ghost_conserved_snapshot = snapshotHydroGhostConservedCells(
+        context.state, m_conserved, world_rank);
 
     double hubble_rate_code = 0.0;
     if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
@@ -3505,7 +3646,21 @@ class HydroStageCallback final : public core::IntegrationCallback {
         &m_primitive_cache,
         &m_last_hydro_profile);
 
-    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+    const HydroConservativeGhostSyncReport ghost_sync_report = restoreHydroGhostConservedCells(
+        m_conserved, ghost_conserved_snapshot);
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "hydro.conservative_ghost_sync",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "hydro.godunov",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "restored imported hydro ghost conserved state; authoritative owner must commit conservative truth",
+          .payload = {{"restored_ghost_cells", std::to_string(ghost_sync_report.restored_ghost_cells)},
+                      {"rejected_remote_delta_l1", std::to_string(ghost_sync_report.rejected_remote_delta_l1)}}});
+    }
+
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, static_cast<std::uint32_t>(cell_index));
       if (context.state.particle_sidecar.owning_rank[gas_particle_index] != world_rank) {
@@ -3638,6 +3793,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
   hydro::HydroPatchGeometry m_geometry;
   hydro::HydroProfileEvent m_last_hydro_profile{};
   SolverGhostRefreshReport m_last_ghost_refresh{};
+  parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::vector<std::size_t> m_active_cells;
   std::vector<std::size_t> m_active_faces;
   std::size_t m_cached_cell_count = 0;

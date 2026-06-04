@@ -91,6 +91,7 @@ class TreePmCoordinator {
 
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
   [[nodiscard]] bool ownsFullPmDomain() const noexcept;
+  [[nodiscard]] const parallel::PmSlabHaloExchangeResult& lastPmSlabHaloExchange() const noexcept;
   [[nodiscard]] core::MemoryReport memoryReport() const;
 
   void solveActiveSetWithPmCadence(
@@ -177,6 +178,7 @@ class TreePmCoordinator {
     std::vector<std::uint16_t> received_response_count;
   } m_tree_exchange_workspace;
   ResidualTraversalStats m_last_residual_stats;
+  parallel::PmSlabHaloExchangeResult m_last_pm_slab_halo_exchange{};
   bool m_has_cached_long_range_field = false;
 };
 

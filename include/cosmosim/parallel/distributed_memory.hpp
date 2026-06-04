@@ -215,6 +215,9 @@ enum class ExchangeObjectKind : std::uint8_t {
   kAmrPatchMetadata = 5,
 };
 
+class MpiContext;
+struct PmSlabLayout;
+
 struct OwnershipDescriptor {
   ExchangeObjectKind kind = ExchangeObjectKind::kLocalParticle;
   std::uint64_t object_id = 0;
@@ -556,6 +559,21 @@ struct TreePseudoParticleDescriptor {
   bool derived_not_authoritative = true;
 };
 
+struct TreePseudoParticlePacket {
+  TreePseudoParticleDescriptor descriptor{};
+  double mass_code = 0.0;
+  double center_x_comoving = 0.0;
+  double center_y_comoving = 0.0;
+  double center_z_comoving = 0.0;
+  double min_x_comoving = 0.0;
+  double max_x_comoving = 0.0;
+  double min_y_comoving = 0.0;
+  double max_y_comoving = 0.0;
+  double min_z_comoving = 0.0;
+  double max_z_comoving = 0.0;
+  std::uint64_t source_count = 0;
+};
+
 struct HydroGhostCellDescriptor {
   std::uint64_t gas_cell_id = 0;
   int owner_rank = 0;
@@ -572,10 +590,49 @@ struct AmrPatchExchangeDescriptor {
   bool metadata_only = true;
 };
 
+struct AmrPatchPayloadRecord {
+  std::uint64_t patch_id = 0;
+  int owner_rank = 0;
+  std::uint32_t level = 0;
+  std::uint32_t first_cell = 0;
+  std::uint32_t cell_count = 0;
+  double cell_mass_sum_code = 0.0;
+  double gas_internal_energy_sum_code = 0.0;
+};
+
 void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor);
 void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor);
+void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet);
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor);
 void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor);
+void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record);
+
+[[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
+    const MpiContext& mpi_context,
+    const TreePseudoParticlePacket& local_packet);
+
+[[nodiscard]] std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchPayloadRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
+struct PmSlabHaloExchangeResult {
+  std::vector<double> left_halo;
+  std::vector<double> right_halo;
+  std::uint64_t sent_bytes = 0;
+  std::uint64_t received_bytes = 0;
+  std::size_t halo_depth_x = 0;
+  int left_peer_rank = -1;
+  int right_peer_rank = -1;
+};
+
+[[nodiscard]] PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
+    const MpiContext& mpi_context,
+    const PmSlabLayout& layout,
+    std::span<const double> local_scalar_field,
+    std::size_t halo_depth_x,
+    bool periodic_x,
+    std::uint64_t exchange_sequence = 0);
 
 struct PmSlabLayout {
   std::size_t global_nx = 0;
@@ -750,6 +807,24 @@ struct BlockingGhostRefreshExchange {
   GhostExchangePlan plan;
   BlockingGhostExchangeResult result;
 };
+
+struct GhostCacheLifecycle {
+  GhostLayerEpoch epoch{};
+  bool valid = false;
+  std::uint64_t refresh_count = 0;
+  std::uint64_t invalidation_count = 0;
+};
+
+void invalidateGhostCache(
+    GhostCacheLifecycle& lifecycle,
+    const GhostLayerEpoch& next_epoch);
+void markGhostCacheCommitted(
+    GhostCacheLifecycle& lifecycle,
+    const GhostLayerEpoch& committed_epoch);
+void requireValidGhostCache(
+    const GhostCacheLifecycle& lifecycle,
+    const GhostLayerEpoch& expected_epoch,
+    std::string_view caller);
 
 struct GhostRefreshCommitReport {
   std::size_t updated_ghost_slots = 0;
