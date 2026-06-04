@@ -4,10 +4,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -42,6 +44,10 @@
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
+#endif
+
+#if COSMOSIM_ENABLE_MPI
+#include <mpi.h>
 #endif
 
 namespace cosmosim::workflows {
@@ -889,6 +895,263 @@ void compactStateToCurrentOwner(
   return items;
 }
 
+
+void syncTimeBinsFromScheduler(
+    const core::HierarchicalTimeBinScheduler& scheduler,
+    core::SimulationState& state);
+
+namespace migration_wire {
+
+void appendBytes(std::vector<std::uint8_t>& out, const void* data, std::size_t bytes) {
+  const auto* first = static_cast<const std::uint8_t*>(data);
+  out.insert(out.end(), first, first + bytes);
+}
+
+template <typename T>
+void appendPod(std::vector<std::uint8_t>& out, const T& value) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  appendBytes(out, &value, sizeof(T));
+}
+
+template <typename T>
+T readPod(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  if (offset + sizeof(T) > bytes.size()) {
+    throw std::runtime_error("particle migration wire packet truncated while reading " + std::string(label));
+  }
+  T value{};
+  std::memcpy(&value, bytes.data() + offset, sizeof(T));
+  offset += sizeof(T);
+  return value;
+}
+
+void appendString(std::vector<std::uint8_t>& out, std::string_view value) {
+  const std::uint64_t size = static_cast<std::uint64_t>(value.size());
+  appendPod(out, size);
+  appendBytes(out, value.data(), value.size());
+}
+
+std::string readString(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
+  const std::uint64_t size = readPod<std::uint64_t>(bytes, offset, label);
+  if (size > static_cast<std::uint64_t>(bytes.size() - offset)) {
+    throw std::runtime_error("particle migration wire packet truncated while reading string " + std::string(label));
+  }
+  std::string value(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(size));
+  offset += static_cast<std::size_t>(size);
+  return value;
+}
+
+void appendBytePayload(std::vector<std::uint8_t>& out, std::span<const std::byte> payload) {
+  const std::uint64_t size = static_cast<std::uint64_t>(payload.size());
+  appendPod(out, size);
+  if (!payload.empty()) {
+    appendBytes(out, payload.data(), payload.size());
+  }
+}
+
+std::vector<std::byte> readBytePayload(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
+  const std::uint64_t size = readPod<std::uint64_t>(bytes, offset, label);
+  if (size > static_cast<std::uint64_t>(bytes.size() - offset)) {
+    throw std::runtime_error("particle migration wire packet truncated while reading payload " + std::string(label));
+  }
+  std::vector<std::byte> payload(static_cast<std::size_t>(size));
+  if (!payload.empty()) {
+    std::memcpy(payload.data(), bytes.data() + offset, payload.size());
+  }
+  offset += static_cast<std::size_t>(size);
+  return payload;
+}
+
+void appendModulePayload(std::vector<std::uint8_t>& out, const core::ModuleParticleSidecarPayload& payload) {
+  appendString(out, payload.module_name);
+  appendPod(out, payload.schema_version);
+  appendPod(out, payload.row_stride_bytes);
+  appendPod(out, payload.required_species_mask);
+  appendBytePayload(out, std::span<const std::byte>(payload.payload.data(), payload.payload.size()));
+}
+
+core::ModuleParticleSidecarPayload readModulePayload(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  core::ModuleParticleSidecarPayload payload;
+  payload.module_name = readString(bytes, offset, "module_name");
+  payload.schema_version = readPod<std::uint32_t>(bytes, offset, "module_schema_version");
+  payload.row_stride_bytes = readPod<std::uint32_t>(bytes, offset, "module_row_stride_bytes");
+  payload.required_species_mask = readPod<std::uint32_t>(bytes, offset, "module_required_species_mask");
+  payload.payload = readBytePayload(bytes, offset, "module_payload");
+  return payload;
+}
+
+void appendMigrationRecord(std::vector<std::uint8_t>& out, const core::ParticleMigrationRecord& record) {
+  appendPod(out, record.particle_id);
+  appendPod(out, record.sfc_key);
+  appendPod(out, record.species_tag);
+  appendPod(out, record.particle_flags);
+  appendPod(out, record.owning_rank);
+  appendPod(out, record.position_x_comoving);
+  appendPod(out, record.position_y_comoving);
+  appendPod(out, record.position_z_comoving);
+  appendPod(out, record.velocity_x_peculiar);
+  appendPod(out, record.velocity_y_peculiar);
+  appendPod(out, record.velocity_z_peculiar);
+  appendPod(out, record.mass_code);
+  appendPod(out, record.time_bin);
+  appendPod(out, static_cast<std::uint8_t>(record.has_scheduler_fields ? 1U : 0U));
+  appendPod(out, record.scheduler_fields);
+  appendPod(out, record.last_drift_time_code);
+  appendPod(out, record.last_drift_scale_factor);
+  appendPod(out, static_cast<std::uint8_t>(record.has_gravity_softening_value ? 1U : 0U));
+  appendPod(out, static_cast<std::uint8_t>(record.has_gravity_softening_override ? 1U : 0U));
+  appendPod(out, record.gravity_softening_comoving);
+  appendPod(out, static_cast<std::uint8_t>(record.has_gas_cell_fields ? 1U : 0U));
+  appendPod(out, record.gas_cell_fields);
+  appendPod(out, static_cast<std::uint8_t>(record.has_star_fields ? 1U : 0U));
+  appendPod(out, record.star_fields);
+  appendPod(out, static_cast<std::uint8_t>(record.has_black_hole_fields ? 1U : 0U));
+  appendPod(out, record.black_hole_fields);
+  appendPod(out, static_cast<std::uint8_t>(record.has_tracer_fields ? 1U : 0U));
+  appendPod(out, record.tracer_fields);
+  const std::uint64_t module_count = static_cast<std::uint64_t>(record.module_sidecar_payloads.size());
+  appendPod(out, module_count);
+  for (const auto& payload : record.module_sidecar_payloads) {
+    appendModulePayload(out, payload);
+  }
+}
+
+core::ParticleMigrationRecord readMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  core::ParticleMigrationRecord record;
+  record.particle_id = readPod<std::uint64_t>(bytes, offset, "particle_id");
+  record.sfc_key = readPod<std::uint64_t>(bytes, offset, "sfc_key");
+  record.species_tag = readPod<std::uint32_t>(bytes, offset, "species_tag");
+  record.particle_flags = readPod<std::uint32_t>(bytes, offset, "particle_flags");
+  record.owning_rank = readPod<std::uint32_t>(bytes, offset, "owning_rank");
+  record.position_x_comoving = readPod<double>(bytes, offset, "position_x_comoving");
+  record.position_y_comoving = readPod<double>(bytes, offset, "position_y_comoving");
+  record.position_z_comoving = readPod<double>(bytes, offset, "position_z_comoving");
+  record.velocity_x_peculiar = readPod<double>(bytes, offset, "velocity_x_peculiar");
+  record.velocity_y_peculiar = readPod<double>(bytes, offset, "velocity_y_peculiar");
+  record.velocity_z_peculiar = readPod<double>(bytes, offset, "velocity_z_peculiar");
+  record.mass_code = readPod<double>(bytes, offset, "mass_code");
+  record.time_bin = readPod<std::uint8_t>(bytes, offset, "time_bin");
+  record.has_scheduler_fields = readPod<std::uint8_t>(bytes, offset, "has_scheduler_fields") != 0U;
+  record.scheduler_fields = readPod<core::SchedulerMigrationFields>(bytes, offset, "scheduler_fields");
+  record.last_drift_time_code = readPod<double>(bytes, offset, "last_drift_time_code");
+  record.last_drift_scale_factor = readPod<double>(bytes, offset, "last_drift_scale_factor");
+  record.has_gravity_softening_value = readPod<std::uint8_t>(bytes, offset, "has_gravity_softening_value") != 0U;
+  record.has_gravity_softening_override = readPod<std::uint8_t>(bytes, offset, "has_gravity_softening_override") != 0U;
+  record.gravity_softening_comoving = readPod<double>(bytes, offset, "gravity_softening_comoving");
+  record.has_gas_cell_fields = readPod<std::uint8_t>(bytes, offset, "has_gas_cell_fields") != 0U;
+  record.gas_cell_fields = readPod<core::GasCellMigrationFields>(bytes, offset, "gas_cell_fields");
+  record.has_star_fields = readPod<std::uint8_t>(bytes, offset, "has_star_fields") != 0U;
+  record.star_fields = readPod<core::StarParticleMigrationFields>(bytes, offset, "star_fields");
+  record.has_black_hole_fields = readPod<std::uint8_t>(bytes, offset, "has_black_hole_fields") != 0U;
+  record.black_hole_fields = readPod<core::BlackHoleParticleMigrationFields>(bytes, offset, "black_hole_fields");
+  record.has_tracer_fields = readPod<std::uint8_t>(bytes, offset, "has_tracer_fields") != 0U;
+  record.tracer_fields = readPod<core::TracerParticleMigrationFields>(bytes, offset, "tracer_fields");
+  const std::uint64_t module_count = readPod<std::uint64_t>(bytes, offset, "module_count");
+  if (module_count > 1'000'000ULL) {
+    throw std::runtime_error("particle migration wire packet has unreasonable module payload count");
+  }
+  record.module_sidecar_payloads.reserve(static_cast<std::size_t>(module_count));
+  for (std::uint64_t i = 0; i < module_count; ++i) {
+    record.module_sidecar_payloads.push_back(readModulePayload(bytes, offset));
+  }
+  return record;
+}
+
+std::vector<std::uint8_t> serializeMigrationRecords(std::span<const core::ParticleMigrationRecord> records) {
+  std::vector<std::uint8_t> bytes;
+  appendPod(bytes, static_cast<std::uint64_t>(records.size()));
+  for (const core::ParticleMigrationRecord& record : records) {
+    appendMigrationRecord(bytes, record);
+  }
+  return bytes;
+}
+
+std::vector<core::ParticleMigrationRecord> deserializeMigrationRecords(std::span<const std::uint8_t> bytes) {
+  std::size_t offset = 0;
+  const std::uint64_t count = readPod<std::uint64_t>(bytes, offset, "migration_record_count");
+  if (count > 100'000'000ULL) {
+    throw std::runtime_error("particle migration wire packet has unreasonable record count");
+  }
+  std::vector<core::ParticleMigrationRecord> records;
+  records.reserve(static_cast<std::size_t>(count));
+  for (std::uint64_t i = 0; i < count; ++i) {
+    records.push_back(readMigrationRecord(bytes, offset));
+  }
+  if (offset != bytes.size()) {
+    throw std::runtime_error("particle migration wire packet has trailing bytes");
+  }
+  return records;
+}
+
+}  // namespace migration_wire
+
+std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
+    const parallel::MpiContext& mpi_context,
+    const std::vector<std::vector<core::ParticleMigrationRecord>>& records_by_rank) {
+  if (records_by_rank.size() != static_cast<std::size_t>(mpi_context.worldSize())) {
+    throw std::invalid_argument("particle migration exchange records_by_rank size must match world size");
+  }
+  if (mpi_context.worldSize() == 1) {
+    return records_by_rank.empty() ? std::vector<core::ParticleMigrationRecord>{} : records_by_rank[0];
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("runtime particle migration execution requires MPI for world_size > 1");
+  }
+#if COSMOSIM_ENABLE_MPI
+  std::vector<std::vector<std::uint8_t>> send_payloads(records_by_rank.size());
+  std::vector<int> send_counts(records_by_rank.size(), 0);
+  for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
+    send_payloads[rank] = migration_wire::serializeMigrationRecords(records_by_rank[rank]);
+    if (send_payloads[rank].size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("particle migration payload exceeds MPI int byte-count limit");
+    }
+    send_counts[rank] = static_cast<int>(send_payloads[rank].size());
+  }
+  std::vector<int> recv_counts(send_counts.size(), 0);
+  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+  std::vector<int> send_offsets(send_counts.size(), 0);
+  std::vector<int> recv_offsets(recv_counts.size(), 0);
+  int total_send = 0;
+  int total_recv = 0;
+  for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
+    send_offsets[rank] = total_send;
+    recv_offsets[rank] = total_recv;
+    total_send += send_counts[rank];
+    total_recv += recv_counts[rank];
+  }
+  std::vector<std::uint8_t> send_bytes(static_cast<std::size_t>(total_send));
+  for (std::size_t rank = 0; rank < send_payloads.size(); ++rank) {
+    if (!send_payloads[rank].empty()) {
+      std::memcpy(send_bytes.data() + send_offsets[rank], send_payloads[rank].data(), send_payloads[rank].size());
+    }
+  }
+  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_recv));
+  MPI_Alltoallv(
+      send_bytes.data(),
+      send_counts.data(),
+      send_offsets.data(),
+      MPI_BYTE,
+      recv_bytes.data(),
+      recv_counts.data(),
+      recv_offsets.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+
+  std::vector<core::ParticleMigrationRecord> inbound;
+  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
+    const auto offset = static_cast<std::size_t>(recv_offsets[rank]);
+    const auto count = static_cast<std::size_t>(recv_counts[rank]);
+    auto decoded = migration_wire::deserializeMigrationRecords(
+        std::span<const std::uint8_t>(recv_bytes.data() + offset, count));
+    inbound.insert(inbound.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
+  }
+  return inbound;
+#else
+  throw std::runtime_error("runtime particle migration execution requires an MPI-enabled build");
+#endif
+}
+
 void recordRuntimeRebalanceDecision(
     core::ProfilerSession* profiler,
     const parallel::RuntimeRebalancePlan& rebalance,
@@ -909,12 +1172,15 @@ void recordRuntimeRebalanceDecision(
                   {"particle_migration_count", std::to_string(rebalance.particle_migrations.size())},
                   {"amr_patch_ownership_update_count", std::to_string(rebalance.amr_patch_ownership_updates.size())},
                   {"migrated_load_fraction", std::to_string(rebalance.migrated_load_fraction)},
-                  {"weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
-                  {"memory_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.memory_imbalance_ratio)}}});
+                  {"current_weighted_imbalance_ratio", std::to_string(rebalance.current_metrics.weighted_imbalance_ratio)},
+                  {"target_weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
+                  {"current_memory_imbalance_ratio", std::to_string(rebalance.current_metrics.memory_imbalance_ratio)},
+                  {"target_memory_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.memory_imbalance_ratio)}}});
 }
 
 void applyMeasuredRuntimeRebalancePlan(
     core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& scheduler,
     const core::SimulationConfig& config,
     const parallel::MpiContext& mpi_context,
     int world_rank,
@@ -924,6 +1190,9 @@ void applyMeasuredRuntimeRebalancePlan(
     std::uint64_t step_index) {
   if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
     return;
+  }
+  if (world_rank < 0 || world_rank >= mpi_context.worldSize()) {
+    throw std::invalid_argument("runtime rebalance world_rank is outside MPI world");
   }
   auto local_items = buildRuntimeDecompositionItems(state, config, world_rank, active_particle_indices);
   parallel::applyRuntimeDecompositionFeedback(local_items, measurements, makeWorkflowFeedbackCoefficients(config));
@@ -941,14 +1210,148 @@ void applyMeasuredRuntimeRebalancePlan(
       global_items,
       makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
       rebalance_config);
+  if (!rebalance.should_rebalance) {
+    recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
+    return;
+  }
+
+  std::unordered_map<std::uint64_t, std::uint32_t> local_index_by_particle_id;
+  local_index_by_particle_id.reserve(state.particles.size());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    local_index_by_particle_id.emplace(
+        state.particle_sidecar.particle_id[particle_index],
+        static_cast<std::uint32_t>(particle_index));
+  }
+
+  std::unordered_map<std::uint32_t, int> outbound_target_by_local_index;
+  outbound_target_by_local_index.reserve(rebalance.particle_migrations.size());
+  const auto add_particle_migration = [&](std::uint32_t local_index, int new_owner_rank, std::string_view source_label) {
+    if (local_index >= state.particles.size()) {
+      throw std::out_of_range("runtime rebalance attempted to migrate a particle index outside SimulationState");
+    }
+    if (new_owner_rank < 0 || new_owner_rank >= mpi_context.worldSize()) {
+      throw std::invalid_argument("runtime rebalance produced particle migration target outside MPI world");
+    }
+    if (new_owner_rank == world_rank) {
+      return;
+    }
+    if (state.particle_sidecar.owning_rank[local_index] != static_cast<std::uint32_t>(world_rank)) {
+      throw std::runtime_error("runtime rebalance attempted to migrate a non-authoritative local particle via " + std::string(source_label));
+    }
+    const auto [it, inserted] = outbound_target_by_local_index.emplace(local_index, new_owner_rank);
+    if (!inserted && it->second != new_owner_rank) {
+      throw std::runtime_error("runtime rebalance produced conflicting destinations for one particle");
+    }
+  };
+
+  for (const auto& intent : rebalance.particle_migrations) {
+    if (intent.old_owner_rank != world_rank || intent.new_owner_rank == world_rank) {
+      continue;
+    }
+    const auto found = local_index_by_particle_id.find(intent.particle_id);
+    if (found == local_index_by_particle_id.end()) {
+      throw std::runtime_error("runtime rebalance migration intent references a particle ID missing on the owning rank");
+    }
+    add_particle_migration(found->second, intent.new_owner_rank, "particle_sfc_intent");
+  }
+
   for (const auto& update : rebalance.amr_patch_ownership_updates) {
+    if (update.new_owner_rank < 0 || update.new_owner_rank >= mpi_context.worldSize()) {
+      throw std::runtime_error("runtime rebalance produced AMR patch owner outside MPI world");
+    }
     for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
-      if (state.patches.patch_id[patch_index] == update.patch_id) {
-        state.patches.owning_rank[patch_index] = static_cast<std::uint32_t>(update.new_owner_rank);
+      if (state.patches.patch_id[patch_index] != update.patch_id) {
+        continue;
       }
+      if (state.patches.owning_rank[patch_index] == static_cast<std::uint32_t>(world_rank) &&
+          update.new_owner_rank != world_rank) {
+        const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+        const std::uint32_t cell_count = state.patches.cell_count[patch_index];
+        if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > state.cells.size()) {
+          throw std::runtime_error("runtime rebalance AMR patch cell range is outside CellSoa");
+        }
+        for (std::uint32_t cell_offset = 0; cell_offset < cell_count; ++cell_offset) {
+          const std::uint32_t cell_index = first_cell + cell_offset;
+          const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+          if (state.particle_sidecar.owning_rank[gas_particle_index] == static_cast<std::uint32_t>(world_rank)) {
+            add_particle_migration(gas_particle_index, update.new_owner_rank, "amr_patch_ownership_update");
+          }
+        }
+      }
+      state.patches.owning_rank[patch_index] = static_cast<std::uint32_t>(update.new_owner_rank);
     }
   }
+
+  std::vector<std::uint32_t> outbound_local_indices;
+  outbound_local_indices.reserve(outbound_target_by_local_index.size());
+  for (const auto& [local_index, target_rank] : outbound_target_by_local_index) {
+    (void)target_rank;
+    outbound_local_indices.push_back(local_index);
+  }
+  std::sort(outbound_local_indices.begin(), outbound_local_indices.end());
+
+  std::vector<std::uint32_t> preserved_indices;
+  preserved_indices.reserve(state.particles.size() - outbound_local_indices.size());
+  for (std::uint32_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    if (!std::binary_search(outbound_local_indices.begin(), outbound_local_indices.end(), particle_index)) {
+      preserved_indices.push_back(particle_index);
+    }
+  }
+  std::vector<core::ParticleMigrationRecord> scheduler_records =
+      state.packParticleMigrationRecords(preserved_indices, scheduler);
+
+  std::vector<std::vector<core::ParticleMigrationRecord>> outbound_records_by_rank(
+      static_cast<std::size_t>(mpi_context.worldSize()));
+  for (const std::uint32_t local_index : outbound_local_indices) {
+    const int target_rank = outbound_target_by_local_index.at(local_index);
+    auto records = state.packParticleMigrationRecords(std::span<const std::uint32_t>(&local_index, 1), scheduler);
+    if (records.size() != 1U) {
+      throw std::runtime_error("runtime rebalance particle migration packing returned an unexpected record count");
+    }
+    records[0].owning_rank = static_cast<std::uint32_t>(target_rank);
+    outbound_records_by_rank[static_cast<std::size_t>(target_rank)].push_back(std::move(records[0]));
+  }
+
+  std::vector<core::ParticleMigrationRecord> inbound_records =
+      exchangeRuntimeParticleMigrationRecords(mpi_context, outbound_records_by_rank);
+  for (const core::ParticleMigrationRecord& record : inbound_records) {
+    if (record.owning_rank != static_cast<std::uint32_t>(world_rank)) {
+      throw std::runtime_error("runtime particle migration exchange delivered a record to the wrong destination rank");
+    }
+  }
+
+  if (!outbound_local_indices.empty() || !inbound_records.empty()) {
+    scheduler_records.insert(scheduler_records.end(), inbound_records.begin(), inbound_records.end());
+    core::ParticleMigrationCommit commit;
+    commit.world_rank = world_rank;
+    commit.outbound_local_indices = outbound_local_indices;
+    commit.inbound_records = inbound_records;
+    state.commitParticleMigration(commit);
+
+    std::vector<std::uint64_t> destination_particle_ids(state.particle_sidecar.particle_id.begin(),
+                                                        state.particle_sidecar.particle_id.end());
+    core::rebuildSchedulerFromParticleMigrationRecords(scheduler, scheduler_records, destination_particle_ids);
+    syncTimeBinsFromScheduler(scheduler, state);
+  }
+
   recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
+  if (profiler != nullptr && (!outbound_local_indices.empty() || !inbound_records.empty())) {
+    profiler->recordEvent(core::RuntimeEvent{
+        .event_kind = "parallel.decomposition.runtime_migration_commit",
+        .severity = core::RuntimeEventSeverity::kWarning,
+        .subsystem = "parallel.domain_decomposition",
+        .step_index = step_index,
+        .message = "runtime rebalance committed authoritative particle migration at a safe scheduler boundary",
+        .payload = {
+            {"outbound_particle_count", std::to_string(outbound_local_indices.size())},
+            {"inbound_particle_count", std::to_string(inbound_records.size())},
+            {"current_weighted_imbalance_ratio", std::to_string(rebalance.current_metrics.weighted_imbalance_ratio)},
+            {"target_weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
+            {"current_memory_imbalance_ratio", std::to_string(rebalance.current_metrics.memory_imbalance_ratio)},
+            {"target_memory_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.memory_imbalance_ratio)},
+        },
+    });
+  }
 }
 
 void applyInitialGravityAwareDecomposition(
@@ -2081,6 +2484,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
   }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
   [[nodiscard]] core::MemoryReport memoryReport() const { return m_tree_pm_coordinator.memoryReport(); }
+  [[nodiscard]] const parallel::DecompositionRuntimeMeasurements& lastRuntimeDecompositionMeasurements() const noexcept {
+    return m_last_decomposition_measurements;
+  }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
   [[nodiscard]] std::span<const double> cellAccelY() const noexcept { return m_cell_accel_y; }
@@ -2323,7 +2729,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         &m_last_tree_pm_diagnostics,
         softening_view);
 
-    const parallel::DecompositionRuntimeMeasurements decomposition_measurements{
+    m_last_decomposition_measurements = parallel::DecompositionRuntimeMeasurements{
         .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations +
             tree_pm_profile.tree_profile.particle_particle_interactions,
         .tree_remote_request_bytes_recent = m_last_tree_pm_diagnostics.residual_remote_request_bytes +
@@ -2343,15 +2749,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
         .accelerator_occupancy_fraction_recent = (tree_pm_profile.pm_profile.device_kernel_ms > 0.0) ? 1.0 : 0.0,
         .has_measurements = true,
     };
-    applyMeasuredRuntimeRebalancePlan(
-        context.state,
-        m_config,
-        mpi_context,
-        m_runtime_topology.world_rank,
-        decomposition_measurements,
-        context.active_set.particle_indices,
-        context.profiler_session,
-        context.integrator_state.step_index);
 
     const bool allow_heavy_reference_checks =
         m_config.analysis.diagnostics_execution_policy ==
@@ -2938,6 +3335,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
+  parallel::DecompositionRuntimeMeasurements m_last_decomposition_measurements{};
   bool m_has_long_range_field = false;
   std::uint64_t m_last_committed_field_version = 0;
   std::uint64_t m_long_range_refresh_count = 0;
@@ -2966,6 +3364,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::string_view callbackName() const override { return "hydro"; }
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_hydro_stage; }
   [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
+  [[nodiscard]] const hydro::HydroProfileEvent& lastHydroProfile() const noexcept { return m_last_hydro_profile; }
+  [[nodiscard]] const SolverGhostRefreshReport& lastGhostRefreshReport() const noexcept { return m_last_ghost_refresh; }
 
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
@@ -2976,9 +3376,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
     }
 
     parallel::MpiContext mpi_context;
-    const SolverGhostRefreshReport hydro_ghost_refresh = refreshParticleGhostsForSolver(
+    m_last_ghost_refresh = refreshParticleGhostsForSolver(
         context, mpi_context, "hydro.godunov");
-    (void)hydro_ghost_refresh;
+    m_last_hydro_profile = {};
 
     core::requireParticleBoundGasCellContract(context.state, "hydro callback");
 
@@ -3044,7 +3444,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
         source_context,
         m_scratch,
         &m_primitive_cache,
-        nullptr);
+        &m_last_hydro_profile);
 
     const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
@@ -3177,6 +3577,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
   hydro::HydroScratchBuffers m_scratch;
   hydro::HydroPrimitiveCacheSoa m_primitive_cache;
   hydro::HydroPatchGeometry m_geometry;
+  hydro::HydroProfileEvent m_last_hydro_profile{};
+  SolverGhostRefreshReport m_last_ghost_refresh{};
   std::vector<std::size_t> m_active_cells;
   std::vector<std::size_t> m_active_faces;
   std::size_t m_cached_cell_count = 0;
@@ -3907,6 +4309,29 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           gravity_callback.cellAccelZ());
       ensureSchedulerCoversState(state, scheduler);
       scheduler.endSubstep();
+
+      parallel::DecompositionRuntimeMeasurements rebalance_measurements =
+          gravity_callback.lastRuntimeDecompositionMeasurements();
+      const hydro::HydroProfileEvent& hydro_profile = hydro_callback.lastHydroProfile();
+      const SolverGhostRefreshReport& hydro_ghost_report = hydro_callback.lastGhostRefreshReport();
+      rebalance_measurements.hydro_face_fluxes_recent = hydro_profile.face_count;
+      rebalance_measurements.hydro_wall_ms_recent = hydro_profile.total_ms;
+      rebalance_measurements.ghost_exchange_bytes_recent +=
+          hydro_ghost_report.sent_bytes + hydro_ghost_report.received_bytes;
+      rebalance_measurements.has_measurements = rebalance_measurements.has_measurements ||
+          hydro_profile.face_count > 0 || hydro_profile.total_ms > 0.0 ||
+          hydro_ghost_report.sent_bytes > 0 || hydro_ghost_report.received_bytes > 0;
+      applyMeasuredRuntimeRebalancePlan(
+          state,
+          scheduler,
+          config,
+          mpi_context,
+          mpi_context.worldRank(),
+          rebalance_measurements,
+          active_particles,
+          &profiler,
+          integrator_state.step_index);
+      ensureSchedulerCoversState(state, scheduler);
       syncTimeBinsFromScheduler(scheduler, state);
       orchestrator.executeOutputBoundary(
           state,

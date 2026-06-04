@@ -555,6 +555,67 @@ void applyRuntimeDecompositionFeedback(
   }
 }
 
+
+LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
+    std::span<const DecompositionItem> items,
+    const DecompositionConfig& config) {
+  if (config.world_size <= 0) {
+    throw std::invalid_argument("current ownership metrics require positive world_size");
+  }
+  validateComponentWeights(config.component_weights);
+
+  LoadBalanceMetrics metrics;
+  const std::size_t rank_count = static_cast<std::size_t>(config.world_size);
+  metrics.weighted_load_by_rank.assign(rank_count, 0.0);
+  metrics.memory_bytes_by_rank.assign(rank_count, 0ULL);
+  metrics.owned_particles_by_rank.assign(rank_count, 0ULL);
+  metrics.active_targets_by_rank.assign(rank_count, 0ULL);
+  metrics.remote_tree_interactions_by_rank.assign(rank_count, 0ULL);
+  metrics.particle_count_cost_by_rank.assign(rank_count, 0.0);
+  metrics.gas_cell_cost_by_rank.assign(rank_count, 0.0);
+  metrics.tree_interaction_cost_by_rank.assign(rank_count, 0.0);
+  metrics.pm_mesh_cost_by_rank.assign(rank_count, 0.0);
+  metrics.amr_patch_cost_by_rank.assign(rank_count, 0.0);
+  metrics.active_fraction_cost_by_rank.assign(rank_count, 0.0);
+  metrics.memory_pressure_cost_by_rank.assign(rank_count, 0.0);
+  metrics.gpu_occupancy_cost_by_rank.assign(rank_count, 0.0);
+  metrics.generic_work_cost_by_rank.assign(rank_count, 0.0);
+
+  for (const DecompositionItem& item : items) {
+    if (item.current_owner_rank < 0 || item.current_owner_rank >= config.world_size) {
+      throw std::invalid_argument("decomposition item current_owner_rank is outside runtime world size");
+    }
+    const std::size_t rank = static_cast<std::size_t>(item.current_owner_rank);
+    metrics.weighted_load_by_rank[rank] += weightedLoad(item, config);
+    metrics.memory_bytes_by_rank[rank] += item.memory_bytes;
+    if (item.kind == DecompositionEntityKind::kParticle) {
+      ++metrics.owned_particles_by_rank[rank];
+    }
+    metrics.active_targets_by_rank[rank] += item.active_target_count_recent;
+    metrics.remote_tree_interactions_by_rank[rank] += item.remote_tree_interactions_recent;
+    addWorkComponentsToMetrics(metrics, rank, effectiveWorkComponents(item), 1.0);
+  }
+
+  const auto max_load_it = std::max_element(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end());
+  metrics.max_weighted_load = (max_load_it == metrics.weighted_load_by_rank.end()) ? 0.0 : *max_load_it;
+  metrics.mean_weighted_load = metrics.weighted_load_by_rank.empty()
+      ? 0.0
+      : (std::accumulate(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end(), 0.0) /
+         static_cast<double>(metrics.weighted_load_by_rank.size()));
+  metrics.weighted_imbalance_ratio =
+      (metrics.mean_weighted_load > 0.0) ? (metrics.max_weighted_load / metrics.mean_weighted_load) : 0.0;
+
+  metrics.total_memory_bytes = std::accumulate(metrics.memory_bytes_by_rank.begin(), metrics.memory_bytes_by_rank.end(), 0ULL);
+  const auto max_mem_it = std::max_element(metrics.memory_bytes_by_rank.begin(), metrics.memory_bytes_by_rank.end());
+  metrics.max_memory_bytes = (max_mem_it == metrics.memory_bytes_by_rank.end()) ? 0ULL : *max_mem_it;
+  const double mean_memory = metrics.memory_bytes_by_rank.empty()
+      ? 0.0
+      : (static_cast<double>(metrics.total_memory_bytes) / static_cast<double>(metrics.memory_bytes_by_rank.size()));
+  metrics.memory_imbalance_ratio =
+      (mean_memory > 0.0) ? (static_cast<double>(metrics.max_memory_bytes) / mean_memory) : 0.0;
+  return metrics;
+}
+
 RuntimeRebalancePlan buildRuntimeRebalancePlan(
     std::span<const DecompositionItem> items,
     const DecompositionConfig& decomposition_config,
@@ -570,15 +631,16 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
     throw std::invalid_argument("runtime rebalance config world_size must match decomposition world_size");
   }
   RuntimeRebalancePlan rebalance;
+  rebalance.current_metrics = computeCurrentOwnershipLoadBalanceMetrics(items, decomposition_config);
   rebalance.target_decomposition = buildMortonSfcDecomposition(items, decomposition_config);
   if (items.empty()) {
     rebalance.reason = "empty_decomposition";
     return rebalance;
   }
 
-  const bool load_imbalanced = rebalance.target_decomposition.metrics.weighted_imbalance_ratio >=
+  const bool load_imbalanced = rebalance.current_metrics.weighted_imbalance_ratio >=
       rebalance_config.imbalance_trigger_ratio;
-  const bool memory_imbalanced = rebalance.target_decomposition.metrics.memory_imbalance_ratio >=
+  const bool memory_imbalanced = rebalance.current_metrics.memory_imbalance_ratio >=
       rebalance_config.memory_trigger_ratio;
   if (!load_imbalanced && !memory_imbalanced) {
     rebalance.reason = "below_rebalance_threshold";
@@ -586,8 +648,8 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
   }
 
   const double total_load = std::accumulate(
-      rebalance.target_decomposition.metrics.weighted_load_by_rank.begin(),
-      rebalance.target_decomposition.metrics.weighted_load_by_rank.end(),
+      rebalance.current_metrics.weighted_load_by_rank.begin(),
+      rebalance.current_metrics.weighted_load_by_rank.end(),
       0.0);
   const double max_migrated_load = rebalance_config.max_migrated_load_fraction * std::max(0.0, total_load);
 

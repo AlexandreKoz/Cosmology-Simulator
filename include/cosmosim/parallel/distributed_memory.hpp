@@ -179,12 +179,17 @@ class MpiContext;
 struct RuntimeRebalancePlan {
   bool should_rebalance = false;
   std::string reason;
+  LoadBalanceMetrics current_metrics{};
   DecompositionPlan target_decomposition{};
   std::vector<ParticleMigrationIntent> particle_migrations;
   std::vector<AmrPatchOwnershipUpdate> amr_patch_ownership_updates;
   double migrated_load = 0.0;
   double migrated_load_fraction = 0.0;
 };
+
+[[nodiscard]] LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
+    std::span<const DecompositionItem> items,
+    const DecompositionConfig& config);
 
 [[nodiscard]] RuntimeRebalancePlan buildRuntimeRebalancePlan(
     std::span<const DecompositionItem> items,

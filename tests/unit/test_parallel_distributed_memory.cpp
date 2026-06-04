@@ -1117,6 +1117,40 @@ void testRuntimeRebalancePlanProducesParticleAndPatchIntent() {
   assert(!plan.particle_migrations.empty() || !plan.amr_patch_ownership_updates.empty());
 }
 
+void testRuntimeRebalanceUsesCurrentOwnershipImbalance() {
+  std::vector<cosmosim::parallel::DecompositionItem> items(4);
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    items[i].entity_id = 200 + i;
+    items[i].kind = cosmosim::parallel::DecompositionEntityKind::kParticle;
+    items[i].current_owner_rank = 0;
+    items[i].x_comov = 0.1 + 0.2 * static_cast<double>(i);
+    items[i].work_components = cosmosim::parallel::DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .generic_work_cost = 1.0,
+        .has_explicit_components = true,
+    };
+  }
+  cosmosim::parallel::DecompositionConfig decomposition_config;
+  decomposition_config.world_size = 2;
+  decomposition_config.domain_x_min_comov = 0.0;
+  decomposition_config.domain_x_max_comov = 1.0;
+  decomposition_config.component_weights.particle_count = 1.0;
+  decomposition_config.component_weights.generic_work = 0.0;
+  cosmosim::parallel::RuntimeRebalanceConfig rebalance_config;
+  rebalance_config.world_size = 2;
+  rebalance_config.imbalance_trigger_ratio = 1.25;
+  rebalance_config.memory_trigger_ratio = 10.0;
+  rebalance_config.max_migrated_load_fraction = 1.0;
+
+  const auto current_metrics = cosmosim::parallel::computeCurrentOwnershipLoadBalanceMetrics(items, decomposition_config);
+  assert(current_metrics.weighted_imbalance_ratio > rebalance_config.imbalance_trigger_ratio);
+  const auto plan = cosmosim::parallel::buildRuntimeRebalancePlan(items, decomposition_config, rebalance_config);
+  assert(plan.should_rebalance);
+  assert(plan.current_metrics.weighted_imbalance_ratio > rebalance_config.imbalance_trigger_ratio);
+  assert(plan.target_decomposition.metrics.weighted_imbalance_ratio < plan.current_metrics.weighted_imbalance_ratio);
+  assert(!plan.particle_migrations.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1144,6 +1178,7 @@ int main() {
   testBlockingGhostRefreshResultCommitsIntoIndexedGhostSlots();
   testRuntimeFeedbackRaisesMeasuredCostComponents();
   testRuntimeRebalancePlanProducesParticleAndPatchIntent();
+  testRuntimeRebalanceUsesCurrentOwnershipImbalance();
   testLocalOwnershipIdentitySummaryDetectsReplicationAndDuplicates();
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();
