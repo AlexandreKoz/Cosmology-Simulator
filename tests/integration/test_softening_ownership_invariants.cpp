@@ -11,10 +11,28 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/gravity/tree_softening.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 
 namespace {
+
+cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
+    const cosmosim::core::SimulationState& state) {
+  std::uint8_t max_bin = 0;
+  for (const std::uint8_t bin : state.particles.time_bin) {
+    if (bin > max_bin) {
+      max_bin = bin;
+    }
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(max_bin);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0U, 0U);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  return scheduler;
+}
+
 
 using cosmosim::core::ParticleMigrationCommit;
 using cosmosim::core::ParticleSpecies;
@@ -302,7 +320,7 @@ void test_softening_override_resize_reorder_preservation() {
 
   // Species migration preserves explicit overrides.
   const std::uint32_t outbound = findParticleIndexById(state, 505);
-  auto packet = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{outbound});
+  auto packet = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{outbound}, makeMigrationScheduler(state));
   assert(packet.size() == 1);
   packet[0].species_tag = speciesTag(ParticleSpecies::kGas);
   packet[0].has_black_hole_fields = false;

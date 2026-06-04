@@ -791,7 +791,16 @@ void compactStateToCurrentOwner(
     if (!block.particle_indexed || block.row_stride_bytes == 0U) {
       continue;
     }
-    if ((block.required_species_mask & (1U << species_tag)) != 0U) {
+    const bool species_mask_requires_row = (block.required_species_mask & (1U << species_tag)) != 0U ||
+        (block.requirement.kind == core::ModuleSidecarRequirementKind::kSpeciesMask &&
+         (block.requirement.species_mask & (1U << species_tag)) != 0U);
+    const bool predicate_may_require_row =
+        (block.requirement.kind == core::ModuleSidecarRequirementKind::kGasDensityAtLeast &&
+         species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) ||
+        (block.requirement.kind == core::ModuleSidecarRequirementKind::kBlackHoleAccretionAtLeast &&
+         species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) ||
+        block.requirement.kind == core::ModuleSidecarRequirementKind::kParticleFlagMask;
+    if (species_mask_requires_row || predicate_may_require_row) {
       bytes += block.row_stride_bytes;
     }
   }
@@ -967,6 +976,10 @@ void appendModulePayload(std::vector<std::uint8_t>& out, const core::ModuleParti
   appendPod(out, payload.schema_version);
   appendPod(out, payload.row_stride_bytes);
   appendPod(out, payload.required_species_mask);
+  appendPod(out, static_cast<std::uint32_t>(payload.requirement.kind));
+  appendPod(out, payload.requirement.species_mask);
+  appendPod(out, payload.requirement.particle_flags_mask);
+  appendPod(out, payload.requirement.threshold_code);
   appendBytePayload(out, std::span<const std::byte>(payload.payload.data(), payload.payload.size()));
 }
 
@@ -976,6 +989,11 @@ core::ModuleParticleSidecarPayload readModulePayload(std::span<const std::uint8_
   payload.schema_version = readPod<std::uint32_t>(bytes, offset, "module_schema_version");
   payload.row_stride_bytes = readPod<std::uint32_t>(bytes, offset, "module_row_stride_bytes");
   payload.required_species_mask = readPod<std::uint32_t>(bytes, offset, "module_required_species_mask");
+  payload.requirement.kind = static_cast<core::ModuleSidecarRequirementKind>(
+      readPod<std::uint32_t>(bytes, offset, "module_requirement_kind"));
+  payload.requirement.species_mask = readPod<std::uint32_t>(bytes, offset, "module_requirement_species_mask");
+  payload.requirement.particle_flags_mask = readPod<std::uint32_t>(bytes, offset, "module_requirement_particle_flags_mask");
+  payload.requirement.threshold_code = readPod<double>(bytes, offset, "module_requirement_threshold_code");
   payload.payload = readBytePayload(bytes, offset, "module_payload");
   return payload;
 }
@@ -1152,6 +1170,46 @@ std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecor
 #endif
 }
 
+void requireGlobalOwnedParticlePartitionIdentity(
+    const core::SimulationState& state,
+    const parallel::MpiContext& mpi_context,
+    const parallel::LocalOwnershipIdentitySummary& expected_global_identity,
+    std::string_view caller) {
+  std::vector<std::uint64_t> local_owned_ids;
+  local_owned_ids.reserve(state.particles.size());
+  const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    if (state.particle_sidecar.owning_rank[particle_index] == world_rank) {
+      local_owned_ids.push_back(state.particle_sidecar.particle_id[particle_index]);
+    }
+  }
+  const auto local_identity = parallel::summarizeLocalOwnedParticleIds(local_owned_ids);
+  const std::uint64_t global_count = mpi_context.allreduceSumUint64(local_identity.local_owned_count);
+  const std::uint64_t global_sum = mpi_context.allreduceSumUint64(local_identity.local_particle_id_sum);
+  const std::uint64_t global_square_sum =
+      mpi_context.allreduceSumUint64(local_identity.local_particle_id_square_sum);
+  const std::uint64_t global_xor = mpi_context.allreduceXorUint64(local_identity.local_particle_id_xor);
+  const bool all_ranks_unique =
+      mpi_context.allreduceSumUint64(local_identity.local_particle_ids_unique ? 1ULL : 0ULL) ==
+      static_cast<std::uint64_t>(mpi_context.worldSize());
+  const parallel::LocalOwnershipIdentitySummary reduced{
+      .local_owned_count = global_count,
+      .local_particle_id_sum = global_sum,
+      .local_particle_id_square_sum = global_square_sum,
+      .local_particle_id_xor = global_xor,
+      .local_particle_ids_unique = all_ranks_unique,
+  };
+  if (!parallel::partitionIdentityMatchesGeneratedSet(
+          reduced,
+          expected_global_identity.local_owned_count,
+          expected_global_identity.local_particle_id_sum,
+          expected_global_identity.local_particle_id_square_sum,
+          expected_global_identity.local_particle_id_xor)) {
+    throw std::runtime_error(std::string(caller) +
+        ": distributed authoritative particle ownership partition has duplicate, missing, or extra IDs");
+  }
+}
+
 void recordRuntimeRebalanceDecision(
     core::ProfilerSession* profiler,
     const parallel::RuntimeRebalancePlan& rebalance,
@@ -1186,6 +1244,7 @@ void applyMeasuredRuntimeRebalancePlan(
     int world_rank,
     const parallel::DecompositionRuntimeMeasurements& measurements,
     std::span<const std::uint32_t> active_particle_indices,
+    const parallel::LocalOwnershipIdentitySummary& expected_global_identity,
     core::ProfilerSession* profiler,
     std::uint64_t step_index) {
   if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
@@ -4329,6 +4388,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           mpi_context.worldRank(),
           rebalance_measurements,
           active_particles,
+          expected_global_identity,
           &profiler,
           integrator_state.step_index);
       ensureSchedulerCoversState(state, scheduler);

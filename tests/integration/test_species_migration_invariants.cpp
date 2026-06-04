@@ -13,6 +13,23 @@
 
 namespace {
 
+cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
+    const cosmosim::core::SimulationState& state) {
+  std::uint8_t max_bin = 0;
+  for (const std::uint8_t bin : state.particles.time_bin) {
+    if (bin > max_bin) {
+      max_bin = bin;
+    }
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(max_bin);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0U, 0U);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  return scheduler;
+}
+
+
 using cosmosim::core::HierarchicalTimeBinScheduler;
 using cosmosim::core::ParticleMigrationCommit;
 using cosmosim::core::ParticleMigrationRecord;
@@ -79,7 +96,7 @@ void test_species_migration_identity_invariants() {
   const std::uint64_t migrated_id = 1103;
   const std::uint32_t outbound_index = findParticleIndexById(state, migrated_id);
   const std::array<std::uint32_t, 1> single_outbound{outbound_index};
-  auto records = state.packParticleMigrationRecords(single_outbound);
+  auto records = state.packParticleMigrationRecords(single_outbound, makeMigrationScheduler(state));
   assert(records.size() == 1);
 
   records[0].species_tag = speciesTag(ParticleSpecies::kGas);
@@ -133,7 +150,7 @@ void test_species_migration_sidecar_invariants() {
   const std::uint32_t bh_out = findParticleIndexById(state, 1105);
 
   const std::array<std::uint32_t, 2> outbound_indices{star_out, bh_out};
-  auto outbound = state.packParticleMigrationRecords(outbound_indices);
+  auto outbound = state.packParticleMigrationRecords(outbound_indices, makeMigrationScheduler(state));
   assert(outbound.size() == 2);
 
   outbound[0].species_tag = speciesTag(ParticleSpecies::kTracer);
@@ -200,7 +217,7 @@ void test_species_migration_preserves_materialized_softening_without_promoting_d
 
   const std::uint32_t outbound_index = findParticleIndexById(state, 1101);
   const std::array<std::uint32_t, 1> outbound_indices{outbound_index};
-  auto records = state.packParticleMigrationRecords(outbound_indices);
+  auto records = state.packParticleMigrationRecords(outbound_indices, makeMigrationScheduler(state));
   assert(records.size() == 1);
   assert(records[0].has_gravity_softening_value);
   assert(!records[0].has_gravity_softening_override);
@@ -441,7 +458,7 @@ void test_species_migration_softening_timestep_invariants() {
   const std::uint64_t migrated_id = 1102;
   const std::uint32_t outbound_index = findParticleIndexById(state, migrated_id);
   const std::array<std::uint32_t, 1> outbound_indices{outbound_index};
-  auto records = state.packParticleMigrationRecords(outbound_indices);
+  auto records = state.packParticleMigrationRecords(outbound_indices, makeMigrationScheduler(state));
   records[0].species_tag = speciesTag(ParticleSpecies::kStar);
   records[0].has_star_fields = true;
   records[0].star_fields.birth_mass_code = 12.0;
@@ -592,7 +609,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
 
   const std::uint32_t outbound_index = findParticleIndexById(state, 502);
   std::array<std::uint32_t, 1> outbound{outbound_index};
-  auto records = state.packParticleMigrationRecords(outbound);
+  auto records = state.packParticleMigrationRecords(outbound, makeMigrationScheduler(state));
   ParticleMigrationCommit commit;
   commit.world_rank = 0;
   commit.outbound_local_indices = {outbound_index};
@@ -651,7 +668,7 @@ void test_particle_indexed_module_sidecars_migrate_with_particles() {
   state.sidecars.upsert(run_level);
 
   const std::array<std::uint32_t, 1> outbound{1};
-  auto records = state.packParticleMigrationRecords(outbound);
+  auto records = state.packParticleMigrationRecords(outbound, makeMigrationScheduler(state));
   assert(records.size() == 1);
   assert(records[0].module_sidecar_payloads.size() == 1);
   assert(records[0].module_sidecar_payloads[0].module_name == "module_particle_payload");

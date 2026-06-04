@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_integration.hpp"
 
 template <typename T>
 concept HasPersistentAccelerationLanes = requires(T lane_owner) {
@@ -14,6 +15,23 @@ concept HasPersistentAccelerationLanes = requires(T lane_owner) {
   lane_owner.acceleration_y_comoving;
   lane_owner.acceleration_z_comoving;
 };
+
+
+cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
+    const cosmosim::core::SimulationState& state) {
+  std::uint8_t max_bin = 0;
+  for (const std::uint8_t bin : state.particles.time_bin) {
+    if (bin > max_bin) {
+      max_bin = bin;
+    }
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(max_bin);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0U, 0U);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  return scheduler;
+}
 
 int main() {
   static_assert(
@@ -332,7 +350,7 @@ int main() {
   assert(state.validateOwnershipInvariants());
 
   const std::vector<std::uint32_t> outbound_indices = {3};
-  auto outbound_records = state.packParticleMigrationRecords(outbound_indices);
+  auto outbound_records = state.packParticleMigrationRecords(outbound_indices, makeMigrationScheduler(state));
   assert(outbound_records.size() == 1);
   assert(outbound_records[0].particle_id == 1003);
   outbound_records[0].owning_rank = 0;

@@ -19,6 +19,23 @@
 
 namespace {
 
+cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
+    const cosmosim::core::SimulationState& state) {
+  std::uint8_t max_bin = 0;
+  for (const std::uint8_t bin : state.particles.time_bin) {
+    if (bin > max_bin) {
+      max_bin = bin;
+    }
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(max_bin);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0U, 0U);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  return scheduler;
+}
+
+
 using cosmosim::core::ParticleMigrationCommit;
 using cosmosim::core::ParticleMigrationRecord;
 using cosmosim::core::ParticleSpecies;
@@ -580,7 +597,7 @@ void migrateRoundTripSparseSidecars(SimulationState& state) {
   std::sort(outbound.begin(), outbound.end());
   outbound.erase(std::unique(outbound.begin(), outbound.end()), outbound.end());
 
-  std::vector<ParticleMigrationRecord> records = state.packParticleMigrationRecords(outbound);
+  std::vector<ParticleMigrationRecord> records = state.packParticleMigrationRecords(outbound, makeMigrationScheduler(state));
   ParticleMigrationCommit commit;
   commit.world_rank = 0;
   commit.outbound_local_indices = outbound;

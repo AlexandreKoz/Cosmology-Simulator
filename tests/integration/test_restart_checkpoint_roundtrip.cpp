@@ -20,6 +20,23 @@
 
 namespace {
 
+cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
+    const cosmosim::core::SimulationState& state) {
+  std::uint8_t max_bin = 0;
+  for (const std::uint8_t bin : state.particles.time_bin) {
+    if (bin > max_bin) {
+      max_bin = bin;
+    }
+  }
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(max_bin);
+  scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0U, 0U);
+  for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
+    scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
+  }
+  return scheduler;
+}
+
+
 void populateState(cosmosim::core::SimulationState& state) {
   state.resizeParticles(7);
   state.resizeCells(3);
@@ -795,7 +812,7 @@ void testRestartAfterReorderAndMigration() {
   std::filesystem::remove(reorder_path);
 
   const std::uint32_t black_hole_index = state.black_holes.particle_index[0];
-  auto migrated_records = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{black_hole_index});
+  auto migrated_records = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{black_hole_index}, makeMigrationScheduler(state));
   assert(migrated_records.size() == 1);
   migrated_records[0].owning_rank = 0;
   cosmosim::core::ParticleMigrationCommit commit;

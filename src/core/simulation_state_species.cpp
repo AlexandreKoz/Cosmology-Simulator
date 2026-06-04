@@ -58,11 +58,46 @@ void appendModuleRowPayload(ModuleSidecarBlock* block, std::uint64_t particle_id
   return static_cast<ParticleSpecies>(species_tag);
 }
 
-[[nodiscard]] bool moduleRequiresParticle(
+[[nodiscard]] bool moduleRequiresSpeciesMask(
     const ModuleSidecarBlock& block,
     std::uint32_t species_tag,
     const char* caller) {
   return block.requiresSpecies(speciesFromTagOrThrow(species_tag, caller));
+}
+
+[[nodiscard]] bool moduleRequirementMatchesRecord(
+    const ModuleSidecarRequirement& requirement,
+    const ParticleMigrationRecord& record) {
+  switch (requirement.kind) {
+    case ModuleSidecarRequirementKind::kSparse:
+      return false;
+    case ModuleSidecarRequirementKind::kSpeciesMask: {
+      if (!isValidSpeciesTag(record.species_tag)) {
+        return false;
+      }
+      const std::uint32_t bit = record.species_tag;
+      return (requirement.species_mask & (1U << bit)) != 0U;
+    }
+    case ModuleSidecarRequirementKind::kGasDensityAtLeast:
+      return record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kGas) &&
+          record.has_gas_cell_fields &&
+          record.gas_cell_fields.density_code >= requirement.threshold_code;
+    case ModuleSidecarRequirementKind::kBlackHoleAccretionAtLeast:
+      return record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kBlackHole) &&
+          record.has_black_hole_fields &&
+          record.black_hole_fields.accretion_rate_code >= requirement.threshold_code;
+    case ModuleSidecarRequirementKind::kParticleFlagMask:
+      return (record.particle_flags & requirement.particle_flags_mask) == requirement.particle_flags_mask;
+  }
+  return false;
+}
+
+[[nodiscard]] bool moduleRequiresRecord(
+    const ModuleSidecarBlock& block,
+    const ParticleMigrationRecord& record,
+    const char* caller) {
+  return moduleRequiresSpeciesMask(block, record.species_tag, caller) ||
+      moduleRequirementMatchesRecord(block.requirement, record);
 }
 }  // namespace
 
@@ -185,7 +220,7 @@ ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecie
   return packet;
 }
 
-std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecords(
+std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecordsCore(
     std::span<const std::uint32_t> local_indices) const {
   std::vector<ParticleMigrationRecord> records;
   records.reserve(local_indices.size());
@@ -293,7 +328,7 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
       }
       const auto row = findModuleSidecarRowByParticleId(*block, record.particle_id);
       if (!row.has_value()) {
-        if (moduleRequiresParticle(*block, record.species_tag, "packParticleMigrationRecords")) {
+        if (moduleRequiresRecord(*block, record, "packParticleMigrationRecords")) {
           throw std::invalid_argument(
               "packParticleMigrationRecords: required module sidecar row is missing for migrating particle");
         }
@@ -305,6 +340,7 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
       module_payload.schema_version = block->schema_version;
       module_payload.row_stride_bytes = block->row_stride_bytes;
       module_payload.required_species_mask = block->required_species_mask;
+      module_payload.requirement = block->requirement;
       module_payload.payload.assign(row_payload.begin(), row_payload.end());
       record.module_sidecar_payloads.push_back(std::move(module_payload));
     }
@@ -451,7 +487,11 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         }
         if (local_block->schema_version != payload.schema_version ||
             local_block->row_stride_bytes != payload.row_stride_bytes ||
-            local_block->required_species_mask != payload.required_species_mask) {
+            local_block->required_species_mask != payload.required_species_mask ||
+            local_block->requirement.kind != payload.requirement.kind ||
+            local_block->requirement.species_mask != payload.requirement.species_mask ||
+            local_block->requirement.particle_flags_mask != payload.requirement.particle_flags_mask ||
+            local_block->requirement.threshold_code != payload.requirement.threshold_code) {
           throw std::invalid_argument("commitParticleMigration: inbound module sidecar schema, stride, or required-coverage mismatch");
         }
       }
@@ -778,6 +818,33 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   rebuildBlackHoleSidecar(&rebuilt_black_holes);
   rebuildTracerSidecar(&rebuilt_tracers);
 
+  auto module_requires_final_particle = [&](const ModuleSidecarBlock& block, std::size_t final_particle) {
+    ParticleMigrationRecord synthetic;
+    synthetic.particle_id = new_sidecar.particle_id[final_particle];
+    synthetic.species_tag = new_sidecar.species_tag[final_particle];
+    synthetic.particle_flags = new_sidecar.particle_flags[final_particle];
+    if (synthetic.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+      for (std::size_t row = 0; row < rebuilt_gas_cells.size(); ++row) {
+        if (rebuilt_gas_cells.parent_particle_id[row] == synthetic.particle_id) {
+          synthetic.has_gas_cell_fields = true;
+          synthetic.gas_cell_fields.parent_particle_id = synthetic.particle_id;
+          synthetic.gas_cell_fields.gas_cell_id = rebuilt_gas_cells.gas_cell_id[row];
+          synthetic.gas_cell_fields.density_code = rebuilt_gas_cells.density_code[row];
+          break;
+        }
+      }
+    } else if (synthetic.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) {
+      for (std::size_t row = 0; row < rebuilt_black_holes.size(); ++row) {
+        if (rebuilt_black_holes.particle_index[row] == final_particle) {
+          synthetic.has_black_hole_fields = true;
+          synthetic.black_hole_fields.accretion_rate_code = rebuilt_black_holes.accretion_rate_code[row];
+          break;
+        }
+      }
+    }
+    return moduleRequiresRecord(block, synthetic, "commitParticleMigration");
+  };
+
   ModuleSidecarRegistry rebuilt_module_sidecars;
   std::unordered_set<std::string> rebuilt_module_names;
   auto append_particle_indexed_module_rows = [&](const ModuleSidecarBlock& source_block, ModuleSidecarBlock* destination) {
@@ -786,6 +853,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     destination->particle_indexed = true;
     destination->row_stride_bytes = source_block.row_stride_bytes;
     destination->required_species_mask = source_block.required_species_mask;
+    destination->requirement = source_block.requirement;
     destination->payload.clear();
     destination->particle_id_by_row.clear();
 
@@ -804,7 +872,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         appendModuleRowPayload(destination, particle_id, source_block.rowPayload(*source_row));
         continue;
       }
-      if (moduleRequiresParticle(source_block, new_sidecar.species_tag[final_particle], "commitParticleMigration")) {
+      if (module_requires_final_particle(source_block, final_particle)) {
         throw std::invalid_argument(
             "commitParticleMigration: required module sidecar row is missing after particle migration");
       }
@@ -837,10 +905,15 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     rebuilt_block.particle_indexed = true;
     rebuilt_block.row_stride_bytes = prototype->row_stride_bytes;
     rebuilt_block.required_species_mask = prototype->required_species_mask;
+    rebuilt_block.requirement = prototype->requirement;
     for (const auto& [particle_id, payload] : payloads_by_particle) {
       if (payload->schema_version != rebuilt_block.schema_version ||
           payload->row_stride_bytes != rebuilt_block.row_stride_bytes ||
-          payload->required_species_mask != rebuilt_block.required_species_mask) {
+          payload->required_species_mask != rebuilt_block.required_species_mask ||
+          payload->requirement.kind != rebuilt_block.requirement.kind ||
+          payload->requirement.species_mask != rebuilt_block.requirement.species_mask ||
+          payload->requirement.particle_flags_mask != rebuilt_block.requirement.particle_flags_mask ||
+          payload->requirement.threshold_code != rebuilt_block.requirement.threshold_code) {
         throw std::invalid_argument("commitParticleMigration: inbound module sidecar payloads disagree on schema, stride, or required coverage");
       }
     }
@@ -851,7 +924,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         appendModuleRowPayload(&rebuilt_block, particle_id, payload_it->second->payload);
         continue;
       }
-      if (moduleRequiresParticle(rebuilt_block, new_sidecar.species_tag[final_particle], "commitParticleMigration")) {
+      if (module_requires_final_particle(rebuilt_block, final_particle)) {
         throw std::invalid_argument(
             "commitParticleMigration: required inbound module sidecar row is missing after particle migration");
       }

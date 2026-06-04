@@ -834,6 +834,10 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
     writeScalarU32Attribute(module_group.get(), "particle_indexed", block->particle_indexed ? 1U : 0U);
     writeScalarU32Attribute(module_group.get(), "row_stride_bytes", block->row_stride_bytes);
     writeScalarU32Attribute(module_group.get(), "required_species_mask", block->required_species_mask);
+    writeScalarU32Attribute(module_group.get(), "requirement_kind", static_cast<std::uint32_t>(block->requirement.kind));
+    writeScalarU32Attribute(module_group.get(), "requirement_species_mask", block->requirement.species_mask);
+    writeScalarU32Attribute(module_group.get(), "requirement_particle_flags_mask", block->requirement.particle_flags_mask);
+    writeScalarF64Attribute(module_group.get(), "requirement_threshold_code", block->requirement.threshold_code);
     std::vector<std::uint8_t> payload(block->payload.size());
     for (std::size_t i = 0; i < block->payload.size(); ++i) {
       payload[i] = std::to_integer<std::uint8_t>(block->payload[i]);
@@ -985,6 +989,19 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
     }
     if (hdf5AttributeExists(module_group.get(), "required_species_mask")) {
       block.required_species_mask = readScalarU32Attribute(module_group.get(), "required_species_mask");
+    }
+    if (hdf5AttributeExists(module_group.get(), "requirement_kind")) {
+      block.requirement.kind = static_cast<core::ModuleSidecarRequirementKind>(
+          readScalarU32Attribute(module_group.get(), "requirement_kind"));
+    }
+    if (hdf5AttributeExists(module_group.get(), "requirement_species_mask")) {
+      block.requirement.species_mask = readScalarU32Attribute(module_group.get(), "requirement_species_mask");
+    }
+    if (hdf5AttributeExists(module_group.get(), "requirement_particle_flags_mask")) {
+      block.requirement.particle_flags_mask = readScalarU32Attribute(module_group.get(), "requirement_particle_flags_mask");
+    }
+    if (hdf5AttributeExists(module_group.get(), "requirement_threshold_code")) {
+      block.requirement.threshold_code = readScalarF64Attribute(module_group.get(), "requirement_threshold_code");
     }
     const auto payload_u8 = readDataset1d<std::uint8_t>(module_group.get(), "payload", H5T_NATIVE_UINT8);
     block.payload.resize(payload_u8.size());
@@ -1387,6 +1404,10 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
     append_u64(block->particle_indexed ? 1ULL : 0ULL);
     append_u64(static_cast<std::uint64_t>(block->row_stride_bytes));
     append_u64(static_cast<std::uint64_t>(block->required_species_mask));
+    append_u64(static_cast<std::uint64_t>(block->requirement.kind));
+    append_u64(static_cast<std::uint64_t>(block->requirement.species_mask));
+    append_u64(static_cast<std::uint64_t>(block->requirement.particle_flags_mask));
+    append_u64(std::bit_cast<std::uint64_t>(block->requirement.threshold_code));
     append_u64(static_cast<std::uint64_t>(block->particle_id_by_row.size()));
     for (const std::uint64_t particle_id : block->particle_id_by_row) {
       append_u64(particle_id);

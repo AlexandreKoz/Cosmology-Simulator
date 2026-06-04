@@ -269,6 +269,26 @@ struct StateMetadata {
   [[nodiscard]] static StateMetadata deserialize(std::string_view text);
 };
 
+enum class ModuleSidecarRequirementKind : std::uint8_t {
+  kSparse = 0,
+  kSpeciesMask = 1,
+  kGasDensityAtLeast = 2,
+  kBlackHoleAccretionAtLeast = 3,
+  kParticleFlagMask = 4,
+};
+
+struct ModuleSidecarRequirement {
+  // Structured coverage contract for particle-indexed module sidecars.
+  // kSparse means optional rows.  kSpeciesMask reproduces the legacy mask.
+  // Other predicates are evaluated against the authoritative particle/gas/BH
+  // state during pack/commit so modules can require rows only for physically
+  // active subsets instead of every particle of a species.
+  ModuleSidecarRequirementKind kind = ModuleSidecarRequirementKind::kSparse;
+  std::uint32_t species_mask = 0;
+  std::uint32_t particle_flags_mask = 0;
+  double threshold_code = 0.0;
+};
+
 struct ModuleSidecarBlock {
   // Opaque module payload with an independent schema version. Non-particle-indexed
   // blocks are run/module persistent state and are preserved as whole blocks.
@@ -283,10 +303,10 @@ struct ModuleSidecarBlock {
   std::uint32_t row_stride_bytes = 0;
   std::vector<std::uint64_t> particle_id_by_row;
 
-  // Optional enforcement mask for particle-indexed sidecars. Bit i requires
-  // one module row for every authoritative particle whose species_tag == i.
-  // A zero mask means sparse rows are allowed.
+  // Legacy unconditional species mask retained for compatibility. Structured
+  // requirement is ORed with this mask when deciding whether a row is required.
   std::uint32_t required_species_mask = 0;
+  ModuleSidecarRequirement requirement{};
 
   [[nodiscard]] bool isParticleIndexed() const noexcept;
   [[nodiscard]] bool requiresSpecies(ParticleSpecies species) const noexcept;
@@ -299,6 +319,7 @@ struct ModuleParticleSidecarPayload {
   std::uint32_t schema_version = 1;
   std::uint32_t row_stride_bytes = 0;
   std::uint32_t required_species_mask = 0;
+  ModuleSidecarRequirement requirement{};
   std::vector<std::byte> payload;
 };
 
@@ -469,8 +490,6 @@ class SimulationState {
 
   [[nodiscard]] ParticleTransferPacket packSpeciesTransferPacket(ParticleSpecies species_tag) const;
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
-      std::span<const std::uint32_t> local_indices) const;
-  [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecords(
       std::span<const std::uint32_t> local_indices,
       const HierarchicalTimeBinScheduler& scheduler) const;
   void commitParticleMigration(const ParticleMigrationCommit& commit);
@@ -480,6 +499,9 @@ class SimulationState {
   void bumpCellIndexGeneration() noexcept;
 
  private:
+  [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecordsCore(
+      std::span<const std::uint32_t> local_indices) const;
+
   std::uint64_t m_particle_index_generation = 0;
   std::uint64_t m_cell_index_generation = 0;
 };

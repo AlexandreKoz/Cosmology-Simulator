@@ -112,7 +112,8 @@ bool ModuleSidecarBlock::requiresSpecies(ParticleSpecies species) const noexcept
   if (bit >= 32U) {
     return false;
   }
-  return (required_species_mask & (1U << bit)) != 0U;
+  const std::uint32_t mask = required_species_mask | requirement.species_mask;
+  return (mask & (1U << bit)) != 0U;
 }
 
 std::size_t ModuleSidecarBlock::rowCount() const noexcept {
@@ -136,6 +137,53 @@ std::span<const std::byte> ModuleSidecarBlock::rowPayload(std::size_t row) const
 
 namespace {
 
+[[nodiscard]] std::uint32_t validModuleRequirementSpeciesMask() noexcept {
+  return (1U << static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kGas)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kStar)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) |
+      (1U << static_cast<std::uint32_t>(ParticleSpecies::kTracer));
+}
+
+void validateModuleSidecarRequirement(const ModuleSidecarRequirement& requirement) {
+  const std::uint32_t valid_species_mask = validModuleRequirementSpeciesMask();
+  if ((requirement.species_mask & ~valid_species_mask) != 0U) {
+    throw std::invalid_argument("ModuleSidecarRegistry.upsert: module sidecar requirement has invalid species bits");
+  }
+  switch (requirement.kind) {
+    case ModuleSidecarRequirementKind::kSparse:
+      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U || requirement.threshold_code != 0.0) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: sparse sidecar requirement must not carry predicate parameters");
+      }
+      break;
+    case ModuleSidecarRequirementKind::kSpeciesMask:
+      if (requirement.species_mask == 0U) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: species-mask sidecar requirement needs a nonzero species mask");
+      }
+      if (requirement.particle_flags_mask != 0U || requirement.threshold_code != 0.0) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: species-mask sidecar requirement cannot carry flag or threshold predicates");
+      }
+      break;
+    case ModuleSidecarRequirementKind::kGasDensityAtLeast:
+      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U || requirement.threshold_code < 0.0) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: gas-density sidecar requirement has invalid predicate parameters");
+      }
+      break;
+    case ModuleSidecarRequirementKind::kBlackHoleAccretionAtLeast:
+      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U || requirement.threshold_code < 0.0) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: black-hole-accretion sidecar requirement has invalid predicate parameters");
+      }
+      break;
+    case ModuleSidecarRequirementKind::kParticleFlagMask:
+      if (requirement.particle_flags_mask == 0U || requirement.species_mask != 0U || requirement.threshold_code != 0.0) {
+        throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-flag sidecar requirement needs a nonzero flag mask only");
+      }
+      break;
+    default:
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: unknown module sidecar requirement kind");
+  }
+}
+
 void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
   if (block.module_name.empty()) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: module_name cannot be empty");
@@ -144,8 +192,8 @@ void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
     if (block.row_stride_bytes != 0U || !block.particle_id_by_row.empty()) {
       throw std::invalid_argument("ModuleSidecarRegistry.upsert: non-indexed block has particle row metadata");
     }
-    if (block.required_species_mask != 0U) {
-      throw std::invalid_argument("ModuleSidecarRegistry.upsert: required_species_mask is valid only for particle-indexed sidecars");
+    if (block.required_species_mask != 0U || block.requirement.kind != ModuleSidecarRequirementKind::kSparse) {
+      throw std::invalid_argument("ModuleSidecarRegistry.upsert: module sidecar coverage requirements are valid only for particle-indexed sidecars");
     }
     return;
   }
@@ -156,15 +204,11 @@ void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
   if (block.row_stride_bytes == 0U) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed sidecar row_stride_bytes must be positive");
   }
-  const std::uint32_t valid_species_mask =
-      (1U << static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter)) |
-      (1U << static_cast<std::uint32_t>(ParticleSpecies::kGas)) |
-      (1U << static_cast<std::uint32_t>(ParticleSpecies::kStar)) |
-      (1U << static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) |
-      (1U << static_cast<std::uint32_t>(ParticleSpecies::kTracer));
+  const std::uint32_t valid_species_mask = validModuleRequirementSpeciesMask();
   if ((block.required_species_mask & ~valid_species_mask) != 0U) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: required_species_mask contains invalid species bits");
   }
+  validateModuleSidecarRequirement(block.requirement);
   const std::size_t stride = static_cast<std::size_t>(block.row_stride_bytes);
   if (block.payload.size() != stride * block.particle_id_by_row.size()) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed payload size must equal row_stride_bytes * row_count");
