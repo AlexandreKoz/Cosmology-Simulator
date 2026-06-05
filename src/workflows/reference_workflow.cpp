@@ -1275,6 +1275,54 @@ void recordRuntimeRebalanceDecision(
   return records;
 }
 
+
+[[nodiscard]] std::vector<parallel::AmrPatchCellPayloadRecord> buildLocalAmrPatchCellPayloadRecords(
+    const core::SimulationState& state,
+    int world_rank) {
+  std::vector<parallel::AmrPatchCellPayloadRecord> records;
+  if (world_rank < 0 || state.patches.size() == 0) {
+    return records;
+  }
+  std::size_t total_owned_cells = 0;
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.owning_rank[patch_index] == static_cast<std::uint32_t>(world_rank)) {
+      total_owned_cells += state.patches.cell_count[patch_index];
+    }
+  }
+  records.reserve(total_owned_cells);
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
+      continue;
+    }
+    const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+    const std::uint32_t cell_count = state.patches.cell_count[patch_index];
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > state.cells.size()) {
+      throw std::runtime_error("AMR patch cell payload build found a patch range outside CellSoa");
+    }
+    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
+      const std::uint32_t cell_index = first_cell + offset;
+      parallel::AmrPatchCellPayloadRecord record;
+      record.patch_id = state.patches.patch_id[patch_index];
+      record.owner_rank = world_rank;
+      record.local_cell_offset = offset;
+      record.patch_index = static_cast<std::uint32_t>(patch_index);
+      record.center_x_comoving = state.cells.center_x_comoving[cell_index];
+      record.center_y_comoving = state.cells.center_y_comoving[cell_index];
+      record.center_z_comoving = state.cells.center_z_comoving[cell_index];
+      record.mass_code = state.cells.mass_code[cell_index];
+      record.time_bin = state.cells.time_bin[cell_index];
+      record.density_code = cell_index < state.gas_cells.density_code.size() ? state.gas_cells.density_code[cell_index] : 0.0;
+      record.pressure_code = cell_index < state.gas_cells.pressure_code.size() ? state.gas_cells.pressure_code[cell_index] : 0.0;
+      record.internal_energy_code = cell_index < state.gas_cells.internal_energy_code.size()
+          ? state.gas_cells.internal_energy_code[cell_index]
+          : 0.0;
+      parallel::validateAmrPatchCellPayloadRecord(record);
+      records.push_back(record);
+    }
+  }
+  return records;
+}
+
 void exchangeAndValidateAmrPatchPayloads(
     const core::SimulationState& state,
     const parallel::MpiContext& mpi_context,
@@ -1282,16 +1330,43 @@ void exchangeAndValidateAmrPatchPayloads(
     std::uint64_t step_index,
     core::ProfilerSession* profiler) {
   const std::vector<parallel::AmrPatchPayloadRecord> local_records = buildLocalAmrPatchPayloadRecords(state, world_rank);
+  const std::vector<parallel::AmrPatchCellPayloadRecord> local_cell_records =
+      buildLocalAmrPatchCellPayloadRecords(state, world_rank);
   const std::vector<parallel::AmrPatchPayloadRecord> global_records = parallel::executeBlockingAmrPatchPayloadExchange(
       mpi_context,
       local_records,
       step_index);
+  const std::vector<parallel::AmrPatchCellPayloadRecord> global_cell_records =
+      parallel::executeBlockingAmrPatchCellPayloadExchange(mpi_context, local_cell_records, step_index);
+
   std::unordered_map<std::uint64_t, int> owner_by_patch_id;
+  std::unordered_map<std::uint64_t, std::uint32_t> expected_cell_count_by_patch_id;
+  std::unordered_map<std::uint64_t, std::uint32_t> observed_cell_count_by_patch_id;
   owner_by_patch_id.reserve(global_records.size());
+  expected_cell_count_by_patch_id.reserve(global_records.size());
+  observed_cell_count_by_patch_id.reserve(global_records.size());
   for (const parallel::AmrPatchPayloadRecord& record : global_records) {
     const auto [it, inserted] = owner_by_patch_id.emplace(record.patch_id, record.owner_rank);
     if (!inserted && it->second != record.owner_rank) {
       throw std::runtime_error("AMR patch payload exchange detected duplicate authoritative patch ownership");
+    }
+    expected_cell_count_by_patch_id.emplace(record.patch_id, record.cell_count);
+  }
+  for (const parallel::AmrPatchCellPayloadRecord& record : global_cell_records) {
+    const auto owner_it = owner_by_patch_id.find(record.patch_id);
+    if (owner_it == owner_by_patch_id.end()) {
+      throw std::runtime_error("AMR patch cell payload exchange found a cell for an unknown patch");
+    }
+    if (owner_it->second != record.owner_rank) {
+      throw std::runtime_error("AMR patch cell payload owner does not match authoritative patch owner");
+    }
+    ++observed_cell_count_by_patch_id[record.patch_id];
+  }
+  for (const auto& [patch_id, expected_count] : expected_cell_count_by_patch_id) {
+    const std::uint32_t observed_count = observed_cell_count_by_patch_id[patch_id];
+    if (observed_count != expected_count) {
+      throw std::runtime_error("AMR patch cell payload exchange coverage mismatch for patch_id=" +
+                               std::to_string(patch_id));
     }
   }
   if (profiler != nullptr) {
@@ -1303,7 +1378,9 @@ void exchangeAndValidateAmrPatchPayloads(
         .message = "blocking AMR patch payload exchange validated authoritative patch ownership and cell summaries",
         .payload = {{"local_patch_payloads", std::to_string(local_records.size())},
                     {"global_patch_payloads", std::to_string(global_records.size())},
-                    {"payload_bytes", std::to_string(global_records.size() * sizeof(parallel::AmrPatchPayloadRecord))}}});
+                    {"global_patch_cell_payloads", std::to_string(global_cell_records.size())},
+                    {"payload_bytes", std::to_string(global_records.size() * sizeof(parallel::AmrPatchPayloadRecord) +
+                                                       global_cell_records.size() * sizeof(parallel::AmrPatchCellPayloadRecord))}}});
   }
 }
 

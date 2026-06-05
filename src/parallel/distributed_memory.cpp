@@ -1687,6 +1687,21 @@ void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record) {
   }
 }
 
+void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) {
+  if (record.owner_rank < 0) {
+    throw std::invalid_argument("AMR patch cell payload owner_rank must be non-negative");
+  }
+  if (record.patch_id == 0) {
+    throw std::invalid_argument("AMR patch cell payload patch_id must be non-zero");
+  }
+  if (!std::isfinite(record.center_x_comoving) || !std::isfinite(record.center_y_comoving) ||
+      !std::isfinite(record.center_z_comoving) || !std::isfinite(record.mass_code) ||
+      !std::isfinite(record.density_code) || !std::isfinite(record.pressure_code) ||
+      !std::isfinite(record.internal_energy_code)) {
+    throw std::invalid_argument("AMR patch cell payload contains non-finite state");
+  }
+}
+
 void recordDistributedProfiling(
     core::ProfilerSession* profiler,
     const LoadBalanceMetrics& metrics,
@@ -1939,6 +1954,71 @@ std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
   return result;
 #else
   throw std::runtime_error("AMR patch payload exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+
+std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchCellPayloadRecord> local_records,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const AmrPatchCellPayloadRecord& record : local_records) {
+    validateAmrPatchCellPayloadRecord(record);
+    if (record.owner_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("AMR patch cell payload exchange received a cell not owned by this rank");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<AmrPatchCellPayloadRecord>(local_records.begin(), local_records.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(AmrPatchCellPayloadRecord);
+    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("AMR patch cell payload exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes64 = total_records64 * sizeof(AmrPatchCellPayloadRecord);
+  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("AMR patch cell payload exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<AmrPatchCellPayloadRecord> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<AmrPatchCellPayloadRecord*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(AmrPatchCellPayloadRecord)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const AmrPatchCellPayloadRecord& record : result) {
+    validateAmrPatchCellPayloadRecord(record);
+  }
+  return result;
+#else
+  throw std::runtime_error("AMR patch cell payload exchange requires MPI support when MPI context is enabled");
 #endif
 }
 

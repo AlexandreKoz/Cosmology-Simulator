@@ -600,12 +600,28 @@ struct AmrPatchPayloadRecord {
   double gas_internal_energy_sum_code = 0.0;
 };
 
+struct AmrPatchCellPayloadRecord {
+  std::uint64_t patch_id = 0;
+  int owner_rank = 0;
+  std::uint32_t local_cell_offset = 0;
+  std::uint32_t patch_index = 0;
+  double center_x_comoving = 0.0;
+  double center_y_comoving = 0.0;
+  double center_z_comoving = 0.0;
+  double mass_code = 0.0;
+  std::uint32_t time_bin = 0;
+  double density_code = 0.0;
+  double pressure_code = 0.0;
+  double internal_energy_code = 0.0;
+};
+
 void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor);
 void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor);
 void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet);
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor);
 void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor);
 void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record);
+void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record);
 
 [[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
     const MpiContext& mpi_context,
@@ -614,6 +630,11 @@ void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record);
 [[nodiscard]] std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchPayloadRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchCellPayloadRecord> local_records,
     std::uint64_t exchange_sequence = 0);
 
 struct PmSlabHaloExchangeResult {

@@ -668,23 +668,43 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         pm_options,
         profile != nullptr ? &profile->pm_profile : nullptr);
     m_last_pm_slab_halo_exchange = {};
-    if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
-      m_last_pm_slab_halo_exchange = parallel::executeBlockingPmSlabHaloExchange(
-          parallel::MpiContext{},
-          m_grid.slabLayout(),
-          m_grid.density(),
-          /*halo_depth_x=*/1,
-          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
-          /*exchange_sequence=*/static_cast<std::uint64_t>(profile != nullptr ? profile->pm_profile.fft_transpose_bytes : 0U));
-      if (profile != nullptr) {
-        profile->pm_profile.bytes_moved +=
-            m_last_pm_slab_halo_exchange.sent_bytes + m_last_pm_slab_halo_exchange.received_bytes;
-      }
-    }
+    m_grid.clearForceHaloCache();
     if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
       m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
     } else {
       m_pm_solver.solvePoissonIsolatedOpen(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+    }
+    if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
+      const std::uint64_t exchange_sequence = ++m_pm_halo_exchange_sequence;
+      const parallel::PmSlabHaloExchangeResult force_x_halo = parallel::executeBlockingPmSlabHaloExchange(
+          parallel::MpiContext{},
+          m_grid.slabLayout(),
+          m_grid.force_x(),
+          /*halo_depth_x=*/1,
+          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
+          exchange_sequence * 3U + 0U);
+      const parallel::PmSlabHaloExchangeResult force_y_halo = parallel::executeBlockingPmSlabHaloExchange(
+          parallel::MpiContext{},
+          m_grid.slabLayout(),
+          m_grid.force_y(),
+          /*halo_depth_x=*/1,
+          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
+          exchange_sequence * 3U + 1U);
+      const parallel::PmSlabHaloExchangeResult force_z_halo = parallel::executeBlockingPmSlabHaloExchange(
+          parallel::MpiContext{},
+          m_grid.slabLayout(),
+          m_grid.force_z(),
+          /*halo_depth_x=*/1,
+          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
+          exchange_sequence * 3U + 2U);
+      m_grid.setForceHaloCache(force_x_halo, force_y_halo, force_z_halo, exchange_sequence);
+      m_last_pm_slab_halo_exchange = force_x_halo;
+      m_last_pm_slab_halo_exchange.sent_bytes += force_y_halo.sent_bytes + force_z_halo.sent_bytes;
+      m_last_pm_slab_halo_exchange.received_bytes += force_y_halo.received_bytes + force_z_halo.received_bytes;
+      if (profile != nullptr) {
+        profile->pm_profile.bytes_moved +=
+            m_last_pm_slab_halo_exchange.sent_bytes + m_last_pm_slab_halo_exchange.received_bytes;
+      }
     }
     m_has_cached_long_range_field = true;
   }

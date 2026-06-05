@@ -108,11 +108,40 @@ class PmGridStorage {
   [[nodiscard]] std::span<double> force_z();
   [[nodiscard]] std::span<const double> force_z() const;
 
+  void clearForceHaloCache();
+  void setForceHaloCache(
+      const parallel::PmSlabHaloExchangeResult& force_x_halo,
+      const parallel::PmSlabHaloExchangeResult& force_y_halo,
+      const parallel::PmSlabHaloExchangeResult& force_z_halo,
+      std::uint64_t exchange_sequence);
+  [[nodiscard]] bool hasForceHaloCache() const noexcept;
+  [[nodiscard]] bool tryLoadForceFromHalo(
+      std::size_t global_x,
+      std::size_t global_y,
+      std::size_t global_z,
+      double& force_x_value,
+      double& force_y_value,
+      double& force_z_value) const;
+
   [[nodiscard]] std::size_t linearIndex(std::size_t ix, std::size_t iy, std::size_t iz) const;
   void clear();
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
+  struct ForceHaloCache {
+    std::vector<double> left_force_x;
+    std::vector<double> left_force_y;
+    std::vector<double> left_force_z;
+    std::vector<double> right_force_x;
+    std::vector<double> right_force_y;
+    std::vector<double> right_force_z;
+    std::size_t halo_depth_x = 0;
+    int left_peer_rank = -1;
+    int right_peer_rank = -1;
+    std::uint64_t exchange_sequence = 0;
+    bool valid = false;
+  };
+
   PmGridShape m_shape;
   parallel::PmSlabLayout m_layout;
   std::vector<double> m_density;
@@ -120,6 +149,7 @@ class PmGridStorage {
   std::vector<double> m_force_x;
   std::vector<double> m_force_y;
   std::vector<double> m_force_z;
+  ForceHaloCache m_force_halo_cache;
 };
 
 class PmSolver {

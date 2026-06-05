@@ -996,6 +996,100 @@ std::span<const double> PmGridStorage::force_z() const {
   return m_force_z;
 }
 
+void PmGridStorage::clearForceHaloCache() {
+  m_force_halo_cache = ForceHaloCache{};
+}
+
+void PmGridStorage::setForceHaloCache(
+    const parallel::PmSlabHaloExchangeResult& force_x_halo,
+    const parallel::PmSlabHaloExchangeResult& force_y_halo,
+    const parallel::PmSlabHaloExchangeResult& force_z_halo,
+    std::uint64_t exchange_sequence) {
+  const auto require_same_shape = [&](const parallel::PmSlabHaloExchangeResult& component, std::string_view label) {
+    if (component.halo_depth_x != force_x_halo.halo_depth_x ||
+        component.left_peer_rank != force_x_halo.left_peer_rank ||
+        component.right_peer_rank != force_x_halo.right_peer_rank ||
+        component.left_halo.size() != force_x_halo.left_halo.size() ||
+        component.right_halo.size() != force_x_halo.right_halo.size()) {
+      throw std::invalid_argument(std::string("PM force halo cache component shape mismatch for ") + std::string(label));
+    }
+  };
+  require_same_shape(force_y_halo, "force_y");
+  require_same_shape(force_z_halo, "force_z");
+
+  const std::size_t plane_size = m_layout.global_ny * m_layout.global_nz;
+  if (force_x_halo.halo_depth_x == 0 || plane_size == 0) {
+    clearForceHaloCache();
+    return;
+  }
+  const std::size_t expected_values = force_x_halo.halo_depth_x * plane_size;
+  if (force_x_halo.left_halo.size() != expected_values || force_x_halo.right_halo.size() != expected_values) {
+    throw std::invalid_argument("PM force halo cache received a halo payload with inconsistent plane count");
+  }
+
+  m_force_halo_cache.left_force_x = force_x_halo.left_halo;
+  m_force_halo_cache.left_force_y = force_y_halo.left_halo;
+  m_force_halo_cache.left_force_z = force_z_halo.left_halo;
+  m_force_halo_cache.right_force_x = force_x_halo.right_halo;
+  m_force_halo_cache.right_force_y = force_y_halo.right_halo;
+  m_force_halo_cache.right_force_z = force_z_halo.right_halo;
+  m_force_halo_cache.halo_depth_x = force_x_halo.halo_depth_x;
+  m_force_halo_cache.left_peer_rank = force_x_halo.left_peer_rank;
+  m_force_halo_cache.right_peer_rank = force_x_halo.right_peer_rank;
+  m_force_halo_cache.exchange_sequence = exchange_sequence;
+  m_force_halo_cache.valid = true;
+}
+
+bool PmGridStorage::hasForceHaloCache() const noexcept {
+  return m_force_halo_cache.valid;
+}
+
+bool PmGridStorage::tryLoadForceFromHalo(
+    std::size_t global_x,
+    std::size_t global_y,
+    std::size_t global_z,
+    double& force_x_value,
+    double& force_y_value,
+    double& force_z_value) const {
+  if (!m_force_halo_cache.valid || global_y >= m_layout.global_ny || global_z >= m_layout.global_nz ||
+      m_force_halo_cache.halo_depth_x == 0 || m_layout.global_nx == 0) {
+    return false;
+  }
+  const std::size_t depth = m_force_halo_cache.halo_depth_x;
+  const std::size_t plane_size = m_layout.global_ny * m_layout.global_nz;
+  const auto plane_offset = [&](std::size_t halo_x) {
+    return halo_x * plane_size + global_y * m_layout.global_nz + global_z;
+  };
+
+  if (m_force_halo_cache.left_peer_rank >= 0) {
+    for (std::size_t halo_x = 0; halo_x < depth; ++halo_x) {
+      const std::size_t halo_global_x = (m_layout.owned_x.begin_x + m_layout.global_nx - depth + halo_x) %
+          m_layout.global_nx;
+      if (halo_global_x == global_x) {
+        const std::size_t index = plane_offset(halo_x);
+        force_x_value = m_force_halo_cache.left_force_x[index];
+        force_y_value = m_force_halo_cache.left_force_y[index];
+        force_z_value = m_force_halo_cache.left_force_z[index];
+        return true;
+      }
+    }
+  }
+
+  if (m_force_halo_cache.right_peer_rank >= 0) {
+    for (std::size_t halo_x = 0; halo_x < depth; ++halo_x) {
+      const std::size_t halo_global_x = (m_layout.owned_x.end_x + halo_x) % m_layout.global_nx;
+      if (halo_global_x == global_x) {
+        const std::size_t index = plane_offset(halo_x);
+        force_x_value = m_force_halo_cache.right_force_x[index];
+        force_y_value = m_force_halo_cache.right_force_y[index];
+        force_z_value = m_force_halo_cache.right_force_z[index];
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::size_t PmGridStorage::linearIndex(std::size_t ix, std::size_t iy, std::size_t iz) const {
   return m_layout.localLinearIndex(ix, iy, iz);
 }
@@ -1006,6 +1100,7 @@ void PmGridStorage::clear() {
   std::fill(m_force_x.begin(), m_force_x.end(), 0.0);
   std::fill(m_force_y.begin(), m_force_y.end(), 0.0);
   std::fill(m_force_z.begin(), m_force_z.end(), 0.0);
+  clearForceHaloCache();
 }
 
 void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const {
@@ -1022,6 +1117,12 @@ void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const
   add("pm_mesh.force_x", m_force_x);
   add("pm_mesh.force_y", m_force_y);
   add("pm_mesh.force_z", m_force_z);
+  add("pm_mesh.force_halo_left_x", m_force_halo_cache.left_force_x);
+  add("pm_mesh.force_halo_left_y", m_force_halo_cache.left_force_y);
+  add("pm_mesh.force_halo_left_z", m_force_halo_cache.left_force_z);
+  add("pm_mesh.force_halo_right_x", m_force_halo_cache.right_force_x);
+  add("pm_mesh.force_halo_right_y", m_force_halo_cache.right_force_y);
+  add("pm_mesh.force_halo_right_z", m_force_halo_cache.right_force_z);
 }
 
 PmSolver::PmSolver(PmGridShape shape) : m_shape(shape), m_impl(std::make_unique<Impl>(shape)) {
@@ -1798,6 +1899,10 @@ void PmSolver::interpolateForces(
     std::fill(exchange.recv_contrib_counts_bytes.begin(), exchange.recv_contrib_counts_bytes.end(), 0);
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
+    std::fill(accel_x.begin(), accel_x.end(), 0.0);
+    std::fill(accel_y.begin(), accel_y.end(), 0.0);
+    std::fill(accel_z.begin(), accel_z.end(), 0.0);
+
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
       const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
@@ -1808,12 +1913,30 @@ void PmSolver::interpolateForces(
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
         const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
-        auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
             const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            if (destination_rank == grid.slabLayout().world_rank) {
+              const std::size_t local_index = grid.linearIndex(ix, iy, iz);
+              accel_x[p] += weight * grid.force_x()[local_index];
+              accel_y[p] += weight * grid.force_y()[local_index];
+              accel_z[p] += weight * grid.force_z()[local_index];
+              continue;
+            }
+
+            double halo_fx = 0.0;
+            double halo_fy = 0.0;
+            double halo_fz = 0.0;
+            if (grid.tryLoadForceFromHalo(ix, iy, iz, halo_fx, halo_fy, halo_fz)) {
+              accel_x[p] += weight * halo_fx;
+              accel_y[p] += weight * halo_fy;
+              accel_z[p] += weight * halo_fz;
+              continue;
+            }
+
+            auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
             batch.push_back(PmInterpolationRequestRecord{
                 .particle_index = static_cast<std::uint32_t>(p),
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -1878,9 +2001,6 @@ void PmSolver::interpolateForces(
       const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
       for (int i = 0; i < count; ++i) {
         const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
-        if (request.particle_index >= pos_x.size()) {
-          throw std::invalid_argument("PmSolver::interpolateForces request particle index out of range");
-        }
         if (request.global_ix >= m_shape.nx || request.global_iy >= m_shape.ny || request.global_iz >= m_shape.nz) {
           throw std::invalid_argument("PmSolver::interpolateForces request PM index out of range");
         }
@@ -1949,9 +2069,6 @@ void PmSolver::interpolateForces(
         MPI_BYTE,
         MPI_COMM_WORLD);
 
-    std::fill(accel_x.begin(), accel_x.end(), 0.0);
-    std::fill(accel_y.begin(), accel_y.end(), 0.0);
-    std::fill(accel_z.begin(), accel_z.end(), 0.0);
     for (const auto& contribution : exchange.recv_contribs_flat) {
       if (contribution.particle_index >= pos_x.size()) {
         throw std::invalid_argument("PmSolver::interpolateForces response particle index out of range");

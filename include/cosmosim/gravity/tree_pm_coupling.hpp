@@ -179,6 +179,7 @@ class TreePmCoordinator {
   } m_tree_exchange_workspace;
   ResidualTraversalStats m_last_residual_stats;
   parallel::PmSlabHaloExchangeResult m_last_pm_slab_halo_exchange{};
+  std::uint64_t m_pm_halo_exchange_sequence = 0;
   bool m_has_cached_long_range_field = false;
 };
 
