@@ -1173,7 +1173,7 @@ std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecor
 void requireGlobalOwnedParticlePartitionIdentity(
     const core::SimulationState& state,
     const parallel::MpiContext& mpi_context,
-    const parallel::LocalOwnershipIdentitySummary& expected_global_identity,
+    std::span<const std::uint64_t> expected_global_particle_ids,
     std::string_view caller) {
   std::vector<std::uint64_t> local_owned_ids;
   local_owned_ids.reserve(state.particles.size());
@@ -1183,30 +1183,14 @@ void requireGlobalOwnedParticlePartitionIdentity(
       local_owned_ids.push_back(state.particle_sidecar.particle_id[particle_index]);
     }
   }
-  const auto local_identity = parallel::summarizeLocalOwnedParticleIds(local_owned_ids);
-  const std::uint64_t global_count = mpi_context.allreduceSumUint64(local_identity.local_owned_count);
-  const std::uint64_t global_sum = mpi_context.allreduceSumUint64(local_identity.local_particle_id_sum);
-  const std::uint64_t global_square_sum =
-      mpi_context.allreduceSumUint64(local_identity.local_particle_id_square_sum);
-  const std::uint64_t global_xor = mpi_context.allreduceXorUint64(local_identity.local_particle_id_xor);
-  const bool all_ranks_unique =
-      mpi_context.allreduceSumUint64(local_identity.local_particle_ids_unique ? 1ULL : 0ULL) ==
-      static_cast<std::uint64_t>(mpi_context.worldSize());
-  const parallel::LocalOwnershipIdentitySummary reduced{
-      .local_owned_count = global_count,
-      .local_particle_id_sum = global_sum,
-      .local_particle_id_square_sum = global_square_sum,
-      .local_particle_id_xor = global_xor,
-      .local_particle_ids_unique = all_ranks_unique,
-  };
-  if (!parallel::partitionIdentityMatchesGeneratedSet(
-          reduced,
-          expected_global_identity.local_owned_count,
-          expected_global_identity.local_particle_id_sum,
-          expected_global_identity.local_particle_id_square_sum,
-          expected_global_identity.local_particle_id_xor)) {
+  const parallel::ExactOwnershipPartitionReport report =
+      parallel::validateExactGlobalOwnershipPartition(mpi_context, local_owned_ids, expected_global_particle_ids);
+  if (!report.valid()) {
     throw std::runtime_error(std::string(caller) +
-        ": distributed authoritative particle ownership partition has duplicate, missing, or extra IDs");
+        ": exact distributed authoritative ownership table has duplicate=" +
+        std::to_string(report.duplicate_particle_ids.size()) +
+        ", missing=" + std::to_string(report.missing_expected_particle_ids.size()) +
+        ", extra=" + std::to_string(report.extra_particle_ids.size()) + " particle IDs");
   }
 }
 
@@ -1324,7 +1308,7 @@ void recordRuntimeRebalanceDecision(
 }
 
 void exchangeAndValidateAmrPatchPayloads(
-    const core::SimulationState& state,
+    core::SimulationState& state,
     const parallel::MpiContext& mpi_context,
     int world_rank,
     std::uint64_t step_index,
@@ -1369,6 +1353,44 @@ void exchangeAndValidateAmrPatchPayloads(
                                std::to_string(patch_id));
     }
   }
+
+
+  std::unordered_map<std::uint64_t, std::size_t> local_patch_index_by_id;
+  local_patch_index_by_id.reserve(state.patches.size());
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.owning_rank[patch_index] == static_cast<std::uint32_t>(world_rank)) {
+      local_patch_index_by_id.emplace(state.patches.patch_id[patch_index], patch_index);
+    }
+  }
+  std::size_t applied_owned_patch_cells = 0;
+  for (const parallel::AmrPatchCellPayloadRecord& record : global_cell_records) {
+    if (record.owner_rank != world_rank) {
+      continue;
+    }
+    const auto patch_it = local_patch_index_by_id.find(record.patch_id);
+    if (patch_it == local_patch_index_by_id.end()) {
+      throw std::runtime_error("AMR patch cell payload for this rank has no local authoritative patch");
+    }
+    const std::size_t patch_index = patch_it->second;
+    if (record.local_cell_offset >= state.patches.cell_count[patch_index]) {
+      throw std::runtime_error("AMR patch cell payload offset exceeds local patch cell count");
+    }
+    const std::uint32_t cell_index = state.patches.first_cell[patch_index] + record.local_cell_offset;
+    if (cell_index >= state.cells.size()) {
+      throw std::runtime_error("AMR patch cell payload target cell is outside local CellSoa");
+    }
+    state.cells.center_x_comoving[cell_index] = record.center_x_comoving;
+    state.cells.center_y_comoving[cell_index] = record.center_y_comoving;
+    state.cells.center_z_comoving[cell_index] = record.center_z_comoving;
+    state.cells.mass_code[cell_index] = record.mass_code;
+    state.cells.time_bin[cell_index] = record.time_bin;
+    if (cell_index < state.gas_cells.density_code.size()) {
+      state.gas_cells.density_code[cell_index] = record.density_code;
+      state.gas_cells.pressure_code[cell_index] = record.pressure_code;
+      state.gas_cells.internal_energy_code[cell_index] = record.internal_energy_code;
+    }
+    ++applied_owned_patch_cells;
+  }
   if (profiler != nullptr) {
     profiler->recordEvent(core::RuntimeEvent{
         .event_kind = "amr.patch_payload_exchange",
@@ -1379,6 +1401,7 @@ void exchangeAndValidateAmrPatchPayloads(
         .payload = {{"local_patch_payloads", std::to_string(local_records.size())},
                     {"global_patch_payloads", std::to_string(global_records.size())},
                     {"global_patch_cell_payloads", std::to_string(global_cell_records.size())},
+                    {"applied_owned_patch_cells", std::to_string(applied_owned_patch_cells)},
                     {"payload_bytes", std::to_string(global_records.size() * sizeof(parallel::AmrPatchPayloadRecord) +
                                                        global_cell_records.size() * sizeof(parallel::AmrPatchCellPayloadRecord))}}});
   }
@@ -1392,7 +1415,7 @@ void applyMeasuredRuntimeRebalancePlan(
     int world_rank,
     const parallel::DecompositionRuntimeMeasurements& measurements,
     std::span<const std::uint32_t> active_particle_indices,
-    const parallel::LocalOwnershipIdentitySummary& expected_global_identity,
+    std::span<const std::uint64_t> expected_global_particle_ids,
     core::ProfilerSession* profiler,
     std::uint64_t step_index) {
   if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
@@ -1540,6 +1563,8 @@ void applyMeasuredRuntimeRebalancePlan(
                                                         state.particle_sidecar.particle_id.end());
     core::rebuildSchedulerFromParticleMigrationRecords(scheduler, scheduler_records, destination_particle_ids);
     syncTimeBinsFromScheduler(scheduler, state);
+    requireGlobalOwnedParticlePartitionIdentity(
+        state, mpi_context, expected_global_particle_ids, "runtime rebalance particle migration commit");
   }
 
   exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
@@ -4302,6 +4327,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     finalizeStateMetadata(m_frozen_config, state);
     maybeInitializeParticleSofteningFromSpeciesPolicy(state, config);
     const auto expected_global_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    const std::vector<std::uint64_t> expected_global_particle_ids(
+        state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
     parallel::MpiContext mpi_context;
     report.world_size = mpi_context.worldSize();
     report.world_rank = mpi_context.worldRank();
@@ -4621,7 +4648,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           mpi_context.worldRank(),
           rebalance_measurements,
           active_particles,
-          expected_global_identity,
+          expected_global_particle_ids,
           &profiler,
           integrator_state.step_index);
       ensureSchedulerCoversState(state, scheduler);

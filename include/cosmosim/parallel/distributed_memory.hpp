@@ -342,8 +342,28 @@ struct LocalOwnershipIdentitySummary {
   bool local_particle_ids_unique = true;
 };
 
+struct ExactOwnershipPartitionReport {
+  std::uint64_t global_owned_count = 0;
+  bool local_particle_ids_unique = true;
+  bool globally_unique = true;
+  bool matches_expected_ids = true;
+  std::vector<std::uint64_t> duplicate_particle_ids;
+  std::vector<std::uint64_t> missing_expected_particle_ids;
+  std::vector<std::uint64_t> extra_particle_ids;
+
+  [[nodiscard]] bool valid() const noexcept {
+    return local_particle_ids_unique && globally_unique && matches_expected_ids &&
+        duplicate_particle_ids.empty() && missing_expected_particle_ids.empty() && extra_particle_ids.empty();
+  }
+};
+
 [[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
     std::span<const std::uint64_t> local_particle_ids);
+
+[[nodiscard]] ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
+    const MpiContext& mpi_context,
+    std::span<const std::uint64_t> local_owned_particle_ids,
+    std::span<const std::uint64_t> expected_global_particle_ids);
 
 [[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,
@@ -572,6 +592,10 @@ struct TreePseudoParticlePacket {
   double min_z_comoving = 0.0;
   double max_z_comoving = 0.0;
   std::uint64_t source_count = 0;
+  std::uint32_t hierarchy_level = 0;
+  std::uint32_t local_node_index = 0;
+  std::uint8_t child_count = 0;
+  std::uint8_t is_leaf = 0;
 };
 
 struct HydroGhostCellDescriptor {
@@ -626,6 +650,11 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record);
 [[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
     const MpiContext& mpi_context,
     const TreePseudoParticlePacket& local_packet);
+
+[[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchyExchange(
+    const MpiContext& mpi_context,
+    std::span<const TreePseudoParticlePacket> local_packets,
+    std::uint64_t exchange_sequence = 0);
 
 [[nodiscard]] std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
     const MpiContext& mpi_context,

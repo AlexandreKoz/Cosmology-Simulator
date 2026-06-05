@@ -997,6 +997,96 @@ LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(std::span<const std
   return summary;
 }
 
+ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
+    const MpiContext& mpi_context,
+    std::span<const std::uint64_t> local_owned_particle_ids,
+    std::span<const std::uint64_t> expected_global_particle_ids) {
+  ExactOwnershipPartitionReport report;
+  std::vector<std::uint64_t> local_sorted(local_owned_particle_ids.begin(), local_owned_particle_ids.end());
+  std::sort(local_sorted.begin(), local_sorted.end());
+  report.local_particle_ids_unique = std::adjacent_find(local_sorted.begin(), local_sorted.end()) == local_sorted.end();
+
+  std::vector<std::uint64_t> global_ids;
+  if (!mpi_context.isEnabled()) {
+    global_ids = std::move(local_sorted);
+  } else {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    const std::uint64_t local_count = static_cast<std::uint64_t>(local_owned_particle_ids.size());
+    std::vector<std::uint64_t> counts64(static_cast<std::size_t>(mpi_context.worldSize()), 0U);
+    MPI_Allgather(
+        const_cast<std::uint64_t*>(&local_count),
+        1,
+        MPI_UINT64_T,
+        counts64.data(),
+        1,
+        MPI_UINT64_T,
+        MPI_COMM_WORLD);
+    std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(mpi_context.worldSize()), 0);
+    std::uint64_t total_count = 0;
+    for (int rank = 0; rank < mpi_context.worldSize(); ++rank) {
+      if (counts64[static_cast<std::size_t>(rank)] > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("exact ownership partition gather exceeds MPI int count limit");
+      }
+      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(counts64[static_cast<std::size_t>(rank)]);
+      if (rank > 0) {
+        recv_displs[static_cast<std::size_t>(rank)] =
+            recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+      }
+      total_count += counts64[static_cast<std::size_t>(rank)];
+    }
+    if (total_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("exact ownership partition global count exceeds MPI int count limit");
+    }
+    global_ids.resize(static_cast<std::size_t>(total_count));
+    MPI_Allgatherv(
+        const_cast<std::uint64_t*>(local_owned_particle_ids.data()),
+        static_cast<int>(local_owned_particle_ids.size()),
+        MPI_UINT64_T,
+        global_ids.data(),
+        recv_counts.data(),
+        recv_displs.data(),
+        MPI_UINT64_T,
+        MPI_COMM_WORLD);
+#else
+    throw std::runtime_error("exact global ownership validation requires MPI support when MPI context is enabled");
+#endif
+  }
+
+  std::sort(global_ids.begin(), global_ids.end());
+  report.global_owned_count = static_cast<std::uint64_t>(global_ids.size());
+  for (auto it = global_ids.begin(); it != global_ids.end();) {
+    const auto range = std::equal_range(it, global_ids.end(), *it);
+    if (std::distance(range.first, range.second) > 1) {
+      report.duplicate_particle_ids.push_back(*it);
+    }
+    it = range.second;
+  }
+  report.globally_unique = report.duplicate_particle_ids.empty();
+
+  std::vector<std::uint64_t> expected(expected_global_particle_ids.begin(), expected_global_particle_ids.end());
+  std::sort(expected.begin(), expected.end());
+  expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+  std::vector<std::uint64_t> global_unique = global_ids;
+  global_unique.erase(std::unique(global_unique.begin(), global_unique.end()), global_unique.end());
+  std::set_difference(
+      expected.begin(),
+      expected.end(),
+      global_unique.begin(),
+      global_unique.end(),
+      std::back_inserter(report.missing_expected_particle_ids));
+  std::set_difference(
+      global_unique.begin(),
+      global_unique.end(),
+      expected.begin(),
+      expected.end(),
+      std::back_inserter(report.extra_particle_ids));
+  report.matches_expected_ids =
+      report.missing_expected_particle_ids.empty() && report.extra_particle_ids.empty() &&
+      global_unique.size() == expected.size();
+  return report;
+}
+
 bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,
     std::uint64_t expected_global_count,
@@ -1649,6 +1739,12 @@ void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet) {
       packet.min_z_comoving > packet.max_z_comoving) {
     throw std::invalid_argument("tree pseudo-particle packet bounds are invalid");
   }
+  if (packet.child_count > 8U) {
+    throw std::invalid_argument("tree pseudo-particle packet child count is invalid");
+  }
+  if (packet.is_leaf > 1U) {
+    throw std::invalid_argument("tree pseudo-particle packet leaf flag is invalid");
+  }
 }
 
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor) {
@@ -1893,6 +1989,80 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
   return packets;
 #else
   throw std::runtime_error("tree pseudo-particle exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchyExchange(
+    const MpiContext& mpi_context,
+    std::span<const TreePseudoParticlePacket> local_packets,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const TreePseudoParticlePacket& packet : local_packets) {
+    validateTreePseudoParticlePacket(packet);
+    if (packet.descriptor.source_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("tree pseudo hierarchy packet source rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<TreePseudoParticlePacket>(local_packets.begin(), local_packets.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_packets.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_packets = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * sizeof(TreePseudoParticlePacket);
+    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("tree pseudo hierarchy exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_packets += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes = total_packets * sizeof(TreePseudoParticlePacket);
+  if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<TreePseudoParticlePacket> result(static_cast<std::size_t>(total_packets));
+  MPI_Allgatherv(
+      const_cast<TreePseudoParticlePacket*>(local_packets.data()),
+      static_cast<int>(local_packets.size() * sizeof(TreePseudoParticlePacket)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  std::vector<std::uint64_t> per_rank_count(static_cast<std::size_t>(world_size), 0U);
+  for (const TreePseudoParticlePacket& packet : result) {
+    validateTreePseudoParticlePacket(packet);
+    if (packet.descriptor.source_rank < 0 || packet.descriptor.source_rank >= world_size) {
+      throw std::runtime_error("tree pseudo hierarchy exchange returned packet with invalid source rank");
+    }
+    ++per_rank_count[static_cast<std::size_t>(packet.descriptor.source_rank)];
+  }
+  for (int rank = 0; rank < world_size; ++rank) {
+    if (per_rank_count[static_cast<std::size_t>(rank)] != counts64[static_cast<std::size_t>(rank)]) {
+      throw std::runtime_error("tree pseudo hierarchy exchange source-rank coverage mismatch");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("tree pseudo hierarchy exchange requires MPI support when MPI context is enabled");
 #endif
 }
 

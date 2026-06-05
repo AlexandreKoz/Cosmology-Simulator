@@ -515,6 +515,86 @@ struct PeriodicInterval {
   return bounds;
 }
 
+[[nodiscard]] std::vector<parallel::TreePseudoParticlePacket> makeLocalTreePseudoParticleHierarchyPackets(
+    int world_rank,
+    std::uint64_t decomposition_epoch,
+    const TreeNodeSoa& nodes,
+    std::size_t max_packets = 128) {
+  std::vector<parallel::TreePseudoParticlePacket> packets;
+  if (nodes.size() == 0 || max_packets == 0) {
+    return packets;
+  }
+  struct QueueEntry {
+    std::uint32_t node_index = 0;
+    std::uint32_t level = 0;
+  };
+  std::vector<QueueEntry> queue;
+  queue.reserve(std::min<std::size_t>(nodes.size(), max_packets));
+  queue.push_back(QueueEntry{.node_index = 0U, .level = 0U});
+  for (std::size_t cursor = 0; cursor < queue.size() && packets.size() < max_packets; ++cursor) {
+    const QueueEntry entry = queue[cursor];
+    if (entry.node_index >= nodes.size()) {
+      continue;
+    }
+    const double half_size = nodes.half_size_comoving[entry.node_index];
+    parallel::TreePseudoParticlePacket packet;
+    packet.descriptor = parallel::TreePseudoParticleDescriptor{
+        .pseudo_particle_id = (static_cast<std::uint64_t>(std::max(world_rank, 0)) << 48U) ^
+            (static_cast<std::uint64_t>(entry.level) << 40U) ^
+            static_cast<std::uint64_t>(entry.node_index) ^ decomposition_epoch,
+        .source_rank = world_rank,
+        .decomposition_epoch = decomposition_epoch,
+        .derived_not_authoritative = true,
+    };
+    packet.mass_code = nodes.mass_code[entry.node_index];
+    packet.center_x_comoving = nodes.com_x_comoving[entry.node_index];
+    packet.center_y_comoving = nodes.com_y_comoving[entry.node_index];
+    packet.center_z_comoving = nodes.com_z_comoving[entry.node_index];
+    packet.min_x_comoving = nodes.center_x_comoving[entry.node_index] - half_size;
+    packet.max_x_comoving = nodes.center_x_comoving[entry.node_index] + half_size;
+    packet.min_y_comoving = nodes.center_y_comoving[entry.node_index] - half_size;
+    packet.max_y_comoving = nodes.center_y_comoving[entry.node_index] + half_size;
+    packet.min_z_comoving = nodes.center_z_comoving[entry.node_index] - half_size;
+    packet.max_z_comoving = nodes.center_z_comoving[entry.node_index] + half_size;
+    packet.source_count = nodes.particle_count[entry.node_index];
+    packet.hierarchy_level = entry.level;
+    packet.local_node_index = entry.node_index;
+    packet.child_count = nodes.child_count[entry.node_index];
+    packet.is_leaf = nodes.child_count[entry.node_index] == 0U ? 1U : 0U;
+    parallel::validateTreePseudoParticlePacket(packet);
+    packets.push_back(packet);
+
+    if (nodes.child_count[entry.node_index] == 0U || queue.size() >= max_packets) {
+      continue;
+    }
+    const std::size_t child_slot_offset = static_cast<std::size_t>(entry.node_index) * 8U;
+    for (std::uint8_t octant = 0; octant < 8U && queue.size() < max_packets; ++octant) {
+      const std::uint32_t child = nodes.child_index[child_slot_offset + octant];
+      if (child == std::numeric_limits<std::uint32_t>::max()) {
+        continue;
+      }
+      queue.push_back(QueueEntry{.node_index = child, .level = entry.level + 1U});
+    }
+  }
+  return packets;
+}
+
+[[nodiscard]] bool remoteTreeHierarchyIntersectsCutoff(
+    double px,
+    double py,
+    double pz,
+    std::span<const parallel::TreePseudoParticlePacket> packets,
+    const PeriodicBoxLengths& box_lengths,
+    double cutoff_radius_comoving) {
+  for (const parallel::TreePseudoParticlePacket& packet : packets) {
+    if (minimumDistanceToPeriodicBounds(px, py, pz, boundsFromTreePseudoParticlePacket(packet), box_lengths) <=
+        cutoff_radius_comoving) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 void TreePmForceAccumulatorView::reset() const {
@@ -1233,23 +1313,30 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& expected_response_count = m_tree_exchange_workspace.expected_response_count;
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
-    const parallel::TreePseudoParticlePacket local_pseudo_packet = makeLocalTreePseudoParticlePacket(
-        mpi_world_rank,
-        /*decomposition_epoch=*/0,
-        pos_x_comoving,
-        pos_y_comoving,
-        pos_z_comoving,
-        mass_code,
-        box_lengths);
+    const std::vector<parallel::TreePseudoParticlePacket> local_pseudo_hierarchy =
+        makeLocalTreePseudoParticleHierarchyPackets(
+            mpi_world_rank,
+            /*decomposition_epoch=*/0,
+            m_tree_solver.nodes(),
+            /*max_packets=*/std::max<std::size_t>(32U, static_cast<std::size_t>(mpi_world_size) * 16U));
     const std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets =
-        parallel::executeBlockingTreePseudoParticleExchange(parallel::MpiContext{}, local_pseudo_packet);
-    if (peer_pseudo_packets.size() != static_cast<std::size_t>(mpi_world_size)) {
-      throw std::runtime_error("TreePM pseudo-particle exchange returned incomplete rank coverage");
+        parallel::executeBlockingTreePseudoParticleHierarchyExchange(
+            parallel::MpiContext{}, local_pseudo_hierarchy, m_pm_halo_exchange_sequence);
+    if (peer_pseudo_packets.empty()) {
+      throw std::runtime_error("TreePM pseudo-particle hierarchy exchange returned no derived nodes");
     }
-    std::vector<SourceDomainBoundsPacket> peer_bounds(static_cast<std::size_t>(mpi_world_size));
+    std::vector<std::vector<parallel::TreePseudoParticlePacket>> peer_hierarchy_by_rank(
+        static_cast<std::size_t>(mpi_world_size));
+    for (const parallel::TreePseudoParticlePacket& packet : peer_pseudo_packets) {
+      if (packet.descriptor.source_rank < 0 || packet.descriptor.source_rank >= mpi_world_size) {
+        throw std::runtime_error("TreePM pseudo-particle hierarchy packet has invalid source rank");
+      }
+      peer_hierarchy_by_rank[static_cast<std::size_t>(packet.descriptor.source_rank)].push_back(packet);
+    }
     for (int peer = 0; peer < mpi_world_size; ++peer) {
-      peer_bounds[static_cast<std::size_t>(peer)] =
-          boundsFromTreePseudoParticlePacket(peer_pseudo_packets[static_cast<std::size_t>(peer)]);
+      if (peer_hierarchy_by_rank[static_cast<std::size_t>(peer)].empty()) {
+        throw std::runtime_error("TreePM pseudo-particle hierarchy exchange returned incomplete rank coverage");
+      }
     }
 
     std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer(static_cast<std::size_t>(mpi_world_size));
@@ -1283,9 +1370,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           if (peer == mpi_world_rank) {
             continue;
           }
-          if (minimumDistanceToPeriodicBounds(px, py, pz, peer_bounds[static_cast<std::size_t>(peer)], box_lengths) >
-              cutoff_radius_comoving) {
-            ++m_last_residual_stats.remote_pairs_pruned_by_bounds;
+          const auto& peer_hierarchy = peer_hierarchy_by_rank[static_cast<std::size_t>(peer)];
+          if (!remoteTreeHierarchyIntersectsCutoff(
+                  px, py, pz, peer_hierarchy, box_lengths, cutoff_radius_comoving)) {
+            m_last_residual_stats.remote_pairs_pruned_by_bounds +=
+                static_cast<std::uint64_t>(peer_hierarchy.size());
             continue;
           }
           requests_by_peer[static_cast<std::size_t>(peer)].push_back(ShortRangeTargetRequestPacket{
