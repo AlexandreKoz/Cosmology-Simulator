@@ -13,6 +13,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
@@ -614,10 +615,35 @@ void TreePmForceAccumulatorView::addToActiveSlot(
 }
 
 TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape)
-    : m_shape(pm_shape), m_grid(pm_shape), m_pm_solver(pm_shape), m_tree_solver() {}
+    : m_shape(pm_shape),
+      m_mpi_context(),
+      m_grid(pm_shape),
+      m_pm_solver(pm_shape),
+      m_tree_solver() {}
 
 TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout)
-    : m_shape(pm_shape), m_grid(pm_shape, std::move(pm_layout)), m_pm_solver(pm_shape), m_tree_solver() {}
+    : TreePmCoordinator(pm_shape, std::move(pm_layout), parallel::MpiContext()) {}
+
+TreePmCoordinator::TreePmCoordinator(
+    PmGridShape pm_shape,
+    parallel::PmSlabLayout pm_layout,
+    parallel::MpiContext mpi_context)
+    : m_shape(pm_shape),
+      m_mpi_context(std::move(mpi_context)),
+      m_grid(pm_shape, std::move(pm_layout)),
+      m_pm_solver(pm_shape),
+      m_tree_solver() {
+  const auto& layout = m_grid.slabLayout();
+  if (layout.world_size > 1) {
+    if (layout.world_size != m_mpi_context.worldSize() ||
+        layout.world_rank != m_mpi_context.worldRank()) {
+      throw std::invalid_argument("TreePM distributed PM layout world metadata must match MPI context");
+    }
+    if (!m_mpi_context.isEnabled()) {
+      throw std::runtime_error("TreePM distributed PM layout requires an enabled MPI context");
+    }
+  }
+}
 
 const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
   return m_grid.slabLayout();
@@ -757,21 +783,21 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
       const std::uint64_t exchange_sequence = ++m_pm_halo_exchange_sequence;
       const parallel::PmSlabHaloExchangeResult force_x_halo = parallel::executeBlockingPmSlabHaloExchange(
-          parallel::MpiContext{},
+          m_mpi_context,
           m_grid.slabLayout(),
           m_grid.force_x(),
           /*halo_depth_x=*/1,
           pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
           exchange_sequence * 3U + 0U);
       const parallel::PmSlabHaloExchangeResult force_y_halo = parallel::executeBlockingPmSlabHaloExchange(
-          parallel::MpiContext{},
+          m_mpi_context,
           m_grid.slabLayout(),
           m_grid.force_y(),
           /*halo_depth_x=*/1,
           pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
           exchange_sequence * 3U + 1U);
       const parallel::PmSlabHaloExchangeResult force_z_halo = parallel::executeBlockingPmSlabHaloExchange(
-          parallel::MpiContext{},
+          m_mpi_context,
           m_grid.slabLayout(),
           m_grid.force_z(),
           /*halo_depth_x=*/1,
@@ -1321,7 +1347,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             /*max_packets=*/std::max<std::size_t>(32U, static_cast<std::size_t>(mpi_world_size) * 16U));
     const std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets =
         parallel::executeBlockingTreePseudoParticleHierarchyExchange(
-            parallel::MpiContext{}, local_pseudo_hierarchy, m_pm_halo_exchange_sequence);
+            m_mpi_context, local_pseudo_hierarchy, m_pm_halo_exchange_sequence);
     if (peer_pseudo_packets.empty()) {
       throw std::runtime_error("TreePM pseudo-particle hierarchy exchange returned no derived nodes");
     }

@@ -88,6 +88,7 @@ class TreePmCoordinator {
  public:
   explicit TreePmCoordinator(PmGridShape pm_shape);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
+  TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout, parallel::MpiContext mpi_context);
 
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
   [[nodiscard]] bool ownsFullPmDomain() const noexcept;
@@ -147,6 +148,7 @@ class TreePmCoordinator {
   };
 
   PmGridShape m_shape;
+  parallel::MpiContext m_mpi_context;
   PmGridStorage m_grid;
   PmSolver m_pm_solver;
   TreeGravitySolver m_tree_solver;

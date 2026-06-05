@@ -624,6 +624,18 @@ struct AmrPatchPayloadRecord {
   double gas_internal_energy_sum_code = 0.0;
 };
 
+
+struct HydroConservativeFluxCorrectionRecord {
+  std::uint64_t parent_particle_id = 0;
+  int source_rank = 0;
+  int owner_rank = 0;
+  double delta_mass_density_comoving = 0.0;
+  double delta_momentum_density_x_comoving = 0.0;
+  double delta_momentum_density_y_comoving = 0.0;
+  double delta_momentum_density_z_comoving = 0.0;
+  double delta_total_energy_density_comoving = 0.0;
+};
+
 struct AmrPatchCellPayloadRecord {
   std::uint64_t patch_id = 0;
   int owner_rank = 0;
@@ -634,9 +646,13 @@ struct AmrPatchCellPayloadRecord {
   double center_z_comoving = 0.0;
   double mass_code = 0.0;
   std::uint32_t time_bin = 0;
+  std::uint64_t gas_cell_id = 0;
+  std::uint64_t parent_particle_id = 0;
   double density_code = 0.0;
   double pressure_code = 0.0;
   double internal_energy_code = 0.0;
+  double temperature_code = 0.0;
+  double sound_speed_code = 0.0;
 };
 
 void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor);
@@ -646,6 +662,7 @@ void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor
 void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor);
 void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record);
 void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record);
+void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCorrectionRecord& record);
 
 [[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
     const MpiContext& mpi_context,
@@ -664,6 +681,11 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record);
 [[nodiscard]] std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchCellPayloadRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroConservativeFluxCorrectionRecord> local_records,
     std::uint64_t exchange_sequence = 0);
 
 struct PmSlabHaloExchangeResult {

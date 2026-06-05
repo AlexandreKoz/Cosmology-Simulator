@@ -305,6 +305,9 @@ add_library(cosmosim_parallel STATIC
   src/parallel/distributed_memory.cpp)
 add_library(cosmosim_utils STATIC
   src/utils/utils_module.cpp)
+
+target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
+
 add_library(cosmosim_workflows STATIC
   src/workflows/reference_workflow.cpp)
 

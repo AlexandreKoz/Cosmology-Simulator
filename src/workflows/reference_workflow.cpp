@@ -110,7 +110,7 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
       pm_grid_shape.nz,
       mpi_context.worldSize(),
       mpi_context.worldRank());
-  return gravity::TreePmCoordinator(pm_grid_shape, layout);
+  return gravity::TreePmCoordinator(pm_grid_shape, layout, mpi_context);
 }
 
 
@@ -1295,10 +1295,25 @@ void recordRuntimeRebalanceDecision(
       record.center_z_comoving = state.cells.center_z_comoving[cell_index];
       record.mass_code = state.cells.mass_code[cell_index];
       record.time_bin = state.cells.time_bin[cell_index];
+      const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+      const std::uint64_t parent_particle_id = state.particle_sidecar.particle_id[gas_particle_index];
+      record.gas_cell_id = cell_index < state.gas_cells.gas_cell_id.size() && state.gas_cells.gas_cell_id[cell_index] != 0U
+          ? state.gas_cells.gas_cell_id[cell_index]
+          : parent_particle_id;
+      record.parent_particle_id = cell_index < state.gas_cells.parent_particle_id.size() &&
+              state.gas_cells.parent_particle_id[cell_index] != 0U
+          ? state.gas_cells.parent_particle_id[cell_index]
+          : parent_particle_id;
       record.density_code = cell_index < state.gas_cells.density_code.size() ? state.gas_cells.density_code[cell_index] : 0.0;
       record.pressure_code = cell_index < state.gas_cells.pressure_code.size() ? state.gas_cells.pressure_code[cell_index] : 0.0;
       record.internal_energy_code = cell_index < state.gas_cells.internal_energy_code.size()
           ? state.gas_cells.internal_energy_code[cell_index]
+          : 0.0;
+      record.temperature_code = cell_index < state.gas_cells.temperature_code.size()
+          ? state.gas_cells.temperature_code[cell_index]
+          : 0.0;
+      record.sound_speed_code = cell_index < state.gas_cells.sound_speed_code.size()
+          ? state.gas_cells.sound_speed_code[cell_index]
           : 0.0;
       parallel::validateAmrPatchCellPayloadRecord(record);
       records.push_back(record);
@@ -1385,9 +1400,13 @@ void exchangeAndValidateAmrPatchPayloads(
     state.cells.mass_code[cell_index] = record.mass_code;
     state.cells.time_bin[cell_index] = record.time_bin;
     if (cell_index < state.gas_cells.density_code.size()) {
+      state.gas_cells.gas_cell_id[cell_index] = record.gas_cell_id;
+      state.gas_cells.parent_particle_id[cell_index] = record.parent_particle_id;
       state.gas_cells.density_code[cell_index] = record.density_code;
       state.gas_cells.pressure_code[cell_index] = record.pressure_code;
       state.gas_cells.internal_energy_code[cell_index] = record.internal_energy_code;
+      state.gas_cells.temperature_code[cell_index] = record.temperature_code;
+      state.gas_cells.sound_speed_code[cell_index] = record.sound_speed_code;
     }
     ++applied_owned_patch_cells;
   }
@@ -1996,12 +2015,15 @@ struct SolverGhostRefreshReport {
 
 struct HydroGhostConservedSnapshot {
   std::vector<std::uint32_t> cell_indices;
+  std::vector<std::uint64_t> parent_particle_ids;
+  std::vector<std::uint32_t> owner_ranks;
   std::vector<hydro::HydroConservedState> conserved_state;
 };
 
 struct HydroConservativeGhostSyncReport {
   std::size_t restored_ghost_cells = 0;
   double rejected_remote_delta_l1 = 0.0;
+  std::vector<parallel::HydroConservativeFluxCorrectionRecord> correction_records;
 };
 
 [[nodiscard]] HydroGhostConservedSnapshot snapshotHydroGhostConservedCells(
@@ -2010,13 +2032,18 @@ struct HydroConservativeGhostSyncReport {
     std::uint32_t world_rank) {
   HydroGhostConservedSnapshot snapshot;
   snapshot.cell_indices.reserve(state.cells.size());
+  snapshot.parent_particle_ids.reserve(state.cells.size());
+  snapshot.owner_ranks.reserve(state.cells.size());
   snapshot.conserved_state.reserve(state.cells.size());
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
     const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(state, cell_index);
-    if (state.particle_sidecar.owning_rank[gas_particle_index] == world_rank) {
+    const std::uint32_t owner_rank = state.particle_sidecar.owning_rank[gas_particle_index];
+    if (owner_rank == world_rank) {
       continue;
     }
     snapshot.cell_indices.push_back(cell_index);
+    snapshot.parent_particle_ids.push_back(state.particle_sidecar.particle_id[gas_particle_index]);
+    snapshot.owner_ranks.push_back(owner_rank);
     snapshot.conserved_state.push_back(conserved.loadCell(cell_index));
   }
   return snapshot;
@@ -2024,11 +2051,15 @@ struct HydroConservativeGhostSyncReport {
 
 [[nodiscard]] HydroConservativeGhostSyncReport restoreHydroGhostConservedCells(
     hydro::HydroConservedStateSoa& conserved,
-    const HydroGhostConservedSnapshot& snapshot) {
-  if (snapshot.cell_indices.size() != snapshot.conserved_state.size()) {
+    const HydroGhostConservedSnapshot& snapshot,
+    std::uint32_t world_rank) {
+  if (snapshot.cell_indices.size() != snapshot.conserved_state.size() ||
+      snapshot.cell_indices.size() != snapshot.parent_particle_ids.size() ||
+      snapshot.cell_indices.size() != snapshot.owner_ranks.size()) {
     throw std::invalid_argument("hydro ghost snapshot is inconsistent");
   }
   HydroConservativeGhostSyncReport report;
+  report.correction_records.reserve(snapshot.cell_indices.size());
   for (std::size_t i = 0; i < snapshot.cell_indices.size(); ++i) {
     const std::uint32_t cell_index = snapshot.cell_indices[i];
     if (cell_index >= conserved.size()) {
@@ -2036,11 +2067,29 @@ struct HydroConservativeGhostSyncReport {
     }
     const hydro::HydroConservedState before = snapshot.conserved_state[i];
     const hydro::HydroConservedState after = conserved.loadCell(cell_index);
-    report.rejected_remote_delta_l1 += std::abs(after.mass_density_comoving - before.mass_density_comoving);
-    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_x_comoving - before.momentum_density_x_comoving);
-    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_y_comoving - before.momentum_density_y_comoving);
-    report.rejected_remote_delta_l1 += std::abs(after.momentum_density_z_comoving - before.momentum_density_z_comoving);
-    report.rejected_remote_delta_l1 += std::abs(after.total_energy_density_comoving - before.total_energy_density_comoving);
+    const double dm = after.mass_density_comoving - before.mass_density_comoving;
+    const double dmx = after.momentum_density_x_comoving - before.momentum_density_x_comoving;
+    const double dmy = after.momentum_density_y_comoving - before.momentum_density_y_comoving;
+    const double dmz = after.momentum_density_z_comoving - before.momentum_density_z_comoving;
+    const double de = after.total_energy_density_comoving - before.total_energy_density_comoving;
+    report.rejected_remote_delta_l1 += std::abs(dm);
+    report.rejected_remote_delta_l1 += std::abs(dmx);
+    report.rejected_remote_delta_l1 += std::abs(dmy);
+    report.rejected_remote_delta_l1 += std::abs(dmz);
+    report.rejected_remote_delta_l1 += std::abs(de);
+    if (dm != 0.0 || dmx != 0.0 || dmy != 0.0 || dmz != 0.0 || de != 0.0) {
+      parallel::HydroConservativeFluxCorrectionRecord record;
+      record.parent_particle_id = snapshot.parent_particle_ids[i];
+      record.source_rank = static_cast<int>(world_rank);
+      record.owner_rank = static_cast<int>(snapshot.owner_ranks[i]);
+      record.delta_mass_density_comoving = dm;
+      record.delta_momentum_density_x_comoving = dmx;
+      record.delta_momentum_density_y_comoving = dmy;
+      record.delta_momentum_density_z_comoving = dmz;
+      record.delta_total_energy_density_comoving = de;
+      parallel::validateHydroConservativeFluxCorrectionRecord(record);
+      report.correction_records.push_back(record);
+    }
     conserved.storeCell(cell_index, before);
     ++report.restored_ghost_cells;
   }
@@ -3749,7 +3798,35 @@ class HydroStageCallback final : public core::IntegrationCallback {
         &m_last_hydro_profile);
 
     const HydroConservativeGhostSyncReport ghost_sync_report = restoreHydroGhostConservedCells(
-        m_conserved, ghost_conserved_snapshot);
+        m_conserved, ghost_conserved_snapshot, world_rank);
+    const std::vector<parallel::HydroConservativeFluxCorrectionRecord> global_flux_corrections =
+        parallel::executeBlockingHydroConservativeFluxCorrectionExchange(
+            mpi_context, ghost_sync_report.correction_records, context.integrator_state.step_index);
+    std::size_t applied_flux_corrections = 0;
+    double applied_flux_delta_l1 = 0.0;
+    for (const parallel::HydroConservativeFluxCorrectionRecord& correction : global_flux_corrections) {
+      if (correction.owner_rank != static_cast<int>(world_rank)) {
+        continue;
+      }
+      const std::uint32_t cell_index = context.state.gasCellRowForParticleId(correction.parent_particle_id);
+      const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, cell_index);
+      if (context.state.particle_sidecar.owning_rank[gas_particle_index] != world_rank) {
+        throw std::runtime_error("hydro conservative flux correction targeted a non-authoritative local ghost cell");
+      }
+      hydro::HydroConservedState owned = m_conserved.loadCell(cell_index);
+      owned.mass_density_comoving += correction.delta_mass_density_comoving;
+      owned.momentum_density_x_comoving += correction.delta_momentum_density_x_comoving;
+      owned.momentum_density_y_comoving += correction.delta_momentum_density_y_comoving;
+      owned.momentum_density_z_comoving += correction.delta_momentum_density_z_comoving;
+      owned.total_energy_density_comoving += correction.delta_total_energy_density_comoving;
+      m_conserved.storeCell(cell_index, owned);
+      ++applied_flux_corrections;
+      applied_flux_delta_l1 += std::abs(correction.delta_mass_density_comoving);
+      applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_x_comoving);
+      applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_y_comoving);
+      applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_z_comoving);
+      applied_flux_delta_l1 += std::abs(correction.delta_total_energy_density_comoving);
+    }
     if (context.profiler_session != nullptr) {
       context.profiler_session->recordEvent(core::RuntimeEvent{
           .event_kind = "hydro.conservative_ghost_sync",
@@ -3758,9 +3835,13 @@ class HydroStageCallback final : public core::IntegrationCallback {
           .step_index = context.integrator_state.step_index,
           .simulation_time_code = context.integrator_state.current_time_code,
           .scale_factor = context.integrator_state.current_scale_factor,
-          .message = "restored imported hydro ghost conserved state; authoritative owner must commit conservative truth",
+          .message = "restored imported hydro ghosts and applied conservative owner-side boundary corrections",
           .payload = {{"restored_ghost_cells", std::to_string(ghost_sync_report.restored_ghost_cells)},
-                      {"rejected_remote_delta_l1", std::to_string(ghost_sync_report.rejected_remote_delta_l1)}}});
+                      {"local_correction_records", std::to_string(ghost_sync_report.correction_records.size())},
+                      {"global_correction_records", std::to_string(global_flux_corrections.size())},
+                      {"applied_flux_corrections", std::to_string(applied_flux_corrections)},
+                      {"rejected_remote_delta_l1", std::to_string(ghost_sync_report.rejected_remote_delta_l1)},
+                      {"applied_flux_delta_l1", std::to_string(applied_flux_delta_l1)}}});
     }
 
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {

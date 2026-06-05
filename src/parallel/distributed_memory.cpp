@@ -1790,11 +1790,31 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) 
   if (record.patch_id == 0) {
     throw std::invalid_argument("AMR patch cell payload patch_id must be non-zero");
   }
+  if (record.gas_cell_id == 0 || record.parent_particle_id == 0) {
+    throw std::invalid_argument("AMR patch cell payload must carry stable gas-cell and parent-particle identity");
+  }
   if (!std::isfinite(record.center_x_comoving) || !std::isfinite(record.center_y_comoving) ||
       !std::isfinite(record.center_z_comoving) || !std::isfinite(record.mass_code) ||
       !std::isfinite(record.density_code) || !std::isfinite(record.pressure_code) ||
-      !std::isfinite(record.internal_energy_code)) {
+      !std::isfinite(record.internal_energy_code) || !std::isfinite(record.temperature_code) ||
+      !std::isfinite(record.sound_speed_code)) {
     throw std::invalid_argument("AMR patch cell payload contains non-finite state");
+  }
+}
+
+void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCorrectionRecord& record) {
+  if (record.parent_particle_id == 0) {
+    throw std::invalid_argument("hydro conservative flux correction requires a non-zero parent particle id");
+  }
+  if (record.source_rank < 0 || record.owner_rank < 0) {
+    throw std::invalid_argument("hydro conservative flux correction ranks must be non-negative");
+  }
+  if (!std::isfinite(record.delta_mass_density_comoving) ||
+      !std::isfinite(record.delta_momentum_density_x_comoving) ||
+      !std::isfinite(record.delta_momentum_density_y_comoving) ||
+      !std::isfinite(record.delta_momentum_density_z_comoving) ||
+      !std::isfinite(record.delta_total_energy_density_comoving)) {
+    throw std::invalid_argument("hydro conservative flux correction contains non-finite state");
   }
 }
 
@@ -2189,6 +2209,74 @@ std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchang
   return result;
 #else
   throw std::runtime_error("AMR patch cell payload exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroConservativeFluxCorrectionRecord> local_records,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const HydroConservativeFluxCorrectionRecord& record : local_records) {
+    validateHydroConservativeFluxCorrectionRecord(record);
+    if (record.source_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("hydro conservative flux correction source rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<HydroConservativeFluxCorrectionRecord>(local_records.begin(), local_records.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroConservativeFluxCorrectionRecord);
+    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("hydro conservative flux correction exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroConservativeFluxCorrectionRecord);
+  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("hydro conservative flux correction exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<HydroConservativeFluxCorrectionRecord> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<HydroConservativeFluxCorrectionRecord*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(HydroConservativeFluxCorrectionRecord)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const HydroConservativeFluxCorrectionRecord& record : result) {
+    validateHydroConservativeFluxCorrectionRecord(record);
+    if (record.source_rank < 0 || record.source_rank >= world_size ||
+        record.owner_rank < 0 || record.owner_rank >= world_size) {
+      throw std::runtime_error("hydro conservative flux correction exchange returned invalid rank metadata");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("hydro conservative flux correction exchange requires MPI support when MPI context is enabled");
 #endif
 }
 
