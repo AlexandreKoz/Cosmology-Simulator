@@ -1,1 +1,34 @@
 /build/
+
+# CMake/build artifacts
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Local user presets
+CMakeUserPresets.json
+
+# Generated binaries and libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Python/editor caches
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Runtime artifacts
+/output/
+*.log

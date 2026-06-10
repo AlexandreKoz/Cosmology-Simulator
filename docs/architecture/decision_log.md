@@ -1,5 +1,31 @@
 # Architecture decision log
 
+## 2026-06-07 — ADR-INFRA-AGENT-INTERFACE-016: Repository-wide agent task contract
+
+### Status
+Accepted (documentation/interface decision)
+
+### Context
+The root `AGENTS.md` still described a narrow infrastructure-repair session even though current CHUI/CosmoSim work regularly asks AI agents to audit, patch, implement feature stages, and return clean source archives. That mismatch made it easy for agents to over-restrict valid implementation work or under-specify packaging and evidence duties.
+
+### Decision
+- Treat `AGENTS.md` as the canonical repository-wide agent contract.
+- Add `docs/architecture/agent_task_interface.md` as the detailed task router for audit, repair, feature implementation, and packaging requests.
+- Add `.github/copilot-instructions.md` as a short integration surface for GitHub Copilot-style agents that points back to the canonical contract.
+- Preserve the CHUI user-facing name while explicitly forbidding opportunistic renames of existing `CosmoSim`/`cosmosim` compatibility identifiers.
+
+### Consequences
+- Positive: agent sessions now have one explicit mode-selection, evidence, ownership, and clean-zip policy.
+- Positive: repair-only constraints no longer accidentally block requested feature implementation work.
+- Positive: clean handoff artifacts now have an explicit repo-local exclusion contract.
+- Tradeoff: documentation-only changes do not prove solver readiness; agents must still provide command-backed evidence for code changes.
+
+### Evidence references
+- `AGENTS.md`
+- `docs/architecture/agent_task_interface.md`
+- `.github/copilot-instructions.md`
+- `docs/architecture/developer_workflow_contract.md`
+
 ## 2026-05-11 — ADR-INFRA-STAGE2-TIMESTEP-AUTHORITY-015: Scheduler-owned timestep truth and claim discipline
 
 ### Status

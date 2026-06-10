@@ -1,16 +1,17 @@
-# Developer workflow contract (Codex + human review)
+# Developer workflow contract (agents + human review)
 
-This contract defines the minimum acceptable quality bar for implementation prompts and PR review in CosmoSim.
+This contract defines the minimum acceptable quality bar for implementation prompts, AI-agent patches, and PR review in CosmoSim/CHUI. The root `AGENTS.md` is the mandatory repository-wide contract; `docs/architecture/agent_task_interface.md` explains how agents route audit, repair, feature, and packaging requests.
 
 ## Required response structure for implementation prompts
 
 1. Brief design summary.
 2. Exact file list with one-line rationale per file.
 3. Explicit assumptions, invariants, and numerical conventions.
-4. Full changed-file content.
-5. Tests added/updated.
-6. Benchmark or profiling hook added/updated.
-7. Acceptance checklist.
+4. Ownership and persistence impact: config, runtime truth, sidecars, schema/restart, MPI ghosts, and output naming as applicable.
+5. Tests added/updated, or existing tests explicitly named as covering the invariant.
+6. Benchmark or profiling hook added/updated for hot paths, or rationale for why none is needed.
+7. Exact validation commands and outcomes, or exact blocked commands and missing dependency/environment reason.
+8. Acceptance checklist.
 
 ## Mandatory engineering rules
 
@@ -19,6 +20,7 @@ This contract defines the minimum acceptable quality bar for implementation prom
 - No hidden interface drift.
 - No silent schema/config/provenance changes.
 - No ambiguous unit/frame naming where confusion is possible.
+- No clean-zip handoff containing build trees, caches, generated outputs, local user presets, or binaries.
 
 ## Reviewer checklist
 

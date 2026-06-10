@@ -4,7 +4,8 @@ CosmoSim is a research codebase with strict expectations for numerical integrity
 
 ## 0) Repo-local repair guardrails (read first)
 
-- Mandatory repair-session rules: [`AGENTS.md`](AGENTS.md)
+- Mandatory agent/reviewer contract: [`AGENTS.md`](AGENTS.md)
+- Agent task router and patch interface: [`docs/architecture/agent_task_interface.md`](docs/architecture/agent_task_interface.md)
 - Infrastructure review checklist: [`docs/code_review.md`](docs/code_review.md)
 - Architecture decisions and exceptions: [`docs/architecture/decision_log.md`](docs/architecture/decision_log.md)
 
@@ -48,9 +49,9 @@ Required docs for those updates:
 - benchmark/profiling workflow changes → `docs/profiling.md`
 - architecture-level decisions → `docs/architecture/decision_log.md`
 
-## 4) Codex prompt + review expectations
+## 4) Agent prompt + review expectations
 
-Every implementation PR should satisfy the workflow contract in [`docs/architecture/developer_workflow_contract.md`](docs/architecture/developer_workflow_contract.md):
+Every implementation PR should satisfy the root agent contract in [`AGENTS.md`](AGENTS.md), the task router in [`docs/architecture/agent_task_interface.md`](docs/architecture/agent_task_interface.md), and the workflow contract in [`docs/architecture/developer_workflow_contract.md`](docs/architecture/developer_workflow_contract.md):
 
 - explicit assumptions and invariants,
 - no hidden schema/config drift,

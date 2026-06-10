@@ -26,6 +26,7 @@ This file is the architecture index for contributors.
 
 - Decision log: [`decision_log.md`](decision_log.md)
 - Developer workflow contract: [`developer_workflow_contract.md`](developer_workflow_contract.md)
+- Agent task interface: [`agent_task_interface.md`](agent_task_interface.md)
 - Config reference: [`../configuration.md`](../configuration.md)
 - Output schema guide: [`../output_schema.md`](../output_schema.md)
 - Validation ladder: [`../validation_plan.md`](../validation_plan.md)

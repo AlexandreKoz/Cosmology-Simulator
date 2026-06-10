@@ -1,3 +1,9 @@
+## 2026-06-07 Agent interface update
+
+- Promoted `AGENTS.md` from a repair-only guardrail into the repository-wide CHUI/CosmoSim agent contract covering audit, repair, feature implementation, and clean packaging modes.
+- Added `docs/architecture/agent_task_interface.md` and `.github/copilot-instructions.md` so Codex/Copilot-style agents share one task router, evidence floor, and clean-artifact policy.
+- Reproducibility impact: documentation/interface only; solver numerics, config normalization, output naming, snapshot/restart schemas, and runtime state ownership are unchanged.
+
 
 ## 2026-05-25 Stage 6 memory accounting infrastructure by subsystem (S6-07)
 

@@ -16,6 +16,7 @@ The flagship science target is physically credible zoom-in galaxy formation from
 
 - **Developer architecture and workflow**
   - Architecture index and ownership map: [`docs/architecture/overview.md`](docs/architecture/overview.md)
+  - AI-agent task interface and repo-specific guardrails: [`AGENTS.md`](AGENTS.md), [`docs/architecture/agent_task_interface.md`](docs/architecture/agent_task_interface.md)
   - Design decisions and compatibility notes: [`docs/architecture/decision_log.md`](docs/architecture/decision_log.md)
   - Prompt/review contract for Codex + human contributors: [`docs/architecture/developer_workflow_contract.md`](docs/architecture/developer_workflow_contract.md)
   - Contribution rules: [`CONTRIBUTING.md`](CONTRIBUTING.md)
