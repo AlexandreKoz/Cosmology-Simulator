@@ -40,6 +40,7 @@ int main() {
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
   bool saw_softening = false;
   bool saw_gas_identity = false;
+  bool saw_hydro_geometry = false;
   bool saw_species_sidecars = false;
   bool saw_output_cadence = false;
   bool saw_stochastic_state = false;
@@ -47,6 +48,7 @@ int main() {
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
+    saw_hydro_geometry = saw_hydro_geometry || item == "hydro_geometry_patch_state";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
     saw_output_cadence = saw_output_cadence || item == "output_cadence_persistent_state";
     saw_stochastic_state = saw_stochastic_state || item == "stochastic_module_persistent_state";
@@ -54,6 +56,7 @@ int main() {
   }
   assert(saw_softening);
   assert(saw_gas_identity);
+  assert(saw_hydro_geometry);
   assert(saw_species_sidecars);
   assert(saw_output_cadence);
   assert(saw_stochastic_state);
@@ -210,7 +213,7 @@ int main() {
     cosmosim::core::SimulationState gas_state;
     gas_state.resizeParticles(4);
     gas_state.resizeCells(2);
-    gas_state.resizePatches(0);
+    gas_state.resizePatches(1);
     gas_state.species.count_by_species = {2, 2, 0, 0, 0};
     for (std::size_t i = 0; i < gas_state.particles.size(); ++i) {
       gas_state.particle_sidecar.particle_id[i] = 900 + i;
@@ -221,6 +224,12 @@ int main() {
     }
     gas_state.rebuildSpeciesIndex();
     gas_state.refreshGasCellIdentityFromParticleOrder();
+    gas_state.patches.patch_id[0] = 777;
+    gas_state.patches.first_cell[0] = 0;
+    gas_state.patches.cell_count[0] = 2;
+    gas_state.patches.owning_rank[0] = 0;
+    gas_state.cells.patch_index[0] = 0;
+    gas_state.cells.patch_index[1] = 0;
 
     cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(2);
     gas_scheduler.reset(4, 0, 0);
@@ -245,6 +254,24 @@ int main() {
       stale_cell_mirror_threw = true;
     }
     assert(stale_cell_mirror_threw);
+
+    cosmosim::core::syncTimeBinMirrorsFromScheduler(
+        gas_scheduler,
+        gas_state,
+        cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+    assert(cosmosim::io::restartPayloadIntegrityHash(gas_payload) != 0);
+
+    gas_state.cells.patch_index[1] = 1;
+    bool mismatched_patch_index_threw = false;
+    try {
+      (void)cosmosim::io::restartPayloadIntegrityHash(gas_payload);
+    } catch (const std::invalid_argument& ex) {
+      const std::string message = ex.what();
+      mismatched_patch_index_threw =
+          message.find("/state/cells/patch_index") != std::string::npos ||
+          message.find("/state/patches") != std::string::npos;
+    }
+    assert(mismatched_patch_index_threw);
   }
 
   return 0;

@@ -2053,6 +2053,111 @@ double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl) {
   return c_cfl * (input.cell_width_code / denom);
 }
 
+double computeDirectionalCflTimeStep(const DirectionalCflTimeStepInput& input, double c_cfl) {
+  if (c_cfl <= 0.0 || !std::isfinite(c_cfl)) {
+    throw std::invalid_argument("c_cfl must be finite and positive");
+  }
+  if (!std::isfinite(input.sound_speed_code)) {
+    throw std::invalid_argument("sound_speed_code must be finite");
+  }
+  const double sound_speed = std::max(input.sound_speed_code, 0.0);
+  double dt = std::numeric_limits<double>::infinity();
+  for (std::size_t axis = 0; axis < input.cell_width_axis_code.size(); ++axis) {
+    const double cell_width = input.cell_width_axis_code[axis];
+    if (cell_width <= 0.0 || !std::isfinite(cell_width)) {
+      throw std::invalid_argument("cell_width_axis_code entries must be finite and positive");
+    }
+    if (!std::isfinite(input.velocity_axis_code[axis])) {
+      throw std::invalid_argument("velocity_axis_code entries must be finite");
+    }
+    const double denom = std::abs(input.velocity_axis_code[axis]) + sound_speed;
+    if (denom > 0.0) {
+      dt = std::min(dt, c_cfl * cell_width / denom);
+    }
+  }
+  return dt;
+}
+
+HydroCflDiagnostics makeHydroCflDiagnostics(
+    std::uint32_t local_row,
+    const DirectionalCflTimeStepInput& input,
+    double c_cfl,
+    double accepted_dt_time_code,
+    std::uint64_t gas_cell_id,
+    std::optional<std::uint64_t> patch_id,
+    std::optional<std::uint32_t> patch_row) {
+  HydroCflDiagnostics diagnostics;
+  diagnostics.local_row = local_row;
+  diagnostics.gas_cell_id = gas_cell_id;
+  diagnostics.has_gas_cell_id = gas_cell_id != 0U;
+  diagnostics.patch_id = patch_id.value_or(0U);
+  diagnostics.has_patch_id = patch_id.has_value();
+  diagnostics.patch_row = patch_row.value_or(0U);
+  diagnostics.has_patch_row = patch_row.has_value();
+  diagnostics.accepted_dt_time_code = accepted_dt_time_code;
+  diagnostics.cfl_number = c_cfl;
+  diagnostics.cell_width_axis_code = input.cell_width_axis_code;
+  diagnostics.velocity_axis_code = input.velocity_axis_code;
+  diagnostics.sound_speed_code = input.sound_speed_code;
+  diagnostics.proposed_dt_time_code = computeDirectionalCflTimeStep(input, c_cfl);
+  diagnostics.safety_factor = diagnostics.accepted_dt_time_code > 0.0
+      ? diagnostics.proposed_dt_time_code / diagnostics.accepted_dt_time_code
+      : std::numeric_limits<double>::infinity();
+
+  double limiting_dt = std::numeric_limits<double>::infinity();
+  const double sound_speed = std::max(input.sound_speed_code, 0.0);
+  for (std::size_t axis = 0; axis < input.cell_width_axis_code.size(); ++axis) {
+    const double denom = std::abs(input.velocity_axis_code[axis]) + sound_speed;
+    const double axis_dt = denom > 0.0
+        ? c_cfl * input.cell_width_axis_code[axis] / denom
+        : std::numeric_limits<double>::infinity();
+    if (axis_dt < limiting_dt) {
+      limiting_dt = axis_dt;
+      diagnostics.limiting_axis = static_cast<std::uint8_t>(axis);
+    }
+  }
+  return diagnostics;
+}
+
+void assertHydroCflStable(
+    const HydroCflDiagnostics& diagnostics,
+    double relative_tolerance) {
+  if (relative_tolerance < 0.0 || !std::isfinite(relative_tolerance)) {
+    throw std::invalid_argument("relative_tolerance must be finite and non-negative");
+  }
+  if (diagnostics.accepted_dt_time_code <= 0.0 || !std::isfinite(diagnostics.accepted_dt_time_code)) {
+    throw std::invalid_argument("accepted hydro dt must be finite and positive");
+  }
+  if (!std::isfinite(diagnostics.proposed_dt_time_code)) {
+    return;
+  }
+  const double allowed = diagnostics.proposed_dt_time_code *
+      (1.0 + relative_tolerance);
+  if (diagnostics.accepted_dt_time_code <= allowed) {
+    return;
+  }
+
+  std::ostringstream out;
+  out << "hydro CFL violation before state mutation"
+      << "; local_row=" << diagnostics.local_row
+      << "; gas_cell_id=" << (diagnostics.has_gas_cell_id ? std::to_string(diagnostics.gas_cell_id) : "n/a")
+      << "; patch_id=" << (diagnostics.has_patch_id ? std::to_string(diagnostics.patch_id) : "n/a")
+      << "; patch_row=" << (diagnostics.has_patch_row ? std::to_string(diagnostics.patch_row) : "n/a")
+      << "; proposed_dt=" << diagnostics.proposed_dt_time_code
+      << "; accepted_dt=" << diagnostics.accepted_dt_time_code
+      << "; cfl_number=" << diagnostics.cfl_number
+      << "; safety_factor=" << diagnostics.safety_factor
+      << "; limiting_axis=" << static_cast<unsigned>(diagnostics.limiting_axis)
+      << "; velocity=(" << diagnostics.velocity_axis_code[0] << ","
+      << diagnostics.velocity_axis_code[1] << ","
+      << diagnostics.velocity_axis_code[2] << ")"
+      << "; sound_speed=" << diagnostics.sound_speed_code
+      << "; cell_width=(" << diagnostics.cell_width_axis_code[0] << ","
+      << diagnostics.cell_width_axis_code[1] << ","
+      << diagnostics.cell_width_axis_code[2] << ")";
+  throw std::runtime_error(out.str());
+}
+
 double computeGravityTimeStep(const GravityTimeStepInput& input, double eta) {
   if (input.softening_length_code <= 0.0) {
     throw std::invalid_argument("softening_length_code must be positive");

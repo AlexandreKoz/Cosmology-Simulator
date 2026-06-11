@@ -617,6 +617,41 @@ void testTimeBinMappingAndCriteria() {
   const double dt_cfl = cosmosim::core::computeCflTimeStep(cfl_input, 0.8);
   assert(std::abs(dt_cfl - (0.8 * 0.25 / 1.5)) < k_tolerance);
 
+  const cosmosim::core::DirectionalCflTimeStepInput directional_cfl{
+      .cell_width_axis_code = {0.5, 0.125, 0.25},
+      .velocity_axis_code = {20.0, 1.0, 4.0},
+      .sound_speed_code = 5.0,
+  };
+  const double dt_directional = cosmosim::core::computeDirectionalCflTimeStep(directional_cfl, 0.4);
+  assert(std::abs(dt_directional - (0.4 * 0.125 / 6.0)) < k_tolerance);
+  const auto cfl_diagnostics = cosmosim::core::makeHydroCflDiagnostics(
+      7,
+      directional_cfl,
+      0.4,
+      0.005,
+      9007,
+      std::uint64_t{42},
+      std::uint32_t{3});
+  assert(cfl_diagnostics.local_row == 7);
+  assert(cfl_diagnostics.gas_cell_id == 9007);
+  assert(cfl_diagnostics.patch_id == 42);
+  assert(cfl_diagnostics.patch_row == 3);
+  assert(cfl_diagnostics.limiting_axis == 1);
+  cosmosim::core::assertHydroCflStable(cfl_diagnostics);
+  assert(throwsWithContext(
+      [&]() {
+        const auto unstable = cosmosim::core::makeHydroCflDiagnostics(
+            7,
+            directional_cfl,
+            0.4,
+            0.02,
+            9007,
+            std::uint64_t{42},
+            std::uint32_t{3});
+        cosmosim::core::assertHydroCflStable(unstable);
+      },
+      "hydro CFL violation"));
+
   const cosmosim::core::GravityTimeStepInput grav_input{
       .softening_length_code = 0.01,
       .acceleration_magnitude_code = 4.0,
@@ -908,6 +943,44 @@ void testHydroGravityCandidateReconciliation() {
   assert(hot.bin_index[0] == 0);
   assert(hot.bin_index[1] == 2);
   assert(hot.bin_index[2] == 3);
+}
+
+void testHighMachHydroCflCandidateLimitsBin() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(4);
+  scheduler.reset(1, 4, 0);
+  const cosmosim::core::TimeStepLimits limits{
+      .min_dt_time_code = 0.01,
+      .max_dt_time_code = 0.16,
+      .max_bin = 4,
+  };
+  const cosmosim::core::DirectionalCflTimeStepInput high_mach_cell{
+      .cell_width_axis_code = {1.0, 1.0, 0.5},
+      .velocity_axis_code = {2.0, 3.0, 49.0},
+      .sound_speed_code = 1.0,
+  };
+  const double hydro_dt = cosmosim::core::computeDirectionalCflTimeStep(high_mach_cell, 0.4);
+  assert(std::abs(hydro_dt - 0.004) < k_tolerance);
+
+  scheduler.submitCandidateTimeStep(
+      0,
+      hydro_dt,
+      limits,
+      cosmosim::core::TimeStepCandidateSource::kHydroCfl,
+      "high_mach_cell_hydro_cfl");
+  scheduler.submitCandidateTimeStep(
+      0,
+      0.08,
+      limits,
+      cosmosim::core::TimeStepCandidateSource::kGravityAcceleration,
+      "gravity_looser");
+  const auto reconciliation = scheduler.reconcileCandidateTransitions();
+  assert(reconciliation.submitted_candidates == 2);
+  assert(reconciliation.limiting_candidates_by_source[
+             static_cast<std::size_t>(cosmosim::core::TimeStepCandidateSource::kHydroCfl)] == 1);
+  assert(reconciliation.dominant_limiting_source == cosmosim::core::TimeStepCandidateSource::kHydroCfl);
+  scheduler.beginSubstep();
+  scheduler.endSubstep();
+  assert(scheduler.hotMetadata().bin_index[0] == 0);
 }
 
 void testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected() {
@@ -1359,6 +1432,7 @@ int main() {
   testActiveSetAuthority();
   testActiveSetNoCompetingBuilders();
   testHydroGravityCandidateReconciliation();
+  testHighMachHydroCflCandidateLimitsBin();
   testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected();
   testOrchestratorRejectsSchedulerActiveSetWithoutTick();
   testSchedulerBackedTimeBinReorderIgnoresStaleMirrors();

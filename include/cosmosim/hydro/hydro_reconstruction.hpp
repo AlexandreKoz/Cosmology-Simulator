@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <string_view>
 
 namespace cosmosim::hydro {
@@ -22,7 +23,10 @@ enum class HydroSlopeLimiter {
 
 struct HydroReconstructionPolicy {
   HydroSlopeLimiter limiter = HydroSlopeLimiter::kMonotonizedCentral;
+  // Backward-compatible scalar used when dt_over_cell_width_code is left at zero.
   double dt_over_dx_code = 0.0;
+  // Ordered as x, y, z. Values are dt_code / cell_width_axis_code.
+  std::array<double, 3> dt_over_cell_width_code{0.0, 0.0, 0.0};
   double rho_floor = 1.0e-12;
   double pressure_floor = 1.0e-12;
   bool enable_muscl_hancock_predictor = true;
@@ -67,7 +71,7 @@ class PiecewiseConstantReconstruction final : public HydroReconstruction {
 };
 
 // MUSCL-Hancock face reconstruction with runtime-selectable slope limiter.
-// The predictor currently assumes a 1D contiguous cell ordering; otherwise it falls back to piecewise-constant.
+// Slopes are taken from explicit per-face Cartesian stencil metadata.
 class MusclHancockReconstruction final : public HydroReconstruction {
  public:
   explicit MusclHancockReconstruction(HydroReconstructionPolicy policy = {});

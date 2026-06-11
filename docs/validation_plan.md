@@ -97,6 +97,26 @@ The CSV is the required Phase 1 force-error map over PMGRID/ASMTH/RCUT and must 
 - **Regression:** preserve prior output metadata/behavior with tolerances.
 - **Convergence:** when numerical order or resolution behavior is affected.
 
+## Hydro classical CI guards
+
+The default CPU validation ladder now includes:
+
+- Executable: `test_validation_hydro_classics`
+- CTest entry: `validation_hydro_classics`
+- Labels: `validation;integration;hydro`
+
+This executable runs small fixed-grid Cartesian versions of Sedov, Noh, Gresho
+vortex, Kelvin-Helmholtz, and an Evrard-style collapse toy. The assertions are
+deliberately CI-scale: every case checks finite state, positive density,
+positive pressure/internal energy, and at least one physically meaningful
+invariant or trend. These tests are not paper-grade reference-profile or
+convergence campaigns.
+
+The Evrard-style case uses a fixed analytic inward gravity source through the
+hydro source-term interface. It is a bounded source-coupling and collapse-trend
+guard until a self-gravitating hydro workflow can own a restartable Evrard
+reference path with documented gravity/hydro ownership.
+
 ## Validation reporting in PRs
 
 Every PR should include:

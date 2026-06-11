@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <iterator>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -33,6 +34,8 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
+#include "cosmosim/hydro/hydro_boundary_conditions.hpp"
+#include "cosmosim/hydro/hydro_cartesian_patch.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
@@ -290,10 +293,182 @@ void maybeInitializeParticleSofteningFromSpeciesPolicy(
 
 struct AdaptiveTimeStepCriteriaStorage {
   std::vector<std::uint32_t> gas_particle_index_by_cell;
+  std::vector<std::uint64_t> gas_cell_id_by_cell;
+  std::vector<std::uint64_t> patch_id_by_cell;
+  std::vector<std::uint32_t> patch_row_by_cell;
+  std::vector<double> cell_width_x_code;
+  std::vector<double> cell_width_y_code;
+  std::vector<double> cell_width_z_code;
 };
+
+struct LocalGasCellCflMetadata {
+  std::vector<double> cell_width_x_code;
+  std::vector<double> cell_width_y_code;
+  std::vector<double> cell_width_z_code;
+  std::vector<std::uint64_t> patch_id_by_cell;
+  std::vector<std::uint32_t> patch_row_by_cell;
+};
+
+[[nodiscard]] std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
+  std::vector<double> unique(values.begin(), values.end());
+  std::sort(unique.begin(), unique.end());
+  unique.erase(
+      std::unique(
+          unique.begin(),
+          unique.end(),
+          [](double lhs, double rhs) {
+            const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+            return std::abs(lhs - rhs) <= 1.0e-10 * scale;
+          }),
+      unique.end());
+  return unique;
+}
+
+[[nodiscard]] double coordinateSpacing(
+    const std::vector<double>& coordinates,
+    double fallback_width_comoving) {
+  if (coordinates.size() <= 1U) {
+    return fallback_width_comoving;
+  }
+  const double span = coordinates.back() - coordinates.front();
+  return std::max(1.0e-12, span / static_cast<double>(coordinates.size() - 1U));
+}
+
+[[nodiscard]] std::optional<hydro::HydroCartesianPatchSpec> trySpecFromCellCenters(
+    const core::SimulationState& state,
+    const core::SimulationConfig& config) {
+  const std::size_t cell_count = state.cells.size();
+  if (cell_count == 0) {
+    return std::nullopt;
+  }
+  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
+  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
+  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
+  if (x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
+      x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty()) {
+    return std::nullopt;
+  }
+  const double fallback_dx = config.cosmology.box_size_x_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(x_coordinates.size(), 1U));
+  const double fallback_dy = config.cosmology.box_size_y_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(y_coordinates.size(), 1U));
+  const double fallback_dz = config.cosmology.box_size_z_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(z_coordinates.size(), 1U));
+  const double dx = coordinateSpacing(x_coordinates, fallback_dx);
+  const double dy = coordinateSpacing(y_coordinates, fallback_dy);
+  const double dz = coordinateSpacing(z_coordinates, fallback_dz);
+  return hydro::HydroCartesianPatchSpec{
+      .nx = x_coordinates.size(),
+      .ny = y_coordinates.size(),
+      .nz = z_coordinates.size(),
+      .origin_x_comoving = x_coordinates.front() - 0.5 * dx,
+      .origin_y_comoving = y_coordinates.front() - 0.5 * dy,
+      .origin_z_comoving = z_coordinates.front() - 0.5 * dz,
+      .cell_width_x_comoving = dx,
+      .cell_width_y_comoving = dy,
+      .cell_width_z_comoving = dz,
+  };
+}
+
+[[nodiscard]] hydro::HydroCartesianPatchSpec fallbackCartesianSpec(
+    std::size_t cell_count,
+    const core::SimulationConfig& config) {
+  const std::array<std::size_t, 3> factors = hydro::chooseNearCubicCartesianFactors(cell_count);
+  return hydro::HydroCartesianPatchSpec{
+      .nx = factors[0],
+      .ny = factors[1],
+      .nz = factors[2],
+      .origin_x_comoving = 0.0,
+      .origin_y_comoving = 0.0,
+      .origin_z_comoving = 0.0,
+      .cell_width_x_comoving = config.cosmology.box_size_x_mpc_comoving /
+          static_cast<double>(std::max<std::size_t>(factors[0], 1U)),
+      .cell_width_y_comoving = config.cosmology.box_size_y_mpc_comoving /
+          static_cast<double>(std::max<std::size_t>(factors[1], 1U)),
+      .cell_width_z_comoving = config.cosmology.box_size_z_mpc_comoving /
+          static_cast<double>(std::max<std::size_t>(factors[2], 1U)),
+  };
+}
+
+[[nodiscard]] std::optional<std::size_t> coordinateIndex(
+    const std::vector<double>& coordinates,
+    double value) {
+  for (std::size_t index = 0; index < coordinates.size(); ++index) {
+    const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
+    if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool rowOrderMatchesCartesianSpec(
+    const core::SimulationState& state,
+    const hydro::HydroCartesianPatchSpec& spec) {
+  if (state.cells.size() == 0) {
+    return true;
+  }
+  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
+  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
+  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
+  if (x_coordinates.size() != spec.nx || y_coordinates.size() != spec.ny || z_coordinates.size() != spec.nz) {
+    return false;
+  }
+  const hydro::HydroPatchGeometry row_order_geometry = hydro::makeCartesianPatchGeometry(spec);
+  for (std::size_t row = 0; row < state.cells.size(); ++row) {
+    const std::optional<std::size_t> i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[row]);
+    const std::optional<std::size_t> j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[row]);
+    const std::optional<std::size_t> k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[row]);
+    if (!i.has_value() || !j.has_value() || !k.has_value() ||
+        row_order_geometry.linearCellIndex(*i, *j, *k) != row) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] LocalGasCellCflMetadata buildLocalGasCellCflMetadata(
+    const core::SimulationState& state,
+    const core::SimulationConfig& config) {
+  LocalGasCellCflMetadata metadata;
+  const std::size_t cell_count = state.cells.size();
+  metadata.cell_width_x_code.resize(cell_count);
+  metadata.cell_width_y_code.resize(cell_count);
+  metadata.cell_width_z_code.resize(cell_count);
+  metadata.patch_id_by_cell.assign(cell_count, 0U);
+  metadata.patch_row_by_cell.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
+  if (cell_count == 0) {
+    return metadata;
+  }
+
+  const std::optional<hydro::HydroCartesianPatchSpec> center_spec = trySpecFromCellCenters(state, config);
+  const hydro::HydroCartesianPatchSpec spec =
+      center_spec.value_or(fallbackCartesianSpec(cell_count, config));
+  if (center_spec.has_value() && !rowOrderMatchesCartesianSpec(state, spec)) {
+    throw std::runtime_error("hydro CFL metadata requires row-ordered Cartesian gas-cell centers");
+  }
+  std::fill(metadata.cell_width_x_code.begin(), metadata.cell_width_x_code.end(), spec.cell_width_x_comoving);
+  std::fill(metadata.cell_width_y_code.begin(), metadata.cell_width_y_code.end(), spec.cell_width_y_comoving);
+  std::fill(metadata.cell_width_z_code.begin(), metadata.cell_width_z_code.end(), spec.cell_width_z_comoving);
+
+  for (std::size_t patch = 0; patch < state.patches.size(); ++patch) {
+    const std::uint32_t first_cell = state.patches.first_cell[patch];
+    const std::uint32_t patch_cell_count = state.patches.cell_count[patch];
+    for (std::uint32_t offset = 0; offset < patch_cell_count; ++offset) {
+      const std::size_t row = static_cast<std::size_t>(first_cell) + offset;
+      if (row >= cell_count) {
+        continue;
+      }
+      metadata.patch_id_by_cell[row] = state.patches.patch_id[patch];
+      metadata.patch_row_by_cell[row] = offset;
+    }
+  }
+  return metadata;
+}
 
 [[nodiscard]] core::AdaptiveTimeStepCriteriaView buildAdaptiveTimeStepCriteriaView(
     const core::SimulationState& state,
+    const core::SimulationConfig& config,
     std::span<const double> particle_accel_x,
     std::span<const double> particle_accel_y,
     std::span<const double> particle_accel_z,
@@ -306,9 +481,16 @@ struct AdaptiveTimeStepCriteriaStorage {
   }
   storage.gas_particle_index_by_cell.clear();
   storage.gas_particle_index_by_cell.reserve(state.cells.size());
+  storage.gas_cell_id_by_cell.assign(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
+  LocalGasCellCflMetadata cfl_metadata = buildLocalGasCellCflMetadata(state, config);
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
     storage.gas_particle_index_by_cell.push_back(core::gasParticleIndexForCellRow(state, cell_index));
   }
+  storage.patch_id_by_cell = std::move(cfl_metadata.patch_id_by_cell);
+  storage.patch_row_by_cell = std::move(cfl_metadata.patch_row_by_cell);
+  storage.cell_width_x_code = std::move(cfl_metadata.cell_width_x_code);
+  storage.cell_width_y_code = std::move(cfl_metadata.cell_width_y_code);
+  storage.cell_width_z_code = std::move(cfl_metadata.cell_width_z_code);
   return core::AdaptiveTimeStepCriteriaView{
       .particles = core::TimeStepParticleCriteriaView{
           .velocity_x_peculiar = state.particles.velocity_x_peculiar,
@@ -325,6 +507,12 @@ struct AdaptiveTimeStepCriteriaStorage {
       },
       .gas_cells = core::TimeStepGasCellCriteriaView{
           .gas_particle_index_by_cell = storage.gas_particle_index_by_cell,
+          .gas_cell_id_by_cell = storage.gas_cell_id_by_cell,
+          .patch_id_by_cell = storage.patch_id_by_cell,
+          .patch_row_by_cell = storage.patch_row_by_cell,
+          .cell_width_x_code = storage.cell_width_x_code,
+          .cell_width_y_code = storage.cell_width_y_code,
+          .cell_width_z_code = storage.cell_width_z_code,
           .cell_mass_code = state.cells.mass_code,
           .density_code = state.gas_cells.density_code,
           .temperature_code = state.gas_cells.temperature_code,
@@ -359,14 +547,15 @@ void updateAdaptiveTimeBinsFromView(
   if (view.gas_cells.density_code.size() != cell_count ||
       view.gas_cells.temperature_code.size() != cell_count ||
       view.gas_cells.sound_speed_code.size() != cell_count ||
-      view.gas_cells.gas_particle_index_by_cell.size() != cell_count) {
+      view.gas_cells.gas_particle_index_by_cell.size() != cell_count ||
+      view.gas_cells.gas_cell_id_by_cell.size() != cell_count ||
+      view.gas_cells.patch_id_by_cell.size() != cell_count ||
+      view.gas_cells.patch_row_by_cell.size() != cell_count ||
+      view.gas_cells.cell_width_x_code.size() != cell_count ||
+      view.gas_cells.cell_width_y_code.size() != cell_count ||
+      view.gas_cells.cell_width_z_code.size() != cell_count) {
     throw std::invalid_argument("gas-cell timestep criteria view has mismatched extents");
   }
-  const double box_volume = config.cosmology.box_size_x_mpc_comoving *
-      config.cosmology.box_size_y_mpc_comoving * config.cosmology.box_size_z_mpc_comoving;
-  const double cell_width = cell_count > 0
-      ? std::cbrt(box_volume / static_cast<double>(cell_count))
-      : std::cbrt(box_volume / std::max<double>(static_cast<double>(particle_count), 1.0));
   const auto species_softening = speciesSofteningByTag(config);
   const double global_softening = config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
   const core::UnitSystem runtime_units = core::makeUnitSystem(
@@ -436,10 +625,17 @@ void updateAdaptiveTimeBinsFromView(
       const double vx = view.particles.velocity_x_peculiar[gas_index];
       const double vy = view.particles.velocity_y_peculiar[gas_index];
       const double vz = view.particles.velocity_z_peculiar[gas_index];
-      const double flow_speed = std::sqrt(vx * vx + vy * vy + vz * vz);
       const double sound_speed = std::max(view.gas_cells.sound_speed_code[element_index], 0.0);
+      const core::DirectionalCflTimeStepInput hydro_cfl_input{
+          .cell_width_axis_code = {
+              view.gas_cells.cell_width_x_code[element_index],
+              view.gas_cells.cell_width_y_code[element_index],
+              view.gas_cells.cell_width_z_code[element_index]},
+          .velocity_axis_code = {vx, vy, vz},
+          .sound_speed_code = sound_speed,
+      };
       registry.registerCflHook([=](std::uint32_t) {
-        return core::computeCflTimeStep({.cell_width_code = cell_width, .flow_speed_code = flow_speed, .sound_speed_code = sound_speed}, 0.4);
+        return core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
       });
       const double ax = (element_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[element_index] : 0.0;
       const double ay = (element_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[element_index] : 0.0;
@@ -482,13 +678,6 @@ void updateAdaptiveTimeBinsFromView(
       continue;
     }
     if (element_index < particle_count) {
-      const double vx = view.particles.velocity_x_peculiar[element_index];
-      const double vy = view.particles.velocity_y_peculiar[element_index];
-      const double vz = view.particles.velocity_z_peculiar[element_index];
-      const double speed = std::sqrt(vx * vx + vy * vy + vz * vz);
-      registry.registerCflHook([=](std::uint32_t) {
-        return (speed > 0.0) ? (0.4 * cell_width / speed) : std::numeric_limits<double>::infinity();
-      });
       const double ax = (element_index < view.particles.accel_x_comoving.size()) ? view.particles.accel_x_comoving[element_index] : 0.0;
       const double ay = (element_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[element_index] : 0.0;
       const double az = (element_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[element_index] : 0.0;
@@ -501,12 +690,6 @@ void updateAdaptiveTimeBinsFromView(
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
       });
-      scheduler.submitCandidateTimeStep(
-          element_index,
-          registry.hooks().cfl_hook(element_index),
-          limits,
-          core::TimeStepCandidateSource::kHydroCfl,
-          "particle_speed_cfl");
       scheduler.submitCandidateTimeStep(
           element_index,
           registry.hooks().gravity_hook(element_index),
@@ -547,6 +730,7 @@ void updateAdaptiveTimeBins(
   AdaptiveTimeStepCriteriaStorage storage;
   const core::AdaptiveTimeStepCriteriaView view = buildAdaptiveTimeStepCriteriaView(
       state,
+      config,
       particle_accel_x,
       particle_accel_y,
       particle_accel_z,
@@ -3714,6 +3898,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
   [[nodiscard]] const hydro::HydroProfileEvent& lastHydroProfile() const noexcept { return m_last_hydro_profile; }
   [[nodiscard]] const SolverGhostRefreshReport& lastGhostRefreshReport() const noexcept { return m_last_ghost_refresh; }
+  [[nodiscard]] const core::HydroCflDiagnostics& lastHydroCflDiagnostics() const noexcept {
+    return m_last_hydro_cfl_diagnostics;
+  }
 
   void onStage(core::StepContext& context) override {
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
@@ -3730,10 +3917,11 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     core::requireParticleBoundGasCellContract(context.state, "hydro callback");
 
-    rebuildGeometryIfNeeded(context.state.cells.size(), context.integrator_state.dt_time_code);
+    rebuildGeometryIfNeeded(context.state, context.integrator_state.dt_time_code);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
+    verifyAcceptedHydroCfl(context, active_view.active_cells);
 
-    m_conserved.resize(context.state.cells.size());
+    m_conserved.resize(m_geometry.totalCellStorageCount());
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(context.state, static_cast<std::uint32_t>(cell_index));
       const double rho = std::max(context.state.gas_cells.density_code[cell_index], k_density_floor);
@@ -3751,6 +3939,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
       };
       m_conserved.storeCell(cell_index, hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
     }
+    hydro::fillHydroBoundaryGhostCells(m_conserved, m_geometry, k_gamma_adiabatic);
     const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
     const HydroGhostConservedSnapshot ghost_conserved_snapshot = snapshotHydroGhostConservedCells(
         context.state, m_conserved, world_rank);
@@ -3796,6 +3985,36 @@ class HydroStageCallback final : public core::IntegrationCallback {
         m_scratch,
         &m_primitive_cache,
         &m_last_hydro_profile);
+    if (context.profiler_session != nullptr) {
+      const hydro::HydroConservationReport& conservation = m_last_hydro_profile.conservation;
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "hydro.conservation",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "hydro.godunov",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "computed volume-integrated hydro conservation totals for the local update stage",
+          .payload = {{"cell_count", std::to_string(conservation.cell_count)},
+                      {"before_mass", std::to_string(conservation.before.mass)},
+                      {"after_mass", std::to_string(conservation.after.mass)},
+                      {"flux_delta_mass", std::to_string(conservation.flux_delta.mass)},
+                      {"source_delta_mass", std::to_string(conservation.source_delta.mass)},
+                      {"floor_delta_mass", std::to_string(conservation.floor_delta.mass)},
+                      {"residual_mass", std::to_string(conservation.residual.mass)},
+                      {"residual_momentum_x", std::to_string(conservation.residual.momentum_x)},
+                      {"residual_momentum_y", std::to_string(conservation.residual.momentum_y)},
+                      {"residual_momentum_z", std::to_string(conservation.residual.momentum_z)},
+                      {"residual_total_energy", std::to_string(conservation.residual.total_energy)},
+                      {"residual_internal_energy", std::to_string(conservation.residual.internal_energy)},
+                      {"flux_delta_total_energy", std::to_string(conservation.flux_delta.total_energy)},
+                      {"source_delta_total_energy", std::to_string(conservation.source_delta.total_energy)},
+                      {"floor_delta_total_energy", std::to_string(conservation.floor_delta.total_energy)},
+                      {"internal_energy_floor_count", std::to_string(conservation.internal_energy_floor_count)},
+                      {"mass_tolerance", "1e-10"},
+                      {"momentum_tolerance", "1e-10"},
+                      {"energy_tolerance", "1e-10"}}});
+    }
 
     const HydroConservativeGhostSyncReport ghost_sync_report = restoreHydroGhostConservedCells(
         m_conserved, ghost_conserved_snapshot, world_rank);
@@ -3877,72 +4096,217 @@ class HydroStageCallback final : public core::IntegrationCallback {
        .owner = core::StageSubsystem::kHydro},
   }};
 
-  void rebuildGeometryIfNeeded(std::size_t cell_count, double dt_time_code) {
-    if (m_cached_cell_count == cell_count && cell_count > 0) {
-      return;
+  [[nodiscard]] static hydro::HydroBoundaryKind hydroBoundaryKindFromModePolicy(
+      core::BoundaryCondition boundary_condition) {
+    switch (boundary_condition) {
+      case core::BoundaryCondition::kPeriodic:
+        return hydro::HydroBoundaryKind::kPeriodic;
+      case core::BoundaryCondition::kOpen:
+        return hydro::HydroBoundaryKind::kOpen;
+      case core::BoundaryCondition::kReflective:
+        return hydro::HydroBoundaryKind::kReflective;
     }
+    return hydro::HydroBoundaryKind::kOpen;
+  }
 
-    m_cached_cell_count = cell_count;
-    m_geometry = {};
-    const double box_volume_comoving =
-        m_config.cosmology.box_size_x_mpc_comoving *
-        m_config.cosmology.box_size_y_mpc_comoving *
-        m_config.cosmology.box_size_z_mpc_comoving;
-    m_geometry.cell_volume_comoving = std::max(
-        1.0,
-        box_volume_comoving / static_cast<double>(std::max<std::size_t>(cell_count, 1)));
-    m_geometry.faces.clear();
-    if (cell_count == 0) {
-      return;
+  struct HydroGeometryCacheKey {
+    std::size_t cell_count = 0;
+    std::size_t nx = 0;
+    std::size_t ny = 0;
+    std::size_t nz = 0;
+    double origin_x_comoving = 0.0;
+    double origin_y_comoving = 0.0;
+    double origin_z_comoving = 0.0;
+    double cell_width_x_comoving = 0.0;
+    double cell_width_y_comoving = 0.0;
+    double cell_width_z_comoving = 0.0;
+    double dt_time_code = 0.0;
+    core::BoundaryCondition hydro_boundary = core::BoundaryCondition::kPeriodic;
+    std::uint64_t patch_signature = 0;
+
+    [[nodiscard]] bool operator==(const HydroGeometryCacheKey& rhs) const noexcept {
+      return cell_count == rhs.cell_count &&
+          nx == rhs.nx &&
+          ny == rhs.ny &&
+          nz == rhs.nz &&
+          origin_x_comoving == rhs.origin_x_comoving &&
+          origin_y_comoving == rhs.origin_y_comoving &&
+          origin_z_comoving == rhs.origin_z_comoving &&
+          cell_width_x_comoving == rhs.cell_width_x_comoving &&
+          cell_width_y_comoving == rhs.cell_width_y_comoving &&
+          cell_width_z_comoving == rhs.cell_width_z_comoving &&
+          dt_time_code == rhs.dt_time_code &&
+          hydro_boundary == rhs.hydro_boundary &&
+          patch_signature == rhs.patch_signature;
     }
+  };
 
-    for (std::size_t cell_index = 0; cell_index + 1 < cell_count; ++cell_index) {
-      m_geometry.faces.push_back(hydro::HydroFace{
-          .owner_cell = cell_index,
-          .neighbor_cell = cell_index + 1,
-          .area_comoving = 1.0,
-          .normal_x = 1.0,
-          .normal_y = 0.0,
-          .normal_z = 0.0,
-      });
-    }
+  [[nodiscard]] static std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
+    std::vector<double> unique(values.begin(), values.end());
+    std::sort(unique.begin(), unique.end());
+    unique.erase(
+        std::unique(
+            unique.begin(),
+            unique.end(),
+            [](double lhs, double rhs) {
+              const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+              return std::abs(lhs - rhs) <= 1.0e-10 * scale;
+            }),
+        unique.end());
+    return unique;
+  }
 
-    if (m_mode_policy.hydro_boundary == core::BoundaryCondition::kPeriodic && cell_count > 1) {
-      m_geometry.faces.push_back(hydro::HydroFace{
-          .owner_cell = cell_count - 1,
-          .neighbor_cell = 0,
-          .area_comoving = 1.0,
-          .normal_x = 1.0,
-          .normal_y = 0.0,
-          .normal_z = 0.0,
-      });
-    } else {
-      m_geometry.faces.push_back(hydro::HydroFace{
-          .owner_cell = 0,
-          .neighbor_cell = hydro::k_invalid_cell_index,
-          .area_comoving = 1.0,
-          .normal_x = -1.0,
-          .normal_y = 0.0,
-          .normal_z = 0.0,
-      });
-      if (cell_count > 1) {
-        m_geometry.faces.push_back(hydro::HydroFace{
-            .owner_cell = cell_count - 1,
-            .neighbor_cell = hydro::k_invalid_cell_index,
-            .area_comoving = 1.0,
-            .normal_x = 1.0,
-            .normal_y = 0.0,
-            .normal_z = 0.0,
-        });
+  [[nodiscard]] static std::optional<std::size_t> coordinateIndex(
+      const std::vector<double>& coordinates,
+      double value) {
+    for (std::size_t index = 0; index < coordinates.size(); ++index) {
+      const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
+      if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
+        return index;
       }
     }
+    return std::nullopt;
+  }
 
-    const double dx = std::max(
-        1.0e-6,
-        m_config.cosmology.box_size_x_mpc_comoving / static_cast<double>(std::max<std::size_t>(cell_count, 1)));
+  [[nodiscard]] static double coordinateSpacing(
+      const std::vector<double>& coordinates,
+      double fallback_width_comoving) {
+    if (coordinates.size() <= 1U) {
+      return fallback_width_comoving;
+    }
+    const double span = coordinates.back() - coordinates.front();
+    return std::max(1.0e-12, span / static_cast<double>(coordinates.size() - 1U));
+  }
+
+  [[nodiscard]] std::optional<hydro::HydroCartesianPatchSpec> trySpecFromCellCenters(
+      const core::SimulationState& state) const {
+    const std::size_t cell_count = state.cells.size();
+    if (cell_count == 0) {
+      return std::nullopt;
+    }
+    const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
+    const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
+    const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
+    if (x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
+        x_coordinates.size() <= 1U ||
+        y_coordinates.size() <= 1U ||
+        z_coordinates.size() <= 1U) {
+      return std::nullopt;
+    }
+
+    const hydro::HydroCartesianPatchSpec spec{
+        .nx = x_coordinates.size(),
+        .ny = y_coordinates.size(),
+        .nz = z_coordinates.size(),
+        .origin_x_comoving = x_coordinates.front() -
+            0.5 * coordinateSpacing(x_coordinates, m_config.cosmology.box_size_x_mpc_comoving /
+                static_cast<double>(x_coordinates.size())),
+        .origin_y_comoving = y_coordinates.front() -
+            0.5 * coordinateSpacing(y_coordinates, m_config.cosmology.box_size_y_mpc_comoving /
+                static_cast<double>(y_coordinates.size())),
+        .origin_z_comoving = z_coordinates.front() -
+            0.5 * coordinateSpacing(z_coordinates, m_config.cosmology.box_size_z_mpc_comoving /
+                static_cast<double>(z_coordinates.size())),
+        .cell_width_x_comoving = coordinateSpacing(
+            x_coordinates,
+            m_config.cosmology.box_size_x_mpc_comoving / static_cast<double>(x_coordinates.size())),
+        .cell_width_y_comoving = coordinateSpacing(
+            y_coordinates,
+            m_config.cosmology.box_size_y_mpc_comoving / static_cast<double>(y_coordinates.size())),
+        .cell_width_z_comoving = coordinateSpacing(
+            z_coordinates,
+            m_config.cosmology.box_size_z_mpc_comoving / static_cast<double>(z_coordinates.size())),
+    };
+
+    hydro::HydroPatchGeometry row_order_geometry = hydro::makeCartesianPatchGeometry(spec);
+    for (std::size_t row = 0; row < cell_count; ++row) {
+      const std::optional<std::size_t> i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[row]);
+      const std::optional<std::size_t> j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[row]);
+      const std::optional<std::size_t> k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[row]);
+      if (!i.has_value() || !j.has_value() || !k.has_value() ||
+          row_order_geometry.linearCellIndex(*i, *j, *k) != row) {
+        return std::nullopt;
+      }
+    }
+    return spec;
+  }
+
+  [[nodiscard]] hydro::HydroCartesianPatchSpec fallbackCartesianSpec(std::size_t cell_count) const {
+    const std::array<std::size_t, 3> factors = hydro::chooseNearCubicCartesianFactors(cell_count);
+    return hydro::HydroCartesianPatchSpec{
+        .nx = factors[0],
+        .ny = factors[1],
+        .nz = factors[2],
+        .origin_x_comoving = 0.0,
+        .origin_y_comoving = 0.0,
+        .origin_z_comoving = 0.0,
+        .cell_width_x_comoving = m_config.cosmology.box_size_x_mpc_comoving /
+            static_cast<double>(std::max<std::size_t>(factors[0], 1U)),
+        .cell_width_y_comoving = m_config.cosmology.box_size_y_mpc_comoving /
+            static_cast<double>(std::max<std::size_t>(factors[1], 1U)),
+        .cell_width_z_comoving = m_config.cosmology.box_size_z_mpc_comoving /
+            static_cast<double>(std::max<std::size_t>(factors[2], 1U)),
+    };
+  }
+
+  [[nodiscard]] static std::uint64_t patchSignature(const core::PatchSoa& patches) {
+    std::uint64_t signature = 1469598103934665603ULL;
+    const auto mix = [&signature](std::uint64_t value) {
+      signature ^= value;
+      signature *= 1099511628211ULL;
+    };
+    mix(static_cast<std::uint64_t>(patches.size()));
+    for (std::size_t patch = 0; patch < patches.size(); ++patch) {
+      mix(patches.patch_id[patch]);
+      mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(patches.level[patch])));
+      mix(patches.first_cell[patch]);
+      mix(patches.cell_count[patch]);
+      mix(patches.owning_rank[patch]);
+    }
+    return signature;
+  }
+
+  void rebuildGeometryIfNeeded(const core::SimulationState& state, double dt_time_code) {
+    const std::size_t cell_count = state.cells.size();
+    if (cell_count == 0) {
+      m_cached_geometry_key.reset();
+      m_geometry = {};
+      return;
+    }
+
+    const hydro::HydroCartesianPatchSpec spec =
+        trySpecFromCellCenters(state).value_or(fallbackCartesianSpec(cell_count));
+    const HydroGeometryCacheKey key{
+        .cell_count = cell_count,
+        .nx = spec.nx,
+        .ny = spec.ny,
+        .nz = spec.nz,
+        .origin_x_comoving = spec.origin_x_comoving,
+        .origin_y_comoving = spec.origin_y_comoving,
+        .origin_z_comoving = spec.origin_z_comoving,
+        .cell_width_x_comoving = spec.cell_width_x_comoving,
+        .cell_width_y_comoving = spec.cell_width_y_comoving,
+        .cell_width_z_comoving = spec.cell_width_z_comoving,
+        .dt_time_code = dt_time_code,
+        .hydro_boundary = m_mode_policy.hydro_boundary,
+        .patch_signature = patchSignature(state.patches),
+    };
+    if (m_cached_geometry_key.has_value() && *m_cached_geometry_key == key) {
+      return;
+    }
+
+    m_cached_geometry_key = key;
+    m_geometry = hydro::makeCartesianPatchGeometry(spec);
+    hydro::appendCartesianBoundaryGhostFaces(
+        m_geometry,
+        hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary));
+    const double dx = std::max(1.0e-6, spec.cell_width_x_comoving);
+    const double dy = std::max(1.0e-6, spec.cell_width_y_comoving);
+    const double dz = std::max(1.0e-6, spec.cell_width_z_comoving);
     m_reconstruction = hydro::MusclHancockReconstruction(hydro::HydroReconstructionPolicy{
         .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
         .dt_over_dx_code = dt_time_code / dx,
+        .dt_over_cell_width_code = {dt_time_code / dx, dt_time_code / dy, dt_time_code / dz},
         .rho_floor = k_density_floor,
         .pressure_floor = k_pressure_floor,
         .enable_muscl_hancock_predictor = true,
@@ -3964,6 +4328,111 @@ class HydroStageCallback final : public core::IntegrationCallback {
     return hydro::HydroActiveSetView{.active_cells = m_active_cells, .active_faces = m_active_faces};
   }
 
+  [[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint32_t>> patchIdentityForCellRow(
+      const core::SimulationState& state,
+      std::uint32_t cell_index) const {
+    for (std::size_t patch = 0; patch < state.patches.size(); ++patch) {
+      const std::uint32_t first_cell = state.patches.first_cell[patch];
+      const std::uint32_t count = state.patches.cell_count[patch];
+      if (cell_index >= first_cell && cell_index < first_cell + count) {
+        return std::pair<std::uint64_t, std::uint32_t>{
+            state.patches.patch_id[patch],
+            cell_index - first_cell};
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] core::HydroCflDiagnostics hydroCflDiagnosticsForCell(
+      const core::SimulationState& state,
+      std::uint32_t cell_index,
+      double accepted_dt_time_code) const {
+    const std::uint32_t gas_particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+    const core::DirectionalCflTimeStepInput input{
+        .cell_width_axis_code = {
+            m_geometry.cell_width_x_comoving,
+            m_geometry.cell_width_y_comoving,
+            m_geometry.cell_width_z_comoving},
+        .velocity_axis_code = {
+            state.particles.velocity_x_peculiar[gas_particle_index],
+            state.particles.velocity_y_peculiar[gas_particle_index],
+            state.particles.velocity_z_peculiar[gas_particle_index]},
+        .sound_speed_code = std::max(state.gas_cells.sound_speed_code[cell_index], 0.0),
+    };
+    const auto patch_identity = patchIdentityForCellRow(state, cell_index);
+    return core::makeHydroCflDiagnostics(
+        cell_index,
+        input,
+        0.4,
+        accepted_dt_time_code,
+        cell_index < state.gas_cells.gas_cell_id.size() ? state.gas_cells.gas_cell_id[cell_index] : 0U,
+        patch_identity.has_value() ? std::optional<std::uint64_t>(patch_identity->first) : std::nullopt,
+        patch_identity.has_value() ? std::optional<std::uint32_t>(patch_identity->second) : std::nullopt);
+  }
+
+  void verifyAcceptedHydroCfl(
+      core::StepContext& context,
+      std::span<const std::size_t> active_cells) {
+    if (context.integrator_state.dt_time_code <= 0.0) {
+      throw std::invalid_argument("hydro CFL guard requires dt_time_code > 0");
+    }
+    const std::size_t cell_count = context.state.cells.size();
+    if (cell_count == 0) {
+      return;
+    }
+
+    std::vector<std::size_t> all_cells;
+    std::span<const std::size_t> cells_to_check = active_cells;
+    if (cells_to_check.empty()) {
+      all_cells.resize(cell_count);
+      std::iota(all_cells.begin(), all_cells.end(), 0U);
+      cells_to_check = all_cells;
+    }
+
+    core::HydroCflDiagnostics worst;
+    bool have_worst = false;
+    for (const std::size_t cell : cells_to_check) {
+      if (cell >= cell_count) {
+        throw std::out_of_range("hydro CFL guard active cell index out of range");
+      }
+      const core::HydroCflDiagnostics diagnostics = hydroCflDiagnosticsForCell(
+          context.state,
+          static_cast<std::uint32_t>(cell),
+          context.integrator_state.dt_time_code);
+      if (!have_worst || diagnostics.safety_factor < worst.safety_factor) {
+        worst = diagnostics;
+        have_worst = true;
+      }
+    }
+    if (!have_worst) {
+      return;
+    }
+    m_last_hydro_cfl_diagnostics = worst;
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "hydro.cfl_guard",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "hydro.godunov",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "checked accepted hydro timestep against local directional CFL bound",
+          .payload = {{"local_row", std::to_string(worst.local_row)},
+                      {"gas_cell_id", worst.has_gas_cell_id ? std::to_string(worst.gas_cell_id) : "n/a"},
+                      {"patch_id", worst.has_patch_id ? std::to_string(worst.patch_id) : "n/a"},
+                      {"patch_row", worst.has_patch_row ? std::to_string(worst.patch_row) : "n/a"},
+                      {"proposed_dt_time_code", std::to_string(worst.proposed_dt_time_code)},
+                      {"accepted_dt_time_code", std::to_string(worst.accepted_dt_time_code)},
+                      {"cfl_number", std::to_string(worst.cfl_number)},
+                      {"safety_factor", std::to_string(worst.safety_factor)},
+                      {"velocity_x_code", std::to_string(worst.velocity_axis_code[0])},
+                      {"velocity_y_code", std::to_string(worst.velocity_axis_code[1])},
+                      {"velocity_z_code", std::to_string(worst.velocity_axis_code[2])},
+                      {"sound_speed_code", std::to_string(worst.sound_speed_code)}}});
+    }
+    core::assertHydroCflStable(worst);
+  }
+
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   const GravityStageCallback& m_gravity_callback;
@@ -3975,11 +4444,12 @@ class HydroStageCallback final : public core::IntegrationCallback {
   hydro::HydroPrimitiveCacheSoa m_primitive_cache;
   hydro::HydroPatchGeometry m_geometry;
   hydro::HydroProfileEvent m_last_hydro_profile{};
+  core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   SolverGhostRefreshReport m_last_ghost_refresh{};
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::vector<std::size_t> m_active_cells;
   std::vector<std::size_t> m_active_faces;
-  std::size_t m_cached_cell_count = 0;
+  std::optional<HydroGeometryCacheKey> m_cached_geometry_key;
 };
 
 bool maybeWriteOutputs(

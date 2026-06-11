@@ -43,7 +43,9 @@ Implemented now:
   - opening-angle convergence check;
   - two-body orbit energy-drift check;
   - static-halo radial-force profile check vs softened direct-sum reference.
-- Hydro: Sod-like conservation check, smooth-wave self-convergence.
+- Hydro: Sod-like conservation check, smooth-wave self-convergence, and CI-scale
+  classical guards for Sedov, Noh, Gresho vortex, Kelvin-Helmholtz, and an
+  Evrard-style hydro plus analytic-gravity collapse toy.
 - AMR: coarse-fine reflux synchronization regression.
 - Galaxy modules: cooling monotonicity check, star-formation mass-budget regression.
 
@@ -58,8 +60,40 @@ Phase 2 distributed TreePM gravity gate (implemented):
 - Distributed-workflow honesty is checked separately in `test_reference_workflow_distributed_treepm_mpi` by reducing local owned counts and particle-ID checksums; identical per-rank full-state digests are not treated as evidence of a real distributed-memory workflow.
 
 Planned as modules mature:
-- Sedov blast convergence ladder.
-- Evrard collapse regression and convergence set.
+- Publication-grade Sedov blast convergence ladder with reference profiles.
+- Self-gravitating Evrard collapse regression and convergence set once the
+  hydro-gravity workflow owns a clean, restartable coupling path for the case.
+
+## Classical hydro CI guards
+
+Executable: `test_validation_hydro_classics`.
+
+CTest entry: `validation_hydro_classics`.
+
+The classical hydro executable is a runtime-credibility guard, not a
+publication-grade convergence campaign. It uses small Cartesian patches so the
+default CTest validation suite can catch catastrophic solver, ownership,
+conservation, and positivity failures before AMR work builds on the hydro
+foundation.
+
+Cases covered:
+
+- Sedov blast: compact central thermal-energy deposit; checks finite positive
+  state, closed-patch total-energy preservation, outward shell motion, central
+  pressure excess, and coarse radial symmetry.
+- Noh converging inflow: radial cold inflow; checks finite positive state,
+  central compression, and coarse radial symmetry.
+- Gresho vortex: two-dimensional vortex pressure/velocity balance; checks
+  finite positive state, angular-momentum retention, and bounded low-resolution
+  vortex-profile diffusion.
+- Kelvin-Helmholtz: density-contrast shear layer with seeded transverse
+  perturbation; checks finite positive state, perturbation survival, and
+  interface density contrast.
+- Evrard-style collapse toy: hydro plus a fixed analytic inward gravity source;
+  checks finite positive state, bounded source-coupled energy, inward velocity
+  trend, and central concentration. This is explicitly a CI guard for hydro
+  source coupling and collapse-like response, not a self-gravitating Evrard
+  reference solution.
 
 ## Force-error map artifact (PMGRID/ASMTH/RCUT)
 

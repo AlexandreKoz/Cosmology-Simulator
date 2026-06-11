@@ -276,6 +276,8 @@ if(COSMOSIM_ENABLE_CUDA)
 endif()
 add_library(cosmosim_hydro STATIC
   src/hydro/hydro_module.cpp
+  src/hydro/hydro_boundary_conditions.cpp
+  src/hydro/hydro_cartesian_patch.cpp
   src/hydro/hydro_core_solver.cpp
   src/hydro/hydro_reconstruction.cpp
   src/hydro/hydro_riemann.cpp)
@@ -516,6 +518,10 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_unit_hydro_reconstruction PRIVATE cosmosim_all)
   add_test(NAME unit_hydro_reconstruction COMMAND test_unit_hydro_reconstruction)
 
+  add_executable(test_unit_hydro_boundary_conditions tests/unit/test_hydro_boundary_conditions.cpp)
+  target_link_libraries(test_unit_hydro_boundary_conditions PRIVATE cosmosim_hydro)
+  add_test(NAME unit_hydro_boundary_conditions COMMAND test_unit_hydro_boundary_conditions)
+
   add_executable(test_unit_hydro_riemann tests/unit/test_hydro_riemann.cpp)
   target_link_libraries(test_unit_hydro_riemann PRIVATE cosmosim_all)
   add_test(NAME unit_hydro_riemann COMMAND test_unit_hydro_riemann)
@@ -661,6 +667,14 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_hydro_sod_like tests/integration/test_hydro_sod_like.cpp)
   target_link_libraries(test_integration_hydro_sod_like PRIVATE cosmosim_hydro)
   add_test(NAME integration_hydro_sod_like COMMAND test_integration_hydro_sod_like)
+
+  add_executable(test_integration_hydro_conservation_periodic tests/integration/test_hydro_conservation_periodic.cpp)
+  target_link_libraries(test_integration_hydro_conservation_periodic PRIVATE cosmosim_hydro)
+  add_test(NAME integration_hydro_conservation_periodic COMMAND test_integration_hydro_conservation_periodic)
+
+  add_executable(test_integration_hydro_axis_symmetry tests/integration/test_hydro_axis_symmetry.cpp)
+  target_link_libraries(test_integration_hydro_axis_symmetry PRIVATE cosmosim_hydro)
+  add_test(NAME integration_hydro_axis_symmetry COMMAND test_integration_hydro_axis_symmetry)
 
 
 
@@ -881,6 +895,14 @@ if(COSMOSIM_ENABLE_TESTS)
   target_compile_definitions(test_validation_convergence PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME validation_convergence COMMAND test_validation_convergence)
   set_tests_properties(validation_convergence PROPERTIES LABELS "validation;convergence")
+
+  add_executable(
+    test_validation_hydro_classics
+    tests/validation/test_validation_hydro_classics.cpp)
+  target_link_libraries(test_validation_hydro_classics PRIVATE cosmosim_hydro)
+  target_include_directories(test_validation_hydro_classics PRIVATE tests tests/validation)
+  add_test(NAME validation_hydro_classics COMMAND test_validation_hydro_classics)
+  set_tests_properties(validation_hydro_classics PROPERTIES LABELS "validation;integration;hydro")
 
   add_executable(
     test_validation_regression

@@ -1,29 +1,79 @@
 #include <cassert>
 #include <cmath>
 #include <filesystem>
+#include <string>
 #include <utility>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/hydro/hydro_cartesian_patch.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "restart_equivalence_harness.hpp"
 #include "restart_equivalence_scenarios.hpp"
 
 namespace {
 
-cosmosim::hydro::HydroPatchGeometry makePeriodic1dGeometry(std::size_t cell_count) {
-  cosmosim::hydro::HydroPatchGeometry geometry;
-  geometry.cell_volume_comoving = 1.0;
-  geometry.faces.reserve(cell_count);
-  for (std::size_t i = 0; i < cell_count; ++i) {
-    geometry.faces.push_back(cosmosim::hydro::HydroFace{
-        .owner_cell = i,
-        .neighbor_cell = (i + 1U) % cell_count,
-        .area_comoving = 1.0,
-        .normal_x = 1.0,
-        .normal_y = 0.0,
-        .normal_z = 0.0});
+constexpr std::size_t k_nx = 4;
+constexpr std::size_t k_ny = 3;
+constexpr std::size_t k_nz = 2;
+constexpr double k_dx_code = 0.25;
+constexpr double k_dy_code = 0.5;
+constexpr double k_dz_code = 0.75;
+
+cosmosim::hydro::HydroCartesianPatchSpec makeRestartHydroPatchSpec() {
+  return cosmosim::hydro::HydroCartesianPatchSpec{
+      .nx = k_nx,
+      .ny = k_ny,
+      .nz = k_nz,
+      .origin_x_comoving = 0.125,
+      .origin_y_comoving = 0.25,
+      .origin_z_comoving = 0.375,
+      .cell_width_x_comoving = k_dx_code,
+      .cell_width_y_comoving = k_dy_code,
+      .cell_width_z_comoving = k_dz_code};
+}
+
+cosmosim::core::SimulationState makeH1CartesianHydroState(const std::string& run_name) {
+  const auto spec = makeRestartHydroPatchSpec();
+  const auto geometry = cosmosim::hydro::makeCartesianPatchGeometry(spec);
+  auto state = cosmosim::tests::makeStage8HydroToyState(geometry.cellCount(), run_name);
+  state.resizePatches(1);
+  state.patches.patch_id[0] = 4242;
+  state.patches.level[0] = 1;
+  state.patches.first_cell[0] = 0;
+  state.patches.cell_count[0] = static_cast<std::uint32_t>(geometry.cellCount());
+  state.patches.owning_rank[0] = 0;
+
+  for (std::size_t cidx = 0; cidx < geometry.cellCount(); ++cidx) {
+    const auto ijk = geometry.cellIjk(cidx);
+    const double x = spec.origin_x_comoving + (static_cast<double>(ijk[0]) + 0.5) * spec.cell_width_x_comoving;
+    const double y = spec.origin_y_comoving + (static_cast<double>(ijk[1]) + 0.5) * spec.cell_width_y_comoving;
+    const double z = spec.origin_z_comoving + (static_cast<double>(ijk[2]) + 0.5) * spec.cell_width_z_comoving;
+    const double pattern =
+        0.03 * static_cast<double>(ijk[0]) - 0.02 * static_cast<double>(ijk[1]) +
+        0.015 * static_cast<double>(ijk[2]);
+    state.cells.center_x_comoving[cidx] = x;
+    state.cells.center_y_comoving[cidx] = y;
+    state.cells.center_z_comoving[cidx] = z;
+    state.cells.patch_index[cidx] = 0;
+    state.particles.position_x_comoving[cidx] = x;
+    state.particles.position_y_comoving[cidx] = y;
+    state.particles.position_z_comoving[cidx] = z;
+    state.particles.velocity_x_peculiar[cidx] = 0.02 + 0.004 * static_cast<double>(ijk[1]);
+    state.particles.velocity_y_peculiar[cidx] = -0.015 + 0.003 * static_cast<double>(ijk[2]);
+    state.particles.velocity_z_peculiar[cidx] = 0.01 - 0.002 * static_cast<double>(ijk[0]);
+    state.gas_cells.density_code[cidx] = 1.0 + pattern;
+    state.gas_cells.pressure_code[cidx] = 0.8 + 0.5 * pattern;
+    state.gas_cells.temperature_code[cidx] =
+        state.gas_cells.pressure_code[cidx] / state.gas_cells.density_code[cidx];
+    state.gas_cells.internal_energy_code[cidx] =
+        state.gas_cells.pressure_code[cidx] / ((1.4 - 1.0) * state.gas_cells.density_code[cidx]);
+    state.gas_cells.sound_speed_code[cidx] =
+        std::sqrt(1.4 * state.gas_cells.pressure_code[cidx] / state.gas_cells.density_code[cidx]);
+    state.cells.mass_code[cidx] = state.gas_cells.density_code[cidx] * geometry.cell_volume_comoving;
+    state.particles.mass_code[cidx] = state.cells.mass_code[cidx];
   }
-  return geometry;
+  assert(state.validateOwnershipInvariants());
+  return state;
 }
 
 void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& context) {
@@ -39,7 +89,8 @@ void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& co
     conserved.storeCell(cidx, cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(primitive, gamma));
   }
 
-  const auto geometry = makePeriodic1dGeometry(context.state.cells.size());
+  const auto geometry = cosmosim::hydro::makeCartesianPatchGeometry(makeRestartHydroPatchSpec());
+  assert(geometry.cellCount() == context.state.cells.size());
   const cosmosim::hydro::HydroUpdateContext update{
       .dt_code = 1.0e-3,
       .scale_factor = context.integrator_state.current_scale_factor,
@@ -49,7 +100,11 @@ void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& co
   cosmosim::hydro::HydroCoreSolver solver(gamma);
   cosmosim::hydro::MusclHancockReconstruction reconstruction(cosmosim::hydro::HydroReconstructionPolicy{
       .limiter = cosmosim::hydro::HydroSlopeLimiter::kMonotonizedCentral,
-      .dt_over_dx_code = update.dt_code,
+      .dt_over_dx_code = update.dt_code / geometry.cell_width_x_comoving,
+      .dt_over_cell_width_code = {
+          update.dt_code / geometry.cell_width_x_comoving,
+          update.dt_code / geometry.cell_width_y_comoving,
+          update.dt_code / geometry.cell_width_z_comoving},
       .rho_floor = 1.0e-10,
       .pressure_floor = 1.0e-10,
       .enable_muscl_hancock_predictor = true});
@@ -79,18 +134,7 @@ void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& co
 int main() {
 #if COSMOSIM_ENABLE_HDF5
   const auto restart_path = cosmosim::tests::stage8RestartPath("restart_equivalence_hydro_toy");
-  auto state = cosmosim::tests::makeStage8HydroToyState(24, "restart_equivalence_hydro_toy");
-  for (std::size_t cidx = 0; cidx < state.cells.size(); ++cidx) {
-    const bool left = cidx < state.cells.size() / 2U;
-    state.gas_cells.density_code[cidx] = left ? 1.0 : 0.125;
-    state.gas_cells.pressure_code[cidx] = left ? 1.0 : 0.1;
-    state.gas_cells.temperature_code[cidx] = state.gas_cells.pressure_code[cidx] / state.gas_cells.density_code[cidx];
-    state.gas_cells.internal_energy_code[cidx] = state.gas_cells.pressure_code[cidx] /
-        ((1.4 - 1.0) * state.gas_cells.density_code[cidx]);
-    state.gas_cells.sound_speed_code[cidx] = std::sqrt(1.4 * state.gas_cells.pressure_code[cidx] / state.gas_cells.density_code[cidx]);
-    state.cells.mass_code[cidx] = state.gas_cells.density_code[cidx];
-    state.particles.mass_code[cidx] = state.cells.mass_code[cidx];
-  }
+  auto state = makeH1CartesianHydroState("restart_equivalence_hydro_toy");
   auto scheduler = cosmosim::tests::makeStage8Scheduler(static_cast<std::uint32_t>(state.particles.size()), 2);
   auto integrator_state = cosmosim::tests::makeStage8IntegratorState(2, 2);
   auto output_state = cosmosim::tests::makeStage8OutputCadenceState(false);
@@ -101,8 +145,9 @@ int main() {
   scenario.tolerances.velocity_abs = 1.0e-12;
   scenario.tolerances.scalar_abs = 1.0e-12;
   const auto result = cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
-  assert(result.direct_state.gas_cells.density_code[11U] > 0.2);
-  assert(result.direct_state.gas_cells.density_code[12U] < 0.9);
+  assert(result.direct_state.gas_cells.density_code[5U] != result.direct_state.gas_cells.density_code[6U]);
+  assert(result.direct_state.patches.patch_id[0] == 4242);
+  assert(result.direct_state.patches.cell_count[0] == k_nx * k_ny * k_nz);
   std::filesystem::remove(restart_path);
 #endif
   return 0;

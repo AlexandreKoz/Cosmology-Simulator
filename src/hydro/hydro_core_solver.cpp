@@ -59,12 +59,31 @@ void validateAdvanceInputs(
     throw std::invalid_argument("Hydro source_context.update must match update passed to advancePatch");
   }
 
+  const std::size_t real_cell_count = geometry.cellCount() == 0 ? conserved.size() : geometry.cellCount();
   for (const HydroFace& face : geometry.faces) {
     if (face.owner_cell >= conserved.size()) {
       throw std::invalid_argument("Hydro face owner index is out of range");
     }
+    if (face.owner_cell >= real_cell_count) {
+      throw std::invalid_argument("Hydro face owner must be an authoritative real cell");
+    }
     if (face.neighbor_cell != k_invalid_cell_index && face.neighbor_cell >= conserved.size()) {
       throw std::invalid_argument("Hydro face neighbor index is out of range");
+    }
+    if (face.owner_minus_cell != k_invalid_cell_index && face.owner_minus_cell >= conserved.size()) {
+      throw std::invalid_argument("Hydro face owner-minus stencil index is out of range");
+    }
+    if (face.neighbor_plus_cell != k_invalid_cell_index && face.neighbor_plus_cell >= conserved.size()) {
+      throw std::invalid_argument("Hydro face neighbor-plus stencil index is out of range");
+    }
+    if (face.ghost_cell_slot != k_invalid_ghost_cell_slot) {
+      if (face.ghost_cell_slot >= geometry.ghost_cells.size()) {
+        throw std::invalid_argument("Hydro face references an invalid ghost cell slot");
+      }
+      const HydroGhostCell& ghost = geometry.ghost_cells[face.ghost_cell_slot];
+      if (face.neighbor_cell != ghost.ghost_cell || face.owner_cell != ghost.owner_real_cell) {
+        throw std::invalid_argument("Hydro face ghost metadata does not match face endpoints");
+      }
     }
     if (face.area_comoving <= 0.0) {
       throw std::invalid_argument("Hydro face area_comoving must be positive");
@@ -80,13 +99,14 @@ void validateActiveSet(const HydroActiveSetView& active_set, const HydroConserve
   if (active_set.active_cells.empty()) {
     throw std::invalid_argument("Hydro active set requires at least one active cell");
   }
-  if (active_set.active_faces.empty()) {
-    throw std::invalid_argument("Hydro active set requires at least one active face");
-  }
 
+  const std::size_t real_cell_count = geometry.cellCount() == 0 ? conserved.size() : geometry.cellCount();
   for (std::size_t cell_index : active_set.active_cells) {
     if (cell_index >= conserved.size()) {
       throw std::invalid_argument("Hydro active cell index is out of range");
+    }
+    if (cell_index >= real_cell_count) {
+      throw std::invalid_argument("Hydro active cells must be authoritative real cells");
     }
   }
   for (std::size_t face_index : active_set.active_faces) {
@@ -99,6 +119,7 @@ void validateActiveSet(const HydroActiveSetView& active_set, const HydroConserve
 void fillPrimitiveCache(
     const HydroConservedStateSoa& conserved,
     const HydroActiveSetView& active_set,
+    const HydroPatchGeometry& geometry,
     double adiabatic_index,
     HydroPrimitiveCacheSoa& primitive_cache) {
   if (primitive_cache.size() != conserved.size()) {
@@ -110,6 +131,58 @@ void fillPrimitiveCache(
         cell_index,
         HydroCoreSolver::primitiveFromConserved(conserved.loadCell(cell_index), adiabatic_index));
   }
+  for (std::size_t face_index : active_set.active_faces) {
+    const HydroFace& face = geometry.faces[face_index];
+    primitive_cache.storeCell(
+        face.owner_cell,
+        HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.owner_cell), adiabatic_index));
+    if (face.neighbor_cell != k_invalid_cell_index) {
+      primitive_cache.storeCell(
+          face.neighbor_cell,
+          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.neighbor_cell), adiabatic_index));
+    }
+    if (face.owner_minus_cell != k_invalid_cell_index) {
+      primitive_cache.storeCell(
+          face.owner_minus_cell,
+          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.owner_minus_cell), adiabatic_index));
+    }
+    if (face.neighbor_plus_cell != k_invalid_cell_index) {
+      primitive_cache.storeCell(
+          face.neighbor_plus_cell,
+          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.neighbor_plus_cell), adiabatic_index));
+    }
+  }
+}
+
+[[nodiscard]] HydroConservationTotals totalsFromDelta(
+    const HydroConservedState& delta,
+    const HydroConservedState& reference_state,
+    double cell_volume_comoving) {
+  const double rho = std::max(reference_state.mass_density_comoving, k_small);
+  const double old_kinetic_density = 0.5 *
+      (reference_state.momentum_density_x_comoving * reference_state.momentum_density_x_comoving +
+       reference_state.momentum_density_y_comoving * reference_state.momentum_density_y_comoving +
+       reference_state.momentum_density_z_comoving * reference_state.momentum_density_z_comoving) /
+      rho;
+  const HydroConservedState updated = reference_state + delta;
+  const double updated_rho = std::max(updated.mass_density_comoving, k_small);
+  const double new_kinetic_density = 0.5 *
+      (updated.momentum_density_x_comoving * updated.momentum_density_x_comoving +
+       updated.momentum_density_y_comoving * updated.momentum_density_y_comoving +
+       updated.momentum_density_z_comoving * updated.momentum_density_z_comoving) /
+      updated_rho;
+
+  HydroConservationTotals totals;
+  totals.mass = delta.mass_density_comoving * cell_volume_comoving;
+  totals.momentum_x = delta.momentum_density_x_comoving * cell_volume_comoving;
+  totals.momentum_y = delta.momentum_density_y_comoving * cell_volume_comoving;
+  totals.momentum_z = delta.momentum_density_z_comoving * cell_volume_comoving;
+  totals.total_energy = delta.total_energy_density_comoving * cell_volume_comoving;
+  totals.internal_energy =
+      ((updated.total_energy_density_comoving - new_kinetic_density) -
+       (reference_state.total_energy_density_comoving - old_kinetic_density)) *
+      cell_volume_comoving;
+  return totals;
 }
 
 }  // namespace
@@ -149,6 +222,36 @@ HydroConservedState operator*(double scalar, HydroConservedState state) {
   state.momentum_density_z_comoving *= scalar;
   state.total_energy_density_comoving *= scalar;
   return state;
+}
+
+HydroConservationTotals& HydroConservationTotals::operator+=(const HydroConservationTotals& rhs) {
+  mass += rhs.mass;
+  momentum_x += rhs.momentum_x;
+  momentum_y += rhs.momentum_y;
+  momentum_z += rhs.momentum_z;
+  total_energy += rhs.total_energy;
+  internal_energy += rhs.internal_energy;
+  return *this;
+}
+
+HydroConservationTotals& HydroConservationTotals::operator-=(const HydroConservationTotals& rhs) {
+  mass -= rhs.mass;
+  momentum_x -= rhs.momentum_x;
+  momentum_y -= rhs.momentum_y;
+  momentum_z -= rhs.momentum_z;
+  total_energy -= rhs.total_energy;
+  internal_energy -= rhs.internal_energy;
+  return *this;
+}
+
+HydroConservationTotals operator+(HydroConservationTotals lhs, const HydroConservationTotals& rhs) {
+  lhs += rhs;
+  return lhs;
+}
+
+HydroConservationTotals operator-(HydroConservationTotals lhs, const HydroConservationTotals& rhs) {
+  lhs -= rhs;
+  return lhs;
 }
 
 HydroConservedStateSoa::HydroConservedStateSoa(std::size_t cell_count)
@@ -326,6 +429,41 @@ HydroPrimitiveState HydroCoreSolver::primitiveFromConserved(
   return primitive;
 }
 
+HydroConservationTotals HydroCoreSolver::conservationTotals(
+    const HydroConservedStateSoa& conserved,
+    const HydroPatchGeometry& geometry,
+    std::span<const std::size_t> cells) {
+  if (geometry.cell_volume_comoving <= 0.0) {
+    throw std::invalid_argument("Hydro conservation totals require positive cell_volume_comoving");
+  }
+
+  HydroConservationTotals totals;
+  const std::size_t real_cell_count = geometry.cellCount() == 0 ? conserved.size() : geometry.cellCount();
+  for (std::size_t cell_index : cells) {
+    if (cell_index >= conserved.size()) {
+      throw std::out_of_range("Hydro conservation totals cell index is out of range");
+    }
+    if (cell_index >= real_cell_count) {
+      throw std::invalid_argument("Hydro conservation totals require authoritative real cells");
+    }
+    const HydroConservedState state = conserved.loadCell(cell_index);
+    const double rho = std::max(state.mass_density_comoving, k_small);
+    const double kinetic_density = 0.5 *
+        (state.momentum_density_x_comoving * state.momentum_density_x_comoving +
+         state.momentum_density_y_comoving * state.momentum_density_y_comoving +
+         state.momentum_density_z_comoving * state.momentum_density_z_comoving) /
+        rho;
+    totals.mass += state.mass_density_comoving * geometry.cell_volume_comoving;
+    totals.momentum_x += state.momentum_density_x_comoving * geometry.cell_volume_comoving;
+    totals.momentum_y += state.momentum_density_y_comoving * geometry.cell_volume_comoving;
+    totals.momentum_z += state.momentum_density_z_comoving * geometry.cell_volume_comoving;
+    totals.total_energy += state.total_energy_density_comoving * geometry.cell_volume_comoving;
+    totals.internal_energy +=
+        (state.total_energy_density_comoving - kinetic_density) * geometry.cell_volume_comoving;
+  }
+  return totals;
+}
+
 void HydroCoreSolver::advancePatch(
     HydroConservedStateSoa& conserved,
     const HydroPatchGeometry& geometry,
@@ -428,6 +566,9 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   validateAdvanceInputs(conserved, geometry, update, source_context, m_adiabatic_index);
   validateActiveSet(active_set, conserved, geometry);
   scratch.resize(conserved.size(), active_set.active_faces.size());
+  HydroConservationReport conservation_report;
+  conservation_report.before = conservationTotals(conserved, geometry, active_set.active_cells);
+  conservation_report.cell_count = static_cast<std::uint64_t>(active_set.active_cells.size());
   scratch.touched_cells.clear();
   scratch.touched_cells.reserve(active_set.active_faces.size() * 2U + active_set.active_cells.size());
   for (std::size_t cell_index : active_set.active_cells) {
@@ -444,7 +585,7 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     }
   }
   if (primitive_cache != nullptr) {
-    fillPrimitiveCache(conserved, active_set, m_adiabatic_index, *primitive_cache);
+    fillPrimitiveCache(conserved, active_set, geometry, m_adiabatic_index, *primitive_cache);
   }
 
   const auto total_start = std::chrono::steady_clock::now();
@@ -508,9 +649,38 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
       source_total += source->sourceForCell(cell_index, old_cell, primitive, source_context);
     }
 
-    HydroConservedState updated = old_cell + scratch.cell_delta[cell_index] + update.dt_code * source_total;
+    const HydroConservedState flux_delta = scratch.cell_delta[cell_index];
+    const HydroConservedState source_delta = update.dt_code * source_total;
+    conservation_report.flux_delta += totalsFromDelta(
+        flux_delta,
+        old_cell,
+        geometry.cell_volume_comoving);
+    conservation_report.source_delta += totalsFromDelta(
+        source_delta,
+        old_cell + flux_delta,
+        geometry.cell_volume_comoving);
+
+    HydroConservedState updated = old_cell + flux_delta + source_delta;
+    const HydroConservedState before_floor = updated;
     updated.mass_density_comoving = std::max(updated.mass_density_comoving, k_small);
-    updated.total_energy_density_comoving = std::max(updated.total_energy_density_comoving, k_small);
+    const double kinetic_density = 0.5 *
+        (updated.momentum_density_x_comoving * updated.momentum_density_x_comoving +
+         updated.momentum_density_y_comoving * updated.momentum_density_y_comoving +
+         updated.momentum_density_z_comoving * updated.momentum_density_z_comoving) /
+        std::max(updated.mass_density_comoving, k_small);
+    const double minimum_total_energy_density = kinetic_density + k_small;
+    const bool applied_internal_energy_floor = updated.total_energy_density_comoving < minimum_total_energy_density;
+    if (applied_internal_energy_floor) {
+      updated.total_energy_density_comoving = minimum_total_energy_density;
+      ++conservation_report.internal_energy_floor_count;
+    }
+    if (updated.mass_density_comoving != before_floor.mass_density_comoving ||
+        updated.total_energy_density_comoving != before_floor.total_energy_density_comoving) {
+      conservation_report.floor_delta += totalsFromDelta(
+          updated - before_floor,
+          before_floor,
+          geometry.cell_volume_comoving);
+    }
     conserved.storeCell(cell_index, updated);
     if (primitive_cache != nullptr) {
       primitive_cache->storeCell(cell_index, primitiveFromConserved(updated, m_adiabatic_index));
@@ -518,6 +688,9 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   }
   const auto source_stop = std::chrono::steady_clock::now();
   const auto total_stop = std::chrono::steady_clock::now();
+  conservation_report.after = conservationTotals(conserved, geometry, active_set.active_cells);
+  conservation_report.residual = conservation_report.after - conservation_report.before -
+      conservation_report.flux_delta - conservation_report.source_delta - conservation_report.floor_delta;
 
   if (profile != nullptr) {
     profile->face_count += static_cast<std::uint64_t>(active_set.active_faces.size());
@@ -536,6 +709,7 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     profile->total_ms += std::chrono::duration<double, std::milli>(total_stop - total_start).count();
     profile->bytes_moved += static_cast<std::uint64_t>(
         (6U * active_set.active_cells.size() + 10U * active_set.active_faces.size()) * sizeof(double));
+    profile->conservation = conservation_report;
   }
 }
 

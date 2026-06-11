@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -498,6 +499,32 @@ struct CflTimeStepInput {
   double sound_speed_code = 0.0;
 };
 
+struct DirectionalCflTimeStepInput {
+  // Ordered x, y, z in code/comoving units. The stable CFL bound is the minimum
+  // directional crossing time, not the norm of the velocity vector.
+  std::array<double, 3> cell_width_axis_code{0.0, 0.0, 0.0};
+  std::array<double, 3> velocity_axis_code{0.0, 0.0, 0.0};
+  double sound_speed_code = 0.0;
+};
+
+struct HydroCflDiagnostics {
+  std::uint32_t local_row = 0;
+  std::uint64_t gas_cell_id = 0;
+  bool has_gas_cell_id = false;
+  std::uint64_t patch_id = 0;
+  bool has_patch_id = false;
+  std::uint32_t patch_row = 0;
+  bool has_patch_row = false;
+  double proposed_dt_time_code = std::numeric_limits<double>::infinity();
+  double accepted_dt_time_code = 0.0;
+  double cfl_number = 0.0;
+  double safety_factor = std::numeric_limits<double>::infinity();
+  std::array<double, 3> cell_width_axis_code{0.0, 0.0, 0.0};
+  std::array<double, 3> velocity_axis_code{0.0, 0.0, 0.0};
+  double sound_speed_code = 0.0;
+  std::uint8_t limiting_axis = 0;
+};
+
 struct GravityTimeStepInput {
   double softening_length_code = 0.0;
   double acceleration_magnitude_code = 0.0;
@@ -522,6 +549,12 @@ struct TimeStepParticleCriteriaView {
 
 struct TimeStepGasCellCriteriaView {
   std::span<const std::uint32_t> gas_particle_index_by_cell;
+  std::span<const std::uint64_t> gas_cell_id_by_cell;
+  std::span<const std::uint64_t> patch_id_by_cell;
+  std::span<const std::uint32_t> patch_row_by_cell;
+  std::span<const double> cell_width_x_code;
+  std::span<const double> cell_width_y_code;
+  std::span<const double> cell_width_z_code;
   std::span<const double> cell_mass_code;
   std::span<const double> density_code;
   std::span<const double> temperature_code;
@@ -754,6 +787,18 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     TimeBinMirrorDomain domain = TimeBinMirrorDomain::kParticles);
 
 [[nodiscard]] double computeCflTimeStep(const CflTimeStepInput& input, double c_cfl);
+[[nodiscard]] double computeDirectionalCflTimeStep(const DirectionalCflTimeStepInput& input, double c_cfl);
+[[nodiscard]] HydroCflDiagnostics makeHydroCflDiagnostics(
+    std::uint32_t local_row,
+    const DirectionalCflTimeStepInput& input,
+    double c_cfl,
+    double accepted_dt_time_code,
+    std::uint64_t gas_cell_id = 0,
+    std::optional<std::uint64_t> patch_id = std::nullopt,
+    std::optional<std::uint32_t> patch_row = std::nullopt);
+void assertHydroCflStable(
+    const HydroCflDiagnostics& diagnostics,
+    double relative_tolerance = 1.0e-12);
 [[nodiscard]] double computeGravityTimeStep(const GravityTimeStepInput& input, double eta);
 
 [[nodiscard]] double combineTimeStepCriteria(

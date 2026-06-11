@@ -649,6 +649,33 @@ void testRestartRoundtrip() {
   assert(invalid_scheduler_reader_threw);
   std::filesystem::remove(invalid_scheduler_path);
 
+  const std::filesystem::path invalid_patch_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_invalid_hydro_patch_geometry.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(invalid_patch_path, payload);
+  hid_t invalid_patch_file = H5Fopen(invalid_patch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(invalid_patch_file >= 0);
+  hid_t invalid_patch_dataset = H5Dopen2(invalid_patch_file, "/state/cells/patch_index", H5P_DEFAULT);
+  assert(invalid_patch_dataset >= 0);
+  std::vector<std::uint32_t> invalid_patch_index(state.cells.patch_index.begin(), state.cells.patch_index.end());
+  invalid_patch_index.back() = 1U;
+  assert(H5Dwrite(
+             invalid_patch_dataset, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+             invalid_patch_index.data()) >= 0);
+  H5Dclose(invalid_patch_dataset);
+  H5Fclose(invalid_patch_file);
+  bool invalid_patch_reader_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(invalid_patch_path);
+  } catch (const std::exception& ex) {
+    const std::string message = ex.what();
+    invalid_patch_reader_threw =
+        message.find("/state/cells/patch_index") != std::string::npos ||
+        message.find("/state/patches") != std::string::npos ||
+        message.find("payload integrity hash mismatch") != std::string::npos;
+  }
+  assert(invalid_patch_reader_threw);
+  std::filesystem::remove(invalid_patch_path);
+
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(tamper_file >= 0);
   hid_t tamper_attr = H5Aopen(tamper_file, "payload_integrity_hash", H5P_DEFAULT);

@@ -24,23 +24,60 @@ constexpr double k_small = 1.0e-14;
   return changed;
 }
 
-[[nodiscard]] bool isContiguousPair(std::size_t left_index, std::size_t right_index, std::size_t cell_count) {
-  return right_index == left_index + 1U || (left_index + 1U == cell_count && right_index == 0U);
-}
-
-[[nodiscard]] std::size_t wrappedPlusOne(std::size_t cell_index, std::size_t cell_count) {
-  return (cell_index + 1U) % cell_count;
-}
-
-[[nodiscard]] std::size_t wrappedMinusOne(std::size_t cell_index, std::size_t cell_count) {
-  return (cell_index + cell_count - 1U) % cell_count;
-}
-
 [[nodiscard]] double minmodLimiter(double a, double b) {
   if (a * b <= 0.0) {
     return 0.0;
   }
   return (std::abs(a) < std::abs(b)) ? a : b;
+}
+
+[[nodiscard]] std::size_t axisIndex(HydroFaceAxis axis) {
+  switch (axis) {
+    case HydroFaceAxis::kX:
+      return 0U;
+    case HydroFaceAxis::kY:
+      return 1U;
+    case HydroFaceAxis::kZ:
+      return 2U;
+  }
+  return 0U;
+}
+
+[[nodiscard]] double normalComponent(const HydroPrimitiveState& state, HydroFaceAxis axis) {
+  switch (axis) {
+    case HydroFaceAxis::kX:
+      return state.vel_x_peculiar;
+    case HydroFaceAxis::kY:
+      return state.vel_y_peculiar;
+    case HydroFaceAxis::kZ:
+      return state.vel_z_peculiar;
+  }
+  return state.vel_x_peculiar;
+}
+
+void addScaledSlope(HydroPrimitiveState& state, const HydroPrimitiveState& slope, double scale) {
+  state.rho_comoving += scale * slope.rho_comoving;
+  state.vel_x_peculiar += scale * slope.vel_x_peculiar;
+  state.vel_y_peculiar += scale * slope.vel_y_peculiar;
+  state.vel_z_peculiar += scale * slope.vel_z_peculiar;
+  state.pressure_comoving += scale * slope.pressure_comoving;
+}
+
+[[nodiscard]] double dtOverCellWidth(const HydroReconstructionPolicy& policy, HydroFaceAxis axis) {
+  const double axis_value = policy.dt_over_cell_width_code[axisIndex(axis)];
+  return axis_value > 0.0 ? axis_value : policy.dt_over_dx_code;
+}
+
+[[nodiscard]] double faceNormalSign(const HydroFace& face) {
+  switch (face.axis) {
+    case HydroFaceAxis::kX:
+      return face.normal_x >= 0.0 ? 1.0 : -1.0;
+    case HydroFaceAxis::kY:
+      return face.normal_y >= 0.0 ? 1.0 : -1.0;
+    case HydroFaceAxis::kZ:
+      return face.normal_z >= 0.0 ? 1.0 : -1.0;
+  }
+  return 1.0;
 }
 
 }  // namespace
@@ -133,6 +170,12 @@ MusclHancockReconstruction::MusclHancockReconstruction(HydroReconstructionPolicy
   if (m_policy.rho_floor <= 0.0 || m_policy.pressure_floor <= 0.0) {
     throw std::invalid_argument("MUSCL-Hancock reconstruction requires positive floors");
   }
+  if (m_policy.dt_over_dx_code < 0.0 ||
+      m_policy.dt_over_cell_width_code[0] < 0.0 ||
+      m_policy.dt_over_cell_width_code[1] < 0.0 ||
+      m_policy.dt_over_cell_width_code[2] < 0.0) {
+    throw std::invalid_argument("MUSCL-Hancock reconstruction requires non-negative CFL policy values");
+  }
 }
 
 bool MusclHancockReconstruction::reconstructFaceFromCache(
@@ -147,16 +190,12 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
   }
   right_state = primitive_cache.loadCell(face.neighbor_cell);
 
-  const std::size_t cell_count = primitive_cache.size();
-  if (!isContiguousPair(face.owner_cell, face.neighbor_cell, cell_count)) {
-    return true;
-  }
-
-  const std::size_t left_minus_index = wrappedMinusOne(face.owner_cell, cell_count);
-  const std::size_t right_plus_index = wrappedPlusOne(face.neighbor_cell, cell_count);
-
-  const HydroPrimitiveState left_minus = primitive_cache.loadCell(left_minus_index);
-  const HydroPrimitiveState right_plus = primitive_cache.loadCell(right_plus_index);
+  const HydroPrimitiveState left_minus = face.owner_minus_cell == k_invalid_cell_index
+      ? left_state
+      : primitive_cache.loadCell(face.owner_minus_cell);
+  const HydroPrimitiveState right_plus = face.neighbor_plus_cell == k_invalid_cell_index
+      ? right_state
+      : primitive_cache.loadCell(face.neighbor_plus_cell);
 
   auto limited = [&](double qm, double q, double qp) {
     const double dm = q - qm;
@@ -168,40 +207,52 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
     return slope;
   };
 
-  const double slope_rho_left = limited(left_minus.rho_comoving, left_state.rho_comoving, right_state.rho_comoving);
-  const double slope_u_left = limited(left_minus.vel_x_peculiar, left_state.vel_x_peculiar, right_state.vel_x_peculiar);
-  const double slope_p_left = limited(left_minus.pressure_comoving, left_state.pressure_comoving, right_state.pressure_comoving);
+  const HydroPrimitiveState slope_left{
+      .rho_comoving = limited(left_minus.rho_comoving, left_state.rho_comoving, right_state.rho_comoving),
+      .vel_x_peculiar = limited(left_minus.vel_x_peculiar, left_state.vel_x_peculiar, right_state.vel_x_peculiar),
+      .vel_y_peculiar = limited(left_minus.vel_y_peculiar, left_state.vel_y_peculiar, right_state.vel_y_peculiar),
+      .vel_z_peculiar = limited(left_minus.vel_z_peculiar, left_state.vel_z_peculiar, right_state.vel_z_peculiar),
+      .pressure_comoving = limited(left_minus.pressure_comoving, left_state.pressure_comoving, right_state.pressure_comoving)};
+  const HydroPrimitiveState slope_right{
+      .rho_comoving = limited(left_state.rho_comoving, right_state.rho_comoving, right_plus.rho_comoving),
+      .vel_x_peculiar = limited(left_state.vel_x_peculiar, right_state.vel_x_peculiar, right_plus.vel_x_peculiar),
+      .vel_y_peculiar = limited(left_state.vel_y_peculiar, right_state.vel_y_peculiar, right_plus.vel_y_peculiar),
+      .vel_z_peculiar = limited(left_state.vel_z_peculiar, right_state.vel_z_peculiar, right_plus.vel_z_peculiar),
+      .pressure_comoving = limited(left_state.pressure_comoving, right_state.pressure_comoving, right_plus.pressure_comoving)};
 
-  const double slope_rho_right = limited(left_state.rho_comoving, right_state.rho_comoving, right_plus.rho_comoving);
-  const double slope_u_right = limited(left_state.vel_x_peculiar, right_state.vel_x_peculiar, right_plus.vel_x_peculiar);
-  const double slope_p_right = limited(left_state.pressure_comoving, right_state.pressure_comoving, right_plus.pressure_comoving);
+  const double orientation = faceNormalSign(face);
+  addScaledSlope(left_state, slope_left, 0.5 * orientation);
+  addScaledSlope(right_state, slope_right, -0.5 * orientation);
 
-  left_state.rho_comoving += 0.5 * slope_rho_left;
-  left_state.vel_x_peculiar += 0.5 * slope_u_left;
-  left_state.pressure_comoving += 0.5 * slope_p_left;
+  const double cfl = dtOverCellWidth(m_policy, face.axis);
+  if (m_policy.enable_muscl_hancock_predictor && cfl > 0.0) {
+    auto predict = [&](HydroPrimitiveState& state, const HydroPrimitiveState& slope) {
+      const double u_normal = normalComponent(state, face.axis);
+      const double slope_u_normal = normalComponent(slope, face.axis);
+      const double inv_rho = 1.0 / std::max(state.rho_comoving, k_small);
 
-  right_state.rho_comoving -= 0.5 * slope_rho_right;
-  right_state.vel_x_peculiar -= 0.5 * slope_u_right;
-  right_state.pressure_comoving -= 0.5 * slope_p_right;
+      const double drho_dt = -u_normal * slope.rho_comoving - state.rho_comoving * slope_u_normal;
+      const double dux_dt = -u_normal * slope.vel_x_peculiar;
+      const double duy_dt = -u_normal * slope.vel_y_peculiar;
+      const double duz_dt = -u_normal * slope.vel_z_peculiar;
+      const double dp_dt = -u_normal * slope.pressure_comoving -
+          m_policy.adiabatic_index * state.pressure_comoving * slope_u_normal;
 
-  if (m_policy.enable_muscl_hancock_predictor && m_policy.dt_over_dx_code > 0.0) {
-    const double cfl = m_policy.dt_over_dx_code;
+      state.rho_comoving += -0.5 * cfl * drho_dt;
+      state.vel_x_peculiar += -0.5 * cfl * (face.axis == HydroFaceAxis::kX
+          ? dux_dt - slope.pressure_comoving * inv_rho
+          : dux_dt);
+      state.vel_y_peculiar += -0.5 * cfl * (face.axis == HydroFaceAxis::kY
+          ? duy_dt - slope.pressure_comoving * inv_rho
+          : duy_dt);
+      state.vel_z_peculiar += -0.5 * cfl * (face.axis == HydroFaceAxis::kZ
+          ? duz_dt - slope.pressure_comoving * inv_rho
+          : duz_dt);
+      state.pressure_comoving += -0.5 * cfl * dp_dt;
+    };
 
-    const double drho_dt_left = -left_state.vel_x_peculiar * slope_rho_left - left_state.rho_comoving * slope_u_left;
-    const double du_dt_left = -left_state.vel_x_peculiar * slope_u_left - slope_p_left / std::max(left_state.rho_comoving, k_small);
-    const double dp_dt_left = -left_state.vel_x_peculiar * slope_p_left - m_policy.adiabatic_index * left_state.pressure_comoving * slope_u_left;
-
-    const double drho_dt_right = -right_state.vel_x_peculiar * slope_rho_right - right_state.rho_comoving * slope_u_right;
-    const double du_dt_right = -right_state.vel_x_peculiar * slope_u_right - slope_p_right / std::max(right_state.rho_comoving, k_small);
-    const double dp_dt_right = -right_state.vel_x_peculiar * slope_p_right - m_policy.adiabatic_index * right_state.pressure_comoving * slope_u_right;
-
-    left_state.rho_comoving += -0.5 * cfl * drho_dt_left;
-    left_state.vel_x_peculiar += -0.5 * cfl * du_dt_left;
-    left_state.pressure_comoving += -0.5 * cfl * dp_dt_left;
-
-    right_state.rho_comoving += -0.5 * cfl * drho_dt_right;
-    right_state.vel_x_peculiar += -0.5 * cfl * du_dt_right;
-    right_state.pressure_comoving += -0.5 * cfl * dp_dt_right;
+    predict(left_state, slope_left);
+    predict(right_state, slope_right);
   }
 
   if (enforcePrimitiveFloors(left_state, m_policy.rho_floor, m_policy.pressure_floor)) {

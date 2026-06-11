@@ -410,6 +410,11 @@ inline void compareSimulationState(
   requireAlignedNear(lhs.cells.mass_code, rhs.cells.mass_code, tolerances.scalar_abs, "cell_mass");
   requireAlignedExact(lhs.cells.time_bin, rhs.cells.time_bin, "cell_time_bin mirror");
   requireAlignedExact(lhs.cells.patch_index, rhs.cells.patch_index, "cell_patch_index");
+  requireAlignedExact(lhs.patches.patch_id, rhs.patches.patch_id, "patch_id");
+  requireAlignedExact(lhs.patches.level, rhs.patches.level, "patch_level");
+  requireAlignedExact(lhs.patches.first_cell, rhs.patches.first_cell, "patch_first_cell");
+  requireAlignedExact(lhs.patches.cell_count, rhs.patches.cell_count, "patch_cell_count");
+  requireAlignedExact(lhs.patches.owning_rank, rhs.patches.owning_rank, "patch_owning_rank");
   requireAlignedExact(lhs.gas_cells.gas_cell_id, rhs.gas_cells.gas_cell_id, "gas_cell_id");
   requireAlignedExact(lhs.gas_cells.parent_particle_id, rhs.gas_cells.parent_particle_id, "gas_parent_particle_id");
   requireAlignedNear(lhs.gas_cells.density_code, rhs.gas_cells.density_code, tolerances.scalar_abs, "gas_density");

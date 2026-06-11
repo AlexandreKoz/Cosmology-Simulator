@@ -150,10 +150,23 @@ This avoids repeated full-state scans: each substep only touches bins synchroniz
 Typed helper criteria are provided and can be combined via `TimeStepCriteriaRegistry`:
 
 - CFL limiter: `dt_CFL <= C_cfl * (Delta x / (|u| + c_s))`
+- directional hydro CFL limiter:
+  `dt_hydro_CFL = min_axes(C_cfl * cell_width_axis_code / (abs(v_axis_code) + c_s))`
 - Gravity limiter: `dt_grav <= eta * sqrt(eps / |a|)`
 - source-term limiter and user clamp hooks
 
 `combineTimeStepCriteria` takes the conservative minimum across registered hooks and a fallback dt.
+
+Hydro CFL candidates submitted by the reference workflow use local Cartesian patch widths where gas-cell
+center metadata identifies a row-ordered patch, otherwise the same near-cubic fixed-grid fallback used by the
+hydro patch builder. The scheduler remains the only authority for the accepted bin; hydro submits
+`TimeStepCandidateSource::kHydroCfl` candidates and the callback verifies the accepted `dt_time_code` against the
+current directional CFL bound before invoking the finite-volume update. A violation is a hard runtime error, not a
+silent clamp inside the hydro solver.
+
+`HydroCflDiagnostics` records the worst checked gas cell with local row, gas-cell ID when available, patch ID/row
+when available, proposed and accepted `dt`, CFL number, safety factor, velocity components, sound speed, cell widths,
+and limiting axis. The reference workflow emits this through the profiler event `hydro.cfl_guard` for reporting.
 
 ## Synchronization and legal transitions
 

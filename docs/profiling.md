@@ -46,6 +46,18 @@ Do not claim scientific correctness from benchmark throughput.
 - Preserve deterministic behavior when profiling is disabled.
 - Compare against prior baselines using the same preset and workload size.
 
+## Hydro runtime events
+
+The reference workflow emits `hydro.conservation` events from the Godunov hydro stage when a profiler session is
+present. Payload values are volume-integrated local diagnostics over the cells updated by that stage. The event includes
+before/after mass, flux/source/floor mass deltas, residuals for mass, momentum x/y/z, total energy, and derived internal
+energy, total-energy source/floor deltas, `internal_energy_floor_count`, and the tolerances used by the CPU closed-box
+regression. Source-term deltas are reported separately from flux deltas so gravity/expansion work is not classified as
+a flux-conservation error.
+
+The solver also records these same totals in `HydroProfileEvent::conservation`, alongside the existing face count,
+fallback counters, bytes moved, and stage timings.
+
 ## Workflow hooks for documentation/scaffolding changes
 
 Documentation changes still need auditable developer workflow checks:

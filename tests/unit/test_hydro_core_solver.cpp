@@ -1,8 +1,10 @@
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 
+#include "cosmosim/hydro/hydro_cartesian_patch.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 
 namespace {
@@ -62,6 +64,7 @@ void testMusclReconstructionProducesFiniteStates() {
   cosmosim::hydro::MusclHancockReconstruction reconstruction(cosmosim::hydro::HydroReconstructionPolicy{
       .limiter = cosmosim::hydro::HydroSlopeLimiter::kMonotonizedCentral,
       .dt_over_dx_code = 0.1,
+      .dt_over_cell_width_code = {0.1, 0.1, 0.1},
       .rho_floor = 1.0e-8,
       .pressure_floor = 1.0e-8,
       .enable_muscl_hancock_predictor = true});
@@ -133,6 +136,8 @@ void testProfileFallbackCountersAreStepLocal() {
     geometry.faces.push_back(cosmosim::hydro::HydroFace{
         .owner_cell = i,
         .neighbor_cell = (i + 1U) % conserved.size(),
+        .owner_minus_cell = (i + conserved.size() - 1U) % conserved.size(),
+        .neighbor_plus_cell = (i + 2U) % conserved.size(),
         .area_comoving = 1.0,
         .normal_x = 1.0});
   }
@@ -172,6 +177,8 @@ void testActiveSetFullCoverageMatchesFullAdvance() {
     geometry.faces.push_back(cosmosim::hydro::HydroFace{
         .owner_cell = i,
         .neighbor_cell = (i + 1U) % full_state.size(),
+        .owner_minus_cell = (i + full_state.size() - 1U) % full_state.size(),
+        .neighbor_plus_cell = (i + 2U) % full_state.size(),
         .area_comoving = 1.0,
         .normal_x = 1.0});
   }
@@ -213,6 +220,131 @@ void testActiveSetFullCoverageMatchesFullAdvance() {
   }
 }
 
+void testConservationReportSeparatesSourceTerms() {
+  constexpr double gamma = 1.4;
+  cosmosim::hydro::HydroConservedStateSoa conserved(2);
+  for (std::size_t i = 0; i < conserved.size(); ++i) {
+    cosmosim::hydro::HydroPrimitiveState primitive;
+    primitive.rho_comoving = 1.0;
+    primitive.vel_x_peculiar = 0.1;
+    primitive.pressure_comoving = 1.0;
+    conserved.storeCell(i, cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(primitive, gamma));
+  }
+
+  cosmosim::hydro::HydroPatchGeometry geometry;
+  geometry.cell_volume_comoving = 2.0;
+  geometry.faces.push_back(cosmosim::hydro::HydroFace{
+      .owner_cell = 0,
+      .neighbor_cell = 1,
+      .area_comoving = 1.0,
+      .normal_x = 1.0});
+
+  cosmosim::hydro::HydroUpdateContext update{.dt_code = 1.0e-3, .scale_factor = 1.0, .hubble_rate_code = 0.0};
+  std::vector<double> gravity_x{0.2, 0.2};
+  std::vector<double> gravity_y{0.0, 0.0};
+  std::vector<double> gravity_z{0.0, 0.0};
+  cosmosim::hydro::HydroSourceContext source_context{
+      .update = update,
+      .gravity_accel_x_peculiar = gravity_x,
+      .gravity_accel_y_peculiar = gravity_y,
+      .gravity_accel_z_peculiar = gravity_z};
+
+  cosmosim::hydro::HydroCoreSolver solver(gamma);
+  cosmosim::hydro::MusclHancockReconstruction reconstruction;
+  cosmosim::hydro::HllcRiemannSolver riemann;
+  cosmosim::hydro::ComovingGravityExpansionSource source;
+  std::array<const cosmosim::hydro::HydroSourceTerm*, 1> sources{&source};
+  cosmosim::hydro::HydroProfileEvent profile;
+
+  solver.advancePatch(conserved, geometry, update, reconstruction, riemann, sources, source_context, &profile);
+
+  assert(profile.conservation.cell_count == 2U);
+  assert(std::abs(profile.conservation.source_delta.momentum_x) > 0.0);
+  assert(std::abs(profile.conservation.residual.mass) < 1.0e-12);
+  assert(std::abs(profile.conservation.residual.momentum_x) < 1.0e-12);
+  assert(std::abs(profile.conservation.residual.total_energy) < 1.0e-12);
+}
+
+void testInternalEnergyFloorIsReported() {
+  constexpr double gamma = 1.4;
+  cosmosim::hydro::HydroConservedStateSoa conserved(1);
+  conserved.storeCell(0, cosmosim::hydro::HydroConservedState{
+      .mass_density_comoving = 1.0,
+      .momentum_density_x_comoving = 10.0,
+      .momentum_density_y_comoving = 0.0,
+      .momentum_density_z_comoving = 0.0,
+      .total_energy_density_comoving = 1.0});
+
+  cosmosim::hydro::HydroPatchGeometry geometry;
+  geometry.cell_volume_comoving = 1.0;
+  cosmosim::hydro::HydroUpdateContext update{.dt_code = 1.0e-3, .scale_factor = 1.0, .hubble_rate_code = 0.0};
+  cosmosim::hydro::HydroSourceContext source_context{.update = update};
+  cosmosim::hydro::HydroCoreSolver solver(gamma);
+  cosmosim::hydro::MusclHancockReconstruction reconstruction;
+  cosmosim::hydro::HllcRiemannSolver riemann;
+  cosmosim::hydro::HydroProfileEvent profile;
+
+  solver.advancePatch(conserved, geometry, update, reconstruction, riemann, {}, source_context, &profile);
+
+  assert(profile.conservation.internal_energy_floor_count == 1U);
+  assert(profile.conservation.floor_delta.total_energy > 0.0);
+  const auto primitive = cosmosim::hydro::HydroCoreSolver::primitiveFromConserved(conserved.loadCell(0), gamma);
+  assert(primitive.pressure_comoving > 0.0);
+}
+
+void testCartesianPatchGeometry2x2x2() {
+  const cosmosim::hydro::HydroPatchGeometry geometry = cosmosim::hydro::makeCartesianPatchGeometry(
+      cosmosim::hydro::HydroCartesianPatchSpec{
+          .nx = 2,
+          .ny = 2,
+          .nz = 2,
+          .origin_x_comoving = 1.0,
+          .origin_y_comoving = 2.0,
+          .origin_z_comoving = 3.0,
+          .cell_width_x_comoving = 0.5,
+          .cell_width_y_comoving = 0.25,
+          .cell_width_z_comoving = 0.125});
+
+  assert(geometry.cellCount() == 8U);
+  assert(geometry.faces.size() == 12U);
+  assert(std::abs(geometry.cell_volume_comoving - 0.015625) < k_tol);
+  assert(geometry.linearCellIndex(1, 0, 0) == 1U);
+  assert(geometry.linearCellIndex(0, 1, 0) == 2U);
+  assert(geometry.linearCellIndex(0, 0, 1) == 4U);
+  const auto ijk = geometry.cellIjk(6U);
+  assert(ijk[0] == 0U && ijk[1] == 1U && ijk[2] == 1U);
+  assert(geometry.neighborCell(0U, 1, 0, 0) == 1U);
+  assert(geometry.neighborCell(0U, 0, 1, 0) == 2U);
+  assert(geometry.neighborCell(0U, 0, 0, 1) == 4U);
+  assert(geometry.neighborCell(0U, -1, 0, 0) == cosmosim::hydro::k_invalid_cell_index);
+
+  std::size_t x_faces = 0;
+  std::size_t y_faces = 0;
+  std::size_t z_faces = 0;
+  for (const cosmosim::hydro::HydroFace& face : geometry.faces) {
+    if (face.axis == cosmosim::hydro::HydroFaceAxis::kX) {
+      ++x_faces;
+      assert(std::abs(face.area_comoving - 0.03125) < k_tol);
+      assert(face.normal_x == 1.0 && face.normal_y == 0.0 && face.normal_z == 0.0);
+    } else if (face.axis == cosmosim::hydro::HydroFaceAxis::kY) {
+      ++y_faces;
+      assert(std::abs(face.area_comoving - 0.0625) < k_tol);
+      assert(face.normal_x == 0.0 && face.normal_y == 1.0 && face.normal_z == 0.0);
+    } else {
+      ++z_faces;
+      assert(std::abs(face.area_comoving - 0.125) < k_tol);
+      assert(face.normal_x == 0.0 && face.normal_y == 0.0 && face.normal_z == 1.0);
+    }
+    assert(face.neighbor_cell != cosmosim::hydro::k_invalid_cell_index);
+  }
+  assert(x_faces == 4U);
+  assert(y_faces == 4U);
+  assert(z_faces == 4U);
+
+  const std::array<std::size_t, 3> factors = cosmosim::hydro::chooseNearCubicCartesianFactors(24U);
+  assert(factors[0] == 4U && factors[1] == 3U && factors[2] == 2U);
+}
+
 }  // namespace
 
 int main() {
@@ -223,5 +355,8 @@ int main() {
   testRiemannSymmetryRegression();
   testProfileFallbackCountersAreStepLocal();
   testActiveSetFullCoverageMatchesFullAdvance();
+  testConservationReportSeparatesSourceTerms();
+  testInternalEnergyFloorIsReported();
+  testCartesianPatchGeometry2x2x2();
   return 0;
 }

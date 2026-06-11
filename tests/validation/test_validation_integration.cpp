@@ -36,6 +36,8 @@ cosmosim::hydro::HydroPatchGeometry makePeriodic1dGeometry(std::size_t cell_coun
     geometry.faces.push_back(cosmosim::hydro::HydroFace{
         .owner_cell = i,
         .neighbor_cell = (i + 1U) % cell_count,
+        .owner_minus_cell = (i + cell_count - 1U) % cell_count,
+        .neighbor_plus_cell = (i + 2U) % cell_count,
         .area_comoving = 1.0,
         .normal_x = 1.0,
         .normal_y = 0.0,
@@ -414,6 +416,10 @@ void testHydroSodMassConservation(const cosmosim::validation::ValidationToleranc
   cosmosim::hydro::MusclHancockReconstruction reconstruction(cosmosim::hydro::HydroReconstructionPolicy{
       .limiter = cosmosim::hydro::HydroSlopeLimiter::kMonotonizedCentral,
       .dt_over_dx_code = update.dt_code * static_cast<double>(k_cell_count),
+      .dt_over_cell_width_code = {
+          update.dt_code * static_cast<double>(k_cell_count),
+          update.dt_code * static_cast<double>(k_cell_count),
+          update.dt_code * static_cast<double>(k_cell_count)},
       .rho_floor = 1.0e-10,
       .pressure_floor = 1.0e-10,
       .enable_muscl_hancock_predictor = true});

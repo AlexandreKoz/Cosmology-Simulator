@@ -7,6 +7,9 @@ The restart schema (`cosmosim_restart_v14`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
+- hydro geometry ownership lanes: cell centers, gas-cell identity and thermodynamic fields,
+  cell `patch_index`, and `PatchSoa` descriptors (`patch_id`, `level`, `first_cell`,
+  `cell_count`, `owning_rank`),
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
 - `IntegratorState`,
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
@@ -50,7 +53,7 @@ behavior on filesystems where `rename` is atomic.
 
 ## Integrity and provenance
 
-- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority. For particle-bound gas cells, derived cell `time_bin` mirrors are validated through each cell's parent gas particle scheduler entry rather than by cell-row count equality.
+- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority. For particle-bound gas cells, derived cell `time_bin` mirrors are validated through each cell's parent gas particle scheduler entry rather than by cell-row count equality. Restart validation also requires hydro patch descriptors to cover every gas-cell row exactly once and requires each cell's `patch_index` to agree with the serialized patch range. H1 Cartesian CFL metadata remains derived from persistent cell centers/config and is not serialized as a scratch cache.
 - The hash covers particle lanes, sidecars, gas-cell identity lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
   `active_flag`, `pending_bin_index`), output cadence persistence fields, and the full serialized provenance payload. State `time_bin` arrays remain hash inputs for corruption detection, but restart continuation imports scheduler state and rebuilds mirrors rather than treating mirrors as fallback authority.
@@ -84,16 +87,21 @@ The checklist exposed by `exactRestartCompletenessChecklist()` and enforced by
 restart write/read checks is:
 
 1. `simulation_state_lanes_and_metadata`
-2. `particle_identity_and_softening_override_lanes`
+2. `particle_identity_softening_and_drift_epoch_lanes`
 3. `gas_cell_identity_lanes`
-4. `species_specific_sidecars`
-5. `module_sidecars_with_schema_versions`
-6. `integrator_state`
-7. `scheduler_persistent_state`
-8. `distributed_gravity_state`
-9. `normalized_config_text_and_hash`
-10. `provenance_record`
-11. `payload_integrity_hash_and_hex`
+4. `hydro_geometry_patch_state`
+5. `species_specific_sidecars`
+6. `module_sidecars_with_schema_versions`
+7. `integrator_state`
+8. `integrator_owned_pm_sync_state`
+9. `scheduler_persistent_state`
+10. `output_cadence_persistent_state`
+11. `stochastic_module_persistent_state`
+12. `restart_diagnostics_summary`
+13. `distributed_gravity_state`
+14. `normalized_config_text_and_hash`
+15. `provenance_record`
+16. `payload_integrity_hash_and_hex`
 
 `validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 
@@ -113,6 +121,8 @@ Restart round-trip invariant coverage now explicitly checks that:
 - scheduler persistent state survives and reconstructs the same active set at resume tick,
 - particle `time_bin` mirrors are rejected when stale and rebuilt from scheduler state on successful read,
 - particle-bound gas-cell `time_bin` mirrors are rejected when stale against their parent gas particle scheduler entry and are rebuilt from that mapping on successful read,
+- hydro patch geometry state is rejected when patch ranges overlap, omit gas cells, extend beyond
+  the cell arrays, or disagree with per-cell `patch_index`,
 - per-particle softening overrides survive and continue to take precedence over species/global defaults,
 - normalized config text/hash and provenance config hash remain aligned after reload.
 

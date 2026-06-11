@@ -144,6 +144,60 @@ void rebuildRestartTimeBinMirrorsFromScheduler(
   }
 }
 
+void validateHydroGeometryStateForRestart(
+    const core::SimulationState& state,
+    std::string_view context) {
+  if (state.cells.size() != state.gas_cells.size()) {
+    throw std::invalid_argument(std::string(context) + ": /state/cells and /state/gas_cells sizes must match");
+  }
+  if (!state.cells.isConsistent()) {
+    throw std::invalid_argument(std::string(context) + ": /state/cells lanes must have matching lengths");
+  }
+  if (!state.gas_cells.isConsistent()) {
+    throw std::invalid_argument(std::string(context) + ": /state/gas_cells lanes must have matching lengths");
+  }
+  if (!state.patches.isConsistent()) {
+    throw std::invalid_argument(std::string(context) + ": /state/patches lanes must have matching lengths");
+  }
+  if (state.cells.size() == 0) {
+    if (state.patches.size() != 0) {
+      throw std::invalid_argument(std::string(context) + ": /state/patches must be empty when no gas cells exist");
+    }
+    return;
+  }
+  if (state.patches.size() == 0) {
+    throw std::invalid_argument(std::string(context) + ": /state/patches must describe non-empty gas-cell geometry");
+  }
+
+  std::vector<std::uint8_t> cell_covered_by_patch(state.cells.size(), 0U);
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    const std::uint64_t first_cell = state.patches.first_cell[patch_index];
+    const std::uint64_t cell_count = state.patches.cell_count[patch_index];
+    if (cell_count == 0U) {
+      throw std::invalid_argument(std::string(context) + ": /state/patches/cell_count entries must be non-zero");
+    }
+    if (first_cell > state.cells.size() || cell_count > state.cells.size() - first_cell) {
+      throw std::invalid_argument(std::string(context) + ": /state/patches cell range exceeds /state/cells");
+    }
+    for (std::uint64_t offset = 0; offset < cell_count; ++offset) {
+      const std::size_t cell_index = static_cast<std::size_t>(first_cell + offset);
+      if (cell_covered_by_patch[cell_index] != 0U) {
+        throw std::invalid_argument(std::string(context) + ": /state/patches cell ranges overlap");
+      }
+      cell_covered_by_patch[cell_index] = 1U;
+      if (state.cells.patch_index[cell_index] != patch_index) {
+        throw std::invalid_argument(
+            std::string(context) + ": /state/cells/patch_index does not match /state/patches cell ranges");
+      }
+    }
+  }
+  for (std::size_t cell_index = 0; cell_index < cell_covered_by_patch.size(); ++cell_index) {
+    if (cell_covered_by_patch[cell_index] == 0U) {
+      throw std::invalid_argument(std::string(context) + ": /state/patches do not cover every gas cell");
+    }
+  }
+}
+
 void validateOutputCadenceStateForRestart(
     const OutputCadencePersistentState& output_state,
     const core::IntegratorState& integrator_state,
@@ -1245,6 +1299,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "simulation_state_lanes_and_metadata",
       "particle_identity_softening_and_drift_epoch_lanes",
       "gas_cell_identity_lanes",
+      "hydro_geometry_patch_state",
       "species_specific_sidecars",
       "module_sidecars_with_schema_versions",
       "integrator_state",
@@ -1269,6 +1324,7 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
       payload.normalized_config_hash_hex,
       payload.provenance,
       "restart payload");
+  validateHydroGeometryStateForRestart(*payload.persistent_state.simulation_state, "restart payload");
   if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
   }

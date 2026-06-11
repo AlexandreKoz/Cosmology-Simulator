@@ -42,6 +42,8 @@ Current restart identity:
 Restart payload includes:
 
 - `SimulationState`
+- hydro geometry state under `/state/cells`, `/state/gas_cells`, and `/state/patches`
+  (`patch_id`, `level`, `first_cell`, `cell_count`, `owning_rank`)
 - `IntegratorState`
 - `HierarchicalTimeBinScheduler` persistent state (`TimeBinPersistentState`)
 - distributed TreePM continuation metadata (`DistributedRestartState`)
@@ -58,7 +60,7 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 |---|---|
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
-| Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For particle-bound gas cells, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry, not by cell-row count equality. |
+| Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, hydro patch geometry lanes (`CellSoa::patch_index`, gas-cell identity/thermodynamic lanes, `PatchSoa` descriptors and ownership), module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For particle-bound gas cells, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry, not by cell-row count equality. H1 Cartesian CFL widths are derived from persisted cell centers/config and are not serialized as scratch caches. |
 
 Additive softening sidecar persistence:
 - Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.
@@ -71,6 +73,15 @@ restart is execution-resume oriented.
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
 Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. Stage 8 now advances the active restart schema to `cosmosim_restart_v14`. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+
+## H1 Hydro Restart Geometry Note
+
+Schema v14 already persists the H1 restart-authoritative hydro geometry inputs needed to rebuild
+Cartesian gas-cell geometry deterministically: cell centers, gas-cell identity lanes, cell
+`patch_index`, and `PatchSoa` descriptors including patch ownership. Restart validation rejects
+patch ranges that overlap, omit cells, exceed the cell arrays, or disagree with per-cell
+`patch_index`. Transient hydro reconstruction scratch, ghost-fill buffers, face flux arrays, and
+derived CFL width caches remain outside restart payloads.
 
 ## 3) Provenance payload
 

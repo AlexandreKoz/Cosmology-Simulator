@@ -16,6 +16,36 @@ U^{n+1}_i = U^n_i - \frac{\Delta t}{a V_i} \sum_f A_f \hat{F}_f + \Delta t\, S_i
 
 with `a = scale_factor`, `V_i = cell_volume_comoving`, and `A_f = face.area_comoving`.
 
+## Conservation diagnostics
+
+`HydroConservationTotals` reports volume-integrated diagnostics over the selected real cells:
+
+- mass: `sum rho * V`
+- momentum x/y/z: `sum rho * u_* * V`
+- total energy: `sum rho * (e_internal + 0.5 |u|^2) * V`
+- internal energy: `sum (E_total - 0.5 |m|^2 / rho) * V`
+
+The internal-energy entry is derived from the conserved total-energy and momentum densities. It is not a second
+evolved energy authority.
+
+`HydroProfileEvent::conservation` records the selected-cell totals before and after the hydro update, plus separate
+volume-integrated deltas from conservative face fluxes, explicit source terms, and internal-energy floor corrections.
+The residual is:
+
+\[
+U_\mathrm{after} - U_\mathrm{before} - \Delta U_\mathrm{flux} - \Delta U_\mathrm{source} - \Delta U_\mathrm{floor}.
+\]
+
+This keeps deliberate source-term work and momentum injection out of the flux-conservation error budget. For a closed
+periodic full-patch update without source terms or floor corrections, the flux deltas and residuals for mass, momentum,
+total energy, and the derived internal-energy diagnostic are expected to remain within the test tolerance. Active-set
+updates report the budget over the caller-selected active cells; flux across the active/inactive boundary is therefore
+physical active-set exchange, not automatically a conservation error.
+
+If the update would leave non-positive internal energy, the solver raises total energy to the kinetic energy plus the
+small positive floor and increments `internal_energy_floor_count`; the resulting energy addition is reported in
+`floor_delta` rather than hidden inside flux or source accounting.
+
 ## Stage structure and ownership
 
 The update is split into stages to keep AMR reuse and future GPU kernels straightforward:
@@ -28,11 +58,13 @@ The update is split into stages to keep AMR reuse and future GPU kernels straigh
 Implementation is now split along these boundaries:
 
 - `src/hydro/hydro_reconstruction.cpp` + `include/cosmosim/hydro/hydro_reconstruction.hpp`:
-  limiter library, piecewise-constant reconstruction, and MUSCL-Hancock predictor/floors.
+  limiter library, piecewise-constant reconstruction, and axis-aware MUSCL-Hancock predictor/floors.
 - `src/hydro/hydro_riemann.cpp` + `include/cosmosim/hydro/hydro_riemann.hpp`:
   HLLE and HLLC flux construction with HLL fallback on HLLC degeneracy.
 - `src/hydro/hydro_core_solver.cpp` + `include/cosmosim/hydro/hydro_core_solver.hpp`:
   patch update scaffold (validation, cache fill, conservative flux accumulation, source-term pass, profiling).
+- `src/hydro/hydro_boundary_conditions.cpp` + `include/cosmosim/hydro/hydro_boundary_conditions.hpp`:
+  explicit Cartesian physical-boundary ghost metadata and transient ghost-state fill.
 
 Hydro hot data remains SoA in `HydroConservedStateSoa`. Cold patch metadata is isolated in `HydroPatchColdData`.
 For hierarchical timestepping, `HydroActiveSetView` allows explicit active cell/face subsets via
@@ -40,6 +72,84 @@ For hierarchical timestepping, `HydroActiveSetView` allows explicit active cell/
 For memory-sensitive loops, `HydroScratchBuffers` and `HydroPrimitiveCacheSoa` can be reused across calls via
 `advancePatchWithScratch` / `advancePatchActiveSetWithScratch` to avoid repeated allocations and repeated
 primitive reconstruction for piecewise-constant paths.
+
+## Cartesian patch geometry
+
+H1 production fixed-grid hydro uses `makeCartesianPatchGeometry(...)` from
+`include/cosmosim/hydro/hydro_cartesian_patch.hpp` to build a dense local Cartesian patch. The patch contract is:
+
+- row order is `linearCellIndex(i, j, k) = i + nx * (j + ny * k)`;
+- `cellIjk(row)` and `neighborCell(row, di, dj, dk)` are the explicit indexing helpers;
+- `HydroPatchGeometry` carries `nx`, `ny`, `nz`, origin, axis cell widths, and one uniform cell volume;
+- internal faces are built in x, y, and z only, with axis metadata, explicit owner-minus and neighbor-plus
+  stencil cells, and normals pointing from owner to neighbor;
+- face areas are transverse products: `dy dz`, `dx dz`, and `dx dy`.
+
+The reference workflow first tries to derive `nx`, `ny`, `nz`, origin, and spacing from rectilinear 3D
+`CellSoa` center metadata with row order matching the helper. If that metadata is not available, fixed-grid toy
+states use exact near-cubic factors of `cell_count` over the configured axis-aware box lengths. Geometry caching is
+invalidated by cell count, dimensions, origin, widths, timestep used by the reconstruction predictor, hydro boundary
+policy, and patch metadata signature.
+
+`makeCartesianPatchGeometry(...)` builds only internal owner-neighbor faces. Runtime physical-boundary faces are added
+explicitly by `appendCartesianBoundaryGhostFaces(...)`, which appends one transient ghost row per lower/upper Cartesian
+boundary face in x, y, and z. Boundary faces keep the real cell as `owner_cell`; `neighbor_cell` points at a transient
+ghost row after the real-cell range, and `ghost_cell_slot` indexes `HydroPatchGeometry::ghost_cells`.
+
+Each `HydroGhostCell` records:
+
+- the authoritative owner real cell;
+- the source real cell used to fill the ghost state;
+- the transient ghost row and slot;
+- boundary kind (`periodic`, `open`, `reflective`, or `imported_mpi`);
+- face axis and lower/upper side;
+- mutation rights.
+
+Physical-boundary ghost rows are `kWritablePhysicalBoundaryScratch`: they may be filled from real-cell state before
+reconstruction, but they are not authoritative cells and are never written back to `SimulationState`. Imported MPI ghosts
+remain distinguished as `kImportedMpi` / `kReadOnlyImported`; the physical-boundary fill helper intentionally skips them.
+
+The fill rules are:
+
+- periodic ghosts copy primitive/conserved state from the opposite interior side;
+- open/outflow ghosts copy the boundary-adjacent real cell;
+- reflective ghosts copy density, pressure, and tangential velocity while reversing only the velocity component normal
+  to the face axis.
+
+`HydroCoreSolver` validates that active cells and face owners are real cells and that any explicit face stencil rows are
+inside the conserved/primitive storage. Ghost rows may be consumed as reconstruction neighbors through active boundary
+faces, but flux deltas accumulated into ghost rows are scratch only because source/update writeback iterates active real
+cells. A single-cell patch therefore receives six physical-boundary ghost faces after boundary append and remains valid
+without persistent ghost cells.
+
+## MUSCL-Hancock reconstruction contract
+
+`MusclHancockReconstruction` reconstructs the full primitive vector
+`{rho_comoving, vel_x_peculiar, vel_y_peculiar, vel_z_peculiar, pressure_comoving}`. It does not infer Cartesian
+direction from row contiguity. Instead, each `HydroFace` carries:
+
+- `axis`, selecting x, y, or z directional reconstruction;
+- `owner_minus_cell`, the owner-side upwind stencil row when available;
+- `neighbor_plus_cell`, the neighbor-side downwind stencil row when available.
+
+Missing stencil rows are treated as a zero local slope on that side, which is the deliberate boundary/degenerate-patch
+fallback. Boundary faces still use their ghost-filled `neighbor_cell` state from `appendCartesianBoundaryGhostFaces(...)`
+and `fillHydroBoundaryGhostCells(...)`.
+
+The predictor CFL is axis-aware through
+`HydroReconstructionPolicy::dt_over_cell_width_code = {dt/dx, dt/dy, dt/dz}`. The legacy scalar
+`dt_over_dx_code` remains a compatibility fallback when the per-axis entry is zero. Directional evolution uses the
+velocity component normal to the face for density, normal momentum, transverse velocity advection, and pressure updates;
+transverse velocity components are reconstructed and predicted rather than copied from cell centers.
+
+The reference workflow rebuilds the reconstruction policy whenever the accepted timestep or local Cartesian geometry
+changes, so `dt_over_cell_width_code` cannot remain cached from an older scheduler bin. Before
+`HydroCoreSolver::advancePatchActiveSetWithScratch(...)` is called, `HydroStageCallback` checks the accepted
+integrator timestep against the local directional CFL bound
+`min_axes(C_cfl * cell_width_axis / (abs(v_axis) + sound_speed))` for the active gas cells. If the accepted timestep is
+larger than the current hydro CFL bound beyond tolerance, the callback throws before mutating persistent gas state.
+The hydro solver itself does not clamp `dt`; scheduler-visible `HydroCfl` candidates and profiler-visible
+`HydroCflDiagnostics` carry the proposal and worst-cell identity.
 
 ## Source-term convention
 
@@ -55,7 +165,17 @@ This is intentionally conservative and modular; additional baryonic sources shou
 ## Assumptions
 
 - Face normals are unit vectors.
-- Current patch geometry uses a uniform `cell_volume_comoving` per patch.
+- Cartesian patch geometry uses a uniform `cell_volume_comoving` per dense local patch.
 - `advancePatch` updates the full patch; `advancePatchActiveSet` updates only caller-selected cell/face subsets.
-- Boundary handling is left to reconstruction/ghost filling; if no neighbor is present, piecewise-constant reconstruction mirrors owner state.
-- The provided integration test uses a periodic 1D Sod-like setup to exercise the full stage path while preserving conservation.
+- Boundary handling is explicit for Cartesian physical boundaries: append boundary ghost faces, fill ghost rows, then
+  reconstruct using those ghost-filled states. A face with no neighbor remains a legacy/internal fallback that mirrors
+  owner state.
+- `MusclHancockReconstruction` consumes explicit axis/stencil metadata from `HydroFace`; hand-built geometries that omit
+  stencil rows get boundary-style zero slopes on the omitted side rather than row-difference inference.
+- The provided integration test uses a closed 3D Cartesian Sod-like setup to exercise x/y/z face construction while
+  preserving conservation.
+- The classical hydro validation executable (`validation_hydro_classics`) uses the same Cartesian patch, scratch/cache,
+  reconstruction, Riemann, conservation-total, and source-term paths for CI-scale Sedov, Noh, Gresho vortex,
+  Kelvin-Helmholtz, and Evrard-style collapse guards. These cases are runtime-credibility sentinels for positivity,
+  finite state, conservation/source-energy bounds, symmetry, and qualitative physical trends; they are not final
+  publication-grade convergence or reference-profile campaigns.
