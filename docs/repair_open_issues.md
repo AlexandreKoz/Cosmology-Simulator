@@ -1,4 +1,17 @@
 
+## 2026-06-11 H1 hydro closeout status
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| H2-HYDRO-GAS-ID-AUTHORITY | Open | Hydro gas-cell identity | H1 remains intentionally particle-bound through `requireParticleBoundGasCellContract(...)`; stable `gas_cell_id` is not yet the production-authoritative hydro lookup contract. | Promote `gas_cell_id` / `parent_particle_id` ownership with reorder, migration, restart, and active-view tests before H2 closeout. |
+| H2-HYDRO-RESTART-SCHEMA | Open | Hydro restart compatibility | Any H2 identity-promotion change that alters persistent gas identity semantics will require schema/version handling; H1 does not make that change. | If identity semantics change, update restart schema/docs/tests in the same patch and reject ambiguous legacy payloads unless a tested importer exists. |
+| H2-HYDRO-WORKFLOW-DECOUPLING | Open | Reference workflow hydro ownership | Live hydro pack/unpack still depends on the particle-bound gas-cell contract, which is acceptable for H1 but must not be the final H2 identity model. | Replace workflow hydro row lookup with stable gas-cell identity helpers after the authoritative identity contract exists. |
+| H2-HYDRO-MPI-GHOST-ID | Open | Hydro ghost/correction ownership | Hydro ghost refresh and conservative correction exchange need stable gas-cell identity semantics before multi-rank identity promotion can be claimed. | Define imported hydro ghost ownership and owner-side correction exchange by stable gas-cell identity, with stale/remote ghost rejection tests. |
+| H3-HYDRO-AMR-PATCH-OWNERSHIP | Blocked on H2 | AMR hydro ownership | AMR patch ownership, prolongation/restriction, synchronization, and reflux semantics cannot be closed until stable gas-cell identity is authoritative. | Start only after H2 closeout; document patch ownership and conservation implications with tests. |
+| H3-HYDRO-MULTIRANK-CONTINUATION | Blocked on H2 | Distributed hydro continuation | Multi-rank restart/migration evidence for stable hydro cell identity is not yet present. | Add distributed restart/migration/ghost evidence after H2 identity promotion. |
+| H3-HYDRO-VALIDATION-CAMPAIGN | Blocked on H2 | Hydro validation maturity | H1 classical cases are CI guards, not publication-grade Sedov/Evrard convergence campaigns. | Add reference-profile or convergence validation campaigns before claiming publication-grade hydro evidence. |
+| H3-HYDRO-PERFORMANCE-FLOOR | Blocked on H2 | Hydro performance | Production multidimensional hydro benchmark evidence after identity promotion/AMR-facing ownership is not yet established. | Add benchmark/profiling evidence for the production path once H2 contracts are stable. |
+
 ## 2026-05-25 Stage 6 memory accounting status
 
 | ID | Status | Area | Finding | Resolution / Remaining action |
