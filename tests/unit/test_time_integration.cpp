@@ -619,7 +619,7 @@ void testTimeBinMappingAndCriteria() {
 
   const cosmosim::core::DirectionalCflTimeStepInput directional_cfl{
       .cell_width_axis_code = {0.5, 0.125, 0.25},
-      .velocity_axis_code = {20.0, 1.0, 4.0},
+      .velocity_axis_code = {18.0, 1.0, 4.0},
       .sound_speed_code = 5.0,
   };
   const double dt_directional = cosmosim::core::computeDirectionalCflTimeStep(directional_cfl, 0.4);

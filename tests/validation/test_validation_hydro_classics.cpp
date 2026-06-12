@@ -106,17 +106,17 @@ void testNohConvergingInflowGuard() {
     const double inv_radius = radius > 1.0e-14 ? 1.0 / radius : 0.0;
     cosmosim::hydro::HydroPrimitiveState primitive{};
     primitive.rho_comoving = 1.0;
-    primitive.vel_x_peculiar = -0.35 * dx * inv_radius;
-    primitive.vel_y_peculiar = -0.35 * dy * inv_radius;
-    primitive.vel_z_peculiar = -0.35 * dz * inv_radius;
-    primitive.pressure_comoving = 1.0e-3;
+    primitive.vel_x_peculiar = -0.85 * dx * inv_radius;
+    primitive.vel_y_peculiar = -0.85 * dy * inv_radius;
+    primitive.vel_z_peculiar = -0.85 * dz * inv_radius;
+    primitive.pressure_comoving = 1.0e-5;
     hv::storePrimitive(conserved, cell, primitive, gamma);
   }
 
   hv::advanceHydroSteps(conserved, geometry, hv::HydroStepConfig{
       .gamma = gamma,
-      .dt_code = 4.0e-5,
-      .step_count = 30,
+      .dt_code = 6.0e-4,
+      .step_count = 96,
       .rho_floor = 1.0e-9,
       .pressure_floor = 1.0e-9,
       .limiter = cosmosim::hydro::HydroSlopeLimiter::kMinmod});

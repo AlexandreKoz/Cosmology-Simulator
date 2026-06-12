@@ -185,6 +185,31 @@ void fillPrimitiveCache(
   return totals;
 }
 
+[[nodiscard]] std::size_t fluxNeighborTargetCell(
+    const HydroPatchGeometry& geometry,
+    const HydroFace& face) {
+  if (face.ghost_cell_slot == k_invalid_ghost_cell_slot) {
+    return face.neighbor_cell;
+  }
+  if (face.ghost_cell_slot >= geometry.ghost_cells.size()) {
+    throw std::invalid_argument("Hydro face references an invalid ghost cell slot");
+  }
+
+  const HydroGhostCell& ghost = geometry.ghost_cells[face.ghost_cell_slot];
+  if (ghost.boundary_kind == HydroBoundaryKind::kPeriodic) {
+    // Periodic ghosts are only reconstruction scratch.  The conservative
+    // update must land on the wrapped authoritative real cell, otherwise a
+    // production periodic patch leaks flux into non-authoritative ghost storage.
+    return ghost.source_real_cell;
+  }
+
+  // Open and reflective physical-boundary ghosts are not authoritative cells.
+  // Imported MPI ghosts are restored after the stage and owner-side correction
+  // records handle the real-rank update path, so the local solver must not
+  // mutate them as truth.
+  return k_invalid_cell_index;
+}
+
 }  // namespace
 
 HydroConservedState& HydroConservedState::operator+=(const HydroConservedState& rhs) {
@@ -579,9 +604,10 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     const HydroFace& face = geometry.faces[face_index];
     scratch.cell_delta[face.owner_cell] = HydroConservedState{};
     scratch.touched_cells.push_back(face.owner_cell);
-    if (face.neighbor_cell != k_invalid_cell_index) {
-      scratch.cell_delta[face.neighbor_cell] = HydroConservedState{};
-      scratch.touched_cells.push_back(face.neighbor_cell);
+    const std::size_t neighbor_target = fluxNeighborTargetCell(geometry, face);
+    if (neighbor_target != k_invalid_cell_index) {
+      scratch.cell_delta[neighbor_target] = HydroConservedState{};
+      scratch.touched_cells.push_back(neighbor_target);
     }
   }
   if (primitive_cache != nullptr) {
@@ -628,8 +654,9 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     const HydroFace& face = geometry.faces[face_index];
     const HydroConservedState face_delta = (flux_scale * face.area_comoving) * scratch.fluxes[active_face_slot];
     scratch.cell_delta[face.owner_cell] -= face_delta;
-    if (face.neighbor_cell != k_invalid_cell_index) {
-      scratch.cell_delta[face.neighbor_cell] += face_delta;
+    const std::size_t neighbor_target = fluxNeighborTargetCell(geometry, face);
+    if (neighbor_target != k_invalid_cell_index) {
+      scratch.cell_delta[neighbor_target] += face_delta;
     }
   }
   const auto accumulate_stop = std::chrono::steady_clock::now();

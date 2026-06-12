@@ -1071,6 +1071,7 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
     state.sidecars.upsert(std::move(block));
   }
 
+  validateHydroGeometryStateForRestart(state, "restart reader");
   if (!state.validateOwnershipInvariants()) {
     throw std::runtime_error("restart state failed ownership invariant validation");
   }
@@ -1708,6 +1709,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       readStringDataset(file.get(), std::string(shared_names.provenance_record_dataset)));
 
   readStateGroup(file.get(), result.state);
+  validateHydroGeometryStateForRestart(result.state, "restart reader");
 
   Hdf5Handle integrator_group(H5Gopen2(file.get(), "/integrator", H5P_DEFAULT));
   result.integrator_state.current_time_code = readScalarF64Attribute(integrator_group.get(), "current_time_code");

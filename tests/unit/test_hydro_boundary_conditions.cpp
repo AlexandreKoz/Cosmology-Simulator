@@ -1,8 +1,10 @@
 #include <cassert>
 #include <cmath>
+#include <vector>
 
 #include "cosmosim/hydro/hydro_boundary_conditions.hpp"
 #include "cosmosim/hydro/hydro_cartesian_patch.hpp"
+#include "cosmosim/hydro/hydro_riemann.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
 
 namespace {
@@ -171,11 +173,74 @@ void testImportedGhostMetadataIsReadOnly() {
   assertClose(actual.total_energy_density_comoving, sentinel.total_energy_density_comoving);
 }
 
+[[nodiscard]] std::vector<std::size_t> indexRange(std::size_t count) {
+  std::vector<std::size_t> indices(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    indices[i] = i;
+  }
+  return indices;
+}
+
+void testPeriodicGhostFluxUpdatesWrappedRealCell() {
+  auto geometry = makeGeometry(cosmosim::hydro::HydroBoundaryKind::kPeriodic);
+  cosmosim::hydro::HydroConservedStateSoa conserved(geometry.totalCellStorageCount());
+  fillRealCells(conserved, geometry);
+  cosmosim::hydro::fillHydroBoundaryGhostCells(conserved, geometry, k_gamma);
+
+  const std::vector<std::size_t> real_cells = indexRange(geometry.cellCount());
+  const std::vector<std::size_t> active_faces = indexRange(geometry.faces.size());
+  const cosmosim::hydro::HydroConservationTotals initial =
+      cosmosim::hydro::HydroCoreSolver::conservationTotals(conserved, geometry, real_cells);
+
+  cosmosim::hydro::HydroUpdateContext update{.dt_code = 2.5e-4, .scale_factor = 1.0, .hubble_rate_code = 0.0};
+  cosmosim::hydro::HydroSourceContext source_context{.update = update};
+  cosmosim::hydro::HydroCoreSolver solver(k_gamma);
+  cosmosim::hydro::MusclHancockReconstruction reconstruction(cosmosim::hydro::HydroReconstructionPolicy{
+      .limiter = cosmosim::hydro::HydroSlopeLimiter::kMonotonizedCentral,
+      .dt_over_dx_code = update.dt_code / geometry.cell_width_x_comoving,
+      .dt_over_cell_width_code = {
+          update.dt_code / geometry.cell_width_x_comoving,
+          update.dt_code / geometry.cell_width_y_comoving,
+          update.dt_code / geometry.cell_width_z_comoving},
+      .rho_floor = 1.0e-12,
+      .pressure_floor = 1.0e-12,
+      .enable_muscl_hancock_predictor = true,
+      .adiabatic_index = k_gamma});
+  cosmosim::hydro::HllcRiemannSolver riemann_solver;
+  cosmosim::hydro::HydroScratchBuffers scratch;
+  cosmosim::hydro::HydroPrimitiveCacheSoa primitive_cache(conserved.size());
+
+  for (std::size_t step = 0; step < 4U; ++step) {
+    cosmosim::hydro::fillHydroBoundaryGhostCells(conserved, geometry, k_gamma);
+    solver.advancePatchActiveSetWithScratch(
+        conserved,
+        geometry,
+        cosmosim::hydro::HydroActiveSetView{.active_cells = real_cells, .active_faces = active_faces},
+        update,
+        reconstruction,
+        riemann_solver,
+        {},
+        source_context,
+        scratch,
+        &primitive_cache,
+        nullptr);
+  }
+
+  const cosmosim::hydro::HydroConservationTotals final =
+      cosmosim::hydro::HydroCoreSolver::conservationTotals(conserved, geometry, real_cells);
+  assert(std::abs(final.mass - initial.mass) < 1.0e-10);
+  assert(std::abs(final.momentum_x - initial.momentum_x) < 1.0e-10);
+  assert(std::abs(final.momentum_y - initial.momentum_y) < 1.0e-10);
+  assert(std::abs(final.momentum_z - initial.momentum_z) < 1.0e-10);
+  assert(std::abs(final.total_energy - initial.total_energy) < 1.0e-10);
+}
+
 }  // namespace
 
 int main() {
   testPeriodicOpenReflectiveGhostRows();
   testReconstructionConsumesGhostState();
   testImportedGhostMetadataIsReadOnly();
+  testPeriodicGhostFluxUpdatesWrappedRealCell();
   return 0;
 }
