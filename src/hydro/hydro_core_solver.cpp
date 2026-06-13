@@ -592,11 +592,12 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   validateActiveSet(active_set, conserved, geometry);
   scratch.resize(conserved.size(), active_set.active_faces.size());
   HydroConservationReport conservation_report;
-  conservation_report.before = conservationTotals(conserved, geometry, active_set.active_cells);
-  conservation_report.cell_count = static_cast<std::uint64_t>(active_set.active_cells.size());
+
+  std::vector<unsigned char> active_cell_mask(conserved.size(), 0U);
   scratch.touched_cells.clear();
   scratch.touched_cells.reserve(active_set.active_faces.size() * 2U + active_set.active_cells.size());
   for (std::size_t cell_index : active_set.active_cells) {
+    active_cell_mask[cell_index] = 1U;
     scratch.cell_delta[cell_index] = HydroConservedState{};
     scratch.touched_cells.push_back(cell_index);
   }
@@ -610,6 +611,19 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
       scratch.touched_cells.push_back(neighbor_target);
     }
   }
+  std::sort(scratch.touched_cells.begin(), scratch.touched_cells.end());
+  scratch.touched_cells.erase(
+      std::unique(scratch.touched_cells.begin(), scratch.touched_cells.end()),
+      scratch.touched_cells.end());
+  const std::size_t real_cell_count = geometry.cellCount() == 0 ? conserved.size() : geometry.cellCount();
+  scratch.touched_cells.erase(
+      std::remove_if(
+          scratch.touched_cells.begin(),
+          scratch.touched_cells.end(),
+          [real_cell_count](std::size_t cell_index) { return cell_index >= real_cell_count; }),
+      scratch.touched_cells.end());
+  conservation_report.before = conservationTotals(conserved, geometry, scratch.touched_cells);
+  conservation_report.cell_count = static_cast<std::uint64_t>(scratch.touched_cells.size());
   if (primitive_cache != nullptr) {
     fillPrimitiveCache(conserved, active_set, geometry, m_adiabatic_index, *primitive_cache);
   }
@@ -662,18 +676,20 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   const auto accumulate_stop = std::chrono::steady_clock::now();
 
   const auto source_start = std::chrono::steady_clock::now();
-  for (std::size_t cell_index : active_set.active_cells) {
+  for (std::size_t cell_index : scratch.touched_cells) {
     const HydroConservedState old_cell = conserved.loadCell(cell_index);
-    const HydroPrimitiveState primitive = primitive_cache != nullptr
+    HydroPrimitiveState primitive = primitive_cache != nullptr
         ? primitive_cache->loadCell(cell_index)
         : primitiveFromConserved(old_cell, m_adiabatic_index);
 
     HydroConservedState source_total;
-    for (const HydroSourceTerm* source : source_terms) {
-      if (source == nullptr) {
-        continue;
+    if (active_cell_mask[cell_index] != 0U) {
+      for (const HydroSourceTerm* source : source_terms) {
+        if (source == nullptr) {
+          continue;
+        }
+        source_total += source->sourceForCell(cell_index, old_cell, primitive, source_context);
       }
-      source_total += source->sourceForCell(cell_index, old_cell, primitive, source_context);
     }
 
     const HydroConservedState flux_delta = scratch.cell_delta[cell_index];
@@ -715,7 +731,7 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   }
   const auto source_stop = std::chrono::steady_clock::now();
   const auto total_stop = std::chrono::steady_clock::now();
-  conservation_report.after = conservationTotals(conserved, geometry, active_set.active_cells);
+  conservation_report.after = conservationTotals(conserved, geometry, scratch.touched_cells);
   conservation_report.residual = conservation_report.after - conservation_report.before -
       conservation_report.flux_delta - conservation_report.source_delta - conservation_report.floor_delta;
 
@@ -735,7 +751,7 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     profile->source_ms += std::chrono::duration<double, std::milli>(source_stop - source_start).count();
     profile->total_ms += std::chrono::duration<double, std::milli>(total_stop - total_start).count();
     profile->bytes_moved += static_cast<std::uint64_t>(
-        (6U * active_set.active_cells.size() + 10U * active_set.active_faces.size()) * sizeof(double));
+        (6U * scratch.touched_cells.size() + 10U * active_set.active_faces.size()) * sizeof(double));
     profile->conservation = conservation_report;
   }
 }

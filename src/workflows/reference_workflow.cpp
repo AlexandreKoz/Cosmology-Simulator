@@ -2733,6 +2733,22 @@ void flushCommonArtifacts(
 #endif
 
 
+void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
+  if (state.cells.size() == 0 || state.patches.size() != 0) {
+    return;
+  }
+  state.patches.resize(1U);
+  state.patches.patch_id[0] = 1ULL;
+  state.patches.level[0] = 0;
+  state.patches.first_cell[0] = 0U;
+  state.patches.cell_count[0] = static_cast<std::uint32_t>(state.cells.size());
+  state.patches.owning_rank[0] = 0U;
+  if (state.cells.patch_index.size() != state.cells.size()) {
+    state.cells.patch_index.resize(state.cells.size());
+  }
+  std::fill(state.cells.patch_index.begin(), state.cells.patch_index.end(), 0U);
+}
+
 void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::SimulationState& state) {
   state.metadata.run_name = frozen_config.config.output.run_name;
   state.metadata.normalized_config_hash = frozen_config.provenance.config_hash;
@@ -2743,6 +2759,7 @@ void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::Simula
       ? state.metadata.scale_factor
       : std::max(1.0, frozen_config.config.numerics.t_code_begin);
   state.rebuildSpeciesIndex();
+  materializeRootHydroPatchIfMissing(state);
 }
 
 void initializeSchedulerBins(
@@ -4225,7 +4242,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
       const std::optional<std::size_t> k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[row]);
       if (!i.has_value() || !j.has_value() || !k.has_value() ||
           row_order_geometry.linearCellIndex(*i, *j, *k) != row) {
-        return std::nullopt;
+        throw std::runtime_error(
+            "hydro Cartesian geometry requires row-major gas-cell center ordering when centers form a full 3D patch");
       }
     }
     return spec;
