@@ -333,7 +333,7 @@ struct LocalGasCellCflMetadata {
   }
   const auto parent_it = particle_row_by_id.find(*record->parent_particle_id);
   if (parent_it == particle_row_by_id.end()) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell parent_particle_id is not a local particle");
+    return std::nullopt;
   }
   return parent_it->second;
 }
@@ -347,6 +347,33 @@ struct LocalGasCellCflMetadata {
     throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
   }
   return *record;
+}
+
+[[nodiscard]] std::uint32_t gasCellOwnerRankForLocalRow(
+    const core::SimulationState& state,
+    std::uint32_t cell_row,
+    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
+    std::string_view caller) {
+  if (cell_row >= state.cells.size()) {
+    throw std::out_of_range(std::string(caller) + ": gas-cell row is outside CellSoa");
+  }
+  const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+  if (patch_index < state.patches.size()) {
+    if (patch_index >= state.patches.owning_rank.size()) {
+      throw std::runtime_error(std::string(caller) + ": patch owning-rank lane is shorter than patch table");
+    }
+    return state.patches.owning_rank[patch_index];
+  }
+
+  const auto& identity = gasCellIdentityRecordForLocalRow(state, cell_row, caller);
+  if (!identity.parent_particle_id.has_value()) {
+    throw std::runtime_error(std::string(caller) + ": parentless gas cell has no valid patch owner");
+  }
+  const auto parent_it = particle_row_by_id.find(*identity.parent_particle_id);
+  if (parent_it == particle_row_by_id.end()) {
+    throw std::runtime_error(std::string(caller) + ": gas-cell parent_particle_id is not a local particle");
+  }
+  return state.particle_sidecar.owning_rank[parent_it->second];
 }
 
 [[nodiscard]] std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
@@ -1087,17 +1114,19 @@ void compactStateToCurrentOwner(
     item.memory_bytes = estimateParticleMemoryBytesForDecomposition(state, species_tag);
     double amr_patch_cost = 0.0;
     if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) && !state.cells.patch_index.empty()) {
-      try {
-        const std::uint32_t cell_row = state.gasCellRowForParticleId(item.entity_id);
-        if (cell_row < state.cells.patch_index.size()) {
-          const std::uint32_t patch_index = state.cells.patch_index[cell_row];
-          if (patch_index < patch_cell_count.size()) {
-            amr_patch_cost = static_cast<double>(patch_cell_count[patch_index]) *
-                (1.0 + static_cast<double>(std::max<std::int32_t>(state.patches.level[patch_index], 0)));
-          }
+      std::vector<std::uint32_t> seen_patch_indices;
+      for (const std::uint32_t cell_row : state.gas_cell_identity.rowsForParentParticleId(item.entity_id)) {
+        if (cell_row >= state.cells.patch_index.size()) {
+          continue;
         }
-      } catch (const std::exception&) {
-        amr_patch_cost = 0.0;
+        const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+        if (patch_index >= patch_cell_count.size() ||
+            std::find(seen_patch_indices.begin(), seen_patch_indices.end(), patch_index) != seen_patch_indices.end()) {
+          continue;
+        }
+        seen_patch_indices.push_back(patch_index);
+        amr_patch_cost += static_cast<double>(patch_cell_count[patch_index]) *
+            (1.0 + static_cast<double>(std::max<std::int32_t>(state.patches.level[patch_index], 0)));
       }
     }
     item.work_components = parallel::DecompositionWorkComponents{
@@ -1973,16 +2002,18 @@ void applyInitialGravityAwareDecomposition(
     const std::uint32_t species_tag = state.particle_sidecar.species_tag[particle_index];
     double amr_patch_cost = 0.0;
     if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) && !state.cells.patch_index.empty()) {
-      try {
-        const std::uint32_t cell_row = state.gasCellRowForParticleId(item.entity_id);
-        if (cell_row < state.cells.patch_index.size()) {
-          const std::uint32_t patch_index = state.cells.patch_index[cell_row];
-          if (patch_index < patch_cell_count.size()) {
-            amr_patch_cost = static_cast<double>(patch_cell_count[patch_index]);
-          }
+      std::vector<std::uint32_t> seen_patch_indices;
+      for (const std::uint32_t cell_row : state.gas_cell_identity.rowsForParentParticleId(item.entity_id)) {
+        if (cell_row >= state.cells.patch_index.size()) {
+          continue;
         }
-      } catch (const std::exception&) {
-        amr_patch_cost = 0.0;
+        const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+        if (patch_index >= patch_cell_count.size() ||
+            std::find(seen_patch_indices.begin(), seen_patch_indices.end(), patch_index) != seen_patch_indices.end()) {
+          continue;
+        }
+        seen_patch_indices.push_back(patch_index);
+        amr_patch_cost += static_cast<double>(patch_cell_count[patch_index]);
       }
     }
     const double local_density_d = static_cast<double>(std::max<std::uint32_t>(local_density, 1U));
@@ -2285,15 +2316,11 @@ struct HydroConservativeGhostSyncReport {
   snapshot.owner_ranks.reserve(state.cells.size());
   snapshot.conserved_state.reserve(state.cells.size());
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const auto gas_particle_index = parentParticleRowForGasCellRow(
+    const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
         state,
         cell_index,
         particle_row_by_id,
         "snapshotHydroGhostConservedCells");
-    if (!gas_particle_index.has_value()) {
-      continue;
-    }
-    const std::uint32_t owner_rank = state.particle_sidecar.owning_rank[*gas_particle_index];
     if (owner_rank == world_rank) {
       continue;
     }
@@ -2303,7 +2330,7 @@ struct HydroConservativeGhostSyncReport {
         "snapshotHydroGhostConservedCells");
     snapshot.cell_indices.push_back(cell_index);
     snapshot.gas_cell_ids.push_back(identity.gas_cell_id);
-    snapshot.parent_particle_ids.push_back(state.particle_sidecar.particle_id[*gas_particle_index]);
+    snapshot.parent_particle_ids.push_back(identity.parent_particle_id.value_or(0U));
     snapshot.owner_ranks.push_back(owner_rank);
     snapshot.conserved_state.push_back(conserved.loadCell(cell_index));
   }
@@ -4044,6 +4071,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
     const auto particle_row_by_id = buildParticleRowById(context.state);
+    std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
 
     rebuildGeometryIfNeeded(context.state, context.integrator_state.dt_time_code);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
@@ -4159,13 +4187,12 @@ class HydroStageCallback final : public core::IntegrationCallback {
         throw std::runtime_error("hydro conservative flux correction targeted an unknown local gas_cell_id");
       }
       const std::uint32_t cell_index = *correction_row;
-      const auto gas_particle_index = parentParticleRowForGasCellRow(
+      const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
           context.state,
           cell_index,
           particle_row_by_id,
           "hydro conservative flux correction");
-      if (!gas_particle_index.has_value() ||
-          context.state.particle_sidecar.owning_rank[*gas_particle_index] != world_rank) {
+      if (owner_rank != world_rank) {
         throw std::runtime_error("hydro conservative flux correction targeted a non-authoritative local ghost cell");
       }
       hydro::HydroConservedState owned = m_conserved.loadCell(cell_index);
@@ -4200,15 +4227,19 @@ class HydroStageCallback final : public core::IntegrationCallback {
     }
 
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
+      const std::uint32_t gas_cell_owner_rank = gasCellOwnerRankForLocalRow(
+          context.state,
+          static_cast<std::uint32_t>(cell_index),
+          particle_row_by_id,
+          "hydro callback primitive store");
+      if (gas_cell_owner_rank != world_rank) {
+        continue;
+      }
       const auto gas_particle_index = parentParticleRowForGasCellRow(
           context.state,
           static_cast<std::uint32_t>(cell_index),
           particle_row_by_id,
           "hydro callback primitive store");
-      if (gas_particle_index.has_value() &&
-          context.state.particle_sidecar.owning_rank[*gas_particle_index] != world_rank) {
-        continue;
-      }
       const hydro::HydroPrimitiveState primitive =
           hydro::HydroCoreSolver::primitiveFromConserved(m_conserved.loadCell(cell_index), k_gamma_adiabatic);
       context.state.gas_cells.density_code[cell_index] = primitive.rho_comoving;

@@ -313,6 +313,19 @@ void validateStochasticStateForRestart(
   return modules;
 }
 
+[[nodiscard]] std::vector<core::GasCellIdentityRecord> gasIdentityRecordsSortedByLocalRow(
+    const core::GasCellIdentityMap& identity_map) {
+  std::vector<core::GasCellIdentityRecord> records(
+      identity_map.records().begin(), identity_map.records().end());
+  std::sort(
+      records.begin(),
+      records.end(),
+      [](const core::GasCellIdentityRecord& lhs, const core::GasCellIdentityRecord& rhs) {
+        return lhs.local_cell_row < rhs.local_cell_row;
+      });
+  return records;
+}
+
 #if COSMOSIM_ENABLE_HDF5
 
 class Hdf5Handle {
@@ -821,19 +834,6 @@ void readStarSidecarGroup(hid_t state_group, core::StarParticleSidecar& stars) {
         "stellar_feedback_energy_channel_cumulative_erg_" + suffix,
         H5T_NATIVE_DOUBLE);
   }
-}
-
-[[nodiscard]] std::vector<core::GasCellIdentityRecord> gasIdentityRecordsSortedByLocalRow(
-    const core::GasCellIdentityMap& identity_map) {
-  std::vector<core::GasCellIdentityRecord> records(
-      identity_map.records().begin(), identity_map.records().end());
-  std::sort(
-      records.begin(),
-      records.end(),
-      [](const core::GasCellIdentityRecord& lhs, const core::GasCellIdentityRecord& rhs) {
-        return lhs.local_cell_row < rhs.local_cell_row;
-      });
-  return records;
 }
 
 void writeGasCellIdentityGroup(hid_t state_group, const core::SimulationState& state) {

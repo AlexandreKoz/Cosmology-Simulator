@@ -2,17 +2,15 @@
 
 Date: 2026-06-14
 Prompt ID: H2.7
-Scope: audit/documentation only; no solver numerics, AMR hydro implementation, config keys, output names, or restart datasets are changed by this closeout.
+Scope: H2 repair closeout after restoring build/test health; no AMR hydro implementation, config keys, output names, or restart dataset names are changed by this closeout.
 
 ## Verdict
 
-The H2 gas-cell identity design criterion is satisfied by code inspection: production hydro/runtime no longer requires local gas-cell count to equal local gas-particle count.
+H2 is now command-backed green for the targeted gas-cell identity, decoupled hydro, migration, split/merge/remap, and restart gates in this repair worktree. The previous CPU-debug compile blocker in `src/core/simulation_state_species.cpp` has been fixed, and the HDF5 restart round-trip blocker caused by empty serialized metadata string fields has also been fixed.
 
 The remaining `requireParticleBoundGasCellContract(...)` executable callers are legacy/import compatibility and tests only. The production runtime now validates dense `SimulationState::gas_cell_identity` coverage, gathers/scatters hydro state by stable `gas_cell_id`, and treats `parent_particle_id` as optional lineage/mirror metadata rather than identity authority.
 
-Command-backed H2 closure is blocked in this worktree by a CPU debug build failure in `src/core/simulation_state_species.cpp`: four calls to `requireGasCellIdentityMapCoversDenseRows(*this, "...")` resolve to the one-argument `SimulationState` member on MSVC instead of the intended free helper. H3 should not begin from this worktree until that compile blocker is fixed and the targeted H2 validation suite passes.
-
-After that compile blocker is fixed, H3 may begin only on the APIs and blockers listed below. H3 must not claim mature AMR gas ownership until scheduler cell authority, patch exchange, ghost synchronization, and parentless/multi-cell production paths are promoted beyond the current compatibility bridges.
+This closeout is still not permission to start H3 blindly: scheduler cell authority, AMR patch exchange, full MPI patch/gas-sidecar migration, and AMR reflux/ghost synchronization remain H3 surfaces. H3 may begin from this repaired worktree, but it must consume the H2 `gas_cell_id` APIs listed below and must not reintroduce parent-particle identity as gas truth.
 
 ## Evidence basis
 
@@ -76,7 +74,7 @@ The remaining runtime parent lookups are H3 surfaces, not H2 stop-condition bloc
 
 - adaptive timestep metadata can emit a sentinel when no parent particle exists;
 - drift/gravity/hydro callbacks update parent particle mirrors only when a parent is present;
-- flux-correction and ghost paths still need H3 promotion to `gas_cell_id`-native exchange before AMR production maturity;
+- hydro conservative ghost correction is now keyed by `gas_cell_id` and uses patch ownership for authority, but full AMR/MPI ghost synchronization remains an H3 surface;
 - scheduler cell mirror validation still has parent-backed compatibility behavior where a local parent exists.
 
 ## Parentless and multi-cell coverage
@@ -148,28 +146,59 @@ These are not H2 closeout blockers, but they are H3 prerequisites before AMR hyd
 
 ## Validation status
 
-Commands attempted:
+Commands run after the H2 repair pass:
 
 ```bash
 cmake --preset cpu-only-debug
-cmake --build --preset build-cpu-debug
-ctest --preset test-cpu-debug --output-on-failure -R "gas_cell|hydro_decoupled|migration|restart_equivalence_hydro_toy"
+cmake --build --preset build-cpu-debug --target \
+  test_unit_gas_cell_identity_invariants \
+  test_unit_simulation_state \
+  test_integration_stage6_active_views \
+  test_integration_gas_cell_split_merge_remap \
+  test_integration_hydro_decoupled_gas_cells \
+  test_integration_gas_cell_identity_migration \
+  test_integration_species_migration_invariants \
+  test_integration_hydro_sod_like \
+  test_unit_hydro_core_solver \
+  test_unit_hydro_boundary_conditions \
+  test_unit_hydro_reconstruction \
+  test_unit_time_integration \
+  test_unit_hydro_riemann \
+  test_integration_hydro_axis_symmetry \
+  test_integration_hydro_conservation_periodic \
+  test_integration_hierarchical_timestep_regression \
+  test_validation_hydro_classics
+ctest --preset test-cpu-debug --output-on-failure \
+  -R "gas_cell_identity|hydro_decoupled|gas_cell_split_merge_remap|species_migration|stage6_active_views|integration_hydro_sod_like|unit_simulation_state"
+ctest --preset test-cpu-debug --output-on-failure \
+  -R "unit_hydro_|integration_hydro_|validation_hydro|unit_time_integration|hierarchical_timestep"
+cmake --preset hdf5-debug
+cmake --build --preset build-hdf5-debug --target \
+  test_unit_restart_checkpoint_schema \
+  test_integration_restart_checkpoint_roundtrip \
+  test_integration_restart_equivalence_hydro_toy \
+  test_integration_hydro_decoupled_gas_cells \
+  test_integration_gas_cell_identity_migration
+ctest --preset test-hdf5-debug --output-on-failure \
+  -R "restart_checkpoint|restart_equivalence_hydro_toy|hydro_decoupled|gas_cell_identity_migration"
 bash ./scripts/ci/check_repo_hygiene.sh
 ```
 
 Outcomes:
 
-- `cmake --preset cpu-only-debug` passed when invoked through Visual Studio's bundled CMake because plain `cmake` is not on this PowerShell `PATH`.
-- The first build attempt without `VsDevCmd.bat` failed before repo code because `cl.exe` could not find standard library headers such as `<algorithm>` and `<array>`.
-- The build attempt inside `VsDevCmd.bat` reached repo code and failed before linking/tests:
-  - `src/core/simulation_state_species.cpp:365`
-  - `src/core/simulation_state_species.cpp:496`
-  - `src/core/simulation_state_species.cpp:1066`
-  - `src/core/simulation_state_species.cpp:1088`
-  - MSVC error: `SimulationState::requireGasCellIdentityMapCoversDenseRows` does not take two arguments.
-- The requested CTest regex was not run because `build-cpu-debug` did not complete.
-- `bash ./scripts/ci/check_repo_hygiene.sh` did not run because this Windows environment routes `bash` to WSL and WSL reports no installed Linux distributions.
+- CPU H2 gas-cell identity/decoupled-hydro/migration gate: 8/8 passed.
+- CPU H1 hydro carry-over gate: 11/11 passed.
+- HDF5 restart/decoupled-hydro/migration gate: 5/5 passed.
+- Repository hygiene: passed.
+
+Repair notes:
+
+- `src/core/simulation_state_species.cpp` now calls the one-argument `SimulationState::requireGasCellIdentityMapCoversDenseRows(...)` member from member functions instead of accidentally attempting a two-argument member call.
+- `src/io/restart_checkpoint.cpp` now exposes `gasIdentityRecordsSortedByLocalRow(...)` outside the HDF5-only block so CPU-only builds can hash v15 identity records.
+- `StateMetadata::deserialize(...)` accepts empty string-valued metadata fields emitted by `StateMetadata::serialize()` while preserving strict validation for malformed keys and numeric fields.
+- Runtime decomposition AMR patch-cost accounting no longer uses `gasCellRowForParticleId(...)`; it uses `GasCellIdentityMap::rowsForParentParticleId(...)` and therefore handles multi-cell parent cases without invoking the legacy particle-bound contract.
+- Hydro ghost snapshot/restore and primitive writeback now use gas-cell patch ownership for authority, with optional parent-particle mirrors only when a local parent exists. Parentless cells are no longer skipped by the conservative ghost snapshot path merely because they lack a parent particle.
 
 ## Reproducibility impact
 
-This closeout audit is documentation-only. It changes no runtime behavior, solver numerics, restart schema version, HDF5 dataset names, config normalization, provenance payloads, output naming, rank coordination, or scheduler semantics.
+This repair changes runtime behavior in targeted H2 ownership paths: migration identity-map validation calls are fixed, restart metadata deserialization accepts empty string-valued metadata fields, CPU-only restart hashing includes v15 gas-cell identity records, decomposition patch-cost accounting no longer relies on legacy particle-bound row lookup, and hydro ghost correction/writeback authority is keyed by gas-cell patch ownership. It does not change solver numerics, restart schema version, HDF5 dataset names, config normalization, provenance payloads, or output naming.

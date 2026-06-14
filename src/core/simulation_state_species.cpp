@@ -362,7 +362,7 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
 
     if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
       if (cells.size() != 0 || gas_cells.size() != 0) {
-        requireGasCellIdentityMapCoversDenseRows(*this, "packParticleMigrationRecords");
+        this->requireGasCellIdentityMapCoversDenseRows("packParticleMigrationRecords");
         const std::vector<std::uint32_t> rows = gas_cell_identity.rowsForParentParticleId(record.particle_id);
         if (rows.size() == 1U) {
           record.has_gas_cell_fields = true;
@@ -493,7 +493,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       !particle_sidecar.has_gravity_softening_override.empty();
   const bool state_has_gas_state = cells.size() != 0 || gas_cells.size() != 0;
   if (state_has_gas_state) {
-    requireGasCellIdentityMapCoversDenseRows(*this, "commitParticleMigration");
+    this->requireGasCellIdentityMapCoversDenseRows("commitParticleMigration");
   }
 
   auto require_inbound_sidecar_contract = [destination_expects_softening_value](
@@ -1063,7 +1063,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
 std::vector<GasCellMigrationRecord> SimulationState::packGasCellMigrationRecords(
     std::span<const std::uint32_t> local_cell_rows,
     std::uint64_t ghost_hydro_epoch) const {
-  requireGasCellIdentityMapCoversDenseRows(*this, "packGasCellMigrationRecords");
+  this->requireGasCellIdentityMapCoversDenseRows("packGasCellMigrationRecords");
   std::vector<GasCellMigrationRecord> records;
   records.reserve(local_cell_rows.size());
   for (const std::uint32_t row : local_cell_rows) {
@@ -1085,7 +1085,7 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
   if (commit.world_rank < 0) {
     throw std::invalid_argument("commitGasCellMigration: world_rank must be non-negative");
   }
-  requireGasCellIdentityMapCoversDenseRows(*this, "commitGasCellMigration");
+  this->requireGasCellIdentityMapCoversDenseRows("commitGasCellMigration");
 
   std::vector<std::uint8_t> remove_mask(cells.size(), 0U);
   const auto mark_remove = [&](std::uint32_t row, std::string_view label) {

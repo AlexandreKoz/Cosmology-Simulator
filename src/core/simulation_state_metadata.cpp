@@ -74,12 +74,15 @@ StateMetadata StateMetadata::deserialize(std::string_view text) {
     }
 
     const auto equal_pos = trimmed.find('=');
-    if (equal_pos == std::string::npos || equal_pos == 0 || equal_pos == trimmed.size() - 1) {
+    if (equal_pos == std::string::npos || equal_pos == 0) {
       throw std::invalid_argument("StateMetadata.deserialize: malformed line '" + line + "'");
     }
 
     const std::string key = trim(trimmed.substr(0, equal_pos));
     const std::string value = trim(trimmed.substr(equal_pos + 1));
+    if (key.empty()) {
+      throw std::invalid_argument("StateMetadata.deserialize: malformed line '" + line + "'");
+    }
 
     if (key == "schema_version") {
       metadata.schema_version = parseUint32(value, key);
