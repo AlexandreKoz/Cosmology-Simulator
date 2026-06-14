@@ -589,6 +589,50 @@ void refreshGasCellIdentityMapFromParticleBoundState(SimulationState& state) {
   state.gas_cell_identity.assign(std::move(records));
 }
 
+void refreshGasCellIdentityMapFromSidecarLanes(SimulationState& state) {
+  if (state.cells.size() != state.gas_cells.size() ||
+      state.gas_cells.gas_cell_id.size() != state.cells.size() ||
+      state.gas_cells.parent_particle_id.size() != state.cells.size()) {
+    throw std::runtime_error(
+        "refreshGasCellIdentityMapFromSidecarLanes: gas-cell sidecar lanes must cover dense CellSoa rows");
+  }
+  if (!state.patches.patch_id.empty() && state.cells.patch_index.size() != state.cells.size()) {
+    throw std::runtime_error(
+        "refreshGasCellIdentityMapFromSidecarLanes: cells.patch_index must cover dense CellSoa rows when patches exist");
+  }
+
+  std::vector<GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint64_t gas_cell_id = state.gas_cells.gas_cell_id[cell_index];
+    if (gas_cell_id == 0U) {
+      throw std::runtime_error(
+          "refreshGasCellIdentityMapFromSidecarLanes: gas_cell_id lanes must be nonzero");
+    }
+
+    std::uint64_t owning_patch_id = 0U;
+    if (!state.patches.patch_id.empty()) {
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index >= state.patches.size()) {
+        throw std::runtime_error(
+            "refreshGasCellIdentityMapFromSidecarLanes: cell patch_index is outside PatchSoa");
+      }
+      owning_patch_id = state.patches.patch_id[patch_index];
+    }
+
+    const std::uint64_t mirrored_parent = state.gas_cells.parent_particle_id[cell_index];
+    records.push_back(GasCellIdentityRecord{
+        .gas_cell_id = gas_cell_id,
+        .parent_particle_id = mirrored_parent == 0U
+            ? std::optional<std::uint64_t>{}
+            : std::optional<std::uint64_t>{mirrored_parent},
+        .owning_patch_id = owning_patch_id,
+        .local_cell_row = static_cast<std::uint32_t>(cell_index),
+    });
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
 bool gasCellIdentityMapMatchesParticleBoundState(const SimulationState& state) {
   if (!gasCellIdentityMatchesParticleOrder(state)) {
     return false;
@@ -664,6 +708,10 @@ bool SimulationState::gasCellIdentityMatchesParticleOrder() const {
 
 void SimulationState::refreshGasCellIdentityMapFromParticleBoundState() {
   cosmosim::core::refreshGasCellIdentityMapFromParticleBoundState(*this);
+}
+
+void SimulationState::refreshGasCellIdentityMapFromSidecarLanes() {
+  cosmosim::core::refreshGasCellIdentityMapFromSidecarLanes(*this);
 }
 
 bool SimulationState::gasCellIdentityMapMatchesParticleBoundState() const {

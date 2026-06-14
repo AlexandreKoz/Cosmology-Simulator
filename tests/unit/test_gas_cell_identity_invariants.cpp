@@ -126,6 +126,37 @@ void test_simulation_state_identity_map_materialization_and_drift_rejection() {
   assert(zero_parent_threw);
 }
 
+void test_sidecar_identity_refresh_synchronizes_patch_ownership() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(2);
+  state.resizePatches(1);
+  state.patches.patch_id[0] = 42;
+  state.patches.level[0] = 0;
+  state.patches.first_cell[0] = 0;
+  state.patches.cell_count[0] = 2;
+  state.patches.owning_rank[0] = 0;
+  state.cells.patch_index = {0, 0};
+  state.gas_cells.gas_cell_id = {7001, 7002};
+  state.gas_cells.parent_particle_id = {0, 9001};
+
+  state.gas_cell_identity.assign({
+      {.gas_cell_id = 7001, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 7002, .parent_particle_id = 9001, .owning_patch_id = 0, .local_cell_row = 1},
+  });
+  assert(!state.gasCellIdentityMapMatchesSidecarLanes());
+
+  state.refreshGasCellIdentityMapFromSidecarLanes();
+  assert(state.gasCellIdentityMapMatchesSidecarLanes());
+  const auto* first = state.gas_cell_identity.findByLocalRow(0);
+  const auto* second = state.gas_cell_identity.findByLocalRow(1);
+  assert(first != nullptr && second != nullptr);
+  assert(first->owning_patch_id == 42);
+  assert(second->owning_patch_id == 42);
+  assert(!first->parent_particle_id.has_value());
+  assert(second->parent_particle_id.has_value());
+  assert(*second->parent_particle_id == 9001);
+}
+
 void test_hydro_view_rejects_stale_gas_identity_generation() {
   cosmosim::core::SimulationState state = makeGasContractState();
   cosmosim::core::TransientStepWorkspace workspace;
@@ -351,6 +382,7 @@ void test_gas_cell_identity_map_row_remap_by_stable_id() {
 int main() {
   test_gas_cell_identity_invariants();
   test_simulation_state_identity_map_materialization_and_drift_rejection();
+  test_sidecar_identity_refresh_synchronizes_patch_ownership();
   test_hydro_view_rejects_stale_gas_identity_generation();
   test_hydro_view_scatters_by_stable_gas_cell_id_without_parent();
   test_gas_cell_reorder_resize_invariants();

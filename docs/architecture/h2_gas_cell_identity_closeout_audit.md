@@ -6,7 +6,7 @@ Scope: H2 repair closeout after restoring build/test health; no AMR hydro implem
 
 ## Verdict
 
-H2 is now command-backed green for the targeted gas-cell identity, decoupled hydro, migration, split/merge/remap, and restart gates in this repair worktree. The previous CPU-debug compile blocker in `src/core/simulation_state_species.cpp` has been fixed, and the HDF5 restart round-trip blocker caused by empty serialized metadata string fields has also been fixed.
+H2 is now command-backed green for the targeted gas-cell identity, decoupled hydro, migration, split/merge/remap, H1 carry-over hydro, restart, and HDF5 reference-workflow gates in this repair worktree. The previous CPU-debug compile blocker in `src/core/simulation_state_species.cpp` has been fixed; the HDF5 restart round-trip blocker caused by empty serialized metadata string fields has been fixed; and the HDF5 `integration_reference_workflow` checkpoint blocker caused by implicit-root patch materialization leaving stale `GasCellIdentityRecord::owning_patch_id` values has been fixed.
 
 The remaining `requireParticleBoundGasCellContract(...)` executable callers are legacy/import compatibility and tests only. The production runtime now validates dense `SimulationState::gas_cell_identity` coverage, gathers/scatters hydro state by stable `gas_cell_id`, and treats `parent_particle_id` as optional lineage/mirror metadata rather than identity authority.
 
@@ -157,6 +157,7 @@ cmake --build --preset build-cpu-debug --target \
   test_integration_gas_cell_split_merge_remap \
   test_integration_hydro_decoupled_gas_cells \
   test_integration_gas_cell_identity_migration \
+  test_integration_reference_workflow \
   test_integration_species_migration_invariants \
   test_integration_hydro_sod_like \
   test_unit_hydro_core_solver \
@@ -178,9 +179,10 @@ cmake --build --preset build-hdf5-debug --target \
   test_integration_restart_checkpoint_roundtrip \
   test_integration_restart_equivalence_hydro_toy \
   test_integration_hydro_decoupled_gas_cells \
-  test_integration_gas_cell_identity_migration
+  test_integration_gas_cell_identity_migration \
+  test_integration_reference_workflow
 ctest --preset test-hdf5-debug --output-on-failure \
-  -R "restart_checkpoint|restart_equivalence_hydro_toy|hydro_decoupled|gas_cell_identity_migration"
+  -R "restart_checkpoint|restart_equivalence_hydro_toy|hydro_decoupled|gas_cell_identity_migration|^integration_reference_workflow$"
 bash ./scripts/ci/check_repo_hygiene.sh
 ```
 
@@ -188,7 +190,7 @@ Outcomes:
 
 - CPU H2 gas-cell identity/decoupled-hydro/migration gate: 8/8 passed.
 - CPU H1 hydro carry-over gate: 11/11 passed.
-- HDF5 restart/decoupled-hydro/migration gate: 5/5 passed.
+- HDF5 restart/decoupled-hydro/migration/reference-workflow gate: 6/6 passed.
 - Repository hygiene: passed.
 
 Repair notes:
@@ -198,6 +200,8 @@ Repair notes:
 - `StateMetadata::deserialize(...)` accepts empty string-valued metadata fields emitted by `StateMetadata::serialize()` while preserving strict validation for malformed keys and numeric fields.
 - Runtime decomposition AMR patch-cost accounting no longer uses `gasCellRowForParticleId(...)`; it uses `GasCellIdentityMap::rowsForParentParticleId(...)` and therefore handles multi-cell parent cases without invoking the legacy particle-bound contract.
 - Hydro ghost snapshot/restore and primitive writeback now use gas-cell patch ownership for authority, with optional parent-particle mirrors only when a local parent exists. Parentless cells are no longer skipped by the conservative ghost snapshot path merely because they lack a parent particle.
+- `SimulationState::refreshGasCellIdentityMapFromSidecarLanes(...)` rebuilds authoritative identity records from dense gas-cell sidecar lanes and current `PatchSoa` ownership. `ReferenceWorkflow` root hydro patch materialization now calls it after creating an explicit root patch, so checkpoint validation sees `GasCellIdentityRecord::owning_patch_id` synchronized with `cells.patch_index -> patches.patch_id`.
+- `tests/unit/test_gas_cell_identity_invariants.cpp` includes a regression proving sidecar-lane identity refresh updates patch ownership while preserving parentless and parented identity semantics.
 
 ## Reproducibility impact
 

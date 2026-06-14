@@ -188,8 +188,9 @@ struct GasCellIdentityRecord {
 
 class GasCellIdentityMap {
  public:
-  // Isolated identity seam: not wired into production hydro/restart until schema migration is explicit.
-  // The map owns one validated row-space for gas-cell identity. Lookup indices are rebuilt atomically on
+  // Authoritative production row-space for gas-cell identity. Dense local rows remain transient
+  // indexing; gas_cell_id is the stable key across reorder, restart, split/merge, and migration.
+  // Lookup indices are rebuilt atomically on
   // assign(), and generation() changes after every successful mutation so future production views can
   // reject stale local-row mappings.
   void assign(std::vector<GasCellIdentityRecord> records);
@@ -527,6 +528,7 @@ class SimulationState {
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
   void refreshGasCellIdentityMapFromParticleBoundState();
+  void refreshGasCellIdentityMapFromSidecarLanes();
   [[nodiscard]] bool gasCellIdentityMapMatchesParticleBoundState() const;
   [[nodiscard]] std::uint64_t gasCellIdentityGeneration() const noexcept;
   void requireGasCellIdentityMapCoversDenseRows(std::string_view caller) const;
@@ -814,6 +816,7 @@ void debugAssertSpeciesSidecarOwnershipInvariants(const SimulationState& state);
 void refreshGasCellIdentityFromParticleOrder(SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMatchesParticleOrder(const SimulationState& state);
 void refreshGasCellIdentityMapFromParticleBoundState(SimulationState& state);
+void refreshGasCellIdentityMapFromSidecarLanes(SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMapMatchesParticleBoundState(const SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMapMatchesSidecarLanes(const SimulationState& state);
 void requireGasCellIdentityMapCoversDenseRows(const SimulationState& state, std::string_view caller);

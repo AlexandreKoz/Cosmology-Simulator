@@ -2853,6 +2853,11 @@ void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
     state.cells.patch_index.resize(state.cells.size());
   }
   std::fill(state.cells.patch_index.begin(), state.cells.patch_index.end(), 0U);
+
+  if (state.gas_cells.size() == state.cells.size() && !state.gas_cell_identity.empty()) {
+    state.refreshGasCellIdentityMapFromSidecarLanes();
+  }
+  state.bumpCellIndexGeneration();
 }
 
 void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::SimulationState& state) {
