@@ -179,7 +179,7 @@ CFL:
 
 Restart:
 
-- Restart schema is `cosmosim_restart_v14`.
+- Restart schema is `cosmosim_restart_v15`.
 - Hydro persistent lanes are not a separate hydro solver schema. They are part of `SimulationState`: cells, gas-cell identity, and gas thermodynamic fields.
 - `src/io/restart_checkpoint.cpp` requires and writes `/state/gas_cells/{gas_cell_id,parent_particle_id,density_code,pressure_code,internal_energy_code,temperature_code,sound_speed_code}`.
 - Restart integrity hashing includes the gas-cell hydro lanes and cell/particle time-bin mirrors.

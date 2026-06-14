@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <system_error>
 
 #include "cosmosim/core/profiling.hpp"
 
@@ -118,12 +119,14 @@ void testOperationalEventReportWriter() {
 
   std::ifstream in(path);
   const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
   assert(text.find("\"run_label\": \"unit_profiling\"") != std::string::npos);
   assert(text.find("\"provenance_config_hash_hex\": \"cafef00d\"") != std::string::npos);
   assert(text.find("\"event_kind\": \"restart.write.failure\"") != std::string::npos);
   assert(text.find("\"status\": \"error\"") != std::string::npos);
 
-  std::filesystem::remove(path);
+  std::error_code cleanup_error;
+  std::filesystem::remove(path, cleanup_error);
 }
 
 
@@ -140,10 +143,12 @@ void testOperationalReportIncludesMemoryAccounting() {
 
   std::ifstream in(path);
   const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
   assert(text.find("\"memory_report\"") != std::string::npos);
   assert(text.find("\"persistent_total_bytes\": 1024") != std::string::npos);
   assert(text.find("\"transient_total_bytes\": 256") != std::string::npos);
-  std::filesystem::remove(path);
+  std::error_code cleanup_error;
+  std::filesystem::remove(path, cleanup_error);
 }
 
 }  // namespace

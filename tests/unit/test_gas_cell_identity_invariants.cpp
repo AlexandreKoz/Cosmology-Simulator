@@ -45,7 +45,7 @@ std::unordered_map<std::uint64_t, double> densityByGasParticleId(const cosmosim:
   cosmosim::core::requireParticleBoundGasCellContract(state, "densityByGasParticleId");
   for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
     by_id.emplace(
-        cosmosim::core::parentParticleIdForGasCellRow(state, static_cast<std::uint32_t>(cell)),
+        cosmosim::core::parentParticleIdForGasCellRow(state, static_cast<std::uint32_t>(cell)).value(),
         state.gas_cells.density_code[cell]);
   }
   return by_id;
@@ -54,8 +54,15 @@ std::unordered_map<std::uint64_t, double> densityByGasParticleId(const cosmosim:
 void test_gas_cell_identity_invariants() {
   cosmosim::core::SimulationState state = makeGasContractState();
   cosmosim::core::requireParticleBoundGasCellContract(state, "test_gas_cell_identity_invariants");
-  assert(state.parentParticleIdForGasCellRow(0) == 100);
-  assert(state.parentParticleIdForGasCellRow(1) == 101);
+  assert(state.gasCellIdentityMapMatchesParticleBoundState());
+  state.requireGasCellIdentityMapCoversDenseRows("test_gas_cell_identity_invariants");
+  assert(state.gas_cell_identity.coversDenseLocalRows(state.cells.size()));
+  assert(state.gas_cell_identity.gasCellIdForLocalRow(0).has_value());
+  assert(*state.gas_cell_identity.gasCellIdForLocalRow(0) == 100);
+  assert(state.gas_cell_identity.rowForGasCellId(102).has_value());
+  assert(*state.gas_cell_identity.rowForGasCellId(102) == 2);
+  assert(state.parentParticleIdForGasCellRow(0).value() == 100);
+  assert(state.parentParticleIdForGasCellRow(1).value() == 101);
   assert(state.gasCellRowForParticleId(102) == 2);
   assert(state.gasParticleIndexForCellRow(1) == 2);
 
@@ -76,6 +83,99 @@ void test_gas_cell_identity_invariants() {
   // Reconstruction scratch lanes are persistent sidecar fields and are not part of HydroCellKernelView.
   assert(state.gas_cells.sound_speed_code[0] == 0.5);
   assert(state.gas_cells.internal_energy_code[2] == 302.0);
+}
+
+void test_simulation_state_identity_map_materialization_and_drift_rejection() {
+  cosmosim::core::SimulationState state = makeGasContractState();
+  const std::uint64_t initial_generation = state.gasCellIdentityGeneration();
+  assert(initial_generation > 0);
+
+  state.refreshGasCellIdentityMapFromParticleBoundState();
+  assert(state.gasCellIdentityGeneration() == initial_generation + 1);
+  assert(state.gasCellIdentityMapMatchesParticleBoundState());
+  state.requireGasCellIdentityMapFresh(state.gasCellIdentityGeneration(), "fresh generation");
+
+  bool stale_generation_threw = false;
+  try {
+    state.requireGasCellIdentityMapFresh(initial_generation, "stale generation");
+  } catch (const std::runtime_error&) {
+    stale_generation_threw = true;
+  }
+  assert(stale_generation_threw);
+
+  state.gas_cells.gas_cell_id[1] = 999999;
+  assert(!state.gasCellIdentityMapMatchesParticleBoundState());
+  bool contract_threw = false;
+  try {
+    cosmosim::core::requireParticleBoundGasCellContract(state, "drift rejection");
+  } catch (const std::runtime_error&) {
+    contract_threw = true;
+  }
+  assert(contract_threw);
+
+  state.gas_cells.gas_cell_id[1] = 101;
+  assert(state.gasCellIdentityMapMatchesParticleBoundState());
+
+  state.gas_cells.parent_particle_id[0] = 0;
+  bool zero_parent_threw = false;
+  try {
+    state.refreshGasCellIdentityMapFromParticleBoundState();
+  } catch (const std::runtime_error&) {
+    zero_parent_threw = true;
+  }
+  assert(zero_parent_threw);
+}
+
+void test_hydro_view_rejects_stale_gas_identity_generation() {
+  cosmosim::core::SimulationState state = makeGasContractState();
+  cosmosim::core::TransientStepWorkspace workspace;
+  const std::array<std::uint32_t, 1> active_cell{1};
+  auto view = cosmosim::core::buildHydroCellKernelView(state, active_cell, workspace);
+
+  state.refreshGasCellIdentityMapFromParticleBoundState();
+  assert(view.source_cell_index_generation == state.cellIndexGeneration());
+  assert(view.source_gas_cell_identity_generation != state.gasCellIdentityGeneration());
+
+  bool stale_identity_threw = false;
+  try {
+    cosmosim::core::scatterHydroCellKernelView(view, state);
+  } catch (const std::runtime_error&) {
+    stale_identity_threw = true;
+  }
+  assert(stale_identity_threw);
+}
+
+void test_hydro_view_scatters_by_stable_gas_cell_id_without_parent() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(3);
+  for (std::size_t row = 0; row < state.cells.size(); ++row) {
+    state.cells.center_x_comoving[row] = 10.0 + static_cast<double>(row);
+    state.cells.mass_code[row] = 1.0 + static_cast<double>(row);
+    state.gas_cells.density_code[row] = 100.0 + static_cast<double>(row);
+    state.gas_cells.pressure_code[row] = 200.0 + static_cast<double>(row);
+  }
+  state.gas_cell_identity.assign({
+      {.gas_cell_id = 7003, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 7001, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
+      {.gas_cell_id = 7002, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},
+  });
+
+  cosmosim::core::TransientStepWorkspace workspace;
+  const std::array<std::uint32_t, 1> active_cell{1};
+  auto view = cosmosim::core::buildHydroCellKernelView(state, active_cell, workspace);
+  assert(view.gas_cell_id[0] == 7001);
+  assert(view.local_cell_row[0] == 1);
+
+  view.cell_index[0] = 0;
+  view.local_cell_row[0] = 0;
+  view.density_code[0] = 444.0;
+  view.pressure_code[0] = 555.0;
+  cosmosim::core::scatterHydroCellKernelView(view, state);
+
+  assert(state.gas_cells.density_code[0] == 100.0);
+  assert(state.gas_cells.pressure_code[0] == 200.0);
+  assert(state.gas_cells.density_code[1] == 444.0);
+  assert(state.gas_cells.pressure_code[1] == 555.0);
 }
 
 void test_gas_cell_reorder_resize_invariants() {
@@ -250,6 +350,9 @@ void test_gas_cell_identity_map_row_remap_by_stable_id() {
 
 int main() {
   test_gas_cell_identity_invariants();
+  test_simulation_state_identity_map_materialization_and_drift_rejection();
+  test_hydro_view_rejects_stale_gas_identity_generation();
+  test_hydro_view_scatters_by_stable_gas_cell_id_without_parent();
   test_gas_cell_reorder_resize_invariants();
   test_decoupled_gas_cell_identity_map_api_shape();
   test_gas_cell_identity_map_row_remap_by_stable_id();

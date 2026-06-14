@@ -1,7 +1,7 @@
 # RFC: GasCellIdentityMap seam for decoupled gas ownership
 
-Status: Proposed infrastructure seam (P2 design-enabling upgrade)  
-Scope: identity/mapping API only; no hydro solver, AMR, moving-mesh, or restart schema behavior changes.
+Status: Promoted to `SimulationState` in-memory authority for H2.1; restart/hydro decoupling still staged
+Scope: identity/mapping API and core state ownership only; no hydro solver, AMR, moving-mesh, or restart schema behavior changes.
 
 ## Context
 
@@ -32,9 +32,13 @@ contains:
 The current implementation validates nonzero unique `gas_cell_id` values and unique `local_cell_row` values,
 rebuilds lookup tables atomically during `assign(...)`, exposes read-only records, supports lookup by stable gas-cell
 ID or local row, and carries a monotonic `generation()` counter. The generation counter is already present so a
-future production promotion can make hydro views and restart writers reject stale row mappings exactly as particle and
-cell active views do today. It is deliberately not stored inside `SimulationState` yet, so it cannot shadow the
-authoritative production gas contract or affect solver paths.
+H2.1 production promotion makes hydro views reject stale row mappings exactly as particle and cell active views do
+today. It is stored once inside `SimulationState`; no hydro, AMR, or workflow-local duplicate map is allowed.
+
+H2.1 stores one `GasCellIdentityMap` on `core::SimulationState`. During the legacy particle-bound transition,
+`GasCellSidecar::{gas_cell_id,parent_particle_id}` are compatibility mirrors synchronized from the map/materialization
+helpers rather than a second identity authority. Mutable hydro cell views capture the map generation so stale local-row
+mappings fail before scatter.
 
 The seam also provides `coversDenseLocalRows(cell_count)` / `requireCoversDenseLocalRows(...)` and
 `buildGasCellNewToOldRowMap(old_map, new_map)`. These utilities are intentionally small but not toy behavior: they
@@ -61,8 +65,9 @@ When the seam is promoted to production, these invalidation rules must be enforc
 
 ## Migration plan
 
-1. **Current state (this RFC):** keep `requireParticleBoundGasCellContract(...)` as the production gate. Add a
-   compile/unit-tested `GasCellIdentityMap` shape that can represent non-1:1 mappings in isolation.
+1. **H2.1 state:** keep `requireParticleBoundGasCellContract(...)` as the production gate while
+   `SimulationState::gas_cell_identity` owns the validated dense local row map. Legacy particle-bound materialization
+   requires nonzero mirrored parent IDs and fails if the map drifts from `gas_cells.{gas_cell_id,parent_particle_id}`.
 2. **Schema planning:** before serializing the map, define a new restart schema version and compatibility policy
    in `docs/output_schema.md` and migration notes. No restart payload changes are made by this RFC.
 3. **Dual-read transition:** when implemented, restart readers should accept the legacy particle-bound lanes and

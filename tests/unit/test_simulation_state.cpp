@@ -47,7 +47,9 @@ int main() {
       "GravityParticleKernelView hot contract changed: unexpected extra field(s)");
   static_assert(
       sizeof(cosmosim::core::HydroCellKernelView) ==
-          sizeof(std::span<std::uint32_t>) + (6 * sizeof(std::span<double>)) + sizeof(std::uint64_t),
+          sizeof(std::span<std::uint32_t>) + sizeof(std::span<std::uint64_t>) +
+              sizeof(std::span<std::uint32_t>) + (6 * sizeof(std::span<double>)) +
+              (2 * sizeof(std::uint64_t)),
       "HydroCellKernelView hot contract changed: unexpected extra field(s)");
 
   cosmosim::core::SimulationState state;
@@ -184,6 +186,7 @@ int main() {
   }
   hydro_fixture.species.count_by_species = {0, 3, 0, 0, 0};
   hydro_fixture.rebuildSpeciesIndex();
+  hydro_fixture.refreshGasCellIdentityFromParticleOrder();
   const std::array<std::uint32_t, 2> kernel_cell_indices{0, 1};
   auto hydro_view = cosmosim::core::buildHydroCellKernelView(hydro_fixture, kernel_cell_indices, workspace);
   hydro_view.center_x_comoving[1] = 44.0;
@@ -256,6 +259,7 @@ int main() {
       cell_state.gas_cells.pressure_code[i] = static_cast<double>(150 + i);
     }
     cell_state.rebuildSpeciesIndex();
+    cell_state.refreshGasCellIdentityFromParticleOrder();
     cosmosim::core::TransientStepWorkspace stale_workspace;
     const std::array<std::uint32_t, 2> stale_cell_indices{0, 1};
     auto stale_hydro_view = cosmosim::core::buildHydroCellKernelView(cell_state, stale_cell_indices, stale_workspace);
@@ -288,6 +292,7 @@ int main() {
       derivation_state.gas_cells.density_code[i] = static_cast<double>(40 + i);
     }
     derivation_state.rebuildSpeciesIndex();
+    derivation_state.refreshGasCellIdentityFromParticleOrder();
     const std::array<std::uint32_t, 2> authoritative_particle_indices{1, 3};
     const std::array<std::uint32_t, 1> authoritative_cell_indices{1};
     cosmosim::core::TransientStepWorkspace derivation_workspace;

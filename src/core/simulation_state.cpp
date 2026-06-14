@@ -140,6 +140,24 @@ std::optional<std::uint64_t> GasCellIdentityMap::gasCellIdForLocalRow(std::uint3
   return record->gas_cell_id;
 }
 
+std::optional<std::uint64_t> GasCellIdentityMap::parentParticleIdForGasCellId(
+    std::uint64_t gas_cell_id) const noexcept {
+  const auto* record = findByGasCellId(gas_cell_id);
+  if (record == nullptr) {
+    return std::nullopt;
+  }
+  return record->parent_particle_id;
+}
+
+std::optional<std::uint64_t> GasCellIdentityMap::owningPatchIdForGasCellId(
+    std::uint64_t gas_cell_id) const noexcept {
+  const auto* record = findByGasCellId(gas_cell_id);
+  if (record == nullptr) {
+    return std::nullopt;
+  }
+  return record->owning_patch_id;
+}
+
 std::vector<std::uint32_t> GasCellIdentityMap::rowsForParentParticleId(std::uint64_t parent_particle_id) const {
   std::vector<std::uint32_t> rows;
   for (const auto& record : m_records) {
@@ -411,23 +429,29 @@ void reorderParticles(
     throw std::invalid_argument("reorderParticles: inconsistent reorder map");
   }
   if (state.cells.size() > 0) {
-    requireParticleBoundGasCellContract(state, "reorderParticles");
-    const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
-    std::vector<std::uint64_t> gas_particle_ids_old;
-    gas_particle_ids_old.reserve(gas_globals.size());
-    for (const auto gas_global : gas_globals) {
-      gas_particle_ids_old.push_back(state.particle_sidecar.particle_id[gas_global]);
+    requireGasCellIdentityMapCoversDenseRows(state, "reorderParticles");
+    if (!gasCellIdentityMapMatchesSidecarLanes(state)) {
+      throw std::invalid_argument("reorderParticles: GasCellIdentityMap must match gas-cell sidecar mirror lanes");
     }
-    std::vector<std::uint64_t> gas_particle_ids_new;
-    gas_particle_ids_new.reserve(gas_globals.size());
-    for (const auto old_index : reorder_map.new_to_old_index) {
-      if (state.particle_sidecar.species_tag[old_index] == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
-        gas_particle_ids_new.push_back(state.particle_sidecar.particle_id[old_index]);
+    if (gasCellIdentityMapMatchesParticleBoundState(state)) {
+      const auto gas_globals = state.particle_species_index.globalIndices(ParticleSpecies::kGas);
+      std::vector<std::uint64_t> gas_particle_ids_old;
+      gas_particle_ids_old.reserve(gas_globals.size());
+      for (const auto gas_global : gas_globals) {
+        gas_particle_ids_old.push_back(state.particle_sidecar.particle_id[gas_global]);
       }
-    }
-    if (gas_particle_ids_new != gas_particle_ids_old) {
-      throw std::invalid_argument(
-          "reorderParticles: temporary gas-cell contract forbids gas-particle relative reorder without gas-cell rebuild");
+      std::vector<std::uint64_t> gas_particle_ids_new;
+      gas_particle_ids_new.reserve(gas_globals.size());
+      for (const auto old_index : reorder_map.new_to_old_index) {
+        if (state.particle_sidecar.species_tag[old_index] == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
+          gas_particle_ids_new.push_back(state.particle_sidecar.particle_id[old_index]);
+        }
+      }
+      if (gas_particle_ids_new != gas_particle_ids_old) {
+        throw std::invalid_argument(
+            "reorderParticles: legacy particle-bound gas-cell layout forbids gas-particle relative reorder without "
+            "gas-cell rebuild");
+      }
     }
   }
 
@@ -495,7 +519,11 @@ void refreshGasCellIdentityFromParticleOrder(SimulationState& state) {
     const std::uint64_t particle_id = state.particle_sidecar.particle_id[particle_index];
     state.gas_cells.gas_cell_id[cell_index] = particle_id;
     state.gas_cells.parent_particle_id[cell_index] = particle_id;
+    state.gas_cells.velocity_x_peculiar[cell_index] = state.particles.velocity_x_peculiar[particle_index];
+    state.gas_cells.velocity_y_peculiar[cell_index] = state.particles.velocity_y_peculiar[particle_index];
+    state.gas_cells.velocity_z_peculiar[cell_index] = state.particles.velocity_z_peculiar[particle_index];
   }
+  refreshGasCellIdentityMapFromParticleBoundState(state);
   state.bumpCellIndexGeneration();
 }
 
@@ -527,6 +555,105 @@ bool gasCellIdentityMatchesParticleOrder(const SimulationState& state) {
   return true;
 }
 
+void refreshGasCellIdentityMapFromParticleBoundState(SimulationState& state) {
+  if (!gasCellIdentityMatchesParticleOrder(state)) {
+    throw std::runtime_error(
+        "refreshGasCellIdentityMapFromParticleBoundState: legacy gas-cell lanes must match particle-bound order");
+  }
+
+  std::vector<GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint64_t gas_cell_id = state.gas_cells.gas_cell_id[cell_index];
+    const std::uint64_t parent_particle_id = state.gas_cells.parent_particle_id[cell_index];
+    if (gas_cell_id == 0U || parent_particle_id == 0U) {
+      throw std::runtime_error(
+          "refreshGasCellIdentityMapFromParticleBoundState: legacy particle-bound gas-cell IDs must be nonzero");
+    }
+    std::uint64_t owning_patch_id = 0;
+    if (!state.patches.patch_id.empty()) {
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index >= state.patches.size()) {
+        throw std::runtime_error(
+            "refreshGasCellIdentityMapFromParticleBoundState: cell patch_index is outside PatchSoa");
+      }
+      owning_patch_id = state.patches.patch_id[patch_index];
+    }
+    records.push_back(GasCellIdentityRecord{
+        .gas_cell_id = gas_cell_id,
+        .parent_particle_id = parent_particle_id,
+        .owning_patch_id = owning_patch_id,
+        .local_cell_row = static_cast<std::uint32_t>(cell_index),
+    });
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
+bool gasCellIdentityMapMatchesParticleBoundState(const SimulationState& state) {
+  if (!gasCellIdentityMatchesParticleOrder(state)) {
+    return false;
+  }
+  if (!state.gas_cell_identity.isConsistent() ||
+      !state.gas_cell_identity.coversDenseLocalRows(state.cells.size())) {
+    return false;
+  }
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const auto* record = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(cell_index));
+    if (record == nullptr) {
+      return false;
+    }
+    if (record->gas_cell_id != state.gas_cells.gas_cell_id[cell_index]) {
+      return false;
+    }
+    if (!record->parent_particle_id.has_value() ||
+        *record->parent_particle_id != state.gas_cells.parent_particle_id[cell_index]) {
+      return false;
+    }
+    if (record->parent_particle_id.value() == 0U || record->gas_cell_id == 0U) {
+      return false;
+    }
+    if (!state.patches.patch_id.empty()) {
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index >= state.patches.size() || record->owning_patch_id != state.patches.patch_id[patch_index]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool gasCellIdentityMapMatchesSidecarLanes(const SimulationState& state) {
+  if (!state.gas_cell_identity.isConsistent() ||
+      !state.gas_cell_identity.coversDenseLocalRows(state.cells.size())) {
+    return false;
+  }
+  if (state.gas_cells.gas_cell_id.size() != state.cells.size() ||
+      state.gas_cells.parent_particle_id.size() != state.cells.size()) {
+    return false;
+  }
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const auto* record = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(cell_index));
+    if (record == nullptr || record->gas_cell_id == 0U) {
+      return false;
+    }
+    if (state.gas_cells.gas_cell_id[cell_index] != record->gas_cell_id) {
+      return false;
+    }
+    const std::uint64_t mirrored_parent =
+        record->parent_particle_id.has_value() ? *record->parent_particle_id : 0U;
+    if (state.gas_cells.parent_particle_id[cell_index] != mirrored_parent) {
+      return false;
+    }
+    if (!state.patches.patch_id.empty()) {
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index >= state.patches.size() || record->owning_patch_id != state.patches.patch_id[patch_index]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 void SimulationState::refreshGasCellIdentityFromParticleOrder() {
   cosmosim::core::refreshGasCellIdentityFromParticleOrder(*this);
 }
@@ -535,7 +662,64 @@ bool SimulationState::gasCellIdentityMatchesParticleOrder() const {
   return cosmosim::core::gasCellIdentityMatchesParticleOrder(*this);
 }
 
-void requireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller) {
+void SimulationState::refreshGasCellIdentityMapFromParticleBoundState() {
+  cosmosim::core::refreshGasCellIdentityMapFromParticleBoundState(*this);
+}
+
+bool SimulationState::gasCellIdentityMapMatchesParticleBoundState() const {
+  return cosmosim::core::gasCellIdentityMapMatchesParticleBoundState(*this);
+}
+
+bool SimulationState::gasCellIdentityMapMatchesSidecarLanes() const {
+  return cosmosim::core::gasCellIdentityMapMatchesSidecarLanes(*this);
+}
+
+std::uint64_t SimulationState::gasCellIdentityGeneration() const noexcept {
+  return gas_cell_identity.generation();
+}
+
+void requireGasCellIdentityMapCoversDenseRows(const SimulationState& state, std::string_view caller) {
+  state.gas_cell_identity.requireCoversDenseLocalRows(state.cells.size(), caller);
+}
+
+void SimulationState::requireGasCellIdentityMapCoversDenseRows(std::string_view caller) const {
+  cosmosim::core::requireGasCellIdentityMapCoversDenseRows(*this, caller);
+}
+
+void requireGasCellIdentityMapFresh(
+    const SimulationState& state,
+    std::uint64_t expected_generation,
+    std::string_view caller) {
+  if (state.gas_cell_identity.generation() != expected_generation) {
+    throw std::runtime_error(std::string(caller) + ": stale GasCellIdentityMap generation");
+  }
+  requireGasCellIdentityMapCoversDenseRows(state, caller);
+}
+
+void SimulationState::requireGasCellIdentityMapFresh(
+    std::uint64_t expected_generation,
+    std::string_view caller) const {
+  cosmosim::core::requireGasCellIdentityMapFresh(*this, expected_generation, caller);
+}
+
+std::optional<std::uint32_t> SimulationState::rowForGasCellId(std::uint64_t gas_cell_id) const noexcept {
+  return gas_cell_identity.rowForGasCellId(gas_cell_id);
+}
+
+std::optional<std::uint64_t> SimulationState::gasCellIdForLocalRow(std::uint32_t local_cell_row) const noexcept {
+  return gas_cell_identity.gasCellIdForLocalRow(local_cell_row);
+}
+
+std::optional<std::uint64_t> SimulationState::parentParticleIdForGasCellId(
+    std::uint64_t gas_cell_id) const noexcept {
+  return gas_cell_identity.parentParticleIdForGasCellId(gas_cell_id);
+}
+
+std::optional<std::uint64_t> SimulationState::owningPatchIdForGasCellId(std::uint64_t gas_cell_id) const noexcept {
+  return gas_cell_identity.owningPatchIdForGasCellId(gas_cell_id);
+}
+
+void legacyRequireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller) {
   const std::size_t gas_particle_count = state.particle_species_index.count(ParticleSpecies::kGas);
   const std::size_t cell_count = state.cells.size();
   const std::size_t gas_cell_count = state.gas_cells.size();
@@ -544,30 +728,44 @@ void requireParticleBoundGasCellContract(const SimulationState& state, std::stri
   }
   if (cell_count != gas_cell_count) {
     throw std::runtime_error(std::string(caller) +
-        ": particle-bound gas-cell contract violated: CellSoa row count does not match GasCellSidecar row count");
+        ": legacy/import particle-bound gas-cell compatibility contract violated: CellSoa row count does not match "
+        "GasCellSidecar row count");
   }
   if (gas_particle_count != cell_count) {
     throw std::runtime_error(std::string(caller) +
-        ": particle-bound gas-cell contract violated: local gas particle count must equal local gas cell row count; "
-        "gas particle IDs are the stable identity anchors and cell_index is only a transient local row");
+        ": legacy/import particle-bound gas-cell compatibility contract violated: local gas particle count must equal "
+        "local gas cell row count; production hydro must use GasCellIdentityMap instead");
   }
   if (!gasCellIdentityMatchesParticleOrder(state)) {
     throw std::runtime_error(std::string(caller) +
-        ": particle-bound gas-cell contract violated: gas_cell_id and parent_particle_id lanes must equal the "
-        "canonical gas particle IDs in local gas-cell row order");
+        ": legacy/import particle-bound gas-cell compatibility contract violated: gas_cell_id and parent_particle_id "
+        "lanes must equal the canonical gas particle IDs in local gas-cell row order");
+  }
+  if (!gasCellIdentityMapMatchesParticleBoundState(state)) {
+    throw std::runtime_error(std::string(caller) +
+        ": legacy/import particle-bound gas-cell compatibility contract violated: SimulationState::gas_cell_identity "
+        "must match the compatibility gas_cell_id/parent_particle_id mirror lanes and cover dense local rows");
   }
 }
 
-std::uint64_t parentParticleIdForGasCellRow(const SimulationState& state, std::uint32_t cell_index) {
-  requireParticleBoundGasCellContract(state, "parentParticleIdForGasCellRow");
+void requireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller) {
+  legacyRequireParticleBoundGasCellContract(state, caller);
+}
+
+std::optional<std::uint64_t> parentParticleIdForGasCellRow(const SimulationState& state, std::uint32_t cell_index) {
   if (cell_index >= state.cells.size()) {
     throw std::out_of_range("parentParticleIdForGasCellRow: cell index out of range");
   }
-  return state.gas_cells.parent_particle_id[cell_index];
+  state.requireGasCellIdentityMapCoversDenseRows("parentParticleIdForGasCellRow");
+  const auto* record = state.gas_cell_identity.findByLocalRow(cell_index);
+  if (record == nullptr) {
+    throw std::runtime_error("parentParticleIdForGasCellRow: GasCellIdentityMap is missing local row");
+  }
+  return record->parent_particle_id;
 }
 
 std::uint32_t gasCellRowForParticleId(const SimulationState& state, std::uint64_t particle_id) {
-  requireParticleBoundGasCellContract(state, "gasCellRowForParticleId");
+  legacyRequireParticleBoundGasCellContract(state, "gasCellRowForParticleId");
   for (std::uint32_t cell_index = 0; cell_index < state.gas_cells.parent_particle_id.size(); ++cell_index) {
     if (state.gas_cells.parent_particle_id[cell_index] == particle_id) {
       return cell_index;
@@ -577,7 +775,7 @@ std::uint32_t gasCellRowForParticleId(const SimulationState& state, std::uint64_
 }
 
 std::uint32_t gasParticleIndexForCellRow(const SimulationState& state, std::uint32_t cell_index) {
-  requireParticleBoundGasCellContract(state, "gasParticleIndexForCellRow");
+  legacyRequireParticleBoundGasCellContract(state, "gasParticleIndexForCellRow");
   if (cell_index >= state.cells.size()) {
     throw std::out_of_range("gasParticleIndexForCellRow: cell index out of range");
   }
@@ -589,7 +787,11 @@ void SimulationState::requireParticleBoundGasCellContract(std::string_view calle
   cosmosim::core::requireParticleBoundGasCellContract(*this, caller);
 }
 
-std::uint64_t SimulationState::parentParticleIdForGasCellRow(std::uint32_t cell_index) const {
+void SimulationState::legacyRequireParticleBoundGasCellContract(std::string_view caller) const {
+  cosmosim::core::legacyRequireParticleBoundGasCellContract(*this, caller);
+}
+
+std::optional<std::uint64_t> SimulationState::parentParticleIdForGasCellRow(std::uint32_t cell_index) const {
   return cosmosim::core::parentParticleIdForGasCellRow(*this, cell_index);
 }
 
@@ -602,7 +804,7 @@ std::uint32_t SimulationState::gasParticleIndexForCellRow(std::uint32_t cell_ind
 }
 
 void debugAssertGasCellIdentityContract(const SimulationState& state) {
-  requireParticleBoundGasCellContract(state, "debugAssertGasCellIdentityContract");
+  legacyRequireParticleBoundGasCellContract(state, "debugAssertGasCellIdentityContract");
 }
 
 }  // namespace cosmosim::core

@@ -601,6 +601,16 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
   cosmosim_mark_runtime_truth_test(integration_species_migration_invariants migration sidecar)
 
+  add_executable(test_integration_gas_cell_identity_migration tests/integration/test_gas_cell_identity_migration.cpp)
+  target_link_libraries(test_integration_gas_cell_identity_migration PRIVATE cosmosim_core)
+  add_test(NAME integration_gas_cell_identity_migration COMMAND test_integration_gas_cell_identity_migration)
+  cosmosim_mark_runtime_truth_test(integration_gas_cell_identity_migration migration gas sidecar)
+
+  add_executable(test_integration_gas_cell_split_merge_remap tests/integration/test_gas_cell_split_merge_remap.cpp)
+  target_link_libraries(test_integration_gas_cell_split_merge_remap PRIVATE cosmosim_core cosmosim_hydro)
+  add_test(NAME integration_gas_cell_split_merge_remap COMMAND test_integration_gas_cell_split_merge_remap)
+  cosmosim_mark_runtime_truth_test(integration_gas_cell_split_merge_remap gas hydro sidecar)
+
   add_executable(test_integration_transform_fuzz_invariants tests/integration/test_transform_fuzz_invariants.cpp)
   target_link_libraries(test_integration_transform_fuzz_invariants PRIVATE cosmosim_all)
   add_test(NAME integration_transform_fuzz_invariants COMMAND test_integration_transform_fuzz_invariants)
@@ -667,6 +677,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_hydro_sod_like tests/integration/test_hydro_sod_like.cpp)
   target_link_libraries(test_integration_hydro_sod_like PRIVATE cosmosim_hydro)
   add_test(NAME integration_hydro_sod_like COMMAND test_integration_hydro_sod_like)
+  add_executable(test_integration_hydro_decoupled_gas_cells tests/integration/test_hydro_decoupled_gas_cells.cpp)
+  target_link_libraries(test_integration_hydro_decoupled_gas_cells PRIVATE cosmosim_core cosmosim_hydro)
+  add_test(NAME integration_hydro_decoupled_gas_cells COMMAND test_integration_hydro_decoupled_gas_cells)
+  cosmosim_mark_runtime_truth_test(integration_hydro_decoupled_gas_cells hydro gas integration)
 
   add_executable(test_integration_hydro_conservation_periodic tests/integration/test_hydro_conservation_periodic.cpp)
   target_link_libraries(test_integration_hydro_conservation_periodic PRIVATE cosmosim_hydro)
@@ -838,6 +852,7 @@ if(COSMOSIM_ENABLE_TESTS)
         test_unit_hot_cold_sidecar_layout
         test_integration_reorder_compaction_sidecars
         test_integration_species_migration_invariants
+        test_integration_gas_cell_identity_migration
         test_integration_transform_fuzz_invariants
         test_integration_softening_ownership_invariants
         test_integration_hierarchical_time_bins

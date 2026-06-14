@@ -1896,13 +1896,23 @@ void syncGasCellTimeBinMirrorsFromParticleScheduler(
   if (state.cells.size() == 0) {
     return;
   }
-  requireParticleBoundGasCellContract(state, "syncGasCellTimeBinMirrorsFromParticleScheduler");
+  state.requireGasCellIdentityMapCoversDenseRows("syncGasCellTimeBinMirrorsFromParticleScheduler");
   const auto persistent = scheduler.exportPersistentState();
   if (persistent.bin_index.size() < state.particles.size()) {
     throw std::invalid_argument("syncGasCellTimeBinMirrorsFromParticleScheduler: scheduler lacks particle bin entries");
   }
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const std::uint32_t particle_index = gasParticleIndexForCellRow(state, cell_index);
+    const auto parent_id = parentParticleIdForGasCellRow(state, cell_index);
+    if (!parent_id.has_value()) {
+      continue;
+    }
+    const auto particle_it =
+        std::find(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end(), *parent_id);
+    if (particle_it == state.particle_sidecar.particle_id.end()) {
+      throw std::invalid_argument("syncGasCellTimeBinMirrorsFromParticleScheduler: parent particle is not local");
+    }
+    const std::uint32_t particle_index =
+        static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
     state.cells.time_bin[cell_index] = persistent.bin_index[particle_index];
   }
 }
@@ -1958,16 +1968,24 @@ bool timeBinMirrorsMatchScheduler(
     if (state.cells.size() == 0) {
       return true;
     }
-    try {
-      requireParticleBoundGasCellContract(state, "timeBinMirrorsMatchScheduler");
-    } catch (const std::exception&) {
+    if (!state.gas_cell_identity.isConsistent() || !state.gas_cell_identity.coversDenseLocalRows(state.cells.size())) {
       return false;
     }
     if (hot.bin_index.size() < state.particles.size()) {
       return false;
     }
     for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
-      const std::uint32_t particle_index = gasParticleIndexForCellRow(state, i);
+      const auto parent_id = parentParticleIdForGasCellRow(state, i);
+      if (!parent_id.has_value()) {
+        continue;
+      }
+      const auto particle_it =
+          std::find(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end(), *parent_id);
+      if (particle_it == state.particle_sidecar.particle_id.end()) {
+        return false;
+      }
+      const std::uint32_t particle_index =
+          static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
       if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
         return false;
       }
@@ -2014,7 +2032,7 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     throw_particle(static_cast<std::uint32_t>(hot.bin_index.size()));
   }
   if ((domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
-      hot.bin_index.size() < state.particles.size()) {
+      hot.bin_index.size() < state.cells.size()) {
     throw_cell(static_cast<std::uint32_t>(hot.bin_index.size()));
   }
   if (domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) {
@@ -2026,11 +2044,10 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
   }
   if (domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) {
     if (state.cells.size() > 0) {
-      requireParticleBoundGasCellContract(state, "debugAssertTimeBinMirrorAuthorityInvariant");
+      requireGasCellIdentityMapCoversDenseRows(state, "debugAssertTimeBinMirrorAuthorityInvariant");
     }
     for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
-      const std::uint32_t particle_index = gasParticleIndexForCellRow(state, i);
-      if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
+      if (state.cells.time_bin[i] != hot.bin_index[i]) {
         throw_cell(i);
       }
     }

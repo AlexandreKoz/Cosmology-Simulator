@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -61,6 +63,9 @@ cosmosim::core::SimulationState makeH1CartesianHydroState(const std::string& run
     state.particles.velocity_x_peculiar[cidx] = 0.02 + 0.004 * static_cast<double>(ijk[1]);
     state.particles.velocity_y_peculiar[cidx] = -0.015 + 0.003 * static_cast<double>(ijk[2]);
     state.particles.velocity_z_peculiar[cidx] = 0.01 - 0.002 * static_cast<double>(ijk[0]);
+    state.gas_cells.velocity_x_peculiar[cidx] = state.particles.velocity_x_peculiar[cidx];
+    state.gas_cells.velocity_y_peculiar[cidx] = state.particles.velocity_y_peculiar[cidx];
+    state.gas_cells.velocity_z_peculiar[cidx] = state.particles.velocity_z_peculiar[cidx];
     state.gas_cells.density_code[cidx] = 1.0 + pattern;
     state.gas_cells.pressure_code[cidx] = 0.8 + 0.5 * pattern;
     state.gas_cells.temperature_code[cidx] =
@@ -72,6 +77,24 @@ cosmosim::core::SimulationState makeH1CartesianHydroState(const std::string& run
     state.cells.mass_code[cidx] = state.gas_cells.density_code[cidx] * geometry.cell_volume_comoving;
     state.particles.mass_code[cidx] = state.cells.mass_code[cidx];
   }
+  std::vector<cosmosim::core::GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::uint32_t cidx = 0; cidx < state.cells.size(); ++cidx) {
+    std::optional<std::uint64_t> parent_particle_id = state.gas_cells.parent_particle_id[cidx];
+    if (cidx == 0U) {
+      parent_particle_id = std::nullopt;
+    } else if (cidx == 2U) {
+      parent_particle_id = state.gas_cells.parent_particle_id[1U];
+    }
+    records.push_back(cosmosim::core::GasCellIdentityRecord{
+        .gas_cell_id = state.gas_cells.gas_cell_id[cidx],
+        .parent_particle_id = parent_particle_id,
+        .owning_patch_id = state.patches.patch_id[0],
+        .local_cell_row = cidx,
+    });
+    state.gas_cells.parent_particle_id[cidx] = parent_particle_id.value_or(0U);
+  }
+  state.gas_cell_identity.assign(std::move(records));
   assert(state.validateOwnershipInvariants());
   return state;
 }
@@ -82,9 +105,9 @@ void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& co
   for (std::size_t cidx = 0; cidx < context.state.cells.size(); ++cidx) {
     cosmosim::hydro::HydroPrimitiveState primitive;
     primitive.rho_comoving = context.state.gas_cells.density_code[cidx];
-    primitive.vel_x_peculiar = context.state.particles.velocity_x_peculiar[cidx];
-    primitive.vel_y_peculiar = context.state.particles.velocity_y_peculiar[cidx];
-    primitive.vel_z_peculiar = context.state.particles.velocity_z_peculiar[cidx];
+    primitive.vel_x_peculiar = context.state.gas_cells.velocity_x_peculiar[cidx];
+    primitive.vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[cidx];
+    primitive.vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[cidx];
     primitive.pressure_comoving = context.state.gas_cells.pressure_code[cidx];
     conserved.storeCell(cidx, cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(primitive, gamma));
   }
@@ -117,9 +140,9 @@ void applyProductionHydroStep(cosmosim::tests::RestartEquivalenceStepContext& co
     context.state.gas_cells.pressure_code[cidx] = primitive.pressure_comoving;
     context.state.cells.mass_code[cidx] = primitive.rho_comoving * geometry.cell_volume_comoving;
     context.state.particles.mass_code[cidx] = context.state.cells.mass_code[cidx];
-    context.state.particles.velocity_x_peculiar[cidx] = primitive.vel_x_peculiar;
-    context.state.particles.velocity_y_peculiar[cidx] = primitive.vel_y_peculiar;
-    context.state.particles.velocity_z_peculiar[cidx] = primitive.vel_z_peculiar;
+    context.state.gas_cells.velocity_x_peculiar[cidx] = primitive.vel_x_peculiar;
+    context.state.gas_cells.velocity_y_peculiar[cidx] = primitive.vel_y_peculiar;
+    context.state.gas_cells.velocity_z_peculiar[cidx] = primitive.vel_z_peculiar;
     context.state.gas_cells.internal_energy_code[cidx] =
         primitive.pressure_comoving / std::max((gamma - 1.0) * primitive.rho_comoving, 1.0e-30);
     context.state.gas_cells.temperature_code[cidx] =
@@ -136,6 +159,7 @@ int main() {
   const auto restart_path = cosmosim::tests::stage8RestartPath("restart_equivalence_hydro_toy");
   auto state = makeH1CartesianHydroState("restart_equivalence_hydro_toy");
   auto scheduler = cosmosim::tests::makeStage8Scheduler(static_cast<std::uint32_t>(state.particles.size()), 2);
+  scheduler.setElementBin(2, 1, scheduler.currentTick());
   auto integrator_state = cosmosim::tests::makeStage8IntegratorState(2, 2);
   auto output_state = cosmosim::tests::makeStage8OutputCadenceState(false);
   auto scenario = cosmosim::tests::makeStage8Scenario(

@@ -3,13 +3,17 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v14`) persists:
+The restart schema (`cosmosim_restart_v15`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
-- hydro geometry ownership lanes: cell centers, gas-cell identity and thermodynamic fields,
+- hydro geometry ownership lanes: cell centers, gas-cell identity, cell-local velocity, and thermodynamic fields,
   cell `patch_index`, and `PatchSoa` descriptors (`patch_id`, `level`, `first_cell`,
   `cell_count`, `owning_rank`),
+- authoritative gas-cell identity records under `/state/gas_cell_identity`, including
+  `gas_cell_id`, `has_parent_particle`, `parent_particle_id`, `owning_patch_id`,
+  `local_cell_row`, `local_row_reconstruction_policy=explicit_dense_local_cell_row`,
+  and `identity_generation_at_write` as an audit stamp,
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
 - `IntegratorState`,
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
@@ -29,19 +33,24 @@ Restart write payloads now carry `RestartPersistentStateView` (`persistent_state
 
 Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
 
-Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v14, so those states must not be serialized as persistent truth.
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v15, so those states must not be serialized as persistent truth.
 
 
 ## Restart diagnostics metadata
 
-Schema v14 adds a compact `/restart_diagnostics` group. It records the schema identity, current and last completed boundary kind, restart-safe decision, scheduler tick/bin/active/pending counts, PM cadence/field-version summary, output cadence summary, and stochastic module count. These fields are audit metadata only: authoritative continuation remains the serialized `SimulationState`, `IntegratorState`, scheduler arrays, output cadence state, stochastic state, distributed TreePM state, normalized config, provenance, and integrity hash.
+Schema v15 retains the compact `/restart_diagnostics` group. It records the schema identity, current and last completed boundary kind, restart-safe decision, scheduler tick/bin/active/pending counts, PM cadence/field-version summary, output cadence summary, and stochastic module count. These fields are audit metadata only: authoritative continuation remains the serialized `SimulationState`, `IntegratorState`, scheduler arrays, output cadence state, stochastic state, distributed TreePM state, normalized config, provenance, and integrity hash.
 
 ## File format and compatibility
 
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: exact version match (`14`).
+- Current compatibility policy: write current v15; read current v15 plus the documented
+  legacy particle-bound v14 import path.
+- v14 compatibility materializes `/state/gas_cell_identity` from
+  `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
+  and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
+  reinterpret `parent_particle_id=0` as absent in old files.
 - `v5` and older restart files are intentionally rejected because they can omit exact sidecar truth lanes required by v6, including materialized softening override mask/value datasets.
 
 ## Atomic write semantics
@@ -53,8 +62,8 @@ behavior on filesystems where `rename` is atomic.
 
 ## Integrity and provenance
 
-- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority. For particle-bound gas cells, derived cell `time_bin` mirrors are validated through each cell's parent gas particle scheduler entry rather than by cell-row count equality. Restart validation also requires hydro patch descriptors to cover every gas-cell row exactly once and requires each cell's `patch_index` to agree with the serialized patch range. H1 Cartesian CFL metadata remains derived from persistent cell centers/config and is not serialized as a scratch cache.
-- The hash covers particle lanes, sidecars, gas-cell identity lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
+- `restartPayloadIntegrityHash` hashes state+integrator+scheduler+config text/hash+provenance and first validates that derived particle `time_bin` mirrors match scheduler `bin_index` authority. For gas cells with a local parent particle, derived cell `time_bin` mirrors are validated through the parent scheduler entry; parentless gas-cell time-bin mirrors remain cell-local diagnostics until a future cell scheduler authority is introduced. Restart validation also requires hydro patch descriptors to cover every gas-cell row exactly once and requires each cell's `patch_index` to agree with the serialized patch range. H1 Cartesian CFL metadata remains derived from persistent cell centers/config and is not serialized as a scratch cache.
+- The hash covers particle lanes, sidecars, gas-cell mirror lanes, authoritative gas-cell identity records (`gas_cell_id`, `has_parent_particle`, `parent_particle_id`, `owning_patch_id`, `local_cell_row`, and reconstruction policy), gas-cell velocity and thermodynamic lanes, species counts, full star/BH/tracer sidecars (including stellar-evolution cumulative lanes), integrator
   time-bin context, scheduler persistent arrays (`bin_index`, `next_activation_tick`,
   `active_flag`, `pending_bin_index`), output cadence persistence fields, and the full serialized provenance payload. State `time_bin` arrays remain hash inputs for corruption detection, but restart continuation imports scheduler state and rebuilds mirrors rather than treating mirrors as fallback authority.
 - Because gravity TreePM metadata now lives in `ProvenanceRecord`, restart artifacts carry
@@ -130,7 +139,12 @@ Compatibility policy for legacy restart payloads is explicit:
 
 - Missing required continuation fields (for example scheduler persistent lanes such as
   `pending_bin_index`) are rejected with clear read errors.
-- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v14 after Stage 8 added restart diagnostics metadata without making diagnostics authoritative truth.
+- Stale particle `time_bin` mirrors that disagree with `/scheduler/bin_index` are rejected by hash/write/read validation before exact continuation is accepted. Stale particle-bound gas-cell `time_bin` mirrors are checked against the parent gas particle scheduler entry. This originated as a v6 compatibility check; the current schema is v15 after H2 gas-cell identity promotion added explicit identity records without making diagnostics authoritative truth.
+- v15 malformed identity records are rejected on read: duplicate or zero `gas_cell_id`,
+  missing `/state/gas_cell_identity/has_parent_particle`, non-binary parent flags,
+  `parent_particle_id=0` when `has_parent_particle=true`, nonzero parent values when
+  `has_parent_particle=false`, sparse or duplicate `local_cell_row`, and identity
+  `owning_patch_id` values that do not match each cell's owning `PatchSoa::patch_id`.
 - The v6 reader requires `/state/particle_sidecar/gravity_softening_comoving` and `/state/particle_sidecar/has_gravity_softening_override` datasets to be present. The mask remains authoritative; empty datasets encode no materialized per-particle softening lane, while populated datasets must satisfy `ParticleSidecar` ownership invariants. Missing lanes are rejected instead of being interpreted as implicit defaults.
 
 ## Parallel and scale-up note

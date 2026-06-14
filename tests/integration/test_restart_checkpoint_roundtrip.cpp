@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -120,6 +121,9 @@ void populateState(cosmosim::core::SimulationState& state) {
     state.gas_cells.internal_energy_code[i] = 50.0 + static_cast<double>(i);
     state.gas_cells.temperature_code[i] = 60.0 + static_cast<double>(i);
     state.gas_cells.sound_speed_code[i] = 70.0 + static_cast<double>(i);
+    state.gas_cells.velocity_x_peculiar[i] = 80.0 + static_cast<double>(i);
+    state.gas_cells.velocity_y_peculiar[i] = 90.0 + static_cast<double>(i);
+    state.gas_cells.velocity_z_peculiar[i] = 100.0 + static_cast<double>(i);
   }
 
   state.patches.patch_id[0] = 11;
@@ -156,6 +160,7 @@ void populateState(cosmosim::core::SimulationState& state) {
   state.sidecars.upsert(std::move(indexed_module_sidecar));
 
   state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   assert(state.validateOwnershipInvariants());
 }
 
@@ -447,6 +452,21 @@ void testRestartRoundtrip() {
   assert(restored.state.gasCellIdentityMatchesParticleOrder());
   assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
   assert(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
+  assert(restored.state.gas_cell_identity.size() == state.gas_cell_identity.size());
+  assert(restored.state.gasCellIdentityMapMatchesSidecarLanes());
+  for (std::uint32_t row = 0; row < restored.state.cells.size(); ++row) {
+    const auto* restored_record = restored.state.gas_cell_identity.findByLocalRow(row);
+    const auto* original_record = state.gas_cell_identity.findByLocalRow(row);
+    assert(restored_record != nullptr);
+    assert(original_record != nullptr);
+    assert(restored_record->gas_cell_id == original_record->gas_cell_id);
+    assert(restored_record->parent_particle_id == original_record->parent_particle_id);
+    assert(restored_record->owning_patch_id == original_record->owning_patch_id);
+    assert(restored_record->local_cell_row == original_record->local_cell_row);
+  }
+  assert(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
+  assert(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
+  assert(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
   assertSofteningPriorityResolution(restored.state);
   assert(restored.integrator_state.step_index == integrator_state.step_index);
   assert(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);
@@ -676,6 +696,49 @@ void testRestartRoundtrip() {
   assert(invalid_patch_reader_threw);
   std::filesystem::remove(invalid_patch_path);
 
+  const std::filesystem::path missing_parent_flag_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_gas_identity_has_parent.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(missing_parent_flag_path, payload);
+  hid_t missing_parent_flag_file = H5Fopen(missing_parent_flag_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(missing_parent_flag_file >= 0);
+  assert(H5Ldelete(missing_parent_flag_file, "/state/gas_cell_identity/has_parent_particle", H5P_DEFAULT) >= 0);
+  H5Fclose(missing_parent_flag_file);
+  bool missing_parent_flag_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(missing_parent_flag_path);
+  } catch (const std::runtime_error& error) {
+    missing_parent_flag_threw =
+        std::string(error.what()).find("/state/gas_cell_identity/has_parent_particle") != std::string::npos;
+  }
+  assert(missing_parent_flag_threw);
+  std::filesystem::remove(missing_parent_flag_path);
+
+  const std::filesystem::path duplicate_gas_id_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_duplicate_gas_cell_id.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(duplicate_gas_id_path, payload);
+  hid_t duplicate_gas_id_file = H5Fopen(duplicate_gas_id_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(duplicate_gas_id_file >= 0);
+  hid_t duplicate_gas_id_dataset =
+      H5Dopen2(duplicate_gas_id_file, "/state/gas_cell_identity/gas_cell_id", H5P_DEFAULT);
+  assert(duplicate_gas_id_dataset >= 0);
+  std::vector<std::uint64_t> duplicate_gas_ids(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
+  duplicate_gas_ids[1] = duplicate_gas_ids[0];
+  assert(H5Dwrite(
+             duplicate_gas_id_dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+             duplicate_gas_ids.data()) >= 0);
+  H5Dclose(duplicate_gas_id_dataset);
+  H5Fclose(duplicate_gas_id_file);
+  bool duplicate_gas_id_threw = false;
+  try {
+    (void)cosmosim::io::readRestartCheckpointHdf5(duplicate_gas_id_path);
+  } catch (const std::exception& error) {
+    duplicate_gas_id_threw =
+        std::string(error.what()).find("gas_cell_id") != std::string::npos ||
+        std::string(error.what()).find("payload integrity hash mismatch") != std::string::npos;
+  }
+  assert(duplicate_gas_id_threw);
+  std::filesystem::remove(duplicate_gas_id_path);
+
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(tamper_file >= 0);
   hid_t tamper_attr = H5Aopen(tamper_file, "payload_integrity_hash", H5P_DEFAULT);
@@ -872,10 +935,75 @@ void testRestartAfterReorderAndMigration() {
 #endif
 }
 
+void testParentlessGasCellRestartRoundtrip() {
+#if COSMOSIM_ENABLE_HDF5
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(0);
+  state.resizeCells(2);
+  state.resizePatches(1);
+  state.patches.patch_id[0] = 9100;
+  state.patches.level[0] = 2;
+  state.patches.first_cell[0] = 0;
+  state.patches.cell_count[0] = 2;
+  state.patches.owning_rank[0] = 0;
+  state.cells.patch_index[0] = 0;
+  state.cells.patch_index[1] = 0;
+  state.cells.center_x_comoving = {0.25, 0.75};
+  state.cells.center_y_comoving = {0.5, 0.5};
+  state.cells.center_z_comoving = {0.125, 0.875};
+  state.cells.mass_code = {2.0, 3.0};
+  state.gas_cell_identity.assign({
+      {.gas_cell_id = 8101, .parent_particle_id = std::nullopt, .owning_patch_id = 9100, .local_cell_row = 0},
+      {.gas_cell_id = 8102, .parent_particle_id = std::nullopt, .owning_patch_id = 9100, .local_cell_row = 1},
+  });
+  state.gas_cells.gas_cell_id = {8101, 8102};
+  state.gas_cells.parent_particle_id = {0, 0};
+  state.gas_cells.velocity_x_peculiar = {1.25, -0.5};
+  state.gas_cells.velocity_y_peculiar = {0.75, 2.5};
+  state.gas_cells.velocity_z_peculiar = {-1.0, 0.125};
+  state.gas_cells.density_code = {4.0, 5.0};
+  state.gas_cells.pressure_code = {6.0, 7.0};
+  state.gas_cells.internal_energy_code = {8.0, 9.0};
+  state.gas_cells.temperature_code = {10.0, 11.0};
+  state.gas_cells.sound_speed_code = {12.0, 13.0};
+  state.rebuildSpeciesIndex();
+  assert(state.validateOwnershipInvariants());
+
+  cosmosim::core::IntegratorState integrator_state;
+  integrator_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  integrator_state.last_completed_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
+  integrator_state.last_completed_restart_safe = true;
+  integrator_state.step_index = 9;
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(0);
+  scheduler.reset(0, 0, 0);
+  cosmosim::io::RestartWritePayload payload;
+  fillRestartPayload(payload, state, integrator_state, scheduler);
+
+  const std::filesystem::path checkpoint_path =
+      std::filesystem::temp_directory_path() / "cosmosim_restart_parentless_gas_cells.hdf5";
+  cosmosim::io::writeRestartCheckpointHdf5(checkpoint_path, payload);
+  const auto restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
+  assert(restored.state.validateOwnershipInvariants());
+  assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
+  assert(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
+  assert(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
+  assert(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
+  assert(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
+  for (std::uint32_t row = 0; row < restored.state.cells.size(); ++row) {
+    const auto* record = restored.state.gas_cell_identity.findByLocalRow(row);
+    assert(record != nullptr);
+    assert(!record->parent_particle_id.has_value());
+    assert(record->owning_patch_id == 9100);
+  }
+  std::filesystem::remove(checkpoint_path);
+#endif
+}
+
 }  // namespace
 
 int main() {
   testRestartRoundtrip();
   testRestartAfterReorderAndMigration();
+  testParentlessGasCellRestartRoundtrip();
   return 0;
 }

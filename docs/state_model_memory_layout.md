@@ -12,10 +12,10 @@ This document defines the persistent and transient memory contract for simulatio
   kernel/workspace products and are not restart truth.
 - `ParticleSidecar`: shared metadata (`particle_id`, species tags, flags, rank ownership).
 - `CellSoa`: gas-cell gravity skeleton (`center_*_comoving`, `mass_code`, `time_bin`, `patch_index`).
-- `GasCellSidecar`: persistent gas identity and thermodynamic sidecar (`density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`) plus the particle-bound gas identity lanes (`gas_cell_id`, `parent_particle_id`). Hydro transient reconstruction gradients are transient scratch, not restart truth. Gas particle ID is the stable identity anchor; gas cell row indices are local/transient and must not be serialized or consumed as universal identity.
+- `GasCellSidecar`: persistent gas-cell sidecar (`velocity_[xyz]_peculiar`, `density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`) plus compatibility identity mirrors (`gas_cell_id`, `parent_particle_id`). `parent_particle_id == 0` mirrors an authoritative parentless identity record; it is not a gas-cell ID sentinel. Hydro transient reconstruction gradients are transient scratch, not restart truth.
+- `GasCellIdentityMap`: authoritative in-memory gas-cell identity owner. It stores nonzero stable `gas_cell_id`, optional lineage-only `parent_particle_id`, stable `owning_patch_id`, and transient dense `local_cell_row` mappings with a generation counter. `SimulationState::refreshGasCellIdentityMapFromParticleBoundState()` materializes this map from legacy one-cell-per-gas-particle lanes, while general production identity validation accepts parentless cells and multiple rows with the same parent. Mutable hydro cell views capture the map generation so stale row mappings fail before scatter.
 - `StarParticleSidecar`, `BlackHoleParticleSidecar`, `TracerParticleSidecar`: species-cold metadata blocks keyed by global particle index.
 - `PatchSoa`: AMR patch descriptors and contiguous cell ranges.
-- `GasCellIdentityMap`: proposed, isolated identity seam for future AMR/moving-mesh decoupling. It is not yet stored as production state; see `docs/architecture/gas_cell_identity_map_rfc.md`.
 - `SpeciesContainer`: explicit species accounting ledger.
 - `ParticleSpeciesIndex`: explicit local/global species indexing map for branch-light species iteration.
 - `StateMetadata`: schema/provenance-sensitive run metadata.
@@ -55,34 +55,43 @@ storage.
 
 `buildGravityParticleKernelView` / `scatterGravityParticleKernelView` and
 `buildHydroCellKernelView` / `scatterHydroCellKernelView` provide explicit read/write compact views
-for gravity-hot and hydro-active loops. Hydro active-view build/scatter paths validate the temporary
-particle-bound gas-cell contract before solver kernels run; they may carry transient `cell_index` rows
-for scatter, but they must not infer stable particle identity from those rows without the named contract
-helpers. This keeps solver kernels independent from full-state layout and centralizes scatter/update semantics.
+for gravity-hot and hydro-active loops. Hydro active-view build/scatter paths validate dense
+`GasCellIdentityMap` coverage, carry stable `gas_cell_id` plus transient `local_cell_row`, and scatter
+by resolving the stable gas-cell ID through the current identity map. They do not require
+`cell_index == gas particle row`; parent-particle mirrors are optional workflow compatibility mirrors.
+This keeps solver kernels independent from full-state layout and
+centralizes scatter/update semantics.
 
-## Temporary gas-cell ownership contract
+## H2 gas-cell ownership transition
 
-Stage-0 gas cells are particle-bound finite-volume carriers. Until AMR or moving-mesh decoupling is
-implemented, any path that consumes local gas-cell rows must pass `requireParticleBoundGasCellContract(...)`:
+H2 promotes `SimulationState::gas_cell_identity` as the authoritative in-memory identity map. Production identity
+validation now requires only dense local-cell coverage, unique nonzero `gas_cell_id`, unique `local_cell_row`, and
+sidecar mirror agreement. Parent lineage is optional and non-unique: AMR split rows may share one old parent, and
+merged or newly created cells may be parentless.
+
+Legacy particle-bound adapters remain available behind `legacyRequireParticleBoundGasCellContract(...)`
+and the compatibility wrapper `requireParticleBoundGasCellContract(...)`:
 
 - local `CellSoa` rows, `GasCellSidecar` rows, and local gas-particle rows have equal counts;
-- `GasCellSidecar::gas_cell_id[cell]` and `parent_particle_id[cell]` equal the parent gas particle ID;
-- `parentParticleIdForGasCellRow(...)` maps transient cell rows to stable gas particle IDs;
-- `gasCellRowForParticleId(...)` maps stable gas particle IDs back to transient local rows after rebuild;
-- migration/compaction must rebuild hydro fields by gas particle ID before hydro kernels resume.
+- `GasCellIdentityMap` covers dense local rows and matches the compatibility mirror lanes;
+- `GasCellSidecar::gas_cell_id[cell]` and `parent_particle_id[cell]` mirror the parent gas particle ID;
+- `parentParticleIdForGasCellRow(...)` returns `std::optional<std::uint64_t>` from the identity map;
+- `gasCellRowForParticleId(...)` remains a legacy unique inverse and must only be used after the particle-bound contract;
+- migration/compaction paths that still operate by gas particle ID must rebuild hydro fields by particle ID before those legacy adapters resume.
 
-This is an explicit quarantine of the current 1:1 assumption, not an AMR design. Future many-cells-per-particle
-or cell-without-particle layouts should replace the helper implementations and contract, not add positional
-assumptions to workflow or solver code.
+Hydro kernels consume cell-local velocity from `GasCellSidecar::velocity_[xyz]_peculiar`. When a gas cell has a
+local parent particle, hydro writeback may update the particle mass and velocity compatibility mirrors through
+explicit optional-parent lookup. If multiple cells share one parent, the parent mirror is written at most once during
+the hydro store pass; cell-local gas state remains authoritative for every row. Parentless cells update only
+cell-local gas state, so restart can preserve their hydro state without particle velocity access.
 
 ## Future decoupled gas-cell identity seam
 
-`GasCellIdentityMap` is the documented next-step seam for AMR/moving-mesh readiness. It can represent multiple
-gas cells with the same optional parent particle, gas cells without a parent particle, stable patch ownership, and
-a transient `local_cell_row` mapping. Its current use is intentionally limited to isolated validation tests so it
-does not duplicate production authority or alter hydro/restart behavior. Promotion to production requires the
-restart-schema migration plan in `docs/architecture/gas_cell_identity_map_rfc.md`, plus tests proving hydro state
-remaps by stable `gas_cell_id` rather than particle index or row position.
+`GasCellIdentityMap` can represent multiple gas cells with the same optional parent particle, gas cells without a
+parent particle, stable patch ownership, and a transient `local_cell_row` mapping. H2.6 makes those layouts valid
+production state for local identity validation and hydro active-view scatter without requiring local gas-particle
+count to equal local gas-cell count. Remaining future work is distributed
+gas-cell scheduler identity exchange and schema-versioned compatibility import for older restart files.
 
 ## Hot/cold ownership contract (Stage 6.2)
 
@@ -90,7 +99,7 @@ remaps by stable `gas_cell_id` rather than particle index or row position.
 | --- | --- | --- | --- |
 | Particle hot lanes | `ParticleSoa`, `GravityParticleKernelView` | `position_[xyz]_comoving`, `velocity_[xyz]_peculiar`, `mass_code`, transient `particle_index` scatter key | `particle_id`, species tag, owning rank, flags, SFC key, module state |
 | Particle cold metadata | `ParticleSidecar` + species sidecars | IDs, species tags, ownership, flags, SFC, provenance-adjacent bookkeeping, optional per-species/module payloads | mutation from gravity/hydro hot-view scatter paths |
-| Gas/cell hot lanes | `CellSoa`, `HydroCellKernelView` | `center_[xyz]_comoving`, `mass_code`, `density_code`, `pressure_code`, transient `cell_index` scatter key | gas identity metadata (`gas_cell_id`, `parent_particle_id`), patch metadata, transient reconstruction gradients |
+| Gas/cell hot lanes | `CellSoa`, `HydroCellKernelView` | `center_[xyz]_comoving`, `mass_code`, `density_code`, `pressure_code`, stable `gas_cell_id`, transient `local_cell_row` | parent-particle metadata, patch metadata, transient reconstruction gradients |
 | Transient scratch | `TransientStepWorkspace`, reconstruction/work arrays | active-list mirrors, kernel gather/scatter buffers, temporary reconstruction/face work | restart truth or persistent ownership |
 
 The unit contract tests now assert that gravity/hydro hot-view scatter updates only allowed hot lanes and leaves cold sidecars untouched.

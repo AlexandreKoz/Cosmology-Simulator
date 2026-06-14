@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
+#include "cosmosim/core/build_config.hpp"
 
 [[nodiscard]] std::string readFile(const std::filesystem::path& path) {
   std::ifstream in(path);
@@ -102,6 +103,7 @@ int main() {
 
   std::ifstream op_in(report.operational_report_json_path);
   const std::string op_text((std::istreambuf_iterator<char>(op_in)), std::istreambuf_iterator<char>());
+  op_in.close();
   assert(op_text.find("\"event_kind\": \"config.freeze\"") != std::string::npos);
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
@@ -179,6 +181,7 @@ int main() {
           restart_diagnostics_config,
           "test_reference_workflow_restart_diagnostics");
   cosmosim::workflows::ReferenceWorkflowRunner restart_diagnostics_runner(restart_diagnostics_frozen);
+#if COSMOSIM_ENABLE_HDF5
   const cosmosim::workflows::ReferenceWorkflowReport restart_diagnostics_report =
       restart_diagnostics_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = true});
   assert(restart_diagnostics_report.restart_roundtrip_executed);
@@ -189,6 +192,18 @@ int main() {
   assert(restart_diag_events_text.find("\"event_kind\": \"restart.read.complete\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"payload_hash_hex\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"scheduler_pending_transition_count\"") != std::string::npos);
+#else
+  bool trapped_hdf5_disabled = false;
+  try {
+    (void)restart_diagnostics_runner.run(
+        output_dir,
+        cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = true});
+  } catch (const std::runtime_error& error) {
+    trapped_hdf5_disabled =
+        std::string(error.what()).find("lacks HDF5 support") != std::string::npos;
+  }
+  assert(trapped_hdf5_disabled);
+#endif
 
   auto invalidGravityConfig = []() {
     std::stringstream cfg;
@@ -270,8 +285,10 @@ int main() {
       zoom_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
   std::ifstream zoom_op_in(zoom_report.operational_report_json_path);
   const std::string zoom_op_text((std::istreambuf_iterator<char>(zoom_op_in)), std::istreambuf_iterator<char>());
+  zoom_op_in.close();
   assert(zoom_op_text.find("\"zoom_membership_source\": \"particle_id_file_text\"") != std::string::npos);
 
-  std::filesystem::remove_all(output_dir);
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_dir, cleanup_error);
   return 0;
 }

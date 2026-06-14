@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 
 #include "cosmosim/analysis/halo_workflow.hpp"
 
@@ -53,9 +54,11 @@ int main() {
 
   std::ifstream in(report.halo_catalog_path);
   std::string json_text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
   assert(json_text.find("cosmosim_halo_catalog_v1") != std::string::npos);
   assert(json_text.find("\"schema_version\": 1") != std::string::npos);
 
-  std::filesystem::remove_all(output_root);
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_root, cleanup_error);
   return 0;
 }

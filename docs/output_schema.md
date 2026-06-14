@@ -36,14 +36,19 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v14`
-- `version = 14`
+- `name = cosmosim_restart_v15`
+- `version = 15`
 
 Restart payload includes:
 
 - `SimulationState`
 - hydro geometry state under `/state/cells`, `/state/gas_cells`, and `/state/patches`
+  (`/state/gas_cells/velocity_[xyz]_peculiar` is persistent cell-local hydro velocity truth)
   (`patch_id`, `level`, `first_cell`, `cell_count`, `owning_rank`)
+- authoritative gas-cell identity records under `/state/gas_cell_identity`:
+  `gas_cell_id`, `has_parent_particle`, `parent_particle_id`, `owning_patch_id`,
+  `local_cell_row`, `@local_row_reconstruction_policy`, and
+  `@identity_generation_at_write`
 - `IntegratorState`
 - `HierarchicalTimeBinScheduler` persistent state (`TimeBinPersistentState`)
 - distributed TreePM continuation metadata (`DistributedRestartState`)
@@ -60,7 +65,7 @@ Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 |---|---|
 | Shared metadata contract | normalized config text/hash, provenance payload, schema identity |
 | Snapshot-only (interoperable science output) | `/Header` cosmology attrs, `/PartTypeN` particle datasets, read aliases (`Position`, `VEL`, `ID`, etc.) |
-| Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, hydro patch geometry lanes (`CellSoa::patch_index`, gas-cell identity/thermodynamic lanes, `PatchSoa` descriptors and ownership), module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For particle-bound gas cells, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry, not by cell-row count equality. H1 Cartesian CFL widths are derived from persisted cell centers/config and are not serialized as scratch caches. |
+| Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, hydro patch geometry lanes (`CellSoa::patch_index`, gas-cell mirror lanes, authoritative `/state/gas_cell_identity` records, gas-cell velocity/thermodynamic lanes, `PatchSoa` descriptors and ownership), module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For gas cells with a local parent, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry; parentless cells retain their cell-local mirror until a future cell scheduler authority is introduced. H1 Cartesian CFL widths are derived from persisted cell centers/config and are not serialized as scratch caches. |
 
 Additive softening sidecar persistence:
 - Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.
@@ -72,16 +77,18 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. Stage 8 now advances the active restart schema to `cosmosim_restart_v14`. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid mirrors from scheduler state on import. Particle-bound gas-cell mirrors are compared through the parent gas particle scheduler entry.
+Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 keeps the active restart schema at `cosmosim_restart_v15` and fills out that schema with authoritative gas-cell identity records. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
 
 ## H1 Hydro Restart Geometry Note
 
-Schema v14 already persists the H1 restart-authoritative hydro geometry inputs needed to rebuild
-Cartesian gas-cell geometry deterministically: cell centers, gas-cell identity lanes, cell
-`patch_index`, and `PatchSoa` descriptors including patch ownership. Restart validation rejects
-patch ranges that overlap, omit cells, exceed the cell arrays, or disagree with per-cell
-`patch_index`. Transient hydro reconstruction scratch, ghost-fill buffers, face flux arrays, and
-derived CFL width caches remain outside restart payloads.
+Schema v15 persists the restart-authoritative hydro geometry inputs needed to rebuild
+Cartesian gas-cell geometry deterministically: cell centers, gas-cell mirror lanes,
+authoritative `/state/gas_cell_identity` records, cell `patch_index`, and `PatchSoa`
+descriptors including patch ownership. Restart validation rejects patch ranges that
+overlap, omit cells, exceed the cell arrays, disagree with per-cell `patch_index`, or
+disagree with identity-record `owning_patch_id`. Transient hydro reconstruction scratch,
+ghost-fill buffers, face flux arrays, and derived CFL width caches remain outside restart
+payloads.
 
 ## 3) Provenance payload
 
@@ -184,10 +191,18 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v14`, version `14`, because Stage 8 restart files now declare explicit file-kind metadata, persist output cadence/counter state, and include compact `/restart_diagnostics` audit metadata alongside scheduler/runtime truth.
+- Restart schema version/name are now `cosmosim_restart_v15`, version `15`, because H2 restart files persist cell-local gas velocity lanes and authoritative gas-cell identity records in addition to Stage 8 file-kind metadata, output cadence/counter state, and compact `/restart_diagnostics` audit metadata alongside scheduler/runtime truth.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v14`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v15`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
+- The reader accepts the documented legacy `cosmosim_restart_v14` particle-bound import path
+  by materializing `/state/gas_cell_identity` from
+  `/state/gas_cells/{gas_cell_id,parent_particle_id}` with
+  `has_parent_particle=true`; it requires `gas_cell_id == parent_particle_id != 0` and
+  does not reinterpret `parent_particle_id=0` as absent in old files.
+- New v15 files require `/state/gas_cell_identity/has_parent_particle`; malformed identity
+  records with duplicate or zero `gas_cell_id`, sparse `local_cell_row`, invalid parent
+  flags, or invalid patch ownership are rejected.
 - Restart v6 compatibility behavior is tightened without changing payload fields: non-empty
   `CellSoa::time_bin` mirrors must match the scheduler `bin_index` of each gas cell's
   parent particle, and restart import rebuilds cells from that parent-particle scheduler

@@ -1,7 +1,9 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "cosmosim/core/simulation_state.hpp"
 
@@ -41,6 +43,35 @@ int main() {
   for (const std::uint32_t idx : active) {
     assert(std::abs(state.particles.mass_code[idx] - (2.0 + 0.01 * static_cast<double>(idx))) < 1.0e-14);
   }
+
+  cosmosim::core::SimulationState gas_state;
+  gas_state.resizeCells(4);
+  for (std::size_t row = 0; row < gas_state.cells.size(); ++row) {
+    gas_state.cells.center_x_comoving[row] = static_cast<double>(row);
+    gas_state.cells.mass_code[row] = 10.0 + static_cast<double>(row);
+    gas_state.gas_cells.density_code[row] = 20.0 + static_cast<double>(row);
+    gas_state.gas_cells.pressure_code[row] = 30.0 + static_cast<double>(row);
+  }
+  gas_state.gas_cell_identity.assign({
+      {.gas_cell_id = 401, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 404, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
+      {.gas_cell_id = 402, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},
+      {.gas_cell_id = 403, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 3},
+  });
+
+  cosmosim::core::TransientStepWorkspace hydro_workspace;
+  std::array<std::uint32_t, 2> active_cells{1, 3};
+  auto hydro_compact = cosmosim::core::buildHydroCellKernelView(gas_state, active_cells, hydro_workspace);
+  assert(hydro_compact.gas_cell_id[0] == 404);
+  assert(hydro_compact.gas_cell_id[1] == 403);
+  hydro_compact.cell_index[0] = 0;
+  hydro_compact.cell_index[1] = 0;
+  hydro_compact.density_code[0] = 88.0;
+  hydro_compact.pressure_code[1] = 99.0;
+  cosmosim::core::scatterHydroCellKernelView(hydro_compact, gas_state);
+  assert(gas_state.gas_cells.density_code[0] == 20.0);
+  assert(gas_state.gas_cells.density_code[1] == 88.0);
+  assert(gas_state.gas_cells.pressure_code[3] == 99.0);
 
   return 0;
 }

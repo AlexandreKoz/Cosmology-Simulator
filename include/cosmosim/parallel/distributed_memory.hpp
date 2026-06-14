@@ -626,6 +626,7 @@ struct AmrPatchPayloadRecord {
 
 
 struct HydroConservativeFluxCorrectionRecord {
+  std::uint64_t gas_cell_id = 0;
   std::uint64_t parent_particle_id = 0;
   int source_rank = 0;
   int owner_rank = 0;

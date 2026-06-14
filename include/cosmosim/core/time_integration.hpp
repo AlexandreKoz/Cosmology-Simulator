@@ -556,6 +556,9 @@ struct TimeStepGasCellCriteriaView {
   std::span<const double> cell_width_y_code;
   std::span<const double> cell_width_z_code;
   std::span<const double> cell_mass_code;
+  std::span<const double> velocity_x_peculiar;
+  std::span<const double> velocity_y_peculiar;
+  std::span<const double> velocity_z_peculiar;
   std::span<const double> density_code;
   std::span<const double> temperature_code;
   std::span<const double> sound_speed_code;

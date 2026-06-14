@@ -100,11 +100,16 @@ struct CellSoa {
 struct GasCellSidecar {
   // Persistent gas-cell identity and thermodynamic state excluded from gravity-hot paths.
   // Reconstruction gradients are transient hydro/workspace scratch, not restart truth.
-  // Stage-0 gas identity contract: gas cells are currently particle-bound finite-volume
-  // carriers. gas_cell_id and parent_particle_id are persistent identity lanes and must
-  // match the canonical gas-particle ordering whenever local gas cells exist.
+  // gas_cell_id is the stable nonzero identity mirror. parent_particle_id is legacy
+  // lineage metadata: a value of zero mirrors a parentless GasCellIdentityRecord.
+  // Cell-local velocity lanes are persistent hydro restart truth for parentless or
+  // split cells; particle velocities are compatibility mirrors only when a unique
+  // local parent particle is present.
   AlignedVector<std::uint64_t> gas_cell_id;
   AlignedVector<std::uint64_t> parent_particle_id;
+  AlignedVector<double> velocity_x_peculiar;
+  AlignedVector<double> velocity_y_peculiar;
+  AlignedVector<double> velocity_z_peculiar;
   AlignedVector<double> density_code;
   AlignedVector<double> pressure_code;
   AlignedVector<double> internal_energy_code;
@@ -200,6 +205,8 @@ class GasCellIdentityMap {
   [[nodiscard]] const GasCellIdentityRecord* findByLocalRow(std::uint32_t local_cell_row) const noexcept;
   [[nodiscard]] std::optional<std::uint32_t> rowForGasCellId(std::uint64_t gas_cell_id) const noexcept;
   [[nodiscard]] std::optional<std::uint64_t> gasCellIdForLocalRow(std::uint32_t local_cell_row) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> parentParticleIdForGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> owningPatchIdForGasCellId(std::uint64_t gas_cell_id) const noexcept;
   [[nodiscard]] std::vector<std::uint32_t> rowsForParentParticleId(std::uint64_t parent_particle_id) const;
   [[nodiscard]] std::vector<std::uint32_t> rowsForPatch(std::uint64_t owning_patch_id) const;
 
@@ -359,18 +366,50 @@ struct ParticleTransferPacket {
 
 struct GasCellMigrationFields {
   std::uint64_t gas_cell_id = 0;
+  std::uint8_t has_parent_particle = 0;
   std::uint64_t parent_particle_id = 0;
+  std::uint64_t owning_patch_id = 0;
+  std::uint32_t destination_local_cell_row = kInvalidGasCellRow;
+  std::uint64_t gas_cell_identity_generation = 0;
+  std::uint64_t ghost_hydro_epoch = 0;
   double center_x_comoving = 0.0;
   double center_y_comoving = 0.0;
   double center_z_comoving = 0.0;
   double cell_mass_code = 0.0;
   std::uint8_t cell_time_bin = 0;
   std::uint32_t patch_index = 0;
+  double velocity_x_peculiar = 0.0;
+  double velocity_y_peculiar = 0.0;
+  double velocity_z_peculiar = 0.0;
   double density_code = 0.0;
   double pressure_code = 0.0;
   double internal_energy_code = 0.0;
   double temperature_code = 0.0;
   double sound_speed_code = 0.0;
+};
+
+struct GasCellMigrationRecord {
+  // Standalone gas-cell ownership payload keyed by gas_cell_id. This is separate
+  // from ParticleMigrationRecord so parentless and split/merged cells can migrate
+  // without inventing a particle parent.
+  std::uint32_t owning_rank = 0;
+  GasCellMigrationFields fields{};
+};
+
+struct GasCellStaleGhostRecord {
+  std::uint64_t gas_cell_id = 0;
+  std::uint32_t local_cell_row = kInvalidGasCellRow;
+  std::uint64_t gas_cell_identity_generation = 0;
+  std::uint64_t ghost_hydro_epoch = 0;
+};
+
+struct GasCellMigrationCommit {
+  int world_rank = 0;
+  std::uint64_t expected_gas_cell_identity_generation = 0;
+  std::uint64_t expected_ghost_hydro_epoch = 0;
+  std::vector<std::uint32_t> outbound_local_cell_rows;
+  std::vector<GasCellMigrationRecord> inbound_records;
+  std::vector<GasCellStaleGhostRecord> stale_local_ghost_records;
 };
 
 struct StarParticleMigrationFields {
@@ -465,6 +504,10 @@ class SimulationState {
   ParticleSidecar particle_sidecar;
   CellSoa cells;
   GasCellSidecar gas_cells;
+  // Authoritative in-memory gas-cell identity map. During the H2 legacy transition,
+  // gas_cells.gas_cell_id and gas_cells.parent_particle_id are compatibility mirrors
+  // synchronized from this map for particle-bound import/restart paths.
+  GasCellIdentityMap gas_cell_identity;
   PatchSoa patches;
   SpeciesContainer species;
   ParticleSpeciesIndex particle_species_index;
@@ -483,8 +526,19 @@ class SimulationState {
   void rebuildSpeciesIndex();
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
+  void refreshGasCellIdentityMapFromParticleBoundState();
+  [[nodiscard]] bool gasCellIdentityMapMatchesParticleBoundState() const;
+  [[nodiscard]] std::uint64_t gasCellIdentityGeneration() const noexcept;
+  void requireGasCellIdentityMapCoversDenseRows(std::string_view caller) const;
+  void requireGasCellIdentityMapFresh(std::uint64_t expected_generation, std::string_view caller) const;
+  [[nodiscard]] std::optional<std::uint32_t> rowForGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> gasCellIdForLocalRow(std::uint32_t local_cell_row) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> parentParticleIdForGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] std::optional<std::uint64_t> owningPatchIdForGasCellId(std::uint64_t gas_cell_id) const noexcept;
+  [[nodiscard]] bool gasCellIdentityMapMatchesSidecarLanes() const;
   void requireParticleBoundGasCellContract(std::string_view caller) const;
-  [[nodiscard]] std::uint64_t parentParticleIdForGasCellRow(std::uint32_t cell_index) const;
+  void legacyRequireParticleBoundGasCellContract(std::string_view caller) const;
+  [[nodiscard]] std::optional<std::uint64_t> parentParticleIdForGasCellRow(std::uint32_t cell_index) const;
   [[nodiscard]] std::uint32_t gasCellRowForParticleId(std::uint64_t particle_id) const;
   [[nodiscard]] std::uint32_t gasParticleIndexForCellRow(std::uint32_t cell_index) const;
 
@@ -493,6 +547,10 @@ class SimulationState {
       std::span<const std::uint32_t> local_indices,
       const HierarchicalTimeBinScheduler& scheduler) const;
   void commitParticleMigration(const ParticleMigrationCommit& commit);
+  [[nodiscard]] std::vector<GasCellMigrationRecord> packGasCellMigrationRecords(
+      std::span<const std::uint32_t> local_cell_rows,
+      std::uint64_t ghost_hydro_epoch = 0) const;
+  void commitGasCellMigration(const GasCellMigrationCommit& commit);
   [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
   [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
   void bumpParticleIndexGeneration() noexcept;
@@ -580,10 +638,12 @@ struct HydroCellKernelView {
   // Compact read/write cell hydro view for active hydrodynamics kernels.
   // HOT-FIELD CONTRACT (review-critical):
   //   allowed mutable lanes = {center_[xyz]_comoving, mass_code, density_code, pressure_code}
-  //   allowed index lane = {cell_index}
+  //   allowed identity/scatter lanes = {gas_cell_id, local_cell_row}
   // No patch descriptors, thermodynamic cold metadata, reconstruction
   // gradients, or provenance fields may be added to this hot view.
   std::span<std::uint32_t> cell_index;
+  std::span<std::uint64_t> gas_cell_id;
+  std::span<std::uint32_t> local_cell_row;
   std::span<double> center_x_comoving;
   std::span<double> center_y_comoving;
   std::span<double> center_z_comoving;
@@ -591,6 +651,7 @@ struct HydroCellKernelView {
   std::span<double> density_code;
   std::span<double> pressure_code;
   std::uint64_t source_cell_index_generation = 0;
+  std::uint64_t source_gas_cell_identity_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
 };
@@ -672,6 +733,8 @@ struct TransientStepWorkspace {
   // Compact read/write hydro kernel buffers. These carry only allowed hot lanes
   // in HydroCellKernelView and are scattered only after cell-generation checks.
   AlignedVector<std::uint32_t> hydro_cell_index;
+  AlignedVector<std::uint64_t> hydro_gas_cell_id;
+  AlignedVector<std::uint32_t> hydro_local_cell_row;
   AlignedVector<double> hydro_cell_center_x_comoving;
   AlignedVector<double> hydro_cell_center_y_comoving;
   AlignedVector<double> hydro_cell_center_z_comoving;
@@ -750,16 +813,27 @@ void debugAssertSpeciesSidecarOwnershipInvariants(const SimulationState& state);
 // Rebuild/check the temporary gas identity lanes from canonical gas-particle ordering.
 void refreshGasCellIdentityFromParticleOrder(SimulationState& state);
 [[nodiscard]] bool gasCellIdentityMatchesParticleOrder(const SimulationState& state);
-// Stage-0 named gas ownership contract (temporary and auditable): local gas cells
-// are particle-bound finite-volume carriers. The stable identity anchor is the gas
-// particle ID; cell_index/host_cell_index are local transient rows and must be
-// validated before hydro kernels or migration remaps use positional gas ordering.
+void refreshGasCellIdentityMapFromParticleBoundState(SimulationState& state);
+[[nodiscard]] bool gasCellIdentityMapMatchesParticleBoundState(const SimulationState& state);
+[[nodiscard]] bool gasCellIdentityMapMatchesSidecarLanes(const SimulationState& state);
+void requireGasCellIdentityMapCoversDenseRows(const SimulationState& state, std::string_view caller);
+void requireGasCellIdentityMapFresh(
+    const SimulationState& state,
+    std::uint64_t expected_generation,
+    std::string_view caller);
+// Legacy/import compatibility contract only: older particle-bound inputs require
+// one local gas particle per gas-cell row before positional remaps may consume them.
+void legacyRequireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller);
+// Backward-compatible wrapper for older tests/import callers. Production hydro
+// paths should validate GasCellIdentityMap coverage and use optional parent lookup.
 void requireParticleBoundGasCellContract(const SimulationState& state, std::string_view caller);
-[[nodiscard]] std::uint64_t parentParticleIdForGasCellRow(const SimulationState& state, std::uint32_t cell_index);
+[[nodiscard]] std::optional<std::uint64_t> parentParticleIdForGasCellRow(
+    const SimulationState& state,
+    std::uint32_t cell_index);
 [[nodiscard]] std::uint32_t gasCellRowForParticleId(const SimulationState& state, std::uint64_t particle_id);
 [[nodiscard]] std::uint32_t gasParticleIndexForCellRow(const SimulationState& state, std::uint32_t cell_index);
-// Backward-compatible debug alias for existing call sites; new code should use
-// requireParticleBoundGasCellContract with a caller-specific error prefix.
+// Backward-compatible debug alias for legacy particle-bound checks; production
+// gas-cell paths should validate GasCellIdentityMap coverage instead.
 void debugAssertGasCellIdentityContract(const SimulationState& state);
 
 }  // namespace cosmosim::core

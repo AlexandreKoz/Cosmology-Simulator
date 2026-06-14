@@ -1,6 +1,6 @@
 # Stage 8 restart/output maturity map
 
-This note is the current Stage 8 restart/output implementation map after the schema-v14 repair pass. It supersedes earlier reconnaissance notes that referenced older restart schema versions.
+This note is the current Stage 8 restart/output implementation map after the schema-v15 repair pass. It supersedes earlier reconnaissance notes that referenced older restart schema versions.
 
 ## Current restart and snapshot entry points
 
@@ -10,7 +10,7 @@ This note is the current Stage 8 restart/output implementation map after the sch
 - Snapshot reader: `cosmosim::io::readGadgetArepoSnapshotHdf5()` in `src/io/snapshot_hdf5.cpp`.
 - Workflow output/restart orchestration: `maybeWriteOutputs()` in `src/workflows/reference_workflow.cpp`.
 
-Restart files use `cosmosim_restart_v14` and root `cosmosim_file_kind=restart_checkpoint`. Ordinary science snapshots use `gadget_arepo_v4` and root `cosmosim_file_kind=science_snapshot`. Readers reject the wrong file kind, so a particle-only snapshot cannot be treated as a complete restart.
+Restart files use `cosmosim_restart_v15` and root `cosmosim_file_kind=restart_checkpoint`. Ordinary science snapshots use `gadget_arepo_v4` and root `cosmosim_file_kind=science_snapshot`. Readers reject the wrong file kind, so a particle-only snapshot cannot be treated as a complete restart.
 
 ## Persistent restart truth
 

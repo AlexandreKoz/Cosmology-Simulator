@@ -598,7 +598,7 @@ void test_gas_cell_migration_rebuilds_hydro_fields_by_particle_id() {
   std::unordered_map<std::uint64_t, GasFieldRecord> gas_fields_by_id;
   for (std::uint32_t cell = 0; cell < state.cells.size(); ++cell) {
     gas_fields_by_id.emplace(
-        state.parentParticleIdForGasCellRow(cell),
+        state.parentParticleIdForGasCellRow(cell).value(),
         GasFieldRecord{
             .mass_code = state.cells.mass_code[cell],
             .time_bin = state.cells.time_bin[cell],

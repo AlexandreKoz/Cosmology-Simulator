@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,9 @@ namespace {
 
 constexpr std::uint64_t k_offset_basis = 14695981039346656037ull;
 constexpr std::uint64_t k_prime = 1099511628211ull;
+constexpr std::uint32_t k_restart_schema_v14 = 14;
+constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
+constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 
 [[nodiscard]] std::string hexU64(std::uint64_t value) {
   constexpr char k_hex[] = "0123456789abcdef";
@@ -108,9 +112,20 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
   // mirror that bypasses exact-size validation and later masquerades as timestep
   // truth in hydro diagnostics.
   if (!state.cells.time_bin.empty()) {
-    core::requireParticleBoundGasCellContract(state, context);
+    state.requireGasCellIdentityMapCoversDenseRows(context);
     for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-      const std::uint32_t particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+      const auto parent_id = core::parentParticleIdForGasCellRow(state, cell_index);
+      if (!parent_id.has_value()) {
+        continue;
+      }
+      const auto particle_it =
+          std::find(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end(), *parent_id);
+      if (particle_it == state.particle_sidecar.particle_id.end()) {
+        throw std::invalid_argument(
+            std::string(context) + ": /state/cells/time_bin parent particle is not local");
+      }
+      const std::uint32_t particle_index =
+          static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
       if (particle_index >= scheduler_state.bin_index.size()) {
         throw std::invalid_argument(
             std::string(context) + ": /state/cells/time_bin parent particle is outside /scheduler/bin_index");
@@ -133,9 +148,19 @@ void rebuildRestartTimeBinMirrorsFromScheduler(
     state.particles.time_bin[i] = scheduler_state.bin_index[i];
   }
   if (!state.cells.time_bin.empty()) {
-    core::requireParticleBoundGasCellContract(state, "restart reader");
+    state.requireGasCellIdentityMapCoversDenseRows("restart reader");
     for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-      const std::uint32_t particle_index = core::gasParticleIndexForCellRow(state, cell_index);
+      const auto parent_id = core::parentParticleIdForGasCellRow(state, cell_index);
+      if (!parent_id.has_value()) {
+        continue;
+      }
+      const auto particle_it =
+          std::find(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end(), *parent_id);
+      if (particle_it == state.particle_sidecar.particle_id.end()) {
+        throw std::invalid_argument("restart reader: cell time_bin parent particle is not local");
+      }
+      const std::uint32_t particle_index =
+          static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
       if (particle_index >= scheduler_state.bin_index.size()) {
         throw std::invalid_argument("restart reader: cell time_bin parent particle is outside scheduler bin_index");
       }
@@ -194,6 +219,21 @@ void validateHydroGeometryStateForRestart(
   for (std::size_t cell_index = 0; cell_index < cell_covered_by_patch.size(); ++cell_index) {
     if (cell_covered_by_patch[cell_index] == 0U) {
       throw std::invalid_argument(std::string(context) + ": /state/patches do not cover every gas cell");
+    }
+  }
+  if (!state.gas_cell_identity.isConsistent() ||
+      !state.gas_cell_identity.coversDenseLocalRows(state.cells.size())) {
+    throw std::invalid_argument(
+        std::string(context) + ": /state/gas_cell_identity must cover dense local cell rows");
+  }
+  if (!state.gasCellIdentityMapMatchesSidecarLanes()) {
+    throw std::invalid_argument(
+        std::string(context) + ": /state/gas_cell_identity records must match gas-cell mirror lanes and patch ownership");
+  }
+  for (const core::GasCellIdentityRecord& record : state.gas_cell_identity.records()) {
+    if (record.parent_particle_id.has_value() && *record.parent_particle_id == 0U) {
+      throw std::invalid_argument(
+          std::string(context) + ": /state/gas_cell_identity/parent_particle_id must be nonzero when has_parent_particle is true");
     }
   }
 }
@@ -467,7 +507,7 @@ void validateFileKindAttribute(
   }
 }
 
-void validateRestartCheckpointSchema(hid_t file) {
+void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
   const auto& shared_names = sharedIoContractNames();
   validateFileKindAttribute(file, shared_names.restart_checkpoint_file_kind, "restart reader");
 
@@ -503,11 +543,24 @@ void validateRestartCheckpointSchema(hid_t file) {
   requireHdf5Dataset1d(file, "/state/cells/patch_index");
   requireHdf5Dataset1d(file, "/state/gas_cells/gas_cell_id");
   requireHdf5Dataset1d(file, "/state/gas_cells/parent_particle_id");
+  requireHdf5Dataset1d(file, "/state/gas_cells/velocity_x_peculiar");
+  requireHdf5Dataset1d(file, "/state/gas_cells/velocity_y_peculiar");
+  requireHdf5Dataset1d(file, "/state/gas_cells/velocity_z_peculiar");
   requireHdf5Dataset1d(file, "/state/gas_cells/density_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/pressure_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/internal_energy_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/temperature_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/sound_speed_code");
+  if (schema_version >= restartSchema().version) {
+    Hdf5Handle identity_group = openRequiredGroup(file, "/state/gas_cell_identity");
+    requireHdf5Attribute(identity_group.get(), "/state/gas_cell_identity", "local_row_reconstruction_policy");
+    requireHdf5Attribute(identity_group.get(), "/state/gas_cell_identity", "identity_generation_at_write");
+    requireHdf5Dataset1d(file, "/state/gas_cell_identity/gas_cell_id");
+    requireHdf5Dataset1d(file, "/state/gas_cell_identity/has_parent_particle");
+    requireHdf5Dataset1d(file, "/state/gas_cell_identity/parent_particle_id");
+    requireHdf5Dataset1d(file, "/state/gas_cell_identity/owning_patch_id");
+    requireHdf5Dataset1d(file, "/state/gas_cell_identity/local_cell_row");
+  }
   requireHdf5Dataset1d(file, "/state/patches/patch_id");
   requireHdf5Dataset1d(file, "/state/patches/level");
   requireHdf5Dataset1d(file, "/state/patches/first_cell");
@@ -770,6 +823,136 @@ void readStarSidecarGroup(hid_t state_group, core::StarParticleSidecar& stars) {
   }
 }
 
+[[nodiscard]] std::vector<core::GasCellIdentityRecord> gasIdentityRecordsSortedByLocalRow(
+    const core::GasCellIdentityMap& identity_map) {
+  std::vector<core::GasCellIdentityRecord> records(
+      identity_map.records().begin(), identity_map.records().end());
+  std::sort(
+      records.begin(),
+      records.end(),
+      [](const core::GasCellIdentityRecord& lhs, const core::GasCellIdentityRecord& rhs) {
+        return lhs.local_cell_row < rhs.local_cell_row;
+      });
+  return records;
+}
+
+void writeGasCellIdentityGroup(hid_t state_group, const core::SimulationState& state) {
+  Hdf5Handle identity_group(openOrCreateGroup(state_group, "gas_cell_identity"));
+  writeScalarStringAttribute(identity_group.get(), "local_row_reconstruction_policy", std::string(k_gas_identity_row_policy));
+  writeScalarU64Attribute(identity_group.get(), "identity_generation_at_write", state.gasCellIdentityGeneration());
+
+  const auto records = gasIdentityRecordsSortedByLocalRow(state.gas_cell_identity);
+  std::vector<std::uint64_t> gas_cell_id;
+  std::vector<std::uint8_t> has_parent_particle;
+  std::vector<std::uint64_t> parent_particle_id;
+  std::vector<std::uint64_t> owning_patch_id;
+  std::vector<std::uint32_t> local_cell_row;
+  gas_cell_id.reserve(records.size());
+  has_parent_particle.reserve(records.size());
+  parent_particle_id.reserve(records.size());
+  owning_patch_id.reserve(records.size());
+  local_cell_row.reserve(records.size());
+  for (const core::GasCellIdentityRecord& record : records) {
+    gas_cell_id.push_back(record.gas_cell_id);
+    has_parent_particle.push_back(record.parent_particle_id.has_value() ? 1U : 0U);
+    parent_particle_id.push_back(record.parent_particle_id.value_or(0U));
+    owning_patch_id.push_back(record.owning_patch_id);
+    local_cell_row.push_back(record.local_cell_row);
+  }
+
+  writeDataset1d(identity_group.get(), "gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, gas_cell_id);
+  writeDataset1d(identity_group.get(), "has_parent_particle", H5T_STD_U8LE, H5T_NATIVE_UINT8, has_parent_particle);
+  writeDataset1d(identity_group.get(), "parent_particle_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, parent_particle_id);
+  writeDataset1d(identity_group.get(), "owning_patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, owning_patch_id);
+  writeDataset1d(identity_group.get(), "local_cell_row", H5T_STD_U32LE, H5T_NATIVE_UINT32, local_cell_row);
+}
+
+void materializeLegacyGasCellIdentityMapFromMirrors(core::SimulationState& state) {
+  std::vector<core::GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const std::uint64_t gas_cell_id = state.gas_cells.gas_cell_id[cell_index];
+    const std::uint64_t parent_particle_id = state.gas_cells.parent_particle_id[cell_index];
+    if (gas_cell_id == 0U || parent_particle_id == 0U || gas_cell_id != parent_particle_id) {
+      throw std::runtime_error(
+          "legacy v14 restart gas-cell identity requires nonzero gas_cell_id == parent_particle_id");
+    }
+    std::uint64_t owning_patch_id = 0U;
+    if (!state.patches.patch_id.empty()) {
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index >= state.patches.size()) {
+        throw std::runtime_error("legacy v14 restart gas-cell identity has invalid patch_index");
+      }
+      owning_patch_id = state.patches.patch_id[patch_index];
+    }
+    records.push_back(core::GasCellIdentityRecord{
+        .gas_cell_id = gas_cell_id,
+        .parent_particle_id = parent_particle_id,
+        .owning_patch_id = owning_patch_id,
+        .local_cell_row = static_cast<std::uint32_t>(cell_index),
+    });
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
+void readGasCellIdentityGroup(hid_t state_group, core::SimulationState& state, std::uint32_t schema_version) {
+  if (schema_version == k_restart_schema_v14 && H5Lexists(state_group, "gas_cell_identity", H5P_DEFAULT) <= 0) {
+    materializeLegacyGasCellIdentityMapFromMirrors(state);
+    return;
+  }
+
+  Hdf5Handle identity_group(H5Gopen2(state_group, "gas_cell_identity", H5P_DEFAULT));
+  if (!identity_group.valid()) {
+    throw std::runtime_error("restart is missing /state/gas_cell_identity");
+  }
+  const std::string row_policy =
+      readScalarStringAttribute(identity_group.get(), "local_row_reconstruction_policy");
+  if (row_policy != k_gas_identity_row_policy) {
+    throw std::runtime_error("unsupported /state/gas_cell_identity local_row_reconstruction_policy");
+  }
+
+  const auto gas_cell_id =
+      readDataset1d<std::uint64_t>(identity_group.get(), "gas_cell_id", H5T_NATIVE_UINT64);
+  const auto has_parent_particle =
+      readDataset1d<std::uint8_t>(identity_group.get(), "has_parent_particle", H5T_NATIVE_UINT8);
+  const auto parent_particle_id =
+      readDataset1d<std::uint64_t>(identity_group.get(), "parent_particle_id", H5T_NATIVE_UINT64);
+  const auto owning_patch_id =
+      readDataset1d<std::uint64_t>(identity_group.get(), "owning_patch_id", H5T_NATIVE_UINT64);
+  const auto local_cell_row =
+      readDataset1d<std::uint32_t>(identity_group.get(), "local_cell_row", H5T_NATIVE_UINT32);
+  if (gas_cell_id.size() != has_parent_particle.size() ||
+      gas_cell_id.size() != parent_particle_id.size() ||
+      gas_cell_id.size() != owning_patch_id.size() ||
+      gas_cell_id.size() != local_cell_row.size()) {
+    throw std::runtime_error("/state/gas_cell_identity datasets must have matching lengths");
+  }
+
+  std::vector<core::GasCellIdentityRecord> records;
+  records.reserve(gas_cell_id.size());
+  for (std::size_t i = 0; i < gas_cell_id.size(); ++i) {
+    if (has_parent_particle[i] > 1U) {
+      throw std::runtime_error("/state/gas_cell_identity/has_parent_particle must contain only 0 or 1");
+    }
+    if (has_parent_particle[i] == 0U && parent_particle_id[i] != 0U) {
+      throw std::runtime_error(
+          "/state/gas_cell_identity/parent_particle_id must be 0 when has_parent_particle is false");
+    }
+    if (has_parent_particle[i] != 0U && parent_particle_id[i] == 0U) {
+      throw std::runtime_error(
+          "/state/gas_cell_identity/parent_particle_id must be nonzero when has_parent_particle is true");
+    }
+    records.push_back(core::GasCellIdentityRecord{
+        .gas_cell_id = gas_cell_id[i],
+        .parent_particle_id =
+            has_parent_particle[i] != 0U ? std::optional<std::uint64_t>(parent_particle_id[i]) : std::nullopt,
+        .owning_patch_id = owning_patch_id[i],
+        .local_cell_row = local_cell_row[i],
+    });
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
 void writeStateGroup(hid_t root, const core::SimulationState& state) {
   Hdf5Handle state_group(openOrCreateGroup(root, "/state"));
   Hdf5Handle particles_group(openOrCreateGroup(state_group.get(), "particles"));
@@ -814,11 +997,16 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   Hdf5Handle gas_group(openOrCreateGroup(state_group.get(), "gas_cells"));
   writeDataset1d(gas_group.get(), "gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.gas_cells.gas_cell_id);
   writeDataset1d(gas_group.get(), "parent_particle_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.gas_cells.parent_particle_id);
+  writeDataset1d(gas_group.get(), "velocity_x_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_x_peculiar);
+  writeDataset1d(gas_group.get(), "velocity_y_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_y_peculiar);
+  writeDataset1d(gas_group.get(), "velocity_z_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_z_peculiar);
   writeDataset1d(gas_group.get(), "density_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.density_code);
   writeDataset1d(gas_group.get(), "pressure_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.pressure_code);
   writeDataset1d(gas_group.get(), "internal_energy_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.internal_energy_code);
   writeDataset1d(gas_group.get(), "temperature_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.temperature_code);
   writeDataset1d(gas_group.get(), "sound_speed_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.sound_speed_code);
+
+  writeGasCellIdentityGroup(state_group.get(), state);
 
   Hdf5Handle patches_group(openOrCreateGroup(state_group.get(), "patches"));
   writeDataset1d(patches_group.get(), "patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.patches.patch_id);
@@ -911,7 +1099,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeStringDataset(state_group.get(), "module_sidecar_names", module_names_text);
 }
 
-void readStateGroup(hid_t root, core::SimulationState& state) {
+void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t schema_version) {
   Hdf5Handle state_group(H5Gopen2(root, "/state", H5P_DEFAULT));
   Hdf5Handle particles_group(H5Gopen2(state_group.get(), "particles", H5P_DEFAULT));
   state.particles.position_x_comoving = readDataset1dAligned<double>(particles_group.get(), "position_x_comoving", H5T_NATIVE_DOUBLE);
@@ -963,6 +1151,12 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
     throw std::runtime_error("restart is missing gas-cell identity datasets gas_cell_id/parent_particle_id");
   }
   state.gas_cells.density_code = readDataset1dAligned<double>(gas_group.get(), "density_code", H5T_NATIVE_DOUBLE);
+  state.gas_cells.velocity_x_peculiar =
+      readDataset1dAligned<double>(gas_group.get(), "velocity_x_peculiar", H5T_NATIVE_DOUBLE);
+  state.gas_cells.velocity_y_peculiar =
+      readDataset1dAligned<double>(gas_group.get(), "velocity_y_peculiar", H5T_NATIVE_DOUBLE);
+  state.gas_cells.velocity_z_peculiar =
+      readDataset1dAligned<double>(gas_group.get(), "velocity_z_peculiar", H5T_NATIVE_DOUBLE);
   state.gas_cells.pressure_code = readDataset1dAligned<double>(gas_group.get(), "pressure_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.internal_energy_code = readDataset1dAligned<double>(gas_group.get(), "internal_energy_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.temperature_code = readDataset1dAligned<double>(gas_group.get(), "temperature_code", H5T_NATIVE_DOUBLE);
@@ -978,6 +1172,8 @@ void readStateGroup(hid_t root, core::SimulationState& state) {
   } else {
     state.patches.owning_rank.assign(state.patches.patch_id.size(), 0U);
   }
+
+  readGasCellIdentityGroup(state_group.get(), state, schema_version);
 
   const auto species_count = readDataset1d<std::uint64_t>(state_group.get(), "species_count_by_species", H5T_NATIVE_UINT64);
   if (species_count.size() != state.species.count_by_species.size()) {
@@ -1292,7 +1488,7 @@ const RestartSchema& restartSchema() {
 }
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
-  return file_schema_version == restartSchema().version;
+  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v14;
 }
 
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
@@ -1316,7 +1512,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
   return checklist;
 }
 
-std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
+std::uint64_t restartPayloadIntegrityHashImpl(const RestartWritePayload& payload, bool include_gas_identity_records) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -1411,11 +1607,40 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
 
   append_any_vec(state.gas_cells.gas_cell_id);
   append_any_vec(state.gas_cells.parent_particle_id);
+  append_any_vec(state.gas_cells.velocity_x_peculiar);
+  append_any_vec(state.gas_cells.velocity_y_peculiar);
+  append_any_vec(state.gas_cells.velocity_z_peculiar);
   append_any_vec(state.gas_cells.density_code);
   append_any_vec(state.gas_cells.pressure_code);
   append_any_vec(state.gas_cells.internal_energy_code);
   append_any_vec(state.gas_cells.temperature_code);
   append_any_vec(state.gas_cells.sound_speed_code);
+  if (include_gas_identity_records) {
+    append_string(std::string(k_gas_identity_row_policy));
+    const auto gas_identity_records = gasIdentityRecordsSortedByLocalRow(state.gas_cell_identity);
+    std::vector<std::uint64_t> identity_gas_cell_id;
+    std::vector<std::uint8_t> identity_has_parent_particle;
+    std::vector<std::uint64_t> identity_parent_particle_id;
+    std::vector<std::uint64_t> identity_owning_patch_id;
+    std::vector<std::uint32_t> identity_local_cell_row;
+    identity_gas_cell_id.reserve(gas_identity_records.size());
+    identity_has_parent_particle.reserve(gas_identity_records.size());
+    identity_parent_particle_id.reserve(gas_identity_records.size());
+    identity_owning_patch_id.reserve(gas_identity_records.size());
+    identity_local_cell_row.reserve(gas_identity_records.size());
+    for (const core::GasCellIdentityRecord& record : gas_identity_records) {
+      identity_gas_cell_id.push_back(record.gas_cell_id);
+      identity_has_parent_particle.push_back(record.parent_particle_id.has_value() ? 1U : 0U);
+      identity_parent_particle_id.push_back(record.parent_particle_id.value_or(0U));
+      identity_owning_patch_id.push_back(record.owning_patch_id);
+      identity_local_cell_row.push_back(record.local_cell_row);
+    }
+    append_any_vec(identity_gas_cell_id);
+    append_any_vec(identity_has_parent_particle);
+    append_any_vec(identity_parent_particle_id);
+    append_any_vec(identity_owning_patch_id);
+    append_any_vec(identity_local_cell_row);
+  }
 
   append_any_vec(state.patches.patch_id);
   append_any_vec(state.patches.level);
@@ -1533,6 +1758,10 @@ std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
   append_string(payload.distributed_gravity_state.serialize());
 
   return hash;
+}
+
+std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
+  return restartPayloadIntegrityHashImpl(payload, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -1687,17 +1916,24 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
     throw std::runtime_error("failed to open restart checkpoint: " + input_path.string());
   }
 
-  validateRestartCheckpointSchema(file.get());
-
-  RestartReadResult result;
+  validateFileKindAttribute(
+      file.get(),
+      sharedIoContractNames().restart_checkpoint_file_kind,
+      "restart reader");
   const std::string schema_name = readScalarStringAttribute(file.get(), "restart_schema_name");
   const std::uint32_t schema_version = readScalarU32Attribute(file.get(), "restart_schema_version");
-  if (schema_name != restartSchema().name || !isRestartSchemaCompatible(schema_version)) {
+  const bool current_schema =
+      schema_name == restartSchema().name && schema_version == restartSchema().version;
+  const bool legacy_v14_schema =
+      schema_name == k_restart_schema_name_v14 && schema_version == k_restart_schema_v14;
+  if ((!current_schema && !legacy_v14_schema) || !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
         ", expected='" + restartSchema().name + "' v" + std::to_string(restartSchema().version));
   }
+  validateRestartCheckpointSchema(file.get(), schema_version);
 
+  RestartReadResult result;
   result.normalized_config_hash_hex = readScalarStringAttribute(file.get(), "normalized_config_hash_hex");
   result.payload_hash_hex = readScalarStringAttribute(file.get(), "payload_integrity_hash_hex");
   result.payload_hash = readScalarU64Attribute(file.get(), "payload_integrity_hash");
@@ -1708,7 +1944,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.provenance = core::deserializeProvenanceRecord(
       readStringDataset(file.get(), std::string(shared_names.provenance_record_dataset)));
 
-  readStateGroup(file.get(), result.state);
+  readStateGroup(file.get(), result.state, schema_version);
   validateHydroGeometryStateForRestart(result.state, "restart reader");
 
   Hdf5Handle integrator_group(H5Gopen2(file.get(), "/integrator", H5P_DEFAULT));
@@ -1769,8 +2005,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.stochastic_state = readStochasticStateGroup(file.get());
   validateStochasticStateForRestart(result.stochastic_state, result.integrator_state, "restart reader");
   result.diagnostics = readRestartDiagnosticsGroup(file.get());
-  if (result.diagnostics.restart_schema_name != restartSchema().name ||
-      result.diagnostics.restart_schema_version != restartSchema().version ||
+  if (result.diagnostics.restart_schema_name != schema_name ||
+      result.diagnostics.restart_schema_version != schema_version ||
       result.diagnostics.step_index != result.integrator_state.step_index ||
       result.diagnostics.scheduler_current_tick != result.scheduler_state.current_tick ||
       result.diagnostics.scheduler_element_count != result.scheduler_state.bin_index.size() ||
@@ -1793,7 +2029,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.output_cadence_state = result.output_cadence_state;
   verify_payload.stochastic_state = result.stochastic_state;
 
-  const std::uint64_t computed_hash = restartPayloadIntegrityHash(verify_payload);
+  const std::uint64_t computed_hash =
+      restartPayloadIntegrityHashImpl(verify_payload, schema_version >= restartSchema().version);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");
   }

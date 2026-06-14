@@ -94,7 +94,9 @@ For particle ownership migration in `core::SimulationState`:
   - species sidecars are rebuilt from the post-commit `species_tag` ledger with remapped particle indices,
   - species counts and `ParticleSpeciesIndex` are rebuilt from `species_tag`,
   - the particle-index generation counter is bumped once for the index-space mutation.
-- Gas-cell state is not keyed by old local particle positions during ownership compaction. The reference workflow snapshots gas records by stable gas particle ID, commits particle ownership, then rebuilds cells/gas sidecars by the post-commit gas particle IDs and remaps host-cell references through `{old cell -> particle ID -> new cell}`.
+- Gas-cell state is not keyed by old local particle positions during ownership compaction. Particle migration may carry one compatibility gas-cell payload only when a migrating gas particle has a single attached gas-cell row. Parentless cells and split/merged cells with non-unique parent lineage must move through `GasCellMigrationRecord`, keyed by stable nonzero `gas_cell_id`.
+- `GasCellMigrationRecord` carries the gas identity record, parent-lineage presence bit, owning patch identity, destination row hint, hydro conserved/persistent sidecar fields, cell timestep mirror, and ghost generation/epoch metadata. `commitGasCellMigration(...)` removes outbound/stale local rows, rejects stale ghosts whose `{gas_cell_id, gas_cell_identity_generation, ghost_hydro_epoch}` do not match the commit boundary, appends inbound authoritative rows, rebuilds `SimulationState::gas_cell_identity`, remaps host-cell sidecars by old row to new `gas_cell_id`, and bumps the cell-index generation once.
+- Imported gas ghosts are read-only boundary state. They may be discarded by stale-ghost records or restored after solver use, but they must not mutate authoritative hydro truth unless routed through an explicit owner-side conservative correction path.
 - Ownership is never committed mid-walk/mid-exchange by this contract; commit must run at a phase boundary so stale active/kernel views are invalidated before further scatter.
 
 ## 3) Deterministic reduction contract

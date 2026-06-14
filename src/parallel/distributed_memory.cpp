@@ -1790,8 +1790,8 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) 
   if (record.patch_id == 0) {
     throw std::invalid_argument("AMR patch cell payload patch_id must be non-zero");
   }
-  if (record.gas_cell_id == 0 || record.parent_particle_id == 0) {
-    throw std::invalid_argument("AMR patch cell payload must carry stable gas-cell and parent-particle identity");
+  if (record.gas_cell_id == 0) {
+    throw std::invalid_argument("AMR patch cell payload must carry stable gas-cell identity");
   }
   if (!std::isfinite(record.center_x_comoving) || !std::isfinite(record.center_y_comoving) ||
       !std::isfinite(record.center_z_comoving) || !std::isfinite(record.mass_code) ||
@@ -1803,8 +1803,8 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) 
 }
 
 void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCorrectionRecord& record) {
-  if (record.parent_particle_id == 0) {
-    throw std::invalid_argument("hydro conservative flux correction requires a non-zero parent particle id");
+  if (record.gas_cell_id == 0) {
+    throw std::invalid_argument("hydro conservative flux correction requires a non-zero gas_cell_id");
   }
   if (record.source_rank < 0 || record.owner_rank < 0) {
     throw std::invalid_argument("hydro conservative flux correction ranks must be non-negative");

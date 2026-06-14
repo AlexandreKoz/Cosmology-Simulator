@@ -91,7 +91,9 @@ Stage 2 uses a single-owner timestep model: `HierarchicalTimeBinScheduler` is th
 
 - Authoritative live lanes: `HierarchicalTimeBinScheduler` hot metadata (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`) and `PmSynchronizationState` cadence fields (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
 - Derived mirrors: `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration/transfer `time_bin` payloads, and serialized restart state mirrors are diagnostic or compatibility mirrors only. They are refreshed from scheduler state with `syncTimeBinMirrorsFromScheduler(...)` and may be validated for corruption, but they are never fallback scheduling truth.
-- Cell mirrors in particle-bound gas states map through the parent gas particle identity (`gasParticleIndexForCellRow(...)`), so a cell row count mismatch is not a reason to trust `CellSoa::time_bin` independently.
+- Cell mirrors in production gas-cell states map through dense local gas-cell rows validated by `GasCellIdentityMap`.
+  Legacy particle-bound import paths may still map through a parent gas particle, but production scheduler invariants
+  do not require local gas-particle count to equal local gas-cell count.
 - Active-set descriptors for hierarchical execution must be constructed from scheduler output (`makeSchedulerActiveSetDescriptor(...)`) and must carry scheduler tick/generation provenance before solver callbacks consume them.
 
 ### Candidate criteria flow

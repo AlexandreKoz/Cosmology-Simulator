@@ -78,6 +78,9 @@ void accountCellSoa(MemoryReportBuilder& builder, const CellSoa& cells) {
 void accountGasSidecar(MemoryReportBuilder& builder, const GasCellSidecar& gas) {
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.gas_cell_id", gas.gas_cell_id);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.parent_particle_id", gas.parent_particle_id);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.velocity_x_peculiar", gas.velocity_x_peculiar);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.velocity_y_peculiar", gas.velocity_y_peculiar);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.velocity_z_peculiar", gas.velocity_z_peculiar);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.density_code", gas.density_code);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.pressure_code", gas.pressure_code);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.internal_energy_code", gas.internal_energy_code);
@@ -335,7 +338,7 @@ MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input) 
 
   addEstimate(builder, MemorySubsystem::kParticles, MemoryLifetime::kPersistent, "estimate.particles.hot_soa", bytes(input.particle_capacity, 7 * sizeof(double) + sizeof(std::uint8_t)), "capacity estimate from configured particle count; allocator overhead not included");
   addEstimate(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "estimate.particle_sidecars", bytes(input.particle_capacity, 3 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double) + sizeof(std::uint8_t)), "particle metadata/softening sidecar capacity estimate");
-  addEstimate(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "estimate.gas_hydro.cells", bytes(input.gas_cell_capacity, 10 * sizeof(double) + 2 * sizeof(std::uint64_t) + 2 * sizeof(std::uint32_t) + sizeof(std::uint8_t)), "cell and gas thermodynamic capacity estimate; hydro conserved solver storage must be reported separately by hydro module");
+  addEstimate(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "estimate.gas_hydro.cells", bytes(input.gas_cell_capacity, 13 * sizeof(double) + 2 * sizeof(std::uint64_t) + 2 * sizeof(std::uint32_t) + sizeof(std::uint8_t)), "cell and gas thermodynamic capacity estimate; hydro conserved solver storage must be reported separately by hydro module");
   addEstimate(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "estimate.star_sidecars", bytes(input.star_capacity, 2 * sizeof(std::uint32_t) + 16 * sizeof(double)), "star sidecar estimate includes channel cumulative fields");
   addEstimate(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "estimate.black_hole_sidecars", bytes(input.black_hole_capacity, 2 * sizeof(std::uint32_t) + 8 * sizeof(double)), "black-hole sidecar capacity estimate");
   addEstimate(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "estimate.tracer_sidecars", bytes(input.tracer_capacity, 2 * sizeof(std::uint64_t) + 2 * sizeof(std::uint32_t) + 3 * sizeof(double)), "tracer sidecar capacity estimate");

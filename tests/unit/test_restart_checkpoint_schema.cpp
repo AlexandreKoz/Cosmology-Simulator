@@ -1,4 +1,5 @@
 #include <cassert>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
@@ -30,10 +31,10 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v14");
-  assert(schema.version == 14);
+  assert(schema.name == "cosmosim_restart_v15");
+  assert(schema.version == 15);
+  assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
-  assert(!cosmosim::io::isRestartSchemaCompatible(13));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
   const auto& checklist = cosmosim::io::exactRestartCompletenessChecklist();
   assert(!checklist.empty());
@@ -170,8 +171,6 @@ int main() {
   }
   assert(missing_metadata_threw);
 
-
-
   bool provenance_hash_message_threw = false;
   try {
     cosmosim::io::RestartWritePayload invalid_metadata = payload;
@@ -223,13 +222,13 @@ int main() {
                 : static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
     }
     gas_state.rebuildSpeciesIndex();
-    gas_state.refreshGasCellIdentityFromParticleOrder();
     gas_state.patches.patch_id[0] = 777;
     gas_state.patches.first_cell[0] = 0;
     gas_state.patches.cell_count[0] = 2;
     gas_state.patches.owning_rank[0] = 0;
     gas_state.cells.patch_index[0] = 0;
     gas_state.cells.patch_index[1] = 0;
+    gas_state.refreshGasCellIdentityFromParticleOrder();
 
     cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(2);
     gas_scheduler.reset(4, 0, 0);
@@ -272,6 +271,52 @@ int main() {
           message.find("/state/patches") != std::string::npos;
     }
     assert(mismatched_patch_index_threw);
+
+    cosmosim::core::SimulationState parentless_state;
+    parentless_state.resizeParticles(0);
+    parentless_state.resizeCells(1);
+    parentless_state.resizePatches(1);
+    parentless_state.patches.patch_id[0] = 901;
+    parentless_state.patches.level[0] = 0;
+    parentless_state.patches.first_cell[0] = 0;
+    parentless_state.patches.cell_count[0] = 1;
+    parentless_state.patches.owning_rank[0] = 0;
+    parentless_state.cells.patch_index[0] = 0;
+    parentless_state.gas_cell_identity.assign({
+        {.gas_cell_id = 7001, .parent_particle_id = std::nullopt, .owning_patch_id = 901, .local_cell_row = 0},
+    });
+    parentless_state.gas_cells.gas_cell_id[0] = 7001;
+    parentless_state.gas_cells.parent_particle_id[0] = 0;
+    parentless_state.gas_cells.velocity_x_peculiar[0] = 1.0;
+    parentless_state.gas_cells.velocity_y_peculiar[0] = 2.0;
+    parentless_state.gas_cells.velocity_z_peculiar[0] = 3.0;
+    parentless_state.gas_cells.density_code[0] = 4.0;
+    parentless_state.gas_cells.pressure_code[0] = 5.0;
+    parentless_state.gas_cells.internal_energy_code[0] = 6.0;
+    parentless_state.gas_cells.temperature_code[0] = 7.0;
+    parentless_state.gas_cells.sound_speed_code[0] = 8.0;
+    parentless_state.rebuildSpeciesIndex();
+    assert(parentless_state.validateOwnershipInvariants());
+
+    cosmosim::core::HierarchicalTimeBinScheduler parentless_scheduler(0);
+    parentless_scheduler.reset(0, 0, 0);
+    cosmosim::io::RestartWritePayload parentless_payload = payload;
+    parentless_payload.persistent_state.simulation_state = &parentless_state;
+    parentless_payload.scheduler = &parentless_scheduler;
+    parentless_payload.distributed_gravity_state.owning_rank_by_item.clear();
+    assert(cosmosim::io::restartPayloadIntegrityHash(parentless_payload) != 0);
+
+    parentless_state.gas_cell_identity.assign({
+        {.gas_cell_id = 7001, .parent_particle_id = 0, .owning_patch_id = 901, .local_cell_row = 0},
+    });
+    bool zero_parent_with_has_parent_threw = false;
+    try {
+      (void)cosmosim::io::restartPayloadIntegrityHash(parentless_payload);
+    } catch (const std::invalid_argument& ex) {
+      zero_parent_with_has_parent_threw =
+          std::string(ex.what()).find("parent_particle_id must be nonzero") != std::string::npos;
+    }
+    assert(zero_parent_with_has_parent_threw);
   }
 
   return 0;

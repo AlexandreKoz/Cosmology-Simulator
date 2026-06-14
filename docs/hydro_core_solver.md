@@ -73,6 +73,13 @@ For memory-sensitive loops, `HydroScratchBuffers` and `HydroPrimitiveCacheSoa` c
 `advancePatchWithScratch` / `advancePatchActiveSetWithScratch` to avoid repeated allocations and repeated
 primitive reconstruction for piecewise-constant paths.
 
+Production workflow hydro validates dense `GasCellIdentityMap` coverage before loading or storing gas-cell state.
+Hydro state is cell-local: parentless cells load velocity and thermodynamics from `GasCellSidecar`, and split cells
+may share one optional parent particle without making that parent the gas-cell identity authority. Particle mass and
+velocity lanes are updated only as compatibility mirrors through explicit optional-parent lookup, and a shared parent
+is mirrored at most once per hydro store pass. Conservative ghost flux corrections are keyed by stable `gas_cell_id`;
+`parent_particle_id` is lineage metadata only.
+
 ## Cartesian patch geometry
 
 H1 production fixed-grid hydro uses `makeCartesianPatchGeometry(...)` from

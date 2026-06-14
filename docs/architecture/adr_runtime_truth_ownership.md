@@ -25,7 +25,7 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | Active/inactive status | Scheduler subsystem | `HierarchicalTimeBinScheduler::m_hot.active_flag` and `m_active_elements` | `beginSubstep` (`rebuildActiveSet`), `endSubstep` | `ActiveSetDescriptor` is per-step derived data. |
 | Canonical particle order | `core::SimulationState` particle SoA+sidecar lanes | `SimulationState::{particles,particle_sidecar}` row order | `reorderParticles`, `commitParticleMigration` | All sidecars must be synchronized through these APIs. |
 | Species partition/grouping | `ParticleSidecar::species_tag` with ledger/index maintained by `SimulationState` | `particle_sidecar.species_tag`; `species.count_by_species`; `particle_species_index` | `reorderParticles` (then `rebuildSpeciesIndex`), `commitParticleMigration`, species-changing physics callbacks | `species.count_by_species` and `particle_species_index` are derived/validated mirrors. |
-| Gas cell identity and gas-cell row order | Local gas particle identity (`particle_sidecar.particle_id` for gas species) mediated by workflow gas rebuild path | `cells` + `gas_cells` rows keyed by gas particle IDs during migration/rebuild | `rebuildLocalGasStateFromParticleIds` and related migration helpers in `workflows/reference_workflow.cpp`; `requireParticleBoundGasCellContract`; `parentParticleIdForGasCellRow`; `gasCellRowForParticleId`; guarded `reorderParticles` | **Temporary contract:** local 1:1 gas-particle/gas-cell ownership is required on hydro/active-kernel paths. Gas cell index is local/transient only; gas particle ID is the stable identity anchor. |
+| Gas cell identity and gas-cell row order | `core::SimulationState::gas_cell_identity` | `GasCellIdentityMap` records keyed by stable nonzero `gas_cell_id`, with transient dense `local_cell_row` and generation | `refreshGasCellIdentityMapFromParticleBoundState`, legacy `refreshGasCellIdentityFromParticleOrder`, future gas-cell remap/migration helpers | **H2 transition contract:** local 1:1 gas-particle/gas-cell ownership is still required on production hydro/restart paths, but `gas_cells.{gas_cell_id,parent_particle_id}` are compatibility mirrors validated against the authoritative map. |
 | Softening (global/species/per-particle) | Frozen typed config for policy defaults; particle sidecar for overrides | Defaults: `SimulationConfig.numerics.gravity_softening_*`; overrides: `particle_sidecar.gravity_softening_comoving` gated by `particle_sidecar.has_gravity_softening_override` | Config load/normalization; `materializePerParticleSoftening` | Diagnostics/provenance are observers, never authorities. |
 | Raw config, normalized config, derived runtime constants, provenance | Config/provenance subsystem (`core::FrozenConfig`, `core::ProvenanceRecord`) | `FrozenConfig::{config,normalized_text,provenance}` + persisted normalized/provenance artifacts | `loadFrozenConfigFromFile/String`, `writeNormalizedConfigSnapshot`, provenance constructors and IO writers | Runtime mutation of typed config is forbidden. |
 | Restart continuation truth | Restart schema payload + typed restart read result | `io::RestartReadResult::{state,integrator_state,scheduler_state,provenance,normalized_config_*}` | `writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5` | Restart preserves full scheduler persistent state; snapshot does not. |
@@ -42,11 +42,12 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | `ParticleActiveView`, `CellActiveView`, `GravityParticleKernelView`, `HydroCellKernelView` | `TransientStepWorkspace` | `SimulationState` + current `ActiveSetDescriptor` | Gather on build; push back with scatter functions where mutable views are used | Invalid on any state reorder/resize/migration before scatter; invalid after scatter for reuse | Stage-local/transient only |
 | `ParticleSpeciesIndex` | `SimulationState` species index subsystem | `particle_sidecar.species_tag` | Must rebuild via `SimulationState::rebuildSpeciesIndex()` after any change affecting particle order/count/species tags | Invalid immediately after reorder/migration/species-tag edits until rebuild | Persistent derived index |
 | `SpeciesContainer::count_by_species` ledger | `SimulationState::species` | `particle_sidecar.species_tag` | Updated by authoritative mutation APIs and validated by invariants | Invalid after unsynchronized direct species-tag edits (forbidden) | Persistent derived ledger |
-| Gas migration lookup maps (e.g., `GasCellMigrationRecord` maps) | Reference workflow migration helpers | Gas particle ID + gas-cell row data | Recomputed at each migration/compaction event | Invalid after migration commit/reorder | Event-scoped transient |
+| Gas migration lookup maps (e.g., `GasCellMigrationRecord` maps) | Reference workflow migration helpers | `SimulationState::gas_cell_identity` plus legacy gas particle ID mirror data | Recomputed at each migration/compaction event | Invalid after migration commit/reorder or gas identity-map generation change | Event-scoped transient |
 
 Gas identity field classes:
-- **Stable identity field:** gas particle ID (`particle_sidecar.particle_id` for gas species rows).
-- **Persistent owner-mutable hydro sidecar fields:** `density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`.
+- **Stable identity field:** `GasCellIdentityMap::gas_cell_id`, nonzero and unique. During the current particle-bound transition it equals the parent gas `particle_sidecar.particle_id`, but that equality is compatibility behavior rather than the long-term identity model.
+- **Compatibility mirror fields:** `GasCellSidecar::{gas_cell_id,parent_particle_id}` mirror the map for legacy restart/import and particle-bound callers. `parent_particle_id == 0` mirrors a parentless identity record; parent lineage is not a uniqueness authority.
+- **Persistent owner-mutable hydro sidecar fields:** `velocity_[xyz]_peculiar`, `density_code`, `pressure_code`, `internal_energy_code`, `temperature_code`, `sound_speed_code`.
 - **Transient reconstruction scratch (not identity/restart truth):** reconstruction gradients live in hydro/transient workspaces, not `GasCellSidecar`.
 - **Scratch/transient hydro extraction fields:** `HydroCellKernelView` gathered active-cell buffers in `TransientStepWorkspace`; these are not persistence or identity authority.
 
@@ -59,7 +60,7 @@ Gas identity field classes:
 | Particle/cell time-bin mirrors | `syncTimeBinMirrorsFromScheduler`; restart read into `SimulationState` as load-time artifact | Any module treating mirrors as independent bin authority |
 | Particle order and sidecar alignment | `reorderParticles`; `commitParticleMigration` | Ad-hoc partial reorders of subset arrays/sidecars |
 | Species index and counts | `rebuildSpeciesIndex` + synchronized species-ledger updates in canonical mutation paths | Manual edits to `particle_species_index`/`count_by_species` detached from `species_tag` truth |
-| Gas cell rows/identity mapping | Workflow gas rebuild helpers keyed by gas particle IDs | Assuming pre-migration cell index stability or mutating cells without ID remap |
+| Gas cell rows/identity mapping | `SimulationState::gas_cell_identity` materialization/remap helpers; legacy workflow gas rebuild helpers must keep the map and compatibility mirrors synchronized | Assuming pre-migration cell index stability, mutating cells without ID remap, or letting compatibility mirror lanes drift from the map |
 | Per-particle softening overrides | Controlled writes to `particle_sidecar.setGravitySofteningOverride` / `clearGravitySofteningOverride`; materialized default values may populate `gravity_softening_comoving` only when the override mask is false | Diagnostics/provenance or tree kernels writing override truth |
 | Normalized config/provenance text/hash | Config/provenance loading and snapshot/restart IO contracts | Recomputing/rewriting normalized config or hashes in unrelated subsystems |
 | Active-set buffers/views | Active-view builders and scatter functions | Caching and reusing stale active views across reorder/bin changes |
@@ -88,7 +89,7 @@ Debug/test enforcement helpers:
 6. The default `SidecarSyncMode::kUseParentIndirection` keeps sidecar row order stable and remaps only `particle_index`; payload identity remains keyed by the parent particle ID, not by pre-reorder row number.
 7. Reorder implementations must use typed sidecar lane visitors so scalar and array-channel lanes move together. Future module sidecars may register only an explicit row-move/remap contract; ad-hoc edits to one metadata lane are forbidden.
 8. `debugAssertSpeciesSidecarOwnershipInvariants(...)` is the defensive post-reorder guard for exactly one eligible sidecar row and zero ineligible rows.
-9. Gas cell rows must be reconstructed by gas particle ID mapping in migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`), then host-cell references remapped. Code that needs a row/ID association must use the named helpers (`parentParticleIdForGasCellRow`, `gasCellRowForParticleId`, or `gasParticleIndexForCellRow`) after `requireParticleBoundGasCellContract(...)` has passed.
+9. Gas cell rows must be reconstructed through the authoritative `SimulationState::gas_cell_identity` mapping. During the legacy particle-bound transition, migration/compaction paths (`collectLocalGasCellRecords` / `rebuildLocalGasStateFromParticleIds`) may still materialize from gas particle IDs, but they must refresh or validate the map in the same commit boundary before hydro kernels resume. Code that needs a legacy row/ID association must use the named helpers (`parentParticleIdForGasCellRow`, `gasCellRowForParticleId`, or `gasParticleIndexForCellRow`) after `requireParticleBoundGasCellContract(...)` has passed.
 10. Temporary safety guard: `reorderParticles` must fail loudly if it would change the relative gas-particle order while gas cells exist (unless a gas-cell ID-based rebuild follows in the same repair path). Hydro active-view construction and scatter also require this contract before solver kernels can consume cell rows.
 11. Resize operations (`resizeParticles`, `resizeCells`) are structural and must be followed by required derived-index/ledger synchronization before runtime stepping.
 12. Allowed species migration path is `packParticleMigrationRecords` + `commitParticleMigration`; species-tag edits outside this path are forbidden because sidecars/count ledgers/indexes and per-particle softening overrides must stay synchronized.
@@ -147,8 +148,8 @@ Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
    Any alternate authority lane is forbidden.
 7. Active-set caches/views must carry explicit source generation fields for mutable scatter paths; pointer-keyed global registries are forbidden because view lifetime must be local and auditable.
    - Particle compact mutable views capture `SimulationState::particleIndexGeneration()`.
-   - Cell compact mutable views capture `SimulationState::cellIndexGeneration()`.
-   Scatter must fail loudly on generation mismatch.
+   - Cell compact mutable views capture `SimulationState::cellIndexGeneration()` and `SimulationState::gasCellIdentityGeneration()`.
+   Scatter must fail loudly on either generation mismatch.
 8. Allowed invalidation events for active views/caches:
    - scheduler bin mutation (`requestBinTransition` + `endSubstep`),
    - particle/cell reorder,
@@ -188,7 +189,7 @@ Future repair prompts that touch these domains must include targeted tests (or c
 
 1. Scheduler truth vs state mirror synchronization invariants across full substep loops.
 2. Reorder/migration stale-index prevention and species-index rebuild obligations.
-3. Gas cell ID-based reconstruction correctness under migration/compaction.
+3. Gas cell ID-based reconstruction correctness under migration/compaction, including identity-map generation invalidation and compatibility-mirror drift rejection.
 4. Softening priority-order correctness and preservation across reorder/restart.
 5. Restart-vs-snapshot timestep-bin contract boundaries.
 6. Active-set cache invalidation after scheduler bin changes and reorder events.
@@ -197,7 +198,7 @@ Future repair prompts that touch these domains must include targeted tests (or c
 
 1. **Scheduler vs state bin ambiguity** (runtime truth map): policy now formalizes scheduler as sole authority and state bins as mirrors only.
 2. **Species multi-lane duplication** (`species_tag`, `count_by_species`, `particle_species_index`): policy now formalizes `species_tag` as root truth and other lanes as derived mirrors requiring explicit rebuild/sync.
-3. **Gas cell identity under migration**: policy now formalizes gas particle ID as stable identity anchor and cell index as rebuildable local index.
+3. **Gas cell identity under migration**: policy now formalizes `SimulationState::gas_cell_identity` as the in-memory stable gas-cell identity authority. Legacy particle-bound mode still materializes `gas_cell_id == parent_particle_id == gas particle_id` until later H2 schema/hydro stages remove that compatibility constraint.
 4. **Snapshot timestep-bin continuity ambiguity**: policy now formalizes that snapshot import is non-authoritative for timestep-bin continuation; restart is required for exact continuation.
 
 ## Reproducibility impact
@@ -222,5 +223,7 @@ The P0-05..P0-08 repair pass strengthened the ownership contract in four places.
 - Scheduler element rows are local index-space rows, not physical identities. Any particle reorder, compaction, migration commit, gas-cell rebuild, or restart import that changes row spaces must either remap scheduler persistent lanes by stable identity in the same commit boundary or leave the scheduler unusable until an explicit identity-record rebuild/import occurs.
 - Stable scheduler remap keys are `particle_sidecar.particle_id` for particle scheduler rows and `gas_cells.gas_cell_id` / `gas_cells.parent_particle_id` for gas-cell mirror validation. `state.particles.time_bin`, `state.cells.time_bin`, `ParticleMigrationRecord::time_bin`, and `GasCellMigrationRecord::time_bin` are diagnostic/transfer mirrors only and are never sufficient authority for exact continuation.
 - Public scheduler remap helpers under `include/cosmosim/core/time_integration.hpp` provide the supported migration path: export full identity records, remap persistent state by particle ID, rebuild scheduler persistent state from identity records, then refresh particle and gas-cell mirrors from scheduler authority.
-- Gas-cell time-bin mirror refresh must resolve each cell through the particle-bound gas identity contract (`parent_particle_id` -> gas particle row) rather than assuming `cell_index == scheduler element index`.
+- Gas-cell time-bin mirror validation in production resolves cells through dense `GasCellIdentityMap` local rows and
+  does not require local gas-particle count to equal local gas-cell count. Legacy particle-bound restart/import
+  adapters may still resolve `parent_particle_id -> gas particle row` before handing state to production paths.
 - Future MPI contract: current helpers validate local-row identity remaps and local migration readiness only. Multi-rank scheduler truth exchange must send full scheduler identity records alongside migrating particles and must define rank coordination for current tick/max bin before claiming distributed exact-continuation maturity; `ParticleMigrationRecord::time_bin` alone remains non-authoritative.

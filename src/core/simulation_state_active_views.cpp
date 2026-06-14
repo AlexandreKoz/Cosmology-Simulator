@@ -27,6 +27,8 @@ void TransientStepWorkspace::clear() {
   gravity_particle_index.clear();
 
   hydro_cell_index.clear();
+  hydro_gas_cell_id.clear();
+  hydro_local_cell_row.clear();
   hydro_cell_center_x_comoving.clear();
   hydro_cell_center_y_comoving.clear();
   hydro_cell_center_z_comoving.clear();
@@ -249,9 +251,11 @@ HydroCellKernelView buildHydroCellKernelView(
     std::span<const std::uint32_t> active_cell_indices,
     TransientStepWorkspace& workspace) {
   if (!active_cell_indices.empty()) {
-    requireParticleBoundGasCellContract(state, "buildHydroCellKernelView");
+    state.requireGasCellIdentityMapCoversDenseRows("buildHydroCellKernelView");
   }
   workspace.hydro_cell_index.resize(active_cell_indices.size());
+  workspace.hydro_gas_cell_id.resize(active_cell_indices.size());
+  workspace.hydro_local_cell_row.resize(active_cell_indices.size());
   workspace.hydro_cell_center_x_comoving.resize(active_cell_indices.size());
   workspace.hydro_cell_center_y_comoving.resize(active_cell_indices.size());
   workspace.hydro_cell_center_z_comoving.resize(active_cell_indices.size());
@@ -264,7 +268,13 @@ HydroCellKernelView buildHydroCellKernelView(
     if (source >= state.cells.size()) {
       throw std::out_of_range("buildHydroCellKernelView: cell index out of range");
     }
+    const auto gas_cell_id = state.gasCellIdForLocalRow(source);
+    if (!gas_cell_id.has_value()) {
+      throw std::runtime_error("buildHydroCellKernelView: active cell row is absent from GasCellIdentityMap");
+    }
     workspace.hydro_cell_index[i] = source;
+    workspace.hydro_gas_cell_id[i] = *gas_cell_id;
+    workspace.hydro_local_cell_row[i] = source;
   }
 
   gatherSpan<double>(
@@ -284,6 +294,8 @@ HydroCellKernelView buildHydroCellKernelView(
   gatherSpan<double>(state.gas_cells.pressure_code, active_cell_indices, workspace.hydro_cell_pressure_code);
   return HydroCellKernelView{
       .cell_index = workspace.hydro_cell_index,
+      .gas_cell_id = workspace.hydro_gas_cell_id,
+      .local_cell_row = workspace.hydro_local_cell_row,
       .center_x_comoving = workspace.hydro_cell_center_x_comoving,
       .center_y_comoving = workspace.hydro_cell_center_y_comoving,
       .center_z_comoving = workspace.hydro_cell_center_z_comoving,
@@ -291,6 +303,7 @@ HydroCellKernelView buildHydroCellKernelView(
       .density_code = workspace.hydro_cell_density_code,
       .pressure_code = workspace.hydro_cell_pressure_code,
       .source_cell_index_generation = state.cellIndexGeneration(),
+      .source_gas_cell_identity_generation = state.gasCellIdentityGeneration(),
   };
 }
 
@@ -298,20 +311,26 @@ void scatterHydroCellKernelView(const HydroCellKernelView& view, SimulationState
   if (view.source_cell_index_generation != state.cellIndexGeneration()) {
     throw std::runtime_error("scatterHydroCellKernelView: stale cell view generation");
   }
+  if (view.source_gas_cell_identity_generation != state.gasCellIdentityGeneration()) {
+    throw std::runtime_error("scatterHydroCellKernelView: stale gas-cell identity map generation");
+  }
   if (view.size() > 0) {
-    requireParticleBoundGasCellContract(state, "scatterHydroCellKernelView");
+    state.requireGasCellIdentityMapCoversDenseRows("scatterHydroCellKernelView");
   }
   for (std::size_t i = 0; i < view.size(); ++i) {
-    const auto destination = view.cell_index[i];
-    if (destination >= state.cells.size()) {
-      throw std::out_of_range("scatterHydroCellKernelView: stale cell index");
+    const auto destination = state.rowForGasCellId(view.gas_cell_id[i]);
+    if (!destination.has_value()) {
+      throw std::out_of_range("scatterHydroCellKernelView: gas_cell_id is not attached to a local cell row");
     }
-    state.cells.center_x_comoving[destination] = view.center_x_comoving[i];
-    state.cells.center_y_comoving[destination] = view.center_y_comoving[i];
-    state.cells.center_z_comoving[destination] = view.center_z_comoving[i];
-    state.cells.mass_code[destination] = view.mass_code[i];
-    state.gas_cells.density_code[destination] = view.density_code[i];
-    state.gas_cells.pressure_code[destination] = view.pressure_code[i];
+    if (*destination >= state.cells.size()) {
+      throw std::out_of_range("scatterHydroCellKernelView: resolved gas-cell row out of range");
+    }
+    state.cells.center_x_comoving[*destination] = view.center_x_comoving[i];
+    state.cells.center_y_comoving[*destination] = view.center_y_comoving[i];
+    state.cells.center_z_comoving[*destination] = view.center_z_comoving[i];
+    state.cells.mass_code[*destination] = view.mass_code[i];
+    state.gas_cells.density_code[*destination] = view.density_code[i];
+    state.gas_cells.pressure_code[*destination] = view.pressure_code[i];
   }
 }
 

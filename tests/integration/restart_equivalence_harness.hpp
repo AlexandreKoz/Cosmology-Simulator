@@ -417,6 +417,9 @@ inline void compareSimulationState(
   requireAlignedExact(lhs.patches.owning_rank, rhs.patches.owning_rank, "patch_owning_rank");
   requireAlignedExact(lhs.gas_cells.gas_cell_id, rhs.gas_cells.gas_cell_id, "gas_cell_id");
   requireAlignedExact(lhs.gas_cells.parent_particle_id, rhs.gas_cells.parent_particle_id, "gas_parent_particle_id");
+  requireAlignedNear(lhs.gas_cells.velocity_x_peculiar, rhs.gas_cells.velocity_x_peculiar, tolerances.velocity_abs, "gas_velocity_x");
+  requireAlignedNear(lhs.gas_cells.velocity_y_peculiar, rhs.gas_cells.velocity_y_peculiar, tolerances.velocity_abs, "gas_velocity_y");
+  requireAlignedNear(lhs.gas_cells.velocity_z_peculiar, rhs.gas_cells.velocity_z_peculiar, tolerances.velocity_abs, "gas_velocity_z");
   requireAlignedNear(lhs.gas_cells.density_code, rhs.gas_cells.density_code, tolerances.scalar_abs, "gas_density");
   requireAlignedNear(lhs.gas_cells.pressure_code, rhs.gas_cells.pressure_code, tolerances.scalar_abs, "gas_pressure");
   requireAlignedNear(lhs.gas_cells.internal_energy_code, rhs.gas_cells.internal_energy_code, tolerances.scalar_abs, "gas_internal_energy");
