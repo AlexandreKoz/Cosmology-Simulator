@@ -93,6 +93,28 @@ void validateAdvanceInputs(
       throw std::invalid_argument("Hydro face normal must be unit length");
     }
   }
+  if (!geometry.flux_register_faces.empty() &&
+      geometry.flux_register_faces.size() != geometry.faces.size()) {
+    throw std::invalid_argument("Hydro flux-register metadata must be empty or match face count");
+  }
+  for (const HydroFluxRegisterFace& register_face : geometry.flux_register_faces) {
+    if (register_face.role == HydroFluxRegisterFaceRole::kNone) {
+      continue;
+    }
+    if (register_face.register_key == 0U) {
+      throw std::invalid_argument("Hydro flux-register face requires nonzero register_key");
+    }
+    if (register_face.coarse_patch_id == 0U) {
+      throw std::invalid_argument("Hydro flux-register face requires nonzero coarse_patch_id");
+    }
+    if (register_face.coarse_cell_index == k_invalid_cell_index) {
+      throw std::invalid_argument("Hydro flux-register face requires valid coarse_cell_index");
+    }
+    if (register_face.coarse_orientation_sign != 1.0 &&
+        register_face.coarse_orientation_sign != -1.0) {
+      throw std::invalid_argument("Hydro flux-register coarse_orientation_sign must be +1 or -1");
+    }
+  }
 }
 
 void validateActiveSet(const HydroActiveSetView& active_set, const HydroConservedStateSoa& conserved, const HydroPatchGeometry& geometry) {
@@ -208,6 +230,33 @@ void fillPrimitiveCache(
   // records handle the real-rank update path, so the local solver must not
   // mutate them as truth.
   return k_invalid_cell_index;
+}
+
+void maybeRecordFluxRegister(
+    const HydroPatchGeometry& geometry,
+    std::size_t face_index,
+    const HydroUpdateContext& update,
+    const HydroConservedState& flux_code,
+    HydroFluxRegisterSink* flux_register_sink) {
+  if (flux_register_sink == nullptr || geometry.flux_register_faces.empty()) {
+    return;
+  }
+  const HydroFluxRegisterFace& register_face = geometry.flux_register_faces[face_index];
+  if (register_face.role == HydroFluxRegisterFaceRole::kNone) {
+    return;
+  }
+  const HydroConservedState oriented_flux = register_face.coarse_orientation_sign * flux_code;
+  flux_register_sink->recordFaceFlux(HydroFluxRegisterRecord{
+      .role = register_face.role,
+      .register_key = register_face.register_key,
+      .coarse_patch_id = register_face.coarse_patch_id,
+      .coarse_cell_index = register_face.coarse_cell_index,
+      .level = register_face.level,
+      .axis = register_face.axis,
+      .orientation = register_face.orientation,
+      .face_area_comoving = geometry.faces[face_index].area_comoving,
+      .dt_code = update.dt_code,
+      .flux_code = oriented_flux});
 }
 
 }  // namespace
@@ -497,7 +546,8 @@ void HydroCoreSolver::advancePatch(
     const HydroRiemannSolver& riemann_solver,
     std::span<const HydroSourceTerm* const> source_terms,
     const HydroSourceContext& source_context,
-    HydroProfileEvent* profile) const {
+    HydroProfileEvent* profile,
+    HydroFluxRegisterSink* flux_register_sink) const {
   HydroScratchBuffers scratch;
   HydroPrimitiveCacheSoa primitive_cache(conserved.size());
   advancePatchWithScratch(
@@ -510,7 +560,8 @@ void HydroCoreSolver::advancePatch(
       source_context,
       scratch,
       &primitive_cache,
-      profile);
+      profile,
+      flux_register_sink);
 }
 
 void HydroCoreSolver::advancePatchWithScratch(
@@ -523,7 +574,8 @@ void HydroCoreSolver::advancePatchWithScratch(
     const HydroSourceContext& source_context,
     HydroScratchBuffers& scratch,
     HydroPrimitiveCacheSoa* primitive_cache,
-    HydroProfileEvent* profile) const {
+    HydroProfileEvent* profile,
+    HydroFluxRegisterSink* flux_register_sink) const {
   scratch.full_active_cells.resize(conserved.size());
   for (std::size_t i = 0; i < scratch.full_active_cells.size(); ++i) {
     scratch.full_active_cells[i] = i;
@@ -543,7 +595,8 @@ void HydroCoreSolver::advancePatchWithScratch(
       source_context,
       scratch,
       primitive_cache,
-      profile);
+      profile,
+      flux_register_sink);
 }
 
 void HydroCoreSolver::advancePatchActiveSet(
@@ -555,7 +608,8 @@ void HydroCoreSolver::advancePatchActiveSet(
     const HydroRiemannSolver& riemann_solver,
     std::span<const HydroSourceTerm* const> source_terms,
     const HydroSourceContext& source_context,
-    HydroProfileEvent* profile) const {
+    HydroProfileEvent* profile,
+    HydroFluxRegisterSink* flux_register_sink) const {
   HydroScratchBuffers scratch;
   HydroPrimitiveCacheSoa primitive_cache(conserved.size());
   advancePatchActiveSetWithScratch(
@@ -569,7 +623,8 @@ void HydroCoreSolver::advancePatchActiveSet(
       source_context,
       scratch,
       &primitive_cache,
-      profile);
+      profile,
+      flux_register_sink);
 }
 
 void HydroCoreSolver::advancePatchActiveSetWithScratch(
@@ -583,7 +638,8 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     const HydroSourceContext& source_context,
     HydroScratchBuffers& scratch,
     HydroPrimitiveCacheSoa* primitive_cache,
-    HydroProfileEvent* profile) const {
+    HydroProfileEvent* profile,
+    HydroFluxRegisterSink* flux_register_sink) const {
   const std::uint64_t limiter_before = reconstruction.limiterClipCount();
   const std::uint64_t positivity_before = reconstruction.positivityFallbackCount();
   const std::uint64_t riemann_fallback_before = riemann_solver.fallbackCount();
@@ -658,6 +714,12 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
         scratch.right_states[active_face_slot],
         geometry.faces[face_index],
         m_adiabatic_index);
+    maybeRecordFluxRegister(
+        geometry,
+        face_index,
+        update,
+        scratch.fluxes[active_face_slot],
+        flux_register_sink);
   }
   const auto riemann_stop = std::chrono::steady_clock::now();
 

@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cosmosim/hydro/hydro_core_solver.hpp"
+
 namespace cosmosim::amr {
 
 struct ConservedState {
@@ -85,6 +87,8 @@ class AmrPatch {
   [[nodiscard]] std::span<const ConservedState> conservedView() const;
   [[nodiscard]] std::span<CellMetrics> metricsView();
   [[nodiscard]] std::span<const CellMetrics> metricsView() const;
+  [[nodiscard]] std::span<std::uint64_t> gasCellIdView();
+  [[nodiscard]] std::span<const std::uint64_t> gasCellIdView() const;
 
   [[nodiscard]] ConservedState totalConserved() const;
   [[nodiscard]] bool isLeaf() const;
@@ -94,6 +98,7 @@ class AmrPatch {
   PatchDescriptor m_descriptor;
   std::vector<ConservedState> m_conserved;
   std::vector<CellMetrics> m_metrics;
+  std::vector<std::uint64_t> m_gas_cell_ids;
   bool m_is_leaf = true;
 };
 
@@ -111,12 +116,16 @@ class PatchHierarchy {
 
   [[nodiscard]] std::size_t levelCount() const;
   [[nodiscard]] std::size_t patchCount() const;
+  [[nodiscard]] std::span<const std::uint64_t> retiredGasCellIds() const;
 
  private:
   std::vector<std::vector<AmrPatch>> m_levels;
   std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> m_patch_index;
   std::uint64_t m_next_patch_id = 1;
+  std::uint64_t m_next_gas_cell_id = 1;
+  std::vector<std::uint64_t> m_retired_gas_cell_ids;
 
+  void assignStableGasCellIds(AmrPatch& patch);
   void rebuildPatchIndex();
 };
 
@@ -130,12 +139,37 @@ class ConservativeTransfer {
 };
 
 struct FluxRegisterEntry {
+  std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
   std::size_t coarse_cell_index = 0;
+  std::uint8_t level = 0;
+  hydro::HydroFaceAxis axis = hydro::HydroFaceAxis::kX;
+  hydro::HydroFaceSide orientation = hydro::HydroFaceSide::kLower;
   ConservedState coarse_face_flux_code;
   ConservedState fine_face_flux_code;
   double face_area_comov = 1.0;
   double dt_code = 0.0;
+  std::uint32_t coarse_face_count = 0;
+  std::uint32_t fine_face_count = 0;
+};
+
+class FluxRegisterAccumulator final : public hydro::HydroFluxRegisterSink {
+ public:
+  void recordFaceFlux(const hydro::HydroFluxRegisterRecord& record) override;
+  [[nodiscard]] std::vector<FluxRegisterEntry> entries() const;
+  void clear();
+
+ private:
+  struct AccumulatedEntry {
+    FluxRegisterEntry entry;
+    ConservedState coarse_area_weighted_flux;
+    ConservedState fine_area_weighted_flux;
+    double coarse_area_comov = 0.0;
+    double fine_area_comov = 0.0;
+  };
+
+  std::unordered_map<std::uint64_t, std::size_t> m_slot_by_key;
+  std::vector<AccumulatedEntry> m_entries;
 };
 
 struct RefluxDiagnostics {

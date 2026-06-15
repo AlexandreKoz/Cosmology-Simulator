@@ -112,6 +112,23 @@ enum class HydroFaceSide {
   kUpper,
 };
 
+enum class HydroFluxRegisterFaceRole {
+  kNone,
+  kCoarse,
+  kFine,
+};
+
+struct HydroFluxRegisterFace {
+  HydroFluxRegisterFaceRole role = HydroFluxRegisterFaceRole::kNone;
+  std::uint64_t register_key = 0;
+  std::uint64_t coarse_patch_id = 0;
+  std::size_t coarse_cell_index = k_invalid_cell_index;
+  int level = 0;
+  HydroFaceAxis axis = HydroFaceAxis::kX;
+  HydroFaceSide orientation = HydroFaceSide::kLower;
+  double coarse_orientation_sign = 1.0;
+};
+
 enum class HydroBoundaryKind {
   kInterior,
   kPeriodic,
@@ -162,6 +179,7 @@ struct HydroPatchGeometry {
   double cell_volume_comoving = 0.0;
   std::vector<HydroFace> faces;
   std::vector<HydroGhostCell> ghost_cells;
+  std::vector<HydroFluxRegisterFace> flux_register_faces;
 
   [[nodiscard]] std::size_t cellCount() const noexcept;
   [[nodiscard]] std::size_t totalCellStorageCount() const noexcept;
@@ -172,6 +190,26 @@ struct HydroPatchGeometry {
       int di,
       int dj,
       int dk) const noexcept;
+};
+
+struct HydroFluxRegisterRecord {
+  HydroFluxRegisterFaceRole role = HydroFluxRegisterFaceRole::kNone;
+  std::uint64_t register_key = 0;
+  std::uint64_t coarse_patch_id = 0;
+  std::size_t coarse_cell_index = k_invalid_cell_index;
+  int level = 0;
+  HydroFaceAxis axis = HydroFaceAxis::kX;
+  HydroFaceSide orientation = HydroFaceSide::kLower;
+  double face_area_comoving = 0.0;
+  double dt_code = 0.0;
+  HydroConservedState flux_code;
+};
+
+class HydroFluxRegisterSink {
+ public:
+  virtual ~HydroFluxRegisterSink() = default;
+
+  virtual void recordFaceFlux(const HydroFluxRegisterRecord& record) = 0;
 };
 
 struct HydroActiveSetView {
@@ -304,7 +342,8 @@ class HydroCoreSolver {
       const HydroRiemannSolver& riemann_solver,
       std::span<const HydroSourceTerm* const> source_terms,
       const HydroSourceContext& source_context,
-      HydroProfileEvent* profile = nullptr) const;
+      HydroProfileEvent* profile = nullptr,
+      HydroFluxRegisterSink* flux_register_sink = nullptr) const;
 
   void advancePatchWithScratch(
       HydroConservedStateSoa& conserved,
@@ -316,7 +355,8 @@ class HydroCoreSolver {
       const HydroSourceContext& source_context,
       HydroScratchBuffers& scratch,
       HydroPrimitiveCacheSoa* primitive_cache,
-      HydroProfileEvent* profile = nullptr) const;
+      HydroProfileEvent* profile = nullptr,
+      HydroFluxRegisterSink* flux_register_sink = nullptr) const;
 
   void advancePatchActiveSet(
       HydroConservedStateSoa& conserved,
@@ -327,7 +367,8 @@ class HydroCoreSolver {
       const HydroRiemannSolver& riemann_solver,
       std::span<const HydroSourceTerm* const> source_terms,
       const HydroSourceContext& source_context,
-      HydroProfileEvent* profile = nullptr) const;
+      HydroProfileEvent* profile = nullptr,
+      HydroFluxRegisterSink* flux_register_sink = nullptr) const;
 
   void advancePatchActiveSetWithScratch(
       HydroConservedStateSoa& conserved,
@@ -340,7 +381,8 @@ class HydroCoreSolver {
       const HydroSourceContext& source_context,
       HydroScratchBuffers& scratch,
       HydroPrimitiveCacheSoa* primitive_cache,
-      HydroProfileEvent* profile = nullptr) const;
+      HydroProfileEvent* profile = nullptr,
+      HydroFluxRegisterSink* flux_register_sink = nullptr) const;
 
  private:
   double m_adiabatic_index = 5.0 / 3.0;

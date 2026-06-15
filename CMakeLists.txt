@@ -283,7 +283,9 @@ add_library(cosmosim_hydro STATIC
   src/hydro/hydro_riemann.cpp)
 add_library(cosmosim_amr STATIC
   src/amr/amr_module.cpp
-  src/amr/amr_framework.cpp)
+  src/amr/amr_framework.cpp
+  src/amr/amr_hydro_geometry.cpp
+  src/amr/amr_ghost_fill.cpp)
 add_library(cosmosim_physics STATIC
   src/physics/physics_module.cpp
   src/physics/cooling_heating.cpp
@@ -349,6 +351,7 @@ target_link_libraries(cosmosim_workflows
     cosmosim_physics)
 
 target_link_libraries(cosmosim_io PUBLIC cosmosim_parallel)
+target_link_libraries(cosmosim_amr PUBLIC cosmosim_hydro)
 
 if(COSMOSIM_ENABLE_MPI)
   target_link_libraries(cosmosim_parallel PUBLIC MPI::MPI_CXX)
@@ -663,6 +666,15 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_amr_refinement tests/unit/test_amr_refinement.cpp)
   target_link_libraries(test_unit_amr_refinement PRIVATE cosmosim_amr)
   add_test(NAME unit_amr_refinement COMMAND test_unit_amr_refinement)
+  add_executable(test_unit_amr_hydro_geometry tests/unit/test_amr_hydro_geometry.cpp)
+  target_link_libraries(test_unit_amr_hydro_geometry PRIVATE cosmosim_amr cosmosim_hydro)
+  add_test(NAME unit_amr_hydro_geometry COMMAND test_unit_amr_hydro_geometry)
+  add_executable(test_unit_amr_ghost_fill tests/unit/test_amr_ghost_fill.cpp)
+  target_link_libraries(test_unit_amr_ghost_fill PRIVATE cosmosim_amr cosmosim_hydro)
+  add_test(NAME unit_amr_ghost_fill COMMAND test_unit_amr_ghost_fill)
+  add_executable(test_unit_amr_flux_register_generation tests/unit/test_amr_flux_register_generation.cpp)
+  target_link_libraries(test_unit_amr_flux_register_generation PRIVATE cosmosim_amr cosmosim_hydro)
+  add_test(NAME unit_amr_flux_register_generation COMMAND test_unit_amr_flux_register_generation)
 
   add_executable(test_unit_hydro_core_solver tests/unit/test_hydro_core_solver.cpp)
   target_link_libraries(test_unit_hydro_core_solver PRIVATE cosmosim_hydro)
@@ -695,6 +707,15 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_amr_static_refinement_sync tests/integration/test_amr_static_refinement_sync.cpp)
   target_link_libraries(test_integration_amr_static_refinement_sync PRIVATE cosmosim_amr)
   add_test(NAME integration_amr_static_refinement_sync COMMAND test_integration_amr_static_refinement_sync)
+  add_executable(test_integration_amr_patch_boundary_consistency tests/integration/test_amr_patch_boundary_consistency.cpp)
+  target_link_libraries(test_integration_amr_patch_boundary_consistency PRIVATE cosmosim_amr cosmosim_hydro)
+  add_test(NAME integration_amr_patch_boundary_consistency COMMAND test_integration_amr_patch_boundary_consistency)
+  add_executable(test_integration_amr_conservative_refine tests/integration/test_amr_conservative_refine.cpp)
+  target_link_libraries(test_integration_amr_conservative_refine PRIVATE cosmosim_amr)
+  add_test(NAME integration_amr_conservative_refine COMMAND test_integration_amr_conservative_refine)
+  add_executable(test_integration_amr_conservative_derefine tests/integration/test_amr_conservative_derefine.cpp)
+  target_link_libraries(test_integration_amr_conservative_derefine PRIVATE cosmosim_amr)
+  add_test(NAME integration_amr_conservative_derefine COMMAND test_integration_amr_conservative_derefine)
 
   add_executable(test_integration_simulation_mode_toy_runs tests/integration/test_simulation_mode_toy_runs.cpp)
   target_link_libraries(test_integration_simulation_mode_toy_runs PRIVATE cosmosim_core)

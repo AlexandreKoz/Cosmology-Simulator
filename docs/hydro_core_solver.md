@@ -55,6 +55,19 @@ The update is split into stages to keep AMR reuse and future GPU kernels straigh
 3. Flux accumulation (`HydroCoreSolver`): apply conservative owner/neighbor updates.
 4. Source application (`HydroSourceTerm`): apply gravity/expansion and optional future sources.
 
+During the Riemann stage, callers may pass a `HydroFluxRegisterSink`. `HydroCoreSolver` remains AMR-neutral: it only
+checks `HydroPatchGeometry::flux_register_faces` for precomputed per-face metadata and emits the actual numerical flux
+returned by the configured `HydroRiemannSolver`. Faces without flux-register metadata do not call the sink, so same-level
+and ordinary physical-boundary faces do not produce reflux records.
+
+The flux-register sign convention is oriented to the coarse cell face named by the metadata. `HydroFace::normal_*`
+continues to point from the hydro face owner toward its neighbor/ghost, and the finite-volume owner update subtracts
+`F * A * dt / (a V)`. For reflux diagnostics, `coarse_orientation_sign = +1` means the Riemann flux is already aligned
+with the outward normal of the registered coarse face; `-1` flips the flux before it reaches the sink. Fine faces that
+are swept from the fine patch side of a coarse-fine boundary typically use `-1` when their local outward normal points
+back toward the coarse ghost. The AMR accumulator area-weights all fine-face fluxes sharing the same register key and
+emits one deterministic `FluxRegisterEntry` ordered by that key.
+
 Implementation is now split along these boundaries:
 
 - `src/hydro/hydro_reconstruction.cpp` + `include/cosmosim/hydro/hydro_reconstruction.hpp`:
@@ -79,6 +92,22 @@ may share one optional parent particle without making that parent the gas-cell i
 velocity lanes are updated only as compatibility mirrors through explicit optional-parent lookup, and a shared parent
 is mirrored at most once per hydro store pass. Conservative ghost flux corrections are keyed by stable `gas_cell_id`;
 `parent_particle_id` is lineage metadata only.
+
+AMR patch hydro geometry is supplied by `cosmosim/amr/amr_hydro_geometry.hpp` as an adapter layer around
+`HydroPatchGeometry`. The adapter maps one `amr::PatchDescriptor` to patch-local real cells, ghost placeholders, and
+face metadata keyed by stable `gas_cell_id`, while `HydroCoreSolver` continues to consume only the geometry-neutral
+hydro types. Persistent hydro truth remains in `core::SimulationState`; AMR patch geometry views capture the
+`GasCellIdentityMap` generation and must be rebuilt after gas-cell identity remaps.
+
+AMR same-level and coarse-fine ghost state is filled by `cosmosim/amr/amr_ghost_fill.hpp` after patch-local conserved
+state has been loaded from `SimulationState`. Physical AMR boundaries delegate to the H1 Cartesian fill rules
+(`periodic`, `open`, and `reflective`). Same-level AMR ghosts are copied from the geometrically adjacent source patch
+cell at the same refinement level. Fine-side coarse-fine ghosts use piecewise-constant coarse-to-fine injection from
+the adjacent coarse cell. Coarse-side coarse-fine ghosts use a monotone arithmetic average of the adjacent fine boundary
+cells that cover the coarse ghost volume; this makes the fine boundary state available for reconstruction/restriction
+tests without replacing flux registers or refluxing. AMR ghost writes are scratch-only writes into the patch-local
+`HydroConservedStateSoa` ghost rows. Same-level, coarse-fine, and remote imported ghost sources are read-only; stale
+remote ghost epochs are rejected before fill.
 
 ## Cartesian patch geometry
 

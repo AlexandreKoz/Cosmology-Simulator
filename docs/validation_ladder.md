@@ -46,7 +46,13 @@ Implemented now:
 - Hydro: Sod-like conservation check, smooth-wave self-convergence, and CI-scale
   classical guards for Sedov, Noh, Gresho vortex, Kelvin-Helmholtz, and an
   Evrard-style hydro plus analytic-gravity collapse toy.
-- AMR: coarse-fine reflux synchronization regression.
+- AMR: coarse-fine reflux synchronization regression, conservative
+  piecewise-constant prolongation on scaffold patch refinement, and
+  conservative restriction on scaffold derefine. The current refinement and
+  derefinement transfers preserve volume-integrated mass, momentum components,
+  and total energy across parent/child transitions; slope-limited conservative
+  prolongation and production `SimulationState` gas-cell remapping remain
+  future work before production AMR hydro closure.
 - Galaxy modules: cooling monotonicity check, star-formation mass-budget regression.
 
 Phase 2 distributed TreePM gravity gate (implemented):
