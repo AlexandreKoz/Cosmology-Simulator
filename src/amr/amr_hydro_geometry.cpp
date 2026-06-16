@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -287,6 +288,69 @@ void appendAxisBoundaryGhosts(
   return std::max(state.cells.mass_code.at(row) / volume, 1.0e-14);
 }
 
+void validatePatchLocalRowOrdering(
+    const core::SimulationState& state,
+    const PatchDescriptor& patch,
+    std::span<const std::uint32_t> rows) {
+  std::vector<double> xs;
+  std::vector<double> ys;
+  std::vector<double> zs;
+  xs.reserve(rows.size());
+  ys.reserve(rows.size());
+  zs.reserve(rows.size());
+  for (const std::uint32_t row : rows) {
+    xs.push_back(state.cells.center_x_comoving.at(row));
+    ys.push_back(state.cells.center_y_comoving.at(row));
+    zs.push_back(state.cells.center_z_comoving.at(row));
+  }
+  auto unique_with_tol = [](std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    values.erase(
+        std::unique(
+            values.begin(),
+            values.end(),
+            [](double lhs, double rhs) {
+              const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+              return std::abs(lhs - rhs) <= 1.0e-10 * scale;
+            }),
+        values.end());
+    return values;
+  };
+  xs = unique_with_tol(std::move(xs));
+  ys = unique_with_tol(std::move(ys));
+  zs = unique_with_tol(std::move(zs));
+  if (xs.size() != patch.cell_dims[0] || ys.size() != patch.cell_dims[1] || zs.size() != patch.cell_dims[2]) {
+    return;
+  }
+  if (xs.size() * ys.size() * zs.size() != rows.size()) {
+    return;
+  }
+  auto coordinate_index = [](const std::vector<double>& coordinates, double value) -> std::optional<std::size_t> {
+    for (std::size_t index = 0; index < coordinates.size(); ++index) {
+      const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
+      if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  };
+  for (std::size_t patch_cell = 0; patch_cell < rows.size(); ++patch_cell) {
+    const std::uint32_t row = rows[patch_cell];
+    const auto i = coordinate_index(xs, state.cells.center_x_comoving.at(row));
+    const auto j = coordinate_index(ys, state.cells.center_y_comoving.at(row));
+    const auto k = coordinate_index(zs, state.cells.center_z_comoving.at(row));
+    if (!i.has_value() || !j.has_value() || !k.has_value()) {
+      throw std::runtime_error("buildAmrHydroPatchGeometry: patch-local cell center lookup failed");
+    }
+    const std::size_t expected = *i + static_cast<std::size_t>(patch.cell_dims[0]) *
+        (*j + static_cast<std::size_t>(patch.cell_dims[1]) * *k);
+    if (expected != patch_cell) {
+      throw std::runtime_error(
+          "buildAmrHydroPatchGeometry: gas-cell rows must be ordered by explicit patch-local (i,j,k) geometry");
+    }
+  }
+}
+
 }  // namespace
 
 std::span<const std::uint64_t> AmrHydroPatchGeometry::gasCellIds() const noexcept {
@@ -319,6 +383,7 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
     throw std::runtime_error("buildAmrHydroPatchGeometry: patch gas-cell coverage does not match PatchDescriptor cell_dims");
   }
   std::sort(rows.begin(), rows.end());
+  validatePatchLocalRowOrdering(state, patch, rows);
 
   AmrHydroPatchGeometry result;
   result.patch = patch;

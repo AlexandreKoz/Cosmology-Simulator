@@ -285,7 +285,8 @@ add_library(cosmosim_amr STATIC
   src/amr/amr_module.cpp
   src/amr/amr_framework.cpp
   src/amr/amr_hydro_geometry.cpp
-  src/amr/amr_ghost_fill.cpp)
+  src/amr/amr_ghost_fill.cpp
+  src/amr/amr_hydro_orchestrator.cpp)
 add_library(cosmosim_physics STATIC
   src/physics/physics_module.cpp
   src/physics/cooling_heating.cpp
@@ -346,6 +347,7 @@ target_link_libraries(cosmosim_workflows
     cosmosim_analysis
     cosmosim_gravity
     cosmosim_hydro
+    cosmosim_amr
     cosmosim_io
     cosmosim_parallel
     cosmosim_physics)
@@ -716,6 +718,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_amr_conservative_derefine tests/integration/test_amr_conservative_derefine.cpp)
   target_link_libraries(test_integration_amr_conservative_derefine PRIVATE cosmosim_amr)
   add_test(NAME integration_amr_conservative_derefine COMMAND test_integration_amr_conservative_derefine)
+  add_executable(test_integration_amr_production_hydro_integration tests/integration/test_amr_production_hydro_integration.cpp)
+  target_link_libraries(test_integration_amr_production_hydro_integration PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_test(NAME integration_amr_production_hydro_integration COMMAND test_integration_amr_production_hydro_integration)
+  cosmosim_mark_runtime_truth_test(integration_amr_production_hydro_integration amr hydro gas integration)
 
   add_executable(test_integration_simulation_mode_toy_runs tests/integration/test_simulation_mode_toy_runs.cpp)
   target_link_libraries(test_integration_simulation_mode_toy_runs PRIVATE cosmosim_core)

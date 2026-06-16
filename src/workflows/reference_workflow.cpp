@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
+#include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/constants.hpp"
@@ -4075,6 +4076,10 @@ class HydroStageCallback final : public core::IntegrationCallback {
     m_last_hydro_profile = {};
 
     context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
+    if (amr::hasProductionAmrHydroCoverage(context.state)) {
+      runProductionAmrHydroPath(context);
+      return;
+    }
     const auto particle_row_by_id = buildParticleRowById(context.state);
     std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
 
@@ -4290,6 +4295,71 @@ class HydroStageCallback final : public core::IntegrationCallback {
         return hydro::HydroBoundaryKind::kReflective;
     }
     return hydro::HydroBoundaryKind::kOpen;
+  }
+
+  void runProductionAmrHydroPath(core::StepContext& context) {
+    double hubble_rate_code = 0.0;
+    if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
+      hubble_rate_code =
+          core::computeScaleFactorRate(*context.cosmology_background, context.integrator_state.current_scale_factor) /
+          context.integrator_state.current_scale_factor;
+    }
+
+    const hydro::HydroUpdateContext update{
+        .dt_code = context.integrator_state.dt_time_code,
+        .scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor),
+        .hubble_rate_code = hubble_rate_code,
+    };
+    std::vector<double> metallicity(context.state.cells.size(), 0.0);
+    std::vector<double> temperature(context.state.cells.size(), 0.0);
+    std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    const hydro::HydroSourceContext source_context{
+        .update = update,
+        .gravity_accel_x_peculiar = m_gravity_callback.cellAccelX(),
+        .gravity_accel_y_peculiar = m_gravity_callback.cellAccelY(),
+        .gravity_accel_z_peculiar = m_gravity_callback.cellAccelZ(),
+        .hydrogen_number_density_cgs = hydrogen_number_density,
+        .metallicity_mass_fraction = metallicity,
+        .temperature_k = temperature,
+        .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
+    };
+    hydro::ComovingGravityExpansionSource gravity_source;
+    std::array<const hydro::HydroSourceTerm*, 1> sources{&gravity_source};
+    const amr::ProductionAmrHydroDiagnostics amr_diagnostics = amr::advanceProductionAmrHydro(
+        context.state,
+        context.active_set.cell_indices,
+        update,
+        source_context,
+        m_solver,
+        m_riemann_solver,
+        sources,
+        amr::ProductionAmrHydroOptions{
+            .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
+            .adiabatic_index = k_gamma_adiabatic,
+            .density_floor = k_density_floor,
+            .pressure_floor = k_pressure_floor});
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "hydro.amr_production_stage",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "hydro.amr",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "advanced production AMR hydro patches from SimulationState-authoritative gas rows",
+          .payload = {{"patch_count", std::to_string(amr_diagnostics.patch_count)},
+                      {"advanced_patch_count", std::to_string(amr_diagnostics.advanced_patch_count)},
+                      {"active_cell_count", std::to_string(amr_diagnostics.active_cell_count)},
+                      {"active_face_count", std::to_string(amr_diagnostics.active_face_count)},
+                      {"flux_register_entry_count", std::to_string(amr_diagnostics.flux_register_entry_count)},
+                      {"reflux_corrected_cells", std::to_string(amr_diagnostics.reflux.corrected_cells)},
+                      {"reflux_corrected_mass", std::to_string(amr_diagnostics.reflux.corrected_mass_code)},
+                      {"reflux_corrected_momentum_x", std::to_string(amr_diagnostics.reflux.corrected_momentum_x_code)},
+                      {"reflux_corrected_momentum_y", std::to_string(amr_diagnostics.reflux.corrected_momentum_y_code)},
+                      {"reflux_corrected_momentum_z", std::to_string(amr_diagnostics.reflux.corrected_momentum_z_code)},
+                      {"reflux_corrected_total_energy", std::to_string(amr_diagnostics.reflux.corrected_energy_code)},
+                      {"reflux_corrected_internal_energy", std::to_string(amr_diagnostics.reflux.corrected_internal_energy_code)}}});
+    }
   }
 
   struct HydroGeometryCacheKey {
