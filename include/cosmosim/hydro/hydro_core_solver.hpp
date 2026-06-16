@@ -122,6 +122,7 @@ struct HydroFluxRegisterFace {
   HydroFluxRegisterFaceRole role = HydroFluxRegisterFaceRole::kNone;
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
+  std::uint64_t coarse_gas_cell_id = 0;
   std::size_t coarse_cell_index = k_invalid_cell_index;
   int level = 0;
   HydroFaceAxis axis = HydroFaceAxis::kX;
@@ -196,6 +197,7 @@ struct HydroFluxRegisterRecord {
   HydroFluxRegisterFaceRole role = HydroFluxRegisterFaceRole::kNone;
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
+  std::uint64_t coarse_gas_cell_id = 0;
   std::size_t coarse_cell_index = k_invalid_cell_index;
   int level = 0;
   HydroFaceAxis axis = HydroFaceAxis::kX;

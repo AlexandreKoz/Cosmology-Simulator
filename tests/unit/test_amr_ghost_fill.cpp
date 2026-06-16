@@ -49,13 +49,33 @@ cosmosim::core::SimulationState makeState(
     const std::size_t patch_cell_count =
         static_cast<std::size_t>(patch.cell_dims[0]) * patch.cell_dims[1] * patch.cell_dims[2];
     state.patches.patch_id[patch_row] = patch.patch_id;
+    state.patches.parent_patch_id[patch_row] = patch.parent_patch_id;
     state.patches.level[patch_row] = patch.level;
+    state.patches.morton_key[patch_row] = patch.morton_key == 0U ? patch.patch_id : patch.morton_key;
+    state.patches.origin_x_comoving[patch_row] = patch.origin_comov[0];
+    state.patches.origin_y_comoving[patch_row] = patch.origin_comov[1];
+    state.patches.origin_z_comoving[patch_row] = patch.origin_comov[2];
+    state.patches.extent_x_comoving[patch_row] = patch.extent_comov[0];
+    state.patches.extent_y_comoving[patch_row] = patch.extent_comov[1];
+    state.patches.extent_z_comoving[patch_row] = patch.extent_comov[2];
+    state.patches.cell_dim_x[patch_row] = patch.cell_dims[0];
+    state.patches.cell_dim_y[patch_row] = patch.cell_dims[1];
+    state.patches.cell_dim_z[patch_row] = patch.cell_dims[2];
     state.patches.first_cell[patch_row] = row;
-    state.patches.cell_count[patch_row] = patch_cell_count;
+    state.patches.cell_count[patch_row] = static_cast<std::uint32_t>(patch_cell_count);
     state.patches.owning_rank[patch_row] = 0;
     for (std::size_t patch_cell = 0; patch_cell < patch_cell_count; ++patch_cell) {
       const double value = 100.0 * static_cast<double>(patch_row + 1U) + static_cast<double>(patch_cell);
+      const std::size_t i = patch_cell % patch.cell_dims[0];
+      const std::size_t j = (patch_cell / patch.cell_dims[0]) % patch.cell_dims[1];
+      const std::size_t k = patch_cell / (static_cast<std::size_t>(patch.cell_dims[0]) * patch.cell_dims[1]);
       state.cells.patch_index[row] = static_cast<std::uint32_t>(patch_row);
+      state.cells.center_x_comoving[row] = patch.origin_comov[0] + (static_cast<double>(i) + 0.5) *
+          patch.extent_comov[0] / static_cast<double>(patch.cell_dims[0]);
+      state.cells.center_y_comoving[row] = patch.origin_comov[1] + (static_cast<double>(j) + 0.5) *
+          patch.extent_comov[1] / static_cast<double>(patch.cell_dims[1]);
+      state.cells.center_z_comoving[row] = patch.origin_comov[2] + (static_cast<double>(k) + 0.5) *
+          patch.extent_comov[2] / static_cast<double>(patch.cell_dims[2]);
       state.cells.mass_code[row] = value;
       state.gas_cells.gas_cell_id[row] = gas_cell_id;
       state.gas_cells.parent_particle_id[row] = 0;

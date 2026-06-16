@@ -141,6 +141,7 @@ class ConservativeTransfer {
 struct FluxRegisterEntry {
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
+  std::uint64_t coarse_gas_cell_id = 0;
   std::size_t coarse_cell_index = 0;
   std::uint8_t level = 0;
   hydro::HydroFaceAxis axis = hydro::HydroFaceAxis::kX;
@@ -148,9 +149,12 @@ struct FluxRegisterEntry {
   ConservedState coarse_face_flux_code;
   ConservedState fine_face_flux_code;
   double face_area_comov = 1.0;
+  double coarse_area_comov = 0.0;
+  double fine_area_comov = 0.0;
   double dt_code = 0.0;
   std::uint32_t coarse_face_count = 0;
   std::uint32_t fine_face_count = 0;
+  [[nodiscard]] bool isComplete() const noexcept { return coarse_face_count > 0U && fine_face_count > 0U; }
 };
 
 class FluxRegisterAccumulator final : public hydro::HydroFluxRegisterSink {
@@ -173,6 +177,10 @@ class FluxRegisterAccumulator final : public hydro::HydroFluxRegisterSink {
 };
 
 struct RefluxDiagnostics {
+  std::size_t complete_register_count = 0;
+  std::size_t skipped_incomplete_register_count = 0;
+  std::size_t skipped_area_mismatch_count = 0;
+  std::size_t skipped_missing_target_count = 0;
   std::size_t corrected_cells = 0;
   double corrected_mass_code = 0.0;
   double corrected_momentum_x_code = 0.0;

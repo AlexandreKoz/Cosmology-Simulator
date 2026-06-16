@@ -241,6 +241,17 @@ void PatchSoa::resize(std::size_t count) {
   level.resize(count);
   first_cell.resize(count);
   cell_count.resize(count);
+  parent_patch_id.resize(count);
+  morton_key.resize(count);
+  origin_x_comoving.resize(count);
+  origin_y_comoving.resize(count);
+  origin_z_comoving.resize(count);
+  extent_x_comoving.resize(count);
+  extent_y_comoving.resize(count);
+  extent_z_comoving.resize(count);
+  cell_dim_x.resize(count);
+  cell_dim_y.resize(count);
+  cell_dim_z.resize(count);
   owning_rank.resize(count);
 }
 
@@ -248,8 +259,37 @@ std::size_t PatchSoa::size() const noexcept { return patch_id.size(); }
 
 bool PatchSoa::isConsistent() const noexcept {
   const std::size_t expected = patch_id.size();
-  return level.size() == expected && first_cell.size() == expected && cell_count.size() == expected &&
-         owning_rank.size() == expected;
+  if (level.size() != expected || first_cell.size() != expected || cell_count.size() != expected ||
+      parent_patch_id.size() != expected || morton_key.size() != expected ||
+      origin_x_comoving.size() != expected || origin_y_comoving.size() != expected ||
+      origin_z_comoving.size() != expected || extent_x_comoving.size() != expected ||
+      extent_y_comoving.size() != expected || extent_z_comoving.size() != expected ||
+      cell_dim_x.size() != expected || cell_dim_y.size() != expected || cell_dim_z.size() != expected ||
+      owning_rank.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    const bool has_geometry = extent_x_comoving[i] > 0.0 || extent_y_comoving[i] > 0.0 ||
+        extent_z_comoving[i] > 0.0 || cell_dim_x[i] != 0U || cell_dim_y[i] != 0U || cell_dim_z[i] != 0U;
+    if (!has_geometry || cell_count[i] == 0U) {
+      continue;
+    }
+    if (!(extent_x_comoving[i] > 0.0 && extent_y_comoving[i] > 0.0 && extent_z_comoving[i] > 0.0) ||
+        cell_dim_x[i] == 0U || cell_dim_y[i] == 0U || cell_dim_z[i] == 0U) {
+      return false;
+    }
+    const std::size_t dims_product = static_cast<std::size_t>(cell_dim_x[i]) *
+        static_cast<std::size_t>(cell_dim_y[i]) * static_cast<std::size_t>(cell_dim_z[i]);
+    if (dims_product != cell_count[i]) {
+      return false;
+    }
+    if (!std::isfinite(origin_x_comoving[i]) || !std::isfinite(origin_y_comoving[i]) ||
+        !std::isfinite(origin_z_comoving[i]) || !std::isfinite(extent_x_comoving[i]) ||
+        !std::isfinite(extent_y_comoving[i]) || !std::isfinite(extent_z_comoving[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace cosmosim::core

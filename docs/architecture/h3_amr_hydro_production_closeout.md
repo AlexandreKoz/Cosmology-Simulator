@@ -56,3 +56,22 @@ geometry is derived from `PatchSoa` cell ranges and cell centers because `PatchS
 origin/extent/cell-dimension lanes.  That derivation is checked, but an explicit restart-authoritative patch
 geometry schema would be cleaner before large production AMR runs.  Reflux state is drained inside the
 hydro stage; no new persistent flux-register restart schema was added.
+
+## 2026-06-16 hardening update: explicit patch geometry, stable-ID reflux, and safe incomplete-register handling
+
+This patch tightens the production AMR hydro path without promoting `amr::AmrPatch::m_conserved` to production truth. Persistent hydro state remains owned by `core::SimulationState` lanes: `cells`, `gas_cells`, `gas_cell_identity`, and `patches`.
+
+Implemented hardening:
+
+- `core::PatchSoa` now carries restart-authoritative patch descriptor lanes: parent patch ID, Morton key, origin, extent, and cell dimensions. Production AMR hydro coverage requires these explicit lanes instead of silently deriving patch geometry from sorted cell centers.
+- AMR patch-local hydro mapping is row-order robust. `buildAmrHydroPatchGeometry` computes `(i,j,k)` from cell centers and explicit patch geometry, builds a patch-local permutation, rejects duplicate/missing cells, and keeps scatter keyed by stable `gas_cell_id`.
+- Production refine/derefine helpers validate caller-provided ID ranges before mutating state and provide seedless overloads that scan for non-colliding patch and gas-cell ID ranges.
+- Production derefine now validates the exact octant contract for eight children, including level, extents, origin octants, duplicate octants, and cell dimensions. Restricted parent cells preserve a parent particle ID only when all contributors agree; time bins are remapped conservatively from child minima rather than blindly reset.
+- Flux-register records now carry a stable coarse gas-cell correction target. Reflux applies by resolving `coarse_gas_cell_id` through `GasCellIdentityMap`, not by sorted patch rows.
+- Reflux skips incomplete or area-mismatched registers. It never applies a missing coarse or fine contribution as an implicit zero side. Diagnostics count complete, incomplete, area-mismatched, and missing-target registers.
+- Restart schema is bumped to `cosmosim_restart_v16` so explicit patch geometry lanes are serialized and hashed. Older v14/v15-compatible inputs are still accepted with legacy zero-geometry backfill, but production AMR hydro will not enter unless explicit geometry is present.
+
+Still intentionally deferred:
+
+- True distributed/MPI AMR ghost exchange remains future work. Current production AMR hydro is hardened for local/single-rank patch coverage and keeps remote/imported ghost contracts explicit, but it does not claim multi-rank AMR ghost exchange completeness.
+- AMR hydro restart equivalence is not a dedicated standalone test yet. The v16 patch-geometry restart lanes are covered by restart schema/round-trip tests, but a full run/restart/run production AMR hydro comparison should still be added before claiming H3 final closeout.

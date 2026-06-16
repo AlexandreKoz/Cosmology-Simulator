@@ -31,8 +31,8 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v15");
-  assert(schema.version == 15);
+  assert(schema.name == "cosmosim_restart_v16");
+  assert(schema.version == 16);
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));

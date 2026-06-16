@@ -250,6 +250,7 @@ void maybeRecordFluxRegister(
       .role = register_face.role,
       .register_key = register_face.register_key,
       .coarse_patch_id = register_face.coarse_patch_id,
+      .coarse_gas_cell_id = register_face.coarse_gas_cell_id,
       .coarse_cell_index = register_face.coarse_cell_index,
       .level = register_face.level,
       .axis = register_face.axis,

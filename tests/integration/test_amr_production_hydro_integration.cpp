@@ -21,6 +21,18 @@ struct Totals {
   double total_energy = 0.0;
 };
 
+void setPatch(
+    cosmosim::core::SimulationState& state,
+    std::size_t patch_index,
+    const cosmosim::amr::PatchDescriptor& descriptor,
+    std::uint32_t first_cell,
+    std::uint32_t cell_count) {
+  cosmosim::amr::writePatchDescriptorToStateRow(state, patch_index, descriptor);
+  state.patches.first_cell[patch_index] = first_cell;
+  state.patches.cell_count[patch_index] = cell_count;
+  state.patches.owning_rank[patch_index] = 0;
+}
+
 [[nodiscard]] cosmosim::hydro::HydroPrimitiveState primitiveForRow(
     const cosmosim::core::SimulationState& state,
     std::uint32_t row) {
@@ -91,16 +103,22 @@ void setCell(
   cosmosim::core::SimulationState state;
   state.resizeCells(4);
   state.resizePatches(2);
-  state.patches.patch_id[0] = 101;
-  state.patches.level[0] = 0;
-  state.patches.first_cell[0] = 0;
-  state.patches.cell_count[0] = 2;
-  state.patches.owning_rank[0] = 0;
-  state.patches.patch_id[1] = 201;
-  state.patches.level[1] = 1;
-  state.patches.first_cell[1] = 2;
-  state.patches.cell_count[1] = 2;
-  state.patches.owning_rank[1] = 0;
+  setPatch(state, 0, cosmosim::amr::PatchDescriptor{
+      .patch_id = 101,
+      .parent_patch_id = 0,
+      .level = 0,
+      .morton_key = 101,
+      .origin_comov = {0.0, 0.0, 0.0},
+      .extent_comov = {1.0, 1.0, 1.0},
+      .cell_dims = {2, 1, 1}}, 0, 2);
+  setPatch(state, 1, cosmosim::amr::PatchDescriptor{
+      .patch_id = 201,
+      .parent_patch_id = 101,
+      .level = 1,
+      .morton_key = 201,
+      .origin_comov = {1.0, 0.0, 0.0},
+      .extent_comov = {0.5, 1.0, 1.0},
+      .cell_dims = {2, 1, 1}}, 2, 2);
 
   std::vector<cosmosim::core::GasCellIdentityRecord> records;
   records.reserve(4);
@@ -173,11 +191,14 @@ void testProductionAmrGeometryScatterAndRefluxPath() {
   cosmosim::core::SimulationState state;
   state.resizeCells(8);
   state.resizePatches(1);
-  state.patches.patch_id[0] = 301;
-  state.patches.level[0] = 0;
-  state.patches.first_cell[0] = 0;
-  state.patches.cell_count[0] = 8;
-  state.patches.owning_rank[0] = 0;
+  setPatch(state, 0, cosmosim::amr::PatchDescriptor{
+      .patch_id = 301,
+      .parent_patch_id = 0,
+      .level = 0,
+      .morton_key = 301,
+      .origin_comov = {0.0, 0.0, 0.0},
+      .extent_comov = {1.0, 1.0, 1.0},
+      .cell_dims = {2, 2, 2}}, 0, 8);
   std::vector<cosmosim::core::GasCellIdentityRecord> records;
   records.reserve(8);
   std::uint32_t row = 0;
@@ -219,6 +240,99 @@ void assertClose(double lhs, double rhs) {
   assert(std::abs(lhs - rhs) < k_tol);
 }
 
+void rebuildIdentityFromCurrentRows(cosmosim::core::SimulationState& state) {
+  std::vector<cosmosim::core::GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+    const std::uint32_t patch_index = state.cells.patch_index[row];
+    records.push_back(cosmosim::core::GasCellIdentityRecord{
+        .gas_cell_id = state.gas_cells.gas_cell_id[row],
+        .parent_particle_id = std::nullopt,
+        .owning_patch_id = state.patches.patch_id[patch_index],
+        .local_cell_row = row});
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
+void swapGasRows(cosmosim::core::SimulationState& state, std::uint32_t a, std::uint32_t b) {
+  using std::swap;
+  swap(state.cells.center_x_comoving[a], state.cells.center_x_comoving[b]);
+  swap(state.cells.center_y_comoving[a], state.cells.center_y_comoving[b]);
+  swap(state.cells.center_z_comoving[a], state.cells.center_z_comoving[b]);
+  swap(state.cells.mass_code[a], state.cells.mass_code[b]);
+  swap(state.cells.time_bin[a], state.cells.time_bin[b]);
+  swap(state.cells.patch_index[a], state.cells.patch_index[b]);
+  swap(state.gas_cells.gas_cell_id[a], state.gas_cells.gas_cell_id[b]);
+  swap(state.gas_cells.parent_particle_id[a], state.gas_cells.parent_particle_id[b]);
+  swap(state.gas_cells.velocity_x_peculiar[a], state.gas_cells.velocity_x_peculiar[b]);
+  swap(state.gas_cells.velocity_y_peculiar[a], state.gas_cells.velocity_y_peculiar[b]);
+  swap(state.gas_cells.velocity_z_peculiar[a], state.gas_cells.velocity_z_peculiar[b]);
+  swap(state.gas_cells.density_code[a], state.gas_cells.density_code[b]);
+  swap(state.gas_cells.pressure_code[a], state.gas_cells.pressure_code[b]);
+  swap(state.gas_cells.internal_energy_code[a], state.gas_cells.internal_energy_code[b]);
+  swap(state.gas_cells.temperature_code[a], state.gas_cells.temperature_code[b]);
+  swap(state.gas_cells.sound_speed_code[a], state.gas_cells.sound_speed_code[b]);
+  rebuildIdentityFromCurrentRows(state);
+}
+
+void testPatchLocalMappingSurvivesRowReorder() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  swapGasRows(state, 0, 7);
+  const auto patch = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  const auto geometry = cosmosim::amr::buildAmrHydroPatchGeometry(state, patch);
+  assert(geometry.real_cells.front().local_cell_row == 7U);
+  assert(geometry.real_cells.front().gas_cell_id == state.gas_cells.gas_cell_id[7]);
+  auto conserved = cosmosim::amr::loadAmrHydroConservedState(state, geometry, k_gamma);
+  auto cell0 = conserved.loadCell(0);
+  cell0.mass_density_comoving *= 1.125;
+  conserved.storeCell(0, cell0);
+  const std::uint64_t target_gas_cell_id = geometry.real_cells.front().gas_cell_id;
+  cosmosim::amr::scatterAmrHydroConservedState(state, geometry, conserved, k_gamma);
+  const auto row = state.gas_cell_identity.rowForGasCellId(target_gas_cell_id);
+  assert(row.has_value());
+  assert(*row == 7U);
+  assert(state.gas_cells.density_code[*row] > 1.0);
+}
+
+void testProductionRegridRejectsIdCollisions() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  bool patch_collision = false;
+  try {
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 301, 20000);
+  } catch (const std::invalid_argument&) {
+    patch_collision = true;
+  }
+  assert(patch_collision);
+
+  bool gas_collision = false;
+  try {
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 9201);
+  } catch (const std::invalid_argument&) {
+    gas_collision = true;
+  }
+  assert(gas_collision);
+}
+
+void testPartialActiveSetSkipsIncompleteReflux() {
+  cosmosim::core::SimulationState state = makeCoarseFineState();
+  cosmosim::hydro::HydroCoreSolver solver(k_gamma);
+  cosmosim::hydro::HlleRiemannSolver riemann;
+  const cosmosim::hydro::HydroUpdateContext update{.dt_code = 1.0e-4, .scale_factor = 1.0, .hubble_rate_code = 0.0};
+  const cosmosim::hydro::HydroSourceContext source_context{.update = update};
+  const cosmosim::amr::ProductionAmrHydroOptions options{
+      .physical_boundary_kind = cosmosim::hydro::HydroBoundaryKind::kOpen,
+      .adiabatic_index = k_gamma,
+      .density_floor = 1.0e-12,
+      .pressure_floor = 1.0e-12};
+  const std::vector<std::uint32_t> active_rows{0, 1};
+  const auto diagnostics = cosmosim::amr::advanceProductionAmrHydro(
+      state, active_rows, update, source_context, solver, riemann, {}, options);
+  assert(diagnostics.flux_register_entry_count > 0U);
+  assert(diagnostics.reflux.corrected_cells == 0U);
+  assert(diagnostics.reflux.skipped_incomplete_register_count > 0U);
+}
+
 void testProductionRefineAndDerefineConserveSimulationState() {
   cosmosim::core::SimulationState state = makeRefineState();
   const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
@@ -255,6 +369,9 @@ void testProductionRefineAndDerefineConserveSimulationState() {
 
 int main() {
   testProductionAmrGeometryScatterAndRefluxPath();
+  testPatchLocalMappingSurvivesRowReorder();
+  testProductionRegridRejectsIdCollisions();
+  testPartialActiveSetSkipsIncompleteReflux();
   testProductionRefineAndDerefineConserveSimulationState();
   return 0;
 }

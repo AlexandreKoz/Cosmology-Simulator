@@ -23,11 +23,28 @@ cosmosim::core::SimulationState makePatchState() {
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 8;
   state.patches.owning_rank[0] = 0;
+  state.patches.parent_patch_id[0] = 0;
+  state.patches.morton_key[0] = 31;
+  state.patches.origin_x_comoving[0] = 1.0;
+  state.patches.origin_y_comoving[0] = 2.0;
+  state.patches.origin_z_comoving[0] = 3.0;
+  state.patches.extent_x_comoving[0] = 1.0;
+  state.patches.extent_y_comoving[0] = 2.0;
+  state.patches.extent_z_comoving[0] = 4.0;
+  state.patches.cell_dim_x[0] = 2;
+  state.patches.cell_dim_y[0] = 2;
+  state.patches.cell_dim_z[0] = 2;
 
   std::vector<cosmosim::core::GasCellIdentityRecord> records;
   records.reserve(8);
   for (std::uint32_t row = 0; row < 8; ++row) {
+    const std::uint32_t i = row % 2U;
+    const std::uint32_t j = (row / 2U) % 2U;
+    const std::uint32_t k = row / 4U;
     state.cells.patch_index[row] = 0;
+    state.cells.center_x_comoving[row] = 1.0 + (static_cast<double>(i) + 0.5) * 0.5;
+    state.cells.center_y_comoving[row] = 2.0 + (static_cast<double>(j) + 0.5) * 1.0;
+    state.cells.center_z_comoving[row] = 3.0 + (static_cast<double>(k) + 0.5) * 2.0;
     state.cells.mass_code[row] = 1.0;
     state.gas_cells.gas_cell_id[row] = 9001U + row;
     state.gas_cells.parent_particle_id[row] = 0;

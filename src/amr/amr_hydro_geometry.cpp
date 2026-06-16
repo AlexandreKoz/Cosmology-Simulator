@@ -288,67 +288,43 @@ void appendAxisBoundaryGhosts(
   return std::max(state.cells.mass_code.at(row) / volume, 1.0e-14);
 }
 
-void validatePatchLocalRowOrdering(
+[[nodiscard]] std::size_t linearPatchCellIndex(
+    std::array<std::uint16_t, 3> dims,
+    std::size_t i,
+    std::size_t j,
+    std::size_t k) {
+  return i + static_cast<std::size_t>(dims[0]) * (j + static_cast<std::size_t>(dims[1]) * k);
+}
+
+[[nodiscard]] std::size_t patchLocalCellForRow(
     const core::SimulationState& state,
     const PatchDescriptor& patch,
-    std::span<const std::uint32_t> rows) {
-  std::vector<double> xs;
-  std::vector<double> ys;
-  std::vector<double> zs;
-  xs.reserve(rows.size());
-  ys.reserve(rows.size());
-  zs.reserve(rows.size());
-  for (const std::uint32_t row : rows) {
-    xs.push_back(state.cells.center_x_comoving.at(row));
-    ys.push_back(state.cells.center_y_comoving.at(row));
-    zs.push_back(state.cells.center_z_comoving.at(row));
-  }
-  auto unique_with_tol = [](std::vector<double> values) {
-    std::sort(values.begin(), values.end());
-    values.erase(
-        std::unique(
-            values.begin(),
-            values.end(),
-            [](double lhs, double rhs) {
-              const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
-              return std::abs(lhs - rhs) <= 1.0e-10 * scale;
-            }),
-        values.end());
-    return values;
-  };
-  xs = unique_with_tol(std::move(xs));
-  ys = unique_with_tol(std::move(ys));
-  zs = unique_with_tol(std::move(zs));
-  if (xs.size() != patch.cell_dims[0] || ys.size() != patch.cell_dims[1] || zs.size() != patch.cell_dims[2]) {
-    return;
-  }
-  if (xs.size() * ys.size() * zs.size() != rows.size()) {
-    return;
-  }
-  auto coordinate_index = [](const std::vector<double>& coordinates, double value) -> std::optional<std::size_t> {
-    for (std::size_t index = 0; index < coordinates.size(); ++index) {
-      const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
-      if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
-        return index;
-      }
+    std::uint32_t row) {
+  const std::array<double, 3> point{
+      state.cells.center_x_comoving.at(row),
+      state.cells.center_y_comoving.at(row),
+      state.cells.center_z_comoving.at(row)};
+  std::array<std::size_t, 3> ijk{};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double extent = patch.extent_comov[axis];
+    const std::uint16_t dim = patch.cell_dims[axis];
+    if (extent <= 0.0 || dim == 0U) {
+      throw std::invalid_argument("buildAmrHydroPatchGeometry: invalid explicit patch geometry");
     }
-    return std::nullopt;
-  };
-  for (std::size_t patch_cell = 0; patch_cell < rows.size(); ++patch_cell) {
-    const std::uint32_t row = rows[patch_cell];
-    const auto i = coordinate_index(xs, state.cells.center_x_comoving.at(row));
-    const auto j = coordinate_index(ys, state.cells.center_y_comoving.at(row));
-    const auto k = coordinate_index(zs, state.cells.center_z_comoving.at(row));
-    if (!i.has_value() || !j.has_value() || !k.has_value()) {
-      throw std::runtime_error("buildAmrHydroPatchGeometry: patch-local cell center lookup failed");
+    const double lower = patch.origin_comov[axis];
+    const double upper = patch.origin_comov[axis] + extent;
+    const double scale = std::max({1.0, std::abs(lower), std::abs(upper), std::abs(point[axis])});
+    if (point[axis] < lower - 1.0e-10 * scale || point[axis] >= upper + 1.0e-10 * scale) {
+      throw std::runtime_error("buildAmrHydroPatchGeometry: gas-cell center lies outside explicit patch geometry");
     }
-    const std::size_t expected = *i + static_cast<std::size_t>(patch.cell_dims[0]) *
-        (*j + static_cast<std::size_t>(patch.cell_dims[1]) * *k);
-    if (expected != patch_cell) {
-      throw std::runtime_error(
-          "buildAmrHydroPatchGeometry: gas-cell rows must be ordered by explicit patch-local (i,j,k) geometry");
+    double coord = (point[axis] - lower) / (extent / static_cast<double>(dim));
+    coord = std::clamp(coord, 0.0, static_cast<double>(dim) - 1.0e-12);
+    ijk[axis] = static_cast<std::size_t>(coord);
+    if (ijk[axis] >= dim) {
+      ijk[axis] = dim - 1U;
     }
   }
+  return linearPatchCellIndex(patch.cell_dims, ijk[0], ijk[1], ijk[2]);
 }
 
 }  // namespace
@@ -382,8 +358,19 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
   if (rows.size() != expected_cells) {
     throw std::runtime_error("buildAmrHydroPatchGeometry: patch gas-cell coverage does not match PatchDescriptor cell_dims");
   }
-  std::sort(rows.begin(), rows.end());
-  validatePatchLocalRowOrdering(state, patch, rows);
+  std::vector<std::uint32_t> row_by_patch_cell(expected_cells, core::kInvalidGasCellRow);
+  for (const std::uint32_t row : rows) {
+    const std::size_t patch_cell = patchLocalCellForRow(state, patch, row);
+    if (patch_cell >= expected_cells || row_by_patch_cell[patch_cell] != core::kInvalidGasCellRow) {
+      throw std::runtime_error("buildAmrHydroPatchGeometry: duplicate or out-of-range patch-local gas-cell mapping");
+    }
+    row_by_patch_cell[patch_cell] = row;
+  }
+  for (const std::uint32_t row : row_by_patch_cell) {
+    if (row == core::kInvalidGasCellRow) {
+      throw std::runtime_error("buildAmrHydroPatchGeometry: explicit patch geometry has a missing patch-local gas cell");
+    }
+  }
 
   AmrHydroPatchGeometry result;
   result.patch = patch;
@@ -402,11 +389,11 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
       result.geometry.cell_width_y_comoving *
       result.geometry.cell_width_z_comoving;
 
-  result.real_cells.reserve(rows.size());
-  result.gas_cell_ids.reserve(rows.size());
-  result.local_cell_rows.reserve(rows.size());
-  for (std::size_t patch_cell = 0; patch_cell < rows.size(); ++patch_cell) {
-    const std::uint32_t row = rows[patch_cell];
+  result.real_cells.reserve(row_by_patch_cell.size());
+  result.gas_cell_ids.reserve(row_by_patch_cell.size());
+  result.local_cell_rows.reserve(row_by_patch_cell.size());
+  for (std::size_t patch_cell = 0; patch_cell < row_by_patch_cell.size(); ++patch_cell) {
+    const std::uint32_t row = row_by_patch_cell[patch_cell];
     const auto* record = state.gas_cell_identity.findByLocalRow(row);
     if (record == nullptr || record->owning_patch_id != patch.patch_id) {
       throw std::runtime_error("buildAmrHydroPatchGeometry: identity row does not belong to requested patch");

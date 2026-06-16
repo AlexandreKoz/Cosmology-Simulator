@@ -578,6 +578,19 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
   requireHdf5Dataset1d(file, "/state/patches/level");
   requireHdf5Dataset1d(file, "/state/patches/first_cell");
   requireHdf5Dataset1d(file, "/state/patches/cell_count");
+  if (schema_version >= restartSchema().version) {
+    requireHdf5Dataset1d(file, "/state/patches/parent_patch_id");
+    requireHdf5Dataset1d(file, "/state/patches/morton_key");
+    requireHdf5Dataset1d(file, "/state/patches/origin_x_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/origin_y_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/origin_z_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/extent_x_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/extent_y_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/extent_z_comoving");
+    requireHdf5Dataset1d(file, "/state/patches/cell_dim_x");
+    requireHdf5Dataset1d(file, "/state/patches/cell_dim_y");
+    requireHdf5Dataset1d(file, "/state/patches/cell_dim_z");
+  }
   requireHdf5Dataset1d(file, "/state/species_count_by_species");
   requireHdf5Link(file, "/state/module_sidecars");
   requireHdf5Dataset1d(file, "/state/module_sidecar_names");
@@ -1013,6 +1026,17 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(patches_group.get(), "level", H5T_STD_I32LE, H5T_NATIVE_INT32, state.patches.level);
   writeDataset1d(patches_group.get(), "first_cell", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.first_cell);
   writeDataset1d(patches_group.get(), "cell_count", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.cell_count);
+  writeDataset1d(patches_group.get(), "parent_patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.patches.parent_patch_id);
+  writeDataset1d(patches_group.get(), "morton_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.patches.morton_key);
+  writeDataset1d(patches_group.get(), "origin_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.origin_x_comoving);
+  writeDataset1d(patches_group.get(), "origin_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.origin_y_comoving);
+  writeDataset1d(patches_group.get(), "origin_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.origin_z_comoving);
+  writeDataset1d(patches_group.get(), "extent_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.extent_x_comoving);
+  writeDataset1d(patches_group.get(), "extent_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.extent_y_comoving);
+  writeDataset1d(patches_group.get(), "extent_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.patches.extent_z_comoving);
+  writeDataset1d(patches_group.get(), "cell_dim_x", H5T_STD_U16LE, H5T_NATIVE_UINT16, state.patches.cell_dim_x);
+  writeDataset1d(patches_group.get(), "cell_dim_y", H5T_STD_U16LE, H5T_NATIVE_UINT16, state.patches.cell_dim_y);
+  writeDataset1d(patches_group.get(), "cell_dim_z", H5T_STD_U16LE, H5T_NATIVE_UINT16, state.patches.cell_dim_z);
   writeDataset1d(patches_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.owning_rank);
 
   writeDataset1d(state_group.get(), "species_count_by_species", H5T_STD_U64LE, H5T_NATIVE_UINT64, std::vector<std::uint64_t>(state.species.count_by_species.begin(), state.species.count_by_species.end()));
@@ -1167,6 +1191,31 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
   state.patches.level = readDataset1dAligned<std::int32_t>(patches_group.get(), "level", H5T_NATIVE_INT32);
   state.patches.first_cell = readDataset1dAligned<std::uint32_t>(patches_group.get(), "first_cell", H5T_NATIVE_UINT32);
   state.patches.cell_count = readDataset1dAligned<std::uint32_t>(patches_group.get(), "cell_count", H5T_NATIVE_UINT32);
+  if (H5Lexists(patches_group.get(), "parent_patch_id", H5P_DEFAULT) > 0) {
+    state.patches.parent_patch_id = readDataset1dAligned<std::uint64_t>(patches_group.get(), "parent_patch_id", H5T_NATIVE_UINT64);
+    state.patches.morton_key = readDataset1dAligned<std::uint64_t>(patches_group.get(), "morton_key", H5T_NATIVE_UINT64);
+    state.patches.origin_x_comoving = readDataset1dAligned<double>(patches_group.get(), "origin_x_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.origin_y_comoving = readDataset1dAligned<double>(patches_group.get(), "origin_y_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.origin_z_comoving = readDataset1dAligned<double>(patches_group.get(), "origin_z_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.extent_x_comoving = readDataset1dAligned<double>(patches_group.get(), "extent_x_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.extent_y_comoving = readDataset1dAligned<double>(patches_group.get(), "extent_y_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.extent_z_comoving = readDataset1dAligned<double>(patches_group.get(), "extent_z_comoving", H5T_NATIVE_DOUBLE);
+    state.patches.cell_dim_x = readDataset1dAligned<std::uint16_t>(patches_group.get(), "cell_dim_x", H5T_NATIVE_UINT16);
+    state.patches.cell_dim_y = readDataset1dAligned<std::uint16_t>(patches_group.get(), "cell_dim_y", H5T_NATIVE_UINT16);
+    state.patches.cell_dim_z = readDataset1dAligned<std::uint16_t>(patches_group.get(), "cell_dim_z", H5T_NATIVE_UINT16);
+  } else {
+    state.patches.parent_patch_id.assign(state.patches.patch_id.size(), 0U);
+    state.patches.morton_key.assign(state.patches.patch_id.size(), 0U);
+    state.patches.origin_x_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.origin_y_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.origin_z_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.extent_x_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.extent_y_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.extent_z_comoving.assign(state.patches.patch_id.size(), 0.0);
+    state.patches.cell_dim_x.assign(state.patches.patch_id.size(), 0U);
+    state.patches.cell_dim_y.assign(state.patches.patch_id.size(), 0U);
+    state.patches.cell_dim_z.assign(state.patches.patch_id.size(), 0U);
+  }
   if (H5Lexists(patches_group.get(), "owning_rank", H5P_DEFAULT) > 0) {
     state.patches.owning_rank = readDataset1dAligned<std::uint32_t>(patches_group.get(), "owning_rank", H5T_NATIVE_UINT32);
   } else {
@@ -1488,7 +1537,9 @@ const RestartSchema& restartSchema() {
 }
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
-  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v14;
+  constexpr std::uint32_t k_restart_schema_v15 = 15;
+  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v15 ||
+      file_schema_version == k_restart_schema_v14;
 }
 
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
@@ -1646,6 +1697,17 @@ std::uint64_t restartPayloadIntegrityHashImpl(const RestartWritePayload& payload
   append_any_vec(state.patches.level);
   append_any_vec(state.patches.first_cell);
   append_any_vec(state.patches.cell_count);
+  append_any_vec(state.patches.parent_patch_id);
+  append_any_vec(state.patches.morton_key);
+  append_any_vec(state.patches.origin_x_comoving);
+  append_any_vec(state.patches.origin_y_comoving);
+  append_any_vec(state.patches.origin_z_comoving);
+  append_any_vec(state.patches.extent_x_comoving);
+  append_any_vec(state.patches.extent_y_comoving);
+  append_any_vec(state.patches.extent_z_comoving);
+  append_any_vec(state.patches.cell_dim_x);
+  append_any_vec(state.patches.cell_dim_y);
+  append_any_vec(state.patches.cell_dim_z);
   append_any_vec(state.patches.owning_rank);
   append_any_vec(state.star_particles.particle_index);
   append_any_vec(state.star_particles.formation_scale_factor);

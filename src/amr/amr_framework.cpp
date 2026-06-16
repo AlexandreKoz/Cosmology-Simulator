@@ -75,6 +75,8 @@ void validateCompatibleRegisterRecord(
     const FluxRegisterEntry& entry,
     const hydro::HydroFluxRegisterRecord& record) {
   if (entry.coarse_patch_id != record.coarse_patch_id ||
+      (entry.coarse_gas_cell_id != 0U && record.coarse_gas_cell_id != 0U &&
+       entry.coarse_gas_cell_id != record.coarse_gas_cell_id) ||
       entry.coarse_cell_index != record.coarse_cell_index ||
       entry.level != static_cast<std::uint8_t>(record.level) ||
       entry.axis != record.axis ||
@@ -163,6 +165,7 @@ void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecor
     AccumulatedEntry accumulated;
     accumulated.entry.register_key = record.register_key;
     accumulated.entry.coarse_patch_id = record.coarse_patch_id;
+    accumulated.entry.coarse_gas_cell_id = record.coarse_gas_cell_id;
     accumulated.entry.coarse_cell_index = record.coarse_cell_index;
     accumulated.entry.level = static_cast<std::uint8_t>(record.level);
     accumulated.entry.axis = record.axis;
@@ -176,6 +179,9 @@ void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecor
   }
 
   AccumulatedEntry& accumulated = m_entries[slot];
+  if (accumulated.entry.coarse_gas_cell_id == 0U && record.coarse_gas_cell_id != 0U) {
+    accumulated.entry.coarse_gas_cell_id = record.coarse_gas_cell_id;
+  }
   const ConservedState area_weighted_flux =
       conservedFromHydroFlux(record.flux_code) * record.face_area_comoving;
   if (record.role == hydro::HydroFluxRegisterFaceRole::kCoarse) {
@@ -202,6 +208,8 @@ std::vector<FluxRegisterEntry> FluxRegisterAccumulator::entries() const {
         ? accumulated.coarse_area_comov
         : accumulated.fine_area_comov;
     entry.face_area_comov = register_area;
+    entry.coarse_area_comov = accumulated.coarse_area_comov;
+    entry.fine_area_comov = accumulated.fine_area_comov;
     entry.coarse_face_flux_code =
         averageFluxOrZero(accumulated.coarse_area_weighted_flux, register_area);
     entry.fine_face_flux_code =

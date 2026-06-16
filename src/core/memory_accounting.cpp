@@ -159,6 +159,17 @@ void accountPatchSoa(MemoryReportBuilder& builder, const PatchSoa& patches) {
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.level", patches.level);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.first_cell", patches.first_cell);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.cell_count", patches.cell_count);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.parent_patch_id", patches.parent_patch_id);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.morton_key", patches.morton_key);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.origin_x_comoving", patches.origin_x_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.origin_y_comoving", patches.origin_y_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.origin_z_comoving", patches.origin_z_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.extent_x_comoving", patches.extent_x_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.extent_y_comoving", patches.extent_y_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.extent_z_comoving", patches.extent_z_comoving);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.cell_dim_x", patches.cell_dim_x);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.cell_dim_y", patches.cell_dim_y);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.cell_dim_z", patches.cell_dim_z);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.owning_rank", patches.owning_rank);
 }
 

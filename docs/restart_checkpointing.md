@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v15`) persists:
+The restart schema (`cosmosim_restart_v16`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -157,3 +157,8 @@ which preserves a direct path to coordinated rank-safe checkpointing in future M
 The reference workflow now treats restart verification as exact runtime-state continuation, not a count-only smoke test. The verification path compares all restart-authoritative state families: particle hot SoA lanes, particle metadata/softening override lanes, gas-cell identity and hydro fields, patch state, star/black-hole/tracer sidecars, species count ledgers, opaque module sidecar payloads, scheduler state, provenance/config metadata, and distributed gravity restart metadata.
 
 Module sidecar payload length is explicitly included in the restart payload integrity hash before payload bytes. This preserves hash boundary clarity across adjacent module payloads and makes omitted or reshaped module truth detectable by the hash.
+
+
+### AMR patch geometry restart lanes (v16)
+
+PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_patch_id`, `morton_key`, `origin_x/y/z_comoving`, `extent_x/y/z_comoving`, and `cell_dim_x/y/z`. Production AMR hydro requires these lanes to be explicit; legacy restart inputs without them are accepted only as non-AMR/legacy patch states and do not silently enter the production AMR hydro path.

@@ -51,6 +51,19 @@ struct ProductionAmrRegridDiagnostics {
 
 [[nodiscard]] bool hasProductionAmrHydroCoverage(const core::SimulationState& state);
 
+[[nodiscard]] bool patchStateRowHasExplicitGeometry(
+    const core::SimulationState& state,
+    std::size_t patch_index);
+
+[[nodiscard]] PatchDescriptor patchDescriptorFromStateRow(
+    const core::SimulationState& state,
+    std::size_t patch_index);
+
+void writePatchDescriptorToStateRow(
+    core::SimulationState& state,
+    std::size_t patch_index,
+    const PatchDescriptor& patch);
+
 [[nodiscard]] std::vector<PatchDescriptor> buildProductionAmrPatchDescriptors(
     const core::SimulationState& state);
 
@@ -87,10 +100,20 @@ void scatterAmrHydroConservedState(
     std::uint64_t first_child_gas_cell_id,
     const ProductionAmrHydroOptions& options = {});
 
+[[nodiscard]] ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
+    core::SimulationState& state,
+    const PatchDescriptor& parent_patch,
+    const ProductionAmrHydroOptions& options = {});
+
 [[nodiscard]] ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
     core::SimulationState& state,
     const PatchDescriptor& parent_patch,
     std::uint64_t replacement_gas_cell_id,
+    const ProductionAmrHydroOptions& options = {});
+
+[[nodiscard]] ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
+    core::SimulationState& state,
+    const PatchDescriptor& parent_patch,
     const ProductionAmrHydroOptions& options = {});
 
 }  // namespace cosmosim::amr

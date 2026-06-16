@@ -232,6 +232,19 @@ struct PatchSoa {
   AlignedVector<std::int32_t> level;
   AlignedVector<std::uint32_t> first_cell;
   AlignedVector<std::uint32_t> cell_count;
+  // Restart-authoritative patch geometry. Zero extents/dimensions mark a legacy
+  // non-AMR descriptor; production AMR hydro requires these lanes to be populated.
+  AlignedVector<std::uint64_t> parent_patch_id;
+  AlignedVector<std::uint64_t> morton_key;
+  AlignedVector<double> origin_x_comoving;
+  AlignedVector<double> origin_y_comoving;
+  AlignedVector<double> origin_z_comoving;
+  AlignedVector<double> extent_x_comoving;
+  AlignedVector<double> extent_y_comoving;
+  AlignedVector<double> extent_z_comoving;
+  AlignedVector<std::uint16_t> cell_dim_x;
+  AlignedVector<std::uint16_t> cell_dim_y;
+  AlignedVector<std::uint16_t> cell_dim_z;
   // Authoritative AMR patch owner for distributed rebalancing. Patch payloads remain
   // contiguous in CellSoa; this lane is the ownership contract used by load-balance
   // planning and restart, not transient exchange scratch.
