@@ -176,6 +176,7 @@ void testSameLevelGhostFillForAxis(cosmosim::hydro::HydroFaceAxis axis) {
       axis,
       cosmosim::hydro::HydroFaceSide::kUpper,
       left_owner);
+  assert(ghost.fill_status == cosmosim::amr::AmrHydroGhostFillStatus::kFilledSameLevel);
   assertStateNear(left_conserved.loadCell(ghost.ghost_cell), right_conserved.loadCell(right_source));
   assertStateNear(right_conserved.loadCell(0), before_neighbor);
 }
@@ -201,13 +202,12 @@ void testRejectsStaleRemoteGhostEpoch() {
       .expected_ghost_hydro_epoch = 5,
   }};
 
-  bool threw = false;
-  try {
-    (void)cosmosim::amr::fillAmrHydroGhostCells(patches, k_gamma);
-  } catch (const std::runtime_error&) {
-    threw = true;
+  const auto diagnostics = cosmosim::amr::fillAmrHydroGhostCells(patches, k_gamma);
+  assert(diagnostics.stale_epoch_rejections == geometry.ghosts.size());
+  assert(diagnostics.unresolved_ghosts == geometry.ghosts.size());
+  for (const auto& ghost : geometry.ghosts) {
+    assert(ghost.fill_status == cosmosim::amr::AmrHydroGhostFillStatus::kRejectedStaleRemote);
   }
-  assert(threw);
 }
 
 }  // namespace

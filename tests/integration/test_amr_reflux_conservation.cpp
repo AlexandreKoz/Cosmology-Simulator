@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -135,6 +136,70 @@ void assertNear(double lhs, double rhs) {
   assert(std::abs(lhs - rhs) < k_conservation_tol);
 }
 
+
+cosmosim::amr::FluxRegisterEntry makeCompleteRegister(
+    std::uint64_t coarse_gas_cell_id = 9002,
+    std::size_t coarse_cell_index = 1) {
+  return cosmosim::amr::FluxRegisterEntry{
+      .register_key = 199,
+      .coarse_patch_id = 101,
+      .coarse_gas_cell_id = coarse_gas_cell_id,
+      .coarse_cell_index = coarse_cell_index,
+      .level = 0,
+      .coarse_face_flux_code = cosmosim::amr::ConservedState{
+          .mass_code = 0.10,
+          .momentum_x_code = 0.20,
+          .momentum_y_code = -0.10,
+          .momentum_z_code = 0.05,
+          .total_energy_code = 0.30},
+      .fine_face_flux_code = cosmosim::amr::ConservedState{
+          .mass_code = 0.40,
+          .momentum_x_code = 0.70,
+          .momentum_y_code = 0.20,
+          .momentum_z_code = -0.15,
+          .total_energy_code = 0.90},
+      .face_area_comov = 0.5,
+      .coarse_area_comov = 0.5,
+      .fine_area_comov = 0.5,
+      .dt_code = 1.0e-5,
+      .coarse_face_count = 1,
+      .fine_face_count = 1};
+}
+
+void rebuildIdentityFromCurrentRows(cosmosim::core::SimulationState& state) {
+  std::vector<cosmosim::core::GasCellIdentityRecord> records;
+  records.reserve(state.cells.size());
+  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+    records.push_back(cosmosim::core::GasCellIdentityRecord{
+        .gas_cell_id = state.gas_cells.gas_cell_id[row],
+        .parent_particle_id = std::nullopt,
+        .owning_patch_id = state.patches.patch_id[state.cells.patch_index[row]],
+        .local_cell_row = row});
+  }
+  state.gas_cell_identity.assign(std::move(records));
+}
+
+void swapGasRows(cosmosim::core::SimulationState& state, std::uint32_t a, std::uint32_t b) {
+  using std::swap;
+  swap(state.cells.center_x_comoving[a], state.cells.center_x_comoving[b]);
+  swap(state.cells.center_y_comoving[a], state.cells.center_y_comoving[b]);
+  swap(state.cells.center_z_comoving[a], state.cells.center_z_comoving[b]);
+  swap(state.cells.mass_code[a], state.cells.mass_code[b]);
+  swap(state.cells.time_bin[a], state.cells.time_bin[b]);
+  swap(state.cells.patch_index[a], state.cells.patch_index[b]);
+  swap(state.gas_cells.gas_cell_id[a], state.gas_cells.gas_cell_id[b]);
+  swap(state.gas_cells.parent_particle_id[a], state.gas_cells.parent_particle_id[b]);
+  swap(state.gas_cells.velocity_x_peculiar[a], state.gas_cells.velocity_x_peculiar[b]);
+  swap(state.gas_cells.velocity_y_peculiar[a], state.gas_cells.velocity_y_peculiar[b]);
+  swap(state.gas_cells.velocity_z_peculiar[a], state.gas_cells.velocity_z_peculiar[b]);
+  swap(state.gas_cells.density_code[a], state.gas_cells.density_code[b]);
+  swap(state.gas_cells.pressure_code[a], state.gas_cells.pressure_code[b]);
+  swap(state.gas_cells.internal_energy_code[a], state.gas_cells.internal_energy_code[b]);
+  swap(state.gas_cells.temperature_code[a], state.gas_cells.temperature_code[b]);
+  swap(state.gas_cells.sound_speed_code[a], state.gas_cells.sound_speed_code[b]);
+  rebuildIdentityFromCurrentRows(state);
+}
+
 void testAutomaticRefluxChangesCoarseOwnerAndPreservesTotals() {
   cosmosim::core::SimulationState state = makeCoarseFineState();
   const auto before_descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
@@ -174,6 +239,69 @@ void testAutomaticRefluxChangesCoarseOwnerAndPreservesTotals() {
   assertNear(after.total_energy, before.total_energy);
 }
 
+
+void testManualRefluxAcceptanceSkipsUnsafeRegisters() {
+  cosmosim::core::SimulationState state = makeCoarseFineState();
+  const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
+
+  auto incomplete_coarse_only = makeCompleteRegister();
+  incomplete_coarse_only.fine_face_count = 0;
+  auto incomplete_fine_only = makeCompleteRegister();
+  incomplete_fine_only.coarse_face_count = 0;
+  auto area_mismatch = makeCompleteRegister();
+  area_mismatch.fine_area_comov = 0.25;
+  auto missing_id = makeCompleteRegister(999999, 1);
+  auto wrong_patch_owner = makeCompleteRegister(9101, 0);
+  std::vector<cosmosim::amr::FluxRegisterEntry> entries{
+      incomplete_coarse_only,
+      incomplete_fine_only,
+      area_mismatch,
+      missing_id,
+      wrong_patch_owner};
+
+  const double density_before = state.gas_cells.density_code[1];
+  const auto diagnostics = cosmosim::amr::applyFluxRegistersToSimulationState(
+      state, entries, descriptors, k_gamma);
+  assert(diagnostics.corrected_cells == 0U);
+  assert(diagnostics.skipped_incomplete_register_count == 2U);
+  assert(diagnostics.skipped_area_mismatch_count == 1U);
+  assert(diagnostics.skipped_missing_target_count == 2U);
+  assert(state.gas_cells.density_code[1] == density_before);
+}
+
+void testCompleteManualRefluxAppliesOnceByStableGasCellId() {
+  cosmosim::core::SimulationState state = makeCoarseFineState();
+  const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
+  const double density_before = state.gas_cells.density_code[1];
+  std::vector<cosmosim::amr::FluxRegisterEntry> entries{makeCompleteRegister()};
+  const auto diagnostics = cosmosim::amr::applyFluxRegistersToSimulationState(
+      state, entries, descriptors, k_gamma);
+  assert(diagnostics.complete_register_count == 1U);
+  assert(diagnostics.corrected_cells == 1U);
+  assert(diagnostics.corrected_mass_code > 0.0);
+  assert(diagnostics.corrected_momentum_x_code > 0.0);
+  assert(diagnostics.corrected_momentum_y_code > 0.0);
+  assert(diagnostics.corrected_momentum_z_code > 0.0);
+  assert(diagnostics.corrected_total_energy_code > 0.0);
+  assert(state.gas_cells.density_code[1] != density_before);
+}
+
+void testRefluxRowReorderTargetsStableGasCellId() {
+  cosmosim::core::SimulationState state = makeCoarseFineState();
+  swapGasRows(state, 0, 1);
+  const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
+  const double target_density_before = state.gas_cells.density_code[0];
+  const double other_density_before = state.gas_cells.density_code[1];
+  std::vector<cosmosim::amr::FluxRegisterEntry> entries{makeCompleteRegister(9002, 1)};
+
+  const auto diagnostics = cosmosim::amr::applyFluxRegistersToSimulationState(
+      state, entries, descriptors, k_gamma);
+  assert(diagnostics.corrected_cells == 1U);
+  assert(state.gas_cells.gas_cell_id[0] == 9002U);
+  assert(state.gas_cells.density_code[0] != target_density_before);
+  assert(state.gas_cells.density_code[1] == other_density_before);
+}
+
 void testStaleRefluxTargetMappingFails() {
   cosmosim::core::SimulationState state = makeCoarseFineState();
   const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
@@ -205,6 +333,9 @@ void testStaleRefluxTargetMappingFails() {
 
 int main() {
   testAutomaticRefluxChangesCoarseOwnerAndPreservesTotals();
+  testManualRefluxAcceptanceSkipsUnsafeRegisters();
+  testCompleteManualRefluxAppliesOnceByStableGasCellId();
+  testRefluxRowReorderTargetsStableGasCellId();
   testStaleRefluxTargetMappingFails();
   return 0;
 }

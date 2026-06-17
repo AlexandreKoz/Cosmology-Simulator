@@ -1,103 +1,74 @@
 # H3 AMR Hydro Closeout Audit
 
 Date: 2026-06-16
-Prompt ID: H3.9
-Mode: Audit
+Prompt range: H3.0-H3.9
+Mode: production repair closeout
 
-## Verdict
+## Executive verdict
 
-H3 is **locally conservative at the implemented single-rank production AMR-hydro level**, but it is **not a full galaxy-formation credibility closeout** and should not be advertised as distributed/restart-complete AMR hydro.
+The H3 AMR hydro branch is no longer invalidated by the previous `cosmosim_amr` compile failure. The build blocker in `applyFluxRegistersToSimulationState` was fixed without removing stale-target validation, and the CPU/no-HDF5/no-MPI AMR/hydro test bundle now compiles and passes in this environment.
 
-The implemented production path is real: it uses `core::SimulationState` as persistent gas truth, builds patch-local hydro views, fills AMR ghosts, advances `HydroCoreSolver` over production patch geometry, generates flux-register records from actual Riemann face fluxes, scatters by stable `gas_cell_id`, and applies reflux automatically before the hydro stage returns.
+This is still **not** a full distributed or restart-complete AMR hydro closeout. The accepted claim after this repair is narrower: the local/single-rank production AMR hydro path builds, is selected when production AMR coverage exists, uses `core::SimulationState` as authoritative hydro state, maps gas rows to patch-local cells from explicit patch geometry rather than sorted dense-row order, performs conservative refine/derefine through row-order-independent maps, fills ghost descriptors with auditable status metadata, emits solver-derived flux-register records, and skips unsafe reflux records instead of applying them.
 
-The remaining closeout blocker is evidence breadth, not the local conservative mechanism itself: there is no dedicated production AMR hydro run/restart/run equivalence test. Restart schema v16 persists and validates patch geometry and gas identity lanes, and AMR patch migration has atomic payload tests, but H3 should keep restart-equivalence closure open until the production AMR hydro path itself is exercised across restart.
+## Environment and configuration used
 
-## Evidence Basis
+Configured and tested in the local container with:
 
-Inspected before writing this audit:
+- Compiler: GNU C++ 14.2.0 (`c++ (Debian 14.2.0-19) 14.2.0`).
+- Build type: `Release`.
+- Tests: enabled.
+- HDF5: disabled.
+- MPI: disabled.
+- FFTW/CUDA: disabled by the configured build.
 
-- Repository contracts and ownership docs: `README.md`, `CONTRIBUTING.md`, `docs/architecture/overview.md`, `docs/architecture/developer_workflow_contract.md`, `docs/architecture/runtime_truth_map.md`, `docs/architecture/adr_runtime_truth_ownership.md`, `docs/repair_state_recap.md`, `docs/repair_open_issues.md`.
-- H3 architecture/docs: `docs/architecture/h3_amr_hydro_coupling_plan.md`, `docs/architecture/h3_amr_hydro_production_closeout.md`, `docs/hydro_core_solver.md`, `docs/validation_ladder.md`, `docs/parallel_distributed_memory_contracts.md`, `docs/restart_checkpointing.md`, `docs/output_schema.md`.
-- AMR/hydro implementation: `include/cosmosim/amr/amr_framework.hpp`, `src/amr/amr_framework.cpp`, `include/cosmosim/amr/amr_hydro_geometry.hpp`, `src/amr/amr_hydro_geometry.cpp`, `include/cosmosim/amr/amr_ghost_fill.hpp`, `src/amr/amr_ghost_fill.cpp`, `include/cosmosim/amr/amr_hydro_orchestrator.hpp`, `src/amr/amr_hydro_orchestrator.cpp`, `include/cosmosim/hydro/hydro_core_solver.hpp`, `src/hydro/hydro_core_solver.cpp`, `src/workflows/reference_workflow.cpp`.
-- Restart/MPI impact surfaces: `include/cosmosim/io/restart_checkpoint.hpp`, `src/io/restart_checkpoint.cpp`, `include/cosmosim/core/simulation_state.hpp`, `src/core/simulation_state_species.cpp`.
-- Tests and registration: `CMakeLists.txt`, `tests/unit/test_amr_*.cpp`, `tests/integration/test_amr_*.cpp`, `tests/integration/amr_hydro_validation_helpers.hpp`, `tests/integration/test_restart_equivalence_hydro_toy.cpp`, `tests/validation/`.
-
-Discovery commands included:
+Configuration command:
 
 ```bash
-rg -n "H3|AMR|amr|FluxRegister|Reflux|prolong|restrict|ghost|Sedov|shock|sync|subcycling|moving mesh|moving-mesh" src include tests docs CMakeLists.txt
-rg --files tests | rg "test_amr_|validation|hydro|restart_equivalence_hydro_toy"
-rg -n "advanceProductionAmrHydro|refineProductionPatchInSimulationState|derefineProductionPatchInSimulationState|fillAmrHydroGhostCells|populateAmrHydroFluxRegisterFaces|applyFluxRegistersToSimulationState" src include tests docs
-rg -n "integration_amr_|unit_amr_|validation_hydro_classics|restart_equivalence_hydro_toy" CMakeLists.txt
-rg -n "restart|checkpoint|AmrPatch|gas_cell_id|patch" src/io include/cosmosim/io tests/unit/test_restart_checkpoint_schema.cpp tests/integration/test_restart_checkpoint_roundtrip.cpp
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCOSMOSIM_ENABLE_TESTS=ON \
+  -DCOSMOSIM_ENABLE_HDF5=OFF \
+  -DCOSMOSIM_ENABLE_MPI=OFF
 ```
 
-## Conservative AMR Transfer
+## Commands run and outcomes
 
-Status: **implemented and tested at scaffold and production-state levels**.
+Build commands:
 
-- `ConservativeTransfer::prolongateFromCoarse` splits volume-integrated `ConservedState` equally into fine cells, preserving mass, momentum x/y/z, and total energy for piecewise-constant refinement.
-- `ConservativeTransfer::restrictToCoarse` sums child volume-integrated states back to a coarse cell.
-- `PatchHierarchy::refinePatch` and `PatchHierarchy::derefinePatch` use those transfers for standalone AMR scaffold patches.
-- `refineProductionPatchInSimulationState` and `derefineProductionPatchInSimulationState` repeat the conservation contract against persistent `SimulationState` gas rows, rebuild `GasCellIdentityMap`, update patch descriptors, and bump the cell index generation.
+```bash
+cmake --build build --target cosmosim_amr -j2
+cmake --build build --target test_integration_amr_production_hydro_integration -j2
+./build/test_integration_amr_production_hydro_integration
+cmake --build build --target integration_amr_hydro_shock_tube -j2
+cmake --build build --target integration_amr_hydro_sedov -j2
+cmake --build build --target integration_amr_synchronization_stress -j2
+```
 
-Coverage:
+Outcome: all commands above completed successfully.
 
-- `integration_amr_conservative_refine`
-- `integration_amr_conservative_derefine`
-- `integration_amr_production_hydro_integration`
-- `integration_amr_synchronization_stress`
+The full AMR/hydro CTest set was built first because this repository's default `ctest` execution expects test executables to exist. Then the targeted AMR/hydro test regex was run:
 
-These tests check conservation of volume-integrated mass, momentum x/y/z, and total energy across refine/derefine. The implemented prolongation is piecewise-constant; there is no slope-limited conservative prolongation claim.
+```bash
+ctest --test-dir build --output-on-failure -R "amr|AMR|hydro"
+```
 
-## Ghost Fill
+Outcome: **24/24 tests passed**.
 
-Status: **production path, not test-only helper**.
+Passing tests in that run:
 
-`advanceProductionAmrHydro` builds `AmrHydroPatchGeometry` for every explicit patch descriptor, loads patch-local conserved storage from `SimulationState`, and calls `fillAmrHydroGhostCells` before solving. The ghost fill path handles:
-
-- H1 physical boundary rules for periodic/open/reflective ghosts;
-- same-level AMR ghost copy;
-- coarse-to-fine ghost injection;
-- fine-to-coarse coarse ghost averaging;
-- stale remote ghost epoch rejection for imported/read-only ghost surfaces.
-
-Coverage:
-
-- `unit_amr_ghost_fill`
-- `integration_amr_patch_boundary_consistency`
-- `integration_amr_production_hydro_integration`
-- `integration_amr_hydro_shock_tube`
-- `integration_amr_hydro_sedov`
-- `integration_amr_synchronization_stress`
-
-Ghost rows are scratch-only and remain outside restart truth. Source same-level, coarse-fine, and remote imported ghosts are read-only from the perspective of the receiving patch.
-
-## Flux Registers and Reflux
-
-Status: **production path, automatically applied**.
-
-`HydroCoreSolver::advancePatchActiveSetWithScratch` accepts a `HydroFluxRegisterSink`. During the Riemann face loop it calls the sink only when `HydroPatchGeometry::flux_register_faces` marks a face as coarse or fine. `populateAmrHydroFluxRegisterFaces` marks coarse-fine ghost faces before the sweep; `FluxRegisterAccumulator` area-weights coarse/fine contributions by register key; `advanceProductionAmrHydro` scatters patch-local states to `SimulationState` and then applies `applyFluxRegistersToSimulationState` automatically.
-
-The reflux target is resolved through stable coarse patch/gas-cell metadata. Stale target mappings fail before correction. Incomplete or area-mismatched registers are skipped and counted; missing coarse or fine sides are not treated as implicit zero flux.
-
-Coverage:
-
-- `unit_amr_flux_register_generation` proves records come from actual hydro sweeps and configured Riemann fluxes.
-- `integration_amr_reflux_conservation` proves automatic production reflux changes the coarse owner and preserves total state within tolerance.
-- `integration_amr_production_hydro_integration` proves geometry, ghost fill, hydro sweep, flux-register generation, reflux, scatter, and identity consistency through one production path.
-- `integration_amr_hydro_shock_tube`, `integration_amr_hydro_sedov`, and `integration_amr_synchronization_stress` exercise the production AMR path with CI-scale physical guards.
-
-## Validation Registration
-
-Status: **registered in CMake; command execution blocked in this environment**.
-
-Registered H3-relevant CPU tests include:
-
+- `unit_hydro_reconstruction`
+- `unit_hydro_boundary_conditions`
+- `unit_hydro_riemann`
+- `integration_amr_patch_migration`
 - `unit_amr_refinement`
 - `unit_amr_hydro_geometry`
 - `unit_amr_ghost_fill`
 - `unit_amr_flux_register_generation`
+- `unit_hydro_core_solver`
+- `integration_hydro_sod_like`
+- `integration_hydro_decoupled_gas_cells`
+- `integration_hydro_conservation_periodic`
+- `integration_hydro_axis_symmetry`
 - `integration_amr_static_refinement_sync`
 - `integration_amr_patch_boundary_consistency`
 - `integration_amr_conservative_refine`
@@ -107,112 +78,130 @@ Registered H3-relevant CPU tests include:
 - `integration_amr_hydro_shock_tube`
 - `integration_amr_hydro_sedov`
 - `integration_amr_synchronization_stress`
-- `integration_amr_patch_migration`
+- `integration_restart_equivalence_hydro_toy`
+- `validation_hydro_classics`
 
-The validation ladder describes AMR hydro shock/Sedov/synchronization stress as CI-scale production guards. They are not publication-grade convergence decks.
+## H3.0-H3.9 verdicts
 
-## Restart and MPI Impact
+### H3.0 -- AMR/hydro coupling design audit
 
-Status: **documented and partially tested; H3 restart equivalence remains open**.
+Verdict: **accepted for the local production ownership contract**.
 
-Restart:
+`core::SimulationState` remains the production owner of gas/hydro state. `amr::PatchHierarchy` and `AmrPatch::m_conserved` remain scaffold/topology/test infrastructure. The workflow still enters the AMR-driven hydro path when `amr::hasProductionAmrHydroCoverage(context.state)` is true and does not fall back to the old global Cartesian toy patch in that case.
 
-- Restart schema is `cosmosim_restart_v16` in code.
-- Patch geometry lanes, cell `patch_index`, gas-cell identity records, gas thermodynamic lanes, and patch ownership are serialized and integrity-hashed.
-- Restart validation rejects invalid patch geometry coverage and malformed gas identity records.
-- `test_restart_checkpoint_roundtrip` covers patch geometry and parentless gas-cell restart cases.
+Limit: this does not close distributed AMR hydro, AMR subcycling, HDF5 AMR hydro restart equivalence, or galaxy-formation physics.
 
-Blocker:
+### H3.1 -- AMR patches as first-class hydro geometry providers
 
-- `test_restart_equivalence_hydro_toy` is an H1 Cartesian hydro restart-equivalence test, not a production AMR hydro restart-equivalence test.
-- No dedicated test currently proves `advanceProductionAmrHydro` plus AMR patch geometry/ghost/reflux state survives a run/restart/run split with equivalence to uninterrupted evolution.
+Verdict: **accepted for explicit local patch geometry and row-order-independent mapping**.
 
-MPI/patch migration:
+A shared helper in `include/cosmosim/amr/amr_patch_indexing.hpp` now computes patch-local `(i,j,k)` and linear patch-cell indices from `PatchDescriptor` origin, extent, cell dimensions, and gas-cell center coordinates. It validates positive dimensions/extents, bounds, duplicate cells, missing cells, and identity ownership. Both AMR hydro geometry construction and orchestrator-side validation use the same helper.
 
-- `AmrPatchMigrationRecord` carries patch descriptors plus complete gas-cell migration records.
-- `commitAmrPatchMigration` updates patch descriptors and gas-cell rows atomically, rebuilds `GasCellIdentityMap`, and rejects stale gas ghosts by identity generation/ghost epoch.
-- `integration_amr_patch_migration` tests atomic descriptor/gas sidecar payload behavior and stale ghost epoch rejection.
+`buildAmrHydroPatchGeometry` now builds patch-local row order from explicit geometry and stable identity records. It no longer treats sorted dense rows as patch-local truth.
 
-Limit:
+Limit: production coverage still assumes a patch's dense rows are represented as a complete patch block in the current `SimulationState`/identity model. The physical mapping within that block is row-order independent, but arbitrary interleaving of one patch's rows through another patch's dense block is still outside the current production coverage contract.
 
-- True distributed AMR ghost exchange and multi-rank production AMR hydro are not complete. Current remote ghost epoch machinery is a correctness seam and local/test-facing contract, not a full MPI AMR hydro closure.
+### H3.2 -- Conservative prolongation on refine
 
-## Limitations
+Verdict: **accepted for piecewise-constant conservative production refinement**.
 
-- No AMR time subcycling is implemented or evidenced here. The production H3 path advances the selected active patch cells for the current hydro update and skips incomplete reflux registers rather than claiming subcycled fine/coarse synchronization.
-- No cooling, star formation, stellar feedback, AGN feedback, metal enrichment, or other baryonic/subgrid coupling is closed by H3.
-- No MHD, radiation transport, cosmic rays, conduction, viscosity, or chemistry is implemented by this stage.
-- No moving mesh is implemented, validated, or recommended by this closeout.
-- CI-scale shock/Sedov/stress tests are credible regression guards, not paper-grade validation or convergence campaigns.
-- MPI AMR patch migration is represented by local/pseudo-rank payload contracts; full distributed AMR ghost exchange and multi-rank restart equivalence remain future work.
-- Restart schema docs have some surrounding historical wording drift in older sections, but the implementation-facing H3 evidence depends on current code identity `cosmosim_restart_v16` and the AMR v16 patch geometry note.
+`refineProductionPatchInSimulationState` now obtains parent rows through the shared geometry map instead of `sortedRowsForPatch(...)[parent_cell]`. The helper validates complete unique parent coverage before mutation. The integration test now includes a regression where parent gas rows are deliberately swapped before refinement; child states still map to the correct physical parent cell and volume-integrated mass, momentum, and total energy are conserved.
 
-## Future Moving-Mesh Seams
+Limit: prolongation is piecewise-constant. No slope-limited/high-order conservative prolongation is claimed.
 
-Moving mesh remains a future backend, not an H3 recommendation. If considered later, the required seams are:
+### H3.3 -- Conservative restriction on derefine
 
-- Keep `gas_cell_id` as stable cell identity independent of dense row order.
-- Keep `parent_particle_id` as optional lineage metadata, not gas ownership truth.
-- Preserve geometry adapters that feed `HydroPatchGeometry`-like solver inputs without promoting mesh-specific scratch to restart authority.
-- Define face ownership, neighbor topology, ghost import epochs, and conservative correction ownership before solver coupling.
-- Version restart/schema changes for any new topology, face, or mesh-generating-point fields.
-- Add restart equivalence and migration tests before claiming a new backend is production-ready.
+Verdict: **accepted for local conservative production derefinement under the explicit octant contract**.
 
-## Commands and Outcomes
+`derefineProductionPatchInSimulationState` now builds row-by-patch-cell maps for every child patch using the shared patch-local indexing helper. Restriction uses geometry-based child cell locations rather than sorted child-row order. The integration test now shuffles rows within child patch blocks before derefine and verifies conservation.
 
-Attempted:
+The pre-existing contract checks for child count, child level, extents, octants, duplicates, and patch relationships are preserved.
 
-```bash
-cmake --preset cpu-only-debug
-```
+Limit: the production derefine path remains local/synchronous. It does not claim distributed derefine or subcycled fine/coarse synchronization.
 
-Outcome: **blocked**. PowerShell reported:
+### H3.4 -- Same-level and coarse-fine ghost fill
 
-```text
-cmake : O termo 'cmake' nao e reconhecido como nome de cmdlet, funcao, arquivo de script ou programa operavel.
-```
+Verdict: **accepted for local ghost fill metadata and diagnostics**.
 
-Additional environment check:
+`fillAmrHydroGhostCells` remains live in the production AMR hydro path. Ghost descriptors now carry auditable fill statuses beyond the original unfilled states, including filled physical boundary, filled same-level, filled coarse-to-fine, filled fine-to-coarse, stale remote rejection, skipped remote, and missing source states. Diagnostics now include skipped remote/imported ghosts, stale epoch rejections, missing source records, and unresolved ghosts.
 
-```bash
-Get-Command cmake -ErrorAction SilentlyContinue
-```
+Tests inspect per-ghost status, not only aggregate counters.
 
-Outcome: **blocked/not found**. No bundled workspace dependency runtime was configured in Codex Desktop.
+Limit: full MPI/distributed AMR ghost exchange is not implemented. Remote/imported ghost support is an epoch/identity correctness seam and local contract, not a production multi-rank exchange path.
 
-Not run because configure was blocked by missing `cmake`:
+### H3.5 -- Flux-register generation during hydro sweeps
 
-```bash
-cmake --build --preset build-cpu-debug
-ctest --preset test-cpu-debug --output-on-failure -R "hydro|amr|gas_cell|restart_equivalence_hydro_toy"
-ctest --preset test-hdf5-debug --output-on-failure -R "restart_checkpoint|restart_equivalence_hydro_toy"
-ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure -R "amr|migration|parallel"
-```
+Verdict: **accepted for local solver-emitted register records**.
 
-## Risk Register
+`HydroCoreSolver` remains geometry-agnostic and emits `HydroFluxRegisterRecord` values through `HydroFluxRegisterSink` when patch geometry marks coarse-fine faces. The records carry stable coarse gas-cell IDs where reflux targets are required. Existing and strengthened tests verify records are produced by the hydro face loop rather than by a purely synthetic/manual production path.
 
-| Risk | Status | Required next evidence |
-| --- | --- | --- |
-| Production AMR hydro local conservation | Closure candidate | Run CPU AMR/hydro targeted CTest bundle in an environment with CMake available. |
-| AMR hydro restart equivalence | Open blocker | Add/run a dedicated production AMR hydro run/restart/run equivalence test that exercises patch geometry, ghost fill, flux registers, reflux, and stable gas-cell identity. |
-| Distributed AMR hydro ghost exchange | Open future work | Implement multi-rank AMR ghost exchange with full identity/epoch contracts and MPI tests before any distributed AMR closure claim. |
-| AMR subcycling | Not implemented | Define scheduler/reflux timing law and tests before claiming subcycled AMR. |
-| Galaxy-formation physics coupling | Out of H3 scope | Separate validated stages for cooling, star formation, feedback, metals, and related source terms. |
+Limit: no persistent flux-register restart schema was added.
 
-## Allowed Claims
+### H3.6 -- Automatic reflux application
 
-- Production AMR hydro has a real single-rank path through `SimulationState`, patch-local geometry, scratch ghost fill, live hydro sweeps, flux-register generation, scatter, and automatic reflux.
-- Conservative refine/derefine is implemented for piecewise-constant transfers at scaffold and production `SimulationState` levels.
-- CI-scale AMR hydro shock, Sedov, and synchronization stress guards are registered.
+Verdict: **accepted for local synchronized sweeps with unsafe-register skipping**.
 
-## Forbidden Claims
+The compile blocker in `applyFluxRegistersToSimulationState` is fixed by using the shared patch-local indexing helper. Reflux resolves targets by stable `coarse_gas_cell_id`, then validates current patch ownership and patch-local cell position before mutation. Incomplete coarse-only or fine-only records, area mismatches, missing targets, and wrong patch ownership are skipped or rejected and counted. Tests cover complete application, incomplete registers, area mismatch, missing ID, wrong patch ownership, row reorder, and nonzero momentum/energy diagnostics.
 
-- H3 is fully closed for distributed AMR hydro.
-- AMR hydro restart equivalence is proven for the production AMR path.
-- AMR subcycling is implemented.
-- The H3 evidence is publication-grade hydro validation.
-- Cooling/star formation/feedback/MHD/radiation or moving-mesh production readiness is implied by H3.
+Limit: reflux is applied at the end of the current local AMR hydro stage and is safe only for synchronized local sweeps. This is not a complete deferred/subcycling reflux solution.
 
-## Reproducibility Impact
+### H3.7 -- AMR hydro validation tests
 
-This audit changes documentation only. No solver numerics, config keys, restart schema fields, output names, HDF5 dataset names, scheduler behavior, MPI rank coordination, or persistent runtime ownership semantics were changed.
+Verdict: **accepted as CI-scale guards, not scientific validation decks**.
+
+The requested H3.7 tests compile and run in the CPU/no-HDF5/no-MPI configuration:
+
+- `integration_amr_hydro_shock_tube`
+- `integration_amr_hydro_sedov`
+- `integration_amr_synchronization_stress`
+
+CMake now also provides build-target aliases with those exact names, while CTest continues to run the same names as tests backed by `test_*` executables.
+
+Limit: these are regression/smoke guards with finite-state, positivity, conservation, and qualitative-behavior checks. They are not publication-grade convergence studies.
+
+### H3.8 -- AMR-aware MPI patch/gas-sidecar migration
+
+Verdict: **partially accepted as local contract coverage only**.
+
+`integration_amr_patch_migration` passes and covers local/pseudo-rank pack/commit behavior, patch descriptors, gas sidecars, identity coverage, and stale ghost epoch rejection.
+
+Limit: no two-rank MPI AMR migration or distributed AMR ghost-exchange smoke test was run because MPI was disabled in this build. H3.8 must not be advertised as production distributed AMR hydro.
+
+### H3.9 -- Closeout audit
+
+Verdict: **accepted as an honest local repair closeout**.
+
+This document records exact commands, configuration, test results, skipped evidence, and remaining limitations. Older aspirational claims that depended only on docs/test presence have been replaced with build/test-backed claims.
+
+## Tests not run / skipped evidence
+
+- **HDF5 AMR hydro restart equivalence:** not run because the requested environment was configured with `COSMOSIM_ENABLE_HDF5=OFF`. The passing `integration_restart_equivalence_hydro_toy` is a toy/H1-style hydro restart guard, not a production AMR hydro run/restart/run equivalence proof.
+- **MPI AMR migration/ghost exchange:** not run because the requested environment was configured with `COSMOSIM_ENABLE_MPI=OFF`. No full distributed AMR hydro ghost exchange is claimed.
+- **AMR subcycling/deferred flux-register persistence:** not implemented or tested.
+- **Publication-grade hydro validation:** not attempted; the H3.7 tests are CI-scale guards.
+
+## Remaining known limitations
+
+- Production AMR hydro is local/single-rank in the tested configuration.
+- Full MPI AMR ghost exchange remains future work.
+- Full AMR hydro restart equivalence with HDF5 checkpoint/reload remains future work.
+- Reflux drains inside the current local hydro stage; there is no persistent deferred-register or subcycling completion model.
+- Conservative refine/prolongation is piecewise-constant only.
+- No cooling, star formation, feedback, metals, MHD, radiation, chemistry, or galaxy-formation subgrid coupling is closed by H3.
+
+## Allowed claims after this repair
+
+- `cosmosim_amr` compiles in the CPU/no-HDF5/no-MPI test configuration.
+- Registered AMR/hydro tests compile and pass in the targeted CTest run.
+- The production AMR hydro path remains `SimulationState`-owned and AMR-driven when patch coverage exists.
+- Patch-local mapping, refine, derefine, and reflux validation use explicit geometry and stable identity rather than sorted dense-row order.
+- Ghost fill has per-ghost fill/skip/reject metadata and expanded diagnostics.
+- Unsafe reflux registers are skipped/reported rather than silently applied.
+
+## Forbidden claims after this repair
+
+- Full distributed AMR hydro is complete.
+- Production AMR hydro restart equivalence has been proven.
+- AMR time subcycling is implemented.
+- The CI shock/Sedov/stress guards are publication-grade validation.
+- H3 closes galaxy-formation physics or any subgrid model readiness.

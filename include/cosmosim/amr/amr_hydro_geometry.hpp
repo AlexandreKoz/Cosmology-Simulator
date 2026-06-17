@@ -22,6 +22,13 @@ enum class AmrHydroGhostFillStatus : std::uint8_t {
   kUnfilledPhysicalBoundary,
   kUnfilledSameLevel,
   kUnfilledCoarseFine,
+  kFilledPhysicalBoundary,
+  kFilledSameLevel,
+  kFilledCoarseToFine,
+  kFilledFineToCoarse,
+  kSkippedRemote,
+  kRejectedStaleRemote,
+  kMissingSource,
 };
 
 struct AmrHydroGeometryOptions {

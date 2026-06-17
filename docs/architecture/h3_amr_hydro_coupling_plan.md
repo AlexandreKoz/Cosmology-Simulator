@@ -353,3 +353,15 @@ If a future patch touches restart/HDF5 behavior, also run the HDF5 preset from `
 ## Reproducibility Impact
 
 This H3.0 document changes no runtime behavior, solver numerics, config semantics, output names, or restart schema. It records the required ownership and sequencing contract for future AMR hydro integration so that production work does not introduce duplicate conserved-state ownership or fake flux-register evidence.
+
+## 2026-06-16 repair evidence note
+
+The H3 repair pass following this plan fixed the previous `cosmosim_amr` build failure and implemented the key local production contracts that this plan required:
+
+- patch-local mapping is centralized in `include/cosmosim/amr/amr_patch_indexing.hpp` and is computed from explicit patch geometry plus gas-cell centers;
+- production geometry construction, conservative refine, conservative derefine, and reflux validation use that shared mapping instead of sorted dense-row order;
+- AMR ghost fill now records per-ghost filled/skipped/rejected/missing-source status;
+- local reflux targets are resolved by stable `coarse_gas_cell_id` and validated against current patch ownership and patch-local location;
+- CI-scale AMR hydro shock, Sedov, and synchronization stress tests build and run in the CPU/no-HDF5/no-MPI configuration.
+
+The implemented evidence remains local/single-rank. MPI AMR ghost exchange, production AMR hydro HDF5 restart equivalence, AMR time subcycling, and persistent deferred flux-register restart state remain future work rather than accepted H3 claims.

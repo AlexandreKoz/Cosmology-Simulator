@@ -141,10 +141,11 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
   if (patch.conserved->size() < patch.geometry->geometry.totalCellStorageCount()) {
     throw std::invalid_argument("fillAmrHydroGhostCells: conserved storage is missing AMR ghost rows");
   }
-  if (patch.residency == AmrGhostSourceResidency::kRemoteReadOnly &&
-      patch.ghost_hydro_epoch != patch.expected_ghost_hydro_epoch) {
-    throw std::runtime_error("fillAmrHydroGhostCells: stale remote AMR hydro ghost epoch");
-  }
+}
+
+[[nodiscard]] bool staleRemotePatch(const AmrHydroGhostFillPatch& patch) {
+  return patch.residency == AmrGhostSourceResidency::kRemoteReadOnly &&
+      patch.ghost_hydro_epoch != patch.expected_ghost_hydro_epoch;
 }
 
 [[nodiscard]] CellSelection selectSourceCells(
@@ -211,7 +212,7 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
 
 void fillAmrGhost(
     AmrHydroGhostFillPatch& target,
-    const AmrHydroGhostDescriptor& descriptor,
+    AmrHydroGhostDescriptor& descriptor,
     std::span<AmrHydroGhostFillPatch> patches,
     AmrHydroGhostFillDiagnostics& diagnostics) {
   const hydro::HydroGhostCell& ghost =
@@ -219,22 +220,40 @@ void fillAmrGhost(
   const CellSelection selection =
       selectSourceCells(target, ghost, descriptor.boundary_class, patches);
   if (selection.patch == nullptr || selection.cells.empty()) {
+    descriptor.fill_status = AmrHydroGhostFillStatus::kMissingSource;
+    ++diagnostics.missing_source_records;
+    ++diagnostics.unresolved_ghosts;
     throw std::runtime_error(
         "fillAmrHydroGhostCells: unresolved AMR hydro ghost for patch " +
         std::to_string(target.geometry->patch.patch_id));
   }
-  if (selection.patch->residency == AmrGhostSourceResidency::kRemoteReadOnly &&
-      selection.patch->ghost_hydro_epoch != selection.patch->expected_ghost_hydro_epoch) {
+  if (staleRemotePatch(*selection.patch)) {
+    descriptor.fill_status = AmrHydroGhostFillStatus::kRejectedStaleRemote;
+    ++diagnostics.stale_epoch_rejections;
+    ++diagnostics.unresolved_ghosts;
     throw std::runtime_error("fillAmrHydroGhostCells: stale source AMR hydro ghost epoch");
   }
 
   target.conserved->storeCell(descriptor.ghost_cell, averageSourceState(selection));
   if (descriptor.boundary_class == AmrHydroBoundaryClass::kSameLevel) {
+    descriptor.fill_status = AmrHydroGhostFillStatus::kFilledSameLevel;
     ++diagnostics.same_level_ghosts_filled;
   } else if (selection.patch->geometry->patch.level < target.geometry->patch.level) {
+    descriptor.fill_status = AmrHydroGhostFillStatus::kFilledCoarseToFine;
     ++diagnostics.coarse_to_fine_ghosts_filled;
   } else {
+    descriptor.fill_status = AmrHydroGhostFillStatus::kFilledFineToCoarse;
     ++diagnostics.fine_to_coarse_ghosts_filled;
+  }
+}
+
+void markStaleRemoteTarget(
+    AmrHydroGhostFillPatch& patch,
+    AmrHydroGhostFillDiagnostics& diagnostics) {
+  for (AmrHydroGhostDescriptor& ghost : patch.geometry->ghosts) {
+    ghost.fill_status = AmrHydroGhostFillStatus::kRejectedStaleRemote;
+    ++diagnostics.stale_epoch_rejections;
+    ++diagnostics.unresolved_ghosts;
   }
 }
 
@@ -249,9 +268,14 @@ AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
   }
 
   for (AmrHydroGhostFillPatch& patch : patches) {
+    if (staleRemotePatch(patch)) {
+      markStaleRemoteTarget(patch, diagnostics);
+      continue;
+    }
     hydro::fillHydroBoundaryGhostCells(*patch.conserved, patch.geometry->geometry, adiabatic_index);
-    for (const AmrHydroGhostDescriptor& ghost : patch.geometry->ghosts) {
+    for (AmrHydroGhostDescriptor& ghost : patch.geometry->ghosts) {
       if (ghost.boundary_class == AmrHydroBoundaryClass::kPhysical) {
+        ghost.fill_status = AmrHydroGhostFillStatus::kFilledPhysicalBoundary;
         ++diagnostics.physical_ghosts_filled;
         continue;
       }

@@ -1,5 +1,7 @@
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 
+#include "cosmosim/amr/amr_patch_indexing.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -355,12 +357,11 @@ void writeVolumeIntegratedToRow(
   state.gas_cells.temperature_code[row] = state.gas_cells.internal_energy_code[row];
 }
 
-[[nodiscard]] std::vector<std::uint32_t> sortedRowsForPatch(
+[[nodiscard]] std::vector<std::uint32_t> patchLocalRowsForPatch(
     const core::SimulationState& state,
-    std::uint64_t patch_id) {
-  std::vector<std::uint32_t> rows = state.gas_cell_identity.rowsForPatch(patch_id);
-  std::sort(rows.begin(), rows.end());
-  return rows;
+    const PatchDescriptor& patch,
+    std::string_view context) {
+  return rowsForPatchLocalCellOrder(state, patch, context);
 }
 
 [[nodiscard]] std::array<double, 5> totalsForRows(
@@ -784,7 +785,7 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
         state.cells.patch_index[row] != *patch_index ||
         state.gas_cells.gas_cell_id[row] != entry.coarse_gas_cell_id ||
         entry.coarse_cell_index >= product(patch_it->cell_dims) ||
-        patchLocalCellForRow(state, *patch_it, row) != entry.coarse_cell_index) {
+        patchLocalCellForRow(state, *patch_it, row, "applyFluxRegistersToSimulationState").linear_index != entry.coarse_cell_index) {
       throw std::runtime_error("applyFluxRegistersToSimulationState rejected a stale AMR reflux target mapping");
     }
     const double volume = patch_it->extent_comov[0] * patch_it->extent_comov[1] * patch_it->extent_comov[2] /
@@ -1000,7 +1001,7 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
   if (!parent_patch_index.has_value()) {
     throw std::runtime_error("production AMR refine target patch is absent from SimulationState");
   }
-  const std::vector<std::uint32_t> parent_rows = sortedRowsForPatch(state, parent_patch.patch_id);
+  const std::vector<std::uint32_t> parent_rows = patchLocalRowsForPatch(state, parent_patch, "production AMR refine");
   if (parent_rows.size() != product(parent_patch.cell_dims)) {
     throw std::runtime_error("production AMR refine parent row coverage does not match descriptor");
   }
@@ -1187,7 +1188,7 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
       static_cast<double>(product(children.front().cell_dims));
   std::vector<std::uint32_t> child_rows;
   for (const PatchDescriptor& child : children) {
-    const std::vector<std::uint32_t> rows = sortedRowsForPatch(state, child.patch_id);
+    const std::vector<std::uint32_t> rows = patchLocalRowsForPatch(state, child, "production AMR derefine child coverage");
     child_rows.insert(child_rows.end(), rows.begin(), rows.end());
   }
   const auto before = totalsForRows(state, child_rows, child_volume, options);
@@ -1202,7 +1203,7 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
   std::vector<std::uint64_t> restricted_parent_particle_id(parent_cell_count, std::numeric_limits<std::uint64_t>::max());
   std::vector<std::uint8_t> restricted_time_bin(parent_cell_count, std::numeric_limits<std::uint8_t>::max());
   for (const PatchDescriptor& child : children) {
-    const std::vector<std::uint32_t> rows = sortedRowsForPatch(old, child.patch_id);
+    const std::vector<std::uint32_t> rows = patchLocalRowsForPatch(old, child, "production AMR derefine child restriction");
     for (std::size_t child_cell = 0; child_cell < rows.size(); ++child_cell) {
       const std::array<double, 3> center = cellCenter(child, child_cell);
       const std::size_t parent_cell = cellContainingPoint(parent_patch, center);

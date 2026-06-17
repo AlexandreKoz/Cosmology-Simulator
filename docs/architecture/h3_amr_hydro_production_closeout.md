@@ -75,3 +75,34 @@ Still intentionally deferred:
 
 - True distributed/MPI AMR ghost exchange remains future work. Current production AMR hydro is hardened for local/single-rank patch coverage and keeps remote/imported ghost contracts explicit, but it does not claim multi-rank AMR ghost exchange completeness.
 - AMR hydro restart equivalence is not a dedicated standalone test yet. The v16 patch-geometry restart lanes are covered by restart schema/round-trip tests, but a full run/restart/run production AMR hydro comparison should still be added before claiming H3 final closeout.
+
+## 2026-06-16 production repair closeout: build, row-order mapping, ghost status, and reflux acceptance
+
+A subsequent H3 repair pass fixed the compile failure in `applyFluxRegistersToSimulationState` and reran the CPU/no-HDF5/no-MPI AMR/hydro test set. The production AMR hydro path still treats `core::SimulationState` as authoritative state and still runs from the workflow whenever production AMR patch coverage exists.
+
+Additional hardening in this pass:
+
+- Added `include/cosmosim/amr/amr_patch_indexing.hpp` as a shared AMR helper for patch-local `(i,j,k)` and linear cell indexing from explicit `PatchDescriptor` geometry and gas-cell center coordinates.
+- Reused that helper in hydro geometry construction, production refine, production derefine, and reflux target validation.
+- Removed remaining production assumptions that sorted dense gas rows are equivalent to patch-local physical order.
+- Added row-reorder regression coverage for production refine, derefine, and reflux target application.
+- Extended AMR ghost descriptors with filled/skipped/rejected/missing-source statuses and expanded ghost-fill diagnostics.
+- Preserved unsafe-register behavior: incomplete, area-mismatched, missing-target, and wrong-owner reflux records are skipped or rejected and counted instead of being applied.
+- Added CMake build-target aliases for the H3.7 integration guards `integration_amr_hydro_shock_tube`, `integration_amr_hydro_sedov`, and `integration_amr_synchronization_stress`; the backing executables remain `test_*` targets and CTest uses the integration names.
+
+Evidence gathered in this repair pass:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCOSMOSIM_ENABLE_TESTS=ON -DCOSMOSIM_ENABLE_HDF5=OFF -DCOSMOSIM_ENABLE_MPI=OFF
+cmake --build build --target cosmosim_amr -j2
+cmake --build build --target test_integration_amr_production_hydro_integration -j2
+./build/test_integration_amr_production_hydro_integration
+cmake --build build --target integration_amr_hydro_shock_tube -j2
+cmake --build build --target integration_amr_hydro_sedov -j2
+cmake --build build --target integration_amr_synchronization_stress -j2
+ctest --test-dir build --output-on-failure -R "amr|AMR|hydro"
+```
+
+Result: `cosmosim_amr` built successfully and the targeted AMR/hydro CTest run passed 24/24 tests.
+
+Remaining limitations are unchanged in scope: no full MPI AMR ghost exchange, no HDF5 production AMR hydro restart-equivalence proof in this CPU/no-HDF5 build, no AMR time subcycling, and no persistent deferred flux-register restart schema.

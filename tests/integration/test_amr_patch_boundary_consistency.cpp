@@ -159,6 +159,7 @@ void testCoarseFineBoundaryFill() {
 
   assert(diagnostics.coarse_to_fine_ghosts_filled == 16U);
   assert(diagnostics.fine_to_coarse_ghosts_filled == 4U);
+  assert(diagnostics.unresolved_ghosts == 0U);
 
   const auto& fine_lower_ghost = findGhost(
       fine_geometry,
@@ -213,6 +214,7 @@ void testPhysicalReflectiveBoundaryStillUsesH1Rules() {
   assertNear(primitive.vel_y_peculiar, source.vel_y_peculiar);
   assertNear(primitive.vel_z_peculiar, source.vel_z_peculiar);
   assertNear(primitive.pressure_comoving, source.pressure_comoving);
+  assert(ghost.fill_status == cosmosim::amr::AmrHydroGhostFillStatus::kFilledPhysicalBoundary);
 }
 
 }  // namespace

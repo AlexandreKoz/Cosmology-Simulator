@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -315,6 +316,56 @@ void testProductionRegridRejectsIdCollisions() {
   assert(gas_collision);
 }
 
+void testProductionRefineUsesPatchLocalGeometryAfterRowReorder() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  swapGasRows(state, 0, 7);
+  const double patch_cell_zero_density = state.gas_cells.density_code[7];
+  const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000);
+  assert(refine.refined_patch_count == 1U);
+  assertClose(refine.conserved_mass_before, refine.conserved_mass_after);
+  assertClose(refine.conserved_momentum_x_before, refine.conserved_momentum_x_after);
+  assertClose(refine.conserved_momentum_y_before, refine.conserved_momentum_y_after);
+  assertClose(refine.conserved_momentum_z_before, refine.conserved_momentum_z_after);
+  assertClose(refine.conserved_total_energy_before, refine.conserved_total_energy_after);
+
+  const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
+  const auto child_it = std::find_if(
+      descriptors.begin(),
+      descriptors.end(),
+      [](const cosmosim::amr::PatchDescriptor& patch) {
+        return patch.parent_patch_id == 301U && patch.origin_comov[0] == 0.0 &&
+            patch.origin_comov[1] == 0.0 && patch.origin_comov[2] == 0.0;
+      });
+  assert(child_it != descriptors.end());
+  for (const std::uint32_t row : state.gas_cell_identity.rowsForPatch(child_it->patch_id)) {
+    assertClose(state.gas_cells.density_code[row], patch_cell_zero_density);
+  }
+}
+
+void testProductionDerefineUsesPatchLocalGeometryAfterChildRowReorder() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000);
+  assert(refine.refined_patch_count == 1U);
+
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    const std::uint32_t first = state.patches.first_cell[patch_index];
+    const std::uint32_t count = state.patches.cell_count[patch_index];
+    if (count >= 8U) {
+      swapGasRows(state, first, static_cast<std::uint32_t>(first + count - 1U));
+    }
+  }
+
+  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, parent, 30000);
+  assert(derefine.derefined_patch_count == 1U);
+  assertClose(derefine.conserved_mass_before, derefine.conserved_mass_after);
+  assertClose(derefine.conserved_momentum_x_before, derefine.conserved_momentum_x_after);
+  assertClose(derefine.conserved_momentum_y_before, derefine.conserved_momentum_y_after);
+  assertClose(derefine.conserved_momentum_z_before, derefine.conserved_momentum_z_after);
+  assertClose(derefine.conserved_total_energy_before, derefine.conserved_total_energy_after);
+}
+
 void testPartialActiveSetSkipsIncompleteReflux() {
   cosmosim::core::SimulationState state = makeCoarseFineState();
   cosmosim::hydro::HydroCoreSolver solver(k_gamma);
@@ -372,6 +423,8 @@ int main() {
   testProductionAmrGeometryScatterAndRefluxPath();
   testPatchLocalMappingSurvivesRowReorder();
   testProductionRegridRejectsIdCollisions();
+  testProductionRefineUsesPatchLocalGeometryAfterRowReorder();
+  testProductionDerefineUsesPatchLocalGeometryAfterChildRowReorder();
   testPartialActiveSetSkipsIncompleteReflux();
   testProductionRefineAndDerefineConserveSimulationState();
   return 0;
