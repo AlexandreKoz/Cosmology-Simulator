@@ -426,6 +426,41 @@ struct GasCellMigrationCommit {
   std::vector<GasCellStaleGhostRecord> stale_local_ghost_records;
 };
 
+struct AmrPatchMigrationFields {
+  std::uint64_t patch_id = 0;
+  std::uint64_t parent_patch_id = 0;
+  std::uint64_t morton_key = 0;
+  std::int32_t level = 0;
+  std::uint32_t owning_rank = 0;
+  std::uint32_t cell_count = 0;
+  double origin_x_comoving = 0.0;
+  double origin_y_comoving = 0.0;
+  double origin_z_comoving = 0.0;
+  double extent_x_comoving = 0.0;
+  double extent_y_comoving = 0.0;
+  double extent_z_comoving = 0.0;
+  std::uint16_t cell_dim_x = 0;
+  std::uint16_t cell_dim_y = 0;
+  std::uint16_t cell_dim_z = 0;
+};
+
+struct AmrPatchMigrationRecord {
+  // Atomic patch ownership payload. Patch descriptors and every authoritative
+  // gas-cell row in the patch migrate together, keyed by stable patch_id and
+  // gas_cell_id rather than by old local rows.
+  AmrPatchMigrationFields patch{};
+  std::vector<GasCellMigrationRecord> gas_cell_records;
+};
+
+struct AmrPatchMigrationCommit {
+  int world_rank = 0;
+  std::uint64_t expected_gas_cell_identity_generation = 0;
+  std::uint64_t expected_ghost_hydro_epoch = 0;
+  std::vector<std::uint32_t> outbound_local_patch_indices;
+  std::vector<AmrPatchMigrationRecord> inbound_records;
+  std::vector<GasCellStaleGhostRecord> stale_local_ghost_records;
+};
+
 struct StarParticleMigrationFields {
   double formation_scale_factor = 0.0;
   double birth_mass_code = 0.0;
@@ -566,6 +601,10 @@ class SimulationState {
       std::span<const std::uint32_t> local_cell_rows,
       std::uint64_t ghost_hydro_epoch = 0) const;
   void commitGasCellMigration(const GasCellMigrationCommit& commit);
+  [[nodiscard]] std::vector<AmrPatchMigrationRecord> packAmrPatchMigrationRecords(
+      std::span<const std::uint32_t> local_patch_indices,
+      std::uint64_t ghost_hydro_epoch = 0) const;
+  void commitAmrPatchMigration(const AmrPatchMigrationCommit& commit);
   [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
   [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
   void bumpParticleIndexGeneration() noexcept;

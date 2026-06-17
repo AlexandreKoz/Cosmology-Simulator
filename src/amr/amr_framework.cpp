@@ -668,6 +668,7 @@ RefluxDiagnostics RefluxSynchronizer::apply(
     diagnostics.corrected_momentum_x_code += std::abs(delta_flux.momentum_x_code);
     diagnostics.corrected_momentum_y_code += std::abs(delta_flux.momentum_y_code);
     diagnostics.corrected_momentum_z_code += std::abs(delta_flux.momentum_z_code);
+    diagnostics.corrected_total_energy_code += std::abs(delta_flux.total_energy_code);
     diagnostics.corrected_energy_code += std::abs(delta_flux.total_energy_code);
     diagnostics.corrected_internal_energy_code += std::abs(delta_flux.total_energy_code);
   }

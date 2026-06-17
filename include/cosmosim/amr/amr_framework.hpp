@@ -186,6 +186,7 @@ struct RefluxDiagnostics {
   double corrected_momentum_x_code = 0.0;
   double corrected_momentum_y_code = 0.0;
   double corrected_momentum_z_code = 0.0;
+  double corrected_total_energy_code = 0.0;
   double corrected_energy_code = 0.0;
   double corrected_internal_energy_code = 0.0;
 };

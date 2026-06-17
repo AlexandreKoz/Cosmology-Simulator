@@ -117,6 +117,32 @@ hydro source-term interface. It is a bounded source-coupling and collapse-trend
 guard until a self-gravitating hydro workflow can own a restartable Evrard
 reference path with documented gravity/hydro ownership.
 
+## AMR hydro CI guards
+
+The default CPU integration ladder includes three AMR hydro validation guards:
+
+- `integration_amr_hydro_shock_tube`: refines the patch adjacent to a Sod-like
+  discontinuity, advances through production AMR hydro, and checks finite
+  positive state, coarse-fine ghost fill, flux-register/reflux completion,
+  conservation bounds, and shock/contact trend.
+- `integration_amr_hydro_sedov`: refines a compact Sedov-style blast fixture,
+  verifies child states are nonzero after refinement, advances the refined
+  hierarchy, and checks finite positive state, approximate symmetry, outward
+  shell motion, and total-energy bound.
+- `integration_amr_synchronization_stress`: evolves, refines, evolves across a
+  coarse-fine boundary with flux registers and reflux, derefines through
+  conservative restriction, evolves again, and checks global conserved totals.
+
+These tests are CI-scale synchronization and conservation sentinels for H3 AMR
+hydro. They intentionally do not replace future high-resolution AMR convergence
+decks, restart equivalence decks, or cross-code shock/blast comparisons.
+
+Restart comparison blocker: these AMR hydro fixtures currently validate the
+in-memory production patch/regrid/ghost/reflux path only. A short AMR
+run/restart/run comparison remains a follow-up requirement once the HDF5-enabled
+restart gate owns an AMR patch-hierarchy fixture with explicit patch, gas-cell
+identity, and reflux-synchronization expectations.
+
 ## Validation reporting in PRs
 
 Every PR should include:

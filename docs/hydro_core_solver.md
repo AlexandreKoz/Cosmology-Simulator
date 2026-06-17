@@ -68,6 +68,14 @@ are swept from the fine patch side of a coarse-fine boundary typically use `-1` 
 back toward the coarse ghost. The AMR accumulator area-weights all fine-face fluxes sharing the same register key and
 emits one deterministic `FluxRegisterEntry` ordered by that key.
 
+In the production AMR hydro path, refluxing is applied automatically by `advanceProductionAmrHydro` after all active
+coarse and fine patch sweeps for the current hydro update have contributed to the shared flux register accumulator and
+after patch-local conserved states have been scattered back to authoritative `SimulationState` gas rows. The reflux
+application happens before AMR restriction/derefine decisions, output checks, or restart-boundary writes, so the
+coarse-fine flux mismatch is corrected in the live owner cells rather than left for test-only callers. Reflux targets
+are validated by patch ID, stable `gas_cell_id`, and patch-local cell index; stale coarse patch/gas-cell mappings fail
+before any correction is applied.
+
 Implementation is now split along these boundaries:
 
 - `src/hydro/hydro_reconstruction.cpp` + `include/cosmosim/hydro/hydro_reconstruction.hpp`:

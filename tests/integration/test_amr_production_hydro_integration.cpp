@@ -169,6 +169,7 @@ void testProductionAmrGeometryScatterAndRefluxPath() {
   assert(diagnostics.reflux.corrected_cells > 0U);
   assert(diagnostics.reflux.corrected_mass_code >= 0.0);
   assert(diagnostics.reflux.corrected_momentum_x_code >= 0.0);
+  assert(diagnostics.reflux.corrected_total_energy_code >= 0.0);
   assert(diagnostics.reflux.corrected_energy_code >= 0.0);
 
   assert(state.gas_cell_identity.coversDenseLocalRows(state.cells.size()));

@@ -58,6 +58,13 @@ a flux-conservation error.
 The solver also records these same totals in `HydroProfileEvent::conservation`, alongside the existing face count,
 fallback counters, bytes moved, and stage timings.
 
+For production AMR hydro, the reference workflow emits `hydro.amr_production_stage` after the AMR hydro synchronization
+point. The payload includes patch and active cell/face counts, `flux_register_entry_count`, reflux corrected cell count,
+corrected mass, corrected momentum x/y/z, corrected total energy, corrected internal energy, complete register count,
+and skipped register counts for incomplete, area-mismatched, or missing-target registers. These diagnostics are
+observational only; flux-register ownership remains in the AMR hydro synchronization path and is not persisted as
+restart truth.
+
 ## Workflow hooks for documentation/scaffolding changes
 
 Documentation changes still need auditable developer workflow checks:

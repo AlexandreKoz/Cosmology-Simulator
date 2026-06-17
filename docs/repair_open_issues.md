@@ -5,6 +5,12 @@
 | --- | --- | --- | --- | --- |
 | S6-07-MEMORY-ACCOUNTING | Open | Runtime memory diagnostics | Core now reports capacity-based owned bytes for SimulationState/workspace lanes and keeps unknown external allocations explicit, but tree/PM/MPI/IO subsystems still need direct report hooks for concrete owned buffers. | Keep central API stable; add per-subsystem report hooks to replace unknown estimates when each module exposes ownership details. |
 
+## 2026-06-16 H3 AMR hydro closeout status
+
+| ID | Status | Area | Finding | Resolution / Remaining action |
+| --- | --- | --- | --- | --- |
+| H3-09-AMR-HYDRO-RESTART-EQUIVALENCE | Open | AMR hydro restart evidence | The production AMR hydro path is locally conservative at the implemented single-rank level, with tests for conservative refine/derefine, same-level and coarse-fine ghost fill, live flux-register generation, automatic reflux, shock/Sedov guards, synchronization stress, and AMR patch migration payloads. However, no dedicated production AMR hydro run/restart/run equivalence test currently exercises patch geometry, ghost fill, flux registers, reflux, and stable `gas_cell_id` identity across restart. | Add and run a dedicated HDF5 restart-equivalence test for `advanceProductionAmrHydro` on explicit AMR patch geometry before claiming H3 final restart closure. Current audit evidence is in `docs/architecture/h3_amr_hydro_closeout_audit.md`; local validation was environment-blocked because `cmake` was not found on PATH. |
+
 # Repair open issues (P01–P19 freeze ledger)
 
 _Date captured: 2026-04-14 (UTC)_

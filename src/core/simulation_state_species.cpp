@@ -115,6 +115,30 @@ void requireValidGasCellMigrationFields(const GasCellMigrationFields& fields, co
   }
 }
 
+void requireValidAmrPatchMigrationFields(const AmrPatchMigrationFields& fields, const char* caller) {
+  if (fields.patch_id == 0U) {
+    throw std::invalid_argument(std::string(caller) + ": patch_id must be nonzero");
+  }
+  if (fields.cell_count == 0U) {
+    throw std::invalid_argument(std::string(caller) + ": patch cell_count must be nonzero");
+  }
+  const bool has_geometry = fields.extent_x_comoving > 0.0 || fields.extent_y_comoving > 0.0 ||
+      fields.extent_z_comoving > 0.0 || fields.cell_dim_x != 0U || fields.cell_dim_y != 0U ||
+      fields.cell_dim_z != 0U;
+  if (has_geometry) {
+    if (!(fields.extent_x_comoving > 0.0 && fields.extent_y_comoving > 0.0 &&
+          fields.extent_z_comoving > 0.0) ||
+        fields.cell_dim_x == 0U || fields.cell_dim_y == 0U || fields.cell_dim_z == 0U) {
+      throw std::invalid_argument(std::string(caller) + ": patch geometry fields must be complete");
+    }
+    const std::size_t dims_product = static_cast<std::size_t>(fields.cell_dim_x) *
+        static_cast<std::size_t>(fields.cell_dim_y) * static_cast<std::size_t>(fields.cell_dim_z);
+    if (dims_product != fields.cell_count) {
+      throw std::invalid_argument(std::string(caller) + ": patch cell dimensions must match cell_count");
+    }
+  }
+}
+
 [[nodiscard]] GasCellMigrationFields gasCellFieldsFromLocalRow(
     const SimulationState& state,
     std::uint32_t row,
@@ -177,6 +201,58 @@ void writeGasCellFieldsToRow(
   gas_cells.internal_energy_code[row] = fields.internal_energy_code;
   gas_cells.temperature_code[row] = fields.temperature_code;
   gas_cells.sound_speed_code[row] = fields.sound_speed_code;
+}
+
+[[nodiscard]] AmrPatchMigrationFields patchFieldsFromLocalRow(
+    const SimulationState& state,
+    std::uint32_t patch_index,
+    const char* caller) {
+  if (patch_index >= state.patches.size()) {
+    throw std::out_of_range(std::string(caller) + ": local patch index is out of range");
+  }
+  AmrPatchMigrationFields fields;
+  fields.patch_id = state.patches.patch_id[patch_index];
+  fields.parent_patch_id = state.patches.parent_patch_id[patch_index];
+  fields.morton_key = state.patches.morton_key[patch_index];
+  fields.level = state.patches.level[patch_index];
+  fields.owning_rank = state.patches.owning_rank[patch_index];
+  fields.cell_count = state.patches.cell_count[patch_index];
+  fields.origin_x_comoving = state.patches.origin_x_comoving[patch_index];
+  fields.origin_y_comoving = state.patches.origin_y_comoving[patch_index];
+  fields.origin_z_comoving = state.patches.origin_z_comoving[patch_index];
+  fields.extent_x_comoving = state.patches.extent_x_comoving[patch_index];
+  fields.extent_y_comoving = state.patches.extent_y_comoving[patch_index];
+  fields.extent_z_comoving = state.patches.extent_z_comoving[patch_index];
+  fields.cell_dim_x = state.patches.cell_dim_x[patch_index];
+  fields.cell_dim_y = state.patches.cell_dim_y[patch_index];
+  fields.cell_dim_z = state.patches.cell_dim_z[patch_index];
+  requireValidAmrPatchMigrationFields(fields, caller);
+  return fields;
+}
+
+void writePatchFieldsToRow(
+    const AmrPatchMigrationFields& fields,
+    std::uint32_t first_cell,
+    std::uint32_t cell_count,
+    std::uint32_t patch_index,
+    PatchSoa& patches) {
+  requireValidAmrPatchMigrationFields(fields, "writePatchFieldsToRow");
+  patches.patch_id[patch_index] = fields.patch_id;
+  patches.level[patch_index] = fields.level;
+  patches.first_cell[patch_index] = first_cell;
+  patches.cell_count[patch_index] = cell_count;
+  patches.parent_patch_id[patch_index] = fields.parent_patch_id;
+  patches.morton_key[patch_index] = fields.morton_key;
+  patches.origin_x_comoving[patch_index] = fields.origin_x_comoving;
+  patches.origin_y_comoving[patch_index] = fields.origin_y_comoving;
+  patches.origin_z_comoving[patch_index] = fields.origin_z_comoving;
+  patches.extent_x_comoving[patch_index] = fields.extent_x_comoving;
+  patches.extent_y_comoving[patch_index] = fields.extent_y_comoving;
+  patches.extent_z_comoving[patch_index] = fields.extent_z_comoving;
+  patches.cell_dim_x[patch_index] = fields.cell_dim_x;
+  patches.cell_dim_y[patch_index] = fields.cell_dim_y;
+  patches.cell_dim_z[patch_index] = fields.cell_dim_z;
+  patches.owning_rank[patch_index] = fields.owning_rank;
 }
 
 [[nodiscard]] std::vector<GasCellIdentityRecord> gasIdentityRecordsFromSidecars(
@@ -1171,6 +1247,243 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
     tracers.host_cell_index[row] = remap_host_cell(tracers.host_cell_index[row]);
   }
 
+  cells = std::move(rebuilt_cells);
+  gas_cells = std::move(rebuilt_gas_cells);
+  gas_cell_identity.assign(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
+  bumpCellIndexGeneration();
+}
+
+std::vector<AmrPatchMigrationRecord> SimulationState::packAmrPatchMigrationRecords(
+    std::span<const std::uint32_t> local_patch_indices,
+    std::uint64_t ghost_hydro_epoch) const {
+  if (!patches.isConsistent()) {
+    throw std::runtime_error("packAmrPatchMigrationRecords: PatchSoa is inconsistent");
+  }
+  this->requireGasCellIdentityMapCoversDenseRows("packAmrPatchMigrationRecords");
+
+  std::vector<AmrPatchMigrationRecord> records;
+  records.reserve(local_patch_indices.size());
+  for (const std::uint32_t patch_index : local_patch_indices) {
+    if (patch_index >= patches.size()) {
+      throw std::out_of_range("packAmrPatchMigrationRecords: local patch index is out of range");
+    }
+    const std::uint32_t first_cell = patches.first_cell[patch_index];
+    const std::uint32_t cell_count = patches.cell_count[patch_index];
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > cells.size()) {
+      throw std::runtime_error("packAmrPatchMigrationRecords: patch cell range is outside CellSoa");
+    }
+
+    AmrPatchMigrationRecord record;
+    record.patch = patchFieldsFromLocalRow(*this, patch_index, "packAmrPatchMigrationRecords");
+    record.gas_cell_records.reserve(cell_count);
+    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
+      const std::uint32_t cell_row = first_cell + offset;
+      GasCellMigrationFields fields =
+          gasCellFieldsFromLocalRow(*this, cell_row, ghost_hydro_epoch, "packAmrPatchMigrationRecords");
+      fields.patch_index = 0U;
+      fields.owning_patch_id = record.patch.patch_id;
+      fields.destination_local_cell_row = offset;
+      record.gas_cell_records.push_back(GasCellMigrationRecord{
+          .owning_rank = record.patch.owning_rank,
+          .fields = fields,
+      });
+    }
+    if (record.gas_cell_records.size() != record.patch.cell_count) {
+      throw std::runtime_error("packAmrPatchMigrationRecords: patch payload did not cover every gas-cell row");
+    }
+    records.push_back(std::move(record));
+  }
+  return records;
+}
+
+void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& commit) {
+  if (commit.world_rank < 0) {
+    throw std::invalid_argument("commitAmrPatchMigration: world_rank must be non-negative");
+  }
+  if (!patches.isConsistent()) {
+    throw std::runtime_error("commitAmrPatchMigration: PatchSoa is inconsistent");
+  }
+  this->requireGasCellIdentityMapCoversDenseRows("commitAmrPatchMigration");
+
+  std::vector<std::uint8_t> remove_patch(patches.size(), 0U);
+  for (const std::uint32_t patch_index : commit.outbound_local_patch_indices) {
+    if (patch_index >= patches.size()) {
+      throw std::out_of_range("commitAmrPatchMigration: outbound patch index is out of range");
+    }
+    if (remove_patch[patch_index] != 0U) {
+      throw std::invalid_argument("commitAmrPatchMigration: duplicate outbound patch index");
+    }
+    if (patches.owning_rank[patch_index] != static_cast<std::uint32_t>(commit.world_rank)) {
+      throw std::invalid_argument("commitAmrPatchMigration: outbound patch is not owned by committing rank");
+    }
+    remove_patch[patch_index] = 1U;
+  }
+
+  std::vector<std::uint8_t> remove_cell(cells.size(), 0U);
+  for (std::uint32_t cell_row = 0; cell_row < cells.size(); ++cell_row) {
+    const std::uint32_t patch_index = cells.patch_index[cell_row];
+    if (patch_index >= patches.size()) {
+      throw std::runtime_error("commitAmrPatchMigration: cell patch_index is outside PatchSoa");
+    }
+    if (remove_patch[patch_index] != 0U) {
+      remove_cell[cell_row] = 1U;
+    }
+  }
+
+  for (const GasCellStaleGhostRecord& stale : commit.stale_local_ghost_records) {
+    if (stale.gas_cell_identity_generation != commit.expected_gas_cell_identity_generation ||
+        stale.ghost_hydro_epoch != commit.expected_ghost_hydro_epoch) {
+      throw std::invalid_argument("commitAmrPatchMigration: stale gas ghost generation or hydro epoch mismatch");
+    }
+    if (stale.local_cell_row >= cells.size()) {
+      throw std::out_of_range("commitAmrPatchMigration: stale gas ghost local row is out of range");
+    }
+    const auto* identity = gas_cell_identity.findByLocalRow(stale.local_cell_row);
+    if (identity == nullptr || identity->gas_cell_id != stale.gas_cell_id) {
+      throw std::invalid_argument("commitAmrPatchMigration: stale gas ghost gas_cell_id does not match local row");
+    }
+    if (remove_cell[stale.local_cell_row] != 0U) {
+      throw std::invalid_argument("commitAmrPatchMigration: duplicate gas-cell removal");
+    }
+    remove_cell[stale.local_cell_row] = 1U;
+  }
+
+  std::unordered_set<std::uint64_t> final_patch_ids;
+  final_patch_ids.reserve(patches.size() + commit.inbound_records.size());
+  for (std::uint32_t patch_index = 0; patch_index < patches.size(); ++patch_index) {
+    if (remove_patch[patch_index] != 0U) {
+      continue;
+    }
+    if (!final_patch_ids.insert(patches.patch_id[patch_index]).second) {
+      throw std::invalid_argument("commitAmrPatchMigration: kept patches contain duplicate patch_id");
+    }
+  }
+  for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
+    requireValidAmrPatchMigrationFields(inbound.patch, "commitAmrPatchMigration");
+    if (inbound.patch.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
+      throw std::invalid_argument("commitAmrPatchMigration: inbound patch owner rank does not match commit rank");
+    }
+    if (inbound.gas_cell_records.size() != inbound.patch.cell_count) {
+      throw std::invalid_argument("commitAmrPatchMigration: inbound patch gas-cell payload count mismatch");
+    }
+    if (!final_patch_ids.insert(inbound.patch.patch_id).second) {
+      throw std::invalid_argument("commitAmrPatchMigration: inbound patch_id duplicates local patch state");
+    }
+  }
+
+  std::vector<AmrPatchMigrationFields> final_patches;
+  std::vector<std::vector<GasCellMigrationFields>> final_cells_by_patch;
+  final_patches.reserve(patches.size() + commit.inbound_records.size());
+  final_cells_by_patch.reserve(patches.size() + commit.inbound_records.size());
+  std::unordered_set<std::uint64_t> final_gas_cell_ids;
+  final_gas_cell_ids.reserve(cells.size());
+
+  for (std::uint32_t patch_index = 0; patch_index < patches.size(); ++patch_index) {
+    if (remove_patch[patch_index] != 0U) {
+      continue;
+    }
+    AmrPatchMigrationFields patch = patchFieldsFromLocalRow(*this, patch_index, "commitAmrPatchMigration");
+    std::vector<GasCellMigrationFields> patch_cells;
+    const std::uint32_t first_cell = patches.first_cell[patch_index];
+    const std::uint32_t cell_count = patches.cell_count[patch_index];
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > cells.size()) {
+      throw std::runtime_error("commitAmrPatchMigration: kept patch cell range is outside CellSoa");
+    }
+    patch_cells.reserve(cell_count);
+    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
+      const std::uint32_t old_cell = first_cell + offset;
+      if (remove_cell[old_cell] != 0U) {
+        continue;
+      }
+      GasCellMigrationFields fields =
+          gasCellFieldsFromLocalRow(*this, old_cell, 0U, "commitAmrPatchMigration");
+      fields.owning_patch_id = patch.patch_id;
+      patch_cells.push_back(fields);
+    }
+    patch.cell_count = static_cast<std::uint32_t>(patch_cells.size());
+    if (patch.cell_dim_x != 0U || patch.cell_dim_y != 0U || patch.cell_dim_z != 0U) {
+      const std::size_t dims_product = static_cast<std::size_t>(patch.cell_dim_x) *
+          static_cast<std::size_t>(patch.cell_dim_y) * static_cast<std::size_t>(patch.cell_dim_z);
+      if (dims_product != patch.cell_count) {
+        throw std::runtime_error("commitAmrPatchMigration: kept AMR patch lost cells without a descriptor remap");
+      }
+    }
+    final_patches.push_back(patch);
+    final_cells_by_patch.push_back(std::move(patch_cells));
+  }
+
+  for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
+    std::vector<GasCellMigrationFields> patch_cells;
+    patch_cells.reserve(inbound.gas_cell_records.size());
+    for (const GasCellMigrationRecord& gas_record : inbound.gas_cell_records) {
+      if (gas_record.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
+        throw std::invalid_argument("commitAmrPatchMigration: inbound gas-cell owner rank does not match commit rank");
+      }
+      requireValidGasCellMigrationFields(gas_record.fields, "commitAmrPatchMigration");
+      if (gas_record.fields.owning_patch_id != inbound.patch.patch_id) {
+        throw std::invalid_argument("commitAmrPatchMigration: inbound gas-cell owning_patch_id does not match patch");
+      }
+      patch_cells.push_back(gas_record.fields);
+    }
+    final_patches.push_back(inbound.patch);
+    final_cells_by_patch.push_back(std::move(patch_cells));
+  }
+
+  std::size_t total_cell_count = 0;
+  for (const auto& patch_cells : final_cells_by_patch) {
+    total_cell_count += patch_cells.size();
+  }
+  PatchSoa rebuilt_patches;
+  CellSoa rebuilt_cells;
+  GasCellSidecar rebuilt_gas_cells;
+  rebuilt_patches.resize(final_patches.size());
+  rebuilt_cells.resize(total_cell_count);
+  rebuilt_gas_cells.resize(total_cell_count);
+
+  std::uint32_t write_cell = 0;
+  for (std::uint32_t patch_index = 0; patch_index < final_patches.size(); ++patch_index) {
+    AmrPatchMigrationFields patch = final_patches[patch_index];
+    patch.cell_count = static_cast<std::uint32_t>(final_cells_by_patch[patch_index].size());
+    writePatchFieldsToRow(patch, write_cell, patch.cell_count, patch_index, rebuilt_patches);
+    for (GasCellMigrationFields fields : final_cells_by_patch[patch_index]) {
+      fields.patch_index = patch_index;
+      fields.destination_local_cell_row = write_cell;
+      if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {
+        throw std::invalid_argument("commitAmrPatchMigration: duplicate final gas_cell_id");
+      }
+      writeGasCellFieldsToRow(fields, write_cell, rebuilt_cells, rebuilt_gas_cells);
+      ++write_cell;
+    }
+  }
+
+  std::unordered_map<std::uint64_t, std::uint32_t> new_row_by_gas_cell_id;
+  new_row_by_gas_cell_id.reserve(rebuilt_gas_cells.size());
+  for (std::uint32_t row = 0; row < rebuilt_gas_cells.size(); ++row) {
+    new_row_by_gas_cell_id.emplace(rebuilt_gas_cells.gas_cell_id[row], row);
+  }
+  const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
+    if (old_cell_index >= cells.size()) {
+      throw std::runtime_error("commitAmrPatchMigration: sidecar host_cell_index is outside old CellSoa");
+    }
+    const std::uint64_t gas_cell_id = gas_cells.gas_cell_id[old_cell_index];
+    const auto row_it = new_row_by_gas_cell_id.find(gas_cell_id);
+    if (row_it == new_row_by_gas_cell_id.end()) {
+      throw std::runtime_error("commitAmrPatchMigration: sidecar host gas cell was removed during patch migration");
+    }
+    return row_it->second;
+  };
+  for (std::size_t row = 0; row < black_holes.size(); ++row) {
+    if (black_holes.host_cell_index[row] < cells.size()) {
+      black_holes.host_cell_index[row] = remap_host_cell(black_holes.host_cell_index[row]);
+    }
+  }
+  for (std::size_t row = 0; row < tracers.size(); ++row) {
+    if (tracers.host_cell_index[row] < cells.size()) {
+      tracers.host_cell_index[row] = remap_host_cell(tracers.host_cell_index[row]);
+    }
+  }
+
+  patches = std::move(rebuilt_patches);
   cells = std::move(rebuilt_cells);
   gas_cells = std::move(rebuilt_gas_cells);
   gas_cell_identity.assign(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));

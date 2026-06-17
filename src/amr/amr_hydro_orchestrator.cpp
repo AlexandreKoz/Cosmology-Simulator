@@ -779,6 +779,14 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
       ++diagnostics.skipped_missing_target_count;
       continue;
     }
+    const auto patch_index = patchIndexById(state, entry.coarse_patch_id);
+    if (!patch_index.has_value() || row >= state.cells.patch_index.size() ||
+        state.cells.patch_index[row] != *patch_index ||
+        state.gas_cells.gas_cell_id[row] != entry.coarse_gas_cell_id ||
+        entry.coarse_cell_index >= product(patch_it->cell_dims) ||
+        patchLocalCellForRow(state, *patch_it, row) != entry.coarse_cell_index) {
+      throw std::runtime_error("applyFluxRegistersToSimulationState rejected a stale AMR reflux target mapping");
+    }
     const double volume = patch_it->extent_comov[0] * patch_it->extent_comov[1] * patch_it->extent_comov[2] /
         static_cast<double>(std::max<std::size_t>(product(patch_it->cell_dims), 1U));
     ++diagnostics.complete_register_count;
@@ -814,6 +822,7 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
     diagnostics.corrected_momentum_x_code += std::abs(delta_flux.momentum_x_code * volume);
     diagnostics.corrected_momentum_y_code += std::abs(delta_flux.momentum_y_code * volume);
     diagnostics.corrected_momentum_z_code += std::abs(delta_flux.momentum_z_code * volume);
+    diagnostics.corrected_total_energy_code += std::abs(delta_flux.total_energy_code * volume);
     diagnostics.corrected_energy_code += std::abs(delta_flux.total_energy_code * volume);
     diagnostics.corrected_internal_energy_code += std::abs((new_internal_density - old_internal_density) * volume);
   }
