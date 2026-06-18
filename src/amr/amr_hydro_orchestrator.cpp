@@ -827,6 +827,307 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
     diagnostics.corrected_energy_code += std::abs(delta_flux.total_energy_code * volume);
     diagnostics.corrected_internal_energy_code += std::abs((new_internal_density - old_internal_density) * volume);
   }
+
+  return diagnostics;
+}
+
+namespace {
+
+[[nodiscard]] std::uint8_t axisToStorage(hydro::HydroFaceAxis axis) {
+  return static_cast<std::uint8_t>(axisIndex(axis));
+}
+
+[[nodiscard]] std::uint8_t sideToStorage(hydro::HydroFaceSide side) {
+  return side == hydro::HydroFaceSide::kLower ? 0U : 1U;
+}
+
+[[nodiscard]] hydro::HydroFaceAxis axisFromStorage(std::uint8_t axis) {
+  switch (axis) {
+    case 0U:
+      return hydro::HydroFaceAxis::kX;
+    case 1U:
+      return hydro::HydroFaceAxis::kY;
+    case 2U:
+      return hydro::HydroFaceAxis::kZ;
+    default:
+      throw std::runtime_error("pending AMR flux register has invalid face axis metadata");
+  }
+}
+
+[[nodiscard]] hydro::HydroFaceSide sideFromStorage(std::uint8_t side) {
+  if (side > 1U) {
+    throw std::runtime_error("pending AMR flux register has invalid face-side metadata");
+  }
+  return side == 0U ? hydro::HydroFaceSide::kLower : hydro::HydroFaceSide::kUpper;
+}
+
+void addFluxIntegral(
+    double& mass,
+    double& momentum_x,
+    double& momentum_y,
+    double& momentum_z,
+    double& total_energy,
+    const ConservedState& flux,
+    double area_comov,
+    double dt_code) {
+  const double scale = area_comov * dt_code;
+  mass += flux.mass_code * scale;
+  momentum_x += flux.momentum_x_code * scale;
+  momentum_y += flux.momentum_y_code * scale;
+  momentum_z += flux.momentum_z_code * scale;
+  total_energy += flux.total_energy_code * scale;
+}
+
+[[nodiscard]] ConservedState averageFluxFromIntegral(
+    double mass,
+    double momentum_x,
+    double momentum_y,
+    double momentum_z,
+    double total_energy,
+    double area_comov,
+    double dt_code) {
+  const double denom = area_comov * dt_code;
+  if (denom <= 0.0) {
+    return ConservedState{};
+  }
+  return ConservedState{
+      .mass_code = mass / denom,
+      .momentum_x_code = momentum_x / denom,
+      .momentum_y_code = momentum_y / denom,
+      .momentum_z_code = momentum_z / denom,
+      .total_energy_code = total_energy / denom};
+}
+
+void validatePendingCompatible(
+    const core::PendingFluxRegisterRecord& pending,
+    const FluxRegisterEntry& entry) {
+  if (pending.coarse_patch_id != entry.coarse_patch_id ||
+      pending.coarse_gas_cell_id != entry.coarse_gas_cell_id ||
+      pending.coarse_cell_index != entry.coarse_cell_index ||
+      pending.level != entry.level ||
+      pending.axis != axisToStorage(entry.axis) ||
+      pending.orientation != sideToStorage(entry.orientation)) {
+    throw std::runtime_error("pending AMR flux register received incompatible stable identity metadata for an existing key");
+  }
+}
+
+[[nodiscard]] core::PendingFluxRegisterRecord makePendingRecordSeed(
+    const core::SimulationState& state,
+    const FluxRegisterEntry& entry,
+    const ProductionAmrHydroOptions& options) {
+  const double coarse_dt = options.reflux_coarse_dt_code > 0.0 ? options.reflux_coarse_dt_code : entry.dt_code;
+  const double interval_start = options.reflux_interval_start_code;
+  const double interval_end = options.reflux_interval_end_code > interval_start
+      ? options.reflux_interval_end_code
+      : interval_start + coarse_dt;
+  const double expected_area = std::max({entry.face_area_comov, entry.coarse_area_comov, entry.fine_area_comov, 0.0});
+  return core::PendingFluxRegisterRecord{
+      .register_key = entry.register_key,
+      .coarse_patch_id = entry.coarse_patch_id,
+      .coarse_gas_cell_id = entry.coarse_gas_cell_id,
+      .coarse_cell_index = entry.coarse_cell_index,
+      .level = entry.level,
+      .axis = axisToStorage(entry.axis),
+      .orientation = sideToStorage(entry.orientation),
+      .expected_area_comov = expected_area,
+      .interval_start_code = interval_start,
+      .interval_end_code = interval_end,
+      .coarse_dt_code = coarse_dt,
+      .expected_fine_substeps = std::max<std::uint32_t>(1U, options.expected_fine_substeps),
+      .gas_cell_identity_generation = state.gasCellIdentityGeneration(),
+      .patch_geometry_generation = state.cellIndexGeneration()};
+}
+
+[[nodiscard]] FluxRegisterEntry fluxEntryFromPendingRecord(
+    const core::PendingFluxRegisterRecord& pending) {
+  const double area = pending.expected_area_comov;
+  const double dt = pending.coarse_dt_code > 0.0
+      ? pending.coarse_dt_code
+      : std::max(0.0, pending.interval_end_code - pending.interval_start_code);
+  return FluxRegisterEntry{
+      .register_key = pending.register_key,
+      .coarse_patch_id = pending.coarse_patch_id,
+      .coarse_gas_cell_id = pending.coarse_gas_cell_id,
+      .coarse_cell_index = pending.coarse_cell_index,
+      .level = pending.level,
+      .axis = axisFromStorage(pending.axis),
+      .orientation = sideFromStorage(pending.orientation),
+      .coarse_face_flux_code = averageFluxFromIntegral(
+          pending.coarse_mass_flux_integral_code,
+          pending.coarse_momentum_x_flux_integral_code,
+          pending.coarse_momentum_y_flux_integral_code,
+          pending.coarse_momentum_z_flux_integral_code,
+          pending.coarse_total_energy_flux_integral_code,
+          area,
+          dt),
+      .fine_face_flux_code = averageFluxFromIntegral(
+          pending.fine_mass_flux_integral_code,
+          pending.fine_momentum_x_flux_integral_code,
+          pending.fine_momentum_y_flux_integral_code,
+          pending.fine_momentum_z_flux_integral_code,
+          pending.fine_total_energy_flux_integral_code,
+          area,
+          dt),
+      .face_area_comov = area,
+      .coarse_area_comov = pending.coarse_area_accumulated_comov,
+      .fine_area_comov = pending.fine_area_accumulated_comov,
+      .dt_code = dt,
+      .coarse_face_count = pending.coarse_face_count,
+      .fine_face_count = pending.fine_face_count};
+}
+
+void accumulateDiagnostics(ProductionAmrHydroDiagnostics& lhs, const ProductionAmrHydroDiagnostics& rhs) {
+  lhs.patch_count = std::max(lhs.patch_count, rhs.patch_count);
+  lhs.advanced_patch_count += rhs.advanced_patch_count;
+  lhs.active_cell_count += rhs.active_cell_count;
+  lhs.active_face_count += rhs.active_face_count;
+  lhs.flux_register_entry_count += rhs.flux_register_entry_count;
+  lhs.pending_register_created_count += rhs.pending_register_created_count;
+  lhs.pending_register_completed_count += rhs.pending_register_completed_count;
+  lhs.pending_register_deferred_count += rhs.pending_register_deferred_count;
+  lhs.pending_register_applied_count += rhs.pending_register_applied_count;
+  lhs.pending_register_rejected_count += rhs.pending_register_rejected_count;
+  lhs.ghost_fill.physical_ghosts_filled += rhs.ghost_fill.physical_ghosts_filled;
+  lhs.ghost_fill.same_level_ghosts_filled += rhs.ghost_fill.same_level_ghosts_filled;
+  lhs.ghost_fill.coarse_to_fine_ghosts_filled += rhs.ghost_fill.coarse_to_fine_ghosts_filled;
+  lhs.ghost_fill.fine_to_coarse_ghosts_filled += rhs.ghost_fill.fine_to_coarse_ghosts_filled;
+  lhs.ghost_fill.skipped_remote_ghosts += rhs.ghost_fill.skipped_remote_ghosts;
+  lhs.ghost_fill.stale_epoch_rejections += rhs.ghost_fill.stale_epoch_rejections;
+  lhs.ghost_fill.missing_source_records += rhs.ghost_fill.missing_source_records;
+  lhs.ghost_fill.unresolved_ghosts += rhs.ghost_fill.unresolved_ghosts;
+  lhs.reflux.complete_register_count += rhs.reflux.complete_register_count;
+  lhs.reflux.skipped_incomplete_register_count += rhs.reflux.skipped_incomplete_register_count;
+  lhs.reflux.skipped_area_mismatch_count += rhs.reflux.skipped_area_mismatch_count;
+  lhs.reflux.skipped_missing_target_count += rhs.reflux.skipped_missing_target_count;
+  lhs.reflux.corrected_cells += rhs.reflux.corrected_cells;
+  lhs.reflux.corrected_mass_code += rhs.reflux.corrected_mass_code;
+  lhs.reflux.corrected_momentum_x_code += rhs.reflux.corrected_momentum_x_code;
+  lhs.reflux.corrected_momentum_y_code += rhs.reflux.corrected_momentum_y_code;
+  lhs.reflux.corrected_momentum_z_code += rhs.reflux.corrected_momentum_z_code;
+  lhs.reflux.corrected_total_energy_code += rhs.reflux.corrected_total_energy_code;
+  lhs.reflux.corrected_energy_code += rhs.reflux.corrected_energy_code;
+  lhs.reflux.corrected_internal_energy_code += rhs.reflux.corrected_internal_energy_code;
+}
+
+[[nodiscard]] std::vector<std::uint32_t> activeRowsForLevel(
+    const core::SimulationState& state,
+    int level,
+    std::span<const std::uint32_t> requested_rows) {
+  std::unordered_set<std::uint32_t> requested_lookup(requested_rows.begin(), requested_rows.end());
+  const bool all_requested = requested_rows.empty();
+  std::vector<std::uint32_t> rows;
+  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+    if (!all_requested && !requested_lookup.contains(row)) {
+      continue;
+    }
+    if (row >= state.cells.patch_index.size()) {
+      continue;
+    }
+    const std::uint32_t patch_index = state.cells.patch_index[row];
+    if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
+      rows.push_back(row);
+    }
+  }
+  return rows;
+}
+
+}  // namespace
+
+std::size_t mergeFluxRegistersIntoPendingStore(
+    core::SimulationState& state,
+    std::span<const FluxRegisterEntry> entries,
+    const ProductionAmrHydroOptions& options) {
+  std::size_t created_count = 0;
+  for (const FluxRegisterEntry& entry : entries) {
+    if (entry.register_key == 0U) {
+      continue;
+    }
+    auto* pending = state.pending_flux_registers.findByRegisterKey(entry.register_key);
+    if (pending == nullptr) {
+      core::PendingFluxRegisterRecord seed = makePendingRecordSeed(state, entry, options);
+      pending = &state.pending_flux_registers.upsertByRegisterKey(seed);
+      ++created_count;
+    } else {
+      validatePendingCompatible(*pending, entry);
+      pending->expected_fine_substeps = std::max(pending->expected_fine_substeps, options.expected_fine_substeps);
+      pending->expected_area_comov = std::max({pending->expected_area_comov, entry.face_area_comov, entry.coarse_area_comov, entry.fine_area_comov});
+    }
+
+    if (entry.coarse_face_count > 0U && entry.coarse_area_comov > 0.0) {
+      pending->coarse_face_count += entry.coarse_face_count;
+      pending->coarse_area_accumulated_comov = std::max(pending->coarse_area_accumulated_comov, entry.coarse_area_comov);
+      addFluxIntegral(
+          pending->coarse_mass_flux_integral_code,
+          pending->coarse_momentum_x_flux_integral_code,
+          pending->coarse_momentum_y_flux_integral_code,
+          pending->coarse_momentum_z_flux_integral_code,
+          pending->coarse_total_energy_flux_integral_code,
+          entry.coarse_face_flux_code,
+          entry.coarse_area_comov,
+          entry.dt_code);
+    }
+    if (entry.fine_face_count > 0U && entry.fine_area_comov > 0.0) {
+      pending->fine_face_count += entry.fine_face_count;
+      pending->fine_area_accumulated_comov = std::max(pending->fine_area_accumulated_comov, entry.fine_area_comov);
+      addFluxIntegral(
+          pending->fine_mass_flux_integral_code,
+          pending->fine_momentum_x_flux_integral_code,
+          pending->fine_momentum_y_flux_integral_code,
+          pending->fine_momentum_z_flux_integral_code,
+          pending->fine_total_energy_flux_integral_code,
+          entry.fine_face_flux_code,
+          entry.fine_area_comov,
+          entry.dt_code);
+      const std::uint32_t expected = std::max<std::uint32_t>(1U, pending->expected_fine_substeps);
+      const std::uint32_t substep = expected == 1U ? 0U : std::min(options.fine_substep_index, expected - 1U);
+      if (substep < 64U) {
+        const std::uint64_t bit = 1ULL << substep;
+        if ((pending->fine_substep_coverage_mask & bit) == 0U) {
+          pending->fine_substep_coverage_mask |= bit;
+          pending->completed_fine_substeps += 1U;
+        }
+      } else {
+        pending->completed_fine_substeps += 1U;
+      }
+    }
+  }
+  return created_count;
+}
+
+RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
+    core::SimulationState& state,
+    std::span<const PatchDescriptor> all_patches,
+    double adiabatic_index) {
+  RefluxDiagnostics diagnostics;
+  std::vector<std::uint64_t> applied_keys;
+  for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+    if (!pending.isComplete()) {
+      ++diagnostics.skipped_incomplete_register_count;
+      continue;
+    }
+    if (pending.gas_cell_identity_generation != state.gasCellIdentityGeneration()) {
+      ++diagnostics.skipped_missing_target_count;
+      continue;
+    }
+    const FluxRegisterEntry entry = fluxEntryFromPendingRecord(pending);
+    RefluxDiagnostics one = applyFluxRegistersToSimulationState(state, std::span<const FluxRegisterEntry>(&entry, 1), all_patches, adiabatic_index);
+    diagnostics.complete_register_count += one.complete_register_count;
+    diagnostics.skipped_incomplete_register_count += one.skipped_incomplete_register_count;
+    diagnostics.skipped_area_mismatch_count += one.skipped_area_mismatch_count;
+    diagnostics.skipped_missing_target_count += one.skipped_missing_target_count;
+    diagnostics.corrected_cells += one.corrected_cells;
+    diagnostics.corrected_mass_code += one.corrected_mass_code;
+    diagnostics.corrected_momentum_x_code += one.corrected_momentum_x_code;
+    diagnostics.corrected_momentum_y_code += one.corrected_momentum_y_code;
+    diagnostics.corrected_momentum_z_code += one.corrected_momentum_z_code;
+    diagnostics.corrected_total_energy_code += one.corrected_total_energy_code;
+    diagnostics.corrected_energy_code += one.corrected_energy_code;
+    diagnostics.corrected_internal_energy_code += one.corrected_internal_energy_code;
+    if (one.complete_register_count == 1U) {
+      applied_keys.push_back(pending.register_key);
+    }
+  }
+  state.pending_flux_registers.eraseCompletedByKey(std::span<const std::uint64_t>(applied_keys.data(), applied_keys.size()));
   return diagnostics;
 }
 
@@ -839,6 +1140,17 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
     const hydro::HydroRiemannSolver& riemann_solver,
     std::span<const hydro::HydroSourceTerm* const> source_terms,
     const ProductionAmrHydroOptions& options) {
+  if (options.sweep_mode == ProductionAmrHydroSweepMode::kLocalSubcycling) {
+    return advanceProductionAmrHydroSubcycled(
+        state,
+        active_cell_rows,
+        update,
+        global_source_context,
+        solver,
+        riemann_solver,
+        source_terms,
+        options);
+  }
   if (!hasProductionAmrHydroCoverage(state)) {
     throw std::runtime_error("advanceProductionAmrHydro requires complete AMR patch coverage in SimulationState");
   }
@@ -981,7 +1293,122 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
   }
   const std::vector<FluxRegisterEntry> entries = flux_registers.entries();
   diagnostics.flux_register_entry_count = entries.size();
-  diagnostics.reflux = applyFluxRegistersToSimulationState(state, entries, descriptors, options.adiabatic_index);
+  if (options.persist_incomplete_flux_registers) {
+    diagnostics.pending_register_created_count = mergeFluxRegistersIntoPendingStore(state, entries, options);
+    std::size_t complete_pending = 0;
+    for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+      if (pending.isComplete()) {
+        ++complete_pending;
+      }
+    }
+    diagnostics.pending_register_completed_count = complete_pending;
+    diagnostics.pending_register_deferred_count = state.pending_flux_registers.size() - complete_pending;
+    diagnostics.reflux = applyCompletePendingFluxRegistersToSimulationState(state, descriptors, options.adiabatic_index);
+    diagnostics.pending_register_applied_count = diagnostics.reflux.complete_register_count;
+    diagnostics.pending_register_rejected_count = diagnostics.reflux.skipped_area_mismatch_count +
+        diagnostics.reflux.skipped_missing_target_count;
+  } else {
+    diagnostics.reflux = applyFluxRegistersToSimulationState(state, entries, descriptors, options.adiabatic_index);
+  }
+  return diagnostics;
+}
+
+ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_rows,
+    const hydro::HydroUpdateContext& coarse_update,
+    const hydro::HydroSourceContext& global_source_context,
+    const hydro::HydroCoreSolver& solver,
+    const hydro::HydroRiemannSolver& riemann_solver,
+    std::span<const hydro::HydroSourceTerm* const> source_terms,
+    const ProductionAmrHydroOptions& options) {
+  if (!hasProductionAmrHydroCoverage(state)) {
+    throw std::runtime_error("advanceProductionAmrHydroSubcycled requires complete AMR patch coverage in SimulationState");
+  }
+  if (options.refinement_ratio < 2U) {
+    throw std::invalid_argument("AMR hydro subcycling requires refinement_ratio >= 2");
+  }
+  const std::vector<PatchDescriptor> descriptors = buildProductionAmrPatchDescriptors(state);
+  int min_level = std::numeric_limits<int>::max();
+  int max_level = std::numeric_limits<int>::min();
+  for (const PatchDescriptor& patch : descriptors) {
+    const int patch_level = static_cast<int>(patch.level);
+    min_level = std::min(min_level, patch_level);
+    max_level = std::max(max_level, patch_level);
+  }
+  if (min_level == std::numeric_limits<int>::max()) {
+    return ProductionAmrHydroDiagnostics{};
+  }
+
+  ProductionAmrHydroDiagnostics diagnostics;
+  diagnostics.patch_count = descriptors.size();
+  diagnostics.levels_advanced = static_cast<std::size_t>(max_level - min_level + 1);
+  diagnostics.max_level_advanced = static_cast<std::size_t>(std::max(0, max_level));
+  diagnostics.substeps_by_level.assign(static_cast<std::size_t>(max_level + 1), 0U);
+
+  const auto advance_level = [&](auto&& self, int level, double dt_code, std::uint32_t substep_index) -> void {
+    const std::vector<std::uint32_t> rows = activeRowsForLevel(state, level, active_cell_rows);
+    if (!rows.empty()) {
+      hydro::HydroUpdateContext level_update = coarse_update;
+      level_update.dt_code = dt_code;
+      ProductionAmrHydroOptions level_options = options;
+      level_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
+      level_options.persist_incomplete_flux_registers = true;
+      level_options.reflux_coarse_dt_code = dt_code;
+      level_options.reflux_interval_end_code = level_options.reflux_interval_start_code + dt_code;
+      level_options.expected_fine_substeps = level < max_level ? options.refinement_ratio : options.refinement_ratio;
+      level_options.fine_substep_index = substep_index;
+      const ProductionAmrHydroDiagnostics level_diag = advanceProductionAmrHydro(
+          state,
+          rows,
+          level_update,
+          global_source_context,
+          solver,
+          riemann_solver,
+          source_terms,
+          level_options);
+      accumulateDiagnostics(diagnostics, level_diag);
+      if (level >= 0 && static_cast<std::size_t>(level) < diagnostics.substeps_by_level.size()) {
+        diagnostics.substeps_by_level[static_cast<std::size_t>(level)] += 1U;
+      }
+      diagnostics.subcycled_level_step_count += 1U;
+    }
+    if (level < max_level) {
+      const double fine_dt = dt_code / static_cast<double>(options.refinement_ratio);
+      for (std::uint32_t substep = 0; substep < options.refinement_ratio; ++substep) {
+        self(self, level + 1, fine_dt, substep);
+      }
+      const RefluxDiagnostics post_child_reflux = applyCompletePendingFluxRegistersToSimulationState(
+          state,
+          buildProductionAmrPatchDescriptors(state),
+          options.adiabatic_index);
+      diagnostics.reflux.complete_register_count += post_child_reflux.complete_register_count;
+      diagnostics.reflux.skipped_incomplete_register_count += post_child_reflux.skipped_incomplete_register_count;
+      diagnostics.reflux.skipped_area_mismatch_count += post_child_reflux.skipped_area_mismatch_count;
+      diagnostics.reflux.skipped_missing_target_count += post_child_reflux.skipped_missing_target_count;
+      diagnostics.reflux.corrected_cells += post_child_reflux.corrected_cells;
+      diagnostics.reflux.corrected_mass_code += post_child_reflux.corrected_mass_code;
+      diagnostics.reflux.corrected_momentum_x_code += post_child_reflux.corrected_momentum_x_code;
+      diagnostics.reflux.corrected_momentum_y_code += post_child_reflux.corrected_momentum_y_code;
+      diagnostics.reflux.corrected_momentum_z_code += post_child_reflux.corrected_momentum_z_code;
+      diagnostics.reflux.corrected_total_energy_code += post_child_reflux.corrected_total_energy_code;
+      diagnostics.reflux.corrected_energy_code += post_child_reflux.corrected_energy_code;
+      diagnostics.reflux.corrected_internal_energy_code += post_child_reflux.corrected_internal_energy_code;
+      diagnostics.pending_register_applied_count += post_child_reflux.complete_register_count;
+      diagnostics.pending_register_rejected_count += post_child_reflux.skipped_area_mismatch_count +
+          post_child_reflux.skipped_missing_target_count;
+    }
+  };
+
+  advance_level(advance_level, min_level, coarse_update.dt_code, 0U);
+  std::size_t complete_pending = 0;
+  for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+    if (pending.isComplete()) {
+      ++complete_pending;
+    }
+  }
+  diagnostics.pending_register_completed_count = std::max(diagnostics.pending_register_completed_count, complete_pending);
+  diagnostics.pending_register_deferred_count = state.pending_flux_registers.size() - complete_pending;
   return diagnostics;
 }
 

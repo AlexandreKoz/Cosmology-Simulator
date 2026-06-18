@@ -33,7 +33,11 @@ namespace {
 constexpr std::uint64_t k_offset_basis = 14695981039346656037ull;
 constexpr std::uint64_t k_prime = 1099511628211ull;
 constexpr std::uint32_t k_restart_schema_v14 = 14;
+constexpr std::uint32_t k_restart_schema_v15 = 15;
+constexpr std::uint32_t k_restart_schema_v16 = 16;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
+constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
+constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 
 [[nodiscard]] std::string hexU64(std::uint64_t value) {
@@ -591,6 +595,29 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
     requireHdf5Dataset1d(file, "/state/patches/cell_dim_y");
     requireHdf5Dataset1d(file, "/state/patches/cell_dim_z");
   }
+  if (schema_version >= restartSchema().version) {
+    Hdf5Handle pending_group = openRequiredGroup(file, "/state/amr_pending_flux_registers");
+    requireHdf5Attribute(pending_group.get(), "/state/amr_pending_flux_registers", "schema_version");
+    for (std::string_view dataset : {"register_key", "coarse_patch_id", "coarse_gas_cell_id",
+                                     "coarse_cell_index", "level", "axis", "orientation",
+                                     "expected_area_comov", "coarse_area_accumulated_comov",
+                                     "fine_area_accumulated_comov", "interval_start_code",
+                                     "interval_end_code", "coarse_dt_code", "expected_fine_substeps",
+                                     "completed_fine_substeps", "fine_substep_coverage_mask",
+                                     "coarse_face_count", "fine_face_count",
+                                     "gas_cell_identity_generation", "patch_geometry_generation",
+                                     "coarse_mass_flux_integral_code",
+                                     "coarse_momentum_x_flux_integral_code",
+                                     "coarse_momentum_y_flux_integral_code",
+                                     "coarse_momentum_z_flux_integral_code",
+                                     "coarse_total_energy_flux_integral_code",
+                                     "fine_mass_flux_integral_code", "fine_momentum_x_flux_integral_code",
+                                     "fine_momentum_y_flux_integral_code",
+                                     "fine_momentum_z_flux_integral_code",
+                                     "fine_total_energy_flux_integral_code"}) {
+      requireHdf5Dataset1d(file, std::string("/state/amr_pending_flux_registers/") + std::string(dataset));
+    }
+  }
   requireHdf5Dataset1d(file, "/state/species_count_by_species");
   requireHdf5Link(file, "/state/module_sidecars");
   requireHdf5Dataset1d(file, "/state/module_sidecar_names");
@@ -968,6 +995,198 @@ void readGasCellIdentityGroup(hid_t state_group, core::SimulationState& state, s
   state.gas_cell_identity.assignWithGeneration(std::move(records), identity_generation_at_write);
 }
 
+void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxRegisterStore& store) {
+  Hdf5Handle group(openOrCreateGroup(state_group, "amr_pending_flux_registers"));
+  writeScalarU32Attribute(group.get(), "schema_version", 1U);
+  const auto records = store.records();
+  std::vector<std::uint64_t> register_key;
+  std::vector<std::uint64_t> coarse_patch_id;
+  std::vector<std::uint64_t> coarse_gas_cell_id;
+  std::vector<std::uint64_t> coarse_cell_index;
+  std::vector<std::uint8_t> level;
+  std::vector<std::uint8_t> axis;
+  std::vector<std::uint8_t> orientation;
+  std::vector<double> expected_area_comov;
+  std::vector<double> coarse_area_accumulated_comov;
+  std::vector<double> fine_area_accumulated_comov;
+  std::vector<double> interval_start_code;
+  std::vector<double> interval_end_code;
+  std::vector<double> coarse_dt_code;
+  std::vector<std::uint32_t> expected_fine_substeps;
+  std::vector<std::uint32_t> completed_fine_substeps;
+  std::vector<std::uint64_t> fine_substep_coverage_mask;
+  std::vector<std::uint32_t> coarse_face_count;
+  std::vector<std::uint32_t> fine_face_count;
+  std::vector<std::uint64_t> gas_cell_identity_generation;
+  std::vector<std::uint64_t> patch_geometry_generation;
+  std::vector<double> coarse_mass_flux_integral_code;
+  std::vector<double> coarse_momentum_x_flux_integral_code;
+  std::vector<double> coarse_momentum_y_flux_integral_code;
+  std::vector<double> coarse_momentum_z_flux_integral_code;
+  std::vector<double> coarse_total_energy_flux_integral_code;
+  std::vector<double> fine_mass_flux_integral_code;
+  std::vector<double> fine_momentum_x_flux_integral_code;
+  std::vector<double> fine_momentum_y_flux_integral_code;
+  std::vector<double> fine_momentum_z_flux_integral_code;
+  std::vector<double> fine_total_energy_flux_integral_code;
+  register_key.reserve(records.size());
+  for (const core::PendingFluxRegisterRecord& record : records) {
+    register_key.push_back(record.register_key);
+    coarse_patch_id.push_back(record.coarse_patch_id);
+    coarse_gas_cell_id.push_back(record.coarse_gas_cell_id);
+    coarse_cell_index.push_back(static_cast<std::uint64_t>(record.coarse_cell_index));
+    level.push_back(record.level);
+    axis.push_back(record.axis);
+    orientation.push_back(record.orientation);
+    expected_area_comov.push_back(record.expected_area_comov);
+    coarse_area_accumulated_comov.push_back(record.coarse_area_accumulated_comov);
+    fine_area_accumulated_comov.push_back(record.fine_area_accumulated_comov);
+    interval_start_code.push_back(record.interval_start_code);
+    interval_end_code.push_back(record.interval_end_code);
+    coarse_dt_code.push_back(record.coarse_dt_code);
+    expected_fine_substeps.push_back(record.expected_fine_substeps);
+    completed_fine_substeps.push_back(record.completed_fine_substeps);
+    fine_substep_coverage_mask.push_back(record.fine_substep_coverage_mask);
+    coarse_face_count.push_back(record.coarse_face_count);
+    fine_face_count.push_back(record.fine_face_count);
+    gas_cell_identity_generation.push_back(record.gas_cell_identity_generation);
+    patch_geometry_generation.push_back(record.patch_geometry_generation);
+    coarse_mass_flux_integral_code.push_back(record.coarse_mass_flux_integral_code);
+    coarse_momentum_x_flux_integral_code.push_back(record.coarse_momentum_x_flux_integral_code);
+    coarse_momentum_y_flux_integral_code.push_back(record.coarse_momentum_y_flux_integral_code);
+    coarse_momentum_z_flux_integral_code.push_back(record.coarse_momentum_z_flux_integral_code);
+    coarse_total_energy_flux_integral_code.push_back(record.coarse_total_energy_flux_integral_code);
+    fine_mass_flux_integral_code.push_back(record.fine_mass_flux_integral_code);
+    fine_momentum_x_flux_integral_code.push_back(record.fine_momentum_x_flux_integral_code);
+    fine_momentum_y_flux_integral_code.push_back(record.fine_momentum_y_flux_integral_code);
+    fine_momentum_z_flux_integral_code.push_back(record.fine_momentum_z_flux_integral_code);
+    fine_total_energy_flux_integral_code.push_back(record.fine_total_energy_flux_integral_code);
+  }
+  writeDataset1d(group.get(), "register_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, register_key);
+  writeDataset1d(group.get(), "coarse_patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, coarse_patch_id);
+  writeDataset1d(group.get(), "coarse_gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, coarse_gas_cell_id);
+  writeDataset1d(group.get(), "coarse_cell_index", H5T_STD_U64LE, H5T_NATIVE_UINT64, coarse_cell_index);
+  writeDataset1d(group.get(), "level", H5T_STD_U8LE, H5T_NATIVE_UINT8, level);
+  writeDataset1d(group.get(), "axis", H5T_STD_U8LE, H5T_NATIVE_UINT8, axis);
+  writeDataset1d(group.get(), "orientation", H5T_STD_U8LE, H5T_NATIVE_UINT8, orientation);
+  writeDataset1d(group.get(), "expected_area_comov", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, expected_area_comov);
+  writeDataset1d(group.get(), "coarse_area_accumulated_comov", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_area_accumulated_comov);
+  writeDataset1d(group.get(), "fine_area_accumulated_comov", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_area_accumulated_comov);
+  writeDataset1d(group.get(), "interval_start_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, interval_start_code);
+  writeDataset1d(group.get(), "interval_end_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, interval_end_code);
+  writeDataset1d(group.get(), "coarse_dt_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_dt_code);
+  writeDataset1d(group.get(), "expected_fine_substeps", H5T_STD_U32LE, H5T_NATIVE_UINT32, expected_fine_substeps);
+  writeDataset1d(group.get(), "completed_fine_substeps", H5T_STD_U32LE, H5T_NATIVE_UINT32, completed_fine_substeps);
+  writeDataset1d(group.get(), "fine_substep_coverage_mask", H5T_STD_U64LE, H5T_NATIVE_UINT64, fine_substep_coverage_mask);
+  writeDataset1d(group.get(), "coarse_face_count", H5T_STD_U32LE, H5T_NATIVE_UINT32, coarse_face_count);
+  writeDataset1d(group.get(), "fine_face_count", H5T_STD_U32LE, H5T_NATIVE_UINT32, fine_face_count);
+  writeDataset1d(group.get(), "gas_cell_identity_generation", H5T_STD_U64LE, H5T_NATIVE_UINT64, gas_cell_identity_generation);
+  writeDataset1d(group.get(), "patch_geometry_generation", H5T_STD_U64LE, H5T_NATIVE_UINT64, patch_geometry_generation);
+  writeDataset1d(group.get(), "coarse_mass_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_mass_flux_integral_code);
+  writeDataset1d(group.get(), "coarse_momentum_x_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_momentum_x_flux_integral_code);
+  writeDataset1d(group.get(), "coarse_momentum_y_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_momentum_y_flux_integral_code);
+  writeDataset1d(group.get(), "coarse_momentum_z_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_momentum_z_flux_integral_code);
+  writeDataset1d(group.get(), "coarse_total_energy_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_total_energy_flux_integral_code);
+  writeDataset1d(group.get(), "fine_mass_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_mass_flux_integral_code);
+  writeDataset1d(group.get(), "fine_momentum_x_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_x_flux_integral_code);
+  writeDataset1d(group.get(), "fine_momentum_y_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_y_flux_integral_code);
+  writeDataset1d(group.get(), "fine_momentum_z_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_z_flux_integral_code);
+  writeDataset1d(group.get(), "fine_total_energy_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_total_energy_flux_integral_code);
+}
+
+void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& state, std::uint32_t schema_version) {
+  if (schema_version < restartSchema().version && H5Lexists(state_group, "amr_pending_flux_registers", H5P_DEFAULT) <= 0) {
+    state.pending_flux_registers.clear();
+    return;
+  }
+  Hdf5Handle group(H5Gopen2(state_group, "amr_pending_flux_registers", H5P_DEFAULT));
+  if (!group.valid()) {
+    state.pending_flux_registers.clear();
+    return;
+  }
+  const auto register_key = readDataset1d<std::uint64_t>(group.get(), "register_key", H5T_NATIVE_UINT64);
+  const auto coarse_patch_id = readDataset1d<std::uint64_t>(group.get(), "coarse_patch_id", H5T_NATIVE_UINT64);
+  const auto coarse_gas_cell_id = readDataset1d<std::uint64_t>(group.get(), "coarse_gas_cell_id", H5T_NATIVE_UINT64);
+  const auto coarse_cell_index = readDataset1d<std::uint64_t>(group.get(), "coarse_cell_index", H5T_NATIVE_UINT64);
+  const auto level = readDataset1d<std::uint8_t>(group.get(), "level", H5T_NATIVE_UINT8);
+  const auto axis = readDataset1d<std::uint8_t>(group.get(), "axis", H5T_NATIVE_UINT8);
+  const auto orientation = readDataset1d<std::uint8_t>(group.get(), "orientation", H5T_NATIVE_UINT8);
+  const auto expected_area_comov = readDataset1d<double>(group.get(), "expected_area_comov", H5T_NATIVE_DOUBLE);
+  const auto coarse_area_accumulated_comov = readDataset1d<double>(group.get(), "coarse_area_accumulated_comov", H5T_NATIVE_DOUBLE);
+  const auto fine_area_accumulated_comov = readDataset1d<double>(group.get(), "fine_area_accumulated_comov", H5T_NATIVE_DOUBLE);
+  const auto interval_start_code = readDataset1d<double>(group.get(), "interval_start_code", H5T_NATIVE_DOUBLE);
+  const auto interval_end_code = readDataset1d<double>(group.get(), "interval_end_code", H5T_NATIVE_DOUBLE);
+  const auto coarse_dt_code = readDataset1d<double>(group.get(), "coarse_dt_code", H5T_NATIVE_DOUBLE);
+  const auto expected_fine_substeps = readDataset1d<std::uint32_t>(group.get(), "expected_fine_substeps", H5T_NATIVE_UINT32);
+  const auto completed_fine_substeps = readDataset1d<std::uint32_t>(group.get(), "completed_fine_substeps", H5T_NATIVE_UINT32);
+  const auto fine_substep_coverage_mask = readDataset1d<std::uint64_t>(group.get(), "fine_substep_coverage_mask", H5T_NATIVE_UINT64);
+  const auto coarse_face_count = readDataset1d<std::uint32_t>(group.get(), "coarse_face_count", H5T_NATIVE_UINT32);
+  const auto fine_face_count = readDataset1d<std::uint32_t>(group.get(), "fine_face_count", H5T_NATIVE_UINT32);
+  const auto gas_cell_identity_generation = readDataset1d<std::uint64_t>(group.get(), "gas_cell_identity_generation", H5T_NATIVE_UINT64);
+  const auto patch_geometry_generation = readDataset1d<std::uint64_t>(group.get(), "patch_geometry_generation", H5T_NATIVE_UINT64);
+  const auto coarse_mass_flux_integral_code = readDataset1d<double>(group.get(), "coarse_mass_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto coarse_momentum_x_flux_integral_code = readDataset1d<double>(group.get(), "coarse_momentum_x_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto coarse_momentum_y_flux_integral_code = readDataset1d<double>(group.get(), "coarse_momentum_y_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto coarse_momentum_z_flux_integral_code = readDataset1d<double>(group.get(), "coarse_momentum_z_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto coarse_total_energy_flux_integral_code = readDataset1d<double>(group.get(), "coarse_total_energy_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto fine_mass_flux_integral_code = readDataset1d<double>(group.get(), "fine_mass_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto fine_momentum_x_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_x_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto fine_momentum_y_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_y_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto fine_momentum_z_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_z_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const auto fine_total_energy_flux_integral_code = readDataset1d<double>(group.get(), "fine_total_energy_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const std::size_t n = register_key.size();
+  const bool sizes_match = coarse_patch_id.size() == n && coarse_gas_cell_id.size() == n && coarse_cell_index.size() == n &&
+      level.size() == n && axis.size() == n && orientation.size() == n && expected_area_comov.size() == n &&
+      coarse_area_accumulated_comov.size() == n && fine_area_accumulated_comov.size() == n && interval_start_code.size() == n &&
+      interval_end_code.size() == n && coarse_dt_code.size() == n && expected_fine_substeps.size() == n &&
+      completed_fine_substeps.size() == n && fine_substep_coverage_mask.size() == n && coarse_face_count.size() == n &&
+      fine_face_count.size() == n && gas_cell_identity_generation.size() == n && patch_geometry_generation.size() == n &&
+      coarse_mass_flux_integral_code.size() == n && coarse_momentum_x_flux_integral_code.size() == n &&
+      coarse_momentum_y_flux_integral_code.size() == n && coarse_momentum_z_flux_integral_code.size() == n &&
+      coarse_total_energy_flux_integral_code.size() == n && fine_mass_flux_integral_code.size() == n &&
+      fine_momentum_x_flux_integral_code.size() == n && fine_momentum_y_flux_integral_code.size() == n &&
+      fine_momentum_z_flux_integral_code.size() == n && fine_total_energy_flux_integral_code.size() == n;
+  if (!sizes_match) {
+    throw std::runtime_error("/state/amr_pending_flux_registers datasets must have matching lengths");
+  }
+  std::vector<core::PendingFluxRegisterRecord> records;
+  records.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    records.push_back(core::PendingFluxRegisterRecord{
+        .register_key = register_key[i],
+        .coarse_patch_id = coarse_patch_id[i],
+        .coarse_gas_cell_id = coarse_gas_cell_id[i],
+        .coarse_cell_index = static_cast<std::size_t>(coarse_cell_index[i]),
+        .level = level[i],
+        .axis = axis[i],
+        .orientation = orientation[i],
+        .expected_area_comov = expected_area_comov[i],
+        .coarse_area_accumulated_comov = coarse_area_accumulated_comov[i],
+        .fine_area_accumulated_comov = fine_area_accumulated_comov[i],
+        .interval_start_code = interval_start_code[i],
+        .interval_end_code = interval_end_code[i],
+        .coarse_dt_code = coarse_dt_code[i],
+        .expected_fine_substeps = expected_fine_substeps[i],
+        .completed_fine_substeps = completed_fine_substeps[i],
+        .fine_substep_coverage_mask = fine_substep_coverage_mask[i],
+        .coarse_face_count = coarse_face_count[i],
+        .fine_face_count = fine_face_count[i],
+        .gas_cell_identity_generation = gas_cell_identity_generation[i],
+        .patch_geometry_generation = patch_geometry_generation[i],
+        .coarse_mass_flux_integral_code = coarse_mass_flux_integral_code[i],
+        .coarse_momentum_x_flux_integral_code = coarse_momentum_x_flux_integral_code[i],
+        .coarse_momentum_y_flux_integral_code = coarse_momentum_y_flux_integral_code[i],
+        .coarse_momentum_z_flux_integral_code = coarse_momentum_z_flux_integral_code[i],
+        .coarse_total_energy_flux_integral_code = coarse_total_energy_flux_integral_code[i],
+        .fine_mass_flux_integral_code = fine_mass_flux_integral_code[i],
+        .fine_momentum_x_flux_integral_code = fine_momentum_x_flux_integral_code[i],
+        .fine_momentum_y_flux_integral_code = fine_momentum_y_flux_integral_code[i],
+        .fine_momentum_z_flux_integral_code = fine_momentum_z_flux_integral_code[i],
+        .fine_total_energy_flux_integral_code = fine_total_energy_flux_integral_code[i]});
+  }
+  state.pending_flux_registers.assign(std::move(records));
+}
+
 void writeStateGroup(hid_t root, const core::SimulationState& state) {
   Hdf5Handle state_group(openOrCreateGroup(root, "/state"));
   Hdf5Handle particles_group(openOrCreateGroup(state_group.get(), "particles"));
@@ -1040,6 +1259,8 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(patches_group.get(), "cell_dim_y", H5T_STD_U16LE, H5T_NATIVE_UINT16, state.patches.cell_dim_y);
   writeDataset1d(patches_group.get(), "cell_dim_z", H5T_STD_U16LE, H5T_NATIVE_UINT16, state.patches.cell_dim_z);
   writeDataset1d(patches_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.owning_rank);
+
+  writePendingFluxRegisterGroup(state_group.get(), state.pending_flux_registers);
 
   writeDataset1d(state_group.get(), "species_count_by_species", H5T_STD_U64LE, H5T_NATIVE_UINT64, std::vector<std::uint64_t>(state.species.count_by_species.begin(), state.species.count_by_species.end()));
 
@@ -1225,6 +1446,7 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
   }
 
   readGasCellIdentityGroup(state_group.get(), state, schema_version);
+  readPendingFluxRegisterGroup(state_group.get(), state, schema_version);
 
   const auto species_count = readDataset1d<std::uint64_t>(state_group.get(), "species_count_by_species", H5T_NATIVE_UINT64);
   if (species_count.size() != state.species.count_by_species.size()) {
@@ -1539,9 +1761,8 @@ const RestartSchema& restartSchema() {
 }
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
-  constexpr std::uint32_t k_restart_schema_v15 = 15;
-  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v15 ||
-      file_schema_version == k_restart_schema_v14;
+  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v16 ||
+      file_schema_version == k_restart_schema_v15 || file_schema_version == k_restart_schema_v14;
 }
 
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
@@ -1550,6 +1771,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "particle_identity_softening_and_drift_epoch_lanes",
       "gas_cell_identity_lanes",
       "hydro_geometry_patch_state",
+      "amr_pending_flux_register_state",
       "species_specific_sidecars",
       "module_sidecars_with_schema_versions",
       "integrator_state",
@@ -1565,7 +1787,10 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
   return checklist;
 }
 
-std::uint64_t restartPayloadIntegrityHashImpl(const RestartWritePayload& payload, bool include_gas_identity_records) {
+std::uint64_t restartPayloadIntegrityHashImpl(
+    const RestartWritePayload& payload,
+    bool include_gas_identity_records,
+    bool include_pending_flux_registers) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -1711,6 +1936,49 @@ std::uint64_t restartPayloadIntegrityHashImpl(const RestartWritePayload& payload
   append_any_vec(state.patches.cell_dim_y);
   append_any_vec(state.patches.cell_dim_z);
   append_any_vec(state.patches.owning_rank);
+  if (include_pending_flux_registers) {
+    std::vector<core::PendingFluxRegisterRecord> pending_flux_records(
+        state.pending_flux_registers.records().begin(), state.pending_flux_registers.records().end());
+    std::sort(
+        pending_flux_records.begin(),
+        pending_flux_records.end(),
+        [](const core::PendingFluxRegisterRecord& lhs, const core::PendingFluxRegisterRecord& rhs) {
+          return lhs.register_key < rhs.register_key;
+        });
+    append_u64(static_cast<std::uint64_t>(pending_flux_records.size()));
+    for (const core::PendingFluxRegisterRecord& record : pending_flux_records) {
+      append_u64(record.register_key);
+      append_u64(record.coarse_patch_id);
+      append_u64(record.coarse_gas_cell_id);
+      append_u64(static_cast<std::uint64_t>(record.coarse_cell_index));
+      append_u64(record.level);
+      append_u64(record.axis);
+      append_u64(record.orientation);
+      append_u64(std::bit_cast<std::uint64_t>(record.expected_area_comov));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_area_accumulated_comov));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_area_accumulated_comov));
+      append_u64(std::bit_cast<std::uint64_t>(record.interval_start_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.interval_end_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_dt_code));
+      append_u64(record.expected_fine_substeps);
+      append_u64(record.completed_fine_substeps);
+      append_u64(record.fine_substep_coverage_mask);
+      append_u64(record.coarse_face_count);
+      append_u64(record.fine_face_count);
+      append_u64(record.gas_cell_identity_generation);
+      append_u64(record.patch_geometry_generation);
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_mass_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_x_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_y_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_z_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.coarse_total_energy_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_mass_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_x_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_y_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_z_flux_integral_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.fine_total_energy_flux_integral_code));
+    }
+  }
   append_any_vec(state.star_particles.particle_index);
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);
@@ -1825,7 +2093,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(const RestartWritePayload& payload
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true);
+  return restartPayloadIntegrityHashImpl(payload, true, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -1990,7 +2258,12 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       schema_name == restartSchema().name && schema_version == restartSchema().version;
   const bool legacy_v14_schema =
       schema_name == k_restart_schema_name_v14 && schema_version == k_restart_schema_v14;
-  if ((!current_schema && !legacy_v14_schema) || !isRestartSchemaCompatible(schema_version)) {
+  const bool legacy_v15_schema =
+      schema_name == k_restart_schema_name_v15 && schema_version == k_restart_schema_v15;
+  const bool legacy_v16_schema =
+      schema_name == k_restart_schema_name_v16 && schema_version == k_restart_schema_v16;
+  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema) ||
+      !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
         ", expected='" + restartSchema().name + "' v" + std::to_string(restartSchema().version));
@@ -2094,7 +2367,10 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.stochastic_state = result.stochastic_state;
 
   const std::uint64_t computed_hash =
-      restartPayloadIntegrityHashImpl(verify_payload, schema_version >= restartSchema().version);
+      restartPayloadIntegrityHashImpl(
+          verify_payload,
+          schema_version >= k_restart_schema_v15,
+          schema_version >= restartSchema().version);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");
   }

@@ -41,3 +41,15 @@ It does not prove real MPI AMR migration. A future MPI acceptance test must run 
 ## Validation boundary
 
 The current AMR shock tube, Sedov, and synchronization stress tests are CI guards. They are useful for regression protection but must not be described as convergence studies or cross-code validation. Scientific validation remains future work.
+
+---
+
+## Post-H3 implementation update
+
+A local subcycled AMR hydro orchestrator path has been added. The boundary is precise: the orchestrator can recursively advance explicit local AMR levels and track fine substep coverage for reflux, but the global hierarchical scheduler still does not own a persistent AMR level timeline.
+
+Flux-register handling now has a persistent pending-store layer in `core::SimulationState`. The store is restart-authoritative, stable-ID based, and separate from transient solver scratch. `HydroCoreSolver` remains AMR-agnostic; it emits fluxes through the existing sink path, and AMR-specific merge/apply logic lives in the orchestrator/flux-register layer.
+
+The HDF5 restart schema now writes pending registers under `/state/amr_pending_flux_registers`. Legacy restarts without that group load with an empty pending store, while v17 restart validation requires the group and its datasets.
+
+Future work is still required before claiming full Berger-Colella AMR in production: scheduler-owned level timelines, time-centered coarse/fine ghost interpolation, MPI-distributed level synchronization, restart after migration, and real convergence/cross-code validation.

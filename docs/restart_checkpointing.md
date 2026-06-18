@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v16`) persists:
+The restart schema (`cosmosim_restart_v17`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -111,6 +111,7 @@ restart write/read checks is:
 14. `normalized_config_text_and_hash`
 15. `provenance_record`
 16. `payload_integrity_hash_and_hex`
+17. `amr_pending_flux_register_state`
 
 `validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 
@@ -170,3 +171,33 @@ The H3 hardening pass added `integration_restart_equivalence_amr_hydro`, an HDF5
 The restart-equivalence harness now compares explicit AMR patch lanes (`parent_patch_id`, `morton_key`, origins, extents, cell dimensions), `GasCellIdentityMap` records, and the gas identity generation value. Restart read restores the serialized gas identity generation with `GasCellIdentityMap::assignWithGeneration(...)` so a checkpoint/reload path does not masquerade as a runtime identity rebuild.
 
 This proves local HDF5 AMR hydro restart equivalence for the exercised synchronized-sweep scenario. It does not prove MPI restart, restart after AMR migration, Berger-Colella subcycling, or replay of persistent pending flux registers.
+
+---
+
+## AMR pending flux-register restart lanes (v17)
+
+Restart schema `cosmosim_restart_v17` adds restart-authoritative pending AMR flux-register state under:
+
+```text
+/state/amr_pending_flux_registers
+```
+
+The group persists stable identity and coverage metadata for deferred reflux records, including:
+
+- `register_key`
+- `coarse_patch_id`
+- `coarse_gas_cell_id`
+- `coarse_cell_index`
+- `level`, `axis`, `orientation`
+- expected/coarse/fine area coverage
+- interval start/end and coarse timestep
+- expected/completed fine substeps and substep coverage mask
+- coarse/fine face counts
+- gas-cell identity generation and patch geometry generation
+- coarse/fine flux-integrated mass, momentum, and total-energy contributions
+
+Old restart files without this group are treated as legacy inputs with an empty pending store. Current v17 restart schema validation requires the group and datasets so a new restart cannot accidentally omit pending deferred reflux truth.
+
+The restart payload integrity hash includes the pending-register store for v17 payloads. The HDF5-gated `integration_restart_equivalence_amr_flux_registers` test writes an incomplete pending register before restart, reads it back, merges the missing fine contribution, applies completed reflux, and compares direct vs restart continuation.
+
+This proves the exercised single-rank pending-register restart path. It does not prove MPI AMR restart, restart after AMR patch migration, or scheduler-owned Berger-Colella subcycling.

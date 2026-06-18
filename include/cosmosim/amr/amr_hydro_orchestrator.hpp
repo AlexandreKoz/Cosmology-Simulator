@@ -15,11 +15,24 @@
 
 namespace cosmosim::amr {
 
+enum class ProductionAmrHydroSweepMode : std::uint8_t {
+  kSynchronized = 0,
+  kLocalSubcycling = 1,
+};
+
 struct ProductionAmrHydroOptions {
   hydro::HydroBoundaryKind physical_boundary_kind = hydro::HydroBoundaryKind::kOpen;
   double adiabatic_index = 5.0 / 3.0;
   double density_floor = 1.0e-10;
   double pressure_floor = 1.0e-10;
+  ProductionAmrHydroSweepMode sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
+  std::uint32_t refinement_ratio = 2;
+  bool persist_incomplete_flux_registers = false;
+  double reflux_interval_start_code = 0.0;
+  double reflux_interval_end_code = 0.0;
+  double reflux_coarse_dt_code = 0.0;
+  std::uint32_t expected_fine_substeps = 1;
+  std::uint32_t fine_substep_index = 0;
 };
 
 struct ProductionAmrHydroDiagnostics {
@@ -28,6 +41,15 @@ struct ProductionAmrHydroDiagnostics {
   std::size_t active_cell_count = 0;
   std::size_t active_face_count = 0;
   std::size_t flux_register_entry_count = 0;
+  std::size_t levels_advanced = 0;
+  std::size_t max_level_advanced = 0;
+  std::size_t subcycled_level_step_count = 0;
+  std::size_t pending_register_created_count = 0;
+  std::size_t pending_register_completed_count = 0;
+  std::size_t pending_register_deferred_count = 0;
+  std::size_t pending_register_applied_count = 0;
+  std::size_t pending_register_rejected_count = 0;
+  std::vector<std::uint32_t> substeps_by_level;
   AmrHydroGhostFillDiagnostics ghost_fill;
   RefluxDiagnostics reflux;
 };
@@ -83,10 +105,30 @@ void scatterAmrHydroConservedState(
     std::span<const PatchDescriptor> all_patches,
     double adiabatic_index);
 
+[[nodiscard]] std::size_t mergeFluxRegistersIntoPendingStore(
+    core::SimulationState& state,
+    std::span<const FluxRegisterEntry> entries,
+    const ProductionAmrHydroOptions& options);
+
+[[nodiscard]] RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
+    core::SimulationState& state,
+    std::span<const PatchDescriptor> all_patches,
+    double adiabatic_index);
+
 [[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
     core::SimulationState& state,
     std::span<const std::uint32_t> active_cell_rows,
     const hydro::HydroUpdateContext& update,
+    const hydro::HydroSourceContext& global_source_context,
+    const hydro::HydroCoreSolver& solver,
+    const hydro::HydroRiemannSolver& riemann_solver,
+    std::span<const hydro::HydroSourceTerm* const> source_terms,
+    const ProductionAmrHydroOptions& options = {});
+
+[[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_rows,
+    const hydro::HydroUpdateContext& coarse_update,
     const hydro::HydroSourceContext& global_source_context,
     const hydro::HydroCoreSolver& solver,
     const hydro::HydroRiemannSolver& riemann_solver,

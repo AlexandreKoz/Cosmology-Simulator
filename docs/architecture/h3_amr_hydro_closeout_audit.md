@@ -176,3 +176,43 @@ The harness now compares:
 - No distributed AMR ghost exchange.
 - No restart-after-MPI-AMR-migration test.
 - H3.7 tests are fast CI guards, not convergence or cross-code validation.
+
+---
+
+## Post-H3 credibility pass: AMR subcycling and pending flux registers
+
+Date: 2026-06-17  
+Mode: local AMR hydro credibility extension after H3 closeout
+
+### What changed after the original H3 audit
+
+The repository now contains a first real **local** AMR hydro subcycling path in the AMR hydro orchestrator. This is not a global scheduler-integrated Berger-Colella implementation. It advances explicit AMR levels recursively inside the local orchestrator, uses a validated refinement ratio, advances fine levels with smaller timesteps (`dt_fine = dt_coarse / refinement_ratio`), and delays complete reflux application until the required fine-substep coverage has accumulated.
+
+The repository also now contains a restart-authoritative pending flux-register store in `core::SimulationState`. Pending records are stable-ID based and include coarse patch identity, coarse gas-cell identity, patch-local target index, level pair metadata, face orientation, area coverage, timestep/substep coverage, flux-integrated conserved quantities, and generation metadata. Complete records are resolved by stable `coarse_gas_cell_id` before mutation; incomplete, area-mismatched, stale-generation, wrong-owner, and missing-target records are skipped/rejected with diagnostics rather than silently applied.
+
+### New test evidence
+
+New or strengthened tests:
+
+- `unit_amr_pending_flux_registers`
+- `integration_amr_hydro_subcycling`
+- `integration_restart_equivalence_amr_flux_registers`
+
+The HDF5 restart-equivalence coverage now includes a case where an incomplete pending register is written to restart state, read back, completed by a later fine contribution, and then applied. The restart-equivalence harness also compares pending flux-register metadata and accumulated flux integrals.
+
+### Updated verdict
+
+The old limitations are partly closed:
+
+- **AMR hydro subcycling:** implemented as local orchestrator-level subcycling for explicit AMR patch coverage. It is not yet scheduler-owned, MPI-distributed, or cosmological timeline-integrated.
+- **Persistent pending flux-register state:** implemented in restart-authoritative `SimulationState` and serialized under `/state/amr_pending_flux_registers` in restart schema v17.
+- **H3.7 validation:** still CI-scale. The new subcycling/pending-register tests are deterministic regression/credibility guards, not scientific convergence or cross-code validation.
+
+### Remaining limitations
+
+- No production scheduler ownership of subcycled AMR level timelines.
+- No temporal interpolation model for coarse/fine ghost fill across arbitrary scheduler phases.
+- No MPI-distributed AMR hydro subcycling.
+- No restart after real MPI AMR patch migration.
+- No publication-grade AMR shock/Sedov convergence deck.
+- No cross-code comparison against AREPO, RAMSES, ENZO, Athena++, or another reference solver.

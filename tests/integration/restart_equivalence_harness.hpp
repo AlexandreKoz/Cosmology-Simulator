@@ -426,6 +426,45 @@ inline void compareSimulationState(
   requireAlignedExact(lhs.patches.cell_dim_y, rhs.patches.cell_dim_y, "patch_cell_dim_y");
   requireAlignedExact(lhs.patches.cell_dim_z, rhs.patches.cell_dim_z, "patch_cell_dim_z");
   requireAlignedExact(lhs.patches.owning_rank, rhs.patches.owning_rank, "patch_owning_rank");
+  if (lhs.pending_flux_registers.records().size() != rhs.pending_flux_registers.records().size()) {
+    failRestartEquivalence("pending flux-register count");
+  }
+  for (std::size_t record_index = 0; record_index < lhs.pending_flux_registers.records().size(); ++record_index) {
+    const auto& lhs_record = lhs.pending_flux_registers.records()[record_index];
+    const auto& rhs_record = rhs.pending_flux_registers.records()[record_index];
+    if (lhs_record.register_key != rhs_record.register_key ||
+        lhs_record.coarse_patch_id != rhs_record.coarse_patch_id ||
+        lhs_record.coarse_gas_cell_id != rhs_record.coarse_gas_cell_id ||
+        lhs_record.coarse_cell_index != rhs_record.coarse_cell_index ||
+        lhs_record.level != rhs_record.level ||
+        lhs_record.axis != rhs_record.axis ||
+        lhs_record.orientation != rhs_record.orientation ||
+        lhs_record.expected_fine_substeps != rhs_record.expected_fine_substeps ||
+        lhs_record.completed_fine_substeps != rhs_record.completed_fine_substeps ||
+        lhs_record.fine_substep_coverage_mask != rhs_record.fine_substep_coverage_mask ||
+        lhs_record.coarse_face_count != rhs_record.coarse_face_count ||
+        lhs_record.fine_face_count != rhs_record.fine_face_count ||
+        lhs_record.gas_cell_identity_generation != rhs_record.gas_cell_identity_generation ||
+        lhs_record.patch_geometry_generation != rhs_record.patch_geometry_generation) {
+      failRestartEquivalence("pending flux-register metadata " + std::to_string(record_index));
+    }
+    requireNear(lhs_record.expected_area_comov, rhs_record.expected_area_comov, tolerances.scalar_abs, "pending_expected_area");
+    requireNear(lhs_record.coarse_area_accumulated_comov, rhs_record.coarse_area_accumulated_comov, tolerances.scalar_abs, "pending_coarse_area");
+    requireNear(lhs_record.fine_area_accumulated_comov, rhs_record.fine_area_accumulated_comov, tolerances.scalar_abs, "pending_fine_area");
+    requireNear(lhs_record.interval_start_code, rhs_record.interval_start_code, tolerances.scalar_abs, "pending_interval_start");
+    requireNear(lhs_record.interval_end_code, rhs_record.interval_end_code, tolerances.scalar_abs, "pending_interval_end");
+    requireNear(lhs_record.coarse_dt_code, rhs_record.coarse_dt_code, tolerances.scalar_abs, "pending_coarse_dt");
+    requireNear(lhs_record.coarse_mass_flux_integral_code, rhs_record.coarse_mass_flux_integral_code, tolerances.scalar_abs, "pending_coarse_mass_flux");
+    requireNear(lhs_record.coarse_momentum_x_flux_integral_code, rhs_record.coarse_momentum_x_flux_integral_code, tolerances.scalar_abs, "pending_coarse_mom_x_flux");
+    requireNear(lhs_record.coarse_momentum_y_flux_integral_code, rhs_record.coarse_momentum_y_flux_integral_code, tolerances.scalar_abs, "pending_coarse_mom_y_flux");
+    requireNear(lhs_record.coarse_momentum_z_flux_integral_code, rhs_record.coarse_momentum_z_flux_integral_code, tolerances.scalar_abs, "pending_coarse_mom_z_flux");
+    requireNear(lhs_record.coarse_total_energy_flux_integral_code, rhs_record.coarse_total_energy_flux_integral_code, tolerances.scalar_abs, "pending_coarse_energy_flux");
+    requireNear(lhs_record.fine_mass_flux_integral_code, rhs_record.fine_mass_flux_integral_code, tolerances.scalar_abs, "pending_fine_mass_flux");
+    requireNear(lhs_record.fine_momentum_x_flux_integral_code, rhs_record.fine_momentum_x_flux_integral_code, tolerances.scalar_abs, "pending_fine_mom_x_flux");
+    requireNear(lhs_record.fine_momentum_y_flux_integral_code, rhs_record.fine_momentum_y_flux_integral_code, tolerances.scalar_abs, "pending_fine_mom_y_flux");
+    requireNear(lhs_record.fine_momentum_z_flux_integral_code, rhs_record.fine_momentum_z_flux_integral_code, tolerances.scalar_abs, "pending_fine_mom_z_flux");
+    requireNear(lhs_record.fine_total_energy_flux_integral_code, rhs_record.fine_total_energy_flux_integral_code, tolerances.scalar_abs, "pending_fine_energy_flux");
+  }
   if (lhs.gasCellIdentityGeneration() != rhs.gasCellIdentityGeneration()) {
     failRestartEquivalence("gas-cell identity generation");
   }

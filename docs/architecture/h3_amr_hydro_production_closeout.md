@@ -83,3 +83,18 @@ ctest --preset test-hdf5-debug -R "restart_equivalence" --output-on-failure
 ```
 
 Result: the targeted CPU AMR tests passed, and the HDF5 restart-equivalence suite passed 8/8 including `integration_restart_equivalence_amr_hydro`.
+
+---
+
+## Post-H3 update: local AMR subcycling and restart-safe pending registers
+
+The production AMR hydro path now has two explicitly selectable sweep modes:
+
+- synchronized local sweep, preserving the H3 behavior;
+- local level-subcycled sweep through the AMR hydro orchestrator.
+
+The subcycling mode is intentionally scoped. It is real in the sense that finer AMR levels are advanced with smaller timesteps and expected fine-substep coverage is tracked before reflux can be applied. It is not a claim that the global production scheduler owns an arbitrary Berger-Colella AMR timeline.
+
+Pending flux-register state is now restart-authoritative. Incomplete records can be merged into `core::SimulationState::pending_flux_registers`, serialized through HDF5 restart schema v17, restored, validated by stable gas-cell identity, and completed after restart. The new `integration_restart_equivalence_amr_flux_registers` test exercises this direct-vs-restart path.
+
+The validation posture is unchanged in the scientific sense: shock/Sedov/synchronization tests remain fast CI/regression guards. They are stronger than smoke tests, but they are not convergence studies or cross-code validation.

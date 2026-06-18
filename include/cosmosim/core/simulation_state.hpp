@@ -383,6 +383,94 @@ struct ParticleTransferPacket {
 };
 
 
+
+struct PendingFluxRegisterRecord {
+  std::uint64_t register_key = 0;
+  std::uint64_t coarse_patch_id = 0;
+  std::uint64_t coarse_gas_cell_id = 0;
+  std::size_t coarse_cell_index = 0;
+  std::uint8_t level = 0;
+  std::uint8_t axis = 0;
+  std::uint8_t orientation = 0;
+  double expected_area_comov = 0.0;
+  double coarse_area_accumulated_comov = 0.0;
+  double fine_area_accumulated_comov = 0.0;
+  double interval_start_code = 0.0;
+  double interval_end_code = 0.0;
+  double coarse_dt_code = 0.0;
+  std::uint32_t expected_fine_substeps = 1;
+  std::uint32_t completed_fine_substeps = 0;
+  std::uint64_t fine_substep_coverage_mask = 0;
+  std::uint32_t coarse_face_count = 0;
+  std::uint32_t fine_face_count = 0;
+  std::uint64_t gas_cell_identity_generation = 0;
+  std::uint64_t patch_geometry_generation = 0;
+  double coarse_mass_flux_integral_code = 0.0;
+  double coarse_momentum_x_flux_integral_code = 0.0;
+  double coarse_momentum_y_flux_integral_code = 0.0;
+  double coarse_momentum_z_flux_integral_code = 0.0;
+  double coarse_total_energy_flux_integral_code = 0.0;
+  double fine_mass_flux_integral_code = 0.0;
+  double fine_momentum_x_flux_integral_code = 0.0;
+  double fine_momentum_y_flux_integral_code = 0.0;
+  double fine_momentum_z_flux_integral_code = 0.0;
+  double fine_total_energy_flux_integral_code = 0.0;
+
+  [[nodiscard]] bool hasCoarseContribution() const noexcept { return coarse_face_count > 0U; }
+  [[nodiscard]] bool hasCompleteFineSubstepCoverage() const noexcept {
+    return expected_fine_substeps > 0U && completed_fine_substeps >= expected_fine_substeps;
+  }
+  [[nodiscard]] bool isComplete() const noexcept {
+    return hasCoarseContribution() && hasCompleteFineSubstepCoverage();
+  }
+};
+
+class PendingFluxRegisterStore {
+ public:
+  [[nodiscard]] bool empty() const noexcept { return m_records.empty(); }
+  [[nodiscard]] std::size_t size() const noexcept { return m_records.size(); }
+  [[nodiscard]] std::span<const PendingFluxRegisterRecord> records() const noexcept { return m_records; }
+  [[nodiscard]] std::span<PendingFluxRegisterRecord> mutableRecords() noexcept { return m_records; }
+  void clear() noexcept { m_records.clear(); }
+  void assign(std::vector<PendingFluxRegisterRecord> records) { m_records = std::move(records); }
+  [[nodiscard]] const PendingFluxRegisterRecord* findByRegisterKey(std::uint64_t register_key) const noexcept {
+    for (const auto& record : m_records) {
+      if (record.register_key == register_key) {
+        return &record;
+      }
+    }
+    return nullptr;
+  }
+  [[nodiscard]] PendingFluxRegisterRecord* findByRegisterKey(std::uint64_t register_key) noexcept {
+    for (auto& record : m_records) {
+      if (record.register_key == register_key) {
+        return &record;
+      }
+    }
+    return nullptr;
+  }
+  PendingFluxRegisterRecord& upsertByRegisterKey(const PendingFluxRegisterRecord& record) {
+    if (auto* existing = findByRegisterKey(record.register_key); existing != nullptr) {
+      return *existing;
+    }
+    m_records.push_back(record);
+    return m_records.back();
+  }
+  void eraseCompletedByKey(std::span<const std::uint64_t> register_keys) {
+    m_records.erase(
+        std::remove_if(
+            m_records.begin(),
+            m_records.end(),
+            [register_keys](const PendingFluxRegisterRecord& record) {
+              return std::find(register_keys.begin(), register_keys.end(), record.register_key) != register_keys.end();
+            }),
+        m_records.end());
+  }
+
+ private:
+  std::vector<PendingFluxRegisterRecord> m_records;
+};
+
 struct GasCellMigrationFields {
   std::uint64_t gas_cell_id = 0;
   std::uint8_t has_parent_particle = 0;
@@ -563,6 +651,8 @@ class SimulationState {
   // synchronized from this map for particle-bound import/restart paths.
   GasCellIdentityMap gas_cell_identity;
   PatchSoa patches;
+  // Restart-authoritative AMR hydro deferred synchronization state.
+  PendingFluxRegisterStore pending_flux_registers;
   SpeciesContainer species;
   ParticleSpeciesIndex particle_species_index;
   StarParticleSidecar star_particles;

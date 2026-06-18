@@ -682,6 +682,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_amr_flux_register_generation tests/unit/test_amr_flux_register_generation.cpp)
   target_link_libraries(test_unit_amr_flux_register_generation PRIVATE cosmosim_amr cosmosim_hydro)
   add_test(NAME unit_amr_flux_register_generation COMMAND test_unit_amr_flux_register_generation)
+  add_executable(test_unit_amr_pending_flux_registers tests/unit/test_amr_pending_flux_registers.cpp)
+  target_link_libraries(test_unit_amr_pending_flux_registers PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_custom_target(unit_amr_pending_flux_registers DEPENDS test_unit_amr_pending_flux_registers)
+  add_test(NAME unit_amr_pending_flux_registers COMMAND test_unit_amr_pending_flux_registers)
+  cosmosim_mark_runtime_truth_test(unit_amr_pending_flux_registers amr hydro gas unit pending_flux)
 
   add_executable(test_unit_hydro_core_solver tests/unit/test_hydro_core_solver.cpp)
   target_link_libraries(test_unit_hydro_core_solver PRIVATE cosmosim_hydro)
@@ -731,6 +736,11 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_amr_production_hydro_integration PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_test(NAME integration_amr_production_hydro_integration COMMAND test_integration_amr_production_hydro_integration)
   cosmosim_mark_runtime_truth_test(integration_amr_production_hydro_integration amr hydro gas integration)
+  add_executable(test_integration_amr_hydro_subcycling tests/integration/test_amr_hydro_subcycling.cpp)
+  target_link_libraries(test_integration_amr_hydro_subcycling PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_custom_target(integration_amr_hydro_subcycling DEPENDS test_integration_amr_hydro_subcycling)
+  add_test(NAME integration_amr_hydro_subcycling COMMAND test_integration_amr_hydro_subcycling)
+  cosmosim_mark_runtime_truth_test(integration_amr_hydro_subcycling amr hydro gas integration pending_flux)
   add_executable(test_integration_amr_hydro_shock_tube tests/integration/test_amr_hydro_shock_tube.cpp)
   target_link_libraries(test_integration_amr_hydro_shock_tube PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_hydro_shock_tube DEPENDS test_integration_amr_hydro_shock_tube)
@@ -825,7 +835,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_restart_equivalence_harness COMMAND test_integration_restart_equivalence_harness)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_harness restart scheduler output stochastic equivalence integration)
 
-  foreach(stage8_case IN ITEMS dm_only treepm hydro_toy multirate_bins output_enabled stochastic_sources amr_hydro)
+  foreach(stage8_case IN ITEMS dm_only treepm hydro_toy multirate_bins output_enabled stochastic_sources amr_hydro amr_flux_registers)
     add_executable(
       test_integration_restart_equivalence_${stage8_case}
       tests/integration/test_restart_equivalence_${stage8_case}.cpp)
@@ -835,6 +845,7 @@ if(COSMOSIM_ENABLE_TESTS)
       COMMAND test_integration_restart_equivalence_${stage8_case})
   endforeach()
   add_custom_target(integration_restart_equivalence_amr_hydro DEPENDS test_integration_restart_equivalence_amr_hydro)
+  add_custom_target(integration_restart_equivalence_amr_flux_registers DEPENDS test_integration_restart_equivalence_amr_flux_registers)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_dm_only restart scheduler equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_treepm restart scheduler treepm pm equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_hydro_toy restart scheduler hydro gas equivalence integration)
@@ -842,6 +853,7 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_output_enabled restart scheduler output equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_stochastic_sources restart scheduler stochastic source_terms equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_hydro restart scheduler hydro gas amr equivalence integration)
+  cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_flux_registers restart scheduler hydro gas amr equivalence integration pending_flux)
 
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
@@ -923,6 +935,7 @@ if(COSMOSIM_ENABLE_TESTS)
         test_integration_restart_equivalence_output_enabled
         test_integration_restart_equivalence_stochastic_sources
         test_integration_restart_equivalence_amr_hydro
+        test_integration_restart_equivalence_amr_flux_registers
         test_integration_provenance_roundtrip)
 
 
