@@ -138,6 +138,11 @@ class ConservativeTransfer {
   [[nodiscard]] static ConservedState restrictToCoarse(std::span<const ConservedState> fine_cells);
 };
 
+// Local synchronized-sweep flux-register record. Incomplete records are safety
+// rejects in applyFluxRegistersToSimulationState(): they are not persisted and
+// not replayed later. A future Berger-Colella subcycling implementation needs a
+// restart-safe pending-register owner with patch/gas identity metadata, area
+// coverage, and dt coverage before deferred synchronization can be claimed.
 struct FluxRegisterEntry {
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;

@@ -162,3 +162,11 @@ Module sidecar payload length is explicitly included in the restart payload inte
 ### AMR patch geometry restart lanes (v16)
 
 PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_patch_id`, `morton_key`, `origin_x/y/z_comoving`, `extent_x/y/z_comoving`, and `cell_dim_x/y/z`. Production AMR hydro requires these lanes to be explicit; legacy restart inputs without them are accepted only as non-AMR/legacy patch states and do not silently enter the production AMR hydro path.
+
+## AMR hydro restart-equivalence coverage
+
+The H3 hardening pass added `integration_restart_equivalence_amr_hydro`, an HDF5-gated integration test that compares a direct local AMR hydro continuation against a checkpoint/reload/continue path. The test exercises production AMR coverage, explicit PatchSoa geometry lanes, stable `GasCellIdentityMap` records, ghost-fill/reflux safety, scheduler state, integrator state, output cadence state, and stochastic persistent state.
+
+The restart-equivalence harness now compares explicit AMR patch lanes (`parent_patch_id`, `morton_key`, origins, extents, cell dimensions), `GasCellIdentityMap` records, and the gas identity generation value. Restart read restores the serialized gas identity generation with `GasCellIdentityMap::assignWithGeneration(...)` so a checkpoint/reload path does not masquerade as a runtime identity rebuild.
+
+This proves local HDF5 AMR hydro restart equivalence for the exercised synchronized-sweep scenario. It does not prove MPI restart, restart after AMR migration, Berger-Colella subcycling, or replay of persistent pending flux registers.

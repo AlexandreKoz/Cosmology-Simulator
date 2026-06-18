@@ -612,7 +612,7 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(integration_gas_cell_identity_migration migration gas sidecar)
 
   add_executable(test_integration_amr_patch_migration tests/integration/test_amr_patch_migration.cpp)
-  target_link_libraries(test_integration_amr_patch_migration PRIVATE cosmosim_core)
+  target_link_libraries(test_integration_amr_patch_migration PRIVATE cosmosim_core cosmosim_amr cosmosim_hydro)
   add_test(NAME integration_amr_patch_migration COMMAND test_integration_amr_patch_migration)
   cosmosim_mark_runtime_truth_test(integration_amr_patch_migration amr hydro gas migration)
 
@@ -825,7 +825,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_restart_equivalence_harness COMMAND test_integration_restart_equivalence_harness)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_harness restart scheduler output stochastic equivalence integration)
 
-  foreach(stage8_case IN ITEMS dm_only treepm hydro_toy multirate_bins output_enabled stochastic_sources)
+  foreach(stage8_case IN ITEMS dm_only treepm hydro_toy multirate_bins output_enabled stochastic_sources amr_hydro)
     add_executable(
       test_integration_restart_equivalence_${stage8_case}
       tests/integration/test_restart_equivalence_${stage8_case}.cpp)
@@ -834,12 +834,14 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_restart_equivalence_${stage8_case}
       COMMAND test_integration_restart_equivalence_${stage8_case})
   endforeach()
+  add_custom_target(integration_restart_equivalence_amr_hydro DEPENDS test_integration_restart_equivalence_amr_hydro)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_dm_only restart scheduler equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_treepm restart scheduler treepm pm equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_hydro_toy restart scheduler hydro gas equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_multirate_bins restart scheduler multirate equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_output_enabled restart scheduler output equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_stochastic_sources restart scheduler stochastic source_terms equivalence integration)
+  cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_hydro restart scheduler hydro gas amr equivalence integration)
 
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
@@ -920,6 +922,7 @@ if(COSMOSIM_ENABLE_TESTS)
         test_integration_restart_equivalence_multirate_bins
         test_integration_restart_equivalence_output_enabled
         test_integration_restart_equivalence_stochastic_sources
+        test_integration_restart_equivalence_amr_hydro
         test_integration_provenance_roundtrip)
 
 

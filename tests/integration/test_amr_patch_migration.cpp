@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
 namespace {
@@ -102,6 +103,17 @@ void test_patch_payload_carries_descriptor_and_gas_sidecars_atomically() {
   auto records = state.packAmrPatchMigrationRecords(outbound_patch, 42);
   assert(records.size() == 1);
   assert(records[0].patch.patch_id == 101);
+  assert(records[0].patch.parent_patch_id == 10);
+  assert(records[0].patch.morton_key == 0xAA);
+  assert(records[0].patch.origin_x_comoving == 0.0);
+  assert(records[0].patch.origin_y_comoving == 0.0);
+  assert(records[0].patch.origin_z_comoving == 0.0);
+  assert(records[0].patch.extent_x_comoving == 2.0);
+  assert(records[0].patch.extent_y_comoving == 1.0);
+  assert(records[0].patch.extent_z_comoving == 1.0);
+  assert(records[0].patch.cell_dim_x == 2U);
+  assert(records[0].patch.cell_dim_y == 1U);
+  assert(records[0].patch.cell_dim_z == 1U);
   assert(records[0].patch.cell_count == 2);
   assert(records[0].gas_cell_records.size() == 2);
   assert(records[0].gas_cell_records[0].fields.gas_cell_id == 7001);
@@ -125,9 +137,16 @@ void test_patch_payload_carries_descriptor_and_gas_sidecars_atomically() {
   assert(state.patches.first_cell[0] == 0);
   assert(state.patches.first_cell[1] == 1);
   assert(state.patches.cell_count[1] == 2);
+  assert(state.patches.parent_patch_id[1] == 10);
+  assert(state.patches.morton_key[1] == 0xAA);
+  assert(state.patches.origin_x_comoving[1] == 0.0);
+  assert(state.patches.extent_x_comoving[1] == 2.0);
+  assert(state.patches.cell_dim_x[1] == 2U);
 
   const std::uint32_t parented_row = rowForGasCell(state, 7001);
   const std::uint32_t parentless_row = rowForGasCell(state, 7002);
+  assert(parented_row == 1U);
+  assert(parentless_row == 2U);
   assert(state.cells.patch_index[parented_row] == 1);
   assert(state.cells.patch_index[parentless_row] == 1);
   assert(state.parentParticleIdForGasCellId(7001).value() == 9001);
@@ -136,6 +155,7 @@ void test_patch_payload_carries_descriptor_and_gas_sidecars_atomically() {
   assert(state.gas_cells.density_code[parented_row] == 100.0);
   assert(state.gas_cells.internal_energy_code[parentless_row] == 301.0);
   assert(state.validateOwnershipInvariants());
+  assert(cosmosim::amr::hasProductionAmrHydroCoverage(state));
 }
 
 void test_patch_commit_rejects_stale_gas_ghost_epoch() {

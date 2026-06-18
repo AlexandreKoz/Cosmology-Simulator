@@ -72,6 +72,10 @@ inline core::SimulationState makeStage8HydroToyState(std::size_t cell_count, con
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = static_cast<std::uint32_t>(cell_count);
+  // Patch ownership is part of the GasCellIdentityMap restart contract.  The
+  // patch descriptor is filled after the legacy particle-bound identity lanes,
+  // so rebuild the identity records once PatchSoa carries its authoritative id.
+  state.refreshGasCellIdentityMapFromSidecarLanes();
   state.rebuildSpeciesIndex();
   return state;
 }

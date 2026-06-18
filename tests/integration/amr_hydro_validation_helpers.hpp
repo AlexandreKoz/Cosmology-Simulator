@@ -15,6 +15,10 @@
 
 namespace cosmosim::tests::amr_hydro_validation {
 
+// CI-scale AMR hydro guard helpers. These tests exercise the production AMR
+// path, finite/positive state, identity coverage, and basic conservation trends;
+// they are not convergence studies or cross-code scientific validation decks.
+
 constexpr double k_gamma = 1.4;
 
 struct CellCenter {
@@ -223,6 +227,9 @@ inline void requireFinitePositiveState(const core::SimulationState& state, const
       .adiabatic_index = k_gamma,
       .density_floor = 1.0e-10,
       .pressure_floor = 1.0e-10};
+  requireOrThrow(
+      amr::hasProductionAmrHydroCoverage(state),
+      "AMR hydro validation helper: production AMR coverage missing");
   for (std::size_t step = 0; step < step_count; ++step) {
     const hydro::HydroUpdateContext update{
         .dt_code = dt_code,

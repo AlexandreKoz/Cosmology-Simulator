@@ -194,6 +194,11 @@ class GasCellIdentityMap {
   // assign(), and generation() changes after every successful mutation so future production views can
   // reject stale local-row mappings.
   void assign(std::vector<GasCellIdentityRecord> records);
+  // Restart-authoritative import path: restore validated records together with
+  // the generation value persisted at write time, so stale view checks see the
+  // same identity epoch after reload. Normal runtime mutations must keep using
+  // assign()/clear(), which bump the generation.
+  void assignWithGeneration(std::vector<GasCellIdentityRecord> records, std::uint64_t generation);
   void clear() noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] bool empty() const noexcept;

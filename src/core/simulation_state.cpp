@@ -29,6 +29,22 @@ void GasCellIdentityMap::assign(std::vector<GasCellIdentityRecord> records) {
   ++m_generation;
 }
 
+void GasCellIdentityMap::assignWithGeneration(
+    std::vector<GasCellIdentityRecord> records,
+    std::uint64_t generation) {
+  GasCellIdentityMap candidate;
+  candidate.m_records = std::move(records);
+  if (!candidate.rebuildLookupTables()) {
+    throw std::invalid_argument(
+        "GasCellIdentityMap.assignWithGeneration: gas_cell_id must be nonzero and gas_cell_id/local_cell_row must be unique");
+  }
+
+  m_records = std::move(candidate.m_records);
+  m_index_by_gas_cell_id = std::move(candidate.m_index_by_gas_cell_id);
+  m_index_by_local_row = std::move(candidate.m_index_by_local_row);
+  m_generation = generation;
+}
+
 void GasCellIdentityMap::clear() noexcept {
   m_records.clear();
   m_index_by_gas_cell_id.clear();

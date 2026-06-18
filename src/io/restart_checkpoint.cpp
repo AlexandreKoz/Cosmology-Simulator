@@ -923,6 +923,8 @@ void readGasCellIdentityGroup(hid_t state_group, core::SimulationState& state, s
   if (row_policy != k_gas_identity_row_policy) {
     throw std::runtime_error("unsupported /state/gas_cell_identity local_row_reconstruction_policy");
   }
+  const std::uint64_t identity_generation_at_write =
+      readScalarU64Attribute(identity_group.get(), "identity_generation_at_write");
 
   const auto gas_cell_id =
       readDataset1d<std::uint64_t>(identity_group.get(), "gas_cell_id", H5T_NATIVE_UINT64);
@@ -963,7 +965,7 @@ void readGasCellIdentityGroup(hid_t state_group, core::SimulationState& state, s
         .local_cell_row = local_cell_row[i],
     });
   }
-  state.gas_cell_identity.assign(std::move(records));
+  state.gas_cell_identity.assignWithGeneration(std::move(records), identity_generation_at_write);
 }
 
 void writeStateGroup(hid_t root, const core::SimulationState& state) {

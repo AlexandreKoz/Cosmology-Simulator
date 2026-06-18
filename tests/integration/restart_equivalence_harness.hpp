@@ -414,7 +414,34 @@ inline void compareSimulationState(
   requireAlignedExact(lhs.patches.level, rhs.patches.level, "patch_level");
   requireAlignedExact(lhs.patches.first_cell, rhs.patches.first_cell, "patch_first_cell");
   requireAlignedExact(lhs.patches.cell_count, rhs.patches.cell_count, "patch_cell_count");
+  requireAlignedExact(lhs.patches.parent_patch_id, rhs.patches.parent_patch_id, "patch_parent_patch_id");
+  requireAlignedExact(lhs.patches.morton_key, rhs.patches.morton_key, "patch_morton_key");
+  requireAlignedNear(lhs.patches.origin_x_comoving, rhs.patches.origin_x_comoving, tolerances.position_abs, "patch_origin_x");
+  requireAlignedNear(lhs.patches.origin_y_comoving, rhs.patches.origin_y_comoving, tolerances.position_abs, "patch_origin_y");
+  requireAlignedNear(lhs.patches.origin_z_comoving, rhs.patches.origin_z_comoving, tolerances.position_abs, "patch_origin_z");
+  requireAlignedNear(lhs.patches.extent_x_comoving, rhs.patches.extent_x_comoving, tolerances.position_abs, "patch_extent_x");
+  requireAlignedNear(lhs.patches.extent_y_comoving, rhs.patches.extent_y_comoving, tolerances.position_abs, "patch_extent_y");
+  requireAlignedNear(lhs.patches.extent_z_comoving, rhs.patches.extent_z_comoving, tolerances.position_abs, "patch_extent_z");
+  requireAlignedExact(lhs.patches.cell_dim_x, rhs.patches.cell_dim_x, "patch_cell_dim_x");
+  requireAlignedExact(lhs.patches.cell_dim_y, rhs.patches.cell_dim_y, "patch_cell_dim_y");
+  requireAlignedExact(lhs.patches.cell_dim_z, rhs.patches.cell_dim_z, "patch_cell_dim_z");
   requireAlignedExact(lhs.patches.owning_rank, rhs.patches.owning_rank, "patch_owning_rank");
+  if (lhs.gasCellIdentityGeneration() != rhs.gasCellIdentityGeneration()) {
+    failRestartEquivalence("gas-cell identity generation");
+  }
+  if (lhs.gas_cell_identity.records().size() != rhs.gas_cell_identity.records().size()) {
+    failRestartEquivalence("gas-cell identity record count");
+  }
+  for (std::size_t record_index = 0; record_index < lhs.gas_cell_identity.records().size(); ++record_index) {
+    const auto& lhs_record = lhs.gas_cell_identity.records()[record_index];
+    const auto& rhs_record = rhs.gas_cell_identity.records()[record_index];
+    if (lhs_record.gas_cell_id != rhs_record.gas_cell_id ||
+        lhs_record.parent_particle_id != rhs_record.parent_particle_id ||
+        lhs_record.owning_patch_id != rhs_record.owning_patch_id ||
+        lhs_record.local_cell_row != rhs_record.local_cell_row) {
+      failRestartEquivalence("gas-cell identity record " + std::to_string(record_index));
+    }
+  }
   requireAlignedExact(lhs.gas_cells.gas_cell_id, rhs.gas_cells.gas_cell_id, "gas_cell_id");
   requireAlignedExact(lhs.gas_cells.parent_particle_id, rhs.gas_cells.parent_particle_id, "gas_parent_particle_id");
   requireAlignedNear(lhs.gas_cells.velocity_x_peculiar, rhs.gas_cells.velocity_x_peculiar, tolerances.velocity_abs, "gas_velocity_x");
