@@ -115,7 +115,12 @@ void testTwoLevelSubcyclingAdvancesFineTwice() {
   assert(diagnostics.advanced_patch_count == 3U);
   assert(diagnostics.flux_register_entry_count > 0U);
   assert(diagnostics.pending_register_applied_count > 0U);
+  // Fine ghosts are requested at each fine substep start and must be supplied
+  // from the captured coarse interval, never by prematurely copying coarse end state.
+  assert(diagnostics.ghost_fill.temporal_coarse_to_fine_ghosts_filled > 0U);
+  assert(diagnostics.ghost_fill.temporal_endpoint_ghosts_filled > 0U);
   assert(state.pending_flux_registers.empty());
+  assert(state.amr_temporal_boundary_history.empty());
   assert(state.gas_cell_identity.coversDenseLocalRows(state.cells.size()));
   assert(state.gasCellIdentityMapMatchesSidecarLanes());
   for (std::uint32_t row = 0; row < state.cells.size(); ++row) {

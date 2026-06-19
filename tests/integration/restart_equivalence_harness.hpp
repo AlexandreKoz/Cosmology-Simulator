@@ -465,6 +465,42 @@ inline void compareSimulationState(
     requireNear(lhs_record.fine_momentum_z_flux_integral_code, rhs_record.fine_momentum_z_flux_integral_code, tolerances.scalar_abs, "pending_fine_mom_z_flux");
     requireNear(lhs_record.fine_total_energy_flux_integral_code, rhs_record.fine_total_energy_flux_integral_code, tolerances.scalar_abs, "pending_fine_energy_flux");
   }
+  if (lhs.amr_temporal_boundary_history.records().size() != rhs.amr_temporal_boundary_history.records().size()) {
+    failRestartEquivalence("AMR temporal-boundary history count");
+  }
+  for (std::size_t history_index = 0;
+       history_index < lhs.amr_temporal_boundary_history.records().size();
+       ++history_index) {
+    const auto& lhs_history = lhs.amr_temporal_boundary_history.records()[history_index];
+    const auto& rhs_history = rhs.amr_temporal_boundary_history.records()[history_index];
+    if (lhs_history.patch_id != rhs_history.patch_id ||
+        lhs_history.patch_level != rhs_history.patch_level ||
+        lhs_history.patch_geometry_fingerprint != rhs_history.patch_geometry_fingerprint ||
+        lhs_history.gas_cell_identity_generation != rhs_history.gas_cell_identity_generation ||
+        lhs_history.end_state_valid != rhs_history.end_state_valid ||
+        lhs_history.cells.size() != rhs_history.cells.size()) {
+      failRestartEquivalence("AMR temporal-boundary history metadata " + std::to_string(history_index));
+    }
+    requireNear(lhs_history.interval_start_code, rhs_history.interval_start_code, tolerances.scalar_abs, "temporal_interval_start");
+    requireNear(lhs_history.interval_end_code, rhs_history.interval_end_code, tolerances.scalar_abs, "temporal_interval_end");
+    for (std::size_t cell_index = 0; cell_index < lhs_history.cells.size(); ++cell_index) {
+      const auto& lhs_cell = lhs_history.cells[cell_index];
+      const auto& rhs_cell = rhs_history.cells[cell_index];
+      if (lhs_cell.gas_cell_id != rhs_cell.gas_cell_id || lhs_cell.patch_local_cell != rhs_cell.patch_local_cell) {
+        failRestartEquivalence("AMR temporal-boundary cell identity " + std::to_string(cell_index));
+      }
+      requireNear(lhs_cell.start_mass_density_comoving, rhs_cell.start_mass_density_comoving, tolerances.scalar_abs, "temporal_start_rho");
+      requireNear(lhs_cell.start_momentum_density_x_comoving, rhs_cell.start_momentum_density_x_comoving, tolerances.scalar_abs, "temporal_start_mom_x");
+      requireNear(lhs_cell.start_momentum_density_y_comoving, rhs_cell.start_momentum_density_y_comoving, tolerances.scalar_abs, "temporal_start_mom_y");
+      requireNear(lhs_cell.start_momentum_density_z_comoving, rhs_cell.start_momentum_density_z_comoving, tolerances.scalar_abs, "temporal_start_mom_z");
+      requireNear(lhs_cell.start_total_energy_density_comoving, rhs_cell.start_total_energy_density_comoving, tolerances.scalar_abs, "temporal_start_energy");
+      requireNear(lhs_cell.end_mass_density_comoving, rhs_cell.end_mass_density_comoving, tolerances.scalar_abs, "temporal_end_rho");
+      requireNear(lhs_cell.end_momentum_density_x_comoving, rhs_cell.end_momentum_density_x_comoving, tolerances.scalar_abs, "temporal_end_mom_x");
+      requireNear(lhs_cell.end_momentum_density_y_comoving, rhs_cell.end_momentum_density_y_comoving, tolerances.scalar_abs, "temporal_end_mom_y");
+      requireNear(lhs_cell.end_momentum_density_z_comoving, rhs_cell.end_momentum_density_z_comoving, tolerances.scalar_abs, "temporal_end_mom_z");
+      requireNear(lhs_cell.end_total_energy_density_comoving, rhs_cell.end_total_energy_density_comoving, tolerances.scalar_abs, "temporal_end_energy");
+    }
+  }
   if (lhs.gasCellIdentityGeneration() != rhs.gasCellIdentityGeneration()) {
     failRestartEquivalence("gas-cell identity generation");
   }

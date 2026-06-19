@@ -45,7 +45,7 @@ Incomplete or invalid records are not silently applied.
 
 ## Restart path
 
-HDF5 restart schema v17 serializes pending registers under `/state/amr_pending_flux_registers`. Legacy restart files without the group load with an empty pending store. Current v17 restart validation requires the group so pending deferred reflux state cannot be omitted from new checkpoints.
+HDF5 restart schema v17 introduced pending-register serialization; current schema v18 serializes pending registers under `/state/amr_pending_flux_registers`. Legacy restart files without the group load with an empty pending store. Current v18 restart validation requires the group so pending deferred reflux state cannot be omitted from new checkpoints.
 
 The restart-equivalence test `integration_restart_equivalence_amr_flux_registers` writes an incomplete pending record before restart, reloads it, completes the missing fine contribution, applies reflux, and compares final direct-vs-restart state.
 
@@ -56,3 +56,40 @@ The restart-equivalence test `integration_restart_equivalence_amr_flux_registers
 - MPI-distributed AMR subcycling is not implemented.
 - Restart after true MPI AMR migration is not implemented.
 - Validation remains CI/regression scale, not cross-code science validation.
+
+## Temporal coarse-to-fine ghost histories (v18)
+
+The local two-level subcycling path now records a restart-authoritative temporal boundary interval in
+`core::SimulationState::amr_temporal_boundary_history`. Before the coarse level advances, the
+orchestrator captures coarse conserved state at `t_start_code`. After the coarse level advances through
+its complete coarse step, it captures the corresponding `t_end_code` state. Fine ghost fills request the
+physical start time of the particular fine update. This matches the current hydro staging: ghost values are
+consumed before MUSCL-Hancock reconstruction; the predictor itself constructs face-stage states.
+
+For `t_fill` inside `[t_start, t_end]`, the AMR layer linearly interpolates **conserved** density,
+momentum, and total energy, then validates and recovers primitives through the hydro EOS conversion.
+Endpoint requests use the stored endpoint exactly. Requests outside the interval, non-positive/infinite
+intervals, identity generation changes, and geometry fingerprint changes are rejected rather than
+silently clamped or copied from the coarse end state.
+
+The history records stable gas-cell IDs and patch-local cell indices, plus a patch geometry fingerprint and
+identity generation. Dense-row order is never a temporal-history key. Refinement and derefinement are
+prohibited while an active history exists. This is a safe local lifecycle policy, not a migration/remap
+implementation.
+
+HDF5 restart schema v18 stores these records under:
+
+```text
+/state/amr_temporal_boundary_history
+```
+
+`integration_restart_equivalence_amr_temporal_ghosts` checkpoints with both an active temporal history
+and an incomplete pending flux register, reloads, consumes the midpoint temporal ghost, completes the
+remaining fine contribution, refluxes, and compares direct and restarted continuation.
+
+## Current boundary
+
+This is a **local, two-level** temporal boundary model. It does not implement remote MPI history exchange,
+three-or-more nested active temporal intervals, arbitrary scheduler-owned AMR time bins, AMR patch
+migration while a history is live, or temporal fine-to-coarse restriction. Fine-to-coarse use at a
+non-synchronization time is rejected.

@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v17`) persists:
+The restart schema (`cosmosim_restart_v18`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -45,8 +45,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: write current v15; read current v15 plus the documented
-  legacy particle-bound v14 import path.
+- Current compatibility policy: write current v18; read v18 plus documented legacy v17/v16/v15/v14 paths.
 - v14 compatibility materializes `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
   and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
@@ -176,7 +175,7 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ## AMR pending flux-register restart lanes (v17)
 
-Restart schema `cosmosim_restart_v17` adds restart-authoritative pending AMR flux-register state under:
+Restart schema v17 introduced pending AMR flux-register state; current v18 checkpoints retain it under:
 
 ```text
 /state/amr_pending_flux_registers
@@ -196,8 +195,28 @@ The group persists stable identity and coverage metadata for deferred reflux rec
 - gas-cell identity generation and patch geometry generation
 - coarse/fine flux-integrated mass, momentum, and total-energy contributions
 
-Old restart files without this group are treated as legacy inputs with an empty pending store. Current v17 restart schema validation requires the group and datasets so a new restart cannot accidentally omit pending deferred reflux truth.
+Old restart files without this group are treated as legacy inputs with an empty pending store only at a synchronized point. A pre-v18 payload that does contain pending deferred-reflux records is rejected by the temporal-history reader, because it cannot prove the matching temporal boundary history needed for safe mid-subcycle continuation. Current v17 restart schema validation required the group and datasets so a new v17 restart could not accidentally omit pending deferred reflux truth.
 
 The restart payload integrity hash includes the pending-register store for v17 payloads. The HDF5-gated `integration_restart_equivalence_amr_flux_registers` test writes an incomplete pending register before restart, reads it back, merges the missing fine contribution, applies completed reflux, and compares direct vs restart continuation.
 
 This proves the exercised single-rank pending-register restart path. It does not prove MPI AMR restart, restart after AMR patch migration, or scheduler-owned Berger-Colella subcycling.
+
+---
+
+## AMR temporal boundary-history restart lanes (v18)
+
+Restart schema `cosmosim_restart_v18` adds `/state/amr_temporal_boundary_history` for open local AMR
+coarse intervals. Each history record persists patch ID/level, geometry fingerprint, gas identity generation,
+interval start/end, completion state, and stable-ID patch-local conserved start/end records. The restart
+payload integrity hash includes this store for v18 payloads.
+
+`integration_restart_equivalence_amr_temporal_ghosts` checkpoints after coarse end-state capture and a
+first fine temporal ghost use, with an incomplete pending reflux record present. The restarted branch reads
+the history, uses it for the midpoint coarse-to-fine ghost, completes the deferred flux contribution, and
+matches the direct continuation. This is single-rank local coverage only.
+
+Legacy schemas before v18 do not contain temporal history. They may be read only for states that do not
+require resumption inside an active temporal AMR interval; legacy files are not a supported way to resume
+one. The v18 reader conservatively rejects a pre-v18 payload that still contains pending AMR flux-register
+records, because that observable deferred-synchronization state cannot prove the required time-aligned
+coarse boundary history exists.

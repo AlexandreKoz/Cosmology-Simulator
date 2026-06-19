@@ -31,3 +31,16 @@ No cross-code validation is currently complete. Future comparisons should use pu
 ## Level 4: production science readiness
 
 Production science readiness requires a documented validation deck, convergence plots, restart/reproducibility evidence, MPI execution evidence if MPI is claimed, and explicit limitations. The current repository has not reached this level for AMR hydro.
+
+## Level 2 update: campaign machinery is implemented, evidence is not yet complete
+
+The repository now contains versioned Sod/Sedov input decks, a common-profile metric implementation,
+a command-line analyzer (`tools/run_amr_hydro_validation.py`), and opt-in campaign template. The fast C++
+contract tests verify metric algebra and compatibility rejection. They do **not** execute a multi-resolution
+production CHUÍ Sod/Sedov campaign and must not be cited as publication-grade convergence results.
+
+## Level 3 update: external data contract exists, no external result exists
+
+A versioned profile/manifest contract and common-grid comparison tool are implemented. The only in-tree
+cross-code test is a deliberately synthetic contract fixture. No RAMSES/ENZO/AREPO/Athena++ output was
+run or compared. This remains framework readiness, not cross-code validation.

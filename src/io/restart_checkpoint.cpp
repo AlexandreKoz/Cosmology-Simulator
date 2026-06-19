@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <array>
+#include <cmath>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -35,9 +36,11 @@ constexpr std::uint64_t k_prime = 1099511628211ull;
 constexpr std::uint32_t k_restart_schema_v14 = 14;
 constexpr std::uint32_t k_restart_schema_v15 = 15;
 constexpr std::uint32_t k_restart_schema_v16 = 16;
+constexpr std::uint32_t k_restart_schema_v17 = 17;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
 constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
 constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
+constexpr std::string_view k_restart_schema_name_v17 = "cosmosim_restart_v17";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 
 [[nodiscard]] std::string hexU64(std::uint64_t value) {
@@ -618,6 +621,21 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
       requireHdf5Dataset1d(file, std::string("/state/amr_pending_flux_registers/") + std::string(dataset));
     }
   }
+  if (schema_version >= restartSchema().version) {
+    Hdf5Handle temporal_group = openRequiredGroup(file, "/state/amr_temporal_boundary_history");
+    requireHdf5Attribute(temporal_group.get(), "/state/amr_temporal_boundary_history", "schema_version");
+    for (std::string_view dataset : {"patch_id", "patch_level", "patch_geometry_fingerprint",
+                                     "gas_cell_identity_generation", "interval_start_code",
+                                     "interval_end_code", "end_state_valid", "cell_offset", "cell_count",
+                                     "gas_cell_id", "patch_local_cell", "start_mass_density_comoving",
+                                     "start_momentum_density_x_comoving", "start_momentum_density_y_comoving",
+                                     "start_momentum_density_z_comoving", "start_total_energy_density_comoving",
+                                     "end_mass_density_comoving", "end_momentum_density_x_comoving",
+                                     "end_momentum_density_y_comoving", "end_momentum_density_z_comoving",
+                                     "end_total_energy_density_comoving"}) {
+      requireHdf5Dataset1d(file, std::string("/state/amr_temporal_boundary_history/") + std::string(dataset));
+    }
+  }
   requireHdf5Dataset1d(file, "/state/species_count_by_species");
   requireHdf5Link(file, "/state/module_sidecars");
   requireHdf5Dataset1d(file, "/state/module_sidecar_names");
@@ -1187,6 +1205,224 @@ void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& stat
   state.pending_flux_registers.assign(std::move(records));
 }
 
+
+void writeAmrTemporalBoundaryHistoryGroup(
+    hid_t state_group,
+    const core::AmrTemporalBoundaryHistoryStore& store) {
+  Hdf5Handle group(openOrCreateGroup(state_group, "amr_temporal_boundary_history"));
+  writeScalarU32Attribute(group.get(), "schema_version", 1U);
+  std::vector<std::uint64_t> patch_id;
+  std::vector<std::uint8_t> patch_level;
+  std::vector<std::uint64_t> patch_geometry_fingerprint;
+  std::vector<std::uint64_t> gas_cell_identity_generation;
+  std::vector<double> interval_start_code;
+  std::vector<double> interval_end_code;
+  std::vector<std::uint8_t> end_state_valid;
+  std::vector<std::uint64_t> cell_offset;
+  std::vector<std::uint64_t> cell_count;
+  std::vector<std::uint64_t> gas_cell_id;
+  std::vector<std::uint64_t> patch_local_cell;
+  std::vector<double> start_mass_density_comoving;
+  std::vector<double> start_momentum_density_x_comoving;
+  std::vector<double> start_momentum_density_y_comoving;
+  std::vector<double> start_momentum_density_z_comoving;
+  std::vector<double> start_total_energy_density_comoving;
+  std::vector<double> end_mass_density_comoving;
+  std::vector<double> end_momentum_density_x_comoving;
+  std::vector<double> end_momentum_density_y_comoving;
+  std::vector<double> end_momentum_density_z_comoving;
+  std::vector<double> end_total_energy_density_comoving;
+  const auto records = store.records();
+  patch_id.reserve(records.size());
+  std::uint64_t offset = 0U;
+  for (const core::AmrTemporalBoundaryHistoryRecord& record : records) {
+    patch_id.push_back(record.patch_id);
+    patch_level.push_back(record.patch_level);
+    patch_geometry_fingerprint.push_back(record.patch_geometry_fingerprint);
+    gas_cell_identity_generation.push_back(record.gas_cell_identity_generation);
+    interval_start_code.push_back(record.interval_start_code);
+    interval_end_code.push_back(record.interval_end_code);
+    end_state_valid.push_back(record.end_state_valid ? 1U : 0U);
+    cell_offset.push_back(offset);
+    cell_count.push_back(static_cast<std::uint64_t>(record.cells.size()));
+    for (const core::AmrTemporalBoundaryHistoryCellRecord& cell : record.cells) {
+      gas_cell_id.push_back(cell.gas_cell_id);
+      patch_local_cell.push_back(static_cast<std::uint64_t>(cell.patch_local_cell));
+      start_mass_density_comoving.push_back(cell.start_mass_density_comoving);
+      start_momentum_density_x_comoving.push_back(cell.start_momentum_density_x_comoving);
+      start_momentum_density_y_comoving.push_back(cell.start_momentum_density_y_comoving);
+      start_momentum_density_z_comoving.push_back(cell.start_momentum_density_z_comoving);
+      start_total_energy_density_comoving.push_back(cell.start_total_energy_density_comoving);
+      end_mass_density_comoving.push_back(cell.end_mass_density_comoving);
+      end_momentum_density_x_comoving.push_back(cell.end_momentum_density_x_comoving);
+      end_momentum_density_y_comoving.push_back(cell.end_momentum_density_y_comoving);
+      end_momentum_density_z_comoving.push_back(cell.end_momentum_density_z_comoving);
+      end_total_energy_density_comoving.push_back(cell.end_total_energy_density_comoving);
+      ++offset;
+    }
+  }
+  writeDataset1d(group.get(), "patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, patch_id);
+  writeDataset1d(group.get(), "patch_level", H5T_STD_U8LE, H5T_NATIVE_UINT8, patch_level);
+  writeDataset1d(group.get(), "patch_geometry_fingerprint", H5T_STD_U64LE, H5T_NATIVE_UINT64, patch_geometry_fingerprint);
+  writeDataset1d(group.get(), "gas_cell_identity_generation", H5T_STD_U64LE, H5T_NATIVE_UINT64, gas_cell_identity_generation);
+  writeDataset1d(group.get(), "interval_start_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, interval_start_code);
+  writeDataset1d(group.get(), "interval_end_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, interval_end_code);
+  writeDataset1d(group.get(), "end_state_valid", H5T_STD_U8LE, H5T_NATIVE_UINT8, end_state_valid);
+  writeDataset1d(group.get(), "cell_offset", H5T_STD_U64LE, H5T_NATIVE_UINT64, cell_offset);
+  writeDataset1d(group.get(), "cell_count", H5T_STD_U64LE, H5T_NATIVE_UINT64, cell_count);
+  writeDataset1d(group.get(), "gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, gas_cell_id);
+  writeDataset1d(group.get(), "patch_local_cell", H5T_STD_U64LE, H5T_NATIVE_UINT64, patch_local_cell);
+  writeDataset1d(group.get(), "start_mass_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_mass_density_comoving);
+  writeDataset1d(group.get(), "start_momentum_density_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_momentum_density_x_comoving);
+  writeDataset1d(group.get(), "start_momentum_density_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_momentum_density_y_comoving);
+  writeDataset1d(group.get(), "start_momentum_density_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_momentum_density_z_comoving);
+  writeDataset1d(group.get(), "start_total_energy_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_total_energy_density_comoving);
+  writeDataset1d(group.get(), "end_mass_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_mass_density_comoving);
+  writeDataset1d(group.get(), "end_momentum_density_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_x_comoving);
+  writeDataset1d(group.get(), "end_momentum_density_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_y_comoving);
+  writeDataset1d(group.get(), "end_momentum_density_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_z_comoving);
+  writeDataset1d(group.get(), "end_total_energy_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_total_energy_density_comoving);
+}
+
+void readAmrTemporalBoundaryHistoryGroup(
+    hid_t state_group,
+    core::SimulationState& state,
+    std::uint32_t schema_version) {
+  if (schema_version < restartSchema().version) {
+    // Older checkpoints cannot prove a mid-subcycle continuation has the
+    // time-aligned coarse history required by temporal coarse-to-fine fills.
+    // A legacy file is therefore safe only when no deferred AMR synchronization
+    // state remains. Pending registers are the conservative observable marker
+    // for an open local subcycling interval in pre-v18 checkpoints.
+    if (!state.pending_flux_registers.empty()) {
+      throw std::runtime_error(
+          "restart reader: legacy restart with pending AMR flux registers cannot resume "
+          "without v18 temporal boundary history");
+    }
+    state.amr_temporal_boundary_history.clear();
+    return;
+  }
+  Hdf5Handle group(H5Gopen2(state_group, "amr_temporal_boundary_history", H5P_DEFAULT));
+  if (!group.valid()) {
+    throw std::runtime_error("restart reader: v18 restart is missing /state/amr_temporal_boundary_history");
+  }
+  if (readScalarU32Attribute(group.get(), "schema_version") != 1U) {
+    throw std::runtime_error("restart reader: unsupported /state/amr_temporal_boundary_history schema_version");
+  }
+  const auto patch_id = readDataset1d<std::uint64_t>(group.get(), "patch_id", H5T_NATIVE_UINT64);
+  const auto patch_level = readDataset1d<std::uint8_t>(group.get(), "patch_level", H5T_NATIVE_UINT8);
+  const auto patch_geometry_fingerprint = readDataset1d<std::uint64_t>(group.get(), "patch_geometry_fingerprint", H5T_NATIVE_UINT64);
+  const auto gas_cell_identity_generation = readDataset1d<std::uint64_t>(group.get(), "gas_cell_identity_generation", H5T_NATIVE_UINT64);
+  const auto interval_start_code = readDataset1d<double>(group.get(), "interval_start_code", H5T_NATIVE_DOUBLE);
+  const auto interval_end_code = readDataset1d<double>(group.get(), "interval_end_code", H5T_NATIVE_DOUBLE);
+  const auto end_state_valid = readDataset1d<std::uint8_t>(group.get(), "end_state_valid", H5T_NATIVE_UINT8);
+  const auto cell_offset = readDataset1d<std::uint64_t>(group.get(), "cell_offset", H5T_NATIVE_UINT64);
+  const auto cell_count = readDataset1d<std::uint64_t>(group.get(), "cell_count", H5T_NATIVE_UINT64);
+  const auto gas_cell_id = readDataset1d<std::uint64_t>(group.get(), "gas_cell_id", H5T_NATIVE_UINT64);
+  const auto patch_local_cell = readDataset1d<std::uint64_t>(group.get(), "patch_local_cell", H5T_NATIVE_UINT64);
+  const auto start_mass_density_comoving = readDataset1d<double>(group.get(), "start_mass_density_comoving", H5T_NATIVE_DOUBLE);
+  const auto start_momentum_density_x_comoving = readDataset1d<double>(group.get(), "start_momentum_density_x_comoving", H5T_NATIVE_DOUBLE);
+  const auto start_momentum_density_y_comoving = readDataset1d<double>(group.get(), "start_momentum_density_y_comoving", H5T_NATIVE_DOUBLE);
+  const auto start_momentum_density_z_comoving = readDataset1d<double>(group.get(), "start_momentum_density_z_comoving", H5T_NATIVE_DOUBLE);
+  const auto start_total_energy_density_comoving = readDataset1d<double>(group.get(), "start_total_energy_density_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_mass_density_comoving = readDataset1d<double>(group.get(), "end_mass_density_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_momentum_density_x_comoving = readDataset1d<double>(group.get(), "end_momentum_density_x_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_momentum_density_y_comoving = readDataset1d<double>(group.get(), "end_momentum_density_y_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_momentum_density_z_comoving = readDataset1d<double>(group.get(), "end_momentum_density_z_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_total_energy_density_comoving = readDataset1d<double>(group.get(), "end_total_energy_density_comoving", H5T_NATIVE_DOUBLE);
+  const std::size_t n = patch_id.size();
+  const std::size_t nc = gas_cell_id.size();
+  const bool record_sizes = patch_level.size() == n && patch_geometry_fingerprint.size() == n &&
+      gas_cell_identity_generation.size() == n && interval_start_code.size() == n && interval_end_code.size() == n &&
+      end_state_valid.size() == n && cell_offset.size() == n && cell_count.size() == n;
+  const bool cell_sizes = patch_local_cell.size() == nc && start_mass_density_comoving.size() == nc &&
+      start_momentum_density_x_comoving.size() == nc && start_momentum_density_y_comoving.size() == nc &&
+      start_momentum_density_z_comoving.size() == nc && start_total_energy_density_comoving.size() == nc &&
+      end_mass_density_comoving.size() == nc && end_momentum_density_x_comoving.size() == nc &&
+      end_momentum_density_y_comoving.size() == nc && end_momentum_density_z_comoving.size() == nc &&
+      end_total_energy_density_comoving.size() == nc;
+  if (!record_sizes || !cell_sizes) {
+    throw std::runtime_error("/state/amr_temporal_boundary_history datasets must have matching lengths");
+  }
+  std::vector<core::AmrTemporalBoundaryHistoryRecord> records;
+  records.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (end_state_valid[i] > 1U || cell_offset[i] > nc || cell_count[i] > nc - cell_offset[i] ||
+        !std::isfinite(interval_start_code[i]) || !std::isfinite(interval_end_code[i]) ||
+        interval_end_code[i] <= interval_start_code[i]) {
+      throw std::runtime_error("/state/amr_temporal_boundary_history has invalid interval or record bounds");
+    }
+    core::AmrTemporalBoundaryHistoryRecord record;
+    record.patch_id = patch_id[i];
+    record.patch_level = patch_level[i];
+    record.patch_geometry_fingerprint = patch_geometry_fingerprint[i];
+    record.gas_cell_identity_generation = gas_cell_identity_generation[i];
+    record.interval_start_code = interval_start_code[i];
+    record.interval_end_code = interval_end_code[i];
+    record.end_state_valid = end_state_valid[i] != 0U;
+    const std::size_t begin = static_cast<std::size_t>(cell_offset[i]);
+    const std::size_t count = static_cast<std::size_t>(cell_count[i]);
+    record.cells.reserve(count);
+    for (std::size_t j = 0; j < count; ++j) {
+      const std::size_t k = begin + j;
+      record.cells.push_back(core::AmrTemporalBoundaryHistoryCellRecord{
+          .gas_cell_id = gas_cell_id[k],
+          .patch_local_cell = static_cast<std::size_t>(patch_local_cell[k]),
+          .start_mass_density_comoving = start_mass_density_comoving[k],
+          .start_momentum_density_x_comoving = start_momentum_density_x_comoving[k],
+          .start_momentum_density_y_comoving = start_momentum_density_y_comoving[k],
+          .start_momentum_density_z_comoving = start_momentum_density_z_comoving[k],
+          .start_total_energy_density_comoving = start_total_energy_density_comoving[k],
+          .end_mass_density_comoving = end_mass_density_comoving[k],
+          .end_momentum_density_x_comoving = end_momentum_density_x_comoving[k],
+          .end_momentum_density_y_comoving = end_momentum_density_y_comoving[k],
+          .end_momentum_density_z_comoving = end_momentum_density_z_comoving[k],
+          .end_total_energy_density_comoving = end_total_energy_density_comoving[k]});
+    }
+    records.push_back(std::move(record));
+  }
+  state.amr_temporal_boundary_history.assign(std::move(records));
+}
+
+void validateAmrTemporalBoundaryHistoryForRestart(const core::SimulationState& state) {
+  for (const core::AmrTemporalBoundaryHistoryRecord& record : state.amr_temporal_boundary_history.records()) {
+    if (record.patch_id == 0U || record.cells.empty() || !record.end_state_valid ||
+        record.gas_cell_identity_generation != state.gasCellIdentityGeneration() ||
+        !std::isfinite(record.interval_start_code) || !std::isfinite(record.interval_end_code) ||
+        record.interval_end_code <= record.interval_start_code) {
+      throw std::runtime_error("restart reader: active AMR temporal history is incomplete or stale");
+    }
+    for (std::size_t i = 0; i < record.cells.size(); ++i) {
+      const core::AmrTemporalBoundaryHistoryCellRecord& cell = record.cells[i];
+      const auto finite_state = [](double value) { return std::isfinite(value); };
+      if (cell.gas_cell_id == 0U || !finite_state(cell.start_mass_density_comoving) ||
+          !finite_state(cell.start_momentum_density_x_comoving) ||
+          !finite_state(cell.start_momentum_density_y_comoving) ||
+          !finite_state(cell.start_momentum_density_z_comoving) ||
+          !finite_state(cell.start_total_energy_density_comoving) ||
+          !finite_state(cell.end_mass_density_comoving) ||
+          !finite_state(cell.end_momentum_density_x_comoving) ||
+          !finite_state(cell.end_momentum_density_y_comoving) ||
+          !finite_state(cell.end_momentum_density_z_comoving) ||
+          !finite_state(cell.end_total_energy_density_comoving) ||
+          cell.start_mass_density_comoving <= 0.0 || cell.end_mass_density_comoving <= 0.0) {
+        throw std::runtime_error("restart reader: temporal history contains inadmissible conserved state");
+      }
+      for (std::size_t j = 0; j < i; ++j) {
+        if (record.cells[j].gas_cell_id == cell.gas_cell_id ||
+            record.cells[j].patch_local_cell == cell.patch_local_cell) {
+          throw std::runtime_error("restart reader: temporal history has duplicate stable cell identity or patch-local index");
+        }
+      }
+      const auto row = state.rowForGasCellId(cell.gas_cell_id);
+      if (!row.has_value() || state.cells.patch_index[*row] >= state.patches.size() ||
+          state.patches.patch_id[state.cells.patch_index[*row]] != record.patch_id) {
+        throw std::runtime_error("restart reader: AMR temporal history references a missing or moved coarse gas cell");
+      }
+    }
+  }
+}
+
 void writeStateGroup(hid_t root, const core::SimulationState& state) {
   Hdf5Handle state_group(openOrCreateGroup(root, "/state"));
   Hdf5Handle particles_group(openOrCreateGroup(state_group.get(), "particles"));
@@ -1261,6 +1497,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(patches_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.patches.owning_rank);
 
   writePendingFluxRegisterGroup(state_group.get(), state.pending_flux_registers);
+  writeAmrTemporalBoundaryHistoryGroup(state_group.get(), state.amr_temporal_boundary_history);
 
   writeDataset1d(state_group.get(), "species_count_by_species", H5T_STD_U64LE, H5T_NATIVE_UINT64, std::vector<std::uint64_t>(state.species.count_by_species.begin(), state.species.count_by_species.end()));
 
@@ -1447,6 +1684,7 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
 
   readGasCellIdentityGroup(state_group.get(), state, schema_version);
   readPendingFluxRegisterGroup(state_group.get(), state, schema_version);
+  readAmrTemporalBoundaryHistoryGroup(state_group.get(), state, schema_version);
 
   const auto species_count = readDataset1d<std::uint64_t>(state_group.get(), "species_count_by_species", H5T_NATIVE_UINT64);
   if (species_count.size() != state.species.count_by_species.size()) {
@@ -1761,8 +1999,9 @@ const RestartSchema& restartSchema() {
 }
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
-  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v16 ||
-      file_schema_version == k_restart_schema_v15 || file_schema_version == k_restart_schema_v14;
+  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v17 ||
+      file_schema_version == k_restart_schema_v16 || file_schema_version == k_restart_schema_v15 ||
+      file_schema_version == k_restart_schema_v14;
 }
 
 const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
@@ -1772,6 +2011,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "gas_cell_identity_lanes",
       "hydro_geometry_patch_state",
       "amr_pending_flux_register_state",
+      "amr_temporal_boundary_history_state",
       "species_specific_sidecars",
       "module_sidecars_with_schema_versions",
       "integrator_state",
@@ -1790,7 +2030,8 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
 std::uint64_t restartPayloadIntegrityHashImpl(
     const RestartWritePayload& payload,
     bool include_gas_identity_records,
-    bool include_pending_flux_registers) {
+    bool include_pending_flux_registers,
+    bool include_temporal_boundary_history) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -1979,6 +2220,48 @@ std::uint64_t restartPayloadIntegrityHashImpl(
       append_u64(std::bit_cast<std::uint64_t>(record.fine_total_energy_flux_integral_code));
     }
   }
+  if (include_temporal_boundary_history) {
+    std::vector<core::AmrTemporalBoundaryHistoryRecord> temporal_records(
+        state.amr_temporal_boundary_history.records().begin(),
+        state.amr_temporal_boundary_history.records().end());
+    std::sort(
+        temporal_records.begin(), temporal_records.end(),
+        [](const core::AmrTemporalBoundaryHistoryRecord& lhs,
+           const core::AmrTemporalBoundaryHistoryRecord& rhs) {
+          return lhs.patch_id < rhs.patch_id;
+        });
+    append_u64(static_cast<std::uint64_t>(temporal_records.size()));
+    for (const core::AmrTemporalBoundaryHistoryRecord& record : temporal_records) {
+      append_u64(record.patch_id);
+      append_u64(record.patch_level);
+      append_u64(record.patch_geometry_fingerprint);
+      append_u64(record.gas_cell_identity_generation);
+      append_u64(std::bit_cast<std::uint64_t>(record.interval_start_code));
+      append_u64(std::bit_cast<std::uint64_t>(record.interval_end_code));
+      append_u64(record.end_state_valid ? 1U : 0U);
+      std::vector<core::AmrTemporalBoundaryHistoryCellRecord> cells = record.cells;
+      std::sort(cells.begin(), cells.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.patch_local_cell == rhs.patch_local_cell
+            ? lhs.gas_cell_id < rhs.gas_cell_id
+            : lhs.patch_local_cell < rhs.patch_local_cell;
+      });
+      append_u64(static_cast<std::uint64_t>(cells.size()));
+      for (const core::AmrTemporalBoundaryHistoryCellRecord& cell : cells) {
+        append_u64(cell.gas_cell_id);
+        append_u64(static_cast<std::uint64_t>(cell.patch_local_cell));
+        append_u64(std::bit_cast<std::uint64_t>(cell.start_mass_density_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_x_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_y_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_z_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.start_total_energy_density_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.end_mass_density_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_x_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_y_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_z_comoving));
+        append_u64(std::bit_cast<std::uint64_t>(cell.end_total_energy_density_comoving));
+      }
+    }
+  }
   append_any_vec(state.star_particles.particle_index);
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);
@@ -2093,7 +2376,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true, true);
+  return restartPayloadIntegrityHashImpl(payload, true, true, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -2262,7 +2545,9 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       schema_name == k_restart_schema_name_v15 && schema_version == k_restart_schema_v15;
   const bool legacy_v16_schema =
       schema_name == k_restart_schema_name_v16 && schema_version == k_restart_schema_v16;
-  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema) ||
+  const bool legacy_v17_schema =
+      schema_name == k_restart_schema_name_v17 && schema_version == k_restart_schema_v17;
+  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema && !legacy_v17_schema) ||
       !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
@@ -2283,6 +2568,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
 
   readStateGroup(file.get(), result.state, schema_version);
   validateHydroGeometryStateForRestart(result.state, "restart reader");
+  validateAmrTemporalBoundaryHistoryForRestart(result.state);
 
   Hdf5Handle integrator_group(H5Gopen2(file.get(), "/integrator", H5P_DEFAULT));
   result.integrator_state.current_time_code = readScalarF64Attribute(integrator_group.get(), "current_time_code");
@@ -2370,6 +2656,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       restartPayloadIntegrityHashImpl(
           verify_payload,
           schema_version >= k_restart_schema_v15,
+          schema_version >= k_restart_schema_v17,
           schema_version >= restartSchema().version);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");

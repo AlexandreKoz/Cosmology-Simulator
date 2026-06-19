@@ -33,6 +33,11 @@ struct ProductionAmrHydroOptions {
   double reflux_coarse_dt_code = 0.0;
   std::uint32_t expected_fine_substeps = 1;
   std::uint32_t fine_substep_index = 0;
+  // Explicit AMR hydro state/ghost time.  Ghosts are consumed at update
+  // step-start before the in-solver MUSCL-Hancock predictor evolves them.
+  double state_time_code = 0.0;
+  double ghost_fill_time_code = 0.0;
+  bool enable_temporal_coarse_to_fine = false;
 };
 
 struct ProductionAmrHydroDiagnostics {

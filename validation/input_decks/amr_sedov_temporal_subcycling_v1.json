@@ -1,0 +1,17 @@
+{
+  "schema_version": "cosmosim_amr_hydro_campaign_input_v1",
+  "case_name": "sedov_3d_temporal_amr",
+  "geometry": "radial",
+  "gamma": 1.4,
+  "ambient_density_code": 1.0,
+  "explosion_energy_code": 1.0,
+  "deposition": {"method": "uniform_sphere", "radius_code": 0.03},
+  "domain_code": [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+  "boundary_conditions": "outflow",
+  "final_time_code": 0.05,
+  "cfl": 0.35,
+  "hydro": {"reconstruction": "muscl_hancock", "limiter": "van_leer", "riemann_solver": "hllc"},
+  "amr": {"refinement_ratio": 2, "coarse_to_fine_temporal_ghosts": "conserved_linear", "reflux": true},
+  "resolution_ladder": [32, 64, 128],
+  "reference_method": "Supply a separately provenance-tagged Sedov-Taylor self-similar profile or vetted table; blast radius alone is insufficient."
+}

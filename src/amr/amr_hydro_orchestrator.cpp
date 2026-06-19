@@ -991,8 +991,17 @@ void accumulateDiagnostics(ProductionAmrHydroDiagnostics& lhs, const ProductionA
   lhs.ghost_fill.same_level_ghosts_filled += rhs.ghost_fill.same_level_ghosts_filled;
   lhs.ghost_fill.coarse_to_fine_ghosts_filled += rhs.ghost_fill.coarse_to_fine_ghosts_filled;
   lhs.ghost_fill.fine_to_coarse_ghosts_filled += rhs.ghost_fill.fine_to_coarse_ghosts_filled;
+  lhs.ghost_fill.temporal_coarse_to_fine_ghosts_filled += rhs.ghost_fill.temporal_coarse_to_fine_ghosts_filled;
+  lhs.ghost_fill.temporal_endpoint_ghosts_filled += rhs.ghost_fill.temporal_endpoint_ghosts_filled;
   lhs.ghost_fill.skipped_remote_ghosts += rhs.ghost_fill.skipped_remote_ghosts;
   lhs.ghost_fill.stale_epoch_rejections += rhs.ghost_fill.stale_epoch_rejections;
+  lhs.ghost_fill.temporal_same_level_mismatch_rejections += rhs.ghost_fill.temporal_same_level_mismatch_rejections;
+  lhs.ghost_fill.temporal_history_missing_rejections += rhs.ghost_fill.temporal_history_missing_rejections;
+  lhs.ghost_fill.temporal_history_invalid_rejections += rhs.ghost_fill.temporal_history_invalid_rejections;
+  lhs.ghost_fill.temporal_time_out_of_range_rejections += rhs.ghost_fill.temporal_time_out_of_range_rejections;
+  lhs.ghost_fill.temporal_fine_to_coarse_misalignment_rejections += rhs.ghost_fill.temporal_fine_to_coarse_misalignment_rejections;
+  lhs.ghost_fill.temporal_geometry_mismatch_rejections += rhs.ghost_fill.temporal_geometry_mismatch_rejections;
+  lhs.ghost_fill.temporal_identity_mismatch_rejections += rhs.ghost_fill.temporal_identity_mismatch_rejections;
   lhs.ghost_fill.missing_source_records += rhs.ghost_fill.missing_source_records;
   lhs.ghost_fill.unresolved_ghosts += rhs.ghost_fill.unresolved_ghosts;
   lhs.reflux.complete_register_count += rhs.reflux.complete_register_count;
@@ -1186,12 +1195,25 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
   std::vector<AmrHydroGhostFillPatch> ghost_views;
   ghost_views.reserve(geometries.size());
   for (std::size_t i = 0; i < geometries.size(); ++i) {
+    const bool patch_requires_ghost_fill = all_cells_active || std::any_of(
+        geometries[i].real_cells.begin(), geometries[i].real_cells.end(),
+        [&active_lookup](const AmrHydroCellDescriptor& cell) {
+          return active_lookup.contains(cell.local_cell_row);
+        });
     ghost_views.push_back(AmrHydroGhostFillPatch{
         .geometry = &geometries[i],
         .conserved = &conserved_states[i],
         .residency = AmrGhostSourceResidency::kLocal,
         .ghost_hydro_epoch = state.gasCellIdentityGeneration(),
-        .expected_ghost_hydro_epoch = state.gasCellIdentityGeneration()});
+        .expected_ghost_hydro_epoch = state.gasCellIdentityGeneration(),
+        .target_state_time_code = options.state_time_code,
+        .ghost_fill_time_code = options.ghost_fill_time_code,
+        .source_current_state_time_code = options.state_time_code,
+        .temporal_boundary_history = options.enable_temporal_coarse_to_fine
+            ? &state.amr_temporal_boundary_history
+            : nullptr,
+        .enable_temporal_coarse_to_fine = options.enable_temporal_coarse_to_fine,
+        .requires_ghost_fill = patch_requires_ghost_fill});
   }
   diagnostics.ghost_fill = fillAmrHydroGhostCells(ghost_views, options.adiabatic_index);
 
@@ -1328,6 +1350,9 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   if (options.refinement_ratio < 2U) {
     throw std::invalid_argument("AMR hydro subcycling requires refinement_ratio >= 2");
   }
+  if (!std::isfinite(options.state_time_code)) {
+    throw std::invalid_argument("AMR hydro subcycling requires finite state_time_code");
+  }
   const std::vector<PatchDescriptor> descriptors = buildProductionAmrPatchDescriptors(state);
   int min_level = std::numeric_limits<int>::max();
   int max_level = std::numeric_limits<int>::min();
@@ -1339,6 +1364,20 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   if (min_level == std::numeric_limits<int>::max()) {
     return ProductionAmrHydroDiagnostics{};
   }
+  // The temporal-history representation below records one coarse interval and
+  // is intentionally scoped to a single local coarse/fine pair.  Rejecting a
+  // deeper hierarchy is safer than silently reusing an interval from the wrong
+  // parent fine substep; recursive multi-level temporal histories remain work
+  // for a later scheduler-integrated implementation.
+  if (max_level - min_level > 1) {
+    throw std::runtime_error(
+        "local temporal AMR subcycling currently supports one coarse/fine level pair; "
+        "a deeper hierarchy requires nested temporal boundary histories");
+  }
+  if (!state.amr_temporal_boundary_history.empty()) {
+    throw std::runtime_error(
+        "cannot start a new local AMR subcycle while restart-resumable temporal boundary history is active");
+  }
 
   ProductionAmrHydroDiagnostics diagnostics;
   diagnostics.patch_count = descriptors.size();
@@ -1346,61 +1385,78 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   diagnostics.max_level_advanced = static_cast<std::size_t>(std::max(0, max_level));
   diagnostics.substeps_by_level.assign(static_cast<std::size_t>(max_level + 1), 0U);
 
-  const auto advance_level = [&](auto&& self, int level, double dt_code, std::uint32_t substep_index) -> void {
-    const std::vector<std::uint32_t> rows = activeRowsForLevel(state, level, active_cell_rows);
-    if (!rows.empty()) {
-      hydro::HydroUpdateContext level_update = coarse_update;
-      level_update.dt_code = dt_code;
-      ProductionAmrHydroOptions level_options = options;
-      level_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
-      level_options.persist_incomplete_flux_registers = true;
-      level_options.reflux_coarse_dt_code = dt_code;
-      level_options.reflux_interval_end_code = level_options.reflux_interval_start_code + dt_code;
-      level_options.expected_fine_substeps = level < max_level ? options.refinement_ratio : options.refinement_ratio;
-      level_options.fine_substep_index = substep_index;
-      const ProductionAmrHydroDiagnostics level_diag = advanceProductionAmrHydro(
-          state,
-          rows,
-          level_update,
-          global_source_context,
-          solver,
-          riemann_solver,
-          source_terms,
-          level_options);
-      accumulateDiagnostics(diagnostics, level_diag);
-      if (level >= 0 && static_cast<std::size_t>(level) < diagnostics.substeps_by_level.size()) {
-        diagnostics.substeps_by_level[static_cast<std::size_t>(level)] += 1U;
-      }
-      diagnostics.subcycled_level_step_count += 1U;
-    }
-    if (level < max_level) {
-      const double fine_dt = dt_code / static_cast<double>(options.refinement_ratio);
-      for (std::uint32_t substep = 0; substep < options.refinement_ratio; ++substep) {
-        self(self, level + 1, fine_dt, substep);
-      }
-      const RefluxDiagnostics post_child_reflux = applyCompletePendingFluxRegistersToSimulationState(
-          state,
-          buildProductionAmrPatchDescriptors(state),
-          options.adiabatic_index);
-      diagnostics.reflux.complete_register_count += post_child_reflux.complete_register_count;
-      diagnostics.reflux.skipped_incomplete_register_count += post_child_reflux.skipped_incomplete_register_count;
-      diagnostics.reflux.skipped_area_mismatch_count += post_child_reflux.skipped_area_mismatch_count;
-      diagnostics.reflux.skipped_missing_target_count += post_child_reflux.skipped_missing_target_count;
-      diagnostics.reflux.corrected_cells += post_child_reflux.corrected_cells;
-      diagnostics.reflux.corrected_mass_code += post_child_reflux.corrected_mass_code;
-      diagnostics.reflux.corrected_momentum_x_code += post_child_reflux.corrected_momentum_x_code;
-      diagnostics.reflux.corrected_momentum_y_code += post_child_reflux.corrected_momentum_y_code;
-      diagnostics.reflux.corrected_momentum_z_code += post_child_reflux.corrected_momentum_z_code;
-      diagnostics.reflux.corrected_total_energy_code += post_child_reflux.corrected_total_energy_code;
-      diagnostics.reflux.corrected_energy_code += post_child_reflux.corrected_energy_code;
-      diagnostics.reflux.corrected_internal_energy_code += post_child_reflux.corrected_internal_energy_code;
-      diagnostics.pending_register_applied_count += post_child_reflux.complete_register_count;
-      diagnostics.pending_register_rejected_count += post_child_reflux.skipped_area_mismatch_count +
-          post_child_reflux.skipped_missing_target_count;
-    }
-  };
+  const std::vector<std::uint32_t> coarse_rows = activeRowsForLevel(state, min_level, active_cell_rows);
+  const std::vector<std::uint32_t> fine_rows = activeRowsForLevel(state, max_level, active_cell_rows);
+  const double coarse_start_code = options.state_time_code;
+  const double coarse_end_code = coarse_start_code + coarse_update.dt_code;
+  captureAmrTemporalBoundaryHistoryStart(state, descriptors, coarse_start_code, options.adiabatic_index);
 
-  advance_level(advance_level, min_level, coarse_update.dt_code, 0U);
+  if (!coarse_rows.empty()) {
+    ProductionAmrHydroOptions coarse_options = options;
+    coarse_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
+    coarse_options.persist_incomplete_flux_registers = true;
+    coarse_options.reflux_interval_start_code = coarse_start_code;
+    coarse_options.reflux_interval_end_code = coarse_end_code;
+    coarse_options.reflux_coarse_dt_code = coarse_update.dt_code;
+    coarse_options.expected_fine_substeps = options.refinement_ratio;
+    coarse_options.fine_substep_index = 0U;
+    coarse_options.state_time_code = coarse_start_code;
+    coarse_options.ghost_fill_time_code = coarse_start_code;
+    coarse_options.enable_temporal_coarse_to_fine = false;
+    const ProductionAmrHydroDiagnostics coarse_diag = advanceProductionAmrHydro(
+        state, coarse_rows, coarse_update, global_source_context, solver, riemann_solver, source_terms, coarse_options);
+    accumulateDiagnostics(diagnostics, coarse_diag);
+    diagnostics.substeps_by_level[static_cast<std::size_t>(min_level)] = 1U;
+    diagnostics.subcycled_level_step_count += 1U;
+  }
+  captureAmrTemporalBoundaryHistoryEnd(state, descriptors, coarse_end_code, options.adiabatic_index);
+
+  const double fine_dt_code = coarse_update.dt_code / static_cast<double>(options.refinement_ratio);
+  for (std::uint32_t substep = 0; substep < options.refinement_ratio; ++substep) {
+    if (fine_rows.empty()) {
+      continue;
+    }
+    const double fine_start_code = coarse_start_code + static_cast<double>(substep) * fine_dt_code;
+    hydro::HydroUpdateContext fine_update = coarse_update;
+    fine_update.dt_code = fine_dt_code;
+    ProductionAmrHydroOptions fine_options = options;
+    fine_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
+    fine_options.persist_incomplete_flux_registers = true;
+    fine_options.reflux_interval_start_code = coarse_start_code;
+    fine_options.reflux_interval_end_code = coarse_end_code;
+    fine_options.reflux_coarse_dt_code = coarse_update.dt_code;
+    fine_options.expected_fine_substeps = options.refinement_ratio;
+    fine_options.fine_substep_index = substep;
+    fine_options.state_time_code = fine_start_code;
+    // Ghosts are consumed before the predictor inside HydroCoreSolver, hence
+    // this is the physical beginning of the fine substep.
+    fine_options.ghost_fill_time_code = fine_start_code;
+    fine_options.enable_temporal_coarse_to_fine = true;
+    const ProductionAmrHydroDiagnostics fine_diag = advanceProductionAmrHydro(
+        state, fine_rows, fine_update, global_source_context, solver, riemann_solver, source_terms, fine_options);
+    accumulateDiagnostics(diagnostics, fine_diag);
+    diagnostics.substeps_by_level[static_cast<std::size_t>(max_level)] += 1U;
+    diagnostics.subcycled_level_step_count += 1U;
+  }
+
+  const RefluxDiagnostics post_child_reflux = applyCompletePendingFluxRegistersToSimulationState(
+      state, buildProductionAmrPatchDescriptors(state), options.adiabatic_index);
+  diagnostics.reflux.complete_register_count += post_child_reflux.complete_register_count;
+  diagnostics.reflux.skipped_incomplete_register_count += post_child_reflux.skipped_incomplete_register_count;
+  diagnostics.reflux.skipped_area_mismatch_count += post_child_reflux.skipped_area_mismatch_count;
+  diagnostics.reflux.skipped_missing_target_count += post_child_reflux.skipped_missing_target_count;
+  diagnostics.reflux.corrected_cells += post_child_reflux.corrected_cells;
+  diagnostics.reflux.corrected_mass_code += post_child_reflux.corrected_mass_code;
+  diagnostics.reflux.corrected_momentum_x_code += post_child_reflux.corrected_momentum_x_code;
+  diagnostics.reflux.corrected_momentum_y_code += post_child_reflux.corrected_momentum_y_code;
+  diagnostics.reflux.corrected_momentum_z_code += post_child_reflux.corrected_momentum_z_code;
+  diagnostics.reflux.corrected_total_energy_code += post_child_reflux.corrected_total_energy_code;
+  diagnostics.reflux.corrected_energy_code += post_child_reflux.corrected_energy_code;
+  diagnostics.reflux.corrected_internal_energy_code += post_child_reflux.corrected_internal_energy_code;
+  diagnostics.pending_register_applied_count += post_child_reflux.complete_register_count;
+  diagnostics.pending_register_rejected_count += post_child_reflux.skipped_area_mismatch_count +
+      post_child_reflux.skipped_missing_target_count;
+
   std::size_t complete_pending = 0;
   for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
     if (pending.isComplete()) {
@@ -1409,6 +1465,9 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   }
   diagnostics.pending_register_completed_count = std::max(diagnostics.pending_register_completed_count, complete_pending);
   diagnostics.pending_register_deferred_count = state.pending_flux_registers.size() - complete_pending;
+  if (state.pending_flux_registers.empty()) {
+    retireAmrTemporalBoundaryHistory(state);
+  }
   return diagnostics;
 }
 
@@ -1418,6 +1477,10 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
     std::uint64_t first_child_patch_id,
     std::uint64_t first_child_gas_cell_id,
     const ProductionAmrHydroOptions& options) {
+  if (!state.amr_temporal_boundary_history.empty()) {
+    throw std::runtime_error(
+        "production AMR refine is prohibited while a restart-resumable temporal boundary history is active");
+  }
   if (first_child_patch_id == 0U || first_child_gas_cell_id == 0U) {
     throw std::invalid_argument("production AMR refine requires nonzero child patch and gas-cell ID seeds");
   }
@@ -1552,6 +1615,10 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
     const PatchDescriptor& parent_patch,
     std::uint64_t replacement_gas_cell_id,
     const ProductionAmrHydroOptions& options) {
+  if (!state.amr_temporal_boundary_history.empty()) {
+    throw std::runtime_error(
+        "production AMR derefine is prohibited while a restart-resumable temporal boundary history is active");
+  }
   if (replacement_gas_cell_id == 0U) {
     throw std::invalid_argument("production AMR derefine requires a nonzero replacement gas_cell_id seed");
   }

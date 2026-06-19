@@ -679,6 +679,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_amr_ghost_fill tests/unit/test_amr_ghost_fill.cpp)
   target_link_libraries(test_unit_amr_ghost_fill PRIVATE cosmosim_amr cosmosim_hydro)
   add_test(NAME unit_amr_ghost_fill COMMAND test_unit_amr_ghost_fill)
+  add_executable(test_unit_amr_temporal_ghost_fill tests/unit/test_amr_temporal_ghost_fill.cpp)
+  target_link_libraries(test_unit_amr_temporal_ghost_fill PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_custom_target(unit_amr_temporal_ghost_fill DEPENDS test_unit_amr_temporal_ghost_fill)
+  add_test(NAME unit_amr_temporal_ghost_fill COMMAND test_unit_amr_temporal_ghost_fill)
+  cosmosim_mark_runtime_truth_test(unit_amr_temporal_ghost_fill amr hydro gas unit temporal_ghost)
   add_executable(test_unit_amr_flux_register_generation tests/unit/test_amr_flux_register_generation.cpp)
   target_link_libraries(test_unit_amr_flux_register_generation PRIVATE cosmosim_amr cosmosim_hydro)
   add_test(NAME unit_amr_flux_register_generation COMMAND test_unit_amr_flux_register_generation)
@@ -846,6 +851,16 @@ if(COSMOSIM_ENABLE_TESTS)
   endforeach()
   add_custom_target(integration_restart_equivalence_amr_hydro DEPENDS test_integration_restart_equivalence_amr_hydro)
   add_custom_target(integration_restart_equivalence_amr_flux_registers DEPENDS test_integration_restart_equivalence_amr_flux_registers)
+  add_executable(
+    test_integration_restart_equivalence_amr_temporal_ghosts
+    tests/integration/test_restart_equivalence_amr_temporal_ghosts.cpp)
+  target_link_libraries(test_integration_restart_equivalence_amr_temporal_ghosts PRIVATE cosmosim_all)
+  add_custom_target(
+    integration_restart_equivalence_amr_temporal_ghosts
+    DEPENDS test_integration_restart_equivalence_amr_temporal_ghosts)
+  add_test(
+    NAME integration_restart_equivalence_amr_temporal_ghosts
+    COMMAND test_integration_restart_equivalence_amr_temporal_ghosts)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_dm_only restart scheduler equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_treepm restart scheduler treepm pm equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_hydro_toy restart scheduler hydro gas equivalence integration)
@@ -854,6 +869,7 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_stochastic_sources restart scheduler stochastic source_terms equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_hydro restart scheduler hydro gas amr equivalence integration)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_flux_registers restart scheduler hydro gas amr equivalence integration pending_flux)
+  cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_temporal_ghosts restart scheduler hydro gas amr equivalence integration pending_flux temporal_ghost)
 
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
@@ -985,6 +1001,22 @@ if(COSMOSIM_ENABLE_TESTS)
   target_include_directories(test_validation_hydro_classics PRIVATE tests tests/validation)
   add_test(NAME validation_hydro_classics COMMAND test_validation_hydro_classics)
   set_tests_properties(validation_hydro_classics PROPERTIES LABELS "validation;integration;hydro")
+
+  add_executable(
+    test_validation_amr_hydro_convergence
+    tests/validation/test_validation_amr_hydro_convergence.cpp)
+  target_link_libraries(test_validation_amr_hydro_convergence PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  target_include_directories(test_validation_amr_hydro_convergence PRIVATE tests/validation)
+  add_test(NAME validation_amr_hydro_convergence COMMAND test_validation_amr_hydro_convergence)
+  set_tests_properties(validation_amr_hydro_convergence PROPERTIES LABELS "validation;amr;hydro;contract")
+
+  add_executable(
+    test_validation_amr_cross_code_contract
+    tests/validation/test_validation_amr_cross_code_contract.cpp)
+  target_link_libraries(test_validation_amr_cross_code_contract PRIVATE cosmosim_core)
+  target_include_directories(test_validation_amr_cross_code_contract PRIVATE tests/validation)
+  add_test(NAME validation_amr_cross_code_contract COMMAND test_validation_amr_cross_code_contract)
+  set_tests_properties(validation_amr_cross_code_contract PROPERTIES LABELS "validation;amr;cross_code;contract")
 
   add_executable(
     test_validation_regression

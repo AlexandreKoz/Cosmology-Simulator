@@ -1,0 +1,13 @@
+{
+  "schema_version": "cosmosim_amr_hydro_campaign_v1",
+  "campaign": "amr_hydro_convergence_campaign_v1",
+  "status": "template_requires_actual_chui_profile_outputs",
+  "reference_manifest": "validation/reference/REPLACE_WITH_REFERENCE_MANIFEST.json",
+  "reference_profile": "validation/reference/REPLACE_WITH_REFERENCE_PROFILE.csv",
+  "resolution_runs": [
+    {"effective_resolution": 64, "numerical_manifest": "output/validation/sod_n064_manifest.json", "numerical_profile": "output/validation/sod_n064.csv"},
+    {"effective_resolution": 128, "numerical_manifest": "output/validation/sod_n128_manifest.json", "numerical_profile": "output/validation/sod_n128.csv"},
+    {"effective_resolution": 256, "numerical_manifest": "output/validation/sod_n256_manifest.json", "numerical_profile": "output/validation/sod_n256.csv"}
+  ],
+  "notes": "Paths are intentionally unresolved templates. Replace only with actual, provenance-carrying CHUI and reference outputs; this repository contains no fabricated external result."
+}

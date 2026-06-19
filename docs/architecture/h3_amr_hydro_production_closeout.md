@@ -95,6 +95,20 @@ The production AMR hydro path now has two explicitly selectable sweep modes:
 
 The subcycling mode is intentionally scoped. It is real in the sense that finer AMR levels are advanced with smaller timesteps and expected fine-substep coverage is tracked before reflux can be applied. It is not a claim that the global production scheduler owns an arbitrary Berger-Colella AMR timeline.
 
-Pending flux-register state is now restart-authoritative. Incomplete records can be merged into `core::SimulationState::pending_flux_registers`, serialized through HDF5 restart schema v17, restored, validated by stable gas-cell identity, and completed after restart. The new `integration_restart_equivalence_amr_flux_registers` test exercises this direct-vs-restart path.
+Pending flux-register state is now restart-authoritative. Incomplete records can be merged into `core::SimulationState::pending_flux_registers`, serialized through HDF5 restart schema v17 (retained by current v18 checkpoints), restored, validated by stable gas-cell identity, and completed after restart. The new `integration_restart_equivalence_amr_flux_registers` test exercises this direct-vs-restart path.
 
 The validation posture is unchanged in the scientific sense: shock/Sedov/synchronization tests remain fast CI/regression guards. They are stronger than smoke tests, but they are not convergence studies or cross-code validation.
+
+---
+
+## Post-H3 temporal ghost update (2026-06-18)
+
+The former “no temporal interpolation model” limitation is closed only in a bounded local form: during the
+implemented two-level local subcycle, fine start-of-step ghosts are linearly interpolated in conserved state
+from a stable-ID coarse history over the just-advanced coarse interval. Histories reject stale geometry and
+identity generations and are persisted through HDF5 restart schema v18. The dedicated temporal restart test
+uses the restored history at midpoint before completing pending reflux.
+
+This does not close distributed ghost exchange, MPI migration/regrid during active history, arbitrary-depth
+nested subcycling, or scheduler ownership of the AMR timeline. Long scientific convergence and real
+cross-code comparison remain unexecuted future validation work.

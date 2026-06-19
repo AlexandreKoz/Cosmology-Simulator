@@ -1,0 +1,19 @@
+{
+  "schema_version": "cosmosim_amr_hydro_campaign_input_v1",
+  "case_name": "sod_1d_temporal_amr",
+  "geometry": "line",
+  "gamma": 1.4,
+  "domain_code": [0.0, 1.0],
+  "boundary_conditions": "outflow",
+  "initial_primitive": {
+    "left": {"rho_code": 1.0, "vel_x_code": 0.0, "pressure_code": 1.0},
+    "right": {"rho_code": 0.125, "vel_x_code": 0.0, "pressure_code": 0.1},
+    "discontinuity_x_code": 0.5
+  },
+  "final_time_code": 0.2,
+  "cfl": 0.4,
+  "hydro": {"reconstruction": "muscl_hancock", "limiter": "van_leer", "riemann_solver": "hllc"},
+  "amr": {"refinement_ratio": 2, "coarse_to_fine_temporal_ghosts": "conserved_linear", "reflux": true},
+  "resolution_ladder": [64, 128, 256],
+  "expected_interpretation": "Shock/contact solutions are globally shock-limited; do not require second-order global L1 convergence."
+}

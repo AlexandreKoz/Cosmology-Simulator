@@ -31,8 +31,8 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v17");
-  assert(schema.version == 17);
+  assert(schema.name == "cosmosim_restart_v18");
+  assert(schema.version == 18);
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
@@ -47,6 +47,7 @@ int main() {
   bool saw_stochastic_state = false;
   bool saw_restart_diagnostics = false;
   bool saw_amr_pending_flux = false;
+  bool saw_amr_temporal_history = false;
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
@@ -56,6 +57,7 @@ int main() {
     saw_stochastic_state = saw_stochastic_state || item == "stochastic_module_persistent_state";
     saw_restart_diagnostics = saw_restart_diagnostics || item == "restart_diagnostics_summary";
     saw_amr_pending_flux = saw_amr_pending_flux || item == "amr_pending_flux_register_state";
+    saw_amr_temporal_history = saw_amr_temporal_history || item == "amr_temporal_boundary_history_state";
   }
   assert(saw_softening);
   assert(saw_gas_identity);
@@ -65,6 +67,7 @@ int main() {
   assert(saw_stochastic_state);
   assert(saw_restart_diagnostics);
   assert(saw_amr_pending_flux);
+  assert(saw_amr_temporal_history);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;

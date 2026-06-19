@@ -205,7 +205,7 @@ The HDF5 restart-equivalence coverage now includes a case where an incomplete pe
 The old limitations are partly closed:
 
 - **AMR hydro subcycling:** implemented as local orchestrator-level subcycling for explicit AMR patch coverage. It is not yet scheduler-owned, MPI-distributed, or cosmological timeline-integrated.
-- **Persistent pending flux-register state:** implemented in restart-authoritative `SimulationState` and serialized under `/state/amr_pending_flux_registers` in restart schema v17.
+- **Persistent pending flux-register state:** implemented in restart-authoritative `SimulationState` and serialized under `/state/amr_pending_flux_registers` in restart schema v17 (retained by current v18 checkpoints).
 - **H3.7 validation:** still CI-scale. The new subcycling/pending-register tests are deterministic regression/credibility guards, not scientific convergence or cross-code validation.
 
 ### Remaining limitations
@@ -216,3 +216,18 @@ The old limitations are partly closed:
 - No restart after real MPI AMR patch migration.
 - No publication-grade AMR shock/Sedov convergence deck.
 - No cross-code comparison against AREPO, RAMSES, ENZO, Athena++, or another reference solver.
+
+---
+
+## Post-H3 temporal-boundary and validation-campaign update (2026-06-18)
+
+The local AMR subcycling scope now includes restart-authoritative coarse temporal boundary histories and
+conserved-state coarse-to-fine ghost interpolation at fine-update start time. HDF5 schema v18 serializes
+active histories and `integration_restart_equivalence_amr_temporal_ghosts` resumes a midpoint fill after
+restart while an incomplete pending flux register is also present. This is accepted only for local two-level
+orchestrator-level subcycling; it is not scheduler-owned general AMR subcycling or distributed MPI AMR.
+
+The repository now has convergence/cross-code campaign machinery, but no long CHUÍ Sod/Sedov campaign
+or external-code result was run in this pass. H3.7 tests remain CI guards. See
+`docs/validation/amr_hydro_convergence_campaign.md` and
+`docs/validation/amr_hydro_cross_code_protocol.md`.

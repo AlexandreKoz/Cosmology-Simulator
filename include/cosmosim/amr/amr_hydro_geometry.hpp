@@ -25,9 +25,15 @@ enum class AmrHydroGhostFillStatus : std::uint8_t {
   kFilledPhysicalBoundary,
   kFilledSameLevel,
   kFilledCoarseToFine,
+  kFilledCoarseToFineTemporal,
   kFilledFineToCoarse,
   kSkippedRemote,
   kRejectedStaleRemote,
+  kRejectedTemporalSameLevelMismatch,
+  kRejectedTemporalHistoryMissing,
+  kRejectedTemporalHistoryInvalid,
+  kRejectedTemporalTimeOutOfRange,
+  kRejectedTemporalFineToCoarseMismatch,
   kMissingSource,
 };
 

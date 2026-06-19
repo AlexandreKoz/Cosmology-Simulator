@@ -425,6 +425,73 @@ struct PendingFluxRegisterRecord {
   }
 };
 
+struct AmrTemporalBoundaryHistoryCellRecord {
+  // Stable, row-order-independent source identity for one coarse patch cell.
+  std::uint64_t gas_cell_id = 0;
+  std::size_t patch_local_cell = 0;
+  double start_mass_density_comoving = 0.0;
+  double start_momentum_density_x_comoving = 0.0;
+  double start_momentum_density_y_comoving = 0.0;
+  double start_momentum_density_z_comoving = 0.0;
+  double start_total_energy_density_comoving = 0.0;
+  double end_mass_density_comoving = 0.0;
+  double end_momentum_density_x_comoving = 0.0;
+  double end_momentum_density_y_comoving = 0.0;
+  double end_momentum_density_z_comoving = 0.0;
+  double end_total_energy_density_comoving = 0.0;
+};
+
+struct AmrTemporalBoundaryHistoryRecord {
+  // Persistent coarse-to-fine temporal boundary interval.  Geometry and cell
+  // identities are stored explicitly so a restart or dense-row reorder cannot
+  // turn a history entry into a positional lookup.
+  std::uint64_t patch_id = 0;
+  std::uint8_t patch_level = 0;
+  std::uint64_t patch_geometry_fingerprint = 0;
+  std::uint64_t gas_cell_identity_generation = 0;
+  double interval_start_code = 0.0;
+  double interval_end_code = 0.0;
+  bool end_state_valid = false;
+  std::vector<AmrTemporalBoundaryHistoryCellRecord> cells;
+};
+
+class AmrTemporalBoundaryHistoryStore {
+ public:
+  [[nodiscard]] bool empty() const noexcept { return m_records.empty(); }
+  [[nodiscard]] std::size_t size() const noexcept { return m_records.size(); }
+  [[nodiscard]] std::span<const AmrTemporalBoundaryHistoryRecord> records() const noexcept { return m_records; }
+  [[nodiscard]] std::span<AmrTemporalBoundaryHistoryRecord> mutableRecords() noexcept { return m_records; }
+  void clear() noexcept { m_records.clear(); }
+  void assign(std::vector<AmrTemporalBoundaryHistoryRecord> records) { m_records = std::move(records); }
+  [[nodiscard]] const AmrTemporalBoundaryHistoryRecord* findByPatchId(std::uint64_t patch_id) const noexcept {
+    for (const auto& record : m_records) {
+      if (record.patch_id == patch_id) {
+        return &record;
+      }
+    }
+    return nullptr;
+  }
+  [[nodiscard]] AmrTemporalBoundaryHistoryRecord* findByPatchId(std::uint64_t patch_id) noexcept {
+    for (auto& record : m_records) {
+      if (record.patch_id == patch_id) {
+        return &record;
+      }
+    }
+    return nullptr;
+  }
+  AmrTemporalBoundaryHistoryRecord& upsertByPatchId(const AmrTemporalBoundaryHistoryRecord& record) {
+    if (auto* existing = findByPatchId(record.patch_id); existing != nullptr) {
+      *existing = record;
+      return *existing;
+    }
+    m_records.push_back(record);
+    return m_records.back();
+  }
+
+ private:
+  std::vector<AmrTemporalBoundaryHistoryRecord> m_records;
+};
+
 class PendingFluxRegisterStore {
  public:
   [[nodiscard]] bool empty() const noexcept { return m_records.empty(); }
@@ -653,6 +720,9 @@ class SimulationState {
   PatchSoa patches;
   // Restart-authoritative AMR hydro deferred synchronization state.
   PendingFluxRegisterStore pending_flux_registers;
+  // Restart-authoritative coarse temporal boundary intervals retained while
+  // local AMR subcycling has fine work outstanding.
+  AmrTemporalBoundaryHistoryStore amr_temporal_boundary_history;
   SpeciesContainer species;
   ParticleSpeciesIndex particle_species_index;
   StarParticleSidecar star_particles;
