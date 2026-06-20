@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
+#include "workflows/internal/cartesian_gas_cell_layout.hpp"
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/cosmology.hpp"
@@ -199,6 +200,20 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
     }
   }
   return true;
+}
+
+[[nodiscard]] bool gravityForceCachesEquivalent(
+    const io::GravityForceCachePersistentState& lhs,
+    const io::GravityForceCachePersistentState& rhs) {
+  return lhs.valid == rhs.valid &&
+      lhs.particle_id == rhs.particle_id &&
+      lhs.gas_cell_id == rhs.gas_cell_id &&
+      lhs.particle_accel_x_comoving == rhs.particle_accel_x_comoving &&
+      lhs.particle_accel_y_comoving == rhs.particle_accel_y_comoving &&
+      lhs.particle_accel_z_comoving == rhs.particle_accel_z_comoving &&
+      lhs.cell_accel_x_comoving == rhs.cell_accel_x_comoving &&
+      lhs.cell_accel_y_comoving == rhs.cell_accel_y_comoving &&
+      lhs.cell_accel_z_comoving == rhs.cell_accel_z_comoving;
 }
 
 [[nodiscard]] std::string pmDecompositionModeName(core::PmDecompositionMode mode) {
@@ -425,210 +440,17 @@ void synchronizeParentParticleCompatibilityMirrors(
   }
 }
 
-[[nodiscard]] std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
-  std::vector<double> unique(values.begin(), values.end());
-  std::sort(unique.begin(), unique.end());
-  unique.erase(
-      std::unique(
-          unique.begin(),
-          unique.end(),
-          [](double lhs, double rhs) {
-            const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
-            return std::abs(lhs - rhs) <= 1.0e-10 * scale;
-          }),
-      unique.end());
-  return unique;
-}
-
-[[nodiscard]] double coordinateSpacing(
-    const std::vector<double>& coordinates,
-    double fallback_width_comoving) {
-  if (coordinates.size() <= 1U) {
-    return fallback_width_comoving;
-  }
-  const double span = coordinates.back() - coordinates.front();
-  return std::max(1.0e-12, span / static_cast<double>(coordinates.size() - 1U));
-}
-
-[[nodiscard]] std::optional<hydro::HydroCartesianPatchSpec> trySpecFromCellCenters(
+[[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
-    const core::SimulationConfig& config) {
-  const std::size_t cell_count = state.cells.size();
-  if (cell_count == 0U) {
-    return std::nullopt;
+    const core::SimulationConfig& config,
+    std::string_view caller) {
+  internal::CartesianGasCellLayoutBuildResult result =
+      internal::buildCartesianGasCellRowLayout(state, config);
+  if (!result.ok()) {
+    throw std::runtime_error(
+        std::string(caller) + ": fixed Cartesian hydro geometry rejected: " + result.diagnostic);
   }
-  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
-  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
-  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-  if (x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty() ||
-      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count) {
-    return std::nullopt;
-  }
-  const double dx = coordinateSpacing(
-      x_coordinates, config.cosmology.box_size_x_mpc_comoving / static_cast<double>(x_coordinates.size()));
-  const double dy = coordinateSpacing(
-      y_coordinates, config.cosmology.box_size_y_mpc_comoving / static_cast<double>(y_coordinates.size()));
-  const double dz = coordinateSpacing(
-      z_coordinates, config.cosmology.box_size_z_mpc_comoving / static_cast<double>(z_coordinates.size()));
-  return hydro::HydroCartesianPatchSpec{
-      .nx = x_coordinates.size(),
-      .ny = y_coordinates.size(),
-      .nz = z_coordinates.size(),
-      .origin_x_comoving = x_coordinates.front() - 0.5 * dx,
-      .origin_y_comoving = y_coordinates.front() - 0.5 * dy,
-      .origin_z_comoving = z_coordinates.front() - 0.5 * dz,
-      .cell_width_x_comoving = dx,
-      .cell_width_y_comoving = dy,
-      .cell_width_z_comoving = dz,
-  };
-}
-
-[[nodiscard]] hydro::HydroCartesianPatchSpec fallbackCartesianSpec(
-    std::size_t cell_count,
-    const core::SimulationConfig& config) {
-  const std::array<std::size_t, 3> factors = hydro::chooseNearCubicCartesianFactors(cell_count);
-  return hydro::HydroCartesianPatchSpec{
-      .nx = factors[0],
-      .ny = factors[1],
-      .nz = factors[2],
-      .origin_x_comoving = 0.0,
-      .origin_y_comoving = 0.0,
-      .origin_z_comoving = 0.0,
-      .cell_width_x_comoving = config.cosmology.box_size_x_mpc_comoving /
-          static_cast<double>(std::max<std::size_t>(factors[0], 1U)),
-      .cell_width_y_comoving = config.cosmology.box_size_y_mpc_comoving /
-          static_cast<double>(std::max<std::size_t>(factors[1], 1U)),
-      .cell_width_z_comoving = config.cosmology.box_size_z_mpc_comoving /
-          static_cast<double>(std::max<std::size_t>(factors[2], 1U)),
-  };
-}
-
-[[nodiscard]] std::optional<std::size_t> coordinateIndex(
-    const std::vector<double>& coordinates,
-    double value) {
-  for (std::size_t index = 0; index < coordinates.size(); ++index) {
-    const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
-    if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
-      return index;
-    }
-  }
-  return std::nullopt;
-}
-
-struct CartesianGasCellRowLayout {
-  hydro::HydroCartesianPatchSpec spec;
-  // Geometry storage is physical Cartesian order; dense CellSoa order is only a
-  // transient storage mapping and must not define hydro topology.
-  std::vector<std::uint32_t> dense_row_by_geometry_row;
-  std::vector<std::uint32_t> geometry_row_by_dense_row;
-};
-
-[[nodiscard]] bool coordinatesHaveUniformSpacing(const std::vector<double>& coordinates) {
-  if (coordinates.size() <= 2U) {
-    return true;
-  }
-  const double expected = coordinates[1] - coordinates[0];
-  if (!(expected > 0.0) || !std::isfinite(expected)) {
-    return false;
-  }
-  for (std::size_t index = 2; index < coordinates.size(); ++index) {
-    const double actual = coordinates[index] - coordinates[index - 1U];
-    const double scale = std::max({1.0, std::abs(expected), std::abs(actual)});
-    if (std::abs(actual - expected) > 1.0e-10 * scale) {
-      return false;
-    }
-  }
-  return true;
-}
-
-[[nodiscard]] std::optional<CartesianGasCellRowLayout> tryCartesianGasCellRowLayout(
-    const core::SimulationState& state,
-    const core::SimulationConfig& config) {
-  const std::size_t cell_count = state.cells.size();
-  if (cell_count == 0U) {
-    return std::nullopt;
-  }
-  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
-  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
-  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-  if (x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty() ||
-      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
-      !coordinatesHaveUniformSpacing(x_coordinates) ||
-      !coordinatesHaveUniformSpacing(y_coordinates) ||
-      !coordinatesHaveUniformSpacing(z_coordinates)) {
-    return std::nullopt;
-  }
-
-  const double fallback_dx = config.cosmology.box_size_x_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(x_coordinates.size(), 1U));
-  const double fallback_dy = config.cosmology.box_size_y_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(y_coordinates.size(), 1U));
-  const double fallback_dz = config.cosmology.box_size_z_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(z_coordinates.size(), 1U));
-  const double dx = coordinateSpacing(x_coordinates, fallback_dx);
-  const double dy = coordinateSpacing(y_coordinates, fallback_dy);
-  const double dz = coordinateSpacing(z_coordinates, fallback_dz);
-  const hydro::HydroCartesianPatchSpec spec{
-      .nx = x_coordinates.size(),
-      .ny = y_coordinates.size(),
-      .nz = z_coordinates.size(),
-      .origin_x_comoving = x_coordinates.front() - 0.5 * dx,
-      .origin_y_comoving = y_coordinates.front() - 0.5 * dy,
-      .origin_z_comoving = z_coordinates.front() - 0.5 * dz,
-      .cell_width_x_comoving = dx,
-      .cell_width_y_comoving = dy,
-      .cell_width_z_comoving = dz,
-  };
-  const hydro::HydroPatchGeometry geometry = hydro::makeCartesianPatchGeometry(spec);
-  CartesianGasCellRowLayout layout;
-  layout.spec = spec;
-  layout.dense_row_by_geometry_row.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
-  layout.geometry_row_by_dense_row.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
-  for (std::uint32_t dense_row = 0; dense_row < cell_count; ++dense_row) {
-    const auto i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[dense_row]);
-    const auto j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[dense_row]);
-    const auto k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[dense_row]);
-    if (!i.has_value() || !j.has_value() || !k.has_value()) {
-      return std::nullopt;
-    }
-    const std::size_t geometry_row = geometry.linearCellIndex(*i, *j, *k);
-    if (geometry_row >= cell_count ||
-        layout.dense_row_by_geometry_row[geometry_row] != std::numeric_limits<std::uint32_t>::max()) {
-      return std::nullopt;
-    }
-    layout.dense_row_by_geometry_row[geometry_row] = dense_row;
-    layout.geometry_row_by_dense_row[dense_row] = static_cast<std::uint32_t>(geometry_row);
-  }
-  if (std::find(layout.dense_row_by_geometry_row.begin(), layout.dense_row_by_geometry_row.end(),
-                std::numeric_limits<std::uint32_t>::max()) != layout.dense_row_by_geometry_row.end()) {
-    return std::nullopt;
-  }
-  return layout;
-}
-
-[[nodiscard]] bool rowOrderMatchesCartesianSpec(
-    const core::SimulationState& state,
-    const hydro::HydroCartesianPatchSpec& spec) {
-  if (state.cells.size() == 0) {
-    return true;
-  }
-  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
-  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
-  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-  if (x_coordinates.size() != spec.nx || y_coordinates.size() != spec.ny || z_coordinates.size() != spec.nz) {
-    return false;
-  }
-  const hydro::HydroPatchGeometry row_order_geometry = hydro::makeCartesianPatchGeometry(spec);
-  for (std::size_t row = 0; row < state.cells.size(); ++row) {
-    const std::optional<std::size_t> i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[row]);
-    const std::optional<std::size_t> j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[row]);
-    const std::optional<std::size_t> k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[row]);
-    if (!i.has_value() || !j.has_value() || !k.has_value() ||
-        row_order_geometry.linearCellIndex(*i, *j, *k) != row) {
-      return false;
-    }
-  }
-  return true;
+  return std::move(result.layout);
 }
 
 [[nodiscard]] LocalGasCellCflMetadata buildLocalGasCellCflMetadata(
@@ -641,27 +463,73 @@ struct CartesianGasCellRowLayout {
   metadata.cell_width_z_code.resize(cell_count);
   metadata.patch_id_by_cell.assign(cell_count, 0U);
   metadata.patch_row_by_cell.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
-  if (cell_count == 0) {
+  if (cell_count == 0U) {
+    return metadata;
+  }
+  state.requireGasCellIdentityMapCoversDenseRows("hydro CFL metadata construction");
+
+  if (amr::hasProductionAmrHydroCoverage(state)) {
+    const std::vector<amr::PatchDescriptor> descriptors = amr::buildProductionAmrPatchDescriptors(state);
+    for (const amr::PatchDescriptor& descriptor : descriptors) {
+      const amr::AmrHydroPatchGeometry patch_geometry = amr::buildAmrHydroPatchGeometry(state, descriptor);
+      for (const amr::AmrHydroCellDescriptor& cell : patch_geometry.real_cells) {
+        if (cell.local_cell_row >= cell_count || cell.patch_local_cell == hydro::k_invalid_cell_index) {
+          throw std::runtime_error("AMR CFL metadata received an invalid physical cell descriptor");
+        }
+        const auto* identity = state.gas_cell_identity.findByLocalRow(cell.local_cell_row);
+        if (identity == nullptr || identity->gas_cell_id != cell.gas_cell_id ||
+            identity->owning_patch_id != descriptor.patch_id) {
+          throw std::runtime_error("AMR CFL metadata rejected stale gas-cell identity or patch ownership");
+        }
+        const std::uint32_t row = cell.local_cell_row;
+        metadata.cell_width_x_code[row] = patch_geometry.geometry.cell_width_x_comoving;
+        metadata.cell_width_y_code[row] = patch_geometry.geometry.cell_width_y_comoving;
+        metadata.cell_width_z_code[row] = patch_geometry.geometry.cell_width_z_comoving;
+        metadata.patch_id_by_cell[row] = descriptor.patch_id;
+        metadata.patch_row_by_cell[row] = static_cast<std::uint32_t>(cell.patch_local_cell);
+      }
+    }
+    for (std::uint32_t row = 0; row < cell_count; ++row) {
+      if (!std::isfinite(metadata.cell_width_x_code[row]) || metadata.cell_width_x_code[row] <= 0.0 ||
+          !std::isfinite(metadata.cell_width_y_code[row]) || metadata.cell_width_y_code[row] <= 0.0 ||
+          !std::isfinite(metadata.cell_width_z_code[row]) || metadata.cell_width_z_code[row] <= 0.0 ||
+          metadata.patch_id_by_cell[row] == 0U ||
+          metadata.patch_row_by_cell[row] == std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("AMR CFL metadata did not cover every authoritative gas-cell row");
+      }
+    }
     return metadata;
   }
 
-  const std::optional<hydro::HydroCartesianPatchSpec> center_spec = trySpecFromCellCenters(state, config);
-  const hydro::HydroCartesianPatchSpec spec =
-      center_spec.value_or(fallbackCartesianSpec(cell_count, config));
-  std::fill(metadata.cell_width_x_code.begin(), metadata.cell_width_x_code.end(), spec.cell_width_x_comoving);
-  std::fill(metadata.cell_width_y_code.begin(), metadata.cell_width_y_code.end(), spec.cell_width_y_comoving);
-  std::fill(metadata.cell_width_z_code.begin(), metadata.cell_width_z_code.end(), spec.cell_width_z_comoving);
-
-  for (std::size_t patch = 0; patch < state.patches.size(); ++patch) {
-    const std::uint32_t first_cell = state.patches.first_cell[patch];
-    const std::uint32_t patch_cell_count = state.patches.cell_count[patch];
-    for (std::uint32_t offset = 0; offset < patch_cell_count; ++offset) {
-      const std::size_t row = static_cast<std::size_t>(first_cell) + offset;
-      if (row >= cell_count) {
-        continue;
+  const internal::CartesianGasCellRowLayout layout = requireCartesianGasCellRowLayout(
+      state, config, "hydro CFL metadata construction");
+  for (std::uint32_t row = 0; row < cell_count; ++row) {
+    metadata.cell_width_x_code[row] = layout.spec.cell_width_x_comoving;
+    metadata.cell_width_y_code[row] = layout.spec.cell_width_y_comoving;
+    metadata.cell_width_z_code[row] = layout.spec.cell_width_z_comoving;
+    const auto* identity = state.gas_cell_identity.findByLocalRow(row);
+    if (identity == nullptr || identity->gas_cell_id == 0U) {
+      throw std::runtime_error("fixed-patch CFL metadata rejected incomplete gas-cell identity coverage");
+    }
+    if (state.patches.size() != 0U) {
+      if (identity->owning_patch_id == 0U) {
+        throw std::runtime_error("fixed-patch CFL metadata rejected a gas cell without explicit patch ownership");
       }
-      metadata.patch_id_by_cell[row] = state.patches.patch_id[patch];
-      metadata.patch_row_by_cell[row] = offset;
+      bool patch_found = false;
+      for (std::size_t patch = 0; patch < state.patches.size(); ++patch) {
+        if (state.patches.patch_id[patch] == identity->owning_patch_id) {
+          if (state.cells.patch_index[row] != patch) {
+            throw std::runtime_error("fixed-patch CFL metadata rejected stale dense patch-index mirror");
+          }
+          patch_found = true;
+          break;
+        }
+      }
+      if (!patch_found) {
+        throw std::runtime_error("fixed-patch CFL metadata rejected an identity patch absent from PatchSoa");
+      }
+      metadata.patch_id_by_cell[row] = identity->owning_patch_id;
+      metadata.patch_row_by_cell[row] = layout.geometry_row_by_dense_row.at(row);
     }
   }
   return metadata;
@@ -3003,8 +2871,10 @@ void flushCommonArtifacts(
 #endif
 
 
-void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
-  if (state.cells.size() == 0 || state.patches.size() != 0) {
+void materializeRootHydroPatchIfMissing(
+    core::SimulationState& state,
+    const core::SimulationConfig& config) {
+  if (state.cells.size() == 0U || state.patches.size() != 0U) {
     return;
   }
   state.patches.resize(1U);
@@ -3013,33 +2883,6 @@ void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] = static_cast<std::uint32_t>(state.cells.size());
   state.patches.owning_rank[0] = 0U;
-
-  // Generated and imported non-AMR ICs enter the production hydro path through
-  // a real root patch.  Derive the initial Cartesian geometry from centers once;
-  // later Eulerian AMR updates use this explicit patch geometry rather than
-  // guessing a topology from dense row order.
-  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
-  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
-  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-  const bool complete_cartesian = !x_coordinates.empty() && !y_coordinates.empty() && !z_coordinates.empty() &&
-      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() == state.cells.size() &&
-      coordinatesHaveUniformSpacing(x_coordinates) &&
-      coordinatesHaveUniformSpacing(y_coordinates) &&
-      coordinatesHaveUniformSpacing(z_coordinates);
-  if (complete_cartesian) {
-    const double dx = coordinateSpacing(x_coordinates, 1.0);
-    const double dy = coordinateSpacing(y_coordinates, dx);
-    const double dz = coordinateSpacing(z_coordinates, dx);
-    state.patches.origin_x_comoving[0] = x_coordinates.front() - 0.5 * dx;
-    state.patches.origin_y_comoving[0] = y_coordinates.front() - 0.5 * dy;
-    state.patches.origin_z_comoving[0] = z_coordinates.front() - 0.5 * dz;
-    state.patches.extent_x_comoving[0] = dx * static_cast<double>(x_coordinates.size());
-    state.patches.extent_y_comoving[0] = dy * static_cast<double>(y_coordinates.size());
-    state.patches.extent_z_comoving[0] = dz * static_cast<double>(z_coordinates.size());
-    state.patches.cell_dim_x[0] = static_cast<std::uint32_t>(x_coordinates.size());
-    state.patches.cell_dim_y[0] = static_cast<std::uint32_t>(y_coordinates.size());
-    state.patches.cell_dim_z[0] = static_cast<std::uint32_t>(z_coordinates.size());
-  }
   if (state.cells.patch_index.size() != state.cells.size()) {
     state.cells.patch_index.resize(state.cells.size());
   }
@@ -3047,21 +2890,36 @@ void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
 
   if (state.gas_cells.size() == state.cells.size()) {
     if (state.gas_cell_identity.empty()) {
-      // Explicit legacy-import bridge only: a pre-H2 IC has no authoritative
-      // map yet, so bootstrap it once from persisted compatibility lanes.
+      // Import-only bridge: bootstrap truth once from persisted sidecar lanes.
       state.refreshGasCellIdentityMapFromSidecarLanes();
     } else {
-      // The map remains authoritative when a root patch is materialized.  Do
-      // not reconstruct it from mutable mirrors; rewrite the patch ownership
-      // in the canonical records and derive mirrors from those records.
       std::vector<core::GasCellIdentityRecord> records(
           state.gas_cell_identity.records().begin(), state.gas_cell_identity.records().end());
       for (core::GasCellIdentityRecord& record : records) {
         record.owning_patch_id = state.patches.patch_id[0];
       }
       state.replaceGasCellIdentityRecords(std::move(records));
-      return;
     }
+  }
+
+  // Materialize explicit geometry only after identity coverage exists and only
+  // when the shared strict builder can prove the Cartesian topology.  Do not
+  // manufacture a near-cubic shape from the number of storage rows.
+  const internal::CartesianGasCellLayoutBuildResult layout =
+      internal::buildCartesianGasCellRowLayout(state, config);
+  if (layout.ok()) {
+    state.patches.origin_x_comoving[0] = layout.layout.spec.origin_x_comoving;
+    state.patches.origin_y_comoving[0] = layout.layout.spec.origin_y_comoving;
+    state.patches.origin_z_comoving[0] = layout.layout.spec.origin_z_comoving;
+    state.patches.extent_x_comoving[0] =
+        layout.layout.spec.cell_width_x_comoving * static_cast<double>(layout.layout.spec.nx);
+    state.patches.extent_y_comoving[0] =
+        layout.layout.spec.cell_width_y_comoving * static_cast<double>(layout.layout.spec.ny);
+    state.patches.extent_z_comoving[0] =
+        layout.layout.spec.cell_width_z_comoving * static_cast<double>(layout.layout.spec.nz);
+    state.patches.cell_dim_x[0] = static_cast<std::uint16_t>(layout.layout.spec.nx);
+    state.patches.cell_dim_y[0] = static_cast<std::uint16_t>(layout.layout.spec.ny);
+    state.patches.cell_dim_z[0] = static_cast<std::uint16_t>(layout.layout.spec.nz);
   }
   state.bumpCellIndexGeneration();
 }
@@ -3076,7 +2934,7 @@ void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::Simula
       ? state.metadata.scale_factor
       : std::max(1.0, frozen_config.config.numerics.t_code_begin);
   state.rebuildSpeciesIndex();
-  materializeRootHydroPatchIfMissing(state);
+  materializeRootHydroPatchIfMissing(state, frozen_config.config);
 }
 
 void initializeSchedulerBins(
@@ -3210,32 +3068,15 @@ class DriftCallback final : public core::IntegrationCallback {
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("drift callback");
-    // Production AMR cells are Eulerian patch degrees of freedom.  Their centers
-    // are defined by explicit patch geometry and must not be dragged through the
-    // parent-particle compatibility mirror.
-    if (amr::hasProductionAmrHydroCoverage(context.state)) {
-      return;
-    }
-    const auto particle_row_by_id = buildParticleRowById(context.state);
-    for (std::uint32_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::optional<std::uint32_t> gas_particle_index = parentParticleRowForGasCellRow(
-          context.state,
-          cell_index,
-          particle_row_by_id,
-          "drift callback");
-      if (gas_particle_index.has_value()) {
-        context.state.cells.center_x_comoving[cell_index] = context.state.particles.position_x_comoving[*gas_particle_index];
-        context.state.cells.center_y_comoving[cell_index] = context.state.particles.position_y_comoving[*gas_particle_index];
-        context.state.cells.center_z_comoving[cell_index] = context.state.particles.position_z_comoving[*gas_particle_index];
-      } else {
-        context.state.cells.center_x_comoving[cell_index] +=
-            context.state.gas_cells.velocity_x_peculiar[cell_index] * drift_factor;
-        context.state.cells.center_y_comoving[cell_index] +=
-            context.state.gas_cells.velocity_y_peculiar[cell_index] * drift_factor;
-        context.state.cells.center_z_comoving[cell_index] +=
-            context.state.gas_cells.velocity_z_peculiar[cell_index] * drift_factor;
-      }
-    }
+    // Hydro cell centers are Eulerian geometry in both supported production
+    // paths: fixed Cartesian H1 patches derive topology from these centers and
+    // AMR patches derive it from explicit patch geometry.  A dense gas-cell row
+    // and an optional parent particle are storage/compatibility relations, not
+    // permission to advect physical cell centers during particle drift.  Moving
+    // mesh geometry is not implemented by this callback; attempting to mirror
+    // parent-particle positions here corrupts fixed Cartesian topology and makes
+    // a valid row-order-independent patch appear nonuniform.
+
   }
 
  private:
@@ -3397,6 +3238,129 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const double> particleAccelX() const noexcept { return m_particle_accel_x; }
   [[nodiscard]] std::span<const double> particleAccelY() const noexcept { return m_particle_accel_y; }
   [[nodiscard]] std::span<const double> particleAccelZ() const noexcept { return m_particle_accel_z; }
+
+  [[nodiscard]] io::GravityForceCachePersistentState exportRestartForceCache(
+      const core::SimulationState& state) const {
+    io::GravityForceCachePersistentState cache;
+    cache.valid = m_force_cache_valid;
+    if (!cache.valid) {
+      return cache;
+    }
+    if (m_particle_accel_x.size() != state.particles.size() ||
+        m_particle_accel_y.size() != state.particles.size() ||
+        m_particle_accel_z.size() != state.particles.size() ||
+        m_cell_accel_x.size() != state.cells.size() ||
+        m_cell_accel_y.size() != state.cells.size() ||
+        m_cell_accel_z.size() != state.cells.size()) {
+      throw std::runtime_error(
+          "gravity force cache cannot be checkpointed because its dense lanes do not match SimulationState");
+    }
+    cache.particle_id.assign(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
+    cache.gas_cell_id.assign(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
+    cache.particle_accel_x_comoving = m_particle_accel_x;
+    cache.particle_accel_y_comoving = m_particle_accel_y;
+    cache.particle_accel_z_comoving = m_particle_accel_z;
+    cache.cell_accel_x_comoving = m_cell_accel_x;
+    cache.cell_accel_y_comoving = m_cell_accel_y;
+    cache.cell_accel_z_comoving = m_cell_accel_z;
+    return cache;
+  }
+
+  void importRestartForceCache(
+      const io::GravityForceCachePersistentState& cache,
+      const core::SimulationState& state) {
+    if (!cache.valid) {
+      m_particle_accel_x.clear();
+      m_particle_accel_y.clear();
+      m_particle_accel_z.clear();
+      m_cell_accel_x.clear();
+      m_cell_accel_y.clear();
+      m_cell_accel_z.clear();
+      m_force_cache_valid = false;
+      return;
+    }
+    const auto requireTriplet = [](const std::vector<double>& x,
+                                   const std::vector<double>& y,
+                                   const std::vector<double>& z,
+                                   std::size_t expected,
+                                   std::string_view label) {
+      if (x.size() != expected || y.size() != expected || z.size() != expected) {
+        throw std::runtime_error(
+            "restart gravity force cache " + std::string(label) +
+            " extent does not match authoritative SimulationState");
+      }
+      for (const double value : x) {
+        if (!std::isfinite(value)) {
+          throw std::runtime_error("restart gravity force cache contains non-finite values");
+        }
+      }
+      for (const double value : y) {
+        if (!std::isfinite(value)) {
+          throw std::runtime_error("restart gravity force cache contains non-finite values");
+        }
+      }
+      for (const double value : z) {
+        if (!std::isfinite(value)) {
+          throw std::runtime_error("restart gravity force cache contains non-finite values");
+        }
+      }
+    };
+    const auto buildIndexById = [](std::span<const std::uint64_t> ids,
+                                   std::size_t expected,
+                                   std::string_view label) {
+      if (ids.size() != expected) {
+        throw std::runtime_error("restart gravity force cache " + std::string(label) +
+                                 " identity extent does not match acceleration lanes");
+      }
+      std::unordered_map<std::uint64_t, std::size_t> index_by_id;
+      index_by_id.reserve(ids.size());
+      for (std::size_t index = 0; index < ids.size(); ++index) {
+        if (ids[index] == 0U || !index_by_id.emplace(ids[index], index).second) {
+          throw std::runtime_error("restart gravity force cache " + std::string(label) +
+                                   " identity lane contains a zero or duplicate stable ID");
+        }
+      }
+      return index_by_id;
+    };
+    requireTriplet(
+        cache.particle_accel_x_comoving, cache.particle_accel_y_comoving,
+        cache.particle_accel_z_comoving, state.particles.size(), "particle");
+    requireTriplet(
+        cache.cell_accel_x_comoving, cache.cell_accel_y_comoving,
+        cache.cell_accel_z_comoving, state.cells.size(), "gas-cell");
+    const auto particle_index_by_id = buildIndexById(
+        cache.particle_id, state.particles.size(), "particle");
+    const auto gas_index_by_id = buildIndexById(
+        cache.gas_cell_id, state.cells.size(), "gas-cell");
+
+    m_particle_accel_x.resize(state.particles.size());
+    m_particle_accel_y.resize(state.particles.size());
+    m_particle_accel_z.resize(state.particles.size());
+    for (std::size_t row = 0; row < state.particles.size(); ++row) {
+      const auto it = particle_index_by_id.find(state.particle_sidecar.particle_id[row]);
+      if (it == particle_index_by_id.end()) {
+        throw std::runtime_error("restart gravity force cache is missing a persistent particle ID");
+      }
+      const std::size_t cached_row = it->second;
+      m_particle_accel_x[row] = cache.particle_accel_x_comoving[cached_row];
+      m_particle_accel_y[row] = cache.particle_accel_y_comoving[cached_row];
+      m_particle_accel_z[row] = cache.particle_accel_z_comoving[cached_row];
+    }
+    m_cell_accel_x.resize(state.cells.size());
+    m_cell_accel_y.resize(state.cells.size());
+    m_cell_accel_z.resize(state.cells.size());
+    for (std::size_t row = 0; row < state.cells.size(); ++row) {
+      const auto it = gas_index_by_id.find(state.gas_cells.gas_cell_id[row]);
+      if (it == gas_index_by_id.end()) {
+        throw std::runtime_error("restart gravity force cache is missing a persistent gas-cell ID");
+      }
+      const std::size_t cached_row = it->second;
+      m_cell_accel_x[row] = cache.cell_accel_x_comoving[cached_row];
+      m_cell_accel_y[row] = cache.cell_accel_y_comoving[cached_row];
+      m_cell_accel_z[row] = cache.cell_accel_z_comoving[cached_row];
+    }
+    m_force_cache_valid = true;
+  }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
     if (stage == core::IntegrationStage::kGravityKickPre) {
@@ -4630,6 +4594,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
     core::BoundaryCondition hydro_boundary = core::BoundaryCondition::kPeriodic;
     std::uint64_t patch_signature = 0;
     std::uint64_t gas_cell_identity_generation = 0;
+    std::uint64_t cell_index_generation = 0;
+    std::uint64_t row_mapping_signature = 0;
 
     [[nodiscard]] bool operator==(const HydroGeometryCacheKey& rhs) const noexcept {
       return cell_count == rhs.cell_count &&
@@ -4645,70 +4611,11 @@ class HydroStageCallback final : public core::IntegrationCallback {
           dt_time_code == rhs.dt_time_code &&
           hydro_boundary == rhs.hydro_boundary &&
           patch_signature == rhs.patch_signature &&
-          gas_cell_identity_generation == rhs.gas_cell_identity_generation;
+          gas_cell_identity_generation == rhs.gas_cell_identity_generation &&
+          cell_index_generation == rhs.cell_index_generation &&
+          row_mapping_signature == rhs.row_mapping_signature;
     }
   };
-
-  [[nodiscard]] static std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
-    std::vector<double> unique(values.begin(), values.end());
-    std::sort(unique.begin(), unique.end());
-    unique.erase(
-        std::unique(
-            unique.begin(),
-            unique.end(),
-            [](double lhs, double rhs) {
-              const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
-              return std::abs(lhs - rhs) <= 1.0e-10 * scale;
-            }),
-        unique.end());
-    return unique;
-  }
-
-  [[nodiscard]] static std::optional<std::size_t> coordinateIndex(
-      const std::vector<double>& coordinates,
-      double value) {
-    for (std::size_t index = 0; index < coordinates.size(); ++index) {
-      const double scale = std::max({1.0, std::abs(coordinates[index]), std::abs(value)});
-      if (std::abs(coordinates[index] - value) <= 1.0e-10 * scale) {
-        return index;
-      }
-    }
-    return std::nullopt;
-  }
-
-  [[nodiscard]] static double coordinateSpacing(
-      const std::vector<double>& coordinates,
-      double fallback_width_comoving) {
-    if (coordinates.size() <= 1U) {
-      return fallback_width_comoving;
-    }
-    const double span = coordinates.back() - coordinates.front();
-    return std::max(1.0e-12, span / static_cast<double>(coordinates.size() - 1U));
-  }
-
-  [[nodiscard]] std::optional<hydro::HydroCartesianPatchSpec> trySpecFromCellCenters(
-      const core::SimulationState& state) const {
-    const auto layout = tryCartesianGasCellRowLayout(state, m_config);
-    return layout.has_value() ? std::optional<hydro::HydroCartesianPatchSpec>(layout->spec) : std::nullopt;
-  }
-
-  [[nodiscard]] hydro::HydroCartesianPatchSpec fallbackCartesianSpec(std::size_t cell_count) const {
-    const std::array<std::size_t, 3> factors = hydro::chooseNearCubicCartesianFactors(cell_count);
-    return hydro::HydroCartesianPatchSpec{
-        .nx = factors[0],
-        .ny = factors[1],
-        .nz = factors[2],
-        .origin_x_comoving = 0.0,
-        .origin_y_comoving = 0.0,
-        .origin_z_comoving = 0.0,
-        .cell_width_x_comoving = m_config.cosmology.box_size_x_mpc_comoving /
-            static_cast<double>(std::max<std::size_t>(factors[0], 1U)),
-        .cell_width_y_comoving = m_config.cosmology.box_size_y_mpc_comoving /
-            static_cast<double>(std::max<std::size_t>(factors[1], 1U)),
-        .cell_width_z_comoving = m_config.cosmology.box_size_z_mpc_comoving /
-            static_cast<double>(std::max<std::size_t>(factors[2], 1U)),
-    };
-  }
 
   [[nodiscard]] static std::uint64_t patchSignature(const core::PatchSoa& patches) {
     std::uint64_t signature = 1469598103934665603ULL;
@@ -4735,13 +4642,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    const auto layout = tryCartesianGasCellRowLayout(state, m_config);
-    if (!layout.has_value()) {
-      throw std::runtime_error(
-          "reference hydro requires a complete uniformly spaced Cartesian gas-cell layout; "
-          "use production AMR geometry for non-Cartesian or irregular cells");
-    }
-    const hydro::HydroCartesianPatchSpec& spec = layout->spec;
+    const internal::CartesianGasCellRowLayout layout = requireCartesianGasCellRowLayout(
+        state, m_config, "reference hydro workflow");
+    const hydro::HydroCartesianPatchSpec& spec = layout.spec;
     const HydroGeometryCacheKey key{
         .cell_count = cell_count,
         .nx = spec.nx,
@@ -4757,14 +4660,16 @@ class HydroStageCallback final : public core::IntegrationCallback {
         .hydro_boundary = m_mode_policy.hydro_boundary,
         .patch_signature = patchSignature(state.patches),
         .gas_cell_identity_generation = state.gasCellIdentityGeneration(),
+        .cell_index_generation = state.cellIndexGeneration(),
+        .row_mapping_signature = layout.mapping_signature,
     };
     if (m_cached_geometry_key.has_value() && *m_cached_geometry_key == key) {
       return;
     }
 
     m_cached_geometry_key = key;
-    m_dense_row_by_geometry_row = layout->dense_row_by_geometry_row;
-    m_geometry_row_by_dense_row = layout->geometry_row_by_dense_row;
+    m_dense_row_by_geometry_row = layout.dense_row_by_geometry_row;
+    m_geometry_row_by_dense_row = layout.geometry_row_by_dense_row;
     m_geometry = hydro::makeCartesianPatchGeometry(spec);
     hydro::appendCartesianBoundaryGhostFaces(
         m_geometry,
@@ -4807,16 +4712,28 @@ class HydroStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint32_t>> patchIdentityForCellRow(
       const core::SimulationState& state,
       std::uint32_t cell_index) const {
-    for (std::size_t patch = 0; patch < state.patches.size(); ++patch) {
-      const std::uint32_t first_cell = state.patches.first_cell[patch];
-      const std::uint32_t count = state.patches.cell_count[patch];
-      if (cell_index >= first_cell && cell_index < first_cell + count) {
-        return std::pair<std::uint64_t, std::uint32_t>{
-            state.patches.patch_id[patch],
-            cell_index - first_cell};
-      }
+    const auto* identity = state.gas_cell_identity.findByLocalRow(cell_index);
+    if (identity == nullptr || identity->gas_cell_id == 0U) {
+      throw std::runtime_error("hydro CFL diagnostics rejected missing gas-cell identity");
     }
-    return std::nullopt;
+    if (state.patches.size() == 0U) {
+      return std::nullopt;
+    }
+    if (identity->owning_patch_id == 0U || cell_index >= m_geometry_row_by_dense_row.size()) {
+      throw std::runtime_error("hydro CFL diagnostics rejected incomplete fixed-patch identity metadata");
+    }
+    const auto patch_it = std::find(
+        state.patches.patch_id.begin(), state.patches.patch_id.end(), identity->owning_patch_id);
+    if (patch_it == state.patches.patch_id.end()) {
+      throw std::runtime_error("hydro CFL diagnostics rejected an identity patch absent from PatchSoa");
+    }
+    const std::size_t patch_index = static_cast<std::size_t>(std::distance(state.patches.patch_id.begin(), patch_it));
+    if (state.cells.patch_index[cell_index] != patch_index) {
+      throw std::runtime_error("hydro CFL diagnostics rejected stale dense patch-index metadata");
+    }
+    return std::pair<std::uint64_t, std::uint32_t>{
+        identity->owning_patch_id,
+        m_geometry_row_by_dense_row[cell_index]};
   }
 
   [[nodiscard]] core::HydroCflDiagnostics hydroCflDiagnosticsForCell(
@@ -4840,7 +4757,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
         input,
         0.4,
         accepted_dt_time_code,
-        cell_index < state.gas_cells.gas_cell_id.size() ? state.gas_cells.gas_cell_id[cell_index] : 0U,
+        state.gas_cell_identity.findByLocalRow(cell_index) != nullptr
+            ? state.gas_cell_identity.findByLocalRow(cell_index)->gas_cell_id
+            : 0U,
         patch_identity.has_value() ? std::optional<std::uint64_t>(patch_identity->first) : std::nullopt,
         patch_identity.has_value() ? std::optional<std::uint32_t>(patch_identity->second) : std::nullopt);
   }
@@ -5003,6 +4922,9 @@ bool maybeWriteOutputs(
     restart_payload.integrator_state = &integrator_state;
     restart_payload.scheduler = &scheduler;
     restart_payload.gas_cell_scheduler = &gas_cell_scheduler;
+    const io::GravityForceCachePersistentState gravity_force_cache =
+        gravity_callback.exportRestartForceCache(state);
+    restart_payload.gravity_force_cache = &gravity_force_cache;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
     restart_payload.normalized_config_text = frozen_config.normalized_text;
@@ -5089,6 +5011,8 @@ bool maybeWriteOutputs(
         gravity_callback.runtimeTopology().world_size == 1 ||
         report.restart_path.filename().string().find("_rank") != std::string::npos;
     report.restart_roundtrip_ok = restartRuntimeStateExactlyEquivalent(restart_read.state, state) &&
+        restart_read.integrator_state.pm_refresh_enabled == integrator_state.pm_refresh_enabled &&
+        gravityForceCachesEquivalent(restart_read.gravity_force_cache, gravity_force_cache) &&
         restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
         restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particle_sidecar.owning_rank.size() &&
         restart_read.distributed_gravity_state.owning_rank_by_item == restart_payload.distributed_gravity_state.owning_rank_by_item &&
@@ -5348,8 +5272,18 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
     core::validateModePolicy(config, mode_policy);
 
+    if (options.initial_state_override != nullptr && options.restart_state_override != nullptr) {
+      throw std::invalid_argument(
+          "ReferenceWorkflowOptions cannot provide both initial_state_override and restart_state_override");
+    }
+
     io::IcReadResult ic_result;
-    if (options.initial_state_override != nullptr) {
+    if (options.restart_state_override != nullptr) {
+      // Restart payloads are authoritative for production continuation.  Do not
+      // recreate time-bin or integrator state from configuration defaults.
+      ic_result.state = options.restart_state_override->state;
+      ic_result.report.defaulted_fields.push_back("restart_state_override=checkpoint_payload");
+    } else if (options.initial_state_override != nullptr) {
       // A test/benchmark override still traverses every production workflow
       // boundary after import.  It exists so identity-decoupled states that
       // cannot be represented by legacy GADGET IC particle rows are testable
@@ -5455,12 +5389,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? std::optional<core::LambdaCdmBackground>(core::LambdaCdmBackground(background_config))
         : std::nullopt;
 
+    const bool restoring_from_restart = options.restart_state_override != nullptr;
     core::HierarchicalTimeBinScheduler scheduler(
         static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
     core::HierarchicalTimeBinScheduler gas_cell_scheduler(
         static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
-    initializeSchedulerBins(state, scheduler, gas_cell_scheduler);
-    syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
 
     const core::UnitSystem runtime_units = core::makeUnitSystem(
         config.units.length_unit,
@@ -5468,33 +5401,56 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         config.units.velocity_unit);
 
     core::IntegratorState integrator_state;
-    integrator_state.step_index = options.step_index;
-    integrator_state.current_time_code = config.numerics.t_code_begin;
-    integrator_state.time_si_per_code = runtime_units.timeSiPerCode();
-    integrator_state.current_scale_factor = background.has_value()
-        ? config.numerics.a_begin
-        : 1.0;
-    integrator_state.current_redshift = (integrator_state.current_scale_factor > 0.0)
-        ? (1.0 / integrator_state.current_scale_factor - 1.0)
-        : 0.0;
-    integrator_state.current_hubble_rate_code = background.has_value()
-        ? background->hubbleSi(integrator_state.current_scale_factor) * integrator_state.time_si_per_code
-        : 0.0;
-    integrator_state.dt_time_code = options.dt_time_code > 0.0
-        ? options.dt_time_code
-        : std::max(
-              1.0e-6,
-              (config.numerics.t_code_end - config.numerics.t_code_begin) /
-                  static_cast<double>(std::max(config.numerics.max_global_steps, 1)));
-    integrator_state.time_bins.hierarchical_enabled = true;
-    integrator_state.time_bins.max_bin = scheduler.maxBin();
-    integrator_state.pm_refresh_enabled = true;
-    integrator_state.pm_sync_state.reset(static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)));
-    for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-      state.particle_sidecar.last_drift_time_code[particle_index] = integrator_state.current_time_code;
-      state.particle_sidecar.last_drift_scale_factor[particle_index] = integrator_state.current_scale_factor;
+    if (restoring_from_restart) {
+      const io::RestartReadResult& restart = *options.restart_state_override;
+      scheduler.importPersistentState(restart.scheduler_state);
+      gas_cell_scheduler.importPersistentState(restart.gas_cell_scheduler_state);
+      integrator_state = restart.integrator_state;
+      // v14-v19 checkpoints predate serialization of this frozen workflow
+      // policy bit.  Preserve their established compatibility behavior while
+      // v20+ resumes use the checkpoint-authoritative value verbatim.
+      if (restart.diagnostics.restart_schema_version < io::restartSchema().version) {
+        integrator_state.pm_refresh_enabled = true;
+      }
+      if (scheduler.elementCount() != state.particles.size()) {
+        throw std::runtime_error(
+            "ReferenceWorkflow restart payload particle scheduler coverage does not match SimulationState");
+      }
+      if (gas_cell_scheduler.elementCount() != state.cells.size()) {
+        throw std::runtime_error(
+            "ReferenceWorkflow restart payload gas-cell scheduler coverage does not match SimulationState");
+      }
+      state.requireGasCellIdentityMapCoversDenseRows("ReferenceWorkflow restart resume");
+    } else {
+      initializeSchedulerBins(state, scheduler, gas_cell_scheduler);
+      integrator_state.step_index = options.step_index;
+      integrator_state.current_time_code = config.numerics.t_code_begin;
+      integrator_state.time_si_per_code = runtime_units.timeSiPerCode();
+      integrator_state.current_scale_factor = background.has_value()
+          ? config.numerics.a_begin
+          : 1.0;
+      integrator_state.current_redshift = (integrator_state.current_scale_factor > 0.0)
+          ? (1.0 / integrator_state.current_scale_factor - 1.0)
+          : 0.0;
+      integrator_state.current_hubble_rate_code = background.has_value()
+          ? background->hubbleSi(integrator_state.current_scale_factor) * integrator_state.time_si_per_code
+          : 0.0;
+      integrator_state.dt_time_code = options.dt_time_code > 0.0
+          ? options.dt_time_code
+          : std::max(
+                1.0e-6,
+                (config.numerics.t_code_end - config.numerics.t_code_begin) /
+                    static_cast<double>(std::max(config.numerics.max_global_steps, 1)));
+      integrator_state.time_bins.hierarchical_enabled = true;
+      integrator_state.time_bins.max_bin = scheduler.maxBin();
+      integrator_state.pm_refresh_enabled = true;
+      integrator_state.pm_sync_state.reset(static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)));
+      for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+        state.particle_sidecar.last_drift_time_code[particle_index] = integrator_state.current_time_code;
+        state.particle_sidecar.last_drift_scale_factor[particle_index] = integrator_state.current_scale_factor;
+      }
     }
-
+    syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
     PendingOutputBoundary pending_output;
 
     core::StepOrchestrator orchestrator;
@@ -5505,6 +5461,17 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? std::filesystem::path{}
         : resolveConfigRelativePath(m_frozen_config, std::filesystem::path(config.mode.zoom_region_file));
     GravityStageCallback gravity_callback(config, mode_policy, zoom_region_path);
+    if (restoring_from_restart) {
+      const io::RestartReadResult& restart = *options.restart_state_override;
+      if (restart.gravity_force_cache.valid) {
+        gravity_callback.importRestartForceCache(restart.gravity_force_cache, state);
+      } else {
+        // A pre-v20 checkpoint has no cache that can safely service the next
+        // KDK pre-kick.  Do not pretend its persisted PM validity bit implies
+        // a live force cache in this process; force the legal bootstrap path.
+        integrator_state.pm_long_range_field_valid = false;
+      }
+    }
     report.treepm_pm_grid = gravity_callback.pmGridSize();
     report.treepm_pm_grid_nx = gravity_callback.pmGridShape().nx;
     report.treepm_pm_grid_ny = gravity_callback.pmGridShape().ny;
@@ -5606,32 +5573,37 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     orchestrator.registerCallback(diagnostics_callback);
     orchestrator.registerCallback(output_boundary_callback);
 
-    updateAdaptiveTimeBins(
-        state,
-        scheduler,
-        integrator_state,
-        config,
-        {},
-        {},
-        {},
-        {},
-        {},
-        {});
-    updateGasCellAdaptiveTimeBins(
-        state,
-        gas_cell_scheduler,
-        integrator_state,
-        config,
-        {},
-        {},
-        {},
-        {},
-        {},
-        {});
+    if (!restoring_from_restart) {
+      updateAdaptiveTimeBins(
+          state,
+          scheduler,
+          integrator_state,
+          config,
+          {},
+          {},
+          {},
+          {},
+          {},
+          {});
+      updateGasCellAdaptiveTimeBins(
+          state,
+          gas_cell_scheduler,
+          integrator_state,
+          config,
+          {},
+          {},
+          {},
+          {},
+          {},
+          {});
+    }
     ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
 
-    const std::uint64_t target_step_index =
-        integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
+    const std::uint64_t run_start_step_index = integrator_state.step_index;
+    const std::uint64_t configured_segment_steps = options.max_steps_override > 0
+        ? options.max_steps_override
+        : static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
+    const std::uint64_t target_step_index = integrator_state.step_index + configured_segment_steps;
     while (integrator_state.step_index < target_step_index &&
            integrator_state.current_time_code < config.numerics.t_code_end) {
       const std::span<const std::uint32_t> active_particle_scheduler_elements = scheduler.beginSubstep();
@@ -5733,7 +5705,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           requested_boundary);
     }
 
-    report.completed_steps = integrator_state.step_index - options.step_index;
+    report.completed_steps = integrator_state.step_index - run_start_step_index;
+    report.final_hydro_cfl_diagnostics = hydro_callback.lastHydroCflDiagnostics();
     report.final_state_digest = computeStateDigest(state, integrator_state);
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());

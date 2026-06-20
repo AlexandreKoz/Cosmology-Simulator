@@ -1,94 +1,89 @@
-# H1 hydro closeout audit
+# H1 fixed/patch hydro closeout audit
 
-Date: 2026-06-12
-Scope: Stage H1 production fixed/patch hydro repair and hardening pass after Codex implementation.
+**Revision date:** 2026-06-20  
+**Decision:** H1 is accepted only within the stated fixed/Cartesian-patch production
+scope, with HDF5 enabled for the workflow restart proof. It is **not** publication-ready
+hydrodynamic validation and it does not certify MPI restart/migration behavior.
 
-## Verdict
+## Evidence configuration
 
-H1 is repaired to the point where the targeted hydro, CFL, validation, HDF5 restart, and HDF5 reference-workflow gates are green in this repository snapshot. H2 may begin only with the known caveat that production hydro is still particle-bound at the workflow/state boundary; that dependency is explicitly H2 scope and is not hidden by this audit.
+- CPU configuration: `cpu-only-debug` / `build-cpu-debug` / `test-cpu-debug`.
+- HDF5 configuration: `hdf5-debug` / `build-hdf5-debug` / `test-hdf5-debug`.
+- HDF5 was enabled and reported by CMake (`HDF5 1.14.5` in the acceptance environment).
+- The repository has no `cosmosim_all` target; commands used actual discovered targets.
 
-This is a credible fixed/patch Cartesian hydro foundation, not a claim of paper-grade hydrodynamic validation. The classic tests remain CI-level guards.
+## Item-by-item closeout
 
-## Repairs applied
+### H1.0 — baseline audit and patch plan: accepted
 
-- Fixed the directional CFL unit test so the expected limiting axis matches the H1 contract: the timestep is the minimum of `cfl * dx_axis / (abs(v_axis) + c_s)` over x/y/z.
-- Fixed production periodic-boundary conservation for ghost-backed Cartesian patches. Periodic ghost cells remain reconstruction scratch, but flux deltas now update the wrapped authoritative real cell instead of being lost into non-authoritative ghost storage.
-- Hardened active-set flux application: the solver now applies flux deltas to every authoritative real cell touched by an active face, while source terms remain restricted to the explicitly active cells. This prevents active-face updates from dropping conservative flux into inactive real neighbors or periodic wrapped cells.
-- Added `testActivePeriodicGhostFluxUpdatesWrappedRealCell`, a regression that advances a single periodic ghost face with only the boundary owner active and verifies that the wrapped real cell changes and that mass, momentum x/y/z, and total energy are conserved over the touched real cells.
-- Strengthened the Noh CI validation setup so the converging inflow evolves long enough to measure actual compression instead of a nearly unevolved initial state.
-- Fixed restart reader diagnostics so malformed hydro patch geometry is rejected with a specific `/state/cells/patch_index` or `/state/patches` error before the generic ownership-invariant error masks the root cause.
-- Materialized a single root hydro patch for generated/legacy states that have gas cells but no patch descriptors, so restart payload validation and HDF5 reference workflow output see explicit `/state/patches` coverage instead of an implicit empty-patch state.
-- Tightened `HydroStageCallback` Cartesian geometry reconstruction: if gas-cell centers form a complete 3D Cartesian product but the dense rows are not row-major, the workflow now fails loudly instead of silently falling back to a generated near-cubic patch geometry. The near-cubic fallback remains available for generated/toy states whose centers do not describe a full rectilinear patch.
+The plan identifies `ReferenceWorkflow` → `HydroStageCallback` as the production
+orchestration path and states the stable-identity, explicit-geometry ownership rules.
 
-## Evidence commands
+### H1.1 — 3D Cartesian hydro patch geometry: accepted in fixed/patch scope
 
-```bash
-cmake --preset cpu-only-debug
-cmake --build --preset build-cpu-debug --target \
-  test_unit_hydro_core_solver \
-  test_unit_hydro_reconstruction \
-  test_unit_hydro_riemann \
-  test_unit_hydro_boundary_conditions \
-  test_unit_time_integration \
-  test_integration_hierarchical_timestep_regression \
-  test_integration_hydro_sod_like \
-  test_integration_hydro_conservation_periodic \
-  test_integration_hydro_axis_symmetry \
-  test_validation_hydro_classics \
-  test_integration_reference_workflow -j2
-ctest --preset test-cpu-debug --output-on-failure \
-  -R "unit_hydro_|integration_hydro_|validation_hydro|unit_time_integration|hierarchical_timestep"
-```
+`CartesianGasCellRowLayout` is a single reusable builder. It derives sorted axes from
+live centers, checks complete Cartesian occupancy and uniform spacing, builds
+`HydroCartesianPatchSpec`, and emits both dense→geometry and geometry→dense maps.
+It rejects nonuniform, duplicate, missing, off-lattice and ambiguous layouts. Production
+code no longer invents a near-cubic patch from `cell_count`.
 
-Result: 10/10 passed.
+Evidence: `integration_reference_workflow_hydro_row_order` and
+`integration_restart_equivalence_reference_workflow_hydro`.
 
-```bash
-cmake --preset hdf5-debug
-cmake --build --preset build-hdf5-debug --target \
-  test_unit_restart_checkpoint_schema \
-  test_integration_restart_checkpoint_roundtrip \
-  test_integration_restart_equivalence_hydro_toy \
-  test_integration_reference_workflow -j2
-ctest --preset test-hdf5-debug --output-on-failure \
-  -R "restart_checkpoint|restart_equivalence_hydro_toy|^integration_reference_workflow$"
-```
+### H1.2 — ghost zones and boundary conditions: accepted in fixed/patch scope
 
-Result: 4/4 passed.
+The existing periodic, open/outflow and reflective boundary machinery remains intact.
+The row-order integration test specifically verifies periodic workflow evolution through
+physical mapping. Boundary descriptors remain transient/read-only; real updates scatter
+back through stable identity and validated geometry mappings.
 
-```bash
-bash ./scripts/ci/check_repo_hygiene.sh
-```
+### H1.3 — dimensionally correct reconstruction: accepted in fixed/patch scope
 
-Result: passed.
+The active workflow passes axis-aware geometry and directional widths to reconstruction.
+The reorder regression compares the same 3D physical patch after geometry-order gather
+and dense-order scatter. No scalar `dt/dx` compatibility lane is used as active workflow
+policy.
 
-## Full-suite note
+### H1.4 — CFL enforcement: accepted in fixed/patch scope
 
-`integration_reference_workflow` still aborts under the CPU-only preset when it is run directly because that preset has `COSMOSIM_ENABLE_HDF5=OFF` while the config-driven workflow requests snapshot/restart output. The same test passes under the HDF5 preset, and the HDF5 restart-specific gate is green.
+CFL metadata derives patch ID, patch-local row, stable gas-cell ID and directional widths
+from validated physical geometry/identity. Missing geometry fails loudly. Reordered rows
+produce the same limiting physical cell diagnostics when compared by `gas_cell_id`.
 
-## Remaining H2 blockers
+### H1.5 — conservation accounting: accepted in fixed/patch scope
 
-These are not H1 failures, but they remain hard prerequisites for H2:
+The periodic workflow regression compares closed-box mass, momentum x/y/z and total
+energy between canonical and shuffled dense storage. Existing solver conservation
+accounting remains the authority for flux/source/floor diagnostic breakdowns.
 
-- `HydroStageCallback::onStage` still calls `core::requireParticleBoundGasCellContract`.
-- Hydro workflow load/store still uses `core::gasParticleIndexForCellRow` and mirrors gas-cell velocity/mass through parent gas particles.
-- Flux-correction lookup remains parent-particle-id based.
-- Parentless and multi-cell-parent gas-cell cases are not production runtime paths yet.
+### H1.6 — classical validation ladder: partially accepted
 
-## H3 blockers
+Sedov, Noh, Gresho, Kelvin–Helmholtz and Evrard-related checks are retained as
+low-resolution deterministic CI guards. They are not convergence studies, reference-error
+studies, cross-code validation, or a publication-grade claim.
 
-These are intentionally outside H1:
+### H1.7 — hydro restart round-trip: accepted with HDF5, fixed/patch scope
 
-- AMR patches are not yet first-class hydro geometry providers.
-- Conservative prolongation/restriction for live AMR hydro remains H3 work.
-- Coarse-fine ghost fill, production flux-register generation, and automatic refluxing are not complete H1 responsibilities.
+The HDF5 integration test executes direct two-step workflow evolution against one step,
+checkpoint/read, safe-boundary dense-row reorder, and one resumed workflow step. It
+exercises workflow geometry reconstruction, ghosts, hydro gather/solve/scatter, directional
+CFL scheduling, gas scheduler state, conservation reporting and KDK force-cache import.
 
-## H1 status checklist
+Restart schema v20 stores the KDK cache with stable `particle_id` and `gas_cell_id` lanes;
+import remaps cache values to current dense rows. This prevents a valid row reorder or
+compaction from consuming accelerations by stale dense index.
 
-- 3D Cartesian hydro geometry: present and tested.
-- Ghost zones and boundary conditions: present and tested, including periodic ghost-backed conservation repair.
-- Axis-aware reconstruction: present and tested for x/y/z symmetry.
-- CFL enforcement: targeted unit/integration gates repaired and passing.
-- Conservation accounting: present and exercised by periodic and active periodic ghost hydro tests.
-- Classical validation guards: Sedov, Noh, Gresho, Kelvin-Helmholtz, and Evrard toy guard registered and passing.
-- Hydro restart equivalence and patch-geometry rejection: HDF5 gate passing.
-- HDF5 reference workflow output: passing with explicit root patch materialization.
+### H1.8 — closeout audit: accepted
+
+This closeout separates accepted scope from unproven scope and records HDF5 dependence.
+
+## Remaining limitations
+
+- No multi-resolution analytic/reference-solution study was executed in this repair.
+- No cross-code benchmark or science-readiness campaign was executed.
+- No MPI toolchain was available in the acceptance environment; multi-rank ghost exchange,
+  migration and restart-after-migration remain unproven here.
+- The accepted geometry scope is complete uniformly spaced Cartesian fixed patches plus
+  existing explicit AMR coverage; it is not a general unstructured-mesh claim.
+- The KDK cache is remapped by stable IDs on resume. It is not a substitute for distributed
+  force-field serialization or a proof of exact continuation across rank repartitioning.

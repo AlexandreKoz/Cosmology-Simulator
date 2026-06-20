@@ -7,9 +7,14 @@
 #include <vector>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/time_integration.hpp"
 
 namespace cosmosim::core {
 struct SimulationState;
+}
+
+namespace cosmosim::io {
+struct RestartReadResult;
 }
 
 namespace cosmosim::workflows {
@@ -27,6 +32,17 @@ struct ReferenceWorkflowOptions {
   // scheduler, hydro, restart, and output pipeline used after IC import.
   // The caller retains ownership for the synchronous duration of run().
   const core::SimulationState* initial_state_override = nullptr;
+
+  // Narrow, explicit restart-resume seam used by integration tests and restart
+  // tooling. The restored payload remains the restart-authoritative state:
+  // SimulationState, integrator state, and particle/gas-cell scheduler state
+  // are imported without reinitializing time bins. The caller retains ownership
+  // for the synchronous duration of run().
+  const io::RestartReadResult* restart_state_override = nullptr;
+
+  // A bounded execution segment for tests/benchmarks. Zero retains the
+  // configuration's max_global_steps. This is intentionally not persisted.
+  std::uint64_t max_steps_override = 0;
 };
 
 struct ReferenceWorkflowReport {
@@ -69,6 +85,10 @@ struct ReferenceWorkflowReport {
   int world_rank = 0;
   std::uint64_t treepm_long_range_refresh_count = 0;
   std::uint64_t treepm_long_range_reuse_count = 0;
+  // Last production HydroStageCallback CFL record. This exposes workflow-level
+  // physical identity diagnostics to integration tests without coupling callers
+  // to HydroStageCallback implementation details.
+  core::HydroCflDiagnostics final_hydro_cfl_diagnostics{};
   std::size_t treepm_pm_grid = 0;
   std::size_t treepm_pm_grid_nx = 0;
   std::size_t treepm_pm_grid_ny = 0;

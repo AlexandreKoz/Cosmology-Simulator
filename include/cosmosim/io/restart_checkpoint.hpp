@@ -15,9 +15,10 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  // v19 persists the gas-cell scheduler independently of the particle scheduler.
-  std::string name = "cosmosim_restart_v19";
-  std::uint32_t version = 19;
+  // v20 adds restart-authoritative gravity force caches so a resumed KDK
+  // workflow can apply the same pre-kick force state before its next refresh.
+  std::string name = "cosmosim_restart_v20";
+  std::uint32_t version = 20;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -62,6 +63,22 @@ struct StochasticPersistentState {
   std::vector<StochasticModulePersistentState> modules;
 };
 
+struct GravityForceCachePersistentState {
+  // Cached accelerations are restart-authoritative at a safe KDK boundary:
+  // the next pre-kick consumes them before ForceRefresh rebuilds a new field.
+  // The identity lanes make the cache safe to import after a dense-row reorder,
+  // compaction, or local migration: cache order is never physical identity.
+  bool valid = false;
+  std::vector<std::uint64_t> particle_id;
+  std::vector<std::uint64_t> gas_cell_id;
+  std::vector<double> particle_accel_x_comoving;
+  std::vector<double> particle_accel_y_comoving;
+  std::vector<double> particle_accel_z_comoving;
+  std::vector<double> cell_accel_x_comoving;
+  std::vector<double> cell_accel_y_comoving;
+  std::vector<double> cell_accel_z_comoving;
+};
+
 struct RestartWritePayload {
   RestartPersistentStateView persistent_state;
   const core::IntegratorState* integrator_state = nullptr;
@@ -71,6 +88,8 @@ struct RestartWritePayload {
   // workflow-level persistence contract.  Required for v19 writes whenever gas
   // cells exist.
   const core::HierarchicalTimeBinScheduler* gas_cell_scheduler = nullptr;
+  // Optional for direct library callers; ReferenceWorkflow always supplies it.
+  const GravityForceCachePersistentState* gravity_force_cache = nullptr;
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;
@@ -120,6 +139,7 @@ struct RestartReadResult {
   // reconstructed from the historic cell time_bin mirror for compatibility.
   core::TimeBinPersistentState gas_cell_scheduler_state;
   std::vector<std::uint64_t> gas_cell_scheduler_ids;
+  GravityForceCachePersistentState gravity_force_cache;
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;

@@ -31,8 +31,8 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v19");
-  assert(schema.version == 19);
+  assert(schema.name == "cosmosim_restart_v20");
+  assert(schema.version == 20);
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
@@ -48,6 +48,7 @@ int main() {
   bool saw_restart_diagnostics = false;
   bool saw_amr_pending_flux = false;
   bool saw_amr_temporal_history = false;
+  bool saw_gravity_force_cache = false;
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
@@ -58,6 +59,7 @@ int main() {
     saw_restart_diagnostics = saw_restart_diagnostics || item == "restart_diagnostics_summary";
     saw_amr_pending_flux = saw_amr_pending_flux || item == "amr_pending_flux_register_state";
     saw_amr_temporal_history = saw_amr_temporal_history || item == "amr_temporal_boundary_history_state";
+    saw_gravity_force_cache = saw_gravity_force_cache || item == "gravity_force_cache_at_kdk_boundary";
   }
   assert(saw_softening);
   assert(saw_gas_identity);
@@ -68,6 +70,7 @@ int main() {
   assert(saw_restart_diagnostics);
   assert(saw_amr_pending_flux);
   assert(saw_amr_temporal_history);
+  assert(saw_gravity_force_cache);
   assert(checklist.back() == "payload_integrity_hash_and_hex");
 
   bool missing_fields_threw = false;
@@ -83,6 +86,7 @@ int main() {
   state.resizeParticles(1);
   state.resizeCells(0);
   state.resizePatches(0);
+  state.particle_sidecar.particle_id[0] = 1;
   state.particle_sidecar.species_tag[0] =
       static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
   state.species.count_by_species[0] = 1;
@@ -136,6 +140,15 @@ int main() {
   });
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
   payload.stochastic_state = {};
+  cosmosim::io::GravityForceCachePersistentState force_cache;
+  force_cache.valid = true;
+  force_cache.particle_id = {state.particle_sidecar.particle_id[0]};
+  force_cache.particle_accel_x_comoving = {0.125};
+  force_cache.particle_accel_y_comoving = {-0.25};
+  force_cache.particle_accel_z_comoving = {0.5};
+  payload.gravity_force_cache = &force_cache;
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
+  payload.gravity_force_cache = nullptr;
   state.particle_sidecar.setGravitySofteningOverride(0, 0.125);
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);
   const std::uint64_t hash_with_softening = cosmosim::io::restartPayloadIntegrityHash(payload);

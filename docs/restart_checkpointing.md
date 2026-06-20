@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v19`) persists:
+The restart schema (`cosmosim_restart_v20`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -15,7 +15,8 @@ The restart schema (`cosmosim_restart_v19`) persists:
   `local_cell_row`, `local_row_reconstruction_policy=explicit_dense_local_cell_row`,
   and `identity_generation_at_write` as an audit stamp,
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
-- `IntegratorState`,
+- `IntegratorState`, including the `pm_refresh_enabled` policy bit,
+- restart-authoritative `/gravity_force_cache` acceleration triplets used by the next KDK pre-kick,
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
 - distributed TreePM continuation state (`distributed_gravity_state`, schema-versioned),
 - normalized config text/hash and provenance payload,
@@ -25,6 +26,10 @@ The restart schema (`cosmosim_restart_v19`) persists:
 - payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
+
+## H1 fixed/patch workflow restart note (v20)
+
+The v20 addition is deliberately narrow: it persists the committed particle and gas-cell gravity acceleration cache at a restart-safe KDK boundary. `ReferenceWorkflow` restores that cache before its next pre-kick, while continuing to rebuild PM mesh work arrays at their next legal refresh surface. This closes the workflow-level restart gap without serializing transient hydro scratch, ghost descriptors, PM meshes, tree traversal workspaces, or MPI buffers.
 
 Restart write payloads now carry `RestartPersistentStateView` (`persistent_state.simulation_state`) rather than a broad ad-hoc object pointer. This creates an explicit outer-boundary guard: transient runtime owners such as `TransientStepWorkspace`, `HydroScratchBuffers`, PM work arrays, TreePM traversal scratch, MPI send/recv buffers, and output staging buffers are out-of-scope for restart traversal by type.
 
@@ -45,7 +50,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: write current v18; read v18 plus documented legacy v17/v16/v15/v14 paths.
+- Current compatibility policy: write current v20; read v20 plus documented v19/v18/v17/v16/v15/v14 paths. v19 readers remain supported, but a v19 workflow resume has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
 - v14 compatibility materializes `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
   and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
@@ -80,9 +85,7 @@ behavior on filesystems where `rename` is atomic.
     `long_range_field_built_scale_factor`),
   - restart long-range policy (`long_range_restart_policy`).
   Distributed floating-point restart metadata is text-encoded with enough precision for exact read-back comparisons.
-- **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild`.
-  Cached PM long-range field arrays are not serialized; on resume, PM long-range state is rebuilt
-  deterministically on the next refresh opportunity. This is contractually explicit in restart payload + provenance.
+- **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild` for PM mesh-field storage. v20 additionally serializes the acceleration cache that the next KDK pre-kick consumes, so `ReferenceWorkflow` does not discard already-committed force state across a restart. PM mesh arrays themselves remain non-persistent and are rebuilt on the next legal refresh opportunity.
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
   `last_host_mass_code`, `cumulative_exchanged_mass_code`) for deterministic continuation.
 - Writer stores both integer and hex payload integrity hashes.
@@ -102,15 +105,18 @@ restart write/read checks is:
 6. `module_sidecars_with_schema_versions`
 7. `integrator_state`
 8. `integrator_owned_pm_sync_state`
-9. `scheduler_persistent_state`
-10. `output_cadence_persistent_state`
-11. `stochastic_module_persistent_state`
-12. `restart_diagnostics_summary`
-13. `distributed_gravity_state`
-14. `normalized_config_text_and_hash`
-15. `provenance_record`
-16. `payload_integrity_hash_and_hex`
-17. `amr_pending_flux_register_state`
+9. `gravity_force_cache_at_kdk_boundary`
+10. `scheduler_persistent_state`
+11. `gas_cell_scheduler_persistent_state_keyed_by_gas_cell_id`
+12. `output_cadence_persistent_state`
+13. `stochastic_module_persistent_state`
+14. `restart_diagnostics_summary`
+15. `distributed_gravity_state`
+16. `normalized_config_text_and_hash`
+17. `provenance_record`
+18. `payload_integrity_hash_and_hex`
+19. `amr_pending_flux_register_state`
+20. `amr_temporal_boundary_history_state`
 
 `validateContinuationMetadata(...)` now requires non-empty normalized config text, a normalized config hash that matches the text, and a provenance config hash that matches the normalized config hash before hashing/writing restart payloads.
 
@@ -175,7 +181,7 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ## AMR pending flux-register restart lanes (v17)
 
-Restart schema v17 introduced pending AMR flux-register state; current v19 checkpoints retain it under:
+Restart schema v17 introduced pending AMR flux-register state; current v20 checkpoints retain it under:
 
 ```text
 /state/amr_pending_flux_registers
@@ -205,7 +211,7 @@ This proves the exercised single-rank pending-register restart path. It does not
 
 ## AMR temporal boundary-history restart lanes (v18)
 
-Restart schema `cosmosim_restart_v19` adds `/state/amr_temporal_boundary_history` for open local AMR
+Restart schema v19 introduced `/state/amr_temporal_boundary_history`; current `cosmosim_restart_v20` retains it for open local AMR
 coarse intervals. Each history record persists patch ID/level, geometry fingerprint, gas identity generation,
 interval start/end, completion state, and stable-ID patch-local conserved start/end records. The restart
 payload integrity hash includes this store for v18 payloads.
@@ -225,7 +231,7 @@ coarse boundary history exists.
 
 ## Gas-cell scheduler persistence (v19)
 
-Schema v19 (`cosmosim_restart_v19`) persists a separate gas-cell time-bin state in
+Schema v19 introduced a separate gas-cell time-bin state; current v20 (`cosmosim_restart_v20`) persists it in
 `/gas_cell_scheduler`. Its identity key is explicitly `gas_cell_id`, not
 `parent_particle_id` and not a dense local row. The group contains `gas_cell_id`,
 `bin_index`, `next_activation_tick`, `active_flag`, and `pending_bin_index`, together with
@@ -240,3 +246,18 @@ looks up a cell through a parent particle.
 A state with gas cells but no `PatchSoa` is legal for legacy/non-AMR Cartesian continuation only
 when every `cells.patch_index` is the zero sentinel and identity records use
 `owning_patch_id = 0`. AMR states continue to require complete patch coverage.
+
+## H1 fixed-patch workflow restart evidence (v20)
+
+For the H1 fixed/Cartesian-patch workflow proof, `/gravity_force_cache` stores stable
+`particle_id` and `gas_cell_id` lanes beside cached acceleration components. On import,
+`ReferenceWorkflow` remaps those components to the current dense rows by stable ID rather
+than assuming write-time row order. A missing, duplicate, zero, or non-covering cache
+identity lane is rejected. This is required because dense row is transient storage position,
+not physical identity.
+
+The HDF5 workflow-equivalence test covers a checkpoint boundary at which gas-cell rows are
+intentionally reordered before resume. It proves the exercised local workflow path, not
+multi-rank migration/repartition restart. Validation posture remains: CI guards;
+deterministic regression and restart equivalence; multi-resolution reference convergence;
+cross-code comparison; then science-readiness benchmarks.

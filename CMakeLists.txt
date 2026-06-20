@@ -314,6 +314,7 @@ add_library(cosmosim_utils STATIC
 target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
 
 add_library(cosmosim_workflows STATIC
+  src/workflows/internal/cartesian_gas_cell_layout.cpp
   src/workflows/reference_workflow.cpp)
 
 set(COSMOSIM_MODULE_LIBS
@@ -429,6 +430,28 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_reference_workflow tests/integration/test_reference_workflow_end_to_end.cpp)
   target_link_libraries(test_integration_reference_workflow PRIVATE cosmosim_all)
   add_test(NAME integration_reference_workflow COMMAND test_integration_reference_workflow)
+
+  add_executable(
+    test_integration_reference_workflow_hydro_row_order
+    tests/integration/test_reference_workflow_hydro_row_order.cpp)
+  target_link_libraries(test_integration_reference_workflow_hydro_row_order PRIVATE cosmosim_all)
+  add_test(
+    NAME integration_reference_workflow_hydro_row_order
+    COMMAND test_integration_reference_workflow_hydro_row_order)
+  cosmosim_mark_runtime_truth_test(
+    integration_reference_workflow_hydro_row_order
+    restart scheduler hydro gas workflow geometry integration)
+
+  add_executable(
+    test_integration_restart_equivalence_reference_workflow_hydro
+    tests/integration/test_restart_equivalence_reference_workflow_hydro.cpp)
+  target_link_libraries(test_integration_restart_equivalence_reference_workflow_hydro PRIVATE cosmosim_all)
+  add_test(
+    NAME integration_restart_equivalence_reference_workflow_hydro
+    COMMAND test_integration_restart_equivalence_reference_workflow_hydro)
+  cosmosim_mark_runtime_truth_test(
+    integration_restart_equivalence_reference_workflow_hydro
+    restart scheduler hydro gas workflow equivalence integration)
   add_executable(
     test_integration_reference_workflow_distributed_treepm_mpi
     tests/integration/test_reference_workflow_distributed_treepm_mpi.cpp)

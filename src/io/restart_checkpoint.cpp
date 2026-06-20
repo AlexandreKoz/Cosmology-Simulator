@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 #include <utility>
+#include <unordered_set>
 #include <span>
 
 #include "cosmosim/core/build_config.hpp"
@@ -38,11 +39,14 @@ constexpr std::uint32_t k_restart_schema_v15 = 15;
 constexpr std::uint32_t k_restart_schema_v16 = 16;
 constexpr std::uint32_t k_restart_schema_v17 = 17;
 constexpr std::uint32_t k_restart_schema_v18 = 18;
+constexpr std::uint32_t k_restart_schema_v19 = 19;
+constexpr std::uint32_t k_restart_schema_v20 = 20;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
 constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
 constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
 constexpr std::string_view k_restart_schema_name_v17 = "cosmosim_restart_v17";
 constexpr std::string_view k_restart_schema_name_v18 = "cosmosim_restart_v18";
+constexpr std::string_view k_restart_schema_name_v19 = "cosmosim_restart_v19";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 constexpr std::string_view k_gas_cell_scheduler_identity_key = "gas_cell_id";
 
@@ -104,6 +108,78 @@ void validateSchedulerPersistentStateForRestart(
           std::string(context) + ": " + std::string(scheduler_path) + "/pending_bin_index exceeds max_bin");
     }
   }
+}
+
+void validateGravityForceCacheForRestart(
+    const GravityForceCachePersistentState& cache,
+    const core::SimulationState& state,
+    std::string_view context) {
+  const auto validate_triplet = [&](const std::vector<double>& x,
+                                    const std::vector<double>& y,
+                                    const std::vector<double>& z,
+                                    std::size_t expected,
+                                    std::string_view label) {
+    if (x.size() != y.size() || x.size() != z.size()) {
+      throw std::invalid_argument(std::string(context) + ": gravity force cache " +
+                                  std::string(label) + " component extents differ");
+    }
+    if (cache.valid && x.size() != expected) {
+      throw std::invalid_argument(std::string(context) + ": gravity force cache " +
+                                  std::string(label) + " extent does not match authoritative state");
+    }
+    if (!cache.valid && !x.empty()) {
+      throw std::invalid_argument(std::string(context) +
+                                  ": invalid gravity force cache must not retain stale component lanes");
+    }
+    for (const double value : x) {
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument(std::string(context) + ": gravity force cache contains non-finite values");
+      }
+    }
+    for (const double value : y) {
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument(std::string(context) + ": gravity force cache contains non-finite values");
+      }
+    }
+    for (const double value : z) {
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument(std::string(context) + ": gravity force cache contains non-finite values");
+      }
+    }
+  };
+  const auto validate_identity = [&](const std::vector<std::uint64_t>& cache_ids,
+                                     std::span<const std::uint64_t> state_ids,
+                                     std::string_view label) {
+    if (!cache.valid && !cache_ids.empty()) {
+      throw std::invalid_argument(std::string(context) + ": invalid gravity force cache must not retain stale " +
+                                  std::string(label) + " identity lanes");
+    }
+    if (!cache.valid) {
+      return;
+    }
+    if (cache_ids.size() != state_ids.size()) {
+      throw std::invalid_argument(std::string(context) + ": gravity force cache " +
+                                  std::string(label) + " identity extent does not match authoritative state");
+    }
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(cache_ids.size());
+    for (std::size_t index = 0; index < cache_ids.size(); ++index) {
+      if (cache_ids[index] == 0U || !seen.insert(cache_ids[index]).second) {
+        throw std::invalid_argument(std::string(context) + ": gravity force cache " +
+                                    std::string(label) + " identity lane contains a zero or duplicate ID");
+      }
+      if (cache_ids[index] != state_ids[index]) {
+        throw std::invalid_argument(std::string(context) + ": gravity force cache " +
+                                    std::string(label) + " identity lane does not match authoritative dense row");
+      }
+    }
+  };
+  validate_triplet(cache.particle_accel_x_comoving, cache.particle_accel_y_comoving,
+                   cache.particle_accel_z_comoving, state.particles.size(), "particles");
+  validate_triplet(cache.cell_accel_x_comoving, cache.cell_accel_y_comoving,
+                   cache.cell_accel_z_comoving, state.cells.size(), "gas cells");
+  validate_identity(cache.particle_id, state.particle_sidecar.particle_id, "particle");
+  validate_identity(cache.gas_cell_id, state.gas_cells.gas_cell_id, "gas-cell");
 }
 
 void validateRestartTimeBinMirrorsAgainstScheduler(
@@ -709,6 +785,20 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
                                 "pm_pending_refresh_opportunity", "pm_pending_refresh_field_version"}) {
     requireHdf5Attribute(integrator_group.get(), "/integrator", attr);
   }
+  if (schema_version >= k_restart_schema_v20) {
+    requireHdf5Attribute(integrator_group.get(), "/integrator", "pm_refresh_enabled");
+  }
+
+  if (schema_version >= k_restart_schema_v20) {
+    Hdf5Handle force_cache_group = openRequiredGroup(file, "/gravity_force_cache");
+    requireHdf5Attribute(force_cache_group.get(), "/gravity_force_cache", "valid");
+    for (std::string_view dataset : {"particle_id", "gas_cell_id",
+                                     "particle_accel_x_comoving", "particle_accel_y_comoving",
+                                     "particle_accel_z_comoving", "cell_accel_x_comoving",
+                                     "cell_accel_y_comoving", "cell_accel_z_comoving"}) {
+      requireHdf5Dataset1d(file, std::string("/gravity_force_cache/") + std::string(dataset));
+    }
+  }
 
   Hdf5Handle scheduler_group = openRequiredGroup(file, "/scheduler");
   requireHdf5Attribute(scheduler_group.get(), "/scheduler", "current_tick");
@@ -717,7 +807,7 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
   requireHdf5Dataset1d(file, "/scheduler/next_activation_tick");
   requireHdf5Dataset1d(file, "/scheduler/active_flag");
   requireHdf5Dataset1d(file, "/scheduler/pending_bin_index");
-  if (schema_version >= restartSchema().version) {
+  if (schema_version >= k_restart_schema_v19) {
     Hdf5Handle gas_scheduler_group = openRequiredGroup(file, "/gas_cell_scheduler");
     requireHdf5Attribute(gas_scheduler_group.get(), "/gas_cell_scheduler", "identity_key");
     requireHdf5Attribute(gas_scheduler_group.get(), "/gas_cell_scheduler", "current_tick");
@@ -754,7 +844,7 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
     requireHdf5Attribute(diagnostics_group.get(), "/restart_diagnostics", attr);
   }
 
-  if (schema_version >= restartSchema().version) {
+  if (schema_version >= k_restart_schema_v19) {
     for (std::string_view attr : {"gas_cell_scheduler_current_tick", "gas_cell_scheduler_max_bin",
                                   "gas_cell_scheduler_element_count", "gas_cell_scheduler_active_count",
                                   "gas_cell_scheduler_pending_transition_count"}) {
@@ -1208,7 +1298,7 @@ void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxReg
 }
 
 void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& state, std::uint32_t schema_version) {
-  if (schema_version < restartSchema().version && H5Lexists(state_group, "amr_pending_flux_registers", H5P_DEFAULT) <= 0) {
+  if (schema_version < k_restart_schema_v19 && H5Lexists(state_group, "amr_pending_flux_registers", H5P_DEFAULT) <= 0) {
     state.pending_flux_registers.clear();
     return;
   }
@@ -1383,7 +1473,7 @@ void readAmrTemporalBoundaryHistoryGroup(
     hid_t state_group,
     core::SimulationState& state,
     std::uint32_t schema_version) {
-  if (schema_version < restartSchema().version) {
+  if (schema_version < k_restart_schema_v19) {
     // Older checkpoints cannot prove a mid-subcycle continuation has the
     // time-aligned coarse history required by temporal coarse-to-fine fills.
     // A legacy file is therefore safe only when no deferred AMR synchronization
@@ -2095,7 +2185,7 @@ void writeRestartDiagnosticsGroup(hid_t root, const RestartDiagnosticsSummary& d
   diagnostics.scheduler_active_count = readScalarU64Attribute(group.get(), "scheduler_active_count");
   diagnostics.scheduler_pending_transition_count =
       readScalarU64Attribute(group.get(), "scheduler_pending_transition_count");
-  if (schema_version >= restartSchema().version) {
+  if (schema_version >= k_restart_schema_v19) {
     diagnostics.gas_cell_scheduler_current_tick =
         readScalarU64Attribute(group.get(), "gas_cell_scheduler_current_tick");
     diagnostics.gas_cell_scheduler_max_bin =
@@ -2132,7 +2222,9 @@ const RestartSchema& restartSchema() {
 }
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
-  return file_schema_version == restartSchema().version || file_schema_version == k_restart_schema_v18 ||
+  return file_schema_version == restartSchema().version ||
+      file_schema_version == k_restart_schema_v19 ||
+      file_schema_version == k_restart_schema_v18 ||
       file_schema_version == k_restart_schema_v17 || file_schema_version == k_restart_schema_v16 ||
       file_schema_version == k_restart_schema_v15 || file_schema_version == k_restart_schema_v14;
 }
@@ -2149,6 +2241,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "module_sidecars_with_schema_versions",
       "integrator_state",
       "integrator_owned_pm_sync_state",
+      "gravity_force_cache_at_kdk_boundary",
       "scheduler_persistent_state",
       "gas_cell_scheduler_persistent_state_keyed_by_gas_cell_id",
       "output_cadence_persistent_state",
@@ -2166,7 +2259,8 @@ std::uint64_t restartPayloadIntegrityHashImpl(
     bool include_gas_identity_records,
     bool include_pending_flux_registers,
     bool include_temporal_boundary_history,
-    bool include_gas_cell_scheduler) {
+    bool include_gas_cell_scheduler,
+    bool include_gravity_force_cache) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -2178,6 +2272,13 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   validateHydroGeometryStateForRestart(*payload.persistent_state.simulation_state, "restart payload");
   if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
+  }
+  const GravityForceCachePersistentState empty_force_cache{};
+  const GravityForceCachePersistentState& gravity_force_cache =
+      payload.gravity_force_cache != nullptr ? *payload.gravity_force_cache : empty_force_cache;
+  if (include_gravity_force_cache) {
+    validateGravityForceCacheForRestart(
+        gravity_force_cache, *payload.persistent_state.simulation_state, "restart payload");
   }
   const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
   const core::TimeBinPersistentState gas_cell_scheduler_state_for_validation =
@@ -2484,6 +2585,9 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.active_bin));
   append_u64(static_cast<std::uint64_t>(payload.integrator_state->time_bins.max_bin));
   append_u64(payload.integrator_state->pm_long_range_field_valid ? 1ull : 0ull);
+  if (include_gravity_force_cache) {
+    append_u64(payload.integrator_state->pm_refresh_enabled ? 1ull : 0ull);
+  }
   const core::PmSynchronizationPersistentState pm_sync_state = payload.integrator_state->pm_sync_state.exportPersistentState();
   append_u64(pm_sync_state.cadence_steps);
   append_u64(pm_sync_state.gravity_kick_opportunity);
@@ -2494,6 +2598,17 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_u64(pm_sync_state.refresh_commit_pending ? 1ull : 0ull);
   append_u64(pm_sync_state.pending_refresh_opportunity);
   append_u64(pm_sync_state.pending_refresh_field_version);
+  if (include_gravity_force_cache) {
+    append_u64(gravity_force_cache.valid ? 1ULL : 0ULL);
+    append_any_vec(gravity_force_cache.particle_id);
+    append_any_vec(gravity_force_cache.gas_cell_id);
+    append_any_vec(gravity_force_cache.particle_accel_x_comoving);
+    append_any_vec(gravity_force_cache.particle_accel_y_comoving);
+    append_any_vec(gravity_force_cache.particle_accel_z_comoving);
+    append_any_vec(gravity_force_cache.cell_accel_x_comoving);
+    append_any_vec(gravity_force_cache.cell_accel_y_comoving);
+    append_any_vec(gravity_force_cache.cell_accel_z_comoving);
+  }
 
   const core::TimeBinPersistentState& scheduler_state = scheduler_state_for_validation;
   append_u64(scheduler_state.current_tick);
@@ -2537,7 +2652,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true, true, true, true);
+  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -2590,6 +2705,11 @@ void writeRestartCheckpointHdf5(
       payload.output_cadence_state, *payload.integrator_state, "restart writer");
   validateStochasticStateForRestart(
       payload.stochastic_state, *payload.integrator_state, "restart writer");
+  const GravityForceCachePersistentState empty_force_cache{};
+  const GravityForceCachePersistentState& gravity_force_cache =
+      payload.gravity_force_cache != nullptr ? *payload.gravity_force_cache : empty_force_cache;
+  validateGravityForceCacheForRestart(
+      gravity_force_cache, *payload.persistent_state.simulation_state, "restart writer");
 
   std::filesystem::create_directories(output_path.parent_path());
   const std::filesystem::path temporary_path = output_path.string() + policy.temporary_suffix;
@@ -2640,6 +2760,7 @@ void writeRestartCheckpointHdf5(
   writeScalarU32Attribute(integrator_group.get(), "time_bins_active_bin", payload.integrator_state->time_bins.active_bin);
   writeScalarU32Attribute(integrator_group.get(), "time_bins_max_bin", payload.integrator_state->time_bins.max_bin);
   writeScalarU32Attribute(integrator_group.get(), "pm_long_range_field_valid", payload.integrator_state->pm_long_range_field_valid ? 1U : 0U);
+  writeScalarU32Attribute(integrator_group.get(), "pm_refresh_enabled", payload.integrator_state->pm_refresh_enabled ? 1U : 0U);
   const core::PmSynchronizationPersistentState pm_sync_state = payload.integrator_state->pm_sync_state.exportPersistentState();
   writeScalarU64Attribute(integrator_group.get(), "pm_cadence_steps", pm_sync_state.cadence_steps);
   writeScalarU64Attribute(integrator_group.get(), "pm_gravity_kick_opportunity", pm_sync_state.gravity_kick_opportunity);
@@ -2650,6 +2771,17 @@ void writeRestartCheckpointHdf5(
   writeScalarU32Attribute(integrator_group.get(), "pm_refresh_commit_pending", pm_sync_state.refresh_commit_pending ? 1U : 0U);
   writeScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_opportunity", pm_sync_state.pending_refresh_opportunity);
   writeScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_field_version", pm_sync_state.pending_refresh_field_version);
+
+  Hdf5Handle force_cache_group(openOrCreateGroup(file.get(), "/gravity_force_cache"));
+  writeScalarU32Attribute(force_cache_group.get(), "valid", gravity_force_cache.valid ? 1U : 0U);
+  writeDataset1d(force_cache_group.get(), "particle_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, gravity_force_cache.particle_id);
+  writeDataset1d(force_cache_group.get(), "gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, gravity_force_cache.gas_cell_id);
+  writeDataset1d(force_cache_group.get(), "particle_accel_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.particle_accel_x_comoving);
+  writeDataset1d(force_cache_group.get(), "particle_accel_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.particle_accel_y_comoving);
+  writeDataset1d(force_cache_group.get(), "particle_accel_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.particle_accel_z_comoving);
+  writeDataset1d(force_cache_group.get(), "cell_accel_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.cell_accel_x_comoving);
+  writeDataset1d(force_cache_group.get(), "cell_accel_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.cell_accel_y_comoving);
+  writeDataset1d(force_cache_group.get(), "cell_accel_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, gravity_force_cache.cell_accel_z_comoving);
 
   const core::TimeBinPersistentState scheduler_state = scheduler_state_for_validation;
   Hdf5Handle scheduler_group(openOrCreateGroup(file.get(), "/scheduler"));
@@ -2760,7 +2892,9 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       schema_name == k_restart_schema_name_v17 && schema_version == k_restart_schema_v17;
   const bool legacy_v18_schema =
       schema_name == k_restart_schema_name_v18 && schema_version == k_restart_schema_v18;
-  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema && !legacy_v17_schema && !legacy_v18_schema) ||
+  const bool legacy_v19_schema =
+      schema_name == k_restart_schema_name_v19 && schema_version == k_restart_schema_v19;
+  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema && !legacy_v17_schema && !legacy_v18_schema && !legacy_v19_schema) ||
       !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
@@ -2813,6 +2947,9 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       static_cast<std::uint8_t>(readScalarU32Attribute(integrator_group.get(), "time_bins_max_bin"));
   result.integrator_state.pm_long_range_field_valid =
       readScalarU32Attribute(integrator_group.get(), "pm_long_range_field_valid") != 0U;
+  result.integrator_state.pm_refresh_enabled =
+      schema_version >= k_restart_schema_v20 &&
+      readScalarU32Attribute(integrator_group.get(), "pm_refresh_enabled") != 0U;
   core::PmSynchronizationPersistentState pm_sync_state;
   pm_sync_state.cadence_steps = readScalarU64Attribute(integrator_group.get(), "pm_cadence_steps");
   pm_sync_state.gravity_kick_opportunity = readScalarU64Attribute(integrator_group.get(), "pm_gravity_kick_opportunity");
@@ -2824,6 +2961,19 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   pm_sync_state.pending_refresh_opportunity = readScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_opportunity");
   pm_sync_state.pending_refresh_field_version = readScalarU64Attribute(integrator_group.get(), "pm_pending_refresh_field_version");
   result.integrator_state.pm_sync_state.importPersistentState(pm_sync_state);
+  if (schema_version >= k_restart_schema_v20) {
+    Hdf5Handle force_cache_group(H5Gopen2(file.get(), "/gravity_force_cache", H5P_DEFAULT));
+    result.gravity_force_cache.valid = readScalarU32Attribute(force_cache_group.get(), "valid") != 0U;
+    result.gravity_force_cache.particle_id = readDataset1d<std::uint64_t>(force_cache_group.get(), "particle_id", H5T_NATIVE_UINT64);
+    result.gravity_force_cache.gas_cell_id = readDataset1d<std::uint64_t>(force_cache_group.get(), "gas_cell_id", H5T_NATIVE_UINT64);
+    result.gravity_force_cache.particle_accel_x_comoving = readDataset1d<double>(force_cache_group.get(), "particle_accel_x_comoving", H5T_NATIVE_DOUBLE);
+    result.gravity_force_cache.particle_accel_y_comoving = readDataset1d<double>(force_cache_group.get(), "particle_accel_y_comoving", H5T_NATIVE_DOUBLE);
+    result.gravity_force_cache.particle_accel_z_comoving = readDataset1d<double>(force_cache_group.get(), "particle_accel_z_comoving", H5T_NATIVE_DOUBLE);
+    result.gravity_force_cache.cell_accel_x_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_x_comoving", H5T_NATIVE_DOUBLE);
+    result.gravity_force_cache.cell_accel_y_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_y_comoving", H5T_NATIVE_DOUBLE);
+    result.gravity_force_cache.cell_accel_z_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_z_comoving", H5T_NATIVE_DOUBLE);
+    validateGravityForceCacheForRestart(result.gravity_force_cache, result.state, "restart reader");
+  }
 
   Hdf5Handle scheduler_group(H5Gopen2(file.get(), "/scheduler", H5P_DEFAULT));
   result.scheduler_state.current_tick = readScalarU64Attribute(scheduler_group.get(), "current_tick");
@@ -2836,7 +2986,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       readDataset1d<std::uint8_t>(scheduler_group.get(), "pending_bin_index", H5T_NATIVE_UINT8);
   validateRestartTimeBinMirrorsAgainstScheduler(result.state, result.scheduler_state, "restart reader");
   rebuildRestartTimeBinMirrorsFromScheduler(result.state, result.scheduler_state);
-  if (schema_version >= restartSchema().version) {
+  if (schema_version >= k_restart_schema_v19) {
     Hdf5Handle gas_scheduler_group(H5Gopen2(file.get(), "/gas_cell_scheduler", H5P_DEFAULT));
     const std::string identity_key = readScalarStringAttribute(gas_scheduler_group.get(), "identity_key");
     if (identity_key != k_gas_cell_scheduler_identity_key) {
@@ -2881,7 +3031,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       result.diagnostics.step_index != result.integrator_state.step_index ||
       result.diagnostics.scheduler_current_tick != result.scheduler_state.current_tick ||
       result.diagnostics.scheduler_element_count != result.scheduler_state.bin_index.size() ||
-      (schema_version >= restartSchema().version &&
+      (schema_version >= k_restart_schema_v19 &&
        (result.diagnostics.gas_cell_scheduler_current_tick != result.gas_cell_scheduler_state.current_tick ||
         result.diagnostics.gas_cell_scheduler_element_count != result.gas_cell_scheduler_state.bin_index.size())) ||
       result.diagnostics.output_last_completed_step_index != result.output_cadence_state.last_completed_step_index ||
@@ -2898,7 +3048,10 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   core::HierarchicalTimeBinScheduler verify_gas_cell_scheduler(result.gas_cell_scheduler_state.max_bin);
   verify_gas_cell_scheduler.importPersistentState(result.gas_cell_scheduler_state);
   verify_payload.scheduler = &verify_scheduler;
-  if (schema_version >= restartSchema().version) {
+  if (schema_version >= k_restart_schema_v20) {
+    verify_payload.gravity_force_cache = &result.gravity_force_cache;
+  }
+  if (schema_version >= k_restart_schema_v19) {
     verify_payload.gas_cell_scheduler = &verify_gas_cell_scheduler;
   }
   verify_payload.normalized_config_hash_hex = result.normalized_config_hash_hex;
@@ -2914,7 +3067,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
           schema_version >= k_restart_schema_v15,
           schema_version >= k_restart_schema_v17,
           schema_version >= k_restart_schema_v18,
-          schema_version >= restartSchema().version);
+          schema_version >= k_restart_schema_v19,
+          schema_version >= k_restart_schema_v20);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");
   }
