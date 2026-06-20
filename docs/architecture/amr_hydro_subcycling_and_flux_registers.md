@@ -45,7 +45,7 @@ Incomplete or invalid records are not silently applied.
 
 ## Restart path
 
-HDF5 restart schema v17 introduced pending-register serialization; current schema v18 serializes pending registers under `/state/amr_pending_flux_registers`. Legacy restart files without the group load with an empty pending store. Current v18 restart validation requires the group so pending deferred reflux state cannot be omitted from new checkpoints.
+HDF5 restart schema v17 introduced pending-register serialization; current schema v19 retains and serializes pending registers under `/state/amr_pending_flux_registers`. Legacy restart files without the group load with an empty pending store. Current v19 restart validation requires the group so pending deferred reflux state cannot be omitted from new checkpoints.
 
 The restart-equivalence test `integration_restart_equivalence_amr_flux_registers` writes an incomplete pending record before restart, reloads it, completes the missing fine contribution, applies reflux, and compares final direct-vs-restart state.
 
@@ -77,7 +77,7 @@ identity generation. Dense-row order is never a temporal-history key. Refinement
 prohibited while an active history exists. This is a safe local lifecycle policy, not a migration/remap
 implementation.
 
-HDF5 restart schema v18 stores these records under:
+HDF5 restart schema v19 retains these records under:
 
 ```text
 /state/amr_temporal_boundary_history

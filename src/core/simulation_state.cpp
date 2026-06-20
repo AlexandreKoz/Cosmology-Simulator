@@ -730,6 +730,76 @@ void SimulationState::refreshGasCellIdentityMapFromSidecarLanes() {
   cosmosim::core::refreshGasCellIdentityMapFromSidecarLanes(*this);
 }
 
+void SimulationState::synchronizeGasCellIdentityCompatibilityMirrors() {
+  gas_cell_identity.requireCoversDenseLocalRows(cells.size(),
+      "synchronizeGasCellIdentityCompatibilityMirrors");
+  if (gas_cells.gas_cell_id.size() != cells.size() ||
+      gas_cells.parent_particle_id.size() != cells.size()) {
+    throw std::runtime_error(
+        "synchronizeGasCellIdentityCompatibilityMirrors: gas-cell sidecar lanes must cover dense CellSoa rows");
+  }
+
+  std::unordered_map<std::uint64_t, std::uint32_t> patch_row_by_id;
+  if (!patches.patch_id.empty()) {
+    if (!patches.isConsistent() || cells.patch_index.size() != cells.size()) {
+      throw std::runtime_error(
+          "synchronizeGasCellIdentityCompatibilityMirrors: PatchSoa and CellSoa patch-index lane must be consistent");
+    }
+    patch_row_by_id.reserve(patches.size());
+    for (std::uint32_t patch_row = 0; patch_row < patches.size(); ++patch_row) {
+      if (!patch_row_by_id.emplace(patches.patch_id[patch_row], patch_row).second) {
+        throw std::runtime_error(
+            "synchronizeGasCellIdentityCompatibilityMirrors: duplicate PatchSoa patch_id");
+      }
+    }
+  }
+
+  for (const GasCellIdentityRecord& record : gas_cell_identity.records()) {
+    if (record.local_cell_row >= cells.size()) {
+      throw std::runtime_error(
+          "synchronizeGasCellIdentityCompatibilityMirrors: identity local row is outside CellSoa");
+    }
+    const std::uint32_t row = record.local_cell_row;
+    gas_cells.gas_cell_id[row] = record.gas_cell_id;
+    gas_cells.parent_particle_id[row] = record.parent_particle_id.value_or(0U);
+    if (!patches.patch_id.empty()) {
+      const auto patch_it = patch_row_by_id.find(record.owning_patch_id);
+      if (patch_it == patch_row_by_id.end()) {
+        throw std::runtime_error(
+            "synchronizeGasCellIdentityCompatibilityMirrors: identity owning_patch_id is not present in PatchSoa");
+      }
+      cells.patch_index[row] = patch_it->second;
+    }
+  }
+
+  if (!gasCellIdentityMapMatchesSidecarLanes()) {
+    throw std::runtime_error(
+        "synchronizeGasCellIdentityCompatibilityMirrors: map-to-mirror synchronization failed validation");
+  }
+}
+
+void SimulationState::replaceGasCellIdentityRecords(std::vector<GasCellIdentityRecord> records) {
+  if (records.size() != cells.size()) {
+    throw std::invalid_argument(
+        "replaceGasCellIdentityRecords: record count must match dense CellSoa rows");
+  }
+  gas_cell_identity.assign(std::move(records));
+  synchronizeGasCellIdentityCompatibilityMirrors();
+  bumpCellIndexGeneration();
+}
+
+void SimulationState::restoreGasCellIdentityRecords(
+    std::vector<GasCellIdentityRecord> records,
+    std::uint64_t generation) {
+  if (records.size() != cells.size()) {
+    throw std::invalid_argument(
+        "restoreGasCellIdentityRecords: record count must match dense CellSoa rows");
+  }
+  gas_cell_identity.assignWithGeneration(std::move(records), generation);
+  synchronizeGasCellIdentityCompatibilityMirrors();
+  bumpCellIndexGeneration();
+}
+
 bool SimulationState::gasCellIdentityMapMatchesParticleBoundState() const {
   return cosmosim::core::gasCellIdentityMapMatchesParticleBoundState(*this);
 }
@@ -744,6 +814,12 @@ std::uint64_t SimulationState::gasCellIdentityGeneration() const noexcept {
 
 void requireGasCellIdentityMapCoversDenseRows(const SimulationState& state, std::string_view caller) {
   state.gas_cell_identity.requireCoversDenseLocalRows(state.cells.size(), caller);
+  if (!gasCellIdentityMapMatchesSidecarLanes(state)) {
+    throw std::runtime_error(std::string(caller) +
+        ": GasCellIdentityMap and compatibility gas-cell mirror lanes diverged; "
+        "use SimulationState::replaceGasCellIdentityRecords() or "
+        "synchronizeGasCellIdentityCompatibilityMirrors()");
+  }
 }
 
 void SimulationState::requireGasCellIdentityMapCoversDenseRows(std::string_view caller) const {

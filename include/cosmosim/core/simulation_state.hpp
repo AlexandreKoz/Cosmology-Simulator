@@ -740,8 +740,24 @@ class SimulationState {
   void rebuildSpeciesIndex();
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
+  // Legacy/bootstrap imports only: these construct the authoritative map from
+  // old particle-bound or sidecar representations. Normal production mutation
+  // must flow in the opposite direction through replaceGasCellIdentityRecords().
   void refreshGasCellIdentityMapFromParticleBoundState();
   void refreshGasCellIdentityMapFromSidecarLanes();
+
+  // Authoritative production mutation path. Records are validated and installed
+  // atomically in GasCellIdentityMap, then compatibility lanes are rebuilt from
+  // the map. Dense rows remain storage positions only.
+  void replaceGasCellIdentityRecords(std::vector<GasCellIdentityRecord> records);
+  // Restart-only variant preserving the serialized identity generation.
+  void restoreGasCellIdentityRecords(
+      std::vector<GasCellIdentityRecord> records,
+      std::uint64_t generation);
+  // Rebuild compatibility mirror lanes from GasCellIdentityMap. This never
+  // imports identity from mirrors and is safe at production boundaries.
+  void synchronizeGasCellIdentityCompatibilityMirrors();
+
   [[nodiscard]] bool gasCellIdentityMapMatchesParticleBoundState() const;
   [[nodiscard]] std::uint64_t gasCellIdentityGeneration() const noexcept;
   void requireGasCellIdentityMapCoversDenseRows(std::string_view caller) const;

@@ -417,7 +417,7 @@ void rebuildIdentityFromSidecars(core::SimulationState& state) {
         .owning_patch_id = state.patches.patch_id[patch_index],
         .local_cell_row = row});
   }
-  state.gas_cell_identity.assign(std::move(records));
+  state.replaceGasCellIdentityRecords(std::move(records));
 }
 
 [[nodiscard]] bool idRangeOverflows(std::uint64_t first, std::size_t count) {

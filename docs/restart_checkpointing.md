@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v18`) persists:
+The restart schema (`cosmosim_restart_v19`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -175,7 +175,7 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ## AMR pending flux-register restart lanes (v17)
 
-Restart schema v17 introduced pending AMR flux-register state; current v18 checkpoints retain it under:
+Restart schema v17 introduced pending AMR flux-register state; current v19 checkpoints retain it under:
 
 ```text
 /state/amr_pending_flux_registers
@@ -205,7 +205,7 @@ This proves the exercised single-rank pending-register restart path. It does not
 
 ## AMR temporal boundary-history restart lanes (v18)
 
-Restart schema `cosmosim_restart_v18` adds `/state/amr_temporal_boundary_history` for open local AMR
+Restart schema `cosmosim_restart_v19` adds `/state/amr_temporal_boundary_history` for open local AMR
 coarse intervals. Each history record persists patch ID/level, geometry fingerprint, gas identity generation,
 interval start/end, completion state, and stable-ID patch-local conserved start/end records. The restart
 payload integrity hash includes this store for v18 payloads.
@@ -220,3 +220,23 @@ require resumption inside an active temporal AMR interval; legacy files are not 
 one. The v18 reader conservatively rejects a pre-v18 payload that still contains pending AMR flux-register
 records, because that observable deferred-synchronization state cannot prove the required time-aligned
 coarse boundary history exists.
+
+---
+
+## Gas-cell scheduler persistence (v19)
+
+Schema v19 (`cosmosim_restart_v19`) persists a separate gas-cell time-bin state in
+`/gas_cell_scheduler`. Its identity key is explicitly `gas_cell_id`, not
+`parent_particle_id` and not a dense local row. The group contains `gas_cell_id`,
+`bin_index`, `next_activation_tick`, `active_flag`, and `pending_bin_index`, together with
+`current_tick` and `max_bin` attributes.
+
+Restart validation checks that each scheduler identity agrees with the authoritative
+`GasCellIdentityMap` and that `CellSoa::time_bin` is a derived mirror of `bin_index`. The
+payload integrity hash and diagnostics include this state. v14--v18 files retain a narrow
+compatibility reconstruction route based on persisted cell time-bin mirrors; that route never
+looks up a cell through a parent particle.
+
+A state with gas cells but no `PatchSoa` is legal for legacy/non-AMR Cartesian continuation only
+when every `cells.patch_index` is the zero sentinel and identity records use
+`owning_patch_id = 0`. AMR states continue to require complete patch coverage.

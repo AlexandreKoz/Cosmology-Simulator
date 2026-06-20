@@ -206,3 +206,23 @@ Repair notes:
 ## Reproducibility impact
 
 This repair changes runtime behavior in targeted H2 ownership paths: migration identity-map validation calls are fixed, restart metadata deserialization accepts empty string-valued metadata fields, CPU-only restart hashing includes v15 gas-cell identity records, decomposition patch-cost accounting no longer relies on legacy particle-bound row lookup, and hydro ghost correction/writeback authority is keyed by gas-cell patch ownership. It does not change solver numerics, restart schema version, HDF5 dataset names, config normalization, provenance payloads, or output naming.
+
+---
+
+## Superseding repair assessment (2026-06-19)
+
+This audit predates the production repair and its schema-v15 claims are obsolete. Current
+restart schema is **v19**, with a dedicated gas-cell scheduler persisted by stable
+`gas_cell_id`. `SimulationState::gas_cell_identity` is authoritative, compatibility sidecars
+are derived mirrors, and map/mirror divergence is rejected at guarded hydro, scheduler,
+migration, and restart boundaries.
+
+The production reference workflow now has an HDF5 regression that runs parentless,
+shared-parent, and shuffled-row gas cells through the same setup, scheduling, hydro, output,
+and restart path used by normal execution. The two physical-equivalent row orders are compared
+by stable ID after restart.
+
+This is sufficient evidence for the exercised single-rank CPU/HDF5 H2 path. It is **not** MPI
+acceptance: real two-/three-rank gas-cell migration and post-migration scheduler/restart
+continuation remain unexecuted in an environment without MPI tooling. The authoritative repair
+record is `h2_gas_cell_identity_repair_acceptance.md`.

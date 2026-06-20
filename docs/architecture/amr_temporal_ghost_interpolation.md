@@ -38,7 +38,7 @@ reject with a named temporal-misalignment status.
 
 ## Restart
 
-Schema `cosmosim_restart_v18` serializes active histories in
+Schema `cosmosim_restart_v19` serializes active histories in
 `/state/amr_temporal_boundary_history`. A restart written while a local interval is active must contain a
 completed coarse start/end history before remaining fine substeps can resume. The HDF5 test
 `integration_restart_equivalence_amr_temporal_ghosts` exercises this exact continuation path.

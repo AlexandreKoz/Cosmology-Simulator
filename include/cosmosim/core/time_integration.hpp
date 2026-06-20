@@ -764,6 +764,26 @@ void rebuildSchedulerFromParticleIdentityRecords(
     std::span<const TimeBinSchedulerIdentityRecord> records,
     std::span<const std::uint64_t> destination_particle_ids);
 
+// Gas-cell scheduler authority is keyed by stable gas_cell_id, never by a
+// parent particle row.  These helpers are the remap/restart seam used by
+// cell migration and restart reconstruction.
+[[nodiscard]] std::vector<TimeBinSchedulerIdentityRecord> exportGasCellSchedulerIdentityRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> cell_indices);
+
+void rebuildSchedulerFromGasCellIdentityRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    const SimulationState& state);
+
+void syncGasCellTimeBinMirrorsFromGasCellScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state);
+
+// Legacy compatibility helper only.  New workflow paths must use the
+// gas-cell scheduler helper above so parentless and split cells remain
+// independently schedulable.
 void syncGasCellTimeBinMirrorsFromParticleScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     SimulationState& state);

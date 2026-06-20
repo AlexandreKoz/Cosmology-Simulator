@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_integration.hpp"
 
 namespace {
 
@@ -116,6 +117,18 @@ void test_simulation_state_identity_map_materialization_and_drift_rejection() {
   state.gas_cells.gas_cell_id[1] = 101;
   assert(state.gasCellIdentityMapMatchesParticleBoundState());
 
+  // Public compatibility mirrors must not silently become a second identity authority.
+  state.gas_cells.parent_particle_id[1] = 777777;
+  bool mirror_divergence_threw = false;
+  try {
+    state.requireGasCellIdentityMapCoversDenseRows("mirror divergence rejection");
+  } catch (const std::runtime_error&) {
+    mirror_divergence_threw = true;
+  }
+  assert(mirror_divergence_threw);
+  state.synchronizeGasCellIdentityCompatibilityMirrors();
+  assert(state.gasCellIdentityMapMatchesSidecarLanes());
+
   state.gas_cells.parent_particle_id[0] = 0;
   bool zero_parent_threw = false;
   try {
@@ -185,7 +198,7 @@ void test_hydro_view_scatters_by_stable_gas_cell_id_without_parent() {
     state.gas_cells.density_code[row] = 100.0 + static_cast<double>(row);
     state.gas_cells.pressure_code[row] = 200.0 + static_cast<double>(row);
   }
-  state.gas_cell_identity.assign({
+  state.replaceGasCellIdentityRecords({
       {.gas_cell_id = 7003, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
       {.gas_cell_id = 7001, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
       {.gas_cell_id = 7002, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},
@@ -207,6 +220,42 @@ void test_hydro_view_scatters_by_stable_gas_cell_id_without_parent() {
   assert(state.gas_cells.pressure_code[0] == 200.0);
   assert(state.gas_cells.density_code[1] == 444.0);
   assert(state.gas_cells.pressure_code[1] == 555.0);
+}
+
+void test_gas_cell_scheduler_is_independent_and_remaps_by_stable_id() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(3);
+  state.replaceGasCellIdentityRecords({
+      {.gas_cell_id = 8103, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 8101, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
+      {.gas_cell_id = 8102, .parent_particle_id = 42, .owning_patch_id = 0, .local_cell_row = 2},
+  });
+
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
+  scheduler.reset(3, 0, 0);
+  scheduler.setElementBin(0, 2, 0);
+  scheduler.setElementBin(1, 0, 0);
+  scheduler.setElementBin(2, 1, 0);
+  cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(scheduler, state);
+  assert(state.cells.time_bin[0] == 2);
+  assert(state.cells.time_bin[1] == 0);
+  assert(state.cells.time_bin[2] == 1);
+
+  const std::array<std::uint32_t, 3> source_rows{0, 1, 2};
+  const auto records = cosmosim::core::exportGasCellSchedulerIdentityRecords(
+      scheduler, state, source_rows);
+
+  // Dense rows are deliberately reordered while stable IDs retain their bins.
+  state.replaceGasCellIdentityRecords({
+      {.gas_cell_id = 8101, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 8102, .parent_particle_id = 42, .owning_patch_id = 0, .local_cell_row = 1},
+      {.gas_cell_id = 8103, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},
+  });
+  cosmosim::core::rebuildSchedulerFromGasCellIdentityRecords(scheduler, records, state);
+  cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(scheduler, state);
+  assert(state.cells.time_bin[0] == 0);  // gas_cell_id 8101
+  assert(state.cells.time_bin[1] == 1);  // gas_cell_id 8102
+  assert(state.cells.time_bin[2] == 2);  // gas_cell_id 8103
 }
 
 void test_gas_cell_reorder_resize_invariants() {
@@ -385,6 +434,7 @@ int main() {
   test_sidecar_identity_refresh_synchronizes_patch_ownership();
   test_hydro_view_rejects_stale_gas_identity_generation();
   test_hydro_view_scatters_by_stable_gas_cell_id_without_parent();
+  test_gas_cell_scheduler_is_independent_and_remaps_by_stable_id();
   test_gas_cell_reorder_resize_invariants();
   test_decoupled_gas_cell_identity_map_api_shape();
   test_gas_cell_identity_map_row_remap_by_stable_id();

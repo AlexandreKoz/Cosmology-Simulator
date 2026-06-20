@@ -8,6 +8,10 @@
 
 #include "cosmosim/core/config.hpp"
 
+namespace cosmosim::core {
+struct SimulationState;
+}
+
 namespace cosmosim::workflows {
 
 // Integration-layer ownership note:
@@ -17,6 +21,12 @@ struct ReferenceWorkflowOptions {
   std::uint64_t step_index = 0;
   double dt_time_code = 0.0;
   bool write_outputs = true;
+
+  // Narrow integration-test/benchmark seam.  When present, the runner copies
+  // this already-validated state and executes the same production setup,
+  // scheduler, hydro, restart, and output pipeline used after IC import.
+  // The caller retains ownership for the synchronous duration of run().
+  const core::SimulationState* initial_state_override = nullptr;
 };
 
 struct ReferenceWorkflowReport {

@@ -15,8 +15,9 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  std::string name = "cosmosim_restart_v18";
-  std::uint32_t version = 18;
+  // v19 persists the gas-cell scheduler independently of the particle scheduler.
+  std::string name = "cosmosim_restart_v19";
+  std::uint32_t version = 19;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -64,7 +65,12 @@ struct StochasticPersistentState {
 struct RestartWritePayload {
   RestartPersistentStateView persistent_state;
   const core::IntegratorState* integrator_state = nullptr;
+  // Particle scheduler; particles.time_bin is a derived compatibility mirror.
   const core::HierarchicalTimeBinScheduler* scheduler = nullptr;
+  // Authoritative scheduler for gas-cell rows keyed by stable gas_cell_id in the
+  // workflow-level persistence contract.  Required for v19 writes whenever gas
+  // cells exist.
+  const core::HierarchicalTimeBinScheduler* gas_cell_scheduler = nullptr;
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;
@@ -86,6 +92,11 @@ struct RestartDiagnosticsSummary {
   std::uint64_t scheduler_element_count = 0;
   std::uint64_t scheduler_active_count = 0;
   std::uint64_t scheduler_pending_transition_count = 0;
+  std::uint64_t gas_cell_scheduler_current_tick = 0;
+  std::uint32_t gas_cell_scheduler_max_bin = 0;
+  std::uint64_t gas_cell_scheduler_element_count = 0;
+  std::uint64_t gas_cell_scheduler_active_count = 0;
+  std::uint64_t gas_cell_scheduler_pending_transition_count = 0;
   std::uint64_t pm_cadence_steps = 0;
   std::uint64_t pm_gravity_kick_opportunity = 0;
   std::uint64_t pm_field_version = 0;
@@ -105,6 +116,10 @@ struct RestartReadResult {
   core::SimulationState state;
   core::IntegratorState integrator_state;
   core::TimeBinPersistentState scheduler_state;
+  // v19+: state keyed by stable gas_cell_id.  For v14-v18 reads this is
+  // reconstructed from the historic cell time_bin mirror for compatibility.
+  core::TimeBinPersistentState gas_cell_scheduler_state;
+  std::vector<std::uint64_t> gas_cell_scheduler_ids;
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;

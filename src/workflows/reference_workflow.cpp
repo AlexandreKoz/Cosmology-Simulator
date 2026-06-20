@@ -377,6 +377,54 @@ struct LocalGasCellCflMetadata {
   return state.particle_sidecar.owning_rank[parent_it->second];
 }
 
+// Particle lanes are compatibility mirrors for parent-associated gas only.  The
+// gas-cell state remains authoritative; this helper derives a deterministic
+// aggregate by stable gas_cell_id so dense-row reorders and split/merge layouts
+// cannot select an arbitrary child as the parent mirror.
+void synchronizeParentParticleCompatibilityMirrors(
+    core::SimulationState& state,
+    std::uint32_t world_rank,
+    std::string_view caller) {
+  state.requireGasCellIdentityMapCoversDenseRows(caller);
+  const auto particle_row_by_id = buildParticleRowById(state);
+  struct ParentMirrorAccumulator {
+    double mass_code = 0.0;
+    double momentum_x_code = 0.0;
+    double momentum_y_code = 0.0;
+    double momentum_z_code = 0.0;
+  };
+  std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> rows_by_parent;
+  for (std::uint32_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
+    if (gasCellOwnerRankForLocalRow(state, cell_row, particle_row_by_id, caller) != world_rank) {
+      continue;
+    }
+    const auto parent_row = parentParticleRowForGasCellRow(state, cell_row, particle_row_by_id, caller);
+    if (parent_row.has_value()) {
+      rows_by_parent[*parent_row].push_back(cell_row);
+    }
+  }
+  for (auto& [parent_row, rows] : rows_by_parent) {
+    std::sort(rows.begin(), rows.end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
+      return gasCellIdentityRecordForLocalRow(state, lhs, caller).gas_cell_id <
+          gasCellIdentityRecordForLocalRow(state, rhs, caller).gas_cell_id;
+    });
+    ParentMirrorAccumulator aggregate;
+    for (const std::uint32_t cell_row : rows) {
+      const double mass_code = state.cells.mass_code[cell_row];
+      aggregate.mass_code += mass_code;
+      aggregate.momentum_x_code += mass_code * state.gas_cells.velocity_x_peculiar[cell_row];
+      aggregate.momentum_y_code += mass_code * state.gas_cells.velocity_y_peculiar[cell_row];
+      aggregate.momentum_z_code += mass_code * state.gas_cells.velocity_z_peculiar[cell_row];
+    }
+    if (aggregate.mass_code > 0.0) {
+      state.particles.mass_code[parent_row] = aggregate.mass_code;
+      state.particles.velocity_x_peculiar[parent_row] = aggregate.momentum_x_code / aggregate.mass_code;
+      state.particles.velocity_y_peculiar[parent_row] = aggregate.momentum_y_code / aggregate.mass_code;
+      state.particles.velocity_z_peculiar[parent_row] = aggregate.momentum_z_code / aggregate.mass_code;
+    }
+  }
+}
+
 [[nodiscard]] std::vector<double> sortedUniqueCoordinates(std::span<const double> values) {
   std::vector<double> unique(values.begin(), values.end());
   std::sort(unique.begin(), unique.end());
@@ -406,25 +454,22 @@ struct LocalGasCellCflMetadata {
     const core::SimulationState& state,
     const core::SimulationConfig& config) {
   const std::size_t cell_count = state.cells.size();
-  if (cell_count == 0) {
+  if (cell_count == 0U) {
     return std::nullopt;
   }
   const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
   const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
   const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-  if (x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
-      x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty()) {
+  if (x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty() ||
+      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count) {
     return std::nullopt;
   }
-  const double fallback_dx = config.cosmology.box_size_x_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(x_coordinates.size(), 1U));
-  const double fallback_dy = config.cosmology.box_size_y_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(y_coordinates.size(), 1U));
-  const double fallback_dz = config.cosmology.box_size_z_mpc_comoving /
-      static_cast<double>(std::max<std::size_t>(z_coordinates.size(), 1U));
-  const double dx = coordinateSpacing(x_coordinates, fallback_dx);
-  const double dy = coordinateSpacing(y_coordinates, fallback_dy);
-  const double dz = coordinateSpacing(z_coordinates, fallback_dz);
+  const double dx = coordinateSpacing(
+      x_coordinates, config.cosmology.box_size_x_mpc_comoving / static_cast<double>(x_coordinates.size()));
+  const double dy = coordinateSpacing(
+      y_coordinates, config.cosmology.box_size_y_mpc_comoving / static_cast<double>(y_coordinates.size()));
+  const double dz = coordinateSpacing(
+      z_coordinates, config.cosmology.box_size_z_mpc_comoving / static_cast<double>(z_coordinates.size()));
   return hydro::HydroCartesianPatchSpec{
       .nx = x_coordinates.size(),
       .ny = y_coordinates.size(),
@@ -470,6 +515,97 @@ struct LocalGasCellCflMetadata {
   return std::nullopt;
 }
 
+struct CartesianGasCellRowLayout {
+  hydro::HydroCartesianPatchSpec spec;
+  // Geometry storage is physical Cartesian order; dense CellSoa order is only a
+  // transient storage mapping and must not define hydro topology.
+  std::vector<std::uint32_t> dense_row_by_geometry_row;
+  std::vector<std::uint32_t> geometry_row_by_dense_row;
+};
+
+[[nodiscard]] bool coordinatesHaveUniformSpacing(const std::vector<double>& coordinates) {
+  if (coordinates.size() <= 2U) {
+    return true;
+  }
+  const double expected = coordinates[1] - coordinates[0];
+  if (!(expected > 0.0) || !std::isfinite(expected)) {
+    return false;
+  }
+  for (std::size_t index = 2; index < coordinates.size(); ++index) {
+    const double actual = coordinates[index] - coordinates[index - 1U];
+    const double scale = std::max({1.0, std::abs(expected), std::abs(actual)});
+    if (std::abs(actual - expected) > 1.0e-10 * scale) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::optional<CartesianGasCellRowLayout> tryCartesianGasCellRowLayout(
+    const core::SimulationState& state,
+    const core::SimulationConfig& config) {
+  const std::size_t cell_count = state.cells.size();
+  if (cell_count == 0U) {
+    return std::nullopt;
+  }
+  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
+  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
+  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
+  if (x_coordinates.empty() || y_coordinates.empty() || z_coordinates.empty() ||
+      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
+      !coordinatesHaveUniformSpacing(x_coordinates) ||
+      !coordinatesHaveUniformSpacing(y_coordinates) ||
+      !coordinatesHaveUniformSpacing(z_coordinates)) {
+    return std::nullopt;
+  }
+
+  const double fallback_dx = config.cosmology.box_size_x_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(x_coordinates.size(), 1U));
+  const double fallback_dy = config.cosmology.box_size_y_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(y_coordinates.size(), 1U));
+  const double fallback_dz = config.cosmology.box_size_z_mpc_comoving /
+      static_cast<double>(std::max<std::size_t>(z_coordinates.size(), 1U));
+  const double dx = coordinateSpacing(x_coordinates, fallback_dx);
+  const double dy = coordinateSpacing(y_coordinates, fallback_dy);
+  const double dz = coordinateSpacing(z_coordinates, fallback_dz);
+  const hydro::HydroCartesianPatchSpec spec{
+      .nx = x_coordinates.size(),
+      .ny = y_coordinates.size(),
+      .nz = z_coordinates.size(),
+      .origin_x_comoving = x_coordinates.front() - 0.5 * dx,
+      .origin_y_comoving = y_coordinates.front() - 0.5 * dy,
+      .origin_z_comoving = z_coordinates.front() - 0.5 * dz,
+      .cell_width_x_comoving = dx,
+      .cell_width_y_comoving = dy,
+      .cell_width_z_comoving = dz,
+  };
+  const hydro::HydroPatchGeometry geometry = hydro::makeCartesianPatchGeometry(spec);
+  CartesianGasCellRowLayout layout;
+  layout.spec = spec;
+  layout.dense_row_by_geometry_row.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
+  layout.geometry_row_by_dense_row.assign(cell_count, std::numeric_limits<std::uint32_t>::max());
+  for (std::uint32_t dense_row = 0; dense_row < cell_count; ++dense_row) {
+    const auto i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[dense_row]);
+    const auto j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[dense_row]);
+    const auto k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[dense_row]);
+    if (!i.has_value() || !j.has_value() || !k.has_value()) {
+      return std::nullopt;
+    }
+    const std::size_t geometry_row = geometry.linearCellIndex(*i, *j, *k);
+    if (geometry_row >= cell_count ||
+        layout.dense_row_by_geometry_row[geometry_row] != std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
+    layout.dense_row_by_geometry_row[geometry_row] = dense_row;
+    layout.geometry_row_by_dense_row[dense_row] = static_cast<std::uint32_t>(geometry_row);
+  }
+  if (std::find(layout.dense_row_by_geometry_row.begin(), layout.dense_row_by_geometry_row.end(),
+                std::numeric_limits<std::uint32_t>::max()) != layout.dense_row_by_geometry_row.end()) {
+    return std::nullopt;
+  }
+  return layout;
+}
+
 [[nodiscard]] bool rowOrderMatchesCartesianSpec(
     const core::SimulationState& state,
     const hydro::HydroCartesianPatchSpec& spec) {
@@ -512,9 +648,6 @@ struct LocalGasCellCflMetadata {
   const std::optional<hydro::HydroCartesianPatchSpec> center_spec = trySpecFromCellCenters(state, config);
   const hydro::HydroCartesianPatchSpec spec =
       center_spec.value_or(fallbackCartesianSpec(cell_count, config));
-  if (center_spec.has_value() && !rowOrderMatchesCartesianSpec(state, spec)) {
-    throw std::runtime_error("hydro CFL metadata requires row-ordered Cartesian gas-cell centers");
-  }
   std::fill(metadata.cell_width_x_code.begin(), metadata.cell_width_x_code.end(), spec.cell_width_x_comoving);
   std::fill(metadata.cell_width_y_code.begin(), metadata.cell_width_y_code.end(), spec.cell_width_y_comoving);
   std::fill(metadata.cell_width_z_code.begin(), metadata.cell_width_z_code.end(), spec.cell_width_z_comoving);
@@ -597,11 +730,17 @@ struct LocalGasCellCflMetadata {
   };
 }
 
+enum class SchedulerElementFamily {
+  kParticles,
+  kGasCells,
+};
+
 void updateAdaptiveTimeBinsFromView(
     const core::AdaptiveTimeStepCriteriaView& view,
     core::HierarchicalTimeBinScheduler& scheduler,
     const core::IntegratorState& integrator_state,
-    const core::SimulationConfig& config) {
+    const core::SimulationConfig& config,
+    SchedulerElementFamily element_family) {
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("adaptive time-bin update requires dt_time_code > 0");
   }
@@ -691,31 +830,36 @@ void updateAdaptiveTimeBinsFromView(
     }
     return std::nullopt;
   };
-  for (std::uint32_t element_index = 0; element_index < scheduler.elementCount(); ++element_index) {
-    core::TimeStepCriteriaRegistry registry;
-    if (element_index < cell_count) {
-      const std::uint32_t gas_index = view.gas_cells.gas_particle_index_by_cell[element_index];
+  const std::size_t expected_element_count =
+      element_family == SchedulerElementFamily::kParticles ? particle_count : cell_count;
+  if (scheduler.elementCount() != expected_element_count) {
+    throw std::invalid_argument(
+        "adaptive time-bin scheduler extent does not match its declared element family");
+  }
+  if (element_family == SchedulerElementFamily::kGasCells) {
+    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      core::TimeStepCriteriaRegistry registry;
+      const std::uint32_t gas_index = view.gas_cells.gas_particle_index_by_cell[cell_index];
       if (gas_index != std::numeric_limits<std::uint32_t>::max() && gas_index >= particle_count) {
         throw std::out_of_range("gas-particle index in timestep criteria view is out of range");
       }
-      const double vx = view.gas_cells.velocity_x_peculiar[element_index];
-      const double vy = view.gas_cells.velocity_y_peculiar[element_index];
-      const double vz = view.gas_cells.velocity_z_peculiar[element_index];
-      const double sound_speed = std::max(view.gas_cells.sound_speed_code[element_index], 0.0);
+      const double vx = view.gas_cells.velocity_x_peculiar[cell_index];
+      const double vy = view.gas_cells.velocity_y_peculiar[cell_index];
+      const double vz = view.gas_cells.velocity_z_peculiar[cell_index];
       const core::DirectionalCflTimeStepInput hydro_cfl_input{
           .cell_width_axis_code = {
-              view.gas_cells.cell_width_x_code[element_index],
-              view.gas_cells.cell_width_y_code[element_index],
-              view.gas_cells.cell_width_z_code[element_index]},
+              view.gas_cells.cell_width_x_code[cell_index],
+              view.gas_cells.cell_width_y_code[cell_index],
+              view.gas_cells.cell_width_z_code[cell_index]},
           .velocity_axis_code = {vx, vy, vz},
-          .sound_speed_code = sound_speed,
+          .sound_speed_code = std::max(view.gas_cells.sound_speed_code[cell_index], 0.0),
       };
       registry.registerCflHook([=](std::uint32_t) {
         return core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
       });
-      const double ax = (element_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[element_index] : 0.0;
-      const double ay = (element_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[element_index] : 0.0;
-      const double az = (element_index < view.gas_cells.accel_z_comoving.size()) ? view.gas_cells.accel_z_comoving[element_index] : 0.0;
+      const double ax = (cell_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[cell_index] : 0.0;
+      const double ay = (cell_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[cell_index] : 0.0;
+      const double az = (cell_index < view.gas_cells.accel_z_comoving.size()) ? view.gas_cells.accel_z_comoving[cell_index] : 0.0;
       const double amag = std::sqrt(ax * ax + ay * ay + az * az);
       const double eps = gas_index != std::numeric_limits<std::uint32_t>::max() &&
               !view.particles.gravity_softening_comoving.empty()
@@ -724,71 +868,59 @@ void updateAdaptiveTimeBinsFromView(
       registry.registerGravityHook([=](std::uint32_t) {
         return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
       });
-      const double cfl_dt = registry.hooks().cfl_hook(element_index);
-      const double gravity_dt = registry.hooks().gravity_hook(element_index);
+      const double cfl_dt = registry.hooks().cfl_hook(cell_index);
+      const double gravity_dt = registry.hooks().gravity_hook(cell_index);
       scheduler.submitCandidateTimeStep(
-          element_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "cell_hydro_cfl");
+          cell_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_cell_hydro_cfl");
       scheduler.submitCandidateTimeStep(
-          element_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "cell_gravity_acceleration");
+          cell_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "gas_cell_gravity_acceleration");
       if (cosmology_dt.has_value()) {
         scheduler.submitCandidateTimeStep(
-            element_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "cell_cosmology_expansion");
+            cell_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "gas_cell_cosmology_expansion");
       }
-      if (const auto source_dt = star_formation_dt_for_cell(element_index); source_dt.has_value()) {
+      if (const auto source_dt = star_formation_dt_for_cell(cell_index); source_dt.has_value()) {
         scheduler.submitCandidateTimeStep(
-            element_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "cell_star_formation_source");
+            cell_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_cell_star_formation_source");
       }
-      if (gas_index < scheduler.elementCount()) {
-        scheduler.submitCandidateTimeStep(
-            gas_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_particle_hydro_cfl");
-        scheduler.submitCandidateTimeStep(
-            gas_index, gravity_dt, limits, core::TimeStepCandidateSource::kGravityAcceleration, "gas_particle_gravity_acceleration");
-        if (cosmology_dt.has_value()) {
-          scheduler.submitCandidateTimeStep(
-              gas_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "gas_particle_cosmology_expansion");
-        }
-        if (const auto source_dt = star_formation_dt_for_cell(element_index); source_dt.has_value()) {
-          scheduler.submitCandidateTimeStep(
-              gas_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_particle_star_formation_source");
-        }
-      }
-      continue;
     }
-    if (element_index < particle_count) {
-      const double ax = (element_index < view.particles.accel_x_comoving.size()) ? view.particles.accel_x_comoving[element_index] : 0.0;
-      const double ay = (element_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[element_index] : 0.0;
-      const double az = (element_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[element_index] : 0.0;
-      const double amag = std::sqrt(ax * ax + ay * ay + az * az);
-      const double eps = !view.particles.gravity_softening_comoving.empty()
-          ? view.particles.gravity_softening_comoving[element_index]
-          : ((static_cast<std::size_t>(view.particles.species_tag[element_index]) < species_softening.epsilon_comoving_by_species.size())
-                ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[element_index])]
-                : global_softening);
-      registry.registerGravityHook([=](std::uint32_t) {
-        return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
-      });
+    return;
+  }
+
+  for (std::uint32_t particle_index = 0; particle_index < particle_count; ++particle_index) {
+    core::TimeStepCriteriaRegistry registry;
+    const double ax = (particle_index < view.particles.accel_x_comoving.size()) ? view.particles.accel_x_comoving[particle_index] : 0.0;
+    const double ay = (particle_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[particle_index] : 0.0;
+    const double az = (particle_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[particle_index] : 0.0;
+    const double amag = std::sqrt(ax * ax + ay * ay + az * az);
+    const double eps = !view.particles.gravity_softening_comoving.empty()
+        ? view.particles.gravity_softening_comoving[particle_index]
+        : ((static_cast<std::size_t>(view.particles.species_tag[particle_index]) < species_softening.epsilon_comoving_by_species.size())
+              ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[particle_index])]
+              : global_softening);
+    registry.registerGravityHook([=](std::uint32_t) {
+      return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
+    });
+    scheduler.submitCandidateTimeStep(
+        particle_index,
+        registry.hooks().gravity_hook(particle_index),
+        limits,
+        core::TimeStepCandidateSource::kGravityAcceleration,
+        "particle_gravity_acceleration");
+    if (cosmology_dt.has_value()) {
       scheduler.submitCandidateTimeStep(
-          element_index,
-          registry.hooks().gravity_hook(element_index),
+          particle_index,
+          *cosmology_dt,
           limits,
-          core::TimeStepCandidateSource::kGravityAcceleration,
-          "particle_gravity_acceleration");
-      if (cosmology_dt.has_value()) {
-        scheduler.submitCandidateTimeStep(
-            element_index,
-            *cosmology_dt,
-            limits,
-            core::TimeStepCandidateSource::kCosmologyExpansion,
-            "particle_cosmology_expansion");
-      }
-      if (const auto source_dt = black_hole_dt_for_particle(element_index); source_dt.has_value()) {
-        scheduler.submitCandidateTimeStep(
-            element_index,
-            *source_dt,
-            limits,
-            core::TimeStepCandidateSource::kSourceTerm,
-            "particle_black_hole_source");
-      }
+          core::TimeStepCandidateSource::kCosmologyExpansion,
+          "particle_cosmology_expansion");
+    }
+    if (const auto source_dt = black_hole_dt_for_particle(particle_index); source_dt.has_value()) {
+      scheduler.submitCandidateTimeStep(
+          particle_index,
+          *source_dt,
+          limits,
+          core::TimeStepCandidateSource::kSourceTerm,
+          "particle_black_hole_source");
     }
   }
 }
@@ -815,7 +947,34 @@ void updateAdaptiveTimeBins(
       cell_accel_y,
       cell_accel_z,
       storage);
-  updateAdaptiveTimeBinsFromView(view, scheduler, integrator_state, config);
+  updateAdaptiveTimeBinsFromView(
+      view, scheduler, integrator_state, config, SchedulerElementFamily::kParticles);
+}
+
+void updateGasCellAdaptiveTimeBins(
+    core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
+    const core::IntegratorState& integrator_state,
+    const core::SimulationConfig& config,
+    std::span<const double> particle_accel_x,
+    std::span<const double> particle_accel_y,
+    std::span<const double> particle_accel_z,
+    std::span<const double> cell_accel_x,
+    std::span<const double> cell_accel_y,
+    std::span<const double> cell_accel_z) {
+  AdaptiveTimeStepCriteriaStorage storage;
+  const core::AdaptiveTimeStepCriteriaView view = buildAdaptiveTimeStepCriteriaView(
+      state,
+      config,
+      particle_accel_x,
+      particle_accel_y,
+      particle_accel_z,
+      cell_accel_x,
+      cell_accel_y,
+      cell_accel_z,
+      storage);
+  updateAdaptiveTimeBinsFromView(
+      view, gas_cell_scheduler, integrator_state, config, SchedulerElementFamily::kGasCells);
 }
 
 
@@ -2307,6 +2466,7 @@ struct HydroConservativeGhostSyncReport {
 [[nodiscard]] HydroGhostConservedSnapshot snapshotHydroGhostConservedCells(
     const core::SimulationState& state,
     const hydro::HydroConservedStateSoa& conserved,
+    std::span<const std::uint32_t> geometry_row_by_dense_row,
     std::uint32_t world_rank) {
   HydroGhostConservedSnapshot snapshot;
   state.requireGasCellIdentityMapCoversDenseRows("snapshotHydroGhostConservedCells");
@@ -2333,7 +2493,10 @@ struct HydroConservativeGhostSyncReport {
     snapshot.gas_cell_ids.push_back(identity.gas_cell_id);
     snapshot.parent_particle_ids.push_back(identity.parent_particle_id.value_or(0U));
     snapshot.owner_ranks.push_back(owner_rank);
-    snapshot.conserved_state.push_back(conserved.loadCell(cell_index));
+    if (cell_index >= geometry_row_by_dense_row.size()) {
+      throw std::out_of_range("snapshotHydroGhostConservedCells: dense row is outside Cartesian geometry map");
+    }
+    snapshot.conserved_state.push_back(conserved.loadCell(geometry_row_by_dense_row[cell_index]));
   }
   return snapshot;
 }
@@ -2850,13 +3013,55 @@ void materializeRootHydroPatchIfMissing(core::SimulationState& state) {
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] = static_cast<std::uint32_t>(state.cells.size());
   state.patches.owning_rank[0] = 0U;
+
+  // Generated and imported non-AMR ICs enter the production hydro path through
+  // a real root patch.  Derive the initial Cartesian geometry from centers once;
+  // later Eulerian AMR updates use this explicit patch geometry rather than
+  // guessing a topology from dense row order.
+  const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
+  const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
+  const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
+  const bool complete_cartesian = !x_coordinates.empty() && !y_coordinates.empty() && !z_coordinates.empty() &&
+      x_coordinates.size() * y_coordinates.size() * z_coordinates.size() == state.cells.size() &&
+      coordinatesHaveUniformSpacing(x_coordinates) &&
+      coordinatesHaveUniformSpacing(y_coordinates) &&
+      coordinatesHaveUniformSpacing(z_coordinates);
+  if (complete_cartesian) {
+    const double dx = coordinateSpacing(x_coordinates, 1.0);
+    const double dy = coordinateSpacing(y_coordinates, dx);
+    const double dz = coordinateSpacing(z_coordinates, dx);
+    state.patches.origin_x_comoving[0] = x_coordinates.front() - 0.5 * dx;
+    state.patches.origin_y_comoving[0] = y_coordinates.front() - 0.5 * dy;
+    state.patches.origin_z_comoving[0] = z_coordinates.front() - 0.5 * dz;
+    state.patches.extent_x_comoving[0] = dx * static_cast<double>(x_coordinates.size());
+    state.patches.extent_y_comoving[0] = dy * static_cast<double>(y_coordinates.size());
+    state.patches.extent_z_comoving[0] = dz * static_cast<double>(z_coordinates.size());
+    state.patches.cell_dim_x[0] = static_cast<std::uint32_t>(x_coordinates.size());
+    state.patches.cell_dim_y[0] = static_cast<std::uint32_t>(y_coordinates.size());
+    state.patches.cell_dim_z[0] = static_cast<std::uint32_t>(z_coordinates.size());
+  }
   if (state.cells.patch_index.size() != state.cells.size()) {
     state.cells.patch_index.resize(state.cells.size());
   }
   std::fill(state.cells.patch_index.begin(), state.cells.patch_index.end(), 0U);
 
-  if (state.gas_cells.size() == state.cells.size() && !state.gas_cell_identity.empty()) {
-    state.refreshGasCellIdentityMapFromSidecarLanes();
+  if (state.gas_cells.size() == state.cells.size()) {
+    if (state.gas_cell_identity.empty()) {
+      // Explicit legacy-import bridge only: a pre-H2 IC has no authoritative
+      // map yet, so bootstrap it once from persisted compatibility lanes.
+      state.refreshGasCellIdentityMapFromSidecarLanes();
+    } else {
+      // The map remains authoritative when a root patch is materialized.  Do
+      // not reconstruct it from mutable mirrors; rewrite the patch ownership
+      // in the canonical records and derive mirrors from those records.
+      std::vector<core::GasCellIdentityRecord> records(
+          state.gas_cell_identity.records().begin(), state.gas_cell_identity.records().end());
+      for (core::GasCellIdentityRecord& record : records) {
+        record.owning_patch_id = state.patches.patch_id[0];
+      }
+      state.replaceGasCellIdentityRecords(std::move(records));
+      return;
+    }
   }
   state.bumpCellIndexGeneration();
 }
@@ -2876,60 +3081,72 @@ void finalizeStateMetadata(const core::FrozenConfig& frozen_config, core::Simula
 
 void initializeSchedulerBins(
     const core::SimulationState& state,
-    core::HierarchicalTimeBinScheduler& scheduler) {
+    core::HierarchicalTimeBinScheduler& particle_scheduler,
+    core::HierarchicalTimeBinScheduler& gas_cell_scheduler) {
+  if (state.particles.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+      state.cells.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("reference workflow scheduler element count exceeds uint32 range");
+  }
   const std::uint32_t particle_count = static_cast<std::uint32_t>(state.particles.size());
   const std::uint32_t cell_count = static_cast<std::uint32_t>(state.cells.size());
-  const std::uint32_t scheduler_count = std::max(particle_count, cell_count);
-  if (scheduler_count == 0U) {
+  if (particle_count == 0U && cell_count == 0U) {
     throw std::runtime_error("reference workflow requires non-empty initial conditions");
   }
 
-  const std::uint8_t default_bin = scheduler.maxBin() > 0 ? 1U : 0U;
-  scheduler.reset(scheduler_count, default_bin, 0);
-
-  if (cell_count > 0) {
-    state.requireGasCellIdentityMapCoversDenseRows("initialize reference scheduler gas cells");
-  }
-  const auto particle_row_by_id = buildParticleRowById(state);
-  for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
-    scheduler.setElementBin(cell_index, 0U, scheduler.currentTick());
-    const std::optional<std::uint32_t> parent_row = parentParticleRowForGasCellRow(
-        state,
-        cell_index,
-        particle_row_by_id,
-        "initialize reference scheduler gas cells");
-    if (parent_row.has_value()) {
-      scheduler.setElementBin(*parent_row, 0U, scheduler.currentTick());
+  const std::uint8_t particle_default_bin = particle_scheduler.maxBin() > 0 ? 1U : 0U;
+  const std::uint8_t gas_default_bin = gas_cell_scheduler.maxBin() > 0 ? 1U : 0U;
+  particle_scheduler.reset(particle_count, particle_default_bin, 0U);
+  gas_cell_scheduler.reset(cell_count, gas_default_bin, 0U);
+  if (cell_count > 0U) {
+    state.requireGasCellIdentityMapCoversDenseRows("initialize independent gas-cell scheduler");
+    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      gas_cell_scheduler.setElementBin(cell_index, 0U, gas_cell_scheduler.currentTick());
     }
   }
 }
 
 void ensureSchedulerCoversState(
-    const core::SimulationState& state,
-    core::HierarchicalTimeBinScheduler& scheduler) {
-  const std::size_t required_size = std::max(state.particles.size(), state.cells.size());
+    std::size_t required_size,
+    core::HierarchicalTimeBinScheduler& scheduler,
+    std::string_view scheduler_name) {
   if (required_size > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-    throw std::overflow_error("reference workflow scheduler element count exceeds uint32 range");
+    throw std::overflow_error(std::string(scheduler_name) + " element count exceeds uint32 range");
   }
   const std::uint32_t required_count = static_cast<std::uint32_t>(required_size);
   if (required_count <= scheduler.elementCount()) {
     return;
   }
-
   const std::uint8_t new_element_bin = scheduler.maxBin() > 0 ? 1U : 0U;
-  const std::uint64_t first_activation_tick = scheduler.currentTick() + 1U;
   scheduler.appendElements(
-      required_count - scheduler.elementCount(),
-      new_element_bin,
-      first_activation_tick);
+      required_count - scheduler.elementCount(), new_element_bin, scheduler.currentTick() + 1U);
 }
 
+void ensureSchedulersCoverState(
+    const core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& particle_scheduler,
+    core::HierarchicalTimeBinScheduler& gas_cell_scheduler) {
+  ensureSchedulerCoversState(state.particles.size(), particle_scheduler, "particle scheduler");
+  ensureSchedulerCoversState(state.cells.size(), gas_cell_scheduler, "gas-cell scheduler");
+}
+
+void syncTimeBinsFromSchedulers(
+    const core::HierarchicalTimeBinScheduler& particle_scheduler,
+    const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
+    core::SimulationState& state) {
+  core::syncTimeBinMirrorsFromScheduler(
+      particle_scheduler, state, core::TimeBinMirrorDomain::kParticles);
+  core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, state);
+}
+
+// Particle migration/rebalance paths own only particle scheduler state.  Gas-cell
+// mirrors are synchronized by the caller that owns the gas-cell scheduler.
 void syncTimeBinsFromScheduler(
     const core::HierarchicalTimeBinScheduler& scheduler,
     core::SimulationState& state) {
   core::syncTimeBinMirrorsFromScheduler(
-      scheduler, state, core::TimeBinMirrorDomain::kParticlesAndCells);
+      scheduler, state, core::TimeBinMirrorDomain::kParticles);
 }
+
 
 class StageAuditCallback final : public core::IntegrationCallback {
  public:
@@ -2993,6 +3210,12 @@ class DriftCallback final : public core::IntegrationCallback {
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("drift callback");
+    // Production AMR cells are Eulerian patch degrees of freedom.  Their centers
+    // are defined by explicit patch geometry and must not be dragged through the
+    // parent-particle compatibility mirror.
+    if (amr::hasProductionAmrHydroCoverage(context.state)) {
+      return;
+    }
     const auto particle_row_by_id = buildParticleRowById(context.state);
     for (std::uint32_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const std::optional<std::uint32_t> gas_particle_index = parentParticleRowForGasCellRow(
@@ -3571,7 +3794,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     context.state.requireGasCellIdentityMapCoversDenseRows("gravity callback gas-cell acceleration sync");
     const auto particle_row_by_id = buildParticleRowById(context.state);
-    std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const std::optional<std::uint32_t> gas_particle_index = parentParticleRowForGasCellRow(
           context.state,
@@ -4071,6 +4293,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
     }
 
     parallel::MpiContext mpi_context;
+    m_current_world_rank = static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
     m_last_ghost_refresh = refreshParticleGhostsForSolver(
         context, mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
     m_last_hydro_profile = {};
@@ -4085,7 +4308,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     rebuildGeometryIfNeeded(context.state, context.integrator_state.dt_time_code);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
-    verifyAcceptedHydroCfl(context, active_view.active_cells);
+    verifyAcceptedHydroCfl(context, context.active_set.cell_indices);
 
     m_conserved.resize(m_geometry.totalCellStorageCount());
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
@@ -4102,12 +4325,17 @@ class HydroStageCallback final : public core::IntegrationCallback {
           .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[cell_index],
           .pressure_comoving = pressure,
       };
-      m_conserved.storeCell(cell_index, hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
+      if (cell_index >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("hydro callback dense row is outside Cartesian geometry map");
+      }
+      m_conserved.storeCell(
+          m_geometry_row_by_dense_row[cell_index],
+          hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
     }
     hydro::fillHydroBoundaryGhostCells(m_conserved, m_geometry, k_gamma_adiabatic);
     const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
     const HydroGhostConservedSnapshot ghost_conserved_snapshot = snapshotHydroGhostConservedCells(
-        context.state, m_conserved, world_rank);
+        context.state, m_conserved, m_geometry_row_by_dense_row, world_rank);
 
     double hubble_rate_code = 0.0;
     if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
@@ -4125,11 +4353,28 @@ class HydroStageCallback final : public core::IntegrationCallback {
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
     std::vector<double> temperature(context.state.cells.size(), 0.0);
     std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    const auto& dense_accel_x = m_gravity_callback.cellAccelX();
+    const auto& dense_accel_y = m_gravity_callback.cellAccelY();
+    const auto& dense_accel_z = m_gravity_callback.cellAccelZ();
+    if (dense_accel_x.size() != context.state.cells.size() ||
+        dense_accel_y.size() != context.state.cells.size() ||
+        dense_accel_z.size() != context.state.cells.size()) {
+      throw std::runtime_error("hydro callback gravity-cell acceleration lanes do not cover dense gas-cell rows");
+    }
+    m_ordered_cell_accel_x.assign(context.state.cells.size(), 0.0);
+    m_ordered_cell_accel_y.assign(context.state.cells.size(), 0.0);
+    m_ordered_cell_accel_z.assign(context.state.cells.size(), 0.0);
+    for (std::size_t geometry_row = 0; geometry_row < m_dense_row_by_geometry_row.size(); ++geometry_row) {
+      const std::uint32_t dense_row = m_dense_row_by_geometry_row[geometry_row];
+      m_ordered_cell_accel_x[geometry_row] = dense_accel_x[dense_row];
+      m_ordered_cell_accel_y[geometry_row] = dense_accel_y[dense_row];
+      m_ordered_cell_accel_z[geometry_row] = dense_accel_z[dense_row];
+    }
     hydro::HydroSourceContext source_context{
         .update = update,
-        .gravity_accel_x_peculiar = m_gravity_callback.cellAccelX(),
-        .gravity_accel_y_peculiar = m_gravity_callback.cellAccelY(),
-        .gravity_accel_z_peculiar = m_gravity_callback.cellAccelZ(),
+        .gravity_accel_x_peculiar = m_ordered_cell_accel_x,
+        .gravity_accel_y_peculiar = m_ordered_cell_accel_y,
+        .gravity_accel_z_peculiar = m_ordered_cell_accel_z,
         .hydrogen_number_density_cgs = hydrogen_number_density,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
@@ -4205,13 +4450,17 @@ class HydroStageCallback final : public core::IntegrationCallback {
       if (owner_rank != world_rank) {
         throw std::runtime_error("hydro conservative flux correction targeted a non-authoritative local ghost cell");
       }
-      hydro::HydroConservedState owned = m_conserved.loadCell(cell_index);
+      if (cell_index >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("hydro flux correction dense row is outside Cartesian geometry map");
+      }
+      const std::uint32_t geometry_row = m_geometry_row_by_dense_row[cell_index];
+      hydro::HydroConservedState owned = m_conserved.loadCell(geometry_row);
       owned.mass_density_comoving += correction.delta_mass_density_comoving;
       owned.momentum_density_x_comoving += correction.delta_momentum_density_x_comoving;
       owned.momentum_density_y_comoving += correction.delta_momentum_density_y_comoving;
       owned.momentum_density_z_comoving += correction.delta_momentum_density_z_comoving;
       owned.total_energy_density_comoving += correction.delta_total_energy_density_comoving;
-      m_conserved.storeCell(cell_index, owned);
+      m_conserved.storeCell(geometry_row, owned);
       ++applied_flux_corrections;
       applied_flux_delta_l1 += std::abs(correction.delta_mass_density_comoving);
       applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_x_comoving);
@@ -4245,13 +4494,12 @@ class HydroStageCallback final : public core::IntegrationCallback {
       if (gas_cell_owner_rank != world_rank) {
         continue;
       }
-      const auto gas_particle_index = parentParticleRowForGasCellRow(
-          context.state,
-          static_cast<std::uint32_t>(cell_index),
-          particle_row_by_id,
-          "hydro callback primitive store");
+      if (cell_index >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("hydro primitive store dense row is outside Cartesian geometry map");
+      }
+      const std::uint32_t geometry_row = m_geometry_row_by_dense_row[cell_index];
       const hydro::HydroPrimitiveState primitive =
-          hydro::HydroCoreSolver::primitiveFromConserved(m_conserved.loadCell(cell_index), k_gamma_adiabatic);
+          hydro::HydroCoreSolver::primitiveFromConserved(m_conserved.loadCell(geometry_row), k_gamma_adiabatic);
       context.state.gas_cells.density_code[cell_index] = primitive.rho_comoving;
       context.state.gas_cells.pressure_code[cell_index] = primitive.pressure_comoving;
       context.state.gas_cells.internal_energy_code[cell_index] =
@@ -4260,14 +4508,10 @@ class HydroStageCallback final : public core::IntegrationCallback {
       context.state.gas_cells.velocity_x_peculiar[cell_index] = primitive.vel_x_peculiar;
       context.state.gas_cells.velocity_y_peculiar[cell_index] = primitive.vel_y_peculiar;
       context.state.gas_cells.velocity_z_peculiar[cell_index] = primitive.vel_z_peculiar;
-      if (gas_particle_index.has_value() && parent_mirror_updated[*gas_particle_index] == 0U) {
-        context.state.particles.mass_code[*gas_particle_index] = context.state.cells.mass_code[cell_index];
-        context.state.particles.velocity_x_peculiar[*gas_particle_index] = primitive.vel_x_peculiar;
-        context.state.particles.velocity_y_peculiar[*gas_particle_index] = primitive.vel_y_peculiar;
-        context.state.particles.velocity_z_peculiar[*gas_particle_index] = primitive.vel_z_peculiar;
-        parent_mirror_updated[*gas_particle_index] = 1U;
-      }
     }
+
+    synchronizeParentParticleCompatibilityMirrors(
+        context.state, world_rank, "hydro callback parent compatibility mirror");
   }
 
  private:
@@ -4338,6 +4582,10 @@ class HydroStageCallback final : public core::IntegrationCallback {
             .adiabatic_index = k_gamma_adiabatic,
             .density_floor = k_density_floor,
             .pressure_floor = k_pressure_floor});
+    synchronizeParentParticleCompatibilityMirrors(
+        context.state,
+        m_current_world_rank,
+        "production AMR hydro parent compatibility mirror");
     if (context.profiler_session != nullptr) {
       context.profiler_session->recordEvent(core::RuntimeEvent{
           .event_kind = "hydro.amr_production_stage",
@@ -4381,6 +4629,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
     double dt_time_code = 0.0;
     core::BoundaryCondition hydro_boundary = core::BoundaryCondition::kPeriodic;
     std::uint64_t patch_signature = 0;
+    std::uint64_t gas_cell_identity_generation = 0;
 
     [[nodiscard]] bool operator==(const HydroGeometryCacheKey& rhs) const noexcept {
       return cell_count == rhs.cell_count &&
@@ -4395,7 +4644,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
           cell_width_z_comoving == rhs.cell_width_z_comoving &&
           dt_time_code == rhs.dt_time_code &&
           hydro_boundary == rhs.hydro_boundary &&
-          patch_signature == rhs.patch_signature;
+          patch_signature == rhs.patch_signature &&
+          gas_cell_identity_generation == rhs.gas_cell_identity_generation;
     }
   };
 
@@ -4438,56 +4688,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
   [[nodiscard]] std::optional<hydro::HydroCartesianPatchSpec> trySpecFromCellCenters(
       const core::SimulationState& state) const {
-    const std::size_t cell_count = state.cells.size();
-    if (cell_count == 0) {
-      return std::nullopt;
-    }
-    const std::vector<double> x_coordinates = sortedUniqueCoordinates(state.cells.center_x_comoving);
-    const std::vector<double> y_coordinates = sortedUniqueCoordinates(state.cells.center_y_comoving);
-    const std::vector<double> z_coordinates = sortedUniqueCoordinates(state.cells.center_z_comoving);
-    if (x_coordinates.size() * y_coordinates.size() * z_coordinates.size() != cell_count ||
-        x_coordinates.size() <= 1U ||
-        y_coordinates.size() <= 1U ||
-        z_coordinates.size() <= 1U) {
-      return std::nullopt;
-    }
-
-    const hydro::HydroCartesianPatchSpec spec{
-        .nx = x_coordinates.size(),
-        .ny = y_coordinates.size(),
-        .nz = z_coordinates.size(),
-        .origin_x_comoving = x_coordinates.front() -
-            0.5 * coordinateSpacing(x_coordinates, m_config.cosmology.box_size_x_mpc_comoving /
-                static_cast<double>(x_coordinates.size())),
-        .origin_y_comoving = y_coordinates.front() -
-            0.5 * coordinateSpacing(y_coordinates, m_config.cosmology.box_size_y_mpc_comoving /
-                static_cast<double>(y_coordinates.size())),
-        .origin_z_comoving = z_coordinates.front() -
-            0.5 * coordinateSpacing(z_coordinates, m_config.cosmology.box_size_z_mpc_comoving /
-                static_cast<double>(z_coordinates.size())),
-        .cell_width_x_comoving = coordinateSpacing(
-            x_coordinates,
-            m_config.cosmology.box_size_x_mpc_comoving / static_cast<double>(x_coordinates.size())),
-        .cell_width_y_comoving = coordinateSpacing(
-            y_coordinates,
-            m_config.cosmology.box_size_y_mpc_comoving / static_cast<double>(y_coordinates.size())),
-        .cell_width_z_comoving = coordinateSpacing(
-            z_coordinates,
-            m_config.cosmology.box_size_z_mpc_comoving / static_cast<double>(z_coordinates.size())),
-    };
-
-    hydro::HydroPatchGeometry row_order_geometry = hydro::makeCartesianPatchGeometry(spec);
-    for (std::size_t row = 0; row < cell_count; ++row) {
-      const std::optional<std::size_t> i = coordinateIndex(x_coordinates, state.cells.center_x_comoving[row]);
-      const std::optional<std::size_t> j = coordinateIndex(y_coordinates, state.cells.center_y_comoving[row]);
-      const std::optional<std::size_t> k = coordinateIndex(z_coordinates, state.cells.center_z_comoving[row]);
-      if (!i.has_value() || !j.has_value() || !k.has_value() ||
-          row_order_geometry.linearCellIndex(*i, *j, *k) != row) {
-        throw std::runtime_error(
-            "hydro Cartesian geometry requires row-major gas-cell center ordering when centers form a full 3D patch");
-      }
-    }
-    return spec;
+    const auto layout = tryCartesianGasCellRowLayout(state, m_config);
+    return layout.has_value() ? std::optional<hydro::HydroCartesianPatchSpec>(layout->spec) : std::nullopt;
   }
 
   [[nodiscard]] hydro::HydroCartesianPatchSpec fallbackCartesianSpec(std::size_t cell_count) const {
@@ -4533,8 +4735,13 @@ class HydroStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    const hydro::HydroCartesianPatchSpec spec =
-        trySpecFromCellCenters(state).value_or(fallbackCartesianSpec(cell_count));
+    const auto layout = tryCartesianGasCellRowLayout(state, m_config);
+    if (!layout.has_value()) {
+      throw std::runtime_error(
+          "reference hydro requires a complete uniformly spaced Cartesian gas-cell layout; "
+          "use production AMR geometry for non-Cartesian or irregular cells");
+    }
+    const hydro::HydroCartesianPatchSpec& spec = layout->spec;
     const HydroGeometryCacheKey key{
         .cell_count = cell_count,
         .nx = spec.nx,
@@ -4549,12 +4756,15 @@ class HydroStageCallback final : public core::IntegrationCallback {
         .dt_time_code = dt_time_code,
         .hydro_boundary = m_mode_policy.hydro_boundary,
         .patch_signature = patchSignature(state.patches),
+        .gas_cell_identity_generation = state.gasCellIdentityGeneration(),
     };
     if (m_cached_geometry_key.has_value() && *m_cached_geometry_key == key) {
       return;
     }
 
     m_cached_geometry_key = key;
+    m_dense_row_by_geometry_row = layout->dense_row_by_geometry_row;
+    m_geometry_row_by_dense_row = layout->geometry_row_by_dense_row;
     m_geometry = hydro::makeCartesianPatchGeometry(spec);
     hydro::appendCartesianBoundaryGhostFaces(
         m_geometry,
@@ -4574,7 +4784,14 @@ class HydroStageCallback final : public core::IntegrationCallback {
   }
 
   [[nodiscard]] hydro::HydroActiveSetView buildActiveFaceView(std::span<const std::uint32_t> active_cells) {
-    m_active_cells.assign(active_cells.begin(), active_cells.end());
+    m_active_cells.clear();
+    m_active_cells.reserve(active_cells.size());
+    for (const std::uint32_t dense_row : active_cells) {
+      if (dense_row >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("active gas-cell row is outside Cartesian row map");
+      }
+      m_active_cells.push_back(m_geometry_row_by_dense_row[dense_row]);
+    }
     std::unordered_set<std::size_t> active_cell_lookup(m_active_cells.begin(), m_active_cells.end());
     m_active_faces.clear();
     for (std::size_t face_index = 0; face_index < m_geometry.faces.size(); ++face_index) {
@@ -4630,7 +4847,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
   void verifyAcceptedHydroCfl(
       core::StepContext& context,
-      std::span<const std::size_t> active_cells) {
+      std::span<const std::uint32_t> active_cells) {
     if (context.integrator_state.dt_time_code <= 0.0) {
       throw std::invalid_argument("hydro CFL guard requires dt_time_code > 0");
     }
@@ -4639,8 +4856,8 @@ class HydroStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    std::vector<std::size_t> all_cells;
-    std::span<const std::size_t> cells_to_check = active_cells;
+    std::vector<std::uint32_t> all_cells;
+    std::span<const std::uint32_t> cells_to_check = active_cells;
     if (cells_to_check.empty()) {
       all_cells.resize(cell_count);
       std::iota(all_cells.begin(), all_cells.end(), 0U);
@@ -4694,6 +4911,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   const GravityStageCallback& m_gravity_callback;
+  std::uint32_t m_current_world_rank = 0;
   hydro::HydroCoreSolver m_solver;
   hydro::MusclHancockReconstruction m_reconstruction;
   hydro::HllcRiemannSolver m_riemann_solver;
@@ -4701,6 +4919,12 @@ class HydroStageCallback final : public core::IntegrationCallback {
   hydro::HydroScratchBuffers m_scratch;
   hydro::HydroPrimitiveCacheSoa m_primitive_cache;
   hydro::HydroPatchGeometry m_geometry;
+  // Dense CellSoa row <-> physical Cartesian solver-row maps.
+  std::vector<std::uint32_t> m_dense_row_by_geometry_row;
+  std::vector<std::uint32_t> m_geometry_row_by_dense_row;
+  std::vector<double> m_ordered_cell_accel_x;
+  std::vector<double> m_ordered_cell_accel_y;
+  std::vector<double> m_ordered_cell_accel_z;
   hydro::HydroProfileEvent m_last_hydro_profile{};
   core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   SolverGhostRefreshReport m_last_ghost_refresh{};
@@ -4716,6 +4940,7 @@ bool maybeWriteOutputs(
     const core::SimulationState& state,
     const core::IntegratorState& integrator_state,
     const core::HierarchicalTimeBinScheduler& scheduler,
+    const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const GravityStageCallback& gravity_callback,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
@@ -4735,6 +4960,9 @@ bool maybeWriteOutputs(
   }
   if (checkpoint_due) {
     core::assertCanWriteCheckpointAtBoundary(integrator_state, scheduler.currentTick());
+    if (gas_cell_scheduler.currentTick() != scheduler.currentTick()) {
+      throw std::runtime_error("output checkpoint requires particle and gas-cell schedulers on one integer tick");
+    }
   }
   if (snapshot_due) {
     core::assertCanWriteSnapshotAtBoundary(integrator_state);
@@ -4774,6 +5002,7 @@ bool maybeWriteOutputs(
     restart_payload.persistent_state.simulation_state = &state;
     restart_payload.integrator_state = &integrator_state;
     restart_payload.scheduler = &scheduler;
+    restart_payload.gas_cell_scheduler = &gas_cell_scheduler;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
     restart_payload.normalized_config_text = frozen_config.normalized_text;
@@ -4994,6 +5223,7 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
       const core::FrozenConfig& frozen_config,
       const core::SimulationConfig& config,
       const core::HierarchicalTimeBinScheduler& scheduler,
+      const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
       const GravityStageCallback& gravity_callback,
       ReferenceWorkflowReport& report,
       core::ProfilerSession& profiler,
@@ -5002,6 +5232,7 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
       : m_frozen_config(frozen_config),
         m_config(config),
         m_scheduler(scheduler),
+        m_gas_cell_scheduler(gas_cell_scheduler),
         m_gravity_callback(gravity_callback),
         m_report(report),
         m_profiler(profiler),
@@ -5034,6 +5265,7 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
         context.state,
         context.integrator_state,
         m_scheduler,
+        m_gas_cell_scheduler,
         m_gravity_callback,
         m_report,
         m_profiler,
@@ -5062,6 +5294,7 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
   const core::FrozenConfig& m_frozen_config;
   const core::SimulationConfig& m_config;
   const core::HierarchicalTimeBinScheduler& m_scheduler;
+  const core::HierarchicalTimeBinScheduler& m_gas_cell_scheduler;
   const GravityStageCallback& m_gravity_callback;
   ReferenceWorkflowReport& m_report;
   core::ProfilerSession& m_profiler;
@@ -5115,7 +5348,17 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
     core::validateModePolicy(config, mode_policy);
 
-    io::IcReadResult ic_result = loadInitialConditions(m_frozen_config);
+    io::IcReadResult ic_result;
+    if (options.initial_state_override != nullptr) {
+      // A test/benchmark override still traverses every production workflow
+      // boundary after import.  It exists so identity-decoupled states that
+      // cannot be represented by legacy GADGET IC particle rows are testable
+      // without adding a second execution path.
+      ic_result.state = *options.initial_state_override;
+      ic_result.report.defaulted_fields.push_back("initial_state_override=caller_supplied");
+    } else {
+      ic_result = loadInitialConditions(m_frozen_config);
+    }
     core::SimulationState state = std::move(ic_result.state);
     profiler.setMemoryReport(core::collectSimulationMemoryReport(state));
     const core::MemoryReport* startup_memory_report = profiler.memoryReport();
@@ -5212,12 +5455,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? std::optional<core::LambdaCdmBackground>(core::LambdaCdmBackground(background_config))
         : std::nullopt;
 
-    const std::uint32_t scheduler_count =
-        static_cast<std::uint32_t>(std::max(state.particles.size(), state.cells.size()));
     core::HierarchicalTimeBinScheduler scheduler(
         static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
-    initializeSchedulerBins(state, scheduler);
-    syncTimeBinsFromScheduler(scheduler, state);
+    core::HierarchicalTimeBinScheduler gas_cell_scheduler(
+        static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
+    initializeSchedulerBins(state, scheduler, gas_cell_scheduler);
+    syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
 
     const core::UnitSystem runtime_units = core::makeUnitSystem(
         config.units.length_unit,
@@ -5347,6 +5590,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         m_frozen_config,
         config,
         scheduler,
+        gas_cell_scheduler,
         gravity_callback,
         report,
         profiler,
@@ -5373,27 +5617,35 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         {},
         {},
         {});
-    ensureSchedulerCoversState(state, scheduler);
+    updateGasCellAdaptiveTimeBins(
+        state,
+        gas_cell_scheduler,
+        integrator_state,
+        config,
+        {},
+        {},
+        {},
+        {},
+        {},
+        {});
+    ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
 
     const std::uint64_t target_step_index =
         integrator_state.step_index + static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
     while (integrator_state.step_index < target_step_index &&
            integrator_state.current_time_code < config.numerics.t_code_end) {
-      const std::span<const std::uint32_t> active_scheduler_elements = scheduler.beginSubstep();
-      std::vector<std::uint32_t> active_particles;
-      std::vector<std::uint32_t> active_cells;
-      active_particles.reserve(active_scheduler_elements.size());
-      active_cells.reserve(active_scheduler_elements.size());
-      for (const std::uint32_t element_index : active_scheduler_elements) {
-        if (element_index < state.particles.size()) {
-          active_particles.push_back(element_index);
-        }
-        if (element_index < state.cells.size()) {
-          active_cells.push_back(element_index);
-        }
+      const std::span<const std::uint32_t> active_particle_scheduler_elements = scheduler.beginSubstep();
+      const std::span<const std::uint32_t> active_gas_cell_scheduler_elements = gas_cell_scheduler.beginSubstep();
+      if (scheduler.currentTick() != gas_cell_scheduler.currentTick()) {
+        throw std::runtime_error("particle and gas-cell schedulers lost their shared integer timeline");
       }
+      std::vector<std::uint32_t> active_particles(
+          active_particle_scheduler_elements.begin(), active_particle_scheduler_elements.end());
+      std::vector<std::uint32_t> active_cells(
+          active_gas_cell_scheduler_elements.begin(), active_gas_cell_scheduler_elements.end());
       if (active_particles.empty() && active_cells.empty()) {
         scheduler.endSubstep();
+        gas_cell_scheduler.endSubstep();
         continue;
       }
 
@@ -5435,8 +5687,20 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           gravity_callback.cellAccelX(),
           gravity_callback.cellAccelY(),
           gravity_callback.cellAccelZ());
-      ensureSchedulerCoversState(state, scheduler);
+      updateGasCellAdaptiveTimeBins(
+          state,
+          gas_cell_scheduler,
+          integrator_state,
+          config,
+          gravity_callback.particleAccelX(),
+          gravity_callback.particleAccelY(),
+          gravity_callback.particleAccelZ(),
+          gravity_callback.cellAccelX(),
+          gravity_callback.cellAccelY(),
+          gravity_callback.cellAccelZ());
+      ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
       scheduler.endSubstep();
+      gas_cell_scheduler.endSubstep();
 
       parallel::DecompositionRuntimeMeasurements rebalance_measurements =
           gravity_callback.lastRuntimeDecompositionMeasurements();
@@ -5460,8 +5724,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           expected_global_particle_ids,
           &profiler,
           integrator_state.step_index);
-      ensureSchedulerCoversState(state, scheduler);
-      syncTimeBinsFromScheduler(scheduler, state);
+      ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
+      syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
       orchestrator.executeOutputBoundary(
           state,
           integrator_state,

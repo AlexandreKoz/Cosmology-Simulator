@@ -195,6 +195,27 @@ void assertParticleTimeBinsMatchScheduler(
   }
 }
 
+void assertGasCellTimeBinsMatchScheduler(
+    const cosmosim::core::SimulationState& state,
+    const cosmosim::core::TimeBinPersistentState& scheduler_state) {
+  assert(state.cells.time_bin.size() == scheduler_state.bin_index.size());
+  for (std::size_t row = 0; row < state.cells.time_bin.size(); ++row) {
+    assert(state.cells.time_bin[row] == scheduler_state.bin_index[row]);
+  }
+}
+
+std::vector<std::uint64_t> gasCellIdsByDenseRow(const cosmosim::core::SimulationState& state) {
+  state.requireGasCellIdentityMapCoversDenseRows("gasCellIdsByDenseRow");
+  std::vector<std::uint64_t> ids;
+  ids.reserve(state.cells.size());
+  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+    const auto gas_cell_id = state.gas_cell_identity.gasCellIdForLocalRow(row);
+    assert(gas_cell_id.has_value());
+    ids.push_back(*gas_cell_id);
+  }
+  return ids;
+}
+
 std::vector<std::uint64_t> schedulerActiveIdsFromPersistentState(
     const cosmosim::core::SimulationState& state,
     const cosmosim::core::TimeBinPersistentState& persistent_state) {
@@ -297,14 +318,30 @@ void testRestartRoundtrip() {
   scheduler.beginSubstep();
   scheduler.endSubstep();
   cosmosim::core::syncTimeBinMirrorsFromScheduler(
-      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+      scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticles);
   const std::vector<std::uint64_t> expected_active_particle_ids =
       schedulerActiveIdsFromPersistentState(state, scheduler.exportPersistentState());
+
+  // This scheduler deliberately differs from the particle scheduler.  It is
+  // keyed by stable gas_cell_id and persists its own bins/activation state;
+  // parent particle rows must not be used to reconstruct it.
+  cosmosim::core::HierarchicalTimeBinScheduler gas_cell_scheduler(3);
+  gas_cell_scheduler.reset(static_cast<std::uint32_t>(state.cells.size()), 1, 8);
+  gas_cell_scheduler.setElementBin(0, 3, gas_cell_scheduler.currentTick());
+  gas_cell_scheduler.setElementBin(1, 0, gas_cell_scheduler.currentTick());
+  gas_cell_scheduler.submitCandidateBin(2, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp);
+  gas_cell_scheduler.beginSubstep();
+  gas_cell_scheduler.endSubstep();
+  assert(gas_cell_scheduler.currentTick() == scheduler.currentTick());
+  cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, state);
+  const auto original_gas_cell_scheduler_state = gas_cell_scheduler.exportPersistentState();
+  const auto original_gas_cell_scheduler_ids = gasCellIdsByDenseRow(state);
 
   cosmosim::io::RestartWritePayload payload;
   payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
+  payload.gas_cell_scheduler = &gas_cell_scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
@@ -494,6 +531,18 @@ void testRestartRoundtrip() {
   assert(restored.scheduler_state.active_flag == original_scheduler_state.active_flag);
   assert(restored.scheduler_state.pending_bin_index == original_scheduler_state.pending_bin_index);
   assertParticleTimeBinsMatchScheduler(restored.state, restored.scheduler_state);
+  assert(restored.gas_cell_scheduler_state.max_bin == gas_cell_scheduler.maxBin());
+  assert(restored.gas_cell_scheduler_state.current_tick == gas_cell_scheduler.currentTick());
+  assert(restored.gas_cell_scheduler_ids == original_gas_cell_scheduler_ids);
+  assert(restored.gas_cell_scheduler_state.bin_index == original_gas_cell_scheduler_state.bin_index);
+  assert(
+      restored.gas_cell_scheduler_state.next_activation_tick ==
+      original_gas_cell_scheduler_state.next_activation_tick);
+  assert(restored.gas_cell_scheduler_state.active_flag == original_gas_cell_scheduler_state.active_flag);
+  assert(
+      restored.gas_cell_scheduler_state.pending_bin_index ==
+      original_gas_cell_scheduler_state.pending_bin_index);
+  assertGasCellTimeBinsMatchScheduler(restored.state, restored.gas_cell_scheduler_state);
   assert(restored.normalized_config_hash_hex == payload.normalized_config_hash_hex);
   assert(restored.normalized_config_text == payload.normalized_config_text);
   assert(restored.provenance.config_hash_hex == payload.provenance.config_hash_hex);
@@ -562,6 +611,9 @@ void testRestartRoundtrip() {
   assert(restored.diagnostics.scheduler_current_tick == scheduler.currentTick());
   assert(restored.diagnostics.scheduler_max_bin == scheduler.maxBin());
   assert(restored.diagnostics.scheduler_element_count == state.particles.size());
+  assert(restored.diagnostics.gas_cell_scheduler_current_tick == gas_cell_scheduler.currentTick());
+  assert(restored.diagnostics.gas_cell_scheduler_max_bin == gas_cell_scheduler.maxBin());
+  assert(restored.diagnostics.gas_cell_scheduler_element_count == state.cells.size());
   assert(restored.diagnostics.pm_cadence_steps == integrator_state.pm_sync_state.cadenceSteps());
   assert(restored.diagnostics.pm_gravity_kick_opportunity == integrator_state.pm_sync_state.gravityKickOpportunity());
   assert(restored.diagnostics.pm_field_version == integrator_state.pm_sync_state.fieldVersion());

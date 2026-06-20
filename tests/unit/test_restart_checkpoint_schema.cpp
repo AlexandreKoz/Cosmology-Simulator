@@ -31,8 +31,8 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v18");
-  assert(schema.version == 18);
+  assert(schema.name == "cosmosim_restart_v19");
+  assert(schema.version == 19);
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
@@ -243,11 +243,17 @@ int main() {
     cosmosim::core::syncTimeBinMirrorsFromScheduler(
         gas_scheduler,
         gas_state,
-        cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+        cosmosim::core::TimeBinMirrorDomain::kParticles);
+    cosmosim::core::HierarchicalTimeBinScheduler gas_cell_scheduler(2);
+    gas_cell_scheduler.reset(2, 0, 0);
+    gas_cell_scheduler.setElementBin(0, 1, 0);
+    gas_cell_scheduler.setElementBin(1, 2, 0);
+    cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, gas_state);
 
     cosmosim::io::RestartWritePayload gas_payload = payload;
     gas_payload.persistent_state.simulation_state = &gas_state;
     gas_payload.scheduler = &gas_scheduler;
+    gas_payload.gas_cell_scheduler = &gas_cell_scheduler;
     gas_payload.distributed_gravity_state.owning_rank_by_item = {0, 0, 0, 0};
     assert(cosmosim::io::restartPayloadIntegrityHash(gas_payload) != 0);
 
@@ -263,7 +269,8 @@ int main() {
     cosmosim::core::syncTimeBinMirrorsFromScheduler(
         gas_scheduler,
         gas_state,
-        cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
+        cosmosim::core::TimeBinMirrorDomain::kParticles);
+    cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, gas_state);
     assert(cosmosim::io::restartPayloadIntegrityHash(gas_payload) != 0);
 
     gas_state.cells.patch_index[1] = 1;

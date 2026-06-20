@@ -36,8 +36,8 @@ Canonical fields and accepted read aliases:
 
 Current restart identity:
 
-- `name = cosmosim_restart_v18`
-- `version = 18`
+- `name = cosmosim_restart_v19`
+- `version = 19`
 
 Restart payload includes:
 
@@ -77,7 +77,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; the active schema is now `cosmosim_restart_v18` and fills out that schema with authoritative gas-cell identity records. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
+Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; the active schema is now `cosmosim_restart_v19` and fills out that schema with authoritative gas-cell identity records. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
 
 ## H1 Hydro Restart Geometry Note
 
@@ -191,9 +191,9 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v18`, version `18`, because H2 restart files persist cell-local gas velocity lanes and authoritative gas-cell identity records in addition to Stage 8 file-kind metadata, output cadence/counter state, and compact `/restart_diagnostics` audit metadata alongside scheduler/runtime truth.
+- Restart schema version/name are now `cosmosim_restart_v19`, version `19`, because H2 restart files persist cell-local gas velocity lanes and authoritative gas-cell identity records in addition to Stage 8 file-kind metadata, output cadence/counter state, and compact `/restart_diagnostics` audit metadata alongside scheduler/runtime truth.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v18`; distributed TreePM state is persisted under restart-only
+- Restart schema is `cosmosim_restart_v19`; distributed TreePM state is persisted under restart-only
   data and covered by restart integrity hashing.
 - The reader accepts the documented legacy `cosmosim_restart_v14` particle-bound import path
   by materializing `/state/gas_cell_identity` from
@@ -220,4 +220,4 @@ PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_pa
 
 ## AMR temporal restart state (v18)
 
-`cosmosim_restart_v18` extends the restart-only schema with `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. It is not part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.
+`cosmosim_restart_v19` extends the restart-only schema with `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. It is not part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.

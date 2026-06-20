@@ -266,3 +266,19 @@ rank-local compacted state:
 Persistent ownership migration must continue to use `core::ParticleMigrationRecord`, because that record carries authoritative runtime-truth lanes: particle hot state, particle identity metadata, softening value/mask, species tag, owning rank, and species-specific sidecar payloads. Any future distributed ownership packet must either be exactly this schema or a versioned superset with tests proving sidecar, softening, restart, and gas-cell identity preservation.
 
 Partition correctness checks now use count, particle-ID sum, particle-ID square sum, particle-ID XOR, and local uniqueness. The reference workflow compares reduced rank-local identity against the generated pre-partition IC identity. Passing by comparing a rank-reduced partition summary to itself is forbidden because it cannot detect replicated-state success.
+
+---
+
+## H2 gas-cell scheduler migration boundary
+
+Gas-cell scheduling is independent of particle scheduling. Any future rank-to-rank gas-cell
+migration must transfer or reconstruct scheduler records by stable `gas_cell_id`, including
+`bin_index`, `next_activation_tick`, active state, and pending-bin state. Copying a parent
+particle time bin is not an acceptable continuation mechanism because a cell may be parentless
+or several cells may share one parent.
+
+The repository has single-process `GasCellMigrationRecord` and stable-ID remap coverage. It does
+not yet have executed multi-rank evidence for this contract in the current repair environment.
+A distributed acceptance test must move a parentless cell and two shared-parent cells between
+ranks, compact/reorder dense rows, rebuild the local gas-cell scheduler by `gas_cell_id`, write
+and reload a restart, and compare the continuation by stable identity.

@@ -244,3 +244,19 @@ Required tests before removing the particle-bound production gate:
 ## Reproducibility impact
 
 H2.0 is documentation-only. It changes no solver numerics, config keys, restart schema, HDF5 dataset names, output naming, scheduler behavior, or rank coordination. Future H2.4 schema work must explicitly update restart/output docs and validation evidence before any compatibility claim.
+
+---
+
+## 2026-06-19 repair addendum
+
+The plan is now partially realized. The authoritative runtime direction is
+`GasCellIdentityMap -> compatibility mirrors`; ordinary code must use controlled
+`SimulationState` identity replacement/restoration rather than writing only sidecar identity
+lanes. The reference workflow's root-patch materialization has also been corrected to update
+canonical records, not rebuild them from mirrors.
+
+The workflow now executes order-independent Cartesian mapping for non-AMR input and keeps a
+separate gas-cell scheduler whose persistence/remap key is `gas_cell_id`. Restart schema v19
+persists that scheduler under `/gas_cell_scheduler`. See
+`h2_gas_cell_identity_repair_acceptance.md` for the exact accepted local/HDF5 scope and the
+remaining MPI evidence boundary.

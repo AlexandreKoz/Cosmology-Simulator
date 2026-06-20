@@ -1890,6 +1890,70 @@ void rebuildSchedulerFromParticleIdentityRecords(
       destination_particle_ids));
 }
 
+std::vector<TimeBinSchedulerIdentityRecord> exportGasCellSchedulerIdentityRecords(
+    const HierarchicalTimeBinScheduler& scheduler,
+    const SimulationState& state,
+    std::span<const std::uint32_t> cell_indices) {
+  state.requireGasCellIdentityMapCoversDenseRows("exportGasCellSchedulerIdentityRecords");
+  const TimeBinPersistentState persistent = scheduler.exportPersistentState();
+  validatePersistentStateShapeForRemap(
+      persistent,
+      state.cells.size(),
+      "exportGasCellSchedulerIdentityRecords");
+  std::vector<TimeBinSchedulerIdentityRecord> records;
+  records.reserve(cell_indices.size());
+  for (const std::uint32_t cell_row : cell_indices) {
+    if (cell_row >= state.cells.size()) {
+      throw std::out_of_range("exportGasCellSchedulerIdentityRecords: cell row out of range");
+    }
+    const auto gas_cell_id = state.gas_cell_identity.gasCellIdForLocalRow(cell_row);
+    if (!gas_cell_id.has_value()) {
+      throw std::runtime_error("exportGasCellSchedulerIdentityRecords: identity map is missing cell row");
+    }
+    records.push_back(TimeBinSchedulerIdentityRecord{
+        .element_id = *gas_cell_id,
+        .bin_index = persistent.bin_index[cell_row],
+        .next_activation_tick = persistent.next_activation_tick[cell_row],
+        .pending_bin_index = persistent.pending_bin_index[cell_row],
+    });
+  }
+  return records;
+}
+
+void rebuildSchedulerFromGasCellIdentityRecords(
+    HierarchicalTimeBinScheduler& scheduler,
+    std::span<const TimeBinSchedulerIdentityRecord> records,
+    const SimulationState& state) {
+  state.requireGasCellIdentityMapCoversDenseRows("rebuildSchedulerFromGasCellIdentityRecords");
+  std::vector<std::uint64_t> destination_gas_cell_ids(state.cells.size());
+  for (std::uint32_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
+    const auto gas_cell_id = state.gas_cell_identity.gasCellIdForLocalRow(cell_row);
+    if (!gas_cell_id.has_value()) {
+      throw std::runtime_error("rebuildSchedulerFromGasCellIdentityRecords: identity map is missing cell row");
+    }
+    destination_gas_cell_ids[cell_row] = *gas_cell_id;
+  }
+  scheduler.importPersistentState(rebuildSchedulerPersistentStateFromIdentityRecords(
+      scheduler.currentTick(), scheduler.maxBin(), records, destination_gas_cell_ids));
+}
+
+void syncGasCellTimeBinMirrorsFromGasCellScheduler(
+    const HierarchicalTimeBinScheduler& scheduler,
+    SimulationState& state) {
+  if (state.cells.size() == 0U) {
+    return;
+  }
+  state.requireGasCellIdentityMapCoversDenseRows("syncGasCellTimeBinMirrorsFromGasCellScheduler");
+  const TimeBinPersistentState persistent = scheduler.exportPersistentState();
+  validatePersistentStateShapeForRemap(
+      persistent,
+      state.cells.size(),
+      "syncGasCellTimeBinMirrorsFromGasCellScheduler");
+  for (std::size_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
+    state.cells.time_bin[cell_row] = persistent.bin_index[cell_row];
+  }
+}
+
 void syncGasCellTimeBinMirrorsFromParticleScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     SimulationState& state) {

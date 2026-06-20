@@ -1117,8 +1117,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   if (rebuild_gas_state) {
     cells = std::move(rebuilt_cells);
     gas_cells = std::move(rebuilt_gas_cells);
-    gas_cell_identity.assign(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
-    bumpCellIndexGeneration();
+    replaceGasCellIdentityRecords(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
   }
   star_particles = std::move(rebuilt_star);
   black_holes = std::move(rebuilt_black_holes);
@@ -1249,8 +1248,7 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
 
   cells = std::move(rebuilt_cells);
   gas_cells = std::move(rebuilt_gas_cells);
-  gas_cell_identity.assign(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
-  bumpCellIndexGeneration();
+  replaceGasCellIdentityRecords(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
 }
 
 std::vector<AmrPatchMigrationRecord> SimulationState::packAmrPatchMigrationRecords(
@@ -1486,8 +1484,7 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
   patches = std::move(rebuilt_patches);
   cells = std::move(rebuilt_cells);
   gas_cells = std::move(rebuilt_gas_cells);
-  gas_cell_identity.assign(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
-  bumpCellIndexGeneration();
+  replaceGasCellIdentityRecords(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
 }
 
 }  // namespace cosmosim::core

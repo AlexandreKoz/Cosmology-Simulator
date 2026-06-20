@@ -5,6 +5,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <unordered_map>
+
+#include "cosmosim/io/restart_checkpoint.hpp"
 
 #include "cosmosim/cosmosim.hpp"
 #include "cosmosim/core/build_config.hpp"
@@ -48,6 +54,112 @@ int main() {
     stream << "output_stem = snapshot\n";
     stream << "restart_stem = restart\n";
     return stream.str();
+  };
+
+  auto makeDecoupledGasCellState = [](const std::array<std::uint32_t, 3>& row_to_physical) {
+    cosmosim::core::SimulationState state;
+    state.resizeParticles(2);
+    state.resizeCells(3);
+    state.resizePatches(1);
+
+    state.particle_sidecar.particle_id = {5001U, 6001U};
+    state.particle_sidecar.sfc_key = {100U, 200U};
+    state.particle_sidecar.species_tag = {
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas),
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter)};
+    state.particle_sidecar.owning_rank = {0U, 0U};
+    state.particle_sidecar.particle_flags = {0U, 0U};
+    state.particles.position_x_comoving = {0.15, 0.45};
+    state.particles.position_y_comoving = {0.05, 0.05};
+    state.particles.position_z_comoving = {0.05, 0.05};
+    state.particles.velocity_x_peculiar = {0.0, 0.0};
+    state.particles.velocity_y_peculiar = {0.0, 0.0};
+    state.particles.velocity_z_peculiar = {0.0, 0.0};
+    state.particles.mass_code = {3.0, 10.0};
+    state.particles.time_bin = {0U, 0U};
+    state.species.count_by_species.fill(0U);
+    state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 1U;
+    state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 1U;
+    state.rebuildSpeciesIndex();
+
+    state.patches.patch_id[0] = 9001U;
+    state.patches.level[0] = 0U;
+    state.patches.first_cell[0] = 0U;
+    state.patches.cell_count[0] = 3U;
+    state.patches.owning_rank[0] = 0U;
+    state.patches.origin_x_comoving[0] = 0.0;
+    state.patches.origin_y_comoving[0] = 0.0;
+    state.patches.origin_z_comoving[0] = 0.0;
+    state.patches.extent_x_comoving[0] = 0.3;
+    state.patches.extent_y_comoving[0] = 0.1;
+    state.patches.extent_z_comoving[0] = 0.1;
+    state.patches.cell_dim_x[0] = 3U;
+    state.patches.cell_dim_y[0] = 1U;
+    state.patches.cell_dim_z[0] = 1U;
+
+    struct CellSeed {
+      std::uint64_t gas_cell_id;
+      std::optional<std::uint64_t> parent_particle_id;
+      double density;
+      double pressure;
+      double internal_energy;
+      double velocity_x;
+    };
+    const std::array<CellSeed, 3> physical_cells{{
+        {8001U, std::nullopt, 1.0, 1.2, 1.8, -0.1},
+        {8002U, 5001U, 1.1, 1.3, 1.9, 0.0},
+        {8003U, 5001U, 0.9, 1.4, 2.0, 0.1},
+    }};
+
+    std::vector<cosmosim::core::GasCellIdentityRecord> records;
+    records.reserve(physical_cells.size());
+    for (std::uint32_t row = 0; row < row_to_physical.size(); ++row) {
+      const std::uint32_t physical = row_to_physical[row];
+      assert(physical < physical_cells.size());
+      const CellSeed& seed = physical_cells[physical];
+      state.cells.center_x_comoving[row] = 0.05 + 0.1 * static_cast<double>(physical);
+      state.cells.center_y_comoving[row] = 0.05;
+      state.cells.center_z_comoving[row] = 0.05;
+      state.cells.mass_code[row] = 1.0;
+      state.cells.time_bin[row] = 0U;
+      state.cells.patch_index[row] = 0U;
+      state.gas_cells.density_code[row] = seed.density;
+      state.gas_cells.pressure_code[row] = seed.pressure;
+      state.gas_cells.internal_energy_code[row] = seed.internal_energy;
+      state.gas_cells.temperature_code[row] = 1.0;
+      state.gas_cells.sound_speed_code[row] = 1.0;
+      state.gas_cells.velocity_x_peculiar[row] = seed.velocity_x;
+      state.gas_cells.velocity_y_peculiar[row] = 0.0;
+      state.gas_cells.velocity_z_peculiar[row] = 0.0;
+      records.push_back(cosmosim::core::GasCellIdentityRecord{
+          .gas_cell_id = seed.gas_cell_id,
+          .parent_particle_id = seed.parent_particle_id,
+          .owning_patch_id = 9001U,
+          .local_cell_row = row,
+      });
+    }
+    state.replaceGasCellIdentityRecords(std::move(records));
+    assert(state.gasCellIdentityMapMatchesSidecarLanes());
+    assert(state.validateOwnershipInvariants());
+    return state;
+  };
+
+  auto gasStateByStableId = [](const cosmosim::core::SimulationState& state) {
+    std::unordered_map<std::uint64_t, std::array<double, 7>> values;
+    state.requireGasCellIdentityMapCoversDenseRows("reference workflow H2 stable-id comparison");
+    for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+      const auto* record = state.gas_cell_identity.findByLocalRow(row);
+      assert(record != nullptr);
+      values.emplace(record->gas_cell_id, std::array<double, 7>{
+          state.cells.mass_code[row],
+          state.cells.center_x_comoving[row],
+          state.gas_cells.density_code[row],
+          state.gas_cells.pressure_code[row],
+          state.gas_cells.internal_energy_code[row],
+          state.gas_cells.velocity_x_peculiar[row],
+          static_cast<double>(state.cells.time_bin[row])});
+    }
+    return values;
   };
 
   std::stringstream stream;
@@ -203,6 +315,63 @@ int main() {
         std::string(error.what()).find("lacks HDF5 support") != std::string::npos;
   }
   assert(trapped_hdf5_disabled);
+#endif
+
+#if COSMOSIM_ENABLE_HDF5
+  // This drives the real ReferenceWorkflow pipeline with a parentless cell,
+  // two cells sharing one optional parent particle, and deliberately shuffled
+  // dense rows.  The only comparison key is stable gas_cell_id.
+  const std::string h2_identity_config =
+      buildConfigText(1, "reference_h2_decoupled_gas_cells", "cic") +
+      "snapshot_interval_steps = 1\n"
+      "write_restarts = true\n";
+  const cosmosim::core::FrozenConfig h2_identity_frozen =
+      cosmosim::core::loadFrozenConfigFromString(
+          h2_identity_config, "test_reference_workflow_h2_decoupled_gas_cells");
+
+  const cosmosim::core::SimulationState canonical_h2_state =
+      makeDecoupledGasCellState({0U, 1U, 2U});
+  const cosmosim::core::SimulationState shuffled_h2_state =
+      makeDecoupledGasCellState({2U, 0U, 1U});
+
+  cosmosim::workflows::ReferenceWorkflowRunner h2_identity_runner(h2_identity_frozen);
+  const auto canonical_h2_report = h2_identity_runner.run(
+      output_dir,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .write_outputs = true,
+          .initial_state_override = &canonical_h2_state});
+
+  std::string shuffled_h2_config = h2_identity_config;
+  const std::string canonical_run_name = "reference_h2_decoupled_gas_cells";
+  const std::string shuffled_run_name = "reference_h2_decoupled_gas_cells_shuffled";
+  const std::size_t run_name_position = shuffled_h2_config.find(canonical_run_name);
+  assert(run_name_position != std::string::npos);
+  shuffled_h2_config.replace(run_name_position, canonical_run_name.size(), shuffled_run_name);
+  const cosmosim::core::FrozenConfig shuffled_h2_frozen =
+      cosmosim::core::loadFrozenConfigFromString(
+          shuffled_h2_config, "test_reference_workflow_h2_decoupled_gas_cells_shuffled");
+  cosmosim::workflows::ReferenceWorkflowRunner shuffled_h2_runner(shuffled_h2_frozen);
+  const auto shuffled_h2_report = shuffled_h2_runner.run(
+      output_dir,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .write_outputs = true,
+          .initial_state_override = &shuffled_h2_state});
+
+  assert(canonical_h2_report.completed_steps == 2U);
+  assert(shuffled_h2_report.completed_steps == 2U);
+  assert(canonical_h2_report.restart_roundtrip_executed && canonical_h2_report.restart_roundtrip_ok);
+  assert(shuffled_h2_report.restart_roundtrip_executed && shuffled_h2_report.restart_roundtrip_ok);
+
+  const auto canonical_h2_restart = cosmosim::io::readRestartCheckpointHdf5(canonical_h2_report.restart_path);
+  const auto shuffled_h2_restart = cosmosim::io::readRestartCheckpointHdf5(shuffled_h2_report.restart_path);
+  const auto canonical_by_id = gasStateByStableId(canonical_h2_restart.state);
+  const auto shuffled_by_id = gasStateByStableId(shuffled_h2_restart.state);
+  assert(canonical_by_id.size() == 3U);
+  assert(canonical_by_id == shuffled_by_id);
+  const auto* parentless = canonical_h2_restart.state.gas_cell_identity.findByGasCellId(8001U);
+  assert(parentless != nullptr && !parentless->parent_particle_id.has_value());
+  assert(canonical_h2_restart.state.gas_cell_identity.rowsForParentParticleId(5001U).size() == 2U);
+  assert(canonical_h2_restart.gas_cell_scheduler_ids.size() == 3U);
 #endif
 
   auto invalidGravityConfig = []() {
