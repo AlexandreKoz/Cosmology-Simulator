@@ -1,0 +1,75 @@
+set(runtime_mpi_root "@CMAKE_BINARY_DIR@/runtime_app_mpi_treepm_smoke")
+set(runtime_mpi_run_root "${runtime_mpi_root}/outputs")
+set(runtime_mpi_config "${runtime_mpi_root}/runtime_mpi_treepm.param.txt")
+set(runtime_mpi_stdout "${runtime_mpi_root}/runtime_stdout.txt")
+set(runtime_mpi_stderr "${runtime_mpi_root}/runtime_stderr.txt")
+set(runtime_mpi_run_dir_rank0 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank000")
+set(runtime_mpi_run_dir_rank1 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank001")
+
+file(REMOVE_RECURSE "${runtime_mpi_root}")
+file(MAKE_DIRECTORY "${runtime_mpi_root}")
+
+file(WRITE "${runtime_mpi_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 1\ngravity_solver = treepm\nhydro_solver = godunov_fv\ntreepm_pm_grid_nx = 16\ntreepm_pm_grid_ny = 16\ntreepm_pm_grid_nz = 16\ntreepm_asmth_cells = 1.5\ntreepm_rcut_cells = 4.5\ntreepm_assignment_scheme = cic\ntreepm_enable_window_deconvolution = true\ntreepm_update_cadence_steps = 1\n\n[analysis]\nenable_diagnostics = true\nenable_halo_workflow = false\nrun_health_interval_steps = 1\nscience_light_interval_steps = 1\nscience_heavy_interval_steps = 4\n\n[output]\nrun_name = runtime_app_mpi_treepm_smoke\noutput_directory = ${runtime_mpi_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 1\nwrite_restarts = true\n\n[parallel]\nmpi_ranks_expected = 2\nomp_threads = 1\ngpu_devices = 0\n\n[units]\ncoordinate_frame = comoving\n")
+
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "2" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_mpi_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE runtime_result
+  OUTPUT_FILE "${runtime_mpi_stdout}"
+  ERROR_FILE "${runtime_mpi_stderr}")
+
+if(NOT runtime_result EQUAL 0)
+  file(READ "${runtime_mpi_stderr}" runtime_err)
+  message(FATAL_ERROR "cosmosim_harness MPI TreePM runtime smoke failed with exit code ${runtime_result}:\n${runtime_err}")
+endif()
+
+foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_rank1}")
+  foreach(required_name IN ITEMS
+      "normalized_config.param.txt"
+      "operational_events.json"
+      "profile.json"
+      "profile.csv")
+    if(NOT EXISTS "${rank_dir}/${required_name}")
+      message(FATAL_ERROR "MPI runtime smoke missing expected rank artifact: ${rank_dir}/${required_name}")
+    endif()
+  endforeach()
+endforeach()
+
+foreach(required_path IN ITEMS
+    "${runtime_mpi_run_dir_rank0}/snap_001_rank000.hdf5"
+    "${runtime_mpi_run_dir_rank1}/snap_001_rank001.hdf5"
+    "${runtime_mpi_run_dir_rank0}/restart_001_rank000.hdf5"
+    "${runtime_mpi_run_dir_rank1}/restart_001_rank001.hdf5")
+  if(NOT EXISTS "${required_path}")
+    message(FATAL_ERROR "MPI runtime smoke missing expected rank-qualified HDF5 artifact: ${required_path}")
+  endif()
+endforeach()
+
+file(READ "${runtime_mpi_stdout}" runtime_stdout_text)
+if(NOT runtime_stdout_text MATCHES "completed_steps=1")
+  message(FATAL_ERROR "MPI runtime smoke stdout must report completed_steps=1")
+endif()
+if(NOT runtime_stdout_text MATCHES "run_directory=${runtime_mpi_run_dir_rank0}")
+  message(FATAL_ERROR "MPI runtime smoke stdout must report rank000 run directory")
+endif()
+if(NOT runtime_stdout_text MATCHES "run_directory=${runtime_mpi_run_dir_rank1}")
+  message(FATAL_ERROR "MPI runtime smoke stdout must report rank001 run directory")
+endif()
+
+foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_rank1}")
+  file(READ "${rank_dir}/operational_events.json" runtime_ops)
+  if(NOT runtime_ops MATCHES "run.complete")
+    message(FATAL_ERROR "MPI runtime smoke operational report must record run.complete in ${rank_dir}")
+  endif()
+  if(NOT runtime_ops MATCHES "config.freeze")
+    message(FATAL_ERROR "MPI runtime smoke operational report must record config.freeze in ${rank_dir}")
+  endif()
+
+  file(READ "${rank_dir}/normalized_config.param.txt" runtime_normalized)
+  if(NOT runtime_normalized MATCHES "mpi_ranks_expected = 2")
+    message(FATAL_ERROR "MPI runtime smoke normalized config must preserve parallel.mpi_ranks_expected = 2")
+  endif()
+  if(NOT runtime_normalized MATCHES "treepm_pm_grid_nx = 16")
+    message(FATAL_ERROR "MPI runtime smoke normalized config must preserve canonical TreePM grid")
+  endif()
+endforeach()

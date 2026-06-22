@@ -987,6 +987,16 @@ if(COSMOSIM_ENABLE_TESTS)
              COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_smoke.cmake")
   endif()
 
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_treepm_smoke.cmake.in"
+      "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_treepm_smoke.cmake"
+      @ONLY)
+    add_test(NAME integration_runtime_app_mpi_treepm_smoke_two_rank
+             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_treepm_smoke.cmake")
+    set_tests_properties(integration_runtime_app_mpi_treepm_smoke_two_rank PROPERTIES PROCESSORS 2)
+  endif()
+
   add_executable(
     test_validation_unit
     tests/validation/test_validation_unit.cpp

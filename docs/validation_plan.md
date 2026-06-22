@@ -163,6 +163,7 @@ Use one of these config-driven paths for honest runtime smoke checks:
 Or run the built-in integration smoke gate:
 
 - `integration_runtime_app_smoke` (HDF5-enabled builds)
+- `integration_runtime_app_mpi_treepm_smoke_two_rank` (MPI+HDF5+FFTW-enabled builds; launches the real `cosmosim_harness` through `mpiexec` with `parallel.mpi_ranks_expected = 2`)
 
 
 

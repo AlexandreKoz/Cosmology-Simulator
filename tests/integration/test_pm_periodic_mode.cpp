@@ -279,12 +279,18 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
   const std::vector<double> all_z{0.15, 0.25, 0.35, 0.45, 0.75, 0.85, 0.95, 0.05};
   const std::vector<double> all_mass{1.0, 2.0, 1.5, 2.5, 3.0, 4.0, 1.25, 0.75};
 
+  // Deliberately uneven owner-local populations: this catches slab owners
+  // that mistake an origin-local return token for a receiver-local row.
+  const auto particle_owner_rank = [](std::size_t particle_index) {
+    return particle_index < 7U ? 0 : 1;
+  };
+
   std::vector<double> local_x;
   std::vector<double> local_y;
   std::vector<double> local_z;
   std::vector<double> local_mass;
   for (std::size_t i = 0; i < all_x.size(); ++i) {
-    if (static_cast<int>(i % static_cast<std::size_t>(world_size)) == world_rank) {
+    if (particle_owner_rank(i) == world_rank) {
       local_x.push_back(all_x[i]);
       local_y.push_back(all_y[i]);
       local_z.push_back(all_z[i]);
@@ -325,7 +331,7 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
       std::vector<double> target_az;
       std::vector<double> target_phi;
       for (std::size_t i = 0; i < all_x.size(); ++i) {
-        if (static_cast<int>(i % static_cast<std::size_t>(world_size)) != target_rank) {
+        if (particle_owner_rank(i) != target_rank) {
           continue;
         }
         target_ax.push_back(ref_ax[i]);

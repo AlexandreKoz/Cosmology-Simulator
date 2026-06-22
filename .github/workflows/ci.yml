@@ -51,7 +51,7 @@ jobs:
           - configure_preset: mpi-hdf5-fftw-debug
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
-            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
+            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
             apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev"
             run_bench: "0"
     steps:

@@ -76,7 +76,9 @@ struct PmDensityContributionRecord {
 };
 
 struct PmInterpolationRequestRecord {
-  std::uint32_t particle_index = 0;
+  std::uint32_t origin_rank = 0;
+  std::uint32_t request_sequence = 0;
+  std::uint32_t origin_particle_index = 0;
   std::uint32_t global_ix = 0;
   std::uint32_t global_iy = 0;
   std::uint32_t global_iz = 0;
@@ -84,16 +86,32 @@ struct PmInterpolationRequestRecord {
 };
 
 struct PmForceContributionRecord {
-  std::uint32_t particle_index = 0;
+  std::uint32_t origin_rank = 0;
+  std::uint32_t request_sequence = 0;
+  std::uint32_t origin_particle_index = 0;
   double accel_x = 0.0;
   double accel_y = 0.0;
   double accel_z = 0.0;
 };
 
 struct PmPotentialContributionRecord {
-  std::uint32_t particle_index = 0;
+  std::uint32_t origin_rank = 0;
+  std::uint32_t request_sequence = 0;
+  std::uint32_t origin_particle_index = 0;
   double potential = 0.0;
 };
+
+[[nodiscard]] std::string pmRoutingDiagnostic(
+    const std::string& stage,
+    int receiver_rank,
+    int sender_rank,
+    std::uint32_t request_sequence,
+    std::uint32_t origin_particle_index,
+    const std::string& detail) {
+  return stage + " routing failure on rank " + std::to_string(receiver_rank) + " from sender " +
+      std::to_string(sender_rank) + " request_sequence=" + std::to_string(request_sequence) +
+      " origin_particle_index=" + std::to_string(origin_particle_index) + ": " + detail;
+}
 
 [[nodiscard]] PmAxisStencil1d makeAxisStencil(double grid_position, PmAssignmentScheme scheme) {
   PmAxisStencil1d stencil{};
@@ -1903,7 +1921,12 @@ void PmSolver::interpolateForces(
     std::fill(accel_y.begin(), accel_y.end(), 0.0);
     std::fill(accel_z.begin(), accel_z.end(), 0.0);
 
+    std::vector<std::uint32_t> request_origin_slots;
+    std::uint32_t next_request_sequence = 0;
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::invalid_argument("PmSolver::interpolateForces origin particle index exceeds routing token limit");
+      }
       const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
       const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
       const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
@@ -1937,13 +1960,20 @@ void PmSolver::interpolateForces(
             }
 
             auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
+            if (next_request_sequence == std::numeric_limits<std::uint32_t>::max()) {
+              throw std::invalid_argument("PmSolver::interpolateForces request sequence exceeds routing token limit");
+            }
+            request_origin_slots.push_back(static_cast<std::uint32_t>(p));
             batch.push_back(PmInterpolationRequestRecord{
-                .particle_index = static_cast<std::uint32_t>(p),
+                .origin_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
+                .request_sequence = next_request_sequence,
+                .origin_particle_index = static_cast<std::uint32_t>(p),
                 .global_ix = static_cast<std::uint32_t>(ix),
                 .global_iy = static_cast<std::uint32_t>(iy),
                 .global_iz = static_cast<std::uint32_t>(iz),
                 .weight = weight,
             });
+            ++next_request_sequence;
           }
         }
       }
@@ -2001,15 +2031,57 @@ void PmSolver::interpolateForces(
       const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
       for (int i = 0; i < count; ++i) {
         const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
+        if (request.origin_rank != static_cast<std::uint32_t>(source_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request origin rank does not match MPI sender segment"));
+        }
+        if (!std::isfinite(request.weight)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request interpolation weight is not finite"));
+        }
         if (request.global_ix >= m_shape.nx || request.global_iy >= m_shape.ny || request.global_iz >= m_shape.nz) {
-          throw std::invalid_argument("PmSolver::interpolateForces request PM index out of range");
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request PM index out of range"));
         }
         if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
-          throw std::invalid_argument("PmSolver::interpolateForces request x-index is not owned by receiving slab");
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request x-index is not owned by receiving slab"));
         }
         const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        if (!std::isfinite(grid.force_x()[index]) || !std::isfinite(grid.force_y()[index]) ||
+            !std::isfinite(grid.force_z()[index])) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "mesh force contribution is not finite"));
+        }
         batch.push_back(PmForceContributionRecord{
-            .particle_index = request.particle_index,
+            .origin_rank = request.origin_rank,
+            .request_sequence = request.request_sequence,
+            .origin_particle_index = request.origin_particle_index,
             .accel_x = request.weight * grid.force_x()[index],
             .accel_y = request.weight * grid.force_y()[index],
             .accel_z = request.weight * grid.force_z()[index],
@@ -2069,14 +2141,62 @@ void PmSolver::interpolateForces(
         MPI_BYTE,
         MPI_COMM_WORLD);
 
-    for (const auto& contribution : exchange.recv_contribs_flat) {
-      if (contribution.particle_index >= pos_x.size()) {
-        throw std::invalid_argument("PmSolver::interpolateForces response particle index out of range");
+    for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
+      const int begin = exchange.recv_contrib_displs[static_cast<std::size_t>(sender_rank)];
+      const int count = exchange.recv_contrib_counts[static_cast<std::size_t>(sender_rank)];
+      for (int i = 0; i < count; ++i) {
+        const auto& contribution = exchange.recv_contribs_flat[static_cast<std::size_t>(begin + i)];
+        if (contribution.origin_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin rank does not match receiver rank"));
+        }
+        if (contribution.request_sequence >= request_origin_slots.size()) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response request sequence out of range"));
+        }
+        if (contribution.origin_particle_index != request_origin_slots[contribution.request_sequence]) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin slot does not match request sequence"));
+        }
+        if (contribution.origin_particle_index >= pos_x.size()) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin particle index out of range"));
+        }
+        if (!std::isfinite(contribution.accel_x) || !std::isfinite(contribution.accel_y) ||
+            !std::isfinite(contribution.accel_z)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response acceleration contribution is not finite"));
+        }
+        const std::size_t p = static_cast<std::size_t>(contribution.origin_particle_index);
+        accel_x[p] += contribution.accel_x;
+        accel_y[p] += contribution.accel_y;
+        accel_z[p] += contribution.accel_z;
       }
-      const std::size_t p = static_cast<std::size_t>(contribution.particle_index);
-      accel_x[p] += contribution.accel_x;
-      accel_y[p] += contribution.accel_y;
-      accel_z[p] += contribution.accel_z;
     }
 #endif
   }
@@ -2186,7 +2306,12 @@ void PmSolver::interpolatePotential(
     std::fill(exchange.recv_contrib_counts_bytes.begin(), exchange.recv_contrib_counts_bytes.end(), 0);
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
+    std::vector<std::uint32_t> request_origin_slots;
+    std::uint32_t next_request_sequence = 0;
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
+      if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::invalid_argument("PmSolver::interpolatePotential origin particle index exceeds routing token limit");
+      }
       const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
       const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
       const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
@@ -2202,13 +2327,20 @@ void PmSolver::interpolatePotential(
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
             const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            if (next_request_sequence == std::numeric_limits<std::uint32_t>::max()) {
+              throw std::invalid_argument("PmSolver::interpolatePotential request sequence exceeds routing token limit");
+            }
+            request_origin_slots.push_back(static_cast<std::uint32_t>(p));
             batch.push_back(PmInterpolationRequestRecord{
-                .particle_index = static_cast<std::uint32_t>(p),
+                .origin_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
+                .request_sequence = next_request_sequence,
+                .origin_particle_index = static_cast<std::uint32_t>(p),
                 .global_ix = static_cast<std::uint32_t>(ix),
                 .global_iy = static_cast<std::uint32_t>(iy),
                 .global_iz = static_cast<std::uint32_t>(iz),
                 .weight = weight,
             });
+            ++next_request_sequence;
           }
         }
       }
@@ -2266,18 +2398,56 @@ void PmSolver::interpolatePotential(
       const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
       for (int i = 0; i < count; ++i) {
         const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
-        if (request.particle_index >= pos_x.size()) {
-          throw std::invalid_argument("PmSolver::interpolatePotential request particle index out of range");
+        if (request.origin_rank != static_cast<std::uint32_t>(source_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request origin rank does not match MPI sender segment"));
+        }
+        if (!std::isfinite(request.weight)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request interpolation weight is not finite"));
         }
         if (request.global_ix >= m_shape.nx || request.global_iy >= m_shape.ny || request.global_iz >= m_shape.nz) {
-          throw std::invalid_argument("PmSolver::interpolatePotential request PM index out of range");
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request PM index out of range"));
         }
         if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
-          throw std::invalid_argument("PmSolver::interpolatePotential request x-index is not owned by receiving slab");
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request x-index is not owned by receiving slab"));
         }
         const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        if (!std::isfinite(grid.potential()[index])) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.request_sequence,
+              request.origin_particle_index,
+              "mesh potential contribution is not finite"));
+        }
         batch.push_back(PmPotentialContributionRecord{
-            .particle_index = request.particle_index,
+            .origin_rank = request.origin_rank,
+            .request_sequence = request.request_sequence,
+            .origin_particle_index = request.origin_particle_index,
             .potential = request.weight * grid.potential()[index],
         });
       }
@@ -2336,11 +2506,58 @@ void PmSolver::interpolatePotential(
         MPI_COMM_WORLD);
 
     std::fill(potential.begin(), potential.end(), 0.0);
-    for (const auto& contribution : exchange.recv_contribs_flat) {
-      if (contribution.particle_index >= pos_x.size()) {
-        throw std::invalid_argument("PmSolver::interpolatePotential response particle index out of range");
+    for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
+      const int begin = exchange.recv_contrib_displs[static_cast<std::size_t>(sender_rank)];
+      const int count = exchange.recv_contrib_counts[static_cast<std::size_t>(sender_rank)];
+      for (int i = 0; i < count; ++i) {
+        const auto& contribution = exchange.recv_contribs_flat[static_cast<std::size_t>(begin + i)];
+        if (contribution.origin_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin rank does not match receiver rank"));
+        }
+        if (contribution.request_sequence >= request_origin_slots.size()) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response request sequence out of range"));
+        }
+        if (contribution.origin_particle_index != request_origin_slots[contribution.request_sequence]) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin slot does not match request sequence"));
+        }
+        if (contribution.origin_particle_index >= pos_x.size()) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response origin particle index out of range"));
+        }
+        if (!std::isfinite(contribution.potential)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response potential contribution is not finite"));
+        }
+        potential[static_cast<std::size_t>(contribution.origin_particle_index)] += contribution.potential;
       }
-      potential[static_cast<std::size_t>(contribution.particle_index)] += contribution.potential;
     }
 #endif
   }

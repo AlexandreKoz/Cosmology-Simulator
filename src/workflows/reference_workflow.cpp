@@ -2557,6 +2557,18 @@ struct HydroConservativeGhostSyncReport {
   return output_root / config.output.run_name;
 }
 
+[[nodiscard]] std::filesystem::path rankQualifiedRunDirectory(
+    std::filesystem::path run_directory,
+    int world_size,
+    int world_rank) {
+  if (world_size <= 1) {
+    return run_directory;
+  }
+  std::ostringstream rank_suffix;
+  rank_suffix << "_rank" << std::setw(3) << std::setfill('0') << world_rank;
+  return run_directory.parent_path() / (run_directory.filename().string() + rank_suffix.str());
+}
+
 [[nodiscard]] std::filesystem::path resolveConfigRelativePath(
     const core::FrozenConfig& frozen_config,
     const std::filesystem::path& candidate) {
@@ -5230,9 +5242,16 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const std::filesystem::path* output_root_override,
     const ReferenceWorkflowOptions& options) const {
   const core::SimulationConfig& config = m_frozen_config.config;
+  parallel::MpiContext mpi_context;
+  mpi_context.validateExpectedWorldSizeOrThrow(config.parallel.mpi_ranks_expected);
 
   ReferenceWorkflowReport report;
-  report.run_directory = computeRunDirectory(config, output_root_override);
+  report.world_size = mpi_context.worldSize();
+  report.world_rank = mpi_context.worldRank();
+  report.run_directory = rankQualifiedRunDirectory(
+      computeRunDirectory(config, output_root_override),
+      report.world_size,
+      report.world_rank);
   report.config_compatible = true;
   report.schema_compatible =
       config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version >= 2 &&
@@ -5315,9 +5334,6 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const auto expected_global_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
     const std::vector<std::uint64_t> expected_global_particle_ids(
         state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
-    parallel::MpiContext mpi_context;
-    report.world_size = mpi_context.worldSize();
-    report.world_rank = mpi_context.worldRank();
     seedParticleOwnershipFromPmSlabs(
         state,
         static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
