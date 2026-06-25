@@ -194,6 +194,33 @@ owner-routed deposition and reverse interpolation delivery:
 - slab owners compute interpolation contributions for owned stencil cells and return force/potential
   contributions back to particle owners via reverse communication.
 
+### PM reverse-interpolation message integrity
+
+Reverse interpolation has a strict owner-local message contract. Every request
+and force/potential response contains `origin_rank`, `origin_particle_index`,
+`request_sequence`, and a solver-generated 64-bit `exchange_epoch`.
+`origin_particle_index` is an opaque origin-local token: it is never valid for
+receiver-local particle-array access on a slab owner. Slab evaluation validates
+the MPI sender segment, current exchange epoch, finite weight, grid bounds,
+slab ownership, and local mesh values; it echoes routing identity unchanged.
+
+At the particle-owner origin, `request_sequence` indexes an exchange-local
+registry containing the expected origin slot, expected slab sender, and epoch.
+A response must match all of those fields, be finite, and remain within the
+origin rank's local particle span before it can mutate a particle result. The
+origin records explicit response state for every emitted request, rejects
+duplicates before accumulation, and rejects a missing response after the
+exchange. Ordered `MPI_Alltoallv` collectives provide normal transport ordering,
+but epoch plus sequence detect stale, malformed, and cross-batch records at the
+protocol boundary.
+
+All PM `MPI_Alltoallv(..., MPI_BYTE, ...)` exchanges for density contributions,
+interpolation requests, force responses, and potential responses convert record
+counts/displacements through one checked internal routine. It validates matching
+array sizes, non-negative inputs, representable record size, per-rank byte
+counts/displacements, and cumulative byte span before calling MPI. This is a
+transport safety contract, not a change to PM numerics or ownership layout.
+
 ## Distributed TreePM restart/debug continuation contract
 
 `parallel::DistributedRestartState` (schema_version `2`) now defines the serialized distributed

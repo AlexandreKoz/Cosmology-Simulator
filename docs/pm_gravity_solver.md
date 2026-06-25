@@ -72,6 +72,40 @@ For particle-space sampling:
 
 Matched deposition + gather is a hard contract for both schemes in this stage.
 
+## Distributed reverse-interpolation integrity contract
+
+For a slab-distributed periodic PM gather, particle rows remain authoritative
+only on the particle-owner/origin rank. A routed request carries four routing
+identity fields:
+
+- `origin_rank`, the rank allowed to mutate the particle result;
+- `origin_particle_index`, an opaque origin-local return token;
+- `request_sequence`, unique within the current origin exchange;
+- `exchange_epoch`, a checked 64-bit batch identity generated monotonically by
+  the solver for each distributed force or potential interpolation exchange.
+
+A slab owner uses those fields only to validate the MPI sender segment and the
+current epoch, then validates finite interpolation weight, mesh index bounds,
+slab ownership, and finite local mesh fields. It must not interpret
+`origin_particle_index` as a receiver-local particle-array index. Force and
+potential response records echo all four identity fields exactly.
+
+The origin keeps a registry keyed by `request_sequence`, recording the expected
+origin particle index, destination slab rank, and exchange epoch. Before adding
+a response, it checks origin rank, epoch, sequence range, expected sender,
+expected origin slot, owner-local slot bounds, and finite values. It rejects a
+duplicate response before accumulation and scans the registry after the reverse
+exchange to reject any missing response. Thus each emitted routed request
+produces one and only one validated contribution to an origin-owned particle
+result.
+
+Ordered blocking collectives continue to define normal delivery ordering, but
+the explicit epoch and sequence are the protocol boundary that detects stale,
+malformed, or cross-batch records. All PM `MPI_Alltoallv` record exchanges use
+checked conversion from record counts/displacements to `MPI_BYTE` arguments;
+negative values, mismatched layout spans, non-representable record sizes, and
+byte/cumulative displacement overflow are rejected before the collective.
+
 ## Assignment/gather kernels (Phase 1)
 
 Let `u_i = x_i / Δi` be the particle coordinate in mesh-cell units on axis `i`, where

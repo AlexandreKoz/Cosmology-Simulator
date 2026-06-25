@@ -1,15 +1,17 @@
 # MPI hardening status
 
-_MPI.1 executable lifecycle repair status._
+_MPI.1 executable lifecycle and MPI.2 PM routed-interpolation hardening status._
 
 ## Verdict
 
 MPI support is still not accepted as complete production distributed execution.
-This MPI.1 repair gives the production `cosmosim_harness` executable ownership
-of the MPI session boundary while preserving MPI-aware libraries as observers.
-It does not repair the PM potential routing blocker or claim broader distributed
-gravity, hydro, AMR, migration, scaling, or rank-count-changing restart
-maturity.
+MPI.1 gives the production `cosmosim_harness` executable ownership of the MPI
+session boundary while preserving MPI-aware libraries as observers. MPI.2 now
+repairs the PM reverse-routing ownership defect and hardens the request/response
+protocol, but local runtime acceptance remains pending a successful real
+multi-rank execution when an MPI launcher and MPI-enabled dependency stack are
+unavailable. This does not claim broader distributed gravity, hydro, AMR,
+migration, scaling, or rank-count-changing restart maturity.
 
 ## Supported now
 
@@ -33,8 +35,27 @@ maturity.
   `MPI_COMM_WORLD`, exposes `worldSize()`/`worldRank()`, validates
   `parallel.mpi_ranks_expected`, and provides sum/xor all-reduce wrappers.
 - PM slab ownership is represented by `parallel::PmSlabLayout`,
-  `pmOwnedXRangeForRank`, and `pmOwnerRankForGlobalCell`.  Distributed periodic
+  `pmOwnedXRangeForRank`, and `pmOwnerRankForGlobalCell`. Distributed periodic
   PM paths require `COSMOSIM_ENABLE_FFTW=ON` and `COSMOSIM_ENABLE_MPI=ON`.
+- MPI.2 reverse interpolation is owner-local: particle-owner ranks emit opaque
+  origin-local tokens (`origin_rank`, `origin_particle_index`,
+  `request_sequence`, `exchange_epoch`); slab owners validate only sender,
+  epoch, mesh routing, ownership, and finite mesh data, then echo those tokens
+  in force/potential responses. Slab owners never use an origin-local particle
+  index to address receiver-local particle arrays.
+- Origin accumulation keeps an exchange-local request registry and accepts one
+  and only one response per emitted request sequence. Duplicate, missing,
+  stale/mismatched epoch, wrong-sender, wrong-slot, out-of-range, and non-finite
+  responses are rejected before mutation of owner-local particle results.
+- PM `MPI_Alltoallv(..., MPI_BYTE, ...)` paths for routed density records,
+  interpolation requests, force responses, and potential responses now use a
+  shared checked record-count/displacement-to-byte conversion. Negative values,
+  size mismatches, non-representable record sizes, byte-count/displacement
+  overflow, and cumulative layout overflow fail explicitly.
+- `tests/integration/test_pm_periodic_mode.cpp` contains a deliberately uneven
+  7-versus-1 owner-local particle split and compares distributed owner-order
+  force/potential with a single-rank reference for CIC and TSC. The intended
+  two-rank CTest is `integration_pm_periodic_mode_mpi_two_rank`.
 - Runtime workflow code in `src/workflows/reference_workflow.cpp` builds a
   `DistributedExecutionTopology`, reduces global particle/cell identity
   summaries, rank-qualifies MPI run directories and snapshot/restart filenames
@@ -46,13 +67,13 @@ maturity.
 
 ## Known blockers
 
-- **PM potential routing bug**: `PmSolver::interpolatePotential` routes remote
-  potential requests with a source-rank local `particle_index`, then validates
-  that index against the receiving rank's local particle span before forming a
-  `PmPotentialContributionRecord`.  This can reject valid remote requests when
-  rank-local particle counts differ.  The force interpolation path has a local
-  owner/halo fast path and does not perform the same receiver-side particle-span
-  check.
+- **MPI.2 multi-rank runtime acceptance pending**: the receiver-local
+  particle-index ownership bug is repaired and the reverse protocol now carries
+  origin rank, origin particle index, request sequence, and a checked 64-bit
+  exchange epoch with exact response coverage. A real successful launcher run
+  of `integration_pm_periodic_mode_mpi_two_rank` is still required before
+  claiming local multi-rank acceptance when MPI is unavailable in the current
+  environment.
 - **Distributed isolated/open PM maturity**: `PmSolver::solvePoissonIsolatedOpen`
   gathers/scatters through a root full-field solve for distributed slabs; this
   is not a scalable distributed open-boundary PM claim.
@@ -104,13 +125,18 @@ maturity.
   AMR patch ownership.  Ghost and pseudo-particle records are derived or
   read-only on non-owner ranks.
 
-## Numerical invariants still to prove
+## Numerical invariants and remaining evidence
 
-This stage proves none of these invariants; later MPI stages must provide
-command-backed evidence for each accepted claim.
+MPI.2 now enforces its owner-local reverse-routing and one-response-per-request
+protocol in source. A successful real multi-rank execution remains the required
+command-backed acceptance evidence; the later MPI-stage invariants below remain
+out of scope for this repair.
 
-- Routed PM density, force, and potential contributions are accumulated exactly
-  once on the owning rank and returned to the requesting particle owner.
+- Routed PM density contributions are accumulated only by the owning slab. For
+  force and potential reverse interpolation, the source implementation now
+  rejects missing or duplicate responses and mutates only origin-owned particle
+  rows after origin-side validation; multi-rank runtime evidence remains
+  required for acceptance.
 - Particle identity, gas identity, sidecars, softening override authority, and
   scheduler identity records are conserved through migration.
 - Finite-volume mass, momentum, and total energy are conserved across ghost
@@ -126,7 +152,7 @@ command-backed evidence for each accepted claim.
 | Stage | Prerequisite | Evidence target |
 | --- | --- | --- |
 | MPI.1 executable lifecycle | `cosmosim_harness` owns MPI lifecycle; libraries observe initialized MPI only. | MPI build where the harness starts under `mpiexec`, initializes/finalizes exactly once, rank-qualifies runtime artifacts, and serial/no-MPI behavior is unchanged. |
-| MPI.2 PM routing | Fix and test remote potential contribution indexing without changing serial PM numerics. | Two-rank uneven local-particle-count PM force+potential agreement against single-rank reference. |
+| MPI.2 PM routing | Owner-local reverse routing with origin rank, origin particle index, request sequence, 64-bit exchange epoch, exact response coverage, and checked MPI_BYTE layouts; serial PM numerics unchanged. | Successful `integration_pm_periodic_mode_mpi_two_rank` run on the deliberately uneven 7-versus-1 partition, matching single-rank CIC/TSC force and potential references. |
 | MPI.3 TreePM exchange | Preserve request/response `batch_token` and `request_id` coverage under stressed batching. | Multi-rank TreePM short-range and active-subset agreement with coverage diagnostics and no missing/duplicate response packets. |
 | MPI.4 migration identity | Exchange full particle, gas, sidecar, softening, and scheduler identity payloads at a safe boundary. | Multi-rank migration test proving global ID partition, gas identity, sidecars, and scheduler records after migration/restart. |
 | MPI.5 hydro ghosts | Accept conservative ghost/correction ownership. | Multi-rank finite-volume hydro conservation and ghost refresh equivalence with owner-side correction accounting. |
