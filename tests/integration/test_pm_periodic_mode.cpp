@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -425,6 +426,22 @@ void testDistributedTwoRankMatchesSingleRankReference() {
 
   const double amplitude = 0.1;
   const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
+  std::vector<double> full_reference_force_x;
+  if (world_rank == 0) {
+    cosmosim::gravity::PmGridStorage reference_grid(shape);
+    cosmosim::gravity::PmSolver reference_solver(shape);
+    for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+      const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
+      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+        for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+          reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
+        }
+      }
+    }
+    reference_solver.solvePoissonPeriodic(reference_grid, options, nullptr);
+    full_reference_force_x.assign(reference_grid.force_x().begin(), reference_grid.force_x().end());
+  }
+
   for (std::size_t local_ix = 0; local_ix < local_layout.local_nx(); ++local_ix) {
     const std::size_t ix = local_layout.globalXFromLocal(local_ix);
     const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
@@ -438,23 +455,12 @@ void testDistributedTwoRankMatchesSingleRankReference() {
 
   std::vector<double> reference_force_x(local_grid.localCellCount(), 0.0);
   if (world_rank == 0) {
-    cosmosim::gravity::PmGridStorage reference_grid(shape);
-    cosmosim::gravity::PmSolver reference_solver(shape);
-    for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-      const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
-      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
-        for (std::size_t iz = 0; iz < shape.nz; ++iz) {
-          reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
-        }
-      }
-    }
-    reference_solver.solvePoissonPeriodic(reference_grid, options, nullptr);
     for (std::size_t local_ix = 0; local_ix < local_layout.local_nx(); ++local_ix) {
       const std::size_t ix = local_layout.globalXFromLocal(local_ix);
       for (std::size_t iy = 0; iy < shape.ny; ++iy) {
         for (std::size_t iz = 0; iz < shape.nz; ++iz) {
           reference_force_x[(local_ix * shape.ny + iy) * shape.nz + iz] =
-              reference_grid.force_x()[reference_grid.linearIndex(ix, iy, iz)];
+              full_reference_force_x[(ix * shape.ny + iy) * shape.nz + iz];
         }
       }
     }
@@ -465,23 +471,12 @@ void testDistributedTwoRankMatchesSingleRankReference() {
       const auto target_layout =
           cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, world_size, target_rank);
       std::vector<double> target_ref(target_layout.localCellCount(), 0.0);
-      cosmosim::gravity::PmGridStorage reference_grid(shape);
-      cosmosim::gravity::PmSolver reference_solver(shape);
-      for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-        const double x = (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) * options.box_size_mpc_comoving;
-        for (std::size_t iy = 0; iy < shape.ny; ++iy) {
-          for (std::size_t iz = 0; iz < shape.nz; ++iz) {
-            reference_grid.density()[reference_grid.linearIndex(ix, iy, iz)] = amplitude * std::sin(kx * x);
-          }
-        }
-      }
-      reference_solver.solvePoissonPeriodic(reference_grid, options, nullptr);
       for (std::size_t local_ix = 0; local_ix < target_layout.local_nx(); ++local_ix) {
         const std::size_t ix = target_layout.globalXFromLocal(local_ix);
         for (std::size_t iy = 0; iy < shape.ny; ++iy) {
           for (std::size_t iz = 0; iz < shape.nz; ++iz) {
             target_ref[(local_ix * shape.ny + iy) * shape.nz + iz] =
-                reference_grid.force_x()[reference_grid.linearIndex(ix, iy, iz)];
+                full_reference_force_x[(ix * shape.ny + iy) * shape.nz + iz];
           }
         }
       }

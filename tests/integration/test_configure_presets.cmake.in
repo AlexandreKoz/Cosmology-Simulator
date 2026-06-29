@@ -1,6 +1,7 @@
 set(source_dir "@CMAKE_SOURCE_DIR@")
 set(current_build_has_hdf5 "@COSMOSIM_ENABLE_HDF5@")
 set(current_build_has_fftw "@COSMOSIM_ENABLE_FFTW@")
+set(current_build_has_mpi "@COSMOSIM_ENABLE_MPI@")
 set(current_build_has_python "@COSMOSIM_ENABLE_PYTHON@")
 
 function(require_preset_configure preset_name)
@@ -27,6 +28,10 @@ endif()
 
 if(current_build_has_hdf5 AND current_build_has_fftw)
   require_preset_configure(pm-hdf5-fftw-debug)
+endif()
+
+if(current_build_has_mpi AND current_build_has_hdf5 AND current_build_has_fftw)
+  require_preset_configure(mpi-hdf5-fftw-debug)
 endif()
 
 if(current_build_has_python)

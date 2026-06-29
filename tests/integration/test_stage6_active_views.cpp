@@ -52,7 +52,7 @@ int main() {
     gas_state.gas_cells.density_code[row] = 20.0 + static_cast<double>(row);
     gas_state.gas_cells.pressure_code[row] = 30.0 + static_cast<double>(row);
   }
-  gas_state.gas_cell_identity.assign({
+  gas_state.replaceGasCellIdentityRecords({
       {.gas_cell_id = 401, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
       {.gas_cell_id = 404, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
       {.gas_cell_id = 402, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},

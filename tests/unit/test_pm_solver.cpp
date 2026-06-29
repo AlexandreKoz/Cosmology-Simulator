@@ -11,6 +11,10 @@
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
 
+#if COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
+
 namespace {
 
 constexpr double k_tolerance = 1.0e-8;
@@ -587,6 +591,10 @@ void testActivePmTargetViewExtentValidation() {
 }  // namespace
 
 int main() {
+#if COSMOSIM_ENABLE_MPI
+  MPI_Init(nullptr, nullptr);
+#endif
+
   testCicMassConservation();
   testTscMassConservationAndPeriodicWrap();
   testPoissonAnalyticMode();
@@ -609,5 +617,10 @@ int main() {
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();
+
+#if COSMOSIM_ENABLE_MPI
+  MPI_Finalize();
+#endif
+
   return 0;
 }

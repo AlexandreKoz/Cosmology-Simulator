@@ -431,8 +431,8 @@ void testExplicitFailureContracts(int world_size, int world_rank) {
       options.box_size_mpc_comoving = 1.0;
       options.scale_factor = 1.0;
       options.gravitational_constant_code = 1.0;
-      std::vector<double> density(grid.cellCount(), 0.0);
-      (void)solver.solvePoissonPeriodic(grid, density, options, nullptr);
+      std::fill(grid.density().begin(), grid.density().end(), 0.0);
+      solver.solvePoissonPeriodic(grid, options, nullptr);
     } catch (const std::invalid_argument&) {
       threw = true;
     }
