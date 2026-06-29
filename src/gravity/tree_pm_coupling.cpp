@@ -1367,10 +1367,27 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
     std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer(static_cast<std::size_t>(mpi_world_size));
 
-    for (std::size_t batch_begin = 0; batch_begin < accumulator.active_particle_index.size();) {
+    std::uint64_t local_active_count_u64 =
+        static_cast<std::uint64_t>(accumulator.active_particle_index.size());
+    std::uint64_t global_active_count_max_u64 = 0;
+    MPI_Allreduce(
+        &local_active_count_u64,
+        &global_active_count_max_u64,
+        1,
+        MPI_UINT64_T,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    const std::size_t global_active_count_max =
+        static_cast<std::size_t>(global_active_count_max_u64);
+
+    for (std::size_t batch_begin = 0; batch_begin < global_active_count_max;) {
+      const std::size_t local_remaining =
+          batch_begin < accumulator.active_particle_index.size()
+          ? accumulator.active_particle_index.size() - batch_begin
+          : 0U;
       const std::size_t batch_size = std::min(
           max_requests_per_peer,
-          accumulator.active_particle_index.size() - batch_begin);
+          local_remaining);
       const std::uint32_t batch_token = static_cast<std::uint32_t>(batch_begin);
 
       for (auto& peer_requests : requests_by_peer) {
@@ -1469,7 +1486,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       }
 
       if (total_send_bytes == 0 && total_recv_bytes == 0) {
-        batch_begin += batch_size;
+        batch_begin += max_requests_per_peer;
         continue;
       }
 
@@ -1511,7 +1528,34 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             std::max(m_last_residual_stats.remote_request_packet_imbalance_ratio, imbalance);
       }
 
-      response_send_payload.assign(recv_payload.size(), 0U);
+      std::vector<int> response_send_counts(static_cast<std::size_t>(mpi_world_size), 0);
+      std::vector<int> response_send_displs(static_cast<std::size_t>(mpi_world_size), 0);
+      std::vector<int> response_recv_counts(static_cast<std::size_t>(mpi_world_size), 0);
+      std::vector<int> response_recv_displs(static_cast<std::size_t>(mpi_world_size), 0);
+      for (int peer = 0; peer < mpi_world_size; ++peer) {
+        if (recv_counts[static_cast<std::size_t>(peer)] % static_cast<int>(sizeof(ShortRangeTargetRequestPacket)) != 0) {
+          throw std::runtime_error("TreePM short-range request payload size is not request-record aligned");
+        }
+        if (send_counts[static_cast<std::size_t>(peer)] % static_cast<int>(sizeof(ShortRangeTargetRequestPacket)) != 0) {
+          throw std::runtime_error("TreePM short-range outbound request payload size is not request-record aligned");
+        }
+        const int inbound_request_records =
+            recv_counts[static_cast<std::size_t>(peer)] / static_cast<int>(sizeof(ShortRangeTargetRequestPacket));
+        const int outbound_request_records =
+            send_counts[static_cast<std::size_t>(peer)] / static_cast<int>(sizeof(ShortRangeTargetRequestPacket));
+        response_send_counts[static_cast<std::size_t>(peer)] =
+            inbound_request_records * static_cast<int>(sizeof(ShortRangeTargetResponsePacket));
+        response_recv_counts[static_cast<std::size_t>(peer)] =
+            outbound_request_records * static_cast<int>(sizeof(ShortRangeTargetResponsePacket));
+      }
+      std::partial_sum(response_send_counts.begin(), response_send_counts.end() - 1, response_send_displs.begin() + 1);
+      std::partial_sum(response_recv_counts.begin(), response_recv_counts.end() - 1, response_recv_displs.begin() + 1);
+      const int total_response_send_bytes =
+          std::accumulate(response_send_counts.begin(), response_send_counts.end(), 0);
+      const int total_response_recv_bytes =
+          std::accumulate(response_recv_counts.begin(), response_recv_counts.end(), 0);
+
+      response_send_payload.assign(static_cast<std::size_t>(total_response_send_bytes), 0U);
       for (int peer = 0; peer < mpi_world_size; ++peer) {
         const int peer_recv_bytes = recv_counts[static_cast<std::size_t>(peer)];
         if (peer_recv_bytes == 0) {
@@ -1543,24 +1587,24 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         }
         const auto encoded_responses =
             asBytes(std::span<const ShortRangeTargetResponsePacket>(peer_responses.data(), peer_responses.size()));
-        if (encoded_responses.size() != static_cast<std::size_t>(peer_recv_bytes)) {
+        if (encoded_responses.size() != static_cast<std::size_t>(response_send_counts[static_cast<std::size_t>(peer)])) {
           throw std::runtime_error("TreePM short-range response payload size mismatch");
         }
         std::copy(
             encoded_responses.begin(),
             encoded_responses.end(),
-            response_send_payload.begin() + recv_displs[static_cast<std::size_t>(peer)]);
+            response_send_payload.begin() + response_send_displs[static_cast<std::size_t>(peer)]);
       }
 
-      response_recv_payload.resize(send_payload.size(), 0U);
+      response_recv_payload.resize(static_cast<std::size_t>(total_response_recv_bytes), 0U);
       MPI_Alltoallv(
           response_send_payload.data(),
-          recv_counts.data(),
-          recv_displs.data(),
+          response_send_counts.data(),
+          response_send_displs.data(),
           MPI_BYTE,
           response_recv_payload.data(),
-          send_counts.data(),
-          send_displs.data(),
+          response_recv_counts.data(),
+          response_recv_displs.data(),
           MPI_BYTE,
           MPI_COMM_WORLD);
 
@@ -1585,12 +1629,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         if (peer == mpi_world_rank) {
           continue;
         }
-        const int expected_bytes = send_counts[static_cast<std::size_t>(peer)];
+        const int expected_bytes = response_recv_counts[static_cast<std::size_t>(peer)];
         if (expected_bytes == 0) {
           continue;
         }
         const std::span<const std::uint8_t> peer_response_bytes(
-            response_recv_payload.data() + send_displs[static_cast<std::size_t>(peer)],
+            response_recv_payload.data() + response_recv_displs[static_cast<std::size_t>(peer)],
             static_cast<std::size_t>(expected_bytes));
         const std::vector<ShortRangeTargetResponsePacket> responses =
             decodeRecords<ShortRangeTargetResponsePacket>(peer_response_bytes);
@@ -1623,7 +1667,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             remote_batch_ay[batch_slot],
             remote_batch_az[batch_slot]);
       }
-      batch_begin += batch_size;
+      batch_begin += max_requests_per_peer;
     }
   }
 #else

@@ -382,6 +382,7 @@ class PmSolver::Impl {
 #endif
     bool is_distributed = false;
     bool spectral_transposed = false;
+    std::size_t real_z_stride = 0;
     std::size_t transposed_local_ny = 0;
     std::size_t transposed_begin_y = 0;
     bool spectral_operators_ready = false;
@@ -564,8 +565,9 @@ class PmSolver::Impl {
 
     PlanResources plan{};
     plan.layout = layout;
-    plan.real.assign(layout.localCellCount(), 0.0);
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
+    plan.real_z_stride = m_shape.nz;
+    plan.real.assign(layout.local_nx() * m_shape.ny * plan.real_z_stride, 0.0);
     const std::size_t expected_local_complex_size = layout.local_nx() * m_shape.ny * nz_complex;
     std::size_t allocated_local_complex_size = expected_local_complex_size;
 
@@ -614,6 +616,8 @@ class PmSolver::Impl {
       }
       allocated_local_complex_size = static_cast<std::size_t>(backend_alloc_local);
       plan.is_distributed = true;
+      plan.real_z_stride = 2U * nz_complex;
+      plan.real.assign(2U * allocated_local_complex_size, 0.0);
       if (decomposition_mode == core::PmDecompositionMode::kPencil) {
         plan.spectral_transposed = true;
         plan.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
@@ -656,6 +660,8 @@ class PmSolver::Impl {
     } else
 #endif
     {
+      plan.real_z_stride = m_shape.nz;
+      plan.real.assign(layout.local_nx() * m_shape.ny * plan.real_z_stride, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -1571,7 +1577,19 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   auto potential_k = m_impl->potentialScratch();
   auto working_k = m_impl->workingScratch();
 
-  std::copy(grid.density().begin(), grid.density().end(), real.begin());
+  std::fill(real.begin(), real.end(), 0.0);
+  if (plan.is_distributed) {
+    for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
+      const std::size_t global_ix = grid.slabLayout().globalXFromLocal(local_ix);
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
+        const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+        std::copy_n(grid.density().begin() + static_cast<std::ptrdiff_t>(compact_base), m_shape.nz, real.begin() + static_cast<std::ptrdiff_t>(fftw_base));
+      }
+    }
+  } else {
+    std::copy(grid.density().begin(), grid.density().end(), real.begin());
+  }
 
   double local_density_sum = std::accumulate(real.begin(), real.end(), 0.0);
   double global_density_sum = local_density_sum;
@@ -1607,15 +1625,28 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
 
-  auto inverse_into = [this, profile, &plan](std::span<const std::complex<double>> src, std::span<double> dst) {
+  auto inverse_into = [this, profile, &plan, &grid](std::span<const std::complex<double>> src, std::span<double> dst) {
     auto fourier_dst = m_impl->fourierGrid();
     std::copy(src.begin(), src.end(), fourier_dst.begin());
     const double fft_time = m_impl->inverseFft();
     auto real_values = m_impl->realGrid();
 #if COSMOSIM_ENABLE_FFTW
     const double normalization = 1.0 / static_cast<double>(m_shape.cellCount());
-    for (std::size_t i = 0; i < dst.size(); ++i) {
-      dst[i] = real_values[i] * normalization;
+    if (plan.is_distributed) {
+      for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+        const std::size_t global_ix = plan.layout.globalXFromLocal(local_ix);
+        for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+          const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
+          const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+          for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+            dst[compact_base + iz] = real_values[fftw_base + iz] * normalization;
+          }
+        }
+      }
+    } else {
+      for (std::size_t i = 0; i < dst.size(); ++i) {
+        dst[i] = real_values[i] * normalization;
+      }
     }
 #else
     std::copy(real_values.begin(), real_values.end(), dst.begin());

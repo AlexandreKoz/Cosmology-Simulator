@@ -1002,8 +1002,8 @@ void compactStateToCurrentOwner(
   }
   std::vector<std::uint32_t> kept_gas_particle_indices;
   kept_gas_particle_indices.reserve(state.cells.size());
-  std::vector<std::uint32_t> outbound_indices;
-  outbound_indices.reserve(state.particles.size());
+  std::vector<std::uint32_t> stale_ghost_indices;
+  stale_ghost_indices.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     const bool owned_here = state.particle_sidecar.owning_rank[particle_index] == static_cast<std::uint32_t>(world_rank);
     if (owned_here) {
@@ -1011,14 +1011,14 @@ void compactStateToCurrentOwner(
         kept_gas_particle_indices.push_back(static_cast<std::uint32_t>(particle_index));
       }
     } else {
-      outbound_indices.push_back(static_cast<std::uint32_t>(particle_index));
+      stale_ghost_indices.push_back(static_cast<std::uint32_t>(particle_index));
     }
   }
   const auto gas_records = collectLocalGasCellRecords(state, kept_gas_particle_indices);
   const auto old_cell_particle_id = gasParticleIdByOldCellIndex(state);
   core::ParticleMigrationCommit commit;
   commit.world_rank = world_rank;
-  commit.outbound_local_indices = std::move(outbound_indices);
+  commit.stale_local_ghost_indices = std::move(stale_ghost_indices);
   state.commitParticleMigration(commit);
   rebuildLocalGasStateFromParticleIds(state, gas_records, old_cell_particle_id);
 }
@@ -1887,7 +1887,6 @@ void applyMeasuredRuntimeRebalancePlan(
     requireGlobalOwnedParticlePartitionIdentity(
         state, mpi_context, expected_global_particle_ids, "runtime rebalance particle migration commit");
   }
-
   exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
 
   recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
@@ -4237,10 +4236,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
 class HydroStageCallback final : public core::IntegrationCallback {
  public:
-  HydroStageCallback(const core::SimulationConfig& config, const core::ModePolicy& mode_policy, const GravityStageCallback& gravity_callback)
+  HydroStageCallback(
+      const core::SimulationConfig& config,
+      const core::ModePolicy& mode_policy,
+      const GravityStageCallback& gravity_callback,
+      parallel::MpiContext mpi_context)
       : m_config(config),
         m_mode_policy(mode_policy),
         m_gravity_callback(gravity_callback),
+        m_mpi_context(std::move(mpi_context)),
         m_solver(k_gamma_adiabatic),
         m_reconstruction(hydro::HydroReconstructionPolicy{
             .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
@@ -4264,14 +4268,26 @@ class HydroStageCallback final : public core::IntegrationCallback {
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
       throw std::logic_error("hydro handler received an unregistered stage");
     }
+    const auto hydro_cell_rank_count_after_refresh = [&]() {
+      const std::uint64_t local_has_hydro_cells = context.state.cells.size() == 0 ? 0ULL : 1ULL;
+      return m_mpi_context.allreduceSumUint64(local_has_hydro_cells);
+    };
     if (context.state.cells.size() == 0) {
+      m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
+      m_last_ghost_refresh = refreshParticleGhostsForSolver(
+          context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
+      m_last_hydro_profile = {};
+      (void)hydro_cell_rank_count_after_refresh();
       return;
     }
 
-    parallel::MpiContext mpi_context;
-    m_current_world_rank = static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
+    m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
     m_last_ghost_refresh = refreshParticleGhostsForSolver(
-        context, mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
+        context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
+    const std::uint64_t hydro_cell_rank_count = hydro_cell_rank_count_after_refresh();
+    const bool all_ranks_have_hydro_cells =
+        !m_mpi_context.isEnabled() ||
+        hydro_cell_rank_count == static_cast<std::uint64_t>(m_mpi_context.worldSize());
     m_last_hydro_profile = {};
 
     context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
@@ -4309,7 +4325,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
           hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
     }
     hydro::fillHydroBoundaryGhostCells(m_conserved, m_geometry, k_gamma_adiabatic);
-    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(m_mpi_context.worldRank());
     const HydroGhostConservedSnapshot ghost_conserved_snapshot = snapshotHydroGhostConservedCells(
         context.state, m_conserved, m_geometry_row_by_dense_row, world_rank);
 
@@ -4404,9 +4420,15 @@ class HydroStageCallback final : public core::IntegrationCallback {
 
     const HydroConservativeGhostSyncReport ghost_sync_report = restoreHydroGhostConservedCells(
         m_conserved, ghost_conserved_snapshot, world_rank);
-    const std::vector<parallel::HydroConservativeFluxCorrectionRecord> global_flux_corrections =
-        parallel::executeBlockingHydroConservativeFluxCorrectionExchange(
-            mpi_context, ghost_sync_report.correction_records, context.integrator_state.step_index);
+    std::vector<parallel::HydroConservativeFluxCorrectionRecord> global_flux_corrections;
+    if (all_ranks_have_hydro_cells) {
+      global_flux_corrections =
+          parallel::executeBlockingHydroConservativeFluxCorrectionExchange(
+              m_mpi_context, ghost_sync_report.correction_records, context.integrator_state.step_index);
+    } else if (!ghost_sync_report.correction_records.empty()) {
+      throw std::runtime_error(
+          "hydro conservative flux correction produced MPI correction records while at least one rank has no hydro cells");
+    }
     std::size_t applied_flux_corrections = 0;
     double applied_flux_delta_l1 = 0.0;
     for (const parallel::HydroConservativeFluxCorrectionRecord& correction : global_flux_corrections) {
@@ -4842,6 +4864,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   const GravityStageCallback& m_gravity_callback;
+  parallel::MpiContext m_mpi_context;
   std::uint32_t m_current_world_rank = 0;
   hydro::HydroCoreSolver m_solver;
   hydro::MusclHancockReconstruction m_reconstruction;
@@ -5562,7 +5585,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         });
       }
     }
-    HydroStageCallback hydro_callback(config, mode_policy, gravity_callback);
+    HydroStageCallback hydro_callback(config, mode_policy, gravity_callback, mpi_context);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
         physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)),
@@ -5634,6 +5657,19 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       if (active_particles.empty() && active_cells.empty()) {
         scheduler.endSubstep();
         gas_cell_scheduler.endSubstep();
+        applyMeasuredRuntimeRebalancePlan(
+            state,
+            scheduler,
+            config,
+            mpi_context,
+            mpi_context.worldRank(),
+            parallel::DecompositionRuntimeMeasurements{},
+            active_particles,
+            expected_global_particle_ids,
+            &profiler,
+            integrator_state.step_index);
+        ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
+        syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
         continue;
       }
 
