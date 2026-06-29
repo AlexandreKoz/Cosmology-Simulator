@@ -2351,6 +2351,38 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
     result.sent_bytes += static_cast<std::uint64_t>(send.size() * sizeof(double));
     result.received_bytes += static_cast<std::uint64_t>(recv.size() * sizeof(double));
   };
+  if (left_peer >= 0 && left_peer == right_peer) {
+    MPI_Sendrecv(
+        const_cast<double*>(send_left.data()),
+        static_cast<int>(send_left.size()),
+        MPI_DOUBLE,
+        left_peer,
+        ghostExchangeSequencedTag(side_tag(left_peer, k_send_left_side), mpi_context.worldRank(), left_peer, exchange_sequence),
+        result.right_halo.data(),
+        static_cast<int>(result.right_halo.size()),
+        MPI_DOUBLE,
+        left_peer,
+        ghostExchangeSequencedTag(side_tag(left_peer, k_send_left_side), mpi_context.worldRank(), left_peer, exchange_sequence),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+    MPI_Sendrecv(
+        const_cast<double*>(send_right.data()),
+        static_cast<int>(send_right.size()),
+        MPI_DOUBLE,
+        right_peer,
+        ghostExchangeSequencedTag(side_tag(right_peer, k_send_right_side), mpi_context.worldRank(), right_peer, exchange_sequence),
+        result.left_halo.data(),
+        static_cast<int>(result.left_halo.size()),
+        MPI_DOUBLE,
+        right_peer,
+        ghostExchangeSequencedTag(side_tag(right_peer, k_send_right_side), mpi_context.worldRank(), right_peer, exchange_sequence),
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
+    result.sent_bytes += static_cast<std::uint64_t>((send_left.size() + send_right.size()) * sizeof(double));
+    result.received_bytes +=
+        static_cast<std::uint64_t>((result.left_halo.size() + result.right_halo.size()) * sizeof(double));
+    return result;
+  }
   // Send the left edge to the left peer and receive that peer's right edge as our left halo.
   sendrecv_planes(left_peer, send_left, result.left_halo, k_send_left_side, k_send_right_side);
   // Send the right edge to the right peer and receive that peer's left edge as our right halo.

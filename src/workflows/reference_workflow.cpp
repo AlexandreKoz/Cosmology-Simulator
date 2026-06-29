@@ -971,6 +971,20 @@ void rebuildLocalGasStateFromParticleIds(
   state.cells = std::move(rebuilt_cells);
   state.gas_cells = std::move(rebuilt_gas);
   state.bumpCellIndexGeneration();
+  state.patches.resize(state.cells.size() == 0U ? 0U : 1U);
+  if (state.cells.size() != 0U) {
+    state.patches.patch_id[0] = 1ULL;
+    state.patches.level[0] = 0;
+    state.patches.first_cell[0] = 0U;
+    state.patches.cell_count[0] = static_cast<std::uint32_t>(state.cells.size());
+    state.patches.owning_rank[0] = state.particle_sidecar.owning_rank.empty()
+        ? 0U
+        : state.particle_sidecar.owning_rank[gas_globals.front()];
+    for (std::uint32_t& patch_index : state.cells.patch_index) {
+      patch_index = 0U;
+    }
+  }
+  state.refreshGasCellIdentityMapFromSidecarLanes();
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
     if (old_cell_index >= old_cell_particle_id.size()) {
@@ -5582,9 +5596,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             .payload = {{"persistent_total_bytes", std::to_string(runtime_memory_report->totals.persistent_total_bytes)},
                         {"transient_total_bytes", std::to_string(runtime_memory_report->totals.transient_total_bytes)},
                         {"unknown_total_bytes", std::to_string(runtime_memory_report->totals.unknown_total_bytes)}},
-        });
-      }
+      });
     }
+  }
     HydroStageCallback hydro_callback(config, mode_policy, gravity_callback, mpi_context);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
@@ -5654,7 +5668,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           active_particle_scheduler_elements.begin(), active_particle_scheduler_elements.end());
       std::vector<std::uint32_t> active_cells(
           active_gas_cell_scheduler_elements.begin(), active_gas_cell_scheduler_elements.end());
-      if (active_particles.empty() && active_cells.empty()) {
+      const bool local_has_active_work = !active_particles.empty() || !active_cells.empty();
+      const std::uint64_t active_work_rank_count = mpi_context.allreduceSumUint64(local_has_active_work ? 1ULL : 0ULL);
+      if (active_work_rank_count == 0ULL) {
         scheduler.endSubstep();
         gas_cell_scheduler.endSubstep();
         applyMeasuredRuntimeRebalancePlan(

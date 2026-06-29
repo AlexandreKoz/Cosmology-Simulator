@@ -1197,6 +1197,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           box_lengths);
       if (min_node_distance > cutoff_radius_comoving) {
         ++cutoff_pruned_nodes;
+        if (!skip_self) {
+          ++m_last_residual_stats.remote_pairs_pruned_by_bounds;
+        }
         continue;
       }
 
