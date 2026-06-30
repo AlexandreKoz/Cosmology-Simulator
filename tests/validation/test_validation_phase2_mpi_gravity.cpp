@@ -303,7 +303,14 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
       << ", rel_l2=" << rel_l2 << " (required <= 5e-6)"
       << ", max_rel=" << global_norm.max_rel << " (required <= 5e-5)"
       << ", residual_pruned_nodes=" << dist_diag.residual_pruned_nodes
-      << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff;
+      << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff
+      << ", force_l2_pm_global=" << dist_diag.force_l2_pm_global
+      << ", force_l2_tree_short_range_local=" << dist_diag.force_l2_tree_short_range_local
+      << ", force_l2_tree_short_range_remote=" << dist_diag.force_l2_tree_short_range_remote
+      << ", residual_remote_request_packets=" << dist_diag.residual_remote_request_packets
+      << ", residual_remote_response_packets=" << dist_diag.residual_remote_response_packets
+      << ", residual_remote_request_bytes=" << dist_diag.residual_remote_request_bytes
+      << ", residual_remote_response_bytes=" << dist_diag.residual_remote_response_bytes;
   requireOrThrow(rel_l2 <= 5.0e-6, msg.str());
   requireOrThrow(global_norm.max_rel <= 5.0e-5, msg.str());
   if (communication_stress && hasFastSpectralPmBackend()) {

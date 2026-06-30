@@ -73,6 +73,8 @@ struct TreePmDiagnostics {
   double force_l2_pm_global = 0.0;
   double force_l2_pm_zoom_correction = 0.0;
   double force_l2_tree_short_range = 0.0;
+  double force_l2_tree_short_range_local = 0.0;
+  double force_l2_tree_short_range_remote = 0.0;
   double force_l2_total = 0.0;
 };
 
@@ -145,6 +147,8 @@ class TreePmCoordinator {
     std::uint64_t remote_request_packets_max_peer = 0;
     std::uint64_t remote_response_packets_max_peer = 0;
     double remote_request_packet_imbalance_ratio = 0.0;
+    double local_short_range_sum_sq = 0.0;
+    double remote_short_range_sum_sq = 0.0;
   };
 
   PmGridShape m_shape;

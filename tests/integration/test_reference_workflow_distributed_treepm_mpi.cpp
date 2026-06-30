@@ -23,6 +23,20 @@ namespace {
   }
 }
 
+std::vector<cosmosim::core::TimeBinSchedulerIdentityRecord> schedulerSeedForRank(int world_rank) {
+  std::vector<cosmosim::core::TimeBinSchedulerIdentityRecord> records;
+  records.reserve(42U);
+  for (std::uint64_t particle_id = 1ULL; particle_id <= 42ULL; ++particle_id) {
+    records.push_back(cosmosim::core::TimeBinSchedulerIdentityRecord{
+        .element_id = particle_id,
+        .bin_index = static_cast<std::uint8_t>(world_rank == 0 ? 0U : 1U),
+        .next_activation_tick = world_rank == 0 ? 0ULL : 2ULL,
+        .pending_bin_index = cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin,
+    });
+  }
+  return records;
+}
+
 std::string buildConfigText(int cadence_steps, int mpi_ranks_expected) {
   std::stringstream stream;
   stream << "schema_version = 1\n\n";
@@ -71,8 +85,10 @@ int main() {
   const cosmosim::core::FrozenConfig frozen =
       cosmosim::core::loadFrozenConfigFromString(config_text, "test_reference_workflow_distributed_treepm_mpi");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
-  const cosmosim::workflows::ReferenceWorkflowReport report =
-      runner.run(cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  cosmosim::workflows::ReferenceWorkflowOptions options;
+  options.write_outputs = false;
+  options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
+  const cosmosim::workflows::ReferenceWorkflowReport report = runner.run(options);
 
   assert(report.completed_steps == 2);
   assert(report.world_size == world_size);
@@ -85,25 +101,24 @@ int main() {
   assert(report.global_particle_partition_identity_match);
   assert(report.treepm_update_cadence_steps == 2);
   assert(report.treepm_long_range_refresh_count == 2);
-  assert(report.treepm_long_range_reuse_count >= 1);
-  assert(report.treepm_cadence_records.size() >= 3);
-
+  assert(report.treepm_long_range_reuse_count == 1);
+  assert(report.treepm_cadence_records.size() == 3U);
+  const std::vector<std::uint64_t> expected_field_versions{1ULL, 1ULL, 2ULL};
+  const std::vector<std::uint64_t> expected_field_built_steps{0ULL, 0ULL, 1ULL};
+  const std::vector<bool> expected_refresh_flags{true, false, true};
+  const std::vector<std::string> expected_stage_names{
+      "gravity_kick_pre", "force_refresh", "force_refresh"};
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
     const auto& record = report.treepm_cadence_records[i];
     assert(record.gravity_kick_opportunity == i + 1U);
-    assert(
-        record.stage_name == "gravity_kick_pre" ||
-        record.stage_name == "force_refresh" ||
-        record.stage_name == "gravity_kick_post");
-    if (record.refreshed_long_range_field) {
-      assert(record.field_age_in_kick_opportunities == 0U);
-      assert(record.gravity_kick_opportunity == record.last_refresh_opportunity);
-    } else {
-      assert(record.field_age_in_kick_opportunities > 0U);
-      assert(record.gravity_kick_opportunity > record.last_refresh_opportunity);
-    }
+    assert(record.stage_name == expected_stage_names[i]);
+    assert(record.field_version == expected_field_versions[i]);
+    assert(record.field_built_step_index == expected_field_built_steps[i]);
+    assert(record.refreshed_long_range_field == expected_refresh_flags[i]);
     assert(record.active_particles_kicked + record.inactive_particles_skipped == report.local_particle_count);
   }
+  assert(frozen.config.parallel.decomposition_runtime_rebalance_enabled);
+
 
   std::vector<std::uint64_t> gathered_opportunity(report.treepm_cadence_records.size(), 0ULL);
   std::vector<std::uint64_t> gathered_field_version(report.treepm_cadence_records.size(), 0ULL);
@@ -157,6 +172,31 @@ int main() {
         gathered_last_refresh_opportunity[i] * static_cast<std::uint64_t>(world_size));
     assert(reduced_refresh_flag[i] == gathered_refresh_flag[i] * static_cast<std::uint64_t>(world_size));
   }
+
+  std::vector<std::uint64_t> local_active_by_boundary(report.treepm_cadence_records.size(), 0ULL);
+  for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
+    local_active_by_boundary[i] = report.treepm_cadence_records[i].active_particles_kicked;
+  }
+  std::vector<std::uint64_t> active_by_rank_and_boundary(
+      static_cast<std::size_t>(world_size) * local_active_by_boundary.size(), 0ULL);
+  MPI_Allgather(
+      local_active_by_boundary.data(),
+      static_cast<int>(local_active_by_boundary.size()),
+      MPI_UINT64_T,
+      active_by_rank_and_boundary.data(),
+      static_cast<int>(local_active_by_boundary.size()),
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  bool saw_zero_local_work_with_remote_activity = false;
+  for (std::size_t boundary = 0; boundary < local_active_by_boundary.size(); ++boundary) {
+    const std::uint64_t rank_zero_active = active_by_rank_and_boundary[boundary];
+    const std::uint64_t rank_one_active =
+        active_by_rank_and_boundary[local_active_by_boundary.size() + boundary];
+    if (rank_zero_active > 0ULL && rank_one_active == 0ULL) {
+      saw_zero_local_work_with_remote_activity = true;
+    }
+  }
+  assert(saw_zero_local_work_with_remote_activity);
 
   cosmosim::parallel::DistributedRestartState invalid_restart_state;
   invalid_restart_state.world_size = world_size;

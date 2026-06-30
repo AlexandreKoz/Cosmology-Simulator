@@ -252,3 +252,11 @@ No issue status changes in this patch. Open blockers remain P38 distributed sche
 ## 2026-05-29 Stage 8 restart-boundary status
 
 No existing repair issue is closed by this patch. The new boundary contract blocks unsafe restart writes but does not implement intentionally represented half-step/local-substep restart; those states remain unsupported and must continue to fail loudly unless a future schema-versioned design serializes all required scheduler/phase state.
+
+## 2026-06-29 MPI TreePM collective-order and patch-topology repair
+
+| ID | Status | Area | Finding | Resolution / Remaining action |
+| --- | --- | --- | --- | --- |
+| MPI-TREEPM-COLLECTIVE-ORDER-20260629 | Pending MPI validation | Distributed TreePM short-range transport | A rank-local zero-byte early continue could skip request/response `MPI_Alltoallv` calls after the count exchange while peers still entered the collective. | Repaired so every rank enters request and response `MPI_Alltoallv` for each globally coordinated batch, with zero counts and safe non-null empty buffers. Added byte-count/displacement overflow/alignment guards and repaired the response max-peer diagnostic. Requires the registered 2-rank and 3-rank MPI gates. |
+| MPI-GAS-PATCH-REBUILD-20260629 | Pending MPI validation | Workflow ownership compaction | Rebuilding local gas state fabricated one patch (`patch_id=1`, level 0) and discarded retained AMR patch topology. | Rebuilt state now carries stable patch ID and patch-local order in migration records, preserves patch metadata/ranges/ownership, remaps dense `patch_index`, and fails loudly for missing metadata or an unsupported split geometry-bearing patch. |
+| MPI-PM-SAME-PEER-HALO-20260629 | Pending MPI validation | Two-rank periodic PM halo contract | The same-peer (`left_peer == right_peer`) Sendrecv orientation had no direct regression. | Added `integration_pm_slab_halo_exchange_mpi_two_rank`, using distinct boundary-plane encodings to verify that left halo receives peer right edge and right halo receives peer left edge. |

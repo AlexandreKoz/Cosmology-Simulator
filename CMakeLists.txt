@@ -803,6 +803,15 @@ if(COSMOSIM_ENABLE_TESTS)
               $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
   endif()
 
+  if(COSMOSIM_ENABLE_MPI)
+    add_executable(test_integration_pm_slab_halo_exchange_mpi tests/integration/test_pm_slab_halo_exchange_mpi.cpp)
+    target_link_libraries(test_integration_pm_slab_halo_exchange_mpi PRIVATE cosmosim_parallel)
+    add_test(
+      NAME integration_pm_slab_halo_exchange_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_slab_halo_exchange_mpi> ${MPIEXEC_POSTFLAGS})
+  endif()
+
   if(COSMOSIM_ENABLE_CUDA)
     add_executable(test_integration_pm_cuda_smoke tests/integration/test_pm_cuda_smoke.cpp)
     target_link_libraries(test_integration_pm_cuda_smoke PRIVATE cosmosim_gravity)

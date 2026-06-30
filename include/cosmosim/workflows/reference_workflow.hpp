@@ -40,6 +40,12 @@ struct ReferenceWorkflowOptions {
   // for the synchronous duration of run().
   const io::RestartReadResult* restart_state_override = nullptr;
 
+  // Narrow MPI regression seam. When supplied for a fresh run, these stable
+  // particle-ID records replace only the initialized particle scheduler state
+  // before the production step loop. They are rejected for restart-resume so
+  // checkpoint scheduler authority remains intact.
+  std::vector<core::TimeBinSchedulerIdentityRecord> initial_particle_scheduler_identity_records;
+
   // A bounded execution segment for tests/benchmarks. Zero retains the
   // configuration's max_global_steps. This is intentionally not persisted.
   std::uint64_t max_steps_override = 0;

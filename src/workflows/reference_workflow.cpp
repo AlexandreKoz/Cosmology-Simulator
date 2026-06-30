@@ -849,12 +849,13 @@ void updateGasCellAdaptiveTimeBins(
 
 struct GasCellMigrationRecord {
   std::uint64_t particle_id = 0;
+  std::uint64_t patch_id = 0;
+  std::uint32_t patch_local_cell_offset = 0;
   double center_x_comoving = 0.0;
   double center_y_comoving = 0.0;
   double center_z_comoving = 0.0;
   double mass_code = 0.0;
   std::uint8_t time_bin = 0;
-  std::uint32_t patch_index = 0;
   double velocity_x_peculiar = 0.0;
   double velocity_y_peculiar = 0.0;
   double velocity_z_peculiar = 0.0;
@@ -865,7 +866,37 @@ struct GasCellMigrationRecord {
   double sound_speed_code = 0.0;
 };
 
+struct LocalPatchMetadata {
+  std::uint64_t patch_id = 0;
+  std::int32_t level = 0;
+  std::uint32_t original_cell_count = 0;
+  std::uint64_t parent_patch_id = 0;
+  std::uint64_t morton_key = 0;
+  double origin_x_comoving = 0.0;
+  double origin_y_comoving = 0.0;
+  double origin_z_comoving = 0.0;
+  double extent_x_comoving = 0.0;
+  double extent_y_comoving = 0.0;
+  double extent_z_comoving = 0.0;
+  std::uint16_t cell_dim_x = 0;
+  std::uint16_t cell_dim_y = 0;
+  std::uint16_t cell_dim_z = 0;
+  std::uint32_t owning_rank = 0;
+
+  [[nodiscard]] bool hasExplicitCartesianGeometry() const noexcept {
+    return cell_dim_x != 0U || cell_dim_y != 0U || cell_dim_z != 0U ||
+        extent_x_comoving != 0.0 || extent_y_comoving != 0.0 || extent_z_comoving != 0.0;
+  }
+};
+
+struct LocalGasCellMigrationState {
+  std::unordered_map<std::uint64_t, GasCellMigrationRecord> gas_records_by_particle_id;
+  std::unordered_map<std::uint64_t, LocalPatchMetadata> patch_metadata_by_patch_id;
+};
+
 static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
+static_assert(std::is_trivially_copyable_v<LocalPatchMetadata>);
+
 
 [[nodiscard]] std::string formatIndexedRankedFileStem(
     std::string_view stem,
@@ -881,11 +912,17 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
   return out.str();
 }
 
-[[nodiscard]] std::unordered_map<std::uint64_t, GasCellMigrationRecord> collectLocalGasCellRecords(
+[[nodiscard]] LocalGasCellMigrationState collectLocalGasCellRecords(
     const core::SimulationState& state,
     std::span<const std::uint32_t> gas_particle_indices) {
   core::legacyRequireParticleBoundGasCellContract(state, "collectLocalGasCellRecords legacy import path");
-  std::unordered_map<std::uint64_t, GasCellMigrationRecord> records;
+  if (!state.patches.isConsistent()) {
+    throw std::runtime_error("collectLocalGasCellRecords requires consistent retained AMR patch metadata");
+  }
+
+  LocalGasCellMigrationState retained{};
+  retained.gas_records_by_particle_id.reserve(gas_particle_indices.size());
+  retained.patch_metadata_by_patch_id.reserve(state.patches.size());
   const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
   std::vector<std::uint8_t> keep_mask(state.particles.size(), 0U);
   for (const std::uint32_t particle_index : gas_particle_indices) {
@@ -894,19 +931,63 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
     }
     keep_mask[particle_index] = 1U;
   }
+
   for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
     const std::uint32_t particle_index = gas_globals[cell_index];
     if (keep_mask[particle_index] == 0U) {
       continue;
     }
+    const std::uint32_t old_patch_index = state.cells.patch_index[cell_index];
+    if (old_patch_index >= state.patches.size()) {
+      throw std::runtime_error("retained gas cell refers to missing AMR patch metadata during ownership compaction");
+    }
+    const std::uint32_t first_cell = state.patches.first_cell[old_patch_index];
+    const std::uint32_t cell_count = state.patches.cell_count[old_patch_index];
+    if (cell_index < first_cell || cell_index >= static_cast<std::size_t>(first_cell) + cell_count) {
+      throw std::runtime_error("retained gas cell lies outside its AMR patch cell range during ownership compaction");
+    }
+    const std::uint64_t patch_id = state.patches.patch_id[old_patch_index];
+    if (patch_id == 0ULL) {
+      throw std::runtime_error("retained gas cell refers to an AMR patch with an invalid stable patch ID");
+    }
+
+    const LocalPatchMetadata metadata{
+        .patch_id = patch_id,
+        .level = state.patches.level[old_patch_index],
+        .original_cell_count = cell_count,
+        .parent_patch_id = state.patches.parent_patch_id[old_patch_index],
+        .morton_key = state.patches.morton_key[old_patch_index],
+        .origin_x_comoving = state.patches.origin_x_comoving[old_patch_index],
+        .origin_y_comoving = state.patches.origin_y_comoving[old_patch_index],
+        .origin_z_comoving = state.patches.origin_z_comoving[old_patch_index],
+        .extent_x_comoving = state.patches.extent_x_comoving[old_patch_index],
+        .extent_y_comoving = state.patches.extent_y_comoving[old_patch_index],
+        .extent_z_comoving = state.patches.extent_z_comoving[old_patch_index],
+        .cell_dim_x = state.patches.cell_dim_x[old_patch_index],
+        .cell_dim_y = state.patches.cell_dim_y[old_patch_index],
+        .cell_dim_z = state.patches.cell_dim_z[old_patch_index],
+        .owning_rank = state.patches.owning_rank[old_patch_index],
+    };
+    const auto [metadata_it, metadata_inserted] =
+        retained.patch_metadata_by_patch_id.emplace(patch_id, metadata);
+    if (!metadata_inserted &&
+        (metadata_it->second.level != metadata.level ||
+         metadata_it->second.original_cell_count != metadata.original_cell_count ||
+         metadata_it->second.parent_patch_id != metadata.parent_patch_id ||
+         metadata_it->second.morton_key != metadata.morton_key ||
+         metadata_it->second.owning_rank != metadata.owning_rank)) {
+      throw std::runtime_error("duplicate stable AMR patch ID has conflicting metadata during ownership compaction");
+    }
+
     GasCellMigrationRecord record;
     record.particle_id = state.particle_sidecar.particle_id[particle_index];
+    record.patch_id = patch_id;
+    record.patch_local_cell_offset = static_cast<std::uint32_t>(cell_index - first_cell);
     record.center_x_comoving = state.cells.center_x_comoving[cell_index];
     record.center_y_comoving = state.cells.center_y_comoving[cell_index];
     record.center_z_comoving = state.cells.center_z_comoving[cell_index];
     record.mass_code = state.cells.mass_code[cell_index];
     record.time_bin = state.cells.time_bin[cell_index];
-    record.patch_index = state.cells.patch_index[cell_index];
     record.velocity_x_peculiar = state.gas_cells.velocity_x_peculiar[cell_index];
     record.velocity_y_peculiar = state.gas_cells.velocity_y_peculiar[cell_index];
     record.velocity_z_peculiar = state.gas_cells.velocity_z_peculiar[cell_index];
@@ -915,9 +996,13 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
     record.internal_energy_code = state.gas_cells.internal_energy_code[cell_index];
     record.temperature_code = state.gas_cells.temperature_code[cell_index];
     record.sound_speed_code = state.gas_cells.sound_speed_code[cell_index];
-    records.emplace(record.particle_id, record);
+    const auto [record_it, record_inserted] =
+        retained.gas_records_by_particle_id.emplace(record.particle_id, record);
+    if (!record_inserted) {
+      throw std::runtime_error("duplicate retained gas particle ID during ownership compaction");
+    }
   }
-  return records;
+  return retained;
 }
 
 [[nodiscard]] std::vector<std::uint64_t> gasParticleIdByOldCellIndex(const core::SimulationState& state) {
@@ -932,23 +1017,74 @@ static_assert(std::is_trivially_copyable_v<GasCellMigrationRecord>);
 
 void rebuildLocalGasStateFromParticleIds(
     core::SimulationState& state,
-    const std::unordered_map<std::uint64_t, GasCellMigrationRecord>& gas_records_by_particle_id,
+    const LocalGasCellMigrationState& retained,
     std::span<const std::uint64_t> old_cell_particle_id) {
   const auto gas_globals = state.particle_species_index.globalIndices(core::ParticleSpecies::kGas);
+  if (gas_globals.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("rebuildLocalGasStateFromParticleIds exceeds uint32_t cell-index capacity");
+  }
+
   core::CellSoa rebuilt_cells;
   core::GasCellSidecar rebuilt_gas;
+  core::PatchSoa rebuilt_patches;
   rebuilt_cells.resize(gas_globals.size());
   rebuilt_gas.resize(gas_globals.size());
+
+  struct RebuiltPatchRange {
+    const LocalPatchMetadata* metadata = nullptr;
+    std::uint32_t first_cell = 0;
+    std::uint32_t cell_count = 0;
+    std::uint32_t previous_patch_local_offset = 0;
+    bool has_previous_patch_local_offset = false;
+  };
+  std::vector<RebuiltPatchRange> rebuilt_patch_ranges;
+  rebuilt_patch_ranges.reserve(retained.patch_metadata_by_patch_id.size());
+  std::unordered_map<std::uint64_t, std::uint32_t> rebuilt_patch_index_by_patch_id;
+  rebuilt_patch_index_by_patch_id.reserve(retained.patch_metadata_by_patch_id.size());
 
   std::unordered_map<std::uint64_t, std::uint32_t> new_cell_index_by_particle_id;
   new_cell_index_by_particle_id.reserve(gas_globals.size());
   for (std::size_t cell_index = 0; cell_index < gas_globals.size(); ++cell_index) {
     const std::uint64_t particle_id = state.particle_sidecar.particle_id[gas_globals[cell_index]];
-    const auto found = gas_records_by_particle_id.find(particle_id);
-    if (found == gas_records_by_particle_id.end()) {
+    const auto record_it = retained.gas_records_by_particle_id.find(particle_id);
+    if (record_it == retained.gas_records_by_particle_id.end()) {
       throw std::runtime_error("missing gas-cell migration record for local gas particle after ownership compaction");
     }
-    const GasCellMigrationRecord& record = found->second;
+    const GasCellMigrationRecord& record = record_it->second;
+    const auto metadata_it = retained.patch_metadata_by_patch_id.find(record.patch_id);
+    if (metadata_it == retained.patch_metadata_by_patch_id.end()) {
+      throw std::runtime_error("retained gas cell lost its stable AMR patch metadata during ownership compaction");
+    }
+
+    std::uint32_t rebuilt_patch_index = 0;
+    const auto patch_index_it = rebuilt_patch_index_by_patch_id.find(record.patch_id);
+    if (patch_index_it == rebuilt_patch_index_by_patch_id.end()) {
+      if (rebuilt_patch_ranges.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::overflow_error("rebuildLocalGasStateFromParticleIds exceeds uint32_t patch-index capacity");
+      }
+      rebuilt_patch_index = static_cast<std::uint32_t>(rebuilt_patch_ranges.size());
+      rebuilt_patch_index_by_patch_id.emplace(record.patch_id, rebuilt_patch_index);
+      rebuilt_patch_ranges.push_back(RebuiltPatchRange{
+          .metadata = &metadata_it->second,
+          .first_cell = static_cast<std::uint32_t>(cell_index),
+      });
+    } else {
+      rebuilt_patch_index = patch_index_it->second;
+      if (rebuilt_patch_index + 1U != rebuilt_patch_ranges.size()) {
+        throw std::runtime_error(
+            "retained gas cells from one AMR patch are non-contiguous after particle compaction; "
+            "the legacy particle-bound gas-cell contract cannot preserve this topology");
+      }
+    }
+    RebuiltPatchRange& patch_range = rebuilt_patch_ranges[rebuilt_patch_index];
+    if (patch_range.has_previous_patch_local_offset &&
+        record.patch_local_cell_offset <= patch_range.previous_patch_local_offset) {
+      throw std::runtime_error("retained AMR patch-local cell ordering is not strictly increasing after compaction");
+    }
+    patch_range.previous_patch_local_offset = record.patch_local_cell_offset;
+    patch_range.has_previous_patch_local_offset = true;
+    ++patch_range.cell_count;
+
     rebuilt_gas.gas_cell_id[cell_index] = particle_id;
     rebuilt_gas.parent_particle_id[cell_index] = particle_id;
     rebuilt_cells.center_x_comoving[cell_index] = record.center_x_comoving;
@@ -956,7 +1092,7 @@ void rebuildLocalGasStateFromParticleIds(
     rebuilt_cells.center_z_comoving[cell_index] = record.center_z_comoving;
     rebuilt_cells.mass_code[cell_index] = record.mass_code;
     rebuilt_cells.time_bin[cell_index] = record.time_bin;
-    rebuilt_cells.patch_index[cell_index] = record.patch_index;
+    rebuilt_cells.patch_index[cell_index] = rebuilt_patch_index;
     rebuilt_gas.velocity_x_peculiar[cell_index] = record.velocity_x_peculiar;
     rebuilt_gas.velocity_y_peculiar[cell_index] = record.velocity_y_peculiar;
     rebuilt_gas.velocity_z_peculiar[cell_index] = record.velocity_z_peculiar;
@@ -965,26 +1101,53 @@ void rebuildLocalGasStateFromParticleIds(
     rebuilt_gas.internal_energy_code[cell_index] = record.internal_energy_code;
     rebuilt_gas.temperature_code[cell_index] = record.temperature_code;
     rebuilt_gas.sound_speed_code[cell_index] = record.sound_speed_code;
-    new_cell_index_by_particle_id.emplace(particle_id, static_cast<std::uint32_t>(cell_index));
+    const auto [index_it, inserted] =
+        new_cell_index_by_particle_id.emplace(particle_id, static_cast<std::uint32_t>(cell_index));
+    if (!inserted) {
+      throw std::runtime_error("duplicate local gas particle ID after ownership compaction");
+    }
+  }
+
+  rebuilt_patches.resize(rebuilt_patch_ranges.size());
+  for (std::size_t patch_index = 0; patch_index < rebuilt_patch_ranges.size(); ++patch_index) {
+    const RebuiltPatchRange& range = rebuilt_patch_ranges[patch_index];
+    if (range.metadata == nullptr || range.metadata->patch_id == 0ULL || range.cell_count == 0U) {
+      throw std::runtime_error("invalid retained AMR patch range while rebuilding local gas state");
+    }
+    if (range.metadata->hasExplicitCartesianGeometry() &&
+        range.cell_count != range.metadata->original_cell_count) {
+      throw std::runtime_error(
+          "ownership compaction would split a geometry-bearing AMR patch; migrate complete patches or preserve "
+          "explicit sparse-cell topology before rebuilding local gas state");
+    }
+    const LocalPatchMetadata& metadata = *range.metadata;
+    rebuilt_patches.patch_id[patch_index] = metadata.patch_id;
+    rebuilt_patches.level[patch_index] = metadata.level;
+    rebuilt_patches.first_cell[patch_index] = range.first_cell;
+    rebuilt_patches.cell_count[patch_index] = range.cell_count;
+    rebuilt_patches.parent_patch_id[patch_index] = metadata.parent_patch_id;
+    rebuilt_patches.morton_key[patch_index] = metadata.morton_key;
+    rebuilt_patches.origin_x_comoving[patch_index] = metadata.origin_x_comoving;
+    rebuilt_patches.origin_y_comoving[patch_index] = metadata.origin_y_comoving;
+    rebuilt_patches.origin_z_comoving[patch_index] = metadata.origin_z_comoving;
+    rebuilt_patches.extent_x_comoving[patch_index] = metadata.extent_x_comoving;
+    rebuilt_patches.extent_y_comoving[patch_index] = metadata.extent_y_comoving;
+    rebuilt_patches.extent_z_comoving[patch_index] = metadata.extent_z_comoving;
+    rebuilt_patches.cell_dim_x[patch_index] = metadata.cell_dim_x;
+    rebuilt_patches.cell_dim_y[patch_index] = metadata.cell_dim_y;
+    rebuilt_patches.cell_dim_z[patch_index] = metadata.cell_dim_z;
+    rebuilt_patches.owning_rank[patch_index] = metadata.owning_rank;
   }
 
   state.cells = std::move(rebuilt_cells);
   state.gas_cells = std::move(rebuilt_gas);
+  state.patches = std::move(rebuilt_patches);
   state.bumpCellIndexGeneration();
-  state.patches.resize(state.cells.size() == 0U ? 0U : 1U);
-  if (state.cells.size() != 0U) {
-    state.patches.patch_id[0] = 1ULL;
-    state.patches.level[0] = 0;
-    state.patches.first_cell[0] = 0U;
-    state.patches.cell_count[0] = static_cast<std::uint32_t>(state.cells.size());
-    state.patches.owning_rank[0] = state.particle_sidecar.owning_rank.empty()
-        ? 0U
-        : state.particle_sidecar.owning_rank[gas_globals.front()];
-    for (std::uint32_t& patch_index : state.cells.patch_index) {
-      patch_index = 0U;
-    }
+  if (!state.patches.isConsistent()) {
+    throw std::runtime_error("rebuildLocalGasStateFromParticleIds produced inconsistent AMR patch metadata");
   }
   state.refreshGasCellIdentityMapFromSidecarLanes();
+  core::legacyRequireParticleBoundGasCellContract(state, "rebuildLocalGasStateFromParticleIds legacy import path");
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
     if (old_cell_index >= old_cell_particle_id.size()) {
@@ -5332,6 +5495,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       throw std::invalid_argument(
           "ReferenceWorkflowOptions cannot provide both initial_state_override and restart_state_override");
     }
+    if (options.restart_state_override != nullptr &&
+        !options.initial_particle_scheduler_identity_records.empty()) {
+      throw std::invalid_argument(
+          "ReferenceWorkflowOptions cannot override scheduler identity records while resuming a restart payload");
+    }
 
     io::IcReadResult ic_result;
     if (options.restart_state_override != nullptr) {
@@ -5476,6 +5644,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       state.requireGasCellIdentityMapCoversDenseRows("ReferenceWorkflow restart resume");
     } else {
       initializeSchedulerBins(state, scheduler, gas_cell_scheduler);
+      if (!options.initial_particle_scheduler_identity_records.empty()) {
+        core::rebuildSchedulerFromParticleIdentityRecords(
+            scheduler,
+            options.initial_particle_scheduler_identity_records,
+            state.particle_sidecar.particle_id);
+      }
       integrator_state.step_index = options.step_index;
       integrator_state.current_time_code = config.numerics.t_code_begin;
       integrator_state.time_si_per_code = runtime_units.timeSiPerCode();
