@@ -183,6 +183,12 @@ void testDefaultsCanonicalizationAndDeterminism() {
   assert(frozen_first.config.physics.enable_cooling);
   assert(frozen_first.config.physics.fb_mode == cosmosim::core::FeedbackMode::kThermalKineticMomentum);
   assert(frozen_first.config.parallel.deterministic_reduction);
+  assert(!frozen_first.config.parallel.decomposition_debug_exact_ownership_audit);
+  assert(frozen_first.normalized_text.find("decomposition_debug_exact_ownership_audit = false") != std::string::npos);
+  assert(frozen_first.config.parallel.isolated_pm_root_workspace_limit_bytes == 268435456ULL);
+  assert(frozen_first.config.parallel.zoom_high_res_allgather_limit_bytes == 268435456ULL);
+  assert(frozen_first.normalized_text.find("isolated_pm_root_workspace_limit_bytes = 268435456") != std::string::npos);
+  assert(frozen_first.normalized_text.find("zoom_high_res_allgather_limit_bytes = 268435456") != std::string::npos);
   assert(frozen_first.normalized_text == frozen_second.normalized_text);
   assert(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
   assert(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
@@ -190,6 +196,22 @@ void testDefaultsCanonicalizationAndDeterminism() {
       cosmosim::core::loadFrozenConfigFromString(frozen_first.normalized_text, "normalized_roundtrip");
   assert(reparsed.normalized_text == frozen_first.normalized_text);
   assert(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
+}
+
+void testDebugExactDecompositionAuditConfig() {
+  const std::string text = R"(
+[mode]
+mode = cosmo_cube
+[parallel]
+decomposition_debug_exact_ownership_audit = true
+isolated_pm_root_workspace_limit_bytes = 1048576
+zoom_high_res_allgather_limit_bytes = 2097152
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "debug_exact_decomposition_audit");
+  assert(frozen.config.parallel.decomposition_debug_exact_ownership_audit);
+  assert(frozen.config.parallel.isolated_pm_root_workspace_limit_bytes == 1048576ULL);
+  assert(frozen.config.parallel.zoom_high_res_allgather_limit_bytes == 2097152ULL);
+  assert(frozen.normalized_text.find("decomposition_debug_exact_ownership_audit = true") != std::string::npos);
 }
 
 void testConfigNormalizationHashDeterminism() {
@@ -785,6 +807,7 @@ int main() {
   testInvalidTypedPolicyEnumsFail();
   testBoundaryModeValidation();
   testDefaultsCanonicalizationAndDeterminism();
+  testDebugExactDecompositionAuditConfig();
   testConfigNormalizationHashDeterminism();
   testConfigRuntimeOwnership();
   testDerivedRuntimeConfigOwnership();

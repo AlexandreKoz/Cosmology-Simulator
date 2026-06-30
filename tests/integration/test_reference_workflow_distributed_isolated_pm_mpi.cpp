@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstdint>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 
@@ -9,7 +11,7 @@
 #endif
 
 namespace {
-std::string buildConfigText(int mpi_ranks_expected) {
+std::string buildConfigText(int mpi_ranks_expected, std::uint64_t isolated_limit_bytes) {
   std::stringstream stream;
   stream << "schema_version = 1\n\n";
   stream << "[mode]\n";
@@ -33,6 +35,7 @@ std::string buildConfigText(int mpi_ranks_expected) {
   stream << "mpi_ranks_expected = " << mpi_ranks_expected << "\n";
   stream << "omp_threads = 1\n";
   stream << "gpu_devices = 0\n";
+  stream << "isolated_pm_root_workspace_limit_bytes = " << isolated_limit_bytes << "\n";
   return stream.str();
 }
 }
@@ -46,8 +49,21 @@ int main() {
     MPI_Finalize();
     return 0;
   }
+  bool guard_threw = false;
+  try {
+    const auto guarded = cosmosim::core::loadFrozenConfigFromString(
+        buildConfigText(world_size, 1024ULL),
+        "test_reference_workflow_distributed_isolated_pm_mpi_guard");
+    cosmosim::workflows::ReferenceWorkflowRunner guarded_runner(guarded);
+    (void)guarded_runner.run(cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+  } catch (const std::runtime_error& err) {
+    guard_threw = std::string(err.what()).find("isolated/open PM root-gather guard exceeded") !=
+        std::string::npos;
+  }
+  assert(guard_threw);
+
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
-      buildConfigText(world_size),
+      buildConfigText(world_size, 64ULL * 1024ULL * 1024ULL),
       "test_reference_workflow_distributed_isolated_pm_mpi");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   const auto report = runner.run(cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});

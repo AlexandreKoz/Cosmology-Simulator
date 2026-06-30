@@ -284,6 +284,83 @@ void checkedMpiRecordLayoutToByteLayout(
   return static_cast<std::uint64_t>(particle_count * sizeof(double) * 4U);
 }
 
+[[nodiscard]] std::size_t checkedProduct(std::size_t a, std::size_t b, std::string_view context) {
+  if (a != 0U && b > std::numeric_limits<std::size_t>::max() / a) {
+    throw std::overflow_error(std::string(context) + " size product overflows size_t");
+  }
+  return a * b;
+}
+
+[[nodiscard]] std::uint64_t checkedBytesForCount(
+    std::size_t count,
+    std::size_t element_size,
+    std::string_view context) {
+  if (element_size != 0U && count > std::numeric_limits<std::uint64_t>::max() / element_size) {
+    throw std::overflow_error(std::string(context) + " byte estimate overflows uint64_t");
+  }
+  return static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(element_size);
+}
+
+[[nodiscard]] std::uint64_t checkedAddBytes(
+    std::uint64_t a,
+    std::uint64_t b,
+    std::string_view context) {
+  if (b > std::numeric_limits<std::uint64_t>::max() - a) {
+    throw std::overflow_error(std::string(context) + " byte estimate overflows uint64_t");
+  }
+  return a + b;
+}
+
+[[nodiscard]] std::uint64_t estimateIsolatedRootWorkspaceBytes(
+    const PmGridShape& shape,
+    bool distributed_slabs) {
+  const std::size_t physical_cells =
+      checkedProduct(checkedProduct(shape.nx, shape.ny, "isolated PM physical grid"),
+                     shape.nz,
+                     "isolated PM physical grid");
+  const std::size_t pad_nx = checkedProduct(2U, shape.nx, "isolated PM padded nx");
+  const std::size_t pad_ny = checkedProduct(2U, shape.ny, "isolated PM padded ny");
+  const std::size_t pad_nz = checkedProduct(2U, shape.nz, "isolated PM padded nz");
+  const std::size_t padded_cells =
+      checkedProduct(checkedProduct(pad_nx, pad_ny, "isolated PM padded grid"),
+                     pad_nz,
+                     "isolated PM padded grid");
+  std::uint64_t bytes = 0;
+  if (distributed_slabs) {
+    bytes = checkedAddBytes(
+        bytes,
+        checkedBytesForCount(physical_cells, sizeof(double), "isolated PM root density gather"),
+        "isolated PM root workspace");
+  }
+  bytes = checkedAddBytes(
+      bytes,
+      checkedBytesForCount(padded_cells, sizeof(std::complex<double>) * 3U, "isolated PM padded complex workspace"),
+      "isolated PM root workspace");
+  bytes = checkedAddBytes(
+      bytes,
+      checkedBytesForCount(padded_cells, sizeof(double), "isolated PM padded real workspace"),
+      "isolated PM root workspace");
+  bytes = checkedAddBytes(
+      bytes,
+      checkedBytesForCount(physical_cells, sizeof(double) * 4U, "isolated PM extracted fields"),
+      "isolated PM root workspace");
+  return bytes;
+}
+
+[[nodiscard]] std::string isolatedPmGuardMessage(
+    const PmGridShape& shape,
+    int world_size,
+    int world_rank,
+    std::uint64_t estimated_bytes,
+    std::uint64_t limit_bytes) {
+  return "isolated/open PM root-gather guard exceeded on rank " + std::to_string(world_rank) +
+      ": grid_shape=(" + std::to_string(shape.nx) + "," + std::to_string(shape.ny) + "," +
+      std::to_string(shape.nz) + ") ranks=" + std::to_string(world_size) +
+      " estimated_root_bytes=" + std::to_string(estimated_bytes) +
+      " configured_limit_bytes=" + std::to_string(limit_bytes) +
+      " route=root_gather_scatter policy=bounded_small_grid_only";
+}
+
 struct BoxLengths {
   double lx = 0.0;
   double ly = 0.0;
@@ -1063,6 +1140,20 @@ void PmProfiler::reset() {
 
 void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.bytes_moved += event.bytes_moved;
+  m_totals.routed_density_records += event.routed_density_records;
+  m_totals.routed_force_requests += event.routed_force_requests;
+  m_totals.routed_potential_requests += event.routed_potential_requests;
+  m_totals.routed_density_peer_count += event.routed_density_peer_count;
+  m_totals.routed_force_peer_count += event.routed_force_peer_count;
+  m_totals.routed_potential_peer_count += event.routed_potential_peer_count;
+  m_totals.force_halo_cache_hits += event.force_halo_cache_hits;
+  m_totals.isolated_open_root_workspace_estimate_bytes =
+      std::max(m_totals.isolated_open_root_workspace_estimate_bytes,
+               event.isolated_open_root_workspace_estimate_bytes);
+  m_totals.isolated_open_root_workspace_limit_bytes =
+      std::max(m_totals.isolated_open_root_workspace_limit_bytes,
+               event.isolated_open_root_workspace_limit_bytes);
+  m_totals.isolated_open_gather_bytes += event.isolated_open_gather_bytes;
   m_totals.assign_ms += event.assign_ms;
   m_totals.fft_forward_ms += event.fft_forward_ms;
   m_totals.poisson_ms += event.poisson_ms;
@@ -1537,6 +1628,17 @@ void PmSolver::assignDensity(
     for (const PmDensityContributionRecord& record : exchange.recv_flat_records) {
       accumulate_owned(record);
     }
+    if (profile != nullptr) {
+      profile->routed_density_records += static_cast<std::uint64_t>(exchange.send_flat_records.size());
+      profile->routed_density_peer_count += static_cast<std::uint64_t>(std::count_if(
+          exchange.send_counts.begin(),
+          exchange.send_counts.end(),
+          [](int count) { return count > 0; }));
+      profile->bytes_moved += checkedBytesForCount(
+          exchange.send_flat_records.size() + exchange.recv_flat_records.size(),
+          sizeof(PmDensityContributionRecord),
+          "PM density routed exchange profile");
+    }
 #endif
   }
 
@@ -1735,10 +1837,27 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   const bool is_root = !distributed_slabs || grid.slabLayout().world_rank == k_root;
   const auto poisson_start = std::chrono::steady_clock::now();
 
+  const int guard_world_size = distributed_slabs ? grid.slabLayout().world_size : 1;
+  const int guard_world_rank = distributed_slabs ? grid.slabLayout().world_rank : 0;
+  const std::uint64_t isolated_root_workspace_estimate_bytes =
+      estimateIsolatedRootWorkspaceBytes(m_shape, distributed_slabs);
+  if (options.isolated_open_root_workspace_limit_bytes == 0U ||
+      isolated_root_workspace_estimate_bytes > options.isolated_open_root_workspace_limit_bytes) {
+    throw std::runtime_error(isolatedPmGuardMessage(
+        m_shape,
+        guard_world_size,
+        guard_world_rank,
+        isolated_root_workspace_estimate_bytes,
+        options.isolated_open_root_workspace_limit_bytes));
+  }
+
   std::vector<double> global_density;
 #if COSMOSIM_ENABLE_MPI
   if (distributed_slabs) {
-    const std::size_t global_size = grid.slabLayout().global_nx * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
+    const std::size_t global_size = checkedProduct(
+        checkedProduct(grid.slabLayout().global_nx, grid.slabLayout().global_ny, "isolated PM distributed gather"),
+        grid.slabLayout().global_nz,
+        "isolated PM distributed gather");
     std::vector<int> recv_counts(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
     std::vector<int> recv_displs(static_cast<std::size_t>(grid.slabLayout().world_size), 0);
     std::size_t disp = 0;
@@ -1747,6 +1866,9 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
       const std::size_t count = owned.extentX() * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
       if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("isolated PM distributed slab count exceeds MPI int limit");
+      }
+      if (disp > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("isolated PM distributed slab displacement exceeds MPI int limit");
       }
       recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
       recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(disp);
@@ -1771,7 +1893,10 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   const std::size_t pad_nx = 2U * m_shape.nx;
   const std::size_t pad_ny = 2U * m_shape.ny;
   const std::size_t pad_nz = 2U * m_shape.nz;
-  const std::size_t pad_total = pad_nx * pad_ny * pad_nz;
+  const std::size_t pad_total =
+      checkedProduct(checkedProduct(pad_nx, pad_ny, "isolated PM padded workspace"),
+                     pad_nz,
+                     "isolated PM padded workspace");
   std::vector<double> full_potential;
   std::vector<double> full_force_x;
   std::vector<double> full_force_y;
@@ -1889,6 +2014,12 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
     for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
       const auto owned = parallel::pmOwnedXRangeForRank(grid.slabLayout().global_nx, grid.slabLayout().world_size, rank);
       const std::size_t count = owned.extentX() * grid.slabLayout().global_ny * grid.slabLayout().global_nz;
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("isolated PM scatter slab count exceeds MPI int limit");
+      }
+      if (disp > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("isolated PM scatter slab displacement exceeds MPI int limit");
+      }
       recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
       recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(disp);
       disp += count;
@@ -1909,8 +2040,17 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   if (profile != nullptr) {
     const auto stop = std::chrono::steady_clock::now();
     profile->poisson_ms += std::chrono::duration<double, std::milli>(stop - poisson_start).count();
+    profile->isolated_open_root_workspace_estimate_bytes =
+        std::max(profile->isolated_open_root_workspace_estimate_bytes, isolated_root_workspace_estimate_bytes);
+    profile->isolated_open_root_workspace_limit_bytes = options.isolated_open_root_workspace_limit_bytes;
     if (distributed_slabs) {
-      profile->bytes_moved += static_cast<std::uint64_t>(5U * grid.localCellCount() * sizeof(double));
+      const std::uint64_t local_gather_scatter_bytes =
+          checkedBytesForCount(
+              checkedProduct(5U, grid.localCellCount(), "isolated PM gather/scatter profile"),
+              sizeof(double),
+              "isolated PM gather/scatter profile");
+      profile->isolated_open_gather_bytes += local_gather_scatter_bytes;
+      profile->bytes_moved += local_gather_scatter_bytes;
     }
   }
 }
@@ -2114,6 +2254,7 @@ void PmSolver::interpolateForces(
 
     std::vector<PmInterpolationRequestRegistryEntry> request_registry;
     std::uint32_t next_request_sequence = 0;
+    std::uint64_t force_halo_cache_hits = 0;
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         throw std::invalid_argument("PmSolver::interpolateForces origin particle index exceeds routing token limit");
@@ -2147,6 +2288,7 @@ void PmSolver::interpolateForces(
               accel_x[p] += weight * halo_fx;
               accel_y[p] += weight * halo_fy;
               accel_z[p] += weight * halo_fz;
+              ++force_halo_cache_hits;
               continue;
             }
 
@@ -2510,6 +2652,24 @@ void PmSolver::interpolateForces(
             expected_request.origin_particle_index,
             "missing response contribution for issued request"));
       }
+    }
+    if (profile != nullptr) {
+      profile->routed_force_requests += static_cast<std::uint64_t>(request_registry.size());
+      profile->routed_force_peer_count += static_cast<std::uint64_t>(std::count_if(
+          exchange.send_counts.begin(),
+          exchange.send_counts.end(),
+          [](int count) { return count > 0; }));
+      profile->force_halo_cache_hits += force_halo_cache_hits;
+      profile->bytes_moved += checkedAddBytes(
+          checkedBytesForCount(
+              exchange.send_requests_flat.size() + exchange.recv_requests_flat.size(),
+              sizeof(PmInterpolationRequestRecord),
+              "PM force routed request profile"),
+          checkedBytesForCount(
+              exchange.send_contribs_flat.size() + exchange.recv_contribs_flat.size(),
+              sizeof(PmForceContributionRecord),
+              "PM force routed response profile"),
+          "PM force routed exchange profile");
     }
 #endif
   }
@@ -2994,6 +3154,23 @@ void PmSolver::interpolatePotential(
             expected_request.origin_particle_index,
             "missing response contribution for issued request"));
       }
+    }
+    if (profile != nullptr) {
+      profile->routed_potential_requests += static_cast<std::uint64_t>(request_registry.size());
+      profile->routed_potential_peer_count += static_cast<std::uint64_t>(std::count_if(
+          exchange.send_counts.begin(),
+          exchange.send_counts.end(),
+          [](int count) { return count > 0; }));
+      profile->bytes_moved += checkedAddBytes(
+          checkedBytesForCount(
+              exchange.send_requests_flat.size() + exchange.recv_requests_flat.size(),
+              sizeof(PmInterpolationRequestRecord),
+              "PM potential routed request profile"),
+          checkedBytesForCount(
+              exchange.send_contribs_flat.size() + exchange.recv_contribs_flat.size(),
+              sizeof(PmPotentialContributionRecord),
+              "PM potential routed response profile"),
+          "PM potential routed exchange profile");
     }
 #endif
   }

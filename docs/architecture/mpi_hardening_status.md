@@ -158,7 +158,7 @@ out of scope for this repair.
 | MPI.5 hydro ghosts | Accept conservative ghost/correction ownership. | Multi-rank finite-volume hydro conservation and ghost refresh equivalence with owner-side correction accounting. |
 | MPI.6 AMR payloads | Define patch ownership, ghost fill, flux-register, and reflux rank boundaries. | Multi-rank AMR refine/derefine/reflux/restart equivalence with stable `gas_cell_id` ownership. |
 | MPI.7 restart topology | Keep rank-count compatibility explicit. | Same-rank-count restart equivalence; rank-count-changing restart remains a documented rejection unless a new schema/versioned design is added. |
-| MPI.8 CI closure | Dependency-enabled MPI runners available. | CI regexes include real two/three-rank validation, not only unit smoke, and failures report dependency or rank-capacity blockers. |
+| MPI.8 CI closure | Dependency-enabled MPI runners available. | CI regexes include real two/three/four-rank validation, distributed workflow restart continuation, PM/TreePM routing, H2 gas migration, MPI.4 hydro, MPI.5/6 AMR boundary/reflux, not only unit smoke; failures report dependency or rank-capacity blockers. |
 
 ## Build and CI evidence map
 
@@ -171,21 +171,31 @@ out of scope for this repair.
   `COSMOSIM_ENABLE_MPI=ON`; distributed periodic PM additionally needs FFTW MPI
   linkage in `cosmosim_gravity`.
 - CTest registers MPI-launched tests only when `COSMOSIM_ENABLE_MPI=ON`,
-  including distributed workflow, PM periodic, TreePM periodic, and
-  two/three-rank Phase 2 gravity validation tests. The production executable
+  including distributed workflow, PM periodic, TreePM periodic, distributed SFC
+  rebalance, gas-cell migration, hydro interface conservation, and
+  two/three/four-rank Phase 2 gravity validation tests. The production executable
   MPI TreePM smoke is registered only when MPI+HDF5+FFTW are all enabled, and
   invokes `cosmosim_harness` through `${MPIEXEC_EXECUTABLE}` with two ranks.
 - `.github/workflows/ci.yml` includes an `mpi-hdf5-fftw-debug` matrix entry
-  whose regex covers `validation_phase2_mpi_gravity_two_rank` and
-  `validation_phase2_mpi_gravity_three_rank`.  The optional MPI smoke job uses
+  whose regex covers distributed PM/TreePM workflow, gas migration, hydro, AMR,
+  and `validation_phase2_mpi_gravity_two_rank`,
+  `validation_phase2_mpi_gravity_three_rank`, and
+  `validation_phase2_mpi_gravity_four_rank`.  The optional MPI smoke job uses
   `mpi-release` and runs only `unit_parallel_distributed_memory` plus
   `integration_parallel_two_rank_restart`; that smoke path is not feature
   validation.
 
+## MPI.8 restart topology contract
+
+The executable restart contract is same-topology only. `ReferenceWorkflow` now validates a restart payload's
+normalized config hash, MPI world size/rank, distributed restart schema, PM grid, decomposition mode, per-rank
+slab table, owner table, and TreePM cadence/field metadata before resuming. Fresh-start decomposition is not
+rerun for checkpoint payloads. Rank-count-changing restart, arbitrary topology remap, and treating rank-qualified
+file stems as portability evidence remain prohibited claims. Per-rank HDF5 files are serial HDF5 artifacts; no
+parallel HDF5/MPIO path is claimed here.
+
 ## Non-goals
 
-- No PM potential routing fix.
-- No solver refactor, hydro/AMR acceptance, parallel HDF5 claim, scale claim,
+- No solver refactor, parallel HDF5 claim, scale claim,
   rank-count-changing restart claim, or broad documentation rewrite.
-- No acceptance declaration for distributed PM potential routing, H2 migration
-  safety, distributed hydro, or distributed AMR.
+- No rank-count-changing restart or arbitrary topology remap acceptance.

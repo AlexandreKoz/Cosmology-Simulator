@@ -85,6 +85,16 @@ behavior on filesystems where `rename` is atomic.
     `long_range_field_built_scale_factor`),
   - restart long-range policy (`long_range_restart_policy`).
   Distributed floating-point restart metadata is text-encoded with enough precision for exact read-back comparisons.
+- **Supported distributed restart topology:** same-topology, rank-local restart only. A continuation must use the
+  same MPI world size, same runtime rank for each rank-qualified checkpoint file, same normalized config hash,
+  same PM grid shape, same PM decomposition mode, same per-rank PM slab table, and coherent TreePM cadence/field
+  metadata before mutable runtime state is used. `ReferenceWorkflow` validates these fields on resume and rejects
+  mismatches with expected/observed rank, world-size, slab, config, or cadence diagnostics. Rank-qualified filenames
+  are a file-mapping guard, not a remapping algorithm.
+- **Unsupported topology changes:** rank-count-changing restart, arbitrary particle/cell remap, and remote-row
+  assignment from another rank's checkpoint are intentionally rejected. Each rank is authoritative only for its
+  local restart payload under the validated topology. Imported PM/tree/hydro ghosts are transient and are rebuilt
+  from owner state after restart; they are not persisted as truth.
 - **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild` for PM mesh-field storage. v20 additionally serializes the acceleration cache that the next KDK pre-kick consumes, so `ReferenceWorkflow` does not discard already-committed force state across a restart. PM mesh arrays themselves remain non-persistent and are rebuilt on the next legal refresh opportunity.
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
   `last_host_mass_code`, `cumulative_exchanged_mass_code`) for deterministic continuation.

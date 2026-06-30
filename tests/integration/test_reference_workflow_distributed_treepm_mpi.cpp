@@ -1,11 +1,13 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
+#include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
 #if COSMOSIM_ENABLE_MPI
@@ -37,7 +39,13 @@ std::vector<cosmosim::core::TimeBinSchedulerIdentityRecord> schedulerSeedForRank
   return records;
 }
 
-std::string buildConfigText(int cadence_steps, int mpi_ranks_expected) {
+std::string buildConfigText(
+    int cadence_steps,
+    int mpi_ranks_expected,
+    std::string_view run_name = "reference_workflow_distributed_treepm_mpi",
+    bool write_restarts = false,
+    int snapshot_interval_steps = 0,
+    bool rebalance_enabled = true) {
   std::stringstream stream;
   stream << "schema_version = 1\n\n";
   stream << "[mode]\n";
@@ -55,15 +63,17 @@ std::string buildConfigText(int cadence_steps, int mpi_ranks_expected) {
   stream << "treepm_update_cadence_steps = " << cadence_steps << "\n";
   stream << "treepm_tree_exchange_batch_bytes = 256\n\n";
   stream << "[output]\n";
-  stream << "run_name = reference_workflow_distributed_treepm_mpi\n";
+  stream << "run_name = " << run_name << "\n";
   stream << "output_directory = integration_outputs\n";
   stream << "output_stem = snapshot\n";
-  stream << "restart_stem = restart\n\n";
+  stream << "restart_stem = restart\n";
+  stream << "snapshot_interval_steps = " << snapshot_interval_steps << "\n";
+  stream << "write_restarts = " << (write_restarts ? "true" : "false") << "\n\n";
   stream << "[parallel]\n";
   stream << "mpi_ranks_expected = " << mpi_ranks_expected << "\n";
   stream << "omp_threads = 1\n";
   stream << "gpu_devices = 0\n";
-  stream << "decomposition_runtime_rebalance_enabled = true\n";
+  stream << "decomposition_runtime_rebalance_enabled = " << (rebalance_enabled ? "true" : "false") << "\n";
   return stream.str();
 }
 
@@ -281,6 +291,107 @@ int main() {
       /*expected_global_count=*/42ULL,
       /*expected_particle_id_sum=*/(42ULL * 43ULL) / 2ULL,
       /*expected_particle_id_xor=*/xorRangeOneToN(42ULL)));
+
+#if COSMOSIM_ENABLE_HDF5
+  {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "cosmosim_treepm_mpi_restart_continuation";
+    const std::string direct_config_text = buildConfigText(
+        /*cadence_steps=*/2,
+        world_size,
+        "treepm_mpi_direct_continuation",
+        /*write_restarts=*/true,
+        /*snapshot_interval_steps=*/1,
+        /*rebalance_enabled=*/false);
+    const cosmosim::core::FrozenConfig direct_frozen =
+        cosmosim::core::loadFrozenConfigFromString(
+            direct_config_text,
+            "test_reference_workflow_distributed_treepm_mpi_direct");
+    cosmosim::workflows::ReferenceWorkflowRunner direct_runner(direct_frozen);
+    cosmosim::workflows::ReferenceWorkflowOptions direct_options;
+    direct_options.write_outputs = true;
+    direct_options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
+    direct_options.max_steps_override = 2;
+    const cosmosim::workflows::ReferenceWorkflowReport direct_report =
+        direct_runner.run(root / ("rank_" + std::to_string(world_rank) + "_direct"), direct_options);
+    assert(direct_report.restart_roundtrip_executed);
+    assert(direct_report.restart_roundtrip_ok);
+
+    const std::string restart_config_text = buildConfigText(
+        /*cadence_steps=*/2,
+        world_size,
+        "treepm_mpi_restart_continuation",
+        /*write_restarts=*/true,
+        /*snapshot_interval_steps=*/1,
+        /*rebalance_enabled=*/false);
+    const cosmosim::core::FrozenConfig restart_frozen =
+        cosmosim::core::loadFrozenConfigFromString(
+            restart_config_text,
+            "test_reference_workflow_distributed_treepm_mpi_restart");
+    cosmosim::workflows::ReferenceWorkflowRunner restart_runner(restart_frozen);
+    cosmosim::workflows::ReferenceWorkflowOptions first_options;
+    first_options.write_outputs = true;
+    first_options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
+    first_options.max_steps_override = 1;
+    const cosmosim::workflows::ReferenceWorkflowReport first_report =
+        restart_runner.run(root / ("rank_" + std::to_string(world_rank) + "_first"), first_options);
+    assert(first_report.restart_roundtrip_executed);
+    assert(first_report.restart_roundtrip_ok);
+    assert(!first_report.restart_path.empty());
+    if (world_size > 1) {
+      assert(first_report.restart_path.filename().string().find("_rank") != std::string::npos);
+    }
+
+    const cosmosim::io::RestartReadResult first_restart =
+        cosmosim::io::readRestartCheckpointHdf5(first_report.restart_path);
+    assert(first_restart.distributed_gravity_state.world_size == world_size);
+    assert(first_restart.distributed_gravity_state.pm_slab_begin_x_by_rank.size() ==
+           static_cast<std::size_t>(world_size));
+    const cosmosim::parallel::PmSlabRange local_slab =
+        cosmosim::parallel::pmOwnedXRangeForRank(16, world_size, world_rank);
+    assert(first_restart.distributed_gravity_state.pm_slab_begin_x_by_rank[world_rank] == local_slab.begin_x);
+    assert(first_restart.distributed_gravity_state.pm_slab_end_x_by_rank[world_rank] == local_slab.end_x);
+
+    cosmosim::workflows::ReferenceWorkflowOptions resumed_options;
+    resumed_options.write_outputs = true;
+    resumed_options.restart_state_override = &first_restart;
+    resumed_options.max_steps_override = 1;
+    const cosmosim::workflows::ReferenceWorkflowReport resumed_report =
+        restart_runner.run(root / ("rank_" + std::to_string(world_rank) + "_resumed"), resumed_options);
+    assert(resumed_report.restart_roundtrip_executed);
+    assert(resumed_report.restart_roundtrip_ok);
+    assert(resumed_report.completed_steps == 1U);
+    assert(resumed_report.global_particle_count == direct_report.global_particle_count);
+    assert(resumed_report.global_particle_id_sum == direct_report.global_particle_id_sum);
+    assert(resumed_report.global_particle_id_xor == direct_report.global_particle_id_xor);
+    assert(resumed_report.final_state_digest == direct_report.final_state_digest);
+
+    cosmosim::io::RestartReadResult mismatched_world_restart = first_restart;
+    mismatched_world_restart.distributed_gravity_state.world_size = world_size + 1;
+    bool rank_count_resume_threw = false;
+    try {
+      cosmosim::workflows::ReferenceWorkflowOptions bad_options;
+      bad_options.write_outputs = false;
+      bad_options.restart_state_override = &mismatched_world_restart;
+      bad_options.max_steps_override = 1;
+      (void)restart_runner.run(
+          root / ("rank_" + std::to_string(world_rank) + "_bad_rank_count"),
+          bad_options);
+    } catch (const std::runtime_error& ex) {
+      const std::string message = ex.what();
+      rank_count_resume_threw =
+          message.find("restart topology validation failed") != std::string::npos &&
+          message.find("world_size mismatch") != std::string::npos;
+    }
+    assert(rank_count_resume_threw);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (world_rank == 0) {
+      std::filesystem::remove_all(root);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+  }
+#endif
 
   MPI_Finalize();
 #endif

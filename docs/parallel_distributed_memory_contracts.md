@@ -12,6 +12,21 @@ Rank-range cuts are contiguous in SFC order and now use nearest-target boundary 
 prefix crosses each rank load target. This keeps ownership deterministic while reducing clustered
 load overshoot compared with a first-crossing-only split.
 
+Runtime MPI rebalancing uses `buildDistributedRuntimeRebalancePlan(...)` rather than the exact
+global `DecompositionItem` planner. Each rank sorts only its authoritative local decomposition
+entities by `(Morton key, entity_id)`, applies the existing component work model and measured
+feedback, exchanges bounded compact cut samples (`key`, `entity_id`, represented load), and
+all-reduces exact per-rank balance/movement counters from local ownership decisions. The accepted
+owner of each entity is the rank selected by the agreed SFC cut. Compact cut samples and reduced
+metrics are control metadata only; they are never authoritative copies of particle, gas-cell, or AMR
+state.
+
+The exact full-item path remains available for small tests and debug evidence through
+`gatherDecompositionItemsAcrossRanks(...)` plus `buildRuntimeRebalancePlan(...)`. Production
+workflow exact ownership validation after runtime migration is opt-in via
+`parallel.decomposition_debug_exact_ownership_audit = true`; the audit data is read-only and must
+not be used as decomposition truth.
+
 Per-item weighted load is:
 
 ```
@@ -38,6 +53,19 @@ Where:
 - `weighted_load_by_rank`
 
 This preserves auditable decomposition inputs while still using one deterministic SFC ordering.
+
+Runtime rebalance diagnostics additionally report:
+
+- whether distributed SFC cuts or the serial/exact path were used,
+- pre-cut and post-cut weighted/memory imbalance,
+- local/global entities and bytes moved,
+- compact control bytes and peak temporary bytes,
+- cut count and moved-entity fraction as a locality/cut-displacement proxy.
+
+Particle migrations are emitted only for locally owned particles whose accepted cut owner differs
+from the current owner. AMR patches use `AmrPatchOwnershipUpdate` and the H2/H3 patch/gas-cell
+migration payload contracts; gas cells follow patch identity and stable `gas_cell_id` migration
+records rather than a particle-only route.
 
 ## 2) Ownership + transfer lifecycle contract (scaffold-level)
 
@@ -97,7 +125,7 @@ For particle ownership migration in `core::SimulationState`:
 - Gas-cell state is not keyed by old local particle positions during ownership compaction. Particle migration may carry one compatibility gas-cell payload only when a migrating gas particle has a single attached gas-cell row. Parentless cells and split/merged cells with non-unique parent lineage must move through `GasCellMigrationRecord`, keyed by stable nonzero `gas_cell_id`.
 - `GasCellMigrationRecord` carries the gas identity record, parent-lineage presence bit, owning patch identity, destination row hint, hydro conserved/persistent sidecar fields, cell timestep mirror, and ghost generation/epoch metadata. `commitGasCellMigration(...)` removes outbound/stale local rows, rejects stale ghosts whose `{gas_cell_id, gas_cell_identity_generation, ghost_hydro_epoch}` do not match the commit boundary, appends inbound authoritative rows, rebuilds `SimulationState::gas_cell_identity`, remaps host-cell sidecars by old row to new `gas_cell_id`, and bumps the cell-index generation once.
 - `AmrPatchMigrationRecord` is the AMR ownership-transfer payload for patch-aware hydro. It carries the patch descriptor (`patch_id`, owner rank, level, parent patch, Morton key, origin, extent, cell dimensions) plus every authoritative `GasCellMigrationRecord` in that patch. `commitAmrPatchMigration(...)` removes outbound patch descriptors and their gas-cell rows in the same commit boundary, appends inbound patch descriptors and gas-cell sidecars atomically, rewrites local `cells.patch_index` to the rebuilt dense patch table, rejects stale gas ghosts by generation/epoch, rebuilds `SimulationState::gas_cell_identity`, and bumps the cell-index generation once. A parent particle referenced by a migrated gas cell is lineage metadata unless that particle also migrates through `ParticleMigrationRecord`; patch ownership is the gas-cell authority, so no authoritative gas cell may remain on the old rank after an outbound patch commit.
-- Imported gas ghosts are read-only boundary state. They may be discarded by stale-ghost records or restored after solver use, but they must not mutate authoritative hydro truth unless routed through an explicit owner-side conservative correction path.
+- Imported gas ghosts are read-only boundary state. They may be discarded by stale-ghost records or restored after solver use, but they must not mutate authoritative hydro truth unless routed through an explicit owner-side conservative correction path. The fixed-grid workflow path uses `HydroGhostCellRequest` and `HydroGhostCellPayloadRecord` for the live boundary exchange: requests carry neighbor rank, stable `gas_cell_id`, face key, hydro sync epoch, decomposition epoch, axis, and side; payloads carry only the conserved hydro stage fields required before reconstruction. Payload validation rejects stale epoch/generation, duplicate face keys, missing owner IDs, same-rank ghosts, wrong owner, and non-finite state. Rank-aware diagnostics report imported/requested/received ghosts, interface faces, stale payload drops, request/payload bytes, correction record counts, and conservation residuals through profiler events.
 - Ownership is never committed mid-walk/mid-exchange by this contract; commit must run at a phase boundary so stale active/kernel views are invalidated before further scatter.
 
 ## 3) Deterministic reduction contract

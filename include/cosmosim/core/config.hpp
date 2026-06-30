@@ -251,6 +251,7 @@ struct ParallelConfig {
   double decomposition_gpu_occupancy_weight = 0.0;
   double decomposition_generic_work_weight = 0.5;
   bool decomposition_runtime_rebalance_enabled = true;
+  bool decomposition_debug_exact_ownership_audit = false;
   double decomposition_rebalance_imbalance_trigger = 1.25;
   double decomposition_rebalance_memory_trigger = 1.50;
   double decomposition_rebalance_max_migrated_load_fraction = 0.25;
@@ -259,6 +260,8 @@ struct ParallelConfig {
   double decomposition_measured_amr_cell_weight = 1.0;
   double decomposition_measured_hydro_face_weight = 1.0;
   double decomposition_measured_wall_ms_weight = 1.0;
+  std::uint64_t isolated_pm_root_workspace_limit_bytes = 256ULL * 1024ULL * 1024ULL;
+  std::uint64_t zoom_high_res_allgather_limit_bytes = 256ULL * 1024ULL * 1024ULL;
 };
 
 struct UnitsConfig {

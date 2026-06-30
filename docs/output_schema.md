@@ -41,7 +41,7 @@ Current restart identity:
 ## H1 workflow force-cache restart note
 
 Restart schema v20 adds `/gravity_force_cache`, containing the particle and gas-cell acceleration triplets consumed by the next KDK pre-kick, plus the persisted `IntegratorState::pm_refresh_enabled` policy bit. The ReferenceWorkflow writes a valid cache only at a restart-safe completed boundary and verifies it on read. Direct low-level checkpoint callers may write an explicitly invalid/empty cache, but those artifacts do not constitute exact `ReferenceWorkflow` continuation proof.
-- `version = 19`
+- `version = 20`
 
 Restart payload includes:
 
@@ -62,6 +62,13 @@ Restart payload includes:
 - `/restart_diagnostics` audit metadata (schema/boundary/scheduler/PM/output/stochastic summaries; non-authoritative)
 
 Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
+
+Distributed restart topology is part of the executable schema contract. Current v20 behavior supports only
+same-world-size, rank-local continuation: the checkpoint's normalized config hash, `/distributed_gravity`
+world size, PM grid, decomposition mode, per-rank slab table, owner table, and TreePM cadence/field metadata
+must match the runtime before `ReferenceWorkflow` resumes. Rank-count-changing restart and arbitrary topology
+remap are not represented by this schema and must fail clearly. Per-rank HDF5 checkpoint files are serial HDF5
+files with rank-qualified names; they are not a parallel-HDF5/MPIO claim.
 
 ## 2.1) Field ownership table (snapshot vs restart)
 

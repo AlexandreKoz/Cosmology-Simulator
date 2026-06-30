@@ -1140,7 +1140,9 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
   return diagnostics;
 }
 
-ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
+namespace {
+
+[[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydroSynchronizedImpl(
     core::SimulationState& state,
     std::span<const std::uint32_t> active_cell_rows,
     const hydro::HydroUpdateContext& update,
@@ -1148,52 +1150,109 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
     const hydro::HydroCoreSolver& solver,
     const hydro::HydroRiemannSolver& riemann_solver,
     std::span<const hydro::HydroSourceTerm* const> source_terms,
-    const ProductionAmrHydroOptions& options) {
-  if (options.sweep_mode == ProductionAmrHydroSweepMode::kLocalSubcycling) {
-    return advanceProductionAmrHydroSubcycled(
-        state,
-        active_cell_rows,
-        update,
-        global_source_context,
-        solver,
-        riemann_solver,
-        source_terms,
-        options);
-  }
+    const ProductionAmrHydroOptions& options,
+    const DistributedAmrHydroExchange* distributed_exchange) {
   if (!hasProductionAmrHydroCoverage(state)) {
     throw std::runtime_error("advanceProductionAmrHydro requires complete AMR patch coverage in SimulationState");
   }
+  if (distributed_exchange != nullptr && options.persist_incomplete_flux_registers) {
+    throw std::runtime_error(
+        "distributed AMR pending flux-register accumulation is gated off; synchronized remote reflux must complete in-step");
+  }
   ProductionAmrHydroDiagnostics diagnostics;
   const std::vector<PatchDescriptor> descriptors = buildProductionAmrPatchDescriptors(state);
-  diagnostics.patch_count = descriptors.size();
+  std::vector<PatchDescriptor> all_descriptors = descriptors;
+  if (distributed_exchange != nullptr) {
+    all_descriptors.reserve(descriptors.size() + distributed_exchange->remote_patches.size());
+    for (const DistributedAmrRemotePatch& remote : distributed_exchange->remote_patches) {
+      all_descriptors.push_back(remote.patch);
+    }
+  }
+  diagnostics.patch_count = all_descriptors.size();
 
   std::unordered_set<std::uint32_t> active_lookup(active_cell_rows.begin(), active_cell_rows.end());
   const bool all_cells_active = active_cell_rows.empty();
 
   std::vector<AmrHydroPatchGeometry> geometries;
   std::vector<hydro::HydroConservedStateSoa> conserved_states;
+  std::vector<AmrHydroPatchGeometry> remote_geometries;
+  std::vector<hydro::HydroConservedStateSoa> remote_conserved_states;
   geometries.reserve(descriptors.size());
   conserved_states.reserve(descriptors.size());
   for (const PatchDescriptor& patch : descriptors) {
     AmrHydroGeometryOptions geometry_options;
     geometry_options.physical_boundary_kind = options.physical_boundary_kind;
     geometry_options.boundary_classes = {
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kLower),
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kUpper),
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kLower),
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kUpper),
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kLower),
-        boundaryClassForSide(patch, descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kUpper),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kLower),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kUpper),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kLower),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kUpper),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kLower),
+        boundaryClassForSide(patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kUpper),
     };
     geometries.push_back(buildAmrHydroPatchGeometry(state, patch, geometry_options));
-    populateAmrHydroFluxRegisterFaces(geometries.back(), descriptors);
+    populateAmrHydroFluxRegisterFaces(geometries.back(), all_descriptors);
     conserved_states.push_back(loadAmrHydroConservedState(state, geometries.back(), options.adiabatic_index));
+  }
+  if (distributed_exchange != nullptr) {
+    remote_geometries.reserve(distributed_exchange->remote_patches.size());
+    remote_conserved_states.reserve(distributed_exchange->remote_patches.size());
+    for (const DistributedAmrRemotePatch& remote : distributed_exchange->remote_patches) {
+      if (remote.owner_rank == distributed_exchange->local_rank) {
+        throw std::runtime_error("distributed AMR remote patch source cannot be owned by the local rank");
+      }
+      if (remote.conserved_cells.size() != remote.gas_cell_ids.size()) {
+        throw std::runtime_error("distributed AMR remote patch conserved payload does not match gas-cell identity payload");
+      }
+      AmrHydroGeometryOptions geometry_options;
+      geometry_options.physical_boundary_kind = options.physical_boundary_kind;
+      geometry_options.boundary_classes = {
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kLower),
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kUpper),
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kLower),
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kUpper),
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kLower),
+          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kUpper),
+      };
+      remote_geometries.push_back(buildRemoteAmrHydroPatchGeometry(
+          remote.patch,
+          remote.gas_cell_ids,
+          remote.expected_ghost_hydro_epoch,
+          geometry_options));
+      populateAmrHydroFluxRegisterFaces(remote_geometries.back(), all_descriptors);
+      hydro::HydroConservedStateSoa remote_soa(remote_geometries.back().geometry.totalCellStorageCount());
+      for (std::size_t cell = 0; cell < remote.conserved_cells.size(); ++cell) {
+        remote_soa.storeCell(cell, remote.conserved_cells[cell]);
+      }
+      remote_conserved_states.push_back(std::move(remote_soa));
+    }
   }
 
   refreshTraceableGhostSourceIds(geometries);
+  refreshTraceableGhostSourceIds(remote_geometries);
+  std::vector<AmrHydroPatchGeometry> trace_geometries;
+  if (!remote_geometries.empty()) {
+    trace_geometries.reserve(geometries.size() + remote_geometries.size());
+    for (const auto& geometry : geometries) {
+      trace_geometries.push_back(geometry);
+    }
+    for (const auto& geometry : remote_geometries) {
+      trace_geometries.push_back(geometry);
+    }
+    refreshTraceableGhostSourceIds(trace_geometries);
+    for (std::size_t i = 0; i < geometries.size(); ++i) {
+      geometries[i].ghosts = trace_geometries[i].ghosts;
+      geometries[i].geometry.flux_register_faces = trace_geometries[i].geometry.flux_register_faces;
+    }
+    for (std::size_t i = 0; i < remote_geometries.size(); ++i) {
+      remote_geometries[i].ghosts = trace_geometries[geometries.size() + i].ghosts;
+      remote_geometries[i].geometry.flux_register_faces =
+          trace_geometries[geometries.size() + i].geometry.flux_register_faces;
+    }
+  }
 
   std::vector<AmrHydroGhostFillPatch> ghost_views;
-  ghost_views.reserve(geometries.size());
+  ghost_views.reserve(geometries.size() + remote_geometries.size());
   for (std::size_t i = 0; i < geometries.size(); ++i) {
     const bool patch_requires_ghost_fill = all_cells_active || std::any_of(
         geometries[i].real_cells.begin(), geometries[i].real_cells.end(),
@@ -1214,6 +1273,23 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
             : nullptr,
         .enable_temporal_coarse_to_fine = options.enable_temporal_coarse_to_fine,
         .requires_ghost_fill = patch_requires_ghost_fill});
+  }
+  if (distributed_exchange != nullptr) {
+    for (std::size_t i = 0; i < remote_geometries.size(); ++i) {
+      const DistributedAmrRemotePatch& remote = distributed_exchange->remote_patches[i];
+      ghost_views.push_back(AmrHydroGhostFillPatch{
+          .geometry = &remote_geometries[i],
+          .conserved = &remote_conserved_states[i],
+          .residency = AmrGhostSourceResidency::kRemoteReadOnly,
+          .ghost_hydro_epoch = remote.ghost_hydro_epoch,
+          .expected_ghost_hydro_epoch = remote.expected_ghost_hydro_epoch,
+          .target_state_time_code = options.state_time_code,
+          .ghost_fill_time_code = options.ghost_fill_time_code,
+          .source_current_state_time_code = options.state_time_code,
+          .temporal_boundary_history = nullptr,
+          .enable_temporal_coarse_to_fine = false,
+          .requires_ghost_fill = false});
+    }
   }
   diagnostics.ghost_fill = fillAmrHydroGhostCells(ghost_views, options.adiabatic_index);
 
@@ -1315,8 +1391,31 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
   }
   const std::vector<FluxRegisterEntry> entries = flux_registers.entries();
   diagnostics.flux_register_entry_count = entries.size();
+  std::vector<FluxRegisterEntry> local_entries;
+  std::vector<FluxRegisterEntry> remote_entries;
+  if (distributed_exchange != nullptr) {
+    local_entries.reserve(entries.size());
+    remote_entries.reserve(entries.size());
+    for (const FluxRegisterEntry& entry : entries) {
+      if (entry.coarse_gas_cell_id != 0U && state.rowForGasCellId(entry.coarse_gas_cell_id).has_value()) {
+        local_entries.push_back(entry);
+      } else {
+        remote_entries.push_back(entry);
+      }
+    }
+    if (distributed_exchange->outbound_remote_flux_registers != nullptr) {
+      distributed_exchange->outbound_remote_flux_registers->insert(
+          distributed_exchange->outbound_remote_flux_registers->end(),
+          remote_entries.begin(),
+          remote_entries.end());
+    } else if (!remote_entries.empty()) {
+      throw std::runtime_error("distributed AMR generated remote reflux entries without an exchange sink");
+    }
+  } else {
+    local_entries = entries;
+  }
   if (options.persist_incomplete_flux_registers) {
-    diagnostics.pending_register_created_count = mergeFluxRegistersIntoPendingStore(state, entries, options);
+    diagnostics.pending_register_created_count = mergeFluxRegistersIntoPendingStore(state, local_entries, options);
     std::size_t complete_pending = 0;
     for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
       if (pending.isComplete()) {
@@ -1330,9 +1429,71 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
     diagnostics.pending_register_rejected_count = diagnostics.reflux.skipped_area_mismatch_count +
         diagnostics.reflux.skipped_missing_target_count;
   } else {
-    diagnostics.reflux = applyFluxRegistersToSimulationState(state, entries, descriptors, options.adiabatic_index);
+    diagnostics.reflux = applyFluxRegistersToSimulationState(state, local_entries, descriptors, options.adiabatic_index);
   }
   return diagnostics;
+}
+
+}  // namespace
+
+ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_rows,
+    const hydro::HydroUpdateContext& update,
+    const hydro::HydroSourceContext& global_source_context,
+    const hydro::HydroCoreSolver& solver,
+    const hydro::HydroRiemannSolver& riemann_solver,
+    std::span<const hydro::HydroSourceTerm* const> source_terms,
+    const ProductionAmrHydroOptions& options) {
+  if (options.sweep_mode == ProductionAmrHydroSweepMode::kLocalSubcycling) {
+    return advanceProductionAmrHydroSubcycled(
+        state,
+        active_cell_rows,
+        update,
+        global_source_context,
+        solver,
+        riemann_solver,
+        source_terms,
+        options);
+  }
+  return advanceProductionAmrHydroSynchronizedImpl(
+      state,
+      active_cell_rows,
+      update,
+      global_source_context,
+      solver,
+      riemann_solver,
+      source_terms,
+      options,
+      nullptr);
+}
+
+ProductionAmrHydroDiagnostics advanceDistributedProductionAmrHydro(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_rows,
+    const hydro::HydroUpdateContext& update,
+    const hydro::HydroSourceContext& global_source_context,
+    const hydro::HydroCoreSolver& solver,
+    const hydro::HydroRiemannSolver& riemann_solver,
+    std::span<const hydro::HydroSourceTerm* const> source_terms,
+    const ProductionAmrHydroOptions& options,
+    const DistributedAmrHydroExchange& exchange) {
+  if (options.sweep_mode == ProductionAmrHydroSweepMode::kLocalSubcycling ||
+      options.enable_temporal_coarse_to_fine) {
+    throw std::runtime_error(
+        "distributed AMR hydro currently supports synchronized patch execution only; "
+        "MPI temporal subcycling is not implemented");
+  }
+  return advanceProductionAmrHydroSynchronizedImpl(
+      state,
+      active_cell_rows,
+      update,
+      global_source_context,
+      solver,
+      riemann_solver,
+      source_terms,
+      options,
+      &exchange);
 }
 
 ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(

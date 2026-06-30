@@ -25,11 +25,11 @@ Optional dependencies are feature-gated and preset-driven:
 | `cpu-only-release` | Performance sanity on CPU-only builds |
 | `hdf5-debug` | Snapshot/restart/provenance schema and I/O work |
 | `pm-hdf5-fftw-debug` | PM/TreePM validation with HDF5+FFTW |
-| `mpi-hdf5-fftw-debug` | Distributed gravity development surface (MPI+HDF5+FFTW) |
+| `mpi-hdf5-fftw-debug` | Required distributed feature-complete validation surface (MPI+HDF5+FFTW/FFTW-MPI) |
 | `cuda-debug` | Single-rank CUDA PM development surface |
 | `mpi-cuda-hdf5-fftw-debug` | Distributed gravity + CUDA infrastructure surface |
 | `asan-debug` | Address-sanitizer safety checks |
-| `mpi-release` | Multi-rank workflow checks |
+| `mpi-release` | MPI-only release smoke; not HDF5/FFTW/TreePM restart coverage |
 | `cuda-release` | GPU-capable build path |
 
 ## Standard developer path (CPU-only)
@@ -63,6 +63,12 @@ cmake --preset mpi-hdf5-fftw-debug
 cmake --build --preset build-mpi-hdf5-fftw-debug
 ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
 ```
+
+This preset is the required CI lane for accepted distributed PM/TreePM, workflow restart, gas migration,
+hydro interface, AMR boundary/reflux, and multi-rank gravity validation. It requires MPI C++ tooling, HDF5,
+serial FFTW, and FFTW-MPI (`fftw3_mpi`; Debian/Ubuntu package `libfftw3-mpi-dev`). The `mpi-release` preset
+is intentionally MPI-only smoke coverage and must not be cited as FFT-PM, HDF5, restart-topology, or
+parallel-HDF5 evidence.
 
 ## MPI and GPU paths
 

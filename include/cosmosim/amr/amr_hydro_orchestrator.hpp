@@ -59,6 +59,23 @@ struct ProductionAmrHydroDiagnostics {
   RefluxDiagnostics reflux;
 };
 
+struct DistributedAmrRemotePatch {
+  PatchDescriptor patch;
+  int owner_rank = 0;
+  std::uint64_t ghost_hydro_epoch = 0;
+  std::uint64_t expected_ghost_hydro_epoch = 0;
+  std::vector<std::uint64_t> gas_cell_ids;
+  std::vector<hydro::HydroConservedState> conserved_cells;
+};
+
+struct DistributedAmrHydroExchange {
+  int local_rank = 0;
+  std::uint64_t ghost_hydro_epoch = 0;
+  std::uint64_t expected_ghost_hydro_epoch = 0;
+  std::span<const DistributedAmrRemotePatch> remote_patches;
+  std::vector<FluxRegisterEntry>* outbound_remote_flux_registers = nullptr;
+};
+
 struct ProductionAmrRegridDiagnostics {
   std::size_t refined_patch_count = 0;
   std::size_t derefined_patch_count = 0;
@@ -129,6 +146,17 @@ void scatterAmrHydroConservedState(
     const hydro::HydroRiemannSolver& riemann_solver,
     std::span<const hydro::HydroSourceTerm* const> source_terms,
     const ProductionAmrHydroOptions& options = {});
+
+[[nodiscard]] ProductionAmrHydroDiagnostics advanceDistributedProductionAmrHydro(
+    core::SimulationState& state,
+    std::span<const std::uint32_t> active_cell_rows,
+    const hydro::HydroUpdateContext& update,
+    const hydro::HydroSourceContext& global_source_context,
+    const hydro::HydroCoreSolver& solver,
+    const hydro::HydroRiemannSolver& riemann_solver,
+    std::span<const hydro::HydroSourceTerm* const> source_terms,
+    const ProductionAmrHydroOptions& options,
+    const DistributedAmrHydroExchange& exchange);
 
 [[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
     core::SimulationState& state,

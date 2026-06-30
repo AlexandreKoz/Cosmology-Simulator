@@ -124,7 +124,9 @@ function(cosmosim_apply_test_defaults)
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         TIMEOUT "${cosmosim_timeout}")
 
-    if(cosmosim_test_name MATCHES "three_rank")
+    if(cosmosim_test_name MATCHES "four_rank")
+      set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 4)
+    elseif(cosmosim_test_name MATCHES "three_rank")
       set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 3)
     elseif(cosmosim_test_name MATCHES "two_rank")
       set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 2)
@@ -461,6 +463,9 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_reference_workflow_distributed_treepm_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_reference_workflow_distributed_treepm_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(
+      integration_reference_workflow_distributed_treepm_mpi_two_rank
+      mpi distributed treepm pm restart workflow integration)
   endif()
 
   add_executable(
@@ -472,6 +477,20 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_reference_workflow_distributed_isolated_pm_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_reference_workflow_distributed_isolated_pm_mpi> ${MPIEXEC_POSTFLAGS})
+  endif()
+
+  add_executable(
+    test_integration_reference_workflow_distributed_hydro_mpi
+    tests/integration/test_reference_workflow_distributed_hydro_mpi.cpp)
+  target_link_libraries(test_integration_reference_workflow_distributed_hydro_mpi PRIVATE cosmosim_all)
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_test(
+      NAME integration_reference_workflow_distributed_hydro_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_reference_workflow_distributed_hydro_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(
+      integration_reference_workflow_distributed_hydro_mpi_two_rank
+      mpi distributed restart hydro gas workflow conservation integration)
   endif()
 
   add_executable(test_unit_simulation_state tests/unit/test_simulation_state.cpp)
@@ -769,6 +788,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_custom_target(integration_amr_hydro_subcycling DEPENDS test_integration_amr_hydro_subcycling)
   add_test(NAME integration_amr_hydro_subcycling COMMAND test_integration_amr_hydro_subcycling)
   cosmosim_mark_runtime_truth_test(integration_amr_hydro_subcycling amr hydro gas integration pending_flux)
+  add_executable(test_integration_amr_distributed_remote_patch_boundary tests/integration/test_amr_distributed_remote_patch_boundary.cpp)
+  target_link_libraries(test_integration_amr_distributed_remote_patch_boundary PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_custom_target(integration_amr_distributed_remote_patch_boundary DEPENDS test_integration_amr_distributed_remote_patch_boundary)
+  add_test(NAME integration_amr_distributed_remote_patch_boundary COMMAND test_integration_amr_distributed_remote_patch_boundary)
+  cosmosim_mark_runtime_truth_test(integration_amr_distributed_remote_patch_boundary amr hydro gas integration mpi distributed reflux)
   add_executable(test_integration_amr_hydro_shock_tube tests/integration/test_amr_hydro_shock_tube.cpp)
   target_link_libraries(test_integration_amr_hydro_shock_tube PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_hydro_shock_tube DEPENDS test_integration_amr_hydro_shock_tube)
@@ -801,6 +825,7 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_pm_periodic_mode_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_periodic_mode_mpi_two_rank mpi distributed pm fftw)
   endif()
 
   if(COSMOSIM_ENABLE_MPI)
@@ -810,6 +835,33 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_pm_slab_halo_exchange_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_slab_halo_exchange_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_slab_halo_exchange_mpi_two_rank mpi distributed pm)
+    add_executable(test_integration_distributed_sfc_rebalance_mpi
+      tests/integration/test_distributed_sfc_rebalance_mpi.cpp)
+    target_link_libraries(test_integration_distributed_sfc_rebalance_mpi PRIVATE cosmosim_parallel)
+    add_test(
+      NAME integration_distributed_sfc_rebalance_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_sfc_rebalance_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_distributed_sfc_rebalance_mpi_three_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_sfc_rebalance_mpi> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      integration_distributed_sfc_rebalance_mpi_two_rank
+      integration_distributed_sfc_rebalance_mpi_three_rank
+      PROPERTIES LABELS "mpi;distributed;decomposition;runtime_truth")
+  endif()
+
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_distributed_gas_cell_migration_mpi
+      tests/integration/test_distributed_gas_cell_migration_mpi.cpp)
+    target_link_libraries(test_integration_distributed_gas_cell_migration_mpi PRIVATE cosmosim_all)
+    add_test(
+      NAME integration_distributed_gas_cell_migration_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_gas_cell_migration_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(integration_distributed_gas_cell_migration_mpi_two_rank mpi hdf5 gas migration restart integration)
   endif()
 
   if(COSMOSIM_ENABLE_CUDA)
@@ -846,6 +898,7 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_tree_pm_coupling_periodic_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_tree_pm_coupling_periodic> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_tree_pm_coupling_periodic_mpi_two_rank mpi distributed treepm pm fftw)
   endif()
 
 
@@ -1087,6 +1140,13 @@ if(COSMOSIM_ENABLE_TESTS)
       validation_phase2_mpi_gravity_two_rank
       validation_phase2_mpi_gravity_three_rank
       PROPERTIES LABELS "validation;gravity;mpi")
+    add_test(
+      NAME validation_phase2_mpi_gravity_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      validation_phase2_mpi_gravity_four_rank
+      PROPERTIES LABELS "validation;gravity;mpi;distributed")
   endif()
 
   if(COSMOSIM_ENABLE_PYTHON)

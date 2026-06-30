@@ -175,7 +175,10 @@ void runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme s
     }
   }
 
-  local_solver.assignDensity(local_grid, local_x, local_y, local_z, local_mass, options, nullptr);
+  cosmosim::gravity::PmProfileEvent profile;
+  local_solver.assignDensity(local_grid, local_x, local_y, local_z, local_mass, options, &profile);
+  requireOrThrow(profile.routed_density_records > 0, "Distributed PM density route did not report routed records");
+  requireOrThrow(profile.routed_density_peer_count > 0, "Distributed PM density route did not report participating peers");
 
   const double cell_volume = std::pow(options.box_size_mpc_comoving, 3.0) / static_cast<double>(shape.cellCount());
   const double local_mass_deposited =
@@ -302,11 +305,19 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
   std::vector<double> local_ax(local_x.size(), 0.0);
   std::vector<double> local_ay(local_x.size(), 0.0);
   std::vector<double> local_az(local_x.size(), 0.0);
-  local_solver.solveForParticles(local_grid, local_x, local_y, local_z, local_mass, local_ax, local_ay, local_az, options, nullptr);
+  cosmosim::gravity::PmProfileEvent profile;
+  local_solver.solveForParticles(local_grid, local_x, local_y, local_z, local_mass, local_ax, local_ay, local_az, options, &profile);
+  requireOrThrow(profile.routed_density_records > 0, "Distributed PM solve did not report routed density records");
+  requireOrThrow(
+      profile.routed_force_requests + profile.force_halo_cache_hits > 0,
+      "Distributed PM solve did not report remote force route or halo-cache hits");
 
   std::vector<double> local_phi(local_x.size(), 0.0);
   if (gather_potential) {
-    local_solver.interpolatePotential(local_grid, local_x, local_y, local_z, local_phi, options, nullptr);
+    local_solver.interpolatePotential(local_grid, local_x, local_y, local_z, local_phi, options, &profile);
+    requireOrThrow(
+        profile.routed_potential_requests > 0,
+        "Distributed PM potential gather did not report routed requests");
   }
 
   std::vector<double> expected_local_ax(local_x.size(), 0.0);

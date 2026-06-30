@@ -184,18 +184,20 @@ The Phase 2 gate is now a dedicated MPI validation suite:
   - `validation_phase2_mpi_gravity_single_rank`
   - `validation_phase2_mpi_gravity_two_rank`
   - `validation_phase2_mpi_gravity_three_rank`
+  - `validation_phase2_mpi_gravity_four_rank`
 
 ### Numerical contracts enforced
 
 - Distributed PM equivalence vs one-rank reference: `rel_L2 <= 1e-10`.
 - Distributed full TreePM equivalence vs one-rank reference: `rel_L2 <= 5e-6` and `max_rel <= 5e-5`.
 - Communication stress path: tiny tree exchange batches (`tree_exchange_batch_bytes=64`) plus PM cadence refresh/reuse toggles, checked against the same TreePM thresholds.
-- Restart continuation contract in MPI mode: reference workflow restart write/read roundtrip must report `restart_roundtrip_ok=true`, preserve rank-qualified restart naming (`..._rank###.hdf5`) for multi-rank runs, and preserve distributed ownership/slab metadata exactly across write/read.
+- Restart continuation contract in MPI mode: reference workflow restart write/read roundtrip must report `restart_roundtrip_ok=true`, preserve rank-qualified restart naming (`..._rank###.hdf5`) for multi-rank runs, preserve distributed ownership/slab metadata exactly across write/read, and pass a production direct-vs-resumed continuation test under the same topology. Rank-count-changing restart is an explicit negative test and must fail as unsupported.
 - Gravity invalid-state trap contract:
   - NaN/Inf force or PM diagnostic norms must raise fatal gravity-state runtime errors.
   - Illegal gravity sync-state transitions (cadence/version/opportunity regressions) must raise fatal gravity-state runtime errors.
   - Distributed restart compatibility must reject gravity-specific metadata mismatches (cadence state and field-version/refresh coherence).
 - Distributed workflow honesty floor: the reference workflow MPI test must prove that the final runtime state is partitioned rather than silently replicated by checking (a) reduced local particle/cell counts equal the reported global counts and (b) the reduced particle-ID sum/xor matches the deterministic generated-IC set.
+- Required MPI CI lane: `mpi-hdf5-fftw-debug` must select the registered two-rank periodic PM/TreePM workflow tests, uneven PM slab/potential routing coverage, two/three/four-rank gravity validation, distributed gas migration, hydro interface conservation, AMR boundary/reflux, and distributed restart continuation. Missing MPI/HDF5/FFTW-MPI dependencies or insufficient runner rank capacity are blockers, not silent skips.
 
 ### Phase 2 scaling artifacts
 

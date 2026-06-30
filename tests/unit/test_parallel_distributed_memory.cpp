@@ -337,6 +337,20 @@ void testRestartStateRoundTrip() {
   assert(out.owning_rank_by_item == in.owning_rank_by_item);
   assert(out.pm_slab_begin_x_by_rank == in.pm_slab_begin_x_by_rank);
   assert(out.pm_slab_end_x_by_rank == in.pm_slab_end_x_by_rank);
+
+  bool bad_owner_threw = false;
+  try {
+    (void)cosmosim::parallel::DistributedRestartState::deserialize(
+        "schema_version=2\ndecomposition_epoch=7\nworld_size=2\npm_grid_nx=8\npm_grid_ny=8\npm_grid_nz=8\n"
+        "pm_decomposition_mode=slab\ngravity_kick_opportunity=0\npm_update_cadence_steps=1\n"
+        "long_range_field_version=0\nlast_long_range_refresh_opportunity=0\n"
+        "long_range_field_built_step_index=0\nlong_range_field_built_scale_factor=1\n"
+        "long_range_restart_policy=deterministic_rebuild\nitem_count=1\nrank[0]=2\n"
+        "pm_slab_rank_count=2\npm_slab_begin_x[0]=0\npm_slab_end_x[0]=4\npm_slab_begin_x[1]=4\npm_slab_end_x[1]=8\n");
+  } catch (const std::invalid_argument&) {
+    bad_owner_threw = true;
+  }
+  assert(bad_owner_threw);
 }
 
 void testExplicitOwnedVsGhostContracts() {
@@ -442,8 +456,51 @@ void testExchangeObjectDescriptorValidation() {
       .owner_rank = 1,
       .consumer_rank = 0,
       .hydro_sync_epoch = 3,
+      .decomposition_epoch = 4,
       .boundary_state_only = true,
   });
+  cosmosim::parallel::validateHydroGhostCellRequest({
+      .descriptor = {.gas_cell_id = 99,
+                     .owner_rank = 1,
+                     .consumer_rank = 0,
+                     .hydro_sync_epoch = 3,
+                     .decomposition_epoch = 4,
+                     .boundary_state_only = true},
+      .face_key = 123,
+      .axis = 0,
+      .side = 1,
+  });
+  cosmosim::parallel::validateHydroGhostCellPayloadRecord({
+      .descriptor = {.gas_cell_id = 99,
+                     .owner_rank = 1,
+                     .consumer_rank = 0,
+                     .hydro_sync_epoch = 3,
+                     .decomposition_epoch = 4,
+                     .boundary_state_only = true},
+      .face_key = 123,
+      .mass_density_comoving = 1.0,
+      .momentum_density_x_comoving = 0.1,
+      .momentum_density_y_comoving = 0.0,
+      .momentum_density_z_comoving = 0.0,
+      .total_energy_density_comoving = 2.5,
+  });
+  bool stale_payload_rejected = false;
+  try {
+    cosmosim::parallel::validateHydroGhostCellPayloadRecord({
+        .descriptor = {.gas_cell_id = 0,
+                       .owner_rank = 1,
+                       .consumer_rank = 0,
+                       .hydro_sync_epoch = 3,
+                       .decomposition_epoch = 4,
+                       .boundary_state_only = true},
+        .face_key = 123,
+        .mass_density_comoving = 1.0,
+        .total_energy_density_comoving = 2.5,
+    });
+  } catch (const std::invalid_argument&) {
+    stale_payload_rejected = true;
+  }
+  assert(stale_payload_rejected);
   cosmosim::parallel::validateAmrPatchExchangeDescriptor({
       .patch_id = 77,
       .owner_rank = 1,
@@ -552,6 +609,19 @@ void testDistributedRestartCompatibilityReporting() {
   const auto ok = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
   assert(ok.compatible());
   assert(ok.mismatch_messages.empty());
+
+  restart.world_size = 3;
+  const auto rank_count_bad = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
+  assert(!rank_count_bad.compatible());
+  assert(!rank_count_bad.world_size_match);
+  assert(!rank_count_bad.pm_slab_table_shape_match);
+  restart.world_size = 2;
+
+  restart.schema_version = 1;
+  const auto schema_bad = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);
+  assert(!schema_bad.compatible());
+  assert(!schema_bad.supported_schema_match);
+  restart.schema_version = 2;
 
   runtime.pm_slab = cosmosim::parallel::makePmSlabLayout(10, 8, 8, 2, 1);
   const auto bad = cosmosim::parallel::evaluateDistributedRestartCompatibility(restart, runtime);

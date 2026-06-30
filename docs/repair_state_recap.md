@@ -1,3 +1,56 @@
+## 2026-06-30 MPI.7 PM/TreePM transport scale guards
+
+- Preserved existing slab-owned periodic PM routed deposition/interpolation and
+  TreePM short-range request identity checks; added profile counters for routed
+  PM records, participating peers, and slab-halo force cache hits so scale runs
+  can distinguish sparse payload traffic from collective completion plumbing.
+- Added explicit bounded policies for the live unbounded paths: isolated/open PM
+  root gather/scatter now estimates root workspace and fails before MPI/data
+  allocation when `parallel.isolated_pm_root_workspace_limit_bytes` is exceeded;
+  focused zoom high-resolution source all-gather is bounded by
+  `parallel.zoom_high_res_allgather_limit_bytes`.
+- Reproducibility impact: no solver equation, HDF5 schema, restart payload, or
+  output naming change. Two normalized config keys now document the supported
+  envelope for gathered PM/zoom compatibility paths.
+
+## 2026-06-30 MPI.6 distributed SFC runtime rebalance
+
+- Replaced routine runtime rebalance planning with distributed compact SFC cuts: ranks sort local
+  authoritative entities, exchange bounded cut samples, all-reduce exact balance/movement counters,
+  and migrate only particles/AMR patches crossing accepted cuts.
+- Kept the exact global `DecompositionItem` all-gather planner as debug/small-test evidence, gated
+  production workflow exact ownership validation behind
+  `parallel.decomposition_debug_exact_ownership_audit = false` by default.
+- Reproducibility impact: no HDF5/restart schema, output naming, rank-count-changing restart, or
+  solver-numerics change. Runtime decomposition ownership is stricter: accepted SFC cuts are the
+  owner authority, while compact summaries and exact audit payloads are read-only diagnostics.
+
+## 2026-06-30 MPI.5 distributed AMR patch boundaries and reflux
+
+- Added a bounded synchronized distributed AMR hydro path: owner ranks export explicit patch geometry and
+  gas-cell conserved state, consumers build transient read-only remote patch ghosts only for adjacent AMR
+  faces, and coarse-fine flux-register entries whose coarse cell is remote are sent back to the authoritative
+  owner rank for reflux.
+- Kept local AMR subcycling and temporal ghost histories local-only. Distributed AMR calls that request
+  subcycling or temporal coarse-to-fine interpolation fail explicitly rather than implying a scheduler-owned
+  MPI Berger-Colella timeline.
+- Reproducibility impact: no config keys, normalized config dumps, HDF5 dataset names, schema versions, or
+  rank-count-changing restart semantics changed. Existing restart-authoritative pending flux-register state
+  remains owner-local and is preserved by the v19 restart groups.
+
+## 2026-06-30 MPI.4 distributed hydro ghost boundary path
+
+- Added a live fixed-grid ReferenceWorkflow hydro MPI boundary path: ranks advertise compact boundary-cell geometry, request adjacent remote gas-cell conserved state by stable `gas_cell_id`, bind it to explicit `kImportedMpi` ghost rows before reconstruction, and route deterministic face-owner conservative ghost deltas back to authoritative owners.
+- Added packet validation and a two-rank MPI+HDF5 workflow regression source covering remote ghost diagnostics, global mass conservation, and restart-vs-uninterrupted continuation for the exercised live interface. Local execution remains dependency-bound if MPI/HDF5 tooling is unavailable.
+- Reproducibility impact: no config keys, normalized config dumps, HDF5 schema datasets, output naming, or rank-count-changing restart semantics changed. Remote hydro ghost state is transient stage scratch keyed by epoch/gas-cell identity generation and is rediscovered after migration or restart.
+
+## 2026-06-30 MPI.3 H2 gas-cell identity migration
+
+- Replaced reference-workflow production compaction/rebalance gas handling with explicit gas-cell/AMR patch payloads keyed by stable `gas_cell_id` and `patch_id`; particle migration now has an explicit `preserve_gas_cell_state` mode so optional parent-particle removal cannot delete hydro truth.
+- Runtime AMR patch migration carries gas-cell scheduler identity records and rebuilds the gas scheduler after a validated commit. Initial decomposition removes stale gas patches by patch ownership, not by one-cell-per-gas-particle reconstruction.
+- Added a two-rank MPI+HDF5 workflow regression source for parentless cells, two cells sharing one parent, restart readback, and restart resume. Local execution remains environment-blocked here because `cmake --preset mpi-hdf5-fftw-debug` cannot find `MPI_CXX`.
+- Reproducibility impact: no config keys, restart HDF5 datasets, schema version, normalized config dumps, or output naming changed. The runtime migration transaction is stricter and fails before commit for wrong-owner or incomplete scheduler/gas payloads.
+
 ## 2026-06-07 Agent interface update
 
 - Promoted `AGENTS.md` from a repair-only guardrail into the repository-wide CHUI/CosmoSim agent contract covering audit, repair, feature implementation, and clean packaging modes.

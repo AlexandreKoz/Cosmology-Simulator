@@ -175,14 +175,14 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 
 ## 2026-05-08 distributed ownership floor status
 
-- P1 distributed ownership correctness floor is partially hardened in code by rank-local ID uniqueness summaries and reduced count/sum/xor partition checks in the reference workflow MPI path.
-- Mature load balancing, pencil FFT, and production migration scheduling remain out of scope for this repair cycle.
+- P1 distributed ownership correctness floor is partially hardened in code by rank-local ID uniqueness summaries, reduced count/sum/xor partition checks, and H2-safe gas-cell/AMR patch migration payloads keyed by stable `gas_cell_id`/`patch_id` in the reference workflow MPI path.
+- Mature load balancing and pencil FFT remain out of scope for this repair cycle.
 - MPI+HDF5+FFTW closure remains dependent on the validation environment providing MPI FFTW (`fftw3_mpi`) and HDF5-enabled MPI presets; if unavailable, the MPI command bundle must be reported as environment-blocked rather than silently passed.
 
 
 ## 2026-05-08 notes
 
-- P2 AMR/moving-mesh gas ownership readiness now has an RFC and isolated `GasCellIdentityMap` API guard. Remaining blocker: promotion to production requires explicit restart schema versioning, compatibility behavior, docs updates in `docs/output_schema.md`, and hydro remap tests keyed by stable `gas_cell_id`.
+- P2 AMR/moving-mesh gas ownership readiness now has an isolated `GasCellIdentityMap` API guard and production distributed workflow compaction/rebalance uses stable gas-cell/patch migration payloads. Remaining blocker: broader AMR neighbor exchange/reflux and rank-count-changing restart remain separate production-claim gates.
 
 ## 2026-05-08 Stage 1 runtime-truth gate status
 
@@ -213,7 +213,7 @@ Phase 3 status in this cycle: **incomplete** (see `docs/treepm_phase3_closeout.m
 
 | ID | Status | Area | Current blocker / ambiguity | Required follow-up |
 | --- | --- | --- | --- | --- |
-| P38-SCHEDULER-MPI-IDENTITY-035 | Open | MPI migration + scheduler authority | Local structural transforms now have stable-ID scheduler remap/rebuild helpers, but multi-rank migration does not yet have a fully specified scheduler identity-record exchange and rank-coordinated tick/max-bin contract. | Define and implement distributed scheduler identity payload exchange, compatibility checks, and MPI tests before claiming multi-rank exact scheduler continuation. |
+| P38-SCHEDULER-MPI-IDENTITY-035 | Partially closed for gas-cell H2 migration | MPI migration + scheduler authority | Particle scheduler identity exchange exists for particle migration, and H2 gas-cell/AMR patch migration now exchanges gas-cell scheduler identity records by `gas_cell_id`. Spawned-particle registration and rank-count-changing restart are still outside this closure. | Run the new two-rank MPI+HDF5 test in an environment with `MPI_CXX`; keep P36 spawned-particle scheduler registration open before broader exact-continuation claims. |
 
 ## 2026-05-11 Stage 2 verification status
 

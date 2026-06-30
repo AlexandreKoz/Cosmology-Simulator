@@ -1177,27 +1177,38 @@ void compactStateToCurrentOwner(
   if (world_rank < 0) {
     throw std::invalid_argument("compactStateToCurrentOwner requires non-negative world rank");
   }
-  std::vector<std::uint32_t> kept_gas_particle_indices;
-  kept_gas_particle_indices.reserve(state.cells.size());
   std::vector<std::uint32_t> stale_ghost_indices;
   stale_ghost_indices.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     const bool owned_here = state.particle_sidecar.owning_rank[particle_index] == static_cast<std::uint32_t>(world_rank);
-    if (owned_here) {
-      if (state.particle_sidecar.species_tag[particle_index] == static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
-        kept_gas_particle_indices.push_back(static_cast<std::uint32_t>(particle_index));
-      }
-    } else {
+    if (!owned_here) {
       stale_ghost_indices.push_back(static_cast<std::uint32_t>(particle_index));
     }
   }
-  const auto gas_records = collectLocalGasCellRecords(state, kept_gas_particle_indices);
-  const auto old_cell_particle_id = gasParticleIdByOldCellIndex(state);
   core::ParticleMigrationCommit commit;
   commit.world_rank = world_rank;
   commit.stale_local_ghost_indices = std::move(stale_ghost_indices);
+  commit.preserve_gas_cell_state = true;
   state.commitParticleMigration(commit);
-  rebuildLocalGasStateFromParticleIds(state, gas_records, old_cell_particle_id);
+
+  if (state.patches.size() != 0 || state.cells.size() != 0) {
+    if (!state.patches.isConsistent()) {
+      throw std::runtime_error("compactStateToCurrentOwner requires consistent AMR patch metadata");
+    }
+    std::vector<std::uint32_t> stale_patch_indices;
+    stale_patch_indices.reserve(state.patches.size());
+    for (std::uint32_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+      if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
+        stale_patch_indices.push_back(patch_index);
+      }
+    }
+    if (!stale_patch_indices.empty()) {
+      core::AmrPatchMigrationCommit patch_commit;
+      patch_commit.world_rank = world_rank;
+      patch_commit.stale_local_ghost_patch_indices = std::move(stale_patch_indices);
+      state.commitAmrPatchMigration(patch_commit);
+    }
+  }
 }
 
 
@@ -1578,6 +1589,81 @@ std::vector<core::ParticleMigrationRecord> deserializeMigrationRecords(std::span
   return records;
 }
 
+void appendGasCellMigrationRecord(std::vector<std::uint8_t>& out, const core::GasCellMigrationRecord& record) {
+  appendPod(out, record.owning_rank);
+  appendPod(out, record.fields);
+}
+
+core::GasCellMigrationRecord readGasCellMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  core::GasCellMigrationRecord record;
+  record.owning_rank = readPod<std::uint32_t>(bytes, offset, "gas_cell_owning_rank");
+  record.fields = readPod<core::GasCellMigrationFields>(bytes, offset, "gas_cell_fields");
+  return record;
+}
+
+void appendAmrPatchMigrationRecord(std::vector<std::uint8_t>& out, const core::AmrPatchMigrationRecord& record) {
+  appendPod(out, record.patch);
+  appendPod(out, static_cast<std::uint64_t>(record.gas_cell_records.size()));
+  for (const core::GasCellMigrationRecord& gas_record : record.gas_cell_records) {
+    appendGasCellMigrationRecord(out, gas_record);
+  }
+  appendPod(out, static_cast<std::uint64_t>(record.gas_cell_scheduler_records.size()));
+  for (const core::GasCellSchedulerMigrationRecord& scheduler_record : record.gas_cell_scheduler_records) {
+    appendPod(out, scheduler_record);
+  }
+}
+
+core::AmrPatchMigrationRecord readAmrPatchMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  core::AmrPatchMigrationRecord record;
+  record.patch = readPod<core::AmrPatchMigrationFields>(bytes, offset, "amr_patch_fields");
+  const std::uint64_t gas_count = readPod<std::uint64_t>(bytes, offset, "amr_patch_gas_cell_count");
+  if (gas_count > 100'000'000ULL) {
+    throw std::runtime_error("AMR patch migration wire packet has unreasonable gas-cell count");
+  }
+  record.gas_cell_records.reserve(static_cast<std::size_t>(gas_count));
+  for (std::uint64_t i = 0; i < gas_count; ++i) {
+    record.gas_cell_records.push_back(readGasCellMigrationRecord(bytes, offset));
+  }
+  const std::uint64_t scheduler_count = readPod<std::uint64_t>(bytes, offset, "amr_patch_scheduler_record_count");
+  if (scheduler_count != gas_count) {
+    throw std::runtime_error("AMR patch migration wire packet scheduler record count does not match gas-cell count");
+  }
+  record.gas_cell_scheduler_records.reserve(static_cast<std::size_t>(scheduler_count));
+  for (std::uint64_t i = 0; i < scheduler_count; ++i) {
+    record.gas_cell_scheduler_records.push_back(
+        readPod<core::GasCellSchedulerMigrationRecord>(bytes, offset, "gas_cell_scheduler_record"));
+  }
+  return record;
+}
+
+std::vector<std::uint8_t> serializeAmrPatchMigrationRecords(
+    std::span<const core::AmrPatchMigrationRecord> records) {
+  std::vector<std::uint8_t> bytes;
+  appendPod(bytes, static_cast<std::uint64_t>(records.size()));
+  for (const core::AmrPatchMigrationRecord& record : records) {
+    appendAmrPatchMigrationRecord(bytes, record);
+  }
+  return bytes;
+}
+
+std::vector<core::AmrPatchMigrationRecord> deserializeAmrPatchMigrationRecords(
+    std::span<const std::uint8_t> bytes) {
+  std::size_t offset = 0;
+  const std::uint64_t count = readPod<std::uint64_t>(bytes, offset, "amr_patch_migration_record_count");
+  if (count > 10'000'000ULL) {
+    throw std::runtime_error("AMR patch migration wire packet has unreasonable record count");
+  }
+  std::vector<core::AmrPatchMigrationRecord> records;
+  records.reserve(static_cast<std::size_t>(count));
+  for (std::uint64_t i = 0; i < count; ++i) {
+    records.push_back(readAmrPatchMigrationRecord(bytes, offset));
+  }
+  if (offset != bytes.size()) {
+    throw std::runtime_error("AMR patch migration wire packet has trailing bytes");
+  }
+  return records;
+}
+
 }  // namespace migration_wire
 
 std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
@@ -1647,6 +1733,160 @@ std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecor
 #endif
 }
 
+std::vector<core::AmrPatchMigrationRecord> exchangeRuntimeAmrPatchMigrationRecords(
+    const parallel::MpiContext& mpi_context,
+    const std::vector<std::vector<core::AmrPatchMigrationRecord>>& records_by_rank) {
+  if (records_by_rank.size() != static_cast<std::size_t>(mpi_context.worldSize())) {
+    throw std::invalid_argument("AMR patch migration exchange records_by_rank size must match world size");
+  }
+  if (mpi_context.worldSize() == 1) {
+    return records_by_rank.empty() ? std::vector<core::AmrPatchMigrationRecord>{} : records_by_rank[0];
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("runtime AMR patch migration execution requires MPI for world_size > 1");
+  }
+#if COSMOSIM_ENABLE_MPI
+  std::vector<std::vector<std::uint8_t>> send_payloads(records_by_rank.size());
+  std::vector<int> send_counts(records_by_rank.size(), 0);
+  for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
+    send_payloads[rank] = migration_wire::serializeAmrPatchMigrationRecords(records_by_rank[rank]);
+    if (send_payloads[rank].size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("AMR patch migration payload exceeds MPI int byte-count limit");
+    }
+    send_counts[rank] = static_cast<int>(send_payloads[rank].size());
+  }
+  std::vector<int> recv_counts(send_counts.size(), 0);
+  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+  std::vector<int> send_offsets(send_counts.size(), 0);
+  std::vector<int> recv_offsets(recv_counts.size(), 0);
+  int total_send = 0;
+  int total_recv = 0;
+  for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
+    send_offsets[rank] = total_send;
+    recv_offsets[rank] = total_recv;
+    total_send += send_counts[rank];
+    total_recv += recv_counts[rank];
+  }
+  std::vector<std::uint8_t> send_bytes(static_cast<std::size_t>(total_send));
+  for (std::size_t rank = 0; rank < send_payloads.size(); ++rank) {
+    if (!send_payloads[rank].empty()) {
+      std::memcpy(send_bytes.data() + send_offsets[rank], send_payloads[rank].data(), send_payloads[rank].size());
+    }
+  }
+  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_recv));
+  MPI_Alltoallv(
+      send_bytes.data(),
+      send_counts.data(),
+      send_offsets.data(),
+      MPI_BYTE,
+      recv_bytes.data(),
+      recv_counts.data(),
+      recv_offsets.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+
+  std::vector<core::AmrPatchMigrationRecord> inbound;
+  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
+    const auto offset = static_cast<std::size_t>(recv_offsets[rank]);
+    const auto count = static_cast<std::size_t>(recv_counts[rank]);
+    auto decoded = migration_wire::deserializeAmrPatchMigrationRecords(
+        std::span<const std::uint8_t>(recv_bytes.data() + offset, count));
+    inbound.insert(inbound.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
+  }
+  return inbound;
+#else
+  throw std::runtime_error("runtime AMR patch migration execution requires an MPI-enabled build");
+#endif
+}
+
+[[nodiscard]] std::string joinRestartCompatibilityMessages(
+    std::span<const std::string> mismatch_messages) {
+  std::ostringstream stream;
+  for (std::size_t i = 0; i < mismatch_messages.size(); ++i) {
+    if (i != 0U) {
+      stream << "; ";
+    }
+    stream << mismatch_messages[i];
+  }
+  return stream.str();
+}
+
+[[nodiscard]] parallel::LocalOwnershipIdentitySummary reduceLocalParticleIdentitySummary(
+    const core::SimulationState& state,
+    const parallel::MpiContext& mpi_context) {
+  const parallel::LocalOwnershipIdentitySummary local =
+      parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+  const std::uint64_t unique_rank_count =
+      mpi_context.allreduceSumUint64(local.local_particle_ids_unique ? 1ULL : 0ULL);
+  return parallel::LocalOwnershipIdentitySummary{
+      .local_owned_count = mpi_context.allreduceSumUint64(local.local_owned_count),
+      .local_particle_id_sum = mpi_context.allreduceSumUint64(local.local_particle_id_sum),
+      .local_particle_id_square_sum = mpi_context.allreduceSumUint64(local.local_particle_id_square_sum),
+      .local_particle_id_xor = mpi_context.allreduceXorUint64(local.local_particle_id_xor),
+      .local_particle_ids_unique =
+          unique_rank_count == static_cast<std::uint64_t>(mpi_context.worldSize()),
+  };
+}
+
+void validateRestartResumeTopologyOrThrow(
+    const io::RestartReadResult& restart,
+    const core::SimulationConfig& config,
+    const core::FrozenConfig& frozen_config,
+    const parallel::MpiContext& mpi_context) {
+  if (restart.normalized_config_hash_hex != frozen_config.provenance.config_hash_hex) {
+    throw std::runtime_error(
+        "ReferenceWorkflow restart topology validation failed: normalized config hash mismatch: expected=" +
+        frozen_config.provenance.config_hash_hex + ", observed=" + restart.normalized_config_hash_hex);
+  }
+  const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
+  const parallel::DistributedExecutionTopology runtime_topology =
+      parallel::buildDistributedExecutionTopology(
+          static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
+          static_cast<std::size_t>(config.numerics.treepm_pm_grid_ny),
+          static_cast<std::size_t>(config.numerics.treepm_pm_grid_nz),
+          mpi_context,
+          config.parallel.mpi_ranks_expected,
+          config.parallel.gpu_devices,
+          cuda_runtime.runtime_available,
+          cuda_runtime.visible_device_count,
+          pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode));
+  const parallel::DistributedRestartCompatibilityReport compatibility =
+      parallel::evaluateDistributedRestartCompatibility(
+          restart.distributed_gravity_state,
+          runtime_topology);
+  if (!compatibility.compatible()) {
+    throw std::runtime_error(
+        "ReferenceWorkflow restart topology validation failed for rank " +
+        std::to_string(mpi_context.worldRank()) + "/" + std::to_string(mpi_context.worldSize()) +
+        ": " + joinRestartCompatibilityMessages(compatibility.mismatch_messages));
+  }
+  if (restart.distributed_gravity_state.owning_rank_by_item.size() !=
+      restart.state.particle_sidecar.owning_rank.size()) {
+    throw std::runtime_error(
+        "ReferenceWorkflow restart topology validation failed: /distributed_gravity owning_rank_by_item count " +
+        std::to_string(restart.distributed_gravity_state.owning_rank_by_item.size()) +
+        " does not match local particle rows " +
+        std::to_string(restart.state.particle_sidecar.owning_rank.size()));
+  }
+  for (std::size_t row = 0; row < restart.state.particle_sidecar.owning_rank.size(); ++row) {
+    const int observed_owner = static_cast<int>(restart.state.particle_sidecar.owning_rank[row]);
+    const int restart_owner = restart.distributed_gravity_state.owning_rank_by_item[row];
+    if (observed_owner != restart_owner) {
+      throw std::runtime_error(
+          "ReferenceWorkflow restart topology validation failed: local particle row " +
+          std::to_string(row) + " owner mismatch: state=" + std::to_string(observed_owner) +
+          ", /distributed_gravity=" + std::to_string(restart_owner));
+    }
+    if (restart_owner < 0 || restart_owner >= mpi_context.worldSize()) {
+      throw std::runtime_error(
+          "ReferenceWorkflow restart topology validation failed: local particle row " +
+          std::to_string(row) + " owner rank is outside runtime world: owner=" +
+          std::to_string(restart_owner) + ", world_size=" + std::to_string(mpi_context.worldSize()));
+    }
+  }
+}
+
 void requireGlobalOwnedParticlePartitionIdentity(
     const core::SimulationState& state,
     const parallel::MpiContext& mpi_context,
@@ -1678,6 +1918,16 @@ void recordRuntimeRebalanceDecision(
   if (profiler == nullptr) {
     return;
   }
+  const auto join_u64 = [](std::span<const std::uint64_t> values) {
+    std::ostringstream stream;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (i != 0U) {
+        stream << ',';
+      }
+      stream << values[i];
+    }
+    return stream.str();
+  };
   profiler->recordEvent(core::RuntimeEvent{
       .event_kind = "parallel.decomposition.runtime_rebalance",
       .severity = rebalance.should_rebalance ? core::RuntimeEventSeverity::kWarning : core::RuntimeEventSeverity::kInfo,
@@ -1691,6 +1941,20 @@ void recordRuntimeRebalanceDecision(
                   {"particle_migration_count", std::to_string(rebalance.particle_migrations.size())},
                   {"amr_patch_ownership_update_count", std::to_string(rebalance.amr_patch_ownership_updates.size())},
                   {"migrated_load_fraction", std::to_string(rebalance.migrated_load_fraction)},
+                  {"used_distributed_sfc_cuts", rebalance.used_distributed_sfc_cuts ? "true" : "false"},
+                  {"exact_debug_audit_enabled", rebalance.exact_debug_audit_enabled ? "true" : "false"},
+                  {"local_entities_considered", std::to_string(rebalance.local_entities_considered)},
+                  {"global_entities_considered", std::to_string(rebalance.global_entities_considered)},
+                  {"local_entities_moved", std::to_string(rebalance.local_entities_moved)},
+                  {"global_entities_moved", std::to_string(rebalance.global_entities_moved)},
+                  {"local_bytes_moved", std::to_string(rebalance.local_bytes_moved)},
+                  {"global_bytes_moved", std::to_string(rebalance.global_bytes_moved)},
+                  {"global_control_bytes", std::to_string(rebalance.global_control_bytes)},
+                  {"peak_temporary_bytes", std::to_string(rebalance.peak_temporary_bytes)},
+                  {"cut_displacement_fraction", std::to_string(rebalance.cut_displacement_fraction)},
+                  {"sfc_cut_count", std::to_string(rebalance.sfc_cut_keys.size())},
+                  {"sfc_cut_keys", join_u64(rebalance.sfc_cut_keys)},
+                  {"sfc_cut_entity_ids", join_u64(rebalance.sfc_cut_entity_ids)},
                   {"current_weighted_imbalance_ratio", std::to_string(rebalance.current_metrics.weighted_imbalance_ratio)},
                   {"target_weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
                   {"current_memory_imbalance_ratio", std::to_string(rebalance.current_metrics.memory_imbalance_ratio)},
@@ -1719,10 +1983,22 @@ void recordRuntimeRebalanceDecision(
     }
     parallel::AmrPatchPayloadRecord record;
     record.patch_id = state.patches.patch_id[patch_index];
+    record.parent_patch_id = state.patches.parent_patch_id[patch_index];
+    record.morton_key = state.patches.morton_key[patch_index];
     record.owner_rank = world_rank;
     record.level = static_cast<std::uint32_t>(std::max<std::int32_t>(state.patches.level[patch_index], 0));
     record.first_cell = first_cell;
     record.cell_count = cell_count;
+    record.origin_x_comoving = state.patches.origin_x_comoving[patch_index];
+    record.origin_y_comoving = state.patches.origin_y_comoving[patch_index];
+    record.origin_z_comoving = state.patches.origin_z_comoving[patch_index];
+    record.extent_x_comoving = state.patches.extent_x_comoving[patch_index];
+    record.extent_y_comoving = state.patches.extent_y_comoving[patch_index];
+    record.extent_z_comoving = state.patches.extent_z_comoving[patch_index];
+    record.cell_dim_x = state.patches.cell_dim_x[patch_index];
+    record.cell_dim_y = state.patches.cell_dim_y[patch_index];
+    record.cell_dim_z = state.patches.cell_dim_z[patch_index];
+    record.decomposition_epoch = state.gasCellIdentityGeneration();
     for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
       const std::uint32_t cell_index = first_cell + offset;
       record.cell_mass_sum_code += state.cells.mass_code[cell_index];
@@ -1778,6 +2054,15 @@ void recordRuntimeRebalanceDecision(
           "buildLocalAmrPatchCellPayloadRecords");
       record.gas_cell_id = identity.gas_cell_id;
       record.parent_particle_id = identity.parent_particle_id.value_or(0U);
+      record.velocity_x_peculiar = cell_index < state.gas_cells.velocity_x_peculiar.size()
+          ? state.gas_cells.velocity_x_peculiar[cell_index]
+          : 0.0;
+      record.velocity_y_peculiar = cell_index < state.gas_cells.velocity_y_peculiar.size()
+          ? state.gas_cells.velocity_y_peculiar[cell_index]
+          : 0.0;
+      record.velocity_z_peculiar = cell_index < state.gas_cells.velocity_z_peculiar.size()
+          ? state.gas_cells.velocity_z_peculiar[cell_index]
+          : 0.0;
       record.density_code = cell_index < state.gas_cells.density_code.size() ? state.gas_cells.density_code[cell_index] : 0.0;
       record.pressure_code = cell_index < state.gas_cells.pressure_code.size() ? state.gas_cells.pressure_code[cell_index] : 0.0;
       record.internal_energy_code = cell_index < state.gas_cells.internal_energy_code.size()
@@ -1903,6 +2188,7 @@ void exchangeAndValidateAmrPatchPayloads(
 void applyMeasuredRuntimeRebalancePlan(
     core::SimulationState& state,
     core::HierarchicalTimeBinScheduler& scheduler,
+    core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const core::SimulationConfig& config,
     const parallel::MpiContext& mpi_context,
     int world_rank,
@@ -1919,8 +2205,6 @@ void applyMeasuredRuntimeRebalancePlan(
   }
   auto local_items = buildRuntimeDecompositionItems(state, config, world_rank, active_particle_indices);
   parallel::applyRuntimeDecompositionFeedback(local_items, measurements, makeWorkflowFeedbackCoefficients(config));
-  const std::vector<parallel::DecompositionItem> global_items =
-      parallel::gatherDecompositionItemsAcrossRanks(mpi_context, local_items);
   parallel::RuntimeRebalanceConfig rebalance_config{
       .world_size = mpi_context.worldSize(),
       .imbalance_trigger_ratio = config.parallel.decomposition_rebalance_imbalance_trigger,
@@ -1929,10 +2213,12 @@ void applyMeasuredRuntimeRebalancePlan(
       .allow_particle_migration = true,
       .allow_amr_patch_reassignment = true,
   };
-  const auto rebalance = parallel::buildRuntimeRebalancePlan(
-      global_items,
+  auto rebalance = parallel::buildDistributedRuntimeRebalancePlan(
+      mpi_context,
+      local_items,
       makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
       rebalance_config);
+  rebalance.exact_debug_audit_enabled = config.parallel.decomposition_debug_exact_ownership_audit;
   if (!rebalance.should_rebalance) {
     exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
     recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
@@ -1949,6 +2235,8 @@ void applyMeasuredRuntimeRebalancePlan(
 
   std::unordered_map<std::uint32_t, int> outbound_target_by_local_index;
   outbound_target_by_local_index.reserve(rebalance.particle_migrations.size());
+  std::unordered_map<std::uint32_t, int> outbound_patch_target_by_local_index;
+  outbound_patch_target_by_local_index.reserve(rebalance.amr_patch_ownership_updates.size());
   const auto add_particle_migration = [&](std::uint32_t local_index, int new_owner_rank, std::string_view source_label) {
     if (local_index >= state.particles.size()) {
       throw std::out_of_range("runtime rebalance attempted to migrate a particle index outside SimulationState");
@@ -1965,6 +2253,24 @@ void applyMeasuredRuntimeRebalancePlan(
     const auto [it, inserted] = outbound_target_by_local_index.emplace(local_index, new_owner_rank);
     if (!inserted && it->second != new_owner_rank) {
       throw std::runtime_error("runtime rebalance produced conflicting destinations for one particle");
+    }
+  };
+  const auto add_patch_migration = [&](std::uint32_t local_patch_index, int new_owner_rank) {
+    if (local_patch_index >= state.patches.size()) {
+      throw std::out_of_range("runtime rebalance attempted to migrate an AMR patch index outside SimulationState");
+    }
+    if (new_owner_rank < 0 || new_owner_rank >= mpi_context.worldSize()) {
+      throw std::invalid_argument("runtime rebalance produced AMR patch migration target outside MPI world");
+    }
+    if (new_owner_rank == world_rank) {
+      return;
+    }
+    if (state.patches.owning_rank[local_patch_index] != static_cast<std::uint32_t>(world_rank)) {
+      throw std::runtime_error("runtime rebalance attempted to migrate a non-authoritative local AMR patch");
+    }
+    const auto [it, inserted] = outbound_patch_target_by_local_index.emplace(local_patch_index, new_owner_rank);
+    if (!inserted && it->second != new_owner_rank) {
+      throw std::runtime_error("runtime rebalance produced conflicting destinations for one AMR patch");
     }
   };
 
@@ -1989,6 +2295,7 @@ void applyMeasuredRuntimeRebalancePlan(
       }
       if (state.patches.owning_rank[patch_index] == static_cast<std::uint32_t>(world_rank) &&
           update.new_owner_rank != world_rank) {
+        add_patch_migration(static_cast<std::uint32_t>(patch_index), update.new_owner_rank);
         const std::uint32_t first_cell = state.patches.first_cell[patch_index];
         const std::uint32_t cell_count = state.patches.cell_count[patch_index];
         if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) > state.cells.size()) {
@@ -2007,7 +2314,6 @@ void applyMeasuredRuntimeRebalancePlan(
           }
         }
       }
-      state.patches.owning_rank[patch_index] = static_cast<std::uint32_t>(update.new_owner_rank);
     }
   }
 
@@ -2018,6 +2324,28 @@ void applyMeasuredRuntimeRebalancePlan(
     outbound_local_indices.push_back(local_index);
   }
   std::sort(outbound_local_indices.begin(), outbound_local_indices.end());
+
+  std::vector<std::uint32_t> outbound_patch_indices;
+  outbound_patch_indices.reserve(outbound_patch_target_by_local_index.size());
+  for (const auto& [patch_index, target_rank] : outbound_patch_target_by_local_index) {
+    (void)target_rank;
+    outbound_patch_indices.push_back(patch_index);
+  }
+  std::sort(outbound_patch_indices.begin(), outbound_patch_indices.end());
+
+  std::vector<std::uint32_t> kept_cell_rows;
+  kept_cell_rows.reserve(state.cells.size());
+  for (std::uint32_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
+    const std::uint32_t patch_index = state.cells.patch_index[cell_row];
+    if (patch_index >= state.patches.size()) {
+      throw std::runtime_error("runtime rebalance found a gas cell with invalid patch_index");
+    }
+    if (!std::binary_search(outbound_patch_indices.begin(), outbound_patch_indices.end(), patch_index)) {
+      kept_cell_rows.push_back(cell_row);
+    }
+  }
+  std::vector<core::TimeBinSchedulerIdentityRecord> gas_scheduler_records =
+      core::exportGasCellSchedulerIdentityRecords(gas_cell_scheduler, state, kept_cell_rows);
 
   std::vector<std::uint32_t> preserved_indices;
   preserved_indices.reserve(state.particles.size() - outbound_local_indices.size());
@@ -2041,12 +2369,75 @@ void applyMeasuredRuntimeRebalancePlan(
     outbound_records_by_rank[static_cast<std::size_t>(target_rank)].push_back(std::move(records[0]));
   }
 
+  std::vector<std::vector<core::AmrPatchMigrationRecord>> outbound_patch_records_by_rank(
+      static_cast<std::size_t>(mpi_context.worldSize()));
+  for (const std::uint32_t patch_index : outbound_patch_indices) {
+    const int target_rank = outbound_patch_target_by_local_index.at(patch_index);
+    auto records = state.packAmrPatchMigrationRecords(std::span<const std::uint32_t>(&patch_index, 1));
+    if (records.size() != 1U) {
+      throw std::runtime_error("runtime rebalance AMR patch migration packing returned an unexpected record count");
+    }
+    records[0].patch.owning_rank = static_cast<std::uint32_t>(target_rank);
+    const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+    const std::uint32_t cell_count = state.patches.cell_count[patch_index];
+    std::vector<std::uint32_t> patch_cell_rows;
+    patch_cell_rows.reserve(cell_count);
+    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
+      patch_cell_rows.push_back(first_cell + offset);
+    }
+    const std::vector<core::TimeBinSchedulerIdentityRecord> patch_scheduler_records =
+        core::exportGasCellSchedulerIdentityRecords(gas_cell_scheduler, state, patch_cell_rows);
+    records[0].gas_cell_scheduler_records.reserve(patch_scheduler_records.size());
+    for (const auto& scheduler_record : patch_scheduler_records) {
+      records[0].gas_cell_scheduler_records.push_back(core::GasCellSchedulerMigrationRecord{
+          .gas_cell_id = scheduler_record.element_id,
+          .bin_index = scheduler_record.bin_index,
+          .next_activation_tick = scheduler_record.next_activation_tick,
+          .pending_bin_index = scheduler_record.pending_bin_index,
+      });
+    }
+    for (core::GasCellMigrationRecord& gas_record : records[0].gas_cell_records) {
+      gas_record.owning_rank = static_cast<std::uint32_t>(target_rank);
+      gas_record.fields.patch_index = 0U;
+      gas_record.fields.owning_patch_id = records[0].patch.patch_id;
+    }
+    outbound_patch_records_by_rank[static_cast<std::size_t>(target_rank)].push_back(std::move(records[0]));
+  }
+
   std::vector<core::ParticleMigrationRecord> inbound_records =
       exchangeRuntimeParticleMigrationRecords(mpi_context, outbound_records_by_rank);
+  std::vector<core::AmrPatchMigrationRecord> inbound_patch_records =
+      exchangeRuntimeAmrPatchMigrationRecords(mpi_context, outbound_patch_records_by_rank);
   for (const core::ParticleMigrationRecord& record : inbound_records) {
     if (record.owning_rank != static_cast<std::uint32_t>(world_rank)) {
       throw std::runtime_error("runtime particle migration exchange delivered a record to the wrong destination rank");
     }
+  }
+  for (const core::AmrPatchMigrationRecord& record : inbound_patch_records) {
+    if (record.patch.owning_rank != static_cast<std::uint32_t>(world_rank)) {
+      throw std::runtime_error("runtime AMR patch migration exchange delivered a patch to the wrong destination rank");
+    }
+    if (record.gas_cell_scheduler_records.size() != record.gas_cell_records.size()) {
+      throw std::runtime_error("runtime AMR patch migration payload is missing gas-cell scheduler identity records");
+    }
+    for (const core::GasCellSchedulerMigrationRecord& scheduler_record : record.gas_cell_scheduler_records) {
+      gas_scheduler_records.push_back(core::TimeBinSchedulerIdentityRecord{
+          .element_id = scheduler_record.gas_cell_id,
+          .bin_index = scheduler_record.bin_index,
+          .next_activation_tick = scheduler_record.next_activation_tick,
+          .pending_bin_index = scheduler_record.pending_bin_index,
+      });
+    }
+  }
+
+  if (!outbound_patch_indices.empty() || !inbound_patch_records.empty()) {
+    core::AmrPatchMigrationCommit patch_commit;
+    patch_commit.world_rank = world_rank;
+    patch_commit.outbound_local_patch_indices = outbound_patch_indices;
+    patch_commit.inbound_records = inbound_patch_records;
+    state.commitAmrPatchMigration(patch_commit);
+    core::rebuildSchedulerFromGasCellIdentityRecords(gas_cell_scheduler, gas_scheduler_records, state);
+    core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, state);
   }
 
   if (!outbound_local_indices.empty() || !inbound_records.empty()) {
@@ -2055,14 +2446,17 @@ void applyMeasuredRuntimeRebalancePlan(
     commit.world_rank = world_rank;
     commit.outbound_local_indices = outbound_local_indices;
     commit.inbound_records = inbound_records;
+    commit.preserve_gas_cell_state = true;
     state.commitParticleMigration(commit);
 
     std::vector<std::uint64_t> destination_particle_ids(state.particle_sidecar.particle_id.begin(),
                                                         state.particle_sidecar.particle_id.end());
     core::rebuildSchedulerFromParticleMigrationRecords(scheduler, scheduler_records, destination_particle_ids);
     syncTimeBinsFromScheduler(scheduler, state);
-    requireGlobalOwnedParticlePartitionIdentity(
-        state, mpi_context, expected_global_particle_ids, "runtime rebalance particle migration commit");
+    if (config.parallel.decomposition_debug_exact_ownership_audit) {
+      requireGlobalOwnedParticlePartitionIdentity(
+          state, mpi_context, expected_global_particle_ids, "runtime rebalance particle migration commit");
+    }
   }
   exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
 
@@ -2507,9 +2901,139 @@ struct HydroConservativeGhostSyncReport {
   std::vector<parallel::HydroConservativeFluxCorrectionRecord> correction_records;
 };
 
+struct HydroRemoteGhostBoundaryReport {
+  std::size_t boundary_metadata_sent = 0;
+  std::size_t boundary_metadata_received = 0;
+  std::size_t requested_cells = 0;
+  std::size_t received_cells = 0;
+  std::size_t imported_ghosts = 0;
+  std::size_t interface_faces = 0;
+  std::size_t stale_or_invalid_payloads = 0;
+  std::uint64_t request_bytes = 0;
+  std::uint64_t payload_bytes = 0;
+};
+
+struct HydroBoundaryCellAdvertisement {
+  std::uint64_t gas_cell_id = 0;
+  int owner_rank = 0;
+  std::uint64_t hydro_sync_epoch = 0;
+  std::uint64_t decomposition_epoch = 0;
+  double center_x_comoving = 0.0;
+  double center_y_comoving = 0.0;
+  double center_z_comoving = 0.0;
+};
+
+[[nodiscard]] bool finiteBoundaryAdvertisement(const HydroBoundaryCellAdvertisement& record) {
+  return record.gas_cell_id != 0U &&
+      record.owner_rank >= 0 &&
+      std::isfinite(record.center_x_comoving) &&
+      std::isfinite(record.center_y_comoving) &&
+      std::isfinite(record.center_z_comoving);
+}
+
+[[nodiscard]] std::vector<HydroBoundaryCellAdvertisement> exchangeHydroBoundaryAdvertisements(
+    const parallel::MpiContext& mpi_context,
+    std::span<const HydroBoundaryCellAdvertisement> local_records) {
+  for (const HydroBoundaryCellAdvertisement& record : local_records) {
+    if (!finiteBoundaryAdvertisement(record)) {
+      throw std::invalid_argument("hydro boundary advertisement is invalid");
+    }
+    if (record.owner_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("hydro boundary advertisement owner rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<HydroBoundaryCellAdvertisement>(local_records.begin(), local_records.end());
+  }
+#if COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroBoundaryCellAdvertisement);
+    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("hydro boundary advertisement exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records += counts64[static_cast<std::size_t>(rank)];
+  }
+  std::vector<HydroBoundaryCellAdvertisement> result(static_cast<std::size_t>(total_records));
+  MPI_Allgatherv(
+      const_cast<HydroBoundaryCellAdvertisement*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(HydroBoundaryCellAdvertisement)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const HydroBoundaryCellAdvertisement& record : result) {
+    if (!finiteBoundaryAdvertisement(record) || record.owner_rank >= world_size) {
+      throw std::runtime_error("hydro boundary advertisement exchange returned invalid metadata");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("hydro boundary advertisement exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+[[nodiscard]] std::uint8_t hydroAxisCode(hydro::HydroFaceAxis axis) {
+  switch (axis) {
+    case hydro::HydroFaceAxis::kX:
+      return 0U;
+    case hydro::HydroFaceAxis::kY:
+      return 1U;
+    case hydro::HydroFaceAxis::kZ:
+      return 2U;
+  }
+  return 0U;
+}
+
+[[nodiscard]] std::uint8_t hydroSideCode(hydro::HydroFaceSide side) {
+  return side == hydro::HydroFaceSide::kLower ? 0U : 1U;
+}
+
+[[nodiscard]] std::uint64_t hydroInterfaceFaceKey(
+    std::uint64_t local_gas_cell_id,
+    std::uint64_t remote_gas_cell_id,
+    hydro::HydroFaceAxis axis) {
+  const std::uint64_t lo = std::min(local_gas_cell_id, remote_gas_cell_id);
+  const std::uint64_t hi = std::max(local_gas_cell_id, remote_gas_cell_id);
+  std::uint64_t key = 1469598103934665603ULL;
+  auto mix = [&](std::uint64_t value) {
+    key ^= value;
+    key *= 1099511628211ULL;
+  };
+  mix(lo);
+  mix(hi);
+  mix(static_cast<std::uint64_t>(hydroAxisCode(axis) + 1U));
+  return key == 0U ? 1U : key;
+}
+
+[[nodiscard]] bool nearlySameCoordinate(double lhs, double rhs, double tolerance) {
+  return std::abs(lhs - rhs) <= tolerance;
+}
+
 [[nodiscard]] HydroGhostConservedSnapshot snapshotHydroGhostConservedCells(
     const core::SimulationState& state,
     const hydro::HydroConservedStateSoa& conserved,
+    const hydro::HydroPatchGeometry& geometry,
     std::span<const std::uint32_t> geometry_row_by_dense_row,
     std::uint32_t world_rank) {
   HydroGhostConservedSnapshot snapshot;
@@ -2541,6 +3065,20 @@ struct HydroConservativeGhostSyncReport {
       throw std::out_of_range("snapshotHydroGhostConservedCells: dense row is outside Cartesian geometry map");
     }
     snapshot.conserved_state.push_back(conserved.loadCell(geometry_row_by_dense_row[cell_index]));
+  }
+  for (const hydro::HydroGhostCell& ghost : geometry.ghost_cells) {
+    if (ghost.boundary_kind != hydro::HydroBoundaryKind::kImportedMpi) {
+      continue;
+    }
+    if (ghost.origin_rank < 0 || ghost.origin_rank == static_cast<int>(world_rank) ||
+        ghost.origin_gas_cell_id == 0U || ghost.ghost_cell >= conserved.size()) {
+      throw std::runtime_error("snapshotHydroGhostConservedCells: imported MPI ghost metadata is invalid");
+    }
+    snapshot.cell_indices.push_back(static_cast<std::uint32_t>(ghost.ghost_cell));
+    snapshot.gas_cell_ids.push_back(ghost.origin_gas_cell_id);
+    snapshot.parent_particle_ids.push_back(0U);
+    snapshot.owner_ranks.push_back(static_cast<std::uint32_t>(ghost.origin_rank));
+    snapshot.conserved_state.push_back(conserved.loadCell(ghost.ghost_cell));
   }
   return snapshot;
 }
@@ -3350,6 +3888,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
             core::GravityBoundaryModel::kPeriodicPoisson
         ? gravity::PmBoundaryCondition::kPeriodic
         : gravity::PmBoundaryCondition::kIsolatedOpen;
+    m_tree_pm_options.pm_options.isolated_open_root_workspace_limit_bytes =
+        config.parallel.isolated_pm_root_workspace_limit_bytes;
     parallel::MpiContext mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
     m_runtime_topology = parallel::buildDistributedExecutionTopology(
@@ -3396,6 +3936,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
         ? config.mode.zoom_contamination_radius_mpc_comoving
         : config.mode.zoom_region_radius_mpc_comoving;
     m_tree_pm_options.tree_exchange_batch_bytes = config.numerics.treepm_tree_exchange_batch_bytes;
+    m_tree_pm_options.zoom_high_res_allgather_limit_bytes =
+        config.parallel.zoom_high_res_allgather_limit_bytes;
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
     m_pm_backend = gravity::PmSolver::fftBackendName();
     if (m_runtime_topology.usesCuda()) {
@@ -4437,6 +4979,9 @@ class HydroStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
   [[nodiscard]] const hydro::HydroProfileEvent& lastHydroProfile() const noexcept { return m_last_hydro_profile; }
   [[nodiscard]] const SolverGhostRefreshReport& lastGhostRefreshReport() const noexcept { return m_last_ghost_refresh; }
+  [[nodiscard]] const HydroRemoteGhostBoundaryReport& lastRemoteGhostBoundaryReport() const noexcept {
+    return m_last_remote_ghost_boundary_report;
+  }
   [[nodiscard]] const core::HydroCflDiagnostics& lastHydroCflDiagnostics() const noexcept {
     return m_last_hydro_cfl_diagnostics;
   }
@@ -4475,8 +5020,10 @@ class HydroStageCallback final : public core::IntegrationCallback {
     const auto particle_row_by_id = buildParticleRowById(context.state);
     std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
 
+    if (m_mpi_context.isEnabled()) {
+      m_cached_geometry_key.reset();
+    }
     rebuildGeometryIfNeeded(context.state, context.integrator_state.dt_time_code);
-    const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
     verifyAcceptedHydroCfl(context, context.active_set.cell_indices);
 
     m_conserved.resize(m_geometry.totalCellStorageCount());
@@ -4501,10 +5048,14 @@ class HydroStageCallback final : public core::IntegrationCallback {
           m_geometry_row_by_dense_row[cell_index],
           hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic));
     }
+    m_last_remote_ghost_boundary_report = refreshRemoteHydroBoundaryGhosts(
+        context,
+        particle_row_by_id);
     hydro::fillHydroBoundaryGhostCells(m_conserved, m_geometry, k_gamma_adiabatic);
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_mpi_context.worldRank());
     const HydroGhostConservedSnapshot ghost_conserved_snapshot = snapshotHydroGhostConservedCells(
-        context.state, m_conserved, m_geometry_row_by_dense_row, world_rank);
+        context.state, m_conserved, m_geometry, m_geometry_row_by_dense_row, world_rank);
+    const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
 
     double hubble_rate_code = 0.0;
     if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
@@ -4657,7 +5208,14 @@ class HydroStageCallback final : public core::IntegrationCallback {
                       {"global_correction_records", std::to_string(global_flux_corrections.size())},
                       {"applied_flux_corrections", std::to_string(applied_flux_corrections)},
                       {"rejected_remote_delta_l1", std::to_string(ghost_sync_report.rejected_remote_delta_l1)},
-                      {"applied_flux_delta_l1", std::to_string(applied_flux_delta_l1)}}});
+                      {"applied_flux_delta_l1", std::to_string(applied_flux_delta_l1)},
+                      {"imported_mpi_ghosts", std::to_string(m_last_remote_ghost_boundary_report.imported_ghosts)},
+                      {"requested_remote_cells", std::to_string(m_last_remote_ghost_boundary_report.requested_cells)},
+                      {"received_remote_cells", std::to_string(m_last_remote_ghost_boundary_report.received_cells)},
+                      {"remote_interface_faces", std::to_string(m_last_remote_ghost_boundary_report.interface_faces)},
+                      {"remote_stale_or_invalid_payloads", std::to_string(m_last_remote_ghost_boundary_report.stale_or_invalid_payloads)},
+                      {"remote_request_bytes", std::to_string(m_last_remote_ghost_boundary_report.request_bytes)},
+                      {"remote_payload_bytes", std::to_string(m_last_remote_ghost_boundary_report.payload_bytes)}}});
     }
 
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
@@ -4716,6 +5274,362 @@ class HydroStageCallback final : public core::IntegrationCallback {
     return hydro::HydroBoundaryKind::kOpen;
   }
 
+  [[nodiscard]] std::array<double, 3> ghostCenterForBoundaryFace(
+      const core::SimulationState& state,
+      const hydro::HydroGhostCell& ghost) const {
+    const std::uint32_t dense_row = m_dense_row_by_geometry_row.at(ghost.owner_real_cell);
+    std::array<double, 3> center{
+        state.cells.center_x_comoving[dense_row],
+        state.cells.center_y_comoving[dense_row],
+        state.cells.center_z_comoving[dense_row]};
+    const double sign = ghost.side == hydro::HydroFaceSide::kLower ? -1.0 : 1.0;
+    switch (ghost.axis) {
+      case hydro::HydroFaceAxis::kX:
+        center[0] += sign * m_geometry.cell_width_x_comoving;
+        break;
+      case hydro::HydroFaceAxis::kY:
+        center[1] += sign * m_geometry.cell_width_y_comoving;
+        break;
+      case hydro::HydroFaceAxis::kZ:
+        center[2] += sign * m_geometry.cell_width_z_comoving;
+        break;
+    }
+    return center;
+  }
+
+  [[nodiscard]] bool isBoundaryGeometryRow(std::size_t geometry_row) const {
+    const auto ijk = m_geometry.cellIjk(geometry_row);
+    return ijk[0] == 0U || ijk[0] + 1U == m_geometry.nx ||
+        ijk[1] == 0U || ijk[1] + 1U == m_geometry.ny ||
+        ijk[2] == 0U || ijk[2] + 1U == m_geometry.nz;
+  }
+
+  [[nodiscard]] std::vector<HydroBoundaryCellAdvertisement> buildLocalHydroBoundaryAdvertisements(
+      const core::SimulationState& state,
+      const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
+      std::uint64_t hydro_sync_epoch,
+      std::uint64_t decomposition_epoch) const {
+    std::vector<HydroBoundaryCellAdvertisement> records;
+    records.reserve(state.cells.size());
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(m_mpi_context.worldRank());
+    for (std::uint32_t dense_row = 0; dense_row < state.cells.size(); ++dense_row) {
+      if (gasCellOwnerRankForLocalRow(state, dense_row, particle_row_by_id, "hydro boundary advertisement") !=
+          world_rank) {
+        continue;
+      }
+      if (dense_row >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("hydro boundary advertisement dense row is outside geometry map");
+      }
+      const std::size_t geometry_row = m_geometry_row_by_dense_row[dense_row];
+      if (!isBoundaryGeometryRow(geometry_row)) {
+        continue;
+      }
+      const core::GasCellIdentityRecord& identity = gasCellIdentityRecordForLocalRow(
+          state,
+          dense_row,
+          "hydro boundary advertisement");
+      records.push_back(HydroBoundaryCellAdvertisement{
+          .gas_cell_id = identity.gas_cell_id,
+          .owner_rank = static_cast<int>(world_rank),
+          .hydro_sync_epoch = hydro_sync_epoch,
+          .decomposition_epoch = decomposition_epoch,
+          .center_x_comoving = state.cells.center_x_comoving[dense_row],
+          .center_y_comoving = state.cells.center_y_comoving[dense_row],
+          .center_z_comoving = state.cells.center_z_comoving[dense_row]});
+    }
+    return records;
+  }
+
+  [[nodiscard]] std::optional<HydroBoundaryCellAdvertisement> findRemoteBoundaryAdvertisement(
+      std::span<const HydroBoundaryCellAdvertisement> advertisements,
+      const std::array<double, 3>& owner_center,
+      hydro::HydroFaceAxis axis,
+      hydro::HydroFaceSide side,
+      std::uint64_t hydro_sync_epoch) const {
+    const double tolerance = 1.0e-8 * std::max({
+        1.0,
+        std::abs(m_geometry.cell_width_x_comoving),
+        std::abs(m_geometry.cell_width_y_comoving),
+        std::abs(m_geometry.cell_width_z_comoving)});
+    std::optional<HydroBoundaryCellAdvertisement> match;
+    double best_normal_distance = std::numeric_limits<double>::infinity();
+    for (const HydroBoundaryCellAdvertisement& record : advertisements) {
+      if (record.owner_rank == m_mpi_context.worldRank()) {
+        continue;
+      }
+      if (record.hydro_sync_epoch != hydro_sync_epoch) {
+        continue;
+      }
+      double normal_distance = 0.0;
+      bool transverse_match = false;
+      switch (axis) {
+        case hydro::HydroFaceAxis::kX:
+          normal_distance = record.center_x_comoving - owner_center[0];
+          transverse_match = nearlySameCoordinate(record.center_y_comoving, owner_center[1], tolerance) &&
+              nearlySameCoordinate(record.center_z_comoving, owner_center[2], tolerance);
+          break;
+        case hydro::HydroFaceAxis::kY:
+          normal_distance = record.center_y_comoving - owner_center[1];
+          transverse_match = nearlySameCoordinate(record.center_x_comoving, owner_center[0], tolerance) &&
+              nearlySameCoordinate(record.center_z_comoving, owner_center[2], tolerance);
+          break;
+        case hydro::HydroFaceAxis::kZ:
+          normal_distance = record.center_z_comoving - owner_center[2];
+          transverse_match = nearlySameCoordinate(record.center_x_comoving, owner_center[0], tolerance) &&
+              nearlySameCoordinate(record.center_y_comoving, owner_center[1], tolerance);
+          break;
+      }
+      const bool correct_side = side == hydro::HydroFaceSide::kUpper
+          ? normal_distance > tolerance
+          : normal_distance < -tolerance;
+      if (!transverse_match || !correct_side) {
+        continue;
+      }
+      const double abs_distance = std::abs(normal_distance);
+      if (abs_distance + tolerance < best_normal_distance) {
+        best_normal_distance = abs_distance;
+        match = record;
+      } else if (std::abs(abs_distance - best_normal_distance) <= tolerance) {
+        throw std::runtime_error("hydro remote boundary discovery found duplicate remote cells for one face");
+      }
+    }
+    return match;
+  }
+
+  [[nodiscard]] HydroRemoteGhostBoundaryReport refreshRemoteHydroBoundaryGhosts(
+      core::StepContext& context,
+      const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id) {
+    HydroRemoteGhostBoundaryReport report;
+    if (!m_mpi_context.isEnabled() || m_mpi_context.worldSize() <= 1) {
+      return report;
+    }
+    const std::uint64_t hydro_sync_epoch =
+        context.integrator_state.step_index * core::integrationStageCount() +
+        core::integrationStageIndex(context.stage) + 1U;
+    const std::uint64_t decomposition_epoch = context.state.gasCellIdentityGeneration();
+    const auto local_advertisements = buildLocalHydroBoundaryAdvertisements(
+        context.state,
+        particle_row_by_id,
+        hydro_sync_epoch,
+        decomposition_epoch);
+    const auto advertisements = exchangeHydroBoundaryAdvertisements(m_mpi_context, local_advertisements);
+    report.boundary_metadata_sent = local_advertisements.size();
+    report.boundary_metadata_received = advertisements.size();
+
+    std::vector<parallel::HydroGhostCellRequest> requests;
+    std::unordered_map<std::uint64_t, std::size_t> ghost_slot_by_face_key;
+    m_remote_non_authority_faces.clear();
+    for (std::size_t face_index = 0; face_index < m_geometry.faces.size(); ++face_index) {
+      hydro::HydroFace& face = m_geometry.faces[face_index];
+      if (face.ghost_cell_slot != hydro::k_invalid_ghost_cell_slot ||
+          face.neighbor_cell == hydro::k_invalid_cell_index ||
+          face.owner_cell >= m_dense_row_by_geometry_row.size() ||
+          face.neighbor_cell >= m_dense_row_by_geometry_row.size()) {
+        continue;
+      }
+      const std::uint32_t owner_dense_row = m_dense_row_by_geometry_row[face.owner_cell];
+      const std::uint32_t neighbor_dense_row = m_dense_row_by_geometry_row[face.neighbor_cell];
+      const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
+          context.state,
+          owner_dense_row,
+          particle_row_by_id,
+          "hydro internal remote boundary discovery");
+      const std::uint32_t neighbor_rank = gasCellOwnerRankForLocalRow(
+          context.state,
+          neighbor_dense_row,
+          particle_row_by_id,
+          "hydro internal remote boundary discovery");
+      if (owner_rank == neighbor_rank) {
+        continue;
+      }
+      if (owner_rank != static_cast<std::uint32_t>(m_mpi_context.worldRank())) {
+        m_remote_non_authority_faces.insert(face_index);
+        continue;
+      }
+      const core::GasCellIdentityRecord& owner_identity = gasCellIdentityRecordForLocalRow(
+          context.state,
+          owner_dense_row,
+          "hydro internal remote boundary discovery");
+      const core::GasCellIdentityRecord& remote_identity = gasCellIdentityRecordForLocalRow(
+          context.state,
+          neighbor_dense_row,
+          "hydro internal remote boundary discovery");
+      const std::uint64_t face_key =
+          hydroInterfaceFaceKey(owner_identity.gas_cell_id, remote_identity.gas_cell_id, face.axis);
+      const std::size_t ghost_slot = m_geometry.ghost_cells.size();
+      const std::size_t ghost_cell = m_geometry.cellCount() + ghost_slot;
+      m_geometry.ghost_cells.push_back(hydro::HydroGhostCell{
+          .owner_real_cell = face.owner_cell,
+          .source_real_cell = face.owner_cell,
+          .ghost_cell = ghost_cell,
+          .ghost_slot = ghost_slot,
+          .boundary_kind = hydro::HydroBoundaryKind::kImportedMpi,
+          .axis = face.axis,
+          .side = hydro::HydroFaceSide::kUpper,
+          .mutation_rights = hydro::HydroGhostMutationRights::kReadOnlyImported,
+          .origin_gas_cell_id = remote_identity.gas_cell_id,
+          .origin_rank = static_cast<int>(neighbor_rank),
+          .hydro_sync_epoch = hydro_sync_epoch,
+          .decomposition_epoch = decomposition_epoch});
+      face.neighbor_cell = ghost_cell;
+      face.neighbor_plus_cell = hydro::k_invalid_cell_index;
+      face.ghost_cell_slot = ghost_slot;
+      if (!ghost_slot_by_face_key.emplace(face_key, ghost_slot).second) {
+        throw std::runtime_error("hydro internal remote boundary discovery produced duplicate face keys");
+      }
+      requests.push_back(parallel::HydroGhostCellRequest{
+          .descriptor = parallel::HydroGhostCellDescriptor{
+              .gas_cell_id = remote_identity.gas_cell_id,
+              .owner_rank = static_cast<int>(neighbor_rank),
+              .consumer_rank = m_mpi_context.worldRank(),
+              .hydro_sync_epoch = hydro_sync_epoch,
+              .decomposition_epoch = decomposition_epoch,
+              .boundary_state_only = true},
+          .face_key = face_key,
+          .axis = hydroAxisCode(face.axis),
+          .side = 1U});
+    }
+    if (m_conserved.size() < m_geometry.totalCellStorageCount()) {
+      m_conserved.resize(m_geometry.totalCellStorageCount());
+    }
+    for (hydro::HydroGhostCell& ghost : m_geometry.ghost_cells) {
+      if (ghost.boundary_kind == hydro::HydroBoundaryKind::kImportedMpi &&
+          ghost.hydro_sync_epoch != hydro_sync_epoch) {
+        ghost.boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary);
+        ghost.mutation_rights = hydro::HydroGhostMutationRights::kWritablePhysicalBoundaryScratch;
+        ghost.origin_gas_cell_id = 0U;
+        ghost.origin_rank = -1;
+        ghost.hydro_sync_epoch = 0U;
+        ghost.decomposition_epoch = 0U;
+      }
+      const std::uint32_t owner_dense_row = m_dense_row_by_geometry_row.at(ghost.owner_real_cell);
+      if (gasCellOwnerRankForLocalRow(
+              context.state,
+              owner_dense_row,
+              particle_row_by_id,
+              "hydro remote boundary discovery") != static_cast<std::uint32_t>(m_mpi_context.worldRank())) {
+        continue;
+      }
+      const std::array<double, 3> owner_center{
+          context.state.cells.center_x_comoving[owner_dense_row],
+          context.state.cells.center_y_comoving[owner_dense_row],
+          context.state.cells.center_z_comoving[owner_dense_row]};
+      const auto remote = findRemoteBoundaryAdvertisement(
+          advertisements,
+          owner_center,
+          ghost.axis,
+          ghost.side,
+          hydro_sync_epoch);
+      if (!remote.has_value()) {
+        continue;
+      }
+      const core::GasCellIdentityRecord& local_identity = gasCellIdentityRecordForLocalRow(
+          context.state,
+          owner_dense_row,
+          "hydro remote boundary discovery");
+      const std::uint64_t face_key = hydroInterfaceFaceKey(local_identity.gas_cell_id, remote->gas_cell_id, ghost.axis);
+      if (!ghost_slot_by_face_key.emplace(face_key, ghost.ghost_slot).second) {
+        throw std::runtime_error("hydro remote boundary discovery produced duplicate face keys");
+      }
+      ghost.boundary_kind = hydro::HydroBoundaryKind::kImportedMpi;
+      ghost.mutation_rights = hydro::HydroGhostMutationRights::kReadOnlyImported;
+      ghost.source_real_cell = ghost.owner_real_cell;
+      ghost.origin_gas_cell_id = remote->gas_cell_id;
+      ghost.origin_rank = remote->owner_rank;
+      ghost.hydro_sync_epoch = hydro_sync_epoch;
+      ghost.decomposition_epoch = decomposition_epoch;
+      requests.push_back(parallel::HydroGhostCellRequest{
+          .descriptor = parallel::HydroGhostCellDescriptor{
+              .gas_cell_id = remote->gas_cell_id,
+              .owner_rank = remote->owner_rank,
+              .consumer_rank = m_mpi_context.worldRank(),
+              .hydro_sync_epoch = hydro_sync_epoch,
+              .decomposition_epoch = decomposition_epoch,
+              .boundary_state_only = true},
+          .face_key = face_key,
+          .axis = hydroAxisCode(ghost.axis),
+          .side = hydroSideCode(ghost.side)});
+    }
+
+    const auto global_requests = parallel::executeBlockingHydroGhostCellRequestExchange(
+        m_mpi_context,
+        requests,
+        hydro_sync_epoch);
+    std::vector<parallel::HydroGhostCellPayloadRecord> local_payloads;
+    for (const parallel::HydroGhostCellRequest& request : global_requests) {
+      if (request.descriptor.owner_rank != m_mpi_context.worldRank()) {
+        continue;
+      }
+      const auto row = context.state.rowForGasCellId(request.descriptor.gas_cell_id);
+      if (!row.has_value()) {
+        throw std::runtime_error("hydro ghost request targeted an unknown owner gas_cell_id");
+      }
+      if (gasCellOwnerRankForLocalRow(
+              context.state,
+              *row,
+              particle_row_by_id,
+              "hydro ghost payload response") != static_cast<std::uint32_t>(m_mpi_context.worldRank())) {
+        throw std::runtime_error("hydro ghost request targeted a local non-authoritative gas cell");
+      }
+      if (*row >= m_geometry_row_by_dense_row.size()) {
+        throw std::out_of_range("hydro ghost payload response dense row is outside geometry map");
+      }
+      const hydro::HydroConservedState state = m_conserved.loadCell(m_geometry_row_by_dense_row[*row]);
+      local_payloads.push_back(parallel::HydroGhostCellPayloadRecord{
+          .descriptor = request.descriptor,
+          .face_key = request.face_key,
+          .mass_density_comoving = state.mass_density_comoving,
+          .momentum_density_x_comoving = state.momentum_density_x_comoving,
+          .momentum_density_y_comoving = state.momentum_density_y_comoving,
+          .momentum_density_z_comoving = state.momentum_density_z_comoving,
+          .total_energy_density_comoving = state.total_energy_density_comoving});
+    }
+    const auto global_payloads = parallel::executeBlockingHydroGhostCellPayloadExchange(
+        m_mpi_context,
+        local_payloads,
+        hydro_sync_epoch);
+
+    std::unordered_set<std::uint64_t> received_face_keys;
+    for (const parallel::HydroGhostCellPayloadRecord& payload : global_payloads) {
+      if (payload.descriptor.consumer_rank != m_mpi_context.worldRank()) {
+        continue;
+      }
+      const auto slot_it = ghost_slot_by_face_key.find(payload.face_key);
+      if (slot_it == ghost_slot_by_face_key.end()) {
+        ++report.stale_or_invalid_payloads;
+        continue;
+      }
+      if (!received_face_keys.insert(payload.face_key).second) {
+        throw std::runtime_error("hydro ghost payload exchange returned duplicate payload for one face");
+      }
+      hydro::HydroGhostCell& ghost = m_geometry.ghost_cells.at(slot_it->second);
+      if (payload.descriptor.gas_cell_id != ghost.origin_gas_cell_id ||
+          payload.descriptor.owner_rank != ghost.origin_rank ||
+          payload.descriptor.hydro_sync_epoch != ghost.hydro_sync_epoch ||
+          payload.descriptor.decomposition_epoch != ghost.decomposition_epoch) {
+        ++report.stale_or_invalid_payloads;
+        continue;
+      }
+      m_conserved.storeCell(ghost.ghost_cell, hydro::HydroConservedState{
+          .mass_density_comoving = payload.mass_density_comoving,
+          .momentum_density_x_comoving = payload.momentum_density_x_comoving,
+          .momentum_density_y_comoving = payload.momentum_density_y_comoving,
+          .momentum_density_z_comoving = payload.momentum_density_z_comoving,
+          .total_energy_density_comoving = payload.total_energy_density_comoving});
+    }
+    if (received_face_keys.size() != requests.size()) {
+      throw std::runtime_error("hydro remote boundary ghost refresh did not receive every requested ghost cell");
+    }
+    report.requested_cells = requests.size();
+    report.received_cells = received_face_keys.size();
+    report.imported_ghosts = received_face_keys.size();
+    report.interface_faces = requests.size();
+    report.request_bytes = static_cast<std::uint64_t>(requests.size() * sizeof(parallel::HydroGhostCellRequest));
+    report.payload_bytes =
+        static_cast<std::uint64_t>(local_payloads.size() * sizeof(parallel::HydroGhostCellPayloadRecord));
+    return report;
+  }
+
   void runProductionAmrHydroPath(core::StepContext& context) {
     double hubble_rate_code = 0.0;
     if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
@@ -4744,19 +5658,206 @@ class HydroStageCallback final : public core::IntegrationCallback {
     };
     hydro::ComovingGravityExpansionSource gravity_source;
     std::array<const hydro::HydroSourceTerm*, 1> sources{&gravity_source};
-    const amr::ProductionAmrHydroDiagnostics amr_diagnostics = amr::advanceProductionAmrHydro(
-        context.state,
-        context.active_set.cell_indices,
-        update,
-        source_context,
-        m_solver,
-        m_riemann_solver,
-        sources,
-        amr::ProductionAmrHydroOptions{
-            .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
-            .adiabatic_index = k_gamma_adiabatic,
-            .density_floor = k_density_floor,
-            .pressure_floor = k_pressure_floor});
+    const amr::ProductionAmrHydroOptions amr_options{
+        .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
+        .adiabatic_index = k_gamma_adiabatic,
+        .density_floor = k_density_floor,
+        .pressure_floor = k_pressure_floor,
+        .state_time_code = context.integrator_state.current_time_code,
+        .ghost_fill_time_code = context.integrator_state.current_time_code};
+    amr::ProductionAmrHydroDiagnostics amr_diagnostics;
+    std::size_t remote_patch_count = 0;
+    std::size_t remote_flux_register_count = 0;
+    std::size_t inbound_flux_register_count = 0;
+    if (m_mpi_context.isEnabled() && m_mpi_context.worldSize() > 1) {
+      const auto local_patch_records = buildLocalAmrPatchPayloadRecords(context.state, m_mpi_context.worldRank());
+      const auto local_cell_records = buildLocalAmrPatchCellPayloadRecords(context.state, m_mpi_context.worldRank());
+      const auto global_patch_records = parallel::executeBlockingAmrPatchPayloadExchange(
+          m_mpi_context, local_patch_records, context.integrator_state.step_index);
+      const auto global_cell_records = parallel::executeBlockingAmrPatchCellPayloadExchange(
+          m_mpi_context, local_cell_records, context.integrator_state.step_index);
+      std::unordered_map<std::uint64_t, parallel::AmrPatchPayloadRecord> patch_record_by_id;
+      std::unordered_map<std::uint64_t, int> owner_rank_by_patch_id;
+      for (const auto& record : global_patch_records) {
+        const auto [it, inserted] = patch_record_by_id.emplace(record.patch_id, record);
+        if (!inserted) {
+          throw std::runtime_error("distributed AMR hydro found duplicate patch payload records");
+        }
+        owner_rank_by_patch_id.emplace(record.patch_id, record.owner_rank);
+      }
+      std::unordered_map<std::uint64_t, std::vector<parallel::AmrPatchCellPayloadRecord>> cells_by_patch_id;
+      for (const auto& record : global_cell_records) {
+        cells_by_patch_id[record.patch_id].push_back(record);
+      }
+      std::vector<amr::DistributedAmrRemotePatch> remote_patches;
+      remote_patches.reserve(global_patch_records.size());
+      for (const auto& patch_record : global_patch_records) {
+        if (patch_record.owner_rank == m_mpi_context.worldRank()) {
+          continue;
+        }
+        auto cells_it = cells_by_patch_id.find(patch_record.patch_id);
+        if (cells_it == cells_by_patch_id.end() ||
+            cells_it->second.size() != patch_record.cell_count) {
+          throw std::runtime_error("distributed AMR hydro remote patch cell payload coverage mismatch");
+        }
+        std::sort(
+            cells_it->second.begin(),
+            cells_it->second.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.local_cell_offset < rhs.local_cell_offset; });
+        amr::DistributedAmrRemotePatch remote;
+        remote.patch = amr::PatchDescriptor{
+            .patch_id = patch_record.patch_id,
+            .parent_patch_id = patch_record.parent_patch_id,
+            .level = static_cast<std::uint8_t>(patch_record.level),
+            .morton_key = patch_record.morton_key,
+            .origin_comov = {patch_record.origin_x_comoving, patch_record.origin_y_comoving, patch_record.origin_z_comoving},
+            .extent_comov = {patch_record.extent_x_comoving, patch_record.extent_y_comoving, patch_record.extent_z_comoving},
+            .cell_dims = {patch_record.cell_dim_x, patch_record.cell_dim_y, patch_record.cell_dim_z}};
+        remote.owner_rank = patch_record.owner_rank;
+        remote.ghost_hydro_epoch = patch_record.decomposition_epoch;
+        remote.expected_ghost_hydro_epoch = patch_record.decomposition_epoch;
+        remote.gas_cell_ids.resize(patch_record.cell_count);
+        remote.conserved_cells.resize(patch_record.cell_count);
+        for (std::size_t i = 0; i < cells_it->second.size(); ++i) {
+          const auto& cell_record = cells_it->second[i];
+          if (cell_record.local_cell_offset != i || cell_record.owner_rank != patch_record.owner_rank) {
+            throw std::runtime_error("distributed AMR hydro remote patch cell payload has stale offset or owner metadata");
+          }
+          remote.gas_cell_ids[i] = cell_record.gas_cell_id;
+          remote.conserved_cells[i] = hydro::HydroCoreSolver::conservedFromPrimitive(
+              hydro::HydroPrimitiveState{
+                  .rho_comoving = cell_record.density_code,
+                  .vel_x_peculiar = cell_record.velocity_x_peculiar,
+                  .vel_y_peculiar = cell_record.velocity_y_peculiar,
+                  .vel_z_peculiar = cell_record.velocity_z_peculiar,
+                  .pressure_comoving = cell_record.pressure_code},
+              k_gamma_adiabatic);
+        }
+        remote_patches.push_back(std::move(remote));
+      }
+      remote_patch_count = remote_patches.size();
+      std::vector<amr::FluxRegisterEntry> outbound_remote_entries;
+      amr_diagnostics = amr::advanceDistributedProductionAmrHydro(
+          context.state,
+          context.active_set.cell_indices,
+          update,
+          source_context,
+          m_solver,
+          m_riemann_solver,
+          sources,
+          amr_options,
+          amr::DistributedAmrHydroExchange{
+              .local_rank = m_mpi_context.worldRank(),
+              .ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
+              .expected_ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
+              .remote_patches = remote_patches,
+              .outbound_remote_flux_registers = &outbound_remote_entries});
+      std::vector<parallel::AmrFluxRegisterPayloadRecord> local_flux_payloads;
+      local_flux_payloads.reserve(outbound_remote_entries.size());
+      for (const amr::FluxRegisterEntry& entry : outbound_remote_entries) {
+        const auto owner_it = owner_rank_by_patch_id.find(entry.coarse_patch_id);
+        if (owner_it == owner_rank_by_patch_id.end()) {
+          throw std::runtime_error("distributed AMR hydro remote reflux entry has unknown coarse patch owner");
+        }
+        parallel::AmrFluxRegisterPayloadRecord record;
+        record.register_key = entry.register_key;
+        record.coarse_patch_id = entry.coarse_patch_id;
+        record.coarse_gas_cell_id = entry.coarse_gas_cell_id;
+        record.coarse_cell_index = static_cast<std::uint64_t>(entry.coarse_cell_index);
+        record.level = entry.level;
+        record.axis = hydroAxisCode(entry.axis);
+        record.orientation = hydroSideCode(entry.orientation);
+        record.source_rank = m_mpi_context.worldRank();
+        record.owner_rank = owner_it->second;
+        record.gas_cell_identity_generation = context.state.gasCellIdentityGeneration();
+        record.patch_geometry_generation = context.state.cellIndexGeneration();
+        record.coarse_mass_flux_code = entry.coarse_face_flux_code.mass_code;
+        record.coarse_momentum_x_flux_code = entry.coarse_face_flux_code.momentum_x_code;
+        record.coarse_momentum_y_flux_code = entry.coarse_face_flux_code.momentum_y_code;
+        record.coarse_momentum_z_flux_code = entry.coarse_face_flux_code.momentum_z_code;
+        record.coarse_total_energy_flux_code = entry.coarse_face_flux_code.total_energy_code;
+        record.fine_mass_flux_code = entry.fine_face_flux_code.mass_code;
+        record.fine_momentum_x_flux_code = entry.fine_face_flux_code.momentum_x_code;
+        record.fine_momentum_y_flux_code = entry.fine_face_flux_code.momentum_y_code;
+        record.fine_momentum_z_flux_code = entry.fine_face_flux_code.momentum_z_code;
+        record.fine_total_energy_flux_code = entry.fine_face_flux_code.total_energy_code;
+        record.face_area_comov = entry.face_area_comov;
+        record.coarse_area_comov = entry.coarse_area_comov;
+        record.fine_area_comov = entry.fine_area_comov;
+        record.dt_code = entry.dt_code;
+        record.coarse_face_count = entry.coarse_face_count;
+        record.fine_face_count = entry.fine_face_count;
+        parallel::validateAmrFluxRegisterPayloadRecord(record);
+        local_flux_payloads.push_back(record);
+      }
+      const auto global_flux_payloads = parallel::executeBlockingAmrFluxRegisterPayloadExchange(
+          m_mpi_context, local_flux_payloads, context.integrator_state.step_index);
+      std::vector<amr::FluxRegisterEntry> inbound_entries;
+      std::unordered_set<std::uint64_t> inbound_keys;
+      for (const auto& payload : global_flux_payloads) {
+        if (payload.owner_rank != m_mpi_context.worldRank()) {
+          continue;
+        }
+        if (!inbound_keys.insert(payload.register_key).second) {
+          throw std::runtime_error("distributed AMR hydro received duplicate reflux register key for local owner");
+        }
+        inbound_entries.push_back(amr::FluxRegisterEntry{
+            .register_key = payload.register_key,
+            .coarse_patch_id = payload.coarse_patch_id,
+            .coarse_gas_cell_id = payload.coarse_gas_cell_id,
+            .coarse_cell_index = static_cast<std::size_t>(payload.coarse_cell_index),
+            .level = payload.level,
+            .axis = payload.axis == 0U ? hydro::HydroFaceAxis::kX : (payload.axis == 1U ? hydro::HydroFaceAxis::kY : hydro::HydroFaceAxis::kZ),
+            .orientation = payload.orientation == 0U ? hydro::HydroFaceSide::kLower : hydro::HydroFaceSide::kUpper,
+            .coarse_face_flux_code = amr::ConservedState{
+                .mass_code = payload.coarse_mass_flux_code,
+                .momentum_x_code = payload.coarse_momentum_x_flux_code,
+                .momentum_y_code = payload.coarse_momentum_y_flux_code,
+                .momentum_z_code = payload.coarse_momentum_z_flux_code,
+                .total_energy_code = payload.coarse_total_energy_flux_code},
+            .fine_face_flux_code = amr::ConservedState{
+                .mass_code = payload.fine_mass_flux_code,
+                .momentum_x_code = payload.fine_momentum_x_flux_code,
+                .momentum_y_code = payload.fine_momentum_y_flux_code,
+                .momentum_z_code = payload.fine_momentum_z_flux_code,
+                .total_energy_code = payload.fine_total_energy_flux_code},
+            .face_area_comov = payload.face_area_comov,
+            .coarse_area_comov = payload.coarse_area_comov,
+            .fine_area_comov = payload.fine_area_comov,
+            .dt_code = payload.dt_code,
+            .coarse_face_count = payload.coarse_face_count,
+            .fine_face_count = payload.fine_face_count});
+      }
+      inbound_flux_register_count = inbound_entries.size();
+      remote_flux_register_count = local_flux_payloads.size();
+      if (!inbound_entries.empty()) {
+        const auto local_descriptors = amr::buildProductionAmrPatchDescriptors(context.state);
+        const amr::RefluxDiagnostics remote_reflux = amr::applyFluxRegistersToSimulationState(
+            context.state, inbound_entries, local_descriptors, k_gamma_adiabatic);
+        amr_diagnostics.reflux.complete_register_count += remote_reflux.complete_register_count;
+        amr_diagnostics.reflux.skipped_incomplete_register_count += remote_reflux.skipped_incomplete_register_count;
+        amr_diagnostics.reflux.skipped_area_mismatch_count += remote_reflux.skipped_area_mismatch_count;
+        amr_diagnostics.reflux.skipped_missing_target_count += remote_reflux.skipped_missing_target_count;
+        amr_diagnostics.reflux.corrected_cells += remote_reflux.corrected_cells;
+        amr_diagnostics.reflux.corrected_mass_code += remote_reflux.corrected_mass_code;
+        amr_diagnostics.reflux.corrected_momentum_x_code += remote_reflux.corrected_momentum_x_code;
+        amr_diagnostics.reflux.corrected_momentum_y_code += remote_reflux.corrected_momentum_y_code;
+        amr_diagnostics.reflux.corrected_momentum_z_code += remote_reflux.corrected_momentum_z_code;
+        amr_diagnostics.reflux.corrected_total_energy_code += remote_reflux.corrected_total_energy_code;
+        amr_diagnostics.reflux.corrected_energy_code += remote_reflux.corrected_energy_code;
+        amr_diagnostics.reflux.corrected_internal_energy_code += remote_reflux.corrected_internal_energy_code;
+      }
+    } else {
+      amr_diagnostics = amr::advanceProductionAmrHydro(
+          context.state,
+          context.active_set.cell_indices,
+          update,
+          source_context,
+          m_solver,
+          m_riemann_solver,
+          sources,
+          amr_options);
+    }
     synchronizeParentParticleCompatibilityMirrors(
         context.state,
         m_current_world_rank,
@@ -4786,7 +5887,10 @@ class HydroStageCallback final : public core::IntegrationCallback {
                       {"reflux_complete_register_count", std::to_string(amr_diagnostics.reflux.complete_register_count)},
                       {"reflux_skipped_incomplete_register_count", std::to_string(amr_diagnostics.reflux.skipped_incomplete_register_count)},
                       {"reflux_skipped_area_mismatch_count", std::to_string(amr_diagnostics.reflux.skipped_area_mismatch_count)},
-                      {"reflux_skipped_missing_target_count", std::to_string(amr_diagnostics.reflux.skipped_missing_target_count)}}});
+                      {"reflux_skipped_missing_target_count", std::to_string(amr_diagnostics.reflux.skipped_missing_target_count)},
+                      {"distributed_remote_patch_count", std::to_string(remote_patch_count)},
+                      {"distributed_remote_flux_register_count", std::to_string(remote_flux_register_count)},
+                      {"distributed_inbound_flux_register_count", std::to_string(inbound_flux_register_count)}}});
     }
   }
 
@@ -4912,6 +6016,16 @@ class HydroStageCallback final : public core::IntegrationCallback {
     m_active_faces.clear();
     for (std::size_t face_index = 0; face_index < m_geometry.faces.size(); ++face_index) {
       const hydro::HydroFace& face = m_geometry.faces[face_index];
+      if (m_remote_non_authority_faces.contains(face_index)) {
+        continue;
+      }
+      if (face.ghost_cell_slot != hydro::k_invalid_ghost_cell_slot) {
+        const hydro::HydroGhostCell& ghost = m_geometry.ghost_cells.at(face.ghost_cell_slot);
+        if (ghost.boundary_kind == hydro::HydroBoundaryKind::kImportedMpi &&
+            m_current_world_rank > static_cast<std::uint32_t>(ghost.origin_rank)) {
+          continue;
+        }
+      }
       if (active_cell_lookup.contains(face.owner_cell) ||
           (face.neighbor_cell != hydro::k_invalid_cell_index && active_cell_lookup.contains(face.neighbor_cell))) {
         m_active_faces.push_back(face_index);
@@ -5059,9 +6173,11 @@ class HydroStageCallback final : public core::IntegrationCallback {
   hydro::HydroProfileEvent m_last_hydro_profile{};
   core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   SolverGhostRefreshReport m_last_ghost_refresh{};
+  HydroRemoteGhostBoundaryReport m_last_remote_ghost_boundary_report{};
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::vector<std::size_t> m_active_cells;
   std::vector<std::size_t> m_active_faces;
+  std::unordered_set<std::size_t> m_remote_non_authority_faces;
   std::optional<HydroGeometryCacheKey> m_cached_geometry_key;
 };
 
@@ -5536,15 +6652,21 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
     finalizeStateMetadata(m_frozen_config, state);
     maybeInitializeParticleSofteningFromSpeciesPolicy(state, config);
-    const auto expected_global_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    const bool restoring_from_restart = options.restart_state_override != nullptr;
+    if (restoring_from_restart) {
+      validateRestartResumeTopologyOrThrow(*options.restart_state_override, config, m_frozen_config, mpi_context);
+    } else {
+      seedParticleOwnershipFromPmSlabs(
+          state,
+          static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
+          mpi_context.worldSize(),
+          config.cosmology.box_size_x_mpc_comoving);
+      applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank(), &profiler);
+    }
+    const parallel::LocalOwnershipIdentitySummary expected_global_identity =
+        reduceLocalParticleIdentitySummary(state, mpi_context);
     const std::vector<std::uint64_t> expected_global_particle_ids(
         state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
-    seedParticleOwnershipFromPmSlabs(
-        state,
-        static_cast<std::size_t>(config.numerics.treepm_pm_grid_nx),
-        mpi_context.worldSize(),
-        config.cosmology.box_size_x_mpc_comoving);
-    applyInitialGravityAwareDecomposition(state, config, mpi_context.worldSize(), mpi_context.worldRank(), &profiler);
 
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
@@ -5610,7 +6732,6 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? std::optional<core::LambdaCdmBackground>(core::LambdaCdmBackground(background_config))
         : std::nullopt;
 
-    const bool restoring_from_restart = options.restart_state_override != nullptr;
     core::HierarchicalTimeBinScheduler scheduler(
         static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
     core::HierarchicalTimeBinScheduler gas_cell_scheduler(
@@ -5850,6 +6971,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         applyMeasuredRuntimeRebalancePlan(
             state,
             scheduler,
+            gas_cell_scheduler,
             config,
             mpi_context,
             mpi_context.worldRank(),
@@ -5930,6 +7052,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       applyMeasuredRuntimeRebalancePlan(
           state,
           scheduler,
+          gas_cell_scheduler,
           config,
           mpi_context,
           mpi_context.worldRank(),
@@ -5949,6 +7072,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     report.completed_steps = integrator_state.step_index - run_start_step_index;
     report.final_hydro_cfl_diagnostics = hydro_callback.lastHydroCflDiagnostics();
+    report.final_hydro_imported_mpi_ghosts =
+        static_cast<std::uint64_t>(hydro_callback.lastRemoteGhostBoundaryReport().imported_ghosts);
+    report.final_hydro_remote_interface_faces =
+        static_cast<std::uint64_t>(hydro_callback.lastRemoteGhostBoundaryReport().interface_faces);
+    report.final_hydro_remote_stale_payloads =
+        static_cast<std::uint64_t>(hydro_callback.lastRemoteGhostBoundaryReport().stale_or_invalid_payloads);
     report.final_state_digest = computeStateDigest(state, integrator_state);
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());

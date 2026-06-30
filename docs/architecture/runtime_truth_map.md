@@ -116,13 +116,13 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ### Cache/mirror/view classification
 
 - `SimulationState::{particles.time_bin,cells.time_bin}` is a mirror of scheduler truth during workflow execution (rebuilt from scheduler after scheduler commit).
-- In particle-bound gas states, `CellSoa::time_bin` maps through the parent gas particle scheduler entry; it is not independently authoritative when `cells.size() != particles.size()`.
+- `CellSoa::time_bin` is a gas-cell scheduler mirror keyed through `GasCellIdentityMap::gas_cell_id`; parent-particle mapping is legacy compatibility only.
 - `IntegratorState::time_bins` is metadata-level mirror and not sufficient alone to reconstruct scheduler occupancy/membership.
 
 ### Reorder/resize/migration behavior
 
 - Particle reorder/migration physically carries particle `time_bin` as a mirror with moved rows, but exact scheduler continuation requires scheduler remap/rebuild helpers keyed by stable particle identity.
-- Gas cell rebuild from gas-particle IDs carries cell `time_bin` through `GasCellMigrationRecord` as a diagnostic/compatibility mirror; scheduler identity records are required for authoritative continuation.
+- Gas-cell and AMR patch migration carries `time_bin` only as a diagnostic/compatibility mirror; gas-cell scheduler identity records keyed by `gas_cell_id` are required for authoritative continuation.
 
 ### Restart/reload behavior
 
@@ -314,12 +314,12 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 - Gas cell structural lanes: `SimulationState::cells`.
 - Hydro/cold lanes: `SimulationState::gas_cells`.
-- Identity bridge to particles: implicit mapping through `particle_species_index.globalIndices(kGas)` and particle IDs.
+- Identity authority: `SimulationState::gas_cell_identity`, keyed by stable `gas_cell_id` with optional `parent_particle_id` compatibility/provenance.
 
 ### Mutation paths
 
 - Drift callback syncs cell centers from gas particle positions.
-- Compaction/migration paths rebuild cell arrays from gas-particle ID keyed `GasCellMigrationRecord` map.
+- Production workflow compaction/migration rebuilds cell arrays from gas-cell/AMR patch payloads keyed by stable `gas_cell_id` and `patch_id`; legacy gas-particle keyed helpers are compatibility-only.
 - Host cell indices for BH/tracers remapped after rebuild.
 
 ### Read paths
@@ -558,9 +558,9 @@ Migration payloads now distinguish `has_gravity_softening_value` from `has_gravi
 
 The P0-05..P0-08 repair pass adds the following concrete runtime-truth structures:
 
-- `GasCellSidecar::gas_cell_id` and `GasCellSidecar::parent_particle_id` are the explicit gas-cell identity lanes for particle-bound gas-cell states. They are serialized in restart/checkpoint state and included in restart integrity hashing.
+- `GasCellSidecar::gas_cell_id` and `GasCellSidecar::parent_particle_id` are compatibility mirror lanes for the authoritative `GasCellIdentityMap`. They are serialized in restart/checkpoint state and included in restart integrity hashing; parent ID may be absent.
 - `ParticleSidecar::has_gravity_softening_override` is the explicit owner of per-particle softening override authority. Numeric softening values without a corresponding override bit are materialized values, not independent override truth.
 - `DerivedRuntimeConfig` is the owner for normalized-config-derived runtime constants.
 - `ActiveSetDescriptor` now carries scheduler provenance and state generation metadata; stale descriptors fail through `debugAssertActiveSetDescriptorFresh()` before solver consumption.
 
-Remaining caveat: some legacy physics/unit tests still operate standalone hydro cells without particle-bound gas identity. Those states are deliberately not promoted to the one-to-one gas-particle identity contract unless gas-particle count matches cell count and the state ownership layer refreshes identity lanes.
+Remaining caveat: some legacy physics/unit tests still operate standalone hydro cells without full workflow AMR ownership. Those states are deliberately not promoted to distributed production coverage unless the state ownership layer installs stable gas-cell identity records and validates dense-row coverage.

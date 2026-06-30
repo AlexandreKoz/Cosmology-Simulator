@@ -51,7 +51,7 @@ jobs:
           - configure_preset: mpi-hdf5-fftw-debug
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
-            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank"
+            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_pm_slab_halo_exchange_mpi_two_rank|integration_tree_pm_coupling_periodic_mpi_two_rank|integration_reference_workflow_distributed_treepm_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|integration_distributed_sfc_rebalance_mpi_two_rank|integration_distributed_sfc_rebalance_mpi_three_rank|integration_distributed_gas_cell_migration_mpi_two_rank|integration_reference_workflow_distributed_hydro_mpi_two_rank|integration_amr_distributed_remote_patch_boundary|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank|validation_phase2_mpi_gravity_four_rank"
             apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev"
             run_bench: "0"
     steps:
@@ -105,7 +105,7 @@ jobs:
       - name: Install dependencies for explicit feature-path gates
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev libfftw3-mpi-dev
+          sudo apt-get install -y g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev
       - name: Run infrastructure gate bundle
         run: bash ./scripts/ci/enforce_infra_gates.sh ci_artifacts/infrastructure_gates
       - name: Upload infrastructure gate report

@@ -152,6 +152,9 @@ Each `HydroGhostCell` records:
 Physical-boundary ghost rows are `kWritablePhysicalBoundaryScratch`: they may be filled from real-cell state before
 reconstruction, but they are not authoritative cells and are never written back to `SimulationState`. Imported MPI ghosts
 remain distinguished as `kImportedMpi` / `kReadOnlyImported`; the physical-boundary fill helper intentionally skips them.
+Imported ghosts carry the remote `origin_rank`, stable `origin_gas_cell_id`, hydro sync epoch, and gas-cell identity
+generation used as the decomposition epoch. They are valid for one hydro stage only. A later stage, migration, regrid, or
+gas-cell identity remap must rediscover and refill them before reconstruction.
 
 The fill rules are:
 
@@ -179,6 +182,15 @@ direction from row contiguity. Instead, each `HydroFace` carries:
 Missing stencil rows are treated as a zero local slope on that side, which is the deliberate boundary/degenerate-patch
 fallback. Boundary faces still use their ghost-filled `neighbor_cell` state from `appendCartesianBoundaryGhostFaces(...)`
 and `fillHydroBoundaryGhostCells(...)`.
+
+For distributed fixed-grid workflow hydro, `HydroStageCallback` can convert a physical boundary ghost face into an
+imported MPI face when compact boundary-cell geometry advertisements show an adjacent remote owner cell. The imported
+row is filled from a requested conserved payload containing only the required hydro stage fields:
+`mass_density_comoving`, all three momentum-density components, and `total_energy_density_comoving`. Face authority is
+deterministic: the lower owner rank advances the inter-rank face, writes the local owner delta, and accumulates the
+opposite-side delta in the imported ghost row. The workflow restores that read-only ghost row after the solve and sends
+the conservative delta back to the authoritative owner keyed by stable `gas_cell_id`. The higher-rank peer may import the
+same boundary state for lifecycle/diagnostic coverage, but it does not advance that interface face.
 
 The predictor CFL is axis-aware through
 `HydroReconstructionPolicy::dt_over_cell_width_code = {dt/dx, dt/dy, dt/dz}`. The legacy scalar

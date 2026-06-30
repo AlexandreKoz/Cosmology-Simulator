@@ -53,8 +53,15 @@ The restart-equivalence test `integration_restart_equivalence_amr_flux_registers
 
 - The global production scheduler does not own subcycled AMR timelines.
 - Coarse/fine ghost timing is still local and simplified.
-- MPI-distributed AMR subcycling is not implemented.
-- Restart after true MPI AMR migration is not implemented.
+- MPI-distributed synchronized AMR patch execution now has a bounded production path: owner ranks exchange
+  explicit patch geometry plus gas-cell conserved state, build transient read-only remote patch ghosts only
+  for actual adjacency, and route coarse-fine flux-register entries back to the authoritative coarse owner
+  before reflux. The old all-gathered patch/cell payload summaries remain validation/debug metadata.
+- MPI-distributed AMR subcycling and remote temporal ghost interpolation are not implemented. Distributed
+  callers that request local subcycling or temporal coarse-to-fine interpolation fail rather than reusing
+  the local temporal-history model across ranks.
+- Restart after true MPI AMR migration is limited to the existing migrated patch/gas/scheduler payload and
+  owner-local pending flux-register state. Rank-count-changing restart remains out of scope.
 - Validation remains CI/regression scale, not cross-code science validation.
 
 ## Temporal coarse-to-fine ghost histories (v18)

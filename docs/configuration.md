@@ -229,6 +229,10 @@ GPU execution contract:
 - `gpu_devices > 0` explicitly requests the CUDA PM path for CIC assignment/interpolation. The runtime validates that CUDA devices are visible and assigns ranks to devices round-robin across the requested device pool.
 - `gpu_devices` must be `>= 0`; requesting more devices than are visible is a configuration/runtime error rather than a silent fallback.
 - `deterministic_reduction`
+- `decomposition_runtime_rebalance_enabled`
+- `decomposition_debug_exact_ownership_audit` (default `false`): keep the routine runtime rebalance path on distributed compact SFC-cut metadata, but run the exact global ownership partition audit after a migration commit in debug/small MPI runs. This exact audit is read-only evidence and is not a production ownership authority.
+- `isolated_pm_root_workspace_limit_bytes` (default `268435456`): maximum rank-0 transient workspace allowed for the current isolated/open PM root-gather path. Multi-rank isolated PM is accepted only inside this explicit small-grid budget and diagnostics must not describe it as scalable.
+- `zoom_high_res_allgather_limit_bytes` (default `268435456`): maximum transient four-field high-resolution source payload allowed for the current focused zoom PM correction all-gather. Exceeding it fails before allocation/communication.
 
 Distributed-memory determinism contract (infrastructure scope):
 

@@ -39,6 +39,24 @@
       "cosmosim_harness"
     ]
   },
+  "mpi-hdf5-fftw-debug": {
+    "features": {
+      "mpi": true,
+      "hdf5": true,
+      "fftw": true,
+      "cuda": false,
+      "python": false,
+      "tests": true,
+      "benchmarks": true
+    },
+    "required_targets": [
+      "cosmosim_core",
+      "cosmosim_gravity",
+      "cosmosim_io",
+      "cosmosim_parallel",
+      "cosmosim_harness"
+    ]
+  },
   "hdf5-debug": {
     "features": {
       "mpi": false,

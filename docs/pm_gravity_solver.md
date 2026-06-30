@@ -229,6 +229,16 @@ Batching and ordering:
   particle index order, then stencil axis loop order (`x`, `y`, `z`).
 - Batched records are exchanged via `MPI_Alltoallv` as byte payloads.
 - PM solver-owned send/recv buffers are reused across solves for stable layout metadata.
+- The transport is sparse by stencil owner: only slabs touched by local particle
+  assignment/interpolation stencils receive records. The MPI implementation keeps
+  the collective all-to-all count/data fallback for completion ordering and
+  portability, but zero-count peers carry no payload.
+- Force interpolation can use the explicit slab-halo cache populated by TreePM
+  before falling back to routed request/response messages for non-neighbor
+  stencil cells.
+- Profile counters report routed density records, routed force/potential
+  requests, participating peers, force-halo cache hits, and moved bytes so scale
+  tests can distinguish neighbor/cache traffic from remote routed fallback.
 
 Receiver validation before accumulation:
 
@@ -349,6 +359,20 @@ Conventions in this stage:
 - **Split consistency:** Tree short-range residual keeps the complementary Gaussian real-space factor `erfc(r/(2r_s))`, so long+short composes to Newtonian force before explicit cutoff.
 - **Self term policy:** kernel value at `r=0` is set to zero in the PM convolution.
 
-Current stage limitations:
-- Isolated PM is restricted to **single-rank** runtime (`mpi_ranks_expected=1`). Multi-rank isolated PM fails hard.
-- Distributed isolated/open PM is still open work; this stage does not claim distributed isolated maturity.
+Current stage limitations and safety policy:
+- Single-rank isolated PM remains the normal supported path.
+- Multi-rank isolated/open PM uses a root-gather/root-scatter implementation only
+  as a bounded small-grid compatibility path. It is correct inside the configured
+  envelope but is not a scalable distributed isolated solver.
+- The root-owned transient workspace is estimated before `MPI_Gatherv`, padded
+  convolution workspace allocation, or field `MPI_Scatterv`. The guard names the
+  grid shape, rank count, estimated root bytes, configured limit, selected route
+  (`root_gather_scatter`), and policy (`bounded_small_grid_only`).
+- Configure the envelope with
+  `parallel.isolated_pm_root_workspace_limit_bytes`; exceeding it fails on all
+  ranks before dangerous root allocation/communication.
+- Focused zoom long-range correction currently gathers high-resolution source
+  coordinates/masses across ranks for the correction solve. It is similarly
+  bounded by `parallel.zoom_high_res_allgather_limit_bytes` and reports the
+  gathered bytes/limit in TreePM diagnostics; it must not be described as a
+  production-scale source transport.

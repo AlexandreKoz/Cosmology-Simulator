@@ -56,10 +56,24 @@ struct PmSolveOptions {
   PmBoundaryCondition boundary_condition = PmBoundaryCondition::kPeriodic;
   // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
   double tree_pm_split_scale_comoving = 0.0;
+  // Root-owned transient workspace budget for the isolated/open gathered PM path.
+  // The implementation is correct inside this envelope but is not a scalable
+  // distributed isolated PM solver.
+  std::uint64_t isolated_open_root_workspace_limit_bytes = 256ULL * 1024ULL * 1024ULL;
 };
 
 struct PmProfileEvent {
   std::uint64_t bytes_moved = 0;
+  std::uint64_t routed_density_records = 0;
+  std::uint64_t routed_force_requests = 0;
+  std::uint64_t routed_potential_requests = 0;
+  std::uint64_t routed_density_peer_count = 0;
+  std::uint64_t routed_force_peer_count = 0;
+  std::uint64_t routed_potential_peer_count = 0;
+  std::uint64_t force_halo_cache_hits = 0;
+  std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
+  std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
+  std::uint64_t isolated_open_gather_bytes = 0;
   double assign_ms = 0.0;
   double fft_forward_ms = 0.0;
   double poisson_ms = 0.0;

@@ -185,6 +185,20 @@ struct RuntimeRebalancePlan {
   std::vector<AmrPatchOwnershipUpdate> amr_patch_ownership_updates;
   double migrated_load = 0.0;
   double migrated_load_fraction = 0.0;
+  std::vector<std::uint64_t> sfc_cut_keys;
+  std::vector<std::uint64_t> sfc_cut_entity_ids;
+  std::uint64_t local_entities_considered = 0;
+  std::uint64_t global_entities_considered = 0;
+  std::uint64_t local_entities_moved = 0;
+  std::uint64_t global_entities_moved = 0;
+  std::uint64_t local_bytes_moved = 0;
+  std::uint64_t global_bytes_moved = 0;
+  std::uint64_t local_control_bytes = 0;
+  std::uint64_t global_control_bytes = 0;
+  std::uint64_t peak_temporary_bytes = 0;
+  double cut_displacement_fraction = 0.0;
+  bool used_distributed_sfc_cuts = false;
+  bool exact_debug_audit_enabled = false;
 };
 
 [[nodiscard]] LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
@@ -193,6 +207,12 @@ struct RuntimeRebalancePlan {
 
 [[nodiscard]] RuntimeRebalancePlan buildRuntimeRebalancePlan(
     std::span<const DecompositionItem> items,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config);
+
+[[nodiscard]] RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
+    const MpiContext& mpi_context,
+    std::span<const DecompositionItem> local_items,
     const DecompositionConfig& decomposition_config,
     const RuntimeRebalanceConfig& rebalance_config);
 
@@ -528,9 +548,11 @@ struct DistributedRestartState {
 };
 
 struct DistributedRestartCompatibilityReport {
+  bool supported_schema_match = true;
   bool world_size_match = true;
   bool pm_grid_shape_match = true;
   bool pm_decomposition_mode_match = true;
+  bool pm_slab_table_shape_match = true;
   bool pm_local_slab_match = true;
   bool pm_cadence_steps_match = true;
   bool gravity_kick_state_match = true;
@@ -538,8 +560,9 @@ struct DistributedRestartCompatibilityReport {
   std::vector<std::string> mismatch_messages;
 
   [[nodiscard]] bool compatible() const noexcept {
-    return world_size_match && pm_grid_shape_match && pm_decomposition_mode_match && pm_local_slab_match &&
-        pm_cadence_steps_match && gravity_kick_state_match && long_range_field_state_match;
+    return supported_schema_match && world_size_match && pm_grid_shape_match && pm_decomposition_mode_match &&
+        pm_slab_table_shape_match && pm_local_slab_match && pm_cadence_steps_match && gravity_kick_state_match &&
+        long_range_field_state_match;
   }
 };
 
@@ -603,7 +626,25 @@ struct HydroGhostCellDescriptor {
   int owner_rank = 0;
   int consumer_rank = 0;
   std::uint64_t hydro_sync_epoch = 0;
+  std::uint64_t decomposition_epoch = 0;
   bool boundary_state_only = true;
+};
+
+struct HydroGhostCellRequest {
+  HydroGhostCellDescriptor descriptor{};
+  std::uint64_t face_key = 0;
+  std::uint8_t axis = 0;
+  std::uint8_t side = 0;
+};
+
+struct HydroGhostCellPayloadRecord {
+  HydroGhostCellDescriptor descriptor{};
+  std::uint64_t face_key = 0;
+  double mass_density_comoving = 0.0;
+  double momentum_density_x_comoving = 0.0;
+  double momentum_density_y_comoving = 0.0;
+  double momentum_density_z_comoving = 0.0;
+  double total_energy_density_comoving = 0.0;
 };
 
 struct AmrPatchExchangeDescriptor {
@@ -616,10 +657,22 @@ struct AmrPatchExchangeDescriptor {
 
 struct AmrPatchPayloadRecord {
   std::uint64_t patch_id = 0;
+  std::uint64_t parent_patch_id = 0;
+  std::uint64_t morton_key = 0;
   int owner_rank = 0;
   std::uint32_t level = 0;
   std::uint32_t first_cell = 0;
   std::uint32_t cell_count = 0;
+  double origin_x_comoving = 0.0;
+  double origin_y_comoving = 0.0;
+  double origin_z_comoving = 0.0;
+  double extent_x_comoving = 0.0;
+  double extent_y_comoving = 0.0;
+  double extent_z_comoving = 0.0;
+  std::uint16_t cell_dim_x = 0;
+  std::uint16_t cell_dim_y = 0;
+  std::uint16_t cell_dim_z = 0;
+  std::uint64_t decomposition_epoch = 0;
   double cell_mass_sum_code = 0.0;
   double gas_internal_energy_sum_code = 0.0;
 };
@@ -649,6 +702,9 @@ struct AmrPatchCellPayloadRecord {
   std::uint32_t time_bin = 0;
   std::uint64_t gas_cell_id = 0;
   std::uint64_t parent_particle_id = 0;
+  double velocity_x_peculiar = 0.0;
+  double velocity_y_peculiar = 0.0;
+  double velocity_z_peculiar = 0.0;
   double density_code = 0.0;
   double pressure_code = 0.0;
   double internal_energy_code = 0.0;
@@ -656,13 +712,46 @@ struct AmrPatchCellPayloadRecord {
   double sound_speed_code = 0.0;
 };
 
+struct AmrFluxRegisterPayloadRecord {
+  std::uint64_t register_key = 0;
+  std::uint64_t coarse_patch_id = 0;
+  std::uint64_t coarse_gas_cell_id = 0;
+  std::uint64_t coarse_cell_index = 0;
+  std::uint8_t level = 0;
+  std::uint8_t axis = 0;
+  std::uint8_t orientation = 0;
+  int source_rank = 0;
+  int owner_rank = 0;
+  std::uint64_t gas_cell_identity_generation = 0;
+  std::uint64_t patch_geometry_generation = 0;
+  double coarse_mass_flux_code = 0.0;
+  double coarse_momentum_x_flux_code = 0.0;
+  double coarse_momentum_y_flux_code = 0.0;
+  double coarse_momentum_z_flux_code = 0.0;
+  double coarse_total_energy_flux_code = 0.0;
+  double fine_mass_flux_code = 0.0;
+  double fine_momentum_x_flux_code = 0.0;
+  double fine_momentum_y_flux_code = 0.0;
+  double fine_momentum_z_flux_code = 0.0;
+  double fine_total_energy_flux_code = 0.0;
+  double face_area_comov = 0.0;
+  double coarse_area_comov = 0.0;
+  double fine_area_comov = 0.0;
+  double dt_code = 0.0;
+  std::uint32_t coarse_face_count = 0;
+  std::uint32_t fine_face_count = 0;
+};
+
 void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descriptor);
 void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor);
 void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet);
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor);
+void validateHydroGhostCellRequest(const HydroGhostCellRequest& request);
+void validateHydroGhostCellPayloadRecord(const HydroGhostCellPayloadRecord& record);
 void validateAmrPatchExchangeDescriptor(const AmrPatchExchangeDescriptor& descriptor);
 void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record);
 void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record);
+void validateAmrFluxRegisterPayloadRecord(const AmrFluxRegisterPayloadRecord& record);
 void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCorrectionRecord& record);
 
 [[nodiscard]] std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
@@ -684,9 +773,24 @@ void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCo
     std::span<const AmrPatchCellPayloadRecord> local_records,
     std::uint64_t exchange_sequence = 0);
 
+[[nodiscard]] std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrFluxRegisterPayloadRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
 [[nodiscard]] std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
     const MpiContext& mpi_context,
     std::span<const HydroConservativeFluxCorrectionRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] std::vector<HydroGhostCellRequest> executeBlockingHydroGhostCellRequestExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroGhostCellRequest> local_requests,
+    std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] std::vector<HydroGhostCellPayloadRecord> executeBlockingHydroGhostCellPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroGhostCellPayloadRecord> local_records,
     std::uint64_t exchange_sequence = 0);
 
 struct PmSlabHaloExchangeResult {

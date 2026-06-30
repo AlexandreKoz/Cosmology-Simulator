@@ -37,6 +37,7 @@ struct TreePmOptions {
   double zoom_region_radius_comoving = 0.0;
   double zoom_contamination_radius_comoving = 0.0;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+  std::uint64_t zoom_high_res_allgather_limit_bytes = 256ULL * 1024ULL * 1024ULL;
 };
 
 struct TreePmDiagnostics {
@@ -69,6 +70,8 @@ struct TreePmDiagnostics {
   std::uint64_t zoom_high_res_source_count = 0;
   std::uint64_t zoom_low_res_source_count = 0;
   std::uint64_t zoom_low_res_contamination_count = 0;
+  std::uint64_t zoom_high_res_allgather_bytes = 0;
+  std::uint64_t zoom_high_res_allgather_limit_bytes = 0;
   double zoom_low_res_contamination_mass_code = 0.0;
   double force_l2_pm_global = 0.0;
   double force_l2_pm_zoom_correction = 0.0;

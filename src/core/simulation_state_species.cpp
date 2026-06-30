@@ -572,7 +572,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     this->requireGasCellIdentityMapCoversDenseRows("commitParticleMigration");
   }
 
-  auto require_inbound_sidecar_contract = [destination_expects_softening_value](
+  auto require_inbound_sidecar_contract = [destination_expects_softening_value, &commit](
                                            const ParticleMigrationRecord& inbound) {
     if (!isValidSpeciesTag(inbound.species_tag)) {
       throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
@@ -586,6 +586,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     if (inbound.has_gas_cell_fields && species != ParticleSpecies::kGas) {
       throw std::invalid_argument(
           "commitParticleMigration: inbound gas-cell hydro fields do not match species tag");
+    }
+    if (commit.preserve_gas_cell_state && inbound.has_gas_cell_fields) {
+      throw std::invalid_argument(
+          "commitParticleMigration: gas-cell payloads are forbidden when preserve_gas_cell_state is set");
     }
     if (inbound.has_gas_cell_fields) {
       requireValidGasCellMigrationFields(inbound.gas_cell_fields, "commitParticleMigration");
@@ -773,7 +777,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   CellSoa rebuilt_cells;
   GasCellSidecar rebuilt_gas_cells;
   std::vector<std::uint32_t> old_cell_to_new(cells.size(), kInvalidGasCellRow);
-  const bool rebuild_gas_state = state_has_gas_state || has_inbound_gas_cell_fields;
+  const bool rebuild_gas_state =
+      !commit.preserve_gas_cell_state && (state_has_gas_state || has_inbound_gas_cell_fields);
   if (rebuild_gas_state) {
     std::unordered_set<std::uint64_t> removed_particle_ids;
     removed_particle_ids.reserve(particle_count);
@@ -1313,6 +1318,18 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
     }
     if (patches.owning_rank[patch_index] != static_cast<std::uint32_t>(commit.world_rank)) {
       throw std::invalid_argument("commitAmrPatchMigration: outbound patch is not owned by committing rank");
+    }
+    remove_patch[patch_index] = 1U;
+  }
+  for (const std::uint32_t patch_index : commit.stale_local_ghost_patch_indices) {
+    if (patch_index >= patches.size()) {
+      throw std::out_of_range("commitAmrPatchMigration: stale ghost patch index is out of range");
+    }
+    if (remove_patch[patch_index] != 0U) {
+      throw std::invalid_argument("commitAmrPatchMigration: duplicate patch removal");
+    }
+    if (patches.owning_rank[patch_index] == static_cast<std::uint32_t>(commit.world_rank)) {
+      throw std::invalid_argument("commitAmrPatchMigration: stale ghost patch is owned by committing rank");
     }
     remove_patch[patch_index] = 1U;
   }

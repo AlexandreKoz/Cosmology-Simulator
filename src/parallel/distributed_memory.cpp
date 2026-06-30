@@ -140,6 +140,34 @@ namespace {
   return (item.kind == DecompositionEntityKind::kParticle) ? 1.0 : std::max(1.0, components.rawTotal());
 }
 
+[[nodiscard]] std::uint64_t sfcKeyForItem(const DecompositionItem& item, const DecompositionConfig& config) {
+  const std::uint32_t qx = quantize10bit(item.x_comov, config.domain_x_min_comov, config.domain_x_max_comov);
+  const std::uint32_t qy = quantize10bit(item.y_comov, config.domain_y_min_comov, config.domain_y_max_comov);
+  const std::uint32_t qz = quantize10bit(item.z_comov, config.domain_z_min_comov, config.domain_z_max_comov);
+  return mortonKey3d(qx, qy, qz);
+}
+
+struct SfcCutPoint {
+  std::uint64_t key = 0;
+  std::uint64_t entity_id = 0;
+};
+
+[[nodiscard]] bool lessSfcPoint(const SfcCutPoint& lhs, const SfcCutPoint& rhs) noexcept {
+  if (lhs.key != rhs.key) {
+    return lhs.key < rhs.key;
+  }
+  return lhs.entity_id < rhs.entity_id;
+}
+
+[[nodiscard]] int ownerForSfcPoint(
+    const SfcCutPoint point,
+    std::span<const SfcCutPoint> cuts,
+    int world_size) {
+  const auto it = std::lower_bound(cuts.begin(), cuts.end(), point, lessSfcPoint);
+  const auto rank = static_cast<int>(std::distance(cuts.begin(), it));
+  return std::min(std::max(rank, 0), std::max(world_size - 1, 0));
+}
+
 void validateComponentWeights(const DecompositionWeightCoefficients& weights) {
   if (weights.particle_count < 0.0 || weights.gas_cell < 0.0 || weights.tree_interaction < 0.0 ||
       weights.pm_mesh < 0.0 || weights.amr_patch < 0.0 || weights.active_fraction < 0.0 ||
@@ -361,12 +389,9 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
 
   std::vector<KeyedItem> keyed(items.size());
   for (std::size_t i = 0; i < items.size(); ++i) {
-    const std::uint32_t qx = quantize10bit(items[i].x_comov, config.domain_x_min_comov, config.domain_x_max_comov);
-    const std::uint32_t qy = quantize10bit(items[i].y_comov, config.domain_y_min_comov, config.domain_y_max_comov);
-    const std::uint32_t qz = quantize10bit(items[i].z_comov, config.domain_z_min_comov, config.domain_z_max_comov);
     keyed[i] = KeyedItem{
         .index = i,
-        .morton_key = mortonKey3d(qx, qy, qz),
+        .morton_key = sfcKeyForItem(items[i], config),
         .weighted_load = weightedLoad(items[i], config),
         .components = effectiveWorkComponents(items[i]),
     };
@@ -688,6 +713,314 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
   rebalance.migrated_load_fraction = (total_load > 0.0) ? (rebalance.migrated_load / total_load) : 0.0;
   rebalance.reason = load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
       (load_imbalanced ? "load_imbalance" : "memory_imbalance");
+  return rebalance;
+}
+
+RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
+    const MpiContext& mpi_context,
+    std::span<const DecompositionItem> local_items,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config) {
+  if (rebalance_config.world_size <= 0 || decomposition_config.world_size != rebalance_config.world_size ||
+      mpi_context.worldSize() != rebalance_config.world_size) {
+    throw std::invalid_argument("distributed runtime rebalance world sizes must agree");
+  }
+  if (rebalance_config.imbalance_trigger_ratio < 1.0 || rebalance_config.memory_trigger_ratio < 1.0 ||
+      rebalance_config.max_migrated_load_fraction < 0.0 || rebalance_config.max_migrated_load_fraction > 1.0) {
+    throw std::invalid_argument("distributed runtime rebalance thresholds are invalid");
+  }
+  if (mpi_context.worldSize() == 1) {
+    RuntimeRebalancePlan serial = buildRuntimeRebalancePlan(local_items, decomposition_config, rebalance_config);
+    serial.used_distributed_sfc_cuts = false;
+    serial.local_entities_considered = static_cast<std::uint64_t>(local_items.size());
+    serial.global_entities_considered = static_cast<std::uint64_t>(local_items.size());
+    return serial;
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("distributed runtime rebalance requires MPI when world_size > 1");
+  }
+
+  struct LocalKeyedItem {
+    std::size_t index = 0;
+    SfcCutPoint point{};
+    double weighted_load = 0.0;
+    DecompositionWorkComponents components{};
+  };
+  struct CompactCutSample {
+    std::uint64_t key = 0;
+    std::uint64_t entity_id = 0;
+    double represented_load = 0.0;
+  };
+  static_assert(std::is_trivially_copyable_v<CompactCutSample>);
+
+  std::vector<LocalKeyedItem> keyed(local_items.size());
+  for (std::size_t i = 0; i < local_items.size(); ++i) {
+    if (local_items[i].current_owner_rank < 0 || local_items[i].current_owner_rank >= decomposition_config.world_size) {
+      throw std::invalid_argument("distributed decomposition item current_owner_rank is outside world size");
+    }
+    keyed[i] = LocalKeyedItem{
+        .index = i,
+        .point = SfcCutPoint{.key = sfcKeyForItem(local_items[i], decomposition_config),
+                             .entity_id = local_items[i].entity_id},
+        .weighted_load = weightedLoad(local_items[i], decomposition_config),
+        .components = effectiveWorkComponents(local_items[i]),
+    };
+  }
+  std::stable_sort(keyed.begin(), keyed.end(), [](const LocalKeyedItem& lhs, const LocalKeyedItem& rhs) {
+    return lessSfcPoint(lhs.point, rhs.point);
+  });
+
+  constexpr std::size_t k_samples_per_rank = 256U;
+  std::vector<CompactCutSample> local_samples;
+  if (!keyed.empty()) {
+    const std::size_t sample_count = std::min(k_samples_per_rank, keyed.size());
+    local_samples.reserve(sample_count);
+    for (std::size_t sample = 0; sample < sample_count; ++sample) {
+      const std::size_t begin = sample * keyed.size() / sample_count;
+      const std::size_t end = (sample + 1U) * keyed.size() / sample_count;
+      double bucket_load = 0.0;
+      for (std::size_t pos = begin; pos < end; ++pos) {
+        bucket_load += keyed[pos].weighted_load;
+      }
+      const LocalKeyedItem& boundary = keyed[end - 1U];
+      local_samples.push_back(CompactCutSample{
+          .key = boundary.point.key,
+          .entity_id = boundary.point.entity_id,
+          .represented_load = bucket_load,
+      });
+    }
+  }
+
+  std::vector<CompactCutSample> global_samples;
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (local_samples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / sizeof(CompactCutSample))) {
+    throw std::overflow_error("distributed rebalance local cut sample byte count exceeds MPI int range");
+  }
+  const int local_sample_bytes = static_cast<int>(local_samples.size() * sizeof(CompactCutSample));
+  std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
+  MPI_Allgather(&local_sample_bytes, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  std::vector<int> displacements(recv_counts.size(), 0);
+  int total_sample_bytes = 0;
+  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
+    if (recv_counts[rank] < 0 || recv_counts[rank] % static_cast<int>(sizeof(CompactCutSample)) != 0) {
+      throw std::runtime_error("distributed rebalance received invalid cut sample byte count");
+    }
+    displacements[rank] = total_sample_bytes;
+    if (recv_counts[rank] > std::numeric_limits<int>::max() - total_sample_bytes) {
+      throw std::overflow_error("distributed rebalance cut sample exchange exceeds MPI int range");
+    }
+    total_sample_bytes += recv_counts[rank];
+  }
+  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_sample_bytes));
+  MPI_Allgatherv(
+      local_samples.data(),
+      local_sample_bytes,
+      MPI_BYTE,
+      recv_bytes.data(),
+      recv_counts.data(),
+      displacements.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  global_samples.resize(static_cast<std::size_t>(total_sample_bytes) / sizeof(CompactCutSample));
+  if (!global_samples.empty()) {
+    std::memcpy(global_samples.data(), recv_bytes.data(), recv_bytes.size());
+  }
+#else
+  throw std::runtime_error("distributed runtime rebalance requires an MPI-enabled build");
+#endif
+
+  std::sort(global_samples.begin(), global_samples.end(), [](const CompactCutSample& lhs, const CompactCutSample& rhs) {
+    return lessSfcPoint(SfcCutPoint{.key = lhs.key, .entity_id = lhs.entity_id},
+                        SfcCutPoint{.key = rhs.key, .entity_id = rhs.entity_id});
+  });
+
+  const double global_total_load = mpi_context.allreduceSumDouble(std::accumulate(
+      keyed.begin(), keyed.end(), 0.0, [](double acc, const LocalKeyedItem& item) { return acc + item.weighted_load; }));
+  const std::uint64_t global_entity_count =
+      mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(local_items.size()));
+  std::vector<SfcCutPoint> cuts;
+  if (!global_samples.empty() && global_total_load > 0.0) {
+    const double target_per_rank = global_total_load / static_cast<double>(mpi_context.worldSize());
+    double cumulative_sample_load = 0.0;
+    std::size_t next_cut_rank = 1U;
+    for (const CompactCutSample& sample : global_samples) {
+      cumulative_sample_load += std::max(0.0, sample.represented_load);
+      if (next_cut_rank < static_cast<std::size_t>(mpi_context.worldSize()) &&
+          cumulative_sample_load >= target_per_rank * static_cast<double>(next_cut_rank)) {
+        cuts.push_back(SfcCutPoint{.key = sample.key, .entity_id = sample.entity_id});
+        ++next_cut_rank;
+      }
+    }
+  }
+  while (cuts.size() + 1U < static_cast<std::size_t>(mpi_context.worldSize())) {
+    const SfcCutPoint final_point = global_samples.empty()
+        ? SfcCutPoint{}
+        : SfcCutPoint{.key = global_samples.back().key, .entity_id = global_samples.back().entity_id};
+    cuts.push_back(final_point);
+  }
+
+  RuntimeRebalancePlan rebalance;
+  rebalance.used_distributed_sfc_cuts = true;
+  rebalance.local_entities_considered = static_cast<std::uint64_t>(local_items.size());
+  rebalance.global_entities_considered = global_entity_count;
+  rebalance.target_decomposition.owning_rank_by_item.assign(local_items.size(), 0);
+  rebalance.target_decomposition.sorted_indices.reserve(local_items.size());
+  rebalance.target_decomposition.ranges_by_rank.assign(static_cast<std::size_t>(mpi_context.worldSize()), RankRange{});
+  for (const SfcCutPoint cut : cuts) {
+    rebalance.sfc_cut_keys.push_back(cut.key);
+    rebalance.sfc_cut_entity_ids.push_back(cut.entity_id);
+  }
+
+  auto zero_metrics = [&]() {
+    LoadBalanceMetrics metrics;
+    const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
+    metrics.weighted_load_by_rank.assign(rank_count, 0.0);
+    metrics.memory_bytes_by_rank.assign(rank_count, 0ULL);
+    metrics.owned_particles_by_rank.assign(rank_count, 0ULL);
+    metrics.active_targets_by_rank.assign(rank_count, 0ULL);
+    metrics.remote_tree_interactions_by_rank.assign(rank_count, 0ULL);
+    metrics.particle_count_cost_by_rank.assign(rank_count, 0.0);
+    metrics.gas_cell_cost_by_rank.assign(rank_count, 0.0);
+    metrics.tree_interaction_cost_by_rank.assign(rank_count, 0.0);
+    metrics.pm_mesh_cost_by_rank.assign(rank_count, 0.0);
+    metrics.amr_patch_cost_by_rank.assign(rank_count, 0.0);
+    metrics.active_fraction_cost_by_rank.assign(rank_count, 0.0);
+    metrics.memory_pressure_cost_by_rank.assign(rank_count, 0.0);
+    metrics.gpu_occupancy_cost_by_rank.assign(rank_count, 0.0);
+    metrics.generic_work_cost_by_rank.assign(rank_count, 0.0);
+    return metrics;
+  };
+  auto accumulate_item = [&](LoadBalanceMetrics& metrics, std::size_t rank, const DecompositionItem& item) {
+    metrics.weighted_load_by_rank[rank] += weightedLoad(item, decomposition_config);
+    metrics.memory_bytes_by_rank[rank] += item.memory_bytes;
+    if (item.kind == DecompositionEntityKind::kParticle) {
+      ++metrics.owned_particles_by_rank[rank];
+    }
+    metrics.active_targets_by_rank[rank] += item.active_target_count_recent;
+    metrics.remote_tree_interactions_by_rank[rank] += item.remote_tree_interactions_recent;
+    addWorkComponentsToMetrics(metrics, rank, effectiveWorkComponents(item), 1.0);
+  };
+  auto finalize_metrics = [](LoadBalanceMetrics& metrics) {
+    const auto max_load_it = std::max_element(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end());
+    metrics.max_weighted_load = (max_load_it == metrics.weighted_load_by_rank.end()) ? 0.0 : *max_load_it;
+    metrics.mean_weighted_load = metrics.weighted_load_by_rank.empty()
+        ? 0.0
+        : (std::accumulate(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end(), 0.0) /
+           static_cast<double>(metrics.weighted_load_by_rank.size()));
+    metrics.weighted_imbalance_ratio =
+        (metrics.mean_weighted_load > 0.0) ? (metrics.max_weighted_load / metrics.mean_weighted_load) : 0.0;
+    metrics.total_memory_bytes = std::accumulate(metrics.memory_bytes_by_rank.begin(), metrics.memory_bytes_by_rank.end(), 0ULL);
+    const auto max_mem_it = std::max_element(metrics.memory_bytes_by_rank.begin(), metrics.memory_bytes_by_rank.end());
+    metrics.max_memory_bytes = (max_mem_it == metrics.memory_bytes_by_rank.end()) ? 0ULL : *max_mem_it;
+    const double mean_memory = metrics.memory_bytes_by_rank.empty()
+        ? 0.0
+        : static_cast<double>(metrics.total_memory_bytes) / static_cast<double>(metrics.memory_bytes_by_rank.size());
+    metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? static_cast<double>(metrics.max_memory_bytes) / mean_memory : 0.0;
+  };
+
+  LoadBalanceMetrics local_current = zero_metrics();
+  LoadBalanceMetrics local_target = zero_metrics();
+  std::uint64_t local_moved_entities = 0;
+  std::uint64_t local_moved_bytes = 0;
+  double local_migrated_load = 0.0;
+  for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
+    const LocalKeyedItem& entry = keyed[sorted_pos];
+    const DecompositionItem& item = local_items[entry.index];
+    rebalance.target_decomposition.sorted_indices.push_back(entry.index);
+    const int new_owner = ownerForSfcPoint(entry.point, cuts, mpi_context.worldSize());
+    rebalance.target_decomposition.owning_rank_by_item[entry.index] = new_owner;
+    accumulate_item(local_current, static_cast<std::size_t>(item.current_owner_rank), item);
+    accumulate_item(local_target, static_cast<std::size_t>(new_owner), item);
+    if (item.current_owner_rank != new_owner) {
+      ++local_moved_entities;
+      local_moved_bytes += item.memory_bytes;
+      local_migrated_load += entry.weighted_load;
+      if (item.kind == DecompositionEntityKind::kParticle && rebalance_config.allow_particle_migration) {
+        rebalance.particle_migrations.push_back(ParticleMigrationIntent{
+            .particle_id = item.entity_id,
+            .item_index = entry.index,
+            .old_owner_rank = item.current_owner_rank,
+            .new_owner_rank = new_owner,
+            .work_units = entry.weighted_load,
+        });
+      } else if (item.kind == DecompositionEntityKind::kAmrPatch && rebalance_config.allow_amr_patch_reassignment) {
+        rebalance.amr_patch_ownership_updates.push_back(AmrPatchOwnershipUpdate{
+            .patch_id = item.entity_id,
+            .old_owner_rank = item.current_owner_rank,
+            .new_owner_rank = new_owner,
+        });
+      }
+    }
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  auto allreduce_double_vector = [](std::vector<double>& values) {
+    std::vector<double> reduced(values.size(), 0.0);
+    MPI_Allreduce(values.data(), reduced.data(), static_cast<int>(values.size()), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    values = std::move(reduced);
+  };
+  auto allreduce_uint64_vector = [](std::vector<std::uint64_t>& values) {
+    std::vector<std::uint64_t> reduced(values.size(), 0ULL);
+    MPI_Allreduce(values.data(), reduced.data(), static_cast<int>(values.size()), MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    values = std::move(reduced);
+  };
+  auto reduce_metrics = [&](LoadBalanceMetrics& metrics) {
+    allreduce_double_vector(metrics.weighted_load_by_rank);
+    allreduce_uint64_vector(metrics.memory_bytes_by_rank);
+    allreduce_uint64_vector(metrics.owned_particles_by_rank);
+    allreduce_uint64_vector(metrics.active_targets_by_rank);
+    allreduce_uint64_vector(metrics.remote_tree_interactions_by_rank);
+    allreduce_double_vector(metrics.particle_count_cost_by_rank);
+    allreduce_double_vector(metrics.gas_cell_cost_by_rank);
+    allreduce_double_vector(metrics.tree_interaction_cost_by_rank);
+    allreduce_double_vector(metrics.pm_mesh_cost_by_rank);
+    allreduce_double_vector(metrics.amr_patch_cost_by_rank);
+    allreduce_double_vector(metrics.active_fraction_cost_by_rank);
+    allreduce_double_vector(metrics.memory_pressure_cost_by_rank);
+    allreduce_double_vector(metrics.gpu_occupancy_cost_by_rank);
+    allreduce_double_vector(metrics.generic_work_cost_by_rank);
+    finalize_metrics(metrics);
+  };
+  reduce_metrics(local_current);
+  reduce_metrics(local_target);
+#endif
+  rebalance.current_metrics = std::move(local_current);
+  rebalance.target_decomposition.metrics = std::move(local_target);
+
+  rebalance.local_entities_moved = local_moved_entities;
+  rebalance.global_entities_moved = mpi_context.allreduceSumUint64(local_moved_entities);
+  rebalance.local_bytes_moved = local_moved_bytes;
+  rebalance.global_bytes_moved = mpi_context.allreduceSumUint64(local_moved_bytes);
+  rebalance.migrated_load = mpi_context.allreduceSumDouble(local_migrated_load);
+  rebalance.migrated_load_fraction = (global_total_load > 0.0) ? rebalance.migrated_load / global_total_load : 0.0;
+  rebalance.local_control_bytes = static_cast<std::uint64_t>(local_samples.size() * sizeof(CompactCutSample));
+  rebalance.global_control_bytes = mpi_context.allreduceSumUint64(rebalance.local_control_bytes);
+  rebalance.peak_temporary_bytes = static_cast<std::uint64_t>(
+      keyed.capacity() * sizeof(LocalKeyedItem) + local_samples.capacity() * sizeof(CompactCutSample) +
+      global_samples.capacity() * sizeof(CompactCutSample));
+  rebalance.cut_displacement_fraction =
+      (global_entity_count > 0U) ? static_cast<double>(rebalance.global_entities_moved) / static_cast<double>(global_entity_count) : 0.0;
+
+  const bool load_imbalanced =
+      rebalance.current_metrics.weighted_imbalance_ratio >= rebalance_config.imbalance_trigger_ratio;
+  const bool memory_imbalanced =
+      rebalance.current_metrics.memory_imbalance_ratio >= rebalance_config.memory_trigger_ratio;
+  if (global_entity_count == 0U) {
+    rebalance.reason = "empty_decomposition";
+  } else if (!load_imbalanced && !memory_imbalanced) {
+    rebalance.reason = "below_rebalance_threshold";
+  } else if (rebalance.migrated_load_fraction > rebalance_config.max_migrated_load_fraction &&
+             rebalance_config.max_migrated_load_fraction < 1.0) {
+    rebalance.reason = "migration_fraction_limited";
+  } else {
+    rebalance.reason = load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
+        (load_imbalanced ? "load_imbalance" : "memory_imbalance");
+    rebalance.should_rebalance =
+        rebalance.global_entities_moved > 0U &&
+        (!rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty() ||
+         mpi_context.allreduceSumUint64(
+             (!rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty()) ? 1ULL : 0ULL) > 0ULL);
+  }
   return rebalance;
 }
 
@@ -1611,6 +1944,15 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
       throw std::runtime_error("restart decode missing ownership entry");
     }
   }
+  for (std::size_t index = 0; index < state.owning_rank_by_item.size(); ++index) {
+    const int rank = state.owning_rank_by_item[index];
+    if (rank < 0 || rank >= state.world_size) {
+      throw std::invalid_argument(
+          "restart ownership entry rank is outside world_size at item " +
+          std::to_string(index) + ": rank=" + std::to_string(rank) +
+          ", world_size=" + std::to_string(state.world_size));
+    }
+  }
   return state;
 }
 
@@ -1618,11 +1960,26 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
     const DistributedRestartState& restart_state,
     const DistributedExecutionTopology& runtime_topology) {
   DistributedRestartCompatibilityReport report;
+  if (restart_state.schema_version != 2) {
+    report.supported_schema_match = false;
+    report.mismatch_messages.push_back(
+        "distributed restart schema mismatch: expected=2, observed=" +
+        std::to_string(restart_state.schema_version));
+  }
   if (restart_state.world_size != runtime_topology.world_size) {
     report.world_size_match = false;
     report.mismatch_messages.push_back(
         "world_size mismatch: restart=" + std::to_string(restart_state.world_size) +
         ", runtime=" + std::to_string(runtime_topology.world_size));
+  }
+  if (restart_state.pm_slab_begin_x_by_rank.size() != restart_state.pm_slab_end_x_by_rank.size() ||
+      restart_state.pm_slab_begin_x_by_rank.size() != static_cast<std::size_t>(std::max(restart_state.world_size, 0))) {
+    report.pm_slab_table_shape_match = false;
+    report.mismatch_messages.push_back(
+        "PM slab table mismatch: begin_count=" +
+        std::to_string(restart_state.pm_slab_begin_x_by_rank.size()) +
+        ", end_count=" + std::to_string(restart_state.pm_slab_end_x_by_rank.size()) +
+        ", restart_world_size=" + std::to_string(restart_state.world_size));
   }
   if (restart_state.pm_grid_nx != runtime_topology.pm_slab.global_nx ||
       restart_state.pm_grid_ny != runtime_topology.pm_slab.global_ny ||
@@ -1660,7 +2017,10 @@ DistributedRestartCompatibilityReport evaluateDistributedRestartCompatibility(
   if (runtime_topology.world_rank < 0 ||
       runtime_topology.world_rank >= static_cast<int>(restart_state.pm_slab_begin_x_by_rank.size())) {
     report.pm_local_slab_match = false;
-    report.mismatch_messages.push_back("runtime world_rank is outside restart PM slab ownership table");
+    report.mismatch_messages.push_back(
+        "runtime world_rank is outside restart PM slab ownership table: rank=" +
+        std::to_string(runtime_topology.world_rank) +
+        ", table_size=" + std::to_string(restart_state.pm_slab_begin_x_by_rank.size()));
     return report;
   }
   const std::size_t rank = static_cast<std::size_t>(runtime_topology.world_rank);
@@ -1748,6 +2108,9 @@ void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet) {
 }
 
 void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor) {
+  if (descriptor.gas_cell_id == 0) {
+    throw std::invalid_argument("hydro ghost cell descriptor requires a non-zero gas_cell_id");
+  }
   if (descriptor.owner_rank < 0 || descriptor.consumer_rank < 0) {
     throw std::invalid_argument("hydro ghost cell ranks must be non-negative");
   }
@@ -1756,6 +2119,33 @@ void validateHydroGhostCellDescriptor(const HydroGhostCellDescriptor& descriptor
   }
   if (!descriptor.boundary_state_only) {
     throw std::invalid_argument("hydro ghost cells are boundary exchange state, not authoritative conserved truth");
+  }
+}
+
+void validateHydroGhostCellRequest(const HydroGhostCellRequest& request) {
+  validateHydroGhostCellDescriptor(request.descriptor);
+  if (request.face_key == 0) {
+    throw std::invalid_argument("hydro ghost cell request requires a non-zero face key");
+  }
+  if (request.axis > 2U || request.side > 1U) {
+    throw std::invalid_argument("hydro ghost cell request carries invalid face orientation metadata");
+  }
+}
+
+void validateHydroGhostCellPayloadRecord(const HydroGhostCellPayloadRecord& record) {
+  validateHydroGhostCellDescriptor(record.descriptor);
+  if (record.face_key == 0) {
+    throw std::invalid_argument("hydro ghost cell payload requires a non-zero face key");
+  }
+  if (!std::isfinite(record.mass_density_comoving) ||
+      !std::isfinite(record.momentum_density_x_comoving) ||
+      !std::isfinite(record.momentum_density_y_comoving) ||
+      !std::isfinite(record.momentum_density_z_comoving) ||
+      !std::isfinite(record.total_energy_density_comoving)) {
+    throw std::invalid_argument("hydro ghost cell payload contains non-finite conserved state");
+  }
+  if (record.mass_density_comoving <= 0.0) {
+    throw std::invalid_argument("hydro ghost cell payload requires positive mass density");
   }
 }
 
@@ -1778,6 +2168,22 @@ void validateAmrPatchPayloadRecord(const AmrPatchPayloadRecord& record) {
   if (record.cell_count == 0) {
     throw std::invalid_argument("AMR patch payload cannot describe an empty patch");
   }
+  if (record.extent_x_comoving <= 0.0 || record.extent_y_comoving <= 0.0 || record.extent_z_comoving <= 0.0 ||
+      record.cell_dim_x == 0U || record.cell_dim_y == 0U || record.cell_dim_z == 0U) {
+    throw std::invalid_argument("AMR patch payload requires explicit positive patch geometry");
+  }
+  const std::uint64_t geometry_cells =
+      static_cast<std::uint64_t>(record.cell_dim_x) *
+      static_cast<std::uint64_t>(record.cell_dim_y) *
+      static_cast<std::uint64_t>(record.cell_dim_z);
+  if (geometry_cells != record.cell_count) {
+    throw std::invalid_argument("AMR patch payload cell_count does not match explicit patch geometry");
+  }
+  if (!std::isfinite(record.origin_x_comoving) || !std::isfinite(record.origin_y_comoving) ||
+      !std::isfinite(record.origin_z_comoving) || !std::isfinite(record.extent_x_comoving) ||
+      !std::isfinite(record.extent_y_comoving) || !std::isfinite(record.extent_z_comoving)) {
+    throw std::invalid_argument("AMR patch payload contains non-finite patch geometry");
+  }
   if (!std::isfinite(record.cell_mass_sum_code) || !std::isfinite(record.gas_internal_energy_sum_code)) {
     throw std::invalid_argument("AMR patch payload contains non-finite cell sums");
   }
@@ -1795,10 +2201,54 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) 
   }
   if (!std::isfinite(record.center_x_comoving) || !std::isfinite(record.center_y_comoving) ||
       !std::isfinite(record.center_z_comoving) || !std::isfinite(record.mass_code) ||
-      !std::isfinite(record.density_code) || !std::isfinite(record.pressure_code) ||
+      !std::isfinite(record.velocity_x_peculiar) || !std::isfinite(record.velocity_y_peculiar) ||
+      !std::isfinite(record.velocity_z_peculiar) || !std::isfinite(record.density_code) ||
+      !std::isfinite(record.pressure_code) ||
       !std::isfinite(record.internal_energy_code) || !std::isfinite(record.temperature_code) ||
       !std::isfinite(record.sound_speed_code)) {
     throw std::invalid_argument("AMR patch cell payload contains non-finite state");
+  }
+  if (record.density_code <= 0.0 || record.pressure_code <= 0.0) {
+    throw std::invalid_argument("AMR patch cell payload requires positive thermodynamic state");
+  }
+}
+
+void validateAmrFluxRegisterPayloadRecord(const AmrFluxRegisterPayloadRecord& record) {
+  if (record.register_key == 0U || record.coarse_patch_id == 0U || record.coarse_gas_cell_id == 0U) {
+    throw std::invalid_argument("AMR flux-register payload requires non-zero stable identity fields");
+  }
+  if (record.source_rank < 0 || record.owner_rank < 0) {
+    throw std::invalid_argument("AMR flux-register payload ranks must be non-negative");
+  }
+  if (record.axis > 2U || record.orientation > 1U) {
+    throw std::invalid_argument("AMR flux-register payload carries invalid face identity");
+  }
+  if (record.face_area_comov <= 0.0 || record.coarse_area_comov <= 0.0 ||
+      record.fine_area_comov <= 0.0 || record.dt_code <= 0.0) {
+    throw std::invalid_argument("AMR flux-register payload requires positive area and timestep metadata");
+  }
+  if (record.coarse_face_count == 0U && record.fine_face_count == 0U) {
+    throw std::invalid_argument("AMR flux-register payload must carry at least one face contribution");
+  }
+  const std::array values{
+      record.coarse_mass_flux_code,
+      record.coarse_momentum_x_flux_code,
+      record.coarse_momentum_y_flux_code,
+      record.coarse_momentum_z_flux_code,
+      record.coarse_total_energy_flux_code,
+      record.fine_mass_flux_code,
+      record.fine_momentum_x_flux_code,
+      record.fine_momentum_y_flux_code,
+      record.fine_momentum_z_flux_code,
+      record.fine_total_energy_flux_code,
+      record.face_area_comov,
+      record.coarse_area_comov,
+      record.fine_area_comov,
+      record.dt_code};
+  for (const double value : values) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument("AMR flux-register payload contains non-finite values");
+    }
   }
 }
 
@@ -2212,6 +2662,74 @@ std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchang
 #endif
 }
 
+std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrFluxRegisterPayloadRecord> local_records,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const AmrFluxRegisterPayloadRecord& record : local_records) {
+    validateAmrFluxRegisterPayloadRecord(record);
+    if (record.source_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("AMR flux-register payload source rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<AmrFluxRegisterPayloadRecord>(local_records.begin(), local_records.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(AmrFluxRegisterPayloadRecord);
+    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("AMR flux-register payload exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes64 = total_records64 * sizeof(AmrFluxRegisterPayloadRecord);
+  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("AMR flux-register payload exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<AmrFluxRegisterPayloadRecord> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<AmrFluxRegisterPayloadRecord*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(AmrFluxRegisterPayloadRecord)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const AmrFluxRegisterPayloadRecord& record : result) {
+    validateAmrFluxRegisterPayloadRecord(record);
+    if (record.source_rank < 0 || record.source_rank >= world_size ||
+        record.owner_rank < 0 || record.owner_rank >= world_size) {
+      throw std::runtime_error("AMR flux-register payload exchange returned invalid rank metadata");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("AMR flux-register payload exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
 std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
     const MpiContext& mpi_context,
     std::span<const HydroConservativeFluxCorrectionRecord> local_records,
@@ -2277,6 +2795,142 @@ std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservat
   return result;
 #else
   throw std::runtime_error("hydro conservative flux correction exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+std::vector<HydroGhostCellRequest> executeBlockingHydroGhostCellRequestExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroGhostCellRequest> local_requests,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const HydroGhostCellRequest& request : local_requests) {
+    validateHydroGhostCellRequest(request);
+    if (request.descriptor.consumer_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("hydro ghost cell request consumer rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<HydroGhostCellRequest>(local_requests.begin(), local_requests.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_requests.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroGhostCellRequest);
+    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("hydro ghost cell request exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroGhostCellRequest);
+  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("hydro ghost cell request exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<HydroGhostCellRequest> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<HydroGhostCellRequest*>(local_requests.data()),
+      static_cast<int>(local_requests.size() * sizeof(HydroGhostCellRequest)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const HydroGhostCellRequest& request : result) {
+    validateHydroGhostCellRequest(request);
+    if (request.descriptor.owner_rank < 0 || request.descriptor.owner_rank >= world_size ||
+        request.descriptor.consumer_rank < 0 || request.descriptor.consumer_rank >= world_size) {
+      throw std::runtime_error("hydro ghost cell request exchange returned invalid rank metadata");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("hydro ghost cell request exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
+std::vector<HydroGhostCellPayloadRecord> executeBlockingHydroGhostCellPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const HydroGhostCellPayloadRecord> local_records,
+    std::uint64_t exchange_sequence) {
+  (void)exchange_sequence;
+  for (const HydroGhostCellPayloadRecord& record : local_records) {
+    validateHydroGhostCellPayloadRecord(record);
+    if (record.descriptor.owner_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("hydro ghost cell payload owner rank does not match MPI context");
+    }
+  }
+  if (!mpi_context.isEnabled()) {
+    return std::vector<HydroGhostCellPayloadRecord>(local_records.begin(), local_records.end());
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
+  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count),
+      1,
+      MPI_UINT64_T,
+      counts64.data(),
+      1,
+      MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total_records64 = 0;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroGhostCellPayloadRecord);
+    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("hydro ghost cell payload exchange byte count exceeds MPI int limit");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
+    if (rank > 0) {
+      recv_displs[static_cast<std::size_t>(rank)] =
+          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  }
+  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroGhostCellPayloadRecord);
+  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("hydro ghost cell payload exchange total byte count exceeds MPI int limit");
+  }
+  std::vector<HydroGhostCellPayloadRecord> result(static_cast<std::size_t>(total_records64));
+  MPI_Allgatherv(
+      const_cast<HydroGhostCellPayloadRecord*>(local_records.data()),
+      static_cast<int>(local_records.size() * sizeof(HydroGhostCellPayloadRecord)),
+      MPI_BYTE,
+      result.data(),
+      recv_counts.data(),
+      recv_displs.data(),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  for (const HydroGhostCellPayloadRecord& record : result) {
+    validateHydroGhostCellPayloadRecord(record);
+    if (record.descriptor.owner_rank < 0 || record.descriptor.owner_rank >= world_size ||
+        record.descriptor.consumer_rank < 0 || record.descriptor.consumer_rank >= world_size) {
+      throw std::runtime_error("hydro ghost cell payload exchange returned invalid rank metadata");
+    }
+  }
+  return result;
+#else
+  throw std::runtime_error("hydro ghost cell payload exchange requires MPI support when MPI context is enabled");
 #endif
 }
 

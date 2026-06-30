@@ -410,6 +410,108 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
   return result;
 }
 
+AmrHydroPatchGeometry buildRemoteAmrHydroPatchGeometry(
+    const PatchDescriptor& patch,
+    std::span<const std::uint64_t> gas_cell_ids,
+    std::uint64_t source_gas_cell_identity_generation,
+    const AmrHydroGeometryOptions& options) {
+  const std::size_t expected_cells = checkedPatchCellCount(patch, "buildRemoteAmrHydroPatchGeometry");
+  if (gas_cell_ids.size() != expected_cells) {
+    throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: remote gas-cell coverage does not match patch geometry");
+  }
+  AmrHydroPatchGeometry result;
+  result.patch = patch;
+  result.source_gas_cell_identity_generation = source_gas_cell_identity_generation;
+  result.geometry.nx = patch.cell_dims[0];
+  result.geometry.ny = patch.cell_dims[1];
+  result.geometry.nz = patch.cell_dims[2];
+  result.geometry.origin_x_comoving = patch.origin_comov[0];
+  result.geometry.origin_y_comoving = patch.origin_comov[1];
+  result.geometry.origin_z_comoving = patch.origin_comov[2];
+  result.geometry.cell_width_x_comoving = checkedCellWidth(patch.extent_comov[0], patch.cell_dims[0], "x");
+  result.geometry.cell_width_y_comoving = checkedCellWidth(patch.extent_comov[1], patch.cell_dims[1], "y");
+  result.geometry.cell_width_z_comoving = checkedCellWidth(patch.extent_comov[2], patch.cell_dims[2], "z");
+  result.geometry.cell_volume_comoving =
+      result.geometry.cell_width_x_comoving *
+      result.geometry.cell_width_y_comoving *
+      result.geometry.cell_width_z_comoving;
+  result.real_cells.reserve(expected_cells);
+  result.gas_cell_ids.assign(gas_cell_ids.begin(), gas_cell_ids.end());
+  result.local_cell_rows.assign(expected_cells, core::kInvalidGasCellRow);
+  for (std::size_t patch_cell = 0; patch_cell < expected_cells; ++patch_cell) {
+    if (result.gas_cell_ids[patch_cell] == 0U) {
+      throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: remote gas-cell IDs must be non-zero");
+    }
+    result.real_cells.push_back(AmrHydroCellDescriptor{
+        .patch_id = patch.patch_id,
+        .gas_cell_id = result.gas_cell_ids[patch_cell],
+        .local_cell_row = core::kInvalidGasCellRow,
+        .patch_local_cell = patch_cell});
+  }
+
+  const auto append_internal_face =
+      [&result](std::size_t owner, std::size_t neighbor, hydro::HydroFaceAxis axis) {
+        hydro::HydroFace face{
+            .owner_cell = owner,
+            .neighbor_cell = neighbor,
+            .owner_minus_cell = hydro::k_invalid_cell_index,
+            .neighbor_plus_cell = hydro::k_invalid_cell_index,
+            .area_comoving = faceArea(result.geometry, axis),
+            .axis = axis};
+        switch (axis) {
+          case hydro::HydroFaceAxis::kX:
+            face.owner_minus_cell = result.geometry.neighborCell(owner, -1, 0, 0);
+            face.neighbor_plus_cell = result.geometry.neighborCell(neighbor, 1, 0, 0);
+            face.normal_x = 1.0;
+            break;
+          case hydro::HydroFaceAxis::kY:
+            face.owner_minus_cell = result.geometry.neighborCell(owner, 0, -1, 0);
+            face.neighbor_plus_cell = result.geometry.neighborCell(neighbor, 0, 1, 0);
+            face.normal_y = 1.0;
+            break;
+          case hydro::HydroFaceAxis::kZ:
+            face.owner_minus_cell = result.geometry.neighborCell(owner, 0, 0, -1);
+            face.neighbor_plus_cell = result.geometry.neighborCell(neighbor, 0, 0, 1);
+            face.normal_z = 1.0;
+            break;
+        }
+        result.geometry.faces.push_back(face);
+      };
+
+  for (std::size_t k = 0; k < result.geometry.nz; ++k) {
+    for (std::size_t j = 0; j < result.geometry.ny; ++j) {
+      for (std::size_t i = 0; i + 1U < result.geometry.nx; ++i) {
+        const std::size_t owner = result.geometry.linearCellIndex(i, j, k);
+        append_internal_face(owner, owner + 1U, hydro::HydroFaceAxis::kX);
+      }
+    }
+  }
+  for (std::size_t k = 0; k < result.geometry.nz; ++k) {
+    for (std::size_t j = 0; j + 1U < result.geometry.ny; ++j) {
+      for (std::size_t i = 0; i < result.geometry.nx; ++i) {
+        const std::size_t owner = result.geometry.linearCellIndex(i, j, k);
+        append_internal_face(owner, owner + result.geometry.nx, hydro::HydroFaceAxis::kY);
+      }
+    }
+  }
+  for (std::size_t k = 0; k + 1U < result.geometry.nz; ++k) {
+    for (std::size_t j = 0; j < result.geometry.ny; ++j) {
+      for (std::size_t i = 0; i < result.geometry.nx; ++i) {
+        const std::size_t owner = result.geometry.linearCellIndex(i, j, k);
+        append_internal_face(owner, owner + result.geometry.nx * result.geometry.ny, hydro::HydroFaceAxis::kZ);
+      }
+    }
+  }
+  appendAxisBoundaryGhosts(result, options, hydro::HydroFaceAxis::kX);
+  appendAxisBoundaryGhosts(result, options, hydro::HydroFaceAxis::kY);
+  appendAxisBoundaryGhosts(result, options, hydro::HydroFaceAxis::kZ);
+  result.faces.reserve(result.geometry.faces.size());
+  for (std::size_t face_index = 0; face_index < result.geometry.faces.size(); ++face_index) {
+    result.faces.push_back(makeFaceDescriptor(result, face_index));
+  }
+  return result;
+}
+
 hydro::HydroConservedStateSoa loadAmrHydroConservedState(
     const core::SimulationState& state,
     const AmrHydroPatchGeometry& patch_geometry,

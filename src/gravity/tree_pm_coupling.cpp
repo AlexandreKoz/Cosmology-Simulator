@@ -96,6 +96,16 @@ struct PeriodicBoxLengths {
 }
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+[[nodiscard]] std::uint64_t checkedZoomGatherBytes(
+    std::size_t particle_count,
+    std::string_view context) {
+  constexpr std::uint64_t k_fields = 4U;
+  if (particle_count > std::numeric_limits<std::uint64_t>::max() / (k_fields * sizeof(double))) {
+    throw std::overflow_error(std::string(context) + " byte estimate overflows uint64_t");
+  }
+  return static_cast<std::uint64_t>(particle_count) * k_fields * sizeof(double);
+}
+
 struct GatheredParticleField {
   std::vector<double> x;
   std::vector<double> y;
@@ -107,20 +117,45 @@ struct GatheredParticleField {
     std::span<const double> x,
     std::span<const double> y,
     std::span<const double> z,
-    std::span<const double> m) {
+    std::span<const double> m,
+    std::uint64_t gather_limit_bytes,
+    std::uint64_t* gathered_bytes = nullptr) {
   if (x.size() != y.size() || x.size() != z.size() || x.size() != m.size()) {
     throw std::invalid_argument("allGatherParticleField requires equal local span lengths");
   }
   int world_size = 1;
+  int world_rank = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (x.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("TreePM zoom high-res all-gather local particle count exceeds MPI int limit");
+  }
   const int local_count = static_cast<int>(x.size());
   std::vector<int> counts(static_cast<std::size_t>(world_size), 0);
   MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
   std::vector<int> displs(static_cast<std::size_t>(world_size), 0);
   int total = 0;
   for (int i = 0; i < world_size; ++i) {
+    if (counts[static_cast<std::size_t>(i)] < 0 ||
+        counts[static_cast<std::size_t>(i)] > std::numeric_limits<int>::max() - total) {
+      throw std::overflow_error("TreePM zoom high-res all-gather count/displacement exceeds MPI int limit");
+    }
     displs[static_cast<std::size_t>(i)] = total;
     total += counts[static_cast<std::size_t>(i)];
+  }
+  const std::uint64_t total_bytes =
+      checkedZoomGatherBytes(static_cast<std::size_t>(total), "TreePM zoom high-res all-gather");
+  if (gathered_bytes != nullptr) {
+    *gathered_bytes = total_bytes;
+  }
+  if (gather_limit_bytes == 0U || total_bytes > gather_limit_bytes) {
+    throw std::runtime_error(
+        "TreePM zoom high-res source all-gather guard exceeded on rank " + std::to_string(world_rank) +
+        ": gathered_high_res_sources=" + std::to_string(total) +
+        " ranks=" + std::to_string(world_size) +
+        " estimated_bytes=" + std::to_string(total_bytes) +
+        " configured_limit_bytes=" + std::to_string(gather_limit_bytes) +
+        " route=allgather policy=bounded_zoom_correction_only");
   }
   GatheredParticleField out;
   out.x.resize(static_cast<std::size_t>(total));
@@ -865,6 +900,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   std::fill(m_active_zoom_corr_ax_comoving.begin(), m_active_zoom_corr_ax_comoving.end(), 0.0);
   std::fill(m_active_zoom_corr_ay_comoving.begin(), m_active_zoom_corr_ay_comoving.end(), 0.0);
   std::fill(m_active_zoom_corr_az_comoving.begin(), m_active_zoom_corr_az_comoving.end(), 0.0);
+  std::uint64_t zoom_high_res_allgather_bytes = 0;
 
   for (std::size_t i = 0; i < accumulator.active_particle_index.size(); ++i) {
     const std::uint32_t particle_index = accumulator.active_particle_index[i];
@@ -921,11 +957,20 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
     if (m_grid.slabLayout().world_size > 1) {
-      const auto gathered = allGatherParticleField(high_res_source_x, high_res_source_y, high_res_source_z, high_res_source_mass);
+      const auto gathered = allGatherParticleField(
+          high_res_source_x,
+          high_res_source_y,
+          high_res_source_z,
+          high_res_source_mass,
+          options.zoom_high_res_allgather_limit_bytes,
+          &zoom_high_res_allgather_bytes);
       high_res_source_x = std::move(gathered.x);
       high_res_source_y = std::move(gathered.y);
       high_res_source_z = std::move(gathered.z);
       high_res_source_mass = std::move(gathered.m);
+      if (profile != nullptr) {
+        profile->pm_profile.bytes_moved += zoom_high_res_allgather_bytes;
+      }
     }
 #endif
 
@@ -1082,6 +1127,8 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (diagnostics != nullptr) {
     const PeriodicBoxLengths diagnostic_box_lengths = effectivePeriodicBoxLengths(options.pm_options);
     *diagnostics = computeTreePmDiagnostics(options.split_policy);
+    diagnostics->zoom_high_res_allgather_bytes = zoom_high_res_allgather_bytes;
+    diagnostics->zoom_high_res_allgather_limit_bytes = options.zoom_high_res_allgather_limit_bytes;
     diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
     diagnostics->residual_pair_skips_cutoff = m_last_residual_stats.pair_skips_cutoff;
     diagnostics->residual_pair_evaluations = m_last_residual_stats.pair_evaluations;

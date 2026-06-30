@@ -226,9 +226,12 @@ void fillPrimitiveCache(
   }
 
   // Open and reflective physical-boundary ghosts are not authoritative cells.
-  // Imported MPI ghosts are restored after the stage and owner-side correction
-  // records handle the real-rank update path, so the local solver must not
-  // mutate them as truth.
+  // Imported MPI ghosts are scratch rows that intentionally accumulate the
+  // conservative opposite-side face delta; the workflow restores the row and
+  // routes that delta back to the authoritative owner by stable gas_cell_id.
+  if (ghost.boundary_kind == HydroBoundaryKind::kImportedMpi) {
+    return ghost.ghost_cell;
+  }
   return k_invalid_cell_index;
 }
 
@@ -673,14 +676,15 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
       std::unique(scratch.touched_cells.begin(), scratch.touched_cells.end()),
       scratch.touched_cells.end());
   const std::size_t real_cell_count = geometry.cellCount() == 0 ? conserved.size() : geometry.cellCount();
-  scratch.touched_cells.erase(
-      std::remove_if(
-          scratch.touched_cells.begin(),
-          scratch.touched_cells.end(),
-          [real_cell_count](std::size_t cell_index) { return cell_index >= real_cell_count; }),
-      scratch.touched_cells.end());
-  conservation_report.before = conservationTotals(conserved, geometry, scratch.touched_cells);
-  conservation_report.cell_count = static_cast<std::uint64_t>(scratch.touched_cells.size());
+  scratch.full_active_cells.clear();
+  scratch.full_active_cells.reserve(scratch.touched_cells.size());
+  for (const std::size_t cell_index : scratch.touched_cells) {
+    if (cell_index < real_cell_count) {
+      scratch.full_active_cells.push_back(cell_index);
+    }
+  }
+  conservation_report.before = conservationTotals(conserved, geometry, scratch.full_active_cells);
+  conservation_report.cell_count = static_cast<std::uint64_t>(scratch.full_active_cells.size());
   if (primitive_cache != nullptr) {
     fillPrimitiveCache(conserved, active_set, geometry, m_adiabatic_index, *primitive_cache);
   }
@@ -794,7 +798,7 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   }
   const auto source_stop = std::chrono::steady_clock::now();
   const auto total_stop = std::chrono::steady_clock::now();
-  conservation_report.after = conservationTotals(conserved, geometry, scratch.touched_cells);
+  conservation_report.after = conservationTotals(conserved, geometry, scratch.full_active_cells);
   conservation_report.residual = conservation_report.after - conservation_report.before -
       conservation_report.flux_delta - conservation_report.source_delta - conservation_report.floor_delta;
 

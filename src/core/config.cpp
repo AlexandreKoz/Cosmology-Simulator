@@ -795,6 +795,7 @@ struct ConfigKeySpec {
       {"parallel.decomposition_gpu_occupancy_weight", "0.0"},
       {"parallel.decomposition_generic_work_weight", "0.5"},
       {"parallel.decomposition_runtime_rebalance_enabled", "true"},
+      {"parallel.decomposition_debug_exact_ownership_audit", "false"},
       {"parallel.decomposition_rebalance_imbalance_trigger", "1.25"},
       {"parallel.decomposition_rebalance_memory_trigger", "1.50"},
       {"parallel.decomposition_rebalance_max_migrated_load_fraction", "0.25"},
@@ -803,6 +804,8 @@ struct ConfigKeySpec {
       {"parallel.decomposition_measured_amr_cell_weight", "1.0"},
       {"parallel.decomposition_measured_hydro_face_weight", "1.0"},
       {"parallel.decomposition_measured_wall_ms_weight", "1.0"},
+      {"parallel.isolated_pm_root_workspace_limit_bytes", "268435456"},
+      {"parallel.zoom_high_res_allgather_limit_bytes", "268435456"},
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
@@ -985,6 +988,10 @@ void validateConfig(const SimulationConfig& config) {
       config.parallel.decomposition_measured_hydro_face_weight < 0.0 ||
       config.parallel.decomposition_measured_wall_ms_weight < 0.0) {
     throw ConfigError("parallel decomposition work/rebalance weights must be non-negative; rebalance triggers must be >= 1");
+  }
+  if (config.parallel.isolated_pm_root_workspace_limit_bytes == 0U ||
+      config.parallel.zoom_high_res_allgather_limit_bytes == 0U) {
+    throw ConfigError("parallel PM gather guard byte limits must be > 0");
   }
   if (config.analysis.run_health_interval_steps <= 0 ||
       config.analysis.science_light_interval_steps <= 0 ||
@@ -1321,6 +1328,8 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.parallel.decomposition_generic_work_weight << '\n';
   stream << "decomposition_runtime_rebalance_enabled = "
          << (frozen.config.parallel.decomposition_runtime_rebalance_enabled ? "true" : "false") << '\n';
+  stream << "decomposition_debug_exact_ownership_audit = "
+         << (frozen.config.parallel.decomposition_debug_exact_ownership_audit ? "true" : "false") << '\n';
   stream << "decomposition_rebalance_imbalance_trigger = "
          << frozen.config.parallel.decomposition_rebalance_imbalance_trigger << '\n';
   stream << "decomposition_rebalance_memory_trigger = "
@@ -1337,6 +1346,10 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.parallel.decomposition_measured_hydro_face_weight << '\n';
   stream << "decomposition_measured_wall_ms_weight = "
          << frozen.config.parallel.decomposition_measured_wall_ms_weight << '\n';
+  stream << "isolated_pm_root_workspace_limit_bytes = "
+         << frozen.config.parallel.isolated_pm_root_workspace_limit_bytes << '\n';
+  stream << "zoom_high_res_allgather_limit_bytes = "
+         << frozen.config.parallel.zoom_high_res_allgather_limit_bytes << '\n';
   stream << "\n[analysis]\n";
   stream << "enable_diagnostics = " << (frozen.config.analysis.enable_diagnostics ? "true" : "false")
          << '\n';
@@ -1834,6 +1847,10 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "parallel.decomposition_runtime_rebalance_enabled",
                     defaultFor("parallel.decomposition_runtime_rebalance_enabled")),
       "parallel.decomposition_runtime_rebalance_enabled");
+  frozen.config.parallel.decomposition_debug_exact_ownership_audit = parseBool(
+      requireString(entries, consumed, "parallel.decomposition_debug_exact_ownership_audit",
+                    defaultFor("parallel.decomposition_debug_exact_ownership_audit")),
+      "parallel.decomposition_debug_exact_ownership_audit");
   frozen.config.parallel.decomposition_rebalance_imbalance_trigger = parseNumber<double>(
       requireString(entries, consumed, "parallel.decomposition_rebalance_imbalance_trigger",
                     defaultFor("parallel.decomposition_rebalance_imbalance_trigger")),
@@ -1866,6 +1883,14 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "parallel.decomposition_measured_wall_ms_weight",
                     defaultFor("parallel.decomposition_measured_wall_ms_weight")),
       "parallel.decomposition_measured_wall_ms_weight");
+  frozen.config.parallel.isolated_pm_root_workspace_limit_bytes = parseNumber<std::uint64_t>(
+      requireString(entries, consumed, "parallel.isolated_pm_root_workspace_limit_bytes",
+                    defaultFor("parallel.isolated_pm_root_workspace_limit_bytes")),
+      "parallel.isolated_pm_root_workspace_limit_bytes");
+  frozen.config.parallel.zoom_high_res_allgather_limit_bytes = parseNumber<std::uint64_t>(
+      requireString(entries, consumed, "parallel.zoom_high_res_allgather_limit_bytes",
+                    defaultFor("parallel.zoom_high_res_allgather_limit_bytes")),
+      "parallel.zoom_high_res_allgather_limit_bytes");
 
   frozen.config.analysis.enable_diagnostics = parseBool(
       requireString(entries, consumed, "analysis.enable_diagnostics", "true"),

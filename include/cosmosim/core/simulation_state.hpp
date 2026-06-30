@@ -604,12 +604,20 @@ struct AmrPatchMigrationFields {
   std::uint16_t cell_dim_z = 0;
 };
 
+struct GasCellSchedulerMigrationRecord {
+  std::uint64_t gas_cell_id = 0;
+  std::uint8_t bin_index = 0;
+  std::uint64_t next_activation_tick = 0;
+  std::uint8_t pending_bin_index = 0xFF;
+};
+
 struct AmrPatchMigrationRecord {
   // Atomic patch ownership payload. Patch descriptors and every authoritative
   // gas-cell row in the patch migrate together, keyed by stable patch_id and
   // gas_cell_id rather than by old local rows.
   AmrPatchMigrationFields patch{};
   std::vector<GasCellMigrationRecord> gas_cell_records;
+  std::vector<GasCellSchedulerMigrationRecord> gas_cell_scheduler_records;
 };
 
 struct AmrPatchMigrationCommit {
@@ -617,6 +625,7 @@ struct AmrPatchMigrationCommit {
   std::uint64_t expected_gas_cell_identity_generation = 0;
   std::uint64_t expected_ghost_hydro_epoch = 0;
   std::vector<std::uint32_t> outbound_local_patch_indices;
+  std::vector<std::uint32_t> stale_local_ghost_patch_indices;
   std::vector<AmrPatchMigrationRecord> inbound_records;
   std::vector<GasCellStaleGhostRecord> stale_local_ghost_records;
 };
@@ -704,6 +713,10 @@ struct ParticleMigrationCommit {
   std::vector<std::uint32_t> outbound_local_indices;
   std::vector<ParticleMigrationRecord> inbound_records;
   std::vector<std::uint32_t> stale_local_ghost_indices;
+  // Distributed gas/AMR migration paths move gas cells explicitly by
+  // gas_cell_id/patch_id. In that mode particle migration must not infer gas
+  // authority from optional parent_particle_id compatibility mirrors.
+  bool preserve_gas_cell_state = false;
 };
 
 class SimulationState {

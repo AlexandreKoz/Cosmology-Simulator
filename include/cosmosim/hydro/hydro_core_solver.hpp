@@ -152,6 +152,10 @@ struct HydroGhostCell {
   HydroFaceAxis axis = HydroFaceAxis::kX;
   HydroFaceSide side = HydroFaceSide::kLower;
   HydroGhostMutationRights mutation_rights = HydroGhostMutationRights::kWritablePhysicalBoundaryScratch;
+  std::uint64_t origin_gas_cell_id = 0;
+  int origin_rank = -1;
+  std::uint64_t hydro_sync_epoch = 0;
+  std::uint64_t decomposition_epoch = 0;
 };
 
 struct HydroFace {
