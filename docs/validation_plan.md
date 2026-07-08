@@ -227,3 +227,19 @@ For Phase 3 gravity maturity evidence generation and separation of correctness/f
 - Provenance collector: `scripts/validation/collect_phase3_evidence.py`
 
 The campaign requires explicit cosmological and zoom runtime runs plus force/time-integration/scaling artifacts. Existing `np1/np2` scaling outputs remain baseline performance evidence only and are not standalone certification.
+
+
+## MPI AMR directed-exchange validation update
+
+The MPI feature lane must include the real MPI-launched AMR directed-exchange
+registration `integration_reference_workflow_distributed_amr_mpi_two_rank` and
+must not count the serial `integration_amr_distributed_remote_patch_boundary`
+fixture as MPI coverage. The serial test remains useful as an AMR data-structure
+and orchestrator guard only.
+
+The current two-rank AMR MPI test exercises the new directed patch/cell payload
+exchange and owner-routed flux-register exchange with asymmetric ranks and
+nonzero mass/momentum/energy payload fields. It is not yet full AMR workflow
+acceptance: a later validation pass still needs to prove production
+`ReferenceWorkflowRunner` AMR restart continuation, named migration/regrid across
+ranks, and all five conserved totals through direct and restart-resumed paths.

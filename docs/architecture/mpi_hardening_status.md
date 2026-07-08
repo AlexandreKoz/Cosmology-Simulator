@@ -1,17 +1,33 @@
 # MPI hardening status
 
-_MPI.1 executable lifecycle and MPI.2 PM routed-interpolation hardening status._
+_MPI.0--MPI.8 hardening status map, updated after directed AMR exchange repair._
 
 ## Verdict
 
 MPI support is still not accepted as complete production distributed execution.
 MPI.1 gives the production `cosmosim_harness` executable ownership of the MPI
-session boundary while preserving MPI-aware libraries as observers. MPI.2 now
-repairs the PM reverse-routing ownership defect and hardens the request/response
-protocol, but local runtime acceptance remains pending a successful real
-multi-rank execution when an MPI launcher and MPI-enabled dependency stack are
-unavailable. This does not claim broader distributed gravity, hydro, AMR,
-migration, scaling, or rank-count-changing restart maturity.
+session boundary while preserving MPI-aware libraries as observers. MPI.2 keeps
+the PM reverse-routing ownership repair. This repair adds a directed AMR patch
+payload exchange surface and routes AMR flux-register payloads to their owner
+ranks instead of globally replicating live patch/cell/flux records. Local runtime
+acceptance remains pending a successful real multi-rank execution when an MPI
+launcher and MPI-enabled dependency stack are available; CPU-only builds cannot
+be used as MPI acceptance evidence.
+
+
+## Current hardening stage map
+
+| Stage | Scope | Current status | Acceptance evidence still required |
+| --- | --- | --- | --- |
+| MPI.0 | Evidence/status truthfulness | Documentation and CI labels now distinguish CPU, serial AMR, and real MPI-launched coverage. | Real MPI lane execution on the dependency-complete preset. |
+| MPI.1 | Executable lifecycle | Preserved: executable owns init/finalize; libraries observe. | Harness smoke under `mpiexec`. |
+| MPI.2 | Routed PM | Preserved: origin-rank/request-sequence reverse routing and byte-safe all-to-all payload layouts. | Uneven periodic PM two-rank run. |
+| MPI.3 | Gas-cell migration | Existing migration path remains present; this repair did not fully upgrade the MPI migration proof to all requested stable-ID/scheduler assertions. | Strengthened two-rank migration/restart test with named cross-rank patch/cell movement. |
+| MPI.4 | Hydro ghosts | Existing distributed hydro ghost/correction test remains registered; this repair did not fully expand it to every requested conserved field assertion. | Two-rank workflow conservation/restart proof for mass, momentum x/y/z, total energy, and internal-energy behavior. |
+| MPI.5 | AMR | Live production AMR patch/cell import now uses bounded rank envelopes plus candidate-peer payload exchange. Flux-register payloads route to authoritative owner ranks. Serial AMR boundary test is no longer counted as MPI coverage. | Real two-rank MPI execution of `integration_reference_workflow_distributed_amr_mpi_two_rank`; current test exercises the directed exchange protocol, not full AMR workflow/restart acceptance. |
+| MPI.6 | Decomposition | Existing weighted SFC rebalance path preserved. | Two-/three-rank rebalance lane execution. |
+| MPI.7 | Gravity scale-path policy | Periodic PM remains sparse-record `MPI_Alltoallv` transport and is accepted only as a small-cluster policy, not as neighbor-scalable proof. Isolated PM uses a root-workspace guard with explicit rejection when the workspace limit is exceeded. | Full MPI gravity lane and scaling artifacts. |
+| MPI.8 | Restart/CI closure | CI manifest now names the new AMR MPI test and isolated-PM guard; serial AMR is not listed as MPI coverage. | Dependency-complete `mpi-hdf5-fftw-debug` lane. |
 
 ## Supported now
 
@@ -80,13 +96,18 @@ migration, scaling, or rank-count-changing restart maturity.
 - **Scheduler identity migration**: local migration/rebuild paths use scheduler
   records, but multi-rank exact scheduler identity exchange remains a future
   contract and cannot be replaced by `ParticleMigrationRecord::time_bin`.
-- **Distributed hydro and AMR acceptance**: hydro ghost refresh, conservative
-  correction exchange, and AMR payload all-gathers exist, but no distributed
-  hydro/AMR conservation or restart-continuation acceptance is claimed here.
+- **Distributed hydro and AMR acceptance**: hydro ghost refresh and conservative
+  correction exchange remain existing pathways. Live AMR patch/cell exchange now
+  uses directed candidate-peer transfer instead of full-record all-gather, and
+  AMR flux-register payloads are delivered only to authoritative owner ranks.
+  Full distributed hydro/AMR conservation and restart-continuation acceptance is
+  still pending real MPI execution and stronger acceptance assertions.
 - **Rank-count-changing restart**: `evaluateDistributedRestartCompatibility`
   requires runtime world size, PM grid, PM decomposition mode, local slab, PM
   cadence, kick state, and long-range field state compatibility.  Changing rank
   count on restart remains unsupported.
+- Distributed AMR subcycling and remote temporal interpolation remain unsupported
+  unless a later patch implements and validates them explicitly.
 
 ## State ownership observed
 
@@ -100,8 +121,11 @@ migration, scaling, or rank-count-changing restart maturity.
 - `GasCellIdentityMap::gas_cell_id` is the gas-cell identity authority.  The
   workflow rebuilds particle-bound gas via gas particle IDs, but this does not
   promote legacy particle IDs into a general gas identity model.
-- AMR patch ownership is carried by patch `owning_rank` lanes and exchanged as
-  `AmrPatchPayloadRecord` / `AmrPatchCellPayloadRecord` for validation.
+- AMR patch ownership is carried by patch `owning_rank` lanes. Live remote AMR
+  patch ghosts are read-only consumer imports built from `AmrPatchPayloadRecord`
+  and `AmrPatchCellPayloadRecord` received from candidate peers discovered by a
+  fixed-size rank-envelope control plane; they are not duplicate authoritative
+  state.
 - Hydro ghost copies are read-only on consumer ranks.  Owner-rank conservative
   corrections are represented by `HydroConservativeFluxCorrectionRecord`.
 - Restart payloads are continuation authority for scheduler, gas-cell
@@ -119,7 +143,7 @@ migration, scaling, or rank-count-changing restart maturity.
 - Multi-rank collective paths include decomposition item all-gather, exact
   ownership identity reductions, PM density/interpolation all-to-alls, TreePM
   pseudo-particle hierarchy all-gather, TreePM short-range request/response
-  all-to-all, particle migration all-to-all, AMR payload all-gathers, hydro
+  all-to-all, particle migration all-to-all, directed AMR patch/cell exchange, hydro
   conservative correction all-gather, and PM slab halo `MPI_Sendrecv`.
 - Only owner ranks may mutate authoritative particle rows, PM slab cells, and
   AMR patch ownership.  Ghost and pseudo-particle records are derived or
@@ -199,3 +223,24 @@ parallel HDF5/MPIO path is claimed here.
 - No solver refactor, parallel HDF5 claim, scale claim,
   rank-count-changing restart claim, or broad documentation rewrite.
 - No rank-count-changing restart or arbitrary topology remap acceptance.
+
+
+## Directed AMR exchange repair note (2026-07-08)
+
+The live AMR workflow no longer calls a full per-patch/per-cell AMR payload
+`MPI_Allgather`/`MPI_Allgatherv` to construct remote patches. It first exchanges
+one fixed-size rank envelope per rank as bounded control-plane metadata, then
+uses candidate-peer point-to-point send/receive phases for patch descriptors and
+cell payloads. The diagnostic surface reports candidate and neighbor peers,
+patch descriptor records, cell records, flux records, control-plane bytes,
+payload bytes, remote patch ghosts, remote interface candidates, and inbound/
+outbound reflux counts.
+
+AMR flux-register payloads are grouped by `owner_rank` and received only by the
+authoritative rank that may apply reflux. Duplicate register keys are still
+rejected before owner mutation. Remote AMR ghosts are read-only; no consumer rank
+may mutate owner truth through imported cells or patch metadata.
+
+Periodic PM is intentionally unchanged in this repair: it still uses sparse
+record payloads over global all-to-all collectives. That is a documented
+small-cluster transport policy, not a general neighbor-PM scalability claim.

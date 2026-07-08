@@ -1,3 +1,22 @@
+# Repair state recap (post-repair audit snapshot)
+
+## 2026-07-08 MPI AMR directed-exchange closure pass
+
+- Replaced the live production AMR patch/cell import path with bounded
+  rank-envelope peer discovery and directed candidate-peer patch/cell payload
+  exchange. Remote AMR data are transient read-only ghosts rather than globally
+  replicated authoritative state.
+- Replaced AMR reflux completion with owner-routed peer exchange keyed by
+  `owner_rank`, so flux-register corrections are sent only to authoritative
+  coarse-cell owners.
+- Relabeled the existing serial AMR boundary regression as serial-only evidence
+  and added a real MPI-launched AMR directed-exchange regression target for
+  dependency-enabled environments.
+- Reproducibility impact: no HDF5 snapshot/restart dataset names, normalized
+  config keys, output naming, solver equations, or rank-count-changing restart
+  semantics changed. Distributed AMR remote patch state remains transient
+  stage scratch rebuilt from owner payloads.
+
 ## 2026-06-30 MPI.7 PM/TreePM transport scale guards
 
 - Preserved existing slab-owned periodic PM routed deposition/interpolation and
@@ -69,12 +88,6 @@
 - Bumped provenance payload contract to `provenance_v5` with explicit config schema identity and auditable raw/normalized/derived runtime payload fields.
 - Wired snapshot provenance metadata to carry `config_schema_name`, `config_schema_version`, `normalized_config_hash_hex`, and raw/normalized/derived config/state payloads.
 - Reproducibility impact: strengthens replay auditability without changing solver numerics; normalized hash remains derived from normalized config only.
-
-# Repair state recap (post-repair audit snapshot)
-
-_Date captured: 2026-04-07 (UTC)_
-
-This recap records **current command-backed audit evidence** for the emergency repair closeout pass.
 
 ## 2026-05-21 Stage 5 config-contract audit map (S5-00)
 

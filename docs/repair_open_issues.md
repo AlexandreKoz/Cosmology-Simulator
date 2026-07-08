@@ -1,3 +1,21 @@
+# Repair open issues
+
+## 2026-07-08 remaining MPI acceptance limitations
+
+- The new `integration_reference_workflow_distributed_amr_mpi_two_rank` test is
+  registered as a real MPI-launched test and exercises directed AMR payload and
+  owner-routed flux exchange, but it does not yet prove full production
+  `ReferenceWorkflowRunner` AMR restart equivalence with pending flux-register
+  persistence.
+- `tests/integration/test_distributed_gas_cell_migration_mpi.cpp` still needs a
+  stronger named patch/gas-cell cross-rank movement oracle with stable-ID keyed
+  physical, sidecar, scheduler, and restart comparisons.
+- `tests/integration/test_reference_workflow_distributed_hydro_mpi.cpp` still
+  needs full conserved-state and correction-sign assertions for mass, momentum
+  x/y/z, total energy, and internal-energy behavior.
+- Periodic PM still uses sparse payload records over global all-to-all
+  collectives. This is documented as a small-cluster transport policy only.
+
 
 ## 2026-05-25 Stage 6 memory accounting status
 

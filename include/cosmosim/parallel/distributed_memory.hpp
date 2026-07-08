@@ -712,6 +712,31 @@ struct AmrPatchCellPayloadRecord {
   double sound_speed_code = 0.0;
 };
 
+struct DirectedAmrExchangeDiagnostics {
+  std::uint64_t candidate_peer_count = 0;
+  std::uint64_t neighbor_peer_count = 0;
+  std::uint64_t directed_patch_descriptor_records_sent = 0;
+  std::uint64_t directed_patch_descriptor_records_received = 0;
+  std::uint64_t directed_patch_cell_records_sent = 0;
+  std::uint64_t directed_patch_cell_records_received = 0;
+  std::uint64_t directed_flux_records_sent = 0;
+  std::uint64_t directed_flux_records_received = 0;
+  std::uint64_t control_plane_bytes = 0;
+  std::uint64_t patch_descriptor_bytes = 0;
+  std::uint64_t patch_cell_payload_bytes = 0;
+  std::uint64_t flux_payload_bytes = 0;
+  std::uint64_t remote_patch_ghost_count = 0;
+  std::uint64_t remote_interface_count = 0;
+  std::uint64_t inbound_reflux_count = 0;
+  std::uint64_t outbound_reflux_count = 0;
+};
+
+struct DirectedAmrPatchPayloadExchange {
+  std::vector<AmrPatchPayloadRecord> patch_payloads_received;
+  std::vector<AmrPatchCellPayloadRecord> patch_cell_payloads_received;
+  DirectedAmrExchangeDiagnostics diagnostics{};
+};
+
 struct AmrFluxRegisterPayloadRecord {
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
@@ -771,6 +796,12 @@ void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCo
 [[nodiscard]] std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchCellPayloadRecord> local_records,
+    std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchPayloadRecord> local_patch_records,
+    std::span<const AmrPatchCellPayloadRecord> local_cell_records,
     std::uint64_t exchange_sequence = 0);
 
 [[nodiscard]] std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(

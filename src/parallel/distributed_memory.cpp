@@ -2536,6 +2536,332 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
 #endif
 }
 
+
+namespace {
+
+struct AmrRankEnvelopeRecord {
+  int rank = -1;
+  std::uint8_t has_patches = 0;
+  std::uint64_t decomposition_epoch = 0;
+  double min_x_comoving = 0.0;
+  double max_x_comoving = 0.0;
+  double min_y_comoving = 0.0;
+  double max_y_comoving = 0.0;
+  double min_z_comoving = 0.0;
+  double max_z_comoving = 0.0;
+  double max_cell_width_comoving = 0.0;
+};
+
+[[nodiscard]] double amrPatchMaxX(const AmrPatchPayloadRecord& record) noexcept {
+  return record.origin_x_comoving + record.extent_x_comoving;
+}
+
+[[nodiscard]] double amrPatchMaxY(const AmrPatchPayloadRecord& record) noexcept {
+  return record.origin_y_comoving + record.extent_y_comoving;
+}
+
+[[nodiscard]] double amrPatchMaxZ(const AmrPatchPayloadRecord& record) noexcept {
+  return record.origin_z_comoving + record.extent_z_comoving;
+}
+
+[[nodiscard]] double amrPatchMaxCellWidth(const AmrPatchPayloadRecord& record) noexcept {
+  const double dx = record.extent_x_comoving / static_cast<double>(std::max<std::uint16_t>(record.cell_dim_x, 1U));
+  const double dy = record.extent_y_comoving / static_cast<double>(std::max<std::uint16_t>(record.cell_dim_y, 1U));
+  const double dz = record.extent_z_comoving / static_cast<double>(std::max<std::uint16_t>(record.cell_dim_z, 1U));
+  return std::max({dx, dy, dz});
+}
+
+[[nodiscard]] AmrRankEnvelopeRecord buildLocalAmrEnvelope(
+    std::span<const AmrPatchPayloadRecord> records,
+    int world_rank) {
+  AmrRankEnvelopeRecord envelope;
+  envelope.rank = world_rank;
+  if (records.empty()) {
+    return envelope;
+  }
+  envelope.has_patches = 1U;
+  envelope.decomposition_epoch = records.front().decomposition_epoch;
+  envelope.min_x_comoving = std::numeric_limits<double>::infinity();
+  envelope.min_y_comoving = std::numeric_limits<double>::infinity();
+  envelope.min_z_comoving = std::numeric_limits<double>::infinity();
+  envelope.max_x_comoving = -std::numeric_limits<double>::infinity();
+  envelope.max_y_comoving = -std::numeric_limits<double>::infinity();
+  envelope.max_z_comoving = -std::numeric_limits<double>::infinity();
+  for (const AmrPatchPayloadRecord& record : records) {
+    validateAmrPatchPayloadRecord(record);
+    if (record.owner_rank != world_rank) {
+      throw std::invalid_argument("directed AMR envelope can only be built from local authoritative patches");
+    }
+    if (record.decomposition_epoch != envelope.decomposition_epoch) {
+      throw std::invalid_argument("directed AMR envelope found mixed decomposition epochs in one exchange");
+    }
+    envelope.min_x_comoving = std::min(envelope.min_x_comoving, record.origin_x_comoving);
+    envelope.min_y_comoving = std::min(envelope.min_y_comoving, record.origin_y_comoving);
+    envelope.min_z_comoving = std::min(envelope.min_z_comoving, record.origin_z_comoving);
+    envelope.max_x_comoving = std::max(envelope.max_x_comoving, amrPatchMaxX(record));
+    envelope.max_y_comoving = std::max(envelope.max_y_comoving, amrPatchMaxY(record));
+    envelope.max_z_comoving = std::max(envelope.max_z_comoving, amrPatchMaxZ(record));
+    envelope.max_cell_width_comoving = std::max(envelope.max_cell_width_comoving, amrPatchMaxCellWidth(record));
+  }
+  return envelope;
+}
+
+[[nodiscard]] bool amrIntervalsOverlap(double amin, double amax, double bmin, double bmax, double reach) noexcept {
+  return (amin - reach) <= bmax && (bmin - reach) <= amax;
+}
+
+[[nodiscard]] bool amrEnvelopeMayNeedPeer(
+    const AmrRankEnvelopeRecord& local,
+    const AmrRankEnvelopeRecord& peer) noexcept {
+  if (local.has_patches == 0U || peer.has_patches == 0U || local.rank == peer.rank) {
+    return false;
+  }
+  const double reach = std::max(local.max_cell_width_comoving, peer.max_cell_width_comoving);
+  return amrIntervalsOverlap(local.min_x_comoving, local.max_x_comoving, peer.min_x_comoving, peer.max_x_comoving, reach) &&
+      amrIntervalsOverlap(local.min_y_comoving, local.max_y_comoving, peer.min_y_comoving, peer.max_y_comoving, reach) &&
+      amrIntervalsOverlap(local.min_z_comoving, local.max_z_comoving, peer.min_z_comoving, peer.max_z_comoving, reach);
+}
+
+[[nodiscard]] bool amrPatchesMayShareInterface(
+    const AmrPatchPayloadRecord& lhs,
+    const AmrPatchPayloadRecord& rhs) noexcept {
+  const double reach = std::max(amrPatchMaxCellWidth(lhs), amrPatchMaxCellWidth(rhs));
+  return amrIntervalsOverlap(lhs.origin_x_comoving, amrPatchMaxX(lhs), rhs.origin_x_comoving, amrPatchMaxX(rhs), reach) &&
+      amrIntervalsOverlap(lhs.origin_y_comoving, amrPatchMaxY(lhs), rhs.origin_y_comoving, amrPatchMaxY(rhs), reach) &&
+      amrIntervalsOverlap(lhs.origin_z_comoving, amrPatchMaxZ(lhs), rhs.origin_z_comoving, amrPatchMaxZ(rhs), reach);
+}
+
+[[nodiscard]] std::vector<int> discoverCandidateAmrPeers(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchPayloadRecord> local_patch_records,
+    DirectedAmrExchangeDiagnostics* diagnostics) {
+  const int world_rank = mpi_context.worldRank();
+  const int world_size = mpi_context.worldSize();
+  const AmrRankEnvelopeRecord local_envelope = buildLocalAmrEnvelope(local_patch_records, world_rank);
+  if (!mpi_context.isEnabled() || world_size <= 1) {
+    if (diagnostics != nullptr) {
+      diagnostics->control_plane_bytes += sizeof(AmrRankEnvelopeRecord);
+    }
+    return {};
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  static_assert(std::is_trivially_copyable_v<AmrRankEnvelopeRecord>);
+  std::vector<AmrRankEnvelopeRecord> envelopes(static_cast<std::size_t>(world_size));
+  MPI_Allgather(
+      const_cast<AmrRankEnvelopeRecord*>(&local_envelope),
+      static_cast<int>(sizeof(AmrRankEnvelopeRecord)),
+      MPI_BYTE,
+      envelopes.data(),
+      static_cast<int>(sizeof(AmrRankEnvelopeRecord)),
+      MPI_BYTE,
+      MPI_COMM_WORLD);
+  if (diagnostics != nullptr) {
+    diagnostics->control_plane_bytes += static_cast<std::uint64_t>(world_size) * sizeof(AmrRankEnvelopeRecord);
+  }
+  std::vector<int> peers;
+  for (const AmrRankEnvelopeRecord& envelope : envelopes) {
+    if (envelope.rank < 0 || envelope.rank >= world_size) {
+      throw std::runtime_error("directed AMR control-plane envelope returned invalid rank metadata");
+    }
+    if (amrEnvelopeMayNeedPeer(local_envelope, envelope)) {
+      peers.push_back(envelope.rank);
+    }
+  }
+  std::sort(peers.begin(), peers.end());
+  peers.erase(std::unique(peers.begin(), peers.end()), peers.end());
+  if (diagnostics != nullptr) {
+    diagnostics->candidate_peer_count = static_cast<std::uint64_t>(peers.size());
+  }
+  return peers;
+#else
+  throw std::runtime_error("directed AMR peer discovery requires MPI support when MPI context is enabled");
+#endif
+}
+
+template <typename T>
+[[nodiscard]] std::vector<T> exchangePodRecordsWithPeer(
+    const MpiContext& mpi_context,
+    int peer_rank,
+    std::span<const T> local_records,
+    int count_tag_base,
+    int payload_tag_base,
+    std::uint64_t exchange_sequence,
+    const char* caller) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  if (peer_rank < 0 || peer_rank >= mpi_context.worldSize() || peer_rank == mpi_context.worldRank()) {
+    throw std::invalid_argument(std::string(caller) + ": invalid peer rank");
+  }
+  if (!mpi_context.isEnabled()) {
+    if (!local_records.empty()) {
+      throw std::runtime_error(std::string(caller) + ": non-empty peer exchange requires MPI");
+    }
+    return {};
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const std::uint64_t send_count = static_cast<std::uint64_t>(local_records.size());
+  std::uint64_t recv_count = 0;
+  MPI_Sendrecv(
+      const_cast<std::uint64_t*>(&send_count),
+      1,
+      MPI_UINT64_T,
+      peer_rank,
+      ghostExchangeSequencedTag(count_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+      &recv_count,
+      1,
+      MPI_UINT64_T,
+      peer_rank,
+      ghostExchangeSequencedTag(count_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+      MPI_COMM_WORLD,
+      MPI_STATUS_IGNORE);
+  const std::uint64_t max_record_count =
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max()) / sizeof(T);
+  if (send_count > max_record_count || recv_count > max_record_count) {
+    throw std::overflow_error(std::string(caller) + ": directed AMR record byte count exceeds MPI int limit");
+  }
+  const std::uint64_t send_bytes = send_count * sizeof(T);
+  const std::uint64_t recv_bytes = recv_count * sizeof(T);
+  std::vector<T> received(static_cast<std::size_t>(recv_count));
+  MPI_Sendrecv(
+      const_cast<T*>(local_records.data()),
+      static_cast<int>(send_bytes),
+      MPI_BYTE,
+      peer_rank,
+      ghostExchangeSequencedTag(payload_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+      received.data(),
+      static_cast<int>(recv_bytes),
+      MPI_BYTE,
+      peer_rank,
+      ghostExchangeSequencedTag(payload_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+      MPI_COMM_WORLD,
+      MPI_STATUS_IGNORE);
+  return received;
+#else
+  throw std::runtime_error(std::string(caller) + ": MPI support is not compiled in");
+#endif
+}
+
+[[nodiscard]] std::uint64_t countInterfaceCandidates(
+    std::span<const AmrPatchPayloadRecord> local_records,
+    std::span<const AmrPatchPayloadRecord> remote_records) {
+  std::uint64_t count = 0;
+  for (const AmrPatchPayloadRecord& local_record : local_records) {
+    for (const AmrPatchPayloadRecord& remote_record : remote_records) {
+      if (local_record.owner_rank != remote_record.owner_rank && amrPatchesMayShareInterface(local_record, remote_record)) {
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
+}  // namespace
+
+DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
+    const MpiContext& mpi_context,
+    std::span<const AmrPatchPayloadRecord> local_patch_records,
+    std::span<const AmrPatchCellPayloadRecord> local_cell_records,
+    std::uint64_t exchange_sequence) {
+  const int world_rank = mpi_context.worldRank();
+  std::unordered_map<std::uint64_t, std::uint32_t> local_patch_cell_counts;
+  local_patch_cell_counts.reserve(local_patch_records.size());
+  for (const AmrPatchPayloadRecord& record : local_patch_records) {
+    validateAmrPatchPayloadRecord(record);
+    if (record.owner_rank != world_rank) {
+      throw std::invalid_argument("directed AMR patch exchange received non-local authoritative patch metadata");
+    }
+    const auto [it, inserted] = local_patch_cell_counts.emplace(record.patch_id, record.cell_count);
+    if (!inserted) {
+      throw std::invalid_argument("directed AMR patch exchange found duplicate local patch metadata");
+    }
+  }
+  std::unordered_map<std::uint64_t, std::uint32_t> observed_local_cells;
+  observed_local_cells.reserve(local_patch_cell_counts.size());
+  for (const AmrPatchCellPayloadRecord& record : local_cell_records) {
+    validateAmrPatchCellPayloadRecord(record);
+    if (record.owner_rank != world_rank) {
+      throw std::invalid_argument("directed AMR patch-cell exchange received non-local authoritative cell payload");
+    }
+    const auto expected_it = local_patch_cell_counts.find(record.patch_id);
+    if (expected_it == local_patch_cell_counts.end()) {
+      throw std::invalid_argument("directed AMR patch-cell exchange found a cell for an unknown local patch");
+    }
+    if (record.local_cell_offset >= expected_it->second) {
+      throw std::invalid_argument("directed AMR patch-cell exchange local cell offset exceeds patch cell_count");
+    }
+    ++observed_local_cells[record.patch_id];
+  }
+  for (const auto& [patch_id, expected_count] : local_patch_cell_counts) {
+    if (observed_local_cells[patch_id] != expected_count) {
+      throw std::invalid_argument("directed AMR patch-cell exchange local payload does not cover every owned patch cell");
+    }
+  }
+
+  DirectedAmrPatchPayloadExchange result;
+  if (!mpi_context.isEnabled() || mpi_context.worldSize() <= 1) {
+    return result;
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  constexpr int k_patch_count_tag_base = 8910;
+  constexpr int k_patch_payload_tag_base = 9910;
+  constexpr int k_cell_count_tag_base = 10910;
+  constexpr int k_cell_payload_tag_base = 11910;
+  const std::vector<int> candidate_peers = discoverCandidateAmrPeers(
+      mpi_context, local_patch_records, &result.diagnostics);
+  result.diagnostics.neighbor_peer_count = static_cast<std::uint64_t>(candidate_peers.size());
+  for (const int peer_rank : candidate_peers) {
+    std::vector<AmrPatchPayloadRecord> remote_patches = exchangePodRecordsWithPeer(
+        mpi_context,
+        peer_rank,
+        local_patch_records,
+        k_patch_count_tag_base,
+        k_patch_payload_tag_base,
+        exchange_sequence,
+        "executeBlockingDirectedAmrPatchPayloadExchange/patch");
+    for (const AmrPatchPayloadRecord& record : remote_patches) {
+      validateAmrPatchPayloadRecord(record);
+      if (record.owner_rank != peer_rank) {
+        throw std::runtime_error("directed AMR patch exchange received metadata from a rank that is not the owner");
+      }
+    }
+    result.diagnostics.directed_patch_descriptor_records_sent += static_cast<std::uint64_t>(local_patch_records.size());
+    result.diagnostics.directed_patch_descriptor_records_received += static_cast<std::uint64_t>(remote_patches.size());
+    result.diagnostics.patch_descriptor_bytes +=
+        (static_cast<std::uint64_t>(local_patch_records.size()) + static_cast<std::uint64_t>(remote_patches.size())) *
+        sizeof(AmrPatchPayloadRecord);
+    result.diagnostics.remote_interface_count += countInterfaceCandidates(local_patch_records, remote_patches);
+    result.patch_payloads_received.insert(
+        result.patch_payloads_received.end(), remote_patches.begin(), remote_patches.end());
+
+    std::vector<AmrPatchCellPayloadRecord> remote_cells = exchangePodRecordsWithPeer(
+        mpi_context,
+        peer_rank,
+        local_cell_records,
+        k_cell_count_tag_base,
+        k_cell_payload_tag_base,
+        exchange_sequence,
+        "executeBlockingDirectedAmrPatchPayloadExchange/cell");
+    for (const AmrPatchCellPayloadRecord& record : remote_cells) {
+      validateAmrPatchCellPayloadRecord(record);
+      if (record.owner_rank != peer_rank) {
+        throw std::runtime_error("directed AMR patch-cell exchange received payload from a rank that is not the owner");
+      }
+    }
+    result.diagnostics.directed_patch_cell_records_sent += static_cast<std::uint64_t>(local_cell_records.size());
+    result.diagnostics.directed_patch_cell_records_received += static_cast<std::uint64_t>(remote_cells.size());
+    result.diagnostics.patch_cell_payload_bytes +=
+        (static_cast<std::uint64_t>(local_cell_records.size()) + static_cast<std::uint64_t>(remote_cells.size())) *
+        sizeof(AmrPatchCellPayloadRecord);
+    result.patch_cell_payloads_received.insert(
+        result.patch_cell_payloads_received.end(), remote_cells.begin(), remote_cells.end());
+  }
+  result.diagnostics.remote_patch_ghost_count = static_cast<std::uint64_t>(result.patch_payloads_received.size());
+  return result;
+#else
+  throw std::runtime_error("directed AMR patch payload exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
 std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchPayloadRecord> local_records,
@@ -2544,187 +2870,81 @@ std::vector<AmrPatchPayloadRecord> executeBlockingAmrPatchPayloadExchange(
   for (const AmrPatchPayloadRecord& record : local_records) {
     validateAmrPatchPayloadRecord(record);
     if (record.owner_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("AMR patch payload exchange received a record not owned by this rank");
+      throw std::invalid_argument("AMR patch payload compatibility exchange received non-local authoritative patch metadata");
     }
   }
-  if (!mpi_context.isEnabled()) {
-    return std::vector<AmrPatchPayloadRecord>(local_records.begin(), local_records.end());
-  }
-#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    if (counts64[static_cast<std::size_t>(rank)] > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("AMR patch payload exchange count exceeds MPI int limit");
-    }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(counts64[static_cast<std::size_t>(rank)] * sizeof(AmrPatchPayloadRecord));
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] = recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
-  }
-  if (total_records64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("AMR patch payload exchange total count exceeds MPI int limit");
-  }
-  std::vector<AmrPatchPayloadRecord> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<AmrPatchPayloadRecord*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(AmrPatchPayloadRecord)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const AmrPatchPayloadRecord& record : result) {
-    validateAmrPatchPayloadRecord(record);
-  }
-  return result;
-#else
-  throw std::runtime_error("AMR patch payload exchange requires MPI support when MPI context is enabled");
-#endif
+  return std::vector<AmrPatchPayloadRecord>(local_records.begin(), local_records.end());
 }
-
 
 std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchCellPayloadRecord> local_records,
     std::uint64_t exchange_sequence) {
-  (void)exchange_sequence;
   for (const AmrPatchCellPayloadRecord& record : local_records) {
     validateAmrPatchCellPayloadRecord(record);
     if (record.owner_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("AMR patch cell payload exchange received a cell not owned by this rank");
+      throw std::invalid_argument("directed AMR patch-cell compatibility exchange received non-local authoritative cell payload");
     }
   }
-  if (!mpi_context.isEnabled()) {
-    return std::vector<AmrPatchCellPayloadRecord>(local_records.begin(), local_records.end());
-  }
-#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(AmrPatchCellPayloadRecord);
-    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("AMR patch cell payload exchange byte count exceeds MPI int limit");
-    }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
-  }
-  const std::uint64_t total_bytes64 = total_records64 * sizeof(AmrPatchCellPayloadRecord);
-  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("AMR patch cell payload exchange total byte count exceeds MPI int limit");
-  }
-  std::vector<AmrPatchCellPayloadRecord> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<AmrPatchCellPayloadRecord*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(AmrPatchCellPayloadRecord)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const AmrPatchCellPayloadRecord& record : result) {
-    validateAmrPatchCellPayloadRecord(record);
-  }
-  return result;
-#else
-  throw std::runtime_error("AMR patch cell payload exchange requires MPI support when MPI context is enabled");
-#endif
+  (void)exchange_sequence;
+  return std::vector<AmrPatchCellPayloadRecord>(local_records.begin(), local_records.end());
 }
 
 std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrFluxRegisterPayloadRecord> local_records,
     std::uint64_t exchange_sequence) {
-  (void)exchange_sequence;
+  const int world_rank = mpi_context.worldRank();
+  const int world_size = mpi_context.worldSize();
   for (const AmrFluxRegisterPayloadRecord& record : local_records) {
     validateAmrFluxRegisterPayloadRecord(record);
-    if (record.source_rank != mpi_context.worldRank()) {
+    if (record.source_rank != world_rank) {
       throw std::invalid_argument("AMR flux-register payload source rank does not match MPI context");
     }
+    if (record.owner_rank < 0 || record.owner_rank >= world_size) {
+      throw std::invalid_argument("AMR flux-register payload owner rank is outside MPI world");
+    }
   }
-  if (!mpi_context.isEnabled()) {
+  if (!mpi_context.isEnabled() || world_size <= 1) {
     return std::vector<AmrFluxRegisterPayloadRecord>(local_records.begin(), local_records.end());
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(AmrFluxRegisterPayloadRecord);
-    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("AMR flux-register payload exchange byte count exceeds MPI int limit");
+  constexpr int k_flux_count_tag_base = 12910;
+  constexpr int k_flux_payload_tag_base = 13910;
+  std::vector<AmrFluxRegisterPayloadRecord> inbound_records;
+  for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
+    if (peer_rank == world_rank) {
+      continue;
     }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    std::vector<AmrFluxRegisterPayloadRecord> outbound_to_peer;
+    outbound_to_peer.reserve(local_records.size());
+    for (const AmrFluxRegisterPayloadRecord& record : local_records) {
+      if (record.owner_rank == peer_rank) {
+        outbound_to_peer.push_back(record);
+      }
     }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
+    std::vector<AmrFluxRegisterPayloadRecord> received_from_peer = exchangePodRecordsWithPeer(
+        mpi_context,
+        peer_rank,
+        outbound_to_peer,
+        k_flux_count_tag_base,
+        k_flux_payload_tag_base,
+        exchange_sequence,
+        "executeBlockingAmrFluxRegisterPayloadExchange");
+    for (const AmrFluxRegisterPayloadRecord& record : received_from_peer) {
+      validateAmrFluxRegisterPayloadRecord(record);
+      if (record.owner_rank != world_rank || record.source_rank != peer_rank) {
+        throw std::runtime_error("AMR flux-register directed exchange returned stale source/owner rank metadata");
+      }
+    }
+    inbound_records.insert(inbound_records.end(), received_from_peer.begin(), received_from_peer.end());
   }
-  const std::uint64_t total_bytes64 = total_records64 * sizeof(AmrFluxRegisterPayloadRecord);
-  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("AMR flux-register payload exchange total byte count exceeds MPI int limit");
-  }
-  std::vector<AmrFluxRegisterPayloadRecord> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<AmrFluxRegisterPayloadRecord*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(AmrFluxRegisterPayloadRecord)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const AmrFluxRegisterPayloadRecord& record : result) {
-    validateAmrFluxRegisterPayloadRecord(record);
-    if (record.source_rank < 0 || record.source_rank >= world_size ||
-        record.owner_rank < 0 || record.owner_rank >= world_size) {
-      throw std::runtime_error("AMR flux-register payload exchange returned invalid rank metadata");
+  for (const AmrFluxRegisterPayloadRecord& record : local_records) {
+    if (record.owner_rank == world_rank) {
+      inbound_records.push_back(record);
     }
   }
-  return result;
+  return inbound_records;
 #else
   throw std::runtime_error("AMR flux-register payload exchange requires MPI support when MPI context is enabled");
 #endif

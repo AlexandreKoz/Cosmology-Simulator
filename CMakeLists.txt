@@ -477,6 +477,9 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_reference_workflow_distributed_isolated_pm_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_reference_workflow_distributed_isolated_pm_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(
+      integration_reference_workflow_distributed_isolated_pm_mpi_two_rank
+      mpi distributed pm isolated_pm guard workflow integration)
   endif()
 
   add_executable(
@@ -792,7 +795,7 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_amr_distributed_remote_patch_boundary PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_distributed_remote_patch_boundary DEPENDS test_integration_amr_distributed_remote_patch_boundary)
   add_test(NAME integration_amr_distributed_remote_patch_boundary COMMAND test_integration_amr_distributed_remote_patch_boundary)
-  cosmosim_mark_runtime_truth_test(integration_amr_distributed_remote_patch_boundary amr hydro gas integration mpi distributed reflux)
+  cosmosim_mark_runtime_truth_test(integration_amr_distributed_remote_patch_boundary amr hydro gas integration reflux serial)
   add_executable(test_integration_amr_hydro_shock_tube tests/integration/test_amr_hydro_shock_tube.cpp)
   target_link_libraries(test_integration_amr_hydro_shock_tube PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_hydro_shock_tube DEPENDS test_integration_amr_hydro_shock_tube)
@@ -851,6 +854,19 @@ if(COSMOSIM_ENABLE_TESTS)
       integration_distributed_sfc_rebalance_mpi_two_rank
       integration_distributed_sfc_rebalance_mpi_three_rank
       PROPERTIES LABELS "mpi;distributed;decomposition;runtime_truth")
+  endif()
+
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_reference_workflow_distributed_amr_mpi
+      tests/integration/test_reference_workflow_distributed_amr_mpi.cpp)
+    target_link_libraries(test_integration_reference_workflow_distributed_amr_mpi PRIVATE cosmosim_all)
+    add_test(
+      NAME integration_reference_workflow_distributed_amr_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_reference_workflow_distributed_amr_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(
+      integration_reference_workflow_distributed_amr_mpi_two_rank
+      mpi hdf5 distributed amr hydro gas workflow directed_exchange reflux integration)
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)

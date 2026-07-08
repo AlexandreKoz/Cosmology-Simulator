@@ -2090,98 +2090,103 @@ void exchangeAndValidateAmrPatchPayloads(
   const std::vector<parallel::AmrPatchPayloadRecord> local_records = buildLocalAmrPatchPayloadRecords(state, world_rank);
   const std::vector<parallel::AmrPatchCellPayloadRecord> local_cell_records =
       buildLocalAmrPatchCellPayloadRecords(state, world_rank);
-  const std::vector<parallel::AmrPatchPayloadRecord> global_records = parallel::executeBlockingAmrPatchPayloadExchange(
-      mpi_context,
-      local_records,
-      step_index);
-  const std::vector<parallel::AmrPatchCellPayloadRecord> global_cell_records =
-      parallel::executeBlockingAmrPatchCellPayloadExchange(mpi_context, local_cell_records, step_index);
 
-  std::unordered_map<std::uint64_t, int> owner_by_patch_id;
   std::unordered_map<std::uint64_t, std::uint32_t> expected_cell_count_by_patch_id;
   std::unordered_map<std::uint64_t, std::uint32_t> observed_cell_count_by_patch_id;
-  owner_by_patch_id.reserve(global_records.size());
-  expected_cell_count_by_patch_id.reserve(global_records.size());
-  observed_cell_count_by_patch_id.reserve(global_records.size());
-  for (const parallel::AmrPatchPayloadRecord& record : global_records) {
-    const auto [it, inserted] = owner_by_patch_id.emplace(record.patch_id, record.owner_rank);
-    if (!inserted && it->second != record.owner_rank) {
-      throw std::runtime_error("AMR patch payload exchange detected duplicate authoritative patch ownership");
+  expected_cell_count_by_patch_id.reserve(local_records.size());
+  observed_cell_count_by_patch_id.reserve(local_records.size());
+  for (const parallel::AmrPatchPayloadRecord& record : local_records) {
+    const auto [it, inserted] = expected_cell_count_by_patch_id.emplace(record.patch_id, record.cell_count);
+    if (!inserted) {
+      throw std::runtime_error("AMR owner-local validation detected duplicate authoritative patch payloads");
     }
-    expected_cell_count_by_patch_id.emplace(record.patch_id, record.cell_count);
+    if (record.owner_rank != world_rank) {
+      throw std::runtime_error("AMR owner-local validation found stale patch owner metadata");
+    }
   }
-  for (const parallel::AmrPatchCellPayloadRecord& record : global_cell_records) {
-    const auto owner_it = owner_by_patch_id.find(record.patch_id);
-    if (owner_it == owner_by_patch_id.end()) {
-      throw std::runtime_error("AMR patch cell payload exchange found a cell for an unknown patch");
+  for (const parallel::AmrPatchCellPayloadRecord& record : local_cell_records) {
+    const auto owner_it = expected_cell_count_by_patch_id.find(record.patch_id);
+    if (owner_it == expected_cell_count_by_patch_id.end()) {
+      throw std::runtime_error("AMR owner-local validation found a cell for an unknown local patch");
     }
-    if (owner_it->second != record.owner_rank) {
-      throw std::runtime_error("AMR patch cell payload owner does not match authoritative patch owner");
+    if (record.owner_rank != world_rank) {
+      throw std::runtime_error("AMR owner-local validation found stale cell owner metadata");
+    }
+    if (record.local_cell_offset >= owner_it->second) {
+      throw std::runtime_error("AMR owner-local validation found a cell offset beyond patch bounds");
     }
     ++observed_cell_count_by_patch_id[record.patch_id];
   }
   for (const auto& [patch_id, expected_count] : expected_cell_count_by_patch_id) {
-    const std::uint32_t observed_count = observed_cell_count_by_patch_id[patch_id];
-    if (observed_count != expected_count) {
-      throw std::runtime_error("AMR patch cell payload exchange coverage mismatch for patch_id=" +
+    if (observed_cell_count_by_patch_id[patch_id] != expected_count) {
+      throw std::runtime_error("AMR owner-local validation patch cell coverage mismatch for patch_id=" +
                                std::to_string(patch_id));
     }
   }
 
+  parallel::DirectedAmrExchangeDiagnostics diagnostics;
+  if (mpi_context.isEnabled() && mpi_context.worldSize() > 1) {
+    const parallel::DirectedAmrPatchPayloadExchange directed = parallel::executeBlockingDirectedAmrPatchPayloadExchange(
+        mpi_context,
+        local_records,
+        local_cell_records,
+        step_index);
+    diagnostics = directed.diagnostics;
 
-  std::unordered_map<std::uint64_t, std::size_t> local_patch_index_by_id;
-  local_patch_index_by_id.reserve(state.patches.size());
-  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
-    if (state.patches.owning_rank[patch_index] == static_cast<std::uint32_t>(world_rank)) {
-      local_patch_index_by_id.emplace(state.patches.patch_id[patch_index], patch_index);
+    std::unordered_map<std::uint64_t, parallel::AmrPatchPayloadRecord> remote_patch_by_id;
+    remote_patch_by_id.reserve(directed.patch_payloads_received.size());
+    for (const parallel::AmrPatchPayloadRecord& record : directed.patch_payloads_received) {
+      if (record.owner_rank == world_rank) {
+        throw std::runtime_error("directed AMR validation received local authoritative patch as a remote ghost");
+      }
+      const auto [it, inserted] = remote_patch_by_id.emplace(record.patch_id, record);
+      if (!inserted) {
+        throw std::runtime_error("directed AMR validation received duplicate remote patch metadata");
+      }
+    }
+    std::unordered_map<std::uint64_t, std::uint32_t> remote_cell_count_by_patch_id;
+    remote_cell_count_by_patch_id.reserve(remote_patch_by_id.size());
+    for (const parallel::AmrPatchCellPayloadRecord& record : directed.patch_cell_payloads_received) {
+      const auto patch_it = remote_patch_by_id.find(record.patch_id);
+      if (patch_it == remote_patch_by_id.end()) {
+        throw std::runtime_error("directed AMR validation received remote cell payload without patch metadata");
+      }
+      if (record.owner_rank != patch_it->second.owner_rank) {
+        throw std::runtime_error("directed AMR validation remote cell owner does not match patch owner");
+      }
+      if (record.local_cell_offset >= patch_it->second.cell_count) {
+        throw std::runtime_error("directed AMR validation remote cell offset exceeds patch extent");
+      }
+      ++remote_cell_count_by_patch_id[record.patch_id];
+    }
+    for (const auto& [patch_id, record] : remote_patch_by_id) {
+      if (remote_cell_count_by_patch_id[patch_id] != record.cell_count) {
+        throw std::runtime_error("directed AMR validation remote patch cell coverage mismatch for patch_id=" +
+                                 std::to_string(patch_id));
+      }
     }
   }
-  std::size_t applied_owned_patch_cells = 0;
-  for (const parallel::AmrPatchCellPayloadRecord& record : global_cell_records) {
-    if (record.owner_rank != world_rank) {
-      continue;
-    }
-    const auto patch_it = local_patch_index_by_id.find(record.patch_id);
-    if (patch_it == local_patch_index_by_id.end()) {
-      throw std::runtime_error("AMR patch cell payload for this rank has no local authoritative patch");
-    }
-    const std::size_t patch_index = patch_it->second;
-    if (record.local_cell_offset >= state.patches.cell_count[patch_index]) {
-      throw std::runtime_error("AMR patch cell payload offset exceeds local patch cell count");
-    }
-    const std::uint32_t cell_index = state.patches.first_cell[patch_index] + record.local_cell_offset;
-    if (cell_index >= state.cells.size()) {
-      throw std::runtime_error("AMR patch cell payload target cell is outside local CellSoa");
-    }
-    state.cells.center_x_comoving[cell_index] = record.center_x_comoving;
-    state.cells.center_y_comoving[cell_index] = record.center_y_comoving;
-    state.cells.center_z_comoving[cell_index] = record.center_z_comoving;
-    state.cells.mass_code[cell_index] = record.mass_code;
-    state.cells.time_bin[cell_index] = record.time_bin;
-    if (cell_index < state.gas_cells.density_code.size()) {
-      state.gas_cells.gas_cell_id[cell_index] = record.gas_cell_id;
-      state.gas_cells.parent_particle_id[cell_index] = record.parent_particle_id;
-      state.gas_cells.density_code[cell_index] = record.density_code;
-      state.gas_cells.pressure_code[cell_index] = record.pressure_code;
-      state.gas_cells.internal_energy_code[cell_index] = record.internal_energy_code;
-      state.gas_cells.temperature_code[cell_index] = record.temperature_code;
-      state.gas_cells.sound_speed_code[cell_index] = record.sound_speed_code;
-    }
-    ++applied_owned_patch_cells;
-  }
+
   if (profiler != nullptr) {
     profiler->recordEvent(core::RuntimeEvent{
-        .event_kind = "amr.patch_payload_exchange",
+        .event_kind = "amr.directed_patch_payload_exchange",
         .severity = core::RuntimeEventSeverity::kInfo,
         .subsystem = "amr.patch_exchange",
         .step_index = step_index,
-        .message = "blocking AMR patch payload exchange validated authoritative patch ownership and cell summaries",
+        .message = "validated owner-local AMR state and interface-scoped directed AMR payload coverage",
         .payload = {{"local_patch_payloads", std::to_string(local_records.size())},
-                    {"global_patch_payloads", std::to_string(global_records.size())},
-                    {"global_patch_cell_payloads", std::to_string(global_cell_records.size())},
-                    {"applied_owned_patch_cells", std::to_string(applied_owned_patch_cells)},
-                    {"payload_bytes", std::to_string(global_records.size() * sizeof(parallel::AmrPatchPayloadRecord) +
-                                                       global_cell_records.size() * sizeof(parallel::AmrPatchCellPayloadRecord))}}});
+                    {"local_patch_cell_payloads", std::to_string(local_cell_records.size())},
+                    {"candidate_peer_count", std::to_string(diagnostics.candidate_peer_count)},
+                    {"neighbor_peer_count", std::to_string(diagnostics.neighbor_peer_count)},
+                    {"directed_patch_descriptor_records_sent", std::to_string(diagnostics.directed_patch_descriptor_records_sent)},
+                    {"directed_patch_descriptor_records_received", std::to_string(diagnostics.directed_patch_descriptor_records_received)},
+                    {"directed_patch_cell_records_sent", std::to_string(diagnostics.directed_patch_cell_records_sent)},
+                    {"directed_patch_cell_records_received", std::to_string(diagnostics.directed_patch_cell_records_received)},
+                    {"control_plane_bytes", std::to_string(diagnostics.control_plane_bytes)},
+                    {"patch_descriptor_bytes", std::to_string(diagnostics.patch_descriptor_bytes)},
+                    {"patch_cell_payload_bytes", std::to_string(diagnostics.patch_cell_payload_bytes)},
+                    {"remote_patch_ghost_count", std::to_string(diagnostics.remote_patch_ghost_count)},
+                    {"remote_interface_count", std::to_string(diagnostics.remote_interface_count)}}});
   }
 }
 
@@ -5669,36 +5674,49 @@ class HydroStageCallback final : public core::IntegrationCallback {
     std::size_t remote_patch_count = 0;
     std::size_t remote_flux_register_count = 0;
     std::size_t inbound_flux_register_count = 0;
+    parallel::DirectedAmrExchangeDiagnostics directed_amr_diagnostics{};
     if (m_mpi_context.isEnabled() && m_mpi_context.worldSize() > 1) {
       const auto local_patch_records = buildLocalAmrPatchPayloadRecords(context.state, m_mpi_context.worldRank());
       const auto local_cell_records = buildLocalAmrPatchCellPayloadRecords(context.state, m_mpi_context.worldRank());
-      const auto global_patch_records = parallel::executeBlockingAmrPatchPayloadExchange(
-          m_mpi_context, local_patch_records, context.integrator_state.step_index);
-      const auto global_cell_records = parallel::executeBlockingAmrPatchCellPayloadExchange(
-          m_mpi_context, local_cell_records, context.integrator_state.step_index);
-      std::unordered_map<std::uint64_t, parallel::AmrPatchPayloadRecord> patch_record_by_id;
+      const auto directed_amr_exchange = parallel::executeBlockingDirectedAmrPatchPayloadExchange(
+          m_mpi_context,
+          local_patch_records,
+          local_cell_records,
+          context.integrator_state.step_index);
+      directed_amr_diagnostics = directed_amr_exchange.diagnostics;
+
       std::unordered_map<std::uint64_t, int> owner_rank_by_patch_id;
-      for (const auto& record : global_patch_records) {
+      owner_rank_by_patch_id.reserve(local_patch_records.size() + directed_amr_exchange.patch_payloads_received.size());
+      for (const auto& record : local_patch_records) {
+        const auto [it, inserted] = owner_rank_by_patch_id.emplace(record.patch_id, record.owner_rank);
+        if (!inserted && it->second != record.owner_rank) {
+          throw std::runtime_error("directed AMR hydro found conflicting local patch ownership metadata");
+        }
+      }
+
+      std::unordered_map<std::uint64_t, parallel::AmrPatchPayloadRecord> patch_record_by_id;
+      patch_record_by_id.reserve(directed_amr_exchange.patch_payloads_received.size());
+      for (const auto& record : directed_amr_exchange.patch_payloads_received) {
+        if (record.owner_rank == m_mpi_context.worldRank()) {
+          throw std::runtime_error("directed AMR hydro imported a local patch as a remote ghost");
+        }
         const auto [it, inserted] = patch_record_by_id.emplace(record.patch_id, record);
         if (!inserted) {
-          throw std::runtime_error("distributed AMR hydro found duplicate patch payload records");
+          throw std::runtime_error("directed AMR hydro found duplicate remote patch payload records");
         }
         owner_rank_by_patch_id.emplace(record.patch_id, record.owner_rank);
       }
       std::unordered_map<std::uint64_t, std::vector<parallel::AmrPatchCellPayloadRecord>> cells_by_patch_id;
-      for (const auto& record : global_cell_records) {
+      for (const auto& record : directed_amr_exchange.patch_cell_payloads_received) {
         cells_by_patch_id[record.patch_id].push_back(record);
       }
       std::vector<amr::DistributedAmrRemotePatch> remote_patches;
-      remote_patches.reserve(global_patch_records.size());
-      for (const auto& patch_record : global_patch_records) {
-        if (patch_record.owner_rank == m_mpi_context.worldRank()) {
-          continue;
-        }
+      remote_patches.reserve(directed_amr_exchange.patch_payloads_received.size());
+      for (const auto& patch_record : directed_amr_exchange.patch_payloads_received) {
         auto cells_it = cells_by_patch_id.find(patch_record.patch_id);
         if (cells_it == cells_by_patch_id.end() ||
             cells_it->second.size() != patch_record.cell_count) {
-          throw std::runtime_error("distributed AMR hydro remote patch cell payload coverage mismatch");
+          throw std::runtime_error("directed AMR hydro remote patch cell payload coverage mismatch");
         }
         std::sort(
             cells_it->second.begin(),
@@ -5721,7 +5739,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
         for (std::size_t i = 0; i < cells_it->second.size(); ++i) {
           const auto& cell_record = cells_it->second[i];
           if (cell_record.local_cell_offset != i || cell_record.owner_rank != patch_record.owner_rank) {
-            throw std::runtime_error("distributed AMR hydro remote patch cell payload has stale offset or owner metadata");
+            throw std::runtime_error("directed AMR hydro remote patch cell payload has stale offset or owner metadata");
           }
           remote.gas_cell_ids[i] = cell_record.gas_cell_id;
           remote.conserved_cells[i] = hydro::HydroCoreSolver::conservedFromPrimitive(
@@ -5792,6 +5810,13 @@ class HydroStageCallback final : public core::IntegrationCallback {
       }
       const auto global_flux_payloads = parallel::executeBlockingAmrFluxRegisterPayloadExchange(
           m_mpi_context, local_flux_payloads, context.integrator_state.step_index);
+      directed_amr_diagnostics.outbound_reflux_count = static_cast<std::uint64_t>(local_flux_payloads.size());
+      directed_amr_diagnostics.inbound_reflux_count = static_cast<std::uint64_t>(global_flux_payloads.size());
+      directed_amr_diagnostics.directed_flux_records_sent = static_cast<std::uint64_t>(local_flux_payloads.size());
+      directed_amr_diagnostics.directed_flux_records_received = static_cast<std::uint64_t>(global_flux_payloads.size());
+      directed_amr_diagnostics.flux_payload_bytes =
+          (static_cast<std::uint64_t>(local_flux_payloads.size()) + static_cast<std::uint64_t>(global_flux_payloads.size())) *
+          sizeof(parallel::AmrFluxRegisterPayloadRecord);
       std::vector<amr::FluxRegisterEntry> inbound_entries;
       std::unordered_set<std::uint64_t> inbound_keys;
       for (const auto& payload : global_flux_payloads) {
@@ -5890,7 +5915,22 @@ class HydroStageCallback final : public core::IntegrationCallback {
                       {"reflux_skipped_missing_target_count", std::to_string(amr_diagnostics.reflux.skipped_missing_target_count)},
                       {"distributed_remote_patch_count", std::to_string(remote_patch_count)},
                       {"distributed_remote_flux_register_count", std::to_string(remote_flux_register_count)},
-                      {"distributed_inbound_flux_register_count", std::to_string(inbound_flux_register_count)}}});
+                      {"distributed_inbound_flux_register_count", std::to_string(inbound_flux_register_count)},
+                      {"directed_amr_candidate_peer_count", std::to_string(directed_amr_diagnostics.candidate_peer_count)},
+                      {"directed_amr_neighbor_peer_count", std::to_string(directed_amr_diagnostics.neighbor_peer_count)},
+                      {"directed_amr_patch_descriptor_records_sent", std::to_string(directed_amr_diagnostics.directed_patch_descriptor_records_sent)},
+                      {"directed_amr_patch_descriptor_records_received", std::to_string(directed_amr_diagnostics.directed_patch_descriptor_records_received)},
+                      {"directed_amr_patch_cell_records_sent", std::to_string(directed_amr_diagnostics.directed_patch_cell_records_sent)},
+                      {"directed_amr_patch_cell_records_received", std::to_string(directed_amr_diagnostics.directed_patch_cell_records_received)},
+                      {"directed_amr_flux_records_sent", std::to_string(directed_amr_diagnostics.directed_flux_records_sent)},
+                      {"directed_amr_flux_records_received", std::to_string(directed_amr_diagnostics.directed_flux_records_received)},
+                      {"directed_amr_control_plane_bytes", std::to_string(directed_amr_diagnostics.control_plane_bytes)},
+                      {"directed_amr_patch_descriptor_bytes", std::to_string(directed_amr_diagnostics.patch_descriptor_bytes)},
+                      {"directed_amr_patch_cell_payload_bytes", std::to_string(directed_amr_diagnostics.patch_cell_payload_bytes)},
+                      {"directed_amr_flux_payload_bytes", std::to_string(directed_amr_diagnostics.flux_payload_bytes)},
+                      {"directed_amr_remote_interface_count", std::to_string(directed_amr_diagnostics.remote_interface_count)},
+                      {"directed_amr_inbound_reflux_count", std::to_string(directed_amr_diagnostics.inbound_reflux_count)},
+                      {"directed_amr_outbound_reflux_count", std::to_string(directed_amr_diagnostics.outbound_reflux_count)}}});
     }
   }
 

@@ -100,3 +100,20 @@ This is a **local, two-level** temporal boundary model. It does not implement re
 three-or-more nested active temporal intervals, arbitrary scheduler-owned AMR time bins, AMR patch
 migration while a history is live, or temporal fine-to-coarse restriction. Fine-to-coarse use at a
 non-synchronization time is rejected.
+
+
+## MPI AMR directed exchange and reflux ownership update
+
+Live distributed AMR hydro must treat patch/cell payloads as read-only remote
+ghosts. The production path now uses a bounded fixed-size rank-envelope control
+plane to discover candidate peers, then exchanges patch descriptors and cell
+payloads only with those peers. Full per-patch, per-cell, or per-flux global
+inventory gathers are not a production AMR transport mechanism.
+
+Remote flux-register entries carry source rank, owner rank, register key, coarse
+patch and gas-cell identity, gas-cell identity generation, patch-geometry
+generation, face orientation, area, timestep, and all five conserved flux
+components. They are routed to the authoritative owner rank and applied at most
+once per stable register key/epoch contract. Consumer-side remote patches remain
+read-only; distributed AMR subcycling and remote temporal interpolation remain
+unsupported until implemented with a separate validation contract.
