@@ -39,6 +39,10 @@ int main() {
   in.gravity_treepm_split_scale_mpc_comoving = 0.625;
   in.gravity_treepm_cutoff_radius_mpc_comoving = 2.25;
   in.gravity_treepm_update_cadence_steps = 2;
+  in.gravity_treepm_tree_opening_criterion = "relative_force_error";
+  in.gravity_treepm_tree_opening_theta = 0.62;
+  in.gravity_treepm_tree_relative_force_tolerance = 0.004;
+  in.gravity_treepm_tree_relative_force_acceleration_floor = 1.0e-24;
   in.gravity_treepm_pm_decomposition_mode = "slab";
   in.gravity_treepm_tree_exchange_batch_bytes = 4194304ULL;
   in.gravity_softening_policy = "comoving_fixed";
@@ -80,12 +84,29 @@ int main() {
   assert(out.gravity_treepm_split_scale_mpc_comoving == in.gravity_treepm_split_scale_mpc_comoving);
   assert(out.gravity_treepm_cutoff_radius_mpc_comoving == in.gravity_treepm_cutoff_radius_mpc_comoving);
   assert(out.gravity_treepm_update_cadence_steps == in.gravity_treepm_update_cadence_steps);
+  assert(out.gravity_treepm_tree_opening_criterion == in.gravity_treepm_tree_opening_criterion);
+  assert(out.gravity_treepm_tree_opening_theta == in.gravity_treepm_tree_opening_theta);
+  assert(
+      out.gravity_treepm_tree_relative_force_tolerance ==
+      in.gravity_treepm_tree_relative_force_tolerance);
+  assert(
+      out.gravity_treepm_tree_relative_force_acceleration_floor ==
+      in.gravity_treepm_tree_relative_force_acceleration_floor);
   assert(out.gravity_treepm_pm_decomposition_mode == in.gravity_treepm_pm_decomposition_mode);
   assert(out.gravity_treepm_tree_exchange_batch_bytes == in.gravity_treepm_tree_exchange_batch_bytes);
   assert(out.gravity_softening_policy == in.gravity_softening_policy);
   assert(out.gravity_softening_kernel == in.gravity_softening_kernel);
   assert(out.gravity_softening_epsilon_kpc_comoving == in.gravity_softening_epsilon_kpc_comoving);
   assert(out.gravity_pm_fft_backend == in.gravity_pm_fft_backend);
+
+  const cosmosim::core::ProvenanceRecord legacy = cosmosim::core::deserializeProvenanceRecord(
+      "schema_version=provenance_v5\n"
+      "gravity_treepm_pm_grid=32\n");
+  assert(legacy.schema_version == "provenance_v5");
+  assert(legacy.gravity_treepm_tree_opening_criterion == "com_distance");
+  assert(legacy.gravity_treepm_tree_opening_theta == 0.7);
+  assert(legacy.gravity_treepm_tree_relative_force_tolerance == 0.005);
+  assert(legacy.gravity_treepm_tree_relative_force_acceleration_floor == 1.0e-30);
 
   std::filesystem::remove_all(run_directory);
   return 0;

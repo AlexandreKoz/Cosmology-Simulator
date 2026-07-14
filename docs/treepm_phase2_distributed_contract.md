@@ -33,7 +33,11 @@ For each PM refresh event in Phase 2 runtime:
 1. Particle owners export assignment contributions to slab owners.
 2. Slab owners assemble local density slabs.
 3. Slab owners perform distributed FFT/Poisson/gradient/inverse FFT with periodic zero-mode policy unchanged from Phase 1:
-   - `∇²φ = 4π G a² (ρ - ρ̄)`
+   - the historical Phase 2 notation was `∇²φ = 4π G a² (ρ - ρ̄)`;
+   - the current normalization bug-fix ADR supersedes that notation with
+     `∇²Psi = 4π G_code (rho_com - mean(rho_com))`, `A = -grad(Psi)`;
+   - PM and tree return the same scale-free `A`; collisionless KDK or the gas
+     conservative source applies the cosmological `A/a²` response;
    - `φ_{k=0}=0`, `a_{k=0}=0`
 4. Slab owners send needed force samples/interpolants back to particle owners for active particles.
 
@@ -69,7 +73,10 @@ These counters are observability-only and do not alter force composition or owne
 
 - Active-set restriction remains authoritative: force accumulation only mutates active slots on owner rank.
 - Ownership migration is an explicit phase boundary operation (not mid-kick).
-- PM refresh cadence semantics from Phase 1 remain unchanged (`treepm_update_cadence_steps`).
+- The historical Phase 2 cadence semantics came from Phase 1. Current
+  production validation supersedes that permissive setting and requires
+  `treepm_update_cadence_steps = 1`; lower-level reuse is explicit and
+  fail-closed.
 
 ## Restart continuity expectations
 

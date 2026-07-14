@@ -360,6 +360,10 @@ void testRestartRoundtrip() {
   payload.provenance.gravity_treepm_split_scale_mpc_comoving = 0.3125;
   payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 1.375;
   payload.provenance.gravity_treepm_update_cadence_steps = 3;
+  payload.provenance.gravity_treepm_tree_opening_criterion = "relative_force_error";
+  payload.provenance.gravity_treepm_tree_opening_theta = 0.61;
+  payload.provenance.gravity_treepm_tree_relative_force_tolerance = 0.0045;
+  payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor = 1.0e-23;
   payload.provenance.gravity_softening_policy = "comoving_fixed";
   payload.provenance.gravity_softening_kernel = "plummer";
   payload.provenance.gravity_softening_epsilon_kpc_comoving = 2.0;
@@ -576,6 +580,18 @@ void testRestartRoundtrip() {
   assert(
       restored.provenance.gravity_treepm_update_cadence_steps ==
       payload.provenance.gravity_treepm_update_cadence_steps);
+  assert(
+      restored.provenance.gravity_treepm_tree_opening_criterion ==
+      payload.provenance.gravity_treepm_tree_opening_criterion);
+  assert(
+      restored.provenance.gravity_treepm_tree_opening_theta ==
+      payload.provenance.gravity_treepm_tree_opening_theta);
+  assert(
+      restored.provenance.gravity_treepm_tree_relative_force_tolerance ==
+      payload.provenance.gravity_treepm_tree_relative_force_tolerance);
+  assert(
+      restored.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
+      payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor);
   assert(restored.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
   assert(restored.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
   assert(

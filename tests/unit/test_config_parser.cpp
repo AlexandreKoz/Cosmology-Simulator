@@ -163,10 +163,27 @@ void testBoundaryModeValidation() {
   assert(threw);
 
   const std::string isolated_ok =
-      "[mode]\nmode = isolated_cluster\nhydro_boundary = reflective\ngravity_boundary = isolated_monopole\n";
+      "[mode]\nmode = isolated_cluster\nhydro_boundary = reflective\ngravity_boundary = isolated_monopole\n"
+      "[numerics]\ntreepm_enable_window_deconvolution = false\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(isolated_ok, "isolated_ok");
   assert(frozen.config.mode.hydro_boundary == cosmosim::core::ModeHydroBoundary::kReflective);
   assert(frozen.config.mode.gravity_boundary == cosmosim::core::ModeGravityBoundary::kIsolatedMonopole);
+  assert(!frozen.config.numerics.treepm_enable_window_deconvolution);
+  assert(frozen.normalized_text.find("treepm_enable_window_deconvolution = false") !=
+      std::string::npos);
+
+  const std::string isolated_incompatible_default =
+      "[mode]\nmode = isolated_cluster\nhydro_boundary = reflective\ngravity_boundary = isolated_monopole\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        isolated_incompatible_default, "isolated_incompatible_default");
+  } catch (const cosmosim::core::ConfigError& ex) {
+    threw = std::string(ex.what()).find(
+                "treepm_enable_window_deconvolution must be false") !=
+        std::string::npos;
+  }
+  assert(threw);
 }
 
 void testDefaultsCanonicalizationAndDeterminism() {
@@ -183,6 +200,19 @@ void testDefaultsCanonicalizationAndDeterminism() {
   assert(frozen_first.config.physics.enable_cooling);
   assert(frozen_first.config.physics.fb_mode == cosmosim::core::FeedbackMode::kThermalKineticMomentum);
   assert(frozen_first.config.parallel.deterministic_reduction);
+  assert(
+      frozen_first.config.numerics.treepm_tree_opening_criterion ==
+      cosmosim::core::TreePmOpeningCriterion::kComDistance);
+  assert(frozen_first.config.numerics.treepm_tree_opening_theta == 0.7);
+  assert(frozen_first.config.numerics.treepm_tree_relative_force_tolerance == 0.005);
+  assert(
+      frozen_first.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-30);
+  assert(
+      frozen_first.config.numerics.treepm_assignment_scheme ==
+      cosmosim::core::TreePmAssignmentScheme::kTsc);
+  assert(frozen_first.config.numerics.treepm_enable_window_deconvolution);
+  assert(frozen_first.normalized_text.find("treepm_tree_opening_criterion = com_distance") !=
+      std::string::npos);
   assert(!frozen_first.config.parallel.decomposition_debug_exact_ownership_audit);
   assert(frozen_first.normalized_text.find("decomposition_debug_exact_ownership_audit = false") != std::string::npos);
   assert(frozen_first.config.parallel.isolated_pm_root_workspace_limit_bytes == 268435456ULL);
@@ -269,6 +299,7 @@ gravity_softening_black_hole = 0.05 kpc
 treepm_pm_grid_nx = 28
 treepm_pm_grid_ny = 20
 treepm_pm_grid_nz = 12
+treepm_rcut_cells = 5.5
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "derived_runtime");
   const auto derived = cosmosim::core::deriveRuntimeConfig(frozen);
@@ -314,7 +345,9 @@ stellar_evolution_table_path = "C://stellar_tables//ssp#grid.h5" # local overrid
 }
 
 void testDeprecatedAliasesAndCanonicalCollision() {
-  const std::string alias_only = "mode = isolated_galaxy\n";
+  const std::string alias_only =
+      "mode = isolated_galaxy\n"
+      "numerics.treepm_enable_window_deconvolution = false\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(alias_only, "alias_only");
   assert(frozen.config.mode.mode == cosmosim::core::SimulationMode::kIsolatedGalaxy);
   assert(!frozen.provenance.deprecation_warnings.empty());
@@ -464,9 +497,13 @@ box_size = 64 mpc
 treepm_pm_grid = 32
 treepm_asmth_cells = 1.5
 treepm_rcut_cells = 5.0
+treepm_tree_opening_criterion = relative_force_error
+treepm_tree_opening_theta = 0.65
+treepm_tree_relative_force_tolerance = 0.006
+treepm_tree_relative_force_acceleration_floor = 1.0e-25
 treepm_assignment_scheme = cic
 treepm_enable_window_deconvolution = true
-treepm_update_cadence_steps = 3
+treepm_update_cadence_steps = 1
 treepm_pm_decomposition_mode = slab
 treepm_tree_exchange_batch_bytes = 8388608
 )";
@@ -477,22 +514,46 @@ treepm_tree_exchange_batch_bytes = 8388608
   assert(frozen.config.numerics.treepm_asmth_cells == 1.5);
   assert(frozen.config.numerics.treepm_rcut_cells == 5.0);
   assert(
+      frozen.config.numerics.treepm_tree_opening_criterion ==
+      cosmosim::core::TreePmOpeningCriterion::kRelativeForceError);
+  assert(frozen.config.numerics.treepm_tree_opening_theta == 0.65);
+  assert(frozen.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
+  assert(frozen.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
+  assert(
       frozen.config.numerics.treepm_assignment_scheme ==
       cosmosim::core::TreePmAssignmentScheme::kCic);
   assert(frozen.config.numerics.treepm_enable_window_deconvolution);
-  assert(frozen.config.numerics.treepm_update_cadence_steps == 3);
+  assert(frozen.config.numerics.treepm_update_cadence_steps == 1);
   assert(
       frozen.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kSlab);
   assert(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
   assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
+  assert(frozen.normalized_text.find("treepm_tree_opening_criterion = relative_force_error") !=
+      std::string::npos);
+  assert(frozen.normalized_text.find("treepm_tree_opening_theta = 0.65") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_pm_decomposition_mode = slab") != std::string::npos);
   const auto reparsed =
       cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "treepm_roundtrip");
   assert(reparsed.config.numerics.treepm_pm_grid_nx == 32);
-  assert(reparsed.config.numerics.treepm_update_cadence_steps == 3);
+  assert(
+      reparsed.config.numerics.treepm_tree_opening_criterion ==
+      cosmosim::core::TreePmOpeningCriterion::kRelativeForceError);
+  assert(reparsed.config.numerics.treepm_tree_opening_theta == 0.65);
+  assert(reparsed.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
+  assert(reparsed.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
+  assert(reparsed.config.numerics.treepm_update_cadence_steps == 1);
   assert(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
+
+  const auto parsed_geometric = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = geometric\n",
+      "treepm_geometric_opening");
+  assert(
+      parsed_geometric.config.numerics.treepm_tree_opening_criterion ==
+      cosmosim::core::TreePmOpeningCriterion::kGeometric);
+  assert(parsed_geometric.normalized_text.find("treepm_tree_opening_criterion = geometric") !=
+      std::string::npos);
 
   const std::string bad_grid =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_grid = 0\n";
@@ -503,6 +564,49 @@ treepm_tree_exchange_batch_bytes = 8388608
     threw = true;
   }
   assert(threw);
+
+  const std::string bad_opening_criterion =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = magic\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        bad_opening_criterion, "treepm_bad_opening_criterion");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  for (const std::string invalid_opening_value : {
+           "treepm_tree_opening_theta = 0\n",
+           "treepm_tree_opening_theta = nan\n",
+           "treepm_tree_relative_force_tolerance = -0.001\n",
+           "treepm_tree_relative_force_acceleration_floor = 0\n"}) {
+    threw = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(
+          "[mode]\nmode = zoom_in\n[numerics]\n" + invalid_opening_value,
+          "treepm_bad_opening_value");
+    } catch (const cosmosim::core::ConfigError&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  const std::string unsafe_pm_cadence =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_update_cadence_steps = 3\n";
+  threw = false;
+  std::string cadence_error;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        unsafe_pm_cadence, "treepm_unsafe_pm_cadence");
+  } catch (const cosmosim::core::ConfigError& error) {
+    threw = true;
+    cadence_error = error.what();
+  }
+  assert(threw);
+  assert(cadence_error.find("must be exactly 1 in production") != std::string::npos);
+  assert(cadence_error.find("source, scale-factor, or decomposition epochs") !=
+      std::string::npos);
 
   const std::string bad_scheme =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_assignment_scheme = magic\n";
@@ -530,6 +634,27 @@ treepm_tree_exchange_batch_bytes = 8388608
     threw = true;
   }
   assert(threw);
+
+  const std::string ambiguous_periodic_cutoff = R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 1 mpc
+[numerics]
+treepm_pm_grid = 8
+treepm_rcut_cells = 4
+)";
+  threw = false;
+  std::string cutoff_error;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        ambiguous_periodic_cutoff, "treepm_ambiguous_periodic_cutoff");
+  } catch (const cosmosim::core::ConfigError& error) {
+    threw = true;
+    cutoff_error = error.what();
+  }
+  assert(threw);
+  assert(cutoff_error.find("< half the shortest box axis") != std::string::npos);
 }
 
 void testAxisAwareBoxAndPmGridCanonicalizationCompatibility() {
@@ -563,6 +688,7 @@ box_size_z = 30 mpc
 treepm_pm_grid_nx = 28
 treepm_pm_grid_ny = 20
 treepm_pm_grid_nz = 12
+treepm_rcut_cells = 5.5
 )";
   const auto axis_frozen = cosmosim::core::loadFrozenConfigFromString(axis_text, "axis_canonical");
   assert(axis_frozen.config.cosmology.box_size_x_mpc_comoving == 70.0);
@@ -794,6 +920,26 @@ void testDerivedRuntimeSerializationUsesCanonicalNames() {
   assert(serialized.find("time_end_code") == std::string::npos);
 }
 
+void testProductionHierarchicalRungsFailClosed() {
+  const auto production = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n", "production_single_rung_default");
+  assert(production.config.numerics.hierarchical_max_rung == 0);
+  assert(production.normalized_text.find("hierarchical_max_rung = 0") !=
+         std::string::npos);
+
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\nhierarchical_max_rung = 1\n",
+        "production_multirung_rejected");
+  } catch (const cosmosim::core::ConfigError& error) {
+    rejected = std::string(error.what()).find(
+        "does not yet carry per-element kick/drift epochs") !=
+        std::string::npos;
+  }
+  assert(rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -828,5 +974,6 @@ int main() {
   testAdversarialPhysicsAndCosmologyDependenciesFail();
   testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
+  testProductionHierarchicalRungsFailClosed();
   return 0;
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <stdexcept>
 
 #include "cosmosim/core/constants.hpp"
@@ -117,6 +118,19 @@ UnitSystem makeUnitSystem(
   units.mass_si_per_code = massSiPerCodeFromName(units.mass_unit);
   units.velocity_si_per_code = velocitySiPerCodeFromName(units.velocity_unit);
   return units;
+}
+
+double newtonGravitationalConstantCode(const UnitSystem& units) {
+  const double time_si_per_code = units.timeSiPerCode();
+  const double denominator = units.length_si_per_code *
+      units.length_si_per_code * units.length_si_per_code;
+  const double result = constants::k_newton_g_si * units.mass_si_per_code *
+      time_si_per_code * time_si_per_code / denominator;
+  if (!std::isfinite(result) || !(result > 0.0)) {
+    throw std::invalid_argument(
+        "code-unit conversion produced a non-finite or non-positive Newton constant");
+  }
+  return result;
 }
 
 double comovingToPhysicalLength(double x_comoving, double scale_factor) {

@@ -31,8 +31,8 @@ std::vector<cosmosim::core::TimeBinSchedulerIdentityRecord> schedulerSeedForRank
   for (std::uint64_t particle_id = 1ULL; particle_id <= 42ULL; ++particle_id) {
     records.push_back(cosmosim::core::TimeBinSchedulerIdentityRecord{
         .element_id = particle_id,
-        .bin_index = static_cast<std::uint8_t>(world_rank == 0 ? 0U : 1U),
-        .next_activation_tick = world_rank == 0 ? 0ULL : 2ULL,
+        .bin_index = 0U,
+        .next_activation_tick = 0ULL,
         .pending_bin_index = cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin,
     });
   }
@@ -44,7 +44,7 @@ std::string buildConfigText(
     int mpi_ranks_expected,
     std::string_view run_name = "reference_workflow_distributed_treepm_mpi",
     bool write_restarts = false,
-    int snapshot_interval_steps = 0,
+    int snapshot_interval_steps = 1,
     bool rebalance_enabled = true) {
   std::stringstream stream;
   stream << "schema_version = 1\n\n";
@@ -56,12 +56,17 @@ std::string buildConfigText(
   stream << "time_begin_code = 0.01\n";
   stream << "time_end_code = 0.0102\n";
   stream << "max_global_steps = 2\n";
-  stream << "hierarchical_max_rung = 2\n";
+  stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 16\n";
   stream << "treepm_asmth_cells = 1.5\n";
   stream << "treepm_rcut_cells = 4.5\n";
   stream << "treepm_update_cadence_steps = " << cadence_steps << "\n";
   stream << "treepm_tree_exchange_batch_bytes = 256\n\n";
+  stream << "[physics]\n";
+  stream << "enable_cooling = false\n";
+  stream << "enable_star_formation = false\n";
+  stream << "enable_feedback = false\n";
+  stream << "enable_stellar_evolution = false\n\n";
   stream << "[output]\n";
   stream << "run_name = " << run_name << "\n";
   stream << "output_directory = integration_outputs\n";
@@ -91,7 +96,7 @@ int main() {
     return 0;
   }
 
-  const std::string config_text = buildConfigText(/*cadence_steps=*/2, world_size);
+  const std::string config_text = buildConfigText(/*cadence_steps=*/1, world_size);
   const cosmosim::core::FrozenConfig frozen =
       cosmosim::core::loadFrozenConfigFromString(config_text, "test_reference_workflow_distributed_treepm_mpi");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
@@ -109,13 +114,13 @@ int main() {
   assert(report.global_particle_id_xor == xorRangeOneToN(42ULL));
   assert(report.local_particle_ids_unique);
   assert(report.global_particle_partition_identity_match);
-  assert(report.treepm_update_cadence_steps == 2);
-  assert(report.treepm_long_range_refresh_count == 2);
-  assert(report.treepm_long_range_reuse_count == 1);
+  assert(report.treepm_update_cadence_steps == 1);
+  assert(report.treepm_long_range_refresh_count == 3);
+  assert(report.treepm_long_range_reuse_count == 0);
   assert(report.treepm_cadence_records.size() == 3U);
-  const std::vector<std::uint64_t> expected_field_versions{1ULL, 1ULL, 2ULL};
+  const std::vector<std::uint64_t> expected_field_versions{1ULL, 2ULL, 3ULL};
   const std::vector<std::uint64_t> expected_field_built_steps{0ULL, 0ULL, 1ULL};
-  const std::vector<bool> expected_refresh_flags{true, false, true};
+  const std::vector<bool> expected_refresh_flags{true, true, true};
   const std::vector<std::string> expected_stage_names{
       "gravity_kick_pre", "force_refresh", "force_refresh"};
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
@@ -197,16 +202,18 @@ int main() {
       static_cast<int>(local_active_by_boundary.size()),
       MPI_UINT64_T,
       MPI_COMM_WORLD);
-  bool saw_zero_local_work_with_remote_activity = false;
+  // Production workflow time integration is intentionally rung-0-only until
+  // per-particle KDK epochs exist. Both nonempty ownership ranks must therefore
+  // contribute active work at every rank-coordinated force boundary. Empty-
+  // target collective behavior is covered by the dedicated PM/TreePM fixtures,
+  // not manufactured through a mixed-bin production schedule.
   for (std::size_t boundary = 0; boundary < local_active_by_boundary.size(); ++boundary) {
     const std::uint64_t rank_zero_active = active_by_rank_and_boundary[boundary];
     const std::uint64_t rank_one_active =
         active_by_rank_and_boundary[local_active_by_boundary.size() + boundary];
-    if (rank_zero_active > 0ULL && rank_one_active == 0ULL) {
-      saw_zero_local_work_with_remote_activity = true;
-    }
+    assert(rank_zero_active > 0ULL);
+    assert(rank_one_active > 0ULL);
   }
-  assert(saw_zero_local_work_with_remote_activity);
 
   cosmosim::parallel::DistributedRestartState invalid_restart_state;
   invalid_restart_state.world_size = world_size;
@@ -297,7 +304,7 @@ int main() {
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() / "cosmosim_treepm_mpi_restart_continuation";
     const std::string direct_config_text = buildConfigText(
-        /*cadence_steps=*/2,
+        /*cadence_steps=*/1,
         world_size,
         "treepm_mpi_direct_continuation",
         /*write_restarts=*/true,
@@ -310,7 +317,6 @@ int main() {
     cosmosim::workflows::ReferenceWorkflowRunner direct_runner(direct_frozen);
     cosmosim::workflows::ReferenceWorkflowOptions direct_options;
     direct_options.write_outputs = true;
-    direct_options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
     direct_options.max_steps_override = 2;
     const cosmosim::workflows::ReferenceWorkflowReport direct_report =
         direct_runner.run(root / ("rank_" + std::to_string(world_rank) + "_direct"), direct_options);
@@ -318,7 +324,7 @@ int main() {
     assert(direct_report.restart_roundtrip_ok);
 
     const std::string restart_config_text = buildConfigText(
-        /*cadence_steps=*/2,
+        /*cadence_steps=*/1,
         world_size,
         "treepm_mpi_restart_continuation",
         /*write_restarts=*/true,
@@ -331,7 +337,6 @@ int main() {
     cosmosim::workflows::ReferenceWorkflowRunner restart_runner(restart_frozen);
     cosmosim::workflows::ReferenceWorkflowOptions first_options;
     first_options.write_outputs = true;
-    first_options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
     first_options.max_steps_override = 1;
     const cosmosim::workflows::ReferenceWorkflowReport first_report =
         restart_runner.run(root / ("rank_" + std::to_string(world_rank) + "_first"), first_options);

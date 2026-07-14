@@ -658,6 +658,24 @@ void testTimeBinMappingAndCriteria() {
   };
   const double dt_grav = cosmosim::core::computeGravityTimeStep(grav_input, 0.4);
   assert(std::abs(dt_grav - 0.4 * std::sqrt(0.01 / 4.0)) < k_tolerance);
+  const cosmosim::core::ComovingGravityTimeStepInput comoving_grav_input{
+      .softening_length_comoving_code = 0.01,
+      .scale_free_acceleration_magnitude_code = 4.0,
+      .scale_factor = 0.5,
+  };
+  const double dt_comoving_grav =
+      cosmosim::core::computeComovingGravityTimeStep(comoving_grav_input, 0.4);
+  assert(std::abs(dt_comoving_grav - 0.4 * std::sqrt(0.125 * 0.01 / 4.0)) <
+      k_tolerance);
+  assert(throwsWithContext(
+      [&]() {
+        (void)cosmosim::core::computeComovingGravityTimeStep(
+            {.softening_length_comoving_code = 0.01,
+             .scale_free_acceleration_magnitude_code = 4.0,
+             .scale_factor = 0.0},
+            0.4);
+      },
+      "scale_factor"));
 
   cosmosim::core::TimeStepCriteriaRegistry registry;
   registry.registerCflHook([](std::uint32_t index) { return index == 0 ? 0.2 : 0.4; });
@@ -1316,6 +1334,16 @@ void testBoundarySafetyClassification() {
   assert(!local_boundary.restart_safe);
   assert(!local_boundary.output_safe);
   assert(!local_boundary.pm_refresh_allowed);
+
+  local_active.has_global_synchronization_metadata = true;
+  local_active.globally_complete_active_set = false;
+  const auto coordinated_local_boundary =
+      cosmosim::core::classifyStepBoundary(state, local_active, true);
+  assert(coordinated_local_boundary.kind ==
+         cosmosim::core::StepBoundaryKind::kLocalActiveBinStep);
+  assert(!coordinated_local_boundary.restart_safe);
+  assert(!coordinated_local_boundary.output_safe);
+  assert(coordinated_local_boundary.pm_refresh_allowed);
 
   cosmosim::core::IntegratorState unsafe_state;
   unsafe_state.current_boundary_kind = local_boundary.kind;

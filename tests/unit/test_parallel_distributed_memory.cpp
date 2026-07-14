@@ -899,14 +899,14 @@ void testPmSlabUnevenPartitionOwnership() {
   const auto r2 = cosmosim::parallel::pmOwnedXRangeForRank(nx, world_size, 2);
 
   assert(r0.begin_x == 0 && r0.end_x == 4);
-  assert(r1.begin_x == 4 && r1.end_x == 7);
-  assert(r2.begin_x == 7 && r2.end_x == 10);
+  assert(r1.begin_x == 4 && r1.end_x == 8);
+  assert(r2.begin_x == 8 && r2.end_x == 10);
 
   for (std::size_t x = 0; x < nx; ++x) {
     const int owner = cosmosim::parallel::pmOwnerRankForGlobalX(nx, world_size, x);
     if (x < 4) {
       assert(owner == 0);
-    } else if (x < 7) {
+    } else if (x < 8) {
       assert(owner == 1);
     } else {
       assert(owner == 2);
@@ -918,11 +918,11 @@ void testPmSlabLayoutRoundTripAndCellOwnership() {
   const auto layout = cosmosim::parallel::makePmSlabLayout(
       /*global_nx=*/10, /*global_ny=*/6, /*global_nz=*/4, /*world_size=*/3, /*world_rank=*/1);
   assert(layout.isValid());
-  assert(layout.local_nx() == 3);
-  assert(layout.localCellCount() == 3 * 6 * 4);
+  assert(layout.local_nx() == 4);
+  assert(layout.localCellCount() == 4 * 6 * 4);
   assert(!layout.ownsFullDomain());
   assert(layout.owned_x.begin_x == 4);
-  assert(layout.owned_x.end_x == 7);
+  assert(layout.owned_x.end_x == 8);
 
   for (std::size_t global_x = layout.owned_x.begin_x; global_x < layout.owned_x.end_x; ++global_x) {
     const std::size_t local_x = layout.localXFromGlobal(global_x);
@@ -932,7 +932,7 @@ void testPmSlabLayoutRoundTripAndCellOwnership() {
   const std::size_t idx = layout.localLinearIndex(/*global_x=*/5, /*global_y=*/2, /*global_z=*/3);
   assert(idx == ((1 * 6 + 2) * 4 + 3));
   assert(layout.ownsGlobalCell(/*global_x=*/6, /*global_y=*/5, /*global_z=*/3));
-  assert(!layout.ownsGlobalCell(/*global_x=*/7, /*global_y=*/1, /*global_z=*/1));
+  assert(!layout.ownsGlobalCell(/*global_x=*/8, /*global_y=*/1, /*global_z=*/1));
 
   bool threw = false;
   try {
@@ -1221,6 +1221,35 @@ void testRuntimeRebalanceUsesCurrentOwnershipImbalance() {
   assert(!plan.particle_migrations.empty());
 }
 
+void testPmSlabHaloSerialDoesNotRequireMpiInitialization() {
+  const cosmosim::parallel::MpiContext mpi_context;
+  assert(!mpi_context.isEnabled());
+  assert(mpi_context.worldSize() == 1);
+  assert(mpi_context.worldRank() == 0);
+
+  const cosmosim::parallel::PmSlabLayout layout =
+      cosmosim::parallel::makePmSlabLayout(
+          /*global_nx=*/2U,
+          /*global_ny=*/2U,
+          /*global_nz=*/2U,
+          /*world_size=*/1,
+          /*world_rank=*/0);
+  const std::vector<double> local_field(layout.localCellCount(), 1.0);
+  const cosmosim::parallel::PmSlabHaloExchangeResult exchange =
+      cosmosim::parallel::executeBlockingPmSlabHaloExchange(
+          mpi_context,
+          layout,
+          local_field,
+          /*halo_depth_x=*/1U,
+          /*periodic_x=*/true,
+          /*exchange_sequence=*/1U);
+  assert(exchange.halo_depth_x == 0U);
+  assert(exchange.left_halo.empty());
+  assert(exchange.right_halo.empty());
+  assert(exchange.sent_bytes == 0U);
+  assert(exchange.received_bytes == 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -1257,5 +1286,6 @@ int main() {
   testDistributedExecutionTopologyRejectsInvalidGpuRequest();
   testPmSlabUnevenPartitionOwnership();
   testPmSlabLayoutRoundTripAndCellOwnership();
+  testPmSlabHaloSerialDoesNotRequireMpiInitialization();
   return 0;
 }

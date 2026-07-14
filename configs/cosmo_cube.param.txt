@@ -26,16 +26,16 @@ box_size = 100 mpc
 time_begin_code = 0.0
 time_end_code = 1.0
 max_global_steps = 2048
-hierarchical_max_rung = 13
+hierarchical_max_rung = 0
 amr_max_level = 9
 gravity_softening = 3.0 kpc
 gravity_solver = treepm
 hydro_solver = godunov_fv
 treepm_pm_grid = 64
 treepm_asmth_cells = 1.25
-treepm_rcut_cells = 4.5
-treepm_assignment_scheme = cic
-treepm_enable_window_deconvolution = false
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = tsc
+treepm_enable_window_deconvolution = true
 treepm_update_cadence_steps = 1
 
 [physics]

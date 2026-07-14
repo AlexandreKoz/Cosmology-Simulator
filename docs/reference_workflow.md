@@ -39,7 +39,9 @@ The runner honors these config fields directly:
 - `numerics.treepm_rcut_cells`
 - `numerics.treepm_assignment_scheme`
 - `numerics.treepm_enable_window_deconvolution`
-- `numerics.treepm_update_cadence_steps` (authoritative PM long-range refresh cadence in gravity kick opportunities; integer `>= 1`)
+- `numerics.treepm_update_cadence_steps` (authoritative PM long-range refresh
+  cadence; production value is exactly `1`)
+- `numerics.hierarchical_max_rung` (production value is exactly `0`)
 
 TreePM runtime mapping is explicit and auditable:
 
@@ -48,13 +50,36 @@ TreePM runtime mapping is explicit and auditable:
 - split-spacing scalar used for current TreePM split policy is `Δmesh = cbrt(Δx*Δy*Δz)`
 - `r_s = treepm_asmth_cells * Δmesh`
 - `r_cut = treepm_rcut_cells * Δmesh`
+- periodic typed validation and solve entry require
+  `r_cut < 0.5*min(box_size_x,box_size_y,box_size_z)` because the residual tree
+  evaluates one minimum image per source
 - Assignment/deconvolution are wired from typed config, not hidden workflow constants
 - `treepm_assignment_scheme` maps directly to runtime PM assignment+gather (`cic` or `tsc`)
-- `treepm_update_cadence_steps` is consumed by runtime PM cadence logic:
-  - refresh long-range PM field every `N` gravity kick opportunities (`N = cadence_steps`)
-  - reuse last long-range PM field between refreshes
-  - default remains conservative (`N = 1`, refresh every kick)
-- Reused PM long-range fields carry explicit provenance in runtime metadata (field version, build step, build scale factor), so each kick can be audited against the field it used.
+- For an isolated/open gravity boundary, typed config validation requires
+  `treepm_enable_window_deconvolution=false` before runtime construction. The
+  periodic default is not silently overridden, so isolated decks must state
+  the disabled policy explicitly.
+- Production validation requires `treepm_update_cadence_steps = 1`, so every
+  authorized rank-coordinated force-refresh rebuilds the PM field. Lower-level
+  explicit reuse remains available for tests/future integration and fails if
+  any rank lacks a compatible cache; it never silently changes into refresh.
+- Field provenance includes force epoch and build step/scale-factor metadata.
+  Particle decomposition epoch is deliberately excluded from PM cache
+  compatibility because the field is owned by fixed FFT slabs.
+- PM and tree both consume `core::newtonGravitationalConstantCode(...)` from
+  frozen units and return a scale-free comoving kernel `A`. Collisionless KDK
+  and the gas conservative source apply Hubble drag/expansion plus the `A/a²`
+  response to their respective state; both use integrator-owned `a` and
+  `H_code`.
+- Hydro runs post-drift before step commit, so fixed-grid and AMR source
+  contexts take `a,H_code` from
+  `timeline_step.scale_factor_end/hubble_end_code`, not the still-step-begin
+  `IntegratorState` values.
+- Adaptive gravity timestep proposals run after commit. With comoving
+  softening they call `computeComovingGravityTimeStep` with `eps_com`,
+  scale-free `|A|`, and committed `a`. The public helper validates `a`, converts
+  to comoving-coordinate acceleration `|A|/a^3`, and uses
+  `dt_grav=eta sqrt(a^3 epsilon_com/|A|)`.
 - `r_cut` is resolved from typed config and drives explicit residual-traversal pruning in the TreePM residual path
 - zoom-focused long-range correction (when enabled):
   - authoritative high-resolution membership is loaded from `mode.zoom_region_file` when provided (plain-text IDs or HDF5 `ParticleIDs`/`Region/ParticleIDs`); otherwise the configured zoom center/radius fallback is used.
@@ -62,10 +87,13 @@ TreePM runtime mapping is explicit and auditable:
     - global coarse PM from all sources,
     - focused PM correction on high-resolution targets only:
       `a_PM_focused(high-res sources) - a_PM_coarse(high-res sources)`,
+    - the focused correction uses isolated/open convolution and forces PM
+      window deconvolution off; isolated deconvolution is not certified,
     - tree short-range residual from all sources.
   - contamination diagnostics count low-resolution source particles/mass inside the configured contamination radius and are emitted as runtime operational events.
 - distributed cadence coherence:
-  - all ranks advance `gravity_kick_opportunity` together for every gravity kick stage;
+  - all ranks advance `gravity_kick_opportunity` together for every
+    integrator-issued PM synchronization event;
   - long-range PM refresh/reuse is checked as a rank-consensus decision, so rank-local counters cannot silently drift;
   - per-kick cadence records (`gravity_kick_opportunity`, `field_version`, refresh flag) are expected to match across ranks.
 
@@ -81,17 +109,18 @@ The workflow uses `core::StepOrchestrator` and preserves the canonical order:
 
 1. `gravity_kick_pre`
 2. `drift`
-3. `hydro_update`
-4. `source_terms`
-5. `gravity_kick_post`
-6. `analysis_hooks`
-7. `output_check`
+3. `force_refresh`
+4. `hydro_update`
+5. `source_terms`
+6. `gravity_kick_post`
+7. `analysis_hooks`
+8. `output_check`
 
 ## Gravity, hydro, and scheduler ownership
 
 - Gravity is executed through the live `gravity::TreePmCoordinator` callback.
 - Hydro is executed through the live Godunov finite-volume callback using the hydro core solver, MUSCL-Hancock reconstruction, and HLLC fluxes.
-- Active sets come from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps are committed through `endSubstep()` before restart output is written.
+- Active sets come from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps are committed through `endSubstep()` before restart output is written. The production workflow currently requires rung zero; nonzero rungs are rejected because per-element kick/drift epochs are not yet authoritative.
 - In MPI mode the workflow report records both local owned counts/checksums and reduced global counts/checksums (`particle_count`, `cell_count`, particle-ID sum/xor). This is part of the operational honesty contract for distributed runs: tests must be able to distinguish a true partitioned state from an accidentally replicated one.
 - Restart payloads therefore serialize the scheduler state that actually drove the run.
 
@@ -125,6 +154,13 @@ The runner flushes the normalized config snapshot as soon as config loading succ
 - `treepm_cadence_records` (per-kick record including step, stage, field version, and refresh/reuse decision)
 - `final_state_digest` (deterministic run-result checksum for reproducibility checks under fixed config/ICs)
 - operational events include `gravity.zoom_force_diagnostics` with PM/tree/total force norms plus low-resolution contamination counters.
+- `gravity.pm_long_range_field` records the current pending refresh directive's
+  opportunity, field version, build step, and build scale factor before cadence
+  commit. It must not report the previous committed `pm_sync_state` values.
+- Gravity diagnostic doubles in operational-event payloads use scientific
+  `max_digits10` formatting. Small `G_code`, relative-MAC floors, derived
+  split/cutoff/softening scales, force norms, and scale factors therefore
+  remain distinguishable from zero.
 - operational events include `gravity.health_summary` plus targeted `gravity.health_check` warning/fatal events:
   - cheap checks are always-on (PM/force finiteness, sync-state invariants, decomposition/zoom sanity),
   - heavy reference checks are opt-in only when `analysis.diagnostics_execution_policy = all_including_provisional`.

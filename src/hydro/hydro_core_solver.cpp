@@ -422,6 +422,23 @@ HydroConservedState ComovingGravityExpansionSource::sourceForCell(
       context.gravity_accel_y_peculiar,
       context.gravity_accel_z_peculiar);
 
+  if (!std::isfinite(context.update.scale_factor) || context.update.scale_factor <= 0.0) {
+    throw std::invalid_argument("comoving gravity source requires finite scale_factor > 0");
+  }
+  if (!std::isfinite(context.update.hubble_rate_code) || context.update.hubble_rate_code < 0.0) {
+    throw std::invalid_argument("comoving gravity source requires finite hubble_rate_code >= 0");
+  }
+  // TreePM returns the scale-free comoving particle kernel A. The conserved
+  // gas momentum stores rho_c u with physical peculiar velocity u, whose
+  // equation is du/dt + H u = A/a^2. Keep the scale-factor response here so
+  // particles and gas share one TreePM normalization without double counting.
+  const double inverse_scale_factor_squared =
+      1.0 / (context.update.scale_factor * context.update.scale_factor);
+  const std::array<double, 3> peculiar_acceleration{
+      g[0] * inverse_scale_factor_squared,
+      g[1] * inverse_scale_factor_squared,
+      g[2] * inverse_scale_factor_squared,
+  };
   const double hubble_rate = context.update.hubble_rate_code;
   const double internal_energy_density = std::max(
       conserved.total_energy_density_comoving -
@@ -430,16 +447,32 @@ HydroConservedState ComovingGravityExpansionSource::sourceForCell(
                  conserved.momentum_density_z_comoving * conserved.momentum_density_z_comoving) /
               std::max(conserved.mass_density_comoving, k_small),
       0.0);
+  const double kinetic_energy_density = std::max(
+      conserved.total_energy_density_comoving - internal_energy_density,
+      0.0);
 
   HydroConservedState source;
   source.mass_density_comoving = 0.0;
-  source.momentum_density_x_comoving = primitive.rho_comoving * g[0] - hubble_rate * conserved.momentum_density_x_comoving;
-  source.momentum_density_y_comoving = primitive.rho_comoving * g[1] - hubble_rate * conserved.momentum_density_y_comoving;
-  source.momentum_density_z_comoving = primitive.rho_comoving * g[2] - hubble_rate * conserved.momentum_density_z_comoving;
+  source.momentum_density_x_comoving =
+      primitive.rho_comoving * peculiar_acceleration[0] -
+      hubble_rate * conserved.momentum_density_x_comoving;
+  source.momentum_density_y_comoving =
+      primitive.rho_comoving * peculiar_acceleration[1] -
+      hubble_rate * conserved.momentum_density_y_comoving;
+  source.momentum_density_z_comoving =
+      primitive.rho_comoving * peculiar_acceleration[2] -
+      hubble_rate * conserved.momentum_density_z_comoving;
 
   const double work_gravity = primitive.rho_comoving *
-      (primitive.vel_x_peculiar * g[0] + primitive.vel_y_peculiar * g[1] + primitive.vel_z_peculiar * g[2]);
-  source.total_energy_density_comoving = work_gravity - 2.0 * hubble_rate * internal_energy_density;
+      (primitive.vel_x_peculiar * peculiar_acceleration[0] +
+       primitive.vel_y_peculiar * peculiar_acceleration[1] +
+       primitive.vel_z_peculiar * peculiar_acceleration[2]);
+  // For rho_c, rho_c u, and rho_c(e + u^2/2), homogeneous expansion gives
+  // -H rho_c u^2 - 3 H P. This is -2 H E for gamma=5/3, while the pressure
+  // form remains correct for every gamma supported by HydroCoreSolver.
+  source.total_energy_density_comoving =
+      work_gravity - hubble_rate *
+          (2.0 * kinetic_energy_density + 3.0 * primitive.pressure_comoving);
   return source;
 }
 

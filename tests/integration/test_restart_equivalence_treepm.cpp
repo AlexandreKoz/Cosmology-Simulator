@@ -21,6 +21,16 @@ namespace {
 #endif
 }
 
+[[nodiscard]] constexpr double rcutCellsForAvailableBackend() noexcept {
+#if COSMOSIM_ENABLE_FFTW
+  return 4.5;
+#else
+  // The fallback keeps a small direct-DFT mesh, so its one-image cutoff must
+  // be smaller than the production FFTW fixture's cutoff.
+  return 3.9;
+#endif
+}
+
 [[nodiscard]] double wrapUnitBox(double x) {
   x = std::fmod(x, 1.0);
   return x < 0.0 ? x + 1.0 : x;
@@ -49,7 +59,10 @@ void applyProductionTreePmKick(cosmosim::tests::RestartEquivalenceStepContext& c
   options.tree_options.softening.epsilon_comoving = 0.015;
   const auto pm_shape = pmShapeForAvailableBackend(16, 8);
   const double mesh_spacing = options.pm_options.box_size_mpc_comoving / static_cast<double>(pm_shape.nx);
-  options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 4.5, mesh_spacing);
+  options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
+      1.25,
+      rcutCellsForAvailableBackend(),
+      mesh_spacing);
 
   cosmosim::gravity::TreePmCoordinator coordinator(pm_shape);
   cosmosim::gravity::TreePmDiagnostics diagnostics;

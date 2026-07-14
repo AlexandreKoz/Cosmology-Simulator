@@ -39,6 +39,9 @@ int main() {
   const double norm_a05 = solve_and_norm(grid_a05, 0.5);
   assert(norm_a1 > 0.0);
   const double ratio = norm_a05 / norm_a1;
-  assert(std::abs(ratio - 0.25) < 1.0e-6);
+  // PM returns the scale-free comoving particle kernel. Cosmological
+  // scale-factor dependence belongs exclusively to the KDK kick integral;
+  // applying a second a^2 here would double-count the convention.
+  assert(std::abs(ratio - 1.0) < 1.0e-12);
   return 0;
 }

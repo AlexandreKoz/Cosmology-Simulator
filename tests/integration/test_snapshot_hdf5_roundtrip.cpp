@@ -108,6 +108,10 @@ void testRoundtripMixedSpeciesSnapshot() {
   payload.provenance.gravity_treepm_split_scale_mpc_comoving = 1.75 * payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving;
   payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving = 6.0 / 9.0;
   payload.provenance.gravity_treepm_update_cadence_steps = 1;
+  payload.provenance.gravity_treepm_tree_opening_criterion = "relative_force_error";
+  payload.provenance.gravity_treepm_tree_opening_theta = 0.58;
+  payload.provenance.gravity_treepm_tree_relative_force_tolerance = 0.003;
+  payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor = 1.0e-22;
   payload.provenance.gravity_softening_policy = "comoving_fixed";
   payload.provenance.gravity_softening_kernel = "plummer";
   payload.provenance.gravity_softening_epsilon_kpc_comoving = 1.5;
@@ -193,6 +197,18 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(
       roundtrip.provenance.gravity_treepm_update_cadence_steps ==
       payload.provenance.gravity_treepm_update_cadence_steps);
+  assert(
+      roundtrip.provenance.gravity_treepm_tree_opening_criterion ==
+      payload.provenance.gravity_treepm_tree_opening_criterion);
+  assert(
+      roundtrip.provenance.gravity_treepm_tree_opening_theta ==
+      payload.provenance.gravity_treepm_tree_opening_theta);
+  assert(
+      roundtrip.provenance.gravity_treepm_tree_relative_force_tolerance ==
+      payload.provenance.gravity_treepm_tree_relative_force_tolerance);
+  assert(
+      roundtrip.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
+      payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor);
   assert(roundtrip.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
   assert(roundtrip.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
   assert(
@@ -244,6 +260,29 @@ void testRoundtripMixedSpeciesSnapshot() {
   }
   assert(restart_reader_rejected_snapshot);
   assert(restart_reader_error.find("science_snapshot") != std::string::npos);
+
+  hid_t legacy_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(legacy_file >= 0);
+  hid_t legacy_provenance = H5Gopen2(legacy_file, "/Provenance", H5P_DEFAULT);
+  assert(legacy_provenance >= 0);
+  for (const char* attribute_name : {
+           "gravity_treepm_tree_opening_criterion",
+           "gravity_treepm_tree_opening_theta",
+           "gravity_treepm_tree_relative_force_tolerance",
+           "gravity_treepm_tree_relative_force_acceleration_floor"}) {
+    assert(H5Adelete(legacy_provenance, attribute_name) >= 0);
+  }
+  H5Gclose(legacy_provenance);
+  H5Fclose(legacy_file);
+
+  const cosmosim::io::SnapshotReadResult legacy_roundtrip =
+      cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
+  assert(legacy_roundtrip.provenance.gravity_treepm_tree_opening_criterion == "com_distance");
+  assert(legacy_roundtrip.provenance.gravity_treepm_tree_opening_theta == 0.7);
+  assert(legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_tolerance == 0.005);
+  assert(
+      legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
+      1.0e-30);
 
   std::filesystem::remove(snapshot_path);
 #else

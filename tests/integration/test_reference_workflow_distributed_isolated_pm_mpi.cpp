@@ -21,10 +21,11 @@ std::string buildConfigText(int mpi_ranks_expected, std::uint64_t isolated_limit
   stream << "time_begin_code = 0.0\n";
   stream << "time_end_code = 0.02\n";
   stream << "max_global_steps = 2\n";
-  stream << "hierarchical_max_rung = 1\n";
+  stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 12\n";
   stream << "treepm_asmth_cells = 1.25\n";
   stream << "treepm_rcut_cells = 4.5\n";
+  stream << "treepm_enable_window_deconvolution = false\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
   stream << "[output]\n";
   stream << "run_name = reference_workflow_distributed_isolated_pm_mpi\n";
@@ -50,17 +51,24 @@ int main() {
     return 0;
   }
   bool guard_threw = false;
+  std::string guard_diagnostic = "no exception";
   try {
     const auto guarded = cosmosim::core::loadFrozenConfigFromString(
         buildConfigText(world_size, 1024ULL),
         "test_reference_workflow_distributed_isolated_pm_mpi_guard");
+    assert(guarded.config.parallel.isolated_pm_root_workspace_limit_bytes == 1024ULL);
     cosmosim::workflows::ReferenceWorkflowRunner guarded_runner(guarded);
     (void)guarded_runner.run(cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
-  } catch (const std::runtime_error& err) {
-    guard_threw = std::string(err.what()).find("isolated/open PM root-gather guard exceeded") !=
+  } catch (const std::exception& err) {
+    guard_diagnostic = err.what();
+    guard_threw = guard_diagnostic.find("isolated/open PM root-gather guard exceeded") !=
         std::string::npos;
   }
-  assert(guard_threw);
+  if (!guard_threw) {
+    throw std::runtime_error(
+        "distributed isolated PM workspace guard did not produce its contract diagnostic: " +
+        guard_diagnostic);
+  }
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       buildConfigText(world_size, 64ULL * 1024ULL * 1024ULL),

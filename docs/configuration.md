@@ -77,7 +77,11 @@ The concrete run directory is:
 - `zoom_contamination_radius` (comoving Mpc; defaults to `zoom_region_radius` when `<=0`)
 - `hydro_boundary` (`auto`, `periodic`, `open`, `reflective`)
 - `gravity_boundary` (`auto`, `periodic`, `isolated_monopole`)
-  - `isolated_monopole` now activates non-periodic/open PM long-range gravity; current implementation requires `parallel.mpi_ranks_expected = 1` and fails fast otherwise.
+  - `isolated_monopole` activates non-periodic/open PM long-range gravity.
+    Single-rank execution is the normal path. Multi-rank execution is accepted
+    only by the bounded root gather/solve/scatter compatibility route governed
+    by `parallel.isolated_pm_root_workspace_limit_bytes`; it is not a scalable
+    distributed-open-PM claim.
 
 ## `[cosmology]`
 
@@ -93,7 +97,16 @@ The concrete run directory is:
 - `t_code_begin`, `t_code_end`
 - `a_begin`, `a_end`, `z_begin`, `z_end`, `t_phys_begin`, `t_phys_end`, `integrator_time_variable`
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
+  - `hierarchical_max_rung` defaults to and currently requires `0` for the
+    production `ReferenceWorkflow`. Nonzero values fail validation because the
+    production KDK state does not yet carry per-element kick/drift epochs needed
+    to advance mixed rungs without skipping elapsed time. Standalone scheduler
+    APIs/tests remain available; they are not production multirate evidence.
 - `gravity_softening` / `gravity_softening_kpc_comoving`
+  - the production gravity timestep combines this comoving length with
+    comoving-coordinate acceleration `|A|/a^3`, not directly with scale-free
+    TreePM `|A|` or the peculiar-velocity response `|A|/a^2`; after step commit
+    it evaluates `dt_grav=eta sqrt(a^3 epsilon_com/|A|)`.
 - `gravity_solver`, `hydro_solver`
 
 Time/scale semantics (anti-ambiguity contract):
@@ -101,18 +114,32 @@ Time/scale semantics (anti-ambiguity contract):
 - `t_code_begin` / `t_code_end` are code-time boundaries for integration bookkeeping.
 - Legacy `time_begin_code`/`time_end_code` and `initial_scale_factor`/`initial_redshift` are accepted only as user-input aliases.
 - They are not redshift keys and not SI physical-time keys.
-- Runtime cosmological scale-factor authority is `IntegratorState.current_scale_factor` (restart-continuation lane), while redshift remains a derived diagnostic (`z = 1/a - 1` when `a>0`).
+- Committed/restart cosmological scale-factor authority is
+  `IntegratorState.current_scale_factor`, while redshift remains derived
+  (`z=1/a-1`). Within an in-flight step, `StepContext.timeline_step` owns stage
+  epochs; post-drift hydro uses its `scale_factor_end/hubble_end_code` before
+  `IntegratorState` commits.
 - TreePM runtime controls (typed + normalized, no hidden workflow defaults):
   - canonical axis-aware PM grid:
     - `treepm_pm_grid_nx`, `treepm_pm_grid_ny`, `treepm_pm_grid_nz` (normalized output always emits these keys)
   - backward-compatible scalar input:
     - `treepm_pm_grid` (legacy alias; when provided alone it maps to `treepm_pm_grid_nx=ny=nz`)
   - `treepm_asmth_cells` (float, default `1.25`; split scale in mesh-cell units)
-  - `treepm_rcut_cells` (float, default `4.5`; user-facing short-range cutoff control in mesh-cell units; this now drives explicit residual-traversal pruning in the TreePM coupling path)
-  - `treepm_assignment_scheme` (`cic` or `tsc`; default `cic`)
-  - `treepm_enable_window_deconvolution` (bool, default `false`; applies scheme-aware PM transfer deconvolution for both `cic` and `tsc`)
-  - `treepm_update_cadence_steps` (int, default `1`; authoritative PM long-range refresh cadence in gravity-kick opportunities)
-  - `treepm_pm_decomposition_mode` (`slab` only in Phase 2 freeze; default `slab`)
+  - `treepm_rcut_cells` (finite positive float, default `6.25`; user-facing short-range cutoff control in mesh-cell units; this drives explicit residual-traversal pruning in the TreePM coupling path)
+  - `treepm_tree_opening_criterion` (`geometric`, `com_distance`, or `relative_force_error`; default `com_distance`)
+  - `treepm_tree_opening_theta` (finite positive float, default `0.7`; Barnes-Hut threshold and deterministic first-evaluation fallback threshold for the relative-force criterion)
+  - `treepm_tree_relative_force_tolerance` (finite positive float, default `0.005`; relative-force MAC tolerance)
+  - `treepm_tree_relative_force_acceleration_floor` (finite positive float in code-acceleration units, default `1e-30`; lower bound for the previous-acceleration scale used by the relative-force MAC)
+  - `treepm_assignment_scheme` (`cic` or `tsc`; default `tsc`; the independent Ewald gate certifies TSC, while CIC remains available as a diagnostic/compatibility variant)
+  - `treepm_enable_window_deconvolution` (bool, default `true`; applies
+    scheme-aware PM transfer deconvolution for both `cic` and `tsc` on the
+    periodic solver path). Isolated/open gravity requires this value to be
+    explicitly `false`; typed config validation rejects `true` because that
+    solver path has no periodic assignment window to deconvolve.
+  - `treepm_update_cadence_steps` (int, default and currently required value
+    `1`; every integrator-issued production force-refresh surface rebuilds the
+    PM long-range field)
+  - `treepm_pm_decomposition_mode` (`slab` or `pencil`; default `slab`; `pencil` selects FFTW-MPI transposed spectral ownership while real-space particle deposition/interpolation retains x-slab ownership)
   - `treepm_tree_exchange_batch_bytes` (uint64 bytes, default `4194304`; cap for tree export/import payload chunking in distributed gravity paths)
 
 TreePM split/cutoff semantics in this phase:
@@ -125,26 +152,80 @@ TreePM split/cutoff semantics in this phase:
 - `r_s = numerics.treepm_asmth_cells * Δmesh`
 - `r_cut = numerics.treepm_rcut_cells * Δmesh`
 
-Normalization emits the dimensionless controls exactly as provided and these are the same values consumed by runtime mapping.
-`treepm_update_cadence_steps` is consumed directly by runtime:
+For periodic gravity, typed validation additionally requires
+`r_cut < 0.5 * min(Lx,Ly,Lz)`. The short-range residual evaluates one periodic
+minimum image per source, so equality or a larger cutoff would make that
+single-image traversal ambiguous. Invalid decks fail with the derived cutoff,
+half-shortest-axis bound, and PM grid shape. Increase PM grid resolution or
+reduce `treepm_rcut_cells`; the restriction does not apply to the isolated/open
+operator.
 
-- refresh PM long-range field every `N` gravity-kick opportunities (`N = treepm_update_cadence_steps`)
-- reuse the most recent PM long-range field between refreshes
-- record per-kick refresh/reuse metadata in the reference-workflow report and operational diagnostics events
+Normalization emits the dimensionless controls exactly as provided and these are the same values consumed by runtime mapping.
+
+Tree opening-criterion semantics are:
+
+- `geometric`: accept an internal node when `l / r < theta`, where `l` is node width and `r` is target-to-node-COM distance.
+- `com_distance` (default): tighten the Barnes-Hut test to account for the node center-to-COM offset, `(l + delta_com) / r < theta`.
+- `relative_force_error`: accept when `G M l^2 <= alpha max(|a_previous|, a_floor) r^4`, using `treepm_tree_relative_force_tolerance` for `alpha`. When a finite previous-acceleration magnitude is unavailable, traversal deterministically falls back to the `com_distance` rule with `treepm_tree_opening_theta`.
+
+All three criteria, the opening threshold, relative tolerance, and acceleration floor are typed fields in the frozen config and are emitted in normalized config text. This makes criterion selection and its numerical thresholds part of the reproducibility hash.
+
+`treepm_update_cadence_steps` is production-restricted to `1`:
+
+- Values other than `1` fail config validation with an explicit production-safety error.
+- Together with required `hierarchical_max_rung=0`, every
+  integrator-issued rank-coordinated production force-refresh surface rebuilds
+  PM.
+- The coordinator's explicit lower-level reuse API requires a transient cache
+  signature match for force epoch, force-evaluation scale factor, `G_code`,
+  split scale, all three box axes, assignment scheme, boundary condition, PM
+  decomposition mode, and window-deconvolution policy. A missing or
+  incompatible cache makes reuse fail coherently; it is not silently converted
+  into a solve. Divergent explicit refresh votes fail before PM collectives.
+- Particle decomposition epoch is deliberately not part of PM compatibility:
+  particles may change owner while the PM field remains owned by the same fixed
+  FFT slabs. Tree packets still carry the actual workflow decomposition epoch,
+  and dense-row force history is invalidated on an ownership change.
+- That signature prevents accidental reuse across known solver/runtime changes,
+  but it is not a long-range time predictor/interpolator for arbitrary
+  multi-kick evolution.
+
 `treepm_rcut_cells` is normalized, carried into provenance, and consumed by runtime residual traversal pruning (node-level AABB pruning + acceptance guard + pair culling beyond `r_cut`).
+
+The certified default combines `treepm_asmth_cells=1.25` with
+`treepm_rcut_cells=6.25`, so `r_cut/r_s=5`. The former `4.5`-cell cutoff and
+other positive explicit values remain available for compatibility and
+parameter sweeps when the periodic half-shortest-axis geometry guard is also
+satisfied, but are not covered by the default Ewald certification: the
+4.5-cell profile showed about nine-percent force error at the cutoff transition. Raising
+the cutoff increases short-range traversal radius, pair work, and distributed
+target/response volume; this is a deliberate accuracy/cost tradeoff and is part
+of normalized config/provenance.
 Zoom long-range strategy semantics:
 
 - `disabled`: standard TreePM split force only.
 - `global_coarse_plus_focused_highres_correction`:  
   `a_total = a_PM_global_coarse(all sources) + a_PM_zoom_correction(high-res targets) + a_tree_short_residual(all sources)`  
   where `a_PM_zoom_correction = a_PM_focused(high-res sources) - a_PM_coarse(high-res sources)` to avoid double counting while retaining global tidal content from the coarse PM solve.
+  The focused correction uses the isolated/open convolution and forces window
+  deconvolution off; isolated deconvolution is unsupported even when the global
+  periodic PM profile enables TSC deconvolution.
 `treepm_assignment_scheme` now maps directly to matched PM assignment+gather behavior:
 
 - `cic`: 2-point/axis stencil, lower cost, stronger smoothing.
 - `tsc`: 3-point/axis stencil, higher cost, smoother transfer and typically lower anisotropy.
 
-`treepm_enable_window_deconvolution=true` deconvolves the matched deposit/gather transfer window for the selected scheme with a safety floor in k-space (disabled by default).
-`treepm_pm_decomposition_mode` and `treepm_tree_exchange_batch_bytes` freeze the distributed TreePM contract surface for Phase 2 infrastructure work; they do not by themselves imply that distributed PM/tree algorithms are already implemented.
+`treepm_enable_window_deconvolution=true` deconvolves the matched deposit/gather
+transfer window for the selected scheme with a safety floor in k-space and is
+enabled by default for the certified periodic TSC profile. It is invalid with
+an isolated/open gravity boundary. There is no silent mode-dependent override:
+tracked isolated decks set the key to `false`, and user isolated decks must do
+the same.
+`treepm_pm_decomposition_mode` and `treepm_tree_exchange_batch_bytes` are live
+distributed runtime controls, not ignored Phase 2 placeholders. Both slab and
+pencil FFTW-MPI paths are implemented; their current np1--np4 correctness
+evidence remains a small-cluster validation boundary, not a large-scale
+performance claim.
 
 ## Migration notes (axis-aware TreePM geometry)
 
@@ -154,6 +235,26 @@ Zoom long-range strategy semantics:
 - Mixed partial axis input is rejected:
   - either provide all three axis keys or provide the scalar compatibility key.
 - Normalized config dumps now always emit canonical axis-aware keys (`box_size_{x,y,z}`, `treepm_pm_grid_n{xyz}`).
+
+## Migration note (isolated/open window deconvolution)
+
+The global default for `numerics.treepm_enable_window_deconvolution` remains
+`true` for the periodic TSC profile. Consequently, an isolated/open deck that
+omits this key inherits `true` and now fails during typed config loading with a
+key-specific error. Set
+`numerics.treepm_enable_window_deconvolution = false` explicitly. Runtime code
+does not silently rewrite the frozen config, so normalized dumps and
+reproducibility hashes continue to describe the solver policy actually used.
+
+## Migration note (periodic cutoff geometry)
+
+Periodic decks must satisfy
+`treepm_rcut_cells * cbrt((Lx/Nx)(Ly/Ny)(Lz/Nz)) < min(Lx,Ly,Lz)/2`.
+Older coarse-mesh decks that were accepted at or above this boundary now fail
+during typed loading, and direct API callers are rejected again at TreePM solve
+entry. Increase `treepm_pm_grid_n{x,y,z}` as appropriate or explicitly lower
+`treepm_rcut_cells`; either choice changes the normalized numerical profile and
+therefore requires fresh force-accuracy evidence.
 
 ## `[physics]`
 
@@ -244,6 +345,20 @@ Distributed-memory determinism contract (infrastructure scope):
 ## `[units]`
 
 - `length_unit`, `mass_unit`, `velocity_unit`, `coordinate_frame`
+
+The three unit strings define one `core::UnitSystem` and its derived code-time
+unit `T_code=L_code/V_code`. Production gravity derives
+
+```text
+G_code = G_SI * M_SI_per_code * T_SI_per_code^2 / L_SI_per_code^3
+```
+
+through `core::newtonGravitationalConstantCode(...)`; it does not assume
+`G_code=1`. PM and the TreePM residual receive the same value. The normalized
+unit strings and config hash remain reproducibility authority; the derived
+value is also reported in the `gravity.treepm_setup` operational event. This is
+an additive public helper, not a new config key or snapshot/restart schema
+field.
 
 ## `[compatibility]`
 

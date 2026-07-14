@@ -2,9 +2,14 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
@@ -88,6 +93,94 @@ void buildClusteredParticles(
     pos_z[i] = wrap(cz + 0.024 * std::sin(0.29 * phase + (first_cluster ? 0.3 : 1.1)));
     mass[i] = first_cluster ? 1.1 : 0.75;
   }
+}
+
+void buildPeriodicSeamCluster(
+    std::size_t particle_count,
+    double box_size,
+    std::vector<double>& pos_x,
+    std::vector<double>& pos_y,
+    std::vector<double>& pos_z,
+    std::vector<double>& mass) {
+  pos_x.resize(particle_count);
+  pos_y.resize(particle_count);
+  pos_z.resize(particle_count);
+  mass.resize(particle_count);
+  const auto wrap = [box_size](double value) {
+    double out = std::fmod(value, box_size);
+    if (out < 0.0) {
+      out += box_size;
+    }
+    return out;
+  };
+  for (std::size_t i = 0; i < particle_count; ++i) {
+    const double phase = static_cast<double>(i + 1U);
+    const double seam_x = (i & 1U) == 0U ? 0.992 : 0.008;
+    const double seam_y = (i % 3U) == 0U ? 0.988 : 0.012;
+    const double seam_z = (i % 5U) < 2U ? 0.985 : 0.015;
+    pos_x[i] = wrap(seam_x + 0.0041 * std::sin(0.73 * phase));
+    pos_y[i] = wrap(seam_y + 0.0037 * std::cos(0.61 * phase + 0.2));
+    pos_z[i] = wrap(seam_z + 0.0033 * std::sin(0.47 * phase + 0.7));
+    mass[i] = 0.65 + 0.035 * static_cast<double>((7U * i + 3U) % 13U);
+  }
+}
+
+enum class ParticlePattern {
+  kUniform,
+  kClustered,
+  kPeriodicSeamCluster,
+};
+
+struct TreePmEquivalenceCase {
+  std::string_view name;
+  ParticlePattern particle_pattern = ParticlePattern::kUniform;
+  bool disjoint_uneven_ownership = false;
+  cosmosim::gravity::PmAssignmentScheme assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
+  cosmosim::gravity::TreeMultipoleOrder multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole;
+  cosmosim::gravity::TreeOpeningCriterion opening_criterion =
+      cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance;
+  std::size_t fast_particle_count = 0;
+  std::size_t fallback_particle_count = 0;
+  int solve_count = 1;
+  std::uint64_t exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+  bool require_multiple_batches = false;
+  bool require_cutoff_evidence = false;
+};
+
+struct ExchangeMetricTotals {
+  std::uint64_t request_packets = 0;
+  std::uint64_t response_packets = 0;
+  std::uint64_t request_bytes = 0;
+  std::uint64_t response_bytes = 0;
+  std::uint64_t batches = 0;
+  std::uint64_t peer_participations = 0;
+  std::uint64_t pruned_nodes = 0;
+  std::uint64_t cutoff_pair_skips = 0;
+  std::uint64_t remote_pairs_pruned_by_bounds = 0;
+};
+
+void accumulateExchangeMetrics(
+    const cosmosim::gravity::TreePmDiagnostics& diagnostics,
+    ExchangeMetricTotals& totals) {
+  totals.request_packets += diagnostics.residual_remote_request_packets;
+  totals.response_packets += diagnostics.residual_remote_response_packets;
+  totals.request_bytes += diagnostics.residual_remote_request_bytes;
+  totals.response_bytes += diagnostics.residual_remote_response_bytes;
+  totals.batches += diagnostics.residual_remote_request_batches;
+  totals.peer_participations += diagnostics.residual_remote_peer_participations;
+  totals.pruned_nodes += diagnostics.residual_pruned_nodes;
+  totals.cutoff_pair_skips += diagnostics.residual_pair_skips_cutoff;
+  totals.remote_pairs_pruned_by_bounds += diagnostics.residual_remote_pairs_pruned_by_bounds;
+}
+
+[[nodiscard]] std::uint64_t globalSumU64(std::uint64_t local_value) {
+#if COSMOSIM_ENABLE_MPI
+  std::uint64_t global_value = 0;
+  MPI_Allreduce(&local_value, &global_value, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  return global_value;
+#else
+  return local_value;
+#endif
 }
 
 [[nodiscard]] std::vector<std::uint32_t> ownedParticleIndices(std::size_t count, int world_size, int world_rank) {
@@ -192,7 +285,11 @@ void testDistributedPmEquivalence(int world_size, int world_rank) {
   requireOrThrow(rel_l2 <= 1.0e-10, msg.str());
 }
 
-void runTreePmCase(int world_size, int world_rank, bool communication_stress, bool clustered_sources) {
+void runTreePmEquivalenceCase(
+    int world_size,
+    int world_rank,
+    std::size_t case_index,
+    const TreePmEquivalenceCase& test_case) {
   const cosmosim::gravity::PmGridShape pm_shape = hasFastSpectralPmBackend()
       ? cosmosim::gravity::PmGridShape{32, 32, 32}
       : cosmosim::gravity::PmGridShape{8, 8, 8};
@@ -202,89 +299,204 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
   std::vector<double> pos_y;
   std::vector<double> pos_z;
   std::vector<double> mass;
-  const std::size_t particle_count = hasFastSpectralPmBackend() ? 384U : 96U;
-  if (clustered_sources) {
-    buildClusteredParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
-  } else {
-    buildDeterministicParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
+  const std::size_t particle_count = hasFastSpectralPmBackend()
+      ? test_case.fast_particle_count
+      : test_case.fallback_particle_count;
+  switch (test_case.particle_pattern) {
+    case ParticlePattern::kUniform:
+      buildDeterministicParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
+      break;
+    case ParticlePattern::kClustered:
+      buildClusteredParticles(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
+      break;
+    case ParticlePattern::kPeriodicSeamCluster:
+      buildPeriodicSeamCluster(particle_count, 1.0, pos_x, pos_y, pos_z, mass);
+      break;
   }
-  const std::vector<std::uint32_t> owned = ownedParticleIndices(pos_x.size(), world_size, world_rank);
+
+  std::vector<std::uint32_t> owned_sources;
+  if (!test_case.disjoint_uneven_ownership) {
+    owned_sources = ownedParticleIndices(pos_x.size(), world_size, world_rank);
+  } else if (world_size == 1 || world_rank == 0) {
+    owned_sources.resize(pos_x.size());
+    for (std::size_t i = 0; i < owned_sources.size(); ++i) {
+      owned_sources[i] = static_cast<std::uint32_t>(i);
+    }
+  }
+
   std::vector<double> local_x;
   std::vector<double> local_y;
   std::vector<double> local_z;
   std::vector<double> local_mass;
-  local_x.reserve(owned.size());
-  local_y.reserve(owned.size());
-  local_z.reserve(owned.size());
-  local_mass.reserve(owned.size());
-  for (const std::uint32_t index : owned) {
+  local_x.reserve(owned_sources.size());
+  local_y.reserve(owned_sources.size());
+  local_z.reserve(owned_sources.size());
+  local_mass.reserve(owned_sources.size());
+  for (const std::uint32_t index : owned_sources) {
     local_x.push_back(pos_x[index]);
     local_y.push_back(pos_y[index]);
     local_z.push_back(pos_z[index]);
     local_mass.push_back(mass[index]);
   }
-  std::vector<std::uint32_t> local_active(local_x.size(), 0U);
-  for (std::size_t i = 0; i < local_active.size(); ++i) {
-    local_active[i] = static_cast<std::uint32_t>(i);
+
+  std::vector<std::uint32_t> owned_targets;
+  if (!test_case.disjoint_uneven_ownership) {
+    owned_targets = owned_sources;
+  } else if (world_size == 1 || world_rank == world_size - 1) {
+    owned_targets.resize(pos_x.size());
+    for (std::size_t i = 0; i < owned_targets.size(); ++i) {
+      owned_targets[i] = static_cast<std::uint32_t>(i);
+    }
+  }
+
+  std::vector<std::uint32_t> local_active(owned_targets.size(), 0U);
+  std::vector<double> local_target_x;
+  std::vector<double> local_target_y;
+  std::vector<double> local_target_z;
+  if (test_case.disjoint_uneven_ownership) {
+    std::fill(local_active.begin(), local_active.end(), std::numeric_limits<std::uint32_t>::max());
+    local_target_x.reserve(owned_targets.size());
+    local_target_y.reserve(owned_targets.size());
+    local_target_z.reserve(owned_targets.size());
+    for (const std::uint32_t index : owned_targets) {
+      local_target_x.push_back(pos_x[index]);
+      local_target_y.push_back(pos_y[index]);
+      local_target_z.push_back(pos_z[index]);
+    }
+  } else {
+    for (std::size_t i = 0; i < local_active.size(); ++i) {
+      local_active[i] = static_cast<std::uint32_t>(i);
+    }
+  }
+
+  std::vector<double> local_previous_acceleration;
+  if (test_case.opening_criterion == cosmosim::gravity::TreeOpeningCriterion::kRelativeForceError) {
+    local_previous_acceleration.reserve(owned_targets.size());
+    for (const std::uint32_t global_index : owned_targets) {
+      local_previous_acceleration.push_back(8.0 + 0.125 * static_cast<double>(global_index % 17U));
+    }
   }
 
   cosmosim::gravity::TreePmOptions options;
   options.pm_options.box_size_mpc_comoving = 1.0;
   options.pm_options.scale_factor = 1.0;
   options.pm_options.gravitational_constant_code = 1.0;
-  options.pm_options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
+  options.pm_options.assignment_scheme = test_case.assignment_scheme;
   options.pm_options.enable_window_deconvolution = true;
   options.tree_options.opening_theta = 0.55;
+  options.tree_options.opening_criterion = test_case.opening_criterion;
+  options.tree_options.multipole_order = test_case.multipole_order;
+  options.tree_options.relative_force_tolerance = 0.005;
+  options.tree_options.relative_force_acceleration_floor_code = 1.0e-12;
   options.tree_options.max_leaf_size = 8;
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.softening.epsilon_comoving = 0.008;
+  // Keep the direct-DFT fallback mesh small while respecting the periodic
+  // one-minimum-image cutoff; the FFTW validation retains the production value.
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       1.25,
-      hasFastSpectralPmBackend() ? 4.5 : 2.5,
+      hasFastSpectralPmBackend() ? 6.25 : 3.9,
       1.0 / static_cast<double>(pm_shape.nx));
-  if (communication_stress) {
-    options.tree_exchange_batch_bytes = 64;
-  }
+  options.tree_exchange_batch_bytes = test_case.exchange_batch_bytes;
 
   std::vector<double> dist_ax(local_active.size(), 0.0);
   std::vector<double> dist_ay(local_active.size(), 0.0);
   std::vector<double> dist_az(local_active.size(), 0.0);
-  cosmosim::gravity::TreePmForceAccumulatorView dist_acc{local_active, dist_ax, dist_ay, dist_az};
+  const cosmosim::gravity::TreePmForceAccumulatorView dist_acc{
+      .active_particle_index = local_active,
+      .accel_x_comoving = dist_ax,
+      .accel_y_comoving = dist_ay,
+      .accel_z_comoving = dist_az,
+      .previous_acceleration_magnitude_code = local_previous_acceleration,
+      .target_pos_x_comoving = local_target_x,
+      .target_pos_y_comoving = local_target_y,
+      .target_pos_z_comoving = local_target_z,
+  };
   cosmosim::gravity::TreePmCoordinator dist_coordinator(pm_shape, layout);
   cosmosim::gravity::TreePmDiagnostics dist_diag;
+  ExchangeMetricTotals local_exchange_totals;
+  int pm_refresh_count = 0;
+  int pm_reuse_count = 0;
+  std::uint64_t observed_pm_solve_count = 0;
+  std::uint64_t observed_pm_reuse_count = 0;
 
-  const int iterations = communication_stress ? (hasFastSpectralPmBackend() ? 4 : 2) : 1;
-  for (int i = 0; i < iterations; ++i) {
-    if (communication_stress) {
+  cosmosim::gravity::TreePmOptions last_options = options;
+  for (int solve_index = 0; solve_index < test_case.solve_count; ++solve_index) {
+    last_options = options;
+    const bool refresh_long_range = test_case.solve_count == 1 ||
+        solve_index == 0 || solve_index == test_case.solve_count - 1;
+    const std::uint64_t field_generation =
+        (refresh_long_range && solve_index > 0) ? 1U : 0U;
+    last_options.decomposition_epoch =
+        1000ULL + static_cast<std::uint64_t>(case_index) * 100ULL + field_generation;
+    last_options.force_epoch =
+        10000ULL + static_cast<std::uint64_t>(case_index) * 100ULL + field_generation;
+    if (test_case.solve_count > 1) {
       dist_coordinator.solveActiveSetWithPmCadence(
           local_x,
           local_y,
           local_z,
           local_mass,
           dist_acc,
-          options,
-          (i % 2) == 0,
+          last_options,
+          refresh_long_range,
           nullptr,
           &dist_diag,
           {});
+      pm_refresh_count += refresh_long_range ? 1 : 0;
+      pm_reuse_count += refresh_long_range ? 0 : 1;
     } else {
-      dist_coordinator.solveActiveSet(local_x, local_y, local_z, local_mass, dist_acc, options, nullptr, &dist_diag);
+      dist_coordinator.solveActiveSet(
+          local_x, local_y, local_z, local_mass, dist_acc, last_options, nullptr, &dist_diag);
+      ++pm_refresh_count;
     }
+    observed_pm_solve_count += dist_diag.pm_solve_count;
+    observed_pm_reuse_count += dist_diag.pm_reuse_count;
+    accumulateExchangeMetrics(dist_diag, local_exchange_totals);
   }
 
   std::vector<std::uint32_t> full_active(pos_x.size(), 0U);
-  for (std::size_t i = 0; i < full_active.size(); ++i) {
-    full_active[i] = static_cast<std::uint32_t>(i);
+  if (test_case.disjoint_uneven_ownership) {
+    std::fill(full_active.begin(), full_active.end(), std::numeric_limits<std::uint32_t>::max());
+  } else {
+    for (std::size_t i = 0; i < full_active.size(); ++i) {
+      full_active[i] = static_cast<std::uint32_t>(i);
+    }
   }
+  std::vector<double> reference_previous_acceleration;
+  if (test_case.opening_criterion == cosmosim::gravity::TreeOpeningCriterion::kRelativeForceError) {
+    reference_previous_acceleration.reserve(pos_x.size());
+    for (std::size_t i = 0; i < pos_x.size(); ++i) {
+      reference_previous_acceleration.push_back(8.0 + 0.125 * static_cast<double>(i % 17U));
+    }
+  }
+  const std::span<const double> reference_target_x = test_case.disjoint_uneven_ownership
+      ? std::span<const double>(pos_x)
+      : std::span<const double>{};
+  const std::span<const double> reference_target_y = test_case.disjoint_uneven_ownership
+      ? std::span<const double>(pos_y)
+      : std::span<const double>{};
+  const std::span<const double> reference_target_z = test_case.disjoint_uneven_ownership
+      ? std::span<const double>(pos_z)
+      : std::span<const double>{};
   std::vector<double> ref_ax(pos_x.size(), 0.0);
   std::vector<double> ref_ay(pos_x.size(), 0.0);
   std::vector<double> ref_az(pos_x.size(), 0.0);
-  cosmosim::gravity::TreePmForceAccumulatorView ref_acc{full_active, ref_ax, ref_ay, ref_az};
+  const cosmosim::gravity::TreePmForceAccumulatorView ref_acc{
+      .active_particle_index = full_active,
+      .accel_x_comoving = ref_ax,
+      .accel_y_comoving = ref_ay,
+      .accel_z_comoving = ref_az,
+      .previous_acceleration_magnitude_code = reference_previous_acceleration,
+      .target_pos_x_comoving = reference_target_x,
+      .target_pos_y_comoving = reference_target_y,
+      .target_pos_z_comoving = reference_target_z,
+  };
   cosmosim::gravity::TreePmCoordinator ref_coordinator(pm_shape);
-  ref_coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, ref_acc, options, nullptr, nullptr);
+  ref_coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, ref_acc, last_options, nullptr, nullptr);
 
   const VectorErrorNorm local_norm =
-      accumulateVectorError(owned, dist_ax, dist_ay, dist_az, ref_ax, ref_ay, ref_az);
+      accumulateVectorError(owned_targets, dist_ax, dist_ay, dist_az, ref_ax, ref_ay, ref_az);
 
 #if COSMOSIM_ENABLE_MPI
   VectorErrorNorm global_norm{};
@@ -296,34 +508,92 @@ void runTreePmCase(int world_size, int world_rank, bool communication_stress, bo
 #endif
 
   const double rel_l2 = std::sqrt(global_norm.diff_l2 / std::max(global_norm.ref_l2, 1.0e-30));
+  const ExchangeMetricTotals global_exchange_totals{
+      .request_packets = globalSumU64(local_exchange_totals.request_packets),
+      .response_packets = globalSumU64(local_exchange_totals.response_packets),
+      .request_bytes = globalSumU64(local_exchange_totals.request_bytes),
+      .response_bytes = globalSumU64(local_exchange_totals.response_bytes),
+      .batches = globalSumU64(local_exchange_totals.batches),
+      .peer_participations = globalSumU64(local_exchange_totals.peer_participations),
+      .pruned_nodes = globalSumU64(local_exchange_totals.pruned_nodes),
+      .cutoff_pair_skips = globalSumU64(local_exchange_totals.cutoff_pair_skips),
+      .remote_pairs_pruned_by_bounds = globalSumU64(local_exchange_totals.remote_pairs_pruned_by_bounds),
+  };
+  const std::uint64_t global_source_count = globalSumU64(static_cast<std::uint64_t>(local_x.size()));
+  const std::uint64_t global_target_count = globalSumU64(static_cast<std::uint64_t>(owned_targets.size()));
+  const std::uint64_t empty_source_rank_count = globalSumU64(local_x.empty() ? 1ULL : 0ULL);
+  const std::uint64_t empty_target_rank_count = globalSumU64(owned_targets.empty() ? 1ULL : 0ULL);
+
   std::ostringstream msg;
-  msg << "distributed TreePM equivalence failed: world_size=" << world_size
-      << ", communication_stress=" << (communication_stress ? "true" : "false")
-      << ", clustered_sources=" << (clustered_sources ? "true" : "false")
+  msg << "distributed TreePM equivalence failed: case=" << test_case.name
+      << ", world_size=" << world_size
       << ", rel_l2=" << rel_l2 << " (required <= 5e-6)"
       << ", max_rel=" << global_norm.max_rel << " (required <= 5e-5)"
-      << ", residual_pruned_nodes=" << dist_diag.residual_pruned_nodes
-      << ", residual_pair_skips_cutoff=" << dist_diag.residual_pair_skips_cutoff
+      << ", residual_pruned_nodes=" << global_exchange_totals.pruned_nodes
+      << ", residual_pair_skips_cutoff=" << global_exchange_totals.cutoff_pair_skips
       << ", force_l2_pm_global=" << dist_diag.force_l2_pm_global
       << ", force_l2_tree_short_range_local=" << dist_diag.force_l2_tree_short_range_local
       << ", force_l2_tree_short_range_remote=" << dist_diag.force_l2_tree_short_range_remote
-      << ", residual_remote_request_packets=" << dist_diag.residual_remote_request_packets
-      << ", residual_remote_response_packets=" << dist_diag.residual_remote_response_packets
-      << ", residual_remote_request_bytes=" << dist_diag.residual_remote_request_bytes
-      << ", residual_remote_response_bytes=" << dist_diag.residual_remote_response_bytes;
+      << ", residual_remote_request_packets=" << global_exchange_totals.request_packets
+      << ", residual_remote_response_packets=" << global_exchange_totals.response_packets
+      << ", residual_remote_request_bytes=" << global_exchange_totals.request_bytes
+      << ", residual_remote_response_bytes=" << global_exchange_totals.response_bytes
+      << ", residual_remote_request_batches=" << global_exchange_totals.batches
+      << ", residual_remote_peer_participations=" << global_exchange_totals.peer_participations
+      << ", pm_refresh=" << pm_refresh_count
+      << ", pm_reuse=" << pm_reuse_count;
   requireOrThrow(rel_l2 <= 5.0e-6, msg.str());
   requireOrThrow(global_norm.max_rel <= 5.0e-5, msg.str());
-  if (communication_stress && hasFastSpectralPmBackend()) {
+  requireOrThrow(global_source_count == particle_count, msg.str());
+  requireOrThrow(global_target_count == particle_count, msg.str());
+  requireOrThrow(global_exchange_totals.request_packets == global_exchange_totals.response_packets, msg.str());
+  requireOrThrow(observed_pm_solve_count == static_cast<std::uint64_t>(pm_refresh_count), msg.str());
+  requireOrThrow(observed_pm_reuse_count == static_cast<std::uint64_t>(pm_reuse_count), msg.str());
+  if (test_case.solve_count > 1) {
+    requireOrThrow(pm_refresh_count >= 2, msg.str());
+    requireOrThrow(pm_reuse_count >= 1, msg.str());
+  }
+  if (test_case.disjoint_uneven_ownership && world_size > 1) {
+    requireOrThrow(empty_source_rank_count == static_cast<std::uint64_t>(world_size - 1), msg.str());
+    requireOrThrow(empty_target_rank_count == static_cast<std::uint64_t>(world_size - 1), msg.str());
+  }
+  if (test_case.require_multiple_batches && world_size > 1) {
+    requireOrThrow(
+        global_exchange_totals.batches >
+            static_cast<std::uint64_t>(world_size * test_case.solve_count),
+        msg.str());
+    requireOrThrow(global_exchange_totals.request_packets > 0U, msg.str());
+    requireOrThrow(global_exchange_totals.peer_participations > 0U, msg.str());
+  }
+  if (test_case.require_cutoff_evidence && hasFastSpectralPmBackend()) {
     // Depending on particle layout and MAC acceptance, valid cutoff work can be
     // accounted as internal-node pruning before any leaf pair is inspected. The
     // validation contract is cutoff traversal evidence, not a specific counter.
     requireOrThrow(
-        (dist_diag.residual_pruned_nodes + dist_diag.residual_pair_skips_cutoff) > 0,
+        (global_exchange_totals.pruned_nodes + global_exchange_totals.cutoff_pair_skips) > 0,
         msg.str());
     if (world_size > 1) {
-      requireOrThrow(dist_diag.residual_remote_pairs_pruned_by_bounds > 0, msg.str());
-      requireOrThrow(dist_diag.residual_remote_request_packet_imbalance_ratio >= 1.0, msg.str());
+      requireOrThrow(global_exchange_totals.remote_pairs_pruned_by_bounds > 0, msg.str());
     }
+  }
+
+  if (world_rank == 0) {
+    std::ostringstream metric;
+    metric << std::scientific << std::setprecision(8)
+           << "TreePM equivalence: case=" << test_case.name
+           << " ranks=" << world_size
+           << " relL2=" << rel_l2
+           << " maxRel=" << global_norm.max_rel
+           << " packets=" << global_exchange_totals.request_packets
+           << " bytes=" << (global_exchange_totals.request_bytes + global_exchange_totals.response_bytes)
+           << " peers=" << global_exchange_totals.peer_participations
+           << " batches=" << global_exchange_totals.batches
+           << " solves=" << test_case.solve_count
+           << " refresh=" << pm_refresh_count
+           << " reuse=" << pm_reuse_count
+           << " emptySourceRanks=" << empty_source_rank_count
+           << " emptyTargetRanks=" << empty_target_rank_count;
+    std::cout << metric.str() << '\n';
   }
 }
 
@@ -339,12 +609,17 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
   stream << "time_begin_code = 0.01\n";
   stream << "time_end_code = 0.0103\n";
   stream << "max_global_steps = 3\n";
-  stream << "hierarchical_max_rung = 1\n";
+  stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 16\n";
   stream << "treepm_asmth_cells = 1.25\n";
-  stream << "treepm_rcut_cells = 4.5\n";
-  stream << "treepm_update_cadence_steps = 2\n";
+  stream << "treepm_rcut_cells = 6.25\n";
+  stream << "treepm_update_cadence_steps = 1\n";
   stream << "treepm_tree_exchange_batch_bytes = 256\n\n";
+  stream << "[physics]\n";
+  stream << "enable_cooling = false\n";
+  stream << "enable_star_formation = false\n";
+  stream << "enable_feedback = false\n";
+  stream << "enable_stellar_evolution = false\n\n";
   stream << "[output]\n";
   stream << "run_name = validation_phase2_restart\n";
   stream << "output_directory = integration_outputs\n";
@@ -427,6 +702,7 @@ void testExplicitFailureContracts(int world_size, int world_rank) {
 #if COSMOSIM_ENABLE_MPI
   if (world_size > 1) {
     bool threw = false;
+    bool carried_layout_diagnostic = false;
     try {
       const cosmosim::gravity::PmGridShape shape{16, 12, 10};
       const int mismatched_rank = (world_rank + 1) % world_size;
@@ -440,10 +716,16 @@ void testExplicitFailureContracts(int world_size, int world_rank) {
       options.gravitational_constant_code = 1.0;
       std::fill(grid.density().begin(), grid.density().end(), 0.0);
       solver.solvePoissonPeriodic(grid, options, nullptr);
-    } catch (const std::invalid_argument&) {
+    } catch (const std::exception& error) {
       threw = true;
+      carried_layout_diagnostic =
+          std::string(error.what()).find("slab layout world metadata") !=
+          std::string::npos;
     }
     requireOrThrow(threw, "communicator/layout mismatch must throw in PM solve");
+    requireOrThrow(
+        carried_layout_diagnostic,
+        "communicator/layout mismatch must retain its coordinated PM diagnostic");
   }
 #endif
 
@@ -495,9 +777,56 @@ int main() {
 #endif
 
   testDistributedPmEquivalence(world_size, world_rank);
-  runTreePmCase(world_size, world_rank, /*communication_stress=*/false, /*clustered_sources=*/false);
-  runTreePmCase(world_size, world_rank, /*communication_stress=*/true, /*clustered_sources=*/false);
-  runTreePmCase(world_size, world_rank, /*communication_stress=*/true, /*clustered_sources=*/true);
+  const std::vector<TreePmEquivalenceCase> equivalence_cases{
+      TreePmEquivalenceCase{
+          .name = "uniform_tsc_quadrupole_com_balanced",
+          .particle_pattern = ParticlePattern::kUniform,
+          .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc,
+          .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole,
+          .opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance,
+          .fast_particle_count = 192U,
+          .fallback_particle_count = 64U,
+      },
+      TreePmEquivalenceCase{
+          .name = "uniform_cic_monopole_geometric_batched_cadence",
+          .particle_pattern = ParticlePattern::kUniform,
+          .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kCic,
+          .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kMonopole,
+          .opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutGeometric,
+          .fast_particle_count = 192U,
+          .fallback_particle_count = 64U,
+          .solve_count = 4,
+          .exchange_batch_bytes = 384U,
+          .require_multiple_batches = true,
+          .require_cutoff_evidence = true,
+      },
+      TreePmEquivalenceCase{
+          .name = "clustered_tsc_quadrupole_com_uneven_empty_ranks",
+          .particle_pattern = ParticlePattern::kClustered,
+          .disjoint_uneven_ownership = true,
+          .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc,
+          .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole,
+          .opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance,
+          .fast_particle_count = 96U,
+          .fallback_particle_count = 40U,
+      },
+      TreePmEquivalenceCase{
+          .name = "periodic_seam_tsc_quadrupole_relative_uneven_empty_ranks",
+          .particle_pattern = ParticlePattern::kPeriodicSeamCluster,
+          .disjoint_uneven_ownership = true,
+          .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc,
+          .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kQuadrupole,
+          .opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kRelativeForceError,
+          .fast_particle_count = 96U,
+          .fallback_particle_count = 40U,
+          .solve_count = 3,
+          .exchange_batch_bytes = 768U,
+          .require_multiple_batches = true,
+      },
+  };
+  for (std::size_t case_index = 0; case_index < equivalence_cases.size(); ++case_index) {
+    runTreePmEquivalenceCase(world_size, world_rank, case_index, equivalence_cases[case_index]);
+  }
   testRestartRoundtripContinuationContract(world_size, world_rank);
   testExplicitFailureContracts(world_size, world_rank);
 

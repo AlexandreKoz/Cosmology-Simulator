@@ -723,6 +723,22 @@ void writeGadgetArepoSnapshotHdf5(
       static_cast<std::uint32_t>(std::max(payload.provenance.gravity_treepm_update_cadence_steps, 0)));
   writeScalarStringAttribute(
       provenance_group.get(),
+      "gravity_treepm_tree_opening_criterion",
+      payload.provenance.gravity_treepm_tree_opening_criterion);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_tree_opening_theta",
+      payload.provenance.gravity_treepm_tree_opening_theta);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_tree_relative_force_tolerance",
+      payload.provenance.gravity_treepm_tree_relative_force_tolerance);
+  writeScalarDoubleAttribute(
+      provenance_group.get(),
+      "gravity_treepm_tree_relative_force_acceleration_floor",
+      payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor);
+  writeScalarStringAttribute(
+      provenance_group.get(),
       "gravity_softening_policy",
       payload.provenance.gravity_softening_policy);
   writeScalarStringAttribute(
@@ -1166,6 +1182,22 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
             provenance_group.get(), "gravity_treepm_update_cadence_steps", gravity_pm_cadence)) {
       result.provenance.gravity_treepm_update_cadence_steps = static_cast<int>(gravity_pm_cadence);
     }
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_treepm_tree_opening_criterion",
+        result.provenance.gravity_treepm_tree_opening_criterion);
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_tree_opening_theta",
+        result.provenance.gravity_treepm_tree_opening_theta));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_tree_relative_force_tolerance",
+        result.provenance.gravity_treepm_tree_relative_force_tolerance));
+    static_cast<void>(readScalarDoubleAttribute(
+        provenance_group.get(),
+        "gravity_treepm_tree_relative_force_acceleration_floor",
+        result.provenance.gravity_treepm_tree_relative_force_acceleration_floor));
     readScalarStringAttribute(
         provenance_group.get(),
         "gravity_softening_policy",

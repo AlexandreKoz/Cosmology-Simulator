@@ -390,6 +390,34 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
       "' (supported: cic, tsc)");
 }
 
+[[nodiscard]] TreePmOpeningCriterion parseTreePmOpeningCriterion(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "geometric") {
+    return TreePmOpeningCriterion::kGeometric;
+  }
+  if (lower == "com_distance") {
+    return TreePmOpeningCriterion::kComDistance;
+  }
+  if (lower == "relative_force_error") {
+    return TreePmOpeningCriterion::kRelativeForceError;
+  }
+  throw ConfigError(
+      "key 'numerics.treepm_tree_opening_criterion': invalid value '" + value +
+      "' (supported: geometric, com_distance, relative_force_error)");
+}
+
+[[nodiscard]] std::string treePmOpeningCriterionToString(TreePmOpeningCriterion criterion) {
+  switch (criterion) {
+    case TreePmOpeningCriterion::kGeometric:
+      return "geometric";
+    case TreePmOpeningCriterion::kComDistance:
+      return "com_distance";
+    case TreePmOpeningCriterion::kRelativeForceError:
+      return "relative_force_error";
+  }
+  throw ConfigError("unhandled TreePmOpeningCriterion enum value during serialization");
+}
+
 [[nodiscard]] PmDecompositionMode parsePmDecompositionMode(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "slab") {
@@ -706,7 +734,7 @@ struct ConfigKeySpec {
       {"numerics.cosmology_max_hubble_time_fraction", "1.0e-2"},
       {"numerics.source_max_fractional_change", "0.1"},
       {"numerics.max_global_steps", "1024"},
-      {"numerics.hierarchical_max_rung", "12"},
+      {"numerics.hierarchical_max_rung", "0"},
       {"numerics.amr_max_level", "10"},
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_softening_gas", ""},
@@ -721,9 +749,13 @@ struct ConfigKeySpec {
       {"numerics.treepm_pm_grid_nz", "16"},
       {"numerics.treepm_pm_grid", "16"},
       {"numerics.treepm_asmth_cells", "1.25"},
-      {"numerics.treepm_rcut_cells", "4.5"},
-      {"numerics.treepm_assignment_scheme", "cic"},
-      {"numerics.treepm_enable_window_deconvolution", "false"},
+      {"numerics.treepm_rcut_cells", "6.25"},
+      {"numerics.treepm_tree_opening_criterion", "com_distance"},
+      {"numerics.treepm_tree_opening_theta", "0.7"},
+      {"numerics.treepm_tree_relative_force_tolerance", "0.005"},
+      {"numerics.treepm_tree_relative_force_acceleration_floor", "1.0e-30"},
+      {"numerics.treepm_assignment_scheme", "tsc"},
+      {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
       {"numerics.treepm_pm_decomposition_mode", "slab"},
       {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
@@ -891,6 +923,11 @@ void validateConfig(const SimulationConfig& config) {
       {config.numerics.gravity_softening_tracer_kpc_comoving, "numerics.gravity_softening_tracer"},
       {config.numerics.treepm_asmth_cells, "numerics.treepm_asmth_cells"},
       {config.numerics.treepm_rcut_cells, "numerics.treepm_rcut_cells"},
+      {config.numerics.treepm_tree_opening_theta, "numerics.treepm_tree_opening_theta"},
+      {config.numerics.treepm_tree_relative_force_tolerance,
+       "numerics.treepm_tree_relative_force_tolerance"},
+      {config.numerics.treepm_tree_relative_force_acceleration_floor,
+       "numerics.treepm_tree_relative_force_acceleration_floor"},
       {config.mode.zoom_region_center_x_mpc_comoving, "mode.zoom_region_center_x"},
       {config.mode.zoom_region_center_y_mpc_comoving, "mode.zoom_region_center_y"},
       {config.mode.zoom_region_center_z_mpc_comoving, "mode.zoom_region_center_z"},
@@ -959,6 +996,11 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.numerics.max_global_steps <= 0) {
     throw ConfigError("numerics.max_global_steps must be > 0");
+  }
+  if (config.numerics.hierarchical_max_rung != 0) {
+    throw ConfigError(
+        "numerics.hierarchical_max_rung must be 0: production ReferenceWorkflow "
+        "does not yet carry per-element kick/drift epochs for mixed-rung KDK integration");
   }
   if (config.output.snapshot_interval_steps <= 0) {
     throw ConfigError("output.snapshot_interval_steps must be > 0");
@@ -1118,8 +1160,24 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.treepm_rcut_cells <= 0.0) {
     throw ConfigError("numerics.treepm_rcut_cells must be finite and > 0");
   }
-  if (config.numerics.treepm_update_cadence_steps < 1) {
-    throw ConfigError("numerics.treepm_update_cadence_steps must be >= 1");
+  if (!std::isfinite(config.numerics.treepm_tree_opening_theta) ||
+      config.numerics.treepm_tree_opening_theta <= 0.0) {
+    throw ConfigError("numerics.treepm_tree_opening_theta must be finite and > 0");
+  }
+  if (!std::isfinite(config.numerics.treepm_tree_relative_force_tolerance) ||
+      config.numerics.treepm_tree_relative_force_tolerance <= 0.0) {
+    throw ConfigError(
+        "numerics.treepm_tree_relative_force_tolerance must be finite and > 0");
+  }
+  if (!std::isfinite(config.numerics.treepm_tree_relative_force_acceleration_floor) ||
+      config.numerics.treepm_tree_relative_force_acceleration_floor <= 0.0) {
+    throw ConfigError(
+        "numerics.treepm_tree_relative_force_acceleration_floor must be finite and > 0");
+  }
+  if (config.numerics.treepm_update_cadence_steps != 1) {
+    throw ConfigError(
+        "numerics.treepm_update_cadence_steps must be exactly 1 in production: PM mesh reuse "
+        "does not yet validate source, scale-factor, or decomposition epochs");
   }
   if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
     throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
@@ -1149,6 +1207,43 @@ void validateConfig(const SimulationConfig& config) {
   }
   const ModePolicy policy = buildModePolicy(config.mode);
   validateModePolicy(config, policy);
+  if (policy.gravity_boundary == GravityBoundaryModel::kPeriodicPoisson) {
+    const double mesh_spacing_x = config.cosmology.box_size_x_mpc_comoving /
+        static_cast<double>(config.numerics.treepm_pm_grid_nx);
+    const double mesh_spacing_y = config.cosmology.box_size_y_mpc_comoving /
+        static_cast<double>(config.numerics.treepm_pm_grid_ny);
+    const double mesh_spacing_z = config.cosmology.box_size_z_mpc_comoving /
+        static_cast<double>(config.numerics.treepm_pm_grid_nz);
+    const double representative_mesh_spacing =
+        std::cbrt(mesh_spacing_x * mesh_spacing_y * mesh_spacing_z);
+    const double cutoff_radius =
+        config.numerics.treepm_rcut_cells * representative_mesh_spacing;
+    const double shortest_box_axis = std::min({
+        config.cosmology.box_size_x_mpc_comoving,
+        config.cosmology.box_size_y_mpc_comoving,
+        config.cosmology.box_size_z_mpc_comoving,
+    });
+    const double half_shortest_axis = 0.5 * shortest_box_axis;
+    if (cutoff_radius >= std::nextafter(half_shortest_axis, 0.0)) {
+      throw ConfigError(
+          "periodic TreePM requires treepm_rcut_cells times the representative mesh spacing "
+          "to be < half the shortest box axis; cutoff_radius=" +
+          std::to_string(cutoff_radius) + ", half_shortest_axis=" +
+          std::to_string(half_shortest_axis) + ", pm_grid=" +
+          std::to_string(config.numerics.treepm_pm_grid_nx) + "x" +
+          std::to_string(config.numerics.treepm_pm_grid_ny) + "x" +
+          std::to_string(config.numerics.treepm_pm_grid_nz) +
+          "; increase the PM grid or reduce treepm_rcut_cells");
+    }
+  }
+  if (policy.gravity_boundary ==
+          GravityBoundaryModel::kIsolatedMonopoleDirichlet &&
+      config.numerics.treepm_enable_window_deconvolution) {
+    throw ConfigError(
+        "numerics.treepm_enable_window_deconvolution must be false for "
+        "isolated/open gravity boundaries because no periodic assignment "
+        "window is defined for that solver path");
+  }
 }
 
 
@@ -1224,6 +1319,15 @@ void validateConfig(const SimulationConfig& config) {
   stream << "treepm_pm_grid_nz = " << frozen.config.numerics.treepm_pm_grid_nz << '\n';
   stream << "treepm_asmth_cells = " << frozen.config.numerics.treepm_asmth_cells << '\n';
   stream << "treepm_rcut_cells = " << frozen.config.numerics.treepm_rcut_cells << '\n';
+  stream << "treepm_tree_opening_criterion = "
+         << treePmOpeningCriterionToString(frozen.config.numerics.treepm_tree_opening_criterion)
+         << '\n';
+  stream << "treepm_tree_opening_theta = "
+         << frozen.config.numerics.treepm_tree_opening_theta << '\n';
+  stream << "treepm_tree_relative_force_tolerance = "
+         << frozen.config.numerics.treepm_tree_relative_force_tolerance << '\n';
+  stream << "treepm_tree_relative_force_acceleration_floor = "
+         << frozen.config.numerics.treepm_tree_relative_force_acceleration_floor << '\n';
   stream << "treepm_assignment_scheme = "
          << (frozen.config.numerics.treepm_assignment_scheme == TreePmAssignmentScheme::kCic ? "cic" : "tsc")
          << '\n';
@@ -1553,7 +1657,7 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "numerics.max_global_steps", "1024"),
       "numerics.max_global_steps"));
   frozen.config.numerics.hierarchical_max_rung = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "numerics.hierarchical_max_rung", "12"),
+      requireString(entries, consumed, "numerics.hierarchical_max_rung", "0"),
       "numerics.hierarchical_max_rung"));
   frozen.config.numerics.amr_max_level = static_cast<int>(parseNumber<long>(
       requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level"));
@@ -1614,6 +1718,32 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.treepm_rcut_cells = parseFloating(
       requireString(entries, consumed, "numerics.treepm_rcut_cells", defaultFor("numerics.treepm_rcut_cells")),
       "numerics.treepm_rcut_cells");
+  frozen.config.numerics.treepm_tree_opening_criterion = parseTreePmOpeningCriterion(requireString(
+      entries,
+      consumed,
+      "numerics.treepm_tree_opening_criterion",
+      defaultFor("numerics.treepm_tree_opening_criterion")));
+  frozen.config.numerics.treepm_tree_opening_theta = parseFloating(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_tree_opening_theta",
+          defaultFor("numerics.treepm_tree_opening_theta")),
+      "numerics.treepm_tree_opening_theta");
+  frozen.config.numerics.treepm_tree_relative_force_tolerance = parseFloating(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_tree_relative_force_tolerance",
+          defaultFor("numerics.treepm_tree_relative_force_tolerance")),
+      "numerics.treepm_tree_relative_force_tolerance");
+  frozen.config.numerics.treepm_tree_relative_force_acceleration_floor = parseFloating(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_tree_relative_force_acceleration_floor",
+          defaultFor("numerics.treepm_tree_relative_force_acceleration_floor")),
+      "numerics.treepm_tree_relative_force_acceleration_floor");
   frozen.config.numerics.treepm_assignment_scheme = parseTreePmAssignmentScheme(requireString(
       entries,
       consumed,

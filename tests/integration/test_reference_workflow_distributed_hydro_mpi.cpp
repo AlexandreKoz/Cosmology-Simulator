@@ -31,10 +31,14 @@ std::string configText(int world_size, std::string_view run_name) {
   stream << "time_begin_code = 0.01\n";
   stream << "time_end_code = 0.0102\n";
   stream << "max_global_steps = 2\n";
-  stream << "hierarchical_max_rung = 1\n";
-  stream << "treepm_pm_grid = 8\n";
+  stream << "hierarchical_max_rung = 0\n";
+  // Match mesh spacing across the 4:1 x/y,z aspect ratio. The resulting
+  // r_cut remains below half the shortest periodic axis.
+  stream << "treepm_pm_grid_nx = 32\n";
+  stream << "treepm_pm_grid_ny = 8\n";
+  stream << "treepm_pm_grid_nz = 8\n";
   stream << "treepm_asmth_cells = 1.25\n";
-  stream << "treepm_rcut_cells = 4.5\n";
+  stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
   stream << "[output]\n";
   stream << "run_name = " << run_name << '\n';

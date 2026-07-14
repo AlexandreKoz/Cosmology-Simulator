@@ -1,5 +1,40 @@
 # Repair state recap (post-repair audit snapshot)
 
+## 2026-07-13 gravity/MPI final regression closure
+
+- Determined that the former
+  `saw_zero_local_work_with_remote_activity` failure came from a stale
+  intermediate MPI test binary. The current fixture intentionally activates
+  rung zero on every rank under the production `hierarchical_max_rung=0`
+  fail-closed contract; rebuilding removed the obsolete assertion without a
+  solver-behavior change.
+- Closed three production collective defects found by the focused matrix and
+  adversarial review: rank-local serial TreePM no longer enters distributed
+  residual exchange; the distributed SFC actionable-migration vote is no
+  longer hidden behind a rank-local short circuit; and MPI-enabled serial PM,
+  TreePM, `MpiContext`, and PM-halo paths check initialization/finalization
+  before communicator queries.
+- PM and TreePM collective entry consensus now binds mesh shape and operator
+  controls. PM halo preparation/allocation failures and protocol identity are
+  coordinated before point-to-point traffic. Focused regressions cover
+  divergent shapes/controls, rank-local failure, zero-width slabs, and
+  np2/np3/np4 mixed-actionability SFC execution.
+- Repaired the CUDA debug build for its configured `sm_52` target by using the
+  standard integer-CAS double atomic below `sm_60` and resolving device symbols
+  in the static gravity library. The CUDA 12.0.140 inventory passes 123/123,
+  including the PM GPU smoke; CUDA remains CIC-only and outside the certified
+  TSC force profile.
+- Final local evidence: repository hygiene and `git diff --check` pass;
+  CPU 122/122; HDF5 124/124; HDF5+FFTW 124/124; MPI+HDF5+FFTW 150/150 with
+  real np1--np4 launchers; ASan+UBSan+LSan 122/122; CUDA 123/123; focused
+  gravity/MPI 36/36; DMO workflow/rank comparator 5/5.
+- Reproducibility impact: no snapshot/restart dataset, schema version, config
+  key, normalized dump, provenance format, output naming, force split, or
+  acceptance tolerance changed in these final repairs. Failure behavior is
+  stricter and collective order is now uniform. The already documented
+  TSC/deconvolution/cutoff default changes remain the numerical reproducibility
+  change for the overall gravity hardening task.
+
 ## 2026-07-08 MPI AMR directed-exchange closure pass
 
 - Replaced the live production AMR patch/cell import path with bounded
@@ -1678,3 +1713,171 @@ Reproducibility impact:
 
 - Restart checkpoint requests now use an explicit `RestartBoundaryDecision` contract before hash/write traversal. Unsafe KDK half-steps, local active-bin substeps, non-restart-safe boundary kinds, and uncommitted PM refresh transitions fail with deterministic diagnostics instead of being silently skipped or serialized.
 - Reproducibility impact: no solver numerics, config keys, restart schema version, HDF5 dataset names, normalized config dumps, provenance payloads, or output naming changed. Exact continuation is hardened by preventing invalid phase states from becoming restart truth.
+
+## 2026-07-13 periodic TreePM and DMO gravity hardening
+
+Current gravity status is consolidated in
+`docs/gravity_production_readiness.md`; dated Phase 2/Phase 3 closeout records
+remain historical and are not rewritten.
+
+Implemented repair outcomes:
+
+- Periodic TreePM builds topology, COMs, corrected quadrupoles, raw second
+  moments, node bounds, MAC geometry, and cutoff pruning in a coherent per-axis
+  largest-gap unwrapped frame. Rectangular seam and integer-image translation
+  tests cover leaf/internal and monopole/quadrupole behavior.
+- Standalone and screened multipoles use the corrected acceleration sign for
+  the repository displacement convention. Screened/softened nodes use the raw
+  second-moment trace and derivatives of the full radial kernel.
+- The third `relative_force_error` MAC is wired through typed config,
+  normalization, validation, runtime, committed force-history fallback,
+  `provenance_v6`, restart audit metadata, unit tests, and integration tests.
+- Empty TreePM ranks emit explicit zero-source roots; independent target
+  coordinates support source-empty target owners; all-empty, source-only,
+  target-only, zero-record, and migration-to-empty epochs are exercised.
+- Tree hierarchy and short-range request/response records use explicit
+  versioned little-endian wire formats with peer/record identity,
+  decomposition/force/exchange epochs, finite/bounds checks, and exact response
+  coverage.
+- Periodic unwrapping and local-tree construction exceptions are now caught and
+  voted on the actual MPI world before any residual collective. PM-layout and
+  context metadata mismatch is rejected by solve-entry consensus rather than a
+  rank-local constructor throw. Reusable TreePM exchange workspace now owns
+  count/displacement, payload, remote-acceleration, and response-coverage lanes;
+  throwing capacity growth occurs in coordinated protocol phases and all of
+  those capacities appear in transient MPI memory accounting.
+- PM halo-cache commit, compact active-position/PM-force/zoom-correction target
+  preparation, and worst-case residual traversal-stack reservation are likewise
+  caught and voted before ranks can enter subsequent collectives. Reserving the
+  full local-node stack bound removes traversal-time growth allocations.
+- PM density and force/potential request/response records also use explicit
+  versioned little-endian `PMW1` formats. Actual-MPI-world preflight votes API
+  operation and serial/distributed layout mode before any layout branch.
+- PM slab authority now matches FFTW-MPI fixed ceil-block ownership. Periodic
+  halos use nonblocking receive-first/send-second completion and handle
+  same-peer neighbors and zero-width slabs. Zero-width ranks use backend-safe
+  dummy allocation and participate in complete FFTW-MPI solves.
+- PM and short-range TreePM now use the physical Newton constant converted from
+  frozen units and return a scale-free comoving kernel. The former extra `a^2`
+  factor is removed; collisionless KDK and the gas conservative source apply
+  the cosmological response to their respective state.
+- The gas source now treats gravity lanes as scale-free `A`, applies `A/a^2`
+  to momentum and gravity work, and uses
+  `S_E=rho(u dot A)/a^2-H(2K+3P)`. Fixed-grid and AMR callbacks consume the
+  post-drift `timeline_step.scale_factor_end/hubble_end_code`, not the
+  still-step-begin committed integrator epoch or an independently recomputed SI
+  Hubble rate.
+- Gravity timestep proposals now keep coordinates consistent: after step
+  commit, both particles and gas cells call the new public
+  `computeComovingGravityTimeStep` helper with comoving softening, scale-free
+  `|A|`, and committed `a`. It validates finite positive `a`, converts to
+  comoving-coordinate acceleration `|A|/a^3`, and uses
+  `dt_grav=eta sqrt(a^3 epsilon_com/|A|)`. The older generic helper remains
+  coordinate-neutral.
+- Production cadence is restricted to one and `hierarchical_max_rung` to zero.
+  Every rank-coordinated production force-refresh surface rebuilds PM;
+  mixed-rung execution is blocked until per-element kick/drift epochs exist.
+- The coordinator now records a transient long-range cache signature containing
+  force epoch, field-build scale, `G_code`, split and box geometry, assignment,
+  boundary, PM decomposition mode, and deconvolution. Explicit reuse with any
+  incompatible or missing rank-local cache fails coherently; divergent votes
+  fail before PM collectives. Particle decomposition epoch is intentionally not
+  a fixed-slab PM invalidator.
+- The workflow decomposition epoch now advances only after an actual globally
+  committed ownership change, is persisted/restored, and guards tree wire
+  records. Dense-row force history is invalidated immediately after such a
+  change so checkpoint truth cannot contain stale acceleration rows.
+- Gravity observability now includes local source/target/tree counts, global
+  empty-source/target rank counts, remote hierarchy packets, unique peers, PM
+  solve/reuse and halo/slab dimensions, plus tree build, multipole-refresh, and
+  opened-node counters.
+- `gravity.pm_long_range_field` now serializes the in-flight
+  `PmRefreshDirective` decision's opportunity, field version, build step, and
+  build scale factor before cadence commit. It no longer reads the previous
+  committed `pm_sync_state` for a current refresh event; this is an
+  observability correction, not a cadence-owner or restart-schema change.
+- Runtime gravity diagnostic doubles now use scientific `max_digits10`
+  formatting for `G_code`, relative-MAC floors, split/cutoff/softening scales,
+  force L2 norms, and scale factors. This prevents small nonzero evidence from
+  appearing as `0.000000`; solver state and output schemas are unchanged.
+- The independent rectangular Ewald reference certifies the FFTW-backed
+  TSC+deconvolution profile. CIC remains available but is explicitly diagnostic
+  for this accuracy envelope. The normalized production defaults are now
+  TSC+deconvolution and `rcut_cells=6.25` (`r_cut/r_s=5` at the default
+  `asmth=1.25`). The former 4.5-cell cutoff remains accepted but diagnostic
+  after showing roughly nine-percent cutoff-transition error. Unchanged configs
+  that relied on implicit defaults therefore have a reproducibility-visible
+  force-profile and short-range-work change.
+- The certified profile obtains the public/runtime `opening_theta=0.7` default
+  from typed configuration. An independent-target matched-MAC fixture asserts
+  geometric, COM-distance, and relative-force error/work behavior against Ewald
+  rather than only printing diagnostics.
+- Periodic TreePM now fails closed unless
+  `r_cut < min(Lx,Ly,Lz)/2`, at both typed config loading and direct coordinator
+  entry. The residual evaluates one minimum image per source, so coarse decks
+  must increase PM resolution or reduce `rcut_cells`; the DMO gate uses a
+  `16^3` mesh so its default `6.25`-cell cutoff remains strictly inside the
+  half-box bound.
+- Isolated/open assignment and gather stencils clip at the physical domain
+  rather than wrapping. Typed config now rejects
+  `treepm_enable_window_deconvolution=true` after mode policy resolves to
+  isolated/open gravity; tracked isolated decks explicitly select `false`, and
+  runtime does not silently override the frozen policy. Focused zoom correction
+  also explicitly disables unsupported isolated window deconvolution.
+- A production-workflow 64-particle Zel'dovich validation exercises config
+  loading, KDK, periodic TreePM, HDF5 restart, stable ownership, np1--np4, mode
+  growth, mass/momentum/COM invariants, and exact direct-vs-resumed state.
+- The follow-up DMO spectrum gate adds a deterministic binned 3D `P(k)`
+  artifact: `12^3` CIC with matched deconvolution, 32 requested bins, all 1727
+  non-DC modes, four explicit empty bins, and reported-not-subtracted Poisson
+  level `0.015625`. Initial/evolved fundamental powers are
+  `2.1315894140899176e-6` / `2.1827523417862502e-6`, giving growth
+  `1.011929959672577` versus `1.0119399775244009`; normalized np1--np4 JSON
+  SHA-256 is
+  `53ee518b63d21cd28790415b8f076614497536bb6a62c95276b8ed6c14984bf3`.
+- The final DMO guards compare direct displacement-mode and square-root-power growth
+  increments against `a_final/a_initial-1` within 7.5 percent and require the
+  two increments to agree within relative `1e-3`. The zero-force Hubble-drag
+  comparison additionally gates response/ballistic RMS and growing-mode
+  projection in `[0.01,0.03]`, with alignment at least `0.99`. The exact
+  initial `4^3` cancellation-dominated lattice is separately force-certified
+  against periodic Ewald and predicts response near `0.019`; this is an
+  independently anchored integration regression, not an analytic LCDM proof.
+- A cross-preset non-MPI serial/MPI1 comparison covers 64 stable IDs with zero
+  position and mass error, maximum velocity error
+  `0`, and byte-identical power JSON SHA-256
+  `8acbf3d6826250ca4fbabb0761511ff1178cbb7c20472cb2d8c8073dd16d355c`.
+
+Command-backed focused evidence:
+
+- PM ownership/halo, periodic TreePM, and strict Phase-2 np1--np4 matrix:
+  12/12 passed in `build/mpi-hdf5-fftw-debug`.
+- Ewald plus periodic TreePM serial/MPI np2--np4 matrix: 6/6 passed.
+- The follow-up focused periodic/workflow regression matrix after cache and
+  diagnostics hardening also passed 6/6.
+- `TMPDIR=/tmp ctest --test-dir build/mpi-hdf5-fftw-debug -R
+  '^validation_dmo_zeldovich_workflow' --output-on-failure`: 5/5 passed for
+  MPI1/np2/np3/np4 producers plus rank comparator.
+- Certified worst TSC metrics are now set by the exact cancellation-dominated
+  `4^3` DMO initial lattice: `relative_L2=8.059667017e-3`,
+  `p99=8.157551429e-3`, net-force fraction `5.985844233e-17`, and translation
+  drift `1.523007584e-13`. Ewald/PM/tree/total force L2 is
+  `10.16780756` / `8.296819318` / `1.789203432` / `10.08586460`. The separate
+  rectangular seam fixture retains translation drift `3.031142721e-14`.
+- DMO direct-mode amplitude grew from `0.0049999895833398901` to
+  `0.0050596390031745634`, or `1.0119299088208957` versus expected
+  `1.0119399775244009`. Maximum phase drift was
+  `7.2112604976761041e-14` radians with coherence one; restart phase/state drift
+  was zero. Response/ballistic RMS was `0.018731640935373602`, projection
+  `0.01873163714589127`, and alignment `0.99999979769618985`.
+
+Limits deliberately remain open: the distributed tree is a bounded hierarchy
+all-gather plus target/response all-to-all, not LET; PM uses communicator-wide
+record collectives; evidence stops at four ranks; zoom and distributed open PM
+retain bounded all-gather/root-workspace paths; and GPU TSC parity is absent.
+Production hierarchical KDK is intentionally rung-zero only.
+The controlled DMO gate now emits the required versioned binned 3D
+power-spectrum artifact, but its direct-DFT `12^3`, 64-particle fixture is not a
+large-volume resolution/convergence, performance, halo-statistics, or
+cross-code campaign. Publishable DMO production and AREPO/GADGET-class parity
+are not claimed.

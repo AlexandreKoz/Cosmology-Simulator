@@ -92,6 +92,16 @@ void validateRuntimeStageContract(
 
 void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_view phase) {
   const auto& directive = context.pm_refresh_directive;
+  const bool initial_surface_exception =
+      directive.reason == PmRefreshDirective::Reason::kInitialForceBootstrap &&
+      directive.sync_stage == PmSyncStage::kInitialLongRangeBootstrap &&
+      context.integrator_state.step_index == 0U &&
+      directive.initial_cache_bootstrap_allowed;
+  const bool coordinated_local_force_refresh =
+      context.boundary.local_substep &&
+      context.active_set.has_global_synchronization_metadata &&
+      directive.reason == PmRefreshDirective::Reason::kScheduledForceRefreshStage &&
+      directive.sync_stage == PmSyncStage::kScheduledLongRangeRefresh;
   if (directive.refresh_long_range_field && !directive.has_sync_event) {
     throw std::runtime_error("PM refresh directive requested long-range refresh without a sync event at " + std::string(phase));
   }
@@ -102,7 +112,9 @@ void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_
     if (!directive.cadence_opportunity_allowed) {
       throw std::runtime_error("PM sync event reached a non-cadence opportunity at " + std::string(phase));
     }
-    if (!context.boundary.pm_refresh_allowed || context.boundary.local_substep) {
+    if (!context.boundary.pm_refresh_allowed ||
+        (context.boundary.local_substep && !initial_surface_exception &&
+         !coordinated_local_force_refresh)) {
       throw std::runtime_error("PM sync event reached an illegal local integration boundary at " + std::string(phase));
     }
     if (!std::isfinite(directive.force_evaluation_scale_factor) || directive.force_evaluation_scale_factor <= 0.0) {
@@ -111,7 +123,8 @@ void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_
   } else if (directive.sync_stage != PmSyncStage::kNone) {
     throw std::runtime_error("typed PM sync stage was set without a sync event at " + std::string(phase));
   }
-  if (context.boundary.local_substep &&
+  if (context.boundary.local_substep && !initial_surface_exception &&
+      !coordinated_local_force_refresh &&
       (directive.has_sync_event || directive.refresh_long_range_field || directive.cadence_opportunity_allowed)) {
     throw std::runtime_error("local active-bin step attempted to authorize PM long-range synchronization at " + std::string(phase));
   }
@@ -868,11 +881,15 @@ void StepOrchestrator::executeSingleStep(
     profiler_session->counters().addCount("step_invocations", 1);
   }
 
-  const StepBoundaryState boundary = classifyStepBoundary(
+  StepBoundaryState boundary = classifyStepBoundary(
       state,
       active_set,
       expected_scheduler_tick.has_value(),
       requested_boundary_kind);
+  if (boundary.local_substep && integrator_state.step_index == 0U &&
+      integrator_state.pm_refresh_enabled && !integrator_state.pm_long_range_field_valid) {
+    boundary.pm_refresh_allowed = true;
+  }
   CosmologicalTimeline timeline(cosmology_background, integrator_state.time_si_per_code);
   const CosmologicalStepFactors timeline_step = timeline.prepareStep(
       integrator_state.current_time_code,
@@ -927,7 +944,13 @@ void StepOrchestrator::executeSingleStep(
       context.has_active_gravity_particles = true;
     }
     if (stage == IntegrationStage::kGravityKickPre) {
-      context.pm_refresh_directive.initial_cache_bootstrap_allowed = !boundary.local_substep;
+      // The initial-condition surface is globally synchronized even when the
+      // first hierarchical scheduler tick activates only a subset.  This is
+      // the sole local-substep exception: subsequent PM refreshes remain
+      // restricted to consensus global boundaries.
+      context.pm_refresh_directive.initial_cache_bootstrap_allowed =
+          !boundary.local_substep ||
+          (integrator_state.step_index == 0U && !integrator_state.pm_long_range_field_valid);
       if (integrator_state.pm_refresh_enabled && context.pm_refresh_directive.initial_cache_bootstrap_allowed &&
           !integrator_state.pm_long_range_field_valid) {
         context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kInitialForceBootstrap;
@@ -951,7 +974,13 @@ void StepOrchestrator::executeSingleStep(
       context.pm_refresh_directive.requires_predicted_inactive_sources = boundary.local_substep;
       context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kScheduledForceRefreshStage;
       context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_end;
-      const bool legal_pm_refresh_boundary = boundary.pm_refresh_allowed && !boundary.local_substep;
+      // A scheduler-local active set is still a collective force-evaluation
+      // surface when the workflow supplied global synchronization metadata:
+      // every rank enters this stage, including ranks with zero local targets.
+      // Inactive sources are predicted to the evaluation epoch above, so
+      // cadence one refreshes the PM field here instead of silently freezing it
+      // until a fully active particle tick.
+      const bool legal_pm_refresh_boundary = boundary.pm_refresh_allowed;
       context.pm_refresh_directive.cadence_opportunity_allowed = legal_pm_refresh_boundary;
       if (integrator_state.pm_refresh_enabled && legal_pm_refresh_boundary) {
         const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
@@ -2255,6 +2284,25 @@ double computeGravityTimeStep(const GravityTimeStepInput& input, double eta) {
   return eta * std::sqrt(input.softening_length_code / accel);
 }
 
+double computeComovingGravityTimeStep(
+    const ComovingGravityTimeStepInput& input,
+    double eta) {
+  if (!std::isfinite(input.scale_factor) || input.scale_factor <= 0.0) {
+    throw std::invalid_argument("comoving gravity timestep scale_factor must be finite and positive");
+  }
+  if (!std::isfinite(input.scale_free_acceleration_magnitude_code)) {
+    throw std::invalid_argument(
+        "comoving gravity timestep scale-free acceleration must be finite");
+  }
+  const double scale_factor_cubed =
+      input.scale_factor * input.scale_factor * input.scale_factor;
+  return computeGravityTimeStep(
+      {.softening_length_code = input.softening_length_comoving_code,
+       .acceleration_magnitude_code =
+           input.scale_free_acceleration_magnitude_code / scale_factor_cubed},
+      eta);
+}
+
 double combineTimeStepCriteria(
     std::uint32_t element_index,
     const TimeStepCriteriaHooks& hooks,
@@ -2415,14 +2463,20 @@ StepBoundaryState classifyStepBoundary(
     StepBoundaryKind requested_kind) {
   const bool particle_subset = active_set.hasParticleSubset(state.particles.size());
   const bool cell_subset = active_set.hasCellSubset(state.cells.size());
-  const bool local = scheduler_owned_substep && (particle_subset || cell_subset);
+  const bool local = scheduler_owned_substep &&
+      (active_set.has_global_synchronization_metadata
+           ? !active_set.globally_complete_active_set
+           : (particle_subset || cell_subset));
   StepBoundaryState boundary{};
   boundary.local_substep = local;
   if (local) {
     boundary.kind = StepBoundaryKind::kLocalActiveBinStep;
     boundary.restart_safe = false;
     boundary.output_safe = false;
-    boundary.pm_refresh_allowed = false;
+    // Local active-bin ownership does not by itself make an MPI collective
+    // unsafe.  A workflow may explicitly certify that every rank enters the
+    // force-evaluation surface via global synchronization metadata.
+    boundary.pm_refresh_allowed = active_set.has_global_synchronization_metadata;
     return boundary;
   }
   boundary.kind = requested_kind;

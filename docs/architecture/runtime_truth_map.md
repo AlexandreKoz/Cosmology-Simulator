@@ -87,6 +87,11 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 - Scheduler authoritative bin timeline: `HierarchicalTimeBinScheduler` internals (`m_hot`, `m_elements_by_bin`, `m_active_elements`, `m_current_tick`).
 - Scheduler-owned PM cadence truth: `PmSynchronizationState` (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
+- During an authorized refresh but before cadence commit, the current
+  `PmRefreshDirective` is the transient decision view. Operational events
+  emitted in that interval copy its opportunity/version/build epoch; the
+  previous committed `PmSynchronizationState` remains authority for completed
+  refreshes.
 - Per-particle timestep bin mirror: `SimulationState::particles.time_bin`.
 - Per-cell timestep bin mirror: `SimulationState::cells.time_bin`.
 - Integrator coarse state and metadata mirror: `IntegratorState::{current_time_code,current_scale_factor,dt_time_code,step_index,scheme,time_bins}`.
@@ -133,6 +138,9 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 ### Ownership decision
 
 - **Single live authority**: Stage 2 assigns timestep-bin membership, activation, active-set construction, and PM cadence ownership to scheduler objects (`HierarchicalTimeBinScheduler` and `PmSynchronizationState`). State `time_bin` lanes, migration records, restart mirrors, and `IntegratorState::time_bins` are mirrors/metadata only. Any future path that consumes mirrors as scheduling authority must be rejected or documented as a new ADR-backed schema/interface change.
+- `gravity.pm_long_range_field` is an observer, not a second cadence owner. Its
+  in-flight payload is copied from `PmRefreshDirective` because the matching
+  `PmSynchronizationState` commit has not happened yet.
 
 ### Tests covering this domain
 
@@ -564,3 +572,29 @@ The P0-05..P0-08 repair pass adds the following concrete runtime-truth structure
 - `ActiveSetDescriptor` now carries scheduler provenance and state generation metadata; stale descriptors fail through `debugAssertActiveSetDescriptorFresh()` before solver consumption.
 
 Remaining caveat: some legacy physics/unit tests still operate standalone hydro cells without full workflow AMR ownership. Those states are deliberately not promoted to distributed production coverage unless the state ownership layer installs stable gas-cell identity records and validates dense-row coverage.
+
+## 2026-07-13 gravity runtime-truth addendum
+
+The production gravity hardening resolves these additional authority
+boundaries:
+
+| Runtime fact | Live authority | Mirrors/transient state | Refresh or invalidation rule |
+| --- | --- | --- | --- |
+| Physical Newton constant in code units | Frozen `UnitSystem`, converted once through `core::newtonGravitationalConstantCode` | PM/tree option fields and the `gravity.treepm_setup` operational-event value | Re-derive from frozen length/mass/velocity units at workflow construction or restart; never hard-code unity in a physical-unit workflow. |
+| Cosmological force time dependence | `CosmologicalTimeline`; during a step, `StepContext.timeline_step`; after commit, `IntegratorState::{current_scale_factor,current_hubble_rate_code}` | `PmSolveOptions::scale_factor` and PM field-build scale are validity/source-time metadata; `HydroUpdateContext` is a stage-local view | PM and short-range TreePM return scale-free `A`. Collisionless KDK applies its Hubble-drag/kick factors. Post-drift gas hydro uses `timeline_step.scale_factor_end/hubble_end_code` for `A/a^2`, `-H m`, and `-H(2K+3P)` because committed `IntegratorState` is still at step begin. Hydro callbacks must not recompute SI `H(a)`. |
+| Particle decomposition epoch | `GravityStageCallback::m_decomposition_epoch` | Provenance/restart fields and TreePM hierarchy/request/response record epochs | Advance once, on every rank, only after an actual committed ownership change; restore before resumed TreePM use. Rank-local dense-row generations are not this authority. |
+| PM long-range field validity | `TreePmCoordinator::LongRangeFieldValidity` | FFT plans, mesh arrays, halos, and diagnostic build metadata | Reuse requires force epoch, build scale, `G_code`, split/box/assignment/boundary/decomposition-mode/deconvolution compatibility on every rank. Missing/incompatible reuse fails. Particle decomposition alone does not invalidate a fixed-slab PM field. |
+| Dense-row gravity force history | `GravityStageCallback` committed force cache plus per-row validity | Relative-MAC previous-acceleration magnitudes and restart `/gravity_force_cache` | Invalidate immediately on a particle ownership/index-generation change; rebuild all locally owned rows before a kick when required. A post-migration checkpoint records invalid rather than stale cache truth. |
+| Gravity timestep acceleration | Post-step adaptive scheduler criteria using committed `IntegratorState.current_scale_factor` | TreePM force lanes store scale-free `A`; `ComovingGravityTimeStepInput` is the transient public view for `eps_com`, `|A|`, and `a` | `computeComovingGravityTimeStep` validates finite positive `a`, converts to comoving-coordinate acceleration `|A|/a^3`, then evaluates `dt_grav=eta sqrt(eps_com/(|A|/a^3))`. Do not pass `A` or `A/a^2` with `eps_com` to the generic coordinate-neutral helper. |
+| Production timestep rung | Frozen config plus particle/gas schedulers constrained to bin zero | State `time_bin` lanes remain scheduler mirrors | `hierarchical_max_rung` must be zero; restart validation requires scheduler `max_bin=0`, committed bins zero, and pending bins zero/unset. Mixed-rung production is blocked until per-element kick/drift epochs exist. |
+
+Production cadence one means each integrator-issued rank-coordinated
+force-refresh surface rebuilds PM. The scheduler core can still represent and
+test coordinated local boundaries, and the coordinator retains an explicit
+lower-level reuse seam, but neither is a competing production authority while
+`hierarchical_max_rung=0`.
+
+All PM density/request/response and TreePM hierarchy/request/response payloads
+are explicit versioned little-endian wire records. Native C++ object layout is
+not wire truth. Decode validation and rank-coordinated failure voting happen
+before the next collective boundary; zero-record ranks still participate.

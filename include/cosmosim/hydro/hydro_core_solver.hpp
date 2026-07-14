@@ -226,11 +226,14 @@ struct HydroActiveSetView {
 struct HydroUpdateContext {
   double dt_code = 0.0;
   double scale_factor = 1.0;
+  // H(a) in inverse code time, owned by the cosmological timeline.
   double hubble_rate_code = 0.0;
 };
 
 struct HydroSourceContext {
   HydroUpdateContext update;
+  // Scale-free comoving gravitational kernel A from TreePM. The comoving
+  // gravity source applies the A/a^2 peculiar-velocity response exactly once.
   std::span<const double> gravity_accel_x_peculiar;
   std::span<const double> gravity_accel_y_peculiar;
   std::span<const double> gravity_accel_z_peculiar;

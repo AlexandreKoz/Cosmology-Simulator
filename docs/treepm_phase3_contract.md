@@ -38,6 +38,27 @@ The following statements are true in the current tree and are treated as baselin
 
 Stage 2 scheduler-authority hardening is infrastructure evidence, not Phase 3 closure. The current code and tests establish scheduler-owned timestep bins, active-set provenance, restart mirror validation, and PM cadence legality traps. They do not establish a production-proven multirate TreePM accuracy envelope, large-rank scaling certification, or final Phase 3 synchronization closure.
 
+## Current production restriction (2026-07-13)
+
+The historical audit baseline above is preserved. Current typed configuration
+and the production `ReferenceWorkflow` now fail closed at
+`hierarchical_max_rung = 0` and `treepm_update_cadence_steps = 1`. Mixed-rung
+KDK is rejected until per-element kick/drift epochs are implemented and
+validated. Lower-level scheduler and PM-reuse APIs remain testable
+infrastructure, but missing or incompatible reuse state throws rather than
+silently refreshing. This restriction narrows current claims; it does not mark
+Phase 3 closed.
+
+Other audited facts have also advanced since the April baseline: rectangular
+PM shapes are typed end to end; FFTW-MPI has both slab and transposed-pencil
+spectral paths; the tree supports monopole and quadrupole moments plus
+geometric, COM-distance, and relative-force MACs; periodic TreePM uses a
+seam-safe unwrapped geometry frame; and isolated/open PM has a bounded
+multi-rank root-gather compatibility route. The independent Ewald and
+production-workflow DMO gates are current correctness evidence. None of these
+repairs supplies a production multirate integrator, a scalable LET, or a
+large-rank/science campaign, so the Phase 3 closure gate below remains open.
+
 ## Phase 3 scope (what must be added)
 
 Phase 3 in this repository is defined as a maturity step from Phase 2 distributed correctness toward integrator-grade, evidence-backed production behavior.

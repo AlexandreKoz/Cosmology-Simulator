@@ -29,6 +29,12 @@ enum class TreePmAssignmentScheme {
   kTsc,
 };
 
+enum class TreePmOpeningCriterion {
+  kGeometric,
+  kComDistance,
+  kRelativeForceError,
+};
+
 enum class PmDecompositionMode {
   kSlab,
   kPencil,
@@ -121,7 +127,9 @@ struct NumericsConfig {
   double cosmology_max_hubble_time_fraction = 1.0e-2;
   double source_max_fractional_change = 0.1;
   int max_global_steps = 1024;
-  int hierarchical_max_rung = 12;
+  // Production ReferenceWorkflow is intentionally single-rung until each
+  // particle/cell has an explicit last-kick epoch and per-bin KDK factors.
+  int hierarchical_max_rung = 0;
   int amr_max_level = 10;
   double gravity_softening_kpc_comoving = 1.0;
   double gravity_softening_gas_kpc_comoving = -1.0;
@@ -137,9 +145,13 @@ struct NumericsConfig {
   // Legacy scalar compatibility lane; canonical runtime geometry must use axis-aware fields above.
   int treepm_pm_grid = 16;
   double treepm_asmth_cells = 1.25;
-  double treepm_rcut_cells = 4.5;
-  TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kCic;
-  bool treepm_enable_window_deconvolution = false;
+  double treepm_rcut_cells = 6.25;
+  TreePmOpeningCriterion treepm_tree_opening_criterion = TreePmOpeningCriterion::kComDistance;
+  double treepm_tree_opening_theta = 0.7;
+  double treepm_tree_relative_force_tolerance = 0.005;
+  double treepm_tree_relative_force_acceleration_floor = 1.0e-30;
+  TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;
+  bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
   PmDecompositionMode treepm_pm_decomposition_mode = PmDecompositionMode::kSlab;
   std::uint64_t treepm_tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;

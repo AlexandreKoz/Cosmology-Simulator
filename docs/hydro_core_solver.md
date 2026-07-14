@@ -213,8 +213,25 @@ The hydro solver itself does not clamp `dt`; scheduler-visible `HydroCfl` candid
 `gravity_accel_*_peculiar` and `hubble_rate_code`:
 
 - `S_rho = 0`
-- `S_m = rho g - H m`
-- `S_E = rho (u · g) - 2 H e_internal`
+- `S_m = rho A/a^2 - H m`
+- `S_E = rho (u · A)/a^2 - H (2 K + 3 P)`
+
+Here `rho` is comoving mass density, `m=rho u`,
+`K=0.5 rho |u|^2`, `P` is comoving pressure, and `u` is physical peculiar
+velocity. Despite the compatibility field stem, `gravity_accel_*_peculiar`
+contains the scale-free comoving TreePM kernel `A`, not the already-scaled
+peculiar acceleration. The source applies `A/a^2` exactly once for both
+momentum and gravity work.
+
+`HydroUpdateContext::scale_factor` and `hubble_rate_code` are derived views of
+integrator timeline truth. Hydro runs post-drift before `IntegratorState`
+commits the step, so both fixed-grid and AMR callbacks use
+`StepContext.timeline_step.scale_factor_end` and `hubble_end_code`, already in
+inverse code time. They do not read the still-step-begin committed epoch or
+recompute an SI-valued `H(a)` independently. The expansion energy term above
+is valid for every supported adiabatic index. It must not be replaced by
+`-2 H U` without first proving the corresponding variable and equation
+convention.
 
 This is intentionally conservative and modular; additional baryonic sources should be implemented through extra `HydroSourceTerm` instances.
 

@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <exception>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -63,6 +64,14 @@ constexpr double k_pressure_floor = 1.0e-10;
 constexpr double k_density_floor = 1.0e-10;
 constexpr std::size_t k_default_generated_particle_axis = 6;
 
+[[nodiscard]] std::string formatRuntimeDouble(double value) {
+  std::ostringstream stream;
+  stream << std::scientific
+         << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << value;
+  return stream.str();
+}
+
 constexpr std::array<core::IntegrationStage, core::integrationStageCount()> k_all_integration_stages = {
     core::IntegrationStage::kGravityKickPre,
     core::IntegrationStage::kDrift,
@@ -102,6 +111,32 @@ constexpr std::array<core::IntegrationStage, 1> k_hydro_stage = {core::Integrati
   throw std::runtime_error("unhandled TreePm assignment scheme enum value");
 }
 
+[[nodiscard]] gravity::TreeOpeningCriterion toTreeOpeningCriterion(
+    core::TreePmOpeningCriterion opening_criterion) {
+  switch (opening_criterion) {
+    case core::TreePmOpeningCriterion::kGeometric:
+      return gravity::TreeOpeningCriterion::kBarnesHutGeometric;
+    case core::TreePmOpeningCriterion::kComDistance:
+      return gravity::TreeOpeningCriterion::kBarnesHutComDistance;
+    case core::TreePmOpeningCriterion::kRelativeForceError:
+      return gravity::TreeOpeningCriterion::kRelativeForceError;
+  }
+  throw std::runtime_error("unhandled TreePM opening criterion enum value");
+}
+
+[[nodiscard]] std::string treePmOpeningCriterionName(
+    core::TreePmOpeningCriterion opening_criterion) {
+  switch (opening_criterion) {
+    case core::TreePmOpeningCriterion::kGeometric:
+      return "geometric";
+    case core::TreePmOpeningCriterion::kComDistance:
+      return "com_distance";
+    case core::TreePmOpeningCriterion::kRelativeForceError:
+      return "relative_force_error";
+  }
+  throw std::runtime_error("unhandled TreePM opening criterion enum value");
+}
+
 
 
 gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
@@ -120,8 +155,7 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
 
 
 [[nodiscard]] double newtonGCodeFromUnits(const core::UnitSystem& units) {
-  return core::constants::k_newton_g_si * units.mass_si_per_code * units.timeSiPerCode() * units.timeSiPerCode() /
-      (units.length_si_per_code * units.length_si_per_code * units.length_si_per_code);
+  return core::newtonGravitationalConstantCode(units);
 }
 
 [[nodiscard]] physics::StarFormationConfig makeRuntimeStarFormationConfig(
@@ -646,6 +680,7 @@ void updateAdaptiveTimeBinsFromView(
       config.units.mass_unit,
       config.units.velocity_unit);
   const double newton_g_code = newtonGCodeFromUnits(runtime_units);
+  const double gravity_scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
   std::optional<double> cosmology_dt;
   if (integrator_state.current_scale_factor > 0.0 && config.cosmology.hubble_param > 0.0) {
     core::CosmologyBackgroundConfig background_config;
@@ -734,7 +769,11 @@ void updateAdaptiveTimeBinsFromView(
           ? view.particles.gravity_softening_comoving[gas_index]
           : species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)];
       registry.registerGravityHook([=](std::uint32_t) {
-        return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
+        return core::computeComovingGravityTimeStep(
+            {.softening_length_comoving_code = std::max(eps, 1.0e-12),
+             .scale_free_acceleration_magnitude_code = amag,
+             .scale_factor = gravity_scale_factor},
+            0.2);
       });
       const double cfl_dt = registry.hooks().cfl_hook(cell_index);
       const double gravity_dt = registry.hooks().gravity_hook(cell_index);
@@ -766,7 +805,11 @@ void updateAdaptiveTimeBinsFromView(
               ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[particle_index])]
               : global_softening);
     registry.registerGravityHook([=](std::uint32_t) {
-      return core::computeGravityTimeStep({.softening_length_code = std::max(eps, 1.0e-12), .acceleration_magnitude_code = amag}, 0.2);
+      return core::computeComovingGravityTimeStep(
+          {.softening_length_comoving_code = std::max(eps, 1.0e-12),
+           .scale_free_acceleration_magnitude_code = amag,
+           .scale_factor = gravity_scale_factor},
+          0.2);
     });
     scheduler.submitCandidateTimeStep(
         particle_index,
@@ -1834,6 +1877,32 @@ void validateRestartResumeTopologyOrThrow(
     const core::SimulationConfig& config,
     const core::FrozenConfig& frozen_config,
     const parallel::MpiContext& mpi_context) {
+  const auto require_bin_zero_scheduler = [](
+      const core::TimeBinPersistentState& scheduler_state,
+      std::string_view label) {
+    if (scheduler_state.max_bin != 0U) {
+      throw std::runtime_error(
+          "ReferenceWorkflow restart topology validation failed: " +
+          std::string(label) + " max_bin must be zero for production KDK");
+    }
+    for (const std::uint8_t bin : scheduler_state.bin_index) {
+      if (bin != 0U) {
+        throw std::runtime_error(
+            "ReferenceWorkflow restart topology validation failed: " +
+            std::string(label) + " contains a nonzero committed time bin");
+      }
+    }
+    for (const std::uint8_t pending : scheduler_state.pending_bin_index) {
+      if (pending != 0U &&
+          pending != core::HierarchicalTimeBinScheduler::k_unset_pending_bin) {
+        throw std::runtime_error(
+            "ReferenceWorkflow restart topology validation failed: " +
+            std::string(label) + " contains a nonzero pending time bin");
+      }
+    }
+  };
+  require_bin_zero_scheduler(restart.scheduler_state, "particle scheduler");
+  require_bin_zero_scheduler(restart.gas_cell_scheduler_state, "gas-cell scheduler");
   if (restart.normalized_config_hash_hex != frozen_config.provenance.config_hash_hex) {
     throw std::runtime_error(
         "ReferenceWorkflow restart topology validation failed: normalized config hash mismatch: expected=" +
@@ -2190,7 +2259,7 @@ void exchangeAndValidateAmrPatchPayloads(
   }
 }
 
-void applyMeasuredRuntimeRebalancePlan(
+[[nodiscard]] bool applyMeasuredRuntimeRebalancePlan(
     core::SimulationState& state,
     core::HierarchicalTimeBinScheduler& scheduler,
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
@@ -2203,7 +2272,7 @@ void applyMeasuredRuntimeRebalancePlan(
     core::ProfilerSession* profiler,
     std::uint64_t step_index) {
   if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
-    return;
+    return false;
   }
   if (world_rank < 0 || world_rank >= mpi_context.worldSize()) {
     throw std::invalid_argument("runtime rebalance world_rank is outside MPI world");
@@ -2227,8 +2296,10 @@ void applyMeasuredRuntimeRebalancePlan(
   if (!rebalance.should_rebalance) {
     exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
     recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
-    return;
+    return false;
   }
+
+  const std::uint64_t particle_index_generation_before = state.particleIndexGeneration();
 
   std::unordered_map<std::uint64_t, std::uint32_t> local_index_by_particle_id;
   local_index_by_particle_id.reserve(state.particles.size());
@@ -2483,6 +2554,11 @@ void applyMeasuredRuntimeRebalancePlan(
         },
     });
   }
+  const bool local_particle_decomposition_changed =
+      state.particleIndexGeneration() != particle_index_generation_before;
+  const std::uint64_t changed_rank_count = mpi_context.allreduceSumUint64(
+      local_particle_decomposition_changed ? 1ULL : 0ULL);
+  return changed_rank_count > 0U;
 }
 
 void applyInitialGravityAwareDecomposition(
@@ -3220,6 +3296,13 @@ struct HydroBoundaryCellAdvertisement {
       config.numerics.treepm_enable_window_deconvolution;
   record.gravity_treepm_asmth_cells = config.numerics.treepm_asmth_cells;
   record.gravity_treepm_rcut_cells = config.numerics.treepm_rcut_cells;
+  record.gravity_treepm_tree_opening_criterion =
+      treePmOpeningCriterionName(config.numerics.treepm_tree_opening_criterion);
+  record.gravity_treepm_tree_opening_theta = config.numerics.treepm_tree_opening_theta;
+  record.gravity_treepm_tree_relative_force_tolerance =
+      config.numerics.treepm_tree_relative_force_tolerance;
+  record.gravity_treepm_tree_relative_force_acceleration_floor =
+      config.numerics.treepm_tree_relative_force_acceleration_floor;
   record.gravity_treepm_mesh_spacing_mpc_comoving = mesh_spacing_mpc_comoving;
   record.gravity_treepm_mesh_spacing_x_mpc_comoving = dx;
   record.gravity_treepm_mesh_spacing_y_mpc_comoving = dy;
@@ -3678,9 +3761,6 @@ void initializeSchedulerBins(
   }
   const std::uint32_t particle_count = static_cast<std::uint32_t>(state.particles.size());
   const std::uint32_t cell_count = static_cast<std::uint32_t>(state.cells.size());
-  if (particle_count == 0U && cell_count == 0U) {
-    throw std::runtime_error("reference workflow requires non-empty initial conditions");
-  }
 
   const std::uint8_t particle_default_bin = particle_scheduler.maxBin() > 0 ? 1U : 0U;
   const std::uint8_t gas_default_bin = gas_cell_scheduler.maxBin() > 0 ? 1U : 0U;
@@ -3706,8 +3786,14 @@ void ensureSchedulerCoversState(
     return;
   }
   const std::uint8_t new_element_bin = scheduler.maxBin() > 0 ? 1U : 0U;
+  const std::uint64_t bin_period = 1ULL << new_element_bin;
+  if (scheduler.currentTick() > std::numeric_limits<std::uint64_t>::max() - bin_period) {
+    throw std::overflow_error(std::string(scheduler_name) + " next activation tick overflows uint64");
+  }
+  const std::uint64_t first_activation_tick =
+      ((scheduler.currentTick() / bin_period) + 1ULL) * bin_period;
   scheduler.appendElements(
-      required_count - scheduler.elementCount(), new_element_bin, scheduler.currentTick() + 1U);
+      required_count - scheduler.elementCount(), new_element_bin, first_activation_tick);
 }
 
 void ensureSchedulersCoverState(
@@ -3883,7 +3969,14 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_tree_pm_options.pm_options.box_size_z_mpc_comoving = config.cosmology.box_size_z_mpc_comoving;
     m_tree_pm_options.pm_options.box_size_mpc_comoving = config.cosmology.box_size_x_mpc_comoving;
     m_tree_pm_options.pm_options.scale_factor = 1.0;
-    m_tree_pm_options.pm_options.gravitational_constant_code = 1.0;
+    const core::UnitSystem runtime_units = core::makeUnitSystem(
+        config.units.length_unit,
+        config.units.mass_unit,
+        config.units.velocity_unit);
+    m_gravitational_constant_code =
+        core::newtonGravitationalConstantCode(runtime_units);
+    m_tree_pm_options.pm_options.gravitational_constant_code =
+        m_gravitational_constant_code;
     m_tree_pm_options.pm_options.assignment_scheme =
         toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
     m_tree_pm_options.pm_options.enable_window_deconvolution =
@@ -3913,8 +4006,15 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_tree_pm_options.pm_options.data_residency = gravity::PmDataResidencyPolicy::kPreferDevice;
     }
 
-    m_tree_pm_options.tree_options.opening_theta = 0.7;
-    m_tree_pm_options.tree_options.gravitational_constant_code = 1.0;
+    m_tree_pm_options.tree_options.opening_criterion =
+        toTreeOpeningCriterion(config.numerics.treepm_tree_opening_criterion);
+    m_tree_pm_options.tree_options.opening_theta = config.numerics.treepm_tree_opening_theta;
+    m_tree_pm_options.tree_options.relative_force_tolerance =
+        config.numerics.treepm_tree_relative_force_tolerance;
+    m_tree_pm_options.tree_options.relative_force_acceleration_floor_code =
+        config.numerics.treepm_tree_relative_force_acceleration_floor;
+    m_tree_pm_options.tree_options.gravitational_constant_code =
+        m_gravitational_constant_code;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
     m_tree_pm_options.tree_options.softening.epsilon_comoving =
         config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
@@ -3958,6 +4058,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] std::uint64_t longRangeRefreshCount() const noexcept { return m_long_range_refresh_count; }
   [[nodiscard]] std::uint64_t longRangeReuseCount() const noexcept { return m_long_range_reuse_count; }
   [[nodiscard]] int pmCadenceSteps() const noexcept { return static_cast<int>(m_pm_update_cadence_steps); }
+  [[nodiscard]] double gravitationalConstantCode() const noexcept {
+    return m_gravitational_constant_code;
+  }
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
@@ -3965,6 +4068,28 @@ class GravityStageCallback final : public core::IntegrationCallback {
   [[nodiscard]] core::MemoryReport memoryReport() const { return m_tree_pm_coordinator.memoryReport(); }
   [[nodiscard]] const parallel::DecompositionRuntimeMeasurements& lastRuntimeDecompositionMeasurements() const noexcept {
     return m_last_decomposition_measurements;
+  }
+  [[nodiscard]] std::uint64_t decompositionEpoch() const noexcept { return m_decomposition_epoch; }
+
+  void restoreDecompositionEpoch(std::uint64_t decomposition_epoch) {
+    if (m_has_long_range_field || m_last_committed_field_version != 0U) {
+      throw std::logic_error("TreePM decomposition epoch must be restored before solver use");
+    }
+    m_decomposition_epoch = decomposition_epoch;
+  }
+
+  void commitParticleDecompositionChange() {
+    if (m_decomposition_epoch == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("TreePM particle-decomposition epoch overflow");
+    }
+    ++m_decomposition_epoch;
+    // Acceleration lanes are dense-row mirrors and are not part of the
+    // migration payload. Invalidate immediately so an output boundary after
+    // migration serializes an honest cache.valid=false state instead of
+    // rejecting or persisting stale row ownership.
+    m_force_cache_valid = false;
+    m_force_cache_particle_index_generation = 0U;
+    m_particle_force_cache_valid.clear();
   }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -3980,6 +4105,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     cache.valid = m_force_cache_valid;
     if (!cache.valid) {
       return cache;
+    }
+    if (m_force_cache_particle_index_generation != state.particleIndexGeneration()) {
+      throw std::runtime_error(
+          "gravity force cache cannot be checkpointed after particle-row ownership changed without refresh");
     }
     if (m_particle_accel_x.size() != state.particles.size() ||
         m_particle_accel_y.size() != state.particles.size() ||
@@ -4011,7 +4140,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_cell_accel_x.clear();
       m_cell_accel_y.clear();
       m_cell_accel_z.clear();
+      m_particle_force_cache_valid.clear();
       m_force_cache_valid = false;
+      m_force_cache_particle_index_generation = 0U;
       return;
     }
     const auto requireTriplet = [](const std::vector<double>& x,
@@ -4095,6 +4226,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_cell_accel_z[row] = cache.cell_accel_z_comoving[cached_row];
     }
     m_force_cache_valid = true;
+    m_force_cache_particle_index_generation = state.particleIndexGeneration();
+    m_particle_force_cache_valid.assign(state.particles.size(), 1U);
   }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
@@ -4136,12 +4269,36 @@ class GravityStageCallback final : public core::IntegrationCallback {
   void onStage(core::StepContext& context) override {
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
         context.stage == core::IntegrationStage::kGravityKickPost;
-    const bool needs_initial_force_bootstrap = context.stage == core::IntegrationStage::kGravityKickPre && !m_force_cache_valid;
+    parallel::MpiContext mpi_context;
+    const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
+    const std::size_t particle_count = context.state.particles.size();
+    if (m_force_cache_particle_index_generation !=
+            context.state.particleIndexGeneration() ||
+        m_particle_force_cache_valid.size() != particle_count) {
+      // Migration/repartition may preserve the dense extent while changing row
+      // identity. Acceleration history is not a migration payload, so no row is
+      // considered compatible until that owned particle is explicitly
+      // refreshed in the new generation. Keeping per-row validity prevents a
+      // partial active-set refresh from blessing stale inactive rows.
+      m_particle_force_cache_valid.assign(particle_count, 0U);
+      m_force_cache_particle_index_generation =
+          context.state.particleIndexGeneration();
+      m_force_cache_valid = false;
+    }
+    const bool local_force_cache_incompatible = !m_force_cache_valid ||
+        m_force_cache_particle_index_generation != context.state.particleIndexGeneration();
+    const std::uint64_t incompatible_cache_rank_count =
+        mpi_context.allreduceSumUint64(local_force_cache_incompatible ? 1ULL : 0ULL);
+    const bool needs_force_cache_rebuild = incompatible_cache_rank_count > 0U;
+    const bool needs_initial_force_bootstrap =
+        context.stage == core::IntegrationStage::kGravityKickPre &&
+        !context.integrator_state.pm_long_range_field_valid;
     if (needs_initial_force_bootstrap && !context.pm_refresh_directive.initial_cache_bootstrap_allowed) {
       throw std::runtime_error(
           "TreePM initial force bootstrap requested outside an integrator-authorized global boundary");
     }
-    const bool is_force_refresh_stage = context.pm_refresh_directive.force_refresh_surface || needs_initial_force_bootstrap;
+    const bool is_force_refresh_stage = context.pm_refresh_directive.force_refresh_surface ||
+        needs_initial_force_bootstrap || (is_kick_stage && needs_force_cache_rebuild);
     if (!is_kick_stage && !is_force_refresh_stage) {
       throw std::logic_error("gravity handler received an unregistered stage");
     }
@@ -4158,8 +4315,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
       return;
     }
 
-    parallel::MpiContext mpi_context;
-    const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
     if (m_runtime_topology.world_size != mpi_context.worldSize()) {
       throw std::runtime_error("reference workflow runtime topology world_size drifted from MPI context");
     }
@@ -4174,15 +4329,48 @@ class GravityStageCallback final : public core::IntegrationCallback {
       }
     };
 
-    const std::size_t particle_count = context.state.particles.size();
-
     const SolverGhostRefreshReport gravity_ghost_refresh = refreshParticleGhostsForSolver(
         context, mpi_context, "gravity.treepm", &m_ghost_cache_lifecycle);
 
+    std::span<const std::uint32_t> force_target_particles =
+        context.active_set.particle_indices;
+    SourcePredictionEpoch source_prediction_epoch =
+        context.pm_refresh_directive.requires_predicted_inactive_sources
+        ? SourcePredictionEpoch::kStepEnd
+        : SourcePredictionEpoch::kNone;
+    if (is_kick_stage && needs_force_cache_rebuild) {
+      // A dense-row ownership transition invalidates acceleration rows by
+      // identity, not merely by extent. Rebuild every locally owned row in one
+      // coordinated solve so later local pre-kicks never mix stale cache rows
+      // with current ones. Sources whose persistent coordinates lag the
+      // current scheduler time are predicted to the pre-kick epoch.
+      m_force_refresh_particle_indices.clear();
+      m_force_refresh_particle_indices.reserve(particle_count);
+      const std::uint32_t local_rank =
+          static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
+      for (std::size_t particle_index = 0; particle_index < particle_count;
+           ++particle_index) {
+        if (context.state.particle_sidecar.owning_rank[particle_index] ==
+            local_rank) {
+          m_force_refresh_particle_indices.push_back(
+              static_cast<std::uint32_t>(particle_index));
+        }
+      }
+      force_target_particles = m_force_refresh_particle_indices;
+      source_prediction_epoch = SourcePredictionEpoch::kStepBegin;
+    }
     rebuildOwnedParticleCompactView(
         context,
-        context.active_set.particle_indices,
-        context.pm_refresh_directive.requires_predicted_inactive_sources);
+        force_target_particles,
+        source_prediction_epoch);
+    m_local_kick_particle_count = 0U;
+    for (const std::uint32_t particle_index :
+         context.active_set.particle_indices) {
+      if (particle_index < m_owned_local_index_by_global.size() &&
+          m_owned_local_index_by_global[particle_index] >= 0) {
+        ++m_local_kick_particle_count;
+      }
+    }
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
@@ -4218,22 +4406,37 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_tree_pm_options.source_is_high_res = m_source_is_high_res;
     m_tree_pm_options.active_is_high_res = m_active_is_high_res;
 
+    m_active_previous_acceleration_magnitude.clear();
+    const bool relative_mac_cache_compatible =
+        m_tree_pm_options.tree_options.opening_criterion == gravity::TreeOpeningCriterion::kRelativeForceError &&
+        m_force_cache_valid &&
+        m_force_cache_particle_index_generation == context.state.particleIndexGeneration() &&
+        m_particle_accel_x.size() == particle_count &&
+        m_particle_accel_y.size() == particle_count &&
+        m_particle_accel_z.size() == particle_count;
+    if (relative_mac_cache_compatible) {
+      m_active_previous_acceleration_magnitude.resize(m_local_active_global_indices.size(), 0.0);
+      for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
+        const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
+        m_active_previous_acceleration_magnitude[active_slot] = std::sqrt(
+            m_particle_accel_x[particle_index] * m_particle_accel_x[particle_index] +
+            m_particle_accel_y[particle_index] * m_particle_accel_y[particle_index] +
+            m_particle_accel_z[particle_index] * m_particle_accel_z[particle_index]);
+      }
+    }
+
     gravity::TreePmForceAccumulatorView accumulator{
         .active_particle_index = m_local_active_indices,
         .accel_x_comoving = m_active_accel_x,
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
+        .previous_acceleration_magnitude_code = m_active_previous_acceleration_magnitude,
     };
 
-    m_tree_pm_options.pm_options.scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor);
-    if (!m_mode_policy.cosmological_comoving_frame) {
-      m_tree_pm_options.pm_options.scale_factor = 1.0;
-    }
-
-    // The integrator owns PM cadence state.  At legal global PM-refresh
-    // boundaries it issues a concrete sync event; local active-bin force
-    // evaluations may recompute short-range forces only and must reuse the
-    // already-valid long-range field without advancing PM cadence truth.
+    // The integrator owns PM cadence state. At every rank-coordinated force
+    // evaluation it issues a concrete sync event. The active particle set may
+    // be local, but all ranks participate and inactive sources are predicted,
+    // so production cadence one advances PM truth at that same force epoch.
     PmLongRangeKickDecision decision{
         .sync_surface = toPmSyncSurface(context.stage),
         .gravity_kick_opportunity = context.integrator_state.pm_sync_state.gravityKickOpportunity(),
@@ -4290,11 +4493,42 @@ class GravityStageCallback final : public core::IntegrationCallback {
 
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
+    double force_evaluation_scale_factor = decision.field_built_scale_factor;
+    if (decision.refresh_long_range_field) {
+      force_evaluation_scale_factor =
+          context.pm_refresh_directive.force_evaluation_scale_factor;
+      if (!std::isfinite(force_evaluation_scale_factor) ||
+          force_evaluation_scale_factor <= 0.0 ||
+          force_evaluation_scale_factor != decision.field_built_scale_factor) {
+        throw std::runtime_error(
+            "TreePM refresh force-evaluation scale factor disagrees with integrator field-build metadata");
+      }
+    }
+    if (!std::isfinite(force_evaluation_scale_factor) ||
+        force_evaluation_scale_factor <= 0.0) {
+      throw std::runtime_error(
+          "TreePM force evaluation requires a finite positive scale factor");
+    }
+    // At a post-drift global refresh this is timeline_step.scale_factor_end,
+    // even though IntegratorState.current_scale_factor remains at the step
+    // beginning until commitStep(). A reuse retains the integrator-owned field
+    // build scale as validity metadata; the returned Newtonian kernel itself is
+    // scale-free and the KDK integrator owns the cosmological kick factor.
+    m_tree_pm_options.pm_options.scale_factor =
+        m_mode_policy.cosmological_comoving_frame
+        ? force_evaluation_scale_factor
+        : 1.0;
+    // Dense-row generations are rank-local mirrors and can legitimately differ
+    // after uneven compaction. The workflow advances this shared epoch exactly
+    // once, on every rank, after a committed particle-ownership transition.
+    m_tree_pm_options.decomposition_epoch = m_decomposition_epoch;
+    m_tree_pm_options.force_epoch = decision.field_version;
 
     if (m_particle_accel_x.size() != particle_count) {
       m_particle_accel_x.assign(particle_count, 0.0);
       m_particle_accel_y.assign(particle_count, 0.0);
       m_particle_accel_z.assign(particle_count, 0.0);
+      m_particle_force_cache_valid.assign(particle_count, 0U);
     }
     if (m_cell_accel_x.size() != context.state.cells.size()) {
       m_cell_accel_x.assign(context.state.cells.size(), 0.0);
@@ -4330,6 +4564,13 @@ class GravityStageCallback final : public core::IntegrationCallback {
         &tree_pm_profile,
         &m_last_tree_pm_diagnostics,
         softening_view);
+    const std::uint64_t expected_pm_solve_count =
+        decision.refresh_long_range_field ? 1U : 0U;
+    if (m_last_tree_pm_diagnostics.pm_solve_count != expected_pm_solve_count ||
+        m_last_tree_pm_diagnostics.pm_reuse_count != 1U - expected_pm_solve_count) {
+      throw std::runtime_error(
+          "TreePM solver PM solve/reuse outcome disagrees with the integrator-owned cadence directive");
+    }
 
     m_last_decomposition_measurements = parallel::DecompositionRuntimeMeasurements{
         .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations +
@@ -4370,7 +4611,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_last_committed_field_version = decision.field_version;
 
     const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
-        context.state.particles.size() - m_local_active_global_indices.size());
+        context.state.particles.size() - m_local_kick_particle_count);
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
@@ -4382,7 +4623,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         .field_built_scale_factor = decision.field_built_scale_factor,
         .field_age_in_kick_opportunities =
             decision.gravity_kick_opportunity - decision.last_refresh_opportunity,
-        .active_particles_kicked = static_cast<std::uint64_t>(m_local_active_global_indices.size()),
+        .active_particles_kicked = static_cast<std::uint64_t>(m_local_kick_particle_count),
         .inactive_particles_skipped = inactive_particles_skipped,
         .refreshed_long_range_field = decision.refresh_long_range_field,
     });
@@ -4399,25 +4640,35 @@ class GravityStageCallback final : public core::IntegrationCallback {
               : "PM long-range field reused for gravity kick",
           .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
                       {"pm_sync_surface", std::string(pmSyncSurfaceName(decision.sync_surface))},
-                      {"gravity_kick_opportunity", std::to_string(context.integrator_state.pm_sync_state.gravityKickOpportunity())},
-                      {"field_version", std::to_string(context.integrator_state.pm_sync_state.fieldVersion())},
-                      {"field_built_step_index", std::to_string(context.integrator_state.pm_sync_state.lastRefreshStepIndex())},
-                      {"field_built_scale_factor", std::to_string(context.integrator_state.pm_sync_state.lastRefreshScaleFactor())},
+                      {"gravity_kick_opportunity", std::to_string(decision.gravity_kick_opportunity)},
+                      {"field_version", std::to_string(decision.field_version)},
+                      {"field_built_step_index", std::to_string(decision.field_built_step_index)},
+                      {"field_built_scale_factor", formatRuntimeDouble(decision.field_built_scale_factor)},
                       {"pm_update_cadence_steps", std::to_string(context.integrator_state.pm_sync_state.cadenceSteps())},
                       {"pm_grid", std::to_string(m_pm_grid_shape.nx) + "x" + std::to_string(m_pm_grid_shape.ny) +
                               "x" + std::to_string(m_pm_grid_shape.nz)},
                       {"pm_assignment_scheme", m_pm_assignment_scheme},
                       {"pm_window_deconvolution", m_config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
-                      {"asmth_cells", std::to_string(m_config.numerics.treepm_asmth_cells)},
-                      {"rcut_cells", std::to_string(m_config.numerics.treepm_rcut_cells)},
-                      {"mesh_spacing_x_mpc_comoving", std::to_string(m_mesh_spacing_x_mpc_comoving)},
-                      {"mesh_spacing_y_mpc_comoving", std::to_string(m_mesh_spacing_y_mpc_comoving)},
-                      {"mesh_spacing_z_mpc_comoving", std::to_string(m_mesh_spacing_z_mpc_comoving)},
-                      {"split_scale_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.split_scale_comoving)},
-                      {"cutoff_radius_mpc_comoving", std::to_string(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
+                      {"asmth_cells", formatRuntimeDouble(m_config.numerics.treepm_asmth_cells)},
+                      {"rcut_cells", formatRuntimeDouble(m_config.numerics.treepm_rcut_cells)},
+                      {"tree_opening_criterion", treePmOpeningCriterionName(
+                          m_config.numerics.treepm_tree_opening_criterion)},
+                      {"tree_opening_theta", formatRuntimeDouble(
+                          m_config.numerics.treepm_tree_opening_theta)},
+                      {"tree_relative_force_tolerance", formatRuntimeDouble(
+                          m_config.numerics.treepm_tree_relative_force_tolerance)},
+                      {"tree_relative_force_acceleration_floor", formatRuntimeDouble(
+                          m_config.numerics.treepm_tree_relative_force_acceleration_floor)},
+                      {"relative_mac_previous_force_available",
+                          relative_mac_cache_compatible ? "true" : "false"},
+                      {"mesh_spacing_x_mpc_comoving", formatRuntimeDouble(m_mesh_spacing_x_mpc_comoving)},
+                      {"mesh_spacing_y_mpc_comoving", formatRuntimeDouble(m_mesh_spacing_y_mpc_comoving)},
+                      {"mesh_spacing_z_mpc_comoving", formatRuntimeDouble(m_mesh_spacing_z_mpc_comoving)},
+                      {"split_scale_mpc_comoving", formatRuntimeDouble(m_tree_pm_options.split_policy.split_scale_comoving)},
+                      {"cutoff_radius_mpc_comoving", formatRuntimeDouble(m_tree_pm_options.split_policy.cutoff_radius_comoving)},
                       {"softening_policy", describeSofteningPolicy(m_config, &context.state)},
                       {"softening_kernel", "plummer"},
-                      {"softening_epsilon_kpc_comoving", std::to_string(m_config.numerics.gravity_softening_kpc_comoving)},
+                      {"softening_epsilon_kpc_comoving", formatRuntimeDouble(m_config.numerics.gravity_softening_kpc_comoving)},
                       {"pm_fft_backend", m_pm_backend},
                       {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
                       {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
@@ -4428,7 +4679,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
                       {"predicted_inactive_sources_required",
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
-                      {"pm_refresh_force_eval_scale_factor", std::to_string(context.pm_refresh_directive.force_evaluation_scale_factor)},
+                      {"pm_refresh_force_eval_scale_factor", formatRuntimeDouble(context.pm_refresh_directive.force_evaluation_scale_factor)},
                       {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{
@@ -4440,14 +4691,14 @@ class GravityStageCallback final : public core::IntegrationCallback {
           .scale_factor = context.integrator_state.current_scale_factor,
           .message = "zoom force decomposition and contamination diagnostics",
           .payload = {
-              {"force_l2_pm_global", std::to_string(m_last_tree_pm_diagnostics.force_l2_pm_global)},
-              {"force_l2_pm_zoom_correction", std::to_string(m_last_tree_pm_diagnostics.force_l2_pm_zoom_correction)},
-              {"force_l2_tree_short_range", std::to_string(m_last_tree_pm_diagnostics.force_l2_tree_short_range)},
-              {"force_l2_total", std::to_string(m_last_tree_pm_diagnostics.force_l2_total)},
+              {"force_l2_pm_global", formatRuntimeDouble(m_last_tree_pm_diagnostics.force_l2_pm_global)},
+              {"force_l2_pm_zoom_correction", formatRuntimeDouble(m_last_tree_pm_diagnostics.force_l2_pm_zoom_correction)},
+              {"force_l2_tree_short_range", formatRuntimeDouble(m_last_tree_pm_diagnostics.force_l2_tree_short_range)},
+              {"force_l2_total", formatRuntimeDouble(m_last_tree_pm_diagnostics.force_l2_total)},
               {"zoom_high_res_source_count", std::to_string(m_last_tree_pm_diagnostics.zoom_high_res_source_count)},
               {"zoom_low_res_source_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_source_count)},
               {"zoom_low_res_contamination_count", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_count)},
-              {"zoom_low_res_contamination_mass_code", std::to_string(m_last_tree_pm_diagnostics.zoom_low_res_contamination_mass_code)},
+              {"zoom_low_res_contamination_mass_code", formatRuntimeDouble(m_last_tree_pm_diagnostics.zoom_low_res_contamination_mass_code)},
               {"zoom_membership_source", m_zoom_membership_source},
           },
       });
@@ -4479,7 +4730,6 @@ class GravityStageCallback final : public core::IntegrationCallback {
       });
     }
 
-    m_force_cache_valid = true;
     if (is_kick_stage) {
       applyActiveKickFromFreshForce(context);
     }
@@ -4489,6 +4739,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_particle_accel_x[particle_index] = m_active_accel_x[active_slot];
       m_particle_accel_y[particle_index] = m_active_accel_y[active_slot];
       m_particle_accel_z[particle_index] = m_active_accel_z[active_slot];
+      m_particle_force_cache_valid[particle_index] = 1U;
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("gravity callback gas-cell acceleration sync");
@@ -4512,6 +4763,19 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_cell_accel_x[cell_index] = m_active_accel_x[static_cast<std::size_t>(active_slot)];
       m_cell_accel_y[cell_index] = m_active_accel_y[static_cast<std::size_t>(active_slot)];
       m_cell_accel_z[cell_index] = m_active_accel_z[static_cast<std::size_t>(active_slot)];
+    }
+    m_force_cache_particle_index_generation = context.state.particleIndexGeneration();
+    m_force_cache_valid = true;
+    const std::uint32_t local_rank =
+        static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
+    for (std::size_t particle_index = 0; particle_index < particle_count;
+         ++particle_index) {
+      if (context.state.particle_sidecar.owning_rank[particle_index] ==
+              local_rank &&
+          m_particle_force_cache_valid[particle_index] == 0U) {
+        m_force_cache_valid = false;
+        break;
+      }
     }
   }
 
@@ -4588,14 +4852,22 @@ class GravityStageCallback final : public core::IntegrationCallback {
   void applyActiveKickFromFreshForce(core::StepContext& context) {
     const double kick_factor = kickFactorForStage(context);
     const double hubble_drag = hubbleDragFactorForStage(context);
-    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
-      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
+    for (const std::uint32_t particle_index :
+         context.active_set.particle_indices) {
+      if (particle_index >= m_active_slot_by_particle.size()) {
+        throw std::out_of_range(
+            "gravity kick particle index is outside the fresh-force slot map");
+      }
+      const int active_slot = m_active_slot_by_particle[particle_index];
+      if (active_slot < 0) {
+        continue;
+      }
       applyPeculiarVelocityKick(
           context.state,
           particle_index,
-          m_active_accel_x[active_slot],
-          m_active_accel_y[active_slot],
-          m_active_accel_z[active_slot],
+          m_active_accel_x[static_cast<std::size_t>(active_slot)],
+          m_active_accel_y[static_cast<std::size_t>(active_slot)],
+          m_active_accel_z[static_cast<std::size_t>(active_slot)],
           kick_factor,
           hubble_drag);
     }
@@ -4605,6 +4877,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
     if (!m_force_cache_valid) {
       throw std::runtime_error("gravity kick requested before a coherent force-refresh boundary");
     }
+    if (m_force_cache_particle_index_generation != context.state.particleIndexGeneration()) {
+      throw std::runtime_error(
+          "gravity cached kick rejected because particle dense-row generation changed since force refresh");
+    }
     const std::size_t particle_count = context.state.particles.size();
     if (m_particle_accel_x.size() != particle_count ||
         m_particle_accel_y.size() != particle_count ||
@@ -4613,10 +4889,18 @@ class GravityStageCallback final : public core::IntegrationCallback {
       m_particle_accel_y.resize(particle_count, 0.0);
       m_particle_accel_z.resize(particle_count, 0.0);
     }
-    rebuildOwnedParticleCompactView(context, context.active_set.particle_indices, false);
+    rebuildOwnedParticleCompactView(
+        context,
+        context.active_set.particle_indices,
+        SourcePredictionEpoch::kNone);
     const double kick_factor = kickFactorForStage(context);
     const double hubble_drag = hubbleDragFactorForStage(context);
     for (const std::uint32_t particle_index : m_local_active_global_indices) {
+      if (particle_index >= m_particle_force_cache_valid.size() ||
+          m_particle_force_cache_valid[particle_index] == 0U) {
+        throw std::runtime_error(
+            "gravity cached kick rejected an invalid per-particle force row");
+      }
       applyPeculiarVelocityKick(
           context.state,
           particle_index,
@@ -4781,10 +5065,16 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
   }
 
+  enum class SourcePredictionEpoch : std::uint8_t {
+    kNone = 0,
+    kStepBegin = 1,
+    kStepEnd = 2,
+  };
+
   void rebuildOwnedParticleCompactView(
       const core::StepContext& context,
       std::span<const std::uint32_t> active_particles,
-      bool predict_inactive_sources = false) {
+      SourcePredictionEpoch prediction_epoch = SourcePredictionEpoch::kNone) {
     const core::SimulationState& state = context.state;
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
@@ -4800,7 +5090,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     m_source_predicted_inactive_count = 0;
 
     std::vector<std::uint8_t> active_mask;
-    if (predict_inactive_sources) {
+    if (prediction_epoch != SourcePredictionEpoch::kNone) {
       if (state.particle_sidecar.last_drift_time_code.size() != particle_count ||
           state.particle_sidecar.last_drift_scale_factor.size() != particle_count) {
         throw std::runtime_error("PM source prediction requires per-particle drift epoch sidecars");
@@ -4832,18 +5122,27 @@ class GravityStageCallback final : public core::IntegrationCallback {
       double source_x = state.particles.position_x_comoving[global_index];
       double source_y = state.particles.position_y_comoving[global_index];
       double source_z = state.particles.position_z_comoving[global_index];
-      if (predict_inactive_sources && active_mask[global_index] == 0U) {
+      if (prediction_epoch != SourcePredictionEpoch::kNone &&
+          active_mask[global_index] == 0U) {
         const double source_time = state.particle_sidecar.last_drift_time_code[global_index];
         const double source_scale = state.particle_sidecar.last_drift_scale_factor[global_index];
-        if (source_time > context.timeline_step.time_end_code + 1.0e-12 || source_scale <= 0.0) {
+        const double evaluation_time =
+            prediction_epoch == SourcePredictionEpoch::kStepBegin
+            ? context.timeline_step.time_begin_code
+            : context.timeline_step.time_end_code;
+        const double evaluation_scale =
+            prediction_epoch == SourcePredictionEpoch::kStepBegin
+            ? context.timeline_step.scale_factor_begin
+            : context.timeline_step.scale_factor_end;
+        if (source_time > evaluation_time + 1.0e-12 || source_scale <= 0.0) {
           throw std::runtime_error("inactive PM source has an invalid or future drift epoch");
         }
-        double inactive_drift_factor = context.timeline_step.time_end_code - source_time;
+        double inactive_drift_factor = evaluation_time - source_time;
         if (context.cosmology_background != nullptr) {
           inactive_drift_factor = core::computeComovingDriftFactor(
               *context.cosmology_background,
               source_scale,
-              context.timeline_step.scale_factor_end,
+              evaluation_scale,
               64) / context.timeline_step.time_si_per_code;
         }
         if (!std::isfinite(inactive_drift_factor) || inactive_drift_factor < -1.0e-14) {
@@ -4911,6 +5210,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   double m_mesh_spacing_x_mpc_comoving = 0.0;
   double m_mesh_spacing_y_mpc_comoving = 0.0;
   double m_mesh_spacing_z_mpc_comoving = 0.0;
+  double m_gravitational_constant_code = 0.0;
   std::string m_pm_assignment_scheme = "unknown";
   std::string m_pm_backend = "unknown";
   gravity::TreePmCoordinator m_tree_pm_coordinator;
@@ -4919,6 +5219,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::vector<double> m_active_accel_x;
   std::vector<double> m_active_accel_y;
   std::vector<double> m_active_accel_z;
+  std::vector<double> m_active_previous_acceleration_magnitude;
   std::vector<double> m_particle_accel_x;
   std::vector<double> m_particle_accel_y;
   std::vector<double> m_particle_accel_z;
@@ -4946,6 +5247,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::string m_zoom_membership_source = "disabled";
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
+  std::vector<std::uint32_t> m_force_refresh_particle_indices;
+  std::size_t m_local_kick_particle_count = 0U;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
   parallel::DecompositionRuntimeMeasurements m_last_decomposition_measurements{};
   bool m_has_long_range_field = false;
@@ -4953,6 +5256,9 @@ class GravityStageCallback final : public core::IntegrationCallback {
   std::uint64_t m_long_range_refresh_count = 0;
   std::uint64_t m_long_range_reuse_count = 0;
   bool m_force_cache_valid = false;
+  std::uint64_t m_force_cache_particle_index_generation = 0U;
+  std::vector<std::uint8_t> m_particle_force_cache_valid;
+  std::uint64_t m_decomposition_epoch = 0U;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
@@ -4999,29 +5305,34 @@ class HydroStageCallback final : public core::IntegrationCallback {
       const std::uint64_t local_has_hydro_cells = context.state.cells.size() == 0 ? 0ULL : 1ULL;
       return m_mpi_context.allreduceSumUint64(local_has_hydro_cells);
     };
-    if (context.state.cells.size() == 0) {
-      m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
-      m_last_ghost_refresh = refreshParticleGhostsForSolver(
-          context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
-      m_last_hydro_profile = {};
-      (void)hydro_cell_rank_count_after_refresh();
-      return;
-    }
-
     m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
     m_last_ghost_refresh = refreshParticleGhostsForSolver(
         context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
     const std::uint64_t hydro_cell_rank_count = hydro_cell_rank_count_after_refresh();
+    const std::uint64_t local_has_production_amr =
+        amr::hasProductionAmrHydroCoverage(context.state) ? 1ULL : 0ULL;
+    const std::uint64_t production_amr_rank_count =
+        m_mpi_context.allreduceSumUint64(local_has_production_amr);
     const bool all_ranks_have_hydro_cells =
         !m_mpi_context.isEnabled() ||
         hydro_cell_rank_count == static_cast<std::uint64_t>(m_mpi_context.worldSize());
     m_last_hydro_profile = {};
 
-    context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
-    if (amr::hasProductionAmrHydroCoverage(context.state)) {
+    // Production AMR exchanges are collective.  Ranks with zero local cells
+    // must still enter the control-plane and zero-record payload exchanges
+    // whenever any peer owns a production patch.
+    if (production_amr_rank_count > 0U) {
+      if (context.state.cells.size() != 0U) {
+        context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
+      }
       runProductionAmrHydroPath(context);
       return;
     }
+    if (context.state.cells.size() == 0U) {
+      return;
+    }
+
+    context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
     const auto particle_row_by_id = buildParticleRowById(context.state);
     std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
 
@@ -5062,16 +5373,19 @@ class HydroStageCallback final : public core::IntegrationCallback {
         context.state, m_conserved, m_geometry, m_geometry_row_by_dense_row, world_rank);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
 
-    double hubble_rate_code = 0.0;
-    if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
-      hubble_rate_code =
-          core::computeScaleFactorRate(*context.cosmology_background, context.integrator_state.current_scale_factor) /
-          context.integrator_state.current_scale_factor;
-    }
+    // Hydro runs after drift/force refresh while IntegratorState still carries
+    // the committed step-begin epoch. TimelineStep is authoritative for the
+    // step-end force/source epoch and for H in inverse code time.
+    const double hydro_scale_factor = context.cosmology_background != nullptr
+        ? context.timeline_step.scale_factor_end
+        : context.integrator_state.current_scale_factor;
+    const double hubble_rate_code = context.cosmology_background != nullptr
+        ? context.timeline_step.hubble_end_code
+        : 0.0;
 
     hydro::HydroUpdateContext update{
         .dt_code = context.integrator_state.dt_time_code,
-        .scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor),
+        .scale_factor = std::max(1.0e-12, hydro_scale_factor),
         .hubble_rate_code = hubble_rate_code,
     };
 
@@ -5636,16 +5950,19 @@ class HydroStageCallback final : public core::IntegrationCallback {
   }
 
   void runProductionAmrHydroPath(core::StepContext& context) {
-    double hubble_rate_code = 0.0;
-    if (context.cosmology_background != nullptr && context.integrator_state.current_scale_factor > 0.0) {
-      hubble_rate_code =
-          core::computeScaleFactorRate(*context.cosmology_background, context.integrator_state.current_scale_factor) /
-          context.integrator_state.current_scale_factor;
-    }
+    // Hydro runs after drift/force refresh while IntegratorState still carries
+    // the committed step-begin epoch. TimelineStep is authoritative for the
+    // step-end force/source epoch and for H in inverse code time.
+    const double hydro_scale_factor = context.cosmology_background != nullptr
+        ? context.timeline_step.scale_factor_end
+        : context.integrator_state.current_scale_factor;
+    const double hubble_rate_code = context.cosmology_background != nullptr
+        ? context.timeline_step.hubble_end_code
+        : 0.0;
 
     const hydro::HydroUpdateContext update{
         .dt_code = context.integrator_state.dt_time_code,
-        .scale_factor = std::max(1.0e-12, context.integrator_state.current_scale_factor),
+        .scale_factor = std::max(1.0e-12, hydro_scale_factor),
         .hubble_rate_code = hubble_rate_code,
     };
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
@@ -5755,21 +6072,26 @@ class HydroStageCallback final : public core::IntegrationCallback {
       }
       remote_patch_count = remote_patches.size();
       std::vector<amr::FluxRegisterEntry> outbound_remote_entries;
-      amr_diagnostics = amr::advanceDistributedProductionAmrHydro(
-          context.state,
-          context.active_set.cell_indices,
-          update,
-          source_context,
-          m_solver,
-          m_riemann_solver,
-          sources,
-          amr_options,
-          amr::DistributedAmrHydroExchange{
-              .local_rank = m_mpi_context.worldRank(),
-              .ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
-              .expected_ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
-              .remote_patches = remote_patches,
-              .outbound_remote_flux_registers = &outbound_remote_entries});
+      if (amr::hasProductionAmrHydroCoverage(context.state)) {
+        amr_diagnostics = amr::advanceDistributedProductionAmrHydro(
+            context.state,
+            context.active_set.cell_indices,
+            update,
+            source_context,
+            m_solver,
+            m_riemann_solver,
+            sources,
+            amr_options,
+            amr::DistributedAmrHydroExchange{
+                .local_rank = m_mpi_context.worldRank(),
+                .ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
+                .expected_ghost_hydro_epoch = context.state.gasCellIdentityGeneration(),
+                .remote_patches = remote_patches,
+                .outbound_remote_flux_registers = &outbound_remote_entries});
+      } else if (context.state.cells.size() != 0U || context.state.patches.size() != 0U) {
+        throw std::runtime_error(
+            "distributed AMR hydro rank has partial local patch coverage; only an explicitly empty rank may skip advancement");
+      }
       std::vector<parallel::AmrFluxRegisterPayloadRecord> local_flux_payloads;
       local_flux_payloads.reserve(outbound_remote_entries.size());
       for (const amr::FluxRegisterEntry& entry : outbound_remote_entries) {
@@ -6266,6 +6588,8 @@ bool maybeWriteOutputs(
     snapshot_payload.normalized_config_text = frozen_config.normalized_text;
     snapshot_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    snapshot_payload.provenance.gravity_treepm_decomposition_epoch =
+        gravity_callback.decompositionEpoch();
     report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
     io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
     report.snapshot_roundtrip_executed = true;
@@ -6298,7 +6622,7 @@ bool maybeWriteOutputs(
     restart_payload.normalized_config_text = frozen_config.normalized_text;
     restart_payload.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
     restart_payload.distributed_gravity_state.schema_version = 2;
-    restart_payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;
+    restart_payload.distributed_gravity_state.decomposition_epoch = gravity_callback.decompositionEpoch();
     restart_payload.distributed_gravity_state.world_size = gravity_callback.runtimeTopology().world_size;
     restart_payload.distributed_gravity_state.pm_grid_nx = gravity_callback.pmGridShape().nx;
     restart_payload.distributed_gravity_state.pm_grid_ny = gravity_callback.pmGridShape().ny;
@@ -6382,6 +6706,8 @@ bool maybeWriteOutputs(
         restart_read.integrator_state.pm_refresh_enabled == integrator_state.pm_refresh_enabled &&
         gravityForceCachesEquivalent(restart_read.gravity_force_cache, gravity_force_cache) &&
         restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
+        restart_read.distributed_gravity_state.decomposition_epoch ==
+            restart_payload.distributed_gravity_state.decomposition_epoch &&
         restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particle_sidecar.owning_rank.size() &&
         restart_read.distributed_gravity_state.owning_rank_by_item == restart_payload.distributed_gravity_state.owning_rank_by_item &&
         restart_read.distributed_gravity_state.pm_slab_begin_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank &&
@@ -6694,7 +7020,24 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     maybeInitializeParticleSofteningFromSpeciesPolicy(state, config);
     const bool restoring_from_restart = options.restart_state_override != nullptr;
     if (restoring_from_restart) {
-      validateRestartResumeTopologyOrThrow(*options.restart_state_override, config, m_frozen_config, mpi_context);
+      std::exception_ptr local_restart_validation_failure;
+      try {
+        validateRestartResumeTopologyOrThrow(
+            *options.restart_state_override, config, m_frozen_config,
+            mpi_context);
+      } catch (...) {
+        local_restart_validation_failure = std::current_exception();
+      }
+      const std::uint64_t restart_validation_failure_ranks =
+          mpi_context.allreduceSumUint64(
+              local_restart_validation_failure != nullptr ? 1ULL : 0ULL);
+      if (restart_validation_failure_ranks != 0U) {
+        if (local_restart_validation_failure != nullptr) {
+          std::rethrow_exception(local_restart_validation_failure);
+        }
+        throw std::runtime_error(
+            "ReferenceWorkflow peer rank rejected restart topology validation before resume");
+      }
     } else {
       seedParticleOwnershipFromPmSlabs(
           state,
@@ -6772,6 +7115,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? std::optional<core::LambdaCdmBackground>(core::LambdaCdmBackground(background_config))
         : std::nullopt;
 
+    if (config.numerics.hierarchical_max_rung != 0) {
+      throw std::logic_error(
+          "ReferenceWorkflow production KDK requires hierarchical_max_rung=0");
+    }
     core::HierarchicalTimeBinScheduler scheduler(
         static_cast<std::uint8_t>(std::max(0, std::min(config.numerics.hierarchical_max_rung, 12))));
     core::HierarchicalTimeBinScheduler gas_cell_scheduler(
@@ -6851,6 +7198,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     GravityStageCallback gravity_callback(config, mode_policy, zoom_region_path);
     if (restoring_from_restart) {
       const io::RestartReadResult& restart = *options.restart_state_override;
+      gravity_callback.restoreDecompositionEpoch(
+          restart.distributed_gravity_state.decomposition_epoch);
       if (restart.gravity_force_cache.valid) {
         gravity_callback.importRestartForceCache(restart.gravity_force_cache, state);
       } else {
@@ -6881,35 +7230,36 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     std::to_string(config.numerics.treepm_pm_grid_nz)},
             {"pm_assignment_scheme", treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme)},
             {"pm_window_deconvolution", config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
-            {"asmth_cells", std::to_string(config.numerics.treepm_asmth_cells)},
-            {"rcut_cells", std::to_string(config.numerics.treepm_rcut_cells)},
-            {"mesh_spacing_x_mpc_comoving", std::to_string(config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx))},
-            {"mesh_spacing_y_mpc_comoving", std::to_string(config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny))},
-            {"mesh_spacing_z_mpc_comoving", std::to_string(config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))},
-            {"split_scale_mpc_comoving", std::to_string(config.numerics.treepm_asmth_cells *
+            {"asmth_cells", formatRuntimeDouble(config.numerics.treepm_asmth_cells)},
+            {"rcut_cells", formatRuntimeDouble(config.numerics.treepm_rcut_cells)},
+            {"mesh_spacing_x_mpc_comoving", formatRuntimeDouble(config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx))},
+            {"mesh_spacing_y_mpc_comoving", formatRuntimeDouble(config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny))},
+            {"mesh_spacing_z_mpc_comoving", formatRuntimeDouble(config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))},
+            {"split_scale_mpc_comoving", formatRuntimeDouble(config.numerics.treepm_asmth_cells *
                 std::cbrt((config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx)) *
                           (config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny)) *
                           (config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))))},
-            {"cutoff_radius_mpc_comoving", std::to_string(config.numerics.treepm_rcut_cells *
+            {"cutoff_radius_mpc_comoving", formatRuntimeDouble(config.numerics.treepm_rcut_cells *
                 std::cbrt((config.cosmology.box_size_x_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nx)) *
                           (config.cosmology.box_size_y_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_ny)) *
                           (config.cosmology.box_size_z_mpc_comoving / static_cast<double>(config.numerics.treepm_pm_grid_nz))))},
             {"pm_update_cadence_steps", std::to_string(config.numerics.treepm_update_cadence_steps)},
+            {"gravitational_constant_code", formatRuntimeDouble(gravity_callback.gravitationalConstantCode())},
             {"zoom_long_range_strategy",
                 config.mode.zoom_long_range_strategy == core::ZoomLongRangeStrategy::kDisabled
                     ? "disabled"
                     : "global_coarse_plus_focused_highres_correction"},
-            {"zoom_region_center_x_mpc_comoving", std::to_string(config.mode.zoom_region_center_x_mpc_comoving)},
-            {"zoom_region_center_y_mpc_comoving", std::to_string(config.mode.zoom_region_center_y_mpc_comoving)},
-            {"zoom_region_center_z_mpc_comoving", std::to_string(config.mode.zoom_region_center_z_mpc_comoving)},
-            {"zoom_region_radius_mpc_comoving", std::to_string(config.mode.zoom_region_radius_mpc_comoving)},
+            {"zoom_region_center_x_mpc_comoving", formatRuntimeDouble(config.mode.zoom_region_center_x_mpc_comoving)},
+            {"zoom_region_center_y_mpc_comoving", formatRuntimeDouble(config.mode.zoom_region_center_y_mpc_comoving)},
+            {"zoom_region_center_z_mpc_comoving", formatRuntimeDouble(config.mode.zoom_region_center_z_mpc_comoving)},
+            {"zoom_region_radius_mpc_comoving", formatRuntimeDouble(config.mode.zoom_region_radius_mpc_comoving)},
             {"zoom_focused_pm_grid", std::to_string(config.mode.zoom_focused_pm_grid_nx) + "x" +
                 std::to_string(config.mode.zoom_focused_pm_grid_ny) + "x" +
                 std::to_string(config.mode.zoom_focused_pm_grid_nz)},
-            {"zoom_contamination_radius_mpc_comoving", std::to_string(config.mode.zoom_contamination_radius_mpc_comoving)},
+            {"zoom_contamination_radius_mpc_comoving", formatRuntimeDouble(config.mode.zoom_contamination_radius_mpc_comoving)},
             {"softening_policy", describeSofteningPolicy(config, &state)},
             {"softening_kernel", "plummer"},
-            {"softening_epsilon_kpc_comoving", std::to_string(config.numerics.gravity_softening_kpc_comoving)},
+            {"softening_epsilon_kpc_comoving", formatRuntimeDouble(config.numerics.gravity_softening_kpc_comoving)},
             {"pm_fft_backend", gravity::PmSolver::fftBackendName()},
         },
     });
@@ -7008,7 +7358,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       if (active_work_rank_count == 0ULL) {
         scheduler.endSubstep();
         gas_cell_scheduler.endSubstep();
-        applyMeasuredRuntimeRebalancePlan(
+        const bool particle_decomposition_changed = applyMeasuredRuntimeRebalancePlan(
             state,
             scheduler,
             gas_cell_scheduler,
@@ -7020,6 +7370,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             expected_global_particle_ids,
             &profiler,
             integrator_state.step_index);
+        if (particle_decomposition_changed) {
+          gravity_callback.commitParticleDecompositionChange();
+        }
         ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
         syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
         continue;
@@ -7032,16 +7385,29 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           integrator_state.step_index + 1U,
           pending_output);
       const core::StepBoundaryKind requested_boundary = requestedBoundaryForPendingOutput(pending_output);
-      orchestrator.executeSchedulerSubstep(
+      const std::uint64_t global_active_particle_count =
+          mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(active_particles.size()));
+      const std::uint64_t global_particle_count =
+          mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(state.particles.size()));
+      const std::uint64_t global_active_cell_count =
+          mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(active_cells.size()));
+      const std::uint64_t global_cell_count =
+          mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(state.cells.size()));
+      core::ActiveSetDescriptor active_set = core::makeSchedulerActiveSetDescriptor(
+          scheduler, state, active_particles, active_cells);
+      active_set.has_global_synchronization_metadata = true;
+      active_set.globally_complete_active_set =
+          global_active_particle_count == global_particle_count &&
+          global_active_cell_count == global_cell_count;
+      orchestrator.executeSingleStep(
           state,
           integrator_state,
-          scheduler,
-          active_particles,
-          active_cells,
+          active_set,
           background.has_value() ? &background.value() : nullptr,
           &workspace,
           &mode_policy,
           &profiler,
+          scheduler.currentTick(),
           requested_boundary);
 
       {
@@ -7052,6 +7418,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
       state.metadata.step_index = integrator_state.step_index;
       state.metadata.scale_factor = integrator_state.current_scale_factor;
+      // Source/AMR stages may append authoritative rows during the step.  The
+      // scheduler must cover those rows before timestep criteria index it.
+      ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
       updateAdaptiveTimeBins(
           state,
           scheduler,
@@ -7089,7 +7458,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       rebalance_measurements.has_measurements = rebalance_measurements.has_measurements ||
           hydro_profile.face_count > 0 || hydro_profile.total_ms > 0.0 ||
           hydro_ghost_report.sent_bytes > 0 || hydro_ghost_report.received_bytes > 0;
-      applyMeasuredRuntimeRebalancePlan(
+      const bool particle_decomposition_changed = applyMeasuredRuntimeRebalancePlan(
           state,
           scheduler,
           gas_cell_scheduler,
@@ -7101,13 +7470,19 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           expected_global_particle_ids,
           &profiler,
           integrator_state.step_index);
+      if (particle_decomposition_changed) {
+        gravity_callback.commitParticleDecompositionChange();
+      }
       ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
       syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
-      orchestrator.executeOutputBoundary(
-          state,
-          integrator_state,
-          &profiler,
-          requested_boundary);
+      if (integrator_state.last_completed_restart_safe &&
+          integrator_state.last_completed_boundary_kind != core::StepBoundaryKind::kLocalActiveBinStep) {
+        orchestrator.executeOutputBoundary(
+            state,
+            integrator_state,
+            &profiler,
+            requested_boundary);
+      }
     }
 
     report.completed_steps = integrator_state.step_index - run_start_step_index;
@@ -7150,7 +7525,15 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         expected_global_identity.local_particle_id_xor);
     if (!report.global_particle_partition_identity_match) {
       throw std::runtime_error(
-          "distributed ownership invariant failed at run completion: duplicate, missing, or extra authoritative particle IDs");
+          "distributed ownership invariant failed at run completion: duplicate, missing, or extra authoritative particle IDs; "
+          "actual_count=" + std::to_string(report.global_particle_count) +
+          ", expected_count=" + std::to_string(expected_global_identity.local_owned_count) +
+          ", actual_sum=" + std::to_string(report.global_particle_id_sum) +
+          ", expected_sum=" + std::to_string(expected_global_identity.local_particle_id_sum) +
+          ", actual_square_sum=" + std::to_string(final_global_particle_id_square_sum) +
+          ", expected_square_sum=" + std::to_string(expected_global_identity.local_particle_id_square_sum) +
+          ", actual_xor=" + std::to_string(report.global_particle_id_xor) +
+          ", expected_xor=" + std::to_string(expected_global_identity.local_particle_id_xor));
     }
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();

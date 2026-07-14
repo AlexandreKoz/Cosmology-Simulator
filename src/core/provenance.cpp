@@ -199,6 +199,14 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "gravity_treepm_split_scale_mpc_comoving=" << record.gravity_treepm_split_scale_mpc_comoving << '\n';
   stream << "gravity_treepm_cutoff_radius_mpc_comoving=" << record.gravity_treepm_cutoff_radius_mpc_comoving << '\n';
   stream << "gravity_treepm_update_cadence_steps=" << record.gravity_treepm_update_cadence_steps << '\n';
+  stream << "gravity_treepm_tree_opening_criterion="
+         << record.gravity_treepm_tree_opening_criterion << '\n';
+  stream << "gravity_treepm_tree_opening_theta="
+         << record.gravity_treepm_tree_opening_theta << '\n';
+  stream << "gravity_treepm_tree_relative_force_tolerance="
+         << record.gravity_treepm_tree_relative_force_tolerance << '\n';
+  stream << "gravity_treepm_tree_relative_force_acceleration_floor="
+         << record.gravity_treepm_tree_relative_force_acceleration_floor << '\n';
   stream << "gravity_treepm_pm_decomposition_mode=" << record.gravity_treepm_pm_decomposition_mode << '\n';
   stream << "gravity_treepm_tree_exchange_batch_bytes="
          << record.gravity_treepm_tree_exchange_batch_bytes << '\n';
@@ -300,6 +308,14 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_treepm_cutoff_radius_mpc_comoving = std::stod(value);
     } else if (key == "gravity_treepm_update_cadence_steps") {
       record.gravity_treepm_update_cadence_steps = std::stoi(value);
+    } else if (key == "gravity_treepm_tree_opening_criterion") {
+      record.gravity_treepm_tree_opening_criterion = value;
+    } else if (key == "gravity_treepm_tree_opening_theta") {
+      record.gravity_treepm_tree_opening_theta = std::stod(value);
+    } else if (key == "gravity_treepm_tree_relative_force_tolerance") {
+      record.gravity_treepm_tree_relative_force_tolerance = std::stod(value);
+    } else if (key == "gravity_treepm_tree_relative_force_acceleration_floor") {
+      record.gravity_treepm_tree_relative_force_acceleration_floor = std::stod(value);
     } else if (key == "gravity_treepm_pm_decomposition_mode") {
       record.gravity_treepm_pm_decomposition_mode = value;
     } else if (key == "gravity_treepm_tree_exchange_batch_bytes") {

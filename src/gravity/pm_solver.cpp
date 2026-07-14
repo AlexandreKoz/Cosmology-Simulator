@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -39,6 +40,26 @@ namespace {
 
 constexpr double k_pi = 3.141592653589793238462643383279502884;
 
+#if COSMOSIM_ENABLE_MPI
+bool queryActiveMpiWorld(int& world_size, int& world_rank) noexcept {
+  world_size = 1;
+  world_rank = 0;
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized == 0) {
+    return false;
+  }
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  if (finalized != 0) {
+    return false;
+  }
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  return true;
+}
+#endif
+
 [[nodiscard]] std::size_t wrapIndex(std::ptrdiff_t i, std::size_t n) {
   const std::ptrdiff_t n_signed = static_cast<std::ptrdiff_t>(n);
   std::ptrdiff_t wrapped = i % n_signed;
@@ -71,14 +92,19 @@ struct PmAxisStencil1d {
 };
 
 struct PmDensityContributionRecord {
+  std::uint32_t origin_rank = 0;
+  std::uint32_t destination_rank = 0;
+  std::uint32_t record_sequence = 0;
   std::uint32_t global_ix = 0;
   std::uint32_t global_iy = 0;
   std::uint32_t global_iz = 0;
+  std::uint64_t exchange_epoch = 0;
   double mass_contribution = 0.0;
 };
 
 struct PmInterpolationRequestRecord {
   std::uint32_t origin_rank = 0;
+  std::uint32_t destination_rank = 0;
   std::uint32_t request_sequence = 0;
   std::uint32_t origin_particle_index = 0;
   std::uint32_t global_ix = 0;
@@ -89,6 +115,7 @@ struct PmInterpolationRequestRecord {
 };
 
 struct PmForceContributionRecord {
+  std::uint32_t source_rank = 0;
   std::uint32_t origin_rank = 0;
   std::uint32_t request_sequence = 0;
   std::uint32_t origin_particle_index = 0;
@@ -99,6 +126,7 @@ struct PmForceContributionRecord {
 };
 
 struct PmPotentialContributionRecord {
+  std::uint32_t source_rank = 0;
   std::uint32_t origin_rank = 0;
   std::uint32_t request_sequence = 0;
   std::uint32_t origin_particle_index = 0;
@@ -126,7 +154,506 @@ struct PmInterpolationRequestRegistryEntry {
       " origin_particle_index=" + std::to_string(origin_particle_index) + ": " + std::string(detail);
 }
 
+constexpr std::uint32_t k_pm_wire_magic = 0x31574d50U;  // "PMW1" in little-endian byte order.
+constexpr std::uint32_t k_pm_wire_version = 1U;
+
+enum class PmWireRecordKind : std::uint32_t {
+  kDensityContribution = 1U,
+  kForceRequest = 2U,
+  kForceResponse = 3U,
+  kPotentialRequest = 4U,
+  kPotentialResponse = 5U,
+};
+
+constexpr std::size_t k_pm_density_wire_bytes = 56U;
+constexpr std::size_t k_pm_interpolation_request_wire_bytes = 56U;
+constexpr std::size_t k_pm_force_response_wire_bytes = 64U;
+constexpr std::size_t k_pm_potential_response_wire_bytes = 48U;
+static_assert(sizeof(double) == sizeof(std::uint64_t), "PM wire protocol requires binary64-sized doubles");
+static_assert(
+    std::numeric_limits<double>::is_iec559 && std::numeric_limits<double>::digits == 53,
+    "PM wire protocol requires IEEE-754 binary64 doubles");
+
+void writePmWireU32(std::span<std::uint8_t> bytes, std::size_t& offset, std::uint32_t value) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(value)) {
+    throw std::overflow_error("PM wire encoder exceeded its fixed record size");
+  }
+  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+    bytes[offset++] = static_cast<std::uint8_t>((value >> shift) & 0xffU);
+  }
+}
+
+void writePmWireU64(std::span<std::uint8_t> bytes, std::size_t& offset, std::uint64_t value) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(value)) {
+    throw std::overflow_error("PM wire encoder exceeded its fixed record size");
+  }
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    bytes[offset++] = static_cast<std::uint8_t>((value >> shift) & 0xffU);
+  }
+}
+
+void writePmWireDouble(std::span<std::uint8_t> bytes, std::size_t& offset, double value) {
+  writePmWireU64(bytes, offset, std::bit_cast<std::uint64_t>(value));
+}
+
+[[nodiscard]] std::uint32_t readPmWireU32(
+    std::span<const std::uint8_t> bytes,
+    std::size_t& offset,
+    std::string_view context) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint32_t)) {
+    throw std::runtime_error(std::string(context) + " PM wire record is truncated");
+  }
+  std::uint32_t value = 0U;
+  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+    value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
+  }
+  return value;
+}
+
+[[nodiscard]] std::uint64_t readPmWireU64(
+    std::span<const std::uint8_t> bytes,
+    std::size_t& offset,
+    std::string_view context) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t)) {
+    throw std::runtime_error(std::string(context) + " PM wire record is truncated");
+  }
+  std::uint64_t value = 0U;
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+  }
+  return value;
+}
+
+[[nodiscard]] double readPmWireDouble(
+    std::span<const std::uint8_t> bytes,
+    std::size_t& offset,
+    std::string_view context) {
+  return std::bit_cast<double>(readPmWireU64(bytes, offset, context));
+}
+
+void writePmWireHeader(
+    std::span<std::uint8_t> bytes,
+    std::size_t& offset,
+    PmWireRecordKind kind) {
+  writePmWireU32(bytes, offset, k_pm_wire_magic);
+  writePmWireU32(bytes, offset, k_pm_wire_version);
+  writePmWireU32(bytes, offset, static_cast<std::uint32_t>(kind));
+}
+
+void readAndValidatePmWireHeader(
+    std::span<const std::uint8_t> bytes,
+    std::size_t& offset,
+    PmWireRecordKind expected_kind,
+    std::string_view context) {
+  const std::uint32_t magic = readPmWireU32(bytes, offset, context);
+  const std::uint32_t version = readPmWireU32(bytes, offset, context);
+  const std::uint32_t kind = readPmWireU32(bytes, offset, context);
+  if (magic != k_pm_wire_magic) {
+    throw std::runtime_error(std::string(context) + " PM wire magic is invalid");
+  }
+  if (version != k_pm_wire_version) {
+    throw std::runtime_error(
+        std::string(context) + " PM wire version is unsupported: received=" + std::to_string(version) +
+        " expected=" + std::to_string(k_pm_wire_version));
+  }
+  if (kind != static_cast<std::uint32_t>(expected_kind)) {
+    throw std::runtime_error(
+        std::string(context) + " PM wire record kind is invalid: received=" + std::to_string(kind) +
+        " expected=" + std::to_string(static_cast<std::uint32_t>(expected_kind)));
+  }
+}
+
+void encodePmDensityRecord(
+    const PmDensityContributionRecord& record,
+    std::span<std::uint8_t> bytes) {
+  if (bytes.size() != k_pm_density_wire_bytes) {
+    throw std::invalid_argument("PM density wire encoder requires an exact 56-byte record");
+  }
+  std::size_t offset = 0U;
+  writePmWireHeader(bytes, offset, PmWireRecordKind::kDensityContribution);
+  writePmWireU32(bytes, offset, record.origin_rank);
+  writePmWireU32(bytes, offset, record.destination_rank);
+  writePmWireU32(bytes, offset, record.record_sequence);
+  writePmWireU32(bytes, offset, record.global_ix);
+  writePmWireU32(bytes, offset, record.global_iy);
+  writePmWireU32(bytes, offset, record.global_iz);
+  writePmWireU32(bytes, offset, 0U);
+  writePmWireU64(bytes, offset, record.exchange_epoch);
+  writePmWireDouble(bytes, offset, record.mass_contribution);
+  if (offset != bytes.size()) {
+    throw std::logic_error("PM density wire encoder size contract drifted");
+  }
+}
+
+[[nodiscard]] PmDensityContributionRecord decodePmDensityRecord(
+    std::span<const std::uint8_t> bytes) {
+  constexpr std::string_view context = "PM density contribution";
+  if (bytes.size() != k_pm_density_wire_bytes) {
+    throw std::runtime_error("PM density wire decoder requires an exact 56-byte record");
+  }
+  std::size_t offset = 0U;
+  readAndValidatePmWireHeader(bytes, offset, PmWireRecordKind::kDensityContribution, context);
+  PmDensityContributionRecord record;
+  record.origin_rank = readPmWireU32(bytes, offset, context);
+  record.destination_rank = readPmWireU32(bytes, offset, context);
+  record.record_sequence = readPmWireU32(bytes, offset, context);
+  record.global_ix = readPmWireU32(bytes, offset, context);
+  record.global_iy = readPmWireU32(bytes, offset, context);
+  record.global_iz = readPmWireU32(bytes, offset, context);
+  const std::uint32_t reserved = readPmWireU32(bytes, offset, context);
+  record.exchange_epoch = readPmWireU64(bytes, offset, context);
+  record.mass_contribution = readPmWireDouble(bytes, offset, context);
+  if (reserved != 0U || offset != bytes.size()) {
+    throw std::runtime_error("PM density wire record has nonzero reserved flags or trailing data");
+  }
+  return record;
+}
+
+void encodePmInterpolationRequest(
+    const PmInterpolationRequestRecord& record,
+    PmWireRecordKind kind,
+    std::span<std::uint8_t> bytes) {
+  if ((kind != PmWireRecordKind::kForceRequest && kind != PmWireRecordKind::kPotentialRequest) ||
+      bytes.size() != k_pm_interpolation_request_wire_bytes) {
+    throw std::invalid_argument("PM interpolation request wire encoder received an invalid kind or record size");
+  }
+  std::size_t offset = 0U;
+  writePmWireHeader(bytes, offset, kind);
+  writePmWireU32(bytes, offset, record.origin_rank);
+  writePmWireU32(bytes, offset, record.destination_rank);
+  writePmWireU32(bytes, offset, record.request_sequence);
+  writePmWireU32(bytes, offset, record.origin_particle_index);
+  writePmWireU32(bytes, offset, record.global_ix);
+  writePmWireU32(bytes, offset, record.global_iy);
+  writePmWireU32(bytes, offset, record.global_iz);
+  writePmWireU64(bytes, offset, record.exchange_epoch);
+  writePmWireDouble(bytes, offset, record.weight);
+  if (offset != bytes.size()) {
+    throw std::logic_error("PM interpolation request wire encoder size contract drifted");
+  }
+}
+
+[[nodiscard]] PmInterpolationRequestRecord decodePmInterpolationRequest(
+    std::span<const std::uint8_t> bytes,
+    PmWireRecordKind expected_kind,
+    std::string_view context) {
+  if ((expected_kind != PmWireRecordKind::kForceRequest &&
+       expected_kind != PmWireRecordKind::kPotentialRequest) ||
+      bytes.size() != k_pm_interpolation_request_wire_bytes) {
+    throw std::runtime_error(std::string(context) + " PM request wire record has an invalid kind or size");
+  }
+  std::size_t offset = 0U;
+  readAndValidatePmWireHeader(bytes, offset, expected_kind, context);
+  PmInterpolationRequestRecord record;
+  record.origin_rank = readPmWireU32(bytes, offset, context);
+  record.destination_rank = readPmWireU32(bytes, offset, context);
+  record.request_sequence = readPmWireU32(bytes, offset, context);
+  record.origin_particle_index = readPmWireU32(bytes, offset, context);
+  record.global_ix = readPmWireU32(bytes, offset, context);
+  record.global_iy = readPmWireU32(bytes, offset, context);
+  record.global_iz = readPmWireU32(bytes, offset, context);
+  record.exchange_epoch = readPmWireU64(bytes, offset, context);
+  record.weight = readPmWireDouble(bytes, offset, context);
+  if (offset != bytes.size()) {
+    throw std::runtime_error(std::string(context) + " PM request wire record has trailing data");
+  }
+  return record;
+}
+
+void encodePmForceResponse(
+    const PmForceContributionRecord& record,
+    std::span<std::uint8_t> bytes) {
+  if (bytes.size() != k_pm_force_response_wire_bytes) {
+    throw std::invalid_argument("PM force response wire encoder requires an exact 64-byte record");
+  }
+  std::size_t offset = 0U;
+  writePmWireHeader(bytes, offset, PmWireRecordKind::kForceResponse);
+  writePmWireU32(bytes, offset, record.source_rank);
+  writePmWireU32(bytes, offset, record.origin_rank);
+  writePmWireU32(bytes, offset, record.request_sequence);
+  writePmWireU32(bytes, offset, record.origin_particle_index);
+  writePmWireU32(bytes, offset, 0U);
+  writePmWireU64(bytes, offset, record.exchange_epoch);
+  writePmWireDouble(bytes, offset, record.accel_x);
+  writePmWireDouble(bytes, offset, record.accel_y);
+  writePmWireDouble(bytes, offset, record.accel_z);
+  if (offset != bytes.size()) {
+    throw std::logic_error("PM force response wire encoder size contract drifted");
+  }
+}
+
+[[nodiscard]] PmForceContributionRecord decodePmForceResponse(
+    std::span<const std::uint8_t> bytes) {
+  constexpr std::string_view context = "PM force response";
+  if (bytes.size() != k_pm_force_response_wire_bytes) {
+    throw std::runtime_error("PM force response wire decoder requires an exact 64-byte record");
+  }
+  std::size_t offset = 0U;
+  readAndValidatePmWireHeader(bytes, offset, PmWireRecordKind::kForceResponse, context);
+  PmForceContributionRecord record;
+  record.source_rank = readPmWireU32(bytes, offset, context);
+  record.origin_rank = readPmWireU32(bytes, offset, context);
+  record.request_sequence = readPmWireU32(bytes, offset, context);
+  record.origin_particle_index = readPmWireU32(bytes, offset, context);
+  const std::uint32_t reserved = readPmWireU32(bytes, offset, context);
+  record.exchange_epoch = readPmWireU64(bytes, offset, context);
+  record.accel_x = readPmWireDouble(bytes, offset, context);
+  record.accel_y = readPmWireDouble(bytes, offset, context);
+  record.accel_z = readPmWireDouble(bytes, offset, context);
+  if (reserved != 0U || offset != bytes.size()) {
+    throw std::runtime_error("PM force response wire record has nonzero reserved flags or trailing data");
+  }
+  return record;
+}
+
+void encodePmPotentialResponse(
+    const PmPotentialContributionRecord& record,
+    std::span<std::uint8_t> bytes) {
+  if (bytes.size() != k_pm_potential_response_wire_bytes) {
+    throw std::invalid_argument("PM potential response wire encoder requires an exact 48-byte record");
+  }
+  std::size_t offset = 0U;
+  writePmWireHeader(bytes, offset, PmWireRecordKind::kPotentialResponse);
+  writePmWireU32(bytes, offset, record.source_rank);
+  writePmWireU32(bytes, offset, record.origin_rank);
+  writePmWireU32(bytes, offset, record.request_sequence);
+  writePmWireU32(bytes, offset, record.origin_particle_index);
+  writePmWireU32(bytes, offset, 0U);
+  writePmWireU64(bytes, offset, record.exchange_epoch);
+  writePmWireDouble(bytes, offset, record.potential);
+  if (offset != bytes.size()) {
+    throw std::logic_error("PM potential response wire encoder size contract drifted");
+  }
+}
+
+[[nodiscard]] PmPotentialContributionRecord decodePmPotentialResponse(
+    std::span<const std::uint8_t> bytes) {
+  constexpr std::string_view context = "PM potential response";
+  if (bytes.size() != k_pm_potential_response_wire_bytes) {
+    throw std::runtime_error("PM potential response wire decoder requires an exact 48-byte record");
+  }
+  std::size_t offset = 0U;
+  readAndValidatePmWireHeader(bytes, offset, PmWireRecordKind::kPotentialResponse, context);
+  PmPotentialContributionRecord record;
+  record.source_rank = readPmWireU32(bytes, offset, context);
+  record.origin_rank = readPmWireU32(bytes, offset, context);
+  record.request_sequence = readPmWireU32(bytes, offset, context);
+  record.origin_particle_index = readPmWireU32(bytes, offset, context);
+  const std::uint32_t reserved = readPmWireU32(bytes, offset, context);
+  record.exchange_epoch = readPmWireU64(bytes, offset, context);
+  record.potential = readPmWireDouble(bytes, offset, context);
+  if (reserved != 0U || offset != bytes.size()) {
+    throw std::runtime_error("PM potential response wire record has nonzero reserved flags or trailing data");
+  }
+  return record;
+}
+
+[[nodiscard]] std::size_t checkedPmWireByteCount(
+    std::size_t record_count,
+    std::size_t record_bytes,
+    std::string_view context) {
+  if (record_bytes == 0U || record_count > std::numeric_limits<std::size_t>::max() / record_bytes) {
+    throw std::overflow_error(std::string(context) + " PM wire byte count overflows size_t");
+  }
+  return record_count * record_bytes;
+}
+
+template <typename Record, typename Encoder>
+void encodePmWireRecords(
+    std::span<const Record> records,
+    std::size_t record_bytes,
+    std::vector<std::uint8_t>& wire,
+    Encoder&& encoder,
+    std::string_view context) {
+  wire.resize(checkedPmWireByteCount(records.size(), record_bytes, context));
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    encoder(records[i], std::span<std::uint8_t>(wire).subspan(i * record_bytes, record_bytes));
+  }
+}
+
+template <typename Record, typename Decoder>
+void decodePmWireRecords(
+    std::span<const std::uint8_t> wire,
+    std::size_t record_bytes,
+    std::vector<Record>& records,
+    Decoder&& decoder,
+    std::string_view context) {
+  if (record_bytes == 0U || wire.size() % record_bytes != 0U) {
+    throw std::runtime_error(std::string(context) + " PM wire payload is not record-aligned");
+  }
+  const std::size_t record_count = wire.size() / record_bytes;
+  records.resize(record_count);
+  for (std::size_t i = 0; i < record_count; ++i) {
+    records[i] = decoder(wire.subspan(i * record_bytes, record_bytes));
+  }
+}
+
 #if COSMOSIM_ENABLE_MPI
+[[nodiscard]] const std::uint8_t* nonNullPmWireData(const std::vector<std::uint8_t>& bytes) {
+  static constexpr std::uint8_t empty_payload = 0U;
+  return bytes.empty() ? &empty_payload : bytes.data();
+}
+
+[[nodiscard]] std::uint8_t* nonNullPmWireData(std::vector<std::uint8_t>& bytes) {
+  static std::uint8_t empty_payload = 0U;
+  return bytes.empty() ? &empty_payload : bytes.data();
+}
+
+void validatePmExchangeEpochConsensus(std::uint64_t exchange_epoch, std::string_view context) {
+  std::uint64_t minimum_epoch = 0U;
+  std::uint64_t maximum_epoch = 0U;
+  MPI_Allreduce(&exchange_epoch, &minimum_epoch, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(&exchange_epoch, &maximum_epoch, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  if (minimum_epoch != maximum_epoch) {
+    throw std::runtime_error(
+        std::string(context) + " ranks disagree on PM exchange epoch: minimum=" +
+        std::to_string(minimum_epoch) + " maximum=" + std::to_string(maximum_epoch));
+  }
+}
+
+template <typename Callable>
+void measurePmMpiWait(double& accumulated_ms, Callable&& call) {
+  const auto start = std::chrono::steady_clock::now();
+  call();
+  const auto stop = std::chrono::steady_clock::now();
+  accumulated_ms += std::chrono::duration<double, std::milli>(stop - start).count();
+}
+
+enum class PmCollectiveEntryKind : int {
+  kAssignDensity = 1,
+  kSolvePoissonPeriodic = 2,
+  kInterpolateForces = 3,
+  kInterpolatePotential = 4,
+  kSolvePoissonIsolatedOpen = 5,
+  kInterpolateForceTargetView = 6,
+  kSolveForParticles = 7,
+};
+
+void validatePmCollectiveEntryConsensus(
+    PmCollectiveEntryKind entry_kind,
+    bool rank_local_serial_layout,
+    const PmGridShape& shape,
+    const PmSolveOptions& options,
+    double& accumulated_mpi_wait_ms,
+    int control_lane_0 = 0,
+    int control_lane_1 = 0) {
+  // Public PM entry is collective over MPI_COMM_WORLD. Bind every mesh and
+  // solver control that can select a different exchange, FFT plan, or kernel
+  // before any rank enters a layout-specific phase.
+  const std::array<std::uint64_t, 21> local_fingerprint{
+      static_cast<std::uint64_t>(entry_kind),
+      rank_local_serial_layout ? 1U : 0U,
+      static_cast<std::uint64_t>(shape.nx),
+      static_cast<std::uint64_t>(shape.ny),
+      static_cast<std::uint64_t>(shape.nz),
+      std::bit_cast<std::uint64_t>(options.box_size_mpc_comoving),
+      std::bit_cast<std::uint64_t>(options.box_size_x_mpc_comoving),
+      std::bit_cast<std::uint64_t>(options.box_size_y_mpc_comoving),
+      std::bit_cast<std::uint64_t>(options.box_size_z_mpc_comoving),
+      std::bit_cast<std::uint64_t>(options.scale_factor),
+      std::bit_cast<std::uint64_t>(options.gravitational_constant_code),
+      static_cast<std::uint64_t>(options.assignment_scheme),
+      options.enable_window_deconvolution ? 1U : 0U,
+      static_cast<std::uint64_t>(options.execution_policy),
+      static_cast<std::uint64_t>(options.data_residency),
+      static_cast<std::uint64_t>(options.decomposition_mode),
+      static_cast<std::uint64_t>(options.boundary_condition),
+      std::bit_cast<std::uint64_t>(options.tree_pm_split_scale_comoving),
+      options.isolated_open_root_workspace_limit_bytes,
+      static_cast<std::uint64_t>(control_lane_0),
+      static_cast<std::uint64_t>(control_lane_1),
+  };
+  std::array<std::uint64_t, 21> minimum_fingerprint{};
+  std::array<std::uint64_t, 21> maximum_fingerprint{};
+  measurePmMpiWait(accumulated_mpi_wait_ms, [&]() {
+    MPI_Allreduce(
+        local_fingerprint.data(),
+        minimum_fingerprint.data(),
+        static_cast<int>(local_fingerprint.size()),
+        MPI_UINT64_T,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+  });
+  measurePmMpiWait(accumulated_mpi_wait_ms, [&]() {
+    MPI_Allreduce(
+        local_fingerprint.data(),
+        maximum_fingerprint.data(),
+        static_cast<int>(local_fingerprint.size()),
+        MPI_UINT64_T,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+  });
+  if (minimum_fingerprint != maximum_fingerprint) {
+    throw std::runtime_error(
+        "PM collective entry disagreement: api_kind_min=" + std::to_string(minimum_fingerprint[0]) +
+        " api_kind_max=" + std::to_string(maximum_fingerprint[0]) +
+        " rank_local_serial_min=" + std::to_string(minimum_fingerprint[1]) +
+        " rank_local_serial_max=" + std::to_string(maximum_fingerprint[1]) +
+        " mesh_min=(" + std::to_string(minimum_fingerprint[2]) + "," +
+        std::to_string(minimum_fingerprint[3]) + "," +
+        std::to_string(minimum_fingerprint[4]) + ") mesh_max=(" +
+        std::to_string(maximum_fingerprint[2]) + "," +
+        std::to_string(maximum_fingerprint[3]) + "," +
+        std::to_string(maximum_fingerprint[4]) + ") control_0_min=" +
+        std::to_string(minimum_fingerprint[19]) + " control_0_max=" +
+        std::to_string(maximum_fingerprint[19]) + " control_1_min=" +
+        std::to_string(minimum_fingerprint[20]) + " control_1_max=" +
+        std::to_string(maximum_fingerprint[20]));
+  }
+}
+
+void throwIfPmPayloadValidationFailed(
+    std::string_view stage,
+    int world_rank,
+    int world_size,
+    const std::string& local_error,
+    double& accumulated_mpi_wait_ms) {
+  const int local_failure = local_error.empty() ? 0 : 1;
+  int global_failure_count = 0;
+  measurePmMpiWait(accumulated_mpi_wait_ms, [&]() {
+    MPI_Allreduce(&local_failure, &global_failure_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  });
+  if (global_failure_count == 0) {
+    return;
+  }
+
+  const int local_failure_rank = local_failure != 0 ? world_rank : world_size;
+  int first_failure_rank = world_size;
+  measurePmMpiWait(accumulated_mpi_wait_ms, [&]() {
+    MPI_Allreduce(&local_failure_rank, &first_failure_rank, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  });
+  const std::string detail = local_failure != 0
+      ? " local_detail=" + local_error
+      : " local_detail=peer_rank_rejected_payload";
+  throw std::runtime_error(
+      std::string(stage) + " coordinated PM payload validation failed: failure_count=" +
+      std::to_string(global_failure_count) + " first_failure_rank=" + std::to_string(first_failure_rank) +
+      detail);
+}
+
+template <typename Callable>
+void runPmCoordinatedPhase(
+    std::string_view stage,
+    int world_rank,
+    int world_size,
+    double& accumulated_mpi_wait_ms,
+    Callable&& phase) {
+  std::string local_error;
+  try {
+    phase();
+  } catch (const std::exception& error) {
+    local_error = error.what();
+  } catch (...) {
+    local_error = "non-standard exception";
+  }
+  throwIfPmPayloadValidationFailed(
+      stage,
+      world_rank,
+      world_size,
+      local_error,
+      accumulated_mpi_wait_ms);
+}
+
 [[nodiscard]] int checkedMpiRecordLimitForByteTransport(
     std::size_t record_size,
     std::string_view context) {
@@ -379,15 +906,25 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
   if (!shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be non-zero in all dimensions");
   }
+  if (!std::isfinite(options.box_size_mpc_comoving) ||
+      !std::isfinite(options.box_size_x_mpc_comoving) ||
+      !std::isfinite(options.box_size_y_mpc_comoving) ||
+      !std::isfinite(options.box_size_z_mpc_comoving)) {
+    throw std::invalid_argument("PM solve requires finite scalar and axis-aware box lengths");
+  }
   const BoxLengths lengths = effectiveBoxLengths(options);
-  if (lengths.lx <= 0.0 || lengths.ly <= 0.0 || lengths.lz <= 0.0) {
-    throw std::invalid_argument("PM solve requires positive box lengths on all axes");
+  if (!std::isfinite(lengths.lx) || !std::isfinite(lengths.ly) || !std::isfinite(lengths.lz) ||
+      lengths.lx <= 0.0 || lengths.ly <= 0.0 || lengths.lz <= 0.0) {
+    throw std::invalid_argument("PM solve requires finite positive effective box lengths on all axes");
   }
-  if (options.scale_factor <= 0.0) {
-    throw std::invalid_argument("PM solve requires scale_factor > 0");
+  if (!std::isfinite(options.scale_factor) || options.scale_factor <= 0.0) {
+    throw std::invalid_argument("PM solve requires finite scale_factor > 0");
   }
-  if (options.gravitational_constant_code <= 0.0) {
-    throw std::invalid_argument("PM solve requires gravitational_constant_code > 0");
+  if (!std::isfinite(options.gravitational_constant_code) || options.gravitational_constant_code <= 0.0) {
+    throw std::invalid_argument("PM solve requires finite gravitational_constant_code > 0");
+  }
+  if (!std::isfinite(options.tree_pm_split_scale_comoving)) {
+    throw std::invalid_argument("PM solve requires a finite TreePM split scale");
   }
   if (options.execution_policy == core::ExecutionPolicy::kCuda && options.data_residency == PmDataResidencyPolicy::kHostOnly) {
     throw std::invalid_argument(
@@ -477,6 +1014,8 @@ class PmSolver::Impl {
     std::vector<std::vector<PmDensityContributionRecord>> send_records_by_rank;
     std::vector<PmDensityContributionRecord> send_flat_records;
     std::vector<PmDensityContributionRecord> recv_flat_records;
+    std::vector<std::uint8_t> send_wire;
+    std::vector<std::uint8_t> recv_wire;
     std::vector<int> send_counts;
     std::vector<int> send_displs;
     std::vector<int> recv_counts;
@@ -492,9 +1031,13 @@ class PmSolver::Impl {
     std::vector<std::vector<PmInterpolationRequestRecord>> send_requests_by_rank;
     std::vector<PmInterpolationRequestRecord> send_requests_flat;
     std::vector<PmInterpolationRequestRecord> recv_requests_flat;
+    std::vector<std::uint8_t> send_request_wire;
+    std::vector<std::uint8_t> recv_request_wire;
     std::vector<std::vector<ContributionRecord>> send_contribs_by_rank;
     std::vector<ContributionRecord> send_contribs_flat;
     std::vector<ContributionRecord> recv_contribs_flat;
+    std::vector<std::uint8_t> send_contrib_wire;
+    std::vector<std::uint8_t> recv_contrib_wire;
     std::vector<int> send_counts;
     std::vector<int> send_displs;
     std::vector<int> recv_counts;
@@ -635,6 +1178,27 @@ class PmSolver::Impl {
         .decomposition_mode = decomposition_mode,
     };
     auto it = m_plan_cache.find(key);
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+    if (layout.world_size > 1) {
+      const int local_cache_hit = it != m_plan_cache.end() ? 1 : 0;
+      int global_cache_hit_count = 0;
+      MPI_Allreduce(
+          &local_cache_hit,
+          &global_cache_hit_count,
+          1,
+          MPI_INT,
+          MPI_SUM,
+          MPI_COMM_WORLD);
+      if (global_cache_hit_count != 0 && global_cache_hit_count != layout.world_size) {
+        throw std::runtime_error(
+            "Distributed PM FFT plan cache state diverged across ranks; all ranks must build or reuse together");
+      }
+      if (global_cache_hit_count == layout.world_size) {
+        m_active_key = key;
+        return it->second;
+      }
+    } else
+#endif
     if (it != m_plan_cache.end()) {
       m_active_key = key;
       return it->second;
@@ -644,8 +1208,29 @@ class PmSolver::Impl {
     plan.layout = layout;
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
     plan.real_z_stride = m_shape.nz;
-    plan.real.assign(layout.local_nx() * m_shape.ny * plan.real_z_stride, 0.0);
-    const std::size_t expected_local_complex_size = layout.local_nx() * m_shape.ny * nz_complex;
+    std::size_t expected_local_complex_size = 0U;
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+    double plan_mpi_wait_ms = 0.0;
+    if (layout.world_size > 1) {
+      runPmCoordinatedPhase(
+          "PmSolver distributed FFT logical-size preparation",
+          layout.world_rank,
+          layout.world_size,
+          plan_mpi_wait_ms,
+          [&]() {
+            expected_local_complex_size = checkedProduct(
+                checkedProduct(layout.local_nx(), m_shape.ny, "PM local Fourier extent"),
+                nz_complex,
+                "PM local Fourier extent");
+          });
+    } else
+#endif
+    {
+      expected_local_complex_size = checkedProduct(
+          checkedProduct(layout.local_nx(), m_shape.ny, "PM local Fourier extent"),
+          nz_complex,
+          "PM local Fourier extent");
+    }
     std::size_t allocated_local_complex_size = expected_local_complex_size;
 
 #if COSMOSIM_ENABLE_FFTW
@@ -653,11 +1238,18 @@ class PmSolver::Impl {
     if (layout.world_size > 1) {
       int mpi_world_size = 1;
       int mpi_world_rank = 0;
-      MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
-      MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
-      if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
-        throw std::invalid_argument("PM slab layout world metadata must match MPI_COMM_WORLD for distributed FFT path");
-      }
+      queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+      runPmCoordinatedPhase(
+          "PmSolver distributed FFT plan metadata preflight",
+          mpi_world_rank,
+          mpi_world_size,
+          plan_mpi_wait_ms,
+          [&]() {
+            if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
+              throw std::invalid_argument(
+                  "PM slab layout world metadata must match MPI_COMM_WORLD for distributed FFT path");
+            }
+          });
       fftw_mpi_init();
       ptrdiff_t backend_local_nx = 0;
       ptrdiff_t backend_begin_x = 0;
@@ -683,37 +1275,63 @@ class PmSolver::Impl {
             &backend_local_nx,
             &backend_begin_x);
       }
-      if (backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx()) ||
-          backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x)) {
-        throw std::invalid_argument(
-            "PM slab layout is incompatible with FFTW MPI ownership for this communicator; the configured slab partition does not match backend local_nx/local_0_start");
+      runPmCoordinatedPhase(
+          "PmSolver distributed FFT backend/storage preparation",
+          mpi_world_rank,
+          mpi_world_size,
+          plan_mpi_wait_ms,
+          [&]() {
+      const bool local_extent_mismatch =
+          backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx());
+      // FFTW leaves local_0_start unspecified for a zero-width input slab and
+      // commonly reports zero, whereas CHUI's canonical empty range is
+      // [global_nx, global_nx).  The origin has no ownership meaning when the
+      // extent is zero, so compare it only for non-empty slabs.
+      const bool nonempty_origin_mismatch =
+          backend_local_nx > 0 &&
+          backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x);
+      if (local_extent_mismatch || nonempty_origin_mismatch) {
+        std::ostringstream message;
+        message << "PM slab layout is incompatible with FFTW MPI ownership for this communicator: rank="
+                << layout.world_rank << ", configured=[" << layout.owned_x.begin_x << ',' << layout.owned_x.end_x
+                << "), backend=[" << backend_begin_x << ',' << (backend_begin_x + backend_local_nx) << ')';
+        throw std::invalid_argument(message.str());
       }
-      if (backend_alloc_local <= 0) {
-        throw std::runtime_error("FFTW MPI reported non-positive local allocation size for distributed PM plan");
+      if (backend_alloc_local < 0) {
+        throw std::runtime_error("FFTW MPI reported a negative local allocation size for distributed PM plan");
       }
-      allocated_local_complex_size = static_cast<std::size_t>(backend_alloc_local);
+      // FFTW permits a participating rank to own no real-space slab when
+      // world_size > nx and may then report alloc_local == 0.  Keep the
+      // authoritative logical extents at zero while providing non-null dummy
+      // storage to planners/backends that still require valid pointer values.
+      allocated_local_complex_size = std::max<std::size_t>(
+          1U,
+          static_cast<std::size_t>(backend_alloc_local));
       plan.is_distributed = true;
       plan.real_z_stride = 2U * nz_complex;
-      plan.real.assign(2U * allocated_local_complex_size, 0.0);
+      plan.real.assign(
+          checkedProduct(2U, allocated_local_complex_size, "FFTW MPI local real allocation"),
+          0.0);
       if (decomposition_mode == core::PmDecompositionMode::kPencil) {
         plan.spectral_transposed = true;
         plan.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
         plan.transposed_begin_y = static_cast<std::size_t>(backend_begin_y);
       }
-    }
-#endif
-    plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.poisson_kernel.assign(allocated_local_complex_size, 0.0);
-    plan.grad_kx.assign(allocated_local_complex_size, 0.0);
-    plan.grad_ky.assign(allocated_local_complex_size, 0.0);
-    plan.grad_kz.assign(allocated_local_complex_size, 0.0);
-#if COSMOSIM_ENABLE_MPI
-    if (layout.world_size > 1) {
       if (allocated_local_complex_size < expected_local_complex_size) {
         throw std::runtime_error("FFTW MPI local allocation is smaller than the expected slab-local Fourier extent");
       }
+      plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
+      plan.poisson_kernel.assign(allocated_local_complex_size, 0.0);
+      plan.grad_kx.assign(allocated_local_complex_size, 0.0);
+      plan.grad_ky.assign(allocated_local_complex_size, 0.0);
+      plan.grad_kz.assign(allocated_local_complex_size, 0.0);
+          });
+    }
+#endif
+#if COSMOSIM_ENABLE_MPI
+    if (layout.world_size > 1) {
       plan.forward_plan = fftw_mpi_plan_dft_r2c_3d(
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
@@ -734,11 +1352,26 @@ class PmSolver::Impl {
           decomposition_mode == core::PmDecompositionMode::kPencil
               ? (COSMOSIM_FFTW_PLANNER_FLAGS | FFTW_MPI_TRANSPOSED_IN)
               : COSMOSIM_FFTW_PLANNER_FLAGS);
+      runPmCoordinatedPhase(
+          "PmSolver distributed FFT plan creation",
+          layout.world_rank,
+          layout.world_size,
+          plan_mpi_wait_ms,
+          [&]() {
+            if (plan.forward_plan == nullptr || plan.inverse_plan == nullptr) {
+              throw std::runtime_error("Failed to create distributed FFTW plans for PM solver");
+            }
+          });
     } else
 #endif
     {
       plan.real_z_stride = m_shape.nz;
-      plan.real.assign(layout.local_nx() * m_shape.ny * plan.real_z_stride, 0.0);
+      plan.real.assign(
+          checkedProduct(
+              checkedProduct(layout.local_nx(), m_shape.ny, "PM local real extent"),
+              plan.real_z_stride,
+              "PM local real extent"),
+          0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -769,6 +1402,12 @@ class PmSolver::Impl {
       throw std::invalid_argument(
           "PM solver naive DFT fallback requires full-domain slab ownership; distributed PM requires COSMOSIM_ENABLE_FFTW=ON and COSMOSIM_ENABLE_MPI=ON");
     }
+    plan.real.assign(
+        checkedProduct(
+            checkedProduct(layout.local_nx(), m_shape.ny, "PM local real extent"),
+            plan.real_z_stride,
+            "PM local real extent"),
+        0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -778,6 +1417,26 @@ class PmSolver::Impl {
     plan.grad_kz.assign(expected_local_complex_size, 0.0);
 #endif
 
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+    if (layout.world_size > 1) {
+      PlanResources* committed_plan = nullptr;
+      runPmCoordinatedPhase(
+          "PmSolver distributed FFT plan cache commit",
+          layout.world_rank,
+          layout.world_size,
+          plan_mpi_wait_ms,
+          [&]() {
+            auto [insert_it, inserted] = m_plan_cache.emplace(key, std::move(plan));
+            if (!inserted) {
+              throw std::logic_error("Distributed PM FFT plan cache changed during coordinated build");
+            }
+            ++m_plan_build_count;
+            m_active_key = key;
+            committed_plan = &insert_it->second;
+          });
+      return *committed_plan;
+    }
+#endif
     auto [insert_it, inserted] = m_plan_cache.emplace(key, std::move(plan));
     (void)inserted;
     ++m_plan_build_count;
@@ -813,7 +1472,7 @@ class PmSolver::Impl {
     std::fill(plan.grad_kz.begin(), plan.grad_kz.end(), 0.0);
 
     const std::size_t nz_complex = shape.nz / 2U + 1U;
-    const double prefactor = -4.0 * k_pi * options.gravitational_constant_code * options.scale_factor * options.scale_factor;
+    const double prefactor = -4.0 * k_pi * options.gravitational_constant_code;
     const double dkx = 2.0 * k_pi / lengths.lx;
     const double dky = 2.0 * k_pi / lengths.ly;
     const double dkz = 2.0 * k_pi / lengths.lz;
@@ -915,13 +1574,13 @@ class PmSolver::Impl {
   [[nodiscard]] std::size_t planCount() const noexcept { return m_plan_cache.size(); }
   [[nodiscard]] std::size_t planBuildCount() const noexcept { return m_plan_build_count; }
 
-  [[nodiscard]] std::uint64_t nextDistributedInterpolationExchangeEpoch() {
-    if (m_next_distributed_interpolation_exchange_epoch == std::numeric_limits<std::uint64_t>::max()) {
+  [[nodiscard]] std::uint64_t nextDistributedExchangeEpoch() {
+    if (m_next_distributed_exchange_epoch == std::numeric_limits<std::uint64_t>::max()) {
       throw std::overflow_error(
-          "PmSolver distributed interpolation exchange epoch would overflow; recreate the solver before another exchange");
+          "PmSolver distributed exchange epoch would overflow; recreate the solver before another exchange");
     }
-    const std::uint64_t epoch = m_next_distributed_interpolation_exchange_epoch;
-    ++m_next_distributed_interpolation_exchange_epoch;
+    const std::uint64_t epoch = m_next_distributed_exchange_epoch;
+    ++m_next_distributed_exchange_epoch;
     return epoch;
   }
 
@@ -1107,7 +1766,7 @@ class PmSolver::Impl {
   std::unordered_map<PlanKey, PlanResources, PlanKeyHasher> m_plan_cache;
   std::optional<PlanKey> m_active_key;
   std::size_t m_plan_build_count = 0;
-  std::uint64_t m_next_distributed_interpolation_exchange_epoch = 1;
+  std::uint64_t m_next_distributed_exchange_epoch = 1;
   struct {
     int world_size = 1;
     int world_rank = 0;
@@ -1146,6 +1805,8 @@ void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.routed_density_peer_count += event.routed_density_peer_count;
   m_totals.routed_force_peer_count += event.routed_force_peer_count;
   m_totals.routed_potential_peer_count += event.routed_potential_peer_count;
+  m_totals.routed_mpi_bytes_sent += event.routed_mpi_bytes_sent;
+  m_totals.routed_mpi_bytes_received += event.routed_mpi_bytes_received;
   m_totals.force_halo_cache_hits += event.force_halo_cache_hits;
   m_totals.isolated_open_root_workspace_estimate_bytes =
       std::max(m_totals.isolated_open_root_workspace_estimate_bytes,
@@ -1161,6 +1822,7 @@ void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.fft_inverse_ms += event.fft_inverse_ms;
   m_totals.fft_transpose_ms += event.fft_transpose_ms;
   m_totals.interpolate_ms += event.interpolate_ms;
+  m_totals.routed_mpi_wait_ms += event.routed_mpi_wait_ms;
   m_totals.transfer_h2d_ms += event.transfer_h2d_ms;
   m_totals.transfer_d2h_ms += event.transfer_d2h_ms;
   m_totals.device_kernel_ms += event.device_kernel_ms;
@@ -1417,8 +2079,55 @@ void PmSolver::assignDensity(
     std::span<const double> mass,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+#if COSMOSIM_ENABLE_MPI
+  double distributed_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  // Public PM entry is collective whenever the hosting MPI world has peers.
+  // The vote precedes any layout-based branch, so divergent rank-local layout
+  // metadata cannot let one rank throw while another enters an exchange.
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kAssignDensity,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        distributed_preflight_mpi_wait_ms);
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity distributed API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        distributed_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in assignDensity");
+          }
+          if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != mass.size()) {
+            throw std::invalid_argument("Particle coordinate/mass spans must match in assignDensity");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument("PmSolver::assignDensity requires a valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::assignDensity slab layout world metadata must match MPI_COMM_WORLD");
+          }
+          if (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            throw std::invalid_argument("PmSolver::assignDensity mesh dimensions exceed fixed-width routing indices");
+          }
+        });
+  }
+#endif
   validateOptions(m_shape, options);
-  if (grid.shape().cellCount() != m_shape.cellCount()) {
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in assignDensity");
   }
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != mass.size()) {
@@ -1437,8 +2146,7 @@ void PmSolver::assignDensity(
   if (distributed_slabs) {
     int mpi_world_size = 1;
     int mpi_world_rank = 0;
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
     if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
       throw std::invalid_argument(
           "PmSolver::assignDensity slab layout world metadata must match MPI_COMM_WORLD");
@@ -1455,6 +2163,24 @@ void PmSolver::assignDensity(
   const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
   const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
   const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
+  if (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+      m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+      m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::invalid_argument("PmSolver::assignDensity mesh dimensions exceed fixed-width routing indices");
+  }
+  std::optional<std::size_t> first_non_finite_source_index;
+  for (std::size_t p = 0; p < mass.size(); ++p) {
+    if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p]) ||
+        !std::isfinite(mass[p])) {
+      first_non_finite_source_index = p;
+      break;
+    }
+  }
+  if (!distributed_slabs && first_non_finite_source_index.has_value()) {
+    throw std::invalid_argument(
+        "PmSolver::assignDensity requires finite particle coordinates and masses; particle_index=" +
+        std::to_string(*first_non_finite_source_index));
+  }
 
   const auto accumulate_owned = [&](const PmDensityContributionRecord& record) {
     if (record.global_ix >= m_shape.nx || record.global_iy >= m_shape.ny || record.global_iz >= m_shape.nz) {
@@ -1462,6 +2188,9 @@ void PmSolver::assignDensity(
     }
     if (!grid.slabLayout().ownsGlobalX(record.global_ix)) {
       throw std::invalid_argument("PmSolver::assignDensity received contribution for non-owned PM slab x-index");
+    }
+    if (!std::isfinite(record.mass_contribution)) {
+      throw std::invalid_argument("PmSolver::assignDensity received a non-finite mass contribution");
     }
     grid.density()[grid.linearIndex(record.global_ix, record.global_iy, record.global_iz)] += record.mass_contribution;
   };
@@ -1511,12 +2240,47 @@ void PmSolver::assignDensity(
     }
   } else {
 #if COSMOSIM_ENABLE_MPI
-    auto& exchange = m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+    double routed_mpi_wait_ms = distributed_preflight_mpi_wait_ms;
+    const int local_sources_valid = first_non_finite_source_index.has_value() ? 0 : 1;
+    int all_sources_valid = 0;
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Allreduce(&local_sources_valid, &all_sources_valid, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    });
+    if (all_sources_valid == 0) {
+      const std::string local_detail = first_non_finite_source_index.has_value()
+          ? " local_first_invalid_particle_index=" + std::to_string(*first_non_finite_source_index)
+          : " local_sources_valid=true";
+      throw std::invalid_argument(
+          "PmSolver::assignDensity rejected non-finite coordinates or masses on at least one MPI rank;" +
+          local_detail);
+    }
+    std::uint64_t exchange_epoch = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity exchange epoch allocation",
+        grid.slabLayout().world_rank,
+        grid.slabLayout().world_size,
+        routed_mpi_wait_ms,
+        [&]() { exchange_epoch = m_impl->nextDistributedExchangeEpoch(); });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::assignDensity");
+    });
+    constexpr std::string_view density_exchange_context = "PmSolver::assignDensity density contribution exchange";
+    Impl::DensityExchangeBuffers* exchange_ptr = nullptr;
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity density send preparation",
+        grid.slabLayout().world_rank,
+        grid.slabLayout().world_size,
+        routed_mpi_wait_ms,
+        [&]() {
+    exchange_ptr = &m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+    auto& exchange = *exchange_ptr;
     for (auto& per_rank : exchange.send_records_by_rank) {
       per_rank.clear();
     }
     exchange.send_flat_records.clear();
     exchange.recv_flat_records.clear();
+    exchange.send_wire.clear();
+    exchange.recv_wire.clear();
     std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
     std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
     std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
@@ -1526,44 +2290,74 @@ void PmSolver::assignDensity(
     std::fill(exchange.recv_counts_bytes.begin(), exchange.recv_counts_bytes.end(), 0);
     std::fill(exchange.recv_displs_bytes.begin(), exchange.recv_displs_bytes.end(), 0);
 
+    std::uint32_t next_record_sequence = 0U;
     for (std::size_t p = 0; p < mass.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
 
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic
+            ? wrapIndex(sx.offsets[dx], m_shape.nx)
+            : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, ix);
         auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic
+              ? wrapIndex(sy.offsets[dy], m_shape.ny)
+              : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic
+                ? wrapIndex(sz.offsets[dz], m_shape.nz)
+                : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
+            if (next_record_sequence == std::numeric_limits<std::uint32_t>::max()) {
+              throw std::invalid_argument("PmSolver::assignDensity record sequence exceeds routing token limit");
+            }
             batch.push_back(PmDensityContributionRecord{
+                .origin_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
+                .destination_rank = static_cast<std::uint32_t>(destination_rank),
+                .record_sequence = next_record_sequence,
                 .global_ix = static_cast<std::uint32_t>(ix),
                 .global_iy = static_cast<std::uint32_t>(iy),
                 .global_iz = static_cast<std::uint32_t>(iz),
+                .exchange_epoch = exchange_epoch,
                 .mass_contribution = mass[p] * weight,
             });
+            ++next_record_sequence;
           }
         }
       }
     }
 
-    constexpr std::string_view density_exchange_context = "PmSolver::assignDensity density contribution exchange";
     std::size_t total_send_records = 0;
     for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
       const std::size_t count = exchange.send_records_by_rank[static_cast<std::size_t>(rank)].size();
       const int mpi_count = checkedMpiRecordCountOrDisplacement(
-          count, sizeof(PmDensityContributionRecord), density_exchange_context, "send record count", rank);
+          count, k_pm_density_wire_bytes, density_exchange_context, "send record count", rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_send_records, sizeof(PmDensityContributionRecord), density_exchange_context, "send record displacement", rank);
+          total_send_records, k_pm_density_wire_bytes, density_exchange_context, "send record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_send_records, count, sizeof(PmDensityContributionRecord), density_exchange_context, rank);
+          total_send_records, count, k_pm_density_wire_bytes, density_exchange_context, rank);
       exchange.send_counts[static_cast<std::size_t>(rank)] = mpi_count;
       exchange.send_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_send_records = next_total;
@@ -1573,60 +2367,145 @@ void PmSolver::assignDensity(
       const auto& records = exchange.send_records_by_rank[static_cast<std::size_t>(rank)];
       exchange.send_flat_records.insert(exchange.send_flat_records.end(), records.begin(), records.end());
     }
+    encodePmWireRecords<PmDensityContributionRecord>(
+        exchange.send_flat_records,
+        k_pm_density_wire_bytes,
+        exchange.send_wire,
+        [](const PmDensityContributionRecord& record, std::span<std::uint8_t> bytes) {
+          encodePmDensityRecord(record, bytes);
+        },
+        density_exchange_context);
+        });
+    auto& exchange = *exchange_ptr;
 
-    MPI_Alltoall(
-        exchange.send_counts.data(),
-        1,
-        MPI_INT,
-        exchange.recv_counts.data(),
-        1,
-        MPI_INT,
-        MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoall(
+          exchange.send_counts.data(),
+          1,
+          MPI_INT,
+          exchange.recv_counts.data(),
+          1,
+          MPI_INT,
+          MPI_COMM_WORLD);
+    });
 
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity density receive-layout preparation",
+        grid.slabLayout().world_rank,
+        grid.slabLayout().world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_recv_records = 0;
     for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
       const std::size_t count = checkedMpiReceivedRecordCount(
           exchange.recv_counts[static_cast<std::size_t>(rank)],
-          sizeof(PmDensityContributionRecord),
+          k_pm_density_wire_bytes,
           density_exchange_context,
           rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_recv_records, sizeof(PmDensityContributionRecord), density_exchange_context, "received record displacement", rank);
+          total_recv_records, k_pm_density_wire_bytes, density_exchange_context, "received record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_recv_records, count, sizeof(PmDensityContributionRecord), density_exchange_context, rank);
+          total_recv_records, count, k_pm_density_wire_bytes, density_exchange_context, rank);
       exchange.recv_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_recv_records = next_total;
     }
-    exchange.recv_flat_records.resize(total_recv_records);
+    exchange.recv_wire.resize(checkedPmWireByteCount(
+        total_recv_records, k_pm_density_wire_bytes, density_exchange_context));
 
     checkedMpiRecordLayoutToByteLayout(
         exchange.send_counts,
         exchange.send_displs,
-        sizeof(PmDensityContributionRecord),
+        k_pm_density_wire_bytes,
         exchange.send_counts_bytes,
         exchange.send_displs_bytes,
         "PmSolver::assignDensity density contribution send MPI_Alltoallv");
     checkedMpiRecordLayoutToByteLayout(
         exchange.recv_counts,
         exchange.recv_displs,
-        sizeof(PmDensityContributionRecord),
+        k_pm_density_wire_bytes,
         exchange.recv_counts_bytes,
         exchange.recv_displs_bytes,
         "PmSolver::assignDensity density contribution receive MPI_Alltoallv");
+        });
 
-    MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(exchange.send_flat_records.data()),
-        exchange.send_counts_bytes.data(),
-        exchange.send_displs_bytes.data(),
-        MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(exchange.recv_flat_records.data()),
-        exchange.recv_counts_bytes.data(),
-        exchange.recv_displs_bytes.data(),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoallv(
+          nonNullPmWireData(exchange.send_wire),
+          exchange.send_counts_bytes.data(),
+          exchange.send_displs_bytes.data(),
+          MPI_BYTE,
+          nonNullPmWireData(exchange.recv_wire),
+          exchange.recv_counts_bytes.data(),
+          exchange.recv_displs_bytes.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+    });
+
+    std::string local_density_validation_error;
+    try {
+      decodePmWireRecords<PmDensityContributionRecord>(
+          exchange.recv_wire,
+          k_pm_density_wire_bytes,
+          exchange.recv_flat_records,
+          [](std::span<const std::uint8_t> bytes) { return decodePmDensityRecord(bytes); },
+          density_exchange_context);
+
+      for (int source_rank = 0; source_rank < grid.slabLayout().world_size; ++source_rank) {
+        const int begin = exchange.recv_displs[static_cast<std::size_t>(source_rank)];
+        const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
+        std::optional<std::uint32_t> previous_sequence;
+        for (int i = 0; i < count; ++i) {
+          const PmDensityContributionRecord& record =
+              exchange.recv_flat_records[static_cast<std::size_t>(begin + i)];
+          if (record.origin_rank != static_cast<std::uint32_t>(source_rank)) {
+            throw std::invalid_argument(
+                "density origin rank does not match MPI sender segment");
+          }
+          if (record.destination_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "density destination rank does not match receiving slab rank");
+          }
+          if (record.exchange_epoch != exchange_epoch) {
+            throw std::invalid_argument(
+                "density exchange epoch is stale/mismatched; received=" +
+                std::to_string(record.exchange_epoch) + " expected=" + std::to_string(exchange_epoch));
+          }
+          if (previous_sequence.has_value() && record.record_sequence <= *previous_sequence) {
+            throw std::invalid_argument(
+                "density record sequence is duplicate or non-monotonic for sender rank " +
+                std::to_string(source_rank));
+          }
+          previous_sequence = record.record_sequence;
+          if (record.global_ix >= m_shape.nx || record.global_iy >= m_shape.ny || record.global_iz >= m_shape.nz) {
+            throw std::invalid_argument("density contribution mesh index is out of range");
+          }
+          const int expected_owner =
+              parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, record.global_ix);
+          if (expected_owner != grid.slabLayout().world_rank ||
+              expected_owner != static_cast<int>(record.destination_rank)) {
+            throw std::invalid_argument(
+                "density contribution expected owner does not match routed destination");
+          }
+          if (!std::isfinite(record.mass_contribution)) {
+            throw std::invalid_argument("density contribution mass is not finite");
+          }
+        }
+      }
+    } catch (const std::exception& error) {
+      local_density_validation_error = error.what();
+    } catch (...) {
+      local_density_validation_error = "non-standard exception while validating density payload";
+    }
+    throwIfPmPayloadValidationFailed(
+        "PmSolver::assignDensity density receive",
+        grid.slabLayout().world_rank,
+        grid.slabLayout().world_size,
+        local_density_validation_error,
+        routed_mpi_wait_ms);
 
     for (const PmDensityContributionRecord& record : exchange.recv_flat_records) {
-      accumulate_owned(record);
+      grid.density()[grid.linearIndex(record.global_ix, record.global_iy, record.global_iz)] +=
+          record.mass_contribution;
     }
     if (profile != nullptr) {
       profile->routed_density_records += static_cast<std::uint64_t>(exchange.send_flat_records.size());
@@ -1634,9 +2513,12 @@ void PmSolver::assignDensity(
           exchange.send_counts.begin(),
           exchange.send_counts.end(),
           [](int count) { return count > 0; }));
+      profile->routed_mpi_bytes_sent += static_cast<std::uint64_t>(exchange.send_wire.size());
+      profile->routed_mpi_bytes_received += static_cast<std::uint64_t>(exchange.recv_wire.size());
+      profile->routed_mpi_wait_ms += routed_mpi_wait_ms;
       profile->bytes_moved += checkedBytesForCount(
           exchange.send_flat_records.size() + exchange.recv_flat_records.size(),
-          sizeof(PmDensityContributionRecord),
+          k_pm_density_wire_bytes,
           "PM density routed exchange profile");
     }
 #endif
@@ -1657,6 +2539,45 @@ void PmSolver::assignDensity(
 }
 
 void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
+#if COSMOSIM_ENABLE_MPI
+  double distributed_plan_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kSolvePoissonPeriodic,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        distributed_plan_preflight_mpi_wait_ms);
+    runPmCoordinatedPhase(
+        "PmSolver::solvePoissonPeriodic distributed API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        distributed_plan_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonPeriodic");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument("PmSolver::solvePoissonPeriodic requires valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::solvePoissonPeriodic slab layout world metadata must match MPI_COMM_WORLD");
+          }
+        });
+    if (profile != nullptr) {
+      profile->routed_mpi_wait_ms += distributed_plan_preflight_mpi_wait_ms;
+    }
+  }
+#endif
   validateOptions(m_shape, options);
   if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonPeriodic");
@@ -1796,6 +2717,91 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 }
 
 void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
+#if COSMOSIM_ENABLE_MPI
+  double isolated_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kSolvePoissonIsolatedOpen,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        isolated_preflight_mpi_wait_ms);
+    runPmCoordinatedPhase(
+        "PmSolver::solvePoissonIsolatedOpen API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        isolated_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny ||
+              grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument(
+                "PmSolver::solvePoissonIsolatedOpen requires valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::solvePoissonIsolatedOpen slab layout world metadata must match MPI_COMM_WORLD");
+          }
+          if (m_shape.nx < 3 || m_shape.ny < 3 || m_shape.nz < 3) {
+            throw std::invalid_argument(
+                "PmSolver::solvePoissonIsolatedOpen requires nx,ny,nz >= 3 for one-sided boundary gradients");
+          }
+          const bool distributed_layout = !rank_local_serial_layout;
+          const std::uint64_t workspace_estimate =
+              estimateIsolatedRootWorkspaceBytes(m_shape, distributed_layout);
+          if (options.isolated_open_root_workspace_limit_bytes == 0U ||
+              workspace_estimate > options.isolated_open_root_workspace_limit_bytes) {
+            throw std::runtime_error(isolatedPmGuardMessage(
+                m_shape,
+                distributed_layout ? grid.slabLayout().world_size : 1,
+                distributed_layout ? grid.slabLayout().world_rank : 0,
+                workspace_estimate,
+                options.isolated_open_root_workspace_limit_bytes));
+          }
+          if (grid.localCellCount() >
+              static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error("isolated PM local slab count exceeds MPI int limit");
+          }
+          if (distributed_layout) {
+            std::size_t displacement = 0U;
+            for (int rank = 0; rank < grid.slabLayout().world_size; ++rank) {
+              const auto owned = parallel::pmOwnedXRangeForRank(
+                  grid.slabLayout().global_nx, grid.slabLayout().world_size, rank);
+              const std::size_t count = checkedProduct(
+                  checkedProduct(
+                      owned.extentX(),
+                      grid.slabLayout().global_ny,
+                      "isolated PM preflight slab count"),
+                  grid.slabLayout().global_nz,
+                  "isolated PM preflight slab count");
+              if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  displacement > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                throw std::overflow_error(
+                    "isolated PM gather/scatter count or displacement exceeds MPI int limit");
+              }
+              if (count > std::numeric_limits<std::size_t>::max() - displacement) {
+                throw std::overflow_error(
+                    "isolated PM preflight gather/scatter displacement overflows size_t");
+              }
+              displacement += count;
+            }
+          }
+        });
+    if (profile != nullptr) {
+      profile->routed_mpi_wait_ms += isolated_preflight_mpi_wait_ms;
+    }
+  }
+#endif
   validateOptions(m_shape, options);
   if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in solvePoissonIsolatedOpen");
@@ -1814,8 +2820,7 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
   if (distributed_slabs) {
     int mpi_world_size = 1;
     int mpi_world_rank = 0;
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
     if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
       throw std::invalid_argument("PmSolver::solvePoissonIsolatedOpen slab layout world metadata must match MPI_COMM_WORLD");
     }
@@ -1957,7 +2962,7 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
     m_impl->isolatedInverse(ws.rho_k);
 
     const double cell_volume = dx * dy * dz;
-    const double prefactor = options.gravitational_constant_code * options.scale_factor * options.scale_factor * cell_volume;
+    const double prefactor = options.gravitational_constant_code * cell_volume;
     full_potential.assign(m_shape.cellCount(), 0.0);
     full_force_x.assign(m_shape.cellCount(), 0.0);
     full_force_y.assign(m_shape.cellCount(), 0.0);
@@ -2060,6 +3065,77 @@ void PmSolver::interpolateForces(
     const PmForceTargetView& target_view,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+#if COSMOSIM_ENABLE_MPI
+  double target_view_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kInterpolateForceTargetView,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        target_view_preflight_mpi_wait_ms,
+        static_cast<int>(target_view.output_layout));
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces target-view API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        target_view_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny ||
+              grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in interpolateForces target view");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument(
+                "PmSolver::interpolateForces target view requires a valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::interpolateForces target-view slab metadata must match MPI_COMM_WORLD");
+          }
+          const std::size_t local_active_count = target_view.active_particle_index.size();
+          if (local_active_count != target_view.pos_x_comoving.size() ||
+              local_active_count != target_view.pos_y_comoving.size() ||
+              local_active_count != target_view.pos_z_comoving.size()) {
+            throw std::invalid_argument(
+                "PmSolver::interpolateForces active target coordinate view extents must match");
+          }
+          switch (target_view.output_layout) {
+            case PmForceOutputLayout::kCompactActive:
+              if (local_active_count != target_view.accel_x_comoving.size() ||
+                  local_active_count != target_view.accel_y_comoving.size() ||
+                  local_active_count != target_view.accel_z_comoving.size()) {
+                throw std::invalid_argument(
+                    "PmSolver::interpolateForces compact active output extents must match active count");
+              }
+              break;
+            case PmForceOutputLayout::kIndexedGlobal:
+              for (const std::uint32_t particle_index : target_view.active_particle_index) {
+                if (particle_index >= target_view.accel_x_comoving.size() ||
+                    particle_index >= target_view.accel_y_comoving.size() ||
+                    particle_index >= target_view.accel_z_comoving.size()) {
+                  throw std::out_of_range(
+                      "PmSolver::interpolateForces indexed active particle output index out of range");
+                }
+              }
+              break;
+            default:
+              throw std::invalid_argument("PmSolver::interpolateForces unknown PM force output layout");
+          }
+        });
+    if (profile != nullptr) {
+      profile->routed_mpi_wait_ms += target_view_preflight_mpi_wait_ms;
+    }
+  }
+#endif
   const std::size_t active_count = target_view.active_particle_index.size();
   if (active_count != target_view.pos_x_comoving.size() || active_count != target_view.pos_y_comoving.size() ||
       active_count != target_view.pos_z_comoving.size()) {
@@ -2128,7 +3204,56 @@ void PmSolver::interpolateForces(
     std::span<double> accel_z,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+#if COSMOSIM_ENABLE_MPI
+  double distributed_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kInterpolateForces,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        distributed_preflight_mpi_wait_ms);
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces distributed API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        distributed_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in interpolateForces");
+          }
+          if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != accel_x.size() ||
+              pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
+            throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument("PmSolver::interpolateForces requires a valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::interpolateForces slab layout world metadata must match MPI_COMM_WORLD");
+          }
+          if (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            throw std::invalid_argument(
+                "PmSolver::interpolateForces mesh dimensions exceed fixed-width routing indices");
+          }
+        });
+  }
+#endif
   validateOptions(m_shape, options);
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+    throw std::invalid_argument("PM solver/grid shape mismatch in interpolateForces");
+  }
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != accel_x.size() ||
       pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
     throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
@@ -2147,8 +3272,7 @@ void PmSolver::interpolateForces(
   if (distributed_slabs) {
     int mpi_world_size = 1;
     int mpi_world_rank = 0;
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
     if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
       throw std::invalid_argument("PmSolver::interpolateForces slab layout world metadata must match MPI_COMM_WORLD");
     }
@@ -2163,6 +3287,25 @@ void PmSolver::interpolateForces(
   const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
   const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
   const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
+
+  if (distributed_slabs &&
+      (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+       m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+       m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))) {
+    throw std::invalid_argument("PmSolver::interpolateForces mesh dimensions exceed fixed-width routing indices");
+  }
+  std::optional<std::size_t> first_non_finite_target_index;
+  for (std::size_t p = 0; p < pos_x.size(); ++p) {
+    if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p])) {
+      first_non_finite_target_index = p;
+      break;
+    }
+  }
+  if (!distributed_slabs && first_non_finite_target_index.has_value()) {
+    throw std::invalid_argument(
+        "PmSolver::interpolateForces requires finite particle coordinates; particle_index=" +
+        std::to_string(*first_non_finite_target_index));
+  }
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
@@ -2219,8 +3362,43 @@ void PmSolver::interpolateForces(
   } else {
 #if COSMOSIM_ENABLE_MPI
     const int world_size = grid.slabLayout().world_size;
-    const std::uint64_t exchange_epoch = m_impl->nextDistributedInterpolationExchangeEpoch();
-    auto& exchange = m_impl->forceInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    double routed_mpi_wait_ms = distributed_preflight_mpi_wait_ms;
+    const int local_targets_valid = first_non_finite_target_index.has_value() ? 0 : 1;
+    int all_targets_valid = 0;
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Allreduce(&local_targets_valid, &all_targets_valid, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    });
+    if (all_targets_valid == 0) {
+      const std::string local_detail = first_non_finite_target_index.has_value()
+          ? " local_first_invalid_particle_index=" + std::to_string(*first_non_finite_target_index)
+          : " local_targets_valid=true";
+      throw std::invalid_argument(
+          "PmSolver::interpolateForces rejected non-finite target coordinates on at least one MPI rank;" +
+          local_detail);
+    }
+    std::uint64_t exchange_epoch = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces exchange epoch allocation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() { exchange_epoch = m_impl->nextDistributedExchangeEpoch(); });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolateForces");
+    });
+    constexpr std::string_view request_exchange_context = "PmSolver::interpolateForces request exchange";
+    Impl::InterpolationExchangeBuffers<PmForceContributionRecord>* exchange_ptr = nullptr;
+    std::vector<PmInterpolationRequestRegistryEntry> request_registry;
+    std::vector<std::uint8_t> response_received;
+    std::uint64_t force_halo_cache_hits = 0;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces request send preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
+    exchange_ptr = &m_impl->forceInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    auto& exchange = *exchange_ptr;
     for (auto& per_rank : exchange.send_requests_by_rank) {
       per_rank.clear();
     }
@@ -2229,8 +3407,12 @@ void PmSolver::interpolateForces(
     }
     exchange.send_requests_flat.clear();
     exchange.recv_requests_flat.clear();
+    exchange.send_request_wire.clear();
+    exchange.recv_request_wire.clear();
     exchange.send_contribs_flat.clear();
     exchange.recv_contribs_flat.clear();
+    exchange.send_contrib_wire.clear();
+    exchange.recv_contrib_wire.clear();
     std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
     std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
     std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
@@ -2252,29 +3434,54 @@ void PmSolver::interpolateForces(
     std::fill(accel_y.begin(), accel_y.end(), 0.0);
     std::fill(accel_z.begin(), accel_z.end(), 0.0);
 
-    std::vector<PmInterpolationRequestRegistryEntry> request_registry;
     std::uint32_t next_request_sequence = 0;
-    std::uint64_t force_halo_cache_hits = 0;
+    const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         throw std::invalid_argument("PmSolver::interpolateForces origin particle index exceeds routing token limit");
       }
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic
+            ? wrapIndex(sx.offsets[dx], m_shape.nx)
+            : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic
+              ? wrapIndex(sy.offsets[dy], m_shape.ny)
+              : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic
+                ? wrapIndex(sz.offsets[dz], m_shape.nz)
+                : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             if (destination_rank == grid.slabLayout().world_rank) {
               const std::size_t local_index = grid.linearIndex(ix, iy, iz);
+              if (!std::isfinite(grid.force_x()[local_index]) || !std::isfinite(grid.force_y()[local_index]) ||
+                  !std::isfinite(grid.force_z()[local_index])) {
+                throw std::invalid_argument(
+                    "PmSolver::interpolateForces encountered non-finite owner-local mesh force data");
+              }
               accel_x[p] += weight * grid.force_x()[local_index];
               accel_y[p] += weight * grid.force_y()[local_index];
               accel_z[p] += weight * grid.force_z()[local_index];
@@ -2285,6 +3492,10 @@ void PmSolver::interpolateForces(
             double halo_fy = 0.0;
             double halo_fz = 0.0;
             if (grid.tryLoadForceFromHalo(ix, iy, iz, halo_fx, halo_fy, halo_fz)) {
+              if (!std::isfinite(halo_fx) || !std::isfinite(halo_fy) || !std::isfinite(halo_fz)) {
+                throw std::invalid_argument(
+                    "PmSolver::interpolateForces encountered non-finite PM force halo data");
+              }
               accel_x[p] += weight * halo_fx;
               accel_y[p] += weight * halo_fy;
               accel_z[p] += weight * halo_fz;
@@ -2303,6 +3514,7 @@ void PmSolver::interpolateForces(
             });
             batch.push_back(PmInterpolationRequestRecord{
                 .origin_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
+                .destination_rank = static_cast<std::uint32_t>(destination_rank),
                 .request_sequence = next_request_sequence,
                 .origin_particle_index = static_cast<std::uint32_t>(p),
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -2316,18 +3528,17 @@ void PmSolver::interpolateForces(
         }
       }
     }
-    std::vector<std::uint8_t> response_received(request_registry.size(), 0U);
+    response_received.assign(request_registry.size(), 0U);
 
-    constexpr std::string_view request_exchange_context = "PmSolver::interpolateForces request exchange";
     std::size_t total_send = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)].size();
       const int mpi_count = checkedMpiRecordCountOrDisplacement(
-          count, sizeof(PmInterpolationRequestRecord), request_exchange_context, "send record count", rank);
+          count, k_pm_interpolation_request_wire_bytes, request_exchange_context, "send record count", rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_send, sizeof(PmInterpolationRequestRecord), request_exchange_context, "send record displacement", rank);
+          total_send, k_pm_interpolation_request_wire_bytes, request_exchange_context, "send record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_send, count, sizeof(PmInterpolationRequestRecord), request_exchange_context, rank);
+          total_send, count, k_pm_interpolation_request_wire_bytes, request_exchange_context, rank);
       exchange.send_counts[static_cast<std::size_t>(rank)] = mpi_count;
       exchange.send_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_send = next_total;
@@ -2338,55 +3549,90 @@ void PmSolver::interpolateForces(
       const auto& source = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)];
       exchange.send_requests_flat.insert(exchange.send_requests_flat.end(), source.begin(), source.end());
     }
+    encodePmWireRecords<PmInterpolationRequestRecord>(
+        exchange.send_requests_flat,
+        k_pm_interpolation_request_wire_bytes,
+        exchange.send_request_wire,
+        [](const PmInterpolationRequestRecord& record, std::span<std::uint8_t> bytes) {
+          encodePmInterpolationRequest(record, PmWireRecordKind::kForceRequest, bytes);
+        },
+        request_exchange_context);
+        });
+    auto& exchange = *exchange_ptr;
 
-    MPI_Alltoall(
-        exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoall(
+          exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    });
 
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces request receive-layout preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_recv = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = checkedMpiReceivedRecordCount(
           exchange.recv_counts[static_cast<std::size_t>(rank)],
-          sizeof(PmInterpolationRequestRecord),
+          k_pm_interpolation_request_wire_bytes,
           request_exchange_context,
           rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_recv, sizeof(PmInterpolationRequestRecord), request_exchange_context, "received record displacement", rank);
+          total_recv, k_pm_interpolation_request_wire_bytes, request_exchange_context, "received record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_recv, count, sizeof(PmInterpolationRequestRecord), request_exchange_context, rank);
+          total_recv, count, k_pm_interpolation_request_wire_bytes, request_exchange_context, rank);
       exchange.recv_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_recv = next_total;
     }
-    exchange.recv_requests_flat.resize(total_recv);
+    exchange.recv_request_wire.resize(checkedPmWireByteCount(
+        total_recv, k_pm_interpolation_request_wire_bytes, request_exchange_context));
 
     checkedMpiRecordLayoutToByteLayout(
         exchange.send_counts,
         exchange.send_displs,
-        sizeof(PmInterpolationRequestRecord),
+        k_pm_interpolation_request_wire_bytes,
         exchange.send_counts_bytes,
         exchange.send_displs_bytes,
         "PmSolver::interpolateForces request send MPI_Alltoallv");
     checkedMpiRecordLayoutToByteLayout(
         exchange.recv_counts,
         exchange.recv_displs,
-        sizeof(PmInterpolationRequestRecord),
+        k_pm_interpolation_request_wire_bytes,
         exchange.recv_counts_bytes,
         exchange.recv_displs_bytes,
         "PmSolver::interpolateForces request receive MPI_Alltoallv");
-    MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(exchange.send_requests_flat.data()),
-        exchange.send_counts_bytes.data(),
-        exchange.send_displs_bytes.data(),
-        MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(exchange.recv_requests_flat.data()),
-        exchange.recv_counts_bytes.data(),
-        exchange.recv_displs_bytes.data(),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+        });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoallv(
+          nonNullPmWireData(exchange.send_request_wire),
+          exchange.send_counts_bytes.data(),
+          exchange.send_displs_bytes.data(),
+          MPI_BYTE,
+          nonNullPmWireData(exchange.recv_request_wire),
+          exchange.recv_counts_bytes.data(),
+          exchange.recv_displs_bytes.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+    });
 
-    for (int source_rank = 0; source_rank < world_size; ++source_rank) {
+    std::string local_force_request_validation_error;
+    try {
+      decodePmWireRecords<PmInterpolationRequestRecord>(
+          exchange.recv_request_wire,
+          k_pm_interpolation_request_wire_bytes,
+          exchange.recv_requests_flat,
+          [](std::span<const std::uint8_t> bytes) {
+            return decodePmInterpolationRequest(
+                bytes, PmWireRecordKind::kForceRequest, "PmSolver::interpolateForces request decode");
+          },
+          request_exchange_context);
+
+      for (int source_rank = 0; source_rank < world_size; ++source_rank) {
       auto& batch = exchange.send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
       const int begin = exchange.recv_displs[static_cast<std::size_t>(source_rank)];
       const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
+      std::optional<std::uint32_t> previous_sequence;
       for (int i = 0; i < count; ++i) {
         const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
         if (request.origin_rank != static_cast<std::uint32_t>(source_rank)) {
@@ -2399,6 +3645,16 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request origin rank does not match MPI sender segment"));
         }
+        if (request.destination_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request destination rank does not match receiving slab rank"));
+        }
         if (request.exchange_epoch != exchange_epoch) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolateForces slab evaluation",
@@ -2409,6 +3665,17 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request exchange epoch is stale/mismatched; expected=" + std::to_string(exchange_epoch)));
         }
+        if (previous_sequence.has_value() && request.request_sequence <= *previous_sequence) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request sequence is duplicate or non-monotonic for sender segment"));
+        }
+        previous_sequence = request.request_sequence;
         if (!std::isfinite(request.weight)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolateForces slab evaluation",
@@ -2439,6 +3706,18 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request x-index is not owned by receiving slab"));
         }
+        const int expected_owner = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, request.global_ix);
+        if (expected_owner != grid.slabLayout().world_rank ||
+            expected_owner != static_cast<int>(request.destination_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request expected mesh owner does not match routed destination"));
+        }
         const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
         if (!std::isfinite(grid.force_x()[index]) || !std::isfinite(grid.force_y()[index]) ||
             !std::isfinite(grid.force_z()[index])) {
@@ -2452,6 +3731,7 @@ void PmSolver::interpolateForces(
               "mesh force contribution is not finite"));
         }
         batch.push_back(PmForceContributionRecord{
+            .source_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
             .origin_rank = request.origin_rank,
             .request_sequence = request.request_sequence,
             .origin_particle_index = request.origin_particle_index,
@@ -2461,18 +3741,35 @@ void PmSolver::interpolateForces(
             .accel_z = request.weight * grid.force_z()[index],
         });
       }
+      }
+    } catch (const std::exception& error) {
+      local_force_request_validation_error = error.what();
+    } catch (...) {
+      local_force_request_validation_error = "non-standard exception while validating force requests";
     }
+    throwIfPmPayloadValidationFailed(
+        "PmSolver::interpolateForces request receive",
+        grid.slabLayout().world_rank,
+        world_size,
+        local_force_request_validation_error,
+        routed_mpi_wait_ms);
 
     constexpr std::string_view response_exchange_context = "PmSolver::interpolateForces response exchange";
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces response send preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_send_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
       const int mpi_count = checkedMpiRecordCountOrDisplacement(
-          count, sizeof(PmForceContributionRecord), response_exchange_context, "send record count", rank);
+          count, k_pm_force_response_wire_bytes, response_exchange_context, "send record count", rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_send_contribs, sizeof(PmForceContributionRecord), response_exchange_context, "send record displacement", rank);
+          total_send_contribs, k_pm_force_response_wire_bytes, response_exchange_context, "send record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_send_contribs, count, sizeof(PmForceContributionRecord), response_exchange_context, rank);
+          total_send_contribs, count, k_pm_force_response_wire_bytes, response_exchange_context, rank);
       exchange.send_contrib_counts[static_cast<std::size_t>(rank)] = mpi_count;
       exchange.send_contrib_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_send_contribs = next_total;
@@ -2483,62 +3780,102 @@ void PmSolver::interpolateForces(
       const auto& source = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)];
       exchange.send_contribs_flat.insert(exchange.send_contribs_flat.end(), source.begin(), source.end());
     }
+    encodePmWireRecords<PmForceContributionRecord>(
+        exchange.send_contribs_flat,
+        k_pm_force_response_wire_bytes,
+        exchange.send_contrib_wire,
+        [](const PmForceContributionRecord& record, std::span<std::uint8_t> bytes) {
+          encodePmForceResponse(record, bytes);
+        },
+        response_exchange_context);
+        });
 
-    MPI_Alltoall(
-        exchange.send_contrib_counts.data(),
-        1,
-        MPI_INT,
-        exchange.recv_contrib_counts.data(),
-        1,
-        MPI_INT,
-        MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoall(
+          exchange.send_contrib_counts.data(),
+          1,
+          MPI_INT,
+          exchange.recv_contrib_counts.data(),
+          1,
+          MPI_INT,
+          MPI_COMM_WORLD);
+    });
 
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces response receive-layout preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_recv_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = checkedMpiReceivedRecordCount(
           exchange.recv_contrib_counts[static_cast<std::size_t>(rank)],
-          sizeof(PmForceContributionRecord),
+          k_pm_force_response_wire_bytes,
           response_exchange_context,
           rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_recv_contribs, sizeof(PmForceContributionRecord), response_exchange_context, "received record displacement", rank);
+          total_recv_contribs, k_pm_force_response_wire_bytes, response_exchange_context, "received record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_recv_contribs, count, sizeof(PmForceContributionRecord), response_exchange_context, rank);
+          total_recv_contribs, count, k_pm_force_response_wire_bytes, response_exchange_context, rank);
       exchange.recv_contrib_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_recv_contribs = next_total;
     }
-    exchange.recv_contribs_flat.resize(total_recv_contribs);
+    exchange.recv_contrib_wire.resize(checkedPmWireByteCount(
+        total_recv_contribs, k_pm_force_response_wire_bytes, response_exchange_context));
 
     checkedMpiRecordLayoutToByteLayout(
         exchange.send_contrib_counts,
         exchange.send_contrib_displs,
-        sizeof(PmForceContributionRecord),
+        k_pm_force_response_wire_bytes,
         exchange.send_contrib_counts_bytes,
         exchange.send_contrib_displs_bytes,
         "PmSolver::interpolateForces response send MPI_Alltoallv");
     checkedMpiRecordLayoutToByteLayout(
         exchange.recv_contrib_counts,
         exchange.recv_contrib_displs,
-        sizeof(PmForceContributionRecord),
+        k_pm_force_response_wire_bytes,
         exchange.recv_contrib_counts_bytes,
         exchange.recv_contrib_displs_bytes,
         "PmSolver::interpolateForces response receive MPI_Alltoallv");
-    MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(exchange.send_contribs_flat.data()),
-        exchange.send_contrib_counts_bytes.data(),
-        exchange.send_contrib_displs_bytes.data(),
-        MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(exchange.recv_contribs_flat.data()),
-        exchange.recv_contrib_counts_bytes.data(),
-        exchange.recv_contrib_displs_bytes.data(),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+        });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoallv(
+          nonNullPmWireData(exchange.send_contrib_wire),
+          exchange.send_contrib_counts_bytes.data(),
+          exchange.send_contrib_displs_bytes.data(),
+          MPI_BYTE,
+          nonNullPmWireData(exchange.recv_contrib_wire),
+          exchange.recv_contrib_counts_bytes.data(),
+          exchange.recv_contrib_displs_bytes.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+    });
 
-    for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
+    std::string local_force_response_validation_error;
+    try {
+      decodePmWireRecords<PmForceContributionRecord>(
+          exchange.recv_contrib_wire,
+          k_pm_force_response_wire_bytes,
+          exchange.recv_contribs_flat,
+          [](std::span<const std::uint8_t> bytes) { return decodePmForceResponse(bytes); },
+          response_exchange_context);
+
+      for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
       const int begin = exchange.recv_contrib_displs[static_cast<std::size_t>(sender_rank)];
       const int count = exchange.recv_contrib_counts[static_cast<std::size_t>(sender_rank)];
       for (int i = 0; i < count; ++i) {
         const auto& contribution = exchange.recv_contribs_flat[static_cast<std::size_t>(begin + i)];
+        if (contribution.source_rank != static_cast<std::uint32_t>(sender_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.exchange_epoch,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response source rank does not match MPI sender segment"));
+        }
         if (contribution.origin_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolateForces origin accumulation",
@@ -2638,36 +3975,52 @@ void PmSolver::interpolateForces(
         accel_y[p] += contribution.accel_y;
         accel_z[p] += contribution.accel_z;
       }
-    }
-
-    for (std::size_t request_index = 0; request_index < request_registry.size(); ++request_index) {
-      if (response_received[request_index] == 0U) {
-        const auto& expected_request = request_registry[request_index];
-        throw std::invalid_argument(pmRoutingDiagnostic(
-            "PmSolver::interpolateForces origin accumulation",
-            grid.slabLayout().world_rank,
-            expected_request.expected_sender_rank,
-            expected_request.exchange_epoch,
-            static_cast<std::uint32_t>(request_index),
-            expected_request.origin_particle_index,
-            "missing response contribution for issued request"));
       }
+
+      for (std::size_t request_index = 0; request_index < request_registry.size(); ++request_index) {
+        if (response_received[request_index] == 0U) {
+          const auto& expected_request = request_registry[request_index];
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolateForces origin accumulation",
+              grid.slabLayout().world_rank,
+              expected_request.expected_sender_rank,
+              expected_request.exchange_epoch,
+              static_cast<std::uint32_t>(request_index),
+              expected_request.origin_particle_index,
+              "missing response contribution for issued request"));
+        }
+      }
+    } catch (const std::exception& error) {
+      local_force_response_validation_error = error.what();
+    } catch (...) {
+      local_force_response_validation_error = "non-standard exception while validating force responses";
     }
+    throwIfPmPayloadValidationFailed(
+        "PmSolver::interpolateForces response receive",
+        grid.slabLayout().world_rank,
+        world_size,
+        local_force_response_validation_error,
+        routed_mpi_wait_ms);
     if (profile != nullptr) {
       profile->routed_force_requests += static_cast<std::uint64_t>(request_registry.size());
       profile->routed_force_peer_count += static_cast<std::uint64_t>(std::count_if(
           exchange.send_counts.begin(),
           exchange.send_counts.end(),
           [](int count) { return count > 0; }));
+      profile->routed_mpi_bytes_sent += static_cast<std::uint64_t>(
+          exchange.send_request_wire.size() + exchange.send_contrib_wire.size());
+      profile->routed_mpi_bytes_received += static_cast<std::uint64_t>(
+          exchange.recv_request_wire.size() + exchange.recv_contrib_wire.size());
+      profile->routed_mpi_wait_ms += routed_mpi_wait_ms;
       profile->force_halo_cache_hits += force_halo_cache_hits;
       profile->bytes_moved += checkedAddBytes(
           checkedBytesForCount(
               exchange.send_requests_flat.size() + exchange.recv_requests_flat.size(),
-              sizeof(PmInterpolationRequestRecord),
+              k_pm_interpolation_request_wire_bytes,
               "PM force routed request profile"),
           checkedBytesForCount(
               exchange.send_contribs_flat.size() + exchange.recv_contribs_flat.size(),
-              sizeof(PmForceContributionRecord),
+              k_pm_force_response_wire_bytes,
               "PM force routed response profile"),
           "PM force routed exchange profile");
     }
@@ -2689,7 +4042,55 @@ void PmSolver::interpolatePotential(
     std::span<double> potential,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+#if COSMOSIM_ENABLE_MPI
+  double distributed_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kInterpolatePotential,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        distributed_preflight_mpi_wait_ms);
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential distributed API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        distributed_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in interpolatePotential");
+          }
+          if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
+            throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument("PmSolver::interpolatePotential requires a valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::interpolatePotential slab layout world metadata must match MPI_COMM_WORLD");
+          }
+          if (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+              m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            throw std::invalid_argument(
+                "PmSolver::interpolatePotential mesh dimensions exceed fixed-width routing indices");
+          }
+        });
+  }
+#endif
   validateOptions(m_shape, options);
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
+    throw std::invalid_argument("PM solver/grid shape mismatch in interpolatePotential");
+  }
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
     throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
   }
@@ -2707,8 +4108,7 @@ void PmSolver::interpolatePotential(
   if (distributed_slabs) {
     int mpi_world_size = 1;
     int mpi_world_rank = 0;
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_world_rank);
+    queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
     if (mpi_world_size != grid.slabLayout().world_size || mpi_world_rank != grid.slabLayout().world_rank) {
       throw std::invalid_argument(
           "PmSolver::interpolatePotential slab layout world metadata must match MPI_COMM_WORLD");
@@ -2723,12 +4123,38 @@ void PmSolver::interpolatePotential(
   const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
   const double inv_dy = static_cast<double>(m_shape.ny) / lengths.ly;
   const double inv_dz = static_cast<double>(m_shape.nz) / lengths.lz;
+  if (distributed_slabs &&
+      (m_shape.nx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+       m_shape.ny > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+       m_shape.nz > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))) {
+    throw std::invalid_argument("PmSolver::interpolatePotential mesh dimensions exceed fixed-width routing indices");
+  }
+  std::optional<std::size_t> first_non_finite_target_index;
+  for (std::size_t p = 0; p < pos_x.size(); ++p) {
+    if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p])) {
+      first_non_finite_target_index = p;
+      break;
+    }
+  }
+  if (!distributed_slabs && first_non_finite_target_index.has_value()) {
+    throw std::invalid_argument(
+        "PmSolver::interpolatePotential requires finite particle coordinates; particle_index=" +
+        std::to_string(*first_non_finite_target_index));
+  }
 
   if (!distributed_slabs) {
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        potential[p] = 0.0;
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -2736,11 +4162,26 @@ void PmSolver::interpolatePotential(
 
       double phi = 0.0;
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic
+            ? wrapIndex(sx.offsets[dx], m_shape.nx)
+            : static_cast<std::size_t>(sx.offsets[dx]);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic
+              ? wrapIndex(sy.offsets[dy], m_shape.ny)
+              : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic
+                ? wrapIndex(sz.offsets[dz], m_shape.nz)
+                : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             phi += weight * grid.potential()[grid.linearIndex(ix, iy, iz)];
           }
@@ -2751,8 +4192,42 @@ void PmSolver::interpolatePotential(
   } else {
 #if COSMOSIM_ENABLE_MPI
     const int world_size = grid.slabLayout().world_size;
-    const std::uint64_t exchange_epoch = m_impl->nextDistributedInterpolationExchangeEpoch();
-    auto& exchange = m_impl->potentialInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    double routed_mpi_wait_ms = distributed_preflight_mpi_wait_ms;
+    const int local_targets_valid = first_non_finite_target_index.has_value() ? 0 : 1;
+    int all_targets_valid = 0;
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Allreduce(&local_targets_valid, &all_targets_valid, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    });
+    if (all_targets_valid == 0) {
+      const std::string local_detail = first_non_finite_target_index.has_value()
+          ? " local_first_invalid_particle_index=" + std::to_string(*first_non_finite_target_index)
+          : " local_targets_valid=true";
+      throw std::invalid_argument(
+          "PmSolver::interpolatePotential rejected non-finite target coordinates on at least one MPI rank;" +
+          local_detail);
+    }
+    std::uint64_t exchange_epoch = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential exchange epoch allocation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() { exchange_epoch = m_impl->nextDistributedExchangeEpoch(); });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolatePotential");
+    });
+    constexpr std::string_view request_exchange_context = "PmSolver::interpolatePotential request exchange";
+    Impl::InterpolationExchangeBuffers<PmPotentialContributionRecord>* exchange_ptr = nullptr;
+    std::vector<PmInterpolationRequestRegistryEntry> request_registry;
+    std::vector<std::uint8_t> response_received;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential request send preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
+    exchange_ptr = &m_impl->potentialInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    auto& exchange = *exchange_ptr;
     for (auto& per_rank : exchange.send_requests_by_rank) {
       per_rank.clear();
     }
@@ -2761,8 +4236,12 @@ void PmSolver::interpolatePotential(
     }
     exchange.send_requests_flat.clear();
     exchange.recv_requests_flat.clear();
+    exchange.send_request_wire.clear();
+    exchange.recv_request_wire.clear();
     exchange.send_contribs_flat.clear();
     exchange.recv_contribs_flat.clear();
+    exchange.send_contrib_wire.clear();
+    exchange.recv_contrib_wire.clear();
     std::fill(exchange.send_counts.begin(), exchange.send_counts.end(), 0);
     std::fill(exchange.send_displs.begin(), exchange.send_displs.end(), 0);
     std::fill(exchange.recv_counts.begin(), exchange.recv_counts.end(), 0);
@@ -2780,30 +4259,51 @@ void PmSolver::interpolatePotential(
     std::fill(exchange.recv_contrib_counts_bytes.begin(), exchange.recv_contrib_counts_bytes.end(), 0);
     std::fill(exchange.recv_contrib_displs_bytes.begin(), exchange.recv_contrib_displs_bytes.end(), 0);
 
-    std::vector<PmInterpolationRequestRegistryEntry> request_registry;
     std::uint32_t next_request_sequence = 0;
+    const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
     for (std::size_t p = 0; p < pos_x.size(); ++p) {
       if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         throw std::invalid_argument("PmSolver::interpolatePotential origin particle index exceeds routing token limit");
       }
-      const double x = wrapPosition(pos_x[p], lengths.lx) * inv_dx;
-      const double y = wrapPosition(pos_y[p], lengths.ly) * inv_dy;
-      const double z = wrapPosition(pos_z[p], lengths.lz) * inv_dz;
+      if (!periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        continue;
+      }
+      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
       const PmAxisStencil1d sz = makeAxisStencil(z, options.assignment_scheme);
       for (std::size_t dx = 0; dx < sx.count; ++dx) {
-        const std::size_t ix = wrapIndex(sx.offsets[dx], m_shape.nx);
+        if (!periodic && (sx.offsets[dx] < 0 || sx.offsets[dx] >= static_cast<std::ptrdiff_t>(m_shape.nx))) {
+          continue;
+        }
+        const std::size_t ix = periodic
+            ? wrapIndex(sx.offsets[dx], m_shape.nx)
+            : static_cast<std::size_t>(sx.offsets[dx]);
         const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
-        auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
-          const std::size_t iy = wrapIndex(sy.offsets[dy], m_shape.ny);
+          if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
+            continue;
+          }
+          const std::size_t iy = periodic
+              ? wrapIndex(sy.offsets[dy], m_shape.ny)
+              : static_cast<std::size_t>(sy.offsets[dy]);
           for (std::size_t dz = 0; dz < sz.count; ++dz) {
-            const std::size_t iz = wrapIndex(sz.offsets[dz], m_shape.nz);
+            if (!periodic && (sz.offsets[dz] < 0 || sz.offsets[dz] >= static_cast<std::ptrdiff_t>(m_shape.nz))) {
+              continue;
+            }
+            const std::size_t iz = periodic
+                ? wrapIndex(sz.offsets[dz], m_shape.nz)
+                : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             if (next_request_sequence == std::numeric_limits<std::uint32_t>::max()) {
               throw std::invalid_argument("PmSolver::interpolatePotential request sequence exceeds routing token limit");
             }
+            auto& batch = exchange.send_requests_by_rank[static_cast<std::size_t>(destination_rank)];
             request_registry.push_back(PmInterpolationRequestRegistryEntry{
                 .origin_particle_index = static_cast<std::uint32_t>(p),
                 .exchange_epoch = exchange_epoch,
@@ -2811,6 +4311,7 @@ void PmSolver::interpolatePotential(
             });
             batch.push_back(PmInterpolationRequestRecord{
                 .origin_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
+                .destination_rank = static_cast<std::uint32_t>(destination_rank),
                 .request_sequence = next_request_sequence,
                 .origin_particle_index = static_cast<std::uint32_t>(p),
                 .global_ix = static_cast<std::uint32_t>(ix),
@@ -2824,18 +4325,17 @@ void PmSolver::interpolatePotential(
         }
       }
     }
-    std::vector<std::uint8_t> response_received(request_registry.size(), 0U);
+    response_received.assign(request_registry.size(), 0U);
 
-    constexpr std::string_view request_exchange_context = "PmSolver::interpolatePotential request exchange";
     std::size_t total_send = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)].size();
       const int mpi_count = checkedMpiRecordCountOrDisplacement(
-          count, sizeof(PmInterpolationRequestRecord), request_exchange_context, "send record count", rank);
+          count, k_pm_interpolation_request_wire_bytes, request_exchange_context, "send record count", rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_send, sizeof(PmInterpolationRequestRecord), request_exchange_context, "send record displacement", rank);
+          total_send, k_pm_interpolation_request_wire_bytes, request_exchange_context, "send record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_send, count, sizeof(PmInterpolationRequestRecord), request_exchange_context, rank);
+          total_send, count, k_pm_interpolation_request_wire_bytes, request_exchange_context, rank);
       exchange.send_counts[static_cast<std::size_t>(rank)] = mpi_count;
       exchange.send_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_send = next_total;
@@ -2846,55 +4346,90 @@ void PmSolver::interpolatePotential(
       const auto& source = exchange.send_requests_by_rank[static_cast<std::size_t>(rank)];
       exchange.send_requests_flat.insert(exchange.send_requests_flat.end(), source.begin(), source.end());
     }
+    encodePmWireRecords<PmInterpolationRequestRecord>(
+        exchange.send_requests_flat,
+        k_pm_interpolation_request_wire_bytes,
+        exchange.send_request_wire,
+        [](const PmInterpolationRequestRecord& record, std::span<std::uint8_t> bytes) {
+          encodePmInterpolationRequest(record, PmWireRecordKind::kPotentialRequest, bytes);
+        },
+        request_exchange_context);
+        });
+    auto& exchange = *exchange_ptr;
 
-    MPI_Alltoall(
-        exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoall(
+          exchange.send_counts.data(), 1, MPI_INT, exchange.recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    });
 
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential request receive-layout preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_recv = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = checkedMpiReceivedRecordCount(
           exchange.recv_counts[static_cast<std::size_t>(rank)],
-          sizeof(PmInterpolationRequestRecord),
+          k_pm_interpolation_request_wire_bytes,
           request_exchange_context,
           rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_recv, sizeof(PmInterpolationRequestRecord), request_exchange_context, "received record displacement", rank);
+          total_recv, k_pm_interpolation_request_wire_bytes, request_exchange_context, "received record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_recv, count, sizeof(PmInterpolationRequestRecord), request_exchange_context, rank);
+          total_recv, count, k_pm_interpolation_request_wire_bytes, request_exchange_context, rank);
       exchange.recv_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_recv = next_total;
     }
-    exchange.recv_requests_flat.resize(total_recv);
+    exchange.recv_request_wire.resize(checkedPmWireByteCount(
+        total_recv, k_pm_interpolation_request_wire_bytes, request_exchange_context));
 
     checkedMpiRecordLayoutToByteLayout(
         exchange.send_counts,
         exchange.send_displs,
-        sizeof(PmInterpolationRequestRecord),
+        k_pm_interpolation_request_wire_bytes,
         exchange.send_counts_bytes,
         exchange.send_displs_bytes,
         "PmSolver::interpolatePotential request send MPI_Alltoallv");
     checkedMpiRecordLayoutToByteLayout(
         exchange.recv_counts,
         exchange.recv_displs,
-        sizeof(PmInterpolationRequestRecord),
+        k_pm_interpolation_request_wire_bytes,
         exchange.recv_counts_bytes,
         exchange.recv_displs_bytes,
         "PmSolver::interpolatePotential request receive MPI_Alltoallv");
-    MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(exchange.send_requests_flat.data()),
-        exchange.send_counts_bytes.data(),
-        exchange.send_displs_bytes.data(),
-        MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(exchange.recv_requests_flat.data()),
-        exchange.recv_counts_bytes.data(),
-        exchange.recv_displs_bytes.data(),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+        });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoallv(
+          nonNullPmWireData(exchange.send_request_wire),
+          exchange.send_counts_bytes.data(),
+          exchange.send_displs_bytes.data(),
+          MPI_BYTE,
+          nonNullPmWireData(exchange.recv_request_wire),
+          exchange.recv_counts_bytes.data(),
+          exchange.recv_displs_bytes.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+    });
 
-    for (int source_rank = 0; source_rank < world_size; ++source_rank) {
+    std::string local_potential_request_validation_error;
+    try {
+      decodePmWireRecords<PmInterpolationRequestRecord>(
+          exchange.recv_request_wire,
+          k_pm_interpolation_request_wire_bytes,
+          exchange.recv_requests_flat,
+          [](std::span<const std::uint8_t> bytes) {
+            return decodePmInterpolationRequest(
+                bytes, PmWireRecordKind::kPotentialRequest, "PmSolver::interpolatePotential request decode");
+          },
+          request_exchange_context);
+
+      for (int source_rank = 0; source_rank < world_size; ++source_rank) {
       auto& batch = exchange.send_contribs_by_rank[static_cast<std::size_t>(source_rank)];
       const int begin = exchange.recv_displs[static_cast<std::size_t>(source_rank)];
       const int count = exchange.recv_counts[static_cast<std::size_t>(source_rank)];
+      std::optional<std::uint32_t> previous_sequence;
       for (int i = 0; i < count; ++i) {
         const auto& request = exchange.recv_requests_flat[static_cast<std::size_t>(begin + i)];
         if (request.origin_rank != static_cast<std::uint32_t>(source_rank)) {
@@ -2907,6 +4442,16 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request origin rank does not match MPI sender segment"));
         }
+        if (request.destination_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request destination rank does not match receiving slab rank"));
+        }
         if (request.exchange_epoch != exchange_epoch) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolatePotential slab evaluation",
@@ -2917,6 +4462,17 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request exchange epoch is stale/mismatched; expected=" + std::to_string(exchange_epoch)));
         }
+        if (previous_sequence.has_value() && request.request_sequence <= *previous_sequence) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request sequence is duplicate or non-monotonic for sender segment"));
+        }
+        previous_sequence = request.request_sequence;
         if (!std::isfinite(request.weight)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolatePotential slab evaluation",
@@ -2947,6 +4503,18 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request x-index is not owned by receiving slab"));
         }
+        const int expected_owner = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, request.global_ix);
+        if (expected_owner != grid.slabLayout().world_rank ||
+            expected_owner != static_cast<int>(request.destination_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential slab evaluation",
+              grid.slabLayout().world_rank,
+              source_rank,
+              request.exchange_epoch,
+              request.request_sequence,
+              request.origin_particle_index,
+              "request expected mesh owner does not match routed destination"));
+        }
         const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
         if (!std::isfinite(grid.potential()[index])) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -2959,6 +4527,7 @@ void PmSolver::interpolatePotential(
               "mesh potential contribution is not finite"));
         }
         batch.push_back(PmPotentialContributionRecord{
+            .source_rank = static_cast<std::uint32_t>(grid.slabLayout().world_rank),
             .origin_rank = request.origin_rank,
             .request_sequence = request.request_sequence,
             .origin_particle_index = request.origin_particle_index,
@@ -2966,18 +4535,35 @@ void PmSolver::interpolatePotential(
             .potential = request.weight * grid.potential()[index],
         });
       }
+      }
+    } catch (const std::exception& error) {
+      local_potential_request_validation_error = error.what();
+    } catch (...) {
+      local_potential_request_validation_error = "non-standard exception while validating potential requests";
     }
+    throwIfPmPayloadValidationFailed(
+        "PmSolver::interpolatePotential request receive",
+        grid.slabLayout().world_rank,
+        world_size,
+        local_potential_request_validation_error,
+        routed_mpi_wait_ms);
 
     constexpr std::string_view response_exchange_context = "PmSolver::interpolatePotential response exchange";
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential response send preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_send_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)].size();
       const int mpi_count = checkedMpiRecordCountOrDisplacement(
-          count, sizeof(PmPotentialContributionRecord), response_exchange_context, "send record count", rank);
+          count, k_pm_potential_response_wire_bytes, response_exchange_context, "send record count", rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_send_contribs, sizeof(PmPotentialContributionRecord), response_exchange_context, "send record displacement", rank);
+          total_send_contribs, k_pm_potential_response_wire_bytes, response_exchange_context, "send record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_send_contribs, count, sizeof(PmPotentialContributionRecord), response_exchange_context, rank);
+          total_send_contribs, count, k_pm_potential_response_wire_bytes, response_exchange_context, rank);
       exchange.send_contrib_counts[static_cast<std::size_t>(rank)] = mpi_count;
       exchange.send_contrib_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_send_contribs = next_total;
@@ -2988,63 +4574,103 @@ void PmSolver::interpolatePotential(
       const auto& source = exchange.send_contribs_by_rank[static_cast<std::size_t>(rank)];
       exchange.send_contribs_flat.insert(exchange.send_contribs_flat.end(), source.begin(), source.end());
     }
+    encodePmWireRecords<PmPotentialContributionRecord>(
+        exchange.send_contribs_flat,
+        k_pm_potential_response_wire_bytes,
+        exchange.send_contrib_wire,
+        [](const PmPotentialContributionRecord& record, std::span<std::uint8_t> bytes) {
+          encodePmPotentialResponse(record, bytes);
+        },
+        response_exchange_context);
+        });
 
-    MPI_Alltoall(
-        exchange.send_contrib_counts.data(),
-        1,
-        MPI_INT,
-        exchange.recv_contrib_counts.data(),
-        1,
-        MPI_INT,
-        MPI_COMM_WORLD);
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoall(
+          exchange.send_contrib_counts.data(),
+          1,
+          MPI_INT,
+          exchange.recv_contrib_counts.data(),
+          1,
+          MPI_INT,
+          MPI_COMM_WORLD);
+    });
 
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential response receive-layout preparation",
+        grid.slabLayout().world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
     std::size_t total_recv_contribs = 0;
     for (int rank = 0; rank < world_size; ++rank) {
       const std::size_t count = checkedMpiReceivedRecordCount(
           exchange.recv_contrib_counts[static_cast<std::size_t>(rank)],
-          sizeof(PmPotentialContributionRecord),
+          k_pm_potential_response_wire_bytes,
           response_exchange_context,
           rank);
       const int mpi_displacement = checkedMpiRecordCountOrDisplacement(
-          total_recv_contribs, sizeof(PmPotentialContributionRecord), response_exchange_context, "received record displacement", rank);
+          total_recv_contribs, k_pm_potential_response_wire_bytes, response_exchange_context, "received record displacement", rank);
       const std::size_t next_total = checkedMpiRecordTotal(
-          total_recv_contribs, count, sizeof(PmPotentialContributionRecord), response_exchange_context, rank);
+          total_recv_contribs, count, k_pm_potential_response_wire_bytes, response_exchange_context, rank);
       exchange.recv_contrib_displs[static_cast<std::size_t>(rank)] = mpi_displacement;
       total_recv_contribs = next_total;
     }
-    exchange.recv_contribs_flat.resize(total_recv_contribs);
+    exchange.recv_contrib_wire.resize(checkedPmWireByteCount(
+        total_recv_contribs, k_pm_potential_response_wire_bytes, response_exchange_context));
 
     checkedMpiRecordLayoutToByteLayout(
         exchange.send_contrib_counts,
         exchange.send_contrib_displs,
-        sizeof(PmPotentialContributionRecord),
+        k_pm_potential_response_wire_bytes,
         exchange.send_contrib_counts_bytes,
         exchange.send_contrib_displs_bytes,
         "PmSolver::interpolatePotential response send MPI_Alltoallv");
     checkedMpiRecordLayoutToByteLayout(
         exchange.recv_contrib_counts,
         exchange.recv_contrib_displs,
-        sizeof(PmPotentialContributionRecord),
+        k_pm_potential_response_wire_bytes,
         exchange.recv_contrib_counts_bytes,
         exchange.recv_contrib_displs_bytes,
         "PmSolver::interpolatePotential response receive MPI_Alltoallv");
-    MPI_Alltoallv(
-        reinterpret_cast<const std::uint8_t*>(exchange.send_contribs_flat.data()),
-        exchange.send_contrib_counts_bytes.data(),
-        exchange.send_contrib_displs_bytes.data(),
-        MPI_BYTE,
-        reinterpret_cast<std::uint8_t*>(exchange.recv_contribs_flat.data()),
-        exchange.recv_contrib_counts_bytes.data(),
-        exchange.recv_contrib_displs_bytes.data(),
-        MPI_BYTE,
-        MPI_COMM_WORLD);
+        });
+    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+      MPI_Alltoallv(
+          nonNullPmWireData(exchange.send_contrib_wire),
+          exchange.send_contrib_counts_bytes.data(),
+          exchange.send_contrib_displs_bytes.data(),
+          MPI_BYTE,
+          nonNullPmWireData(exchange.recv_contrib_wire),
+          exchange.recv_contrib_counts_bytes.data(),
+          exchange.recv_contrib_displs_bytes.data(),
+          MPI_BYTE,
+          MPI_COMM_WORLD);
+    });
 
-    std::fill(potential.begin(), potential.end(), 0.0);
-    for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
+    std::string local_potential_response_validation_error;
+    try {
+      decodePmWireRecords<PmPotentialContributionRecord>(
+          exchange.recv_contrib_wire,
+          k_pm_potential_response_wire_bytes,
+          exchange.recv_contribs_flat,
+          [](std::span<const std::uint8_t> bytes) { return decodePmPotentialResponse(bytes); },
+          response_exchange_context);
+
+      std::fill(potential.begin(), potential.end(), 0.0);
+      for (int sender_rank = 0; sender_rank < world_size; ++sender_rank) {
       const int begin = exchange.recv_contrib_displs[static_cast<std::size_t>(sender_rank)];
       const int count = exchange.recv_contrib_counts[static_cast<std::size_t>(sender_rank)];
       for (int i = 0; i < count; ++i) {
         const auto& contribution = exchange.recv_contribs_flat[static_cast<std::size_t>(begin + i)];
+        if (contribution.source_rank != static_cast<std::uint32_t>(sender_rank)) {
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              sender_rank,
+              contribution.exchange_epoch,
+              contribution.request_sequence,
+              contribution.origin_particle_index,
+              "response source rank does not match MPI sender segment"));
+        }
         if (contribution.origin_rank != static_cast<std::uint32_t>(grid.slabLayout().world_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolatePotential origin accumulation",
@@ -3140,35 +4766,51 @@ void PmSolver::interpolatePotential(
         response_received[contribution.request_sequence] = 1U;
         potential[static_cast<std::size_t>(contribution.origin_particle_index)] += contribution.potential;
       }
-    }
-
-    for (std::size_t request_index = 0; request_index < request_registry.size(); ++request_index) {
-      if (response_received[request_index] == 0U) {
-        const auto& expected_request = request_registry[request_index];
-        throw std::invalid_argument(pmRoutingDiagnostic(
-            "PmSolver::interpolatePotential origin accumulation",
-            grid.slabLayout().world_rank,
-            expected_request.expected_sender_rank,
-            expected_request.exchange_epoch,
-            static_cast<std::uint32_t>(request_index),
-            expected_request.origin_particle_index,
-            "missing response contribution for issued request"));
       }
+
+      for (std::size_t request_index = 0; request_index < request_registry.size(); ++request_index) {
+        if (response_received[request_index] == 0U) {
+          const auto& expected_request = request_registry[request_index];
+          throw std::invalid_argument(pmRoutingDiagnostic(
+              "PmSolver::interpolatePotential origin accumulation",
+              grid.slabLayout().world_rank,
+              expected_request.expected_sender_rank,
+              expected_request.exchange_epoch,
+              static_cast<std::uint32_t>(request_index),
+              expected_request.origin_particle_index,
+              "missing response contribution for issued request"));
+        }
+      }
+    } catch (const std::exception& error) {
+      local_potential_response_validation_error = error.what();
+    } catch (...) {
+      local_potential_response_validation_error = "non-standard exception while validating potential responses";
     }
+    throwIfPmPayloadValidationFailed(
+        "PmSolver::interpolatePotential response receive",
+        grid.slabLayout().world_rank,
+        world_size,
+        local_potential_response_validation_error,
+        routed_mpi_wait_ms);
     if (profile != nullptr) {
       profile->routed_potential_requests += static_cast<std::uint64_t>(request_registry.size());
       profile->routed_potential_peer_count += static_cast<std::uint64_t>(std::count_if(
           exchange.send_counts.begin(),
           exchange.send_counts.end(),
           [](int count) { return count > 0; }));
+      profile->routed_mpi_bytes_sent += static_cast<std::uint64_t>(
+          exchange.send_request_wire.size() + exchange.send_contrib_wire.size());
+      profile->routed_mpi_bytes_received += static_cast<std::uint64_t>(
+          exchange.recv_request_wire.size() + exchange.recv_contrib_wire.size());
+      profile->routed_mpi_wait_ms += routed_mpi_wait_ms;
       profile->bytes_moved += checkedAddBytes(
           checkedBytesForCount(
               exchange.send_requests_flat.size() + exchange.recv_requests_flat.size(),
-              sizeof(PmInterpolationRequestRecord),
+              k_pm_interpolation_request_wire_bytes,
               "PM potential routed request profile"),
           checkedBytesForCount(
               exchange.send_contribs_flat.size() + exchange.recv_contribs_flat.size(),
-              sizeof(PmPotentialContributionRecord),
+              k_pm_potential_response_wire_bytes,
               "PM potential routed response profile"),
           "PM potential routed exchange profile");
     }
@@ -3193,6 +4835,66 @@ void PmSolver::solveForParticles(
     std::span<double> accel_z,
     const PmSolveOptions& options,
     PmProfileEvent* profile) {
+#if COSMOSIM_ENABLE_MPI
+  double solve_preflight_mpi_wait_ms = 0.0;
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
+  if (mpi_world_size > 1) {
+    const bool rank_local_serial_layout =
+        grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
+    validatePmCollectiveEntryConsensus(
+        PmCollectiveEntryKind::kSolveForParticles,
+        rank_local_serial_layout,
+        m_shape,
+        options,
+        solve_preflight_mpi_wait_ms,
+        static_cast<int>(options.execution_policy),
+        static_cast<int>(options.boundary_condition));
+    runPmCoordinatedPhase(
+        "PmSolver::solveForParticles API preflight",
+        mpi_world_rank,
+        mpi_world_size,
+        solve_preflight_mpi_wait_ms,
+        [&]() {
+          validateOptions(m_shape, options);
+          if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny ||
+              grid.shape().nz != m_shape.nz) {
+            throw std::invalid_argument("PM solver/grid shape mismatch in solveForParticles");
+          }
+          if (!grid.slabLayout().isValid()) {
+            throw std::invalid_argument("PmSolver::solveForParticles requires a valid PM slab layout");
+          }
+          if (!rank_local_serial_layout &&
+              (mpi_world_size != grid.slabLayout().world_size ||
+               mpi_world_rank != grid.slabLayout().world_rank)) {
+            throw std::invalid_argument(
+                "PmSolver::solveForParticles slab layout world metadata must match MPI_COMM_WORLD");
+          }
+          if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() ||
+              pos_x.size() != mass.size() || pos_x.size() != accel_x.size() ||
+              pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
+            throw std::invalid_argument(
+                "Particle coordinate/mass/acceleration spans must match in solveForParticles");
+          }
+#if !COSMOSIM_ENABLE_CUDA
+          if (options.execution_policy == core::ExecutionPolicy::kCuda) {
+            throw std::runtime_error(
+                "PM solve requested execution_policy=cuda, but this build has COSMOSIM_ENABLE_CUDA=OFF");
+          }
+#else
+          if (options.execution_policy == core::ExecutionPolicy::kCuda &&
+              !rank_local_serial_layout) {
+            throw std::invalid_argument(
+                "Distributed PM solve does not support execution_policy=cuda");
+          }
+#endif
+        });
+    if (profile != nullptr) {
+      profile->routed_mpi_wait_ms += solve_preflight_mpi_wait_ms;
+    }
+  }
+#endif
   validateOptions(m_shape, options);
 
   if (options.execution_policy == core::ExecutionPolicy::kCuda) {

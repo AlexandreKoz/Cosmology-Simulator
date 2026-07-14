@@ -53,6 +53,60 @@ struct PowerSpectrumBin {
   std::uint64_t mode_count = 0;
 };
 
+enum class PowerSpectrumMassAssignment : std::uint8_t {
+  kNearestGridPoint = 0,
+  kCloudInCell = 1,
+};
+
+enum class PowerSpectrumWindowCorrection : std::uint8_t {
+  kNone = 0,
+  kDeconvolveAssignmentWindow = 1,
+};
+
+enum class PowerSpectrumShotNoisePolicy : std::uint8_t {
+  kReportWithoutSubtraction = 0,
+  kSubtractPoisson = 1,
+};
+
+struct PowerSpectrumEstimateOptions {
+  std::size_t mesh_n = 0;
+  std::size_t bin_count = 0;
+  PowerSpectrumMassAssignment mass_assignment = PowerSpectrumMassAssignment::kCloudInCell;
+  PowerSpectrumWindowCorrection window_correction =
+      PowerSpectrumWindowCorrection::kDeconvolveAssignmentWindow;
+  PowerSpectrumShotNoisePolicy shot_noise_policy =
+      PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction;
+};
+
+struct PowerSpectrumEstimateBin {
+  std::size_t bin_index = 0;
+  double k_lower_code = 0.0;
+  double k_upper_code = 0.0;
+  double k_center_code = 0.0;
+  double power_code_volume = 0.0;
+  std::uint64_t mode_count = 0;
+  bool empty = true;
+};
+
+struct PowerSpectrumEstimate {
+  PowerSpectrumEstimateOptions options;
+  double box_size_code = 0.0;
+  double k_fundamental_code = 0.0;
+  double k_axis_nyquist_code = 0.0;
+  double poisson_shot_noise_code_volume = 0.0;
+  std::vector<PowerSpectrumEstimateBin> bins;
+};
+
+[[nodiscard]] std::string_view powerSpectrumMassAssignmentLabel(
+    PowerSpectrumMassAssignment assignment) noexcept;
+[[nodiscard]] std::string_view powerSpectrumWindowCorrectionLabel(
+    PowerSpectrumWindowCorrection correction) noexcept;
+[[nodiscard]] std::string_view powerSpectrumShotNoisePolicyLabel(
+    PowerSpectrumShotNoisePolicy policy) noexcept;
+[[nodiscard]] std::string_view powerSpectrumKUnits() noexcept;
+[[nodiscard]] std::string_view powerSpectrumPowerUnits() noexcept;
+[[nodiscard]] std::string_view powerSpectrumFourierNormalization() noexcept;
+
 struct StarFormationHistoryBin {
   double scale_factor_center = 0.0;
   double formed_mass_code = 0.0;
@@ -160,6 +214,17 @@ class DiagnosticsEngine {
       const core::SimulationState& state,
       std::size_t mesh_n,
       std::size_t bin_count) const;
+
+  // Detailed deterministic reference estimator used when assignment/window/
+  // noise policy and empty-bin representation must be explicit and
+  // reproducible. Its direct DFT is intended for controlled validation meshes,
+  // not high-dynamic-range production analysis.
+  [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimate(
+      const ParticleDiagnosticsView& particles,
+      const PowerSpectrumEstimateOptions& options) const;
+  [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimate(
+      const core::SimulationState& state,
+      const PowerSpectrumEstimateOptions& options) const;
 
   [[nodiscard]] std::vector<StarFormationHistoryBin> computeStarFormationHistory(
       const StarFormationHistoryView& stars,

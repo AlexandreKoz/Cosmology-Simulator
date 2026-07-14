@@ -596,9 +596,12 @@ struct PmMeshOwnershipDescriptor {
 };
 
 struct TreePseudoParticleDescriptor {
+  std::uint32_t wire_version = 1U;
   std::uint64_t pseudo_particle_id = 0;
   int source_rank = 0;
   std::uint64_t decomposition_epoch = 0;
+  std::uint64_t force_epoch = 0;
+  std::uint64_t exchange_sequence = 0;
   bool derived_not_authoritative = true;
 };
 
@@ -619,6 +622,8 @@ struct TreePseudoParticlePacket {
   std::uint32_t local_node_index = 0;
   std::uint8_t child_count = 0;
   std::uint8_t is_leaf = 0;
+  // 0: ordinary Euclidean frame; 1: contiguous periodic-unwrapped interval.
+  std::uint8_t geometry_frame = 0;
 };
 
 struct HydroGhostCellDescriptor {
@@ -889,10 +894,18 @@ struct PmSlabLayout {
   }
   const std::size_t world = static_cast<std::size_t>(world_size);
   const std::size_t rank_u = static_cast<std::size_t>(rank);
-  const std::size_t base = global_nx / world;
-  const std::size_t remainder = global_nx % world;
-  const std::size_t begin = rank_u * base + std::min(rank_u, remainder);
-  const std::size_t extent = base + (rank_u < remainder ? 1U : 0U);
+  // FFTW MPI uses a fixed ceil(global_nx / world_size) input block and
+  // truncates the final block.  Keeping CHUI's authority map identical to
+  // that backend partition avoids a hidden redistribution layer and, unlike
+  // remainder-to-low-ranks partitioning, is correct when the remainder is
+  // neither zero nor world_size - 1.
+  const std::size_t block = global_nx / world + (global_nx % world != 0U ? 1U : 0U);
+  // Clamp before multiplication: for extreme size_t domains the mathematical
+  // fixed-block offset can lie beyond global_nx even though rank_u*block would
+  // overflow the host index type.
+  const std::size_t begin =
+      rank_u > global_nx / block ? global_nx : std::min(rank_u * block, global_nx);
+  const std::size_t extent = std::min(block, global_nx - begin);
   return {.begin_x = begin, .end_x = begin + extent};
 }
 

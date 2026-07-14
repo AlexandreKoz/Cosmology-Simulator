@@ -10,6 +10,27 @@
 namespace cosmosim::gravity {
 namespace {
 
+__device__ double atomicAddDoubleCompatible(double* address, double value) {
+#if __CUDA_ARCH__ >= 600
+  return atomicAdd(address, value);
+#else
+  // Native double atomicAdd starts at sm_60. Keep the repository's sm_52
+  // build contract by using the CUDA programming-guide CAS fallback. Compare
+  // integer representations so a NaN payload cannot make the loop spin.
+  auto* address_as_ull = reinterpret_cast<unsigned long long int*>(address);
+  unsigned long long int old = *address_as_ull;
+  unsigned long long int assumed = 0U;
+  do {
+    assumed = old;
+    old = atomicCAS(
+        address_as_ull,
+        assumed,
+        __double_as_longlong(value + __longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+#endif
+}
+
 __device__ std::size_t wrapIndexDevice(long long i, std::size_t n) {
   const long long n_signed = static_cast<long long>(n);
   long long wrapped = i % n_signed;
@@ -63,7 +84,9 @@ __global__ void assignDensityKernel(
       for (std::size_t dz = 0; dz < 2; ++dz) {
         const std::size_t iz = wrapIndexDevice(iz0 + static_cast<long long>(dz), launch.nz);
         const std::size_t linear_index = (ix * launch.ny + iy) * launch.nz + iz;
-        atomicAdd(&density[linear_index], mass[particle_index] * wx[dx] * wy[dy] * wz[dz]);
+        atomicAddDoubleCompatible(
+            &density[linear_index],
+            mass[particle_index] * wx[dx] * wy[dy] * wz[dz]);
       }
     }
   }

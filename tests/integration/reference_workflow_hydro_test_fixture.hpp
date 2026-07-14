@@ -41,10 +41,11 @@ constexpr std::size_t k_cell_count = k_nx * k_ny * k_nz;
   stream << "time_begin_code = 0.01\n";
   stream << "time_end_code = 0.0104\n";
   stream << "max_global_steps = 2\n";
-  stream << "hierarchical_max_rung = 1\n";
+  stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 9\n";
   stream << "treepm_asmth_cells = 1.25\n";
-  stream << "treepm_rcut_cells = 4.5\n";
+  // Keep the low-cost CI mesh inside the periodic one-minimum-image cutoff.
+  stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_assignment_scheme = cic\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
   stream << "[output]\n";

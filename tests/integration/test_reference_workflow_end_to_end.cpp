@@ -42,10 +42,11 @@ int main() {
     stream << "time_begin_code = 0.01\n";
     stream << "time_end_code = 0.0102\n";
     stream << "max_global_steps = 2\n";
-    stream << "hierarchical_max_rung = 1\n\n";
+    stream << "hierarchical_max_rung = 0\n\n";
     stream << "treepm_pm_grid = 9\n";
     stream << "treepm_asmth_cells = 1.75\n";
-    stream << "treepm_rcut_cells = 6.0\n";
+    // Keep this low-cost workflow fixture inside the periodic one-image domain.
+    stream << "treepm_rcut_cells = 3.9\n";
     stream << "treepm_assignment_scheme = " << assignment_scheme << '\n';
     stream << "treepm_update_cadence_steps = " << cadence_steps << "\n\n";
     stream << "[output]\n";
@@ -220,12 +221,26 @@ int main() {
   assert(op_text.find("\"provenance_config_hash_hex\"") != std::string::npos);
   assert(op_text.find("\"status\": \"ok\"") != std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.treepm_setup\"") != std::string::npos);
-  assert(op_text.find("\"event_kind\": \"gravity.pm_long_range_field\"") != std::string::npos);
+  const std::size_t first_pm_event_begin =
+      op_text.find("\"event_kind\": \"gravity.pm_long_range_field\"");
+  assert(first_pm_event_begin != std::string::npos);
+  const std::size_t first_pm_event_end =
+      op_text.find("\"event_kind\":", first_pm_event_begin + 1U);
+  const std::string first_pm_event = op_text.substr(
+      first_pm_event_begin,
+      first_pm_event_end == std::string::npos
+          ? std::string::npos
+          : first_pm_event_end - first_pm_event_begin);
+  assert(first_pm_event.find("\"gravity_kick_opportunity\": \"1\"") != std::string::npos);
+  assert(first_pm_event.find("\"field_version\": \"1\"") != std::string::npos);
   assert(op_text.find("\"pm_grid\": \"9x9x9\"") != std::string::npos);
   assert(op_text.find("\"pm_assignment_scheme\": \"cic\"") != std::string::npos);
   assert(op_text.find("\"softening_kernel\": \"plummer\"") != std::string::npos);
   assert(op_text.find("\"pm_fft_backend\"") != std::string::npos);
   assert(op_text.find("\"pm_update_cadence_steps\": \"1\"") != std::string::npos);
+  assert(op_text.find("\"gravitational_constant_code\": \"0.000000\"") == std::string::npos);
+  assert(op_text.find("\"tree_relative_force_acceleration_floor\": \"0.000000\"") ==
+      std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.health_summary\"") != std::string::npos);
   assert(op_text.find("\"heavy_reference_checks_opt_in\": \"false\"") != std::string::npos);
 
@@ -245,44 +260,14 @@ int main() {
 
   const std::string cadence_two_config =
       buildConfigText(2, "reference_integration_test_cadence_two", "cic");
-  const cosmosim::core::FrozenConfig cadence_two_frozen =
-      cosmosim::core::loadFrozenConfigFromString(cadence_two_config, "test_reference_workflow_cadence_two");
-  cosmosim::workflows::ReferenceWorkflowRunner cadence_two_runner(cadence_two_frozen);
-  const cosmosim::workflows::ReferenceWorkflowReport cadence_two_report_a =
-      cadence_two_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
-  const cosmosim::workflows::ReferenceWorkflowReport cadence_two_report_b =
-      cadence_two_runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
-
-  assert(cadence_two_report_a.completed_steps == 2);
-  assert(cadence_two_report_a.treepm_update_cadence_steps == 2);
-  assert(cadence_two_report_a.treepm_long_range_refresh_count == 2);
-  assert(cadence_two_report_a.treepm_long_range_reuse_count == 1);
-  assert(cadence_two_report_a.treepm_cadence_records.size() == 3);
-  const std::vector<std::uint64_t> expected_field_versions{1, 1, 2};
-  const std::vector<std::uint64_t> expected_field_built_steps{0, 0, 1};
-  const std::vector<bool> expected_refresh_flags{true, false, true};
-  const std::vector<std::string> expected_stage_names{
-      "gravity_kick_pre", "force_refresh", "force_refresh"};
-  for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
-    const auto& record = cadence_two_report_a.treepm_cadence_records[i];
-    assert(record.stage_name == expected_stage_names[i]);
-    assert(record.gravity_kick_opportunity == i + 1U);
-    assert(record.field_version == expected_field_versions[i]);
-    assert(record.field_built_step_index == expected_field_built_steps[i]);
-    assert(record.refreshed_long_range_field == expected_refresh_flags[i]);
+  bool unsafe_cadence_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        cadence_two_config, "test_reference_workflow_cadence_two");
+  } catch (const cosmosim::core::ConfigError&) {
+    unsafe_cadence_rejected = true;
   }
-  assert(cadence_two_report_a.final_state_digest == cadence_two_report_b.final_state_digest);
-  assert(cadence_two_report_a.treepm_cadence_records.size() == cadence_two_report_b.treepm_cadence_records.size());
-  for (std::size_t i = 0; i < cadence_two_report_a.treepm_cadence_records.size(); ++i) {
-    const auto& lhs = cadence_two_report_a.treepm_cadence_records[i];
-    const auto& rhs = cadence_two_report_b.treepm_cadence_records[i];
-    assert(lhs.step_index == rhs.step_index);
-    assert(lhs.stage_name == rhs.stage_name);
-    assert(lhs.gravity_kick_opportunity == rhs.gravity_kick_opportunity);
-    assert(lhs.field_version == rhs.field_version);
-    assert(lhs.field_built_step_index == rhs.field_built_step_index);
-    assert(lhs.refreshed_long_range_field == rhs.refreshed_long_range_field);
-  }
+  assert(unsafe_cadence_rejected);
 
   const std::string restart_diagnostics_config =
       buildConfigText(1, "reference_integration_test_restart_diagnostics", "cic") +
@@ -387,7 +372,7 @@ int main() {
     cfg << "max_global_steps = 1\n";
     cfg << "treepm_pm_grid = 9\n";
     cfg << "treepm_asmth_cells = nan\n";
-    cfg << "treepm_rcut_cells = 6.0\n";
+    cfg << "treepm_rcut_cells = 3.9\n";
     cfg << "treepm_update_cadence_steps = 1\n\n";
     cfg << "[output]\n";
     cfg << "run_name = reference_integration_test_invalid_gravity\n";
@@ -435,10 +420,10 @@ int main() {
   zoom_stream << "time_begin_code = 0.01\n";
   zoom_stream << "time_end_code = 0.0101\n";
   zoom_stream << "max_global_steps = 1\n";
-  zoom_stream << "hierarchical_max_rung = 1\n";
+  zoom_stream << "hierarchical_max_rung = 0\n";
   zoom_stream << "treepm_pm_grid = 9\n";
   zoom_stream << "treepm_asmth_cells = 1.25\n";
-  zoom_stream << "treepm_rcut_cells = 4.5\n";
+  zoom_stream << "treepm_rcut_cells = 3.9\n";
   zoom_stream << "treepm_assignment_scheme = cic\n";
   zoom_stream << "treepm_update_cadence_steps = 1\n\n";
   zoom_stream << "[output]\n";

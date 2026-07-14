@@ -12,29 +12,49 @@ This document defines the **operational contract** for `cosmosim::gravity::PmSol
 
 ## Mathematical contract
 
-Input mesh field to `solvePoissonPeriodic()` is a physical density field `ρ(x)` in solver code units.
+The input mesh field to `solvePoissonPeriodic()` is comoving mass density
+`rho_com(x)` in code units: owner particle mass divided by comoving code
+volume. It is not a physical-density lane and must not be multiplied by
+`a^3` before the solve.
 
 The solver applies explicit mean subtraction:
 
-- `δρ(x) = ρ(x) - ρ̄`
-- `ρ̄ = (1/Ncell) Σcell ρ(xcell)`
+- `delta_rho_com(x) = rho_com(x) - mean(rho_com)`
+- `mean(rho_com) = (1/Ncell) sum_cell rho_com(xcell)`
 
-and solves the periodic comoving Poisson equation:
+and solves for the scale-free comoving Newtonian potential kernel `Psi`:
 
-- `∇² φ(x) = 4 π G a² δρ(x)`
+- `nabla_x^2 Psi(x) = 4 pi G_code delta_rho_com(x)`
 
 with Fourier-space relation (for `k != 0`):
 
-- `φ_k = - 4 π G a² δρ_k / k²`
+- `Psi_k = -4 pi G_code delta_rho_com,k / k^2`
 
 and force/acceleration relation:
 
-- `a_i(k) = - i k_i φ_k`
+- `A_i(k) = -i k_i Psi_k`
+
+There is deliberately no factor of `a^2` in this operator. The production
+workflow converts the physical Newton constant into configured code units with
+`core::newtonGravitationalConstantCode(UnitSystem)` and supplies that same
+`G_code` to PM and the complementary short-range tree. In a cosmological run,
+the returned `A` is the common scale-free input to the dynamical update. For
+physical peculiar velocity `u = a dx/dt`, both collisionless KDK and the gas
+conservative source implement
+
+```text
+du/dt + H u = A/a^2.
+```
+
+The particle KDK factors and `ComovingGravityExpansionSource` therefore own
+the scale-factor response for their respective state, outside the PM kernel.
+`PmSolveOptions::scale_factor` remains required positive validity/source-time
+metadata, but changing it must not rescale an otherwise identical PM kernel.
 
 The periodic zero mode is pinned by policy:
 
-- `φ_{k=0} = 0`
-- `a_{k=0} = 0`
+- `Psi_{k=0} = 0`
+- `A_{k=0} = 0`
 
 This enforces the periodic-box gauge convention (potential mean fixed to zero; only differences are physical).
 
@@ -54,14 +74,16 @@ The negative `kz` branch is represented by Hermitian conjugates and is not expli
 
 - FFTW inverse transforms are unnormalized by FFTW; solver applies `1/Ncell` after each inverse transform.
 - Fallback `naive_dft` path already applies inverse normalization internally; no extra factor is applied on that path.
-- The contract above (`δρ`, `φ_k`, `-ikφ_k`, zero mode) is backend-invariant.
+- The contract above (`delta_rho_com`, `Psi_k`, `-ik Psi_k`, zero mode) is
+  backend-invariant.
 
 ## API-level output guarantees
 
 After `solvePoissonPeriodic(grid, options, ...)` returns successfully:
 
-- `grid.potential()` contains the periodic potential solve `φ(x)` with zero mode pinned.
-- `grid.force_x()`, `grid.force_y()`, `grid.force_z()` contain mesh acceleration components from `a_i(k) = -i k_i φ_k`.
+- `grid.potential()` contains `Psi(x)` with the zero mode pinned.
+- `grid.force_x()`, `grid.force_y()`, `grid.force_z()` contain the scale-free
+  comoving kernel components from `A_i(k) = -i k_i Psi_k`.
 
 Potential is a supported output, not an incidental side effect.
 
@@ -136,6 +158,18 @@ PM mesh ownership is now explicit through a centralized slab layout contract:
 - decomposition is by contiguous half-open x-slabs `[x_begin, x_end)`,
 - each global real-space cell `(ix, iy, iz)` is owned by exactly one rank: the slab owner of `ix`.
 
+The x-slab authority map intentionally matches FFTW-MPI's default input-block
+layout. With `B = ceil(Nx / world_size)`, rank `r` owns
+
+```text
+[min(r*B, Nx), min((r+1)*B, Nx))
+```
+
+so the final block is truncated and high ranks may own zero planes. This is not
+the alternative "give the first `Nx % world_size` ranks one extra plane"
+partition. Matching FFTW's layout is required: a different software-side owner
+map can configure at np2 yet fail ownership validation at np3 or np4.
+
 Storage is represented by `parallel::PmSlabLayout` and consumed by
 `gravity::PmGridStorage`:
 
@@ -176,9 +210,23 @@ compute weighted contributions from local PM fields, and return per-particle con
 the requesting owner ranks (`MPI_Alltoallv`). Final acceleration/potential accumulation occurs
 only on the particle-owner rank in local particle order.
 
+Assignment, periodic solve, and force/potential gather use the actual
+`MPI_COMM_WORLD` size to enter a coordinated API preflight before any PM
+collective or layout-based branch. The preflight fingerprints the API
+operation, full-domain-serial versus distributed mode, mesh `nx/ny/nz`, box
+axes, scale factor, `G_code`, assignment/deconvolution, execution/residency,
+decomposition, boundary, split/workspace controls, and entry-specific control
+lanes; disagreement fails on every rank. Validation and payload-decoding
+failures are likewise reduced before throwing, so one bad rank cannot leave
+peers blocked in the next count or payload exchange. A full-domain serial
+reference solve is legal inside an MPI job only when every rank enters the same
+PM call and selects that mode. Rank-zero-only PM calls are not legal collective
+usage. Distributed callers must construct the slab layout from the active
+communicator on every rank. In an MPI-enabled executable that has not called
+`MPI_Init`, or has already finalized, the library observes a serial world and
+does not call `MPI_Comm_size`/`MPI_Comm_rank`.
 
-
-### Distributed interpolation reverse-message contract (Phase 2)
+### Distributed interpolation reverse-message contract
 
 Ownership and message flow for both force and potential gather:
 
@@ -186,25 +234,51 @@ Ownership and message flow for both force and potential gather:
 2. For each stencil node `(ix, iy, iz)`, particle owner routes a request to
    `pmOwnerRankForGlobalX(Nx, world_size, ix)`.
 3. Request payload fields are:
-   - `particle_index` (owner-local index into the caller spans),
+   - `origin_rank` and `destination_rank`,
+   - `origin_particle_index` (an opaque owner-local return token),
+   - `request_sequence` and the monotonic 64-bit `exchange_epoch`,
    - `global_ix/global_iy/global_iz`,
    - `weight` (matched deposit/gather kernel weight).
 4. **Slab-owner rank** receives requests, validates that the x-index is locally owned and the
-   global indices are in range, then computes:
+   global indices are in range, and checks sender, destination, sequence,
+   exchange epoch, and finite numerical fields before computing:
    - force gather: `weight * (ax, ay, az)` from owner-local PM force fields,
    - potential gather: `weight * phi` from owner-local PM potential field.
-5. Slab owners send per-request contributions back to the originating particle-owner rank.
-6. Particle-owner rank accumulates returned contributions by `particle_index` into output spans.
+5. Slab owners echo the request identity and their `source_rank` in each response.
+6. The particle owner matches each response to its exchange-local request
+   registry and rejects a wrong sender/token, duplicate, missing, stale, or
+   non-finite response before accumulating into its output spans.
 
 Ordering/determinism policy:
 
 - Request generation order is deterministic: particle index order, then stencil loop order
   (`x`, `y`, `z`).
-- Returned contributions are accumulated on owner rank in MPI receive order; accumulation target is
-  owner-local particle order indexed by `particle_index`.
+- Every request sequence is accepted exactly once; the opaque
+  `origin_particle_index` is interpreted only by its origin rank.
 - No rank requires replicated full PM fields for interpolation in distributed mode.
 
-### Distributed density assignment message contract (Phase 2)
+### Distributed PM wire contract
+
+PM routing never transmits a native C++ structure. Version 1 is a fixed-width,
+little-endian wire format with an IEEE-754 binary64 requirement. Every record
+starts with the 12-byte header `(magic="PMW1", version=1, record_kind)`.
+The five record kinds and exact sizes are:
+
+- density contribution: 56 bytes;
+- force request: 56 bytes;
+- force response: 64 bytes;
+- potential request: 56 bytes;
+- potential response: 48 bytes.
+
+Density records carry origin/destination rank, per-origin record sequence,
+global cell indices, exchange epoch, a zero reserved lane, and weighted mass.
+Request and response identities are the fields described above; response
+floating-point lanes contain either three acceleration components or one
+potential contribution. Decoders require the exact record size, magic,
+version, kind, zero reserved lanes, and complete record alignment before any
+authoritative mesh or particle field is mutated.
+
+### Distributed density assignment message contract
 
 Ownership and routing model:
 
@@ -215,19 +289,12 @@ Ownership and routing model:
 - Only slab owners accumulate to local PM density storage.
 - No remote direct writes are permitted.
 
-Record format (packed per contribution):
-
-- `global_ix` (`uint32`): global x cell index in `[0, Nx)`.
-- `global_iy` (`uint32`): global y cell index in `[0, Ny)`.
-- `global_iz` (`uint32`): global z cell index in `[0, Nz)`.
-- `mass_contribution` (`double`): already weighted by the matched assignment kernel.
-
 Batching and ordering:
 
 - Each owner rank batches records by destination rank.
 - In-batch order is deterministic append order from nested loops:
   particle index order, then stencil axis loop order (`x`, `y`, `z`).
-- Batched records are exchanged via `MPI_Alltoallv` as byte payloads.
+- Batched wire records are exchanged via `MPI_Alltoallv` with `MPI_BYTE`.
 - PM solver-owned send/recv buffers are reused across solves for stable layout metadata.
 - The transport is sparse by stencil owner: only slabs touched by local particle
   assignment/interpolation stencils receive records. The MPI implementation keeps
@@ -237,13 +304,16 @@ Batching and ordering:
   before falling back to routed request/response messages for non-neighbor
   stencil cells.
 - Profile counters report routed density records, routed force/potential
-  requests, participating peers, force-halo cache hits, and moved bytes so scale
-  tests can distinguish neighbor/cache traffic from remote routed fallback.
+  requests, participating peers, force-halo cache hits, wire bytes sent and
+  received, and measured MPI wait time so scale tests can distinguish
+  neighbor/cache traffic from remote routed fallback.
 
 Receiver validation before accumulation:
 
 - Reject any received record with out-of-range global indices.
 - Reject any record whose `global_ix` is not owned by the receiving slab rank.
+- Reject wrong sender/origin/destination identity, non-monotonic per-sender
+  sequence, stale exchange epoch, or non-finite mass.
 - Accepted records are accumulated only into owner-local slab storage and then normalized by local cell volume.
 
 The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
@@ -256,6 +326,34 @@ This keeps the PM operator auditable while avoiding repeated per-solve heap allo
 Plan/scratch caches are keyed by slab layout ownership metadata (`world_size`, `world_rank`,
 `owned_x.begin`, `owned_x.end`) and are reused until layout/communicator metadata changes.
 Inverse normalization is applied exactly once per inverse field (`φ`, `a_x`, `a_y`, `a_z`).
+FFTW-MPI ranks with a legal zero-width slab retain a logical extent of zero but
+receive a one-element dummy allocation for backend pointer safety; they still
+participate in plan creation, transforms, and all PM collectives.
+
+### PM force-slab halo exchange
+
+TreePM populates a one-dimensional x-halo cache for PM force interpolation.
+Logical left/right peers are derived from the owners of the adjacent global x
+planes, not from `rank-1`/`rank+1`; this skips zero-width slabs and handles a
+truncated final FFTW block. A rank with no owned planes participates in the
+call but has no peers, payload, or halo storage. Locally owned periodic sides
+are copied without MPI.
+
+Remote sides post all `MPI_Irecv` operations before `MPI_Isend`, then complete
+with `MPI_Waitall`. Side- and sequence-qualified tags keep left/right
+orientation distinct even when both logical neighbors are the same peer in a
+two-rank periodic layout. The exchanged depth is bounded by the smallest
+nonempty slab extent, and payload/count/byte arithmetic is checked before MPI.
+All preparation, allocation, and local field-shape failures are reduced before
+point-to-point traffic. A global fingerprint binds mesh shape, requested halo
+depth, periodic mode, communicator size, and exchange sequence, so divergent
+rank-local controls fail coherently. The single-rank helper remains legal in an
+MPI-enabled library without an active MPI session.
+
+`integration_pm_slab_halo_exchange_mpi_{two,three,four}_rank` covers ordinary
+periodic rings, same-peer left/right exchange, `Nx < world_size` zero-width
+slabs, and the single-global-plane local-copy case. All three rank counts passed
+in the 2026-07-13 MPI+HDF5+FFTW run.
 
 ### Pencil-transposed distributed PM path (current implementation)
 
@@ -268,18 +366,41 @@ when FFTW+MPI distributed plans are available. The path is explicit and does not
 
 This gives a real end-to-end alternate decomposition mode with explicit transpose ownership and sequence while preserving existing slab semantics as fallback.
 
-## Long-range field cadence and reuse (Reference workflow Phase 1)
+## Long-range field cadence and reuse
 
-The reference TreePM workflow now supports explicit long-range PM reuse controlled by
-`numerics.treepm_update_cadence_steps`:
+Production configuration requires `numerics.treepm_update_cadence_steps = 1`
+and `numerics.hierarchical_max_rung = 0`. The latter is a fail-closed
+restriction: production `ReferenceWorkflow` does not yet persist the
+per-element kick/drift epochs needed for a correct mixed-rung KDK update. Every
+integrator-issued, rank-coordinated production force-refresh surface therefore
+rebuilds PM. Cadence values greater than one are rejected because no validated
+long-range predictor or temporal interpolator exists.
 
-- cadence unit: gravity kick opportunities (`gravity_kick_pre`, `gravity_kick_post`)
-- refresh rule: rebuild PM mesh/field every `N` kick opportunities (`N >= 1`)
-- reuse rule: between refreshes, reuse the cached PM long-range field and only rebuild/evaluate short-range tree residual forces
+The integrator-owned synchronization event carries kick opportunity, refresh
+decision, field version, last refresh opportunity, build step, and build scale
+factor. The workflow requires all ranks to agree on those values and on the
+refresh vote before entering PM collectives. Empty active sets do not opt a
+rank out of this consensus.
 
-Phase 1 scope is deliberately conservative and single-rank. It is an auditable cadence control surface, not a full multirate production design.
+The coordinator retains an explicit lower-level reuse API for controlled tests
+and future integrator work. Reuse requires an exact transient signature match
+for force epoch, force-evaluation scale factor, `G_code`, split scale,
+rectangular box axes, assignment, boundary, decomposition mode, and
+deconvolution policy on every rank. A missing or incompatible cache makes a
+reuse request fail on all ranks; it is not silently converted into an
+unrequested solve. Divergent explicit refresh votes likewise fail before
+density assignment or FFT collectives.
 
-Operational metadata records which PM field version each kick used, including the field build step index and build scale factor.
+Particle ownership changes advance the TreePM decomposition epoch used by tree
+wire records, but they do not by themselves invalidate a PM mesh field owned by
+fixed FFT slabs. The long-range compatibility comparison therefore deliberately
+does not include the particle-decomposition epoch. It does include the physical
+force epoch and every mesh/operator input above. Dense-row acceleration history
+is separate: the workflow invalidates that force cache immediately after a
+committed ownership change. Production currently does not exercise local-bin
+PM reuse because `hierarchical_max_rung=0`; lower-level reuse evidence must not
+be described as mixed-rung production maturity. Operational metadata still
+records each solve/reuse decision and its exact field-version/build context.
 
 ## Optional modifiers
 
@@ -292,23 +413,56 @@ Operational metadata records which PM field version each kick used, including th
     it is derived from normalized config controls as `r_s = asmth_cells * Δmesh`.
   - `Δmesh = cbrt((Lx/Nx)*(Ly/Ny)*(Lz/Nz))` in this stage.
   - Companion TreePM cutoff uses `r_cut = rcut_cells * Δmesh` on the residual tree path.
+  - The certified default is `asmth_cells=1.25`, `rcut_cells=6.25`, hence
+    `r_cut/r_s=5`. Smaller positive explicit cutoffs remain accepted for
+    compatibility/sweeps but are not covered by the default certification.
+  - Periodic TreePM additionally requires `r_cut < min(Lx,Ly,Lz)/2` because
+    the residual tree evaluates one minimum image per source. Typed config and
+    direct coordinator entry fail closed at equality or above; refine the PM
+    mesh or lower `rcut_cells` and revalidate the resulting profile.
+
+The TreePM coordinator applies the same physical `G_code`, with no scale-factor
+power, to the complementary real-space residual. It rejects unequal PM/tree
+`G_code` inputs and derives the effective short-range prefactor without
+changing standalone-tree semantics. A non-unit-scale-factor regression checks
+that an otherwise identical complete PM-plus-tree kernel is scale invariant;
+the particle KDK kick or gas conservative source supplies the time-dependent
+`1/a^2` response.
 
 These modifiers do not alter the base sign/normalization contract above.
 
-Default policy in this phase is conservative:
+Default production policy is the independently validated profile:
 
-- `assignment_scheme = CIC`
-- `enable_window_deconvolution = false`
+- `assignment_scheme = TSC`
+- `enable_window_deconvolution = true`
+
+This default change is reproducibility-relevant and is captured by normalized
+configuration and `provenance_v6`. Existing explicit CIC/deconvolution-off
+decks keep their requested behavior.
 
 ## Accuracy/cost tradeoffs in this stage
 
-- CIC is cheaper (2-point stencil/axis, 8 points in 3D) and remains first-class.
-- TSC is smoother and generally reduces anisotropy/self-force artifacts, but uses 3 points/axis (27 points in 3D).
-- Deconvolution improves transfer amplitude matching for resolved modes, but can amplify high-`k` noise/aliasing near Nyquist; therefore it is opt-in.
+- CIC is cheaper (2-point stencil/axis, 8 points in 3D) and remains available
+  for compatibility and diagnostics, but is not the accuracy-certified default
+  for the current mesh/split envelope.
+- TSC uses 3 points/axis (27 points in 3D) and is the certified CPU/FFTW profile.
+- Deconvolution improves resolved-mode transfer matching but can amplify
+  high-`k` noise/aliasing near Nyquist. It is enabled for the certified default;
+  users changing assignment, deconvolution, mesh, split, or cutoff must treat
+  that as a new accuracy profile.
+- Raising the cutoff from the historical 4.5-cell profile to 6.25 cells closes
+  the observed cutoff-transition accuracy gap, but increases residual tree
+  search volume, pair work, and distributed target/response traffic. That
+  tradeoff must be included in profiling and scaling evidence.
 
 ## Implementation note
 
-- Explicit CUDA PM assignment/gather remains CIC-only in this build; CPU paths support both `cic` and `tsc`. This guard is intentional and explicit rather than hidden.
+- Explicit CUDA PM assignment/gather remains CIC-only in this build; CPU paths
+  support both `cic` and `tsc`. The CUDA 12.0 `cuda-debug` build and its
+  123/123 test inventory pass, including the PM smoke. Pre-sm_60 targets use a
+  CAS-backed double density atomic while newer targets use native
+  double-precision `atomicAdd`. This build/runtime closure does not promote
+  CIC into the Ewald-certified TSC profile.
 
 ## Validation focus for this stage
 
@@ -317,18 +471,30 @@ Validation and tests explicitly cover:
 - analytic single-mode potential and force shape,
 - uniform-density cancellation (mean subtraction + zero-mode policy),
 - potential-force consistency for a simple periodic mode,
-- transverse leakage diagnostics in periodic mode integration test.
+- transverse leakage diagnostics in periodic mode integration test,
+- FFTW-MPI slab ownership and halo exchange at np2/np3/np4, including empty
+  slabs and same-peer periodic neighbors,
+- an independent Ewald comparison for the complete periodic TreePM force.
+
+The Ewald gate certifies the current TSC+deconvolution profile with the typed
+runtime `opening_theta=0.7` default at `relative_L2 <= 1e-2` and
+`p99_normalized <= 5e-2`. The 2026-07-13 run observed worst certified values
+`8.059667017e-3` and `8.157551429e-3` on the exact cancellation-dominated
+`4^3` DMO initial lattice. CIC is still measured, but
+its worst covered uniform and split-transition cases exceed those targets and
+remain diagnostic. See `docs/tree_pm_coupling.md` for the complete fixture and
+reference contract.
 
 Recommended commands:
 
 ```bash
 cmake --preset pm-hdf5-fftw-debug
 cmake --build --preset build-pm-hdf5-fftw-debug
-ctest --preset test-pm-hdf5-fftw-debug -R "unit_pm_solver|integration_pm_periodic_mode|validation_integration"
+ctest --preset test-pm-hdf5-fftw-debug -R "unit_pm_solver|integration_pm_periodic_mode|validation_periodic_ewald_reference|validation_tree_pm_ewald_accuracy"
 # when MPI is available:
 cmake --preset mpi-hdf5-fftw-debug
 cmake --build --preset build-mpi-hdf5-fftw-debug
-ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two_rank"
+ctest --test-dir build/mpi-hdf5-fftw-debug --output-on-failure -R "integration_pm_periodic_mode_mpi|integration_pm_slab_halo_exchange_mpi|validation_phase2_mpi_gravity"
 ```
 
 - Distributed PM source terms are owner-local inputs: ranks contribute only their owned particle subset, while PM deposition and interpolation route remote slab interactions explicitly through MPI.
@@ -336,9 +502,12 @@ ctest --preset test-mpi-hdf5-fftw-debug -R "integration_pm_periodic_mode_mpi_two
 
 ## Isolated/open PM operator (non-periodic)
 
-For `mode_policy.gravity_boundary = isolated_monopole`, the PM long-range solve uses a **single-rank doubled-domain free-space convolution** on the mesh:
+For `mode_policy.gravity_boundary = isolated_monopole`, the PM long-range solve
+uses a doubled-domain free-space convolution on the mesh. Single-rank execution
+solves locally; the bounded multi-rank compatibility route gathers the slab
+field to a root solve and scatters the result:
 
-1. embed physical density on a padded grid `(2Nx, 2Ny, 2Nz)`,
+1. embed comoving code density on a padded grid `(2Nx, 2Ny, 2Nz)`,
 2. convolve with the free-space kernel in Fourier space,
 3. extract the physical `(Nx,Ny,Nz)` block.
 
@@ -347,19 +516,28 @@ This is linear (non-circular) convolution on the physical domain, so isolated mo
 We solve the isolated Poisson problem in a finite domain with far-field gauge
 \(\phi(\|x\|\to\infty)=0\):
 
-- unsplit: \(\nabla^2\phi = 4\pi G a^2 \rho\)
-- TreePM long-range split: \(\phi_{\mathrm{LR}}(x)= -G a^2\int \rho(x')\,\frac{\mathrm{erf}(\|x-x'\|/(2r_s))}{\|x-x'\|}\,d^3x'\)
+- unsplit: \(\nabla_x^2\Psi = 4\pi G_{\rm code}\rho_{\rm com}\)
+- TreePM long-range split: \(\Psi_{\mathrm{LR}}(x)= -G_{\rm code}\int \rho_{\rm com}(x')\,\frac{\mathrm{erf}(\|x-x'\|/(2r_s))}{\|x-x'\|}\,d^3x'\)
 
 with \(r_s =\) `tree_pm_split_scale_comoving`.
 
 Conventions in this stage:
-- **Potential gauge:** \(\phi(\infty)=0\), approximated by finite-box open convolution.
-- **Force recovery:** \(\mathbf{a}=-\nabla\phi\), using second-order central differences in the interior and second-order one-sided stencils on physical boundaries.
+- **Potential gauge:** \(\Psi(\infty)=0\), approximated by finite-box open convolution.
+- **Force recovery:** \(\mathbf A=-\nabla_x\Psi\), using second-order central differences in the interior and second-order one-sided stencils on physical boundaries.
 - **Boundary condition model:** open/non-periodic; no periodic image wrapping in the short-range residual path.
+- **Assignment/gather boundary stencils:** physical-domain CIC/TSC stencil
+  points are clipped, not wrapped to the opposite face. Particles outside the
+  open domain contribute/sample zero. Clipped weights are not renormalized into
+  the domain, preserving the finite-domain convolution interpretation.
 - **Split consistency:** Tree short-range residual keeps the complementary Gaussian real-space factor `erfc(r/(2r_s))`, so long+short composes to Newtonian force before explicit cutoff.
 - **Self term policy:** kernel value at `r=0` is set to zero in the PM convolution.
 
 Current stage limitations and safety policy:
+- Typed config validation requires
+  `numerics.treepm_enable_window_deconvolution=false` for isolated/open
+  gravity. The periodic-profile default is `true`, so an isolated deck that
+  omits the key fails during config loading; the solver does not silently
+  rewrite frozen configuration. Tracked isolated examples set it explicitly.
 - Single-rank isolated PM remains the normal supported path.
 - Multi-rank isolated/open PM uses a root-gather/root-scatter implementation only
   as a bounded small-grid compatibility path. It is correct inside the configured
@@ -376,3 +554,7 @@ Current stage limitations and safety policy:
   bounded by `parallel.zoom_high_res_allgather_limit_bytes` and reports the
   gathered bytes/limit in TreePM diagnostics; it must not be described as a
   production-scale source transport.
+- The focused correction uses the isolated/open convolution and explicitly
+  disables PM window deconvolution even when the global periodic solve uses the
+  certified TSC+deconvolution profile. Isolated/open deconvolution is rejected
+  and has no accuracy certification in this stage.

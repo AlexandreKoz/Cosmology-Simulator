@@ -105,7 +105,7 @@ payloads.
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v5`)
+- schema tag (`provenance_v6`)
 - config schema identity (`config_schema_name`, `config_schema_version`)
 - audit payloads (`raw_input_config`, `normalized_config`, `derived_runtime_state`)
 - deterministic normalized config hash (`normalized_config_hash_hex`)
@@ -117,6 +117,9 @@ payloads.
   - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
     `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,
     `gravity_treepm_rcut_cells`, `gravity_treepm_update_cadence_steps`,
+    `gravity_treepm_tree_opening_criterion`, `gravity_treepm_tree_opening_theta`,
+    `gravity_treepm_tree_relative_force_tolerance`,
+    `gravity_treepm_tree_relative_force_acceleration_floor`,
     `gravity_treepm_pm_decomposition_mode`, `gravity_treepm_tree_exchange_batch_bytes`
   - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving` (`Δmesh`),
     `gravity_treepm_split_scale_mpc_comoving` (`r_s`),
@@ -152,13 +155,28 @@ payloads.
     - `gravity.treepm_setup` (one setup event with PMGRID, assignment, deconvolution,
       ASMTH/RCUT controls, derived `Δmesh`/`r_s`/`r_cut`, cadence, softening policy/kernel,
       FFT backend),
-    - `gravity.pm_long_range_field` (refresh/reuse event per gravity kick opportunity carrying
-      the same PM contract plus cadence state/version payload).
+    - `gravity.pm_long_range_field` (refresh/reuse event per gravity kick
+      opportunity carrying the same PM contract plus
+      `gravity_kick_opportunity`, `field_version`, `field_built_step_index`, and
+      `field_built_scale_factor`). Because the event is emitted before cadence
+      commit, these four values come from the pending integrator-issued
+      `PmRefreshDirective`/solver decision, not the previous committed
+      `PmSynchronizationState`. This corrects stale initial-refresh payloads
+      without changing the event schema or cadence ownership.
     - `gravity.zoom_force_diagnostics` (per-kick zoom decomposition norms and low-resolution contamination counters).
     - `gravity.health_check` (targeted warning/fatal event for explicit gravity-state violations;
       fatal events are not downgraded into generic diagnostics).
     - `gravity.health_summary` (per-kick gravity health counters summarizing cheap always-on checks
       and heavy reference-only checks when policy enabled).
+
+Gravity operational-event payload values are strings. Diagnostic doubles that
+carry solver evidence use scientific notation with
+`std::numeric_limits<double>::max_digits10` precision, including `G_code`, the
+relative-MAC acceleration floor, split/cutoff/softening scales, force L2 norms,
+and field/force-evaluation scale factors. This prevents small nonzero values
+from being serialized as `0.000000`. It is a value-format correction within
+operational report schema version 1; it does not alter snapshot/restart schema
+or numerical state.
 
 ## 4.1) Diagnostics bundle maturity metadata
 
@@ -219,8 +237,11 @@ When changing snapshot/restart/provenance fields:
   mapping. Mixed states where `cells.size() != particles.size()` are no longer an
   exact-size validation bypass.
 - Diagnostics maturity metadata is additive to diagnostics JSON bundles and does not alter snapshot/restart/provenance schema compatibility.
-- Provenance payload now includes additive zoom-gravity metadata and contamination-radius contract keys;
-  this is a backward-compatible extension to `provenance_v5`.
+- Provenance v6 adds the TreePM tree opening criterion, Barnes-Hut threshold, relative-force
+  tolerance, and relative-force acceleration floor. Readers accept v5 records without these
+  fields and apply the historical production defaults (`com_distance`, `0.7`, `0.005`, and
+  `1e-30` code-acceleration units, respectively). The zoom-gravity metadata and
+  contamination-radius contract keys remain additive fields.
 
 
 ### AMR patch geometry restart lanes (v16)

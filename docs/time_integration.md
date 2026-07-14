@@ -28,64 +28,95 @@ Any new `IntegrationCallback` implementation must provide:
 
 Existing code that previously registered a broad callback and checked `context.stage` internally must split the behavior into explicit stage declarations or return the exact small stage set needed by the handler. No config keys, snapshot/restart payloads, or solver numerics migrate for this interface repair.
 
-### TreePM long-range PM kick operator contract (distributed TreePM runtime)
+### TreePM long-range force-refresh contract (distributed TreePM runtime)
 
-The reference workflow now applies an explicit, config-driven long-range PM kick operator inside KDK:
+The reference workflow applies an integrator-owned, config-driven TreePM
+operator inside KDK. An invalid initial force cache is bootstrapped at the
+globally authorized `gravity_kick_pre` boundary. After drift, the
+`force_refresh` stage evaluates the force at the end-of-step source epoch; the
+`gravity_kick_post` stage consumes that cache for the closing half-kick.
 
-- operator symbol: `K_PM^LR(surface, opportunity, version)`
-- synchronization surfaces: `gravity_kick_pre` and `gravity_kick_post` only
-- operator action per kick surface:
-  1) decide refresh/reuse for PM long-range field (`refresh_long_range_field`);
-  2) evaluate PM long-range acceleration on the **active particle set only** using either refreshed or cached field;
-  3) add PM+tree residual acceleration to active particles and apply half-kick update.
+The synchronization decision is explicit in workflow runtime events and
+cadence records (`pm_sync_surface`, `gravity_kick_opportunity`,
+`field_version`, `last_refresh_opportunity`, `active_particles_kicked`,
+`inactive_particles_skipped`).
 
-This operator is explicit in workflow runtime events and cadence records (`pm_sync_surface`, `gravity_kick_opportunity`, `field_version`, `last_refresh_opportunity`, `active_particles_kicked`, `inactive_particles_skipped`).
+For the in-flight refresh, the integrator-issued `PmRefreshDirective` is the
+decision authority until `PmSynchronizationState` commits it. The
+`gravity.pm_long_range_field` event is emitted in that interval, so its
+opportunity, version, build step, and build scale-factor payload must come from
+the directive/solver decision. Reading the still-previous committed cadence
+state there would produce a self-contradictory refresh event. This event fix
+does not move live cadence ownership away from `PmSynchronizationState`.
 
-#### Refresh and reuse rule
+#### Production refresh and lower-level reuse rule
 
-- cadence control: `numerics.treepm_update_cadence_steps` (integer `>= 1`)
-- cadence unit: **gravity kick opportunities** (`gravity_kick_pre` and `gravity_kick_post`)
-- policy:
-  - refresh PM mesh solve when no cached field exists, or when
-    `current_kick_opportunity - last_refresh_opportunity >= cadence_steps`
-  - otherwise reuse the cached long-range PM field and only evaluate interpolation + tree residual for active targets
-- rank-consensus requirements in distributed runs:
-  - each rank increments the kick opportunity on every gravity kick stage, even when the local active target set is empty;
-  - refresh/reuse is a rank-consensus decision (all ranks must either refresh or reuse on the same opportunity);
-  - cadence metadata (`gravity_kick_opportunity`, `field_version`, `last_refresh_opportunity`, refresh flag) is expected to remain coherent across ranks.
+- `numerics.treepm_update_cadence_steps` is normalized and validated as exactly
+  `1` for the production `ReferenceWorkflow`.
+- Every authorized, rank-coordinated production force-refresh evaluates a new
+  PM field. All ranks enter the decision and collectives, including ranks with
+  zero local targets.
+- Lower-level scheduler and `TreePmCoordinator` interfaces retain explicit
+  refresh/reuse support for focused tests and future multirate work. Reuse is
+  legal only when a compatible cached field is present on every rank. A
+  missing or incompatible cache throws coherently; it is never converted into
+  an implicit refresh.
+- Cache compatibility covers force epoch, force-evaluation scale-factor
+  metadata, `G_code`, split and box geometry, assignment, boundary,
+  decomposition-layout mode, and window-deconvolution policy. Particle
+  ownership/decomposition epoch is intentionally excluded because the cached
+  PM field is owned by the fixed FFT slab layout, not particle rows.
+- Refresh/reuse votes and cadence metadata are rank-consensus facts.
 
-The temporal contract for reuse is explicit: a reused PM field corresponds to the particle state and scale factor from the last refresh opportunity, and that metadata is recorded by the workflow report/events.
-With `treepm_update_cadence_steps = 1` (default), behavior reduces to immediate PM refresh at every kick opportunity.
+The scale factor stored with a field is source-epoch/validity metadata. The PM
+and tree kernels are scale-free; cosmological time dependence is applied only
+by the KDK factors described below.
 
 #### KDK operator order with PM sync
 
 For each global step:
 
-1. `K_PM+Tree^pre` on active set at sync surface `kick_pre`
+1. `K_PM+Tree^pre` on the active set, bootstrapping force truth if necessary
 2. `D` drift on active set
-3. `force_refresh` PM cadence/field refresh surface
+3. rank-coordinated `force_refresh` at the post-drift source epoch
 4. hydro/source stages
-5. `K_PM+Tree^post` on active set at sync surface `kick_post`
+5. `K_PM+Tree^post` on the active set using the refreshed force cache
 6. analysis/output stages
 
-Both kick surfaces use the same PM sync contract above.
+The integrator owns refresh authorization and commits the PM synchronization
+event only after the TreePM callback consumes it successfully.
 
 #### Inactive-particle treatment
 
-- Inactive particles do **not** receive PM or tree kick updates on a given kick opportunity.
-- Their state evolves only when their bin activates on a later synchronized kick surface.
-- This is recorded per event as `inactive_particles_skipped`.
+- The production workflow currently requires `hierarchical_max_rung = 0`, so
+  mixed-rung inactive-particle kicks are not a supported production path.
+- The lower-level scheduler still records compact active sets and
+  `inactive_particles_skipped` for infrastructure validation. Those lanes do
+  not constitute a production-certified multirate TreePM integrator.
 
 #### Restart continuation rule
 
-- Restart payload persists cadence metadata (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
-- Restart policy is `deterministic_rebuild`: PM mesh field values are not checkpointed; after resume, the first kick opportunity refreshes/rebuilds the long-range PM field before reuse can occur.
+- Restart payload persists cadence metadata (`gravity_kick_opportunity`,
+  cadence steps, field version, last refresh opportunity, and field-build
+  step/scale factor).
+- Restart policy is `deterministic_rebuild`: PM mesh/tree scratch is not
+  checkpointed and cannot be treated as reusable field truth. Restart schema
+  v20 does persist the committed gravity-force history keyed by stable particle
+  ID for exact KDK continuation; import remaps compatible rows and invalidates
+  stale or migrated rows. The next integrator-authorized force surface
+  reconstructs transient PM/tree state.
 - Cadence metadata remains auditable across restart boundaries via distributed restart state and provenance fields.
 
 
 ## Stage 2 timestep authority contract
 
 Stage 2 uses a single-owner timestep model: `HierarchicalTimeBinScheduler` is the only live authority for per-element bin assignment, next activation, active flags, pending transitions, active-set construction, and PM kick cadence metadata. Solver callbacks may propose timestep candidates and consume scheduler-built active sets, but they must not treat `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration records, or restart mirrors as authority.
+
+Production currently fails closed at `numerics.hierarchical_max_rung = 0`.
+Nonzero rungs are rejected by typed config validation and by the production
+workflow because per-element kick/drift epochs required for mixed-rung KDK are
+not yet authoritative. The scheduler interfaces below remain infrastructure
+for future multirate work, not an enabled production capability.
 
 ### Scheduler authority and mirror policy
 
@@ -121,11 +152,16 @@ The Stage 2 invariant framework intentionally traps split-brain timestep ownersh
 - active-set descriptors must match scheduler active elements and source generations;
 - restart import must validate scheduler lanes and reject stale particle or cell `time_bin` mirrors before rebuilding mirrors from scheduler state;
 - PM refresh events must be committed before the next kick opportunity can be registered;
-- distributed PM cadence decisions remain rank-consensus metadata, but current evidence does not make Phase 3 multirate TreePM synchronization production-proven.
+- distributed PM decisions remain rank-consensus metadata;
+- production restart import requires particle and gas schedulers to use
+  `max_bin = 0`, with all current/pending bins at zero or unset as appropriate;
+- current evidence does not make mixed-rung TreePM synchronization
+  production-proven.
 
-This contract changes documentation and test guardrails only. It does not change restart schema fields, solver numerics, normalized config output, provenance format, or deterministic scheduling semantics.
+The fail-closed rung-zero policy prevents the scheduler scaffold from being
+mistaken for production multirate integration.
 
-## Hierarchical integer timeline bins
+## Hierarchical integer timeline bins (infrastructure)
 
 `HierarchicalTimeBinScheduler` implements power-of-two integer bins (`dt_bin = dt_min * 2^bin`) and maintains:
 
@@ -154,8 +190,31 @@ Typed helper criteria are provided and can be combined via `TimeStepCriteriaRegi
 - CFL limiter: `dt_CFL <= C_cfl * (Delta x / (|u| + c_s))`
 - directional hydro CFL limiter:
   `dt_hydro_CFL = min_axes(C_cfl * cell_width_axis_code / (abs(v_axis_code) + c_s))`
-- Gravity limiter: `dt_grav <= eta * sqrt(eps / |a|)`
+- Gravity limiter for comoving softening and scale-free TreePM `A`:
+  `dt_grav = eta * sqrt(a^3 eps_com / |A|)`
 - source-term limiter and user clamp hooks
+
+`computeGravityTimeStep(...)` itself remains coordinate-system neutral and
+evaluates `eta sqrt(length/acceleration)`. Cosmological callers should instead
+use the public `ComovingGravityTimeStepInput` and
+`computeComovingGravityTimeStep(...)` interface. It accepts `eps_com`, the
+scale-free TreePM magnitude `|A|`, and `a`, validates a finite positive scale
+factor, converts to comoving-coordinate acceleration `|A|/a^3`, and delegates
+the final length/acceleration calculation to the generic helper. The production
+workflow uses the committed `IntegratorState.current_scale_factor` because
+adaptive-bin proposals run after step commit. Using the peculiar-velocity
+response `A/a^2` directly with a comoving length would mix coordinate systems.
+
+### Public API migration: cosmological gravity timestep
+
+Code that previously constructed `GravityTimeStepInput` from a comoving
+softening and a TreePM force lane must migrate to
+`ComovingGravityTimeStepInput` from
+`include/cosmosim/core/time_integration.hpp`. Pass the unscaled TreePM
+`|A|` and the force-epoch scale factor; do not pre-divide by `a^2` or `a^3`.
+The existing `GravityTimeStepInput`/`computeGravityTimeStep(...)` API remains
+available for callers whose length and acceleration are already expressed in
+one coordinate system.
 
 `combineTimeStepCriteria` takes the conservative minimum across registered hooks and a fallback dt.
 
@@ -187,23 +246,52 @@ Elements may request bin promotion/demotion through `requestBinTransition`. Tran
 
 ## Cosmology helper equations
 
-The helper API is aligned with comoving-variable usage:
+The helper API uses physical peculiar velocity `u` and comoving position `x`:
 
-- `dx/dt = v_pec / a`
-- `dv_pec/dt = -H(a) v_pec - (1/a) grad_x phi + source_terms`
+- `dx/dt = u / a`
+- `du/dt + H(a) u = A / a^2 + source_terms`
 - `da/dt = a H(a)`
+
+Here `A = -grad_x Psi` is the scale-free comoving Newtonian kernel returned by
+both PM and the complementary tree residual. Neither gravity branch inserts an
+additional factor of `a^2`. Collisionless particles receive the response
+through KDK Hubble-drag/kick factors. Gas receives the same `A/a^2` response in
+`ComovingGravityExpansionSource`, which also applies the conservative
+expansion sources using the integrator-owned `a` and `H` in code units.
+
+For hydro conserved variables `m=rho_com u`,
+`E=rho_com(e+|u|^2/2)`, and kinetic energy density `K`, the explicit source is
+
+```text
+S_m = rho_com A/a^2 - H m
+S_E = rho_com (u dot A)/a^2 - H (2 K + 3 P_com).
+```
+
+Because hydro runs after drift/force refresh but before the step commit,
+fixed-grid and AMR callbacks consume
+`StepContext.timeline_step.{scale_factor_end,hubble_end_code}`. The committed
+`IntegratorState` still represents the step-begin epoch at that point; solver
+callbacks must not use it or independently recompute an SI-valued Hubble rate.
 
 The implementation provides midpoint-integrated drift/kick prefactors over scale factor and a closed-form Hubble drag factor `a_begin / a_end`.
 
 ## Assumptions (explicit)
 
 - Baseline stage scheme is kick-drift-kick only.
-- PM long-range cadence is now explicit and rank-consensus audited; it remains a cadence-gated approximation rather than a full asynchronous multirate PM integrator.
+- Production PM refresh cadence is exactly one at every rank-coordinated force
+  evaluation. Lower-level reuse is explicit and fail-closed, but is not a
+  production asynchronous multirate PM integrator.
 - Time bins use strict power-of-two integer periods in tick space.
+- Production config currently permits only rung zero despite the lower-level
+  multi-bin scheduler implementation.
 - Scale factor update in the orchestrator uses forward Euler (`advanceScaleFactorEuler`) for conservative simplicity.
 - If no cosmology background is passed to `StepOrchestrator`, the orchestrator advances `time` only and leaves `current_scale_factor` unchanged.
 - Output cadence policy remains external to the core integrator; output triggering is represented by the explicit `output_check` stage callback.
 
 ## Provenance and schema implications
 
-No snapshot schema field is changed by this patch. Hierarchical scheduler metadata remains runtime-only and can be serialized in a follow-up restart/state I/O patch while preserving current output naming and external dataset compatibility.
+No snapshot schema field is changed by this gravity repair. Restart schema
+version 20 already persists scheduler/cadence truth needed for deterministic
+continuation plus committed stable-ID-keyed force history. PM mesh/tree scratch
+and coordinator-local cache structures remain transient and are
+deterministically rebuilt.

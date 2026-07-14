@@ -3,6 +3,12 @@
 Date: 2026-05-10  
 Scope: infrastructure audit only; no solver math, restart schema, or runtime behavior changes.
 
+> Current restriction note (2026-07-13): this table is preserved as the
+> historical Stage 2 audit. Current production config now requires
+> `hierarchical_max_rung = 0` and `treepm_update_cadence_steps = 1`; restart
+> import likewise requires bin-zero scheduler truth. Lower-level multi-bin and
+> cadence/reuse APIs remain infrastructure rather than production capability.
+
 ## Purpose
 
 Stage 2 timestep repair is blocked until every timestep-related state lane has one explicit owner. This audit maps the criteria-to-scheduler path, scheduler legality, bin commit, activation, integration, mirror update, restart/provenance serialization, and structural-transform preservation path so later patches do not create split-brain timestep truth.
@@ -44,7 +50,7 @@ Inspected code surfaces include:
 | `TimeBinMappingResult` and clipped flags | Core timestep mapping helper | Derived transient result | Criteria mapping call site | Produced by `mapDtToTimeBin`; not persisted. | Diagnostic/test-only. | Low. |
 | `TimeStepLimits` | Core criteria input | Derived transient config | Workflow criteria path | Constructed from `dt_time_code` and scheduler `maxBin`. | Not serialized. | Low. |
 | `CflTimeStepInput` / `computeCflTimeStep` | Core criteria helper; workflow hydro path | Derived criterion | Workflow criteria path | `updateAdaptiveTimeBins` registers CFL hooks for gas cells and particles. | Not serialized. | Low. |
-| `GravityTimeStepInput` / `computeGravityTimeStep` | Core criteria helper; workflow gravity path | Derived criterion | Workflow criteria path | `updateAdaptiveTimeBins` registers gravity hooks from acceleration arrays and softening. | Not serialized. | Low. |
+| `GravityTimeStepInput` / `computeGravityTimeStep`; `ComovingGravityTimeStepInput` / `computeComovingGravityTimeStep` | Core criteria helpers; generic coordinate-neutral API plus workflow cosmological gravity path | Derived criterion | Workflow criteria path | `updateAdaptiveTimeBins` uses the comoving helper with scale-free TreePM `|A|`, comoving softening, and committed `a`; the helper validates finite positive `a` and converts to `|A|/a^3`. Generic callers may use the coordinate-neutral helper only when length and acceleration already share a coordinate system. | Not serialized. | Low. |
 | `TimeStepCriteriaRegistry` hooks | Core criteria registry | Derived transient callback set | Workflow criteria path | Built per element inside `updateAdaptiveTimeBins`; combined by `combineTimeStepCriteria`. | Not serialized. | Low. |
 | `ParticleSoa::time_bin` | Simulation state particle hot lane | Derived mirror / diagnostic output | Must be synchronized from scheduler; structural transforms may preserve mirror alignment only | Initialized by IC/snapshot load; synchronized by `syncTimeBinsFromScheduler`; reordered by `reorderParticles`; packed/unpacked by migration; tests may seed fixtures. | Restart mirror under `/particles/time_bin`; snapshot currently initializes missing snapshot values to zero and is diagnostic/not restart authority. | High: obsolete duplicate if treated as authority; Stage 2 should make mirror semantics unambiguous. |
 | `CellSoa::time_bin` | Simulation state gas-cell hot lane | Derived mirror / diagnostic output | Must be synchronized from scheduler; structural transforms may preserve mirror alignment only | Initialized by IC/snapshot load; synchronized by `syncTimeBinsFromScheduler`; gas-cell tests mirror gas particle bins. | Restart mirror under `/cells/time_bin`; snapshot defaults are diagnostic. | High: same split-brain risk as particles, plus gas-particle binding constraints. |

@@ -20,19 +20,19 @@ struct TreePmSplitPolicy {
 };
 
 inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
-  if (policy.mesh_spacing_comoving <= 0.0) {
+  if (!std::isfinite(policy.mesh_spacing_comoving) || policy.mesh_spacing_comoving <= 0.0) {
     throw std::invalid_argument("TreePM mesh_spacing_comoving must be > 0");
   }
-  if (policy.asmth_cells <= 0.0) {
+  if (!std::isfinite(policy.asmth_cells) || policy.asmth_cells <= 0.0) {
     throw std::invalid_argument("TreePM asmth_cells must be > 0");
   }
-  if (policy.rcut_cells <= 0.0) {
+  if (!std::isfinite(policy.rcut_cells) || policy.rcut_cells <= 0.0) {
     throw std::invalid_argument("TreePM rcut_cells must be > 0");
   }
-  if (policy.split_scale_comoving <= 0.0) {
+  if (!std::isfinite(policy.split_scale_comoving) || policy.split_scale_comoving <= 0.0) {
     throw std::invalid_argument("TreePM split_scale_comoving must be > 0");
   }
-  if (policy.cutoff_radius_comoving <= 0.0) {
+  if (!std::isfinite(policy.cutoff_radius_comoving) || policy.cutoff_radius_comoving <= 0.0) {
     throw std::invalid_argument("TreePM cutoff_radius_comoving must be > 0");
   }
   if (policy.kernel != TreePmSplitKernel::kGaussianErfc) {

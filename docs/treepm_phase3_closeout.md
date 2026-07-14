@@ -2,6 +2,18 @@
 
 Date: 2026-04-21 (UTC)
 
+> Current status note (2026-07-13): this closeout and its command failures are
+> preserved as the historical April evidence cycle. The named periodic,
+> workflow, MPI+FFTW, and power-spectrum blockers have since received new
+> evidence: the focused Ewald/periodic TreePM matrix passed 6/6, the focused PM
+> ownership/halo/strict-Phase-2 matrix passed 12/12 through four ranks, and the
+> production-workflow DMO matrix passed 5/5 at MPI np1--np4 with exact restart
+> continuation. These later repairs do not retroactively change the verdict
+> below and do not close Phase 3: mixed-rung KDK, scalable LET/PM transport,
+> large-rank scaling, and publication-grade DMO science validation remain
+> open. See `docs/gravity_production_readiness.md` for the current matrix and
+> numerical evidence.
+
 ## Verdict
 
 **Phase 3 is still incomplete.**

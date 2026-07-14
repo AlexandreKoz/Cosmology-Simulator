@@ -317,6 +317,11 @@ struct ActiveSetDescriptor {
   std::uint64_t source_particle_index_generation = 0;
   std::uint64_t source_cell_index_generation = 0;
   std::uint64_t source_scheduler_tick = 0;
+  // Optional distributed consensus supplied by the workflow owner.  Local
+  // subset sizes alone cannot decide whether a rank is at the same global
+  // synchronization boundary as its peers (including zero-work ranks).
+  bool has_global_synchronization_metadata = false;
+  bool globally_complete_active_set = false;
 
   [[nodiscard]] bool hasParticleSubset(std::size_t total_particle_count) const noexcept;
   [[nodiscard]] bool hasCellSubset(std::size_t total_cell_count) const noexcept;
@@ -526,8 +531,18 @@ struct HydroCflDiagnostics {
 };
 
 struct GravityTimeStepInput {
+  // Length and acceleration must use the same coordinate system. For
+  // cosmological comoving softening, convert TreePM's scale-free A to the
+  // coordinate acceleration A/a^3 before calling computeGravityTimeStep.
   double softening_length_code = 0.0;
   double acceleration_magnitude_code = 0.0;
+};
+
+struct ComovingGravityTimeStepInput {
+  double softening_length_comoving_code = 0.0;
+  // TreePM's scale-free kernel A = G sum_j m_j (x_j-x_i)/|x_j-x_i|^3.
+  double scale_free_acceleration_magnitude_code = 0.0;
+  double scale_factor = 1.0;
 };
 
 // Narrow runtime view consumed by adaptive timestep criteria. It is deliberately
@@ -823,6 +838,9 @@ void assertHydroCflStable(
     const HydroCflDiagnostics& diagnostics,
     double relative_tolerance = 1.0e-12);
 [[nodiscard]] double computeGravityTimeStep(const GravityTimeStepInput& input, double eta);
+[[nodiscard]] double computeComovingGravityTimeStep(
+    const ComovingGravityTimeStepInput& input,
+    double eta);
 
 [[nodiscard]] double combineTimeStepCriteria(
     std::uint32_t element_index,

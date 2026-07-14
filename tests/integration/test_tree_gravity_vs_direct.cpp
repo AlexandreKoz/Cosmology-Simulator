@@ -105,14 +105,27 @@ void directSumAccelerationWithSofteningView(
     std::span<const std::uint32_t> active,
     const cosmosim::gravity::TreeGravityOptions& options,
     cosmosim::gravity::TreeGravityProfile* profile,
-    double* out_mean_relative_error) {
+    double* out_mean_relative_error,
+    std::span<const double> previous_acceleration_magnitude_code = {}) {
   cosmosim::gravity::TreeGravitySolver solver;
   solver.build(pos_x, pos_y, pos_z, mass, options, profile);
 
   std::vector<double> tree_ax(active.size(), 0.0);
   std::vector<double> tree_ay(active.size(), 0.0);
   std::vector<double> tree_az(active.size(), 0.0);
-  solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, tree_ax, tree_ay, tree_az, options, profile);
+  solver.evaluateActiveSet(
+      pos_x,
+      pos_y,
+      pos_z,
+      mass,
+      active,
+      tree_ax,
+      tree_ay,
+      tree_az,
+      options,
+      profile,
+      {},
+      previous_acceleration_magnitude_code);
 
   std::vector<double> direct_ax(active.size(), 0.0);
   std::vector<double> direct_ay(active.size(), 0.0);
@@ -189,6 +202,78 @@ struct Distribution {
     distribution.active[i] = static_cast<std::uint32_t>((5U * i + 1U) % particle_count);
   }
   return distribution;
+}
+
+void testRelativeForceErrorMacAgainstDirect() {
+  const std::array<Distribution, 2> distributions = {
+      makeQuasiUniformDistribution(),
+      makeClusteredDistribution(),
+  };
+
+  for (std::size_t distribution_index = 0; distribution_index < distributions.size(); ++distribution_index) {
+    const Distribution& distribution = distributions[distribution_index];
+    cosmosim::gravity::TreeGravityOptions options;
+    options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kRelativeForceError;
+    options.opening_theta = 0.6;
+    options.relative_force_tolerance = 0.005;
+    options.relative_force_acceleration_floor_code = 1.0e-12;
+    options.gravitational_constant_code = 1.0;
+    options.max_leaf_size = 4;
+    options.softening.epsilon_comoving = 1.0e-3;
+
+    std::vector<double> direct_ax(distribution.active.size(), 0.0);
+    std::vector<double> direct_ay(distribution.active.size(), 0.0);
+    std::vector<double> direct_az(distribution.active.size(), 0.0);
+    directSumAcceleration(
+        distribution.pos_x,
+        distribution.pos_y,
+        distribution.pos_z,
+        distribution.mass,
+        distribution.active,
+        options,
+        direct_ax,
+        direct_ay,
+        direct_az);
+    std::vector<double> previous_acceleration_magnitude_code(distribution.active.size(), 0.0);
+    for (std::size_t i = 0; i < distribution.active.size(); ++i) {
+      previous_acceleration_magnitude_code[i] =
+          std::sqrt(direct_ax[i] * direct_ax[i] + direct_ay[i] * direct_ay[i] + direct_az[i] * direct_az[i]);
+    }
+
+    for (const cosmosim::gravity::TreeMultipoleOrder multipole_order : {
+             cosmosim::gravity::TreeMultipoleOrder::kMonopole,
+             cosmosim::gravity::TreeMultipoleOrder::kQuadrupole,
+         }) {
+      options.multipole_order = multipole_order;
+      cosmosim::gravity::TreeGravityProfile profile;
+      double mean_relative_error = 0.0;
+      const double max_relative_error = solveAndMeasureMaxRelativeError(
+          distribution.pos_x,
+          distribution.pos_y,
+          distribution.pos_z,
+          distribution.mass,
+          distribution.active,
+          options,
+          &profile,
+          &mean_relative_error,
+          previous_acceleration_magnitude_code);
+
+      std::ostringstream context;
+      context << "relative force-error MAC validation failed for distribution=" << distribution_index
+              << " multipole_order=" << static_cast<int>(multipole_order)
+              << " max_relative_error=" << max_relative_error
+              << " mean_relative_error=" << mean_relative_error
+              << " visited_nodes=" << profile.visited_nodes
+              << " accepted_nodes=" << profile.accepted_nodes
+              << " pp_interactions=" << profile.particle_particle_interactions;
+      requireOrThrow(std::isfinite(max_relative_error), context.str());
+      requireOrThrow(std::isfinite(mean_relative_error), context.str());
+      requireOrThrow(max_relative_error < 0.03, context.str());
+      requireOrThrow(mean_relative_error < 0.01, context.str());
+      requireOrThrow(profile.visited_nodes > 0U, context.str());
+      requireOrThrow(profile.accepted_nodes > 0U, context.str());
+    }
+  }
 }
 
 void testMixedSpeciesSofteningAgainstDirect() {
@@ -272,6 +357,7 @@ void testMixedSpeciesSofteningAgainstDirect() {
 
 int main() {
   testMixedSpeciesSofteningAgainstDirect();
+  testRelativeForceErrorMacAgainstDirect();
   const std::vector<Distribution> distributions = {makeQuasiUniformDistribution(), makeClusteredDistribution()};
   for (std::size_t dist_i = 0; dist_i < distributions.size(); ++dist_i) {
     const Distribution& dist = distributions[dist_i];

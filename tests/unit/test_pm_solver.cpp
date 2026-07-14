@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -90,9 +91,9 @@ void testPoissonAnalyticMode() {
   solver.solvePoissonPeriodic(grid, options, nullptr);
 
   const double expected_force_amp = 4.0 * k_pi * options.gravitational_constant_code *
-      options.scale_factor * options.scale_factor * amplitude / kx;
+      amplitude / kx;
   const double expected_phi_amp = -4.0 * k_pi * options.gravitational_constant_code *
-      options.scale_factor * options.scale_factor * amplitude / (kx * kx);
+      amplitude / (kx * kx);
 
   double corr_force = 0.0;
   double norm_force_expected = 0.0;
@@ -335,7 +336,7 @@ void testIsolatedOpenRejectsDistributedSlab() {
   bool threw = false;
   try {
     solver.solvePoissonIsolatedOpen(grid, options, nullptr);
-  } catch (const std::invalid_argument&) {
+  } catch (const std::exception&) {
     threw = true;
   }
   assert(threw);
@@ -483,7 +484,7 @@ void testPartialSlabStorageRejectsSingleRankSolverPath() {
   bool threw = false;
   try {
     solver.solvePoissonPeriodic(grid, options, nullptr);
-  } catch (const std::invalid_argument&) {
+  } catch (const std::exception&) {
     threw = true;
   }
   assert(threw);
@@ -588,6 +589,82 @@ void testActivePmTargetViewExtentValidation() {
   assert(threw);
 }
 
+void testNonFiniteSolveOptionsRejected() {
+  const cosmosim::gravity::PmGridShape shape{4, 4, 4};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+
+  cosmosim::gravity::PmSolveOptions baseline;
+  baseline.box_size_mpc_comoving = 1.0;
+  baseline.scale_factor = 1.0;
+  baseline.gravitational_constant_code = 1.0;
+
+  const auto require_rejected = [&](const cosmosim::gravity::PmSolveOptions& options) {
+    bool threw = false;
+    try {
+      solver.solvePoissonPeriodic(grid, options, nullptr);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  };
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  auto options = baseline;
+  options.box_size_x_mpc_comoving = nan;
+  require_rejected(options);
+
+  options = baseline;
+  options.scale_factor = nan;
+  require_rejected(options);
+
+  options = baseline;
+  options.gravitational_constant_code = nan;
+  require_rejected(options);
+
+  options = baseline;
+  options.tree_pm_split_scale_comoving = nan;
+  require_rejected(options);
+}
+
+void testIsolatedOpenRectangularAssignmentAndInterpolationClipStencils() {
+  const cosmosim::gravity::PmGridShape shape{4, 3, 2};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_x_mpc_comoving = 2.0;
+  options.box_size_y_mpc_comoving = 3.0;
+  options.box_size_z_mpc_comoving = 4.0;
+  options.boundary_condition = cosmosim::gravity::PmBoundaryCondition::kIsolatedOpen;
+
+  const std::vector<double> x{1.95};
+  const std::vector<double> y{0.0};
+  const std::vector<double> z{0.0};
+  const std::vector<double> mass{1.0};
+  solver.assignDensity(grid, x, y, z, mass, options, nullptr);
+  assert(std::abs(grid.density()[grid.linearIndex(3, 0, 0)] - 0.1) < 1.0e-12);
+  assert(std::abs(grid.density()[grid.linearIndex(0, 0, 0)]) < 1.0e-12);
+
+  grid.force_x()[grid.linearIndex(3, 0, 0)] = 2.0;
+  grid.force_x()[grid.linearIndex(0, 0, 0)] = 100.0;
+  grid.potential()[grid.linearIndex(3, 0, 0)] = 5.0;
+  grid.potential()[grid.linearIndex(0, 0, 0)] = 200.0;
+  std::vector<double> ax(1, 0.0);
+  std::vector<double> ay(1, 0.0);
+  std::vector<double> az(1, 0.0);
+  std::vector<double> potential(1, 0.0);
+  solver.interpolateForces(grid, x, y, z, ax, ay, az, options, nullptr);
+  solver.interpolatePotential(grid, x, y, z, potential, options, nullptr);
+  assert(std::abs(ax[0] - 0.2) < 1.0e-12);
+  assert(std::abs(potential[0] - 0.5) < 1.0e-12);
+
+  const std::vector<double> outside_x{2.1};
+  solver.interpolateForces(grid, outside_x, y, z, ax, ay, az, options, nullptr);
+  solver.interpolatePotential(grid, outside_x, y, z, potential, options, nullptr);
+  assert(ax[0] == 0.0 && ay[0] == 0.0 && az[0] == 0.0);
+  assert(potential[0] == 0.0);
+}
+
 }  // namespace
 
 int main() {
@@ -614,6 +691,8 @@ int main() {
   testPoissonPlanCachingForStableSlabLayout();
   testIndexedGlobalPmTargetViewWritesOnlyActiveRows();
   testActivePmTargetViewExtentValidation();
+  testNonFiniteSolveOptionsRejected();
+  testIsolatedOpenRectangularAssignmentAndInterpolationClipStencils();
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();

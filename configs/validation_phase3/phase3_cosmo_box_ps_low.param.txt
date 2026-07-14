@@ -9,13 +9,13 @@ zoom_high_res_region = false
 time_begin_code = 0.0
 time_end_code = 0.02
 max_global_steps = 8
-hierarchical_max_rung = 7
+hierarchical_max_rung = 0
 gravity_solver = treepm
 hydro_solver = godunov_fv
 treepm_pm_grid = 32
 treepm_asmth_cells = 1.25
-treepm_rcut_cells = 4.5
-treepm_assignment_scheme = cic
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = tsc
 treepm_enable_window_deconvolution = true
 treepm_update_cadence_steps = 1
 

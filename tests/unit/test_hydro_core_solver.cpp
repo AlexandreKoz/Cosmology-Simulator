@@ -107,8 +107,42 @@ void testComovingSourceTermSanity() {
   const cosmosim::hydro::HydroConservedState source_state =
       source.sourceForCell(0, conserved, primitive, context);
 
+  const double inverse_a2 = 1.0 / (context.update.scale_factor * context.update.scale_factor);
+  const double kinetic_energy_density = 0.5 * primitive.rho_comoving *
+      (primitive.vel_x_peculiar * primitive.vel_x_peculiar +
+       primitive.vel_y_peculiar * primitive.vel_y_peculiar +
+       primitive.vel_z_peculiar * primitive.vel_z_peculiar);
+  const double expected_momentum_x =
+      primitive.rho_comoving * gravity_x[0] * inverse_a2 -
+      context.update.hubble_rate_code * conserved.momentum_density_x_comoving;
+  const double expected_momentum_y =
+      primitive.rho_comoving * gravity_y[0] * inverse_a2 -
+      context.update.hubble_rate_code * conserved.momentum_density_y_comoving;
+  const double expected_momentum_z =
+      primitive.rho_comoving * gravity_z[0] * inverse_a2 -
+      context.update.hubble_rate_code * conserved.momentum_density_z_comoving;
+  const double expected_gravity_work = primitive.rho_comoving * inverse_a2 *
+      (primitive.vel_x_peculiar * gravity_x[0] +
+       primitive.vel_y_peculiar * gravity_y[0] +
+       primitive.vel_z_peculiar * gravity_z[0]);
+  const double expected_energy = expected_gravity_work - context.update.hubble_rate_code *
+      (2.0 * kinetic_energy_density + 3.0 * primitive.pressure_comoving);
   assert(std::abs(source_state.mass_density_comoving) < k_tol);
-  assert(source_state.momentum_density_x_comoving < primitive.rho_comoving * gravity_x[0]);
+  assert(std::abs(source_state.momentum_density_x_comoving - expected_momentum_x) < k_tol);
+  assert(std::abs(source_state.momentum_density_y_comoving - expected_momentum_y) < k_tol);
+  assert(std::abs(source_state.momentum_density_z_comoving - expected_momentum_z) < k_tol);
+  assert(std::abs(source_state.total_energy_density_comoving - expected_energy) < k_tol);
+
+  const std::vector<double> zero_gravity{0.0};
+  context.gravity_accel_x_peculiar = zero_gravity;
+  context.gravity_accel_y_peculiar = zero_gravity;
+  context.gravity_accel_z_peculiar = zero_gravity;
+  const cosmosim::hydro::HydroConservedState homogeneous_source =
+      source.sourceForCell(0, conserved, primitive, context);
+  assert(std::abs(
+      homogeneous_source.total_energy_density_comoving +
+      context.update.hubble_rate_code *
+          (2.0 * kinetic_energy_density + 3.0 * primitive.pressure_comoving)) < k_tol);
 }
 
 void testRiemannSymmetryRegression() {

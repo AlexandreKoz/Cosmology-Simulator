@@ -1,5 +1,240 @@
 # Architecture decision log
 
+## 2026-07-13 — ADR-REPAIR-GRAVITY-018: Cosmological gas-source normalization and non-degenerate DMO growth gates
+
+### Status
+Accepted (scientific-correctness bug fix)
+
+### Context
+
+The gravity repair makes PM and the complementary tree return a scale-free
+comoving kernel `A`. The collisionless KDK path consumed that convention, but
+the gas source still treated `A` as an already scaled peculiar acceleration,
+recomputed a background Hubble rate outside the integrator's code-unit
+timeline, and used an incomplete total-energy expansion source. The controlled
+DMO gate also used absolute response floors that were weak relative to the
+short expected growth increment and its seeded Zel'dovich velocity.
+
+### Decision
+
+- Treat `HydroSourceContext::gravity_accel_*_peculiar` as
+  compatibility-named views of scale-free `A`. Apply `A/a^2` exactly once in
+  gas momentum and gravity work.
+- Hydro runs post-drift before `IntegratorState` commits the step. Both
+  fixed-grid and AMR callbacks therefore consume
+  `StepContext.timeline_step.scale_factor_end` and `hubble_end_code`, already
+  in inverse code time.
+- For `m=rho u`, `K=rho |u|^2/2`, and total comoving gas energy, apply
+  `S_m=rho A/a^2-Hm` and
+  `S_E=rho(u dot A)/a^2-H(2K+3P)`. This pressure form is valid for every
+  adiabatic index supported by `HydroCoreSolver`.
+- Force lanes continue to store scale-free `A`. When the gravity timestep
+  criterion combines that force with comoving softening, use the public
+  `ComovingGravityTimeStepInput`/`computeComovingGravityTimeStep` boundary. It
+  validates finite positive `a`, converts to comoving-coordinate acceleration
+  `|A|/a^3`, and after step commit evaluates
+  `dt_grav=eta sqrt(a^3 epsilon_com/|A|)` with the committed scale factor. The
+  existing `computeGravityTimeStep` remains coordinate-neutral.
+- Let `Delta D=a_final/a_initial-1`. Require the direct displacement-mode and
+  `sqrt(P_final/P_initial)` growth increments to be positive and to satisfy
+  `abs((D_measured-1)-Delta D)/Delta D <= 0.075`.
+- Compare final velocity with the exact homogeneous Hubble-drag trajectory
+  `u_ballistic=u_initial a_initial/a_final`. Require response/ballistic RMS in
+  `[0.01,0.03]`, growing-mode projection in `[0.01,0.03]`, and alignment at
+  least `0.99`. Add the exact initial `4^3` cancellation-dominated lattice to
+  the periodic Ewald certification; its short-step kick predicts response near
+  `0.019` of ballistic RMS. The trajectory window is therefore an
+  independently anchored integration regression, not an analytic LCDM proof.
+- Require the power-derived and direct displacement-mode growth increments to agree within
+  relative `1e-3`.
+
+### Consequences
+
+- Positive: collisionless and gas state now consume one TreePM normalization,
+  with their cosmological response applied once in the owning update layer.
+- Positive: hydro source time has one code-unit timeline authority and the
+  energy source remains correct away from `gamma=5/3`.
+- Positive: gravity timestep length and acceleration now use the same comoving
+  coordinate system instead of mixing `epsilon_com` with a scale-free or
+  peculiar-velocity acceleration.
+- Positive: the DMO gate rejects zero-growth/ballistic success and couples two
+  independent growth estimators without overstating the response windows.
+- Reproducibility change: physical-unit cosmological gas evolution is
+  numerically corrected. Noncosmological `a=1`, `H=0` source behavior is
+  unchanged.
+- No config key, normalized dump, snapshot field, restart field, or provenance
+  schema is added.
+
+### Evidence references
+
+- `include/cosmosim/hydro/hydro_core_solver.hpp`
+- `src/hydro/hydro_core_solver.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `tests/unit/test_hydro_core_solver.cpp`
+- `tests/validation/test_dmo_zeldovich_workflow.cpp`
+- `docs/hydro_core_solver.md`
+- `docs/validation_plan.md`
+
+## 2026-07-13 — ADR-REPAIR-GRAVITY-017: Periodic TreePM correctness profile and small-cluster transport boundary
+
+### Status
+Accepted (gravity correctness and reproducibility repair)
+
+### Context
+Periodic short-range trees were formerly built from ordinary wrapped Euclidean
+coordinates even though traversal later used minimum-image deltas. A compact
+cluster crossing a box seam could therefore acquire a box-scale root,
+misleading COM and quadrupole moments, inconsistent MAC geometry, and unsafe
+remote pruning bounds. Empty source ranks also lacked an explicit hierarchy
+record, gravity packets relied on incomplete identity contracts, the PM slab
+authority map did not exactly match FFTW-MPI's fixed input blocks at all rank
+counts, and production cadence greater than one lacked a time-consistent
+long-range predictor. The previous default CIC/deconvolution-off profile also
+did not meet the new independent Ewald force-accuracy target for the covered
+mesh/split fixtures. The workflow additionally hard-coded `G_code=1`, inserted
+an `a^2` factor into both TreePM branches even though the dynamical update
+layers already own the scale-factor response, and allowed production mixed-rung
+scheduler configurations without per-element kick/drift epochs.
+
+### Decision
+
+- For periodic TreePM only, derive a per-axis largest-circular-gap unwrapped
+  source frame and build topology, COMs, quadrupoles, raw second moments, node
+  bounds, and MAC geometry in that coherent frame. Keep wrapped caller state and
+  nonperiodic standalone tree behavior unchanged.
+- Correct the quadrupole acceleration sign for the repository's
+  `x_com - x_target` displacement convention. Store the raw second-moment trace
+  and evaluate softened/screened second-order expansions through derivatives of
+  the complete radial kernel.
+- Add the relative force-error MAC
+  `G M l^2 <= alpha max(|a_previous|, a_floor) r^4`, with a target-containing
+  open guard and deterministic COM-distance fallback when compatible force
+  history is unavailable.
+- Align the public `TreeGravityOptions::opening_theta` default with the typed
+  production/Ewald-certified value `0.7`. Callers that relied on the former
+  aggregate-construction default `0.6` must request it explicitly.
+- Encode tree hierarchy and short-range request/response packets explicitly as
+  versioned little-endian records. Carry source/owner identity, exchange
+  sequence, decomposition epoch, force epoch, geometry frame, target identity,
+  and exact response coverage. Represent an empty local tree with a zero-source
+  root sentinel rather than omitting rank participation.
+- Coordinate every throwable TreePM entry/residual phase on the actual MPI
+  world. Defer constructor-local layout/context rejection to solve-entry
+  consensus; vote periodic unwrap/local-tree failures before residual exchange;
+  vote PM halo-cache commit, compact active/PM/zoom target preparation, and
+  worst-case traversal-stack reservation before later collectives; and place
+  response counts/displacements plus payload/acceleration scratch in
+  a reusable, memory-accounted exchange workspace whose throwing growth occurs
+  inside coordinated preflight/preparation phases.
+- Permit explicit active-target coordinate lanes so a zero-source rank can own
+  targets without fabricating source mass.
+- Match the PM x-slab owner map to FFTW-MPI fixed blocks:
+  `B=ceil(Nx/world_size)`, rank `r` owns
+  `[min(rB,Nx), min((r+1)B,Nx))`. Exchange force halos by posting nonblocking
+  receives before sends and waiting collectively, with side/sequence tags and
+  zero-width-slab support.
+- Treat legal zero-width FFTW-MPI ranks as full solve participants: retain
+  logical zero extent, provide backend-safe dummy allocation, and enter plan
+  creation, transforms, and all PM collectives.
+- Convert the physical SI Newton constant once from frozen length/mass/velocity
+  units with `core::newtonGravitationalConstantCode`. PM and the complementary
+  tree consume the same `G_code` and return a scale-free comoving kernel `A`.
+  Collisionless KDK and the gas conservative source apply Hubble
+  drag/expansion and the `A/a^2` response to their respective state.
+- Make TSC with matched transfer-window deconvolution the normalized production
+  default because it passes the independent small-N Ewald gate. Keep CIC
+  available as a named diagnostic/compatibility profile; do not lower the gate
+  to make it pass.
+- Raise the normalized `treepm_rcut_cells` default from 4.5 to 6.25 while
+  retaining positive explicit lower values for compatibility/diagnostics. With
+  `asmth_cells=1.25`, the certified default has `r_cut/r_s=5`; the historical
+  cutoff produced roughly nine-percent error at the cutoff transition.
+- Require periodic `r_cut < min(Lx,Ly,Lz)/2` during typed loading and again at
+  direct TreePM solve entry. The residual evaluates one minimum image per
+  source, so coarse invalid decks must increase PM resolution or reduce the
+  cutoff rather than relying on ambiguous multi-image reach.
+- Restrict production `treepm_update_cadence_steps` to exactly one and
+  `hierarchical_max_rung` to zero. Every rank-coordinated production
+  force-refresh surface rebuilds PM. Retain lower-level reuse only as a
+  test/future-integration seam; missing or incompatible cache state makes reuse
+  fail rather than silently changing the requested operation.
+- When `gravity.pm_long_range_field` is emitted before cadence commit, populate
+  its opportunity, version, build step, and build scale factor from the pending
+  integrator-issued `PmRefreshDirective`/solver decision. Do not pair a current
+  refresh message with the previous committed `PmSynchronizationState`; the
+  event remains a diagnostic observer and does not change cadence ownership.
+- Serialize gravity operational-event doubles in scientific `max_digits10`
+  form. Physical `G_code`, relative-MAC floors, derived split/cutoff/softening
+  scales, force norms, and scale factors must not be rounded into apparent
+  zeros by fixed six-decimal formatting.
+- Validate the transient PM cache against force epoch, field-build scale,
+  `G_code`, split scale, box axes, assignment, boundary, decomposition mode,
+  and deconvolution. Deliberately exclude particle decomposition epoch because
+  the mesh remains owned by fixed FFT slabs. Tree packets still carry the
+  workflow epoch, which advances only after an actual ownership transition;
+  dense-row force history is invalidated immediately on that transition.
+- Clip isolated/open assignment and gather stencils at physical-domain
+  boundaries rather than wrapping them to the opposite face.
+- Reject `numerics.treepm_enable_window_deconvolution=true` during typed config
+  validation whenever mode policy resolves to isolated/open gravity. The
+  periodic default remains `true`; isolated decks must explicitly select
+  `false`, and runtime code must not hide the incompatibility by mutating the
+  frozen policy.
+- Retain the hardened hierarchy-allgather plus target request/response
+  all-to-all algorithm for correctness-first workstation and small-cluster use.
+  Do not label it a locally essential tree or a neighbor-scalable transport.
+
+### Consequences
+
+- Positive: periodic translation, seam topology/moments, empty-rank
+  participation, target-only ranks, and np2/np3/np4 slab/halo ownership now have
+  executable regression coverage.
+- Positive: the certified TSC profile meets `relative_L2 <= 1e-2` and
+  `p99 <= 5e-2` against an implementation-independent Ewald reference on the
+  covered fixtures; CIC failure remains visible.
+- Positive: opening controls and relative-force parameters are normalized,
+  validated, and recorded in `provenance_v6`; restart force history is consumed
+  only when stable-ID/generation compatible.
+- Positive: physical-unit workflows no longer depend on dimensionless
+  `G_code=1`, and cosmological scale-factor powers are owned by the particle or
+  gas update layer rather than duplicated in the force kernel.
+- Positive: production mixed-rung execution now fails at config/restart
+  validation instead of skipping elapsed time under incomplete per-element KDK
+  state.
+- Positive: occupancy, empty-rank, hierarchy/peer, PM solve/reuse/halo/slab,
+  and tree build/multipole/opened-node counters make correctness and cost
+  behavior directly observable without promoting diagnostics to runtime truth.
+- Reproducibility change: configurations that relied on implicit defaults now
+  select TSC+deconvolution and a 6.25-cell cutoff rather than CIC without
+  deconvolution and a 4.5-cell cutoff. Explicit old settings retain their
+  behavior, and provenance distinguishes the profiles.
+- Tradeoff: TSC costs 27 mesh points per particle rather than CIC's 8; the
+  larger cutoff also increases tree traversal, pair work, and distributed
+  target/response volume.
+- Tradeoff: communicator-wide hierarchy and record collectives remain a scaling
+  ceiling. LET, sparse-peer PM transport, large-rank scaling certification,
+  large DMO science validation, and GPU TSC parity remain future work.
+- Positive: the controlled DMO gate now provides a versioned binned
+  three-dimensional power-spectrum artifact, Fourier phase/coherence checks,
+  serial-vs-MPI1 comparison, and np1--np4 stable-ID state comparison.
+- Limitation: the 64-particle, two-step direct-DFT fixture is not a large-volume
+  convergence, halo-statistics, cross-code, or publication-grade campaign;
+  publishable DMO-production readiness is therefore not implied.
+
+### Evidence references
+
+- `docs/gravity_production_readiness.md`
+- `docs/tree_gravity_solver.md`
+- `docs/tree_pm_coupling.md`
+- `docs/power_spectrum_diagnostics.md`
+- `include/cosmosim/core/units.hpp`
+- `tests/integration/test_tree_pm_coupling_periodic.cpp`
+- `tests/integration/test_pm_slab_halo_exchange_mpi.cpp`
+- `tests/validation/test_periodic_ewald_reference.cpp`
+- `tests/validation/test_tree_pm_ewald_accuracy.cpp`
+- `tests/validation/test_validation_phase2_mpi_gravity.cpp`
+- `tests/validation/test_dmo_zeldovich_workflow.cpp`
+
 ## 2026-06-07 — ADR-INFRA-AGENT-INTERFACE-016: Repository-wide agent task contract
 
 ### Status

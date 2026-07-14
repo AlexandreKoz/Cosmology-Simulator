@@ -24,7 +24,16 @@ The flagship science target is physically credible zoom-in galaxy formation from
 
 ## Current maturity boundary
 
-Stage 2 timestep-authority repairs document scheduler-owned timestep bins, scheduler-built active sets, restart mirror validation, and PM cadence legality as infrastructure invariants. This is not a claim that Phase 3 hierarchical TreePM multirate synchronization is production-proven; Phase 3 closure remains gated by the evidence contract in [`docs/treepm_phase3_contract.md`](docs/treepm_phase3_contract.md).
+Stage 2 timestep-authority repairs document scheduler-owned timestep bins,
+scheduler-built active sets, restart mirror validation, and PM cadence legality
+as infrastructure invariants. Production currently fails closed at
+`hierarchical_max_rung = 0` and `treepm_update_cadence_steps = 1`; nonzero
+rungs require per-element kick/drift epochs that are not yet implemented. This
+is not a claim that Phase 3 hierarchical TreePM multirate synchronization is
+production-proven; Phase 3 closure remains gated by the evidence contract in
+[`docs/treepm_phase3_contract.md`](docs/treepm_phase3_contract.md). The current
+surface-by-surface verdict and numerical evidence are maintained in
+[`docs/gravity_production_readiness.md`](docs/gravity_production_readiness.md).
 
 ## Repository layout
 

@@ -273,6 +273,7 @@ if(COSMOSIM_ENABLE_CUDA)
   target_sources(cosmosim_gravity PRIVATE src/gravity/pm_cuda_kernels.cu)
   set_target_properties(cosmosim_gravity PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON)
 endif()
@@ -466,6 +467,18 @@ if(COSMOSIM_ENABLE_TESTS)
     cosmosim_mark_runtime_truth_test(
       integration_reference_workflow_distributed_treepm_mpi_two_rank
       mpi distributed treepm pm restart workflow integration)
+
+    add_executable(
+      test_integration_tree_pseudo_hierarchy_exchange_mpi
+      tests/integration/test_tree_pseudo_hierarchy_exchange_mpi.cpp)
+    target_link_libraries(test_integration_tree_pseudo_hierarchy_exchange_mpi PRIVATE cosmosim_parallel)
+    add_test(
+      NAME integration_tree_pseudo_hierarchy_exchange_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pseudo_hierarchy_exchange_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_mark_runtime_truth_test(
+      integration_tree_pseudo_hierarchy_exchange_mpi_two_rank
+      mpi distributed treepm hierarchy protocol guard integration)
   endif()
 
   add_executable(
@@ -829,6 +842,13 @@ if(COSMOSIM_ENABLE_TESTS)
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
     cosmosim_append_test_labels(integration_pm_periodic_mode_mpi_two_rank mpi distributed pm fftw)
+    set_tests_properties(integration_pm_periodic_mode_mpi_two_rank PROPERTIES PROCESSORS 2)
+    add_test(
+      NAME integration_pm_zero_width_slab_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_zero_width_slab_mpi_four_rank mpi distributed pm fftw)
+    set_tests_properties(integration_pm_zero_width_slab_mpi_four_rank PROPERTIES PROCESSORS 4)
   endif()
 
   if(COSMOSIM_ENABLE_MPI)
@@ -838,7 +858,20 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_pm_slab_halo_exchange_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_slab_halo_exchange_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_slab_halo_exchange_mpi_three_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_slab_halo_exchange_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_slab_halo_exchange_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_slab_halo_exchange_mpi> ${MPIEXEC_POSTFLAGS})
     cosmosim_append_test_labels(integration_pm_slab_halo_exchange_mpi_two_rank mpi distributed pm)
+    cosmosim_append_test_labels(integration_pm_slab_halo_exchange_mpi_three_rank mpi distributed pm)
+    cosmosim_append_test_labels(integration_pm_slab_halo_exchange_mpi_four_rank mpi distributed pm)
+    set_tests_properties(integration_pm_slab_halo_exchange_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_pm_slab_halo_exchange_mpi_three_rank PROPERTIES PROCESSORS 3)
+    set_tests_properties(integration_pm_slab_halo_exchange_mpi_four_rank PROPERTIES PROCESSORS 4)
     add_executable(test_integration_distributed_sfc_rebalance_mpi
       tests/integration/test_distributed_sfc_rebalance_mpi.cpp)
     target_link_libraries(test_integration_distributed_sfc_rebalance_mpi PRIVATE cosmosim_parallel)
@@ -850,10 +883,16 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_distributed_sfc_rebalance_mpi_three_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_distributed_sfc_rebalance_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_distributed_sfc_rebalance_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_sfc_rebalance_mpi> ${MPIEXEC_POSTFLAGS})
     set_tests_properties(
       integration_distributed_sfc_rebalance_mpi_two_rank
       integration_distributed_sfc_rebalance_mpi_three_rank
+      integration_distributed_sfc_rebalance_mpi_four_rank
       PROPERTIES LABELS "mpi;distributed;decomposition;runtime_truth")
+    set_tests_properties(integration_distributed_sfc_rebalance_mpi_four_rank PROPERTIES PROCESSORS 4)
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
@@ -914,7 +953,22 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_tree_pm_coupling_periodic_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_tree_pm_coupling_periodic> ${MPIEXEC_POSTFLAGS})
-    cosmosim_append_test_labels(integration_tree_pm_coupling_periodic_mpi_two_rank mpi distributed treepm pm fftw)
+    add_test(
+      NAME integration_tree_pm_coupling_periodic_mpi_three_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_coupling_periodic> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_tree_pm_coupling_periodic_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_coupling_periodic> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      integration_tree_pm_coupling_periodic_mpi_two_rank
+      integration_tree_pm_coupling_periodic_mpi_three_rank
+      integration_tree_pm_coupling_periodic_mpi_four_rank
+      PROPERTIES LABELS "mpi;distributed;treepm;pm;fftw")
+    set_tests_properties(integration_tree_pm_coupling_periodic_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_tree_pm_coupling_periodic_mpi_three_rank PROPERTIES PROCESSORS 3)
+    set_tests_properties(integration_tree_pm_coupling_periodic_mpi_four_rank PROPERTIES PROCESSORS 4)
   endif()
 
 
@@ -1155,14 +1209,87 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(
       validation_phase2_mpi_gravity_two_rank
       validation_phase2_mpi_gravity_three_rank
-      PROPERTIES LABELS "validation;gravity;mpi")
+      PROPERTIES LABELS "validation;gravity;mpi;distributed")
+    set_tests_properties(validation_phase2_mpi_gravity_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(validation_phase2_mpi_gravity_three_rank PROPERTIES PROCESSORS 3)
     add_test(
       NAME validation_phase2_mpi_gravity_four_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
     set_tests_properties(
       validation_phase2_mpi_gravity_four_rank
-      PROPERTIES LABELS "validation;gravity;mpi;distributed")
+      PROPERTIES LABELS "validation;gravity;mpi;distributed" PROCESSORS 4)
+  endif()
+
+  add_executable(
+    test_validation_periodic_ewald_reference
+    tests/validation/test_periodic_ewald_reference.cpp
+    tests/support/periodic_ewald_reference.cpp)
+  target_include_directories(test_validation_periodic_ewald_reference PRIVATE tests/support)
+  add_test(NAME validation_periodic_ewald_reference COMMAND test_validation_periodic_ewald_reference)
+  set_tests_properties(
+    validation_periodic_ewald_reference
+    PROPERTIES LABELS "validation;gravity;periodic;reference")
+
+  add_executable(
+    test_validation_tree_pm_ewald_accuracy
+    tests/validation/test_tree_pm_ewald_accuracy.cpp
+    tests/support/periodic_ewald_reference.cpp)
+  target_include_directories(test_validation_tree_pm_ewald_accuracy PRIVATE tests/support)
+  target_link_libraries(test_validation_tree_pm_ewald_accuracy PRIVATE cosmosim_gravity)
+  add_test(NAME validation_tree_pm_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
+  set_tests_properties(
+    validation_tree_pm_ewald_accuracy
+    PROPERTIES LABELS "validation;gravity;treepm;periodic;accuracy")
+
+  add_executable(
+    test_validation_dmo_zeldovich_workflow
+    tests/validation/test_dmo_zeldovich_workflow.cpp)
+  target_link_libraries(test_validation_dmo_zeldovich_workflow PRIVATE cosmosim_all)
+  add_test(
+    NAME integration_dmo_empty_rank_smoke_single_rank
+    COMMAND test_validation_dmo_zeldovich_workflow --empty-rank-smoke)
+  set_tests_properties(
+    integration_dmo_empty_rank_smoke_single_rank
+    PROPERTIES LABELS "integration;gravity;dmo;workflow;empty_rank")
+  if(COSMOSIM_ENABLE_HDF5)
+    add_test(NAME validation_dmo_zeldovich_workflow_single_rank COMMAND test_validation_dmo_zeldovich_workflow)
+    set_tests_properties(
+      validation_dmo_zeldovich_workflow_single_rank
+      PROPERTIES FIXTURES_SETUP dmo_zeldovich_rank_state_artifacts
+                 LABELS "validation;gravity;dmo;workflow;restart;power_spectrum")
+  endif()
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_dmo_empty_rank_smoke_mpi_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_validation_dmo_zeldovich_workflow> --empty-rank-smoke ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      integration_dmo_empty_rank_smoke_mpi_np4
+      PROPERTIES PROCESSORS 4
+                 LABELS "integration;gravity;dmo;workflow;empty_rank;mpi;distributed")
+  endif()
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    foreach(dmo_np IN ITEMS 2 3 4)
+      add_test(
+        NAME validation_dmo_zeldovich_workflow_mpi_np${dmo_np}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${dmo_np} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_dmo_zeldovich_workflow> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        validation_dmo_zeldovich_workflow_mpi_np${dmo_np}
+        PROPERTIES PROCESSORS ${dmo_np}
+                   FIXTURES_SETUP dmo_zeldovich_rank_state_artifacts
+                   LABELS "validation;gravity;dmo;workflow;restart;power_spectrum;mpi;distributed")
+    endforeach()
+    add_test(
+      NAME validation_dmo_zeldovich_workflow_rank_equivalence
+      COMMAND $<TARGET_FILE:test_validation_dmo_zeldovich_workflow> --compare-rank-artifacts)
+    set_tests_properties(
+      validation_dmo_zeldovich_workflow_rank_equivalence
+      PROPERTIES
+        DEPENDS "validation_dmo_zeldovich_workflow_single_rank;validation_dmo_zeldovich_workflow_mpi_np2;validation_dmo_zeldovich_workflow_mpi_np3;validation_dmo_zeldovich_workflow_mpi_np4"
+        FIXTURES_REQUIRED dmo_zeldovich_rank_state_artifacts
+        LABELS "validation;gravity;dmo;workflow;mpi;distributed;rank_equivalence")
   endif()
 
   if(COSMOSIM_ENABLE_PYTHON)

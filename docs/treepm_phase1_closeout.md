@@ -6,6 +6,13 @@ This closeout is limited to **TreePM Phase 1 integration coherence** for the cur
 It does not claim Phase 2 features, multi-rank TreePM production readiness, or Ewald-exact periodic references.
 Phase 2 distributed contracts are now frozen separately in `docs/treepm_phase2_distributed_contract.md`.
 
+> Historical normalization note (2026-07-13): the Phase 1 equations below are
+> preserved as the convention recorded by this closeout. They are not the
+> current production convention. The gravity normalization repair now has PM
+> and tree return scale-free `A` from comoving density and physical `G_code`;
+> collisionless KDK or the gas conservative source applies the `A/a²`
+> response.
+
 ## Final numerical contract (implemented)
 
 - Periodic comoving Poisson solve in PM:

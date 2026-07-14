@@ -76,6 +76,24 @@ void testUnitsConversions() {
 
   const double rho_cgs = units.densityCodeToCgs(1.0);
   assert(rho_cgs > 0.0);
+
+  const double astrophysical_g_code =
+      cosmosim::core::newtonGravitationalConstantCode(units);
+  const double expected_astrophysical_g_code =
+      cosmosim::core::constants::k_newton_g_si *
+      cosmosim::core::constants::k_solar_mass_si /
+      (cosmosim::core::constants::k_megaparsec_si *
+       cosmosim::core::constants::k_kilometer_si *
+       cosmosim::core::constants::k_kilometer_si);
+  assert(std::abs(astrophysical_g_code - expected_astrophysical_g_code) /
+             expected_astrophysical_g_code <
+         1.0e-14);
+
+  const auto si_units = cosmosim::core::makeUnitSystem("m", "kg", "m_s");
+  assert(std::abs(cosmosim::core::newtonGravitationalConstantCode(si_units) -
+                  cosmosim::core::constants::k_newton_g_si) /
+             cosmosim::core::constants::k_newton_g_si <
+         1.0e-14);
 }
 
 void testStableHash() {

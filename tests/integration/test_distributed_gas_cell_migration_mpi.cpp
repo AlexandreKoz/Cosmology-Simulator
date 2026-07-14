@@ -28,10 +28,11 @@ std::string configText(int world_size) {
   stream << "time_begin_code = 0.01\n";
   stream << "time_end_code = 0.0103\n";
   stream << "max_global_steps = 2\n";
-  stream << "hierarchical_max_rung = 1\n";
+  stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 8\n";
   stream << "treepm_asmth_cells = 1.25\n";
-  stream << "treepm_rcut_cells = 4.5\n";
+  // This ownership test uses a deliberately small mesh; keep r_cut < L/2.
+  stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
   stream << "[output]\n";
   stream << "run_name = distributed_gas_cell_migration_mpi\n";
@@ -80,6 +81,9 @@ cosmosim::core::SimulationState makeState() {
   state.patches.first_cell = {0U, 1U};
   state.patches.cell_count = {1U, 2U};
   state.patches.owning_rank = {0U, 0U};
+  state.patches.origin_x_comoving = {0.0, 0.65};
+  state.patches.origin_y_comoving = {0.45, 0.45};
+  state.patches.origin_z_comoving = {0.45, 0.45};
   state.patches.extent_x_comoving = {0.1, 0.2};
   state.patches.extent_y_comoving = {0.1, 0.1};
   state.patches.extent_z_comoving = {0.1, 0.1};

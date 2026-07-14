@@ -28,6 +28,13 @@ This ADR is infrastructure policy only; it does not authorize solver behavior ch
 | Gas cell identity and gas-cell row order | `core::SimulationState::gas_cell_identity` | `GasCellIdentityMap` records keyed by stable nonzero `gas_cell_id`, with transient dense `local_cell_row` and generation | `replaceGasCellIdentityRecords`, `commitGasCellMigration`, `commitAmrPatchMigration`, restart import, legacy particle-bound refresh helpers | **H2 distributed contract:** production workflow compaction/rebalance migrates gas cells and AMR patches by stable `gas_cell_id`/`patch_id`. `parent_particle_id` is optional compatibility/provenance only and is not hydro truth. |
 | Softening (global/species/per-particle) | Frozen typed config for policy defaults; particle sidecar for overrides | Defaults: `SimulationConfig.numerics.gravity_softening_*`; overrides: `particle_sidecar.gravity_softening_comoving` gated by `particle_sidecar.has_gravity_softening_override` | Config load/normalization; `materializePerParticleSoftening` | Diagnostics/provenance are observers, never authorities. |
 | Raw config, normalized config, derived runtime constants, provenance | Config/provenance subsystem (`core::FrozenConfig`, `core::ProvenanceRecord`) | `FrozenConfig::{config,normalized_text,provenance}` + persisted normalized/provenance artifacts | `loadFrozenConfigFromFile/String`, `writeNormalizedConfigSnapshot`, provenance constructors and IO writers | Runtime mutation of typed config is forbidden. |
+| Gravity Newton constant in code units | Frozen `core::UnitSystem` conversion | Result of `core::newtonGravitationalConstantCode(UnitSystem)` supplied identically to PM/tree options | Workflow gravity construction/restart reconstruction from frozen units | Physical-unit workflows must not hard-code `G_code=1`; option copies are derived values, not independent authorities. |
+| Cosmological gravity response | Integrator cosmological timeline | In-flight `StepContext.timeline_step`; committed `IntegratorState::{current_scale_factor,current_hubble_rate_code}` | `CosmologicalTimeline::prepareStep` / stage dispatch / step commit | PM and TreePM return scale-free `A`; collisionless KDK and the gas conservative source apply the time response to their respective state. Post-drift hydro uses the in-flight step-end epoch, not the still-step-begin committed state. PM field-build scale is validity metadata, not a kernel multiplier. |
+| Particle decomposition generation | Gravity workflow | `GravityStageCallback::m_decomposition_epoch` | Advance after a globally committed ownership transition; restore from distributed restart state | Tree wire protocols consume this epoch. Rank-local particle-index generation is not a distributed epoch. |
+| Long-range PM field validity | `TreePmCoordinator` | `LongRangeFieldValidity` plus transient PM mesh/halo state | Refresh at an integrator force surface; explicit reuse only after full compatibility validation | Particle decomposition does not alone invalidate fixed FFT-slab field ownership; force epoch and operator inputs do. |
+| In-flight PM refresh decision | Integrator-issued `PmRefreshDirective`; committed cadence remains `PmSynchronizationState` | Pending opportunity/version/build-step/build-scale values until commit | Stage dispatch creates directive; gravity solve observes it; cadence commit updates `PmSynchronizationState` | `gravity.pm_long_range_field` emitted before commit must copy the pending directive/decision, not stale committed fields; the event is diagnostic only. |
+| Committed gravity force history | Gravity workflow force cache | Dense acceleration arrays, per-row validity, stable-ID restart payload | Refresh at force evaluation; invalidate on dense-row ownership/index changes | Relative MAC may observe only compatible committed history. |
+| Gravity timestep acceleration | Adaptive scheduler criteria after step commit | Transient public `ComovingGravityTimeStepInput` containing scale-free `A`, comoving softening, and committed `IntegratorState.current_scale_factor` | `updateAdaptiveTimeBins` via `computeComovingGravityTimeStep` | With comoving length, the compatible coordinate acceleration is `A/a^3`; the helper validates finite positive `a` and evaluates `eta sqrt(a^3 epsilon_com/|A|)`. The generic `computeGravityTimeStep` remains coordinate-neutral. |
 | Restart continuation truth | Restart schema payload + typed restart read result | `io::RestartReadResult::{state,integrator_state,scheduler_state,provenance,normalized_config_*}` | `writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5` | Restart preserves full scheduler persistent state; snapshot does not. |
 | Active-set construction | Scheduler active-elements + workflow split into particle/cell subsets | `scheduler.beginSubstep()` output then `ActiveSetDescriptor` | Reference workflow step loop | Active views are transient gather/scatter workspaces only. |
 
@@ -167,6 +174,49 @@ Ambiguous legacy-name policy (must remain explicit in code/docs/tests):
 11. Consumers: stage callbacks via `StepContext.active_set` and builders in `simulation_state_active_views.cpp`.
 12. Active eligibility is scheduler/bin-driven and species-agnostic by contract; species migration alone does not authorize ad-hoc active-set mutations outside scheduler ownership APIs.
 13. Forbidden: competing active-set builders that bypass scheduler authority for the same step.
+
+### I. Production gravity time, cache, and decomposition policy
+
+1. Production `ReferenceWorkflow` requires `hierarchical_max_rung=0` until
+   per-element kick and drift epochs are represented and restartable. Both
+   particle and gas-cell scheduler restart payloads must remain bin-zero.
+2. Production cadence one refreshes PM at every integrator-issued,
+   rank-coordinated force-refresh surface. Lower-level local-boundary and PM
+   reuse APIs are validation/future-integration seams, not production multirate
+   authority.
+3. An explicit PM reuse request must fail if any rank lacks a compatible field;
+   it must not silently mutate the integrator's requested operation into a
+   refresh.
+4. The PM compatibility key includes force epoch, field-build scale,
+   `G_code`, split/box geometry, assignment, boundary, decomposition mode, and
+   deconvolution. It excludes the particle decomposition epoch because the PM
+   mesh remains owned by fixed FFT slabs and interpolation routes current
+   targets to those owners.
+5. Tree hierarchy/request/response packets carry the actual workflow
+   decomposition epoch. That epoch advances only on an actual committed
+   particle-ownership transition and is restart truth.
+6. Dense acceleration rows and their relative-MAC history are invalidated
+   immediately on ownership/index change even when the PM mesh field remains
+   compatible. Restart written at that boundary must persist an invalid cache,
+   never stale row data.
+7. Physical Newton `G` is converted from frozen units once. Neither PM nor the
+   complementary tree inserts `a^2`. Collisionless KDK and gas
+   `ComovingGravityExpansionSource` apply the `A/a^2` response to their own
+   state.
+8. During the post-drift hydro stage,
+   `StepContext.timeline_step.{scale_factor_end,hubble_end_code}` is the
+   source-epoch authority for both fixed-grid and AMR callbacks;
+   `IntegratorState` is not committed until the step ends. Recomputing an
+   SI-valued background rate inside a solver callback is forbidden.
+9. Post-step gravity timestep criteria use the now-committed scale factor and
+   call `computeComovingGravityTimeStep` with scale-free `A`, comoving
+   softening, and finite positive `a`. That public helper converts to
+   comoving-coordinate acceleration `A/a^3` before using the generic
+   coordinate-neutral criterion. `A/a^2` is the peculiar-velocity response and
+   is not dimensionally compatible with that length criterion.
+10. PM and TreePM MPI wire formats are explicit versioned byte contracts.
+   Native struct representation, padding, and local endianness are not wire
+   authority.
 
 ## Forbidden duplicate authority patterns
 

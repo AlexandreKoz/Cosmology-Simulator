@@ -40,6 +40,10 @@ struct UnitSystem {
     const std::string& mass_unit,
     const std::string& velocity_unit);
 
+// Newton's constant expressed in the configured code units:
+// [G]_code = L_code^3 / (M_code T_code^2).
+[[nodiscard]] double newtonGravitationalConstantCode(const UnitSystem& units);
+
 // Frame-conversion helpers:
 // r_phys = a * x_comoving
 [[nodiscard]] double comovingToPhysicalLength(double x_comoving, double scale_factor);

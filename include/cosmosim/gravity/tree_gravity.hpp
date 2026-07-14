@@ -14,6 +14,7 @@ namespace cosmosim::gravity {
 enum class TreeOpeningCriterion {
   kBarnesHutGeometric,
   kBarnesHutComDistance,
+  kRelativeForceError,
 };
 
 enum class TreeMultipoleOrder {
@@ -22,20 +23,29 @@ enum class TreeMultipoleOrder {
 };
 
 struct TreeGravityOptions {
-  double opening_theta = 0.6;
+  // Keep the direct solver API aligned with the typed production-config
+  // default certified by the periodic Ewald validation suite.
+  double opening_theta = 0.7;
   TreeOpeningCriterion opening_criterion = TreeOpeningCriterion::kBarnesHutComDistance;
   TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;
   double gravitational_constant_code = 1.0;
   std::size_t max_leaf_size = 16;
   TreeSofteningPolicy softening{};
+  // Relative force-error MAC parameters. For a node of mass M and width l,
+  // accept when G M l^2 <= alpha max(|a_prev|, a_floor) r^4.
+  double relative_force_tolerance = 0.005;
+  double relative_force_acceleration_floor_code = 1.0e-30;
 };
 
 struct TreeGravityProfile {
   double build_ms = 0.0;
   double multipole_ms = 0.0;
   double traversal_ms = 0.0;
+  std::uint64_t build_count = 0;
+  std::uint64_t multipole_refresh_count = 0;
   std::uint64_t visited_nodes = 0;
   std::uint64_t accepted_nodes = 0;
+  std::uint64_t opened_nodes = 0;
   std::uint64_t particle_particle_interactions = 0;
   double average_interactions_per_target = 0.0;
 };
@@ -57,6 +67,11 @@ struct TreeNodeSoa {
   std::vector<double> quad_yy;
   std::vector<double> quad_yz;
   std::vector<double> quad_zz;
+  // Trace of the raw second central moment I_ij = sum(m * dx_i * dx_j).
+  // The trace is redundant for an unsoftened 1/r harmonic kernel, but is
+  // required to evaluate a true second-order expansion of softened and
+  // TreePM-screened kernels.
+  std::vector<double> second_moment_trace;
   std::vector<double> softening_min_comoving;
   std::vector<double> softening_max_comoving;
   std::vector<std::uint32_t> child_base;
@@ -85,6 +100,10 @@ class TreeGravitySolver {
     std::span<double> accel_x_comoving;
     std::span<double> accel_y_comoving;
     std::span<double> accel_z_comoving;
+    // Optional magnitude of the previous total acceleration for each active
+    // target. An empty span, or a non-finite entry, selects the deterministic
+    // COM-distance fallback for that target.
+    std::span<const double> previous_acceleration_magnitude_code{};
   };
 
   TreeGravitySolver() = default;
@@ -116,7 +135,8 @@ class TreeGravitySolver {
       std::span<double> accel_z_comoving,
       const TreeGravityOptions& options,
       TreeGravityProfile* profile = nullptr,
-      const TreeSofteningView& softening_view = {}) const;
+      const TreeSofteningView& softening_view = {},
+      std::span<const double> previous_acceleration_magnitude_code = {}) const;
 
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;

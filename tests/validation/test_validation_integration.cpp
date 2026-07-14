@@ -92,9 +92,9 @@ void testPmSingleMode(const cosmosim::validation::ValidationToleranceTable& tole
 
   const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
   const double expected_amp = 4.0 * k_pi * options.gravitational_constant_code *
-      options.scale_factor * options.scale_factor * 0.1 / kx;
+      0.1 / kx;
   const double expected_phi_amp = -4.0 * k_pi * options.gravitational_constant_code *
-      options.scale_factor * options.scale_factor * 0.1 / (kx * kx);
+      0.1 / (kx * kx);
 
   double corr = 0.0;
   double norm_expected = 0.0;
@@ -356,7 +356,8 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
   const std::size_t reference_pm_grid = hasFastSpectralPmBackend() ? 96U : 12U;
   const double rcut_cells = hasFastSpectralPmBackend() ? 4.5 : 2.5;
 
-  const ForceField tree_only = solveTreePm(pm_grid, pos_x, pos_y, pos_z, mass, 100.0, 40.0, 0.55, 8);
+  // A periodic tree-only profile would require either additional source images
+  // or r_cut >= L/2, neither of which the one-minimum-image residual supports.
   const ForceField pm_only = solveTreePm(pm_grid, pos_x, pos_y, pos_z, mass, 0.2, rcut_cells, 0.55, 8);
   const ForceField split = solveTreePm(pm_grid, pos_x, pos_y, pos_z, mass, 1.25, rcut_cells, 0.55, 8);
 
@@ -374,18 +375,14 @@ void testTreePmPeriodicReferenceAndConsistency(const cosmosim::validation::Valid
   const ForceField direct_short_range_reference = computeDirectShortRangeResidual(pos_x, pos_y, pos_z, mass, ref_options);
   const ForceField periodic_proxy_reference = addFields(periodic_spectral_reference, direct_short_range_reference);
 
-  const double tree_only_rel = relativeL2(tree_only, periodic_proxy_reference);
   const double pm_only_rel = relativeL2(pm_only, periodic_proxy_reference);
   const double split_rel = relativeL2(split, periodic_proxy_reference);
 
   std::ostringstream msg;
-  msg << "tree-pm periodic consistency failure (reference = fine spectral PM + exact pairwise short-range residual; not Ewald exact): tree_only_rel="
-      << tree_only_rel << ", split_rel=" << split_rel << ", pm_only_rel=" << pm_only_rel;
+  msg << "tree-pm periodic consistency failure (reference = fine spectral PM + exact pairwise short-range residual; not Ewald exact): split_rel="
+      << split_rel << ", pm_only_rel=" << pm_only_rel;
 
   const double backend_relaxation = hasFastSpectralPmBackend() ? 1.0 : 2.0;
-  requireOrThrow(
-      tree_only_rel <= backend_relaxation * tolerances.require("gravity_tree_pm_periodic_proxy.tree_only_rel_l2_max"),
-      msg.str());
   requireOrThrow(
       pm_only_rel <= backend_relaxation * tolerances.require("gravity_tree_pm_periodic_proxy.pm_only_rel_l2_max"),
       msg.str());

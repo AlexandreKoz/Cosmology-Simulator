@@ -41,25 +41,83 @@ void validateInputSpans(
       pos_x_comoving.size() != mass_code.size()) {
     throw std::invalid_argument("Tree gravity requires equal particle span lengths");
   }
+  for (std::size_t i = 0; i < mass_code.size(); ++i) {
+    if (!std::isfinite(pos_x_comoving[i]) || !std::isfinite(pos_y_comoving[i]) ||
+        !std::isfinite(pos_z_comoving[i]) || !std::isfinite(mass_code[i]) ||
+        mass_code[i] < 0.0) {
+      throw std::invalid_argument(
+          "Tree gravity requires finite coordinates and finite non-negative masses");
+    }
+  }
 }
 
-[[nodiscard]] bool acceptNodeByMac(
-    TreeOpeningCriterion criterion,
-    bool is_leaf,
+void validateOptions(const TreeGravityOptions& options) {
+  if (!std::isfinite(options.opening_theta) || options.opening_theta <= 0.0 ||
+      !std::isfinite(options.relative_force_tolerance) || options.relative_force_tolerance <= 0.0 ||
+      !std::isfinite(options.relative_force_acceleration_floor_code) ||
+      options.relative_force_acceleration_floor_code <= 0.0 ||
+      !std::isfinite(options.gravitational_constant_code) || options.gravitational_constant_code <= 0.0 ||
+      options.max_leaf_size == 0) {
+    throw std::invalid_argument("Invalid tree gravity options");
+  }
+
+  switch (options.opening_criterion) {
+    case TreeOpeningCriterion::kBarnesHutGeometric:
+    case TreeOpeningCriterion::kBarnesHutComDistance:
+    case TreeOpeningCriterion::kRelativeForceError:
+      break;
+    default:
+      throw std::invalid_argument("Invalid tree gravity opening criterion");
+  }
+}
+
+[[nodiscard]] bool acceptNodeByComDistanceMac(
     double theta,
     double half_size,
     double com_center_offset,
     double r2) {
+  const double r = std::sqrt(r2 + 1.0e-30);
+  const double effective_size = 2.0 * half_size + com_center_offset;
+  return (effective_size / r) < theta;
+}
+
+[[nodiscard]] bool acceptNodeByMac(
+    bool is_leaf,
+    bool target_inside_node,
+    double half_size,
+    double com_center_offset,
+    double node_mass_code,
+    double r2,
+    bool previous_acceleration_available,
+    double previous_acceleration_magnitude_code,
+    const TreeGravityOptions& options) {
   if (is_leaf) {
     return true;
   }
-  const double r = std::sqrt(r2 + 1.0e-30);
   const double width = 2.0 * half_size;
-  if (criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
-    return (width / r) < theta;
+  if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
+    const double r = std::sqrt(r2 + 1.0e-30);
+    return (width / r) < options.opening_theta;
   }
-  const double effective_size = width + com_center_offset;
-  return (effective_size / r) < theta;
+  if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutComDistance) {
+    return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
+  }
+
+  // A relative-MAC node containing the target would include the target's own
+  // mass in an accepted multipole. Force it open before applying either the
+  // history-controlled rule or its deterministic first-evaluation fallback.
+  if (target_inside_node) {
+    return false;
+  }
+  if (!previous_acceleration_available) {
+    return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
+  }
+
+  const double acceleration_scale_code = std::max(
+      std::abs(previous_acceleration_magnitude_code), options.relative_force_acceleration_floor_code);
+  const double lhs = options.gravitational_constant_code * node_mass_code * width * width;
+  const double rhs = options.relative_force_tolerance * acceleration_scale_code * r2 * r2;
+  return lhs <= rhs;
 }
 
 
@@ -122,10 +180,45 @@ void validateInputSpans(
   const double qrz = qxz * dx + qyz * dy + qzz * dz;
   const double rqr = dx * qrx + dy * qry + dz * qrz;
 
-  const double quad_prefactor = 0.5 * options.gravitational_constant_code;
-  ax += quad_prefactor * (2.0 * qrx * inv_r5 - 5.0 * rqr * dx * inv_r7);
-  ay += quad_prefactor * (2.0 * qry * inv_r5 - 5.0 * rqr * dy * inv_r7);
-  az += quad_prefactor * (2.0 * qrz * inv_r5 - 5.0 * rqr * dz * inv_r7);
+  (void)qrx;
+  (void)qry;
+  (void)qrz;
+  (void)rqr;
+  (void)inv_r5;
+  (void)inv_r7;
+
+  // Expand g_i(d) = d_i (|d|^2 + eps^2)^(-3/2) through second
+  // order about the node COM.  Q alone is sufficient only for a harmonic
+  // unsoftened kernel; the trace lane supplies the isotropic second moment
+  // needed by the softened kernel.
+  const double moment_trace = nodes.second_moment_trace[node_index];
+  const double mxx = (qxx + moment_trace) / 3.0;
+  const double mxy = qxy / 3.0;
+  const double mxz = qxz / 3.0;
+  const double myy = (qyy + moment_trace) / 3.0;
+  const double myz = qyz / 3.0;
+  const double mzz = (qzz + moment_trace) / 3.0;
+  const double mdx = mxx * dx + mxy * dy + mxz * dz;
+  const double mdy = mxy * dx + myy * dy + myz * dz;
+  const double mdz = mxz * dx + myz * dy + mzz * dz;
+  const double dmd = dx * mdx + dy * mdy + dz * mdz;
+  const double r = std::sqrt(std::max(r2, 1.0e-30));
+  const double radial_first = -3.0 * r / (denom * denom * std::sqrt(denom));
+  const double radial_second =
+      -3.0 / (denom * denom * std::sqrt(denom)) +
+      15.0 * r2 / (denom * denom * denom * std::sqrt(denom));
+  const double first_over_r = radial_first / r;
+  const double contracted_radial = radial_second / r2 - radial_first / (r2 * r);
+  const double correction_scale = options.gravitational_constant_code;
+  ax += correction_scale *
+      (mdx * first_over_r + 0.5 * moment_trace * dx * first_over_r +
+       0.5 * dx * dmd * contracted_radial);
+  ay += correction_scale *
+      (mdy * first_over_r + 0.5 * moment_trace * dy * first_over_r +
+       0.5 * dy * dmd * contracted_radial);
+  az += correction_scale *
+      (mdz * first_over_r + 0.5 * moment_trace * dz * first_over_r +
+       0.5 * dz * dmd * contracted_radial);
   return {ax, ay, az};
 }
 
@@ -178,6 +271,7 @@ void TreeNodeSoa::clear() {
   quad_yy.clear();
   quad_yz.clear();
   quad_zz.clear();
+  second_moment_trace.clear();
   softening_min_comoving.clear();
   softening_max_comoving.clear();
   child_base.clear();
@@ -202,6 +296,7 @@ void TreeNodeSoa::reserve(std::size_t count) {
   quad_yy.reserve(count);
   quad_yz.reserve(count);
   quad_zz.reserve(count);
+  second_moment_trace.reserve(count);
   softening_min_comoving.reserve(count);
   softening_max_comoving.reserve(count);
   child_base.reserve(count);
@@ -235,6 +330,7 @@ void TreeNodeSoa::appendMemoryReport(core::MemoryReportBuilder& builder) const {
   add("tree.nodes.quad_yy", quad_yy);
   add("tree.nodes.quad_yz", quad_yz);
   add("tree.nodes.quad_zz", quad_zz);
+  add("tree.nodes.second_moment_trace", second_moment_trace);
   add("tree.nodes.softening_min_comoving", softening_min_comoving);
   add("tree.nodes.softening_max_comoving", softening_max_comoving);
   add("tree.nodes.child_base", child_base);
@@ -254,9 +350,7 @@ void TreeGravitySolver::build(
     const TreeSofteningView& softening_view) {
   const auto build_start = std::chrono::steady_clock::now();
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
-  if (options.opening_theta <= 0.0 || options.gravitational_constant_code <= 0.0 || options.max_leaf_size == 0) {
-    throw std::invalid_argument("Invalid tree gravity options");
-  }
+  validateOptions(options);
 
   m_nodes.clear();
   m_source_softening_epsilon_comoving.clear();
@@ -279,6 +373,7 @@ void TreeGravitySolver::build(
   if (pos_x_comoving.empty()) {
     if (profile != nullptr) {
       *profile = {};
+      profile->build_count = 1U;
       profile->build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_start).count();
     }
     return;
@@ -310,6 +405,8 @@ void TreeGravitySolver::build(
   const auto multipole_stop = std::chrono::steady_clock::now();
 
   if (profile != nullptr) {
+    profile->build_count = 1U;
+    profile->multipole_refresh_count = 1U;
     profile->build_ms = std::chrono::duration<double, std::milli>(multipole_start - build_start).count();
     profile->multipole_ms = std::chrono::duration<double, std::milli>(multipole_stop - multipole_start).count();
   }
@@ -332,7 +429,8 @@ void TreeGravitySolver::evaluateActiveSet(
       target_view.accel_z_comoving,
       options,
       profile,
-      softening_view);
+      softening_view,
+      target_view.previous_acceleration_magnitude_code);
 }
 
 void TreeGravitySolver::evaluateActiveSet(
@@ -346,14 +444,20 @@ void TreeGravitySolver::evaluateActiveSet(
     std::span<double> accel_z_comoving,
     const TreeGravityOptions& options,
     TreeGravityProfile* profile,
-    const TreeSofteningView& softening_view) const {
+    const TreeSofteningView& softening_view,
+    std::span<const double> previous_acceleration_magnitude_code) const {
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
+  validateOptions(options);
   if (!built()) {
     throw std::runtime_error("Tree must be built before traversal");
   }
   if (active_particle_index.size() != accel_x_comoving.size() || active_particle_index.size() != accel_y_comoving.size() ||
       active_particle_index.size() != accel_z_comoving.size()) {
     throw std::invalid_argument("Active-set and acceleration spans must match");
+  }
+  if (!previous_acceleration_magnitude_code.empty() &&
+      previous_acceleration_magnitude_code.size() != active_particle_index.size()) {
+    throw std::invalid_argument("Previous acceleration magnitude span must match the active-set size");
   }
   if (!softening_view.target_particle_epsilon_comoving.empty() &&
       softening_view.target_particle_epsilon_comoving.size() != active_particle_index.size()) {
@@ -370,6 +474,7 @@ void TreeGravitySolver::evaluateActiveSet(
 
   const auto traversal_start = std::chrono::steady_clock::now();
   std::uint64_t accepted_nodes = 0;
+  std::uint64_t opened_nodes = 0;
   std::uint64_t visited_nodes = 0;
   std::uint64_t pp_interactions = 0;
 
@@ -387,6 +492,12 @@ void TreeGravitySolver::evaluateActiveSet(
     const double pz = pos_z_comoving[particle_index];
     const double target_softening_comoving =
         resolveTargetSofteningEpsilon(active_i, particle_index, options.softening, softening_view);
+    const bool previous_acceleration_supplied = !previous_acceleration_magnitude_code.empty();
+    const double previous_acceleration_code = previous_acceleration_supplied
+        ? previous_acceleration_magnitude_code[active_i]
+        : 0.0;
+    const bool previous_acceleration_available =
+        previous_acceleration_supplied && std::isfinite(previous_acceleration_code);
 
     double ax = 0.0;
     double ay = 0.0;
@@ -410,9 +521,22 @@ void TreeGravitySolver::evaluateActiveSet(
       const double center_dz = m_nodes.center_z_comoving[node_index] - m_nodes.com_z_comoving[node_index];
       const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
       const bool is_leaf = m_nodes.child_count[node_index] == 0;
+      const bool target_inside_node = !is_leaf &&
+          options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
+          std::abs(px - m_nodes.center_x_comoving[node_index]) <= half_size &&
+          std::abs(py - m_nodes.center_y_comoving[node_index]) <= half_size &&
+          std::abs(pz - m_nodes.center_z_comoving[node_index]) <= half_size;
       const double r = std::sqrt(r2 + 1.0e-30);
-      const bool mac_accept =
-          acceptNodeByMac(options.opening_criterion, is_leaf, options.opening_theta, half_size, com_offset, r2);
+      const bool mac_accept = acceptNodeByMac(
+          is_leaf,
+          target_inside_node,
+          half_size,
+          com_offset,
+          m_nodes.mass_code[node_index],
+          r2,
+          previous_acceleration_available,
+          previous_acceleration_code,
+          options);
       const bool softening_accept = passesSofteningEnvelopeGuard(
           is_leaf,
           half_size,
@@ -453,6 +577,7 @@ void TreeGravitySolver::evaluateActiveSet(
           az += contrib[2];
         }
       } else {
+        ++opened_nodes;
         pushChildrenNearFirst(m_nodes, node_index, px, py, pz, stack);
       }
     }
@@ -465,6 +590,7 @@ void TreeGravitySolver::evaluateActiveSet(
   if (profile != nullptr) {
     profile->visited_nodes += visited_nodes;
     profile->accepted_nodes += accepted_nodes;
+    profile->opened_nodes += opened_nodes;
     profile->particle_particle_interactions += pp_interactions;
     profile->traversal_ms +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traversal_start).count();
@@ -515,6 +641,7 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   m_nodes.quad_yy.push_back(0.0);
   m_nodes.quad_yz.push_back(0.0);
   m_nodes.quad_zz.push_back(0.0);
+  m_nodes.second_moment_trace.push_back(0.0);
   m_nodes.softening_min_comoving.push_back(std::numeric_limits<double>::infinity());
   m_nodes.softening_max_comoving.push_back(0.0);
   m_nodes.child_base.push_back(0U);
@@ -653,6 +780,7 @@ void TreeGravitySolver::accumulateMultipoles(
         i_zz += m * rz * rz;
       }
       const double trace = i_xx + i_yy + i_zz;
+      m_nodes.second_moment_trace[node_index] = trace;
       m_nodes.quad_xx[node_index] = 3.0 * i_xx - trace;
       m_nodes.quad_xy[node_index] = 3.0 * i_xy;
       m_nodes.quad_xz[node_index] = 3.0 * i_xz;
@@ -699,6 +827,7 @@ void TreeGravitySolver::accumulateMultipoles(
     m_nodes.quad_yy[node_index] = 0.0;
     m_nodes.quad_yz[node_index] = 0.0;
     m_nodes.quad_zz[node_index] = 0.0;
+    m_nodes.second_moment_trace[node_index] = 0.0;
     return;
   }
 
@@ -712,6 +841,7 @@ void TreeGravitySolver::accumulateMultipoles(
   double qyy = 0.0;
   double qyz = 0.0;
   double qzz = 0.0;
+  double second_moment_trace = 0.0;
 
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
     const std::uint32_t child = m_nodes.child_index[child_offset + octant];
@@ -730,6 +860,7 @@ void TreeGravitySolver::accumulateMultipoles(
     qyy += m_nodes.quad_yy[child] + m * (3.0 * dy * dy - d2);
     qyz += m_nodes.quad_yz[child] + m * (3.0 * dy * dz);
     qzz += m_nodes.quad_zz[child] + m * (3.0 * dz * dz - d2);
+    second_moment_trace += m_nodes.second_moment_trace[child] + m * d2;
   }
 
   m_nodes.quad_xx[node_index] = qxx;
@@ -738,6 +869,7 @@ void TreeGravitySolver::accumulateMultipoles(
   m_nodes.quad_yy[node_index] = qyy;
   m_nodes.quad_yz[node_index] = qyz;
   m_nodes.quad_zz[node_index] = qzz;
+  m_nodes.second_moment_trace[node_index] = second_moment_trace;
 }
 
 }  // namespace cosmosim::gravity

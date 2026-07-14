@@ -32,7 +32,7 @@
 
 ## Reproducibility and provenance
 
-- [ ] Provenance schema (`provenance_v5`) is documented.
+- [ ] Provenance schema (`provenance_v6`) is documented.
 - [ ] Snapshot and restart schema versions are documented.
 - [ ] Config normalization/hash policy is documented for reference runs.
 

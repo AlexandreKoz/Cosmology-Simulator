@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -27,6 +28,26 @@
 
 namespace cosmosim::parallel {
 namespace {
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+[[nodiscard]] bool queryActiveMpiWorld(int& world_size, int& world_rank) noexcept {
+  world_size = 1;
+  world_rank = 0;
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized == 0) {
+    return false;
+  }
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  if (finalized != 0) {
+    return false;
+  }
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  return true;
+}
+#endif
 
 [[nodiscard]] double clampUnit(double value) {
   if (value <= 0.0) {
@@ -1005,6 +1026,15 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
       rebalance.current_metrics.weighted_imbalance_ratio >= rebalance_config.imbalance_trigger_ratio;
   const bool memory_imbalanced =
       rebalance.current_metrics.memory_imbalance_ratio >= rebalance_config.memory_trigger_ratio;
+  const bool local_has_actionable_migration =
+      !rebalance.particle_migrations.empty() ||
+      !rebalance.amr_patch_ownership_updates.empty();
+  // This vote is collective even on ranks that already have local work. Do
+  // not place it behind a short-circuiting local predicate: ranks with no
+  // migration would otherwise enter the Allreduce while actionable ranks
+  // advance to the payload exchange.
+  const std::uint64_t actionable_migration_rank_count =
+      mpi_context.allreduceSumUint64(local_has_actionable_migration ? 1ULL : 0ULL);
   if (global_entity_count == 0U) {
     rebalance.reason = "empty_decomposition";
   } else if (!load_imbalanced && !memory_imbalanced) {
@@ -1017,9 +1047,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
         (load_imbalanced ? "load_imbalance" : "memory_imbalance");
     rebalance.should_rebalance =
         rebalance.global_entities_moved > 0U &&
-        (!rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty() ||
-         mpi_context.allreduceSumUint64(
-             (!rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty()) ? 1ULL : 0ULL) > 0ULL);
+        actionable_migration_rank_count > 0U;
   }
   return rebalance;
 }
@@ -2071,6 +2099,9 @@ void validatePmMeshOwnershipDescriptor(const PmMeshOwnershipDescriptor& descript
 }
 
 void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& descriptor) {
+  if (descriptor.wire_version != 1U) {
+    throw std::invalid_argument("tree pseudo-particle wire version is unsupported");
+  }
   if (descriptor.source_rank < 0) {
     throw std::invalid_argument("tree pseudo-particle source_rank must be non-negative");
   }
@@ -2104,6 +2135,9 @@ void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet) {
   }
   if (packet.is_leaf > 1U) {
     throw std::invalid_argument("tree pseudo-particle packet leaf flag is invalid");
+  }
+  if (packet.geometry_frame > 1U) {
+    throw std::invalid_argument("tree pseudo-particle packet geometry frame is invalid");
   }
 }
 
@@ -2357,13 +2391,7 @@ void recordDistributedProfiling(
 
 MpiContext::MpiContext() {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  int initialized = 0;
-  MPI_Initialized(&initialized);
-  if (initialized != 0) {
-    m_is_enabled = true;
-    MPI_Comm_size(MPI_COMM_WORLD, &m_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &m_world_rank);
-  }
+  m_is_enabled = queryActiveMpiWorld(m_world_size, m_world_rank);
 #endif
 }
 
@@ -2429,31 +2457,199 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+namespace {
+
+constexpr std::uint32_t k_tree_pseudo_wire_version = 1U;
+constexpr std::size_t k_tree_pseudo_wire_bytes = 152U;
+
+void appendTreeWireU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+    bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+  }
+}
+
+void appendTreeWireU64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+  }
+}
+
+void appendTreeWireDouble(std::vector<std::uint8_t>& bytes, double value) {
+  appendTreeWireU64(bytes, std::bit_cast<std::uint64_t>(value));
+}
+
+[[nodiscard]] std::uint32_t readTreeWireU32(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint32_t)) {
+    throw std::runtime_error("tree pseudo-particle wire record is truncated");
+  }
+  std::uint32_t value = 0U;
+  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+    value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
+  }
+  return value;
+}
+
+[[nodiscard]] std::uint64_t readTreeWireU64(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t)) {
+    throw std::runtime_error("tree pseudo-particle wire record is truncated");
+  }
+  std::uint64_t value = 0U;
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+  }
+  return value;
+}
+
+[[nodiscard]] double readTreeWireDouble(std::span<const std::uint8_t> bytes, std::size_t& offset) {
+  return std::bit_cast<double>(readTreeWireU64(bytes, offset));
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encodeTreePseudoPackets(
+    std::span<const TreePseudoParticlePacket> packets) {
+  if (packets.size() > std::numeric_limits<std::size_t>::max() / k_tree_pseudo_wire_bytes) {
+    throw std::overflow_error("tree pseudo-particle wire payload size overflows size_t");
+  }
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(packets.size() * k_tree_pseudo_wire_bytes);
+  for (const TreePseudoParticlePacket& packet : packets) {
+    appendTreeWireU32(bytes, packet.descriptor.wire_version);
+    appendTreeWireU64(bytes, packet.descriptor.pseudo_particle_id);
+    appendTreeWireU32(bytes, static_cast<std::uint32_t>(packet.descriptor.source_rank));
+    appendTreeWireU64(bytes, packet.descriptor.decomposition_epoch);
+    appendTreeWireU32(bytes, packet.descriptor.derived_not_authoritative ? 1U : 0U);
+    appendTreeWireU64(bytes, packet.descriptor.force_epoch);
+    appendTreeWireU64(bytes, packet.descriptor.exchange_sequence);
+    appendTreeWireU32(bytes, packet.geometry_frame);
+    appendTreeWireDouble(bytes, packet.mass_code);
+    appendTreeWireDouble(bytes, packet.center_x_comoving);
+    appendTreeWireDouble(bytes, packet.center_y_comoving);
+    appendTreeWireDouble(bytes, packet.center_z_comoving);
+    appendTreeWireDouble(bytes, packet.min_x_comoving);
+    appendTreeWireDouble(bytes, packet.max_x_comoving);
+    appendTreeWireDouble(bytes, packet.min_y_comoving);
+    appendTreeWireDouble(bytes, packet.max_y_comoving);
+    appendTreeWireDouble(bytes, packet.min_z_comoving);
+    appendTreeWireDouble(bytes, packet.max_z_comoving);
+    appendTreeWireU64(bytes, packet.source_count);
+    appendTreeWireU32(bytes, packet.hierarchy_level);
+    appendTreeWireU32(bytes, packet.local_node_index);
+    appendTreeWireU32(bytes, packet.child_count);
+    appendTreeWireU32(bytes, packet.is_leaf);
+  }
+  if (bytes.size() != packets.size() * k_tree_pseudo_wire_bytes) {
+    throw std::logic_error("tree pseudo-particle wire encoder size contract failed");
+  }
+  return bytes;
+}
+
+[[nodiscard]] std::vector<TreePseudoParticlePacket> decodeTreePseudoPackets(
+    std::span<const std::uint8_t> bytes) {
+  if (bytes.size() % k_tree_pseudo_wire_bytes != 0U) {
+    throw std::runtime_error("tree pseudo-particle wire payload is misaligned");
+  }
+  std::vector<TreePseudoParticlePacket> packets;
+  packets.reserve(bytes.size() / k_tree_pseudo_wire_bytes);
+  std::size_t offset = 0U;
+  while (offset < bytes.size()) {
+    TreePseudoParticlePacket packet;
+    packet.descriptor.wire_version = readTreeWireU32(bytes, offset);
+    packet.descriptor.pseudo_particle_id = readTreeWireU64(bytes, offset);
+    packet.descriptor.source_rank = static_cast<int>(readTreeWireU32(bytes, offset));
+    packet.descriptor.decomposition_epoch = readTreeWireU64(bytes, offset);
+    packet.descriptor.derived_not_authoritative = readTreeWireU32(bytes, offset) != 0U;
+    packet.descriptor.force_epoch = readTreeWireU64(bytes, offset);
+    packet.descriptor.exchange_sequence = readTreeWireU64(bytes, offset);
+    packet.geometry_frame = static_cast<std::uint8_t>(readTreeWireU32(bytes, offset));
+    packet.mass_code = readTreeWireDouble(bytes, offset);
+    packet.center_x_comoving = readTreeWireDouble(bytes, offset);
+    packet.center_y_comoving = readTreeWireDouble(bytes, offset);
+    packet.center_z_comoving = readTreeWireDouble(bytes, offset);
+    packet.min_x_comoving = readTreeWireDouble(bytes, offset);
+    packet.max_x_comoving = readTreeWireDouble(bytes, offset);
+    packet.min_y_comoving = readTreeWireDouble(bytes, offset);
+    packet.max_y_comoving = readTreeWireDouble(bytes, offset);
+    packet.min_z_comoving = readTreeWireDouble(bytes, offset);
+    packet.max_z_comoving = readTreeWireDouble(bytes, offset);
+    packet.source_count = readTreeWireU64(bytes, offset);
+    packet.hierarchy_level = readTreeWireU32(bytes, offset);
+    packet.local_node_index = readTreeWireU32(bytes, offset);
+    packet.child_count = static_cast<std::uint8_t>(readTreeWireU32(bytes, offset));
+    packet.is_leaf = static_cast<std::uint8_t>(readTreeWireU32(bytes, offset));
+    packets.push_back(packet);
+  }
+  return packets;
+}
+
+}  // namespace
+
 std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleExchange(
     const MpiContext& mpi_context,
     const TreePseudoParticlePacket& local_packet) {
-  validateTreePseudoParticlePacket(local_packet);
-  if (local_packet.descriptor.source_rank != mpi_context.worldRank()) {
-    throw std::invalid_argument("tree pseudo-particle packet source rank does not match MPI context");
+  std::exception_ptr local_validation_failure;
+  try {
+    validateTreePseudoParticlePacket(local_packet);
+    if (local_packet.descriptor.source_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument("tree pseudo-particle packet source rank does not match MPI context");
+    }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
   }
   if (!mpi_context.isEnabled()) {
+    if (local_validation_failure != nullptr) {
+      std::rethrow_exception(local_validation_failure);
+    }
     return {local_packet};
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  std::vector<TreePseudoParticlePacket> packets(static_cast<std::size_t>(mpi_context.worldSize()));
+  std::uint64_t local_failure_vote = local_validation_failure != nullptr ? 1U : 0U;
+  std::uint64_t global_failure_votes = 0U;
+  MPI_Allreduce(
+      &local_failure_vote, &global_failure_votes, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  if (global_failure_votes != 0U) {
+    throw std::runtime_error(
+        "tree pseudo-particle exchange rejected invalid local input on one or more ranks");
+  }
+  std::vector<std::uint8_t> local_wire;
+  std::exception_ptr local_encode_failure;
+  try {
+    local_wire = encodeTreePseudoPackets(
+        std::span<const TreePseudoParticlePacket>(&local_packet, 1U));
+    if (local_wire.size() != k_tree_pseudo_wire_bytes) {
+      throw std::logic_error("tree pseudo-particle single-record wire size mismatch");
+    }
+  } catch (...) {
+    local_encode_failure = std::current_exception();
+  }
+  local_failure_vote = local_encode_failure != nullptr ? 1U : 0U;
+  global_failure_votes = 0U;
+  MPI_Allreduce(
+      &local_failure_vote, &global_failure_votes, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  if (global_failure_votes != 0U) {
+    throw std::runtime_error(
+        "tree pseudo-particle exchange failed to encode local input on one or more ranks");
+  }
+  std::vector<std::uint8_t> gathered_wire(
+      static_cast<std::size_t>(mpi_context.worldSize()) * k_tree_pseudo_wire_bytes,
+      0U);
   MPI_Allgather(
-      const_cast<TreePseudoParticlePacket*>(&local_packet),
-      static_cast<int>(sizeof(TreePseudoParticlePacket)),
+      const_cast<std::uint8_t*>(local_wire.data()),
+      static_cast<int>(k_tree_pseudo_wire_bytes),
       MPI_BYTE,
-      packets.data(),
-      static_cast<int>(sizeof(TreePseudoParticlePacket)),
+      gathered_wire.data(),
+      static_cast<int>(k_tree_pseudo_wire_bytes),
       MPI_BYTE,
       MPI_COMM_WORLD);
+  std::vector<TreePseudoParticlePacket> packets = decodeTreePseudoPackets(gathered_wire);
   for (int rank = 0; rank < mpi_context.worldSize(); ++rank) {
     const TreePseudoParticlePacket& packet = packets[static_cast<std::size_t>(rank)];
     validateTreePseudoParticlePacket(packet);
     if (packet.descriptor.source_rank != rank) {
       throw std::runtime_error("tree pseudo-particle exchange returned a packet with mismatched source rank");
+    }
+    if (packet.descriptor.exchange_sequence != local_packet.descriptor.exchange_sequence ||
+        packet.descriptor.decomposition_epoch != local_packet.descriptor.decomposition_epoch ||
+        packet.descriptor.force_epoch != local_packet.descriptor.force_epoch) {
+      throw std::runtime_error("tree pseudo-particle exchange returned mixed protocol epochs");
     }
   }
   return packets;
@@ -2466,70 +2662,228 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
     const MpiContext& mpi_context,
     std::span<const TreePseudoParticlePacket> local_packets,
     std::uint64_t exchange_sequence) {
-  (void)exchange_sequence;
-  for (const TreePseudoParticlePacket& packet : local_packets) {
-    validateTreePseudoParticlePacket(packet);
-    if (packet.descriptor.source_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("tree pseudo hierarchy packet source rank does not match MPI context");
+  std::exception_ptr local_validation_failure;
+  try {
+    for (const TreePseudoParticlePacket& packet : local_packets) {
+      validateTreePseudoParticlePacket(packet);
+      if (packet.descriptor.source_rank != mpi_context.worldRank()) {
+        throw std::invalid_argument("tree pseudo hierarchy packet source rank does not match MPI context");
+      }
+      if (packet.descriptor.exchange_sequence != exchange_sequence) {
+        throw std::invalid_argument("tree pseudo hierarchy packet exchange sequence does not match exchange call");
+      }
     }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
   }
   if (!mpi_context.isEnabled()) {
+    if (local_validation_failure != nullptr) {
+      std::rethrow_exception(local_validation_failure);
+    }
     return std::vector<TreePseudoParticlePacket>(local_packets.begin(), local_packets.end());
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_packets.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
+  int communicator_world_size = 1;
+  int communicator_world_rank = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &communicator_world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &communicator_world_rank);
+  const auto coordinate_failure = [](std::exception_ptr local_failure, std::string_view phase) {
+    const std::uint64_t local_failure_vote = local_failure != nullptr ? 1U : 0U;
+    std::uint64_t global_failure_votes = 0U;
+    MPI_Allreduce(
+        &local_failure_vote, &global_failure_votes, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    if (global_failure_votes == 0U) {
+      return;
+    }
+    if (local_failure != nullptr) {
+      std::rethrow_exception(local_failure);
+    }
+    throw std::runtime_error(
+        "tree pseudo hierarchy exchange failed during " + std::string(phase) +
+        " on one or more peer ranks");
+  };
+
+  std::exception_ptr communicator_validation_failure;
+  try {
+    if (mpi_context.worldSize() != communicator_world_size ||
+        mpi_context.worldRank() != communicator_world_rank) {
+      throw std::invalid_argument(
+          "tree pseudo hierarchy MPI context does not match MPI_COMM_WORLD");
+    }
+  } catch (...) {
+    communicator_validation_failure = std::current_exception();
+  }
+  coordinate_failure(communicator_validation_failure, "communicator validation");
+  coordinate_failure(local_validation_failure, "local input validation");
+
+  const int world_size = communicator_world_size;
+  std::uint64_t min_exchange_sequence = 0U;
+  std::uint64_t max_exchange_sequence = 0U;
+  MPI_Allreduce(
+      &exchange_sequence, &min_exchange_sequence, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(
+      &exchange_sequence, &max_exchange_sequence, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  if (min_exchange_sequence != max_exchange_sequence) {
+    throw std::runtime_error("tree pseudo hierarchy ranks disagree on exchange sequence");
+  }
+  std::uint64_t local_count = 0U;
+  std::vector<std::uint64_t> counts64;
+  std::exception_ptr count_buffer_failure;
+  try {
+    if (local_packets.size() > static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+      throw std::overflow_error("tree pseudo hierarchy local packet count exceeds uint64_t");
+    }
+    local_count = static_cast<std::uint64_t>(local_packets.size());
+    counts64.assign(static_cast<std::size_t>(world_size), 0U);
+  } catch (...) {
+    count_buffer_failure = std::current_exception();
+  }
+  coordinate_failure(count_buffer_failure, "count-buffer preparation");
   MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
+      &local_count,
       1,
       MPI_UINT64_T,
       counts64.data(),
       1,
       MPI_UINT64_T,
       MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> recv_counts;
+  std::vector<int> recv_displs;
   std::uint64_t total_packets = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * sizeof(TreePseudoParticlePacket);
-    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("tree pseudo hierarchy exchange byte count exceeds MPI int limit");
+  std::uint64_t running_bytes = 0;
+  std::uint64_t total_bytes = 0U;
+  std::exception_ptr receive_layout_failure;
+  try {
+    recv_counts.assign(static_cast<std::size_t>(world_size), 0);
+    recv_displs.assign(static_cast<std::size_t>(world_size), 0);
+    for (int rank = 0; rank < world_size; ++rank) {
+      if (counts64[static_cast<std::size_t>(rank)] >
+          std::numeric_limits<std::uint64_t>::max() / k_tree_pseudo_wire_bytes) {
+        throw std::overflow_error("tree pseudo hierarchy exchange per-rank wire size overflows uint64_t");
+      }
+      const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * k_tree_pseudo_wire_bytes;
+      if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("tree pseudo hierarchy exchange byte count exceeds MPI int limit");
+      }
+      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
+      if (running_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("tree pseudo hierarchy exchange displacement exceeds MPI int limit");
+      }
+      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(running_bytes);
+      if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) - running_bytes) {
+        throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
+      }
+      running_bytes += bytes;
+      if (counts64[static_cast<std::size_t>(rank)] >
+          std::numeric_limits<std::uint64_t>::max() - total_packets) {
+        throw std::overflow_error("tree pseudo hierarchy exchange packet total overflows uint64_t");
+      }
+      total_packets += counts64[static_cast<std::size_t>(rank)];
     }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
+    if (total_packets > std::numeric_limits<std::uint64_t>::max() / k_tree_pseudo_wire_bytes) {
+      throw std::overflow_error("tree pseudo hierarchy exchange total wire size overflows uint64_t");
     }
-    total_packets += counts64[static_cast<std::size_t>(rank)];
+    total_bytes = total_packets * k_tree_pseudo_wire_bytes;
+    if (total_bytes != running_bytes) {
+      throw std::logic_error("tree pseudo hierarchy exchange packet/byte totals disagree");
+    }
+    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
+    }
+    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+      throw std::overflow_error("tree pseudo hierarchy exchange receive allocation exceeds size_t");
+    }
+  } catch (...) {
+    receive_layout_failure = std::current_exception();
   }
-  const std::uint64_t total_bytes = total_packets * sizeof(TreePseudoParticlePacket);
-  if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
+  coordinate_failure(receive_layout_failure, "receive-layout preparation");
+  std::vector<std::uint8_t> local_wire;
+  std::exception_ptr local_encode_failure;
+  try {
+    local_wire = encodeTreePseudoPackets(local_packets);
+    const std::uint64_t expected_local_bytes =
+        counts64[static_cast<std::size_t>(communicator_world_rank)] * k_tree_pseudo_wire_bytes;
+    if (local_wire.size() != static_cast<std::size_t>(expected_local_bytes)) {
+      throw std::logic_error("tree pseudo hierarchy encoded byte count disagrees with gathered packet count");
+    }
+    if (local_wire.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("tree pseudo hierarchy local wire size exceeds MPI int limit");
+    }
+  } catch (...) {
+    local_encode_failure = std::current_exception();
   }
-  std::vector<TreePseudoParticlePacket> result(static_cast<std::size_t>(total_packets));
+  coordinate_failure(local_encode_failure, "local wire encoding");
+
+  std::vector<std::uint8_t> result_wire;
+  std::exception_ptr receive_buffer_failure;
+  try {
+    result_wire.assign(static_cast<std::size_t>(total_bytes), 0U);
+  } catch (...) {
+    receive_buffer_failure = std::current_exception();
+  }
+  coordinate_failure(receive_buffer_failure, "receive-buffer allocation");
+  std::uint8_t empty_wire = 0U;
   MPI_Allgatherv(
-      const_cast<TreePseudoParticlePacket*>(local_packets.data()),
-      static_cast<int>(local_packets.size() * sizeof(TreePseudoParticlePacket)),
+      local_wire.empty() ? &empty_wire : const_cast<std::uint8_t*>(local_wire.data()),
+      static_cast<int>(local_wire.size()),
       MPI_BYTE,
-      result.data(),
+      result_wire.empty() ? &empty_wire : result_wire.data(),
       recv_counts.data(),
       recv_displs.data(),
       MPI_BYTE,
       MPI_COMM_WORLD);
-  std::vector<std::uint64_t> per_rank_count(static_cast<std::size_t>(world_size), 0U);
-  for (const TreePseudoParticlePacket& packet : result) {
-    validateTreePseudoParticlePacket(packet);
-    if (packet.descriptor.source_rank < 0 || packet.descriptor.source_rank >= world_size) {
-      throw std::runtime_error("tree pseudo hierarchy exchange returned packet with invalid source rank");
+  std::vector<TreePseudoParticlePacket> result;
+  std::exception_ptr received_wire_validation_failure;
+  try {
+    result = decodeTreePseudoPackets(result_wire);
+    std::vector<std::uint64_t> per_rank_count(static_cast<std::size_t>(world_size), 0U);
+    std::vector<std::uint32_t> per_rank_root_count(static_cast<std::size_t>(world_size), 0U);
+    std::vector<std::unordered_set<std::uint64_t>> per_rank_ids(static_cast<std::size_t>(world_size));
+    bool have_epoch_contract = false;
+    std::uint64_t expected_decomposition_epoch = 0U;
+    std::uint64_t expected_force_epoch = 0U;
+    std::uint8_t expected_geometry_frame = 0U;
+    for (const TreePseudoParticlePacket& packet : result) {
+      validateTreePseudoParticlePacket(packet);
+      if (packet.descriptor.source_rank < 0 || packet.descriptor.source_rank >= world_size) {
+        throw std::runtime_error("tree pseudo hierarchy exchange returned packet with invalid source rank");
+      }
+      if (packet.descriptor.exchange_sequence != exchange_sequence) {
+        throw std::runtime_error("tree pseudo hierarchy exchange returned a stale exchange sequence");
+      }
+      if (!have_epoch_contract) {
+        expected_decomposition_epoch = packet.descriptor.decomposition_epoch;
+        expected_force_epoch = packet.descriptor.force_epoch;
+        expected_geometry_frame = packet.geometry_frame;
+        have_epoch_contract = true;
+      } else if (packet.descriptor.decomposition_epoch != expected_decomposition_epoch ||
+                 packet.descriptor.force_epoch != expected_force_epoch ||
+                 packet.geometry_frame != expected_geometry_frame) {
+        throw std::runtime_error("tree pseudo hierarchy exchange returned mixed epochs or geometry frames");
+      }
+      const std::size_t source_rank = static_cast<std::size_t>(packet.descriptor.source_rank);
+      if (!per_rank_ids[source_rank].insert(packet.descriptor.pseudo_particle_id).second) {
+        throw std::runtime_error("tree pseudo hierarchy exchange returned duplicate node identity");
+      }
+      ++per_rank_count[source_rank];
+      if (packet.hierarchy_level == 0U) {
+        ++per_rank_root_count[source_rank];
+      }
     }
-    ++per_rank_count[static_cast<std::size_t>(packet.descriptor.source_rank)];
-  }
-  for (int rank = 0; rank < world_size; ++rank) {
-    if (per_rank_count[static_cast<std::size_t>(rank)] != counts64[static_cast<std::size_t>(rank)]) {
-      throw std::runtime_error("tree pseudo hierarchy exchange source-rank coverage mismatch");
+    for (int rank = 0; rank < world_size; ++rank) {
+      if (per_rank_count[static_cast<std::size_t>(rank)] != counts64[static_cast<std::size_t>(rank)]) {
+        throw std::runtime_error("tree pseudo hierarchy exchange source-rank coverage mismatch");
+      }
+      if (per_rank_count[static_cast<std::size_t>(rank)] > 0U &&
+          per_rank_root_count[static_cast<std::size_t>(rank)] != 1U) {
+        throw std::runtime_error(
+            "tree pseudo hierarchy exchange requires exactly one root descriptor per participating rank");
+      }
     }
+  } catch (...) {
+    received_wire_validation_failure = std::current_exception();
   }
+  coordinate_failure(received_wire_validation_failure, "received wire decoding and validation");
   return result;
 #else
   throw std::runtime_error("tree pseudo hierarchy exchange requires MPI support when MPI context is enabled");
@@ -2926,7 +3280,7 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
     std::vector<AmrFluxRegisterPayloadRecord> received_from_peer = exchangePodRecordsWithPeer(
         mpi_context,
         peer_rank,
-        outbound_to_peer,
+        std::span<const AmrFluxRegisterPayloadRecord>(outbound_to_peer),
         k_flux_count_tag_base,
         k_flux_payload_tag_base,
         exchange_sequence,
@@ -3161,36 +3515,212 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
     std::size_t halo_depth_x,
     bool periodic_x,
     std::uint64_t exchange_sequence) {
-  if (!layout.isValid()) {
-    throw std::invalid_argument("PM slab halo exchange requires a valid slab layout");
-  }
-  if (layout.world_size != mpi_context.worldSize() || layout.world_rank != mpi_context.worldRank()) {
-    throw std::invalid_argument("PM slab halo exchange layout world metadata must match MPI context");
-  }
-  if (halo_depth_x == 0 || layout.world_size == 1) {
-    return {};
-  }
-  const std::size_t plane_size = layout.global_ny * layout.global_nz;
-  if (local_scalar_field.size() != layout.localCellCount()) {
-    throw std::invalid_argument("PM slab halo exchange field size does not match local slab cell count");
-  }
-  const std::size_t depth = std::min(halo_depth_x, layout.local_nx());
   PmSlabHaloExchangeResult result;
-  result.halo_depth_x = depth;
-  const int left_peer = (layout.world_rank > 0) ? (layout.world_rank - 1) : (periodic_x ? layout.world_size - 1 : -1);
-  const int right_peer = (layout.world_rank + 1 < layout.world_size) ? (layout.world_rank + 1) : (periodic_x ? 0 : -1);
-  result.left_peer_rank = left_peer;
-  result.right_peer_rank = right_peer;
-  result.left_halo.assign(depth * plane_size, 0.0);
-  result.right_halo.assign(depth * plane_size, 0.0);
-  if (!mpi_context.isEnabled()) {
-    throw std::runtime_error("PM slab halo exchange requires MPI for distributed layouts");
-  }
+  std::vector<double> send_left;
+  std::vector<double> send_right;
+  std::size_t halo_value_count = 0U;
+  std::uint64_t payload_bytes = 0U;
+  int left_peer = -1;
+  int right_peer = -1;
+  bool no_exchange = false;
+  int communicator_world_size = 1;
+  int communicator_world_rank = 0;
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  std::vector<double> send_left(depth * plane_size, 0.0);
-  std::vector<double> send_right(depth * plane_size, 0.0);
-  std::copy_n(local_scalar_field.begin(), send_left.size(), send_left.begin());
-  std::copy_n(local_scalar_field.end() - static_cast<std::ptrdiff_t>(send_right.size()), send_right.size(), send_right.begin());
+  const bool communicator_mpi_active =
+      queryActiveMpiWorld(communicator_world_size, communicator_world_rank);
+#endif
+
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (!layout.isValid()) {
+      throw std::invalid_argument("PM slab halo exchange requires a valid slab layout");
+    }
+    if (layout.world_size != mpi_context.worldSize() ||
+        layout.world_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument(
+          "PM slab halo exchange layout world metadata must match MPI context");
+    }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (!communicator_mpi_active &&
+        (layout.world_size > 1 || mpi_context.isEnabled())) {
+      throw std::invalid_argument(
+          "PM slab halo exchange requires an active MPI_COMM_WORLD for an enabled or distributed context");
+    }
+    if (communicator_mpi_active &&
+        (layout.world_size != communicator_world_size ||
+         layout.world_rank != communicator_world_rank)) {
+      throw std::invalid_argument(
+          "PM slab halo exchange layout world metadata must match MPI_COMM_WORLD");
+    }
+#endif
+    if (layout.global_ny >
+        std::numeric_limits<std::size_t>::max() / layout.global_nz) {
+      throw std::overflow_error("PM slab halo exchange plane size overflows size_t");
+    }
+    const std::size_t plane_size = layout.global_ny * layout.global_nz;
+    if (layout.local_nx() >
+        std::numeric_limits<std::size_t>::max() / plane_size) {
+      throw std::overflow_error("PM slab halo exchange local field size overflows size_t");
+    }
+    const std::size_t expected_local_values = layout.local_nx() * plane_size;
+    if (local_scalar_field.size() != expected_local_values) {
+      throw std::invalid_argument(
+          "PM slab halo exchange field size does not match local slab cell count");
+    }
+    if (halo_depth_x == 0 || layout.world_size == 1 || layout.local_nx() == 0) {
+      no_exchange = true;
+    } else {
+      if (!mpi_context.isEnabled()) {
+        throw std::runtime_error(
+            "PM slab halo exchange requires MPI for distributed layouts");
+      }
+      // A single-neighbor payload cannot span a second slab. Use the smallest
+      // non-empty slab extent so every communicating rank posts matching counts.
+      std::size_t minimum_nonempty_slab_nx =
+          std::numeric_limits<std::size_t>::max();
+      for (int rank = 0; rank < layout.world_size; ++rank) {
+        const PmSlabRange owned =
+            pmOwnedXRangeForRank(layout.global_nx, layout.world_size, rank);
+        if (owned.extentX() > 0U) {
+          minimum_nonempty_slab_nx =
+              std::min(minimum_nonempty_slab_nx, owned.extentX());
+        }
+      }
+      if (minimum_nonempty_slab_nx ==
+          std::numeric_limits<std::size_t>::max()) {
+        throw std::logic_error("PM slab halo exchange layout has no non-empty owner");
+      }
+      const std::size_t depth =
+          std::min(halo_depth_x, minimum_nonempty_slab_nx);
+      if (depth > std::numeric_limits<std::size_t>::max() / plane_size) {
+        throw std::overflow_error("PM slab halo exchange payload size overflows size_t");
+      }
+      halo_value_count = depth * plane_size;
+      if (halo_value_count >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "PM slab halo exchange payload count exceeds MPI int limit");
+      }
+      if (halo_value_count >
+          std::numeric_limits<std::uint64_t>::max() / sizeof(double)) {
+        throw std::overflow_error(
+            "PM slab halo exchange byte diagnostics overflow uint64_t");
+      }
+      payload_bytes =
+          static_cast<std::uint64_t>(halo_value_count) * sizeof(double);
+      result.halo_depth_x = depth;
+      if (layout.owned_x.begin_x > 0) {
+        left_peer = pmOwnerRankForGlobalX(
+            layout.global_nx,
+            layout.world_size,
+            layout.owned_x.begin_x - 1U);
+      } else if (periodic_x) {
+        left_peer = pmOwnerRankForGlobalX(
+            layout.global_nx,
+            layout.world_size,
+            layout.global_nx - 1U);
+      }
+      if (layout.owned_x.end_x < layout.global_nx) {
+        right_peer = pmOwnerRankForGlobalX(
+            layout.global_nx,
+            layout.world_size,
+            layout.owned_x.end_x);
+      } else if (periodic_x) {
+        right_peer = pmOwnerRankForGlobalX(
+            layout.global_nx, layout.world_size, 0U);
+      }
+      result.left_peer_rank = left_peer;
+      result.right_peer_rank = right_peer;
+      result.left_halo.assign(halo_value_count, 0.0);
+      result.right_halo.assign(halo_value_count, 0.0);
+      send_left.assign(halo_value_count, 0.0);
+      send_right.assign(halo_value_count, 0.0);
+      const std::span<const double> left_source =
+          local_scalar_field.first(halo_value_count);
+      const std::span<const double> right_source =
+          local_scalar_field.last(halo_value_count);
+      std::copy(left_source.begin(), left_source.end(), send_left.begin());
+      std::copy(right_source.begin(), right_source.end(), send_right.begin());
+
+      const int local_rank = mpi_context.worldRank();
+      const auto is_remote_peer = [&](int peer) {
+        return peer >= 0 && peer != local_rank;
+      };
+      const std::uint64_t remote_side_count =
+          static_cast<std::uint64_t>(is_remote_peer(left_peer)) +
+          static_cast<std::uint64_t>(is_remote_peer(right_peer));
+      if (remote_side_count > 0 &&
+          payload_bytes >
+              std::numeric_limits<std::uint64_t>::max() / remote_side_count) {
+        throw std::overflow_error(
+            "PM slab halo exchange aggregate byte diagnostics overflow uint64_t");
+      }
+      result.sent_bytes = payload_bytes * remote_side_count;
+      result.received_bytes = payload_bytes * remote_side_count;
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (communicator_mpi_active && communicator_world_size > 1) {
+    const std::uint64_t local_failure_vote =
+        local_preparation_failure ? 1U : 0U;
+    std::uint64_t failure_count = 0U;
+    MPI_Allreduce(
+        &local_failure_vote,
+        &failure_count,
+        1,
+        MPI_UINT64_T,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    if (failure_count != 0U) {
+      if (local_preparation_failure) {
+        std::rethrow_exception(local_preparation_failure);
+      }
+      throw std::runtime_error(
+          "PM slab halo exchange peer rejected protocol preparation");
+    }
+    const std::array<std::uint64_t, 7> local_protocol_identity{
+        static_cast<std::uint64_t>(layout.global_nx),
+        static_cast<std::uint64_t>(layout.global_ny),
+        static_cast<std::uint64_t>(layout.global_nz),
+        static_cast<std::uint64_t>(halo_depth_x),
+        periodic_x ? 1U : 0U,
+        exchange_sequence,
+        static_cast<std::uint64_t>(communicator_world_size),
+    };
+    std::array<std::uint64_t, 7> minimum_protocol_identity{};
+    std::array<std::uint64_t, 7> maximum_protocol_identity{};
+    MPI_Allreduce(
+        local_protocol_identity.data(),
+        minimum_protocol_identity.data(),
+        static_cast<int>(local_protocol_identity.size()),
+        MPI_UINT64_T,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_protocol_identity.data(),
+        maximum_protocol_identity.data(),
+        static_cast<int>(local_protocol_identity.size()),
+        MPI_UINT64_T,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    if (minimum_protocol_identity != maximum_protocol_identity) {
+      throw std::runtime_error(
+          "PM slab halo exchange ranks disagree on global shape, halo depth, "
+          "boundary mode, or exchange sequence");
+    }
+  }
+#endif
+  if (local_preparation_failure) {
+    std::rethrow_exception(local_preparation_failure);
+  }
+  if (no_exchange) {
+    return result;
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   constexpr int k_pm_halo_tag_base = 8810;
   constexpr int k_send_left_side = 0;
   constexpr int k_send_right_side = 1;
@@ -3201,66 +3731,57 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
   const auto side_tag = [&](int peer, int side) {
     return k_pm_halo_tag_base + edge_index(peer) * 2 + side;
   };
-  const auto sendrecv_planes = [&](int peer,
-                                   const std::vector<double>& send,
-                                   std::vector<double>& recv,
-                                   int send_side,
-                                   int recv_side) {
-    if (peer < 0) {
+
+  const int local_rank = mpi_context.worldRank();
+  const auto is_remote_peer = [&](int peer) {
+    return peer >= 0 && peer != local_rank;
+  };
+  if (left_peer == local_rank) {
+    std::copy(send_right.begin(), send_right.end(), result.left_halo.begin());
+  }
+  if (right_peer == local_rank) {
+    std::copy(send_left.begin(), send_left.end(), result.right_halo.begin());
+  }
+
+  std::array<MPI_Request, 4> requests{};
+  int request_count = 0;
+  const int mpi_value_count = static_cast<int>(halo_value_count);
+  const auto post_receive = [&](int peer, std::vector<double>& receive, int sender_side) {
+    if (!is_remote_peer(peer)) {
       return;
     }
-    MPI_Sendrecv(
-        const_cast<double*>(send.data()),
-        static_cast<int>(send.size()),
+    MPI_Irecv(
+        receive.data(),
+        mpi_value_count,
         MPI_DOUBLE,
         peer,
-        ghostExchangeSequencedTag(side_tag(peer, send_side), mpi_context.worldRank(), peer, exchange_sequence),
-        recv.data(),
-        static_cast<int>(recv.size()),
-        MPI_DOUBLE,
-        peer,
-        ghostExchangeSequencedTag(side_tag(peer, recv_side), mpi_context.worldRank(), peer, exchange_sequence),
+        ghostExchangeSequencedTag(side_tag(peer, sender_side), local_rank, peer, exchange_sequence),
         MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-    result.sent_bytes += static_cast<std::uint64_t>(send.size() * sizeof(double));
-    result.received_bytes += static_cast<std::uint64_t>(recv.size() * sizeof(double));
+        &requests[static_cast<std::size_t>(request_count++)]);
   };
-  if (left_peer >= 0 && left_peer == right_peer) {
-    MPI_Sendrecv(
-        const_cast<double*>(send_left.data()),
-        static_cast<int>(send_left.size()),
+  const auto post_send = [&](int peer, const std::vector<double>& send, int sender_side) {
+    if (!is_remote_peer(peer)) {
+      return;
+    }
+    MPI_Isend(
+        const_cast<double*>(send.data()),
+        mpi_value_count,
         MPI_DOUBLE,
-        left_peer,
-        ghostExchangeSequencedTag(side_tag(left_peer, k_send_left_side), mpi_context.worldRank(), left_peer, exchange_sequence),
-        result.right_halo.data(),
-        static_cast<int>(result.right_halo.size()),
-        MPI_DOUBLE,
-        left_peer,
-        ghostExchangeSequencedTag(side_tag(left_peer, k_send_left_side), mpi_context.worldRank(), left_peer, exchange_sequence),
+        peer,
+        ghostExchangeSequencedTag(side_tag(peer, sender_side), local_rank, peer, exchange_sequence),
         MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-    MPI_Sendrecv(
-        const_cast<double*>(send_right.data()),
-        static_cast<int>(send_right.size()),
-        MPI_DOUBLE,
-        right_peer,
-        ghostExchangeSequencedTag(side_tag(right_peer, k_send_right_side), mpi_context.worldRank(), right_peer, exchange_sequence),
-        result.left_halo.data(),
-        static_cast<int>(result.left_halo.size()),
-        MPI_DOUBLE,
-        right_peer,
-        ghostExchangeSequencedTag(side_tag(right_peer, k_send_right_side), mpi_context.worldRank(), right_peer, exchange_sequence),
-        MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-    result.sent_bytes += static_cast<std::uint64_t>((send_left.size() + send_right.size()) * sizeof(double));
-    result.received_bytes +=
-        static_cast<std::uint64_t>((result.left_halo.size() + result.right_halo.size()) * sizeof(double));
-    return result;
+        &requests[static_cast<std::size_t>(request_count++)]);
+  };
+
+  // Post both receives before either send. Distinct side tags keep two-sided
+  // traffic unambiguous when the periodic left and right owner are the same rank.
+  post_receive(left_peer, result.left_halo, k_send_right_side);
+  post_receive(right_peer, result.right_halo, k_send_left_side);
+  post_send(left_peer, send_left, k_send_left_side);
+  post_send(right_peer, send_right, k_send_right_side);
+  if (request_count > 0) {
+    MPI_Waitall(request_count, requests.data(), MPI_STATUSES_IGNORE);
   }
-  // Send the left edge to the left peer and receive that peer's right edge as our left halo.
-  sendrecv_planes(left_peer, send_left, result.left_halo, k_send_left_side, k_send_right_side);
-  // Send the right edge to the right peer and receive that peer's left edge as our right halo.
-  sendrecv_planes(right_peer, send_right, result.right_halo, k_send_right_side, k_send_left_side);
   return result;
 #else
   throw std::runtime_error("PM slab halo exchange requires MPI support when MPI context is enabled");

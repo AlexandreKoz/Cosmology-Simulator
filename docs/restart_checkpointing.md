@@ -33,12 +33,74 @@ The v20 addition is deliberately narrow: it persists the committed particle and 
 
 Restart write payloads now carry `RestartPersistentStateView` (`persistent_state.simulation_state`) rather than a broad ad-hoc object pointer. This creates an explicit outer-boundary guard: transient runtime owners such as `TransientStepWorkspace`, `HydroScratchBuffers`, PM work arrays, TreePM traversal scratch, MPI send/recv buffers, and output staging buffers are out-of-scope for restart traversal by type.
 
+## Gravity force history, PM cadence, and relative-MAC continuation
+
+The `/gravity_force_cache` is the committed dense particle/gas-cell acceleration
+state consumed by the next KDK pre-kick. Stable `particle_id` and `gas_cell_id`
+lanes make it possible to remap this cache after a row reorder without treating
+dense row as physical identity. On import, all components must be finite and
+the stable-ID lanes must be unique and exactly cover the current state.
+
+The same committed particle acceleration is the only production source for the
+relative-force tree MAC's previous-acceleration magnitude. The workflow uses it
+only when the cache is valid, its dense extents match, and its particle-index
+generation matches the current `SimulationState`. Otherwise the traversal uses
+the deterministic COM-distance fallback. A restart therefore does not invent a
+force scale, and a migration/compaction generation change cannot silently feed
+stale row-indexed history to the MAC.
+
+Production config currently requires
+`numerics.treepm_update_cadence_steps = 1` and
+`numerics.hierarchical_max_rung = 0`. Every integrator-issued,
+rank-coordinated production force-refresh surface rebuilds PM. The rung-zero
+restriction is fail-closed until per-element kick/drift epochs exist for a
+correct mixed-rung KDK update. On resume, both particle and gas-cell scheduler
+payloads must have `max_bin=0`, all committed bins zero, and every pending bin
+zero or unset. Ranks validate this policy before production stepping. The
+integrator/distributed restart state remains authoritative for:
+
+- gravity-kick opportunity and refresh decision;
+- long-range field version and last refresh opportunity;
+- PM field build step and scale factor;
+- same-topology PM slab ownership.
+
+PM real/spectral meshes, periodic unwrapped tree coordinates, tree topology,
+multipoles, hierarchy packets, and MPI buffers are transient. They are never
+restart truth. The PM mesh follows `deterministic_rebuild` at the next legal
+refresh; the force cache preserves the already committed kick input. Tree and
+hierarchy state are rebuilt from owner particles. Their actual particle-
+decomposition epoch is restored from distributed restart truth, while force and
+exchange identity follows the resumed field/exchange sequence.
+
+The in-memory TreePM long-range cache validity signature is transient as well.
+It covers force epoch, force-evaluation scale factor, `G_code`, split scale,
+rectangular box axes, assignment, boundary, PM decomposition mode, and
+deconvolution. It is not serialized as a second owner. A newly constructed or
+signature-incompatible coordinator therefore rejects an explicit reuse request
+coherently; it does not silently reinterpret reuse as refresh. Divergent
+explicit refresh/reuse votes fail before PM collectives. Particle-decomposition
+epoch is deliberately excluded because PM ownership remains the fixed FFT slab
+map; tree protocol records still require that epoch.
+
+The distributed decomposition epoch is a workflow-owned generation, not a
+rank-local dense-row counter. It advances once on every rank only when a
+measured rebalance commits an actual particle-ownership change, is persisted in
+`/distributed_gravity/state` and provenance, and is restored before TreePM use.
+The dense-row acceleration cache is invalidated immediately on such a commit,
+so a checkpoint written after migration honestly stores `cache.valid=false`
+rather than stale row-indexed force history.
+
+`provenance_v6` adds the normalized tree-opening criterion, theta,
+relative-force tolerance, and relative-acceleration floor to snapshot/restart
+audit metadata. This is an additive provenance schema change; it does not make
+those fields separate live authorities or change restart schema v20.
+
 
 ## Restart-safe boundary contract
 
 Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
 
-Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v15, so those states must not be serialized as persistent truth.
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v20, so those states must not be serialized as persistent truth.
 
 
 ## Restart diagnostics metadata
@@ -74,6 +136,13 @@ behavior on filesystems where `rename` is atomic.
   and integrity-protect the exact PM controls (`pm_grid`, assignment, deconvolution,
   `asmth_cells`, `rcut_cells`, cadence), derived scales (`Δmesh`, `r_s`, `r_cut`),
   softening policy/kernel/epsilon, and FFT backend name.
+- `G_code` is deterministically re-derived from the integrity-protected frozen
+  `units.{length_unit,mass_unit,velocity_unit}` through
+  `core::newtonGravitationalConstantCode(UnitSystem)`. It is not a second
+  persisted authority and requires no restart schema field. PM and short-range
+  TreePM both consume that same scale-free value. Scale factor and Hubble rate
+  remain integrator truth; collisionless KDK and the gas conservative source
+  apply the cosmological response to their respective state.
 - Distributed continuation metadata is persisted under `/distributed_gravity/state` (text-encoded
   `parallel::DistributedRestartState`) and includes:
   - decomposition epoch,
@@ -165,8 +234,11 @@ Compatibility policy for legacy restart payloads is explicit:
 
 ## Parallel and scale-up note
 
-The current implementation is single-rank write/read but keeps explicit scheduler/rank-related sidecars,
-which preserves a direct path to coordinated rank-safe checkpointing in future MPI modes.
+MPI workflow restart uses rank-qualified serial-HDF5 files and supports exact
+same-world-size, same-rank, same-PM-layout continuation. It is not parallel
+HDF5/MPIO, and it cannot change rank count or remap one rank's checkpoint rows
+onto another rank. The np1--np4 DMO gate exercises direct-vs-resumed state under
+the supported topology.
 
 ## Runtime-state exactness check for reference workflow restart verification
 

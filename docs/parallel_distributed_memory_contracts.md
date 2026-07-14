@@ -21,6 +21,12 @@ owner of each entity is the rank selected by the agreed SFC cut. Compact cut sam
 metrics are control metadata only; they are never authoritative copies of particle, gas-cell, or AMR
 state.
 
+The final decision performs the actionable-migration rank vote unconditionally
+on every rank. It is not guarded by a local `has_migrations` short circuit: a
+rank with outbound work and a rank with no payload must enter the same
+all-reduce before either can advance to migration. The np2/np3/np4 integration
+matrix includes a deterministic four-rank mixed-actionability case.
+
 The exact full-item path remains available for small tests and debug evidence through
 `gatherDecompositionItemsAcrossRanks(...)` plus `buildRuntimeRebalancePlan(...)`. Production
 workflow exact ownership validation after runtime migration is opt-in via
@@ -189,6 +195,32 @@ For upcoming distributed TreePM work:
 
 These names are contractual. They prevent pseudo-distributed ambiguity where all ranks hold replicated state but are described as distributed.
 
+Tree pseudo-hierarchy exchange is an all-rank `MPI_COMM_WORLD` protocol. The
+caller-supplied `MpiContext` must match the actual communicator rank and size.
+Before ranks advance to the packet-count gather, hierarchy-payload gather, or
+return to their caller, they reduce a failure vote for every local phase that
+can throw: buffer allocation, count/displacement and overflow planning, wire
+encoding, receive allocation, and received-wire decoding/validation. A local
+failure therefore makes every participating rank leave the same protocol phase
+with an exception instead of allowing peers to block in the next collective.
+This changes failure behavior only; hierarchy bytes, ownership, force values,
+restart state, and deterministic ordering are unchanged. The two-rank
+`integration_tree_pseudo_hierarchy_exchange_mpi_two_rank` test covers a valid
+round trip, one-rank communicator metadata rejection, and post-gather mixed
+epoch rejection.
+
+The owning `TreePmCoordinator` applies the same rule before entering that
+protocol: periodic coordinate unwrapping and local tree construction are
+caught locally, failure-voted on the actual MPI world, and only then may ranks
+enter residual exchange. PM halo-cache commit, compact active/PM/zoom target
+preparation, and worst-case residual traversal-stack reservation are also
+failure-voted before ranks advance. Constructor-local PM-layout/context mismatch is
+deferred to the solve-entry consensus instead of throwing on one rank while
+peers proceed. Its reusable exchange workspace owns count/displacement,
+payload, remote-acceleration, and response-coverage lanes; any capacity growth
+that can throw occurs inside a coordinated preflight/preparation phase and is
+included in transient MPI-buffer memory accounting.
+
 ## PM slab layout ownership contract (new explicit type)
 
 `parallel::PmSlabLayout` defines the auditable PM real-space ownership mapping used by gravity storage:
@@ -196,10 +228,16 @@ These names are contractual. They prevent pseudo-distributed ambiguity where all
 - decomposition axis: x only,
 - slab range representation: half-open `[begin_x, end_x)`,
 - per-rank slab rule for `global_nx` and `world_size`:
-  - `base = global_nx / world_size`,
-  - `remainder = global_nx % world_size`,
-  - rank `r` owns `base + 1` x-indices if `r < remainder`, else `base`,
-  - `begin_x = r * base + min(r, remainder)`.
+  - `block = ceil(global_nx / world_size)`,
+  - `begin_x = min(r * block, global_nx)`,
+  - `end_x = min(begin_x + block, global_nx)`,
+  - trailing ranks may own empty slabs when `world_size > global_nx`.
+
+  This fixed-block/truncated-tail rule is the FFTW-MPI input ownership rule.
+  CHUI uses it as the single PM ownership authority so density assignment,
+  spectral plans, force routing, halo exchange, and restart metadata agree for
+  every supported rank count; no implicit balanced-to-backend redistribution
+  is performed.
 
 Contracted helpers:
 
@@ -211,6 +249,15 @@ Contracted helpers:
 Single-rank mapping is the same abstraction, not a special case:
 
 - `world_size = 1`, `world_rank = 0`, owned slab `[0, global_nx)`, and local storage equals full mesh.
+
+The blocking PM halo helper validates the actual active communicator before
+using distributed metadata, but remains a legal serial call in an MPI-enabled
+library before `MPI_Init`. For a multi-rank call, local layout/field/allocation
+failure is voted before point-to-point traffic and a collective identity check
+binds global shape, requested depth, periodic mode, sequence, and communicator
+size. Logical peers are global-plane owners, so zero-width tail ranks do not
+break adjacency; receive-first nonblocking traffic handles the two-rank
+same-peer case.
 
 This contract is intentionally storage/ownership-centric. Distributed PM communication covers both
 owner-routed deposition and reverse interpolation delivery:
@@ -265,7 +312,8 @@ continuation contract used by restart checkpoints:
 Current policy is explicitly fixed to `deterministic_rebuild`:
 
 - cached PM long-range arrays are not serialized;
-- restart resumes with deterministic rebuild at the next cadence-triggered refresh;
+- restart resumes with deterministic rebuild at the first authorized
+  production force-refresh;
 - this policy is versioned and validated during deserialize + restart hashing.
 
 `evaluateDistributedRestartCompatibility(...)` compares restart metadata against current
@@ -275,7 +323,9 @@ Current policy is explicitly fixed to `deterministic_rebuild`:
 - PM grid-shape mismatch,
 - PM decomposition-mode mismatch,
 - per-rank local slab ownership mismatch,
-- invalid PM cadence metadata (`pm_update_cadence_steps >= 1` required).
+- invalid PM cadence metadata (the low-level payload requires
+  `pm_update_cadence_steps >= 1`; production config/restart compatibility
+  additionally requires the value to equal `1`).
 
 This reporting is used for continuation debugging and avoids opaque restart failures when
 rank layout/config drifts between write and resume.

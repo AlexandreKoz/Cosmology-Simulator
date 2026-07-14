@@ -70,6 +70,8 @@ struct PmProfileEvent {
   std::uint64_t routed_density_peer_count = 0;
   std::uint64_t routed_force_peer_count = 0;
   std::uint64_t routed_potential_peer_count = 0;
+  std::uint64_t routed_mpi_bytes_sent = 0;
+  std::uint64_t routed_mpi_bytes_received = 0;
   std::uint64_t force_halo_cache_hits = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
@@ -81,6 +83,7 @@ struct PmProfileEvent {
   double fft_inverse_ms = 0.0;
   double fft_transpose_ms = 0.0;
   double interpolate_ms = 0.0;
+  double routed_mpi_wait_ms = 0.0;
   double transfer_h2d_ms = 0.0;
   double transfer_d2h_ms = 0.0;
   double device_kernel_ms = 0.0;
@@ -218,13 +221,15 @@ class PmSolver {
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
 
-  // Periodic comoving Poisson solve contract on the mesh:
-  //   ∇²φ(x) = 4π G a² [ρ(x) - ρ̄]
+  // Periodic scale-free comoving force-kernel contract on the mesh. Density is
+  // deposited per comoving cell volume and Ψ is the kernel potential whose
+  // gradient is multiplied by the cosmological KDK factor outside this solver:
+  //   ∇²Ψ(x) = 4π G [ρ_com(x) - ρ̄_com]
   // Fourier convention (for k != 0):
-  //   φ_k = -4π G a² δρ_k / k², with δρ = ρ - ρ̄
-  //   a_i(k) = -i k_i φ_k
+  //   Ψ_k = -4π G δρ_com,k / k²
+  //   A_i(k) = -i k_i Ψ_k
   // Periodic zero mode policy:
-  //   φ_{k=0} = 0 and therefore a_{k=0} = 0.
+  //   Ψ_{k=0} = 0 and therefore A_{k=0} = 0.
   //
   // After return, grid.potential() and grid.force_{x,y,z}() are populated and
   // available for direct mesh inspection and interpolation.

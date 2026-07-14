@@ -72,6 +72,72 @@ void testPowerSpectrumHasSignalAndFiniteModes() {
   assert(total_modes > 0);
 }
 
+void testDetailedPowerSpectrumContractAndEmptyBins() {
+  cosmosim::analysis::DiagnosticsEngine engine(makeConfig());
+  const cosmosim::core::SimulationState state = makeSingleModeState();
+  const cosmosim::analysis::PowerSpectrumEstimateOptions options{
+      .mesh_n = 4,
+      .bin_count = 8,
+      .mass_assignment = cosmosim::analysis::PowerSpectrumMassAssignment::kCloudInCell,
+      .window_correction =
+          cosmosim::analysis::PowerSpectrumWindowCorrection::kDeconvolveAssignmentWindow,
+      .shot_noise_policy =
+          cosmosim::analysis::PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction,
+  };
+  const auto estimate = engine.computePowerSpectrumEstimate(state, options);
+
+  assert(estimate.options.mesh_n == options.mesh_n);
+  assert(estimate.options.bin_count == options.bin_count);
+  assert(estimate.bins.size() == options.bin_count);
+  assert(cosmosim::analysis::powerSpectrumMassAssignmentLabel(estimate.options.mass_assignment) == "cic");
+  assert(
+      cosmosim::analysis::powerSpectrumWindowCorrectionLabel(estimate.options.window_correction) ==
+      "deconvolve_assignment_window");
+  assert(
+      cosmosim::analysis::powerSpectrumShotNoisePolicyLabel(estimate.options.shot_noise_policy) ==
+      "poisson_reported_not_subtracted");
+  assert(cosmosim::analysis::powerSpectrumKUnits() == "code_length^-1");
+  assert(cosmosim::analysis::powerSpectrumPowerUnits() == "code_length^3");
+  assert(!cosmosim::analysis::powerSpectrumFourierNormalization().empty());
+  assert(std::abs(estimate.poisson_shot_noise_code_volume - 0.25) < 1.0e-15);
+
+  std::uint64_t mode_count = 0;
+  std::size_t empty_bin_count = 0;
+  for (std::size_t bin_index = 0; bin_index < estimate.bins.size(); ++bin_index) {
+    const auto& bin = estimate.bins[bin_index];
+    assert(bin.bin_index == bin_index);
+    assert(bin.k_lower_code < bin.k_upper_code);
+    assert(bin.k_center_code >= bin.k_lower_code);
+    assert(bin.k_center_code <= bin.k_upper_code);
+    assert(std::isfinite(bin.power_code_volume));
+    assert(bin.empty == (bin.mode_count == 0));
+    if (bin.empty) {
+      ++empty_bin_count;
+      assert(bin.power_code_volume == 0.0);
+    }
+    mode_count += bin.mode_count;
+  }
+  assert(mode_count == options.mesh_n * options.mesh_n * options.mesh_n - 1U);
+  assert(empty_bin_count > 0);
+
+  auto subtract_options = options;
+  subtract_options.shot_noise_policy =
+      cosmosim::analysis::PowerSpectrumShotNoisePolicy::kSubtractPoisson;
+  const auto subtracted = engine.computePowerSpectrumEstimate(state, subtract_options);
+  for (std::size_t bin_index = 0; bin_index < estimate.bins.size(); ++bin_index) {
+    if (estimate.bins[bin_index].empty) {
+      assert(subtracted.bins[bin_index].empty);
+      continue;
+    }
+    assert(
+        std::abs(
+            subtracted.bins[bin_index].power_code_volume -
+            (estimate.bins[bin_index].power_code_volume -
+             estimate.poisson_shot_noise_code_volume)) <
+        1.0e-12);
+  }
+}
+
 void testDerivedDiagnosticsSanity() {
   cosmosim::core::SimulationConfig config = makeConfig();
   cosmosim::analysis::DiagnosticsEngine engine(config);
@@ -233,6 +299,7 @@ void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
 
 int main() {
   testPowerSpectrumHasSignalAndFiniteModes();
+  testDetailedPowerSpectrumContractAndEmptyBins();
   testDerivedDiagnosticsSanity();
   testProvisionalHeavyDiagnosticsRequireExplicitPolicy();
   testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords();
