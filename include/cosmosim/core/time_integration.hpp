@@ -441,6 +441,7 @@ struct TimeBinDiagnostics {
   std::uint32_t clipped_to_min_dt = 0;
   std::uint32_t clipped_to_max_dt = 0;
   std::uint32_t illegal_transition_attempts = 0;
+  std::uint32_t deferred_coarsening_events = 0;
   std::uint32_t collapse_candidates = 0;
   double active_fraction = 0.0;
   std::uint8_t most_active_bin = 0;

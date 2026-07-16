@@ -886,6 +886,29 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   }
 
   readOptionalHeaderDouble(header_group.get(), "Time", 1.0, result.state.metadata.scale_factor);
+  result.report.header_time = result.state.metadata.scale_factor;
+  readOptionalHeaderDouble(
+      header_group.get(),
+      "Redshift",
+      result.report.header_time > 0.0 ? 1.0 / result.report.header_time - 1.0 : 0.0,
+      result.report.header_redshift);
+  double scalar_box_size = config.cosmology.box_size_mpc_comoving;
+  readOptionalHeaderDouble(
+      header_group.get(), "BoxSize", config.cosmology.box_size_mpc_comoving, scalar_box_size);
+  readOptionalHeaderDouble(
+      header_group.get(), "CosmoSimBoxSizeX", scalar_box_size, result.report.header_box_size_x);
+  readOptionalHeaderDouble(
+      header_group.get(), "CosmoSimBoxSizeY", scalar_box_size, result.report.header_box_size_y);
+  readOptionalHeaderDouble(
+      header_group.get(), "CosmoSimBoxSizeZ", scalar_box_size, result.report.header_box_size_z);
+  readOptionalHeaderDouble(
+      header_group.get(), "Omega0", config.cosmology.omega_matter, result.report.header_omega_matter);
+  readOptionalHeaderDouble(
+      header_group.get(), "OmegaLambda", config.cosmology.omega_lambda, result.report.header_omega_lambda);
+  readOptionalHeaderDouble(
+      header_group.get(), "OmegaBaryon", config.cosmology.omega_baryon, result.report.header_omega_baryon);
+  readOptionalHeaderDouble(
+      header_group.get(), "HubbleParam", config.cosmology.hubble_param, result.report.header_hubble_param);
   result.report.schema_name = std::string(schema.schema_name);
   readScalarStringAttribute(header_group.get(), "CosmoSimSchemaName", result.report.schema_name);
 

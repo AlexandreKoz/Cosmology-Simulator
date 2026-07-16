@@ -32,16 +32,29 @@ Canonical fields and accepted read aliases:
 
 `SnapshotIoPolicy` controls compression, chunk size, and whether alias groups are emitted.
 
+The snapshot reader reports the decoded `Time`, `Redshift`, axis-aware box size,
+`Omega0`, `OmegaLambda`, `OmegaBaryon`, and `HubbleParam` header values. Production
+roundtrip verification matches those values, schema/file-kind identity, normalized
+config and provenance hashes, and every currently exported per-particle phase-space,
+mass, stable-ID, species, softening, softening-mask, and tracer lane. Matching only
+the particle count is not accepted. A mismatch makes the output step fail closed.
+
 ## 2) Restart schema
 
 Current restart identity:
 
-- `name = cosmosim_restart_v20`
+- `name = cosmosim_restart_v21`
+- `version = 21`
+
+Restart schema v21 adds restart-authoritative code-time output cadence under
+`/output_cadence`: `snapshot_interval_time_code` and `next_snapshot_time_code`.
+The next event is also present in `/restart_diagnostics` as a non-authoritative
+audit mirror. Both authoritative fields are covered by the payload integrity hash.
+Legacy v20 reads default these lanes to zero (disabled).
 
 ## H1 workflow force-cache restart note
 
-Restart schema v20 adds `/gravity_force_cache`, containing the particle and gas-cell acceleration triplets consumed by the next KDK pre-kick, plus the persisted `IntegratorState::pm_refresh_enabled` policy bit. The ReferenceWorkflow writes a valid cache only at a restart-safe completed boundary and verifies it on read. Direct low-level checkpoint callers may write an explicitly invalid/empty cache, but those artifacts do not constitute exact `ReferenceWorkflow` continuation proof.
-- `version = 20`
+Restart schema v20 added `/gravity_force_cache`, containing the particle and gas-cell acceleration triplets consumed by the next KDK pre-kick, plus the persisted `IntegratorState::pm_refresh_enabled` policy bit. Schema v21 retains that contract. The ReferenceWorkflow writes a valid cache only at a restart-safe completed boundary and verifies it on read. Direct low-level checkpoint callers may write an explicitly invalid/empty cache, but those artifacts do not constitute exact `ReferenceWorkflow` continuation proof.
 
 Restart payload includes:
 
@@ -63,7 +76,7 @@ Restart payload includes:
 
 Compatibility rule is explicit through `isRestartSchemaCompatible(version)`.
 
-Distributed restart topology is part of the executable schema contract. Current v20 behavior supports only
+Distributed restart topology is part of the executable schema contract. Current v21 behavior supports only
 same-world-size, rank-local continuation: the checkpoint's normalized config hash, `/distributed_gravity`
 world size, PM grid, decomposition mode, per-rank slab table, owner table, and TreePM cadence/field metadata
 must match the runtime before `ReferenceWorkflow` resumes. Rank-count-changing restart and arbitrary topology
@@ -88,7 +101,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; v19 introduced authoritative gas-cell scheduling and the active schema is now `cosmosim_restart_v20`, retaining those identity records while adding checkpoint-authoritative gravity force caches. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
+Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; v19 introduced authoritative gas-cell scheduling, v20 added checkpoint-authoritative gravity force caches, and the active schema is now `cosmosim_restart_v21` with ordered code-time output events. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
 
 ## H1 Hydro Restart Geometry Note
 
@@ -220,9 +233,9 @@ When changing snapshot/restart/provenance fields:
 - Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v20`, version `20`. It retains the v19 cell-local gas velocity, stable gas-cell identity, and authoritative gas-cell scheduler state; it additionally persists `/gravity_force_cache` and `IntegratorState::pm_refresh_enabled` so a workflow restart can apply the same next KDK pre-kick force state.
+- Restart schema version/name are now `cosmosim_restart_v21`, version `21`. It retains the v20 force cache and adds restart-authoritative code-time output cadence with an explicit v20 compatibility default of disabled.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v20`; distributed TreePM state and the restart-authoritative gravity force cache are persisted under restart-only data and covered by restart integrity hashing.
+- Restart schema is `cosmosim_restart_v21`; distributed TreePM state, the restart-authoritative gravity force cache, and ordered output-event state are persisted under restart-only data and covered by restart integrity hashing.
 - The reader accepts the documented legacy `cosmosim_restart_v14` particle-bound import path
   by materializing `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with
@@ -251,4 +264,4 @@ PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_pa
 
 ## AMR temporal restart state (v18)
 
-`cosmosim_restart_v19` introduced `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. The current `cosmosim_restart_v20` retains it and adds `/gravity_force_cache` for exact workflow KDK continuation. Neither is part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.
+`cosmosim_restart_v19` introduced `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. The current `cosmosim_restart_v21` retains it and the v20 `/gravity_force_cache`, then adds ordered code-time output events. None are part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.

@@ -162,6 +162,15 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.report.schema_version == schema.schema_version);
   assert(roundtrip.report.file_kind == shared_contract.science_snapshot_file_kind);
   assert(!roundtrip.report.restart_compatible);
+  assert(roundtrip.report.header_time == state.metadata.scale_factor);
+  assert(roundtrip.report.header_redshift == 1.0 / state.metadata.scale_factor - 1.0);
+  assert(roundtrip.report.header_box_size_x == config.cosmology.box_size_x_mpc_comoving);
+  assert(roundtrip.report.header_box_size_y == config.cosmology.box_size_y_mpc_comoving);
+  assert(roundtrip.report.header_box_size_z == config.cosmology.box_size_z_mpc_comoving);
+  assert(roundtrip.report.header_omega_matter == config.cosmology.omega_matter);
+  assert(roundtrip.report.header_omega_lambda == config.cosmology.omega_lambda);
+  assert(roundtrip.report.header_omega_baryon == config.cosmology.omega_baryon);
+  assert(roundtrip.report.header_hubble_param == config.cosmology.hubble_param);
   assert(roundtrip.provenance.schema_version == payload.provenance.schema_version);
   assert(roundtrip.provenance.git_sha == payload.provenance.git_sha);
   assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);

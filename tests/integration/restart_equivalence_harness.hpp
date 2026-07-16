@@ -346,6 +346,8 @@ inline void compareOutputCadenceState(
       lhs.last_completed_step_index != rhs.last_completed_step_index ||
       lhs.snapshot_interval_steps != rhs.snapshot_interval_steps ||
       lhs.next_snapshot_step_index != rhs.next_snapshot_step_index ||
+      lhs.snapshot_interval_time_code != rhs.snapshot_interval_time_code ||
+      lhs.next_snapshot_time_code != rhs.next_snapshot_time_code ||
       lhs.snapshot_stem != rhs.snapshot_stem || lhs.restart_stem != rhs.restart_stem) {
     failRestartEquivalence("output cadence state");
   }

@@ -1493,21 +1493,8 @@ void HierarchicalTimeBinScheduler::validateTransitionRequest(
   if (element_index >= m_hot.size()) {
     throw std::out_of_range("element_index out of range");
   }
-  const std::uint8_t old_bin = m_hot.bin_index[element_index];
-  const std::uint8_t new_bin = clampBin(target_bin);
-  const std::uint64_t next_tick = m_hot.next_activation_tick[element_index];
-  const bool element_is_currently_active =
-      next_tick == m_current_tick && isBinActiveAtTick(old_bin, m_current_tick);
-  const std::uint64_t new_period = binPeriodTicks(new_bin);
-  if (element_is_currently_active && m_current_tick % new_period != 0U) {
-    throw std::runtime_error(timeBinContextMessage(
-        "bin transition violates current synchronization boundary",
-        source_label,
-        m_current_tick,
-        element_index,
-        old_bin,
-        next_tick));
-  }
+  (void)target_bin;
+  (void)source_label;
 }
 
 std::uint8_t HierarchicalTimeBinScheduler::clampBin(std::uint8_t requested) const noexcept {
@@ -1607,9 +1594,16 @@ void HierarchicalTimeBinScheduler::applyPendingTransitions() {
 
     const std::uint64_t new_period = binPeriodTicks(new_bin);
     if (m_current_tick % new_period != 0) {
+      // Coarsening to a larger period is legal only at a shared boundary. Keep
+      // the request authoritative and pending while the element continues on
+      // its current bin; the next aligned activation commits it.
+      if (new_bin > old_bin) {
+        ++m_diagnostics.deferred_coarsening_events;
+        continue;
+      }
       ++m_diagnostics.illegal_transition_attempts;
       throw std::runtime_error(timeBinContextMessage(
-          "pending bin transition violates current synchronization boundary",
+          "pending refinement is unexpectedly unaligned",
           "HierarchicalTimeBinScheduler::applyPendingTransitions",
           m_current_tick,
           element,

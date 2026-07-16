@@ -1103,14 +1103,28 @@ void testInvalidEarlyActivationTrap() {
   assert(throwsWithContext([&]() { restored.importPersistentState(state); }, "element=0"));
 }
 
-void testInvalidBinJumpTrap() {
+void testUnalignedCoarseningDefersUntilSynchronization() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
   scheduler.reset(1, 0, 0);
   scheduler.beginSubstep();
   scheduler.endSubstep();
   scheduler.beginSubstep();
-  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp, "illegal_jump_test");
-  assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "illegal_jump_test"));
+  scheduler.submitCandidateBin(0, 3, cosmosim::core::TimeStepCandidateSource::kUserClamp, "deferred_coarsening_test");
+  scheduler.endSubstep();
+  assert(scheduler.hotMetadata().bin_index[0] == 0U);
+  assert(scheduler.hotMetadata().pending_bin_index[0] == 3U);
+  assert(scheduler.diagnostics().deferred_coarsening_events == 1U);
+
+  while (scheduler.currentTick() < 8U) {
+    scheduler.beginSubstep();
+    scheduler.endSubstep();
+  }
+  scheduler.beginSubstep();
+  scheduler.endSubstep();
+  assert(scheduler.hotMetadata().bin_index[0] == 3U);
+  assert(scheduler.hotMetadata().pending_bin_index[0] ==
+         cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin);
+  assert(scheduler.hotMetadata().next_activation_tick[0] == 16U);
 }
 
 void testSkippedPmSyncTrap() {
@@ -1169,14 +1183,28 @@ void testActiveSetMismatchTrap() {
   scheduler.endSubstep();
 }
 
-void testLocalGlobalSyncBoundaryViolationTrap() {
+void testPendingCoarseningSurvivesRestart() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(2);
   scheduler.reset(1, 0, 0);
   scheduler.beginSubstep();
   scheduler.endSubstep();
   scheduler.beginSubstep();
-  scheduler.submitCandidateBin(0, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp, "local_global_boundary_test");
-  assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "synchronization boundary"));
+  scheduler.submitCandidateBin(0, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp, "restart_deferred_coarsening");
+  scheduler.endSubstep();
+
+  const auto persisted = scheduler.exportPersistentState();
+  assert(persisted.pending_bin_index[0] == 2U);
+  cosmosim::core::HierarchicalTimeBinScheduler restored(persisted.max_bin);
+  restored.importPersistentState(persisted);
+  while (restored.currentTick() < 4U) {
+    restored.beginSubstep();
+    restored.endSubstep();
+  }
+  restored.beginSubstep();
+  restored.endSubstep();
+  assert(restored.hotMetadata().bin_index[0] == 2U);
+  assert(restored.hotMetadata().pending_bin_index[0] ==
+         cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin);
 }
 
 
@@ -1466,12 +1494,12 @@ int main() {
   testSchedulerBackedTimeBinReorderIgnoresStaleMirrors();
   testPmSynchronizationPersistentRoundTrip();
   testInvalidEarlyActivationTrap();
-  testInvalidBinJumpTrap();
+  testUnalignedCoarseningDefersUntilSynchronization();
   testSkippedPmSyncTrap();
   testStaleMirrorUseTrap();
   testInvalidRestartTimestepStateTrap();
   testActiveSetMismatchTrap();
-  testLocalGlobalSyncBoundaryViolationTrap();
+  testPendingCoarseningSurvivesRestart();
   testOutputBoundaryRequiresSafeContracts();
   testBoundarySafetyClassification();
   testPmSynchronizationCadencePreservesRefreshBoundaries();

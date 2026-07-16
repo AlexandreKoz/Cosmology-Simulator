@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,18 +27,61 @@ constexpr std::uint32_t k_species_dark_matter =
     static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter);
 constexpr std::uint32_t k_species_gas = static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
 constexpr std::uint32_t k_species_star = static_cast<std::uint32_t>(core::ParticleSpecies::kStar);
+constexpr std::uint32_t k_species_black_hole =
+    static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole);
 
-[[nodiscard]] std::uint32_t mapTypeIndexToSpeciesTag(std::size_t type_index) {
-  if (type_index == 0) {
-    return k_species_gas;
+[[nodiscard]] std::uint32_t mapTypeIndexToSpeciesTag(
+    std::size_t type_index,
+    const IcManifest& manifest) {
+  switch (manifest.species_policy.at(type_index)) {
+    case IcSpeciesPolicy::kGas:
+      return k_species_gas;
+    case IcSpeciesPolicy::kDarkMatter:
+    case IcSpeciesPolicy::kCollisionlessFamily2AsDarkMatter:
+    case IcSpeciesPolicy::kCollisionlessFamily3AsDarkMatter:
+      return k_species_dark_matter;
+    case IcSpeciesPolicy::kStar:
+      return k_species_star;
+    case IcSpeciesPolicy::kBlackHole:
+      return k_species_black_hole;
+    case IcSpeciesPolicy::kTracer:
+      return static_cast<std::uint32_t>(core::ParticleSpecies::kTracer);
+    case IcSpeciesPolicy::kReject:
+      break;
   }
-  if (type_index == 4) {
-    return k_species_star;
-  }
-  return k_species_dark_matter;
+  throw std::runtime_error(
+      "IC particle type " + std::to_string(type_index) +
+      " has no accepted species mapping policy");
 }
 
 [[nodiscard]] bool isFinite(double value) { return std::isfinite(value) != 0; }
+
+[[nodiscard]] std::string fileFnv1aProvenanceId(
+    const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error(
+        "failed to hash IC source file: " + path.string());
+  }
+  std::uint64_t hash = 1469598103934665603ULL;
+  std::array<char, 1U << 15U> buffer{};
+  while (input) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize count = input.gcount();
+    for (std::streamsize i = 0; i < count; ++i) {
+      hash ^= static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)]);
+      hash *= 1099511628211ULL;
+    }
+  }
+  if (!input.eof()) {
+    throw std::runtime_error(
+        "failed while hashing IC source file: " + path.string());
+  }
+  std::ostringstream encoded;
+  encoded << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0')
+          << hash;
+  return encoded.str();
+}
 
 void validateFiniteField(const std::vector<double>& values, std::string_view field_name) {
   for (double value : values) {
@@ -70,38 +116,141 @@ void applyLengthFrameConversion(
       std::string(target_frame));
 }
 
-void convertFieldToCodeUnits(
-    std::vector<double>& values,
-    const core::UnitSystem& source_units,
-    const core::UnitSystem& target_units,
-    std::string_view quantity) {
-  if (quantity == "length") {
-    for (double& value : values) {
-      value = target_units.lengthSiToCode(source_units.lengthCodeToSi(value));
-    }
-    return;
-  }
-  if (quantity == "mass") {
-    for (double& value : values) {
-      value = target_units.massSiToCode(source_units.massCodeToSi(value));
-    }
-    return;
-  }
-  if (quantity == "velocity") {
-    for (double& value : values) {
-      value = target_units.velocitySiToCode(source_units.velocityCodeToSi(value));
-    }
-    return;
-  }
-  throw std::runtime_error("unsupported unit conversion quantity: " + std::string(quantity));
-}
-
 void fillSpeciesLedger(core::SimulationState& state) {
   state.species.count_by_species = {};
   for (std::uint32_t species_tag : state.particle_sidecar.species_tag) {
     if (species_tag < state.species.count_by_species.size()) {
       state.species.count_by_species[species_tag] += 1;
     }
+  }
+}
+
+[[nodiscard]] IcManifest buildRecognizedSingleFileManifest(
+    const std::filesystem::path& ic_path,
+    const IcSchemaSummary& schema,
+    const core::UnitSystem& source_units) {
+  IcManifest manifest;
+  manifest.dialect = IcDialect::kGadgetArepoBridgeV1;
+  manifest.dialect_version = "1";
+  manifest.source_files = {ic_path.lexically_normal()};
+  manifest.num_part_this_file = {schema.count_by_type};
+  manifest.num_part_total = schema.total_count_by_type;
+  manifest.num_part_total_high_word = schema.total_count_high_word;
+  manifest.num_files_per_snapshot = schema.num_files_per_snapshot;
+  manifest.mass_table = schema.mass_table;
+  manifest.box_size = schema.box_size;
+  manifest.scale_factor = schema.scale_factor;
+  manifest.redshift = schema.redshift;
+  manifest.omega_matter = schema.omega_matter;
+  manifest.omega_lambda = schema.omega_lambda;
+  manifest.hubble_param = schema.hubble_param;
+
+  const auto add_field = [&](std::string path,
+                             std::string scalar_type,
+                             std::vector<std::uint64_t> dimensions,
+                             double base_unit_to_si,
+                             IcFieldSemantics semantics,
+                             IcVelocityConvention velocity_convention =
+                                 IcVelocityConvention::kNotVelocity) {
+    const std::uint64_t records = dimensions.front();
+    manifest.fields.push_back(IcFieldManifest{
+        .dataset_path = std::move(path),
+        .scalar_type = std::move(scalar_type),
+        .rank = static_cast<std::uint8_t>(dimensions.size()),
+        .dimensions = std::move(dimensions),
+        .record_count = records,
+        .base_unit_to_si = base_unit_to_si,
+        .hubble_exponent = 0.0,
+        .scale_factor_exponent = 0.0,
+        .coordinate_frame = IcCoordinateFrame::kComoving,
+        .velocity_convention = velocity_convention,
+        .semantics = semantics,
+        .disposition = IcFieldDisposition::kConverted});
+  };
+  add_field("/Header/MassTable", "float64", {6U},
+            source_units.mass_si_per_code,
+            IcFieldSemantics::kExtensive);
+  add_field("/Header/BoxSize", "float64", {1U},
+            source_units.length_si_per_code,
+            IcFieldSemantics::kCoordinate);
+  for (std::size_t type = 0; type < schema.count_by_type.size(); ++type) {
+    const std::uint64_t count = schema.count_by_type[type];
+    if (count == 0U) {
+      continue;
+    }
+    const std::string prefix = "/PartType" + std::to_string(type) + "/";
+    add_field(prefix + "Coordinates", "float64", {count, 3U},
+              source_units.length_si_per_code,
+              IcFieldSemantics::kCoordinate);
+    add_field(prefix + "Velocities", "float64", {count, 3U},
+              source_units.velocity_si_per_code,
+              IcFieldSemantics::kVelocity,
+              IcVelocityConvention::kPhysicalPeculiar);
+    add_field(prefix + "ParticleIDs", "uint64", {count}, 1.0,
+              IcFieldSemantics::kIdentifier);
+    if (schema.mass_table[type] == 0.0) {
+      add_field(prefix + "Masses", "float64", {count},
+                source_units.mass_si_per_code,
+                IcFieldSemantics::kExtensive);
+    }
+    if (type == 0U) {
+      add_field(prefix + "InternalEnergy", "float64", {count},
+                source_units.velocity_si_per_code *
+                    source_units.velocity_si_per_code,
+                IcFieldSemantics::kSpecific);
+      add_field(prefix + "Density", "float64", {count},
+                source_units.mass_si_per_code /
+                    std::pow(source_units.length_si_per_code, 3.0),
+                IcFieldSemantics::kIntensive);
+    } else if (type == 5U) {
+      add_field(prefix + "BH_Mass", "float64", {count},
+                source_units.mass_si_per_code,
+                IcFieldSemantics::kExtensive);
+      add_field(prefix + "BH_Mdot", "float64", {count},
+                source_units.mass_si_per_code /
+                    source_units.timeSiPerCode(),
+                IcFieldSemantics::kIntensive);
+    }
+  }
+  return manifest;
+}
+
+[[nodiscard]] const IcFieldManifest& requireFieldConvention(
+    const IcManifest& manifest,
+    std::string_view canonical_path,
+    IcFieldSemantics semantics) {
+  for (const IcFieldManifest& field : manifest.fields) {
+    if (field.dataset_path == canonical_path) {
+      if (field.semantics != semantics) {
+        throw std::runtime_error(
+            "IC manifest field semantics mismatch for " +
+            std::string(canonical_path));
+      }
+      return field;
+    }
+  }
+  throw std::runtime_error(
+      "IC manifest lacks required conversion entry for " +
+      std::string(canonical_path));
+}
+
+void applyManifestUnitConversion(
+    std::vector<double>& values,
+    const IcFieldManifest& field,
+    const IcManifest& manifest,
+    double target_si_per_code) {
+  if (!(target_si_per_code > 0.0)) {
+    throw std::invalid_argument("target SI-per-code conversion must be positive");
+  }
+  double multiplier = icStoredToSiMultiplier(
+      field, manifest.hubble_param, manifest.scale_factor) /
+      target_si_per_code;
+  if (field.semantics == IcFieldSemantics::kVelocity) {
+    multiplier *= icVelocityConventionMultiplier(
+        field.velocity_convention, manifest.scale_factor);
+  }
+  for (double& value : values) {
+    value *= multiplier;
   }
 }
 
@@ -162,6 +311,8 @@ class Hdf5Handle {
         H5Sclose(m_handle);
       } else if (type == H5I_ATTR) {
         H5Aclose(m_handle);
+      } else if (type == H5I_DATATYPE) {
+        H5Tclose(m_handle);
       }
       m_handle = -1;
     }
@@ -206,15 +357,63 @@ void readHeaderArrays(hid_t header_group, IcSchemaSummary& schema) {
     schema.count_by_type[i] = raw_count[i];
   }
 
+  Hdf5Handle attr_total(H5Aopen(header_group, "NumPart_Total", H5P_DEFAULT));
+  if (!attr_total.valid()) {
+    throw std::runtime_error("Header/NumPart_Total attribute is required");
+  }
+  std::array<std::uint32_t, 6> raw_total{};
+  if (H5Aread(attr_total.get(), H5T_NATIVE_UINT32, raw_total.data()) < 0) {
+    throw std::runtime_error("failed to read NumPart_Total");
+  }
+
+  Hdf5Handle attr_high_word(
+      H5Aopen(header_group, "NumPart_Total_HighWord", H5P_DEFAULT));
+  if (attr_high_word.valid() &&
+      H5Aread(attr_high_word.get(), H5T_NATIVE_UINT32,
+              schema.total_count_high_word.data()) < 0) {
+    throw std::runtime_error("failed to read NumPart_Total_HighWord");
+  }
+  for (std::size_t i = 0; i < 6; ++i) {
+    schema.total_count_by_type[i] =
+        static_cast<std::uint64_t>(raw_total[i]) |
+        (static_cast<std::uint64_t>(schema.total_count_high_word[i]) << 32U);
+  }
+
   Hdf5Handle attr_mass(H5Aopen(header_group, "MassTable", H5P_DEFAULT));
-  if (attr_mass.valid() &&
-      H5Aread(attr_mass.get(), H5T_NATIVE_DOUBLE, schema.mass_table.data()) < 0) {
+  if (!attr_mass.valid()) {
+    throw std::runtime_error("Header/MassTable attribute is required");
+  }
+  if (H5Aread(attr_mass.get(), H5T_NATIVE_DOUBLE, schema.mass_table.data()) < 0) {
     throw std::runtime_error("failed to read MassTable");
   }
 
   Hdf5Handle attr_time(H5Aopen(header_group, "Time", H5P_DEFAULT));
-  if (attr_time.valid() && H5Aread(attr_time.get(), H5T_NATIVE_DOUBLE, &schema.scale_factor) < 0) {
+  if (!attr_time.valid() ||
+      H5Aread(attr_time.get(), H5T_NATIVE_DOUBLE, &schema.scale_factor) < 0) {
     throw std::runtime_error("failed to read Header/Time");
+  }
+
+  const auto read_required_double = [&](const char* name, double& value) {
+    Hdf5Handle attribute(H5Aopen(header_group, name, H5P_DEFAULT));
+    if (!attribute.valid() ||
+        H5Aread(attribute.get(), H5T_NATIVE_DOUBLE, &value) < 0) {
+      throw std::runtime_error(
+          std::string("failed to read required Header/") + name);
+    }
+  };
+  read_required_double("Redshift", schema.redshift);
+  read_required_double("BoxSize", schema.box_size);
+  read_required_double("Omega0", schema.omega_matter);
+  read_required_double("OmegaLambda", schema.omega_lambda);
+  read_required_double("HubbleParam", schema.hubble_param);
+
+  Hdf5Handle attr_num_files(
+      H5Aopen(header_group, "NumFilesPerSnapshot", H5P_DEFAULT));
+  if (!attr_num_files.valid() ||
+      H5Aread(attr_num_files.get(), H5T_NATIVE_UINT32,
+              &schema.num_files_per_snapshot) < 0) {
+    throw std::runtime_error(
+        "failed to read required Header/NumFilesPerSnapshot");
   }
 }
 
@@ -231,6 +430,18 @@ void readDatasetChunk1d(
   Hdf5Handle file_space(H5Dget_space(dataset.get()));
   if (!file_space.valid()) {
     throw std::runtime_error("failed to get dataspace for: " + dataset_name);
+  }
+  if (H5Sget_simple_extent_ndims(file_space.get()) != 1) {
+    throw std::runtime_error("dataset must have rank 1: " + dataset_name);
+  }
+  hsize_t file_dims[1]{};
+  if (H5Sget_simple_extent_dims(file_space.get(), file_dims, nullptr) < 0 ||
+      start + count > file_dims[0]) {
+    throw std::runtime_error("dataset extent/count mismatch: " + dataset_name);
+  }
+  Hdf5Handle datatype(H5Dget_type(dataset.get()));
+  if (!datatype.valid() || H5Tget_class(datatype.get()) != H5T_FLOAT) {
+    throw std::runtime_error("dataset must use a floating-point type: " + dataset_name);
   }
 
   hsize_t file_offset[1] = {static_cast<hsize_t>(start)};
@@ -263,6 +474,21 @@ void readDatasetChunk2d(
   if (!file_space.valid()) {
     throw std::runtime_error("failed to get dataspace for: " + dataset_name);
   }
+  if (H5Sget_simple_extent_ndims(file_space.get()) != 2) {
+    throw std::runtime_error("vector dataset must have rank 2: " + dataset_name);
+  }
+  hsize_t file_dims[2]{};
+  if (H5Sget_simple_extent_dims(file_space.get(), file_dims, nullptr) < 0 ||
+      start + count > file_dims[0] || file_dims[1] != 3U) {
+    throw std::runtime_error(
+        "vector dataset must have dimensions [record_count,3]: " +
+        dataset_name);
+  }
+  Hdf5Handle datatype(H5Dget_type(dataset.get()));
+  if (!datatype.valid() || H5Tget_class(datatype.get()) != H5T_FLOAT) {
+    throw std::runtime_error(
+        "vector dataset must use a floating-point type: " + dataset_name);
+  }
 
   hsize_t file_offset[2] = {static_cast<hsize_t>(start), 0};
   hsize_t file_count[2] = {static_cast<hsize_t>(count), 3};
@@ -291,6 +517,18 @@ void readDatasetChunkIds(
     throw std::runtime_error("failed to open dataset: " + dataset_name);
   }
   Hdf5Handle file_space(H5Dget_space(dataset.get()));
+  if (!file_space.valid() || H5Sget_simple_extent_ndims(file_space.get()) != 1) {
+    throw std::runtime_error("particle ID dataset must have rank 1");
+  }
+  hsize_t file_dims[1]{};
+  if (H5Sget_simple_extent_dims(file_space.get(), file_dims, nullptr) < 0 ||
+      start + count > file_dims[0]) {
+    throw std::runtime_error("particle ID dataset extent/count mismatch");
+  }
+  Hdf5Handle datatype(H5Dget_type(dataset.get()));
+  if (!datatype.valid() || H5Tget_class(datatype.get()) != H5T_INTEGER) {
+    throw std::runtime_error("particle ID dataset must use an integer type");
+  }
   hsize_t file_offset[1] = {static_cast<hsize_t>(start)};
   hsize_t file_count[1] = {static_cast<hsize_t>(count)};
   if (H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr) <
@@ -310,6 +548,14 @@ void readDatasetChunkIds(
 #endif
 
 }  // namespace
+
+IcManifest makeGadgetArepoBridgeV1Manifest(
+    const std::filesystem::path& ic_path,
+    const IcSchemaSummary& schema) {
+  const core::UnitSystem source_units =
+      core::makeUnitSystem("kpc", "msun", "km_s");
+  return buildRecognizedSingleFileManifest(ic_path, schema, source_units);
+}
 
 IcReadResult buildGeneratedIsolatedIc(
     const core::SimulationConfig& config,
@@ -418,11 +664,69 @@ IcReadResult readGadgetArepoHdf5Ic(
     throw std::runtime_error("Header/Time (scale factor) must be positive");
   }
 
-  // Conservative assumption: external ICs store coordinates in comoving-kpc/h and
-  // velocities in km/s. This keeps conversions explicit and auditable.
+  // The recognized bridge is a versioned convention, not an inference from a
+  // filename: kpc, Msun, km/s, comoving coordinates, physical peculiar
+  // velocities, and zero h/a exponents. Callers can replace every convention
+  // through an explicit validated IcManifest.
   const core::UnitSystem source_units = core::makeUnitSystem("kpc", "msun", "km_s");
   const core::UnitSystem target_units =
       core::makeUnitSystem(config.units.length_unit, config.units.mass_unit, config.units.velocity_unit);
+  IcManifest manifest = options.manifest != nullptr
+      ? *options.manifest
+      : makeGadgetArepoBridgeV1Manifest(ic_path, result.report.schema);
+  if (manifest.source_provenance_ids.empty()) {
+    manifest.source_provenance_ids.reserve(manifest.source_files.size());
+    for (const auto& source_file : manifest.source_files) {
+      manifest.source_provenance_ids.push_back(
+          fileFnv1aProvenanceId(source_file));
+    }
+  }
+  validateIcManifest(manifest);
+  if (manifest.source_files.size() != 1U ||
+      manifest.num_files_per_snapshot != 1U) {
+    throw std::runtime_error(
+        "multifile IC manifests require the distributed IC service; convert to canonical single-file CHUI IC or use a supported distributed build");
+  }
+  if (manifest.source_files.front().lexically_normal() !=
+      ic_path.lexically_normal()) {
+    throw std::runtime_error(
+        "IcManifest source file does not match the requested IC path");
+  }
+  if (manifest.num_part_this_file.front() != result.report.schema.count_by_type ||
+      manifest.num_part_total != result.report.schema.total_count_by_type ||
+      manifest.mass_table != result.report.schema.mass_table ||
+      manifest.num_part_total_high_word !=
+          result.report.schema.total_count_high_word) {
+    throw std::runtime_error(
+        "IcManifest particle counts/high words/MassTable do not match the HDF5 header");
+  }
+  const auto nearly_equal = [](double lhs, double rhs) {
+    return std::abs(lhs - rhs) <=
+        1.0e-10 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+  };
+  const core::UnitSystem megaparsec_units =
+      core::makeUnitSystem("mpc", "msun", "km_s");
+  const IcFieldManifest& box_convention = requireFieldConvention(
+      manifest, "/Header/BoxSize", IcFieldSemantics::kCoordinate);
+  double box_size_mpc = result.report.schema.box_size *
+      icStoredToSiMultiplier(
+          box_convention, manifest.hubble_param, manifest.scale_factor) /
+      megaparsec_units.length_si_per_code;
+  if (box_convention.coordinate_frame == IcCoordinateFrame::kPhysical) {
+    box_size_mpc = core::physicalToComovingLength(
+        box_size_mpc, manifest.scale_factor);
+  }
+  if (!nearly_equal(manifest.scale_factor, config.numerics.a_begin) ||
+      !nearly_equal(manifest.omega_matter, config.cosmology.omega_matter) ||
+      !nearly_equal(manifest.omega_lambda, config.cosmology.omega_lambda) ||
+      !nearly_equal(manifest.hubble_param, config.cosmology.hubble_param) ||
+      !nearly_equal(box_size_mpc, config.cosmology.box_size_x_mpc_comoving) ||
+      !nearly_equal(box_size_mpc, config.cosmology.box_size_y_mpc_comoving) ||
+      !nearly_equal(box_size_mpc, config.cosmology.box_size_z_mpc_comoving)) {
+    throw std::runtime_error(
+        "IC manifest cosmology/BoxSize/start epoch does not match the frozen runtime configuration");
+  }
+  result.report.manifest = manifest;
 
   std::size_t total_count = 0;
   for (std::uint64_t count : result.report.schema.count_by_type) {
@@ -431,6 +735,9 @@ IcReadResult readGadgetArepoHdf5Ic(
   result.state.resizeParticles(total_count);
   const std::size_t gas_cell_count = static_cast<std::size_t>(result.report.schema.count_by_type[0]);
   result.state.resizeCells(gas_cell_count);
+  const std::size_t black_hole_count =
+      static_cast<std::size_t>(result.report.schema.count_by_type[5]);
+  result.state.black_holes.resize(black_hole_count);
   result.state.metadata.run_name = config.output.run_name;
   result.state.metadata.scale_factor = result.report.schema.scale_factor;
 
@@ -462,6 +769,8 @@ IcReadResult readGadgetArepoHdf5Ic(
     std::string density_name;
     std::string metallicity_name;
     std::string smoothing_length_name;
+    std::string black_hole_mass_name;
+    std::string black_hole_mdot_name;
     if (type_index == 0) {
       internal_energy_name = pickAlias(
           group.get(),
@@ -487,6 +796,13 @@ IcReadResult readGadgetArepoHdf5Ic(
           result.report,
           group_name + "/SmoothingLength",
           false);
+    } else if (type_index == 5U) {
+      black_hole_mass_name = pickAlias(
+          group.get(), {"BH_Mass"}, result.report,
+          group_name + "/BH_Mass", true);
+      black_hole_mdot_name = pickAlias(
+          group.get(), {"BH_Mdot"}, result.report,
+          group_name + "/BH_Mdot", false);
     }
 
     std::vector<double> coordinates_chunk;
@@ -494,23 +810,40 @@ IcReadResult readGadgetArepoHdf5Ic(
     std::vector<double> mass_chunk;
     std::vector<double> internal_energy_chunk;
     std::vector<double> density_chunk;
+    std::vector<double> black_hole_mass_chunk;
+    std::vector<double> black_hole_mdot_chunk;
     std::vector<std::uint64_t> ids_chunk;
 
     for (std::size_t local_start = 0; local_start < local_count; local_start += options.chunk_particle_count) {
       const std::size_t chunk_count = std::min(options.chunk_particle_count, local_count - local_start);
       readDatasetChunk2d(group.get(), coordinates_name, local_start, chunk_count, coordinates_chunk);
       validateFiniteField(coordinates_chunk, group_name + "/" + coordinates_name);
+      const IcFieldManifest& coordinate_convention = requireFieldConvention(
+          manifest, group_name + "/Coordinates", IcFieldSemantics::kCoordinate);
       applyLengthFrameConversion(
           coordinates_chunk,
           result.report.schema.scale_factor,
-          "comoving",
-          config.units.coordinate_frame == core::CoordinateFrame::kPhysical ? "physical" : "comoving");
-      convertFieldToCodeUnits(coordinates_chunk, source_units, target_units, "length");
+          coordinate_convention.coordinate_frame == IcCoordinateFrame::kPhysical
+              ? "physical"
+              : "comoving",
+          "comoving");
+      applyManifestUnitConversion(
+          coordinates_chunk,
+          coordinate_convention,
+          manifest,
+          target_units.length_si_per_code);
 
       if (!velocities_name.empty()) {
         readDatasetChunk2d(group.get(), velocities_name, local_start, chunk_count, velocity_chunk);
         validateFiniteField(velocity_chunk, group_name + "/" + velocities_name);
-        convertFieldToCodeUnits(velocity_chunk, source_units, target_units, "velocity");
+        applyManifestUnitConversion(
+            velocity_chunk,
+            requireFieldConvention(
+                manifest,
+                group_name + "/Velocities",
+                IcFieldSemantics::kVelocity),
+            manifest,
+            target_units.velocity_si_per_code);
       } else {
         velocity_chunk.assign(chunk_count * 3, 0.0);
         result.report.defaulted_fields.push_back(group_name + "/Velocities=zero");
@@ -529,16 +862,28 @@ IcReadResult readGadgetArepoHdf5Ic(
       if (!masses_name.empty()) {
         readDatasetChunk1d(group.get(), masses_name, local_start, chunk_count, mass_chunk);
         validateFiniteField(mass_chunk, group_name + "/" + masses_name);
-        convertFieldToCodeUnits(mass_chunk, source_units, target_units, "mass");
+        applyManifestUnitConversion(
+            mass_chunk,
+            requireFieldConvention(
+                manifest,
+                group_name + "/Masses",
+                IcFieldSemantics::kExtensive),
+            manifest,
+            target_units.mass_si_per_code);
       } else {
         const double constant_mass = result.report.schema.mass_table[type_index];
         if (!(constant_mass > 0.0) || !options.allow_mass_table_fallback) {
           throw std::runtime_error(
               "missing Masses dataset and invalid/non-enabled MassTable fallback in " + group_name);
         }
-        mass_chunk.assign(
-            chunk_count,
-            target_units.massSiToCode(source_units.massCodeToSi(constant_mass)));
+        mass_chunk.assign(chunk_count, constant_mass);
+        applyManifestUnitConversion(
+            mass_chunk,
+            requireFieldConvention(
+                manifest, "/Header/MassTable",
+                IcFieldSemantics::kExtensive),
+            manifest,
+            target_units.mass_si_per_code);
         result.report.defaulted_fields.push_back(group_name + "/Masses=MassTable");
       }
 
@@ -546,6 +891,15 @@ IcReadResult readGadgetArepoHdf5Ic(
         if (!internal_energy_name.empty()) {
           readDatasetChunk1d(group.get(), internal_energy_name, local_start, chunk_count, internal_energy_chunk);
           validateFiniteField(internal_energy_chunk, group_name + "/" + internal_energy_name);
+          applyManifestUnitConversion(
+              internal_energy_chunk,
+              requireFieldConvention(
+                  manifest,
+                  group_name + "/InternalEnergy",
+                  IcFieldSemantics::kSpecific),
+              manifest,
+              target_units.velocity_si_per_code *
+                  target_units.velocity_si_per_code);
         } else {
           internal_energy_chunk.assign(chunk_count, 0.0);
           result.report.defaulted_fields.push_back(group_name + "/InternalEnergy=zero");
@@ -554,9 +908,50 @@ IcReadResult readGadgetArepoHdf5Ic(
         if (!density_name.empty()) {
           readDatasetChunk1d(group.get(), density_name, local_start, chunk_count, density_chunk);
           validateFiniteField(density_chunk, group_name + "/" + density_name);
+          applyManifestUnitConversion(
+              density_chunk,
+              requireFieldConvention(
+                  manifest,
+                  group_name + "/Density",
+                  IcFieldSemantics::kIntensive),
+              manifest,
+              target_units.mass_si_per_code /
+                  std::pow(target_units.length_si_per_code, 3.0));
         } else {
           density_chunk.assign(chunk_count, 0.0);
           result.report.defaulted_fields.push_back(group_name + "/Density=zero");
+        }
+      } else if (type_index == 5U) {
+        readDatasetChunk1d(
+            group.get(), black_hole_mass_name, local_start, chunk_count,
+            black_hole_mass_chunk);
+        validateFiniteField(
+            black_hole_mass_chunk, group_name + "/" + black_hole_mass_name);
+        applyManifestUnitConversion(
+            black_hole_mass_chunk,
+            requireFieldConvention(
+                manifest, group_name + "/BH_Mass",
+                IcFieldSemantics::kExtensive),
+            manifest,
+            target_units.mass_si_per_code);
+        if (!black_hole_mdot_name.empty()) {
+          readDatasetChunk1d(
+              group.get(), black_hole_mdot_name, local_start, chunk_count,
+              black_hole_mdot_chunk);
+          validateFiniteField(
+              black_hole_mdot_chunk,
+              group_name + "/" + black_hole_mdot_name);
+          applyManifestUnitConversion(
+              black_hole_mdot_chunk,
+              requireFieldConvention(
+                  manifest, group_name + "/BH_Mdot",
+                  IcFieldSemantics::kIntensive),
+              manifest,
+              target_units.mass_si_per_code / target_units.timeSiPerCode());
+        } else {
+          black_hole_mdot_chunk.assign(chunk_count, 0.0);
+          result.report.defaulted_fields.push_back(
+              group_name + "/BH_Mdot=zero");
         }
       }
 
@@ -575,7 +970,13 @@ IcReadResult readGadgetArepoHdf5Ic(
         result.state.particles.time_bin[global_i] = 0;
 
         result.state.particle_sidecar.particle_id[global_i] = ids_chunk[local_i];
-        result.state.particle_sidecar.species_tag[global_i] = mapTypeIndexToSpeciesTag(type_index);
+        if (!(mass_chunk[local_i] > 0.0) ||
+            !std::isfinite(mass_chunk[local_i])) {
+          throw std::runtime_error(
+              "IC particle masses must be finite and positive");
+        }
+        result.state.particle_sidecar.species_tag[global_i] =
+            mapTypeIndexToSpeciesTag(type_index, manifest);
         result.state.particle_sidecar.owning_rank[global_i] = 0;
 
         if (type_index == 0) {
@@ -592,6 +993,23 @@ IcReadResult readGadgetArepoHdf5Ic(
           result.state.gas_cells.pressure_code[cell_i] = 0.0;
           result.state.gas_cells.temperature_code[cell_i] = 0.0;
           result.state.gas_cells.sound_speed_code[cell_i] = 0.0;
+        } else if (type_index == 5U) {
+          const std::size_t black_hole_row = local_start + local_i;
+          if (!(black_hole_mass_chunk[local_i] > 0.0) ||
+              !std::isfinite(black_hole_mass_chunk[local_i]) ||
+              black_hole_mdot_chunk[local_i] < 0.0 ||
+              !std::isfinite(black_hole_mdot_chunk[local_i])) {
+            throw std::runtime_error(
+                "PartType5 BH_Mass/BH_Mdot must be finite with positive mass and non-negative accretion rate");
+          }
+          result.state.black_holes.particle_index[black_hole_row] =
+              static_cast<std::uint32_t>(global_i);
+          result.state.black_holes.host_cell_index[black_hole_row] =
+              std::numeric_limits<std::uint32_t>::max();
+          result.state.black_holes.subgrid_mass_code[black_hole_row] =
+              black_hole_mass_chunk[local_i];
+          result.state.black_holes.accretion_rate_code[black_hole_row] =
+              black_hole_mdot_chunk[local_i];
         }
       }
     }
@@ -611,6 +1029,16 @@ IcReadResult readGadgetArepoHdf5Ic(
   }
 
   fillSpeciesLedger(result.state);
+  {
+    std::vector<std::uint64_t> sorted_ids(
+        result.state.particle_sidecar.particle_id.begin(),
+        result.state.particle_sidecar.particle_id.end());
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+    if (std::adjacent_find(sorted_ids.begin(), sorted_ids.end()) !=
+        sorted_ids.end()) {
+      throw std::runtime_error("IC import contains duplicate particle IDs");
+    }
+  }
   result.state.rebuildSpeciesIndex();
   if (gas_cell_count > 0) {
     result.state.refreshGasCellIdentityFromParticleOrder();

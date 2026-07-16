@@ -812,6 +812,7 @@ struct ConfigKeySpec {
       {"output.output_stem", "snapshot"},
       {"output.restart_stem", "restart"},
       {"output.snapshot_interval_steps", "64"},
+      {"output.snapshot_interval_time_code", "0.0"},
       {"output.write_restarts", "true"},
       {"parallel.mpi_ranks_expected", "1"},
       {"parallel.omp_threads", "1"},
@@ -1002,8 +1003,17 @@ void validateConfig(const SimulationConfig& config) {
         "numerics.hierarchical_max_rung must be 0: production ReferenceWorkflow "
         "does not yet carry per-element kick/drift epochs for mixed-rung KDK integration");
   }
-  if (config.output.snapshot_interval_steps <= 0) {
-    throw ConfigError("output.snapshot_interval_steps must be > 0");
+  if (config.output.snapshot_interval_steps < 0) {
+    throw ConfigError("output.snapshot_interval_steps must be >= 0");
+  }
+  if (!std::isfinite(config.output.snapshot_interval_time_code) ||
+      config.output.snapshot_interval_time_code < 0.0) {
+    throw ConfigError("output.snapshot_interval_time_code must be finite and >= 0");
+  }
+  if (config.output.snapshot_interval_steps == 0 &&
+      config.output.snapshot_interval_time_code == 0.0) {
+    throw ConfigError(
+        "output requires snapshot_interval_steps > 0 or snapshot_interval_time_code > 0");
   }
   if (config.parallel.mpi_ranks_expected <= 0 || config.parallel.omp_threads <= 0) {
     throw ConfigError("parallel settings require positive mpi_ranks_expected and omp_threads");
@@ -1405,6 +1415,8 @@ void validateConfig(const SimulationConfig& config) {
   stream << "output_stem = " << frozen.config.output.output_stem << '\n';
   stream << "restart_stem = " << frozen.config.output.restart_stem << '\n';
   stream << "snapshot_interval_steps = " << frozen.config.output.snapshot_interval_steps << '\n';
+  stream << "snapshot_interval_time_code = "
+         << frozen.config.output.snapshot_interval_time_code << '\n';
   stream << "write_restarts = " << (frozen.config.output.write_restarts ? "true" : "false") << '\n';
   stream << "\n[parallel]\n";
   stream << "mpi_ranks_expected = " << frozen.config.parallel.mpi_ranks_expected << '\n';
@@ -1924,6 +1936,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.output.snapshot_interval_steps = static_cast<int>(parseNumber<long>(
       requireString(entries, consumed, "output.snapshot_interval_steps", "64"),
       "output.snapshot_interval_steps"));
+  frozen.config.output.snapshot_interval_time_code = parseFloating(
+      requireString(entries, consumed, "output.snapshot_interval_time_code", "0.0"),
+      "output.snapshot_interval_time_code");
   frozen.config.output.write_restarts = parseBool(
       requireString(entries, consumed, "output.write_restarts", "true"), "output.write_restarts");
 

@@ -14,6 +14,24 @@ This file is the architecture index for contributors.
 8. `parallel`: distributed-memory exchange and backend seams.
 9. `utils`: narrow cross-module support only.
 
+## Workflow runtime services
+
+The workflow composition root creates one `workflows::RuntimeServices` bundle
+per process. It borrows the process MPI context and profiler and carries the
+deterministic-execution policy. Drift, gravity, and hydro runtime callbacks
+receive this bundle (or an explicit borrowed dependency from it); they do not
+construct replacement MPI contexts. `workflows::FailureCoordinator` provides
+the phase gate used to reduce rank-local failures before any rank enters the
+following collective phase. The first integrated gate covers restart-topology
+validation; additional collective protocols should use the same authority.
+
+`core::moduleDescriptors()` is the compile-time composition catalog. Each
+descriptor names its typed config fragment, state/sidecar requirements,
+stage/task and timestep contributions, restart and migration participation,
+diagnostics, capability prerequisites, and explicit incompatibilities. The
+legacy `moduleNames()` surface remains a compatibility view over the same
+ordered catalog; new composition checks should consume descriptors.
+
 ## Architectural invariants
 
 - SoA-first and hot/cold separated state organization.

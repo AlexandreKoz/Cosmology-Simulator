@@ -940,6 +940,35 @@ void testProductionHierarchicalRungsFailClosed() {
   assert(rejected);
 }
 
+void testOutputCodeTimeCadenceValidationAndRoundtrip() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[output]\n"
+      "snapshot_interval_steps = 0\n"
+      "snapshot_interval_time_code = 0.125\n",
+      "output_code_time_cadence");
+  assert(frozen.config.output.snapshot_interval_steps == 0);
+  assert(frozen.config.output.snapshot_interval_time_code == 0.125);
+  assert(frozen.normalized_text.find("snapshot_interval_time_code = 0.125") !=
+         std::string::npos);
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "output_code_time_cadence_roundtrip");
+  assert(reparsed.normalized_text == frozen.normalized_text);
+
+  for (const char* invalid_value : {"0.0", "-0.125", "nan"}) {
+    bool rejected = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(
+          std::string("[mode]\nmode = zoom_in\n[output]\n") +
+              "snapshot_interval_steps = 0\n" +
+              "snapshot_interval_time_code = " + invalid_value + "\n",
+          "invalid_output_code_time_cadence");
+    } catch (const cosmosim::core::ConfigError&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -975,5 +1004,6 @@ int main() {
   testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
   testProductionHierarchicalRungsFailClosed();
+  testOutputCodeTimeCadenceValidationAndRoundtrip();
   return 0;
 }

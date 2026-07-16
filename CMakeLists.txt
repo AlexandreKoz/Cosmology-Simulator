@@ -301,6 +301,7 @@ add_library(cosmosim_physics STATIC
 add_library(cosmosim_io STATIC
   src/io/io_module.cpp
   src/io/internal/io_contract.cpp
+  src/io/ic_manifest.cpp
   src/io/ic_reader.cpp
   src/io/snapshot_hdf5.cpp
   src/io/restart_checkpoint.cpp)
@@ -318,6 +319,8 @@ target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
 
 add_library(cosmosim_workflows STATIC
   src/workflows/internal/cartesian_gas_cell_layout.cpp
+  src/workflows/runtime_capabilities.cpp
+  src/workflows/runtime_services.cpp
   src/workflows/reference_workflow.cpp)
 
 set(COSMOSIM_MODULE_LIBS
@@ -559,6 +562,18 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(unit_time_integration scheduler restart treepm)
   # Compatibility shim for established build invocations.
   add_custom_target(test_time_integration DEPENDS test_unit_time_integration)
+
+  add_executable(test_unit_runtime_capabilities tests/unit/test_runtime_capabilities.cpp)
+  target_link_libraries(test_unit_runtime_capabilities PRIVATE cosmosim_workflows)
+  add_test(NAME unit_runtime_capabilities COMMAND test_unit_runtime_capabilities)
+
+  add_executable(test_unit_runtime_services tests/unit/test_runtime_services.cpp)
+  target_link_libraries(test_unit_runtime_services PRIVATE cosmosim_workflows)
+  add_test(NAME unit_runtime_services COMMAND test_unit_runtime_services)
+
+  add_executable(test_unit_module_registry tests/unit/test_module_registry.cpp)
+  target_link_libraries(test_unit_module_registry PRIVATE cosmosim_core)
+  add_test(NAME unit_module_registry COMMAND test_unit_module_registry)
 
   add_executable(test_unit_simulation_mode tests/unit/test_simulation_mode.cpp)
   target_link_libraries(test_unit_simulation_mode PRIVATE cosmosim_core)

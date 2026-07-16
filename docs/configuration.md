@@ -301,7 +301,14 @@ Tracers:
 - `run_name`
 - `output_directory` (output root; the runtime appends `run_name` to form the concrete run directory)
 - `output_stem`, `restart_stem` (stable character set only)
-- `snapshot_interval_steps`, `write_restarts`
+- `snapshot_interval_steps` (zero disables step-modulo events)
+- `snapshot_interval_time_code` (zero disables code-time events; positive values are
+  anchored at `numerics.time_begin_code` and steps are clipped rather than crossing them)
+- `write_restarts`
+
+At least one snapshot interval must be positive. Code-time cadence is part of the
+normalized config and its next ordered event is restart-authoritative in restart
+schema v21.
 
 ## `[analysis]`
 

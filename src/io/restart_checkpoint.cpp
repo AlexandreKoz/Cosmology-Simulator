@@ -41,12 +41,14 @@ constexpr std::uint32_t k_restart_schema_v17 = 17;
 constexpr std::uint32_t k_restart_schema_v18 = 18;
 constexpr std::uint32_t k_restart_schema_v19 = 19;
 constexpr std::uint32_t k_restart_schema_v20 = 20;
+constexpr std::uint32_t k_restart_schema_v21 = 21;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
 constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
 constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
 constexpr std::string_view k_restart_schema_name_v17 = "cosmosim_restart_v17";
 constexpr std::string_view k_restart_schema_name_v18 = "cosmosim_restart_v18";
 constexpr std::string_view k_restart_schema_name_v19 = "cosmosim_restart_v19";
+constexpr std::string_view k_restart_schema_name_v20 = "cosmosim_restart_v20";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 constexpr std::string_view k_gas_cell_scheduler_identity_key = "gas_cell_id";
 
@@ -382,18 +384,33 @@ void validateOutputCadenceStateForRestart(
   if (!output_state.output_enabled) {
     return;
   }
-  if (output_state.snapshot_interval_steps == 0) {
+  if (output_state.snapshot_interval_steps == 0 &&
+      output_state.snapshot_interval_time_code == 0.0) {
     throw std::invalid_argument(
-        std::string(context) + ": /output_cadence/@snapshot_interval_steps must be > 0 when output is enabled");
+        std::string(context) +
+        ": /output_cadence requires a positive step or code-time interval when output is enabled");
+  }
+  if (!std::isfinite(output_state.snapshot_interval_time_code) ||
+      output_state.snapshot_interval_time_code < 0.0) {
+    throw std::invalid_argument(
+        std::string(context) +
+        ": /output_cadence/@snapshot_interval_time_code must be finite and >= 0");
   }
   if (output_state.last_completed_step_index != integrator_state.step_index) {
     throw std::invalid_argument(
         std::string(context) + ": /output_cadence/@last_completed_step_index must match /integrator/@step_index");
   }
-  if (output_state.next_snapshot_step_index != 0 &&
+  if (output_state.snapshot_interval_steps > 0 &&
       output_state.next_snapshot_step_index <= output_state.last_completed_step_index) {
     throw std::invalid_argument(
         std::string(context) + ": /output_cadence/@next_snapshot_step_index must be strictly after the restart step");
+  }
+  if (output_state.snapshot_interval_time_code > 0.0 &&
+      (!std::isfinite(output_state.next_snapshot_time_code) ||
+       output_state.next_snapshot_time_code <= integrator_state.current_time_code)) {
+    throw std::invalid_argument(
+        std::string(context) +
+        ": /output_cadence/@next_snapshot_time_code must be finite and strictly after the restart time");
   }
 }
 
@@ -825,6 +842,10 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
                                 "next_snapshot_step_index", "snapshot_stem", "restart_stem"}) {
     requireHdf5Attribute(output_group.get(), "/output_cadence", attr);
   }
+  if (schema_version >= k_restart_schema_v21) {
+    requireHdf5Attribute(output_group.get(), "/output_cadence", "snapshot_interval_time_code");
+    requireHdf5Attribute(output_group.get(), "/output_cadence", "next_snapshot_time_code");
+  }
 
   Hdf5Handle stochastic_group = openRequiredGroup(file, "/stochastic_state");
   requireHdf5Attribute(stochastic_group.get(), "/stochastic_state", "module_count");
@@ -842,6 +863,10 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
                                 "output_last_completed_step_index", "output_next_snapshot_step_index",
                                 "stochastic_module_count"}) {
     requireHdf5Attribute(diagnostics_group.get(), "/restart_diagnostics", attr);
+  }
+  if (schema_version >= k_restart_schema_v21) {
+    requireHdf5Attribute(
+        diagnostics_group.get(), "/restart_diagnostics", "output_next_snapshot_time_code");
   }
 
   if (schema_version >= k_restart_schema_v19) {
@@ -1989,11 +2014,16 @@ void writeOutputCadenceGroup(hid_t root, const OutputCadencePersistentState& out
   writeScalarU64Attribute(group.get(), "last_completed_step_index", output_state.last_completed_step_index);
   writeScalarU64Attribute(group.get(), "snapshot_interval_steps", output_state.snapshot_interval_steps);
   writeScalarU64Attribute(group.get(), "next_snapshot_step_index", output_state.next_snapshot_step_index);
+  writeScalarF64Attribute(
+      group.get(), "snapshot_interval_time_code", output_state.snapshot_interval_time_code);
+  writeScalarF64Attribute(group.get(), "next_snapshot_time_code", output_state.next_snapshot_time_code);
   writeScalarStringAttribute(group.get(), "snapshot_stem", output_state.snapshot_stem);
   writeScalarStringAttribute(group.get(), "restart_stem", output_state.restart_stem);
 }
 
-[[nodiscard]] OutputCadencePersistentState readOutputCadenceGroup(hid_t root) {
+[[nodiscard]] OutputCadencePersistentState readOutputCadenceGroup(
+    hid_t root,
+    std::uint32_t schema_version) {
   Hdf5Handle group(H5Gopen2(root, "/output_cadence", H5P_DEFAULT));
   OutputCadencePersistentState output_state;
   output_state.output_enabled = readScalarU32Attribute(group.get(), "output_enabled") != 0U;
@@ -2003,6 +2033,12 @@ void writeOutputCadenceGroup(hid_t root, const OutputCadencePersistentState& out
   output_state.last_completed_step_index = readScalarU64Attribute(group.get(), "last_completed_step_index");
   output_state.snapshot_interval_steps = readScalarU64Attribute(group.get(), "snapshot_interval_steps");
   output_state.next_snapshot_step_index = readScalarU64Attribute(group.get(), "next_snapshot_step_index");
+  if (schema_version >= k_restart_schema_v21) {
+    output_state.snapshot_interval_time_code =
+        readScalarF64Attribute(group.get(), "snapshot_interval_time_code");
+    output_state.next_snapshot_time_code =
+        readScalarF64Attribute(group.get(), "next_snapshot_time_code");
+  }
   output_state.snapshot_stem = readScalarStringAttribute(group.get(), "snapshot_stem");
   output_state.restart_stem = readScalarStringAttribute(group.get(), "restart_stem");
   return output_state;
@@ -2120,6 +2156,7 @@ void writeStochasticStateGroup(hid_t root, const StochasticPersistentState& stoc
   diagnostics.output_checkpoint_due = output_state.checkpoint_due;
   diagnostics.output_last_completed_step_index = output_state.last_completed_step_index;
   diagnostics.output_next_snapshot_step_index = output_state.next_snapshot_step_index;
+  diagnostics.output_next_snapshot_time_code = output_state.next_snapshot_time_code;
   diagnostics.stochastic_module_count = stochastic_state.modules.size();
   return diagnostics;
 }
@@ -2162,6 +2199,8 @@ void writeRestartDiagnosticsGroup(hid_t root, const RestartDiagnosticsSummary& d
   writeScalarU32Attribute(group.get(), "output_checkpoint_due", diagnostics.output_checkpoint_due ? 1U : 0U);
   writeScalarU64Attribute(group.get(), "output_last_completed_step_index", diagnostics.output_last_completed_step_index);
   writeScalarU64Attribute(group.get(), "output_next_snapshot_step_index", diagnostics.output_next_snapshot_step_index);
+  writeScalarF64Attribute(
+      group.get(), "output_next_snapshot_time_code", diagnostics.output_next_snapshot_time_code);
   writeScalarU64Attribute(group.get(), "stochastic_module_count", diagnostics.stochastic_module_count);
 }
 
@@ -2209,6 +2248,10 @@ void writeRestartDiagnosticsGroup(hid_t root, const RestartDiagnosticsSummary& d
   diagnostics.output_checkpoint_due = readScalarU32Attribute(group.get(), "output_checkpoint_due") != 0U;
   diagnostics.output_last_completed_step_index = readScalarU64Attribute(group.get(), "output_last_completed_step_index");
   diagnostics.output_next_snapshot_step_index = readScalarU64Attribute(group.get(), "output_next_snapshot_step_index");
+  if (schema_version >= k_restart_schema_v21) {
+    diagnostics.output_next_snapshot_time_code =
+        readScalarF64Attribute(group.get(), "output_next_snapshot_time_code");
+  }
   diagnostics.stochastic_module_count = readScalarU64Attribute(group.get(), "stochastic_module_count");
   return diagnostics;
 }
@@ -2223,6 +2266,7 @@ const RestartSchema& restartSchema() {
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
   return file_schema_version == restartSchema().version ||
+      file_schema_version == k_restart_schema_v20 ||
       file_schema_version == k_restart_schema_v19 ||
       file_schema_version == k_restart_schema_v18 ||
       file_schema_version == k_restart_schema_v17 || file_schema_version == k_restart_schema_v16 ||
@@ -2260,7 +2304,8 @@ std::uint64_t restartPayloadIntegrityHashImpl(
     bool include_pending_flux_registers,
     bool include_temporal_boundary_history,
     bool include_gas_cell_scheduler,
-    bool include_gravity_force_cache) {
+    bool include_gravity_force_cache,
+    bool include_output_time_cadence) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -2635,6 +2680,12 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_u64(payload.output_cadence_state.last_completed_step_index);
   append_u64(payload.output_cadence_state.snapshot_interval_steps);
   append_u64(payload.output_cadence_state.next_snapshot_step_index);
+  if (include_output_time_cadence) {
+    append_u64(std::bit_cast<std::uint64_t>(
+        payload.output_cadence_state.snapshot_interval_time_code));
+    append_u64(std::bit_cast<std::uint64_t>(
+        payload.output_cadence_state.next_snapshot_time_code));
+  }
   append_string(payload.output_cadence_state.snapshot_stem);
   append_string(payload.output_cadence_state.restart_stem);
   for (const StochasticModulePersistentState& module_state : sortedStochasticModules(payload.stochastic_state)) {
@@ -2652,7 +2703,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true);
+  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -2894,7 +2945,10 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       schema_name == k_restart_schema_name_v18 && schema_version == k_restart_schema_v18;
   const bool legacy_v19_schema =
       schema_name == k_restart_schema_name_v19 && schema_version == k_restart_schema_v19;
-  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema && !legacy_v17_schema && !legacy_v18_schema && !legacy_v19_schema) ||
+  const bool legacy_v20_schema =
+      schema_name == k_restart_schema_name_v20 && schema_version == k_restart_schema_v20;
+  if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema &&
+       !legacy_v17_schema && !legacy_v18_schema && !legacy_v19_schema && !legacy_v20_schema) ||
       !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
@@ -3021,7 +3075,7 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
         result.state, result.scheduler_state);
     result.gas_cell_scheduler_ids = gasCellIdsByDenseLocalRow(result.state, "legacy restart reader");
   }
-  result.output_cadence_state = readOutputCadenceGroup(file.get());
+  result.output_cadence_state = readOutputCadenceGroup(file.get(), schema_version);
   validateOutputCadenceStateForRestart(result.output_cadence_state, result.integrator_state, "restart reader");
   result.stochastic_state = readStochasticStateGroup(file.get());
   validateStochasticStateForRestart(result.stochastic_state, result.integrator_state, "restart reader");
@@ -3035,6 +3089,9 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
        (result.diagnostics.gas_cell_scheduler_current_tick != result.gas_cell_scheduler_state.current_tick ||
         result.diagnostics.gas_cell_scheduler_element_count != result.gas_cell_scheduler_state.bin_index.size())) ||
       result.diagnostics.output_last_completed_step_index != result.output_cadence_state.last_completed_step_index ||
+      (schema_version >= k_restart_schema_v21 &&
+       result.diagnostics.output_next_snapshot_time_code !=
+           result.output_cadence_state.next_snapshot_time_code) ||
       result.diagnostics.stochastic_module_count != result.stochastic_state.modules.size()) {
     throw std::runtime_error("restart diagnostics summary is inconsistent with authoritative restart state");
   }
@@ -3068,7 +3125,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
           schema_version >= k_restart_schema_v17,
           schema_version >= k_restart_schema_v18,
           schema_version >= k_restart_schema_v19,
-          schema_version >= k_restart_schema_v20);
+          schema_version >= k_restart_schema_v20,
+          schema_version >= k_restart_schema_v21);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");
   }

@@ -231,7 +231,14 @@ and limiting axis. The reference workflow emits this through the profiler event 
 
 ## Synchronization and legal transitions
 
-Elements may request bin promotion/demotion through `requestBinTransition`. Transitions are only applied when the element is active and the current tick is synchronized to the destination bin period. Illegal attempts are recorded in diagnostics (`illegal_transition_attempts`) instead of being silently clipped.
+Elements may request bin promotion/demotion through the scheduler candidate
+path. Refinement is committed at the active safe boundary. Coarsening is
+committed only when the current tick is synchronized to the larger destination
+period; an unaligned coarsening request remains persisted in
+`pending_bin_index` while the element continues on its old bin. The scheduler
+records each such wait in `deferred_coarsening_events`. An unexpectedly
+unaligned refinement is an invariant failure and is recorded in
+`illegal_transition_attempts` before the scheduler throws.
 
 ## Diagnostics and pathological collapse visibility
 
@@ -242,6 +249,7 @@ Elements may request bin promotion/demotion through `requestBinTransition`. Tran
 - promoted/demoted counts
 - clipped-to-min/max counters from dt mapping
 - illegal transition attempts
+- deferred coarsening events
 - collapse candidate count when finest-bin occupancy dominates
 
 ## Cosmology helper equations

@@ -1,4 +1,6 @@
 #include "cosmosim/workflows/reference_workflow.hpp"
+#include "cosmosim/workflows/runtime_capabilities.hpp"
+#include "cosmosim/workflows/runtime_services.hpp"
 
 #include <algorithm>
 #include <array>
@@ -43,6 +45,7 @@
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
 #include "cosmosim/io/ic_reader.hpp"
+#include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
@@ -141,8 +144,9 @@ constexpr std::array<core::IntegrationStage, 1> k_hydro_stage = {core::Integrati
 
 gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
     const core::SimulationConfig& config,
-    const gravity::PmGridShape& pm_grid_shape) {
-  parallel::MpiContext mpi_context;
+    const gravity::PmGridShape& pm_grid_shape,
+    const RuntimeServices& services) {
+  const parallel::MpiContext& mpi_context = services.mpi_context;
   mpi_context.validateExpectedWorldSizeOrThrow(config.parallel.mpi_ranks_expected);
   const auto layout = parallel::makePmSlabLayout(
       pm_grid_shape.nx,
@@ -642,7 +646,9 @@ void updateAdaptiveTimeBinsFromView(
     core::HierarchicalTimeBinScheduler& scheduler,
     const core::IntegratorState& integrator_state,
     const core::SimulationConfig& config,
-    SchedulerElementFamily element_family) {
+    SchedulerElementFamily element_family,
+    std::span<const std::uint32_t> requested_elements,
+    bool update_all_elements) {
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("adaptive time-bin update requires dt_time_code > 0");
   }
@@ -739,9 +745,24 @@ void updateAdaptiveTimeBinsFromView(
     throw std::invalid_argument(
         "adaptive time-bin scheduler extent does not match its declared element family");
   }
+  const auto for_each_requested_element = [&](auto&& callback) {
+    if (update_all_elements) {
+      for (std::uint32_t element = 0; element < expected_element_count;
+           ++element) {
+        callback(element);
+      }
+      return;
+    }
+    for (const std::uint32_t element : requested_elements) {
+      if (element >= expected_element_count) {
+        throw std::out_of_range(
+            "active timestep-criteria element is outside scheduler extent");
+      }
+      callback(element);
+    }
+  };
   if (element_family == SchedulerElementFamily::kGasCells) {
-    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
-      core::TimeStepCriteriaRegistry registry;
+    for_each_requested_element([&](std::uint32_t cell_index) {
       const std::uint32_t gas_index = view.gas_cells.gas_particle_index_by_cell[cell_index];
       if (gas_index != std::numeric_limits<std::uint32_t>::max() && gas_index >= particle_count) {
         throw std::out_of_range("gas-particle index in timestep criteria view is out of range");
@@ -757,9 +778,8 @@ void updateAdaptiveTimeBinsFromView(
           .velocity_axis_code = {vx, vy, vz},
           .sound_speed_code = std::max(view.gas_cells.sound_speed_code[cell_index], 0.0),
       };
-      registry.registerCflHook([=](std::uint32_t) {
-        return core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
-      });
+      const double cfl_dt =
+          core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
       const double ax = (cell_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[cell_index] : 0.0;
       const double ay = (cell_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[cell_index] : 0.0;
       const double az = (cell_index < view.gas_cells.accel_z_comoving.size()) ? view.gas_cells.accel_z_comoving[cell_index] : 0.0;
@@ -768,15 +788,11 @@ void updateAdaptiveTimeBinsFromView(
               !view.particles.gravity_softening_comoving.empty()
           ? view.particles.gravity_softening_comoving[gas_index]
           : species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kGas)];
-      registry.registerGravityHook([=](std::uint32_t) {
-        return core::computeComovingGravityTimeStep(
-            {.softening_length_comoving_code = std::max(eps, 1.0e-12),
-             .scale_free_acceleration_magnitude_code = amag,
-             .scale_factor = gravity_scale_factor},
-            0.2);
-      });
-      const double cfl_dt = registry.hooks().cfl_hook(cell_index);
-      const double gravity_dt = registry.hooks().gravity_hook(cell_index);
+      const double gravity_dt = core::computeComovingGravityTimeStep(
+          {.softening_length_comoving_code = std::max(eps, 1.0e-12),
+           .scale_free_acceleration_magnitude_code = amag,
+           .scale_factor = gravity_scale_factor},
+          0.2);
       scheduler.submitCandidateTimeStep(
           cell_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_cell_hydro_cfl");
       scheduler.submitCandidateTimeStep(
@@ -789,12 +805,11 @@ void updateAdaptiveTimeBinsFromView(
         scheduler.submitCandidateTimeStep(
             cell_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_cell_star_formation_source");
       }
-    }
+    });
     return;
   }
 
-  for (std::uint32_t particle_index = 0; particle_index < particle_count; ++particle_index) {
-    core::TimeStepCriteriaRegistry registry;
+  for_each_requested_element([&](std::uint32_t particle_index) {
     const double ax = (particle_index < view.particles.accel_x_comoving.size()) ? view.particles.accel_x_comoving[particle_index] : 0.0;
     const double ay = (particle_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[particle_index] : 0.0;
     const double az = (particle_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[particle_index] : 0.0;
@@ -804,16 +819,14 @@ void updateAdaptiveTimeBinsFromView(
         : ((static_cast<std::size_t>(view.particles.species_tag[particle_index]) < species_softening.epsilon_comoving_by_species.size())
               ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[particle_index])]
               : global_softening);
-    registry.registerGravityHook([=](std::uint32_t) {
-      return core::computeComovingGravityTimeStep(
-          {.softening_length_comoving_code = std::max(eps, 1.0e-12),
-           .scale_free_acceleration_magnitude_code = amag,
-           .scale_factor = gravity_scale_factor},
-          0.2);
-    });
+    const double gravity_dt = core::computeComovingGravityTimeStep(
+        {.softening_length_comoving_code = std::max(eps, 1.0e-12),
+         .scale_free_acceleration_magnitude_code = amag,
+         .scale_factor = gravity_scale_factor},
+        0.2);
     scheduler.submitCandidateTimeStep(
         particle_index,
-        registry.hooks().gravity_hook(particle_index),
+        gravity_dt,
         limits,
         core::TimeStepCandidateSource::kGravityAcceleration,
         "particle_gravity_acceleration");
@@ -833,37 +846,12 @@ void updateAdaptiveTimeBinsFromView(
           core::TimeStepCandidateSource::kSourceTerm,
           "particle_black_hole_source");
     }
-  }
+  });
 }
 
-void updateAdaptiveTimeBins(
+void updateAdaptiveTimeBinFamilies(
     core::SimulationState& state,
-    core::HierarchicalTimeBinScheduler& scheduler,
-    const core::IntegratorState& integrator_state,
-    const core::SimulationConfig& config,
-    std::span<const double> particle_accel_x,
-    std::span<const double> particle_accel_y,
-    std::span<const double> particle_accel_z,
-    std::span<const double> cell_accel_x,
-    std::span<const double> cell_accel_y,
-    std::span<const double> cell_accel_z) {
-  AdaptiveTimeStepCriteriaStorage storage;
-  const core::AdaptiveTimeStepCriteriaView view = buildAdaptiveTimeStepCriteriaView(
-      state,
-      config,
-      particle_accel_x,
-      particle_accel_y,
-      particle_accel_z,
-      cell_accel_x,
-      cell_accel_y,
-      cell_accel_z,
-      storage);
-  updateAdaptiveTimeBinsFromView(
-      view, scheduler, integrator_state, config, SchedulerElementFamily::kParticles);
-}
-
-void updateGasCellAdaptiveTimeBins(
-    core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& particle_scheduler,
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const core::IntegratorState& integrator_state,
     const core::SimulationConfig& config,
@@ -872,7 +860,10 @@ void updateGasCellAdaptiveTimeBins(
     std::span<const double> particle_accel_z,
     std::span<const double> cell_accel_x,
     std::span<const double> cell_accel_y,
-    std::span<const double> cell_accel_z) {
+    std::span<const double> cell_accel_z,
+    std::span<const std::uint32_t> active_particle_indices,
+    std::span<const std::uint32_t> active_cell_indices,
+    bool update_all_elements) {
   AdaptiveTimeStepCriteriaStorage storage;
   const core::AdaptiveTimeStepCriteriaView view = buildAdaptiveTimeStepCriteriaView(
       state,
@@ -885,7 +876,21 @@ void updateGasCellAdaptiveTimeBins(
       cell_accel_z,
       storage);
   updateAdaptiveTimeBinsFromView(
-      view, gas_cell_scheduler, integrator_state, config, SchedulerElementFamily::kGasCells);
+      view,
+      particle_scheduler,
+      integrator_state,
+      config,
+      SchedulerElementFamily::kParticles,
+      active_particle_indices,
+      update_all_elements);
+  updateAdaptiveTimeBinsFromView(
+      view,
+      gas_cell_scheduler,
+      integrator_state,
+      config,
+      SchedulerElementFamily::kGasCells,
+      active_cell_indices,
+      update_all_elements);
 }
 
 
@@ -3854,6 +3859,9 @@ class StageAuditCallback final : public core::IntegrationCallback {
 
 class DriftCallback final : public core::IntegrationCallback {
  public:
+  explicit DriftCallback(const RuntimeServices& services) noexcept
+      : m_services(services) {}
+
   [[nodiscard]] std::string_view callbackName() const override { return "drift"; }
   [[nodiscard]] std::span<const core::IntegrationStage> integrationStages() const override { return k_drift_stage; }
   [[nodiscard]] std::span<const core::StageContract> stageContracts() const override { return m_contracts; }
@@ -3864,8 +3872,8 @@ class DriftCallback final : public core::IntegrationCallback {
     }
 
     const double drift_factor = context.timeline_step.drift_factor_code;
-    parallel::MpiContext mpi_context;
-    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+    const std::uint32_t world_rank =
+        static_cast<std::uint32_t>(m_services.mpi_context.worldRank());
     for (const std::uint32_t particle_index : context.active_set.particle_indices) {
       if (particle_index >= context.state.particles.size()) {
         throw std::out_of_range("drift callback active particle index out of range");
@@ -3897,6 +3905,7 @@ class DriftCallback final : public core::IntegrationCallback {
   }
 
  private:
+  const RuntimeServices& m_services;
   static constexpr std::array<core::StageContract, 1> m_contracts{{
       {.stage = core::IntegrationStage::kDrift,
        .required_inputs = core::StageDataDomain::kParticles,
@@ -3945,8 +3954,10 @@ class GravityStageCallback final : public core::IntegrationCallback {
   GravityStageCallback(
       const core::SimulationConfig& config,
       const core::ModePolicy& mode_policy,
+      const RuntimeServices& services,
       std::filesystem::path zoom_region_path = {})
-      : m_config(config),
+      : m_services(services),
+        m_config(config),
         m_mode_policy(mode_policy),
         m_pm_update_cadence_steps(static_cast<std::uint64_t>(config.numerics.treepm_update_cadence_steps)),
         m_pm_grid_shape(gravity::PmGridShape{
@@ -3959,7 +3970,8 @@ class GravityStageCallback final : public core::IntegrationCallback {
             config.cosmology.box_size_y_mpc_comoving / static_cast<double>(m_pm_grid_shape.ny)),
         m_mesh_spacing_z_mpc_comoving(
             config.cosmology.box_size_z_mpc_comoving / static_cast<double>(m_pm_grid_shape.nz)),
-        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(config, m_pm_grid_shape)),
+        m_tree_pm_coordinator(makeRuntimeAwareTreePmCoordinator(
+            config, m_pm_grid_shape, services)),
         m_zoom_region_path(std::move(zoom_region_path)) {
     if (!m_pm_grid_shape.isValid()) {
       throw std::runtime_error("numerics.treepm_pm_grid_n{xyz} must all be > 0");
@@ -3988,7 +4000,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
         : gravity::PmBoundaryCondition::kIsolatedOpen;
     m_tree_pm_options.pm_options.isolated_open_root_workspace_limit_bytes =
         config.parallel.isolated_pm_root_workspace_limit_bytes;
-    parallel::MpiContext mpi_context;
+    const parallel::MpiContext& mpi_context = m_services.mpi_context;
     const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
     m_runtime_topology = parallel::buildDistributedExecutionTopology(
         m_pm_grid_shape.nx,
@@ -4269,7 +4281,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
   void onStage(core::StepContext& context) override {
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
         context.stage == core::IntegrationStage::kGravityKickPost;
-    parallel::MpiContext mpi_context;
+    const parallel::MpiContext& mpi_context = m_services.mpi_context;
     const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
     const std::size_t particle_count = context.state.particles.size();
     if (m_force_cache_particle_index_generation !=
@@ -5202,6 +5214,7 @@ class GravityStageCallback final : public core::IntegrationCallback {
     }
   }
 
+  const RuntimeServices& m_services;
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   parallel::DistributedExecutionTopology m_runtime_topology{};
@@ -5270,11 +5283,11 @@ class HydroStageCallback final : public core::IntegrationCallback {
       const core::SimulationConfig& config,
       const core::ModePolicy& mode_policy,
       const GravityStageCallback& gravity_callback,
-      parallel::MpiContext mpi_context)
+      const RuntimeServices& services)
       : m_config(config),
         m_mode_policy(mode_policy),
         m_gravity_callback(gravity_callback),
-        m_mpi_context(std::move(mpi_context)),
+        m_mpi_context(services.mpi_context),
         m_solver(k_gamma_adiabatic),
         m_reconstruction(hydro::HydroReconstructionPolicy{
             .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
@@ -6517,7 +6530,7 @@ class HydroStageCallback final : public core::IntegrationCallback {
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   const GravityStageCallback& m_gravity_callback;
-  parallel::MpiContext m_mpi_context;
+  const parallel::MpiContext& m_mpi_context;
   std::uint32_t m_current_world_rank = 0;
   hydro::HydroCoreSolver m_solver;
   hydro::MusclHancockReconstruction m_reconstruction;
@@ -6543,6 +6556,182 @@ class HydroStageCallback final : public core::IntegrationCallback {
   std::optional<HydroGeometryCacheKey> m_cached_geometry_key;
 };
 
+struct SnapshotRoundtripVerification {
+  bool ok = false;
+  std::string detail;
+};
+
+[[nodiscard]] bool snapshotScalarEquivalent(double lhs, double rhs) {
+  if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+    return false;
+  }
+  const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+  return std::abs(lhs - rhs) <= 32.0 * std::numeric_limits<double>::epsilon() * scale;
+}
+
+[[nodiscard]] SnapshotRoundtripVerification verifySnapshotRoundtrip(
+    const io::SnapshotReadResult& restored,
+    const core::SimulationState& expected,
+    const core::SimulationConfig& config,
+    std::string_view expected_normalized_config,
+    const core::ProvenanceRecord& expected_provenance) {
+  const auto fail = [](std::string detail) {
+    return SnapshotRoundtripVerification{.ok = false, .detail = std::move(detail)};
+  };
+  if (restored.report.schema_name != io::gadgetArepoSchemaMap().schema_name ||
+      restored.report.schema_version != io::gadgetArepoSchemaMap().schema_version) {
+    return fail("snapshot schema identity mismatch");
+  }
+  if (restored.report.file_kind != io::sharedIoContractNames().science_snapshot_file_kind ||
+      restored.report.restart_compatible) {
+    return fail("snapshot file-kind contract mismatch");
+  }
+  if (restored.normalized_config_text != expected_normalized_config ||
+      restored.provenance.config_hash_hex != expected_provenance.config_hash_hex ||
+      restored.provenance.normalized_config_hash_hex !=
+          expected_provenance.normalized_config_hash_hex ||
+      restored.provenance.schema_version != expected_provenance.schema_version) {
+    return fail("snapshot config/provenance identity mismatch");
+  }
+  if (!snapshotScalarEquivalent(restored.report.header_time, expected.metadata.scale_factor) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_redshift,
+          expected.metadata.scale_factor > 0.0
+              ? 1.0 / expected.metadata.scale_factor - 1.0
+              : 0.0) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_box_size_x,
+          config.cosmology.box_size_x_mpc_comoving) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_box_size_y,
+          config.cosmology.box_size_y_mpc_comoving) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_box_size_z,
+          config.cosmology.box_size_z_mpc_comoving) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_omega_matter,
+          config.cosmology.omega_matter) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_omega_lambda,
+          config.cosmology.omega_lambda) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_omega_baryon,
+          config.cosmology.omega_baryon) ||
+      !snapshotScalarEquivalent(
+          restored.report.header_hubble_param,
+          config.cosmology.hubble_param)) {
+    return fail("snapshot Header cosmology/time metadata mismatch");
+  }
+  if (restored.state.particles.size() != expected.particles.size() ||
+      !restored.state.validateUniqueParticleIds() ||
+      !expected.validateUniqueParticleIds()) {
+    return fail("snapshot particle count or stable-ID uniqueness mismatch");
+  }
+
+  std::unordered_map<std::uint64_t, std::size_t> restored_index_by_id;
+  restored_index_by_id.reserve(restored.state.particles.size());
+  for (std::size_t i = 0; i < restored.state.particles.size(); ++i) {
+    restored_index_by_id.emplace(restored.state.particle_sidecar.particle_id[i], i);
+  }
+  const bool expected_has_softening =
+      expected.particle_sidecar.gravity_softening_comoving.size() == expected.particles.size();
+  const bool expected_has_softening_mask =
+      expected.particle_sidecar.has_gravity_softening_override.size() == expected.particles.size();
+  if (expected_has_softening !=
+          (restored.state.particle_sidecar.gravity_softening_comoving.size() ==
+           restored.state.particles.size()) ||
+      expected_has_softening_mask !=
+          (restored.state.particle_sidecar.has_gravity_softening_override.size() ==
+           restored.state.particles.size())) {
+    return fail("snapshot gravity-softening sidecar presence mismatch");
+  }
+  for (std::size_t expected_i = 0; expected_i < expected.particles.size(); ++expected_i) {
+    const std::uint64_t particle_id = expected.particle_sidecar.particle_id[expected_i];
+    const auto restored_it = restored_index_by_id.find(particle_id);
+    if (restored_it == restored_index_by_id.end()) {
+      return fail("snapshot is missing particle_id=" + std::to_string(particle_id));
+    }
+    const std::size_t restored_i = restored_it->second;
+    if (restored.state.particle_sidecar.species_tag[restored_i] !=
+        expected.particle_sidecar.species_tag[expected_i]) {
+      return fail("snapshot species mismatch for particle_id=" + std::to_string(particle_id));
+    }
+    const std::array expected_values{
+        expected.particles.position_x_comoving[expected_i],
+        expected.particles.position_y_comoving[expected_i],
+        expected.particles.position_z_comoving[expected_i],
+        expected.particles.velocity_x_peculiar[expected_i],
+        expected.particles.velocity_y_peculiar[expected_i],
+        expected.particles.velocity_z_peculiar[expected_i],
+        expected.particles.mass_code[expected_i]};
+    const std::array restored_values{
+        restored.state.particles.position_x_comoving[restored_i],
+        restored.state.particles.position_y_comoving[restored_i],
+        restored.state.particles.position_z_comoving[restored_i],
+        restored.state.particles.velocity_x_peculiar[restored_i],
+        restored.state.particles.velocity_y_peculiar[restored_i],
+        restored.state.particles.velocity_z_peculiar[restored_i],
+        restored.state.particles.mass_code[restored_i]};
+    for (std::size_t component = 0; component < expected_values.size(); ++component) {
+      if (!snapshotScalarEquivalent(expected_values[component], restored_values[component])) {
+        return fail(
+            "snapshot phase-space/mass mismatch for particle_id=" +
+            std::to_string(particle_id));
+      }
+    }
+    if (expected_has_softening && !snapshotScalarEquivalent(
+            expected.particle_sidecar.gravity_softening_comoving[expected_i],
+            restored.state.particle_sidecar.gravity_softening_comoving[restored_i])) {
+      return fail("snapshot softening mismatch for particle_id=" + std::to_string(particle_id));
+    }
+    if (expected_has_softening_mask &&
+        expected.particle_sidecar.has_gravity_softening_override[expected_i] !=
+            restored.state.particle_sidecar.has_gravity_softening_override[restored_i]) {
+      return fail("snapshot softening mask mismatch for particle_id=" + std::to_string(particle_id));
+    }
+  }
+
+  if (restored.state.tracers.size() != expected.tracers.size()) {
+    return fail("snapshot tracer count mismatch");
+  }
+  std::unordered_map<std::uint64_t, std::size_t> restored_tracer_row_by_particle_id;
+  for (std::size_t row = 0; row < restored.state.tracers.size(); ++row) {
+    const std::uint32_t particle_index = restored.state.tracers.particle_index[row];
+    if (particle_index >= restored.state.particles.size()) {
+      return fail("snapshot tracer particle index is out of range");
+    }
+    restored_tracer_row_by_particle_id.emplace(
+        restored.state.particle_sidecar.particle_id[particle_index], row);
+  }
+  for (std::size_t expected_row = 0; expected_row < expected.tracers.size(); ++expected_row) {
+    const std::uint32_t particle_index = expected.tracers.particle_index[expected_row];
+    if (particle_index >= expected.particles.size()) {
+      return fail("source tracer particle index is out of range");
+    }
+    const std::uint64_t particle_id = expected.particle_sidecar.particle_id[particle_index];
+    const auto restored_row_it = restored_tracer_row_by_particle_id.find(particle_id);
+    if (restored_row_it == restored_tracer_row_by_particle_id.end()) {
+      return fail("snapshot tracer identity mismatch");
+    }
+    const std::size_t restored_row = restored_row_it->second;
+    if (restored.state.tracers.parent_particle_id[restored_row] !=
+            expected.tracers.parent_particle_id[expected_row] ||
+        restored.state.tracers.injection_step[restored_row] !=
+            expected.tracers.injection_step[expected_row] ||
+        restored.state.tracers.host_cell_index[restored_row] !=
+            expected.tracers.host_cell_index[expected_row] ||
+        !snapshotScalarEquivalent(
+            restored.state.tracers.mass_fraction_of_host[restored_row],
+            expected.tracers.mass_fraction_of_host[expected_row]) ||
+        !snapshotScalarEquivalent(
+            restored.state.tracers.cumulative_exchanged_mass_code[restored_row],
+            expected.tracers.cumulative_exchanged_mass_code[expected_row])) {
+      return fail("snapshot tracer fields mismatch for particle_id=" + std::to_string(particle_id));
+    }
+  }
+  return SnapshotRoundtripVerification{.ok = true, .detail = "scientific fields and metadata match"};
+}
+
 bool maybeWriteOutputs(
     const core::FrozenConfig& frozen_config,
     const core::SimulationConfig& config,
@@ -6555,7 +6744,12 @@ bool maybeWriteOutputs(
     core::ProfilerSession& profiler,
     bool write_outputs_enabled,
     bool snapshot_due,
-    bool checkpoint_due) {
+    bool checkpoint_due,
+    std::uint64_t snapshot_interval_steps,
+    std::uint64_t next_snapshot_step_index,
+    double snapshot_interval_time_code,
+    double next_snapshot_time_code,
+    double restart_resume_dt_time_code) {
   if (!write_outputs_enabled || (!snapshot_due && !checkpoint_due)) {
     return false;
   }
@@ -6582,19 +6776,26 @@ bool maybeWriteOutputs(
 
   bool output_flushed = false;
   if (snapshot_due) {
+    core::ProvenanceRecord snapshot_provenance =
+        makeGravityAwareProvenanceRecord(frozen_config, config);
+    snapshot_provenance.gravity_treepm_decomposition_epoch =
+        gravity_callback.decompositionEpoch();
     io::SnapshotWritePayload snapshot_payload;
     snapshot_payload.state = &state;
     snapshot_payload.config = &config;
     snapshot_payload.normalized_config_text = frozen_config.normalized_text;
-    snapshot_payload.provenance =
-        makeGravityAwareProvenanceRecord(frozen_config, config);
-    snapshot_payload.provenance.gravity_treepm_decomposition_epoch =
-        gravity_callback.decompositionEpoch();
+    snapshot_payload.provenance = snapshot_provenance;
     report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_callback.runtimeTopology().world_size, gravity_callback.runtimeTopology().world_rank);
     io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
     report.snapshot_roundtrip_executed = true;
     const io::SnapshotReadResult snapshot_read = io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
-    report.snapshot_roundtrip_ok = snapshot_read.state.particles.size() == state.particles.size();
+    const SnapshotRoundtripVerification snapshot_verification = verifySnapshotRoundtrip(
+        snapshot_read,
+        state,
+        config,
+        frozen_config.normalized_text,
+        snapshot_provenance);
+    report.snapshot_roundtrip_ok = snapshot_verification.ok;
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "snapshot.write.complete",
         .severity = report.snapshot_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
@@ -6602,16 +6803,31 @@ bool maybeWriteOutputs(
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = "snapshot output written and verified",
-        .payload = {{"path", report.snapshot_path.string()}},
+        .message = report.snapshot_roundtrip_ok
+            ? "snapshot output written and scientifically verified"
+            : "snapshot output failed scientific roundtrip verification",
+        .payload = {{"path", report.snapshot_path.string()},
+                    {"verification", snapshot_verification.detail}},
     });
+    if (!report.snapshot_roundtrip_ok) {
+      throw std::runtime_error(
+          "snapshot scientific roundtrip verification failed: " +
+          snapshot_verification.detail);
+    }
     output_flushed = true;
   }
 
   if (checkpoint_due) {
+    core::IntegratorState restart_integrator_state = integrator_state;
+    if (restart_resume_dt_time_code > 0.0) {
+      // The completed step may have been shortened to land on an output
+      // event.  Persist the pre-clip proposal as the next-step interval so a
+      // resumed workflow follows the same timeline as an uninterrupted run.
+      restart_integrator_state.dt_time_code = restart_resume_dt_time_code;
+    }
     io::RestartWritePayload restart_payload;
     restart_payload.persistent_state.simulation_state = &state;
-    restart_payload.integrator_state = &integrator_state;
+    restart_payload.integrator_state = &restart_integrator_state;
     restart_payload.scheduler = &scheduler;
     restart_payload.gas_cell_scheduler = &gas_cell_scheduler;
     const io::GravityForceCachePersistentState gravity_force_cache =
@@ -6647,13 +6863,12 @@ bool maybeWriteOutputs(
     restart_payload.output_cadence_state.snapshot_due = false;
     restart_payload.output_cadence_state.checkpoint_due = false;
     restart_payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
-    restart_payload.output_cadence_state.snapshot_interval_steps =
-        static_cast<std::uint64_t>(std::max(config.output.snapshot_interval_steps, 0));
-    if (config.output.snapshot_interval_steps > 0) {
-      const std::uint64_t interval = static_cast<std::uint64_t>(config.output.snapshot_interval_steps);
-      restart_payload.output_cadence_state.next_snapshot_step_index =
-          ((integrator_state.step_index / interval) + 1U) * interval;
-    }
+    restart_payload.output_cadence_state.snapshot_interval_steps = snapshot_interval_steps;
+    restart_payload.output_cadence_state.next_snapshot_step_index = next_snapshot_step_index;
+    restart_payload.output_cadence_state.snapshot_interval_time_code =
+        snapshot_interval_time_code;
+    restart_payload.output_cadence_state.next_snapshot_time_code =
+        next_snapshot_time_code;
     restart_payload.output_cadence_state.snapshot_stem = config.output.output_stem;
     restart_payload.output_cadence_state.restart_stem = config.output.restart_stem;
     restart_payload.stochastic_state = buildStochasticPersistentState(
@@ -6728,6 +6943,10 @@ bool maybeWriteOutputs(
         restart_read.output_cadence_state.write_restarts == restart_payload.output_cadence_state.write_restarts &&
         restart_read.output_cadence_state.next_snapshot_step_index ==
             restart_payload.output_cadence_state.next_snapshot_step_index &&
+        restart_read.output_cadence_state.snapshot_interval_time_code ==
+            restart_payload.output_cadence_state.snapshot_interval_time_code &&
+        restart_read.output_cadence_state.next_snapshot_time_code ==
+            restart_payload.output_cadence_state.next_snapshot_time_code &&
         restart_read.output_cadence_state.snapshot_stem == restart_payload.output_cadence_state.snapshot_stem &&
         restart_read.output_cadence_state.restart_stem == restart_payload.output_cadence_state.restart_stem &&
         stochasticStatesEquivalent(restart_read.stochastic_state, restart_payload.stochastic_state) &&
@@ -6752,6 +6971,8 @@ bool maybeWriteOutputs(
                     {"pm_field_version", std::to_string(integrator_state.pm_sync_state.fieldVersion())},
                     {"pm_long_range_field_valid", integrator_state.pm_long_range_field_valid ? "true" : "false"},
                     {"output_next_snapshot_step_index", std::to_string(restart_payload.output_cadence_state.next_snapshot_step_index)},
+                    {"output_next_snapshot_time_code", formatRuntimeDouble(
+                        restart_payload.output_cadence_state.next_snapshot_time_code)},
                     {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())}},
     });
     profiler.recordEvent(core::RuntimeEvent{
@@ -6808,21 +7029,62 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
 struct PendingOutputBoundary {
   bool snapshot_due = false;
   bool checkpoint_due = false;
+  bool step_event_due = false;
+  bool time_event_due = false;
+  std::uint64_t snapshot_interval_steps = 0;
+  std::uint64_t next_snapshot_step_index = 0;
+  double snapshot_interval_time_code = 0.0;
+  double next_snapshot_time_code = 0.0;
+  double restart_resume_dt_time_code = 0.0;
 };
+
+[[nodiscard]] bool timelineTimesEqual(double lhs, double rhs) {
+  const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+  return std::abs(lhs - rhs) <= 8.0 * std::numeric_limits<double>::epsilon() * scale;
+}
+
+[[nodiscard]] double nextOrderedTimeEvent(
+    double timeline_begin_time_code,
+    double current_time_code,
+    double interval_time_code) {
+  if (!std::isfinite(timeline_begin_time_code) || !std::isfinite(current_time_code) ||
+      !std::isfinite(interval_time_code) || interval_time_code <= 0.0) {
+    throw std::invalid_argument("output code-time cadence requires finite times and a positive interval");
+  }
+  const double completed_intervals = std::max(
+      0.0,
+      std::floor((current_time_code - timeline_begin_time_code) / interval_time_code));
+  double next_time_code =
+      std::fma(completed_intervals + 1.0, interval_time_code, timeline_begin_time_code);
+  if (next_time_code <= current_time_code || timelineTimesEqual(next_time_code, current_time_code)) {
+    next_time_code = std::fma(completed_intervals + 2.0, interval_time_code, timeline_begin_time_code);
+  }
+  if (!std::isfinite(next_time_code) || next_time_code <= current_time_code) {
+    throw std::overflow_error("output code-time cadence could not represent its next ordered event");
+  }
+  return next_time_code;
+}
 
 void latchOutputRequestForCompletedStep(
     const core::SimulationConfig& config,
     const ReferenceWorkflowOptions& options,
     std::uint64_t next_step_index,
+    double next_time_code,
     PendingOutputBoundary& pending) {
-  if (!options.write_outputs || config.output.snapshot_interval_steps <= 0) {
+  if (!options.write_outputs) {
     return;
   }
-  if ((next_step_index % static_cast<std::uint64_t>(config.output.snapshot_interval_steps)) != 0U) {
+  const bool step_event_due = pending.snapshot_interval_steps > 0 &&
+      next_step_index >= pending.next_snapshot_step_index;
+  const bool time_event_due = pending.snapshot_interval_time_code > 0.0 &&
+      timelineTimesEqual(next_time_code, pending.next_snapshot_time_code);
+  if (!step_event_due && !time_event_due) {
     return;
   }
   pending.snapshot_due = true;
   pending.checkpoint_due = pending.checkpoint_due || config.output.write_restarts;
+  pending.step_event_due = pending.step_event_due || step_event_due;
+  pending.time_event_due = pending.time_event_due || time_event_due;
 }
 
 [[nodiscard]] core::StepBoundaryKind requestedBoundaryForPendingOutput(const PendingOutputBoundary& pending) {
@@ -6872,10 +7134,32 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
       return;
     }
     if (!context.boundary.output_safe || !context.boundary.restart_safe) {
+      if (m_pending_output.time_event_due) {
+        throw std::runtime_error(
+            "required code-time output event reached a boundary that is not output/restart safe");
+      }
       if (m_pending_output.checkpoint_due) {
         core::assertCanWriteCheckpointAtBoundary(context.integrator_state, m_scheduler.currentTick());
       }
       return;
+    }
+    const double persisted_next_snapshot_time_code = m_pending_output.time_event_due
+        ? nextOrderedTimeEvent(
+              m_config.numerics.t_code_begin,
+              context.integrator_state.current_time_code,
+              m_pending_output.snapshot_interval_time_code)
+        : m_pending_output.next_snapshot_time_code;
+    std::uint64_t persisted_next_snapshot_step_index =
+        m_pending_output.next_snapshot_step_index;
+    if (m_pending_output.step_event_due) {
+      do {
+        if (persisted_next_snapshot_step_index >
+            std::numeric_limits<std::uint64_t>::max() -
+                m_pending_output.snapshot_interval_steps) {
+          throw std::overflow_error("output step cadence overflowed its ordered timeline");
+        }
+        persisted_next_snapshot_step_index += m_pending_output.snapshot_interval_steps;
+      } while (persisted_next_snapshot_step_index <= context.integrator_state.step_index);
     }
     const bool output_flushed = maybeWriteOutputs(
         m_frozen_config,
@@ -6889,9 +7173,20 @@ class OutputBoundaryCallback final : public core::IntegrationCallback {
         m_profiler,
         m_write_outputs_enabled,
         m_pending_output.snapshot_due,
-        m_pending_output.checkpoint_due);
+        m_pending_output.checkpoint_due,
+        m_pending_output.snapshot_interval_steps,
+        persisted_next_snapshot_step_index,
+        m_pending_output.snapshot_interval_time_code,
+        persisted_next_snapshot_time_code,
+        m_pending_output.restart_resume_dt_time_code);
     if (output_flushed) {
-      m_pending_output = {};
+      m_pending_output.snapshot_due = false;
+      m_pending_output.checkpoint_due = false;
+      m_pending_output.step_event_due = false;
+      m_pending_output.time_event_due = false;
+      m_pending_output.next_snapshot_step_index = persisted_next_snapshot_step_index;
+      m_pending_output.next_snapshot_time_code = persisted_next_snapshot_time_code;
+      m_pending_output.restart_resume_dt_time_code = 0.0;
     }
   }
 
@@ -6940,6 +7235,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
   core::ProfilerSession profiler(true);
+  const RuntimeServices runtime_services{
+      .mpi_context = mpi_context,
+      .profiler = profiler,
+      .deterministic_execution = true};
+  const FailureCoordinator failure_coordinator(runtime_services);
   profiler.recordEvent(core::RuntimeEvent{
       .event_kind = "config.freeze",
       .severity = core::RuntimeEventSeverity::kInfo,
@@ -6955,6 +7255,13 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
   try {
     ensureRunDirectory(report.run_directory);
+    const RuntimeCapabilityReport runtime_capabilities =
+        buildRuntimeCapabilityReport(config);
+    validateRequestedRuntimeCapabilities(config, runtime_capabilities);
+    report.runtime_capability_report_path =
+        report.run_directory / "runtime_capabilities.json";
+    writeRuntimeCapabilityReportJson(
+        runtime_capabilities, report.runtime_capability_report_path);
     core::writeNormalizedConfigSnapshot(m_frozen_config, report.run_directory);
     report.normalized_config_snapshot_path = report.run_directory / "normalized_config.param.txt";
     report.normalized_config_snapshot_written = true;
@@ -6999,6 +7306,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     } else {
       ic_result = loadInitialConditions(m_frozen_config);
     }
+    if (ic_result.report.manifest.has_value()) {
+      report.ic_manifest_path = report.run_directory / "ic_manifest.json";
+      io::writeIcManifestJson(
+          *ic_result.report.manifest, report.ic_manifest_path);
+    }
     core::SimulationState state = std::move(ic_result.state);
     profiler.setMemoryReport(core::collectSimulationMemoryReport(state));
     const core::MemoryReport* startup_memory_report = profiler.memoryReport();
@@ -7028,16 +7340,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       } catch (...) {
         local_restart_validation_failure = std::current_exception();
       }
-      const std::uint64_t restart_validation_failure_ranks =
-          mpi_context.allreduceSumUint64(
-              local_restart_validation_failure != nullptr ? 1ULL : 0ULL);
-      if (restart_validation_failure_ranks != 0U) {
-        if (local_restart_validation_failure != nullptr) {
-          std::rethrow_exception(local_restart_validation_failure);
-        }
-        throw std::runtime_error(
-            "ReferenceWorkflow peer rank rejected restart topology validation before resume");
-      }
+      failure_coordinator.rethrowCollectiveFailure(
+          local_restart_validation_failure, "restart topology validation");
     } else {
       seedParticleOwnershipFromPmSlabs(
           state,
@@ -7187,15 +7491,81 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
     syncTimeBinsFromSchedulers(scheduler, gas_cell_scheduler, state);
     PendingOutputBoundary pending_output;
+    if (options.write_outputs && config.output.snapshot_interval_steps > 0) {
+      pending_output.snapshot_interval_steps =
+          static_cast<std::uint64_t>(config.output.snapshot_interval_steps);
+      if (restoring_from_restart &&
+          options.restart_state_override->output_cadence_state.output_enabled) {
+        const io::OutputCadencePersistentState& restored_output =
+            options.restart_state_override->output_cadence_state;
+        if (restored_output.snapshot_interval_steps !=
+            pending_output.snapshot_interval_steps) {
+          throw std::runtime_error(
+              "restart output step interval does not match the active normalized configuration");
+        }
+        pending_output.next_snapshot_step_index =
+            restored_output.next_snapshot_step_index;
+      } else {
+        const std::uint64_t completed_intervals =
+            integrator_state.step_index / pending_output.snapshot_interval_steps;
+        if (completed_intervals == std::numeric_limits<std::uint64_t>::max() ||
+            completed_intervals + 1U >
+                std::numeric_limits<std::uint64_t>::max() /
+                    pending_output.snapshot_interval_steps) {
+          throw std::overflow_error("output step cadence could not represent its next event");
+        }
+        pending_output.next_snapshot_step_index =
+            (completed_intervals + 1U) * pending_output.snapshot_interval_steps;
+      }
+      if (pending_output.next_snapshot_step_index <= integrator_state.step_index) {
+        throw std::runtime_error(
+            "restart output step cadence does not provide a future ordered event");
+      }
+    } else if (restoring_from_restart && options.write_outputs &&
+               options.restart_state_override->output_cadence_state.output_enabled &&
+               options.restart_state_override->output_cadence_state.snapshot_interval_steps > 0U) {
+      throw std::runtime_error(
+          "restart contains an active step output cadence that the current configuration disables");
+    }
+    if (options.write_outputs && config.output.snapshot_interval_time_code > 0.0) {
+      pending_output.snapshot_interval_time_code = config.output.snapshot_interval_time_code;
+      if (restoring_from_restart &&
+          options.restart_state_override->output_cadence_state.snapshot_interval_time_code > 0.0) {
+        const io::OutputCadencePersistentState& restored_output =
+            options.restart_state_override->output_cadence_state;
+        if (!timelineTimesEqual(
+                restored_output.snapshot_interval_time_code,
+                config.output.snapshot_interval_time_code)) {
+          throw std::runtime_error(
+              "restart output code-time interval does not match the active normalized configuration");
+        }
+        pending_output.next_snapshot_time_code = restored_output.next_snapshot_time_code;
+      } else {
+        pending_output.next_snapshot_time_code = nextOrderedTimeEvent(
+            config.numerics.t_code_begin,
+            integrator_state.current_time_code,
+            config.output.snapshot_interval_time_code);
+      }
+      if (!std::isfinite(pending_output.next_snapshot_time_code) ||
+          pending_output.next_snapshot_time_code <= integrator_state.current_time_code) {
+        throw std::runtime_error(
+            "restart output code-time cadence does not provide a future ordered event");
+      }
+    } else if (restoring_from_restart && options.write_outputs &&
+               options.restart_state_override->output_cadence_state.snapshot_interval_time_code > 0.0) {
+      throw std::runtime_error(
+          "restart contains an active code-time output cadence that the current configuration disables");
+    }
 
     core::StepOrchestrator orchestrator;
     StageAuditCallback stage_audit(&report.stage_sequence);
-    DriftCallback drift_callback;
+    DriftCallback drift_callback(runtime_services);
     const std::filesystem::path zoom_region_path =
         config.mode.zoom_region_file.empty()
         ? std::filesystem::path{}
         : resolveConfigRelativePath(m_frozen_config, std::filesystem::path(config.mode.zoom_region_file));
-    GravityStageCallback gravity_callback(config, mode_policy, zoom_region_path);
+    GravityStageCallback gravity_callback(
+        config, mode_policy, runtime_services, zoom_region_path);
     if (restoring_from_restart) {
       const io::RestartReadResult& restart = *options.restart_state_override;
       gravity_callback.restoreDecompositionEpoch(
@@ -7284,7 +7654,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       });
     }
   }
-    HydroStageCallback hydro_callback(config, mode_policy, gravity_callback, mpi_context);
+    HydroStageCallback hydro_callback(
+        config, mode_policy, gravity_callback, runtime_services);
     analysis::DiagnosticsCallback diagnostics_callback(config);
     physics::StarFormationCallback star_formation_callback(
         physics::StarFormationModel(makeRuntimeStarFormationConfig(config.physics, runtime_units)),
@@ -7312,19 +7683,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     orchestrator.registerCallback(output_boundary_callback);
 
     if (!restoring_from_restart) {
-      updateAdaptiveTimeBins(
+      updateAdaptiveTimeBinFamilies(
           state,
           scheduler,
-          integrator_state,
-          config,
-          {},
-          {},
-          {},
-          {},
-          {},
-          {});
-      updateGasCellAdaptiveTimeBins(
-          state,
           gas_cell_scheduler,
           integrator_state,
           config,
@@ -7333,7 +7694,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           {},
           {},
           {},
-          {});
+          {},
+          {},
+          {},
+          true);
     }
     ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
 
@@ -7342,17 +7706,62 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         ? options.max_steps_override
         : static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
     const std::uint64_t target_step_index = integrator_state.step_index + configured_segment_steps;
+    // Retain hot scratch capacity across substeps. Scheduler active lists are
+    // already compact and remain valid through endSubstep(), so consumers use
+    // read-only spans instead of reconstructing duplicate index vectors.
+    core::TransientStepWorkspace workspace;
     while (integrator_state.step_index < target_step_index &&
            integrator_state.current_time_code < config.numerics.t_code_end) {
+      const double remaining_time_code =
+          config.numerics.t_code_end - integrator_state.current_time_code;
+      if (!std::isfinite(remaining_time_code) || remaining_time_code <= 0.0) {
+        throw std::runtime_error(
+            "ReferenceWorkflow computed an invalid remaining endpoint interval");
+      }
+      double ordered_step_limit_time_code = config.numerics.t_code_end;
+      bool limited_by_output_event = false;
+      if (pending_output.snapshot_interval_time_code > 0.0 &&
+          pending_output.next_snapshot_time_code < ordered_step_limit_time_code &&
+          pending_output.next_snapshot_time_code > integrator_state.current_time_code) {
+        ordered_step_limit_time_code = pending_output.next_snapshot_time_code;
+        limited_by_output_event = true;
+      }
+      const double ordered_remaining_time_code =
+          ordered_step_limit_time_code - integrator_state.current_time_code;
+      if (!std::isfinite(ordered_remaining_time_code) || ordered_remaining_time_code <= 0.0) {
+        throw std::runtime_error("ReferenceWorkflow computed an invalid ordered timeline interval");
+      }
+      if (integrator_state.dt_time_code > ordered_remaining_time_code) {
+        const double unclipped_dt_time_code = integrator_state.dt_time_code;
+        integrator_state.dt_time_code = ordered_remaining_time_code;
+        if (limited_by_output_event) {
+          pending_output.restart_resume_dt_time_code = unclipped_dt_time_code;
+        }
+        profiler.recordEvent(core::RuntimeEvent{
+            .event_kind = limited_by_output_event ? "time.output_event_clip" : "time.endpoint_clip",
+            .severity = core::RuntimeEventSeverity::kInfo,
+            .subsystem = "core.time",
+            .step_index = integrator_state.step_index,
+            .simulation_time_code = integrator_state.current_time_code,
+            .scale_factor = integrator_state.current_scale_factor,
+            .message = limited_by_output_event
+                ? "integration interval clipped to an ordered output event"
+                : "integration interval clipped to the configured endpoint",
+            .payload = {{"unclipped_dt_time_code", formatRuntimeDouble(unclipped_dt_time_code)},
+                        {"clipped_dt_time_code", formatRuntimeDouble(integrator_state.dt_time_code)},
+                        {limited_by_output_event ? "output_event_time_code" : "endpoint_time_code",
+                         formatRuntimeDouble(ordered_step_limit_time_code)}},
+        });
+      }
       const std::span<const std::uint32_t> active_particle_scheduler_elements = scheduler.beginSubstep();
       const std::span<const std::uint32_t> active_gas_cell_scheduler_elements = gas_cell_scheduler.beginSubstep();
       if (scheduler.currentTick() != gas_cell_scheduler.currentTick()) {
         throw std::runtime_error("particle and gas-cell schedulers lost their shared integer timeline");
       }
-      std::vector<std::uint32_t> active_particles(
-          active_particle_scheduler_elements.begin(), active_particle_scheduler_elements.end());
-      std::vector<std::uint32_t> active_cells(
-          active_gas_cell_scheduler_elements.begin(), active_gas_cell_scheduler_elements.end());
+      const std::span<const std::uint32_t> active_particles =
+          active_particle_scheduler_elements;
+      const std::span<const std::uint32_t> active_cells =
+          active_gas_cell_scheduler_elements;
       const bool local_has_active_work = !active_particles.empty() || !active_cells.empty();
       const std::uint64_t active_work_rank_count = mpi_context.allreduceSumUint64(local_has_active_work ? 1ULL : 0ULL);
       if (active_work_rank_count == 0ULL) {
@@ -7378,12 +7787,16 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         continue;
       }
 
-      core::TransientStepWorkspace workspace;
+      workspace.clear();
+      profiler.counters().addCount("workflow_workspace_reuses", 1U);
+      profiler.counters().setCount("scheduler_active_index_copy_bytes", 0U);
       latchOutputRequestForCompletedStep(
           config,
           options,
           integrator_state.step_index + 1U,
+          integrator_state.current_time_code + integrator_state.dt_time_code,
           pending_output);
+      const double resume_dt_after_step = pending_output.restart_resume_dt_time_code;
       const core::StepBoundaryKind requested_boundary = requestedBoundaryForPendingOutput(pending_output);
       const std::uint64_t global_active_particle_count =
           mpi_context.allreduceSumUint64(static_cast<std::uint64_t>(active_particles.size()));
@@ -7409,6 +7822,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           &profiler,
           scheduler.currentTick(),
           requested_boundary);
+      if (resume_dt_after_step > 0.0) {
+        integrator_state.dt_time_code = resume_dt_after_step;
+      }
 
       {
         const std::array runtime_reports{
@@ -7421,19 +7837,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       // Source/AMR stages may append authoritative rows during the step.  The
       // scheduler must cover those rows before timestep criteria index it.
       ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
-      updateAdaptiveTimeBins(
+      updateAdaptiveTimeBinFamilies(
           state,
           scheduler,
-          integrator_state,
-          config,
-          gravity_callback.particleAccelX(),
-          gravity_callback.particleAccelY(),
-          gravity_callback.particleAccelZ(),
-          gravity_callback.cellAccelX(),
-          gravity_callback.cellAccelY(),
-          gravity_callback.cellAccelZ());
-      updateGasCellAdaptiveTimeBins(
-          state,
           gas_cell_scheduler,
           integrator_state,
           config,
@@ -7442,7 +7848,16 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           gravity_callback.particleAccelZ(),
           gravity_callback.cellAccelX(),
           gravity_callback.cellAccelY(),
-          gravity_callback.cellAccelZ());
+          gravity_callback.cellAccelZ(),
+          active_particles,
+          active_cells,
+          false);
+      profiler.counters().addCount(
+          "timestep_particle_criteria_evaluations",
+          static_cast<std::uint64_t>(active_particles.size()));
+      profiler.counters().addCount(
+          "timestep_gas_cell_criteria_evaluations",
+          static_cast<std::uint64_t>(active_cells.size()));
       ensureSchedulersCoverState(state, scheduler, gas_cell_scheduler);
       scheduler.endSubstep();
       gas_cell_scheduler.endSubstep();
@@ -7486,6 +7901,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
 
     report.completed_steps = integrator_state.step_index - run_start_step_index;
+    report.final_time_code = integrator_state.current_time_code;
+    report.final_scale_factor = integrator_state.current_scale_factor;
     report.final_hydro_cfl_diagnostics = hydro_callback.lastHydroCflDiagnostics();
     report.final_hydro_imported_mpi_ghosts =
         static_cast<std::uint64_t>(hydro_callback.lastRemoteGhostBoundaryReport().imported_ghosts);
@@ -7550,6 +7967,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .scale_factor = integrator_state.current_scale_factor,
         .message = "runtime workflow completed",
         .payload = {{"completed_steps", std::to_string(report.completed_steps)},
+                    {"final_time_code", formatRuntimeDouble(report.final_time_code)},
+                    {"final_scale_factor", formatRuntimeDouble(report.final_scale_factor)},
                     {"run_directory", report.run_directory.string()},
                     {"treepm_update_cadence_steps", std::to_string(report.treepm_update_cadence_steps)},
                     {"treepm_long_range_refresh_count", std::to_string(report.treepm_long_range_refresh_count)},

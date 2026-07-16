@@ -243,6 +243,14 @@ int main() {
       std::string::npos);
   assert(op_text.find("\"event_kind\": \"gravity.health_summary\"") != std::string::npos);
   assert(op_text.find("\"heavy_reference_checks_opt_in\": \"false\"") != std::string::npos);
+  const std::string profile_text = readFile(report.profiler_json_path);
+  assert(profile_text.find("\"workflow_workspace_reuses\": 2") != std::string::npos);
+  assert(profile_text.find("\"scheduler_active_index_copy_bytes\": 0") !=
+         std::string::npos);
+  assert(profile_text.find("\"timestep_particle_criteria_evaluations\": 84") !=
+         std::string::npos);
+  assert(profile_text.find("\"timestep_gas_cell_criteria_evaluations\": 12") !=
+         std::string::npos);
 
   std::stringstream tsc_stream;
   tsc_stream << buildConfigText(1, "reference_integration_test_tsc", "tsc");
@@ -257,6 +265,31 @@ int main() {
   assert(tsc_report.treepm_pm_grid_shape == "9x9x9");
   assert(tsc_report.treepm_long_range_refresh_count == 3);
   assert(tsc_report.treepm_long_range_reuse_count == 0);
+
+  std::string endpoint_config =
+      buildConfigText(1, "reference_integration_endpoint_clip", "cic");
+  const std::string original_endpoint = "time_end_code = 0.0102";
+  const std::size_t endpoint_pos = endpoint_config.find(original_endpoint);
+  assert(endpoint_pos != std::string::npos);
+  endpoint_config.replace(
+      endpoint_pos, original_endpoint.size(), "time_end_code = 0.01025");
+  const cosmosim::core::FrozenConfig endpoint_frozen =
+      cosmosim::core::loadFrozenConfigFromString(
+          endpoint_config, "test_reference_workflow_endpoint_clip");
+  cosmosim::workflows::ReferenceWorkflowRunner endpoint_runner(endpoint_frozen);
+  const cosmosim::workflows::ReferenceWorkflowReport endpoint_report =
+      endpoint_runner.run(
+          output_dir,
+          cosmosim::workflows::ReferenceWorkflowOptions{
+              .dt_time_code = 0.0002,
+              .write_outputs = false});
+  assert(endpoint_report.completed_steps == 2U);
+  assert(std::abs(endpoint_report.final_time_code - 0.01025) < 1.0e-15);
+  assert(endpoint_report.final_time_code <= 0.01025);
+  const std::string endpoint_events_text =
+      readFile(endpoint_report.operational_report_json_path);
+  assert(endpoint_events_text.find("\"event_kind\": \"time.endpoint_clip\"") !=
+         std::string::npos);
 
   const std::string cadence_two_config =
       buildConfigText(2, "reference_integration_test_cadence_two", "cic");
@@ -289,6 +322,52 @@ int main() {
   assert(restart_diag_events_text.find("\"event_kind\": \"restart.read.complete\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"payload_hash_hex\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"scheduler_pending_transition_count\"") != std::string::npos);
+
+  std::string time_cadence_config =
+      buildConfigText(1, "reference_integration_time_cadence", "cic") +
+      "snapshot_interval_steps = 0\n"
+      "snapshot_interval_time_code = 0.00015\n"
+      "write_restarts = true\n";
+  const std::size_t time_cadence_end = time_cadence_config.find("time_end_code = 0.0102");
+  assert(time_cadence_end != std::string::npos);
+  time_cadence_config.replace(
+      time_cadence_end,
+      std::string("time_end_code = 0.0102").size(),
+      "time_end_code = 0.0104");
+  const std::size_t time_cadence_steps = time_cadence_config.find("max_global_steps = 2");
+  assert(time_cadence_steps != std::string::npos);
+  time_cadence_config.replace(
+      time_cadence_steps,
+      std::string("max_global_steps = 2").size(),
+      "max_global_steps = 4");
+  const auto time_cadence_frozen = cosmosim::core::loadFrozenConfigFromString(
+      time_cadence_config, "test_reference_workflow_time_cadence");
+  cosmosim::workflows::ReferenceWorkflowRunner time_cadence_runner(time_cadence_frozen);
+  const auto time_cadence_report = time_cadence_runner.run(
+      output_dir,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .dt_time_code = 0.0002,
+          .write_outputs = true});
+  assert(std::abs(time_cadence_report.final_time_code - 0.0104) < 1.0e-15);
+  assert(time_cadence_report.restart_roundtrip_executed);
+  assert(time_cadence_report.restart_roundtrip_ok);
+  const auto time_event_restart =
+      cosmosim::io::readRestartCheckpointHdf5(time_cadence_report.restart_path);
+  assert(std::abs(time_event_restart.integrator_state.current_time_code - 0.0103) < 1.0e-15);
+  assert(std::abs(time_event_restart.integrator_state.dt_time_code - 0.0002) < 1.0e-15);
+  assert(std::abs(
+      time_event_restart.output_cadence_state.snapshot_interval_time_code - 0.00015) < 1.0e-15);
+  assert(std::abs(
+      time_event_restart.output_cadence_state.next_snapshot_time_code - 0.01045) < 1.0e-15);
+  const std::string time_cadence_events = readFile(time_cadence_report.operational_report_json_path);
+  assert(time_cadence_events.find("\"event_kind\": \"time.output_event_clip\"") !=
+         std::string::npos);
+  const auto time_cadence_resume_report = time_cadence_runner.run(
+      output_dir,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .write_outputs = false,
+          .restart_state_override = &time_event_restart});
+  assert(std::abs(time_cadence_resume_report.final_time_code - 0.0104) < 1.0e-15);
 #else
   bool trapped_hdf5_disabled = false;
   try {

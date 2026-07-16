@@ -31,8 +31,9 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v20");
-  assert(schema.version == 20);
+  assert(schema.name == "cosmosim_restart_v21");
+  assert(schema.version == 21);
+  assert(cosmosim::io::isRestartSchemaCompatible(20));
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
   assert(!cosmosim::io::isRestartSchemaCompatible(11));
@@ -125,6 +126,8 @@ int main() {
   payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
   payload.output_cadence_state.snapshot_interval_steps = 4;
   payload.output_cadence_state.next_snapshot_step_index = 4;
+  payload.output_cadence_state.snapshot_interval_time_code = 0.25;
+  payload.output_cadence_state.next_snapshot_time_code = 0.25;
   payload.output_cadence_state.snapshot_stem = "snapshot";
   payload.output_cadence_state.restart_stem = "restart";
   assert(cosmosim::io::restartPayloadIntegrityHash(payload) != hash_restored);

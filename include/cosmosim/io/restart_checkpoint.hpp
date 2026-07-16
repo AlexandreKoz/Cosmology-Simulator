@@ -15,10 +15,10 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  // v20 adds restart-authoritative gravity force caches so a resumed KDK
-  // workflow can apply the same pre-kick force state before its next refresh.
-  std::string name = "cosmosim_restart_v20";
-  std::uint32_t version = 20;
+  // v21 adds restart-authoritative code-time output cadence.  v20 gravity
+  // force caches and all older documented compatibility paths are retained.
+  std::string name = "cosmosim_restart_v21";
+  std::uint32_t version = 21;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -45,6 +45,8 @@ struct OutputCadencePersistentState {
   std::uint64_t last_completed_step_index = 0;
   std::uint64_t snapshot_interval_steps = 0;
   std::uint64_t next_snapshot_step_index = 0;
+  double snapshot_interval_time_code = 0.0;
+  double next_snapshot_time_code = 0.0;
   std::string snapshot_stem;
   std::string restart_stem;
 };
@@ -128,6 +130,7 @@ struct RestartDiagnosticsSummary {
   bool output_checkpoint_due = false;
   std::uint64_t output_last_completed_step_index = 0;
   std::uint64_t output_next_snapshot_step_index = 0;
+  double output_next_snapshot_time_code = 0.0;
   std::uint64_t stochastic_module_count = 0;
 };
 

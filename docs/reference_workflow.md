@@ -31,6 +31,7 @@ The runner honors these config fields directly:
 - `output.output_stem`
 - `output.restart_stem`
 - `output.snapshot_interval_steps`
+- `output.snapshot_interval_time_code`
 - `output.write_restarts`
 - `numerics.treepm_pm_grid_nx`
 - `numerics.treepm_pm_grid_ny`
@@ -44,6 +45,14 @@ The runner honors these config fields directly:
 - `numerics.hierarchical_max_rung` (production value is exactly `0`)
 
 TreePM runtime mapping is explicit and auditable:
+
+Output dispatch supports both step-modulo cadence and code-time cadence. A positive
+`snapshot_interval_time_code` creates ordered events anchored at
+`numerics.time_begin_code`; a larger proposed KDK interval is clipped at the event,
+and the next event plus the pre-clip next-step proposal are persisted in a v21
+checkpoint. Restart restores that authority instead of recomputing cadence from the
+resumed step number. Schema v20 reads explicitly materialize the time-event lane as
+disabled.
 
 - `PmGridShape{Nx,Ny,Nz}` uses `numerics.treepm_pm_grid_nx/ny/nz`
 - `Δx = box_size_x / Nx`, `Δy = box_size_y / Ny`, `Δz = box_size_z / Nz`
@@ -138,6 +147,10 @@ When output cadence conditions are met and HDF5 is enabled, the runtime also wri
 - `<output.output_stem>_NNN.hdf5`
 - `<output.restart_stem>_NNN.hdf5` when `output.write_restarts=true`
 
+External-IC runs additionally write `ic_manifest.json`, the exact validated
+unit/frame/species/header contract used by ingestion. Generated-IC runs omit
+this external-import artifact.
+
 ## Failure transparency
 
 The runner flushes the normalized config snapshot as soon as config loading succeeds. A top-level runtime wrapper then attempts to flush `operational_events.json` and profiler reports on both successful completion and runtime failure, so early first-run failures still leave a diagnostic trail whenever the filesystem remains writable.
@@ -165,3 +178,19 @@ The runner flushes the normalized config snapshot as soon as config loading succ
   - cheap checks are always-on (PM/force finiteness, sync-state invariants, decomposition/zoom sanity),
   - heavy reference checks are opt-in only when `analysis.diagnostics_execution_policy = all_including_provisional`.
   - fatal gravity-state failures are escalated as runtime errors and are never demoted to warnings.
+
+The additive `final_time_code` and `final_scale_factor` report fields expose
+the committed integration endpoint without changing restart or snapshot
+schemas. Before KDK preparation, the workflow clips an interval that would
+cross `numerics.time_end_code`; the run therefore commits the configured final
+time exactly and records a `time.endpoint_clip` operational event containing
+the original and accepted intervals. Existing callers that do not read these
+new fields require no migration.
+
+The production substep loop consumes scheduler-owned compact active arrays as
+read-only spans. It does not build duplicate particle/cell index vectors. One
+`TransientStepWorkspace` is owned for the run segment and cleared between
+executed KDK steps; clearing resets sizes and the monotonic scratch offset while
+preserving vector and arena capacity. Profiling exposes
+`workflow_workspace_reuses` and `scheduler_active_index_copy_bytes` (zero on
+this path) so allocation/copy regressions remain visible.

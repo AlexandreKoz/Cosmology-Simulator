@@ -214,6 +214,9 @@ struct OutputConfig {
   std::string output_stem = "snapshot";
   std::string restart_stem = "restart";
   int snapshot_interval_steps = 64;
+  // Zero disables code-time cadence.  When positive, the workflow clips a
+  // step at each ordered event and persists the next event in restart state.
+  double snapshot_interval_time_code = 0.0;
   bool write_restarts = true;
 };
 

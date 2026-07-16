@@ -76,6 +76,10 @@ struct ReferenceWorkflowReport {
   bool restart_roundtrip_ok = false;
   bool snapshot_roundtrip_ok = false;
   std::uint64_t completed_steps = 0;
+  // Committed endpoint observability. These are additive report fields; they
+  // do not change snapshot/restart schemas or integration-state ownership.
+  double final_time_code = 0.0;
+  double final_scale_factor = 1.0;
   std::uint64_t final_state_digest = 0;
   std::uint64_t local_particle_count = 0;
   std::uint64_t global_particle_count = 0;
@@ -111,6 +115,8 @@ struct ReferenceWorkflowReport {
   std::filesystem::path profiler_json_path;
   std::filesystem::path profiler_csv_path;
   std::filesystem::path operational_report_json_path;
+  std::filesystem::path runtime_capability_report_path;
+  std::filesystem::path ic_manifest_path;
   std::filesystem::path restart_path;
   std::filesystem::path snapshot_path;
 };

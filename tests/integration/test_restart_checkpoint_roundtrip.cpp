@@ -392,6 +392,9 @@ void testRestartRoundtrip() {
   payload.output_cadence_state.last_completed_step_index = integrator_state.step_index;
   payload.output_cadence_state.snapshot_interval_steps = 5;
   payload.output_cadence_state.next_snapshot_step_index = 80;
+  payload.output_cadence_state.snapshot_interval_time_code = 0.125;
+  payload.output_cadence_state.next_snapshot_time_code =
+      integrator_state.current_time_code + 0.125;
   payload.output_cadence_state.snapshot_stem = "snapshot";
   payload.output_cadence_state.restart_stem = "restart";
   payload.stochastic_state.modules.push_back(cosmosim::io::StochasticModulePersistentState{
@@ -614,6 +617,10 @@ void testRestartRoundtrip() {
   assert(restored.output_cadence_state.last_completed_step_index == payload.output_cadence_state.last_completed_step_index);
   assert(restored.output_cadence_state.snapshot_interval_steps == payload.output_cadence_state.snapshot_interval_steps);
   assert(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
+  assert(restored.output_cadence_state.snapshot_interval_time_code ==
+      payload.output_cadence_state.snapshot_interval_time_code);
+  assert(restored.output_cadence_state.next_snapshot_time_code ==
+      payload.output_cadence_state.next_snapshot_time_code);
   assert(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
   assert(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
   assert(restored.diagnostics.restart_schema_name == cosmosim::io::restartSchema().name);

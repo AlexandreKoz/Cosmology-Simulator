@@ -70,6 +70,15 @@ struct SnapshotIoReport {
   std::vector<std::string> defaulted_fields;
   std::string file_kind = "unknown";
   bool restart_compatible = false;
+  double header_time = 1.0;
+  double header_redshift = 0.0;
+  double header_box_size_x = 0.0;
+  double header_box_size_y = 0.0;
+  double header_box_size_z = 0.0;
+  double header_omega_matter = 0.0;
+  double header_omega_lambda = 0.0;
+  double header_omega_baryon = 0.0;
+  double header_hubble_param = 0.0;
 };
 
 struct SnapshotReadResult {

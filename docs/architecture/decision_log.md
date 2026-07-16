@@ -888,3 +888,41 @@ Stage 2 timestep repair has multiple existing timestep-related lanes: the hierar
 - `src/workflows/reference_workflow.cpp`
 - `src/io/restart_checkpoint.cpp`
 - `include/cosmosim/parallel/distributed_memory.hpp`
+
+## 2026-07-16 — ADR-RUNTIME-OUTPUT-TIMELINE-016: Persist ordered code-time output events
+
+### Status
+Accepted
+
+### Context
+The production workflow could schedule snapshots only by step modulo. It could
+cross a requested physical/code-time event with a larger KDK interval, and its
+checkpoint cadence payload was not consumed when resuming the workflow.
+
+### Decision
+- Keep step-modulo cadence and add optional `output.snapshot_interval_time_code`,
+  anchored at `numerics.time_begin_code`.
+- Clip the proposed KDK interval at the earliest configured endpoint or output
+  event; never dispatch the event from an unsafe boundary.
+- Make the next code-time event restart-authoritative in
+  `cosmosim_restart_v21`, together with the interval and payload integrity hash.
+- Persist the pre-clip interval as the next-step proposal so restart and direct
+  continuation use the same post-event timestep.
+- Read v20 with the new cadence lanes explicitly disabled; do not synthesize
+  event authority absent from the old payload.
+
+### Consequences
+- Positive: required code-time snapshots/checkpoints are reached without
+  overshoot and cadence survives restart.
+- Positive: normalized config, restart payload, diagnostics, tests, and user
+  documentation describe the same authority.
+- Tradeoff: arbitrary explicit redshift/scale-factor event lists remain outside
+  this narrow schema; the supported beyond-modulo event is periodic code time.
+
+### Evidence references
+- `include/cosmosim/core/config.hpp`
+- `include/cosmosim/io/restart_checkpoint.hpp`
+- `src/core/config.cpp`
+- `src/io/restart_checkpoint.cpp`
+- `src/workflows/reference_workflow.cpp`
+- `tests/integration/test_reference_workflow_end_to_end.cpp`
