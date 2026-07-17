@@ -233,6 +233,22 @@ The following patterns are explicitly forbidden:
 9. Assuming gas-cell identity is `cell_index` alone across reorder/resize/migration/restart boundaries.
 10. Using naked `gas particle count == cell count` checks in workflow or solver code instead of `requireParticleBoundGasCellContract(...)` with a caller-specific error prefix.
 
+### Campaign A workflow owner clarification (2026-07-16)
+
+- `workflows::RungZeroTimeState` is the live owner of both scheduler objects,
+  `IntegratorState`, and pending output cadence. `ReferenceWorkflowRunner`
+  constructs this owner but does not mutate its scheduler internals.
+- `workflows::RuntimeModuleRegistry` is the live composition authority for
+  production stage tasks. The frozen `RuntimeExecutionPlan`, not a callback
+  list or the core layer catalog, determines which typed tasks execute.
+- `RuntimeResourceLease` is transient validation metadata. Its captured
+  generations/tick/step are never restart truth and must be rebuilt after
+  migration, compaction, scheduler advance, or step commit.
+- `GravityRuntime`, `HydroAmrRuntime`, `SourceRuntime`, `AnalysisRuntime`, and
+  `OutputRestartRuntime` are stage owners reached only through their typed view
+  tasks. The numerical modules remain dependency-downstream of their owners
+  and do not include workflow composition.
+
 ## Test obligations for follow-up prompts
 
 Future repair prompts that touch these domains must include targeted tests (or cite exact existing coverage) for:

@@ -18,19 +18,38 @@ This file is the architecture index for contributors.
 
 The workflow composition root creates one `workflows::RuntimeServices` bundle
 per process. It borrows the process MPI context and profiler and carries the
-deterministic-execution policy. Drift, gravity, and hydro runtime callbacks
-receive this bundle (or an explicit borrowed dependency from it); they do not
-construct replacement MPI contexts. `workflows::FailureCoordinator` provides
+deterministic-execution policy. `workflows::GravityRuntime` owns TreePM/PM
+cadence, force-cache lifecycle, and gravity stage contribution behind narrow
+acceleration and restart-state provider interfaces. Drift and the remaining
+runtime tasks receive the shared bundle (or an explicit borrowed dependency
+from it); they do not construct replacement MPI contexts.
+`workflows::FailureCoordinator` provides
 the phase gate used to reduce rank-local failures before any rank enters the
 following collective phase. The first integrated gate covers restart-topology
 validation; additional collective protocols should use the same authority.
 
-`core::moduleDescriptors()` is the compile-time composition catalog. Each
-descriptor names its typed config fragment, state/sidecar requirements,
-stage/task and timestep contributions, restart and migration participation,
-diagnostics, capability prerequisites, and explicit incompatibilities. The
-legacy `moduleNames()` surface remains a compatibility view over the same
-ordered catalog; new composition checks should consume descriptors.
+`workflows::HydroAmrRuntime` owns the supported rung-zero hydro/AMR stage,
+conserved-state and geometry workspaces, ghost/patch exchange validation,
+reflux handoff, and CFL diagnostics. Its public surface exposes only aggregate
+diagnostics and depends on gravity through `GravityAccelerationProvider`.
+`workflows::SourceRuntime` and `workflows::AnalysisRuntime` own construction and
+deterministic ordering of the existing source and diagnostic contributions.
+
+`workflows::RungZeroTimeState` owns the particle and gas-cell schedulers,
+integrator truth, and ordered output cadence. `workflows::TimeCoordinator`
+owns the bounded rung-zero segment lifecycle: active-set creation, endpoint and
+output-event clipping, adaptive criteria, migration/rebalance handoff, and
+legal output boundaries. The core orchestrator remains dependency-safe and
+accepts the workflow's typed dispatcher; it does not depend upward on workflow
+owners.
+
+`workflows::RuntimeModuleRegistry` is the authoritative production stage
+composition. Its typed descriptors declare prerequisites, task stages,
+resource access, view kinds, and factories. Freezing the registry constructs
+the real gravity, hydro/AMR, source, analysis, output/restart, and drift owners
+and produces the only `RuntimeExecutionPlan` consumed by `TimeCoordinator`.
+`core::moduleDescriptors()` remains a compile-time layer/capability catalog; it
+does not drive runtime stage dispatch.
 
 ## Architectural invariants
 

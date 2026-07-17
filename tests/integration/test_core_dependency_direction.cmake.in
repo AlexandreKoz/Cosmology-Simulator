@@ -51,3 +51,51 @@ if(_core_link_violation)
 endif()
 
 message(STATUS "Core CMake target-link guard passed via graphviz metadata.")
+
+# Numerical modules must not depend upward on workflow composition.
+set(_numerical_roots analysis amr gravity hydro io parallel physics)
+set(_numerical_violations "")
+foreach(_root IN LISTS _numerical_roots)
+  file(GLOB_RECURSE _module_headers "@CMAKE_SOURCE_DIR@/include/cosmosim/${_root}/*.hpp")
+  file(GLOB_RECURSE _module_sources "@CMAKE_SOURCE_DIR@/src/${_root}/*.cpp")
+  foreach(_file IN LISTS _module_headers _module_sources)
+    file(READ "${_file}" _content)
+    string(REGEX MATCH "#include[ \t]*[<\"](cosmosim/)?workflows/" _match "${_content}")
+    if(_match)
+      list(APPEND _numerical_violations "${_file}")
+    endif()
+  endforeach()
+endforeach()
+if(_numerical_violations)
+  list(JOIN _numerical_violations "\n  - " _joined)
+  message(FATAL_ERROR
+    "Numerical-to-workflow dependency guard failed:\n  - ${_joined}\n")
+endif()
+message(STATUS "Numerical modules do not include workflow composition.")
+
+# Owner interfaces are public dependency seams; an owner may use shared
+# workflow helpers but may not include another owner's private header.
+set(_owner_sources
+  "@CMAKE_SOURCE_DIR@/src/workflows/analysis_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/gravity_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/hydro_amr_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/migration_balance_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/output_restart_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/source_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/time_coordinator.cpp")
+set(_private_owner_regex
+  "#include[ \t]*[<\"]workflows/internal/(initial_condition_runtime|migration_balance_runtime|output_restart_runtime|reference_runtime_composition)\\.hpp")
+set(_owner_violations "")
+foreach(_file IN LISTS _owner_sources)
+  file(READ "${_file}" _content)
+  string(REGEX MATCH "${_private_owner_regex}" _match "${_content}")
+  if(_match)
+    list(APPEND _owner_violations "${_file}")
+  endif()
+endforeach()
+if(_owner_violations)
+  list(JOIN _owner_violations "\n  - " _joined)
+  message(FATAL_ERROR
+    "Cross-owner private-header guard failed:\n  - ${_joined}\n")
+endif()
+message(STATUS "Owner services use public interfaces or shared helper seams.")

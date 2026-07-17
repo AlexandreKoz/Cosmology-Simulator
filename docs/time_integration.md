@@ -138,9 +138,14 @@ for future multirate work, not an enabled production capability.
 ### Active-set construction flow
 
 1. `beginSubstep()` validates scheduler internals and rebuilds the compact active list from scheduler `bin_index` and `next_activation_tick`.
-2. The workflow splits the scheduler active element list into particle/cell subsets as needed for callbacks.
+2. `RungZeroTimeState` and `TimeCoordinator` retain the scheduler-owned
+   particle and gas-cell active lists as read-only spans for the open substep.
 3. `makeSchedulerActiveSetDescriptor(...)` stamps scheduler tick and state-generation provenance and validates that descriptor indices still match scheduler activity.
-4. `StepOrchestrator::executeSingleStep(...)` runs the canonical KDK stage order and checks descriptor freshness when hierarchical callers pass an expected scheduler tick.
+4. `StepOrchestrator::executeSingleStepWithDispatcher(...)` runs the canonical
+   KDK stage order while `TimeCoordinator` rebuilds the appropriate typed
+   resource view for each stage. Existing callback-based core entry points
+   remain available for lower-level compatibility tests, not production
+   workflow composition.
 5. `endSubstep()` reconciles candidates, applies legal pending transitions, clears active flags, advances the integer tick, and only then are public `time_bin` mirrors refreshed from scheduler truth.
 
 ### Invariant framework

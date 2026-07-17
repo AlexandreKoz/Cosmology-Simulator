@@ -1,0 +1,38 @@
+set(_workflow_root "@CMAKE_SOURCE_DIR@/src/workflows/reference_workflow.cpp")
+file(STRINGS "${_workflow_root}" _root_lines)
+list(LENGTH _root_lines _root_line_count)
+if(_root_line_count GREATER 1500)
+  message(FATAL_ERROR
+    "Campaign A workflow root is ${_root_line_count} lines; limit is 1500")
+endif()
+
+file(GLOB _runtime_sources "@CMAKE_SOURCE_DIR@/src/workflows/*.cpp")
+foreach(_file IN LISTS _runtime_sources)
+  file(STRINGS "${_file}" _lines)
+  list(LENGTH _lines _line_count)
+  if(_line_count GREATER 2000)
+    message(FATAL_ERROR
+      "Campaign A runtime unit ${_file} is ${_line_count} lines; limit is 2000")
+  endif()
+endforeach()
+
+set(_production_stage_sources
+  "@CMAKE_SOURCE_DIR@/src/workflows/analysis_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/gravity_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/hydro_amr_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/output_restart_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/reference_runtime_composition.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/source_runtime.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/time_coordinator.cpp"
+  "@CMAKE_SOURCE_DIR@/src/workflows/reference_workflow.cpp")
+foreach(_file IN LISTS _production_stage_sources)
+  file(READ "${_file}" _content)
+  string(REGEX MATCH "(registerCallback|onStage[ \t\n]*\\(|IntegrationCallback)" _legacy_match "${_content}")
+  if(_legacy_match)
+    message(FATAL_ERROR
+      "Unrestricted legacy callback path remains in ${_file}: ${_legacy_match}")
+  endif()
+endforeach()
+
+message(STATUS
+  "Campaign A structure passed: root=${_root_line_count}, all runtime units <=2000, typed production dispatch only")

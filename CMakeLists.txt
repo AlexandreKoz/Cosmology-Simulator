@@ -318,9 +318,24 @@ add_library(cosmosim_utils STATIC
 target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
 
 add_library(cosmosim_workflows STATIC
+  src/workflows/analysis_runtime.cpp
+  src/workflows/gravity_runtime.cpp
+  src/workflows/hydro_amr_runtime.cpp
+  src/workflows/amr_migration_payload.cpp
+  src/workflows/initial_condition_runtime.cpp
   src/workflows/internal/cartesian_gas_cell_layout.cpp
+  src/workflows/migration_balance_runtime.cpp
+  src/workflows/output_restart_runtime.cpp
+  src/workflows/particle_ghost_runtime.cpp
+  src/workflows/reference_runtime_composition.cpp
+  src/workflows/restart_verification.cpp
   src/workflows/runtime_capabilities.cpp
+  src/workflows/runtime_module_registry.cpp
+  src/workflows/runtime_resources.cpp
   src/workflows/runtime_services.cpp
+  src/workflows/source_runtime.cpp
+  src/workflows/time_coordinator.cpp
+  src/workflows/snapshot_verification.cpp
   src/workflows/reference_workflow.cpp)
 
 set(COSMOSIM_MODULE_LIBS
@@ -436,6 +451,16 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_reference_workflow tests/integration/test_reference_workflow_end_to_end.cpp)
   target_link_libraries(test_integration_reference_workflow PRIVATE cosmosim_all)
   add_test(NAME integration_reference_workflow COMMAND test_integration_reference_workflow)
+
+  add_executable(
+    test_integration_runtime_descriptor_probe
+    tests/integration/test_runtime_descriptor_probe.cpp)
+  target_link_libraries(test_integration_runtime_descriptor_probe PRIVATE cosmosim_all)
+  add_test(
+    NAME integration_runtime_descriptor_probe
+    COMMAND test_integration_runtime_descriptor_probe)
+  cosmosim_mark_runtime_truth_test(
+    integration_runtime_descriptor_probe workflow integration runtime_registry)
 
   add_executable(
     test_integration_reference_workflow_hydro_row_order
@@ -570,6 +595,14 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_runtime_services tests/unit/test_runtime_services.cpp)
   target_link_libraries(test_unit_runtime_services PRIVATE cosmosim_workflows)
   add_test(NAME unit_runtime_services COMMAND test_unit_runtime_services)
+
+  add_executable(test_unit_runtime_resources tests/unit/test_runtime_resources.cpp)
+  target_link_libraries(test_unit_runtime_resources PRIVATE cosmosim_workflows)
+  add_test(NAME unit_runtime_resources COMMAND test_unit_runtime_resources)
+
+  add_executable(test_unit_runtime_module_registry tests/unit/test_runtime_module_registry.cpp)
+  target_link_libraries(test_unit_runtime_module_registry PRIVATE cosmosim_workflows)
+  add_test(NAME unit_runtime_module_registry COMMAND test_unit_runtime_module_registry)
 
   add_executable(test_unit_module_registry tests/unit/test_module_registry.cpp)
   target_link_libraries(test_unit_module_registry PRIVATE cosmosim_core)
@@ -1080,6 +1113,15 @@ if(COSMOSIM_ENABLE_TESTS)
     @ONLY)
   add_test(NAME integration_core_dependency_direction
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_core_dependency_direction.cmake")
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_decomposition_structure.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_runtime_decomposition_structure.cmake"
+    @ONLY)
+  add_test(NAME integration_runtime_decomposition_structure
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_decomposition_structure.cmake")
+  cosmosim_mark_runtime_truth_test(
+    integration_runtime_decomposition_structure architecture workflow runtime_registry)
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_release_readiness_artifacts.cmake.in"

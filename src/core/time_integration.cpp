@@ -816,6 +816,25 @@ void StepOrchestrator::executeOutputBoundary(
     IntegratorState& integrator_state,
     ProfilerSession* profiler_session,
     StepBoundaryKind requested_boundary_kind) const {
+  executeOutputBoundaryWithDispatcher(
+      state,
+      integrator_state,
+      [this](StepContext& context, bool require_output_safe_boundary) {
+        dispatchStageHandlers(context, require_output_safe_boundary);
+      },
+      profiler_session,
+      requested_boundary_kind);
+}
+
+void StepOrchestrator::executeOutputBoundaryWithDispatcher(
+    SimulationState& state,
+    IntegratorState& integrator_state,
+    const StageDispatchFunction& dispatcher,
+    ProfilerSession* profiler_session,
+    StepBoundaryKind requested_boundary_kind) const {
+  if (!dispatcher) {
+    throw std::invalid_argument("output boundary dispatcher must be callable");
+  }
   if (integrator_state.inside_kdk_step) {
     throw std::runtime_error("output boundary dispatch requested inside an open KDK step");
   }
@@ -842,7 +861,7 @@ void StepOrchestrator::executeOutputBoundary(
       .stage = IntegrationStage::kOutputCheck,
   };
 
-  dispatchStageHandlers(context, true);
+  dispatcher(context, true);
 }
 
 void StepOrchestrator::executeSingleStep(
@@ -855,6 +874,35 @@ void StepOrchestrator::executeSingleStep(
     ProfilerSession* profiler_session,
     std::optional<std::uint64_t> expected_scheduler_tick,
     StepBoundaryKind requested_boundary_kind) const {
+  executeSingleStepWithDispatcher(
+      state,
+      integrator_state,
+      active_set,
+      [this](StepContext& context, bool require_output_safe_boundary) {
+        dispatchStageHandlers(context, require_output_safe_boundary);
+      },
+      cosmology_background,
+      workspace,
+      mode_policy,
+      profiler_session,
+      expected_scheduler_tick,
+      requested_boundary_kind);
+}
+
+void StepOrchestrator::executeSingleStepWithDispatcher(
+    SimulationState& state,
+    IntegratorState& integrator_state,
+    ActiveSetDescriptor active_set,
+    const StageDispatchFunction& dispatcher,
+    const LambdaCdmBackground* cosmology_background,
+    TransientStepWorkspace* workspace,
+    const ModePolicy* mode_policy,
+    ProfilerSession* profiler_session,
+    std::optional<std::uint64_t> expected_scheduler_tick,
+    StepBoundaryKind requested_boundary_kind) const {
+  if (!dispatcher) {
+    throw std::invalid_argument("single-step dispatcher must be callable");
+  }
   if (integrator_state.dt_time_code <= 0.0) {
     throw std::invalid_argument("dt_time_code must be positive");
   }
@@ -998,7 +1046,7 @@ void StepOrchestrator::executeSingleStep(
       }
     }
     const std::size_t particle_count_before_stage = state.particles.size();
-    dispatchStageHandlers(context, false);
+    dispatcher(context, false);
     if ((stage == IntegrationStage::kForceRefresh ||
          (stage == IntegrationStage::kGravityKickPre && context.pm_refresh_directive.has_sync_event)) &&
         context.pm_refresh_directive.has_sync_event) {

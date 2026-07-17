@@ -344,6 +344,12 @@ struct StepContext {
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
 
+// Dependency-safe dispatch seam used by workflow-level typed resource views.
+// Core retains KDK/timeline invariants while the workflow owns task selection;
+// no workflow type appears in this interface.
+using StageDispatchFunction =
+    std::function<void(StepContext& context, bool require_output_safe_boundary)>;
+
 // Stage-bound handler interface implemented by gravity, hydro, source, analysis, and output modules.
 // Ownership stays with the caller; StepOrchestrator stores non-owning pointers in
 // deterministic registration order.  Each handler declares the exact stage set it
@@ -389,10 +395,29 @@ class StepOrchestrator {
       ProfilerSession* profiler_session = nullptr,
       StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
 
+  void executeOutputBoundaryWithDispatcher(
+      SimulationState& state,
+      IntegratorState& integrator_state,
+      const StageDispatchFunction& dispatcher,
+      ProfilerSession* profiler_session = nullptr,
+      StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
+
   void executeSingleStep(
       SimulationState& state,
       IntegratorState& integrator_state,
       ActiveSetDescriptor active_set,
+      const LambdaCdmBackground* cosmology_background,
+      TransientStepWorkspace* workspace = nullptr,
+      const ModePolicy* mode_policy = nullptr,
+      ProfilerSession* profiler_session = nullptr,
+      std::optional<std::uint64_t> expected_scheduler_tick = std::nullopt,
+      StepBoundaryKind requested_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint) const;
+
+  void executeSingleStepWithDispatcher(
+      SimulationState& state,
+      IntegratorState& integrator_state,
+      ActiveSetDescriptor active_set,
+      const StageDispatchFunction& dispatcher,
       const LambdaCdmBackground* cosmology_background,
       TransientStepWorkspace* workspace = nullptr,
       const ModePolicy* mode_policy = nullptr,

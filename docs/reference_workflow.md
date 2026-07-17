@@ -12,7 +12,8 @@ A valid `param.txt` run goes through the following real path:
    - `mode.ic_file=generated` uses the in-repo generated IC path.
    - any other `mode.ic_file` is resolved relative to the config file and read through the HDF5 IC reader.
 4. The live run loop uses `HierarchicalTimeBinScheduler` as the execution driver.
-5. The orchestrator executes the canonical KDK stage sequence with real gravity and hydro callbacks.
+5. The orchestrator executes the canonical KDK stage sequence through the
+   gravity owner and the current hydro callback.
 6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory.
 
 ## Runtime contract
@@ -114,7 +115,8 @@ TreePM source/target ownership in the workflow path is now explicit:
 
 ## Canonical stage ordering
 
-The workflow uses `core::StepOrchestrator` and preserves the canonical order:
+`workflows::TimeCoordinator` uses the dependency-safe dispatcher entry point
+of `core::StepOrchestrator` and preserves the canonical order:
 
 1. `gravity_kick_pre`
 2. `drift`
@@ -127,9 +129,22 @@ The workflow uses `core::StepOrchestrator` and preserves the canonical order:
 
 ## Gravity, hydro, and scheduler ownership
 
-- Gravity is executed through the live `gravity::TreePmCoordinator` callback.
-- Hydro is executed through the live Godunov finite-volume callback using the hydro core solver, MUSCL-Hancock reconstruction, and HLLC fluxes.
-- Active sets come from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps are committed through `endSubstep()` before restart output is written. The production workflow currently requires rung zero; nonzero rungs are rejected because per-element kick/drift epochs are not yet authoritative.
+- `workflows::GravityRuntime` owns the live `gravity::TreePmCoordinator`, PM
+  cadence decisions, force-cache invalidation/import/export, and gravity stage
+  contribution. Hydro consumes only its read-only acceleration provider; the
+  output/restart owner consumes only its persistence provider.
+- `workflows::HydroAmrRuntime` owns the live Godunov finite-volume and supported
+  AMR paths using the hydro core solver, MUSCL-Hancock reconstruction, HLLC
+  fluxes, blocking ghost freshness, patch exchange, and existing reflux rules.
+- `workflows::SourceRuntime` preserves star-formation then black-hole model
+  ordering, while `workflows::AnalysisRuntime` owns stage-audit and diagnostics
+  contributions.
+- `workflows::RungZeroTimeState` is the sole workflow owner of particle and
+  gas-cell schedulers, integrator truth, and output cadence. Active sets come
+  from `HierarchicalTimeBinScheduler::beginSubstep()` and completed substeps
+  are committed through `endSubstep()` before restart output is written. The
+  production workflow currently requires rung zero; nonzero rungs are rejected
+  because per-element kick/drift epochs are not yet authoritative.
 - In MPI mode the workflow report records both local owned counts/checksums and reduced global counts/checksums (`particle_count`, `cell_count`, particle-ID sum/xor). This is part of the operational honesty contract for distributed runs: tests must be able to distinguish a true partitioned state from an accidentally replicated one.
 - Restart payloads therefore serialize the scheduler state that actually drove the run.
 
@@ -194,3 +209,27 @@ executed KDK steps; clearing resets sizes and the monotonic scratch offset while
 preserving vector and arena capacity. Profiling exposes
 `workflow_workspace_reuses` and `scheduler_active_index_copy_bytes` (zero on
 this path) so allocation/copy regressions remain visible.
+
+## Runtime composition and resource views
+
+`ReferenceWorkflowRunner` constructs frozen config, one `RuntimeServices`
+bundle, IC/migration ownership, `RungZeroTimeState`, and the descriptor-backed
+runtime composition. It then makes one high-level call to
+`TimeCoordinator::runRungZeroSegment(...)`; numerical stages and the detailed
+substep loop are not implemented in the runner.
+
+Built-in `RuntimeModuleDescriptor` factories construct the real stage owners.
+`RuntimeExecutionPlan` dispatches only typed `DriftParticleStageView`,
+`GravityStageView`, `HydroAmrStageView`, `SourceMutationStageView`,
+`AnalysisStageView`, and `OutputRestartStageView` capabilities. Each carries a
+lease over the relevant particle/cell/gas-identity generation, scheduler tick,
+and/or step epoch. Leases are transient and never restart truth. Reorder,
+migration, compaction, scheduler-tick advance, or step advance invalidates a
+captured view when its guarded epoch changes; callers must rebuild it.
+
+`ReferenceWorkflowOptions::register_runtime_modules` is an additive
+test/embedding seam. It runs after built-ins are declared and before the
+registry freezes, so a caller can add an independent typed descriptor without
+editing `ReferenceWorkflowRunner` or a central callback list. It is not a
+configuration key, is not serialized, and does not affect restart schema or
+provenance authority when unused.

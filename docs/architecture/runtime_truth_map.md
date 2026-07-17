@@ -573,6 +573,21 @@ The P0-05..P0-08 repair pass adds the following concrete runtime-truth structure
 
 Remaining caveat: some legacy physics/unit tests still operate standalone hydro cells without full workflow AMR ownership. Those states are deliberately not promoted to distributed production coverage unless the state ownership layer installs stable gas-cell identity records and validates dense-row coverage.
 
+## 2026-07-16 Campaign A runtime-composition addendum
+
+| Runtime fact | Live authority | Transient view/mirror | Invalidation or rebuild rule |
+| --- | --- | --- | --- |
+| Particle/gas scheduler and integrator state | `workflows::RungZeroTimeState` | particle/cell `time_bin` lanes are mirrors | Fresh construction or restart import initializes the owner; mirrors refresh only from its schedulers. |
+| Production stage ordering and contributions | Frozen `workflows::RuntimeExecutionPlan` built by `RuntimeModuleRegistry` | descriptor declarations and typed task functions | Registry freezes once per run. Adding/removing a descriptor adds/removes its task without a runner callback-list edit. |
+| Stage resource freshness | `SimulationState` particle/cell/gas-identity generations, particle scheduler tick, and `IntegratorState::step_index` | `RuntimeResourceLease` captured in a typed stage view | Rebuild for every stage. Reorder/migration/compaction or tick/step advance makes guarded leases stale and `requireFresh()` throws. Views are never serialized. |
+| Active-set construction | `RungZeroTimeState` schedulers during an open substep | `ActiveSetDescriptor` and typed task views | Rebuild after scheduler commit or ownership-generation change; never repair an old view locally. |
+| Output cadence and legal boundary request | `RungZeroTimeState::pendingOutput()` plus committed integrator boundary metadata | `OutputRestartStageView` | Cadence is restored from checkpoint state or initialized once, latched before a step, and consumed only at a safe boundary. |
+
+Production workflow tasks no longer register `IntegrationCallback` objects or
+receive `StepContext` through their public interface. Numerical modules remain
+below workflow composition in the dependency graph, and owner services include
+other owners only through public/narrow contracts.
+
 ## 2026-07-13 gravity runtime-truth addendum
 
 The production gravity hardening resolves these additional authority

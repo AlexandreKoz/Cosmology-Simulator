@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,8 @@ struct RestartReadResult;
 }
 
 namespace cosmosim::workflows {
+
+class RuntimeModuleRegistry;
 
 // Integration-layer ownership note:
 // This runner intentionally lives outside core/ because it assembles analysis, physics,
@@ -49,6 +52,11 @@ struct ReferenceWorkflowOptions {
   // A bounded execution segment for tests/benchmarks. Zero retains the
   // configuration's max_global_steps. This is intentionally not persisted.
   std::uint64_t max_steps_override = 0;
+
+  // Test/embedding composition seam. Built-in production descriptors are
+  // registered first; callers may add independent descriptors before the
+  // registry freezes. This does not alter config or restart authority.
+  std::function<void(RuntimeModuleRegistry&)> register_runtime_modules;
 };
 
 struct ReferenceWorkflowReport {
