@@ -1,26 +1,58 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace cosmosim::core {
 struct IntegratorState;
 struct SimulationState;
-struct StepContext;
 class HierarchicalTimeBinScheduler;
 }
 
 namespace cosmosim::workflows {
 
-class AnalysisRuntime;
-class GravityRuntime;
-class HydroAmrRuntime;
-class SourceRuntime;
+class RuntimeExecutionPlan;
 class TimeCoordinator;
 namespace internal {
-class DriftRuntime;
-class OutputRestartRuntime;
+class RuntimeStageAccess;
+class RuntimeTaskGrantBinder;
+struct RuntimeStageResourceBundle;
 }
+
+// Resource declarations are part of the executable task contract. They live
+// beside the stage views so the dispatcher can bind one task-scoped grant
+// without introducing a dependency cycle through the module registry.
+enum class RuntimeResourceAccessMode : std::uint8_t {
+  kRead,
+  kWrite,
+  kReadWrite,
+};
+
+enum class RuntimeResourceKey : std::uint8_t {
+  kParticlePosition,
+  kParticleVelocity,
+  kParticleGravitySource,
+  kGravityAcceleration,
+  kHydroConservedState,
+  kHydroPrimitiveState,
+  kAmrPatchState,
+  kSourceMutationState,
+  kMigrationOwnership,
+  kSchedulerTruth,
+  kIntegratorTruth,
+  kOutputRestartState,
+  kDiagnostics,
+};
+
+struct RuntimeResourceAccess {
+  RuntimeResourceKey resource = RuntimeResourceKey::kParticlePosition;
+  RuntimeResourceAccessMode mode = RuntimeResourceAccessMode::kRead;
+};
+
+[[nodiscard]] bool runtimeResourceAccessSatisfies(
+    RuntimeResourceAccess granted,
+    RuntimeResourceAccess required) noexcept;
 
 // A transient stage view is derived from these runtime authorities. It is
 // never restart truth: owners rebuild views after every invalidating event.
@@ -98,109 +130,46 @@ class RuntimeResourceLease {
   RuntimeEpochField m_guarded_fields = RuntimeEpochField::kNone;
 };
 
-// These are deliberately distinct capabilities. A task accepting one view
-// cannot be invoked with another view and cannot obtain SimulationState.
-class DriftParticleStageView {
- public:
-  explicit DriftParticleStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
+// Public stage views deliberately expose freshness and their task-scoped
+// declaration only. They do not carry StepContext, SimulationState, or a public
+// owner escape. Built-in owners use the source-private RuntimeStageAccess bridge,
+// which verifies this task's descriptor grant before returning internal state.
+#define COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(Type)                         \
+  class Type {                                                            \
+   public:                                                                \
+    explicit Type(RuntimeResourceLease lease) noexcept;                   \
+    void requireFresh() const;                                            \
+    [[nodiscard]] std::span<const RuntimeResourceAccess>                  \
+    declaredResources() const noexcept;                                   \
+                                                                          \
+   private:                                                               \
+    friend class RuntimeExecutionPlan;                                    \
+    friend class TimeCoordinator;                                         \
+    friend class internal::RuntimeStageAccess;                            \
+    friend class internal::RuntimeTaskGrantBinder;                       \
+    Type(                                                                 \
+        RuntimeResourceLease lease,                                       \
+        internal::RuntimeStageResourceBundle& resources) noexcept;        \
+    void bindDeclaredResources(                                           \
+        std::span<const RuntimeResourceAccess> resources) noexcept;       \
+    void clearDeclaredResources() noexcept;                               \
+    void requireDeclaredResources(                                        \
+        std::span<const RuntimeResourceAccess> required,                  \
+        std::string_view caller) const;                                   \
+                                                                          \
+    RuntimeResourceLease m_lease;                                         \
+    internal::RuntimeStageResourceBundle* m_resources = nullptr;          \
+    std::span<const RuntimeResourceAccess> m_declared_resources;          \
+  };
 
- private:
-  friend class internal::DriftRuntime;
-  friend class TimeCoordinator;
-  DriftParticleStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(DriftParticleStageView)
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(GravityStageView)
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(HydroAmrStageView)
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(SourceMutationStageView)
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(AnalysisStageView)
+COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW(OutputRestartStageView)
 
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
-
-class GravityStageView {
- public:
-  explicit GravityStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
-
- private:
-  friend class GravityRuntime;
-  friend class TimeCoordinator;
-  GravityStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
-
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
-
-class HydroAmrStageView {
- public:
-  explicit HydroAmrStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
-
- private:
-  friend class HydroAmrRuntime;
-  friend class TimeCoordinator;
-  HydroAmrStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
-
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
-
-class SourceMutationStageView {
- public:
-  explicit SourceMutationStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
-
- private:
-  friend class SourceRuntime;
-  friend class TimeCoordinator;
-  SourceMutationStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
-
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
-
-class AnalysisStageView {
- public:
-  explicit AnalysisStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
-
- private:
-  friend class AnalysisRuntime;
-  friend class TimeCoordinator;
-  AnalysisStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
-
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
-
-class OutputRestartStageView {
- public:
-  explicit OutputRestartStageView(RuntimeResourceLease lease) noexcept;
-  void requireFresh() const;
-
- private:
-  friend class TimeCoordinator;
-  friend class internal::OutputRestartRuntime;
-  OutputRestartStageView(
-      RuntimeResourceLease lease,
-      core::StepContext& context) noexcept;
-  [[nodiscard]] core::StepContext& ownerContext() const;
-
-  RuntimeResourceLease m_lease;
-  core::StepContext* m_context = nullptr;
-};
+#undef COSMOSIM_DECLARE_RUNTIME_STAGE_VIEW
 
 class MigrationOwnershipView {
  public:

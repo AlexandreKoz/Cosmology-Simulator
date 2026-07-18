@@ -579,14 +579,16 @@ Remaining caveat: some legacy physics/unit tests still operate standalone hydro 
 | --- | --- | --- | --- |
 | Particle/gas scheduler and integrator state | `workflows::RungZeroTimeState` | particle/cell `time_bin` lanes are mirrors | Fresh construction or restart import initializes the owner; mirrors refresh only from its schedulers. |
 | Production stage ordering and contributions | Frozen `workflows::RuntimeExecutionPlan` built by `RuntimeModuleRegistry` | descriptor declarations and typed task functions | Registry freezes once per run. Adding/removing a descriptor adds/removes its task without a runner callback-list edit. |
-| Stage resource freshness | `SimulationState` particle/cell/gas-identity generations, particle scheduler tick, and `IntegratorState::step_index` | `RuntimeResourceLease` captured in a typed stage view | Rebuild for every stage. Reorder/migration/compaction or tick/step advance makes guarded leases stale and `requireFresh()` throws. Views are never serialized. |
+| Stage resource freshness and task grant | `SimulationState` particle/cell/gas-identity generations, particle scheduler tick, `IntegratorState::step_index`, and the frozen task declaration | `RuntimeResourceLease` plus one task-scoped `RuntimeResourceAccess` span captured in a typed stage view | Rebuild for every stage and rebind for every task. Reorder/migration/compaction or tick/step advance makes guarded leases stale; the task grant is cleared after invocation. Views are never serialized and expose no `StepContext`. |
 | Active-set construction | `RungZeroTimeState` schedulers during an open substep | `ActiveSetDescriptor` and typed task views | Rebuild after scheduler commit or ownership-generation change; never repair an old view locally. |
 | Output cadence and legal boundary request | `RungZeroTimeState::pendingOutput()` plus committed integrator boundary metadata | `OutputRestartStageView` | Cadence is restored from checkpoint state or initialized once, latched before a step, and consumed only at a safe boundary. |
 
 Production workflow tasks no longer register `IntegrationCallback` objects or
-receive `StepContext` through their public interface. Numerical modules remain
-below workflow composition in the dependency graph, and owner services include
-other owners only through public/narrow contracts.
+receive `StepContext` through their public interface. External/custom tasks can
+observe only freshness and their descriptor grant. Source-private built-in owner
+access validates that grant before entering legacy rung-zero numerical bodies.
+Numerical modules remain below workflow composition in the dependency graph,
+and owner services include other owners only through public/narrow contracts.
 
 ## 2026-07-13 gravity runtime-truth addendum
 

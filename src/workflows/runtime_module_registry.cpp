@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -10,6 +11,26 @@
 #include <utility>
 
 namespace cosmosim::workflows {
+
+namespace internal {
+
+class RuntimeTaskGrantBinder final {
+ public:
+  template <class View>
+  static void bind(
+      View& view,
+      std::span<const RuntimeResourceAccess> resources) noexcept {
+    view.bindDeclaredResources(resources);
+  }
+
+  template <class View>
+  static void clear(View& view) noexcept {
+    view.clearDeclaredResources();
+  }
+};
+
+}  // namespace internal
+
 namespace {
 
 [[nodiscard]] bool viewSupportsStage(
@@ -34,6 +55,100 @@ namespace {
       return stage == core::IntegrationStage::kOutputCheck;
   }
   return false;
+}
+
+[[nodiscard]] std::optional<RuntimeResourceAccessMode> allowedModeForView(
+    RuntimeStageViewKind view_kind,
+    RuntimeResourceKey resource) noexcept {
+  using Mode = RuntimeResourceAccessMode;
+  using Key = RuntimeResourceKey;
+  switch (view_kind) {
+    case RuntimeStageViewKind::kStageAudit:
+      return resource == Key::kDiagnostics
+          ? std::optional<Mode>(Mode::kWrite)
+          : std::nullopt;
+    case RuntimeStageViewKind::kDriftParticles:
+      switch (resource) {
+        case Key::kParticlePosition: return Mode::kReadWrite;
+        case Key::kParticleVelocity: return Mode::kRead;
+        case Key::kMigrationOwnership: return Mode::kRead;
+        default: return std::nullopt;
+      }
+    case RuntimeStageViewKind::kGravity:
+      switch (resource) {
+        case Key::kParticlePosition: return Mode::kRead;
+        case Key::kParticleVelocity: return Mode::kReadWrite;
+        case Key::kParticleGravitySource: return Mode::kRead;
+        case Key::kHydroConservedState: return Mode::kRead;
+        case Key::kMigrationOwnership: return Mode::kRead;
+        case Key::kSchedulerTruth: return Mode::kRead;
+        case Key::kGravityAcceleration: return Mode::kWrite;
+        case Key::kIntegratorTruth: return Mode::kReadWrite;
+        default: return std::nullopt;
+      }
+    case RuntimeStageViewKind::kHydroAmr:
+      switch (resource) {
+        case Key::kParticleVelocity: return Mode::kReadWrite;
+        case Key::kHydroConservedState: return Mode::kReadWrite;
+        case Key::kHydroPrimitiveState: return Mode::kReadWrite;
+        case Key::kAmrPatchState: return Mode::kReadWrite;
+        case Key::kGravityAcceleration: return Mode::kRead;
+        case Key::kMigrationOwnership: return Mode::kRead;
+        case Key::kIntegratorTruth: return Mode::kRead;
+        default: return std::nullopt;
+      }
+    case RuntimeStageViewKind::kSourceMutation:
+      switch (resource) {
+        case Key::kSourceMutationState: return Mode::kReadWrite;
+        case Key::kParticlePosition: return Mode::kReadWrite;
+        case Key::kParticleVelocity: return Mode::kReadWrite;
+        case Key::kHydroConservedState: return Mode::kReadWrite;
+        case Key::kMigrationOwnership: return Mode::kReadWrite;
+        case Key::kIntegratorTruth: return Mode::kRead;
+        default: return std::nullopt;
+      }
+    case RuntimeStageViewKind::kAnalysis:
+      switch (resource) {
+        case Key::kParticlePosition:
+        case Key::kParticleVelocity:
+        case Key::kParticleGravitySource:
+        case Key::kHydroPrimitiveState:
+        case Key::kSourceMutationState:
+        case Key::kMigrationOwnership:
+        case Key::kIntegratorTruth:
+          return Mode::kRead;
+        case Key::kDiagnostics:
+          return Mode::kWrite;
+        default:
+          return std::nullopt;
+      }
+    case RuntimeStageViewKind::kOutputRestart:
+      switch (resource) {
+        case Key::kParticlePosition:
+        case Key::kParticleVelocity:
+        case Key::kHydroConservedState:
+        case Key::kSourceMutationState:
+        case Key::kMigrationOwnership:
+        case Key::kSchedulerTruth:
+        case Key::kIntegratorTruth:
+          return Mode::kRead;
+        case Key::kOutputRestartState:
+          return Mode::kReadWrite;
+        case Key::kDiagnostics:
+          return Mode::kWrite;
+        default:
+          return std::nullopt;
+      }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool viewAllowsAccess(
+    RuntimeStageViewKind view_kind,
+    RuntimeResourceAccess requested) noexcept {
+  const auto allowed_mode = allowedModeForView(view_kind, requested.resource);
+  return allowed_mode.has_value() && runtimeResourceAccessSatisfies(
+      RuntimeResourceAccess{requested.resource, *allowed_mode}, requested);
 }
 
 void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
@@ -70,6 +185,12 @@ void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
         throw std::invalid_argument(
             "runtime task '" + task.task_id +
             "' declares duplicate access for resource '" +
+            std::string(runtimeResourceKeyName(access.resource)) + "'");
+      }
+      if (!viewAllowsAccess(task.view_kind, access)) {
+        throw std::invalid_argument(
+            "runtime task '" + task.task_id +
+            "' declares access outside its typed view for resource '" +
             std::string(runtimeResourceKeyName(access.resource)) + "'");
       }
     }
@@ -147,6 +268,27 @@ void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
   return ordered;
 }
 
+template <class View>
+class TaskGrantScope final {
+ public:
+  TaskGrantScope(
+      View& view,
+      std::span<const RuntimeResourceAccess> resources) noexcept
+      : m_view(view) {
+    internal::RuntimeTaskGrantBinder::bind(m_view, resources);
+  }
+
+  ~TaskGrantScope() {
+    internal::RuntimeTaskGrantBinder::clear(m_view);
+  }
+
+  TaskGrantScope(const TaskGrantScope&) = delete;
+  TaskGrantScope& operator=(const TaskGrantScope&) = delete;
+
+ private:
+  View& m_view;
+};
+
 template <class View, class Task>
 void executeTypedStage(
     std::span<const RuntimeExecutionPlan::PlannedTask> tasks,
@@ -166,6 +308,7 @@ void executeTypedStage(
           "frozen runtime task '" + task.declaration.task_id +
           "' has an inconsistent typed stage view");
     }
+    TaskGrantScope<View> grant_scope(view, task.declaration.resources);
     std::get<Task>(task.task)(view);
   }
 }

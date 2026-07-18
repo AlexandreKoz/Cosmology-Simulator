@@ -36,3 +36,18 @@ endforeach()
 
 message(STATUS
   "Campaign A structure passed: root=${_root_line_count}, all runtime units <=2000, typed production dispatch only")
+
+set(_public_runtime_headers
+  "@CMAKE_SOURCE_DIR@/include/cosmosim/workflows/analysis_runtime.hpp"
+  "@CMAKE_SOURCE_DIR@/include/cosmosim/workflows/gravity_runtime.hpp"
+  "@CMAKE_SOURCE_DIR@/include/cosmosim/workflows/hydro_amr_runtime.hpp"
+  "@CMAKE_SOURCE_DIR@/include/cosmosim/workflows/source_runtime.hpp"
+  "@CMAKE_SOURCE_DIR@/include/cosmosim/workflows/runtime_resources.hpp")
+foreach(_file IN LISTS _public_runtime_headers)
+  file(READ "${_file}" _content)
+  string(REGEX MATCH "(ownerContext[ \t\n]*\\(|stageContext[ \t\n]*\\(|StepContext[ \t]*\\*)" _escape_match "${_content}")
+  if(_escape_match)
+    message(FATAL_ERROR
+      "Public runtime capability escape remains in ${_file}: ${_escape_match}")
+  endif()
+endforeach()

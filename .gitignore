@@ -31,4 +31,11 @@ __pycache__/
 
 # Runtime artifacts
 /output/
+/integration_outputs/
+/validation_outputs/
+/test_outputs/
 *.log
+
+# Windows alternate-data-stream sidecars
+*Zone.Identifier*
+*#Uf03aZone.Identifier*

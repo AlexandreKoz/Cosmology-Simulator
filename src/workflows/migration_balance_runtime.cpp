@@ -1,5 +1,6 @@
 #include "cosmosim/workflows/migration_balance_runtime.hpp"
 #include "workflows/internal/amr_migration_payload.hpp"
+#include "workflows/internal/gas_cell_ownership.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,40 +30,6 @@
 
 namespace cosmosim::workflows::internal {
 namespace {
-
-[[nodiscard]] std::optional<std::uint32_t> parentParticleRowForGasCellRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(
-        std::string(caller) +
-        ": gas-cell identity map is missing a dense local row");
-  }
-  if (!record->parent_particle_id.has_value()) {
-    return std::nullopt;
-  }
-  const auto parent_it = particle_row_by_id.find(*record->parent_particle_id);
-  return parent_it == particle_row_by_id.end()
-      ? std::nullopt
-      : std::optional<std::uint32_t>(parent_it->second);
-}
-
-[[nodiscard]] const core::GasCellIdentityRecord&
-gasCellIdentityRecordForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(
-        std::string(caller) +
-        ": gas-cell identity map is missing a dense local row");
-  }
-  return *record;
-}
 
 void syncTimeBinsFromScheduler(
     const core::HierarchicalTimeBinScheduler& scheduler,

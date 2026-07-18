@@ -18,11 +18,6 @@ class SourceRuntime {
 
   virtual void execute(SourceMutationStageView& view) = 0;
 
- protected:
-  [[nodiscard]] static core::StepContext& stageContext(
-      SourceMutationStageView& view) {
-    return view.ownerContext();
-  }
 };
 
 [[nodiscard]] std::unique_ptr<SourceRuntime> makeSourceRuntime(

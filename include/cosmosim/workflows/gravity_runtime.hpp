@@ -82,11 +82,6 @@ class GravityRuntime : public GravityAccelerationProvider,
       const io::GravityForceCachePersistentState& cache,
       const core::SimulationState& state) = 0;
 
- protected:
-  [[nodiscard]] static core::StepContext& stageContext(
-      GravityStageView& view) {
-    return view.ownerContext();
-  }
 };
 
 [[nodiscard]] std::unique_ptr<GravityRuntime> makeGravityRuntime(

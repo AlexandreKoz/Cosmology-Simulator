@@ -1,4 +1,5 @@
 #include "workflows/internal/amr_migration_payload.hpp"
+#include "workflows/internal/gas_cell_ownership.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -9,22 +10,6 @@
 #include <vector>
 
 namespace cosmosim::workflows::internal {
-namespace {
-
-[[nodiscard]] const core::GasCellIdentityRecord& gasCellIdentityRecordForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(
-        std::string(caller) +
-        ": gas-cell identity map is missing a dense local row");
-  }
-  return *record;
-}
-
-}  // namespace
 
 std::vector<parallel::AmrPatchPayloadRecord>
 buildMigrationAmrPatchPayloadRecords(

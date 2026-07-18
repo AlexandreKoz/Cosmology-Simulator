@@ -9,6 +9,7 @@
 
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/star_formation.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 
 namespace cosmosim::workflows {
 namespace {
@@ -56,7 +57,14 @@ class SourceRuntimeImpl final : public SourceRuntime {
 
   void execute(SourceMutationStageView& view) override {
     view.requireFresh();
-    core::StepContext& context = stageContext(view);
+    core::StepContext& context = internal::RuntimeStageAccess::sourceContext(
+        view,
+        {{RuntimeResourceKey::kSourceMutationState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kSourceTerms) {
       throw std::logic_error("source runtime received a non-source stage");
     }

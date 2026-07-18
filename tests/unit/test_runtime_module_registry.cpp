@@ -55,6 +55,10 @@ cosmosim::workflows::RuntimeModuleDescriptor makeAnalysisModule(
             .task = AnalysisStageTask(
                 [owner = std::move(owner), trace](AnalysisStageView& view) {
                   view.requireFresh();
+                  const auto resources = view.declaredResources();
+                  assert(resources.size() == 1U);
+                  assert(resources.front().resource == RuntimeResourceKey::kDiagnostics);
+                  assert(resources.front().mode == RuntimeResourceAccessMode::kWrite);
                   trace->push_back(*owner);
                 }),
         });
@@ -111,6 +115,7 @@ int main() {
       cosmosim::core::IntegrationStage::kAnalysisHooks,
       analysis_view);
   assert((trace == std::vector<std::string>{"probe", "base"}));
+  assert(analysis_view.declaredResources().empty());
 
   bool rejected_after_freeze = false;
   try {
@@ -144,6 +149,17 @@ int main() {
   incompatible.registerModule(std::move(first));
   incompatible.registerModule(makeAnalysisModule("second", 1, 1, {}, &trace));
   expectInvalid([&]() { (void)incompatible.freezeAndInstantiate(context); });
+
+
+  cosmosim::workflows::RuntimeModuleRegistry forbidden_analysis_write;
+  auto forbidden = makeAnalysisModule("forbidden", 0, 0, {}, &trace);
+  forbidden.stage_tasks.front().resources = {{
+      .resource = cosmosim::workflows::RuntimeResourceKey::kParticlePosition,
+      .mode = cosmosim::workflows::RuntimeResourceAccessMode::kWrite,
+  }};
+  expectInvalid([&]() {
+    forbidden_analysis_write.registerModule(std::move(forbidden));
+  });
 
   cosmosim::workflows::RuntimeModuleRegistry bad_factory;
   auto mismatch = makeAnalysisModule("mismatch", 0, 0, {}, &trace);

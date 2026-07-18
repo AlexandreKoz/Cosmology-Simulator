@@ -1881,3 +1881,19 @@ power-spectrum artifact, but its direct-DFT `12^3`, 64-particle fixture is not a
 large-volume resolution/convergence, performance, halo-statistics, or
 cross-code campaign. Publishable DMO production and AREPO/GADGET-class parity
 are not claimed.
+
+
+## 2026-07-17 runtime capability boundary closure
+
+- Removed public/protected recovery of `core::StepContext` from all typed workflow
+  stage views and owner interfaces.
+- Added task-scoped descriptor grants with typed-view access allowlists and
+  source-private built-in access validation.
+- Added expected compile-failure coverage for the former analysis-owner and
+  direct-view context escapes.
+- Consolidated gas-cell identity, parent-row, owner-rank, and compatibility-mirror
+  helpers under `workflows/internal/gas_cell_ownership.*`.
+- Removed Windows ADS metadata and generated validation outputs; repository
+  hygiene now detects those recursively.
+- CPU focused workflow/resource/registry tests pass. MPI/FFTW/HDF5 runtime
+  validation remains delegated to a dependency-complete environment.

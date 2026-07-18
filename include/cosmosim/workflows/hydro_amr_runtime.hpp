@@ -34,11 +34,6 @@ class HydroAmrRuntime {
   [[nodiscard]] virtual std::size_t
   remoteStaleInvalidPayloadCount() const noexcept = 0;
 
- protected:
-  [[nodiscard]] static core::StepContext& stageContext(
-      HydroAmrStageView& view) {
-    return view.ownerContext();
-  }
 };
 
 [[nodiscard]] std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(

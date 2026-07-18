@@ -78,7 +78,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"distributed_ic_import", RuntimeCapabilityStatus::kUnsupported,
        "Every rank currently enters the same single-file import path."},
       {"rank_remappable_restart", RuntimeCapabilityStatus::kUnsupported,
-       "Restart schema v20 supports same-world-size rank-local continuation only."},
+       "Restart schema v21 supports same-world-size rank-local continuation only."},
       {"asynchronous_output", RuntimeCapabilityStatus::kUnsupported,
        "Snapshot and checkpoint writes are synchronous at restart-safe boundaries."},
       {"production_diagnostics", RuntimeCapabilityStatus::kSupported,

@@ -1,4 +1,5 @@
 #include "cosmosim/workflows/output_restart_runtime.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 
 #include <algorithm>
 #include <array>
@@ -808,7 +809,17 @@ OutputRestartRuntime::OutputRestartRuntime(
 
 void OutputRestartRuntime::execute(OutputRestartStageView& view) {
   view.requireFresh();
-  core::StepContext& context = view.ownerContext();
+  core::StepContext& context = internal::RuntimeStageAccess::outputRestartContext(
+      view,
+      {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kSourceMutationState, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kSchedulerTruth, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead},
+       {RuntimeResourceKey::kOutputRestartState, RuntimeResourceAccessMode::kReadWrite},
+       {RuntimeResourceKey::kDiagnostics, RuntimeResourceAccessMode::kWrite}});
   if (context.stage != core::IntegrationStage::kOutputCheck) {
     throw std::logic_error(
         "output/restart runtime received an unregistered stage");

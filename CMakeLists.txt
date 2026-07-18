@@ -324,6 +324,7 @@ add_library(cosmosim_workflows STATIC
   src/workflows/amr_migration_payload.cpp
   src/workflows/initial_condition_runtime.cpp
   src/workflows/internal/cartesian_gas_cell_layout.cpp
+  src/workflows/internal/gas_cell_ownership.cpp
   src/workflows/migration_balance_runtime.cpp
   src/workflows/output_restart_runtime.cpp
   src/workflows/particle_ghost_runtime.cpp
@@ -1122,6 +1123,15 @@ if(COSMOSIM_ENABLE_TESTS)
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_decomposition_structure.cmake")
   cosmosim_mark_runtime_truth_test(
     integration_runtime_decomposition_structure architecture workflow runtime_registry)
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_resource_capability_compile.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_runtime_resource_capability_compile.cmake"
+    @ONLY)
+  add_test(NAME integration_runtime_resource_capability_compile
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_resource_capability_compile.cmake")
+  cosmosim_mark_runtime_truth_test(
+    integration_runtime_resource_capability_compile architecture workflow runtime_registry)
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_release_readiness_artifacts.cmake.in"

@@ -319,3 +319,10 @@ now implemented and validated as recorded in the closed row above.
 The current readiness matrix and the distinction between controlled DMO
 validation and publishable production are maintained in
 `docs/gravity_production_readiness.md`.
+
+
+## 2026-07-17 Campaign A capability follow-up
+
+| ID | Status | Area | Resolution | Remaining boundary |
+|---|---|---|---|---|
+| P40-RUNTIME-RESOURCE-CAPABILITY-037 | Closed | Workflow resource ownership | Removed public `StepContext`/`ownerContext`/`stageContext` escape, bound descriptor resources per task, enforced typed-view access allowlists, added negative compile tests, and centralized gas-cell ownership helpers. | Built-in owners remain trusted source implementations; dynamic lane tracing and descriptor-owned timestep/restart/migration schemas are not claimed. |

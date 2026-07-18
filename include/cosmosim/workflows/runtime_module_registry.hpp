@@ -16,28 +16,6 @@ namespace cosmosim::workflows {
 
 struct RuntimeServices;
 
-enum class RuntimeResourceAccessMode : std::uint8_t {
-  kRead,
-  kWrite,
-  kReadWrite,
-};
-
-enum class RuntimeResourceKey : std::uint8_t {
-  kParticlePosition,
-  kParticleVelocity,
-  kParticleGravitySource,
-  kGravityAcceleration,
-  kHydroConservedState,
-  kHydroPrimitiveState,
-  kAmrPatchState,
-  kSourceMutationState,
-  kMigrationOwnership,
-  kSchedulerTruth,
-  kIntegratorTruth,
-  kOutputRestartState,
-  kDiagnostics,
-};
-
 enum class RuntimeStageViewKind : std::uint8_t {
   kStageAudit,
   kDriftParticles,
@@ -46,11 +24,6 @@ enum class RuntimeStageViewKind : std::uint8_t {
   kSourceMutation,
   kAnalysis,
   kOutputRestart,
-};
-
-struct RuntimeResourceAccess {
-  RuntimeResourceKey resource = RuntimeResourceKey::kParticlePosition;
-  RuntimeResourceAccessMode mode = RuntimeResourceAccessMode::kRead;
 };
 
 struct RuntimeTaskDeclaration {

@@ -48,6 +48,12 @@ composition. Its typed descriptors declare prerequisites, task stages,
 resource access, view kinds, and factories. Freezing the registry constructs
 the real gravity, hydro/AMR, source, analysis, output/restart, and drift owners
 and produces the only `RuntimeExecutionPlan` consumed by `TimeCoordinator`.
+The execution plan binds one descriptor resource grant per task invocation and
+clears it with RAII. Public stage views expose freshness and the read-only grant
+only; they contain no `StepContext` or state-recovery API. Built-in owners enter
+the existing rung-zero bodies through a source-private bridge that validates the
+grant first. Timestep criteria, restart schemas, and migration payload schemas
+remain owned by their dedicated services rather than by module descriptors.
 `core::moduleDescriptors()` remains a compile-time layer/capability catalog; it
 does not drive runtime stage dispatch.
 

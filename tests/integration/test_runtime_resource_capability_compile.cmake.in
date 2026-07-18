@@ -1,0 +1,46 @@
+set(source_root "@CMAKE_CURRENT_SOURCE_DIR@")
+set(binary_root "@CMAKE_BINARY_DIR@")
+set(compiler "@CMAKE_CXX_COMPILER@")
+set(compiler_id "@CMAKE_CXX_COMPILER_ID@")
+
+function(expect_compile_failure source_name expected_pattern)
+  set(source_path "${source_root}/tests/compile_fail/${source_name}")
+  set(object_path "${binary_root}/${source_name}.o")
+  if(compiler_id STREQUAL "MSVC")
+    set(command
+      "${compiler}" /nologo /std:c++20
+      "/I${source_root}/include"
+      "/I${binary_root}/generated/include"
+      /c "${source_path}" "/Fo${object_path}")
+  else()
+    set(command
+      "${compiler}" -std=c++20
+      "-I${source_root}/include"
+      "-I${binary_root}/generated/include"
+      -c "${source_path}" -o "${object_path}")
+  endif()
+
+  execute_process(
+    COMMAND ${command}
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr)
+  file(REMOVE "${object_path}")
+
+  if(result EQUAL 0)
+    message(FATAL_ERROR
+      "forbidden runtime capability escape compiled successfully: ${source_name}")
+  endif()
+  string(CONCAT diagnostics "${stdout}\n${stderr}")
+  if(NOT diagnostics MATCHES "${expected_pattern}")
+    message(FATAL_ERROR
+      "${source_name} failed for an unexpected reason:\n${diagnostics}")
+  endif()
+endfunction()
+
+expect_compile_failure(
+  runtime_analysis_owner_context_escape.cpp
+  "stageContext")
+expect_compile_failure(
+  runtime_view_owner_context_escape.cpp
+  "ownerContext")

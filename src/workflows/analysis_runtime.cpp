@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 
 namespace cosmosim::workflows {
 namespace {
@@ -22,14 +23,25 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
 
   void audit(AnalysisStageView& view) override {
     view.requireFresh();
-    const core::StepContext& context = stageContext(view);
+    const core::StepContext& context = internal::RuntimeStageAccess::analysisContext(
+        view,
+        {{RuntimeResourceKey::kDiagnostics, RuntimeResourceAccessMode::kWrite}});
     m_stage_sequence->push_back(
         std::string(core::integrationStageName(context.stage)));
   }
 
   void executeDiagnostics(AnalysisStageView& view) override {
     view.requireFresh();
-    core::StepContext& context = stageContext(view);
+    core::StepContext& context = internal::RuntimeStageAccess::analysisContext(
+        view,
+        {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kParticleGravitySource, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kSourceMutationState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kDiagnostics, RuntimeResourceAccessMode::kWrite}});
     if (context.stage != core::IntegrationStage::kAnalysisHooks) {
       throw std::logic_error("analysis diagnostics handler received an unregistered stage");
     }

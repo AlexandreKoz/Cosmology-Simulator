@@ -29,6 +29,8 @@
 #include "cosmosim/workflows/runtime_resources.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/cartesian_gas_cell_layout.hpp"
+#include "workflows/internal/gas_cell_ownership.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "cosmosim/workflows/migration_balance_runtime.hpp"
 #include "cosmosim/workflows/output_restart_runtime.hpp"
 
@@ -178,121 +180,6 @@ struct LocalGasCellCflMetadata {
   std::vector<std::uint32_t> patch_row_by_cell;
 };
 
-[[nodiscard]] std::unordered_map<std::uint64_t, std::uint32_t> buildParticleRowById(
-    const core::SimulationState& state) {
-  std::unordered_map<std::uint64_t, std::uint32_t> row_by_id;
-  row_by_id.reserve(state.particles.size());
-  for (std::uint32_t row = 0; row < state.particles.size(); ++row) {
-    row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
-  }
-  return row_by_id;
-}
-
-[[nodiscard]] std::optional<std::uint32_t> parentParticleRowForGasCellRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
-  }
-  if (!record->parent_particle_id.has_value()) {
-    return std::nullopt;
-  }
-  const auto parent_it = particle_row_by_id.find(*record->parent_particle_id);
-  if (parent_it == particle_row_by_id.end()) {
-    return std::nullopt;
-  }
-  return parent_it->second;
-}
-
-[[nodiscard]] const core::GasCellIdentityRecord& gasCellIdentityRecordForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
-  }
-  return *record;
-}
-
-[[nodiscard]] std::uint32_t gasCellOwnerRankForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  if (cell_row >= state.cells.size()) {
-    throw std::out_of_range(std::string(caller) + ": gas-cell row is outside CellSoa");
-  }
-  const std::uint32_t patch_index = state.cells.patch_index[cell_row];
-  if (patch_index < state.patches.size()) {
-    if (patch_index >= state.patches.owning_rank.size()) {
-      throw std::runtime_error(std::string(caller) + ": patch owning-rank lane is shorter than patch table");
-    }
-    return state.patches.owning_rank[patch_index];
-  }
-
-  const auto& identity = gasCellIdentityRecordForLocalRow(state, cell_row, caller);
-  if (!identity.parent_particle_id.has_value()) {
-    throw std::runtime_error(std::string(caller) + ": parentless gas cell has no valid patch owner");
-  }
-  const auto parent_it = particle_row_by_id.find(*identity.parent_particle_id);
-  if (parent_it == particle_row_by_id.end()) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell parent_particle_id is not a local particle");
-  }
-  return state.particle_sidecar.owning_rank[parent_it->second];
-}
-
-// Particle lanes are compatibility mirrors for parent-associated gas only.  The
-// gas-cell state remains authoritative; this helper derives a deterministic
-// aggregate by stable gas_cell_id so dense-row reorders and split/merge layouts
-// cannot select an arbitrary child as the parent mirror.
-void synchronizeParentParticleCompatibilityMirrors(
-    core::SimulationState& state,
-    std::uint32_t world_rank,
-    std::string_view caller) {
-  state.requireGasCellIdentityMapCoversDenseRows(caller);
-  const auto particle_row_by_id = buildParticleRowById(state);
-  struct ParentMirrorAccumulator {
-    double mass_code = 0.0;
-    double momentum_x_code = 0.0;
-    double momentum_y_code = 0.0;
-    double momentum_z_code = 0.0;
-  };
-  std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> rows_by_parent;
-  for (std::uint32_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
-    if (gasCellOwnerRankForLocalRow(state, cell_row, particle_row_by_id, caller) != world_rank) {
-      continue;
-    }
-    const auto parent_row = parentParticleRowForGasCellRow(state, cell_row, particle_row_by_id, caller);
-    if (parent_row.has_value()) {
-      rows_by_parent[*parent_row].push_back(cell_row);
-    }
-  }
-  for (auto& [parent_row, rows] : rows_by_parent) {
-    std::sort(rows.begin(), rows.end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
-      return gasCellIdentityRecordForLocalRow(state, lhs, caller).gas_cell_id <
-          gasCellIdentityRecordForLocalRow(state, rhs, caller).gas_cell_id;
-    });
-    ParentMirrorAccumulator aggregate;
-    for (const std::uint32_t cell_row : rows) {
-      const double mass_code = state.cells.mass_code[cell_row];
-      aggregate.mass_code += mass_code;
-      aggregate.momentum_x_code += mass_code * state.gas_cells.velocity_x_peculiar[cell_row];
-      aggregate.momentum_y_code += mass_code * state.gas_cells.velocity_y_peculiar[cell_row];
-      aggregate.momentum_z_code += mass_code * state.gas_cells.velocity_z_peculiar[cell_row];
-    }
-    if (aggregate.mass_code > 0.0) {
-      state.particles.mass_code[parent_row] = aggregate.mass_code;
-      state.particles.velocity_x_peculiar[parent_row] = aggregate.momentum_x_code / aggregate.mass_code;
-      state.particles.velocity_y_peculiar[parent_row] = aggregate.momentum_y_code / aggregate.mass_code;
-      state.particles.velocity_z_peculiar[parent_row] = aggregate.momentum_z_code / aggregate.mass_code;
-    }
-  }
-}
-
 [[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -399,14 +286,14 @@ void synchronizeParentParticleCompatibilityMirrors(
     std::span<const double> cell_accel_z,
     AdaptiveTimeStepCriteriaStorage& storage) {
   state.requireGasCellIdentityMapCoversDenseRows("adaptive time-bin view construction");
-  const auto particle_row_by_id = buildParticleRowById(state);
+  const auto particle_row_by_id = internal::buildParticleRowById(state);
   constexpr std::uint32_t k_no_parent_particle = std::numeric_limits<std::uint32_t>::max();
   storage.gas_particle_index_by_cell.clear();
   storage.gas_particle_index_by_cell.reserve(state.cells.size());
   storage.gas_cell_id_by_cell.assign(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
   LocalGasCellCflMetadata cfl_metadata = buildLocalGasCellCflMetadata(state, config);
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const auto parent_row = parentParticleRowForGasCellRow(
+    const auto parent_row = internal::parentParticleRowForGasCellRow(
         state, cell_index, particle_row_by_id, "adaptive time-bin view construction");
     storage.gas_particle_index_by_cell.push_back(parent_row.value_or(k_no_parent_particle));
   }
@@ -1186,8 +1073,9 @@ void TimeCoordinator::dispatchStage(
 
   SimulationRuntimeEpochSource epoch_source(
       context.state, m_time_state.m_particle_scheduler, context.integrator_state);
+  internal::RuntimeStageResourceBundle stage_resources(context);
   AnalysisStageView audit_view(
-      RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+      RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
   m_execution_plan.executeAuditStage(context.stage, audit_view);
 
   switch (context.stage) {
@@ -1195,37 +1083,37 @@ void TimeCoordinator::dispatchStage(
     case core::IntegrationStage::kForceRefresh:
     case core::IntegrationStage::kGravityKickPost: {
       GravityStageView view(
-          RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }
     case core::IntegrationStage::kDrift: {
       DriftParticleStageView view(
-          RuntimeResourceLease(epoch_source, k_particle_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_particle_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }
     case core::IntegrationStage::kHydroUpdate: {
       HydroAmrStageView view(
-          RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }
     case core::IntegrationStage::kSourceTerms: {
       SourceMutationStageView view(
-          RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }
     case core::IntegrationStage::kAnalysisHooks: {
       AnalysisStageView view(
-          RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }
     case core::IntegrationStage::kOutputCheck: {
       OutputRestartStageView view(
-          RuntimeResourceLease(epoch_source, k_state_stage_epochs), context);
+          RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
       m_execution_plan.executeStage(context.stage, view);
       break;
     }

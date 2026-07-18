@@ -6,6 +6,7 @@
 
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 
 namespace cosmosim::workflows {
 namespace {
@@ -43,7 +44,29 @@ namespace {
   return {};
 }
 
+[[nodiscard]] std::string accessModeName(
+    RuntimeResourceAccessMode mode) {
+  switch (mode) {
+    case RuntimeResourceAccessMode::kRead: return "read";
+    case RuntimeResourceAccessMode::kWrite: return "write";
+    case RuntimeResourceAccessMode::kReadWrite: return "read_write";
+  }
+  return "unknown";
+}
+
 }  // namespace
+
+bool runtimeResourceAccessSatisfies(
+    RuntimeResourceAccess granted,
+    RuntimeResourceAccess required) noexcept {
+  if (granted.resource != required.resource) {
+    return false;
+  }
+  if (granted.mode == RuntimeResourceAccessMode::kReadWrite) {
+    return true;
+  }
+  return granted.mode == required.mode;
+}
 
 SimulationRuntimeEpochSource::SimulationRuntimeEpochSource(
     const core::SimulationState& state,
@@ -111,15 +134,38 @@ void RuntimeResourceLease::requireFresh(std::string_view view_name) const {
   Type::Type(RuntimeResourceLease lease) noexcept                        \
       : m_lease(std::move(lease)) {}                                     \
   Type::Type(                                                            \
-      RuntimeResourceLease lease, core::StepContext& context) noexcept   \
-      : m_lease(std::move(lease)), m_context(&context) {}                \
+      RuntimeResourceLease lease,                                        \
+      internal::RuntimeStageResourceBundle& resources) noexcept          \
+      : m_lease(std::move(lease)), m_resources(&resources) {}            \
   void Type::requireFresh() const { m_lease.requireFresh(Name); }         \
-  core::StepContext& Type::ownerContext() const {                         \
-    if (m_context == nullptr) {                                           \
-      throw std::logic_error(                                             \
-          "runtime resource view '" Name "' has no stage context");      \
-    }                                                                     \
-    return *m_context;                                                     \
+  std::span<const RuntimeResourceAccess>                                 \
+  Type::declaredResources() const noexcept {                             \
+    return m_declared_resources;                                         \
+  }                                                                      \
+  void Type::bindDeclaredResources(                                      \
+      std::span<const RuntimeResourceAccess> resources) noexcept {       \
+    m_declared_resources = resources;                                    \
+  }                                                                      \
+  void Type::clearDeclaredResources() noexcept {                         \
+    m_declared_resources = {};                                           \
+  }                                                                      \
+  void Type::requireDeclaredResources(                                   \
+      std::span<const RuntimeResourceAccess> required,                   \
+      std::string_view caller) const {                                   \
+    for (const RuntimeResourceAccess need : required) {                  \
+      bool satisfied = false;                                            \
+      for (const RuntimeResourceAccess grant : m_declared_resources) {   \
+        if (runtimeResourceAccessSatisfies(grant, need)) {                \
+          satisfied = true;                                              \
+          break;                                                         \
+        }                                                                \
+      }                                                                  \
+      if (!satisfied) {                                                  \
+        throw std::logic_error(                                          \
+            std::string(caller) + " requires undeclared " +             \
+            accessModeName(need.mode) + " access to runtime resource"); \
+      }                                                                  \
+    }                                                                    \
   }
 
 COSMOSIM_DEFINE_RUNTIME_STAGE_VIEW(DriftParticleStageView, "drift_particles")

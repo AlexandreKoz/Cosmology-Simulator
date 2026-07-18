@@ -617,20 +617,23 @@ of nonzero hierarchical rungs remain truthful.
 | --- | --- | --- |
 | A: workflow reduction | PASS | 8,008 -> 657 lines; largest runtime 1,834; structural CTest |
 | B: dependency direction | PASS | extended dependency CTest and 17-test MPI matrix |
-| C: resource restriction | PASS | typed friend-gated views; stale/reorder unit tests; no production legacy callback |
-| D: descriptor registration | PASS | real-workflow probe plus descriptor-omission unit test |
+| C: resource restriction | PASS after follow-up | public owner-context escape removed; task-scoped descriptor grants; negative compile tests |
+| D: descriptor registration | PASS for stage composition | real-workflow probe, descriptor omission, typed-view access allowlists, and task-scoped grants |
 | E: behavior preservation | PASS | CPU 129/129, HDF5 13/13, MPI 17/17, sanitizer 13/13 |
 | F: no scope escape | PASS | rung-zero guard and adversarial source/diff search |
 | G: maintainability evidence | PASS | owner/view/dependency/line-count/test evidence in this log |
 
 ## Unresolved risks and limitations
 
-- The owner-private view bridge still reaches the existing `StepContext` so moved
-  numerical bodies can preserve exact rung-zero behavior. Public tasks cannot use
-  that bridge, and the trusted owner set is explicit, but future lane-level
-  hardening can replace each bridge with finer spans without changing composition.
-- Runtime resource declarations are validated for descriptor/task/view agreement;
-  they do not dynamically trace every memory access inside a trusted owner.
+- Follow-up closure removed `StepContext` and owner-context recovery from every
+  public stage-view and owner interface. Each built-in source-private access now
+  validates the current task's descriptor grant before entering the existing
+  rung-zero body. Future lane-level kernel capabilities can replace this trusted
+  internal bridge without changing composition.
+- Runtime resource declarations are executable task grants and typed-view
+  allowlists; they do not dynamically trace every memory access inside a trusted
+  built-in owner. Timestep criteria, restart payloads, and migration payloads
+  remain dedicated-service contracts rather than descriptor extension points.
 - The worktree contains a large pre-existing hardening patch and generated/untracked
   outputs. Campaign A used only file-scoped edits and no reset, checkout, stash, or
   cleanup, so those user-owned changes remain intact.
@@ -642,3 +645,13 @@ of nonzero hierarchical rungs remain truthful.
 None for Campaign A. Later work must remain separate: hierarchical KDK,
 distributed IC ingestion, hydro wake-up, elastic restart, asynchronous output, and
 new physics were neither implemented nor claimed here.
+
+
+## 2026-07-17 resource-capability follow-up
+
+The adversarial Campaign A review demonstrated that a derived owner could use a
+protected `stageContext()` helper to recover mutable global state. The follow-up
+repair removes that API, makes the runtime resource grant task-scoped, validates
+view-specific access modes, adds negative compile tests, and centralizes duplicate
+gas-cell ownership helpers. See
+`docs/repair/runtime_resource_capability_closeout.md`.

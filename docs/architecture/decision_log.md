@@ -926,3 +926,23 @@ checkpoint cadence payload was not consumed when resuming the workflow.
 - `src/io/restart_checkpoint.cpp`
 - `src/workflows/reference_workflow.cpp`
 - `tests/integration/test_reference_workflow_end_to_end.cpp`
+
+
+## 2026-07-17 — Task-scoped runtime resource grants replace public owner-context escape
+
+**Decision.** Public workflow stage views contain no `StepContext` pointer and
+owner interfaces expose no `stageContext()` helper. `RuntimeExecutionPlan` binds
+the frozen task declaration's resource list for one invocation, clears it with
+RAII, and the source-private built-in access bridge validates required keys and
+modes before entering existing rung-zero code. Typed-view allowlists reject
+out-of-scope declarations at registry registration.
+
+**Rationale.** Campaign A decomposition created organizational owners but left a
+protected path by which an external owner subclass could mutate unrelated state.
+The new boundary prevents public/custom modules from recovering global mutable
+state while preserving current numerical order inside trusted built-in owners.
+
+**Consequences.** Descriptor resource lists are executable stage grants rather
+than documentation-only metadata. They do not dynamically instrument trusted
+built-in memory accesses, and descriptor scope remains stage composition—not
+restart-schema, migration-schema, or timestep-criteria registration.

@@ -14,6 +14,7 @@
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "cosmosim/workflows/source_runtime.hpp"
 #include "cosmosim/workflows/output_restart_runtime.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 
 namespace cosmosim::workflows::internal {
 
@@ -29,7 +30,11 @@ class DriftRuntime final {
 
   void execute(DriftParticleStageView& view) const {
     view.requireFresh();
-    core::StepContext& context = view.ownerContext();
+    core::StepContext& context = RuntimeStageAccess::driftContext(
+        view,
+        {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kDrift) {
       throw std::logic_error("drift task received a non-drift stage");
     }
@@ -101,7 +106,12 @@ namespace {
       .ordinal = 100,
       .view_kind = RuntimeStageViewKind::kAnalysis,
       .resources = {read(RuntimeResourceKey::kParticlePosition),
+                    read(RuntimeResourceKey::kParticleVelocity),
+                    read(RuntimeResourceKey::kParticleGravitySource),
                     read(RuntimeResourceKey::kHydroPrimitiveState),
+                    read(RuntimeResourceKey::kSourceMutationState),
+                    read(RuntimeResourceKey::kMigrationOwnership),
+                    read(RuntimeResourceKey::kIntegratorTruth),
                     write(RuntimeResourceKey::kDiagnostics)},
   });
 
@@ -192,7 +202,12 @@ namespace {
         .stage = stage,
         .ordinal = 0,
         .view_kind = RuntimeStageViewKind::kGravity,
-        .resources = {read(RuntimeResourceKey::kParticleGravitySource),
+        .resources = {read(RuntimeResourceKey::kParticlePosition),
+                      readWrite(RuntimeResourceKey::kParticleVelocity),
+                      read(RuntimeResourceKey::kParticleGravitySource),
+                      read(RuntimeResourceKey::kHydroConservedState),
+                      read(RuntimeResourceKey::kMigrationOwnership),
+                      read(RuntimeResourceKey::kSchedulerTruth),
                       write(RuntimeResourceKey::kGravityAcceleration),
                       readWrite(RuntimeResourceKey::kIntegratorTruth)},
     });
@@ -242,10 +257,13 @@ namespace {
           .stage = core::IntegrationStage::kHydroUpdate,
           .ordinal = 0,
           .view_kind = RuntimeStageViewKind::kHydroAmr,
-          .resources = {readWrite(RuntimeResourceKey::kHydroConservedState),
-                        write(RuntimeResourceKey::kHydroPrimitiveState),
+          .resources = {readWrite(RuntimeResourceKey::kParticleVelocity),
+                        readWrite(RuntimeResourceKey::kHydroConservedState),
+                        readWrite(RuntimeResourceKey::kHydroPrimitiveState),
                         readWrite(RuntimeResourceKey::kAmrPatchState),
-                        read(RuntimeResourceKey::kGravityAcceleration)},
+                        read(RuntimeResourceKey::kGravityAcceleration),
+                        read(RuntimeResourceKey::kMigrationOwnership),
+                        read(RuntimeResourceKey::kIntegratorTruth)},
       }},
       .factory = [inputs, assembly](const RuntimeModuleFactoryContext&) {
         if (!assembly->gravity) {
@@ -284,7 +302,10 @@ namespace {
           .view_kind = RuntimeStageViewKind::kSourceMutation,
           .resources = {readWrite(RuntimeResourceKey::kSourceMutationState),
                         readWrite(RuntimeResourceKey::kParticlePosition),
-                        readWrite(RuntimeResourceKey::kHydroConservedState)},
+                        readWrite(RuntimeResourceKey::kParticleVelocity),
+                        readWrite(RuntimeResourceKey::kHydroConservedState),
+                        readWrite(RuntimeResourceKey::kMigrationOwnership),
+                        read(RuntimeResourceKey::kIntegratorTruth)},
       }},
       .factory = [&config = inputs.config, &units = inputs.units,
                   world_rank = inputs.world_rank](const RuntimeModuleFactoryContext&) {
@@ -318,7 +339,9 @@ namespace {
           .ordinal = 0,
           .view_kind = RuntimeStageViewKind::kOutputRestart,
           .resources = {read(RuntimeResourceKey::kParticlePosition),
+                        read(RuntimeResourceKey::kParticleVelocity),
                         read(RuntimeResourceKey::kHydroConservedState),
+                        read(RuntimeResourceKey::kSourceMutationState),
                         read(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kSchedulerTruth),
                         read(RuntimeResourceKey::kIntegratorTruth),

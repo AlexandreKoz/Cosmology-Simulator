@@ -26,7 +26,9 @@
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/particle_ghost_runtime.hpp"
+#include "workflows/internal/gas_cell_ownership.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -292,35 +294,6 @@ void maybeInitializeParticleSofteningFromSpeciesPolicy(
 }
 #endif
 
-
-[[nodiscard]] std::unordered_map<std::uint64_t, std::uint32_t> buildParticleRowById(
-    const core::SimulationState& state) {
-  std::unordered_map<std::uint64_t, std::uint32_t> row_by_id;
-  row_by_id.reserve(state.particles.size());
-  for (std::uint32_t row = 0; row < state.particles.size(); ++row) {
-    row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
-  }
-  return row_by_id;
-}
-
-[[nodiscard]] std::optional<std::uint32_t> parentParticleRowForGasCellRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
-  }
-  if (!record->parent_particle_id.has_value()) {
-    return std::nullopt;
-  }
-  const auto parent_it = particle_row_by_id.find(*record->parent_particle_id);
-  if (parent_it == particle_row_by_id.end()) {
-    return std::nullopt;
-  }
-  return parent_it->second;
-}
 
 class GravityRuntimeImpl final : public GravityRuntime {
  public:
@@ -679,7 +652,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
   void execute(GravityStageView& view) override {
     view.requireFresh();
-    core::StepContext& context = stageContext(view);
+    core::StepContext& context = internal::RuntimeStageAccess::gravityContext(
+        view,
+        {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticleGravitySource, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kSchedulerTruth, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kWrite},
+         {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kReadWrite}});
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
         context.stage == core::IntegrationStage::kGravityKickPost;
     const parallel::MpiContext& mpi_context = m_services.mpi_context;
@@ -1157,9 +1139,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("gravity callback gas-cell acceleration sync");
-    const auto particle_row_by_id = buildParticleRowById(context.state);
+    const auto particle_row_by_id = internal::buildParticleRowById(context.state);
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::optional<std::uint32_t> gas_particle_index = parentParticleRowForGasCellRow(
+      const std::optional<std::uint32_t> gas_particle_index = internal::parentParticleRowForGasCellRow(
           context.state,
           static_cast<std::uint32_t>(cell_index),
           particle_row_by_id,

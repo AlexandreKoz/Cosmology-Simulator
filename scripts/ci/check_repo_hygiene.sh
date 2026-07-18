@@ -21,6 +21,36 @@ if (( ${#bad_root_entries[@]} > 0 )); then
   exit 1
 fi
 
+echo "[hygiene] checking recursive filename and artifact safety"
+
+bad_nested_entries=()
+while IFS= read -r entry; do
+  name="${entry##*/}"
+  if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+     [[ "$name" == *Zone.Identifier* ]] ||
+     [[ "$name" == *#Uf03aZone.Identifier* ]]; then
+    bad_nested_entries+=("${entry#./}")
+  fi
+done < <(find . \
+  -path './.git' -prune -o \
+  -path './build' -prune -o \
+  -path './build-*' -prune -o \
+  -path './cmake-build-*' -prune -o \
+  -type f -print)
+
+if (( ${#bad_nested_entries[@]} > 0 )); then
+  echo "[hygiene] ERROR: nested unsafe/ADS filenames detected:" >&2
+  printf '  - %s\n' "${bad_nested_entries[@]}" >&2
+  exit 1
+fi
+
+for generated_dir in integration_outputs validation_outputs test_outputs output; do
+  if [[ -e "$generated_dir" ]]; then
+    echo "[hygiene] ERROR: generated runtime directory '$generated_dir' is present in the source tree" >&2
+    exit 1
+  fi
+done
+
 echo "[hygiene] checking required preset names"
 required_presets=(
   "cpu-only-debug"

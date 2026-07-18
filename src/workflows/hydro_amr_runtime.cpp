@@ -25,7 +25,9 @@
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
+#include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/cartesian_gas_cell_layout.hpp"
+#include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/amr_migration_payload.hpp"
 #include "workflows/internal/particle_ghost_runtime.hpp"
 
@@ -39,121 +41,6 @@ namespace {
 constexpr double k_gamma_adiabatic = 5.0 / 3.0;
 constexpr double k_pressure_floor = 1.0e-10;
 constexpr double k_density_floor = 1.0e-10;
-[[nodiscard]] std::unordered_map<std::uint64_t, std::uint32_t> buildParticleRowById(
-    const core::SimulationState& state) {
-  std::unordered_map<std::uint64_t, std::uint32_t> row_by_id;
-  row_by_id.reserve(state.particles.size());
-  for (std::uint32_t row = 0; row < state.particles.size(); ++row) {
-    row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
-  }
-  return row_by_id;
-}
-
-[[nodiscard]] std::optional<std::uint32_t> parentParticleRowForGasCellRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
-  }
-  if (!record->parent_particle_id.has_value()) {
-    return std::nullopt;
-  }
-  const auto parent_it = particle_row_by_id.find(*record->parent_particle_id);
-  if (parent_it == particle_row_by_id.end()) {
-    return std::nullopt;
-  }
-  return parent_it->second;
-}
-
-[[nodiscard]] const core::GasCellIdentityRecord& gasCellIdentityRecordForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    std::string_view caller) {
-  const auto* record = state.gas_cell_identity.findByLocalRow(cell_row);
-  if (record == nullptr) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing a dense local row");
-  }
-  return *record;
-}
-
-[[nodiscard]] std::uint32_t gasCellOwnerRankForLocalRow(
-    const core::SimulationState& state,
-    std::uint32_t cell_row,
-    const std::unordered_map<std::uint64_t, std::uint32_t>& particle_row_by_id,
-    std::string_view caller) {
-  if (cell_row >= state.cells.size()) {
-    throw std::out_of_range(std::string(caller) + ": gas-cell row is outside CellSoa");
-  }
-  const std::uint32_t patch_index = state.cells.patch_index[cell_row];
-  if (patch_index < state.patches.size()) {
-    if (patch_index >= state.patches.owning_rank.size()) {
-      throw std::runtime_error(std::string(caller) + ": patch owning-rank lane is shorter than patch table");
-    }
-    return state.patches.owning_rank[patch_index];
-  }
-
-  const auto& identity = gasCellIdentityRecordForLocalRow(state, cell_row, caller);
-  if (!identity.parent_particle_id.has_value()) {
-    throw std::runtime_error(std::string(caller) + ": parentless gas cell has no valid patch owner");
-  }
-  const auto parent_it = particle_row_by_id.find(*identity.parent_particle_id);
-  if (parent_it == particle_row_by_id.end()) {
-    throw std::runtime_error(std::string(caller) + ": gas-cell parent_particle_id is not a local particle");
-  }
-  return state.particle_sidecar.owning_rank[parent_it->second];
-}
-
-// Particle lanes are compatibility mirrors for parent-associated gas only.  The
-// gas-cell state remains authoritative; this helper derives a deterministic
-// aggregate by stable gas_cell_id so dense-row reorders and split/merge layouts
-// cannot select an arbitrary child as the parent mirror.
-void synchronizeParentParticleCompatibilityMirrors(
-    core::SimulationState& state,
-    std::uint32_t world_rank,
-    std::string_view caller) {
-  state.requireGasCellIdentityMapCoversDenseRows(caller);
-  const auto particle_row_by_id = buildParticleRowById(state);
-  struct ParentMirrorAccumulator {
-    double mass_code = 0.0;
-    double momentum_x_code = 0.0;
-    double momentum_y_code = 0.0;
-    double momentum_z_code = 0.0;
-  };
-  std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> rows_by_parent;
-  for (std::uint32_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
-    if (gasCellOwnerRankForLocalRow(state, cell_row, particle_row_by_id, caller) != world_rank) {
-      continue;
-    }
-    const auto parent_row = parentParticleRowForGasCellRow(state, cell_row, particle_row_by_id, caller);
-    if (parent_row.has_value()) {
-      rows_by_parent[*parent_row].push_back(cell_row);
-    }
-  }
-  for (auto& [parent_row, rows] : rows_by_parent) {
-    std::sort(rows.begin(), rows.end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
-      return gasCellIdentityRecordForLocalRow(state, lhs, caller).gas_cell_id <
-          gasCellIdentityRecordForLocalRow(state, rhs, caller).gas_cell_id;
-    });
-    ParentMirrorAccumulator aggregate;
-    for (const std::uint32_t cell_row : rows) {
-      const double mass_code = state.cells.mass_code[cell_row];
-      aggregate.mass_code += mass_code;
-      aggregate.momentum_x_code += mass_code * state.gas_cells.velocity_x_peculiar[cell_row];
-      aggregate.momentum_y_code += mass_code * state.gas_cells.velocity_y_peculiar[cell_row];
-      aggregate.momentum_z_code += mass_code * state.gas_cells.velocity_z_peculiar[cell_row];
-    }
-    if (aggregate.mass_code > 0.0) {
-      state.particles.mass_code[parent_row] = aggregate.mass_code;
-      state.particles.velocity_x_peculiar[parent_row] = aggregate.momentum_x_code / aggregate.mass_code;
-      state.particles.velocity_y_peculiar[parent_row] = aggregate.momentum_y_code / aggregate.mass_code;
-      state.particles.velocity_z_peculiar[parent_row] = aggregate.momentum_z_code / aggregate.mass_code;
-    }
-  }
-}
-
 [[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -318,14 +205,14 @@ struct HydroBoundaryCellAdvertisement {
     std::uint32_t world_rank) {
   HydroGhostConservedSnapshot snapshot;
   state.requireGasCellIdentityMapCoversDenseRows("snapshotHydroGhostConservedCells");
-  const auto particle_row_by_id = buildParticleRowById(state);
+  const auto particle_row_by_id = internal::buildParticleRowById(state);
   snapshot.cell_indices.reserve(state.cells.size());
   snapshot.gas_cell_ids.reserve(state.cells.size());
   snapshot.parent_particle_ids.reserve(state.cells.size());
   snapshot.owner_ranks.reserve(state.cells.size());
   snapshot.conserved_state.reserve(state.cells.size());
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
+    const std::uint32_t owner_rank = internal::gasCellOwnerRankForLocalRow(
         state,
         cell_index,
         particle_row_by_id,
@@ -333,7 +220,7 @@ struct HydroBoundaryCellAdvertisement {
     if (owner_rank == world_rank) {
       continue;
     }
-    const core::GasCellIdentityRecord& identity = gasCellIdentityRecordForLocalRow(
+    const core::GasCellIdentityRecord& identity = internal::gasCellIdentityRecordForLocalRow(
         state,
         cell_index,
         "snapshotHydroGhostConservedCells");
@@ -461,7 +348,15 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 
   void execute(HydroAmrStageView& view) override {
     view.requireFresh();
-    core::StepContext& context = stageContext(view);
+    core::StepContext& context = internal::RuntimeStageAccess::hydroAmrContext(
+        view,
+        {{RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kAmrPatchState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
       throw std::logic_error("hydro handler received an unregistered stage");
     }
@@ -497,7 +392,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
-    const auto particle_row_by_id = buildParticleRowById(context.state);
+    const auto particle_row_by_id = internal::buildParticleRowById(context.state);
     std::vector<std::uint8_t> parent_mirror_updated(context.state.particles.size(), 0U);
 
     if (m_mpi_context.isEnabled()) {
@@ -651,7 +546,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         throw std::runtime_error("hydro conservative flux correction targeted an unknown local gas_cell_id");
       }
       const std::uint32_t cell_index = *correction_row;
-      const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
+      const std::uint32_t owner_rank = internal::gasCellOwnerRankForLocalRow(
           context.state,
           cell_index,
           particle_row_by_id,
@@ -702,7 +597,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     }
 
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::uint32_t gas_cell_owner_rank = gasCellOwnerRankForLocalRow(
+      const std::uint32_t gas_cell_owner_rank = internal::gasCellOwnerRankForLocalRow(
           context.state,
           static_cast<std::uint32_t>(cell_index),
           particle_row_by_id,
@@ -726,7 +621,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       context.state.gas_cells.velocity_z_peculiar[cell_index] = primitive.vel_z_peculiar;
     }
 
-    synchronizeParentParticleCompatibilityMirrors(
+    internal::synchronizeParentParticleCompatibilityMirrors(
         context.state, world_rank, "hydro callback parent compatibility mirror");
   }
 
@@ -783,7 +678,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     records.reserve(state.cells.size());
     const std::uint32_t world_rank = static_cast<std::uint32_t>(m_mpi_context.worldRank());
     for (std::uint32_t dense_row = 0; dense_row < state.cells.size(); ++dense_row) {
-      if (gasCellOwnerRankForLocalRow(state, dense_row, particle_row_by_id, "hydro boundary advertisement") !=
+      if (internal::gasCellOwnerRankForLocalRow(state, dense_row, particle_row_by_id, "hydro boundary advertisement") !=
           world_rank) {
         continue;
       }
@@ -794,7 +689,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       if (!isBoundaryGeometryRow(geometry_row)) {
         continue;
       }
-      const core::GasCellIdentityRecord& identity = gasCellIdentityRecordForLocalRow(
+      const core::GasCellIdentityRecord& identity = internal::gasCellIdentityRecordForLocalRow(
           state,
           dense_row,
           "hydro boundary advertisement");
@@ -899,12 +794,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       }
       const std::uint32_t owner_dense_row = m_dense_row_by_geometry_row[face.owner_cell];
       const std::uint32_t neighbor_dense_row = m_dense_row_by_geometry_row[face.neighbor_cell];
-      const std::uint32_t owner_rank = gasCellOwnerRankForLocalRow(
+      const std::uint32_t owner_rank = internal::gasCellOwnerRankForLocalRow(
           context.state,
           owner_dense_row,
           particle_row_by_id,
           "hydro internal remote boundary discovery");
-      const std::uint32_t neighbor_rank = gasCellOwnerRankForLocalRow(
+      const std::uint32_t neighbor_rank = internal::gasCellOwnerRankForLocalRow(
           context.state,
           neighbor_dense_row,
           particle_row_by_id,
@@ -916,11 +811,11 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         m_remote_non_authority_faces.insert(face_index);
         continue;
       }
-      const core::GasCellIdentityRecord& owner_identity = gasCellIdentityRecordForLocalRow(
+      const core::GasCellIdentityRecord& owner_identity = internal::gasCellIdentityRecordForLocalRow(
           context.state,
           owner_dense_row,
           "hydro internal remote boundary discovery");
-      const core::GasCellIdentityRecord& remote_identity = gasCellIdentityRecordForLocalRow(
+      const core::GasCellIdentityRecord& remote_identity = internal::gasCellIdentityRecordForLocalRow(
           context.state,
           neighbor_dense_row,
           "hydro internal remote boundary discovery");
@@ -973,7 +868,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         ghost.decomposition_epoch = 0U;
       }
       const std::uint32_t owner_dense_row = m_dense_row_by_geometry_row.at(ghost.owner_real_cell);
-      if (gasCellOwnerRankForLocalRow(
+      if (internal::gasCellOwnerRankForLocalRow(
               context.state,
               owner_dense_row,
               particle_row_by_id,
@@ -993,7 +888,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       if (!remote.has_value()) {
         continue;
       }
-      const core::GasCellIdentityRecord& local_identity = gasCellIdentityRecordForLocalRow(
+      const core::GasCellIdentityRecord& local_identity = internal::gasCellIdentityRecordForLocalRow(
           context.state,
           owner_dense_row,
           "hydro remote boundary discovery");
@@ -1034,7 +929,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       if (!row.has_value()) {
         throw std::runtime_error("hydro ghost request targeted an unknown owner gas_cell_id");
       }
-      if (gasCellOwnerRankForLocalRow(
+      if (internal::gasCellOwnerRankForLocalRow(
               context.state,
               *row,
               particle_row_by_id,
@@ -1360,7 +1255,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           sources,
           amr_options);
     }
-    synchronizeParentParticleCompatibilityMirrors(
+    internal::synchronizeParentParticleCompatibilityMirrors(
         context.state,
         m_current_world_rank,
         "production AMR hydro parent compatibility mirror");
