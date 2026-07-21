@@ -68,6 +68,11 @@ The concrete run directory is:
 
 - `mode` (`cosmo_cube`, `zoom_in`, `isolated_galaxy`, `isolated_cluster`)
 - `ic_file`
+- `ic_convention` (`generated`, `chui_canonical_v1`, `gadget_arepo_bridge_v1`, `manifest_v1`)
+- `ic_manifest_file` (required for `manifest_v1`)
+- `ic_chunk_particle_count` (positive bounded HDF5 read chunk; default `65536`)
+- `ic_staging_particle_count` (positive bounded MPI routing/validation staging limit; default `65536`)
+- `ic_part_type2_policy`, `ic_part_type3_policy` (`reject`, `dark_matter`, `star`, `black_hole`, `tracer`)
 - `zoom_high_res_region` (bool)
 - `zoom_region_file` (required when `zoom_high_res_region=true`)
 - `zoom_long_range_strategy` (`disabled`, `global_coarse_plus_focused_highres_correction`)
@@ -82,6 +87,49 @@ The concrete run directory is:
     only by the bounded root gather/solve/scatter compatibility route governed
     by `parallel.isolated_pm_root_workspace_limit_bytes`; it is not a scalable
     distributed-open-PM claim.
+
+### Initial-condition convention contract
+
+External initial conditions are never selected by filename alone. The typed
+`mode.ic_convention` value owns the scientific interpretation:
+
+- `generated`: requires `mode.ic_file=generated` and uses the in-repository generator.
+- `chui_canonical_v1`: reads an IC already expressed in the canonical CHUÍ v1 units,
+  frame, velocity, species, and provenance contract.
+- `gadget_arepo_bridge_v1`: applies the explicitly versioned bridge convention
+  (kpc, Msun, km/s, comoving coordinates, physical peculiar velocities, zero
+  h/scale-factor exponents unless a supplied manifest states otherwise).
+- `manifest_v1`: loads the strict versioned audit manifest named by
+  `mode.ic_manifest_file`; relative source paths are resolved from the manifest.
+
+An external `mode.ic_file` without an explicitly written `mode.ic_convention`
+fails validation. This prevents the runtime from guessing h scaling, coordinate
+frame, scale-factor powers, velocity convention, or species policy. The normalized
+configuration records the resolved convention, manifest path, chunk/staging limits,
+and Type2/Type3 policies.
+
+Example direct bridge import:
+
+```ini
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/cube.0.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_chunk_particle_count = 65536
+ic_staging_particle_count = 65536
+ic_part_type2_policy = reject
+ic_part_type3_policy = reject
+```
+
+Example manifest-driven import:
+
+```ini
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/cube.0.hdf5
+ic_convention = manifest_v1
+ic_manifest_file = ../ics/cube.ic_manifest.json
+```
 
 ## `[cosmology]`
 

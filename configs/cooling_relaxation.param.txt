@@ -1,6 +1,7 @@
 [mode]
 mode = isolated_galaxy
 ic_file = ics.hdf5
+ic_convention = gadget_arepo_bridge_v1
 hydro_boundary = open
 gravity_boundary = isolated_monopole
 

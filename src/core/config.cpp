@@ -361,6 +361,50 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
   throw ConfigError("key 'mode.mode': invalid mode '" + value + "'");
 }
 
+[[nodiscard]] InitialConditionConvention parseInitialConditionConvention(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "generated") {
+    return InitialConditionConvention::kGenerated;
+  }
+  if (lower == "chui_canonical_v1") {
+    return InitialConditionConvention::kChuiCanonicalV1;
+  }
+  if (lower == "gadget_arepo_bridge_v1") {
+    return InitialConditionConvention::kGadgetArepoBridgeV1;
+  }
+  if (lower == "manifest_v1") {
+    return InitialConditionConvention::kManifestV1;
+  }
+  throw ConfigError(
+      "key 'mode.ic_convention': invalid value '" + value +
+      "' (supported: generated, chui_canonical_v1, gadget_arepo_bridge_v1, manifest_v1)");
+}
+
+[[nodiscard]] InitialConditionSpeciesPolicy parseInitialConditionSpeciesPolicy(
+    const std::string& value,
+    const std::string& key) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "reject") {
+    return InitialConditionSpeciesPolicy::kReject;
+  }
+  if (lower == "dark_matter") {
+    return InitialConditionSpeciesPolicy::kDarkMatter;
+  }
+  if (lower == "star") {
+    return InitialConditionSpeciesPolicy::kStar;
+  }
+  if (lower == "black_hole") {
+    return InitialConditionSpeciesPolicy::kBlackHole;
+  }
+  if (lower == "tracer") {
+    return InitialConditionSpeciesPolicy::kTracer;
+  }
+  throw ConfigError(
+      "key '" + key + "': invalid value '" + value +
+      "' (supported: reject, dark_matter, star, black_hole, tracer)");
+}
+
 [[nodiscard]] GravitySolver parseGravitySolver(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "treepm") {
@@ -697,7 +741,13 @@ struct ConfigKeySpec {
       {"units.velocity_unit", "km_s"},
       {"units.coordinate_frame", "comoving"},
       {"mode.mode", "zoom_in"},
-      {"mode.ic_file", "ics.hdf5"},
+      {"mode.ic_file", "generated"},
+      {"mode.ic_convention", "generated"},
+      {"mode.ic_manifest_file", ""},
+      {"mode.ic_chunk_particle_count", "65536"},
+      {"mode.ic_staging_particle_count", "65536"},
+      {"mode.ic_part_type2_policy", "reject"},
+      {"mode.ic_part_type3_policy", "reject"},
       {"mode.zoom_high_res_region", "false"},
       {"mode.zoom_region_file", ""},
       {"mode.zoom_long_range_strategy", "disabled"},
@@ -1192,6 +1242,32 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
     throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
   }
+  if (config.mode.ic_chunk_particle_count == 0U) {
+    throw ConfigError("mode.ic_chunk_particle_count must be > 0");
+  }
+  if (config.mode.ic_staging_particle_count == 0U) {
+    throw ConfigError("mode.ic_staging_particle_count must be > 0");
+  }
+  if (config.mode.ic_convention == InitialConditionConvention::kGenerated) {
+    if (config.mode.ic_file != "generated") {
+      throw ConfigError(
+          "mode.ic_convention=generated requires mode.ic_file=generated; external HDF5 input must select an explicit versioned convention");
+    }
+    if (!config.mode.ic_manifest_file.empty()) {
+      throw ConfigError(
+          "mode.ic_manifest_file must be empty when mode.ic_convention=generated");
+    }
+  } else {
+    if (config.mode.ic_file.empty() || config.mode.ic_file == "generated") {
+      throw ConfigError(
+          "external initial-condition conventions require a non-generated mode.ic_file path");
+    }
+    if (config.mode.ic_convention == InitialConditionConvention::kManifestV1 &&
+        config.mode.ic_manifest_file.empty()) {
+      throw ConfigError(
+          "mode.ic_convention=manifest_v1 requires mode.ic_manifest_file");
+    }
+  }
   if (config.mode.zoom_region_radius_mpc_comoving < 0.0) {
     throw ConfigError("mode.zoom_region_radius must be >= 0");
   }
@@ -1268,6 +1344,22 @@ void validateConfig(const SimulationConfig& config) {
   stream << "\n[mode]\n";
   stream << "mode = " << modeToLowerString(frozen.config.mode.mode) << '\n';
   stream << "ic_file = " << frozen.config.mode.ic_file << '\n';
+  stream << "ic_convention = "
+         << initialConditionConventionToString(frozen.config.mode.ic_convention)
+         << '\n';
+  stream << "ic_manifest_file = " << frozen.config.mode.ic_manifest_file << '\n';
+  stream << "ic_chunk_particle_count = "
+         << frozen.config.mode.ic_chunk_particle_count << '\n';
+  stream << "ic_staging_particle_count = "
+         << frozen.config.mode.ic_staging_particle_count << '\n';
+  stream << "ic_part_type2_policy = "
+         << initialConditionSpeciesPolicyToString(
+                frozen.config.mode.ic_part_type2_policy)
+         << '\n';
+  stream << "ic_part_type3_policy = "
+         << initialConditionSpeciesPolicyToString(
+                frozen.config.mode.ic_part_type3_policy)
+         << '\n';
   stream << "zoom_high_res_region = " << (frozen.config.mode.zoom_high_res_region ? "true" : "false")
          << '\n';
   stream << "zoom_region_file = " << frozen.config.mode.zoom_region_file << '\n';
@@ -1525,6 +1617,40 @@ void validateConfig(const SimulationConfig& config) {
 
   frozen.config.mode.mode = parseMode(requireString(entries, consumed, "mode.mode", defaultFor("mode.mode")));
   frozen.config.mode.ic_file = requireString(entries, consumed, "mode.ic_file", defaultFor("mode.ic_file"));
+  const bool has_explicit_ic_convention = entries.contains("mode.ic_convention");
+  frozen.config.mode.ic_convention = parseInitialConditionConvention(
+      requireString(
+          entries, consumed, "mode.ic_convention",
+          defaultFor("mode.ic_convention")));
+  frozen.config.mode.ic_manifest_file = requireString(
+      entries, consumed, "mode.ic_manifest_file",
+      defaultFor("mode.ic_manifest_file"));
+  frozen.config.mode.ic_chunk_particle_count = parseNumber<std::uint64_t>(
+      requireString(
+          entries, consumed, "mode.ic_chunk_particle_count",
+          defaultFor("mode.ic_chunk_particle_count")),
+      "mode.ic_chunk_particle_count");
+  frozen.config.mode.ic_staging_particle_count = parseNumber<std::uint64_t>(
+      requireString(
+          entries, consumed, "mode.ic_staging_particle_count",
+          defaultFor("mode.ic_staging_particle_count")),
+      "mode.ic_staging_particle_count");
+  frozen.config.mode.ic_part_type2_policy =
+      parseInitialConditionSpeciesPolicy(
+          requireString(
+              entries, consumed, "mode.ic_part_type2_policy",
+              defaultFor("mode.ic_part_type2_policy")),
+          "mode.ic_part_type2_policy");
+  frozen.config.mode.ic_part_type3_policy =
+      parseInitialConditionSpeciesPolicy(
+          requireString(
+              entries, consumed, "mode.ic_part_type3_policy",
+              defaultFor("mode.ic_part_type3_policy")),
+          "mode.ic_part_type3_policy");
+  if (!has_explicit_ic_convention && frozen.config.mode.ic_file != "generated") {
+    throw ConfigError(
+        "mode.ic_convention is required for external initial conditions; the runtime will not guess unit, frame, scale-factor, velocity, or species conventions from mode.ic_file");
+  }
   frozen.config.mode.zoom_high_res_region = parseBool(
       requireString(entries, consumed, "mode.zoom_high_res_region", defaultFor("mode.zoom_high_res_region")),
       "mode.zoom_high_res_region");
@@ -2303,6 +2429,40 @@ std::string coordinateFrameToString(CoordinateFrame frame) {
       return "physical";
   }
   throw ConfigError("unhandled CoordinateFrame enum value during serialization");
+}
+
+std::string initialConditionConventionToString(
+    InitialConditionConvention convention) {
+  switch (convention) {
+    case InitialConditionConvention::kGenerated:
+      return "generated";
+    case InitialConditionConvention::kChuiCanonicalV1:
+      return "chui_canonical_v1";
+    case InitialConditionConvention::kGadgetArepoBridgeV1:
+      return "gadget_arepo_bridge_v1";
+    case InitialConditionConvention::kManifestV1:
+      return "manifest_v1";
+  }
+  throw ConfigError(
+      "unhandled InitialConditionConvention enum value during serialization");
+}
+
+std::string initialConditionSpeciesPolicyToString(
+    InitialConditionSpeciesPolicy policy) {
+  switch (policy) {
+    case InitialConditionSpeciesPolicy::kReject:
+      return "reject";
+    case InitialConditionSpeciesPolicy::kDarkMatter:
+      return "dark_matter";
+    case InitialConditionSpeciesPolicy::kStar:
+      return "star";
+    case InitialConditionSpeciesPolicy::kBlackHole:
+      return "black_hole";
+    case InitialConditionSpeciesPolicy::kTracer:
+      return "tracer";
+  }
+  throw ConfigError(
+      "unhandled InitialConditionSpeciesPolicy enum value during serialization");
 }
 
 std::string modeHydroBoundaryToString(ModeHydroBoundary boundary) {

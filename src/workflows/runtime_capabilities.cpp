@@ -73,10 +73,30 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"production_hierarchical_local_timestep",
        RuntimeCapabilityStatus::kUnsupported,
        "Per-element drift/kick epochs are not yet complete in the production KDK path."},
-      {"canonical_external_ic_import", RuntimeCapabilityStatus::kProvisional,
-       "Versioned IcManifest conversion/validation and a fail-closed single-file bridge exist; canonical conversion tooling and typed manifest-file config are not complete."},
-      {"distributed_ic_import", RuntimeCapabilityStatus::kUnsupported,
-       "Every rank currently enters the same single-file import path."},
+      {"canonical_external_ic_import",
+#if COSMOSIM_ENABLE_HDF5
+       RuntimeCapabilityStatus::kSupported,
+       "Typed generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, strict audit-manifest v2 validation, real HDF5 schema inspection, multifile import, and the streaming canonical converter are available."},
+#else
+       RuntimeCapabilityStatus::kUnsupported,
+       "This build has COSMOSIM_ENABLE_HDF5=OFF, so external HDF5 IC import and canonical conversion are unavailable."},
+#endif
+      {"multifile_external_ic_import",
+#if COSMOSIM_ENABLE_HDF5
+       RuntimeCapabilityStatus::kSupported,
+       "NumFilesPerSnapshot discovery, cross-file header/schema validation, 64-bit totals, hashes, and exact serial duplicate-ID checks are implemented."},
+#else
+       RuntimeCapabilityStatus::kUnsupported,
+       "This build has COSMOSIM_ENABLE_HDF5=OFF."},
+#endif
+      {"distributed_ic_import",
+#if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
+       RuntimeCapabilityStatus::kSupported,
+       "Reader ranks receive deterministic bounded chunks, convert each chunk once, route typed records directly to x-slab owners, and perform exact distributed ID/count/mass validation without replicated global state."},
+#else
+       RuntimeCapabilityStatus::kUnsupported,
+       "Distributed IC ingestion requires both COSMOSIM_ENABLE_HDF5=ON and COSMOSIM_ENABLE_MPI=ON in this build."},
+#endif
       {"rank_remappable_restart", RuntimeCapabilityStatus::kUnsupported,
        "Restart schema v21 supports same-world-size rank-local continuation only."},
       {"asynchronous_output", RuntimeCapabilityStatus::kUnsupported,

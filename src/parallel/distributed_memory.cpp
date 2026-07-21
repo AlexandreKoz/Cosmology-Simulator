@@ -1361,91 +1361,162 @@ LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(std::span<const std
 ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
     const MpiContext& mpi_context,
     std::span<const std::uint64_t> local_owned_particle_ids,
-    std::span<const std::uint64_t> expected_global_particle_ids) {
+    std::span<const std::uint64_t> expected_local_reference_particle_ids) {
   ExactOwnershipPartitionReport report;
-  std::vector<std::uint64_t> local_sorted(local_owned_particle_ids.begin(), local_owned_particle_ids.end());
-  std::sort(local_sorted.begin(), local_sorted.end());
-  report.local_particle_ids_unique = std::adjacent_find(local_sorted.begin(), local_sorted.end()) == local_sorted.end();
+  report.global_owned_count = mpi_context.allreduceSumUint64(
+      static_cast<std::uint64_t>(local_owned_particle_ids.size()));
 
-  std::vector<std::uint64_t> global_ids;
+  const auto sorted_unique = [](std::span<const std::uint64_t> values) {
+    std::vector<std::uint64_t> sorted(values.begin(), values.end());
+    std::sort(sorted.begin(), sorted.end());
+    const bool unique =
+        std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
+    return std::pair{std::move(sorted), unique};
+  };
+
   if (!mpi_context.isEnabled()) {
-    global_ids = std::move(local_sorted);
-  } else {
-#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-    const std::uint64_t local_count = static_cast<std::uint64_t>(local_owned_particle_ids.size());
-    std::vector<std::uint64_t> counts64(static_cast<std::size_t>(mpi_context.worldSize()), 0U);
-    MPI_Allgather(
-        const_cast<std::uint64_t*>(&local_count),
-        1,
-        MPI_UINT64_T,
-        counts64.data(),
-        1,
-        MPI_UINT64_T,
-        MPI_COMM_WORLD);
-    std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
-    std::vector<int> recv_displs(static_cast<std::size_t>(mpi_context.worldSize()), 0);
-    std::uint64_t total_count = 0;
-    for (int rank = 0; rank < mpi_context.worldSize(); ++rank) {
-      if (counts64[static_cast<std::size_t>(rank)] > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error("exact ownership partition gather exceeds MPI int count limit");
+    auto [current, current_unique] = sorted_unique(local_owned_particle_ids);
+    auto [expected, expected_unique] =
+        sorted_unique(expected_local_reference_particle_ids);
+    report.local_particle_ids_unique = current_unique;
+    report.globally_unique = current_unique;
+    for (auto it = current.begin(); it != current.end();) {
+      const auto range = std::equal_range(it, current.end(), *it);
+      if (std::distance(range.first, range.second) > 1) {
+        report.duplicate_particle_ids.push_back(*it);
       }
-      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(counts64[static_cast<std::size_t>(rank)]);
-      if (rank > 0) {
-        recv_displs[static_cast<std::size_t>(rank)] =
-            recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-      }
-      total_count += counts64[static_cast<std::size_t>(rank)];
+      it = range.second;
     }
-    if (total_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("exact ownership partition global count exceeds MPI int count limit");
-    }
-    global_ids.resize(static_cast<std::size_t>(total_count));
-    MPI_Allgatherv(
-        const_cast<std::uint64_t*>(local_owned_particle_ids.data()),
-        static_cast<int>(local_owned_particle_ids.size()),
-        MPI_UINT64_T,
-        global_ids.data(),
-        recv_counts.data(),
-        recv_displs.data(),
-        MPI_UINT64_T,
-        MPI_COMM_WORLD);
-#else
-    throw std::runtime_error("exact global ownership validation requires MPI support when MPI context is enabled");
-#endif
+    current.erase(std::unique(current.begin(), current.end()), current.end());
+    expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+    std::set_difference(
+        expected.begin(), expected.end(), current.begin(), current.end(),
+        std::back_inserter(report.missing_expected_particle_ids));
+    std::set_difference(
+        current.begin(), current.end(), expected.begin(), expected.end(),
+        std::back_inserter(report.extra_particle_ids));
+    report.matches_expected_ids = expected_unique &&
+        report.missing_expected_particle_ids.empty() &&
+        report.extra_particle_ids.empty();
+    return report;
   }
 
-  std::sort(global_ids.begin(), global_ids.end());
-  report.global_owned_count = static_cast<std::uint64_t>(global_ids.size());
-  for (auto it = global_ids.begin(); it != global_ids.end();) {
-    const auto range = std::equal_range(it, global_ids.end(), *it);
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const auto exchange_by_hash = [&](std::span<const std::uint64_t> ids) {
+    std::vector<std::vector<std::uint64_t>> buckets(
+        static_cast<std::size_t>(world_size));
+    for (const std::uint64_t id : ids) {
+      const std::uint64_t mixed = id ^ (id >> 33U) ^ (id << 11U);
+      const int owner = static_cast<int>(
+          mixed % static_cast<std::uint64_t>(world_size));
+      buckets[static_cast<std::size_t>(owner)].push_back(id);
+    }
+    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
+    std::uint64_t send_total = 0U;
+    for (int rank = 0; rank < world_size; ++rank) {
+      const std::size_t count = buckets[static_cast<std::size_t>(rank)].size();
+      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "exact ownership hash bucket exceeds MPI int count limit");
+      }
+      send_counts[static_cast<std::size_t>(rank)] =
+          static_cast<int>(count);
+      if (rank > 0) {
+        send_displs[static_cast<std::size_t>(rank)] =
+            send_displs[static_cast<std::size_t>(rank - 1)] +
+            send_counts[static_cast<std::size_t>(rank - 1)];
+      }
+      send_total += static_cast<std::uint64_t>(count);
+    }
+    MPI_Alltoall(
+        send_counts.data(), 1, MPI_INT,
+        recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    std::uint64_t recv_total = 0U;
+    for (int rank = 0; rank < world_size; ++rank) {
+      if (rank > 0) {
+        recv_displs[static_cast<std::size_t>(rank)] =
+            recv_displs[static_cast<std::size_t>(rank - 1)] +
+            recv_counts[static_cast<std::size_t>(rank - 1)];
+      }
+      recv_total += static_cast<std::uint64_t>(
+          recv_counts[static_cast<std::size_t>(rank)]);
+    }
+    if (send_total > static_cast<std::uint64_t>(
+            std::numeric_limits<int>::max()) ||
+        recv_total > static_cast<std::uint64_t>(
+            std::numeric_limits<int>::max())) {
+      throw std::overflow_error(
+          "exact ownership hash exchange exceeds MPI int total limit");
+    }
+    std::vector<std::uint64_t> send(static_cast<std::size_t>(send_total));
+    for (int rank = 0; rank < world_size; ++rank) {
+      std::copy(
+          buckets[static_cast<std::size_t>(rank)].begin(),
+          buckets[static_cast<std::size_t>(rank)].end(),
+          send.begin() + send_displs[static_cast<std::size_t>(rank)]);
+    }
+    std::vector<std::uint64_t> recv(static_cast<std::size_t>(recv_total));
+    MPI_Alltoallv(
+        send.data(), send_counts.data(), send_displs.data(), MPI_UINT64_T,
+        recv.data(), recv_counts.data(), recv_displs.data(), MPI_UINT64_T,
+        MPI_COMM_WORLD);
+    return recv;
+  };
+
+  std::vector<std::uint64_t> current_partition =
+      exchange_by_hash(local_owned_particle_ids);
+  std::vector<std::uint64_t> expected_partition =
+      exchange_by_hash(expected_local_reference_particle_ids);
+  std::sort(current_partition.begin(), current_partition.end());
+  std::sort(expected_partition.begin(), expected_partition.end());
+
+  for (auto it = current_partition.begin(); it != current_partition.end();) {
+    const auto range = std::equal_range(it, current_partition.end(), *it);
     if (std::distance(range.first, range.second) > 1) {
       report.duplicate_particle_ids.push_back(*it);
     }
     it = range.second;
   }
-  report.globally_unique = report.duplicate_particle_ids.empty();
-
-  std::vector<std::uint64_t> expected(expected_global_particle_ids.begin(), expected_global_particle_ids.end());
-  std::sort(expected.begin(), expected.end());
-  expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
-  std::vector<std::uint64_t> global_unique = global_ids;
-  global_unique.erase(std::unique(global_unique.begin(), global_unique.end()), global_unique.end());
+  const bool local_unique = report.duplicate_particle_ids.empty();
+  current_partition.erase(
+      std::unique(current_partition.begin(), current_partition.end()),
+      current_partition.end());
+  expected_partition.erase(
+      std::unique(expected_partition.begin(), expected_partition.end()),
+      expected_partition.end());
   std::set_difference(
-      expected.begin(),
-      expected.end(),
-      global_unique.begin(),
-      global_unique.end(),
+      expected_partition.begin(), expected_partition.end(),
+      current_partition.begin(), current_partition.end(),
       std::back_inserter(report.missing_expected_particle_ids));
   std::set_difference(
-      global_unique.begin(),
-      global_unique.end(),
-      expected.begin(),
-      expected.end(),
+      current_partition.begin(), current_partition.end(),
+      expected_partition.begin(), expected_partition.end(),
       std::back_inserter(report.extra_particle_ids));
-  report.matches_expected_ids =
-      report.missing_expected_particle_ids.empty() && report.extra_particle_ids.empty() &&
-      global_unique.size() == expected.size();
+
+  const int local_duplicate = local_unique ? 0 : 1;
+  const int local_mismatch =
+      (report.missing_expected_particle_ids.empty() &&
+       report.extra_particle_ids.empty()) ? 0 : 1;
+  int any_duplicate = 0;
+  int any_mismatch = 0;
+  MPI_Allreduce(
+      &local_duplicate, &any_duplicate, 1, MPI_INT, MPI_MAX,
+      MPI_COMM_WORLD);
+  MPI_Allreduce(
+      &local_mismatch, &any_mismatch, 1, MPI_INT, MPI_MAX,
+      MPI_COMM_WORLD);
+  report.local_particle_ids_unique = any_duplicate == 0;
+  report.globally_unique = any_duplicate == 0;
+  report.matches_expected_ids = any_mismatch == 0;
   return report;
+#else
+  throw std::runtime_error(
+      "exact global ownership validation requires MPI support when MPI context is enabled");
+#endif
 }
 
 bool partitionIdentityMatchesGeneratedSet(

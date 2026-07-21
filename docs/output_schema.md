@@ -9,6 +9,35 @@ Authoritative interfaces:
 - `include/cosmosim/core/provenance.hpp`
 - `include/cosmosim/core/profiling.hpp` (operational run-event report)
 
+## 0) Canonical CHUÍ initial-condition schema
+
+The standalone converter writes `chui_canonical_ic_v1`. It is an interchange
+input artifact, not a restart checkpoint and not a normal time-series snapshot.
+The file uses canonical GADGET/AREPO group and dataset names so existing HDF5
+tooling remains usable:
+
+- `/Header`
+- `/PartType0`, `/PartType1`, `/PartType4`, `/PartType5` when populated
+- `Coordinates`, `Velocities`, `Masses`, `ParticleIDs`
+- species fields such as `InternalEnergy`, `Density`, `StellarFormationTime`,
+  `Metallicity`, `BH_Mass`, and `BH_Mdot` where applicable
+
+The header records the canonical schema name/version, cosmology, box, epoch,
+64-bit particle counts, canonical unit scales, coordinate-frame and velocity
+conventions, source/converter provenance, and the SHA-256 digest of the final
+strict audit manifest. Canonical v1 stores comoving positions and physical
+peculiar velocities under explicit unit attributes. It must not be interpreted
+through filename guessing.
+
+The paired `*.ic_manifest.json` uses `chui_ic_audit_manifest` version 2 and
+contains source-member hashes, original headers, actual dataset datatypes and
+dimensions, conversion equations, species policies, defaults, warnings, and
+field dispositions. The runtime verifies this contract before materialization.
+
+Canonical IC, science snapshot, and restart are deliberately separate schemas:
+canonical IC is audited import/interchange state; snapshot is analysis output;
+restart is exact execution continuation.
+
 ## 1) Snapshot schema (GADGET/AREPO interoperability)
 
 Current schema identity:

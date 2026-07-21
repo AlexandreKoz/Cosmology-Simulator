@@ -57,6 +57,24 @@ remain owned by their dedicated services rather than by module descriptors.
 `core::moduleDescriptors()` remains a compile-time layer/capability catalog; it
 does not drive runtime stage dispatch.
 
+## External initial-condition boundary
+
+Typed configuration in `core` defines only foundational convention and species
+policy values; `core` does not depend upward on `io`. `InitialConditionRuntime`
+translates that typed contract at the workflow composition boundary and passes
+its borrowed MPI context to the distributed reader.
+
+The I/O subsystem owns strict manifest v2 parsing, deterministic multifile
+inspection, canonical conversion semantics, bounded source chunks, explicit wire
+records, and collective import validation. It never initializes MPI. A distributed
+read produces an already-partitioned rank-local `SimulationState`; subsequent
+runtime migration/rebalancing remains owned by the parallel/workflow layer and is
+not used to repair a replicated import.
+
+This boundary prevents a second configuration system, a hidden communicator, a
+root-global state, and per-rank `O(global_particle_count)` authoritative IC
+allocation. See [`distributed_ic_ingestion.md`](distributed_ic_ingestion.md).
+
 ## Architectural invariants
 
 - SoA-first and hot/cold separated state organization.
@@ -74,3 +92,4 @@ does not drive runtime stage dispatch.
 - Output schema guide: [`../output_schema.md`](../output_schema.md)
 - Validation ladder: [`../validation_plan.md`](../validation_plan.md)
 - Profiling workflow: [`../profiling.md`](../profiling.md)
+- Distributed IC ingestion: [`distributed_ic_ingestion.md`](distributed_ic_ingestion.md)

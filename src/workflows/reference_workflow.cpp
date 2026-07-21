@@ -310,7 +310,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
     core::validateModePolicy(config, mode_policy);
 
-    const internal::InitialConditionRuntime initial_conditions(m_frozen_config);
+    const internal::InitialConditionRuntime initial_conditions(
+        m_frozen_config, runtime_services);
     internal::InitialConditionStartupResult startup =
         initial_conditions.materialize(options, report.run_directory);
     report.ic_manifest_path = startup.manifest_path;
@@ -344,7 +345,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       }
       failure_coordinator.rethrowCollectiveFailure(
           local_restart_validation_failure, "restart topology validation");
-    } else {
+    } else if (!startup.already_partitioned) {
       migration_balance.initializeOwnership(state);
     }
     const parallel::LocalOwnershipIdentitySummary expected_global_identity =

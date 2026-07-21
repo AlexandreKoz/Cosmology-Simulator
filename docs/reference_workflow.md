@@ -8,10 +8,19 @@ A valid `param.txt` run goes through the following real path:
 
 1. `cosmosim_harness <config.param.txt>` loads the typed frozen config with `loadFrozenConfigFromFile(...)`.
 2. The runner validates the mode/build contract before stepping.
-3. Initial conditions are dispatched from the authoritative config contract:
-   - `mode.ic_file=generated` uses the in-repo generated IC path.
-   - any other `mode.ic_file` is resolved relative to the config file and read through the HDF5 IC reader.
-4. The live run loop uses `HierarchicalTimeBinScheduler` as the execution driver.
+3. Initial conditions are dispatched from the authoritative typed convention:
+   - `mode.ic_convention=generated` requires `mode.ic_file=generated`.
+   - `chui_canonical_v1` reads the canonical CHUÍ v1 contract.
+   - `gadget_arepo_bridge_v1` reads the explicitly versioned external bridge contract.
+   - `manifest_v1` loads the strict audit manifest named by `mode.ic_manifest_file`.
+   External paths without an explicit convention fail before runtime. Relative IC
+   paths are resolved from the config; relative manifest source members are resolved
+   from the manifest directory.
+4. Serial input is chunked and multifile-aware. With MPI, source chunks are assigned
+   once globally, converted once, and routed directly to deterministic initial owners
+   with bounded staging. The result is marked already partitioned, so the legacy
+   replicated-state ownership compactor is not applied.
+5. The live run loop uses `HierarchicalTimeBinScheduler` as the execution driver.
 5. The orchestrator executes the canonical KDK stage sequence through the
    gravity owner and the current hydro callback.
 6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory.
@@ -27,6 +36,11 @@ The runner honors these config fields directly:
 
 - `mode.mode`
 - `mode.ic_file`
+- `mode.ic_convention`
+- `mode.ic_manifest_file`
+- `mode.ic_chunk_particle_count`
+- `mode.ic_staging_particle_count`
+- `mode.ic_part_type2_policy` / `mode.ic_part_type3_policy`
 - `output.output_directory`
 - `output.run_name`
 - `output.output_stem`
@@ -44,6 +58,25 @@ The runner honors these config fields directly:
 - `numerics.treepm_update_cadence_steps` (authoritative PM long-range refresh
   cadence; production value is exactly `1`)
 - `numerics.hierarchical_max_rung` (production value is exactly `0`)
+
+### Initial-condition ownership boundary
+
+`InitialConditionRuntime` owns convention dispatch and borrows MPI/profiler services
+from the process `RuntimeServices` bundle. The `io` layer owns file-set inspection,
+conversion, wire records, and collective validation; it does not initialize MPI or
+create a second runtime context. Distributed import finalizes rank-local state only
+and returns `already_partitioned=true`. Generated or caller-supplied replicated state
+continues through the established ownership initialization path.
+
+Before stepping, distributed import verifies a canonical manifest digest, exact global
+ID uniqueness, source/chunk coverage, ownership completeness and exclusivity, species
+counts and mass totals, finite/domain-valid fields, and sidecar invariants. Rank-local
+failures are coordinated before later collective phases so malformed input fails rather
+than stranding peers in MPI.
+
+The validated audit manifest is written by rank zero as `ic_manifest.json` in the run
+directory. Every rank emits `io.ic_ingestion.summary` counters through the shared
+profiler.
 
 TreePM runtime mapping is explicit and auditable:
 

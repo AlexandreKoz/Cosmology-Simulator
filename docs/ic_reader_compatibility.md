@@ -1,26 +1,73 @@
-# Initial-condition reader compatibility and assumptions
+# Initial-condition ingestion, conversion, and compatibility
 
-This document records the explicit schema and conversion assumptions used by `cosmosim::io::readGadgetArepoHdf5Ic`.
+The external-IC path is an explicit scientific contract shared by typed
+configuration, the runtime reader, the standalone converter, and the audit
+manifest. The runtime never infers unit, frame, velocity, h-scaling, or species
+semantics merely from a GADGET/AREPO-looking filename.
 
-## Supported container and groups
+Authoritative interfaces:
 
-- File format: HDF5 with `/Header` and `/PartType[0..5]` groups.
-- Required `/Header` attributes:
-  - `NumPart_ThisFile` (6 entries)
-  - `NumPart_Total` and optional `NumPart_Total_HighWord` (6 entries each;
-    normalized to canonical 64-bit totals)
-  - `NumFilesPerSnapshot`
-  - `MassTable` (6 entries)
-  - `BoxSize`
-  - `Time` (scale factor, positive)
-  - `Redshift`, `Omega0`, `OmegaLambda`, and `HubbleParam`
+- `include/cosmosim/io/ic_reader.hpp`
+- `src/io/ic_reader_file_set.cpp`
+- `src/io/ic_manifest.cpp`
+- `tools/convert_ic.py`
+- `src/workflows/initial_condition_runtime.cpp`
 
-Header counts, cosmology, cubic box size, and start epoch must agree with the
-validated runtime configuration before state allocation is committed.
+## Typed convention selection
 
-## Dataset aliases
+`mode.ic_convention` must be one of:
 
-Aliases are accepted to improve interoperability with common GADGET/AREPO derivatives:
+- `generated`
+- `chui_canonical_v1`
+- `gadget_arepo_bridge_v1`
+- `manifest_v1`
+
+An external `mode.ic_file` without an explicit convention fails configuration
+validation. `manifest_v1` additionally requires `mode.ic_manifest_file`.
+PartType2 and PartType3 each have an explicit typed policy (`reject`,
+`dark_matter`, `star`, `black_hole`, or `tracer`).
+
+## Source container and deterministic file-set discovery
+
+The bridge accepts HDF5 files containing `/Header` and populated
+`/PartType0` through `/PartType5` groups. Required header attributes are:
+
+- `NumPart_ThisFile`
+- `NumPart_Total`
+- optional `NumPart_Total_HighWord`
+- `NumFilesPerSnapshot`
+- `MassTable`
+- `BoxSize`
+- `Time`, `Redshift`, `Omega0`, `OmegaLambda`, and `HubbleParam`
+
+For a multifile set, a member such as `snapshot.0.hdf5` determines the exact
+ordered sequence `snapshot.0.hdf5` ... `snapshot.(N-1).hdf5`. Discovery does
+not depend on directory iteration order. Missing members, duplicate canonical
+paths, conflicting `NumFilesPerSnapshot`, inconsistent cosmology/box/epoch,
+inconsistent mass tables, conflicting declared totals, or a sum of per-file
+counts that differs from the reconstructed 64-bit total are hard failures.
+Low/high count words are reconstructed with checked 64-bit arithmetic before
+authoritative state allocation.
+
+## Actual HDF5 schema inspection
+
+Every selected dataset is inspected before authoritative state allocation. The
+manifest records the real:
+
+- HDF5 class (integer or floating point),
+- byte width,
+- signedness where applicable,
+- byte order,
+- rank,
+- dimensions,
+- selected source path and alias.
+
+A source `float32` field remains recorded as `float32`; conversion into a C++
+`double` does not rewrite source provenance. Scalar attributes retain rank zero
+and an empty dimension vector. Across a multifile family, path/alias, class,
+width, signedness, byte order, rank, and non-record dimensions must agree.
+
+Accepted aliases include:
 
 - Coordinates: `Coordinates`, `Position`, `POS`
 - Velocities: `Velocities`, `Velocity`, `VEL`
@@ -30,88 +77,153 @@ Aliases are accepted to improve interoperability with common GADGET/AREPO deriva
 - Gas density: `Density`, `Rho`
 - Gas metallicity: `Metallicity`, `GFM_Metallicity`
 - Gas smoothing length: `SmoothingLength`, `Hsml`, `Smoothing_Length`
+- Star formation time: `StellarFormationTime`, `GFM_StellarFormationTime`, `BirthTime`
+- Star metallicity: `Metallicity`, `GFM_Metallicity`
+- Black-hole mass/accretion: `BH_Mass`, `BlackHoleMass`; `BH_Mdot`, `BlackHoleAccretionRate`
 
-The exact alias selected is stored in `IcImportReport::present_aliases` for provenance and audits.
+The selected alias is part of the audit manifest.
 
-## Versioned manifest and conversions
+## Strict audit manifest v2
 
-Every external read owns an `IcManifest` in `IcImportReport`. The manifest
-records deterministic source ordering/provenance IDs, dialect/version, per-file
-and 64-bit total counts, high words, header cosmology, field path/type/rank/
-dimensions/count, base-SI conversion, `h` and scale-factor exponents, frame,
-velocity convention, extensive/intensive/specific semantics, disposition, and
-the six particle-type policies.
+`IcManifest` uses schema name `chui_ic_audit_manifest` and strict schema version
+`2`. Serialization and deserialization are round-tripped and validated; an
+unsupported or incomplete version is not silently upgraded.
 
-The reference workflow writes the validated import contract as
-`<run_directory>/ic_manifest.json` before integration begins. Generated ICs do
-not claim an external import manifest.
+The manifest records:
 
-With no caller manifest, direct import selects the named
-`gadget_arepo_bridge_v1` contract: kpc, Msun, km/s, zero `h`/`a` exponents,
-comoving coordinates, and physical peculiar velocities. This is a versioned
-CHUI convention, not an inference from the word “GADGET.” Producers using
-`h`-scaled fields, physical coordinates, sqrt(a)-scaled peculiar velocities,
-or comoving coordinate rates must supply an explicit validated manifest.
-Runtime particle positions remain comoving and velocities remain physical
-peculiar values. Density and specific internal energy are converted through
-their derived SI dimensions, not copied as raw numbers.
+- ordered source paths, byte sizes, SHA-256 hashes, and provenance IDs;
+- original relevant header values for every source member;
+- per-file counts, low/high words, and reconstructed 64-bit totals;
+- actual dataset schema and aliases;
+- source/target units, h and scale-factor exponents, coordinate frame, velocity
+  convention, and explicit conversion equations;
+- the policy for every particle family;
+- converted, defaulted, dropped, rejected, preserved auxiliary, and warning lists;
+- converter/tool provenance.
 
-`IcManifest` validation rejects inconsistent per-file totals/high words,
-nondeterministic or duplicate sources, invalid field shapes/conversions,
-inconsistent Time/Redshift, nonphysical cosmology/box data, and populated
-particle types whose species policy remains `reject`.
+The reference workflow writes the validated manifest to
+`<run_directory>/ic_manifest.json` on rank zero. Distributed import compares a
+canonical SHA-256 digest of the manifest on every rank before materialization.
 
-## Missing-field behavior
+## Canonical CHUÍ conversion tool
 
-- Missing required datasets raise an exception.
-- Missing optional fields are recorded in `IcImportReport::missing_optional_fields`.
-- Defaulted values are recorded in `IcImportReport::defaulted_fields`, including:
-  - generated particle IDs
-  - velocity zero-fill
-  - mass fallback from `MassTable`
-  - gas `InternalEnergy` zero-fill when missing
-  - gas `Density` zero-fill when missing
+`tools/convert_ic.py` is the standalone streaming converter. Typical use:
 
-## Gas thermodynamic mapping behavior
+```bash
+python3 tools/convert_ic.py \
+  --input path/to/snapshot.0.hdf5 \
+  --output path/to/chui_ic.hdf5 \
+  --manifest path/to/chui_ic.ic_manifest.json \
+  --source-convention gadget_arepo_bridge_v1 \
+  --coordinate-frame comoving \
+  --velocity-convention physical_peculiar
+```
 
-- `PartType0/InternalEnergy` is ingested into `SimulationState::gas_cells.internal_energy_code`.
-- `PartType0/Density` is ingested into `SimulationState::gas_cells.density_code`.
-- Gas particles are mirrored into the gas-cell skeleton for current hydro ownership:
-  - cell centers from imported particle coordinates,
-  - cell mass from imported particle mass.
-- `GasCellSidecar` fields without direct IC equivalents in this reader revision
-  (`pressure_code`, `temperature_code`, `sound_speed_code`, reconstruction gradients) are initialized to zero.
+A previously validated audit manifest can be used as the authoritative source
+contract instead of repeating the convention and conversion flags:
 
-## Species policy
+```bash
+python3 tools/convert_ic.py \
+  --source-manifest path/to/source.ic_manifest.json \
+  --output path/to/chui_ic.hdf5 \
+  --manifest path/to/chui_ic.ic_manifest.json
+```
 
-- PartType0 maps to gas and PartType1 to dark matter.
-- PartType2 and PartType3 are rejected by default. A caller may explicitly map
-  each family to dark matter using its distinct manifest policy; this makes the
-  loss of external family identity an auditable choice.
-- PartType4 maps to stars. Full stellar formation/metallicity import remains a
-  limitation below.
-- PartType5 maps to black holes and requires canonical `BH_Mass`; optional
-  `BH_Mdot` defaults to zero with an audit record. Both are converted into the
-  restart-authoritative CHUI black-hole sidecar.
-- Duplicate IDs and nonpositive/nonfinite particle or black-hole masses are
-  hard failures.
+In manifest mode the converter resolves the ordered source list relative to the
+manifest, re-hashes every member, checks byte sizes, counts, species policies,
+and the complete real HDF5 datatype/dimension signature before conversion. A
+stale or edited source set fails closed.
 
-Floating datasets must have the declared rank and `[count]` or `[count,3]`
-shape; particle IDs must be a rank-one integer dataset. Header/group counts and
-all selected hyperslabs are range checked.
+Use `--help` for the complete set of unit, h-exponent, scale-factor-exponent,
+velocity, chunk, and species-policy controls. The converter:
 
-## Current limitations (explicit and narrow)
+- validates the complete file set before output;
+- hashes source members with streaming SHA-256;
+- streams source datasets in bounded chunks;
+- performs exact duplicate-ID detection over the full unsigned 64-bit domain;
+- writes canonical HDF5 names and CHUÍ v1 schema/unit/frame attributes;
+- writes the complete audit manifest;
+- embeds the final manifest digest in the canonical HDF5 header;
+- finalizes both artifacts atomically through temporary files;
+- returns nonzero on ambiguity, malformed schema, inconsistent files, duplicate
+  IDs, or unsupported populated species.
 
-- `PartType0/Metallicity` is recognized but currently reported as unsupported because the current
-  `SimulationState` schema has no gas-metallicity ownership lane.
-- `PartType0/SmoothingLength` is recognized but currently reported as unsupported because the current
-  `SimulationState` schema has no gas smoothing-length ownership lane.
-- This reader currently imports particle-centric IC payloads only.
-- Direct runtime import is deliberately single-file. A manifest declaring more
-  than one source fails with guidance instead of reading the whole global IC on
-  every rank. Multifile discovery/routing and distributed materialization
-  remain unsupported and are reported as such in `runtime_capabilities.json`.
-- Canonical CHUI conversion tooling and typed-config manifest-file selection
-  are not yet implemented; direct external import therefore remains
-  provisional.
-- PartType4 formation-time and metallicity sidecar import is not yet complete.
+`tools/convert_ic_manifest.py` is retained only as a compatibility entry point
+to the same converter implementation.
+
+## Canonical conversion equations
+
+The source contract stores a base conversion and explicit powers of h and scale
+factor. Runtime canonical positions are comoving and runtime velocities are
+physical peculiar velocities. Supported velocity conventions include physical
+peculiar velocity, sqrt(a)-scaled peculiar velocity, and comoving coordinate
+rate. The converter and runtime reader share the same declared equations and
+manifest semantics so scientific conversion does not diverge between tools.
+
+Density and specific internal energy are converted through their physical
+SI dimensions rather than copied as unlabelled scalars.
+
+## Species and sidecars
+
+- PartType0 maps to gas particles and materializes matching gas-cell and gas
+  identity state. Internal energy and density are imported; missing optional
+  values use explicit zero defaults recorded in the audit.
+- PartType1 maps to dark matter.
+- PartType4 maps to stars and materializes one star sidecar per imported star,
+  including formation time, birth mass, and metallicity where present or an
+  explicitly recorded default where permitted.
+- PartType5 maps to black holes and materializes black-hole mass and accretion
+  sidecars. Required black-hole mass is validated; optional accretion rate may
+  default to zero with an audit record.
+- PartType2 and PartType3 obey their separately configured policies. Mapping to
+  star, black hole, or tracer is accepted only when all required sidecar fields
+  can be constructed.
+- Tracer mapping requires the complete versioned tracer field set; an incomplete
+  tracer family fails closed.
+- Populated unsupported or unknown families are never silently discarded.
+
+Duplicate IDs, nonfinite required values, nonpositive masses, invalid positions,
+and sidecar/species-ledger inconsistencies are hard failures.
+
+## Distributed ingestion and ownership
+
+MPI ownership is workflow-owned. The generic file-set inspector does not create
+or initialize MPI. For `world_size > 1` the workflow passes its borrowed
+`RuntimeServices::mpi_context` into the distributed reader.
+
+The distributed path:
+
+1. inspects and validates the file set once and broadcasts the strict contract;
+2. assigns deterministic bounded chunks by global chunk index;
+3. reads and converts each source chunk exactly once globally;
+4. packs generic particle data and required sidecars into an explicit
+   little-endian versioned wire record;
+5. routes each record directly to its deterministic x-slab initial owner in
+   bounded rounds;
+6. constructs only the final rank-local `SimulationState`;
+7. performs exact distributed duplicate-ID validation by hash partition;
+8. collectively validates species counts, species mass totals, overall totals,
+   coverage, ownership exclusivity/completeness, manifest agreement, finite
+   state, and sidecar invariants.
+
+There is no root full-universe gather, all-rank full-state broadcast, or
+per-rank authoritative allocation sized to the global particle count. The
+startup result is marked `already_partitioned`, so the legacy replicated-state
+ownership compactor is skipped.
+
+## Import counters
+
+Each rank reports files/chunks assigned, bytes and records read, records
+converted/routed, bytes sent/received, measured peak staging bytes, and final
+local particle/gas/sidecar counts. The reference workflow emits these through
+`io.ic_ingestion.summary`; see `profiling.md`.
+
+## Current narrow limitations
+
+- Imported gas metallicity and smoothing length are inspected and audited, but
+  remain unsupported authoritative lanes until `SimulationState` owns them.
+- The canonical converter currently writes one canonical output HDF5 file;
+  input discovery and runtime ingestion are multifile-capable.
+- Distributed tests require an MPI implementation and launcher. Builds without
+  MPI retain the complete serial multifile/converter path and report the
+  distributed capability as unavailable.

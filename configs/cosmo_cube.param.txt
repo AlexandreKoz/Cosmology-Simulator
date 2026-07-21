@@ -9,6 +9,7 @@ coordinate_frame = comoving
 [mode]
 mode = cosmo_cube
 ic_file = cosmo_cube_ics.hdf5
+ic_convention = gadget_arepo_bridge_v1
 zoom_high_res_region = false
 hydro_boundary = periodic
 gravity_boundary = periodic

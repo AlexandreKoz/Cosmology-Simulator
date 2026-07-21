@@ -9,6 +9,8 @@
 
 #include "workflows/internal/cartesian_gas_cell_layout.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
+#include "cosmosim/core/profiling.hpp"
 
 namespace cosmosim::workflows::internal {
 namespace {
@@ -30,30 +32,65 @@ constexpr std::size_t k_generated_particle_axis = 6;
 }
 
 [[nodiscard]] io::IcReadResult loadInitialConditions(
-    const core::FrozenConfig& frozen_config) {
+    const core::FrozenConfig& frozen_config,
+    const RuntimeServices& services) {
   const core::SimulationConfig& config = frozen_config.config;
-  if (config.mode.ic_file == "generated") {
+  if (config.mode.ic_convention ==
+      core::InitialConditionConvention::kGenerated) {
     return io::convertGeneratedIsolatedIcToState(
         config, k_generated_particle_axis);
   }
-  const std::filesystem::path ic_path = resolveConfigRelativePath(
-      frozen_config, std::filesystem::path(config.mode.ic_file));
-  return io::readGadgetArepoHdf5Ic(ic_path, config);
+
+  io::IcImportOptions import_options{
+      .require_velocities = true,
+      .require_particle_ids = true,
+      .allow_mass_table_fallback = true,
+      .chunk_particle_count = static_cast<std::size_t>(
+          config.mode.ic_chunk_particle_count),
+      .manifest = nullptr,
+  };
+  std::optional<io::IcManifest> loaded_manifest;
+  std::filesystem::path ic_path;
+  if (config.mode.ic_convention ==
+      core::InitialConditionConvention::kManifestV1) {
+    const std::filesystem::path manifest_path = resolveConfigRelativePath(
+        frozen_config,
+        std::filesystem::path(config.mode.ic_manifest_file));
+    loaded_manifest = io::readIcManifestJson(manifest_path);
+    for (std::filesystem::path& source_path : loaded_manifest->source_files) {
+      if (source_path.is_relative()) {
+        source_path = (manifest_path.parent_path() / source_path).lexically_normal();
+      }
+    }
+    io::validateIcManifest(*loaded_manifest);
+    import_options.manifest = &*loaded_manifest;
+    ic_path = loaded_manifest->source_files.front();
+  } else {
+    ic_path = resolveConfigRelativePath(
+        frozen_config, std::filesystem::path(config.mode.ic_file));
+  }
+
+  if (services.mpi_context.worldSize() > 1) {
+    return io::readDistributedGadgetArepoHdf5Ic(
+        ic_path, config, services.mpi_context, import_options);
+  }
+  return io::readGadgetArepoHdf5Ic(ic_path, config, import_options);
 }
 
 void materializeRootHydroPatchIfMissing(
     core::SimulationState& state,
-    const core::SimulationConfig& config) {
+    const core::SimulationConfig& config,
+    int world_rank) {
   if (state.cells.size() == 0U || state.patches.size() != 0U) {
     return;
   }
   state.patches.resize(1U);
-  state.patches.patch_id[0] = 1ULL;
+  state.patches.patch_id[0] = static_cast<std::uint64_t>(world_rank) + 1ULL;
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] =
       static_cast<std::uint32_t>(state.cells.size());
-  state.patches.owning_rank[0] = 0U;
+  state.patches.owning_rank[0] = static_cast<std::uint32_t>(world_rank);
   if (state.cells.patch_index.size() != state.cells.size()) {
     state.cells.patch_index.resize(state.cells.size());
   }
@@ -103,7 +140,8 @@ void materializeRootHydroPatchIfMissing(
 
 void finalizeStateMetadata(
     const core::FrozenConfig& frozen_config,
-    core::SimulationState& state) {
+    core::SimulationState& state,
+    int world_rank) {
   state.metadata.run_name = frozen_config.config.output.run_name;
   state.metadata.normalized_config_hash =
       frozen_config.provenance.config_hash;
@@ -115,14 +153,16 @@ void finalizeStateMetadata(
       ? state.metadata.scale_factor
       : std::max(1.0, frozen_config.config.numerics.t_code_begin);
   state.rebuildSpeciesIndex();
-  materializeRootHydroPatchIfMissing(state, frozen_config.config);
+  materializeRootHydroPatchIfMissing(
+      state, frozen_config.config, world_rank);
 }
 
 }  // namespace
 
 InitialConditionRuntime::InitialConditionRuntime(
-    const core::FrozenConfig& frozen_config) noexcept
-    : m_frozen_config(frozen_config) {}
+    const core::FrozenConfig& frozen_config,
+    const RuntimeServices& services) noexcept
+    : m_frozen_config(frozen_config), m_services(services) {}
 
 InitialConditionStartupResult InitialConditionRuntime::materialize(
     const ReferenceWorkflowOptions& options,
@@ -149,20 +189,44 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
     ic_result.report.defaulted_fields.push_back(
         "initial_state_override=caller_supplied");
   } else {
-    ic_result = loadInitialConditions(m_frozen_config);
+    ic_result = loadInitialConditions(m_frozen_config, m_services);
   }
 
   std::filesystem::path manifest_path;
   if (ic_result.report.manifest.has_value()) {
     manifest_path = run_directory / "ic_manifest.json";
-    io::writeIcManifestJson(*ic_result.report.manifest, manifest_path);
+    if (m_services.mpi_context.isRoot()) {
+      io::writeIcManifestJson(*ic_result.report.manifest, manifest_path);
+    }
   }
-  finalizeStateMetadata(m_frozen_config, ic_result.state);
+  finalizeStateMetadata(
+      m_frozen_config,
+      ic_result.state,
+      m_services.mpi_context.worldRank());
+  const io::IcImportCounters& counters = ic_result.report.counters;
+  m_services.profiler.recordEvent(core::RuntimeEvent{
+      .event_kind = "io.ic_ingestion.summary",
+      .severity = core::RuntimeEventSeverity::kInfo,
+      .subsystem = "io.initial_conditions",
+      .message = "initial-condition ingestion completed with explicit provenance and bounded staging counters",
+      .payload = {{"files_assigned", std::to_string(counters.files_assigned)},
+                  {"chunks_assigned", std::to_string(counters.chunks_assigned)},
+                  {"bytes_read", std::to_string(counters.bytes_read)},
+                  {"records_converted", std::to_string(counters.records_converted)},
+                  {"records_routed", std::to_string(counters.records_routed)},
+                  {"bytes_sent", std::to_string(counters.bytes_sent)},
+                  {"bytes_received", std::to_string(counters.bytes_received)},
+                  {"peak_staging_bytes", std::to_string(counters.peak_staging_bytes)},
+                  {"final_local_particle_count", std::to_string(counters.final_local_particle_count)},
+                  {"already_partitioned", ic_result.report.already_partitioned ? "true" : "false"}},
+  });
+  const bool already_partitioned = ic_result.report.already_partitioned;
   return InitialConditionStartupResult{
       .state = std::move(ic_result.state),
       .import_report = std::move(ic_result.report),
       .manifest_path = std::move(manifest_path),
       .restoring_from_restart = restoring,
+      .already_partitioned = already_partitioned,
   };
 }
 

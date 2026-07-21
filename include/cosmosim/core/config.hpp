@@ -63,6 +63,21 @@ enum class ZoomLongRangeStrategy {
   kGlobalCoarsePlusFocusedHighResCorrection,
 };
 
+enum class InitialConditionConvention {
+  kGenerated,
+  kChuiCanonicalV1,
+  kGadgetArepoBridgeV1,
+  kManifestV1,
+};
+
+enum class InitialConditionSpeciesPolicy {
+  kReject,
+  kDarkMatter,
+  kStar,
+  kBlackHole,
+  kTracer,
+};
+
 enum class FeedbackMode {
   kThermal,
   kKinetic,
@@ -288,7 +303,16 @@ struct UnitsConfig {
 
 struct ModeConfig {
   SimulationMode mode = SimulationMode::kZoomIn;
-  std::string ic_file = "ics.hdf5";
+  std::string ic_file = "generated";
+  InitialConditionConvention ic_convention =
+      InitialConditionConvention::kGenerated;
+  std::string ic_manifest_file;
+  std::uint64_t ic_chunk_particle_count = 65536ULL;
+  std::uint64_t ic_staging_particle_count = 65536ULL;
+  InitialConditionSpeciesPolicy ic_part_type2_policy =
+      InitialConditionSpeciesPolicy::kReject;
+  InitialConditionSpeciesPolicy ic_part_type3_policy =
+      InitialConditionSpeciesPolicy::kReject;
   bool zoom_high_res_region = false;
   std::string zoom_region_file;
   ZoomLongRangeStrategy zoom_long_range_strategy =
@@ -412,6 +436,10 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] std::string gravitySolverToString(GravitySolver solver);
 [[nodiscard]] std::string hydroSolverToString(HydroSolver solver);
 [[nodiscard]] std::string coordinateFrameToString(CoordinateFrame frame);
+[[nodiscard]] std::string initialConditionConventionToString(
+    InitialConditionConvention convention);
+[[nodiscard]] std::string initialConditionSpeciesPolicyToString(
+    InitialConditionSpeciesPolicy policy);
 [[nodiscard]] std::string modeHydroBoundaryToString(ModeHydroBoundary boundary);
 [[nodiscard]] std::string modeGravityBoundaryToString(ModeGravityBoundary boundary);
 [[nodiscard]] std::string feedbackModeToString(FeedbackMode mode);

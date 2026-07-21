@@ -9,6 +9,7 @@ coordinate_frame = comoving
 [mode]
 mode = isolated_cluster
 ic_file = isolated_cluster_ics.hdf5
+ic_convention = gadget_arepo_bridge_v1
 zoom_high_res_region = false
 hydro_boundary = reflective
 gravity_boundary = isolated_monopole

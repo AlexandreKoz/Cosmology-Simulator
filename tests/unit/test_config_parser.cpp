@@ -22,6 +22,7 @@ coordinate_frame = comoving
 [mode]
 mode = zoom_in
 ic_file = zoom_ics.hdf5
+ic_convention = gadget_arepo_bridge_v1
 zoom_high_res_region = true
 zoom_region_file = region_zoom.hdf5
 zoom_region_radius = 1.0
@@ -130,6 +131,76 @@ void testInvalidEnumFails() {
     threw = true;
   }
   assert(threw);
+}
+
+
+void testTypedInitialConditionConfiguration() {
+  const auto bridge = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\n"
+      "mode = zoom_in\n"
+      "ic_file = input.0.hdf5\n"
+      "ic_convention = gadget_arepo_bridge_v1\n"
+      "ic_chunk_particle_count = 4096\n"
+      "ic_staging_particle_count = 2048\n"
+      "ic_part_type2_policy = dark_matter\n"
+      "ic_part_type3_policy = reject\n",
+      "typed_ic_bridge");
+  assert(
+      bridge.config.mode.ic_convention ==
+      cosmosim::core::InitialConditionConvention::kGadgetArepoBridgeV1);
+  assert(bridge.config.mode.ic_chunk_particle_count == 4096U);
+  assert(bridge.config.mode.ic_staging_particle_count == 2048U);
+  assert(
+      bridge.config.mode.ic_part_type2_policy ==
+      cosmosim::core::InitialConditionSpeciesPolicy::kDarkMatter);
+  assert(
+      bridge.normalized_text.find(
+          "ic_convention = gadget_arepo_bridge_v1") != std::string::npos);
+  assert(
+      bridge.normalized_text.find("ic_chunk_particle_count = 4096") !=
+      std::string::npos);
+
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\nic_file = ambiguous.hdf5\n",
+        "implicit_external_ic");
+  } catch (const cosmosim::core::ConfigError&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\nic_file = input.hdf5\n"
+        "ic_convention = mystery_v9\n",
+        "unknown_ic_convention");
+  } catch (const cosmosim::core::ConfigError&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\nic_file = input.hdf5\n"
+        "ic_convention = manifest_v1\n",
+        "manifest_without_path");
+  } catch (const cosmosim::core::ConfigError&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  const auto manifest = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\nic_file = input.0.hdf5\n"
+      "ic_convention = manifest_v1\n"
+      "ic_manifest_file = input.audit.json\n",
+      "manifest_ic");
+  assert(
+      manifest.config.mode.ic_convention ==
+      cosmosim::core::InitialConditionConvention::kManifestV1);
+  assert(manifest.config.mode.ic_manifest_file == "input.audit.json");
 }
 
 void testInvalidTypedPolicyEnumsFail() {
@@ -980,6 +1051,7 @@ int main() {
   testAliasConflictFails();
   testInvalidEnumFails();
   testInvalidTypedPolicyEnumsFail();
+  testTypedInitialConditionConfiguration();
   testBoundaryModeValidation();
   testDefaultsCanonicalizationAndDeterminism();
   testDebugExactDecompositionAuditConfig();

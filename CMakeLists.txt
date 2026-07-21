@@ -303,6 +303,7 @@ add_library(cosmosim_io STATIC
   src/io/internal/io_contract.cpp
   src/io/ic_manifest.cpp
   src/io/ic_reader.cpp
+  src/io/ic_reader_file_set.cpp
   src/io/snapshot_hdf5.cpp
   src/io/restart_checkpoint.cpp)
 add_library(cosmosim_analysis STATIC
@@ -945,6 +946,26 @@ if(COSMOSIM_ENABLE_TESTS)
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_distributed_ic_reader_mpi
+      tests/integration/test_distributed_ic_reader_mpi.cpp)
+    target_link_libraries(test_integration_distributed_ic_reader_mpi PRIVATE cosmosim_all)
+    foreach(rank_count IN ITEMS 1 2 4)
+      add_test(
+        NAME integration_distributed_ic_reader_mpi_${rank_count}_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(integration_distributed_ic_reader_mpi_${rank_count}_rank
+        PROPERTIES PROCESSORS ${rank_count} LABELS "mpi;hdf5;distributed;ic;runtime_truth")
+    endforeach()
+    add_test(
+      NAME integration_distributed_ic_reader_duplicate_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> duplicate ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(integration_distributed_ic_reader_duplicate_mpi_two_rank
+      PROPERTIES PROCESSORS 2 LABELS "mpi;hdf5;distributed;ic;malformed;runtime_truth")
+  endif()
+
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
     add_executable(test_integration_reference_workflow_distributed_amr_mpi
       tests/integration/test_reference_workflow_distributed_amr_mpi.cpp)
     target_link_libraries(test_integration_reference_workflow_distributed_amr_mpi PRIVATE cosmosim_all)
@@ -974,6 +995,18 @@ if(COSMOSIM_ENABLE_TESTS)
     add_test(NAME integration_pm_cuda_smoke COMMAND test_integration_pm_cuda_smoke)
   endif()
 
+
+  if(COSMOSIM_ENABLE_HDF5)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+      add_test(
+        NAME integration_convert_ic
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/io/test_convert_ic.py
+                ${PROJECT_SOURCE_DIR}/tools/convert_ic.py)
+      set_tests_properties(integration_convert_ic PROPERTIES
+        SKIP_RETURN_CODE 77 LABELS "integration;hdf5;ic;converter;runtime_truth")
+    endif()
+  endif()
 
   add_executable(test_unit_ic_reader tests/unit/test_ic_reader.cpp)
   target_link_libraries(test_unit_ic_reader PRIVATE cosmosim_io)

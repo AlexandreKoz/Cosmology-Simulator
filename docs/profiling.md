@@ -65,6 +65,35 @@ and skipped register counts for incomplete, area-mismatched, or missing-target r
 observational only; flux-register ownership remains in the AMR hydro synchronization path and is not persisted as
 restart truth.
 
+## Initial-condition ingestion events
+
+After initial state construction, every rank emits one
+`io.ic_ingestion.summary` event in subsystem `io.initial_conditions`. Its
+payload includes:
+
+- `files_assigned`
+- `chunks_assigned`
+- `bytes_read`
+- `records_converted`
+- `records_routed`
+- `bytes_sent`
+- `bytes_received`
+- `peak_staging_bytes`
+- `final_local_particle_count`
+- `already_partitioned`
+
+The `IcImportCounters` report also retains records read and final local gas and
+species-sidecar counts for programmatic tests and detailed reports. Peak staging
+tracks the actual bounded import/routing workspace, not the final authoritative
+rank-local state. For a distributed fixture, the expected evidence is that each
+source chunk is assigned once globally, each record is routed/owned once, and no
+rank allocates an authoritative particle or sidecar array sized to the global
+particle count merely because MPI is enabled.
+
+These counters are scalability evidence, not a substitute for scientific
+validation. Exact distributed duplicate-ID, count, mass, ownership, provenance,
+and sidecar checks run separately before the workflow accepts the state.
+
 ## Workflow hooks for documentation/scaffolding changes
 
 Documentation changes still need auditable developer workflow checks:

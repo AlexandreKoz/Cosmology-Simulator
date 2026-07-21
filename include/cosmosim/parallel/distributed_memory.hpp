@@ -383,7 +383,7 @@ struct ExactOwnershipPartitionReport {
 [[nodiscard]] ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
     const MpiContext& mpi_context,
     std::span<const std::uint64_t> local_owned_particle_ids,
-    std::span<const std::uint64_t> expected_global_particle_ids);
+    std::span<const std::uint64_t> expected_local_reference_particle_ids);
 
 [[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,

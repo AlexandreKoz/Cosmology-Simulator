@@ -19,7 +19,12 @@ void testCapabilityTruth() {
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
   assert(report.require("distributed_ic_import").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
-  assert(report.require("canonical_external_ic_import").status ==
+  const auto canonical_status =
+      report.require("canonical_external_ic_import").status;
+  const auto multifile_status =
+      report.require("multifile_external_ic_import").status;
+  assert(canonical_status == multifile_status);
+  assert(canonical_status !=
          cosmosim::workflows::RuntimeCapabilityStatus::kProvisional);
   cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
 
