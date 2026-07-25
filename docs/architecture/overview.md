@@ -64,7 +64,7 @@ policy values; `core` does not depend upward on `io`. `InitialConditionRuntime`
 translates that typed contract at the workflow composition boundary and passes
 its borrowed MPI context to the distributed reader.
 
-The I/O subsystem owns strict manifest v2 parsing, deterministic multifile
+The I/O subsystem owns strict manifest v3 parsing, deterministic multifile
 inspection, canonical conversion semantics, bounded source chunks, explicit wire
 records, and collective import validation. It never initializes MPI. A distributed
 read produces an already-partitioned rank-local `SimulationState`; subsequent

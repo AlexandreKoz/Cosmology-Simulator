@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -68,6 +69,19 @@ enum class InitialConditionConvention {
   kChuiCanonicalV1,
   kGadgetArepoBridgeV1,
   kManifestV1,
+};
+
+enum class InitialConditionCoordinateFrame {
+  kUnspecified,
+  kComoving,
+  kPhysical,
+};
+
+enum class InitialConditionVelocityConvention {
+  kUnspecified,
+  kPhysicalPeculiar,
+  kSqrtAScaledPeculiar,
+  kComovingCoordinateRate,
 };
 
 enum class InitialConditionSpeciesPolicy {
@@ -307,6 +321,28 @@ struct ModeConfig {
   InitialConditionConvention ic_convention =
       InitialConditionConvention::kGenerated;
   std::string ic_manifest_file;
+  // A generic GADGET/AREPO bridge is scientifically valid only when this
+  // complete source convention is supplied. Zero/NaN/unspecified defaults are
+  // deliberate fail-closed sentinels, not physical defaults.
+  double ic_bridge_source_length_unit_to_si = 0.0;
+  double ic_bridge_source_mass_unit_to_si = 0.0;
+  double ic_bridge_source_velocity_unit_to_si = 0.0;
+  InitialConditionCoordinateFrame ic_bridge_coordinate_frame =
+      InitialConditionCoordinateFrame::kUnspecified;
+  InitialConditionVelocityConvention ic_bridge_velocity_convention =
+      InitialConditionVelocityConvention::kUnspecified;
+  double ic_bridge_length_hubble_exponent =
+      std::numeric_limits<double>::quiet_NaN();
+  double ic_bridge_length_scale_factor_exponent =
+      std::numeric_limits<double>::quiet_NaN();
+  double ic_bridge_mass_hubble_exponent =
+      std::numeric_limits<double>::quiet_NaN();
+  double ic_bridge_mass_scale_factor_exponent =
+      std::numeric_limits<double>::quiet_NaN();
+  double ic_bridge_velocity_hubble_exponent =
+      std::numeric_limits<double>::quiet_NaN();
+  double ic_bridge_velocity_scale_factor_exponent =
+      std::numeric_limits<double>::quiet_NaN();
   std::uint64_t ic_chunk_particle_count = 65536ULL;
   std::uint64_t ic_staging_particle_count = 65536ULL;
   InitialConditionSpeciesPolicy ic_part_type2_policy =
@@ -438,6 +474,10 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] std::string coordinateFrameToString(CoordinateFrame frame);
 [[nodiscard]] std::string initialConditionConventionToString(
     InitialConditionConvention convention);
+[[nodiscard]] std::string initialConditionCoordinateFrameToString(
+    InitialConditionCoordinateFrame frame);
+[[nodiscard]] std::string initialConditionVelocityConventionToString(
+    InitialConditionVelocityConvention convention);
 [[nodiscard]] std::string initialConditionSpeciesPolicyToString(
     InitialConditionSpeciesPolicy policy);
 [[nodiscard]] std::string modeHydroBoundaryToString(ModeHydroBoundary boundary);

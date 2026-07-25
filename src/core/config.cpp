@@ -245,6 +245,15 @@ template <typename T>
   return number;
 }
 
+[[nodiscard]] double parseOptionalFinite(
+    const std::string& value,
+    const std::string& key) {
+  if (toLower(trim(value)) == "unspecified") {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return parseFloating(value, key);
+}
+
 void requireFinite(double value, const std::string& key) {
   if (!std::isfinite(value)) {
     throw ConfigError("key '" + key + "': value must be finite");
@@ -379,6 +388,44 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
   throw ConfigError(
       "key 'mode.ic_convention': invalid value '" + value +
       "' (supported: generated, chui_canonical_v1, gadget_arepo_bridge_v1, manifest_v1)");
+}
+
+[[nodiscard]] InitialConditionCoordinateFrame parseInitialConditionCoordinateFrame(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "unspecified") {
+    return InitialConditionCoordinateFrame::kUnspecified;
+  }
+  if (lower == "comoving") {
+    return InitialConditionCoordinateFrame::kComoving;
+  }
+  if (lower == "physical") {
+    return InitialConditionCoordinateFrame::kPhysical;
+  }
+  throw ConfigError(
+      "key 'mode.ic_bridge_coordinate_frame': invalid value '" + value +
+      "' (supported: comoving, physical)");
+}
+
+[[nodiscard]] InitialConditionVelocityConvention
+parseInitialConditionVelocityConvention(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "unspecified") {
+    return InitialConditionVelocityConvention::kUnspecified;
+  }
+  if (lower == "physical_peculiar") {
+    return InitialConditionVelocityConvention::kPhysicalPeculiar;
+  }
+  if (lower == "sqrt_a_scaled_peculiar") {
+    return InitialConditionVelocityConvention::kSqrtAScaledPeculiar;
+  }
+  if (lower == "comoving_coordinate_rate") {
+    return InitialConditionVelocityConvention::kComovingCoordinateRate;
+  }
+  throw ConfigError(
+      "key 'mode.ic_bridge_velocity_convention': invalid value '" + value +
+      "' (supported: physical_peculiar, sqrt_a_scaled_peculiar, "
+      "comoving_coordinate_rate)");
 }
 
 [[nodiscard]] InitialConditionSpeciesPolicy parseInitialConditionSpeciesPolicy(
@@ -744,6 +791,17 @@ struct ConfigKeySpec {
       {"mode.ic_file", "generated"},
       {"mode.ic_convention", "generated"},
       {"mode.ic_manifest_file", ""},
+      {"mode.ic_bridge_source_length_unit_to_si", "0"},
+      {"mode.ic_bridge_source_mass_unit_to_si", "0"},
+      {"mode.ic_bridge_source_velocity_unit_to_si", "0"},
+      {"mode.ic_bridge_coordinate_frame", "unspecified"},
+      {"mode.ic_bridge_velocity_convention", "unspecified"},
+      {"mode.ic_bridge_length_hubble_exponent", "unspecified"},
+      {"mode.ic_bridge_length_scale_factor_exponent", "unspecified"},
+      {"mode.ic_bridge_mass_hubble_exponent", "unspecified"},
+      {"mode.ic_bridge_mass_scale_factor_exponent", "unspecified"},
+      {"mode.ic_bridge_velocity_hubble_exponent", "unspecified"},
+      {"mode.ic_bridge_velocity_scale_factor_exponent", "unspecified"},
       {"mode.ic_chunk_particle_count", "65536"},
       {"mode.ic_staging_particle_count", "65536"},
       {"mode.ic_part_type2_policy", "reject"},
@@ -1267,6 +1325,65 @@ void validateConfig(const SimulationConfig& config) {
       throw ConfigError(
           "mode.ic_convention=manifest_v1 requires mode.ic_manifest_file");
     }
+    if (config.mode.ic_convention ==
+        InitialConditionConvention::kGadgetArepoBridgeV1) {
+      std::vector<std::string> missing;
+      const auto require_positive = [&](double value, std::string_view key) {
+        if (!std::isfinite(value) || !(value > 0.0)) {
+          missing.emplace_back(key);
+        }
+      };
+      const auto require_finite = [&](double value, std::string_view key) {
+        if (!std::isfinite(value)) {
+          missing.emplace_back(key);
+        }
+      };
+      require_positive(
+          config.mode.ic_bridge_source_length_unit_to_si,
+          "mode.ic_bridge_source_length_unit_to_si");
+      require_positive(
+          config.mode.ic_bridge_source_mass_unit_to_si,
+          "mode.ic_bridge_source_mass_unit_to_si");
+      require_positive(
+          config.mode.ic_bridge_source_velocity_unit_to_si,
+          "mode.ic_bridge_source_velocity_unit_to_si");
+      if (config.mode.ic_bridge_coordinate_frame ==
+          InitialConditionCoordinateFrame::kUnspecified) {
+        missing.emplace_back("mode.ic_bridge_coordinate_frame");
+      }
+      if (config.mode.ic_bridge_velocity_convention ==
+          InitialConditionVelocityConvention::kUnspecified) {
+        missing.emplace_back("mode.ic_bridge_velocity_convention");
+      }
+      require_finite(
+          config.mode.ic_bridge_length_hubble_exponent,
+          "mode.ic_bridge_length_hubble_exponent");
+      require_finite(
+          config.mode.ic_bridge_length_scale_factor_exponent,
+          "mode.ic_bridge_length_scale_factor_exponent");
+      require_finite(
+          config.mode.ic_bridge_mass_hubble_exponent,
+          "mode.ic_bridge_mass_hubble_exponent");
+      require_finite(
+          config.mode.ic_bridge_mass_scale_factor_exponent,
+          "mode.ic_bridge_mass_scale_factor_exponent");
+      require_finite(
+          config.mode.ic_bridge_velocity_hubble_exponent,
+          "mode.ic_bridge_velocity_hubble_exponent");
+      require_finite(
+          config.mode.ic_bridge_velocity_scale_factor_exponent,
+          "mode.ic_bridge_velocity_scale_factor_exponent");
+      if (!missing.empty()) {
+        std::ostringstream message;
+        message
+            << "mode.ic_convention=gadget_arepo_bridge_v1 requires a complete "
+               "explicit scientific convention; missing or invalid: ";
+        for (std::size_t i = 0; i < missing.size(); ++i) {
+          message << (i == 0 ? "" : ", ") << missing[i];
+        }
+        throw ConfigError(message.str());
+      }
+    }
   }
   if (config.mode.zoom_region_radius_mpc_comoving < 0.0) {
     throw ConfigError("mode.zoom_region_radius must be >= 0");
@@ -1335,6 +1452,15 @@ void validateConfig(const SimulationConfig& config) {
 
 [[nodiscard]] std::string buildNormalizedText(const FrozenConfig& frozen) {
   std::ostringstream stream;
+  const auto bridge_number = [](double value) {
+    if (!std::isfinite(value)) {
+      return std::string("unspecified");
+    }
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << value;
+    return out.str();
+  };
   stream << "schema_version = " << frozen.config.schema_version << '\n';
   stream << "\n[units]\n";
   stream << "length_unit = " << frozen.config.units.length_unit << '\n';
@@ -1348,6 +1474,44 @@ void validateConfig(const SimulationConfig& config) {
          << initialConditionConventionToString(frozen.config.mode.ic_convention)
          << '\n';
   stream << "ic_manifest_file = " << frozen.config.mode.ic_manifest_file << '\n';
+  stream << "ic_bridge_source_length_unit_to_si = "
+         << frozen.config.mode.ic_bridge_source_length_unit_to_si << '\n';
+  stream << "ic_bridge_source_mass_unit_to_si = "
+         << frozen.config.mode.ic_bridge_source_mass_unit_to_si << '\n';
+  stream << "ic_bridge_source_velocity_unit_to_si = "
+         << frozen.config.mode.ic_bridge_source_velocity_unit_to_si << '\n';
+  stream << "ic_bridge_coordinate_frame = "
+         << initialConditionCoordinateFrameToString(
+                frozen.config.mode.ic_bridge_coordinate_frame)
+         << '\n';
+  stream << "ic_bridge_velocity_convention = "
+         << initialConditionVelocityConventionToString(
+                frozen.config.mode.ic_bridge_velocity_convention)
+         << '\n';
+  stream << "ic_bridge_length_hubble_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_length_hubble_exponent)
+         << '\n';
+  stream << "ic_bridge_length_scale_factor_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_length_scale_factor_exponent)
+         << '\n';
+  stream << "ic_bridge_mass_hubble_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_mass_hubble_exponent)
+         << '\n';
+  stream << "ic_bridge_mass_scale_factor_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_mass_scale_factor_exponent)
+         << '\n';
+  stream << "ic_bridge_velocity_hubble_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_velocity_hubble_exponent)
+         << '\n';
+  stream << "ic_bridge_velocity_scale_factor_exponent = "
+         << bridge_number(
+                frozen.config.mode.ic_bridge_velocity_scale_factor_exponent)
+         << '\n';
   stream << "ic_chunk_particle_count = "
          << frozen.config.mode.ic_chunk_particle_count << '\n';
   stream << "ic_staging_particle_count = "
@@ -1625,6 +1789,59 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.mode.ic_manifest_file = requireString(
       entries, consumed, "mode.ic_manifest_file",
       defaultFor("mode.ic_manifest_file"));
+  frozen.config.mode.ic_bridge_source_length_unit_to_si = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_bridge_source_length_unit_to_si",
+          defaultFor("mode.ic_bridge_source_length_unit_to_si")),
+      "mode.ic_bridge_source_length_unit_to_si");
+  frozen.config.mode.ic_bridge_source_mass_unit_to_si = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_bridge_source_mass_unit_to_si",
+          defaultFor("mode.ic_bridge_source_mass_unit_to_si")),
+      "mode.ic_bridge_source_mass_unit_to_si");
+  frozen.config.mode.ic_bridge_source_velocity_unit_to_si = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_bridge_source_velocity_unit_to_si",
+          defaultFor("mode.ic_bridge_source_velocity_unit_to_si")),
+      "mode.ic_bridge_source_velocity_unit_to_si");
+  frozen.config.mode.ic_bridge_coordinate_frame =
+      parseInitialConditionCoordinateFrame(requireString(
+          entries, consumed, "mode.ic_bridge_coordinate_frame",
+          defaultFor("mode.ic_bridge_coordinate_frame")));
+  frozen.config.mode.ic_bridge_velocity_convention =
+      parseInitialConditionVelocityConvention(requireString(
+          entries, consumed, "mode.ic_bridge_velocity_convention",
+          defaultFor("mode.ic_bridge_velocity_convention")));
+  frozen.config.mode.ic_bridge_length_hubble_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_length_hubble_exponent",
+          defaultFor("mode.ic_bridge_length_hubble_exponent")),
+      "mode.ic_bridge_length_hubble_exponent");
+  frozen.config.mode.ic_bridge_length_scale_factor_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_length_scale_factor_exponent",
+          defaultFor("mode.ic_bridge_length_scale_factor_exponent")),
+      "mode.ic_bridge_length_scale_factor_exponent");
+  frozen.config.mode.ic_bridge_mass_hubble_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_mass_hubble_exponent",
+          defaultFor("mode.ic_bridge_mass_hubble_exponent")),
+      "mode.ic_bridge_mass_hubble_exponent");
+  frozen.config.mode.ic_bridge_mass_scale_factor_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_mass_scale_factor_exponent",
+          defaultFor("mode.ic_bridge_mass_scale_factor_exponent")),
+      "mode.ic_bridge_mass_scale_factor_exponent");
+  frozen.config.mode.ic_bridge_velocity_hubble_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_velocity_hubble_exponent",
+          defaultFor("mode.ic_bridge_velocity_hubble_exponent")),
+      "mode.ic_bridge_velocity_hubble_exponent");
+  frozen.config.mode.ic_bridge_velocity_scale_factor_exponent = parseOptionalFinite(
+      requireString(
+          entries, consumed, "mode.ic_bridge_velocity_scale_factor_exponent",
+          defaultFor("mode.ic_bridge_velocity_scale_factor_exponent")),
+      "mode.ic_bridge_velocity_scale_factor_exponent");
   frozen.config.mode.ic_chunk_particle_count = parseNumber<std::uint64_t>(
       requireString(
           entries, consumed, "mode.ic_chunk_particle_count",
@@ -2445,6 +2662,36 @@ std::string initialConditionConventionToString(
   }
   throw ConfigError(
       "unhandled InitialConditionConvention enum value during serialization");
+}
+
+std::string initialConditionCoordinateFrameToString(
+    InitialConditionCoordinateFrame frame) {
+  switch (frame) {
+    case InitialConditionCoordinateFrame::kUnspecified:
+      return "unspecified";
+    case InitialConditionCoordinateFrame::kComoving:
+      return "comoving";
+    case InitialConditionCoordinateFrame::kPhysical:
+      return "physical";
+  }
+  throw ConfigError(
+      "unhandled InitialConditionCoordinateFrame enum value during serialization");
+}
+
+std::string initialConditionVelocityConventionToString(
+    InitialConditionVelocityConvention convention) {
+  switch (convention) {
+    case InitialConditionVelocityConvention::kUnspecified:
+      return "unspecified";
+    case InitialConditionVelocityConvention::kPhysicalPeculiar:
+      return "physical_peculiar";
+    case InitialConditionVelocityConvention::kSqrtAScaledPeculiar:
+      return "sqrt_a_scaled_peculiar";
+    case InitialConditionVelocityConvention::kComovingCoordinateRate:
+      return "comoving_coordinate_rate";
+  }
+  throw ConfigError(
+      "unhandled InitialConditionVelocityConvention enum value during serialization");
 }
 
 std::string initialConditionSpeciesPolicyToString(

@@ -1897,3 +1897,19 @@ are not claimed.
   hygiene now detects those recursively.
 - CPU focused workflow/resource/registry tests pass. MPI/FFTW/HDF5 runtime
   validation remains delegated to a dependency-complete environment.
+
+## Campaign B acceptance repair (2026-07-24)
+
+Source-level blockers from the adversarial IC-ingestion audit were repaired:
+complete typed no-guess bridge configuration, manifest schema v3, one shared C++
+conversion engine and compiled converter, pre-read HDF5 shape/type validation,
+full field/family dispositions, distributed per-file hash/schema assignment,
+collective phase guards, exact file/chunk and source/final reconciliation,
+all-axis/sidecar validation, disk-backed bounded-memory global duplicate-ID
+audit, stable tracer-parent remapping after routing, truthful I/O and staging
+counters, build-aware provisional capability reporting, expanded direct,
+canonical, manifest, conversion, type-policy, scaling, route-mutation, and fault
+MPI tests, and clean packaging rules. CPU/HDF5/sanitizer evidence is recorded by
+the repair report. MPI runtime acceptance remains external because `MPI_CXX` is unavailable
+in the repair environment; this is an evidence blocker, not a source-level
+waiver.

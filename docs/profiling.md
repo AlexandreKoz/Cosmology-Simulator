@@ -73,21 +73,34 @@ payload includes:
 
 - `files_assigned`
 - `chunks_assigned`
-- `bytes_read`
-- `records_converted`
-- `records_routed`
+- `metadata_bytes_read`
+- `hash_bytes_read`
+- `payload_bytes_read`
+- `converted_payload_bytes`
+- `bytes_serialized`
 - `bytes_sent`
 - `bytes_received`
+- `manifest_metadata_bytes_communicated`
+- `records_read`, `records_converted`, and `records_routed`
 - `peak_staging_bytes`
-- `final_local_particle_count`
+- final local particle, gas, star, black-hole, and tracer counts
 - `already_partitioned`
 
-The `IcImportCounters` report also retains records read and final local gas and
-species-sidecar counts for programmatic tests and detailed reports. Peak staging
-tracks the actual bounded import/routing workspace, not the final authoritative
-rank-local state. For a distributed fixture, the expected evidence is that each
-source chunk is assigned once globally, each record is routed/owned once, and no
-rank allocates an authoritative particle or sidecar array sized to the global
+`bytes_read` is retained as the checked sum of metadata, SHA-256, and particle
+payload reads. Metadata is the decoded logical HDF5 header payload; hashing
+counts every source byte read by the assigned hashing rank; payload counts only
+datasets actually read, never merely inspected or explicitly dropped fields.
+
+Peak staging is a capacity-based high-water mark for the actual bounded
+import/routing workspace, not the final authoritative owner-local state. It
+includes all simultaneously live coordinate, velocity, mass, ID, gas, star,
+black-hole, tracer, `ParticleRecord`, nested per-peer, flattened exchange,
+count/displacement, decode, coverage, and ID-reconciliation buffers. The exact global duplicate-ID audit
+uses rank-local sorted temporary runs and a bounded-memory external merge; disk
+run bytes are not RAM staging and are removed before import returns. For a
+distributed fixture, the required evidence is that each source file is hashed
+once, each source chunk is assigned once, each source ID balances against one
+final ID, and no rank allocates authoritative arrays sized to the global
 particle count merely because MPI is enabled.
 
 These counters are scalability evidence, not a substitute for scientific

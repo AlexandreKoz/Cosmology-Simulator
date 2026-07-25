@@ -54,6 +54,7 @@ cosmosim::io::IcManifest makeValidManifest() {
       .base_unit_to_si = 10.0,
       .hubble_exponent = -1.0,
       .scale_factor_exponent = 0.0,
+      .length_power = 1,
       .coordinate_frame = cosmosim::io::IcCoordinateFrame::kComoving,
       .velocity_convention = cosmosim::io::IcVelocityConvention::kNotVelocity,
       .semantics = cosmosim::io::IcFieldSemantics::kCoordinate,
@@ -113,6 +114,15 @@ void testManifestValidationAndConversions() {
   manifest.species_policy[2] =
       cosmosim::io::IcSpeciesPolicy::kCollisionlessFamily2AsDarkMatter;
   cosmosim::io::validateIcManifest(manifest);
+
+  manifest.fields.front().length_power = 0;
+  bool rejected_dimension_drift = false;
+  try {
+    cosmosim::io::validateIcManifest(manifest);
+  } catch (const std::invalid_argument&) {
+    rejected_dimension_drift = true;
+  }
+  assert(rejected_dimension_drift);
 }
 
 void testGeneratedIsolatedIcSpeciesAndOwnership() {
@@ -364,6 +374,44 @@ std::filesystem::path writeMinimalIcFile(
   return path;
 }
 
+
+std::filesystem::path writeDimensionalGasBlackHoleIcFile() {
+  const auto path = std::filesystem::temp_directory_path() /
+      "cosmosim_ic_dimensional_contract.hdf5";
+  Hdf5Handle file(H5Fcreate(
+      path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
+  Hdf5Handle header(H5Gcreate2(
+      file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeRequiredHeaderWithTotals(
+      header.get(), {1, 0, 0, 0, 0, 1}, {1, 0, 0, 0, 0, 1}, 1U,
+      0.5, 12.5);
+  {
+    Hdf5Handle hubble(H5Aopen(header.get(), "HubbleParam", H5P_DEFAULT));
+    const double value = 0.5;
+    assert(hubble.get() >= 0);
+    assert(H5Awrite(hubble.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
+  }
+
+  Hdf5Handle gas(H5Gcreate2(
+      file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDataset2dVec3(gas.get(), "Coordinates", {1.0, 2.0, 3.0});
+  writeDataset2dVec3(gas.get(), "Velocities", {1.0, 0.0, 0.0});
+  writeDataset1d(gas.get(), "Masses", {1.0});
+  writeDataset1dIds(gas.get(), "ParticleIDs", {1001U});
+  writeDataset1d(gas.get(), "InternalEnergy", {4.0});
+  writeDataset1d(gas.get(), "Density", {2.0});
+
+  Hdf5Handle black_hole(H5Gcreate2(
+      file.get(), "/PartType5", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDataset2dVec3(black_hole.get(), "Coordinates", {2.0, 2.0, 2.0});
+  writeDataset2dVec3(black_hole.get(), "Velocities", {1.0, 0.0, 0.0});
+  writeDataset1d(black_hole.get(), "Masses", {1.0});
+  writeDataset1dIds(black_hole.get(), "ParticleIDs", {5001U});
+  writeDataset1d(black_hole.get(), "BH_Mass", {3.0});
+  writeDataset1d(black_hole.get(), "BH_Mdot", {0.25});
+  return path;
+}
+
 std::filesystem::path writeCanonicalDmIcFile(bool valid_schema) {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() /
@@ -493,6 +541,27 @@ void removePaths(const std::vector<std::filesystem::path>& paths) {
   }
 }
 
+
+cosmosim::core::SimulationConfig makeExplicitBridgeConfig() {
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.mode.ic_convention =
+      cosmosim::core::InitialConditionConvention::kGadgetArepoBridgeV1;
+  config.mode.ic_bridge_source_length_unit_to_si = 3.0856775814913673e19;
+  config.mode.ic_bridge_source_mass_unit_to_si = 1.98847e30;
+  config.mode.ic_bridge_source_velocity_unit_to_si = 1.0e3;
+  config.mode.ic_bridge_coordinate_frame =
+      cosmosim::core::InitialConditionCoordinateFrame::kComoving;
+  config.mode.ic_bridge_velocity_convention =
+      cosmosim::core::InitialConditionVelocityConvention::kPhysicalPeculiar;
+  config.mode.ic_bridge_length_hubble_exponent = 0.0;
+  config.mode.ic_bridge_length_scale_factor_exponent = 0.0;
+  config.mode.ic_bridge_mass_hubble_exponent = 0.0;
+  config.mode.ic_bridge_mass_scale_factor_exponent = 0.0;
+  config.mode.ic_bridge_velocity_hubble_exponent = 0.0;
+  config.mode.ic_bridge_velocity_scale_factor_exponent = 0.0;
+  return config;
+}
+
 void testCanonicalHeaderContract() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.ic_convention =
@@ -506,7 +575,7 @@ void testCanonicalHeaderContract() {
          cosmosim::io::IcDialect::kChuiCanonicalV1);
   assert(result.state.particles.size() == 1U);
   assert(result.state.particles.position_x_comoving[0] == 10.0);
-  assert(result.state.particles.velocity_x_peculiar[0] == 2.0);
+  assert(std::abs(result.state.particles.velocity_x_peculiar[0] - 2.0) < 1.0e-12);
   std::filesystem::remove(canonical_path);
 
   const auto invalid_path = writeCanonicalDmIcFile(false);
@@ -523,7 +592,7 @@ void testCanonicalHeaderContract() {
 }
 
 void testHdf5StarSidecarAndMultifileSchema() {
-  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  auto config = makeExplicitBridgeConfig();
   const auto star_path = writeMinimalStarIcFile();
   const auto star_result =
       cosmosim::io::readGadgetArepoHdf5Ic(star_path, config);
@@ -620,7 +689,7 @@ void testHdf5StarSidecarAndMultifileSchema() {
 }
 
 void testHdf5GasThermoMapping() {
-  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  auto config = makeExplicitBridgeConfig();
   config.output.run_name = "ic_reader_hdf5_gas_mapping";
   const std::filesystem::path path = writeMinimalIcFile(true);
 
@@ -671,7 +740,7 @@ void testHdf5GasThermoMapping() {
 }
 
 void testHdf5GasOptionalDensityMissingBehavior() {
-  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  auto config = makeExplicitBridgeConfig();
   config.output.run_name = "ic_reader_hdf5_optional";
   const std::filesystem::path path = writeMinimalIcFile(false);
 
@@ -698,8 +767,62 @@ void testHdf5GasOptionalDensityMissingBehavior() {
   std::filesystem::remove(path);
 }
 
+
+void testSharedDimensionalConversionContract() {
+  auto config = makeExplicitBridgeConfig();
+  config.mode.ic_bridge_coordinate_frame =
+      cosmosim::core::InitialConditionCoordinateFrame::kPhysical;
+  config.mode.ic_bridge_velocity_convention =
+      cosmosim::core::InitialConditionVelocityConvention::kSqrtAScaledPeculiar;
+  config.mode.ic_bridge_length_hubble_exponent = -1.0;
+  config.mode.ic_bridge_mass_hubble_exponent = -1.0;
+  config.units.length_unit = "kpc";
+  config.cosmology.box_size_x_mpc_comoving = 0.05;
+  config.cosmology.box_size_y_mpc_comoving = 0.05;
+  config.cosmology.box_size_z_mpc_comoving = 0.05;
+  config.cosmology.box_size_mpc_comoving = 0.05;
+  config.cosmology.hubble_param = 0.5;
+  config.numerics.a_begin = 0.5;
+  const auto path = writeDimensionalGasBlackHoleIcFile();
+
+  const auto direct = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, config, cosmosim::io::IcImportOptions{
+          .validate_runtime_cosmology = false});
+  assert(direct.report.manifest.has_value());
+  assert(direct.state.particles.size() == 2U);
+  assert(std::abs(direct.state.particles.position_x_comoving[0] - 4.0) < 1.0e-12);
+  assert(std::abs(
+      direct.state.particles.velocity_x_peculiar[0] -
+      1.0 / std::sqrt(0.5)) < 1.0e-12);
+  assert(std::abs(direct.state.particles.mass_code[0] - 2.0) < 1.0e-12);
+  assert(std::abs(direct.state.gas_cells.internal_energy_code[0] - 8.0) < 1.0e-12);
+  assert(std::abs(direct.state.gas_cells.density_code[0] - 0.0625) < 1.0e-12);
+  assert(std::abs(direct.state.black_holes.subgrid_mass_code[0] - 6.0) < 1.0e-12);
+  assert(std::abs(
+      direct.state.black_holes.accretion_rate_code[0] -
+      0.25 * std::sqrt(0.5)) < 1.0e-12);
+
+  const cosmosim::io::IcManifest manifest = *direct.report.manifest;
+  const auto manifest_driven = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, config, cosmosim::io::IcImportOptions{
+          .validate_runtime_cosmology = false, .manifest = &manifest});
+  assert(manifest_driven.state.particles.position_x_comoving ==
+         direct.state.particles.position_x_comoving);
+  assert(manifest_driven.state.particles.velocity_x_peculiar ==
+         direct.state.particles.velocity_x_peculiar);
+  assert(manifest_driven.state.particles.mass_code ==
+         direct.state.particles.mass_code);
+  assert(manifest_driven.state.gas_cells.internal_energy_code ==
+         direct.state.gas_cells.internal_energy_code);
+  assert(manifest_driven.state.gas_cells.density_code ==
+         direct.state.gas_cells.density_code);
+  assert(manifest_driven.state.black_holes.accretion_rate_code ==
+         direct.state.black_holes.accretion_rate_code);
+  std::filesystem::remove(path);
+}
+
 void testHdf5BlackHoleAndValidationFailures() {
-  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  auto config = makeExplicitBridgeConfig();
   const std::filesystem::path black_hole_path = writeMinimalBlackHoleIcFile();
   const cosmosim::io::IcReadResult black_hole_result =
       cosmosim::io::readGadgetArepoHdf5Ic(black_hole_path, config);
@@ -794,6 +917,210 @@ void testHdf5BlackHoleAndValidationFailures() {
   assert(cosmology_rejected);
   std::filesystem::remove(mismatch_path);
 }
+
+void expectIcReadFailure(
+    const std::filesystem::path& path,
+    const cosmosim::core::SimulationConfig& config,
+    std::string_view expected_text) {
+  bool rejected = false;
+  try {
+    (void)cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+  } catch (const std::exception& error) {
+    rejected = expected_text.empty() ||
+        std::string(error.what()).find(expected_text) != std::string::npos;
+  }
+  assert(rejected);
+  std::filesystem::remove(path);
+}
+
+void replaceHeaderCountAttributeWithShape(
+    const std::filesystem::path& path,
+    const char* name,
+    std::size_t count) {
+  Hdf5Handle file(
+      H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(H5Adelete(header.get(), name) >= 0);
+  const hsize_t dims[1]{static_cast<hsize_t>(count)};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle attribute(H5Acreate2(
+      header.get(), name, H5T_STD_U32LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  std::vector<std::uint32_t> values(count, 0U);
+  assert(H5Awrite(attribute.get(), H5T_NATIVE_UINT32, values.data()) >= 0);
+}
+
+void replaceDatasetWithFloatingIds(
+    const std::filesystem::path& path,
+    bool signed_negative) {
+  Hdf5Handle file(
+      H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle gas(H5Gopen2(file.get(), "/PartType0", H5P_DEFAULT));
+  assert(H5Ldelete(gas.get(), "ParticleIDs", H5P_DEFAULT) >= 0);
+  hsize_t dims[1]{2U};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  if (signed_negative) {
+    Hdf5Handle dataset(H5Dcreate2(
+        gas.get(), "ParticleIDs", H5T_STD_I64LE, space.get(), H5P_DEFAULT,
+        H5P_DEFAULT, H5P_DEFAULT));
+    const std::array<std::int64_t, 2> values{-1, 2};
+    assert(H5Dwrite(
+               dataset.get(), H5T_NATIVE_INT64, H5S_ALL, H5S_ALL,
+               H5P_DEFAULT, values.data()) >= 0);
+  } else {
+    Hdf5Handle dataset(H5Dcreate2(
+        gas.get(), "ParticleIDs", H5T_IEEE_F64LE, space.get(), H5P_DEFAULT,
+        H5P_DEFAULT, H5P_DEFAULT));
+    const std::array<double, 2> values{1.0, 2.0};
+    assert(H5Dwrite(
+               dataset.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
+               H5P_DEFAULT, values.data()) >= 0);
+  }
+}
+
+
+std::filesystem::path writeTracerPolicyIcFile(bool valid_parent) {
+  const auto path = std::filesystem::temp_directory_path() /
+      (valid_parent ? "cosmosim_ic_tracer_parent_valid.hdf5"
+                    : "cosmosim_ic_tracer_parent_invalid.hdf5");
+  Hdf5Handle file(H5Fcreate(
+      path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
+  Hdf5Handle header(H5Gcreate2(
+      file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeRequiredHeader(header.get(), {1, 0, 1, 0, 0, 0});
+
+  Hdf5Handle gas(H5Gcreate2(
+      file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDataset2dVec3(gas.get(), "Coordinates", {1.0, 2.0, 3.0});
+  writeDataset2dVec3(gas.get(), "Velocities", {0.0, 0.0, 0.0});
+  writeDataset1d(gas.get(), "Masses", {2.0});
+  writeDataset1dIds(gas.get(), "ParticleIDs", {8001U});
+  writeDataset1d(gas.get(), "InternalEnergy", {1.0});
+  writeDataset1d(gas.get(), "Density", {1.0});
+
+  Hdf5Handle tracer(H5Gcreate2(
+      file.get(), "/PartType2", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDataset2dVec3(tracer.get(), "Coordinates", {1.0, 2.0, 3.0});
+  writeDataset2dVec3(tracer.get(), "Velocities", {0.0, 0.0, 0.0});
+  writeDataset1d(tracer.get(), "Masses", {0.1});
+  writeDataset1dIds(tracer.get(), "ParticleIDs", {9001U});
+  writeDataset1dIds(
+      tracer.get(), "ParentParticleIDs",
+      {valid_parent ? 8001U : 9999U});
+  writeDataset1dIds(tracer.get(), "InjectionStep", {7U});
+  writeDataset1dIds(tracer.get(), "HostCellIndex", {42U});
+  writeDataset1d(tracer.get(), "MassFractionOfHost", {0.05});
+  writeDataset1d(tracer.get(), "LastHostMass", {2.0});
+  writeDataset1d(tracer.get(), "CumulativeExchangedMass", {0.0});
+  return path;
+}
+
+void testTracerParentAndHostRemap() {
+  auto config = makeExplicitBridgeConfig();
+  config.mode.ic_part_type2_policy =
+      cosmosim::core::InitialConditionSpeciesPolicy::kTracer;
+
+  const auto valid_path = writeTracerPolicyIcFile(true);
+  const auto result = cosmosim::io::readGadgetArepoHdf5Ic(valid_path, config);
+  assert(result.state.tracers.size() == 1U);
+  assert(result.state.cells.size() == 1U);
+  assert(result.state.tracers.parent_particle_id[0] == 8001U);
+  assert(result.state.tracers.host_cell_index[0] == 0U);
+  assert(result.report.manifest.has_value());
+  assert(std::find_if(
+             result.report.manifest->dropped_fields.begin(),
+             result.report.manifest->dropped_fields.end(),
+             [](const std::string& value) {
+               return value.find("HostCellIndex") != std::string::npos;
+             }) != result.report.manifest->dropped_fields.end());
+  std::filesystem::remove(valid_path);
+
+  const auto invalid_path = writeTracerPolicyIcFile(false);
+  expectIcReadFailure(
+      invalid_path, config,
+      "tracer parent must resolve to a gas cell on the same final owner rank");
+}
+
+void testHdf5MalformedSchemaSafety() {
+  const auto config = makeExplicitBridgeConfig();
+
+  auto path = writeMinimalIcFile(true);
+  replaceHeaderCountAttributeWithShape(path, "NumPart_ThisFile", 7U);
+  expectIcReadFailure(path, config, "expected [6]");
+
+  path = writeMinimalIcFile(true);
+  replaceHeaderCountAttributeWithShape(path, "NumPart_ThisFile", 5U);
+  expectIcReadFailure(path, config, "expected [6]");
+
+  path = writeMinimalIcFile(true);
+  {
+    Hdf5Handle file(
+        H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+    assert(H5Adelete(header.get(), "Time") >= 0);
+    hsize_t dims[1]{1U};
+    Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+    Hdf5Handle attribute(H5Acreate2(
+        header.get(), "Time", H5T_IEEE_F64LE, space.get(), H5P_DEFAULT,
+        H5P_DEFAULT));
+    const double value = 1.0;
+    assert(H5Awrite(attribute.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
+  }
+  expectIcReadFailure(path, config, "expected []");
+
+  path = writeMinimalIcFile(true);
+  replaceDatasetWithFloatingIds(path, false);
+  expectIcReadFailure(path, config, "unsigned integer datatype");
+
+  path = writeMinimalIcFile(true);
+  replaceDatasetWithFloatingIds(path, true);
+  expectIcReadFailure(path, config, "unsigned integer datatype");
+
+  path = writeMinimalIcFile(true);
+  {
+    Hdf5Handle file(
+        H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle group(H5Gcreate2(
+        file.get(), "/PartType6", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+    writeDataset1d(group.get(), "Masses", {1.0});
+  }
+  expectIcReadFailure(path, config, "unsupported populated particle-family");
+
+  path = writeMinimalIcFile(true);
+  {
+    Hdf5Handle file(
+        H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle gas(H5Gopen2(file.get(), "/PartType0", H5P_DEFAULT));
+    writeDataset2dVec3(
+        gas.get(), "Position", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0});
+  }
+  expectIcReadFailure(path, config, "ambiguous aliases");
+
+  path = writeMinimalIcFile(true);
+  {
+    Hdf5Handle file(
+        H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle gas(H5Gopen2(file.get(), "/PartType0", H5P_DEFAULT));
+    writeDataset1d(gas.get(), "UnrecognizedScalar", {3.0, 4.0});
+  }
+  const auto result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+  assert(result.report.manifest.has_value());
+  const auto& fields = result.report.manifest->fields;
+  const auto dropped = std::find_if(
+      fields.begin(), fields.end(), [](const cosmosim::io::IcFieldManifest& field) {
+        return field.dataset_path == "/PartType0/UnrecognizedScalar";
+      });
+  assert(dropped != fields.end());
+  assert(dropped->disposition == cosmosim::io::IcFieldDisposition::kDropped);
+  assert(std::find_if(
+             result.report.manifest->dropped_fields.begin(),
+             result.report.manifest->dropped_fields.end(),
+             [](const std::string& value) {
+               return value.find("UnrecognizedScalar") != std::string::npos;
+             }) != result.report.manifest->dropped_fields.end());
+  std::filesystem::remove(path);
+}
+
 #endif
 
 }  // namespace
@@ -808,7 +1135,10 @@ int main() {
   testHdf5StarSidecarAndMultifileSchema();
   testHdf5GasThermoMapping();
   testHdf5GasOptionalDensityMissingBehavior();
+  testSharedDimensionalConversionContract();
   testHdf5BlackHoleAndValidationFailures();
+  testTracerParentAndHostRemap();
+  testHdf5MalformedSchemaSafety();
 #endif
   return 0;
 }

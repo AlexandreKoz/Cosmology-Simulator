@@ -11,6 +11,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/units.hpp"
 
 namespace cosmosim::parallel {
 class MpiContext;
@@ -100,6 +101,17 @@ struct IcFieldManifest {
   double base_unit_to_si = 1.0;
   double hubble_exponent = 0.0;
   double scale_factor_exponent = 0.0;
+  // Physical dimension Q = L^length_power M^mass_power T^time_power.
+  // These powers make the target code-unit divisor explicit and prevent
+  // density, specific-energy, and accretion-rate conversion drift.
+  std::int8_t length_power = 0;
+  std::int8_t mass_power = 0;
+  std::int8_t time_power = 0;
+  // Additional a-scaling required when a physical spatial quantity is
+  // converted into the canonical comoving runtime frame.
+  double frame_scale_factor_exponent = 0.0;
+  // Apply the selected velocity-convention multiplier this many times.
+  std::uint8_t velocity_convention_power = 0;
   IcCoordinateFrame coordinate_frame = IcCoordinateFrame::kComoving;
   IcVelocityConvention velocity_convention =
       IcVelocityConvention::kNotVelocity;
@@ -112,14 +124,16 @@ struct IcFieldManifest {
 
 struct IcManifest {
   std::string schema_name = "chui_ic_audit_manifest";
-  std::uint32_t schema_version = 2;
-  std::string converter_version = "chui_ic_converter_v1";
+  std::uint32_t schema_version = 3;
+  std::string converter_version = "chui_ic_converter_v2";
   IcDialect dialect = IcDialect::kGadgetArepoBridgeV1;
   std::string dialect_version = "1";
   std::vector<std::filesystem::path> source_files;
   std::vector<std::string> source_provenance_ids;
   std::vector<std::uint64_t> source_file_sizes_bytes;
   std::vector<std::string> source_sha256;
+  std::string source_manifest_file;
+  std::string source_manifest_sha256;
   std::vector<std::string> original_header_attributes;
   std::vector<std::array<std::uint64_t, 6>> num_part_this_file;
   std::array<std::uint64_t, 6> num_part_total{};
@@ -157,6 +171,13 @@ void validateIcManifest(const IcManifest& manifest);
 [[nodiscard]] double icVelocityConventionMultiplier(
     IcVelocityConvention convention,
     double scale_factor);
+[[nodiscard]] double icTargetSiPerCode(
+    const IcFieldManifest& field,
+    const core::UnitSystem& target_units);
+[[nodiscard]] double icFieldConversionMultiplier(
+    const IcFieldManifest& field,
+    const IcManifest& manifest,
+    const core::UnitSystem& target_units);
 [[nodiscard]] std::string serializeIcManifestJson(const IcManifest& manifest);
 [[nodiscard]] IcManifest deserializeIcManifestJson(std::string_view json_text);
 [[nodiscard]] IcManifest readIcManifestJson(
@@ -164,6 +185,9 @@ void validateIcManifest(const IcManifest& manifest);
 void writeIcManifestJson(
     const IcManifest& manifest,
     const std::filesystem::path& output_path);
+[[nodiscard]] std::string icSha256Hex(std::string_view value);
+[[nodiscard]] std::string icSha256FileHex(
+    const std::filesystem::path& input_path);
 
 // A compact per-file schema summary for transparent import auditing.
 struct IcSchemaSummary {
@@ -193,6 +217,9 @@ struct IcImportOptions {
   bool require_particle_ids = true;
   bool allow_mass_table_fallback = true;
   std::size_t chunk_particle_count = 1u << 16;
+  // Canonical conversion tools may intentionally import a source whose
+  // cosmology becomes the output contract rather than matching a run config.
+  bool validate_runtime_cosmology = true;
   // Null selects the recognized, versioned gadget_arepo_bridge_v1 contract.
   // A non-null manifest is caller-owned for the synchronous read.
   const IcManifest* manifest = nullptr;
@@ -201,6 +228,14 @@ struct IcImportOptions {
 struct IcImportCounters {
   std::uint64_t files_assigned = 0;
   std::uint64_t chunks_assigned = 0;
+  std::uint64_t metadata_bytes_read = 0;
+  std::uint64_t hash_bytes_read = 0;
+  std::uint64_t payload_bytes_read = 0;
+  std::uint64_t converted_payload_bytes = 0;
+  std::uint64_t bytes_serialized = 0;
+  std::uint64_t manifest_metadata_bytes_communicated = 0;
+  // Compatibility aggregate. It is the exact sum of metadata, hash, and
+  // payload bytes, not a schema-derived estimate.
   std::uint64_t bytes_read = 0;
   std::uint64_t records_read = 0;
   std::uint64_t records_converted = 0;

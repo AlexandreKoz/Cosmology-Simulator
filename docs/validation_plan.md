@@ -412,3 +412,38 @@ nonzero mass/momentum/energy payload fields. It is not yet full AMR workflow
 acceptance: a later validation pass still needs to prove production
 `ReferenceWorkflowRunner` AMR restart continuation, named migration/regrid across
 ranks, and all five conserved totals through direct and restart-resumed paths.
+
+## Campaign B IC-ingestion acceptance repair gate (2026-07-24)
+
+Serial/HDF5 acceptance requires:
+
+- incomplete direct-bridge conventions rejected before HDF5 access;
+- manifest schema v3 dimensional contract and version-2 rejection;
+- direct, manifest-driven, and canonical converter numerical equivalence for
+  coordinates, velocity, mass, density, internal energy, stellar initial mass,
+  BH mass, and BH accretion rate;
+- malformed attribute-shape, floating/signed-ID, wrong-rank, ambiguous-alias,
+  and unknown-family fixtures under normal plus ASan/UBSan execution;
+- single-file/multifile and mixed-species sidecar equivalence;
+- converter source-manifest hash/schema rejection and atomic output.
+
+MPI acceptance is registered but remains provisional until executed with the
+`mpi-hdf5-fftw-debug` preset. The matrix includes one/two/four-rank direct,
+canonical, and supplied-manifest ingestion; mixed Gas/DM/Star/PartType5-BH
+input; alternate h/a/frame/velocity conversion; PartType2-to-tracer and
+PartType3-to-star mappings; more ranks than files; exact duplicate rejection;
+deliberate lost/duplicated routes; increasing-global-count bounded-staging and
+local-authoritative-capacity checks; and two-rank one-sided fault injection for
+owner serialization, send layout, payload validation, deserialization, sidecar
+append, final state, and source/final reconciliation. Fault tests have 30-second
+timeouts; increasing those timeouts is not an acceptance repair.
+
+Required commands:
+
+```bash
+cmake --preset mpi-hdf5-fftw-debug
+cmake --build --preset build-mpi-hdf5-fftw-debug
+ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
+ctest --test-dir build/mpi-hdf5-fftw-debug --output-on-failure \
+  -R 'integration_distributed_ic_reader'
+```

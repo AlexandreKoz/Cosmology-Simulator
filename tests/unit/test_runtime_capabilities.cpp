@@ -1,4 +1,5 @@
 #include "cosmosim/workflows/runtime_capabilities.hpp"
+#include "cosmosim/core/build_config.hpp"
 
 #include <cassert>
 #include <filesystem>
@@ -17,8 +18,13 @@ void testCapabilityTruth() {
          cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
   assert(report.require("production_hierarchical_local_timestep").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
+#if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
+  assert(report.require("distributed_ic_import").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kProvisional);
+#else
   assert(report.require("distributed_ic_import").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
+#endif
   const auto canonical_status =
       report.require("canonical_external_ic_import").status;
   const auto multifile_status =

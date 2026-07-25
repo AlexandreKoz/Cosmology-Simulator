@@ -58,10 +58,42 @@ def write_member(path: Path, member: int, duplicate: bool = False) -> None:
         g.create_dataset("ParticleIDs", data=ids)
 
 
+
+def write_dimensional_gas_bh(path: Path) -> None:
+    local = np.zeros(6, dtype=np.uint32)
+    local[0] = 1
+    local[5] = 1
+    with h5py.File(path, "w") as f:
+        h = f.create_group("Header")
+        h.attrs["NumPart_ThisFile"] = local
+        h.attrs["NumPart_Total"] = local
+        h.attrs["NumPart_Total_HighWord"] = np.zeros(6, dtype=np.uint32)
+        h.attrs["MassTable"] = np.zeros(6, dtype=np.float64)
+        h.attrs["Time"] = 0.5
+        h.attrs["Redshift"] = 1.0
+        h.attrs["BoxSize"] = 12.5
+        h.attrs["Omega0"] = 0.315
+        h.attrs["OmegaLambda"] = 0.685
+        h.attrs["HubbleParam"] = 0.5
+        h.attrs["NumFilesPerSnapshot"] = np.uint32(1)
+        gas = f.create_group("PartType0")
+        gas["Coordinates"] = np.array([[1.0, 2.0, 3.0]], dtype=np.float64)
+        gas["Velocities"] = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
+        gas["Masses"] = np.array([1.0], dtype=np.float64)
+        gas["ParticleIDs"] = np.array([1001], dtype=np.uint64)
+        gas["InternalEnergy"] = np.array([4.0], dtype=np.float64)
+        gas["Density"] = np.array([2.0], dtype=np.float64)
+        bh = f.create_group("PartType5")
+        bh["Coordinates"] = np.array([[2.0, 2.0, 2.0]], dtype=np.float64)
+        bh["Velocities"] = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
+        bh["Masses"] = np.array([1.0], dtype=np.float64)
+        bh["ParticleIDs"] = np.array([5001], dtype=np.uint64)
+        bh["BH_Mass"] = np.array([3.0], dtype=np.float64)
+        bh["BH_Mdot"] = np.array([0.25], dtype=np.float64)
+
 def run_converter(converter: Path, source: Path, output: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            sys.executable,
             str(converter),
             "--input",
             str(source),
@@ -71,6 +103,12 @@ def run_converter(converter: Path, source: Path, output: Path, manifest: Path) -
             str(manifest),
             "--source-convention",
             "gadget_arepo_bridge_v1",
+            "--source-length-unit-to-si",
+            "3.0856775814913673e19",
+            "--source-mass-unit-to-si",
+            "1.98847e30",
+            "--source-velocity-unit-to-si",
+            "1000",
             "--coordinate-frame",
             "physical",
             "--velocity-convention",
@@ -79,6 +117,14 @@ def run_converter(converter: Path, source: Path, output: Path, manifest: Path) -
             "-1",
             "--mass-h-exponent",
             "-1",
+            "--length-a-exponent",
+            "0",
+            "--mass-a-exponent",
+            "0",
+            "--velocity-h-exponent",
+            "0",
+            "--velocity-a-exponent",
+            "0",
             "--chunk-particles",
             "1",
         ],
@@ -93,7 +139,6 @@ def run_converter_from_manifest(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            sys.executable,
             str(converter),
             "--source-manifest",
             str(source_manifest),
@@ -127,7 +172,7 @@ def main() -> int:
         manifest_text = manifest_path.read_text(encoding="utf-8")
         manifest = json.loads(manifest_text)
         assert manifest["schema_name"] == "chui_ic_audit_manifest"
-        assert manifest["schema_version"] == 2
+        assert manifest["schema_version"] == 3
         assert len(manifest["source_files"]) == 2
         assert all(len(value) == 64 for value in manifest["source_sha256"])
         assert any(
@@ -144,9 +189,15 @@ def main() -> int:
         )
         with h5py.File(output, "r") as f:
             header = f["Header"].attrs
-            assert header["ChuiIcSchemaName"] == "chui_canonical_v1"
+            schema_name = header["ChuiIcSchemaName"]
+            if isinstance(schema_name, bytes):
+                schema_name = schema_name.decode("utf-8").rstrip("\0")
+            assert schema_name == "chui_canonical_v1"
             assert header["NumFilesPerSnapshot"] == 1
-            assert header["ConversionManifestSha256"] == hashlib.sha256(
+            manifest_digest = header["ConversionManifestSha256"]
+            if isinstance(manifest_digest, bytes):
+                manifest_digest = manifest_digest.decode("utf-8").rstrip("\0")
+            assert manifest_digest == hashlib.sha256(
                 manifest_text.encode("utf-8")
             ).hexdigest()
             ids = f["PartType1/ParticleIDs"][:]
@@ -175,6 +226,48 @@ def main() -> int:
                 np.testing.assert_array_equal(
                     expected[f"PartType1/{name}"][:], actual[f"PartType1/{name}"][:]
                 )
+
+        dimensional_source = root / "dimensional_gas_bh.hdf5"
+        write_dimensional_gas_bh(dimensional_source)
+        dimensional_output = root / "dimensional_gas_bh.canonical.hdf5"
+        dimensional_manifest = root / "dimensional_gas_bh.audit.json"
+        dimensional_result = run_converter(
+            converter, dimensional_source, dimensional_output, dimensional_manifest
+        )
+        assert dimensional_result.returncode == 0, dimensional_result.stderr
+        with h5py.File(dimensional_output, "r") as f:
+            assert math.isclose(f["PartType0/Coordinates"][0, 0], 4.0)
+            assert math.isclose(
+                f["PartType0/Velocities"][0, 0], 1.0 / math.sqrt(0.5)
+            )
+            assert math.isclose(f["PartType0/Masses"][0], 2.0)
+            assert math.isclose(f["PartType0/InternalEnergy"][0], 8.0)
+            assert math.isclose(f["PartType0/Density"][0], 0.0625)
+            assert math.isclose(f["PartType5/BH_Mass"][0], 6.0)
+            assert math.isclose(
+                f["PartType5/BH_Mdot"][0], 0.25 * math.sqrt(0.5)
+            )
+        dimensional_manifest_output = root / "dimensional_from_manifest.hdf5"
+        dimensional_manifest_audit = root / "dimensional_from_manifest.audit.json"
+        dimensional_manifest_result = run_converter_from_manifest(
+            converter, dimensional_manifest, dimensional_manifest_output,
+            dimensional_manifest_audit
+        )
+        assert dimensional_manifest_result.returncode == 0, dimensional_manifest_result.stderr
+        with h5py.File(dimensional_output, "r") as expected, h5py.File(
+            dimensional_manifest_output, "r"
+        ) as actual:
+            for group, names in {
+                "PartType0": ("Coordinates", "Velocities", "Masses", "ParticleIDs",
+                              "InternalEnergy", "Density"),
+                "PartType5": ("Coordinates", "Velocities", "Masses", "ParticleIDs",
+                              "BH_Mass", "BH_Mdot"),
+            }.items():
+                for name in names:
+                    np.testing.assert_array_equal(
+                        expected[f"{group}/{name}"][:], actual[f"{group}/{name}"][:]
+                    )
+
         tampered_manifest = root / "tampered_source.audit.json"
         tampered = json.loads(manifest_text)
         tampered["source_sha256"][0] = "0" * 64
@@ -183,7 +276,7 @@ def main() -> int:
             converter, tampered_manifest, root / "tampered.hdf5", root / "tampered.audit.json"
         )
         assert tampered_result.returncode != 0
-        assert "SHA-256" in tampered_result.stderr
+        assert "provenance" in tampered_result.stderr or "sha" in tampered_result.stderr.lower()
 
         duplicate_first = root / "duplicate.0.hdf5"
         duplicate_second = root / "duplicate.1.hdf5"

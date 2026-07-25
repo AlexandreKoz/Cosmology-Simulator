@@ -96,9 +96,10 @@ External initial conditions are never selected by filename alone. The typed
 - `generated`: requires `mode.ic_file=generated` and uses the in-repository generator.
 - `chui_canonical_v1`: reads an IC already expressed in the canonical CHUÍ v1 units,
   frame, velocity, species, and provenance contract.
-- `gadget_arepo_bridge_v1`: applies the explicitly versioned bridge convention
-  (kpc, Msun, km/s, comoving coordinates, physical peculiar velocities, zero
-  h/scale-factor exponents unless a supplied manifest states otherwise).
+- `gadget_arepo_bridge_v1`: requires a complete direct-bridge scientific
+  convention. The source length, mass, and velocity SI scales, coordinate frame,
+  velocity convention, and all length/mass/velocity h and scale-factor exponents
+  are mandatory. There are no kpc/Msun/km/s or frame defaults.
 - `manifest_v1`: loads the strict versioned audit manifest named by
   `mode.ic_manifest_file`; relative source paths are resolved from the manifest.
 
@@ -119,7 +120,26 @@ ic_chunk_particle_count = 65536
 ic_staging_particle_count = 65536
 ic_part_type2_policy = reject
 ic_part_type3_policy = reject
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
+ic_bridge_source_mass_unit_to_si = 1.98847e30
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = physical_peculiar
+ic_bridge_length_hubble_exponent = -1
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = -1
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
 ```
+
+
+Direct-bridge values are part of the normalized configuration and provenance hash.
+Accepted coordinate frames are `comoving` and `physical`. Accepted velocity
+conventions are `physical_peculiar`, `sqrt_a_scaled_peculiar`, and
+`comoving_coordinate_rate`. Unit scales must be finite and positive; all six
+h/a exponents must be finite. Omitting any member of the contract is a
+configuration error before HDF5 is opened.
 
 Example manifest-driven import:
 

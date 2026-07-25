@@ -326,3 +326,19 @@ validation and publishable production are maintained in
 | ID | Status | Area | Resolution | Remaining boundary |
 |---|---|---|---|---|
 | P40-RUNTIME-RESOURCE-CAPABILITY-037 | Closed | Workflow resource ownership | Removed public `StepContext`/`ownerContext`/`stageContext` escape, bound descriptor resources per task, enforced typed-view access allowlists, added negative compile tests, and centralized gas-cell ownership helpers. | Built-in owners remain trusted source implementations; dynamic lane tracing and descriptor-owned timestep/restart/migration schemas are not claimed. |
+
+## Campaign B external acceptance handoff (2026-07-24)
+
+No known source-level Campaign B acceptance item is intentionally left open.
+The remaining Campaign B gate is execution evidence on a dependency-complete MPI
+system: configure/build the `mpi-hdf5-fftw-debug` preset and run the complete
+distributed IC matrix. Keep `distributed_ic_import` provisional until that
+matrix passes. Any failure must be repaired in code or protocol; do not promote
+capability by changing the status test, disabling a fault scenario, or increasing
+its timeout.
+
+A separate repository-wide HDF5 `integration_runtime_app_smoke` process did not
+return within repeated bounded command windows in the repair environment. It
+uses generated ICs and is not part of the external Campaign B ingestion path,
+but it prevents reporting the entire HDF5 preset as 133/133 green until its
+pre-existing harness behavior is diagnosed on the normal validation system.

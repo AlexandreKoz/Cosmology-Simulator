@@ -11,7 +11,8 @@ A valid `param.txt` run goes through the following real path:
 3. Initial conditions are dispatched from the authoritative typed convention:
    - `mode.ic_convention=generated` requires `mode.ic_file=generated`.
    - `chui_canonical_v1` reads the canonical CHUÍ v1 contract.
-   - `gadget_arepo_bridge_v1` reads the explicitly versioned external bridge contract.
+   - `gadget_arepo_bridge_v1` requires the complete explicit source-unit,
+     coordinate-frame, velocity-convention, and h/a exponent contract.
    - `manifest_v1` loads the strict audit manifest named by `mode.ic_manifest_file`.
    External paths without an explicit convention fail before runtime. Relative IC
    paths are resolved from the config; relative manifest source members are resolved
@@ -38,6 +39,13 @@ The runner honors these config fields directly:
 - `mode.ic_file`
 - `mode.ic_convention`
 - `mode.ic_manifest_file`
+- `mode.ic_bridge_source_length_unit_to_si`
+- `mode.ic_bridge_source_mass_unit_to_si`
+- `mode.ic_bridge_source_velocity_unit_to_si`
+- `mode.ic_bridge_coordinate_frame`
+- `mode.ic_bridge_velocity_convention`
+- all six `mode.ic_bridge_*_hubble_exponent` and
+  `mode.ic_bridge_*_scale_factor_exponent` values
 - `mode.ic_chunk_particle_count`
 - `mode.ic_staging_particle_count`
 - `mode.ic_part_type2_policy` / `mode.ic_part_type3_policy`
@@ -69,10 +77,14 @@ and returns `already_partitioned=true`. Generated or caller-supplied replicated 
 continues through the established ownership initialization path.
 
 Before stepping, distributed import verifies a canonical manifest digest, exact global
-ID uniqueness, source/chunk coverage, ownership completeness and exclusivity, species
-counts and mass totals, finite/domain-valid fields, and sidecar invariants. Rank-local
-failures are coordinated before later collective phases so malformed input fails rather
-than stranding peers in MPI.
+ID uniqueness, exact file/chunk coverage, per-chunk source-to-final ID balance,
+ownership completeness and exclusivity, species counts and mass totals, all-axis
+finite/domain-valid fields, and sidecar invariants. File inspection and hashing are
+assigned across ranks rather than repeated by rank zero. Rank-local failures are voted
+at phase boundaries before any later collective so malformed input terminates
+collectively rather than stranding peers in MPI. Distributed IC capability remains
+provisional until the registered MPI acceptance matrix passes on a dependency-complete
+system.
 
 The validated audit manifest is written by rank zero as `ic_manifest.json` in the run
 directory. Every rank emits `io.ic_ingestion.summary` counters through the shared

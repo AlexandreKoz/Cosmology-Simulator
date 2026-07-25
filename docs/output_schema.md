@@ -29,7 +29,7 @@ strict audit manifest. Canonical v1 stores comoving positions and physical
 peculiar velocities under explicit unit attributes. It must not be interpreted
 through filename guessing.
 
-The paired `*.ic_manifest.json` uses `chui_ic_audit_manifest` version 2 and
+The paired `*.ic_manifest.json` uses `chui_ic_audit_manifest` version 3 and
 contains source-member hashes, original headers, actual dataset datatypes and
 dimensions, conversion equations, species policies, defaults, warnings, and
 field dispositions. The runtime verifies this contract before materialization.

@@ -953,16 +953,70 @@ if(COSMOSIM_ENABLE_TESTS)
       add_test(
         NAME integration_distributed_ic_reader_mpi_${rank_count}_rank
         COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count} ${MPIEXEC_PREFLAGS}
-                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> ${MPIEXEC_POSTFLAGS})
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> normal ${MPIEXEC_POSTFLAGS})
       set_tests_properties(integration_distributed_ic_reader_mpi_${rank_count}_rank
-        PROPERTIES PROCESSORS ${rank_count} LABELS "mpi;hdf5;distributed;ic;runtime_truth")
+        PROPERTIES PROCESSORS ${rank_count} TIMEOUT 60
+                   LABELS "mpi;hdf5;distributed;ic;mixed_species;runtime_truth")
+    endforeach()
+    foreach(acceptance_mode IN ITEMS canonical manifest alternate type_policy)
+      foreach(rank_count IN ITEMS 1 2 4)
+        add_test(
+          NAME integration_distributed_ic_reader_${acceptance_mode}_mpi_${rank_count}_rank
+          COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count} ${MPIEXEC_PREFLAGS}
+                  $<TARGET_FILE:test_integration_distributed_ic_reader_mpi>
+                  ${acceptance_mode} ${MPIEXEC_POSTFLAGS})
+        set_tests_properties(
+          integration_distributed_ic_reader_${acceptance_mode}_mpi_${rank_count}_rank
+          PROPERTIES PROCESSORS ${rank_count} TIMEOUT 90
+                     LABELS "mpi;hdf5;distributed;ic;equivalence;runtime_truth")
+      endforeach()
+    endforeach()
+    foreach(rank_count IN ITEMS 2 4)
+      add_test(
+        NAME integration_distributed_ic_reader_scaling_mpi_${rank_count}_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> scaling ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_distributed_ic_reader_scaling_mpi_${rank_count}_rank
+        PROPERTIES PROCESSORS ${rank_count} TIMEOUT 90
+                   LABELS "mpi;hdf5;distributed;ic;scaling;memory;runtime_truth")
     endforeach()
     add_test(
       NAME integration_distributed_ic_reader_duplicate_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> duplicate ${MPIEXEC_POSTFLAGS})
     set_tests_properties(integration_distributed_ic_reader_duplicate_mpi_two_rank
-      PROPERTIES PROCESSORS 2 LABELS "mpi;hdf5;distributed;ic;malformed;runtime_truth")
+      PROPERTIES PROCESSORS 2 TIMEOUT 60
+                 LABELS "mpi;hdf5;distributed;ic;malformed;runtime_truth")
+    foreach(route_case IN ITEMS route_loss route_duplicate)
+      add_test(
+        NAME integration_distributed_ic_reader_${route_case}_mpi_two_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi>
+                ${route_case} ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_distributed_ic_reader_${route_case}_mpi_two_rank
+        PROPERTIES PROCESSORS 2 TIMEOUT 30
+                   LABELS "mpi;hdf5;distributed;ic;reconciliation;malformed;runtime_truth")
+    endforeach()
+    foreach(fault_phase IN ITEMS
+        owner_serialization
+        send_layout
+        payload_validation
+        deserialization
+        sidecar_append
+        final_state
+        source_final_reconciliation)
+      add_test(
+        NAME integration_distributed_ic_reader_fault_${fault_phase}_mpi_two_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi>
+                fault_${fault_phase} ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_distributed_ic_reader_fault_${fault_phase}_mpi_two_rank
+        PROPERTIES PROCESSORS 2 TIMEOUT 30
+                   LABELS "mpi;hdf5;distributed;ic;fault_injection;malformed;runtime_truth")
+    endforeach()
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
@@ -997,12 +1051,14 @@ if(COSMOSIM_ENABLE_TESTS)
 
 
   if(COSMOSIM_ENABLE_HDF5)
+    add_executable(cosmosim_convert_ic tools/convert_ic.cpp)
+    target_link_libraries(cosmosim_convert_ic PRIVATE cosmosim_io)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
       add_test(
         NAME integration_convert_ic
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/io/test_convert_ic.py
-                ${PROJECT_SOURCE_DIR}/tools/convert_ic.py)
+                $<TARGET_FILE:cosmosim_convert_ic>)
       set_tests_properties(integration_convert_ic PROPERTIES
         SKIP_RETURN_CODE 77 LABELS "integration;hdf5;ic;converter;runtime_truth")
     endif()

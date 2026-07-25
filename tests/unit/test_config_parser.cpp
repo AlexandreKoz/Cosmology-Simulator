@@ -23,6 +23,17 @@ coordinate_frame = comoving
 mode = zoom_in
 ic_file = zoom_ics.hdf5
 ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e19
+ic_bridge_source_mass_unit_to_si = 1.98847e30
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = physical_peculiar
+ic_bridge_length_hubble_exponent = 0
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = 0
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
 zoom_high_res_region = true
 zoom_region_file = region_zoom.hdf5
 zoom_region_radius = 1.0
@@ -140,6 +151,17 @@ void testTypedInitialConditionConfiguration() {
       "mode = zoom_in\n"
       "ic_file = input.0.hdf5\n"
       "ic_convention = gadget_arepo_bridge_v1\n"
+      "ic_bridge_source_length_unit_to_si = 3.0856775814913673e19\n"
+      "ic_bridge_source_mass_unit_to_si = 1.98847e30\n"
+      "ic_bridge_source_velocity_unit_to_si = 1000\n"
+      "ic_bridge_coordinate_frame = comoving\n"
+      "ic_bridge_velocity_convention = physical_peculiar\n"
+      "ic_bridge_length_hubble_exponent = 0\n"
+      "ic_bridge_length_scale_factor_exponent = 0\n"
+      "ic_bridge_mass_hubble_exponent = 0\n"
+      "ic_bridge_mass_scale_factor_exponent = 0\n"
+      "ic_bridge_velocity_hubble_exponent = 0\n"
+      "ic_bridge_velocity_scale_factor_exponent = 0\n"
       "ic_chunk_particle_count = 4096\n"
       "ic_staging_particle_count = 2048\n"
       "ic_part_type2_policy = dark_matter\n"
@@ -159,6 +181,19 @@ void testTypedInitialConditionConfiguration() {
   assert(
       bridge.normalized_text.find("ic_chunk_particle_count = 4096") !=
       std::string::npos);
+  assert(bridge.normalized_text.find(
+             "ic_bridge_coordinate_frame = comoving") != std::string::npos);
+
+  bool incomplete_bridge_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\nic_file = input.hdf5\n"
+        "ic_convention = gadget_arepo_bridge_v1\n",
+        "incomplete_bridge");
+  } catch (const cosmosim::core::ConfigError&) {
+    incomplete_bridge_rejected = true;
+  }
+  assert(incomplete_bridge_rejected);
 
   bool rejected = false;
   try {

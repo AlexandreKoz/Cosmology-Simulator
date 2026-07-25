@@ -76,7 +76,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"canonical_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
        RuntimeCapabilityStatus::kSupported,
-       "Typed generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, strict audit-manifest v2 validation, real HDF5 schema inspection, multifile import, and the streaming canonical converter are available."},
+       "Typed no-guess generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, strict audit-manifest v3 validation, real HDF5 schema inspection, multifile import, and the shared compiled canonical converter are available."},
 #else
        RuntimeCapabilityStatus::kUnsupported,
        "This build has COSMOSIM_ENABLE_HDF5=OFF, so external HDF5 IC import and canonical conversion are unavailable."},
@@ -91,8 +91,8 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
 #endif
       {"distributed_ic_import",
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
-       RuntimeCapabilityStatus::kSupported,
-       "Reader ranks receive deterministic bounded chunks, convert each chunk once, route typed records directly to x-slab owners, and perform exact distributed ID/count/mass validation without replicated global state."},
+       RuntimeCapabilityStatus::kProvisional,
+       "The bounded distributed implementation and MPI acceptance tests are present, but runtime acceptance remains provisional until the required one-, two-, and four-rank matrix passes on a real MPI/HDF5 installation."},
 #else
        RuntimeCapabilityStatus::kUnsupported,
        "Distributed IC ingestion requires both COSMOSIM_ENABLE_HDF5=ON and COSMOSIM_ENABLE_MPI=ON in this build."},
