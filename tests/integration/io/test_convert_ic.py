@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ except ImportError:
 
 
 def write_member(path: Path, member: int, duplicate: bool = False) -> None:
-    local = np.zeros(6, dtype=np.uint32)
+    local = np.zeros(6, dtype=np.int32)
     total = np.zeros(6, dtype=np.uint32)
     local[1] = 2
     total[1] = 4
@@ -34,7 +35,7 @@ def write_member(path: Path, member: int, duplicate: bool = False) -> None:
         h.attrs["Omega0"] = 0.315
         h.attrs["OmegaLambda"] = 0.685
         h.attrs["HubbleParam"] = 0.5
-        h.attrs["NumFilesPerSnapshot"] = np.uint32(2)
+        h.attrs["NumFilesPerSnapshot"] = np.int32(2)
         g = f.create_group("PartType1")
         first = member * 2
         g.create_dataset(
@@ -59,14 +60,14 @@ def write_member(path: Path, member: int, duplicate: bool = False) -> None:
 
 
 
-def write_dimensional_gas_bh(path: Path) -> None:
-    local = np.zeros(6, dtype=np.uint32)
+def write_dimensional_gas_bh(path: Path, omit_density: bool = False) -> None:
+    local = np.zeros(6, dtype=np.int32)
     local[0] = 1
     local[5] = 1
     with h5py.File(path, "w") as f:
         h = f.create_group("Header")
         h.attrs["NumPart_ThisFile"] = local
-        h.attrs["NumPart_Total"] = local
+        h.attrs["NumPart_Total"] = local.astype(np.uint32)
         h.attrs["NumPart_Total_HighWord"] = np.zeros(6, dtype=np.uint32)
         h.attrs["MassTable"] = np.zeros(6, dtype=np.float64)
         h.attrs["Time"] = 0.5
@@ -75,14 +76,15 @@ def write_dimensional_gas_bh(path: Path) -> None:
         h.attrs["Omega0"] = 0.315
         h.attrs["OmegaLambda"] = 0.685
         h.attrs["HubbleParam"] = 0.5
-        h.attrs["NumFilesPerSnapshot"] = np.uint32(1)
+        h.attrs["NumFilesPerSnapshot"] = np.int32(1)
         gas = f.create_group("PartType0")
         gas["Coordinates"] = np.array([[1.0, 2.0, 3.0]], dtype=np.float64)
         gas["Velocities"] = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
         gas["Masses"] = np.array([1.0], dtype=np.float64)
         gas["ParticleIDs"] = np.array([1001], dtype=np.uint64)
         gas["InternalEnergy"] = np.array([4.0], dtype=np.float64)
-        gas["Density"] = np.array([2.0], dtype=np.float64)
+        if not omit_density:
+            gas["Density"] = np.array([2.0], dtype=np.float64)
         bh = f.create_group("PartType5")
         bh["Coordinates"] = np.array([[2.0, 2.0, 2.0]], dtype=np.float64)
         bh["Velocities"] = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
@@ -91,54 +93,45 @@ def write_dimensional_gas_bh(path: Path) -> None:
         bh["BH_Mass"] = np.array([3.0], dtype=np.float64)
         bh["BH_Mdot"] = np.array([0.25], dtype=np.float64)
 
-def run_converter(converter: Path, source: Path, output: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
+def run_converter(
+    converter: Path, source: Path, output: Path, manifest: Path,
+    extra_args: list[str] | None = None,
+    fault: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(converter),
+        "--input", str(source),
+        "--output", str(output),
+        "--manifest", str(manifest),
+        "--source-convention", "gadget_arepo_bridge_v1",
+        "--source-length-unit-to-si", "3.0856775814913673e19",
+        "--source-mass-unit-to-si", "1.98847e30",
+        "--source-velocity-unit-to-si", "1000",
+        "--coordinate-frame", "physical",
+        "--velocity-convention", "sqrt_a_scaled_peculiar",
+        "--length-h-exponent", "-1",
+        "--mass-h-exponent", "-1",
+        "--length-a-exponent", "0",
+        "--mass-a-exponent", "0",
+        "--velocity-h-exponent", "0",
+        "--velocity-a-exponent", "0",
+        "--chunk-particles", "1",
+    ]
+    if extra_args:
+        command.extend(extra_args)
+    environment = os.environ.copy()
+    if fault is not None:
+        environment["COSMOSIM_CONVERTER_TEST_FAULT"] = fault
     return subprocess.run(
-        [
-            str(converter),
-            "--input",
-            str(source),
-            "--output",
-            str(output),
-            "--manifest",
-            str(manifest),
-            "--source-convention",
-            "gadget_arepo_bridge_v1",
-            "--source-length-unit-to-si",
-            "3.0856775814913673e19",
-            "--source-mass-unit-to-si",
-            "1.98847e30",
-            "--source-velocity-unit-to-si",
-            "1000",
-            "--coordinate-frame",
-            "physical",
-            "--velocity-convention",
-            "sqrt_a_scaled_peculiar",
-            "--length-h-exponent",
-            "-1",
-            "--mass-h-exponent",
-            "-1",
-            "--length-a-exponent",
-            "0",
-            "--mass-a-exponent",
-            "0",
-            "--velocity-h-exponent",
-            "0",
-            "--velocity-a-exponent",
-            "0",
-            "--chunk-particles",
-            "1",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
+        command, text=True, capture_output=True, check=False, env=environment
     )
 
 
 def run_converter_from_manifest(
-    converter: Path, source_manifest: Path, output: Path, manifest: Path
+    converter: Path, source_manifest: Path, output: Path, manifest: Path,
+    extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
+    command = [
             str(converter),
             "--source-manifest",
             str(source_manifest),
@@ -148,7 +141,11 @@ def run_converter_from_manifest(
             str(manifest),
             "--chunk-particles",
             "2",
-        ],
+        ]
+    if extra_args:
+        command.extend(extra_args)
+    return subprocess.run(
+        command,
         text=True,
         capture_output=True,
         check=False,
@@ -172,7 +169,7 @@ def main() -> int:
         manifest_text = manifest_path.read_text(encoding="utf-8")
         manifest = json.loads(manifest_text)
         assert manifest["schema_name"] == "chui_ic_audit_manifest"
-        assert manifest["schema_version"] == 3
+        assert manifest["schema_version"] == 4
         assert len(manifest["source_files"]) == 2
         assert all(len(value) == 64 for value in manifest["source_sha256"])
         assert any(
@@ -200,6 +197,31 @@ def main() -> int:
             assert manifest_digest == hashlib.sha256(
                 manifest_text.encode("utf-8")
             ).hexdigest()
+            assert int(header["ChuiIcSchemaVersion"]) == 2
+            assert int(header["ChuiConverterFullStateMaterialized"]) == 0
+            assert int(header["ChuiConverterChunkParticleCapacity"]) == 1
+            assert 0 < int(header["ChuiConverterPeakBatchRecords"]) <= 1
+            assert int(header["ChuiConverterPeakReaderStagingBytes"]) > 0
+            converter_flow = header["ChuiConverterFlow"]
+            if isinstance(converter_flow, bytes):
+                converter_flow = converter_flow.decode("utf-8").rstrip("\0")
+            assert converter_flow == "source_chunk_to_validate_convert_append"
+            sidecar_name = header["ConversionManifestSidecar"]
+            marker_name = header["ConversionBundleMarker"]
+            if isinstance(sidecar_name, bytes):
+                sidecar_name = sidecar_name.decode("utf-8").rstrip("\0")
+            if isinstance(marker_name, bytes):
+                marker_name = marker_name.decode("utf-8").rstrip("\0")
+            assert sidecar_name == manifest_path.name
+            assert marker_name == output.name + ".complete"
+            embedded = bytes(f["Provenance/ConversionManifestJson"][:]).decode("utf-8")
+            assert embedded == manifest_text
+            assert (root / marker_name).read_text(encoding="utf-8") == (
+                "chui_ic_bundle_v1\n"
+                f"sha256={manifest_digest}\n"
+                f"canonical={output.name}\n"
+                f"manifest={manifest_path.name}\n"
+            )
             ids = f["PartType1/ParticleIDs"][:]
             assert ids.dtype == np.dtype("uint64")
             assert int(ids[0]) > 2**63
@@ -227,6 +249,38 @@ def main() -> int:
                     expected[f"PartType1/{name}"][:], actual[f"PartType1/{name}"][:]
                 )
 
+        manifest_policy_override = run_converter_from_manifest(
+            converter,
+            manifest_path,
+            root / "manifest_policy_override.hdf5",
+            root / "manifest_policy_override.audit.json",
+            extra_args=["--gas-density-policy", "use_config_value"],
+        )
+        assert manifest_policy_override.returncode != 0
+        assert "manifest mode derives species and missing-field policies" in (
+            manifest_policy_override.stderr
+        )
+
+        relative_source_manifest = root / "relative_source.audit.json"
+        relative_manifest_data = json.loads(manifest_text)
+        relative_manifest_data["source_files"] = [
+            Path(path).name for path in relative_manifest_data["source_files"]
+        ]
+        relative_source_manifest.write_text(
+            json.dumps(relative_manifest_data), encoding="utf-8"
+        )
+        relative_output = root / "canonical_from_relative_manifest.hdf5"
+        relative_audit = root / "canonical_from_relative_manifest.audit.json"
+        relative_result = run_converter_from_manifest(
+            converter, relative_source_manifest, relative_output, relative_audit
+        )
+        assert relative_result.returncode == 0, relative_result.stderr
+        with h5py.File(output, "r") as expected, h5py.File(relative_output, "r") as actual:
+            for name in ("Coordinates", "Velocities", "Masses", "ParticleIDs"):
+                np.testing.assert_array_equal(
+                    expected[f"PartType1/{name}"][:], actual[f"PartType1/{name}"][:]
+                )
+
         dimensional_source = root / "dimensional_gas_bh.hdf5"
         write_dimensional_gas_bh(dimensional_source)
         dimensional_output = root / "dimensional_gas_bh.canonical.hdf5"
@@ -241,12 +295,58 @@ def main() -> int:
                 f["PartType0/Velocities"][0, 0], 1.0 / math.sqrt(0.5)
             )
             assert math.isclose(f["PartType0/Masses"][0], 2.0)
-            assert math.isclose(f["PartType0/InternalEnergy"][0], 8.0)
+            assert math.isclose(f["PartType0/InternalEnergy"][0], 4.0)
             assert math.isclose(f["PartType0/Density"][0], 0.0625)
             assert math.isclose(f["PartType5/BH_Mass"][0], 6.0)
-            assert math.isclose(
-                f["PartType5/BH_Mdot"][0], 0.25 * math.sqrt(0.5)
-            )
+            assert math.isclose(f["PartType5/BH_Mdot"][0], 0.25)
+
+        missing_density_source = root / "missing_density.hdf5"
+        write_dimensional_gas_bh(missing_density_source, omit_density=True)
+        rejected_missing_density = run_converter(
+            converter,
+            missing_density_source,
+            root / "missing_density_rejected.hdf5",
+            root / "missing_density_rejected.audit.json",
+        )
+        assert rejected_missing_density.returncode != 0
+        assert "Density" in rejected_missing_density.stderr
+        missing_density_output = root / "missing_density.canonical.hdf5"
+        missing_density_manifest = root / "missing_density.audit.json"
+        accepted_missing_density = run_converter(
+            converter,
+            missing_density_source,
+            missing_density_output,
+            missing_density_manifest,
+            extra_args=[
+                "--gas-density-policy", "use_config_value",
+                "--gas-density-value-code", "7.5",
+            ],
+        )
+        assert accepted_missing_density.returncode == 0, accepted_missing_density.stderr
+        with h5py.File(missing_density_output, "r") as f:
+            assert math.isclose(f["PartType0/Density"][0], 7.5)
+        missing_density_audit = json.loads(
+            missing_density_manifest.read_text(encoding="utf-8")
+        )
+        assert any(
+            contract["field_path"] == "/PartType0/Density"
+            and contract["policy"] == "use_config_value"
+            and math.isclose(contract["configured_value_code"], 7.5)
+            for contract in missing_density_audit["missing_field_contracts"]
+        )
+        missing_density_manifest_output = root / "missing_density_from_manifest.hdf5"
+        missing_density_manifest_audit = root / "missing_density_from_manifest.audit.json"
+        missing_density_manifest_result = run_converter_from_manifest(
+            converter,
+            missing_density_manifest,
+            missing_density_manifest_output,
+            missing_density_manifest_audit,
+        )
+        assert missing_density_manifest_result.returncode == 0, (
+            missing_density_manifest_result.stderr
+        )
+        with h5py.File(missing_density_manifest_output, "r") as f:
+            assert math.isclose(f["PartType0/Density"][0], 7.5)
         dimensional_manifest_output = root / "dimensional_from_manifest.hdf5"
         dimensional_manifest_audit = root / "dimensional_from_manifest.audit.json"
         dimensional_manifest_result = run_converter_from_manifest(
@@ -277,6 +377,49 @@ def main() -> int:
         )
         assert tampered_result.returncode != 0
         assert "provenance" in tampered_result.stderr or "sha" in tampered_result.stderr.lower()
+
+        tracer_result = run_converter(
+            converter, first, root / "tracer.hdf5", root / "tracer.audit.json",
+            extra_args=["--part-type2-policy", "tracer"],
+        )
+        assert tracer_result.returncode != 0
+        assert "no tracer output family" in tracer_result.stderr
+        assert not (root / "tracer.hdf5").exists()
+
+        tracer_manifest_path = root / "tracer_source.audit.json"
+        tracer_manifest_data = json.loads(manifest_text)
+        tracer_manifest_data["species_policy"][2] = "tracer"
+        tracer_manifest_path.write_text(
+            json.dumps(tracer_manifest_data), encoding="utf-8"
+        )
+        tracer_manifest_result = run_converter_from_manifest(
+            converter,
+            tracer_manifest_path,
+            root / "tracer_manifest.hdf5",
+            root / "tracer_manifest.audit.json",
+        )
+        assert tracer_manifest_result.returncode != 0
+        assert "tracer policy in the supplied manifest" in tracer_manifest_result.stderr
+        assert not (root / "tracer_manifest.hdf5").exists()
+
+        for fault in (
+            "hdf5_write", "manifest_write", "hash_mismatch",
+            "rename_manifest", "rename_hdf5", "rename_marker",
+        ):
+            fault_output = root / f"fault_{fault}.hdf5"
+            fault_manifest = root / f"fault_{fault}.audit.json"
+            fault_result = run_converter(
+                converter, first, fault_output, fault_manifest, fault=fault
+            )
+            assert fault_result.returncode != 0, fault
+            for member in (
+                fault_output, fault_manifest,
+                Path(str(fault_output) + ".complete"),
+                Path(str(fault_output) + ".part"),
+                Path(str(fault_manifest) + ".part"),
+                Path(str(fault_output) + ".complete.part"),
+            ):
+                assert not member.exists(), (fault, member)
 
         duplicate_first = root / "duplicate.0.hdf5"
         duplicate_second = root / "duplicate.1.hdf5"

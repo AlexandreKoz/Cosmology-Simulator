@@ -11,32 +11,40 @@ Authoritative interfaces:
 
 ## 0) Canonical CHUÍ initial-condition schema
 
-The standalone converter writes `chui_canonical_ic_v1`. It is an interchange
-input artifact, not a restart checkpoint and not a normal time-series snapshot.
-The file uses canonical GADGET/AREPO group and dataset names so existing HDF5
-tooling remains usable:
+The standalone converter writes header schema `chui_canonical_v1`, version 2.
+It is an interchange input bundle, not a restart checkpoint and not a normal
+time-series snapshot. The HDF5 member uses canonical GADGET/AREPO group and
+dataset names:
 
 - `/Header`
+- `/Provenance/ConversionManifestJson`
 - `/PartType0`, `/PartType1`, `/PartType4`, `/PartType5` when populated
 - `Coordinates`, `Velocities`, `Masses`, `ParticleIDs`
 - species fields such as `InternalEnergy`, `Density`, `StellarFormationTime`,
-  `Metallicity`, `BH_Mass`, and `BH_Mdot` where applicable
+  `InitialMass`, `Metallicity`, `BH_Mass`, and `BH_Mdot`
 
-The header records the canonical schema name/version, cosmology, box, epoch,
-64-bit particle counts, canonical unit scales, coordinate-frame and velocity
-conventions, source/converter provenance, and the SHA-256 digest of the final
-strict audit manifest. Canonical v1 stores comoving positions and physical
-peculiar velocities under explicit unit attributes. It must not be interpreted
-through filename guessing.
+The header records cosmology, box, epoch, reconstructed 64-bit counts, canonical
+unit scales, comoving-coordinate and physical-peculiar-velocity conventions,
+and the SHA-256 binding of the normalized audit manifest. It also records
+converter evidence:
 
-The paired `*.ic_manifest.json` uses `chui_ic_audit_manifest` version 3 and
-contains source-member hashes, original headers, actual dataset datatypes and
-dimensions, conversion equations, species policies, defaults, warnings, and
-field dispositions. The runtime verifies this contract before materialization.
+- `ChuiConverterFullStateMaterialized = 0`;
+- `ChuiConverterFlow = source_chunk_to_validate_convert_append`;
+- chunk capacity, peak converted batch records, and peak reader staging bytes.
 
-Canonical IC, science snapshot, and restart are deliberately separate schemas:
-canonical IC is audited import/interchange state; snapshot is analysis output;
-restart is exact execution continuation.
+The paired JSON uses `chui_ic_audit_manifest` version 4. The exact normalized
+JSON is embedded in HDF5 and emitted as a sidecar. A completion marker binds the
+canonical filename, sidecar filename, and digest. Runtime import recomputes and
+compares both hashes and requires the marker before materialization; a merely
+well-formed digest string is not accepted as verification.
+
+HDF5, manifest, and marker are written as `.part` members and finalized as one
+recoverable bundle. Any write, digest, or rename failure removes partial and
+orphaned final members.
+
+Canonical IC, science snapshot, and restart remain deliberately separate
+schemas: canonical IC is audited import/interchange state; snapshot is analysis
+output; restart is exact execution continuation.
 
 ## 1) Snapshot schema (GADGET/AREPO interoperability)
 

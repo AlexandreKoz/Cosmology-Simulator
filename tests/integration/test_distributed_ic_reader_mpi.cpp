@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -123,6 +124,50 @@ void writeDataset1d(
              values) >= 0);
 }
 
+void writeByteDataset(
+    hid_t group, const char* name, const std::string& values) {
+  const hsize_t dims[1] = {values.size()};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle dataset(H5Dcreate2(
+      group, name, H5T_STD_U8LE, space.get(), H5P_DEFAULT, H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(dataset.get() >= 0);
+  assert(H5Dwrite(
+             dataset.get(), H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL,
+             H5P_DEFAULT, values.data()) >= 0);
+}
+
+void writeTextFile(
+    const std::filesystem::path& path, const std::string& value) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  assert(output);
+  output.write(value.data(), static_cast<std::streamsize>(value.size()));
+  output.flush();
+  assert(output);
+}
+
+[[nodiscard]] std::string canonicalAuditJson() {
+  cosmosim::io::IcManifest manifest;
+  manifest.source_files = {"clean_room_arepo_source.hdf5"};
+  manifest.source_sha256 = {std::string(64U, 'a')};
+  manifest.source_provenance_ids = {
+      "sha256:" + manifest.source_sha256.front()};
+  manifest.source_file_sizes_bytes = {1U};
+  manifest.original_header_attributes = {"clean-room canonical fixture"};
+  manifest.num_files_per_snapshot = 1U;
+  manifest.num_part_this_file = {std::array<std::uint64_t, 6>{}};
+  manifest.num_part_total = {};
+  manifest.num_part_total_high_word = {};
+  manifest.mass_table = {};
+  manifest.box_size = K_BOX_SIZE;
+  manifest.scale_factor = 1.0;
+  manifest.redshift = 0.0;
+  manifest.omega_matter = 0.315;
+  manifest.omega_lambda = 0.685;
+  manifest.hubble_param = 0.674;
+  return cosmosim::io::serializeIcManifestJson(manifest);
+}
+
 void writeDatasetVec3(
     hid_t group,
     const char* name,
@@ -197,8 +242,14 @@ void writeMember(
       H5Gcreate2(file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   const std::array<std::uint32_t, 6> high{};
   const std::array<double, 6> mass_table{};
+  std::array<std::int32_t, 6> signed_local_counts{};
+  std::transform(
+      K_LOCAL_COUNTS.begin(), K_LOCAL_COUNTS.end(),
+      signed_local_counts.begin(),
+      [](std::uint32_t value) { return static_cast<std::int32_t>(value); });
   writeArrayAttribute(
-      header.get(), "NumPart_ThisFile", H5T_NATIVE_UINT32, K_LOCAL_COUNTS);
+      header.get(), "NumPart_ThisFile", H5T_NATIVE_INT32,
+      signed_local_counts);
   writeArrayAttribute(
       header.get(), "NumPart_Total", H5T_NATIVE_UINT32, K_TOTAL_COUNTS);
   writeArrayAttribute(
@@ -215,19 +266,38 @@ void writeMember(
   writeAttribute(header.get(), "OmegaLambda", H5T_NATIVE_DOUBLE, 0.685);
   writeAttribute(header.get(), "HubbleParam", H5T_NATIVE_DOUBLE, hubble_param);
   writeAttribute(
-      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_UINT32,
-      K_MEMBER_COUNT);
+      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_INT32,
+      static_cast<std::int32_t>(K_MEMBER_COUNT));
   if (canonical_header) {
     writeStringAttribute(header.get(), "ChuiIcSchemaName", "chui_canonical_v1");
+    const std::string audit_json = canonicalAuditJson();
+    const std::string audit_digest = cosmosim::io::icSha256Hex(audit_json);
+    const std::filesystem::path sidecar_path =
+        path.string() + ".manifest.json";
+    const std::filesystem::path marker_path = path.string() + ".complete";
     writeAttribute(
         header.get(), "ChuiIcSchemaVersion", H5T_NATIVE_UINT32,
-        std::uint32_t{1U});
+        std::uint32_t{2U});
     writeStringAttribute(header.get(), "ChuiCoordinateFrame", "comoving");
     writeStringAttribute(
         header.get(), "ChuiVelocityConvention", "physical_peculiar");
     writeStringAttribute(
-        header.get(), "ConversionManifestSha256",
-        "0000000000000000000000000000000000000000000000000000000000000000");
+        header.get(), "ConversionManifestSha256", audit_digest);
+    writeStringAttribute(
+        header.get(), "ConversionManifestSidecar",
+        sidecar_path.filename().string());
+    writeStringAttribute(
+        header.get(), "ConversionBundleMarker",
+        marker_path.filename().string());
+    Hdf5Handle provenance(H5Gcreate2(
+        file.get(), "/Provenance", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+    writeByteDataset(provenance.get(), "ConversionManifestJson", audit_json);
+    writeTextFile(sidecar_path, audit_json);
+    writeTextFile(
+        marker_path,
+        "chui_ic_bundle_v1\nsha256=" + audit_digest +
+            "\ncanonical=" + path.filename().string() +
+            "\nmanifest=" + sidecar_path.filename().string() + "\n");
     writeAttribute(
         header.get(), "ChuiLengthUnitToSI", H5T_NATIVE_DOUBLE, K_MPC_TO_SI);
     writeAttribute(
@@ -310,8 +380,12 @@ void writeScalingMember(
   total[1] = local_dm_count * K_MEMBER_COUNT;
   const std::array<std::uint32_t, 6> high{};
   const std::array<double, 6> mass_table{};
+  std::array<std::int32_t, 6> signed_local{};
+  std::transform(
+      local.begin(), local.end(), signed_local.begin(),
+      [](std::uint32_t value) { return static_cast<std::int32_t>(value); });
   writeArrayAttribute(
-      header.get(), "NumPart_ThisFile", H5T_NATIVE_UINT32, local);
+      header.get(), "NumPart_ThisFile", H5T_NATIVE_INT32, signed_local);
   writeArrayAttribute(
       header.get(), "NumPart_Total", H5T_NATIVE_UINT32, total);
   writeArrayAttribute(
@@ -325,8 +399,8 @@ void writeScalingMember(
   writeAttribute(header.get(), "OmegaLambda", H5T_NATIVE_DOUBLE, 0.685);
   writeAttribute(header.get(), "HubbleParam", H5T_NATIVE_DOUBLE, 0.674);
   writeAttribute(
-      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_UINT32,
-      K_MEMBER_COUNT);
+      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_INT32,
+      static_cast<std::int32_t>(K_MEMBER_COUNT));
 
   Hdf5Handle dm(H5Gcreate2(
       file.get(), "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
@@ -377,6 +451,10 @@ void writeScalingMember(
   if (mpi_context.isRoot()) {
     std::filesystem::remove(first);
     std::filesystem::remove(second);
+    std::filesystem::remove(first.string() + ".manifest.json");
+    std::filesystem::remove(second.string() + ".manifest.json");
+    std::filesystem::remove(first.string() + ".complete");
+    std::filesystem::remove(second.string() + ".complete");
   }
   return result;
 }
@@ -399,8 +477,12 @@ void writePolicyMember(
   total[3] = 4U;
   const std::array<std::uint32_t, 6> high{};
   const std::array<double, 6> mass_table{};
+  std::array<std::int32_t, 6> signed_local{};
+  std::transform(
+      local.begin(), local.end(), signed_local.begin(),
+      [](std::uint32_t value) { return static_cast<std::int32_t>(value); });
   writeArrayAttribute(
-      header.get(), "NumPart_ThisFile", H5T_NATIVE_UINT32, local);
+      header.get(), "NumPart_ThisFile", H5T_NATIVE_INT32, signed_local);
   writeArrayAttribute(
       header.get(), "NumPart_Total", H5T_NATIVE_UINT32, total);
   writeArrayAttribute(
@@ -414,8 +496,8 @@ void writePolicyMember(
   writeAttribute(header.get(), "OmegaLambda", H5T_NATIVE_DOUBLE, 0.685);
   writeAttribute(header.get(), "HubbleParam", H5T_NATIVE_DOUBLE, 0.674);
   writeAttribute(
-      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_UINT32,
-      K_MEMBER_COUNT);
+      header.get(), "NumFilesPerSnapshot", H5T_NATIVE_INT32,
+      static_cast<std::int32_t>(K_MEMBER_COUNT));
 
   Hdf5Handle gas(H5Gcreate2(
       file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
@@ -498,7 +580,7 @@ void writePolicyMember(
   config.mode.ic_bridge_mass_scale_factor_exponent = 0.0;
   config.mode.ic_bridge_velocity_hubble_exponent = 0.0;
   config.mode.ic_bridge_velocity_scale_factor_exponent = 0.0;
-  config.mode.ic_staging_particle_count = 7U;
+  config.mode.ic_staging_particle_count = 21U;
   return config;
 }
 
@@ -678,6 +760,20 @@ int main(int argc, char** argv) {
     assert(
         mpi_context.allreduceSumUint64(
             result.report.counters.chunks_assigned) == expected_chunks);
+    const std::uint64_t global_batches = mpi_context.allreduceSumUint64(
+        result.report.counters.routing_batch_count);
+    const std::uint64_t global_file_opens = mpi_context.allreduceSumUint64(
+        result.report.counters.source_file_open_count);
+    const std::uint64_t global_dataset_opens = mpi_context.allreduceSumUint64(
+        result.report.counters.source_dataset_open_count);
+    assert(global_batches > 0U && global_batches <= expected_chunks);
+    if (!policy_mode) assert(global_batches < expected_chunks);
+    assert(global_file_opens > 0U && global_file_opens <= global_batches);
+    assert(global_dataset_opens > 0U);
+    const std::uint64_t global_collective_phases =
+        mpi_context.allreduceSumUint64(
+            result.report.counters.collective_phase_count);
+    assert(global_collective_phases > global_batches);
     assert(
         mpi_context.allreduceSumUint64(
             result.report.counters.records_read) == expected_global);
@@ -735,7 +831,7 @@ int main(int argc, char** argv) {
           local_error = std::max(
               local_error,
               std::abs(result.state.gas_cells.internal_energy_code[row] -
-                       8.0));
+                       4.0));
           local_error = std::max(
               local_error,
               std::abs(result.state.gas_cells.density_code[row] - 0.0625));
@@ -754,7 +850,7 @@ int main(int argc, char** argv) {
           local_error = std::max(
               local_error,
               std::abs(result.state.black_holes.accretion_rate_code[row] -
-                       0.25 * std::sqrt(0.5)));
+                       0.25));
         }
       }
       int global_gas_match = 0;
@@ -796,6 +892,10 @@ int main(int argc, char** argv) {
   if (world_rank == 0) {
     std::filesystem::remove(first);
     std::filesystem::remove(second);
+    std::filesystem::remove(first.string() + ".manifest.json");
+    std::filesystem::remove(second.string() + ".manifest.json");
+    std::filesystem::remove(first.string() + ".complete");
+    std::filesystem::remove(second.string() + ".complete");
   }
   unsetenv("COSMOSIM_IC_TEST_FAULT");
   unsetenv("COSMOSIM_IC_TEST_ROUTE_MUTATION");

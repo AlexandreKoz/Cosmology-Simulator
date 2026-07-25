@@ -4,7 +4,7 @@ Place developer and CI helper scripts here using `lower_snake` file names.
 
 ## ci/
 
-- `check_repo_hygiene.sh`: validates repository-root naming safety and required preset presence.
+- `check_repo_hygiene.sh`: validates recursive filename/ADS safety, rejects generated build/runtime/cache artifacts, and verifies required preset/dependency wiring.
 - `guard_feature_paths.sh`: runs baseline and PM/HDF5/FFTW guarded configure/build/test flows.
 - `run_preset_pipeline.sh`: configure/build/test pipeline runner with artifact collection, optional benchmark sentinel execution, and per-preset phase report JSON.
 - `check_build_metadata.py`: validates generated build metadata against versioned CI regression expectations.

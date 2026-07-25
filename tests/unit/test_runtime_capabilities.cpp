@@ -32,6 +32,13 @@ void testCapabilityTruth() {
   assert(canonical_status == multifile_status);
   assert(canonical_status !=
          cosmosim::workflows::RuntimeCapabilityStatus::kProvisional);
+#if COSMOSIM_ENABLE_HDF5
+  const auto& canonical_detail =
+      report.require("canonical_external_ic_import").detail;
+  assert(canonical_detail.find("manifest v4") != std::string::npos);
+  assert(canonical_detail.find("source-chunk-to-canonical") !=
+         std::string::npos);
+#endif
   cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
 
   config.numerics.hierarchical_max_rung = 1;

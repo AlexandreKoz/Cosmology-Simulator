@@ -63,8 +63,18 @@ constexpr std::size_t k_generated_particle_axis = 6;
       }
     }
     io::validateIcManifest(*loaded_manifest);
-    import_options.manifest = &*loaded_manifest;
     ic_path = loaded_manifest->source_files.front();
+    if (!config.mode.ic_file.empty() && config.mode.ic_file != "generated") {
+      const std::filesystem::path configured_source =
+          resolveConfigRelativePath(
+              frozen_config, std::filesystem::path(config.mode.ic_file))
+              .lexically_normal();
+      if (configured_source != ic_path.lexically_normal()) {
+        throw std::invalid_argument(
+            "manifest-driven IC import has conflicting mode.ic_file and manifest source authority");
+      }
+    }
+    import_options.manifest = &*loaded_manifest;
   } else {
     ic_path = resolveConfigRelativePath(
         frozen_config, std::filesystem::path(config.mode.ic_file));
@@ -211,6 +221,10 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
       .message = "initial-condition ingestion completed with explicit provenance and bounded staging counters",
       .payload = {{"files_assigned", std::to_string(counters.files_assigned)},
                   {"chunks_assigned", std::to_string(counters.chunks_assigned)},
+                  {"source_file_open_count", std::to_string(counters.source_file_open_count)},
+                  {"source_dataset_open_count", std::to_string(counters.source_dataset_open_count)},
+                  {"routing_batch_count", std::to_string(counters.routing_batch_count)},
+                  {"collective_phase_count", std::to_string(counters.collective_phase_count)},
                   {"metadata_bytes_read", std::to_string(counters.metadata_bytes_read)},
                   {"hash_bytes_read", std::to_string(counters.hash_bytes_read)},
                   {"payload_bytes_read", std::to_string(counters.payload_bytes_read)},

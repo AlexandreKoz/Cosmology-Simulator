@@ -130,6 +130,35 @@ namespace {
   if (value == "tracer") return IcSpeciesPolicy::kTracer;
   throw std::invalid_argument("unsupported IC species policy: " + std::string(value));
 }
+[[nodiscard]] std::string_view missingFieldPolicyName(
+    IcMissingFieldPolicy value) {
+  switch (value) {
+    case IcMissingFieldPolicy::kReject: return "reject";
+    case IcMissingFieldPolicy::kReconstruct: return "reconstruct";
+    case IcMissingFieldPolicy::kUseConfigValue: return "use_config_value";
+    case IcMissingFieldPolicy::kDialectDefinedDefault:
+      return "dialect_defined_default";
+    case IcMissingFieldPolicy::kPreserveUnavailable:
+      return "preserve_unavailable";
+  }
+  throw std::invalid_argument("unknown IC missing-field policy");
+}
+[[nodiscard]] IcMissingFieldPolicy parseMissingFieldPolicy(
+    std::string_view value) {
+  if (value == "reject") return IcMissingFieldPolicy::kReject;
+  if (value == "reconstruct") return IcMissingFieldPolicy::kReconstruct;
+  if (value == "use_config_value") {
+    return IcMissingFieldPolicy::kUseConfigValue;
+  }
+  if (value == "dialect_defined_default") {
+    return IcMissingFieldPolicy::kDialectDefinedDefault;
+  }
+  if (value == "preserve_unavailable") {
+    return IcMissingFieldPolicy::kPreserveUnavailable;
+  }
+  throw std::invalid_argument(
+      "unsupported IC missing-field policy: " + std::string(value));
+}
 [[nodiscard]] std::string_view scalarClassName(IcScalarClass value) {
   return value == IcScalarClass::kFloatingPoint ? "floating_point" : "integer";
 }
@@ -309,8 +338,25 @@ void writeStringArray(std::ostringstream& out, const std::vector<std::string>& v
 }  // namespace
 
 void validateIcManifest(const IcManifest& manifest) {
-  if (manifest.schema_name != "chui_ic_audit_manifest" || manifest.schema_version != 3U) throw std::invalid_argument("IcManifest requires schema chui_ic_audit_manifest version 3; version 2 lacks complete dimensional conversion semantics and is intentionally not reinterpreted");
+  if (manifest.schema_name != "chui_ic_audit_manifest" || manifest.schema_version != 4U) throw std::invalid_argument("IcManifest requires schema chui_ic_audit_manifest version 4; earlier versions apply ambiguous field-coupled conversion/default semantics and are intentionally not reinterpreted");
   if (manifest.converter_version.empty() || manifest.dialect_version.empty()) throw std::invalid_argument("IcManifest converter/dialect versions are required");
+  const auto valid_sha256 = [](std::string_view value) {
+    return value.size() == 64U &&
+        std::all_of(value.begin(), value.end(), [](char character) {
+          return (character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f');
+        });
+  };
+  if (manifest.canonical_source_manifest_verified) {
+    if (manifest.dialect != IcDialect::kChuiCanonicalV1 ||
+        !valid_sha256(manifest.canonical_source_manifest_sha256)) {
+      throw std::invalid_argument(
+          "IcManifest canonical verification state requires a canonical dialect and verified SHA-256");
+    }
+  } else if (!manifest.canonical_source_manifest_sha256.empty()) {
+    throw std::invalid_argument(
+        "IcManifest canonical digest must be empty when verification is false");
+  }
   if (manifest.source_files.empty()) throw std::invalid_argument("IcManifest requires at least one source file");
   const std::size_t file_count=manifest.source_files.size();
   if (manifest.num_files_per_snapshot!=file_count || manifest.num_part_this_file.size()!=file_count || manifest.source_provenance_ids.size()!=file_count || manifest.source_file_sizes_bytes.size()!=file_count || manifest.source_sha256.size()!=file_count || manifest.original_header_attributes.size()!=file_count) throw std::invalid_argument("IcManifest requires one count/hash/size/header record per source file");
@@ -349,13 +395,11 @@ void validateIcManifest(const IcManifest& manifest) {
       const auto require_dimension = [&](IcFieldSemantics semantics,
                                          int length_power,
                                          int mass_power,
-                                         int time_power,
-                                         unsigned velocity_power) {
+                                         int time_power) {
         if (field.semantics != semantics ||
             field.length_power != length_power ||
             field.mass_power != mass_power ||
-            field.time_power != time_power ||
-            field.velocity_convention_power != velocity_power) {
+            field.time_power != time_power) {
           throw std::invalid_argument(
               "IcManifest field has an inconsistent physical-dimension contract: " +
               field.dataset_path);
@@ -363,7 +407,7 @@ void validateIcManifest(const IcManifest& manifest) {
       };
       if (field.dataset_path.ends_with("/Coordinates") ||
           field.dataset_path == "/Header/BoxSize") {
-        require_dimension(IcFieldSemantics::kCoordinate, 1, 0, 0, 0U);
+        require_dimension(IcFieldSemantics::kCoordinate, 1, 0, 0);
         const double expected_frame_exponent =
             field.coordinate_frame == IcCoordinateFrame::kPhysical ? -1.0 : 0.0;
         if (field.frame_scale_factor_exponent != expected_frame_exponent) {
@@ -372,9 +416,9 @@ void validateIcManifest(const IcManifest& manifest) {
               field.dataset_path);
         }
       } else if (field.dataset_path.ends_with("/Velocities")) {
-        require_dimension(IcFieldSemantics::kVelocity, 1, 0, -1, 1U);
+        require_dimension(IcFieldSemantics::kVelocity, 1, 0, -1);
       } else if (field.dataset_path.ends_with("/Density")) {
-        require_dimension(IcFieldSemantics::kIntensive, -3, 1, 0, 0U);
+        require_dimension(IcFieldSemantics::kIntensive, -3, 1, 0);
         const double expected_frame_exponent =
             field.coordinate_frame == IcCoordinateFrame::kPhysical ? 3.0 : 0.0;
         if (field.frame_scale_factor_exponent != expected_frame_exponent) {
@@ -382,14 +426,12 @@ void validateIcManifest(const IcManifest& manifest) {
               "IcManifest density frame transform is inconsistent");
         }
       } else if (field.dataset_path.ends_with("/InternalEnergy")) {
-        require_dimension(IcFieldSemantics::kSpecific, 2, 0, -2, 2U);
+        require_dimension(IcFieldSemantics::kSpecific, 2, 0, -2);
       } else if (field.dataset_path.ends_with("/BH_Mdot")) {
-        require_dimension(IcFieldSemantics::kIntensive, 0, 1, -1, 1U);
-        const double expected_frame_exponent =
-            field.coordinate_frame == IcCoordinateFrame::kPhysical ? 1.0 : 0.0;
-        if (field.frame_scale_factor_exponent != expected_frame_exponent) {
+        require_dimension(IcFieldSemantics::kIntensive, 0, 1, -1);
+        if (field.frame_scale_factor_exponent != 0.0) {
           throw std::invalid_argument(
-              "IcManifest black-hole accretion frame transform is inconsistent");
+              "IcManifest black-hole accretion must not inherit coordinate-frame scaling");
         }
       } else if (field.dataset_path.ends_with("/Masses") ||
                  field.dataset_path.ends_with("/InitialMass") ||
@@ -397,23 +439,61 @@ void validateIcManifest(const IcManifest& manifest) {
                  field.dataset_path.ends_with("/LastHostMass") ||
                  field.dataset_path.ends_with("/CumulativeExchangedMass") ||
                  field.dataset_path == "/Header/MassTable") {
-        require_dimension(IcFieldSemantics::kExtensive, 0, 1, 0, 0U);
+        require_dimension(IcFieldSemantics::kExtensive, 0, 1, 0);
       } else if (field.dataset_path.ends_with("/ParticleIDs") ||
                  field.dataset_path.ends_with("/ParentParticleIDs") ||
                  field.dataset_path.ends_with("/InjectionStep") ||
                  field.dataset_path.ends_with("/HostCellIndex")) {
-        require_dimension(IcFieldSemantics::kIdentifier, 0, 0, 0, 0U);
+        require_dimension(IcFieldSemantics::kIdentifier, 0, 0, 0);
       } else if (field.dataset_path.ends_with("/StellarFormationTime") ||
                  field.dataset_path.ends_with("/Metallicity") ||
                  field.dataset_path.ends_with("/MassFractionOfHost")) {
-        require_dimension(IcFieldSemantics::kIntensive, 0, 0, 0, 0U);
+        require_dimension(IcFieldSemantics::kIntensive, 0, 0, 0);
       }
     }
-    if (field.semantics==IcFieldSemantics::kVelocity && field.velocity_convention==IcVelocityConvention::kNotVelocity) throw std::invalid_argument("IcManifest velocity field requires a velocity convention");
-    if (field.velocity_convention_power > 0U &&
+    const bool is_velocity_field =
+        field.semantics == IcFieldSemantics::kVelocity;
+    const std::uint8_t expected_velocity_power = is_velocity_field ? 1U : 0U;
+    if (field.velocity_convention_power != expected_velocity_power) {
+      throw std::invalid_argument(
+          "IcManifest velocity convention power must follow the field semantics rather than its dataset path: " +
+          field.dataset_path);
+    }
+    if (is_velocity_field &&
         field.velocity_convention == IcVelocityConvention::kNotVelocity) {
       throw std::invalid_argument(
-          "IcManifest field with a velocity-convention power requires a velocity convention");
+          "IcManifest velocity field requires a velocity convention");
+    }
+    if (!is_velocity_field &&
+        field.velocity_convention != IcVelocityConvention::kNotVelocity) {
+      throw std::invalid_argument(
+          "IcManifest non-velocity field must not inherit a velocity-storage convention: " +
+          field.dataset_path);
+    }
+  }
+  std::unordered_set<std::string> missing_paths;
+  for (const IcMissingFieldContract& contract :
+       manifest.missing_field_contracts) {
+    const std::string key = std::to_string(contract.source_file_index) + ":" +
+        contract.field_path;
+    if (contract.source_file_index >= file_count ||
+        contract.field_path.empty() || contract.resolution.empty() ||
+        !missing_paths.insert(key).second) {
+      throw std::invalid_argument(
+          "IcManifest missing-field contracts require unique paths and explicit resolutions");
+    }
+    if (!std::isfinite(contract.configured_value_code)) {
+      throw std::invalid_argument(
+          "IcManifest missing-field configured values must be finite");
+    }
+    if (contract.policy == IcMissingFieldPolicy::kReject) {
+      throw std::invalid_argument(
+          "IcManifest must not contain a resolved missing-field contract with reject policy");
+    }
+    if (contract.policy == IcMissingFieldPolicy::kReconstruct ||
+        contract.policy == IcMissingFieldPolicy::kPreserveUnavailable) {
+      throw std::invalid_argument(
+          "IcManifest v4 does not support unresolved reconstruction or unavailable-sidecar contracts");
     }
   }
 }
@@ -487,7 +567,7 @@ std::string serializeIcManifestJson(const IcManifest& manifest) {
   out << "  \"source_files\": ["; for (std::size_t i=0;i<manifest.source_files.size();++i) out << (i?", ":"") << '"' << escapeJson(manifest.source_files[i].generic_string()) << '"'; out << "],\n  \"source_provenance_ids\": "; writeStringArray(out,manifest.source_provenance_ids);
   out << ",\n  \"source_file_sizes_bytes\": "; writeNumericArray(out,manifest.source_file_sizes_bytes);
   out << ",\n  \"source_sha256\": "; writeStringArray(out,manifest.source_sha256);
-  out << ",\n  \"source_manifest_file\": \"" << escapeJson(manifest.source_manifest_file) << "\",\n  \"source_manifest_sha256\": \"" << escapeJson(manifest.source_manifest_sha256) << "\"";
+  out << ",\n  \"source_manifest_file\": \"" << escapeJson(manifest.source_manifest_file) << "\",\n  \"source_manifest_sha256\": \"" << escapeJson(manifest.source_manifest_sha256) << "\",\n  \"canonical_source_manifest_verified\": " << (manifest.canonical_source_manifest_verified ? "true" : "false") << ",\n  \"canonical_source_manifest_sha256\": \"" << escapeJson(manifest.canonical_source_manifest_sha256) << "\"";
   out << ",\n  \"original_header_attributes\": "; writeStringArray(out,manifest.original_header_attributes);
   out << ",\n  \"num_part_this_file\": ["; for (std::size_t i=0;i<manifest.num_part_this_file.size();++i) { if(i) out<<", "; writeNumericArray(out,manifest.num_part_this_file[i]); } out << "],\n  \"num_part_total\": "; writeNumericArray(out,manifest.num_part_total);
   out << ",\n  \"num_part_total_high_word\": "; writeNumericArray(out,manifest.num_part_total_high_word);
@@ -500,6 +580,19 @@ std::string serializeIcManifestJson(const IcManifest& manifest) {
     out << ", \"record_count\": " << f.record_count << ", \"base_unit_to_si\": " << f.base_unit_to_si << ", \"hubble_exponent\": " << f.hubble_exponent << ", \"scale_factor_exponent\": " << f.scale_factor_exponent << ", \"length_power\": " << static_cast<int>(f.length_power) << ", \"mass_power\": " << static_cast<int>(f.mass_power) << ", \"time_power\": " << static_cast<int>(f.time_power) << ", \"frame_scale_factor_exponent\": " << f.frame_scale_factor_exponent << ", \"velocity_convention_power\": " << static_cast<unsigned>(f.velocity_convention_power) << ", \"coordinate_frame\": \"" << frameName(f.coordinate_frame) << "\", \"velocity_convention\": \"" << velocityConventionName(f.velocity_convention) << "\", \"semantics\": \"" << semanticsName(f.semantics) << "\", \"disposition\": \"" << dispositionName(f.disposition) << "\", \"source_unit\": \"" << escapeJson(f.source_unit) << "\", \"target_unit\": \"" << escapeJson(f.target_unit) << "\", \"conversion_equation\": \"" << escapeJson(f.conversion_equation) << "\"}";
   }
   out << (manifest.fields.empty()?"":"\n") << "  ],\n";
+  out << "  \"missing_field_contracts\": [";
+  for (std::size_t i = 0; i < manifest.missing_field_contracts.size(); ++i) {
+    const auto& contract = manifest.missing_field_contracts[i];
+    out << (i ? ",\n" : "\n")
+        << "    {\"source_file_index\": " << contract.source_file_index
+        << ", \"field_path\": \"" << escapeJson(contract.field_path)
+        << "\", \"policy\": \"" << missingFieldPolicyName(contract.policy)
+        << "\", \"configured_value_code\": "
+        << contract.configured_value_code << ", \"resolution\": \""
+        << escapeJson(contract.resolution) << "\"}";
+  }
+  out << (manifest.missing_field_contracts.empty() ? "" : "\n")
+      << "  ],\n";
   const auto write_named_strings=[&](std::string_view name,const std::vector<std::string>& values,bool final=false){ out << "  \"" << name << "\": "; writeStringArray(out,values); out << (final?"\n":",\n"); };
   write_named_strings("defaulted_fields",manifest.defaulted_fields); write_named_strings("converted_fields",manifest.converted_fields); write_named_strings("dropped_fields",manifest.dropped_fields); write_named_strings("rejected_fields",manifest.rejected_fields); write_named_strings("preserved_auxiliary_fields",manifest.preserved_auxiliary_fields); write_named_strings("conversion_equations",manifest.conversion_equations); write_named_strings("warnings",manifest.warnings,true);
   out << "}\n"; return out.str();
@@ -509,7 +602,7 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
   const JsonValue root=JsonParser(json_text).parse(); IcManifest m;
   m.schema_name=asString(member(root,"schema_name"),"schema_name"); m.schema_version=static_cast<std::uint32_t>(asU64(member(root,"schema_version"),"schema_version")); m.converter_version=asString(member(root,"converter_version"),"converter_version"); m.dialect=parseDialect(asString(member(root,"dialect"),"dialect")); m.dialect_version=asString(member(root,"dialect_version"),"dialect_version"); m.num_files_per_snapshot=static_cast<std::uint32_t>(asU64(member(root,"num_files_per_snapshot"),"num_files_per_snapshot"));
   for (const auto& v:asArray(member(root,"source_files"),"source_files")) m.source_files.emplace_back(asString(v,"source_files"));
-  m.source_provenance_ids=stringArray(member(root,"source_provenance_ids"),"source_provenance_ids"); for (const auto& v:asArray(member(root,"source_file_sizes_bytes"),"source_file_sizes_bytes")) m.source_file_sizes_bytes.push_back(asU64(v,"source_file_sizes_bytes")); m.source_sha256=stringArray(member(root,"source_sha256"),"source_sha256"); m.source_manifest_file=asString(member(root,"source_manifest_file"),"source_manifest_file"); m.source_manifest_sha256=asString(member(root,"source_manifest_sha256"),"source_manifest_sha256"); m.original_header_attributes=stringArray(member(root,"original_header_attributes"),"original_header_attributes");
+  m.source_provenance_ids=stringArray(member(root,"source_provenance_ids"),"source_provenance_ids"); for (const auto& v:asArray(member(root,"source_file_sizes_bytes"),"source_file_sizes_bytes")) m.source_file_sizes_bytes.push_back(asU64(v,"source_file_sizes_bytes")); m.source_sha256=stringArray(member(root,"source_sha256"),"source_sha256"); m.source_manifest_file=asString(member(root,"source_manifest_file"),"source_manifest_file"); m.source_manifest_sha256=asString(member(root,"source_manifest_sha256"),"source_manifest_sha256"); m.canonical_source_manifest_verified=asBool(member(root,"canonical_source_manifest_verified"),"canonical_source_manifest_verified"); m.canonical_source_manifest_sha256=asString(member(root,"canonical_source_manifest_sha256"),"canonical_source_manifest_sha256"); m.original_header_attributes=stringArray(member(root,"original_header_attributes"),"original_header_attributes");
   for (const auto& row:asArray(member(root,"num_part_this_file"),"num_part_this_file")) { const auto& a=asArray(row,"num_part_this_file row"); if(a.size()!=6U) throw std::invalid_argument("num_part_this_file rows require six values"); std::array<std::uint64_t,6> values{}; for(std::size_t i=0;i<6;++i) values[i]=asU64(a[i],"num_part_this_file"); m.num_part_this_file.push_back(values); }
   const auto fill_u64_6=[&](std::string_view name,auto& target){ const auto& a=asArray(member(root,name),name); if(a.size()!=6U) throw std::invalid_argument(std::string(name)+" requires six values"); for(std::size_t i=0;i<6;++i) target[i]=static_cast<typename std::remove_reference_t<decltype(target)>::value_type>(asU64(a[i],name)); };
   fill_u64_6("num_part_total",m.num_part_total); fill_u64_6("num_part_total_high_word",m.num_part_total_high_word);
@@ -518,6 +611,22 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
   { const auto& a=asArray(member(root,"species_policy"),"species_policy"); if(a.size()!=6U) throw std::invalid_argument("species_policy requires six values"); for(std::size_t i=0;i<6;++i) m.species_policy[i]=parseSpeciesPolicy(asString(a[i],"species_policy")); }
   for (const auto& item:asArray(member(root,"fields"),"fields")) {
     IcFieldManifest f; f.source_file_index=static_cast<std::uint32_t>(asU64(member(item,"source_file_index"),"source_file_index")); f.dataset_path=asString(member(item,"dataset_path"),"dataset_path"); f.selected_alias=asString(member(item,"selected_alias"),"selected_alias"); f.scalar_type=asString(member(item,"scalar_type"),"scalar_type"); f.scalar_class=parseScalarClass(asString(member(item,"scalar_class"),"scalar_class")); f.byte_width=static_cast<std::uint8_t>(asU64(member(item,"byte_width"),"byte_width")); f.is_signed=asBool(member(item,"is_signed"),"is_signed"); f.byte_order=parseByteOrder(asString(member(item,"byte_order"),"byte_order")); f.rank=static_cast<std::uint8_t>(asU64(member(item,"rank"),"rank")); for(const auto& d:asArray(member(item,"dimensions"),"dimensions")) f.dimensions.push_back(asU64(d,"dimensions")); f.record_count=asU64(member(item,"record_count"),"record_count"); f.base_unit_to_si=asDouble(member(item,"base_unit_to_si"),"base_unit_to_si"); f.hubble_exponent=asDouble(member(item,"hubble_exponent"),"hubble_exponent"); f.scale_factor_exponent=asDouble(member(item,"scale_factor_exponent"),"scale_factor_exponent"); f.length_power=static_cast<std::int8_t>(asI64(member(item,"length_power"),"length_power")); f.mass_power=static_cast<std::int8_t>(asI64(member(item,"mass_power"),"mass_power")); f.time_power=static_cast<std::int8_t>(asI64(member(item,"time_power"),"time_power")); f.frame_scale_factor_exponent=asDouble(member(item,"frame_scale_factor_exponent"),"frame_scale_factor_exponent"); f.velocity_convention_power=static_cast<std::uint8_t>(asU64(member(item,"velocity_convention_power"),"velocity_convention_power")); f.coordinate_frame=parseFrame(asString(member(item,"coordinate_frame"),"coordinate_frame")); f.velocity_convention=parseVelocityConvention(asString(member(item,"velocity_convention"),"velocity_convention")); f.semantics=parseSemantics(asString(member(item,"semantics"),"semantics")); f.disposition=parseDisposition(asString(member(item,"disposition"),"disposition")); f.source_unit=asString(member(item,"source_unit"),"source_unit"); f.target_unit=asString(member(item,"target_unit"),"target_unit"); f.conversion_equation=asString(member(item,"conversion_equation"),"conversion_equation"); m.fields.push_back(std::move(f));
+  }
+  for (const auto& item :
+       asArray(member(root, "missing_field_contracts"),
+               "missing_field_contracts")) {
+    IcMissingFieldContract contract;
+    contract.source_file_index = static_cast<std::uint32_t>(
+        asU64(member(item, "source_file_index"), "source_file_index"));
+    contract.field_path =
+        asString(member(item, "field_path"), "field_path");
+    contract.policy = parseMissingFieldPolicy(
+        asString(member(item, "policy"), "policy"));
+    contract.configured_value_code = asDouble(
+        member(item, "configured_value_code"), "configured_value_code");
+    contract.resolution =
+        asString(member(item, "resolution"), "resolution");
+    m.missing_field_contracts.push_back(std::move(contract));
   }
   m.defaulted_fields=stringArray(member(root,"defaulted_fields"),"defaulted_fields"); m.converted_fields=stringArray(member(root,"converted_fields"),"converted_fields"); m.dropped_fields=stringArray(member(root,"dropped_fields"),"dropped_fields"); m.rejected_fields=stringArray(member(root,"rejected_fields"),"rejected_fields"); m.preserved_auxiliary_fields=stringArray(member(root,"preserved_auxiliary_fields"),"preserved_auxiliary_fields"); m.conversion_equations=stringArray(member(root,"conversion_equations"),"conversion_equations"); m.warnings=stringArray(member(root,"warnings"),"warnings"); validateIcManifest(m); return m;
 }

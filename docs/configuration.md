@@ -73,6 +73,18 @@ The concrete run directory is:
 - `ic_chunk_particle_count` (positive bounded HDF5 read chunk; default `65536`)
 - `ic_staging_particle_count` (positive bounded MPI routing/validation staging limit; default `65536`)
 - `ic_part_type2_policy`, `ic_part_type3_policy` (`reject`, `dark_matter`, `star`, `black_hole`, `tracer`)
+- missing-field policy keys: `ic_gas_internal_energy_policy`,
+  `ic_gas_density_policy`, `ic_star_formation_time_policy`,
+  `ic_star_initial_mass_policy`, `ic_star_metallicity_policy`, and
+  `ic_bh_mdot_policy`
+- missing-field policy values: `reject`, `reconstruct`, `use_config_value`,
+  `dialect_defined_default`, `preserve_unavailable`; this build rejects
+  `reconstruct` and `preserve_unavailable` until their scientific storage paths
+  exist
+- configured-value companions: `ic_gas_internal_energy_value_code`,
+  `ic_gas_density_value_code`, `ic_star_formation_time_value`,
+  `ic_star_initial_mass_value_code`, `ic_star_metallicity_value`, and
+  `ic_bh_mdot_value_code`
 - `zoom_high_res_region` (bool)
 - `zoom_region_file` (required when `zoom_high_res_region=true`)
 - `zoom_long_range_strategy` (`disabled`, `global_coarse_plus_focused_highres_correction`)
@@ -102,6 +114,8 @@ External initial conditions are never selected by filename alone. The typed
   are mandatory. There are no kpc/Msun/km/s or frame defaults.
 - `manifest_v1`: loads the strict versioned audit manifest named by
   `mode.ic_manifest_file`; relative source paths are resolved from the manifest.
+  `mode.ic_file` is not required. If it is supplied, it must resolve to the same
+  first source member or validation fails as a conflicting authority.
 
 An external `mode.ic_file` without an explicitly written `mode.ic_convention`
 fails validation. This prevents the runtime from guessing h scaling, coordinate
@@ -133,6 +147,14 @@ ic_bridge_velocity_hubble_exponent = 0
 ic_bridge_velocity_scale_factor_exponent = 0
 ```
 
+
+Missing physical fields fail closed by default. Gas `InternalEnergy` and
+`Density`, stellar formation time/initial mass/metallicity, and black-hole
+`BH_Mdot` are imported only when present or when an explicit typed policy is
+selected. Every non-reject resolution is recorded in normalized configuration,
+the IC manifest, runtime provenance, and conversion diagnostics. Negative
+stellar formation times are diagnosed as unsupported AREPO wind particles
+rather than reinterpreted as ordinary stars.
 
 Direct-bridge values are part of the normalized configuration and provenance hash.
 Accepted coordinate frames are `comoving` and `physical`. Accepted velocity

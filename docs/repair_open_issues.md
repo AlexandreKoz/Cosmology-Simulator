@@ -342,3 +342,12 @@ return within repeated bounded command windows in the repair environment. It
 uses generated ICs and is not part of the external Campaign B ingestion path,
 but it prevents reporting the entire HDF5 preset as 133/133 green until its
 pre-existing harness behavior is diagnosed on the normal validation system.
+
+## Campaign B completion follow-ups (2026-07-25)
+
+| ID | Status | Area | Resolution in this pass | Remaining boundary |
+|---|---|---|---|---|
+| CAMPAIGN-B-MPI-ACCEPTANCE-20260725 | Environment-blocked | Distributed IC runtime | Persistent HDF5 sessions, bounded multi-chunk batches, route/accounting counters, and the np1/np2/np4 source test matrix are present. | Configure/build/run `mpi-hdf5-fftw-debug` on a dependency-complete machine; do not promote `distributed_ic_import` until it passes. |
+| CAMPAIGN-B-COLLECTIVE-GUARDS-20260725 | Partially closed | MPI failure consensus | Existing guarded phases cover read, routing, exchange, decode, append, reconciliation, and final audits; new batch/session operations were placed inside guarded reader phases. | Perform runtime fault execution under MPI and continue narrowing any accounting operation that can allocate/throw between guarded phases. |
+| CAMPAIGN-B-INITIAL-REBALANCE-20260725 | Open | Distributed IC ownership | Deterministic x-slab ingestion ownership is documented and existing runtime rebalance ownership was preserved. | Measure imported work imbalance and invoke the existing legal rebalance path before the first expensive production phase when a configured threshold is exceeded; validate under clustered and zoom ICs. |
+| CAMPAIGN-B-IC-SOURCE-SPLIT-20260725 | Partially closed | IC maintainability | Conversion catalog, canonical-bundle verification, persistent reader session, byte codec, record codec, and SHA-256 were moved to narrow source units; the record codec has a dedicated test and the streaming API is isolated behind an internal header. | Split HDF5 schema inspection, serial ingestion, distributed ingestion, and distributed audit from the remaining 4,136-line `ic_reader_file_set.cpp` without creating a replacement monolith. |

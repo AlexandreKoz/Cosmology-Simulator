@@ -302,8 +302,14 @@ add_library(cosmosim_io STATIC
   src/io/io_module.cpp
   src/io/internal/io_contract.cpp
   src/io/ic_manifest.cpp
+  src/io/ic_record_codec.cpp
   src/io/ic_reader.cpp
   src/io/ic_reader_file_set.cpp
+  src/io/ic_canonical_bundle.cpp
+  src/io/ic_conversion_catalog.cpp
+  src/io/ic_reader_session.cpp
+  src/io/ic_byte_codec.cpp
+  src/io/ic_sha256.cpp
   src/io/snapshot_hdf5.cpp
   src/io/restart_checkpoint.cpp)
 add_library(cosmosim_analysis STATIC
@@ -1052,6 +1058,8 @@ if(COSMOSIM_ENABLE_TESTS)
 
   if(COSMOSIM_ENABLE_HDF5)
     add_executable(cosmosim_convert_ic tools/convert_ic.cpp)
+    target_include_directories(
+      cosmosim_convert_ic PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_link_libraries(cosmosim_convert_ic PRIVATE cosmosim_io)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
@@ -1067,6 +1075,12 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_ic_reader tests/unit/test_ic_reader.cpp)
   target_link_libraries(test_unit_ic_reader PRIVATE cosmosim_io)
   add_test(NAME unit_ic_reader COMMAND test_unit_ic_reader)
+
+  add_executable(test_unit_ic_record_codec tests/unit/test_ic_record_codec.cpp)
+  target_include_directories(
+    test_unit_ic_record_codec PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test_unit_ic_record_codec PRIVATE cosmosim_io)
+  add_test(NAME unit_ic_record_codec COMMAND test_unit_ic_record_codec)
 
   add_executable(test_unit_snapshot_hdf5_schema tests/unit/test_snapshot_hdf5_schema.cpp)
   target_link_libraries(test_unit_snapshot_hdf5_schema PRIVATE cosmosim_io)

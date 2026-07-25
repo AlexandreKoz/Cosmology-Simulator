@@ -165,7 +165,14 @@ void testTypedInitialConditionConfiguration() {
       "ic_chunk_particle_count = 4096\n"
       "ic_staging_particle_count = 2048\n"
       "ic_part_type2_policy = dark_matter\n"
-      "ic_part_type3_policy = reject\n",
+      "ic_part_type3_policy = reject\n"
+      "ic_gas_internal_energy_policy = reject\n"
+      "ic_gas_density_policy = use_config_value\n"
+      "ic_gas_density_value_code = 3.25\n"
+      "ic_star_formation_time_policy = dialect_defined_default\n"
+      "ic_star_initial_mass_policy = reject\n"
+      "ic_star_metallicity_policy = reject\n"
+      "ic_bh_mdot_policy = dialect_defined_default\n",
       "typed_ic_bridge");
   assert(
       bridge.config.mode.ic_convention ==
@@ -175,6 +182,13 @@ void testTypedInitialConditionConfiguration() {
   assert(
       bridge.config.mode.ic_part_type2_policy ==
       cosmosim::core::InitialConditionSpeciesPolicy::kDarkMatter);
+  assert(
+      bridge.config.mode.ic_gas_density_policy ==
+      cosmosim::core::InitialConditionMissingFieldPolicy::kUseConfigValue);
+  assert(bridge.config.mode.ic_gas_density_value_code == 3.25);
+  assert(
+      bridge.config.mode.ic_bh_mdot_policy ==
+      cosmosim::core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault);
   assert(
       bridge.normalized_text.find(
           "ic_convention = gadget_arepo_bridge_v1") != std::string::npos);
@@ -228,7 +242,7 @@ void testTypedInitialConditionConfiguration() {
   assert(rejected);
 
   const auto manifest = cosmosim::core::loadFrozenConfigFromString(
-      "[mode]\nmode = zoom_in\nic_file = input.0.hdf5\n"
+      "[mode]\nmode = zoom_in\n"
       "ic_convention = manifest_v1\n"
       "ic_manifest_file = input.audit.json\n",
       "manifest_ic");
@@ -236,6 +250,32 @@ void testTypedInitialConditionConfiguration() {
       manifest.config.mode.ic_convention ==
       cosmosim::core::InitialConditionConvention::kManifestV1);
   assert(manifest.config.mode.ic_manifest_file == "input.audit.json");
+  assert(
+      manifest.normalized_text.find("ic_file = generated") !=
+      std::string::npos);
+
+  bool unsupported_reconstruct_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\nic_file = input.hdf5\n"
+        "ic_convention = gadget_arepo_bridge_v1\n"
+        "ic_bridge_source_length_unit_to_si = 1\n"
+        "ic_bridge_source_mass_unit_to_si = 1\n"
+        "ic_bridge_source_velocity_unit_to_si = 1\n"
+        "ic_bridge_coordinate_frame = comoving\n"
+        "ic_bridge_velocity_convention = physical_peculiar\n"
+        "ic_bridge_length_hubble_exponent = 0\n"
+        "ic_bridge_length_scale_factor_exponent = 0\n"
+        "ic_bridge_mass_hubble_exponent = 0\n"
+        "ic_bridge_mass_scale_factor_exponent = 0\n"
+        "ic_bridge_velocity_hubble_exponent = 0\n"
+        "ic_bridge_velocity_scale_factor_exponent = 0\n"
+        "ic_gas_density_policy = reconstruct\n",
+        "unsupported_ic_reconstruct");
+  } catch (const cosmosim::core::ConfigError&) {
+    unsupported_reconstruct_rejected = true;
+  }
+  assert(unsupported_reconstruct_rejected);
 }
 
 void testInvalidTypedPolicyEnumsFail() {

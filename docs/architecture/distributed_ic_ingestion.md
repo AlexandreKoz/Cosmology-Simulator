@@ -13,7 +13,7 @@ executed successfully on a machine with MPI, HDF5, and FFTW-MPI.
 - `core`: typed IC convention, complete direct-bridge values, Type2/Type3
   policies, validation, and normalized provenance. It has no dependency on
   `io`.
-- `io`: strict audit manifest v3, file-set inspection, the authoritative
+- `io`: strict audit manifest v4, file-set inspection, the authoritative
   dimensional conversion engine, sidecar construction, explicit wire format,
   serial/distributed readers, coverage proofs, and scientific validation.
 - `parallel`: borrowed `MpiContext` plus lower-layer communication primitives.
@@ -40,28 +40,37 @@ conversion formulas.
 1. Rank zero reads only enough of the requested first member to determine the
    deterministic ordered file list.
 2. File indices are assigned by `file_index mod world_size`. Each member is
-   opened, schema-inspected, and SHA-256 hashed exactly once by its assigned
-   rank. More ranks than files are valid.
+   schema-inspected and SHA-256 hashed by its assigned rank. More ranks than
+   files are valid. Payload sessions later revalidate size and SHA-256 against
+   this identity before keeping the file handle open for reads.
 3. Bounded manifest fragments are gathered. Rank zero assembles and validates
    the canonical ordered manifest without rereading source files.
 4. The canonical manifest is broadcast in bounded string chunks. Every rank
    deserializes it and agrees on its SHA-256 digest.
-5. A globally deterministic chunk index assigns each `(file, PartType, begin,
-   count)` token to exactly one reader rank. An exact collective coverage check
-   requires one completion for each token.
-6. The reader reads and converts one bounded chunk, validates all coordinates,
-   velocities, masses, and required sidecars, then serializes explicit
-   little-endian records into per-owner buckets.
-7. Send layout, receive layout, allocation, exchange, wire validation, and
-   deserialization are separate collective phases. Local exceptions are voted
-   before the next MPI collective.
-8. Source IDs and received IDs are hash-partitioned and balanced exactly for the
-   active chunk. Each ID must contribute one source record and one final record.
-9. Each rank appends only received owner-local records and rebuilds local
-   species and sidecar indices.
-10. Exact global duplicate-ID validation, count/species/mass reductions,
-    ownership validation, and state invariants run before the workflow accepts
-    the imported state.
+5. A globally deterministic chunk index defines each `(file, PartType, begin,
+   count)` token. Consecutive tokens are grouped into bounded routing batches;
+   one reader rank owns each batch and exact coverage counters require every
+   token exactly once.
+6. A reader session keeps the assigned HDF5 file and opened dataset handles
+   alive across multiple chunks. The session revalidates file size and SHA-256
+   before payload reads.
+7. The reader converts several chunks within
+   `mode.ic_staging_particle_count`, validates all scientific fields, and
+   accumulates bounded per-owner buckets.
+8. Send layout, receive layout, allocation, one `MPI_Alltoallv` payload
+   exchange, wire validation, and deserialization execute once per routing
+   batch rather than once per HDF5 chunk. Local exceptions are voted before the
+   next collective.
+9. Source IDs and received IDs are hash-partitioned and balanced exactly for the
+   active batch. Each ID must contribute one source record and one final record.
+10. Each rank appends only received owner-local records and rebuilds local
+    species and sidecar indices.
+11. Exact global duplicate-ID validation, count/species/mass reductions,
+    ownership validation, and state invariants run before workflow acceptance.
+
+The batching change reduces communicator-wide exchange phases from one set per
+particle chunk to one set per bounded batch. Exact integrity remains the default;
+no cheaper integrity level is silently substituted.
 
 ## Collective failure protocol
 
@@ -103,7 +112,7 @@ Coverage is not inferred from totals alone:
 - every expected source file must contribute exactly one manifest fragment;
 - every deterministic chunk token must be identical on all ranks and have
   exactly one reader;
-- for every chunk, source and final IDs are hash-partitioned with signed source
+- for every routing batch, source and final IDs are hash-partitioned with signed source
   and final counts; each unique ID must balance as `(1,1)`;
 - the final authoritative ID set is hash-partitioned in bounded rounds; each
   validator writes sorted temporary runs and performs a bounded-memory external
@@ -129,6 +138,14 @@ The final rank must equal the deterministic x-slab owner. Required gas, star,
 black-hole, and tracer sidecars are transmitted in the same wire record as the
 particle and constructed exactly once.
 
+This x-slab assignment is **ingestion ownership**, chosen for deterministic
+bounded startup and PM locality. It is not a claim of final work-weighted
+balance for clustered or zoom initial conditions. The present completion pass
+records local/global ownership counters and leaves the existing legal runtime
+rebalance path intact, but it does not yet add an automatic imbalance-threshold
+vote before the first expensive production phase. That trigger remains an
+explicit acceptance follow-up rather than an implied capability.
+
 ## Bounded-memory and accounting contract
 
 `mode.ic_chunk_particle_count` bounds HDF5 hyperslabs.
@@ -139,6 +156,9 @@ success or failure. The final owner-local authoritative state is not transient
 staging.
 
 The report separates:
+
+- persistent source-file and source-dataset open counts;
+- routing-batch and collective-phase counts;
 
 - logical metadata bytes read;
 - complete source bytes read for SHA-256;

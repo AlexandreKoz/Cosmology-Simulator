@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -21,11 +22,19 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "io/internal/ic_byte_codec.hpp"
+#include "io/internal/ic_canonical_bundle.hpp"
+#include "io/internal/ic_conversion_catalog.hpp"
+#include "io/internal/ic_hdf5_handle.hpp"
+#include "io/internal/ic_reader_session.hpp"
+#include "io/internal/ic_record_codec.hpp"
+#include "io/internal/ic_stream_ingestion.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
@@ -41,9 +50,32 @@ namespace {
 
 constexpr std::size_t kParticleTypeCount = 6U;
 constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max();
+using ParticleRecord = internal::IcParticleRecord;
 
 [[nodiscard]] bool nearlyEqual(double lhs, double rhs) {
   return std::abs(lhs - rhs) <= 1.0e-10 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+}
+
+[[nodiscard]] bool missingFieldContractsEqual(
+    const std::vector<IcMissingFieldContract>& lhs,
+    const std::vector<IcMissingFieldContract>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (const auto& expected : lhs) {
+    const auto observed = std::find_if(
+        rhs.begin(), rhs.end(), [&](const IcMissingFieldContract& actual) {
+          return actual.source_file_index == expected.source_file_index &&
+              actual.field_path == expected.field_path;
+        });
+    if (observed == rhs.end() || observed->policy != expected.policy ||
+        !nearlyEqual(
+            observed->configured_value_code, expected.configured_value_code) ||
+        observed->resolution != expected.resolution) {
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] IcSpeciesPolicy mapConfiguredPolicy(
@@ -66,6 +98,23 @@ constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max(
   throw std::invalid_argument("unknown configured IC species policy");
 }
 
+[[nodiscard]] IcMissingFieldPolicy mapConfiguredMissingFieldPolicy(
+    core::InitialConditionMissingFieldPolicy policy) {
+  switch (policy) {
+    case core::InitialConditionMissingFieldPolicy::kReject:
+      return IcMissingFieldPolicy::kReject;
+    case core::InitialConditionMissingFieldPolicy::kReconstruct:
+      return IcMissingFieldPolicy::kReconstruct;
+    case core::InitialConditionMissingFieldPolicy::kUseConfigValue:
+      return IcMissingFieldPolicy::kUseConfigValue;
+    case core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault:
+      return IcMissingFieldPolicy::kDialectDefinedDefault;
+    case core::InitialConditionMissingFieldPolicy::kPreserveUnavailable:
+      return IcMissingFieldPolicy::kPreserveUnavailable;
+  }
+  throw std::invalid_argument("unknown configured IC missing-field policy");
+}
+
 [[nodiscard]] std::uint32_t speciesTag(IcSpeciesPolicy policy) {
   switch (policy) {
     case IcSpeciesPolicy::kGas:
@@ -86,130 +135,12 @@ constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max(
   throw std::runtime_error("attempted to materialize a rejected IC family");
 }
 
-class Sha256 {
- public:
-  Sha256() { reset(); }
-  void update(const std::uint8_t* data, std::size_t size) {
-    for (std::size_t i = 0; i < size; ++i) {
-      m_block[m_block_size++] = data[i];
-      m_bit_count += 8U;
-      if (m_block_size == 64U) {
-        transform();
-        m_block_size = 0U;
-      }
-    }
-  }
-  [[nodiscard]] std::array<std::uint8_t, 32> finish() {
-    const std::uint64_t original_bits = m_bit_count;
-    m_block[m_block_size++] = 0x80U;
-    if (m_block_size > 56U) {
-      while (m_block_size < 64U) m_block[m_block_size++] = 0U;
-      transform();
-      m_block_size = 0U;
-    }
-    while (m_block_size < 56U) m_block[m_block_size++] = 0U;
-    for (int shift = 56; shift >= 0; shift -= 8) {
-      m_block[m_block_size++] = static_cast<std::uint8_t>((original_bits >> shift) & 0xffU);
-    }
-    transform();
-    std::array<std::uint8_t, 32> digest{};
-    for (std::size_t i = 0; i < 8U; ++i) {
-      digest[i * 4U + 0U] = static_cast<std::uint8_t>(m_state[i] >> 24U);
-      digest[i * 4U + 1U] = static_cast<std::uint8_t>(m_state[i] >> 16U);
-      digest[i * 4U + 2U] = static_cast<std::uint8_t>(m_state[i] >> 8U);
-      digest[i * 4U + 3U] = static_cast<std::uint8_t>(m_state[i]);
-    }
-    return digest;
-  }
- private:
-  static constexpr std::array<std::uint32_t, 64> kRound{
-      0x428a2f98U,0x71374491U,0xb5c0fbcfU,0xe9b5dba5U,0x3956c25bU,0x59f111f1U,0x923f82a4U,0xab1c5ed5U,
-      0xd807aa98U,0x12835b01U,0x243185beU,0x550c7dc3U,0x72be5d74U,0x80deb1feU,0x9bdc06a7U,0xc19bf174U,
-      0xe49b69c1U,0xefbe4786U,0x0fc19dc6U,0x240ca1ccU,0x2de92c6fU,0x4a7484aaU,0x5cb0a9dcU,0x76f988daU,
-      0x983e5152U,0xa831c66dU,0xb00327c8U,0xbf597fc7U,0xc6e00bf3U,0xd5a79147U,0x06ca6351U,0x14292967U,
-      0x27b70a85U,0x2e1b2138U,0x4d2c6dfcU,0x53380d13U,0x650a7354U,0x766a0abbU,0x81c2c92eU,0x92722c85U,
-      0xa2bfe8a1U,0xa81a664bU,0xc24b8b70U,0xc76c51a3U,0xd192e819U,0xd6990624U,0xf40e3585U,0x106aa070U,
-      0x19a4c116U,0x1e376c08U,0x2748774cU,0x34b0bcb5U,0x391c0cb3U,0x4ed8aa4aU,0x5b9cca4fU,0x682e6ff3U,
-      0x748f82eeU,0x78a5636fU,0x84c87814U,0x8cc70208U,0x90befffaU,0xa4506cebU,0xbef9a3f7U,0xc67178f2U};
-  static std::uint32_t rotate(std::uint32_t value, unsigned bits) {
-    return (value >> bits) | (value << (32U - bits));
-  }
-  void reset() {
-    m_state = {0x6a09e667U,0xbb67ae85U,0x3c6ef372U,0xa54ff53aU,0x510e527fU,0x9b05688cU,0x1f83d9abU,0x5be0cd19U};
-    m_block_size = 0U; m_bit_count = 0U;
-  }
-  void transform() {
-    std::array<std::uint32_t, 64> words{};
-    for (std::size_t i = 0; i < 16U; ++i) {
-      words[i] = (static_cast<std::uint32_t>(m_block[i*4U]) << 24U) |
-          (static_cast<std::uint32_t>(m_block[i*4U+1U]) << 16U) |
-          (static_cast<std::uint32_t>(m_block[i*4U+2U]) << 8U) |
-          static_cast<std::uint32_t>(m_block[i*4U+3U]);
-    }
-    for (std::size_t i = 16U; i < 64U; ++i) {
-      const std::uint32_t s0 = rotate(words[i-15U],7U) ^ rotate(words[i-15U],18U) ^ (words[i-15U] >> 3U);
-      const std::uint32_t s1 = rotate(words[i-2U],17U) ^ rotate(words[i-2U],19U) ^ (words[i-2U] >> 10U);
-      words[i] = words[i-16U] + s0 + words[i-7U] + s1;
-    }
-    std::uint32_t a=m_state[0],b=m_state[1],c=m_state[2],d=m_state[3],e=m_state[4],f=m_state[5],g=m_state[6],h=m_state[7];
-    for (std::size_t i=0;i<64U;++i) {
-      const std::uint32_t s1=rotate(e,6U)^rotate(e,11U)^rotate(e,25U);
-      const std::uint32_t choice=(e&f)^((~e)&g);
-      const std::uint32_t temp1=h+s1+choice+kRound[i]+words[i];
-      const std::uint32_t s0=rotate(a,2U)^rotate(a,13U)^rotate(a,22U);
-      const std::uint32_t majority=(a&b)^(a&c)^(b&c);
-      const std::uint32_t temp2=s0+majority;
-      h=g;g=f;f=e;e=d+temp1;d=c;c=b;b=a;a=temp1+temp2;
-    }
-    m_state[0]+=a;m_state[1]+=b;m_state[2]+=c;m_state[3]+=d;m_state[4]+=e;m_state[5]+=f;m_state[6]+=g;m_state[7]+=h;
-  }
-  std::array<std::uint32_t,8> m_state{};
-  std::array<std::uint8_t,64> m_block{};
-  std::size_t m_block_size=0U;
-  std::uint64_t m_bit_count=0U;
-};
-
-[[nodiscard]] std::string sha256Hex(const std::filesystem::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) throw std::runtime_error("failed to open IC source for SHA-256: " + path.string());
-  Sha256 hash; std::array<std::uint8_t,1U<<16U> buffer{};
-  while (input) {
-    input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
-    const auto count=input.gcount(); if(count>0) hash.update(buffer.data(),static_cast<std::size_t>(count));
-  }
-  if(!input.eof()) throw std::runtime_error("failed while hashing IC source: " + path.string());
-  static constexpr char kHex[]="0123456789abcdef"; const auto digest=hash.finish(); std::string out(64U,'0');
-  for(std::size_t i=0;i<digest.size();++i){out[i*2U]=kHex[digest[i]>>4U];out[i*2U+1U]=kHex[digest[i]&0xfU];} return out;
-}
-
-[[nodiscard]] std::string sha256Hex(std::string_view value) {
-  Sha256 hash;
-  hash.update(
-      reinterpret_cast<const std::uint8_t*>(value.data()), value.size());
-  static constexpr char kHex[] = "0123456789abcdef";
-  const auto digest = hash.finish();
-  std::string out(64U, '0');
-  for (std::size_t i = 0; i < digest.size(); ++i) {
-    out[i * 2U] = kHex[digest[i] >> 4U];
-    out[i * 2U + 1U] = kHex[digest[i] & 0xfU];
-  }
-  return out;
-}
-
 #if COSMOSIM_ENABLE_HDF5
 
-class Hdf5Handle {
- public:
-  explicit Hdf5Handle(hid_t handle=-1):m_handle(handle){}
-  Hdf5Handle(const Hdf5Handle&)=delete; Hdf5Handle& operator=(const Hdf5Handle&)=delete;
-  Hdf5Handle(Hdf5Handle&& other) noexcept:m_handle(other.m_handle){other.m_handle=-1;}
-  ~Hdf5Handle(){close();}
-  [[nodiscard]] hid_t get() const noexcept{return m_handle;}
-  [[nodiscard]] bool valid() const noexcept{return m_handle>=0;}
- private:
-  void close(){if(m_handle<0)return; switch(H5Iget_type(m_handle)){case H5I_FILE:H5Fclose(m_handle);break;case H5I_GROUP:H5Gclose(m_handle);break;case H5I_DATASET:H5Dclose(m_handle);break;case H5I_DATASPACE:H5Sclose(m_handle);break;case H5I_ATTR:H5Aclose(m_handle);break;case H5I_DATATYPE:H5Tclose(m_handle);break;default:break;}m_handle=-1;}
-  hid_t m_handle=-1;
-};
+using internal::Hdf5Handle;
+using internal::IcReaderSession;
+using internal::readChunkDouble;
+using internal::readChunkU64;
 
 [[nodiscard]] bool pathExists(hid_t parent, std::string_view path) {
   return H5Lexists(parent, std::string(path).c_str(), H5P_DEFAULT) > 0;
@@ -299,7 +230,8 @@ struct TypeDescription {
     bool required,
     IcScalarClass expected_class,
     std::span<const std::uint64_t> expected_dimensions,
-    bool require_unsigned_integer = false) {
+    bool require_unsigned_integer = false,
+    std::size_t max_integer_width = 4U) {
   Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
   if (!attribute.valid()) {
     if (required) {
@@ -320,10 +252,11 @@ struct TypeDescription {
     throw std::runtime_error(
         std::string("Header/") + name + " must be unsigned integer data");
   }
-  if (expected_class == IcScalarClass::kInteger && description.width > 4U) {
+  if (expected_class == IcScalarClass::kInteger &&
+      description.width > max_integer_width) {
     throw std::runtime_error(
         std::string("Header/") + name +
-        " must fit the uint32 header contract");
+        " exceeds the supported integer width");
   }
   if (expected_class == IcScalarClass::kFloatingPoint &&
       description.width != 4U && description.width != 8U) {
@@ -348,6 +281,72 @@ struct TypeDescription {
     throw std::runtime_error(message.str());
   }
   return attribute;
+}
+
+void readAttributeNonnegativeU64x6(
+    hid_t group,
+    const char* name,
+    std::array<std::uint64_t, 6>& values) {
+  static constexpr std::array<std::uint64_t, 1> kExpected{6U};
+  Hdf5Handle attribute = openValidatedAttribute(
+      group, name, true, IcScalarClass::kInteger, kExpected, false,
+      sizeof(std::uint64_t));
+  Hdf5Handle type(H5Aget_type(attribute.get()));
+  if (!type.valid()) {
+    throw std::runtime_error(std::string("failed to inspect Header/") + name);
+  }
+  const TypeDescription description = describeType(type.get());
+  if (description.is_signed) {
+    std::array<std::int64_t, 6> signed_values{};
+    if (H5Aread(attribute.get(), H5T_NATIVE_INT64, signed_values.data()) < 0) {
+      throw std::runtime_error(std::string("failed to read Header/") + name);
+    }
+    for (std::size_t i = 0; i < signed_values.size(); ++i) {
+      if (signed_values[i] < 0) {
+        throw std::runtime_error(
+            std::string("Header/") + name +
+            " contains a negative particle count");
+      }
+      values[i] = static_cast<std::uint64_t>(signed_values[i]);
+    }
+    return;
+  }
+  if (H5Aread(attribute.get(), H5T_NATIVE_UINT64, values.data()) < 0) {
+    throw std::runtime_error(std::string("failed to read Header/") + name);
+  }
+}
+
+void readAttributeNonnegativeU32(
+    hid_t group,
+    const char* name,
+    std::uint32_t& value) {
+  Hdf5Handle attribute = openValidatedAttribute(
+      group, name, true, IcScalarClass::kInteger, {}, false,
+      sizeof(std::uint64_t));
+  Hdf5Handle type(H5Aget_type(attribute.get()));
+  if (!type.valid()) {
+    throw std::runtime_error(std::string("failed to inspect Header/") + name);
+  }
+  const TypeDescription description = describeType(type.get());
+  std::uint64_t wide = 0U;
+  if (description.is_signed) {
+    std::int64_t signed_value = 0;
+    if (H5Aread(attribute.get(), H5T_NATIVE_INT64, &signed_value) < 0) {
+      throw std::runtime_error(std::string("failed to read Header/") + name);
+    }
+    if (signed_value < 0) {
+      throw std::runtime_error(
+          std::string("Header/") + name + " must be non-negative");
+    }
+    wide = static_cast<std::uint64_t>(signed_value);
+  } else if (H5Aread(attribute.get(), H5T_NATIVE_UINT64, &wide) < 0) {
+    throw std::runtime_error(std::string("failed to read Header/") + name);
+  }
+  if (wide > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::runtime_error(
+        std::string("Header/") + name + " exceeds uint32 range");
+  }
+  value = static_cast<std::uint32_t>(wide);
 }
 
 void readAttributeU32x6(
@@ -436,9 +435,9 @@ void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
 
 [[nodiscard]] IcSchemaSummary readHeader(hid_t header) {
   IcSchemaSummary summary;
-  std::array<std::uint32_t, 6> local{};
+  std::array<std::uint64_t, 6> local{};
   std::array<std::uint32_t, 6> low{};
-  readAttributeU32x6(header, "NumPart_ThisFile", local);
+  readAttributeNonnegativeU64x6(header, "NumPart_ThisFile", local);
   readAttributeU32x6(header, "NumPart_Total", low);
   readAttributeU32x6(
       header, "NumPart_Total_HighWord", summary.total_count_high_word, false);
@@ -449,7 +448,7 @@ void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
   readAttributeF64(header, "Omega0", summary.omega_matter);
   readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
   readAttributeF64(header, "HubbleParam", summary.hubble_param);
-  readAttributeU32(
+  readAttributeNonnegativeU32(
       header, "NumFilesPerSnapshot", summary.num_files_per_snapshot);
   for (std::size_t i = 0; i < 6; ++i) {
     summary.count_by_type[i] = local[i];
@@ -599,45 +598,15 @@ herr_t collectLinkName(
   return files;
 }
 
-struct Convention {
-  core::UnitSystem source_units;
-  IcCoordinateFrame frame = IcCoordinateFrame::kComoving;
-  IcVelocityConvention velocity = IcVelocityConvention::kPhysicalPeculiar;
-  double length_hubble_exponent = 0.0;
-  double length_scale_factor_exponent = 0.0;
-  double mass_hubble_exponent = 0.0;
-  double mass_scale_factor_exponent = 0.0;
-  double velocity_hubble_exponent = 0.0;
-  double velocity_scale_factor_exponent = 0.0;
-};
+using CanonicalBundleVerification =
+    internal::CanonicalBundleVerification;
+using internal::verifyCanonicalBundle;
 
-[[nodiscard]] IcCoordinateFrame mapBridgeFrame(
-    core::InitialConditionCoordinateFrame frame) {
-  switch (frame) {
-    case core::InitialConditionCoordinateFrame::kComoving:
-      return IcCoordinateFrame::kComoving;
-    case core::InitialConditionCoordinateFrame::kPhysical:
-      return IcCoordinateFrame::kPhysical;
-    case core::InitialConditionCoordinateFrame::kUnspecified:
-      break;
-  }
-  throw std::invalid_argument("IC bridge coordinate frame is unspecified");
-}
-
-[[nodiscard]] IcVelocityConvention mapBridgeVelocityConvention(
-    core::InitialConditionVelocityConvention convention) {
-  switch (convention) {
-    case core::InitialConditionVelocityConvention::kPhysicalPeculiar:
-      return IcVelocityConvention::kPhysicalPeculiar;
-    case core::InitialConditionVelocityConvention::kSqrtAScaledPeculiar:
-      return IcVelocityConvention::kSqrtAScaledPeculiar;
-    case core::InitialConditionVelocityConvention::kComovingCoordinateRate:
-      return IcVelocityConvention::kComovingCoordinateRate;
-    case core::InitialConditionVelocityConvention::kUnspecified:
-      break;
-  }
-  throw std::invalid_argument("IC bridge velocity convention is unspecified");
-}
+using Convention = internal::IcSourceConvention;
+using FieldConversionContract = internal::IcFieldConversionContract;
+using internal::fieldConversionContract;
+using internal::mapBridgeFrame;
+using internal::mapBridgeVelocityConvention;
 
 [[nodiscard]] Convention conventionFor(
     IcDialect dialect,
@@ -655,7 +624,7 @@ struct Convention {
         readAttributeString(header, "ChuiVelocityConvention");
     const std::string manifest_digest =
         readAttributeString(header, "ConversionManifestSha256");
-    if (schema_name != "chui_canonical_v1" || schema_version != 1U ||
+    if (schema_name != "chui_canonical_v1" || schema_version != 2U ||
         coordinate_frame != "comoving" ||
         velocity_convention != "physical_peculiar") {
       throw std::runtime_error(
@@ -692,7 +661,7 @@ struct Convention {
   }
 
   if (supplied_manifest) {
-    // The supplied schema-v3 manifest is the authority for every field. These
+    // The supplied schema-v4 manifest is the authority for every field. These
     // neutral values are used only while re-inspecting HDF5 datatype/shape.
     core::UnitSystem units;
     units.length_si_per_code = 1.0;
@@ -732,111 +701,6 @@ struct Convention {
           config.mode.ic_bridge_velocity_hubble_exponent,
       .velocity_scale_factor_exponent =
           config.mode.ic_bridge_velocity_scale_factor_exponent};
-}
-
-struct FieldConversionContract {
-  double base_unit_to_si = 1.0;
-  double hubble_exponent = 0.0;
-  double scale_factor_exponent = 0.0;
-  std::int8_t length_power = 0;
-  std::int8_t mass_power = 0;
-  std::int8_t time_power = 0;
-  double frame_scale_factor_exponent = 0.0;
-  std::uint8_t velocity_convention_power = 0;
-  std::string source_unit = "dimensionless";
-  std::string target_unit = "dimensionless";
-};
-
-[[nodiscard]] FieldConversionContract fieldConversionContract(
-    std::string_view canonical_path,
-    IcFieldSemantics semantics,
-    const Convention& convention) {
-  FieldConversionContract contract;
-  const bool physical_frame =
-      convention.frame == IcCoordinateFrame::kPhysical;
-  if (canonical_path.ends_with("/Density")) {
-    contract.base_unit_to_si =
-        convention.source_units.mass_si_per_code /
-        std::pow(convention.source_units.length_si_per_code, 3.0);
-    contract.hubble_exponent = convention.mass_hubble_exponent -
-        3.0 * convention.length_hubble_exponent;
-    contract.scale_factor_exponent =
-        convention.mass_scale_factor_exponent -
-        3.0 * convention.length_scale_factor_exponent;
-    contract.length_power = -3;
-    contract.mass_power = 1;
-    contract.frame_scale_factor_exponent = physical_frame ? 3.0 : 0.0;
-    contract.source_unit = "source_mass/source_length^3";
-    contract.target_unit = "runtime_mass/runtime_length^3";
-    return contract;
-  }
-  if (canonical_path.ends_with("/BH_Mdot")) {
-    contract.base_unit_to_si =
-        convention.source_units.mass_si_per_code /
-        convention.source_units.timeSiPerCode();
-    contract.hubble_exponent = convention.mass_hubble_exponent +
-        convention.velocity_hubble_exponent -
-        convention.length_hubble_exponent;
-    contract.scale_factor_exponent =
-        convention.mass_scale_factor_exponent +
-        convention.velocity_scale_factor_exponent -
-        convention.length_scale_factor_exponent;
-    contract.mass_power = 1;
-    contract.time_power = -1;
-    contract.frame_scale_factor_exponent = physical_frame ? 1.0 : 0.0;
-    contract.velocity_convention_power = 1U;
-    contract.source_unit = "source_mass/source_time";
-    contract.target_unit = "runtime_mass/runtime_time";
-    return contract;
-  }
-  switch (semantics) {
-    case IcFieldSemantics::kCoordinate:
-      contract.base_unit_to_si = convention.source_units.length_si_per_code;
-      contract.hubble_exponent = convention.length_hubble_exponent;
-      contract.scale_factor_exponent =
-          convention.length_scale_factor_exponent;
-      contract.length_power = 1;
-      contract.frame_scale_factor_exponent = physical_frame ? -1.0 : 0.0;
-      contract.source_unit = "source_length";
-      contract.target_unit = "runtime_comoving_length";
-      break;
-    case IcFieldSemantics::kVelocity:
-      contract.base_unit_to_si = convention.source_units.velocity_si_per_code;
-      contract.hubble_exponent = convention.velocity_hubble_exponent;
-      contract.scale_factor_exponent =
-          convention.velocity_scale_factor_exponent;
-      contract.length_power = 1;
-      contract.time_power = -1;
-      contract.velocity_convention_power = 1U;
-      contract.source_unit = "source_velocity";
-      contract.target_unit = "runtime_peculiar_velocity";
-      break;
-    case IcFieldSemantics::kExtensive:
-      contract.base_unit_to_si = convention.source_units.mass_si_per_code;
-      contract.hubble_exponent = convention.mass_hubble_exponent;
-      contract.scale_factor_exponent = convention.mass_scale_factor_exponent;
-      contract.mass_power = 1;
-      contract.source_unit = "source_mass";
-      contract.target_unit = "runtime_mass";
-      break;
-    case IcFieldSemantics::kSpecific:
-      contract.base_unit_to_si =
-          convention.source_units.velocity_si_per_code *
-          convention.source_units.velocity_si_per_code;
-      contract.hubble_exponent = 2.0 * convention.velocity_hubble_exponent;
-      contract.scale_factor_exponent =
-          2.0 * convention.velocity_scale_factor_exponent;
-      contract.length_power = 2;
-      contract.time_power = -2;
-      contract.velocity_convention_power = 2U;
-      contract.source_unit = "source_velocity^2";
-      contract.target_unit = "runtime_specific_energy";
-      break;
-    case IcFieldSemantics::kIdentifier:
-    case IcFieldSemantics::kIntensive:
-      break;
-  }
-  return contract;
 }
 
 void validateDatasetSemanticType(
@@ -1029,6 +893,59 @@ void validateDatasetSemanticType(
           "target_si_per_code(L^length_power M^mass_power T^time_power)"};
 }
 
+[[nodiscard]] IcFieldManifest inspectHeaderIntegerAttribute(
+    hid_t header,
+    std::uint32_t file_index,
+    std::string name,
+    bool required = true) {
+  Hdf5Handle attribute(H5Aopen(header, name.c_str(), H5P_DEFAULT));
+  if (!attribute.valid()) {
+    if (!required) {
+      return {};
+    }
+    throw std::runtime_error("failed to open Header/" + name);
+  }
+  Hdf5Handle type(H5Aget_type(attribute.get()));
+  Hdf5Handle space(H5Aget_space(attribute.get()));
+  if (!type.valid() || !space.valid()) {
+    throw std::runtime_error("failed to inspect Header/" + name);
+  }
+  const TypeDescription description = describeType(type.get());
+  if (description.scalar_class != IcScalarClass::kInteger ||
+      description.width > sizeof(std::uint64_t)) {
+    throw std::runtime_error(
+        "Header/" + name + " must use an integer type no wider than 64 bits");
+  }
+  const auto dimensions = dataspaceDimensions(space.get());
+  return {
+      .source_file_index = file_index,
+      .dataset_path = "/Header/" + name,
+      .selected_alias = name,
+      .scalar_type = description.name,
+      .scalar_class = description.scalar_class,
+      .byte_width = description.width,
+      .is_signed = description.is_signed,
+      .byte_order = description.order,
+      .rank = static_cast<std::uint8_t>(dimensions.size()),
+      .dimensions = dimensions,
+      .record_count = dimensions.empty() ? 1U : dimensions.front(),
+      .base_unit_to_si = 1.0,
+      .hubble_exponent = 0.0,
+      .scale_factor_exponent = 0.0,
+      .length_power = 0,
+      .mass_power = 0,
+      .time_power = 0,
+      .frame_scale_factor_exponent = 0.0,
+      .velocity_convention_power = 0U,
+      .coordinate_frame = IcCoordinateFrame::kComoving,
+      .velocity_convention = IcVelocityConvention::kNotVelocity,
+      .semantics = IcFieldSemantics::kIdentifier,
+      .disposition = IcFieldDisposition::kPreserved,
+      .source_unit = "integer_count",
+      .target_unit = "manifest_metadata",
+      .conversion_equation = "preserved exactly after checked non-negative read"};
+}
+
 
 void validateCrossFileSchema(const IcManifest& manifest) {
   if (manifest.num_files_per_snapshot <= 1U) {
@@ -1046,6 +963,10 @@ void validateCrossFileSchema(const IcManifest& manifest) {
         lhs.dimensions.begin() + (lhs.dimensions.empty() ? 0 : 1),
         lhs.dimensions.end(),
         rhs.dimensions.begin() + (rhs.dimensions.empty() ? 0 : 1));
+  };
+  const auto is_flexible_count_attribute = [](std::string_view path) {
+    return path == "/Header/NumPart_ThisFile" ||
+        path == "/Header/NumFilesPerSnapshot";
   };
   for (const IcFieldManifest& baseline : manifest.fields) {
     if (baseline.source_file_index != 0U) {
@@ -1066,13 +987,18 @@ void validateCrossFileSchema(const IcManifest& manifest) {
             baseline.dataset_path + " in file index " +
             std::to_string(file_index));
       }
+      const bool flexible_count =
+          is_flexible_count_attribute(baseline.dataset_path);
+      const bool incompatible_type = flexible_count
+          ? candidate->scalar_class != IcScalarClass::kInteger ||
+              candidate->byte_width > sizeof(std::uint64_t)
+          : candidate->scalar_type != baseline.scalar_type ||
+              candidate->scalar_class != baseline.scalar_class ||
+              candidate->byte_width != baseline.byte_width ||
+              candidate->is_signed != baseline.is_signed ||
+              candidate->byte_order != baseline.byte_order;
       if (candidate->selected_alias != baseline.selected_alias ||
-          candidate->scalar_type != baseline.scalar_type ||
-          candidate->scalar_class != baseline.scalar_class ||
-          candidate->byte_width != baseline.byte_width ||
-          candidate->is_signed != baseline.is_signed ||
-          candidate->byte_order != baseline.byte_order ||
-          !comparable_dimensions(baseline, *candidate)) {
+          incompatible_type || !comparable_dimensions(baseline, *candidate)) {
         throw std::runtime_error(
             "inconsistent source schema across IC files for " +
             baseline.dataset_path);
@@ -1185,10 +1111,13 @@ struct SourceFileInspection {
   std::string source_sha256;
   std::string original_header_attributes;
   std::vector<IcFieldManifest> fields;
+  std::vector<IcMissingFieldContract> missing_field_contracts;
   std::vector<std::string> defaulted_fields;
   std::vector<std::string> dropped_fields;
   std::vector<std::string> preserved_auxiliary_fields;
   std::vector<std::string> warnings;
+  bool canonical_manifest_verified = false;
+  std::string canonical_manifest_sha256;
   IcImportCounters counters;
 };
 
@@ -1217,12 +1146,18 @@ struct SourceFileInspection {
   SourceFileInspection result;
   result.path = path;
   result.schema = readHeader(header.get());
+  if (dialect == IcDialect::kChuiCanonicalV1) {
+    const CanonicalBundleVerification verification =
+        verifyCanonicalBundle(path, file.get(), header.get());
+    result.canonical_manifest_verified = verification.verified;
+    result.canonical_manifest_sha256 = verification.manifest_sha256;
+  }
   result.original_header_attributes = headerAuditText(result.schema);
   checkedCounterAdd(
       result.counters.metadata_bytes_read,
       logicalHeaderPayloadBytes(result.schema), "metadata_bytes_read");
   result.source_size_bytes = std::filesystem::file_size(path);
-  result.source_sha256 = sha256Hex(path);
+  result.source_sha256 = icSha256FileHex(path);
   checkedCounterAdd(
       result.counters.hash_bytes_read, result.source_size_bytes,
       "hash_bytes_read");
@@ -1235,6 +1170,16 @@ struct SourceFileInspection {
 
   const Convention convention = conventionFor(
       dialect, header.get(), config, has_authoritative_manifest);
+  result.fields.push_back(inspectHeaderIntegerAttribute(
+      header.get(), file_index, "NumPart_ThisFile"));
+  result.fields.push_back(inspectHeaderIntegerAttribute(
+      header.get(), file_index, "NumPart_Total"));
+  if (attributeExists(header.get(), "NumPart_Total_HighWord")) {
+    result.fields.push_back(inspectHeaderIntegerAttribute(
+        header.get(), file_index, "NumPart_Total_HighWord"));
+  }
+  result.fields.push_back(inspectHeaderIntegerAttribute(
+      header.get(), file_index, "NumFilesPerSnapshot"));
   result.fields.push_back(inspectHeaderAttribute(
       header.get(), file_index, "MassTable", convention,
       IcFieldSemantics::kExtensive));
@@ -1297,6 +1242,50 @@ struct SourceFileInspection {
       result.fields.push_back(std::move(field));
       return true;
     };
+    const auto resolve_missing = [&result, file_index](
+                                     std::string field_path,
+                                     core::InitialConditionMissingFieldPolicy configured_policy,
+                                     double configured_value_code,
+                                     std::string dialect_resolution) {
+      const IcMissingFieldPolicy policy =
+          mapConfiguredMissingFieldPolicy(configured_policy);
+      if (policy == IcMissingFieldPolicy::kReject) {
+        throw std::runtime_error(
+            field_path +
+            " is missing and its normalized missing-field policy is reject");
+      }
+      if (policy == IcMissingFieldPolicy::kReconstruct) {
+        throw std::runtime_error(
+            field_path +
+            " requests reconstruction, but gadget_arepo_bridge_v1 has no "
+            "validated reconstruction contract for this field");
+      }
+      if (policy == IcMissingFieldPolicy::kPreserveUnavailable) {
+        throw std::runtime_error(
+            field_path +
+            " requests preserve_unavailable, but runtime sidecars do not "
+            "carry availability masks");
+      }
+      if (policy == IcMissingFieldPolicy::kDialectDefinedDefault &&
+          dialect_resolution.starts_with("no dialect-defined default")) {
+        throw std::runtime_error(
+            field_path +
+            " requests dialect_defined_default, but this dialect defines no "
+            "scientifically valid default for the field");
+      }
+      const std::string resolution =
+          policy == IcMissingFieldPolicy::kUseConfigValue
+          ? "use normalized configuration value in runtime code units"
+          : std::move(dialect_resolution);
+      result.missing_field_contracts.push_back(IcMissingFieldContract{
+          .source_file_index = file_index,
+          .field_path = field_path,
+          .policy = policy,
+          .configured_value_code = configured_value_code,
+          .resolution = resolution});
+      result.defaulted_fields.push_back(
+          field_path + "=" + resolution);
+    };
 
     add("Coordinates", {"Coordinates", "Position", "POS"}, true,
         IcFieldSemantics::kCoordinate);
@@ -1316,12 +1305,18 @@ struct SourceFileInspection {
     if (type == 0U) {
       if (!add("InternalEnergy", {"InternalEnergy", "U", "Internal_Energy"},
                false, IcFieldSemantics::kSpecific)) {
-        result.defaulted_fields.push_back(
-            group_path + "/InternalEnergy=zero");
+        resolve_missing(
+            group_path + "/InternalEnergy",
+            config.mode.ic_gas_internal_energy_policy,
+            config.mode.ic_gas_internal_energy_value_code,
+            "no dialect-defined default exists");
       }
       if (!add("Density", {"Density", "Rho"}, false,
                IcFieldSemantics::kIntensive)) {
-        result.defaulted_fields.push_back(group_path + "/Density=zero");
+        resolve_missing(
+            group_path + "/Density", config.mode.ic_gas_density_policy,
+            config.mode.ic_gas_density_value_code,
+            "no dialect-defined default exists");
       }
       if (add("Metallicity", {"Metallicity", "GFM_Metallicity"}, false,
               IcFieldSemantics::kIntensive,
@@ -1344,18 +1339,28 @@ struct SourceFileInspection {
                {"GFM_StellarFormationTime", "StellarFormationTime",
                 "BirthTime"},
                false, IcFieldSemantics::kIntensive)) {
-        result.defaulted_fields.push_back(
-            group_path + "/StellarFormationTime=Header/Time");
+        resolve_missing(
+            group_path + "/StellarFormationTime",
+            config.mode.ic_star_formation_time_policy,
+            config.mode.ic_star_formation_time_value,
+            "use Header/Time as the explicitly selected dialect default");
       }
       if (!add("InitialMass",
                {"GFM_InitialMass", "InitialMass", "BirthMass"}, false,
                IcFieldSemantics::kExtensive)) {
-        result.defaulted_fields.push_back(
-            group_path + "/InitialMass=particle_mass");
+        resolve_missing(
+            group_path + "/InitialMass",
+            config.mode.ic_star_initial_mass_policy,
+            config.mode.ic_star_initial_mass_value_code,
+            "use current particle mass as the explicitly selected dialect default");
       }
       if (!add("Metallicity", {"GFM_Metallicity", "Metallicity"}, false,
                IcFieldSemantics::kIntensive)) {
-        result.defaulted_fields.push_back(group_path + "/Metallicity=zero");
+        resolve_missing(
+            group_path + "/Metallicity",
+            config.mode.ic_star_metallicity_policy,
+            config.mode.ic_star_metallicity_value,
+            "use zero metallicity as the explicitly selected dialect default");
       }
     }
     if (species_policy[type] == IcSpeciesPolicy::kBlackHole) {
@@ -1363,7 +1368,10 @@ struct SourceFileInspection {
           IcFieldSemantics::kExtensive);
       if (!add("BH_Mdot", {"BH_Mdot", "BlackHoleAccretionRate"}, false,
                IcFieldSemantics::kIntensive)) {
-        result.defaulted_fields.push_back(group_path + "/BH_Mdot=zero");
+        resolve_missing(
+            group_path + "/BH_Mdot", config.mode.ic_bh_mdot_policy,
+            config.mode.ic_bh_mdot_value_code,
+            "use zero accretion rate as the explicitly selected dialect default");
       }
     }
     if (species_policy[type] == IcSpeciesPolicy::kTracer) {
@@ -1450,7 +1458,7 @@ struct SourceFileInspection {
           ? IcDialect::kChuiCanonicalV1
           : IcDialect::kGadgetArepoBridgeV1;
   manifest.dialect_version = "1";
-  manifest.converter_version = "chui_runtime_inspector_v3";
+  manifest.converter_version = "chui_runtime_inspector_v4";
   manifest.source_files = files;
   manifest.num_files_per_snapshot =
       static_cast<std::uint32_t>(files.size());
@@ -1522,6 +1530,10 @@ struct SourceFileInspection {
         manifest.fields.end(),
         std::make_move_iterator(source.fields.begin()),
         std::make_move_iterator(source.fields.end()));
+    manifest.missing_field_contracts.insert(
+        manifest.missing_field_contracts.end(),
+        std::make_move_iterator(source.missing_field_contracts.begin()),
+        std::make_move_iterator(source.missing_field_contracts.end()));
     manifest.defaulted_fields.insert(
         manifest.defaulted_fields.end(),
         std::make_move_iterator(source.defaulted_fields.begin()),
@@ -1538,6 +1550,17 @@ struct SourceFileInspection {
         manifest.warnings.end(),
         std::make_move_iterator(source.warnings.begin()),
         std::make_move_iterator(source.warnings.end()));
+    if (source.canonical_manifest_verified) {
+      if (manifest.canonical_source_manifest_verified &&
+          manifest.canonical_source_manifest_sha256 !=
+              source.canonical_manifest_sha256) {
+        throw std::runtime_error(
+            "canonical CHUÍ IC file set has inconsistent manifest bindings");
+      }
+      manifest.canonical_source_manifest_verified = true;
+      manifest.canonical_source_manifest_sha256 =
+          source.canonical_manifest_sha256;
+    }
     checkedCounterAdd(
         inspection.counters.metadata_bytes_read,
         source.counters.metadata_bytes_read, "metadata_bytes_read");
@@ -1588,6 +1611,9 @@ struct SourceFileInspection {
             manifest.num_part_total_high_word ||
         supplied.mass_table != manifest.mass_table ||
         supplied.species_policy != manifest.species_policy ||
+        !missingFieldContractsEqual(
+            supplied.missing_field_contracts,
+            manifest.missing_field_contracts) ||
         !nearlyEqual(supplied.box_size, manifest.box_size) ||
         !nearlyEqual(supplied.scale_factor, manifest.scale_factor) ||
         !nearlyEqual(supplied.redshift, manifest.redshift) ||
@@ -1637,6 +1663,36 @@ struct SourceFileInspection {
 
 [[nodiscard]] const IcFieldManifest* findField(const IcManifest& manifest,std::size_t file_index,std::string_view path){const auto it=std::find_if(manifest.fields.begin(),manifest.fields.end(),[&](const IcFieldManifest& field){return field.source_file_index==file_index&&field.dataset_path==path;});return it==manifest.fields.end()?nullptr:&*it;}
 [[nodiscard]] const IcFieldManifest& requireField(const IcManifest& manifest,std::size_t file_index,std::string_view path){const auto* field=findField(manifest,file_index,path);if(field==nullptr)throw std::runtime_error("manifest lacks inspected field "+std::string(path)+" for file "+std::to_string(file_index));return *field;}
+[[nodiscard]] const IcMissingFieldContract& requireMissingFieldContract(
+    const IcManifest& manifest,
+    std::size_t file_index,
+    std::string_view path) {
+  const auto it = std::find_if(
+      manifest.missing_field_contracts.begin(),
+      manifest.missing_field_contracts.end(),
+      [&](const IcMissingFieldContract& contract) {
+        return contract.source_file_index == file_index &&
+            contract.field_path == path;
+      });
+  if (it == manifest.missing_field_contracts.end()) {
+    throw std::runtime_error(
+        "manifest lacks explicit missing-field contract " +
+        std::string(path) + " for file " + std::to_string(file_index));
+  }
+  return *it;
+}
+[[nodiscard]] double resolveMissingScalarValue(
+    const IcMissingFieldContract& contract,
+    double dialect_default) {
+  if (contract.policy == IcMissingFieldPolicy::kUseConfigValue) {
+    return contract.configured_value_code;
+  }
+  if (contract.policy == IcMissingFieldPolicy::kDialectDefinedDefault) {
+    return dialect_default;
+  }
+  throw std::runtime_error(
+      "unsupported resolved missing-field policy for " + contract.field_path);
+}
 
 void checkedCounterAdd(
     std::uint64_t& destination,
@@ -1659,94 +1715,6 @@ template <typename T>
   return static_cast<std::uint64_t>(values.capacity()) * sizeof(T);
 }
 
-void readChunkDouble(
-    hid_t group,
-    const IcFieldManifest& field,
-    std::size_t start,
-    std::size_t count,
-    std::size_t components,
-    std::vector<double>& out,
-    IcImportCounters& counters) {
-  Hdf5Handle dataset(
-      H5Dopen2(group, field.selected_alias.c_str(), H5P_DEFAULT));
-  if (!dataset.valid()) {
-    throw std::runtime_error("failed to open " + field.dataset_path);
-  }
-  Hdf5Handle file_space(H5Dget_space(dataset.get()));
-  if (!file_space.valid()) {
-    throw std::runtime_error("failed to inspect " + field.dataset_path);
-  }
-  const int rank = components == 1U ? 1 : 2;
-  std::array<hsize_t, 2> offset{
-      static_cast<hsize_t>(start), 0U};
-  std::array<hsize_t, 2> extent{
-      static_cast<hsize_t>(count), static_cast<hsize_t>(components)};
-  if (H5Sselect_hyperslab(
-          file_space.get(), H5S_SELECT_SET, offset.data(), nullptr,
-          extent.data(), nullptr) < 0) {
-    throw std::runtime_error("failed hyperslab for " + field.dataset_path);
-  }
-  Hdf5Handle mem(H5Screate_simple(rank, extent.data(), nullptr));
-  if (!mem.valid()) {
-    throw std::runtime_error(
-        "failed to create memory dataspace for " + field.dataset_path);
-  }
-  out.resize(count * components);
-  if (H5Dread(
-          dataset.get(), H5T_NATIVE_DOUBLE, mem.get(), file_space.get(),
-          H5P_DEFAULT, out.data()) < 0) {
-    throw std::runtime_error("failed chunk read for " + field.dataset_path);
-  }
-  const std::uint64_t value_count =
-      static_cast<std::uint64_t>(count) * components;
-  checkedCounterAdd(
-      counters.payload_bytes_read, value_count * field.byte_width,
-      "payload_bytes_read");
-  checkedCounterAdd(
-      counters.converted_payload_bytes, value_count * sizeof(double),
-      "converted_payload_bytes");
-}
-
-void readChunkU64(
-    hid_t group,
-    const IcFieldManifest& field,
-    std::size_t start,
-    std::size_t count,
-    std::vector<std::uint64_t>& out,
-    IcImportCounters& counters) {
-  Hdf5Handle dataset(
-      H5Dopen2(group, field.selected_alias.c_str(), H5P_DEFAULT));
-  if (!dataset.valid()) {
-    throw std::runtime_error("failed to open " + field.dataset_path);
-  }
-  Hdf5Handle file_space(H5Dget_space(dataset.get()));
-  if (!file_space.valid()) {
-    throw std::runtime_error("failed to inspect " + field.dataset_path);
-  }
-  hsize_t offset[1]{static_cast<hsize_t>(start)};
-  hsize_t extent[1]{static_cast<hsize_t>(count)};
-  if (H5Sselect_hyperslab(
-          file_space.get(), H5S_SELECT_SET, offset, nullptr, extent,
-          nullptr) < 0) {
-    throw std::runtime_error("failed hyperslab for " + field.dataset_path);
-  }
-  Hdf5Handle mem(H5Screate_simple(1, extent, nullptr));
-  out.resize(count);
-  if (H5Dread(
-          dataset.get(), H5T_NATIVE_UINT64, mem.get(), file_space.get(),
-          H5P_DEFAULT, out.data()) < 0) {
-    throw std::runtime_error("failed ID chunk read for " + field.dataset_path);
-  }
-  checkedCounterAdd(
-      counters.payload_bytes_read,
-      static_cast<std::uint64_t>(count) * field.byte_width,
-      "payload_bytes_read");
-  checkedCounterAdd(
-      counters.converted_payload_bytes,
-      static_cast<std::uint64_t>(count) * sizeof(std::uint64_t),
-      "converted_payload_bytes");
-}
-
 void convertValues(
     std::vector<double>& values,
     const IcFieldManifest& field,
@@ -1762,31 +1730,6 @@ void convertValues(
     }
   }
 }
-
-struct ParticleRecord {
-  std::uint64_t id = 0;
-  std::uint32_t species = 0;
-  double x = 0.0;
-  double y = 0.0;
-  double z = 0.0;
-  double vx = 0.0;
-  double vy = 0.0;
-  double vz = 0.0;
-  double mass = 0.0;
-  double gas_density = 0.0;
-  double gas_internal_energy = 0.0;
-  double star_formation = 0.0;
-  double star_birth_mass = 0.0;
-  double star_metallicity = 0.0;
-  double bh_mass = 0.0;
-  double bh_mdot = 0.0;
-  std::uint64_t tracer_parent = 0;
-  std::uint64_t tracer_injection = 0;
-  std::uint32_t tracer_host = kInvalidIndex;
-  double tracer_fraction = 0.0;
-  double tracer_last_host_mass = 0.0;
-  double tracer_exchanged_mass = 0.0;
-};
 
 [[nodiscard]] std::uint64_t precedingRecordCount(
     const IcManifest& manifest,
@@ -1867,8 +1810,15 @@ void validateRecordScientificState(
           "gas density and internal energy must be finite and non-negative");
     }
   } else if (policy == IcSpeciesPolicy::kStar) {
-    if (!std::isfinite(record.star_formation) ||
-        record.star_formation < 0.0 ||
+    if (!std::isfinite(record.star_formation)) {
+      throw std::runtime_error("stellar formation time must be finite");
+    }
+    if (record.star_formation < 0.0) {
+      throw std::runtime_error(
+          "negative stellar formation time identifies an AREPO wind particle; "
+          "gadget_arepo_bridge_v1 does not silently reinterpret wind particles as ordinary stars");
+    }
+    if (
         !std::isfinite(record.star_birth_mass) ||
         !(record.star_birth_mass > 0.0) ||
         !std::isfinite(record.star_metallicity) ||
@@ -1893,6 +1843,7 @@ void validateRecordScientificState(
 }
 
 [[nodiscard]] std::vector<ParticleRecord> readRecordChunk(
+    IcReaderSession& session,
     const Inspection& inspection,
     std::size_t file_index,
     std::size_t type_index,
@@ -1903,15 +1854,6 @@ void validateRecordScientificState(
     IcImportCounters& counters) {
   static_cast<void>(options);
   const IcManifest& manifest = inspection.manifest;
-  const auto& path = manifest.source_files[file_index];
-  Hdf5Handle file(
-      H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT));
-  Hdf5Handle group(H5Gopen2(
-      file.get(), ("/PartType" + std::to_string(type_index)).c_str(),
-      H5P_DEFAULT));
-  if (!file.valid() || !group.valid()) {
-    throw std::runtime_error("failed to open particle chunk source");
-  }
   const std::string prefix =
       "/PartType" + std::to_string(type_index) + "/";
   const core::UnitSystem target = core::makeUnitSystem(
@@ -1942,12 +1884,12 @@ void validateRecordScientificState(
   const IcFieldManifest& position_field =
       requireField(manifest, file_index, prefix + "Coordinates");
   readChunkDouble(
-      group.get(), position_field, start, count, 3U, pos, counters);
+      session, position_field, start, count, 3U, pos, counters);
   convertValues(pos, position_field, manifest, target);
 
   if (const auto* field =
           findField(manifest, file_index, prefix + "Velocities")) {
-    readChunkDouble(group.get(), *field, start, count, 3U, vel, counters);
+    readChunkDouble(session, *field, start, count, 3U, vel, counters);
     convertValues(vel, *field, manifest, target);
   } else {
     vel.assign(count * 3U, 0.0);
@@ -1955,7 +1897,7 @@ void validateRecordScientificState(
 
   if (const auto* field =
           findField(manifest, file_index, prefix + "ParticleIDs")) {
-    readChunkU64(group.get(), *field, start, count, ids, counters);
+    readChunkU64(session, *field, start, count, ids, counters);
   } else {
     ids.resize(count);
     const std::uint64_t base =
@@ -1967,7 +1909,7 @@ void validateRecordScientificState(
 
   if (const auto* field =
           findField(manifest, file_index, prefix + "Masses")) {
-    readChunkDouble(group.get(), *field, start, count, 1U, mass, counters);
+    readChunkDouble(session, *field, start, count, 1U, mass, counters);
     convertValues(mass, *field, manifest, target);
   } else {
     mass.assign(count, manifest.mass_table[type_index]);
@@ -1981,18 +1923,22 @@ void validateRecordScientificState(
     if (const auto* field =
             findField(manifest, file_index, prefix + "InternalEnergy")) {
       readChunkDouble(
-          group.get(), *field, start, count, 1U, gas_u, counters);
+          session, *field, start, count, 1U, gas_u, counters);
       convertValues(gas_u, *field, manifest, target);
     } else {
-      gas_u.assign(count, 0.0);
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "InternalEnergy");
+      gas_u.assign(count, resolveMissingScalarValue(contract, 0.0));
     }
     if (const auto* field =
             findField(manifest, file_index, prefix + "Density")) {
       readChunkDouble(
-          group.get(), *field, start, count, 1U, gas_rho, counters);
+          session, *field, start, count, 1U, gas_rho, counters);
       convertValues(gas_rho, *field, manifest, target);
     } else {
-      gas_rho.assign(count, 0.0);
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "Density");
+      gas_rho.assign(count, resolveMissingScalarValue(contract, 0.0));
     }
   }
 
@@ -2000,24 +1946,36 @@ void validateRecordScientificState(
     if (const auto* field = findField(
             manifest, file_index, prefix + "StellarFormationTime")) {
       readChunkDouble(
-          group.get(), *field, start, count, 1U, star_time, counters);
+          session, *field, start, count, 1U, star_time, counters);
     } else {
-      star_time.assign(count, manifest.scale_factor);
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "StellarFormationTime");
+      star_time.assign(
+          count, resolveMissingScalarValue(contract, manifest.scale_factor));
     }
     if (const auto* field =
             findField(manifest, file_index, prefix + "InitialMass")) {
       readChunkDouble(
-          group.get(), *field, start, count, 1U, star_birth, counters);
+          session, *field, start, count, 1U, star_birth, counters);
       convertValues(star_birth, *field, manifest, target);
     } else {
-      star_birth = mass;
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "InitialMass");
+      if (contract.policy == IcMissingFieldPolicy::kDialectDefinedDefault) {
+        star_birth = mass;
+      } else {
+        star_birth.assign(
+            count, resolveMissingScalarValue(contract, 0.0));
+      }
     }
     if (const auto* field =
             findField(manifest, file_index, prefix + "Metallicity")) {
       readChunkDouble(
-          group.get(), *field, start, count, 1U, star_metal, counters);
+          session, *field, start, count, 1U, star_metal, counters);
     } else {
-      star_metal.assign(count, 0.0);
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "Metallicity");
+      star_metal.assign(count, resolveMissingScalarValue(contract, 0.0));
     }
   }
 
@@ -2025,42 +1983,44 @@ void validateRecordScientificState(
     const IcFieldManifest& field =
         requireField(manifest, file_index, prefix + "BH_Mass");
     readChunkDouble(
-        group.get(), field, start, count, 1U, bh_mass, counters);
+        session, field, start, count, 1U, bh_mass, counters);
     convertValues(bh_mass, field, manifest, target);
     if (const auto* mdot =
             findField(manifest, file_index, prefix + "BH_Mdot")) {
       readChunkDouble(
-          group.get(), *mdot, start, count, 1U, bh_mdot, counters);
+          session, *mdot, start, count, 1U, bh_mdot, counters);
       convertValues(bh_mdot, *mdot, manifest, target);
     } else {
-      bh_mdot.assign(count, 0.0);
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "BH_Mdot");
+      bh_mdot.assign(count, resolveMissingScalarValue(contract, 0.0));
     }
   }
 
   if (policy == IcSpeciesPolicy::kTracer) {
     readChunkU64(
-        group.get(),
+        session,
         requireField(manifest, file_index, prefix + "ParentParticleIDs"),
         start, count, tracer_parent, counters);
     readChunkU64(
-        group.get(),
+        session,
         requireField(manifest, file_index, prefix + "InjectionStep"),
         start, count, tracer_injection, counters);
     tracer_host64.assign(count, kInvalidIndex);
     const auto& fraction_field =
         requireField(manifest, file_index, prefix + "MassFractionOfHost");
     readChunkDouble(
-        group.get(), fraction_field, start, count, 1U, tracer_fraction,
+        session, fraction_field, start, count, 1U, tracer_fraction,
         counters);
     const auto& last_field =
         requireField(manifest, file_index, prefix + "LastHostMass");
     readChunkDouble(
-        group.get(), last_field, start, count, 1U, tracer_last, counters);
+        session, last_field, start, count, 1U, tracer_last, counters);
     convertValues(tracer_last, last_field, manifest, target);
     const auto& exchange_field = requireField(
         manifest, file_index, prefix + "CumulativeExchangedMass");
     readChunkDouble(
-        group.get(), exchange_field, start, count, 1U, tracer_exchange,
+        session, exchange_field, start, count, 1U, tracer_exchange,
         counters);
     convertValues(tracer_exchange, exchange_field, manifest, target);
   }
@@ -2215,14 +2175,6 @@ void validateSerialCountsAndIds(const core::SimulationState& state,const IcManif
 
 }  // namespace
 
-std::string icSha256Hex(std::string_view value) {
-  return sha256Hex(value);
-}
-
-std::string icSha256FileHex(const std::filesystem::path& input_path) {
-  return sha256Hex(input_path);
-}
-
 IcReadResult readGadgetArepoHdf5Ic(
     const std::filesystem::path& ic_path,
     const core::SimulationConfig& config,
@@ -2253,10 +2205,19 @@ IcReadResult readGadgetArepoHdf5Ic(
         value.substr(0U, separator));
   }
   result.report.unsupported_fields = inspection.manifest.dropped_fields;
+  result.report.manifest_verified =
+      inspection.manifest.canonical_source_manifest_verified;
+  result.report.verified_manifest_sha256 =
+      inspection.manifest.canonical_source_manifest_sha256;
 
   for (std::size_t file_index = 0U;
        file_index < inspection.manifest.source_files.size(); ++file_index) {
     ++result.report.counters.files_assigned;
+    IcReaderSession session(
+        inspection.manifest.source_files[file_index],
+        inspection.manifest.source_file_sizes_bytes[file_index],
+        inspection.manifest.source_sha256[file_index],
+        result.report.counters);
     for (std::size_t type_index = 0U; type_index < 6U; ++type_index) {
       const std::size_t total = static_cast<std::size_t>(
           inspection.manifest.num_part_this_file[file_index][type_index]);
@@ -2265,7 +2226,7 @@ IcReadResult readGadgetArepoHdf5Ic(
         const std::size_t count =
             std::min(options.chunk_particle_count, total - start);
         auto records = readRecordChunk(
-            inspection, file_index, type_index, start, count, config, options,
+            session, inspection, file_index, type_index, start, count, config, options,
             result.report.counters);
         appendRecords(result.state, records, 0U);
         ++result.report.counters.chunks_assigned;
@@ -2293,62 +2254,101 @@ IcReadResult readGadgetArepoHdf5Ic(
 }
 
 
+IcImportReport internal::streamGadgetArepoHdf5Ic(
+    const std::filesystem::path& ic_path,
+    const core::SimulationConfig& config,
+    const IcImportOptions& options,
+    const IcManifestReadyCallback& on_manifest_ready,
+    const IcRecordBatchCallback& on_record_batch) {
+#if !COSMOSIM_ENABLE_HDF5
+  static_cast<void>(ic_path);
+  static_cast<void>(config);
+  static_cast<void>(options);
+  static_cast<void>(on_manifest_ready);
+  static_cast<void>(on_record_batch);
+  throw std::runtime_error(
+      "COSMOSIM_ENABLE_HDF5=OFF: streaming GADGET/AREPO IC ingestion unavailable");
+#else
+  if (options.chunk_particle_count == 0U) {
+    throw std::invalid_argument("chunk_particle_count must be positive");
+  }
+  if (!on_manifest_ready || !on_record_batch) {
+    throw std::invalid_argument(
+        "streaming IC ingestion requires manifest and record callbacks");
+  }
+  Inspection inspection = inspectFileSet(ic_path, config, options);
+  if (options.validate_runtime_cosmology) {
+    validateRuntimeCosmology(inspection.manifest, config);
+  }
+
+  IcImportReport report;
+  report.counters = inspection.counters;
+  report.manifest = inspection.manifest;
+  report.schema = inspection.schemas.front();
+  report.defaulted_fields = inspection.manifest.defaulted_fields;
+  for (const auto& value : report.defaulted_fields) {
+    const auto separator = value.find('=');
+    report.missing_optional_fields.push_back(value.substr(0U, separator));
+  }
+  report.unsupported_fields = inspection.manifest.dropped_fields;
+  report.manifest_verified =
+      inspection.manifest.canonical_source_manifest_verified;
+  report.verified_manifest_sha256 =
+      inspection.manifest.canonical_source_manifest_sha256;
+  on_manifest_ready(inspection.manifest);
+
+  std::array<std::uint64_t, 6> observed_by_source_type{};
+  for (std::size_t file_index = 0U;
+       file_index < inspection.manifest.source_files.size(); ++file_index) {
+    ++report.counters.files_assigned;
+    IcReaderSession session(
+        inspection.manifest.source_files[file_index],
+        inspection.manifest.source_file_sizes_bytes[file_index],
+        inspection.manifest.source_sha256[file_index],
+        report.counters);
+    for (std::size_t type_index = 0U; type_index < 6U; ++type_index) {
+      const std::size_t total = static_cast<std::size_t>(
+          inspection.manifest.num_part_this_file[file_index][type_index]);
+      for (std::size_t start = 0U; start < total;
+           start += options.chunk_particle_count) {
+        const std::size_t count =
+            std::min(options.chunk_particle_count, total - start);
+        auto records = readRecordChunk(
+            session, inspection, file_index, type_index, start, count, config,
+            options, report.counters);
+        on_record_batch(records);
+        checkedCounterAdd(
+            observed_by_source_type[type_index], records.size(),
+            "streamed_source_type_count");
+        ++report.counters.chunks_assigned;
+        checkedCounterAdd(
+            report.counters.records_routed, records.size(),
+            "records_routed");
+      }
+    }
+  }
+  for (std::size_t type_index = 0U; type_index < 6U; ++type_index) {
+    if (observed_by_source_type[type_index] !=
+        inspection.manifest.num_part_total[type_index]) {
+      throw std::runtime_error(
+          "streaming IC ingestion source coverage disagrees with the manifest");
+    }
+  }
+  report.counters.final_local_particle_count =
+      std::accumulate(
+          observed_by_source_type.begin(), observed_by_source_type.end(),
+          std::uint64_t{0});
+  report.counters.bytes_read =
+      report.counters.metadata_bytes_read +
+      report.counters.hash_bytes_read +
+      report.counters.payload_bytes_read;
+  return report;
+#endif
+}
+
+
 namespace {
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
-
-constexpr std::size_t kWireRecordBytes = 168U;
-
-void appendLe32(std::vector<std::uint8_t>& out, std::uint32_t value) {
-  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
-    out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
-  }
-}
-void appendLe64(std::vector<std::uint8_t>& out, std::uint64_t value) {
-  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
-    out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
-  }
-}
-void appendDouble(std::vector<std::uint8_t>& out, double value) {
-  appendLe64(out, std::bit_cast<std::uint64_t>(value));
-}
-[[nodiscard]] std::uint32_t readLe32(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  if (offset + 4U > bytes.size()) throw std::runtime_error("truncated IC wire uint32");
-  std::uint32_t value = 0U;
-  for (unsigned shift = 0U; shift < 32U; shift += 8U) value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
-  return value;
-}
-[[nodiscard]] std::uint64_t readLe64(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  if (offset + 8U > bytes.size()) throw std::runtime_error("truncated IC wire uint64");
-  std::uint64_t value = 0U;
-  for (unsigned shift = 0U; shift < 64U; shift += 8U) value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
-  return value;
-}
-[[nodiscard]] double readDouble(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  return std::bit_cast<double>(readLe64(bytes, offset));
-}
-void serializeRecord(const ParticleRecord& record, std::vector<std::uint8_t>& out) {
-  const std::size_t begin = out.size();
-  appendLe64(out, record.id); appendLe32(out, record.species);
-  appendDouble(out, record.x); appendDouble(out, record.y); appendDouble(out, record.z);
-  appendDouble(out, record.vx); appendDouble(out, record.vy); appendDouble(out, record.vz); appendDouble(out, record.mass);
-  appendDouble(out, record.gas_density); appendDouble(out, record.gas_internal_energy);
-  appendDouble(out, record.star_formation); appendDouble(out, record.star_birth_mass); appendDouble(out, record.star_metallicity);
-  appendDouble(out, record.bh_mass); appendDouble(out, record.bh_mdot);
-  appendLe64(out, record.tracer_parent); appendLe64(out, record.tracer_injection); appendLe32(out, record.tracer_host);
-  appendDouble(out, record.tracer_fraction); appendDouble(out, record.tracer_last_host_mass); appendDouble(out, record.tracer_exchanged_mass);
-  if (out.size() - begin != kWireRecordBytes) throw std::logic_error("IC wire record byte contract drifted");
-}
-[[nodiscard]] ParticleRecord deserializeRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  if (offset + kWireRecordBytes > bytes.size()) throw std::runtime_error("truncated IC wire record");
-  ParticleRecord r; r.id=readLe64(bytes,offset);r.species=readLe32(bytes,offset);
-  r.x=readDouble(bytes,offset);r.y=readDouble(bytes,offset);r.z=readDouble(bytes,offset);
-  r.vx=readDouble(bytes,offset);r.vy=readDouble(bytes,offset);r.vz=readDouble(bytes,offset);r.mass=readDouble(bytes,offset);
-  r.gas_density=readDouble(bytes,offset);r.gas_internal_energy=readDouble(bytes,offset);
-  r.star_formation=readDouble(bytes,offset);r.star_birth_mass=readDouble(bytes,offset);r.star_metallicity=readDouble(bytes,offset);
-  r.bh_mass=readDouble(bytes,offset);r.bh_mdot=readDouble(bytes,offset);
-  r.tracer_parent=readLe64(bytes,offset);r.tracer_injection=readLe64(bytes,offset);r.tracer_host=readLe32(bytes,offset);
-  r.tracer_fraction=readDouble(bytes,offset);r.tracer_last_host_mass=readDouble(bytes,offset);r.tracer_exchanged_mass=readDouble(bytes,offset);return r;
-}
 
 void populateSchemasFromManifest(Inspection& inspection) {
   inspection.schemas.clear();
@@ -2474,15 +2474,15 @@ void mutateIcTestRoute(
   const std::string operation = specification.substr(0U, separator);
   auto bucket = std::find_if(
       per_rank.begin(), per_rank.end(), [](const auto& candidate) {
-        return candidate.size() >= kWireRecordBytes;
+        return candidate.size() >= internal::kIcWireRecordBytes;
       });
   if (bucket == per_rank.end()) {
     return;
   }
   if (operation == "drop") {
-    bucket->resize(bucket->size() - kWireRecordBytes);
+    bucket->resize(bucket->size() - internal::kIcWireRecordBytes);
   } else if (operation == "duplicate") {
-    const std::size_t record_begin = bucket->size() - kWireRecordBytes;
+    const std::size_t record_begin = bucket->size() - internal::kIcWireRecordBytes;
     bucket->insert(
         bucket->end(), bucket->begin() + static_cast<std::ptrdiff_t>(record_begin),
         bucket->end());
@@ -2496,11 +2496,39 @@ void mutateIcTestRoute(
 #endif
 }
 
+thread_local std::uint64_t* g_collective_phase_counter = nullptr;
+
+void incrementCollectivePhaseCounter() noexcept {
+  if (g_collective_phase_counter == nullptr) {
+    return;
+  }
+  if (*g_collective_phase_counter <
+      std::numeric_limits<std::uint64_t>::max()) {
+    ++(*g_collective_phase_counter);
+  }
+}
+
+class CollectivePhaseCounterScope {
+ public:
+  explicit CollectivePhaseCounterScope(std::uint64_t& counter) noexcept
+      : m_previous(g_collective_phase_counter) {
+    g_collective_phase_counter = &counter;
+  }
+  CollectivePhaseCounterScope(const CollectivePhaseCounterScope&) = delete;
+  CollectivePhaseCounterScope& operator=(const CollectivePhaseCounterScope&) =
+      delete;
+  ~CollectivePhaseCounterScope() { g_collective_phase_counter = m_previous; }
+
+ private:
+  std::uint64_t* m_previous = nullptr;
+};
+
 template <typename T, typename Function>
 [[nodiscard]] T runCollectivePhase(
     const parallel::MpiContext& mpi_context,
     std::string_view phase,
     Function&& function) {
+  incrementCollectivePhaseCounter();
   std::optional<T> value;
   std::exception_ptr local_failure;
   try {
@@ -2521,6 +2549,7 @@ void runCollectivePhaseVoid(
     const parallel::MpiContext& mpi_context,
     std::string_view phase,
     Function&& function) {
+  incrementCollectivePhaseCounter();
   std::exception_ptr local_failure;
   try {
     std::invoke(std::forward<Function>(function));
@@ -2712,10 +2741,18 @@ struct AlltoallLayout {
       }
     }
   }
+  manifest.missing_field_contracts = source.missing_field_contracts;
+  for (IcMissingFieldContract& contract : manifest.missing_field_contracts) {
+    contract.source_file_index = 0U;
+  }
   manifest.defaulted_fields = source.defaulted_fields;
   manifest.dropped_fields = source.dropped_fields;
   manifest.preserved_auxiliary_fields = source.preserved_auxiliary_fields;
   manifest.warnings = source.warnings;
+  manifest.canonical_source_manifest_verified =
+      source.canonical_manifest_verified;
+  manifest.canonical_source_manifest_sha256 =
+      source.canonical_manifest_sha256;
   validateIcManifest(manifest);
   return manifest;
 }
@@ -2724,24 +2761,24 @@ void appendSchemaSummary(
     std::vector<std::uint8_t>& output,
     const IcSchemaSummary& schema) {
   for (std::uint64_t value : schema.count_by_type) {
-    appendLe64(output, value);
+    internal::appendLe64(output, value);
   }
   for (std::uint64_t value : schema.total_count_by_type) {
-    appendLe64(output, value);
+    internal::appendLe64(output, value);
   }
   for (std::uint32_t value : schema.total_count_high_word) {
-    appendLe32(output, value);
+    internal::appendLe32(output, value);
   }
   for (double value : schema.mass_table) {
-    appendDouble(output, value);
+    internal::appendDouble(output, value);
   }
-  appendLe32(output, schema.num_files_per_snapshot);
-  appendDouble(output, schema.box_size);
-  appendDouble(output, schema.scale_factor);
-  appendDouble(output, schema.redshift);
-  appendDouble(output, schema.omega_matter);
-  appendDouble(output, schema.omega_lambda);
-  appendDouble(output, schema.hubble_param);
+  internal::appendLe32(output, schema.num_files_per_snapshot);
+  internal::appendDouble(output, schema.box_size);
+  internal::appendDouble(output, schema.scale_factor);
+  internal::appendDouble(output, schema.redshift);
+  internal::appendDouble(output, schema.omega_matter);
+  internal::appendDouble(output, schema.omega_lambda);
+  internal::appendDouble(output, schema.hubble_param);
 }
 
 [[nodiscard]] IcSchemaSummary readSchemaSummary(
@@ -2749,38 +2786,38 @@ void appendSchemaSummary(
     std::size_t& offset) {
   IcSchemaSummary schema;
   for (std::uint64_t& value : schema.count_by_type) {
-    value = readLe64(input, offset);
+    value = internal::readLe64(input, offset);
   }
   for (std::uint64_t& value : schema.total_count_by_type) {
-    value = readLe64(input, offset);
+    value = internal::readLe64(input, offset);
   }
   for (std::uint32_t& value : schema.total_count_high_word) {
-    value = readLe32(input, offset);
+    value = internal::readLe32(input, offset);
   }
   for (double& value : schema.mass_table) {
-    value = readDouble(input, offset);
+    value = internal::readDouble(input, offset);
   }
-  schema.num_files_per_snapshot = readLe32(input, offset);
-  schema.box_size = readDouble(input, offset);
-  schema.scale_factor = readDouble(input, offset);
-  schema.redshift = readDouble(input, offset);
-  schema.omega_matter = readDouble(input, offset);
-  schema.omega_lambda = readDouble(input, offset);
-  schema.hubble_param = readDouble(input, offset);
+  schema.num_files_per_snapshot = internal::readLe32(input, offset);
+  schema.box_size = internal::readDouble(input, offset);
+  schema.scale_factor = internal::readDouble(input, offset);
+  schema.redshift = internal::readDouble(input, offset);
+  schema.omega_matter = internal::readDouble(input, offset);
+  schema.omega_lambda = internal::readDouble(input, offset);
+  schema.hubble_param = internal::readDouble(input, offset);
   return schema;
 }
 
 void appendLengthPrefixedString(
     std::vector<std::uint8_t>& output,
     std::string_view value) {
-  appendLe64(output, value.size());
+  internal::appendLe64(output, value.size());
   output.insert(output.end(), value.begin(), value.end());
 }
 
 [[nodiscard]] std::string readLengthPrefixedString(
     std::span<const std::uint8_t> input,
     std::size_t& offset) {
-  const std::uint64_t length = readLe64(input, offset);
+  const std::uint64_t length = internal::readLe64(input, offset);
   if (length > input.size() - offset) {
     throw std::runtime_error("truncated distributed IC metadata string");
   }
@@ -2851,7 +2888,7 @@ void appendLengthPrefixedString(
 [[nodiscard]] std::string encodeDiscoveredPaths(
     const std::vector<std::filesystem::path>& paths) {
   std::vector<std::uint8_t> bytes;
-  appendLe64(bytes, paths.size());
+  internal::appendLe64(bytes, paths.size());
   for (const auto& path : paths) {
     appendLengthPrefixedString(bytes, path.lexically_normal().generic_string());
   }
@@ -2864,7 +2901,7 @@ void appendLengthPrefixedString(
   const auto* begin = reinterpret_cast<const std::uint8_t*>(encoded.data());
   std::span<const std::uint8_t> bytes(begin, encoded.size());
   std::size_t offset = 0U;
-  const std::uint64_t count = readLe64(bytes, offset);
+  const std::uint64_t count = internal::readLe64(bytes, offset);
   if (count > std::numeric_limits<std::size_t>::max()) {
     throw std::overflow_error("discovered IC file count exceeds size_t");
   }
@@ -2884,6 +2921,10 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
       destination.fields.end(),
       std::make_move_iterator(source.fields.begin()),
       std::make_move_iterator(source.fields.end()));
+  destination.missing_field_contracts.insert(
+      destination.missing_field_contracts.end(),
+      std::make_move_iterator(source.missing_field_contracts.begin()),
+      std::make_move_iterator(source.missing_field_contracts.end()));
   destination.defaulted_fields.insert(
       destination.defaulted_fields.end(),
       std::make_move_iterator(source.defaulted_fields.begin()),
@@ -2941,7 +2982,8 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
           throw std::runtime_error("IC source is missing /Header");
         }
         std::uint32_t file_count = 0U;
-        readAttributeU32(header.get(), "NumFilesPerSnapshot", file_count);
+        readAttributeNonnegativeU32(
+            header.get(), "NumFilesPerSnapshot", file_count);
         std::vector<std::filesystem::path> paths;
         if (has_authoritative_manifest &&
             !options.manifest->source_files.empty()) {
@@ -3003,9 +3045,9 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
       runCollectivePhase<std::vector<std::uint8_t>>(
           mpi_context, "IC manifest-fragment serialization", [&]() {
             std::vector<std::uint8_t> bytes;
-            appendLe64(bytes, local.sources.size());
+            internal::appendLe64(bytes, local.sources.size());
             for (const auto& [file_index, source] : local.sources) {
-              appendLe32(bytes, file_index);
+              internal::appendLe32(bytes, file_index);
               appendSchemaSummary(bytes, source.schema);
               const std::string json = serializeIcManifestJson(
                   makeTransferManifest(source, dialect, species_policy));
@@ -3039,9 +3081,9 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
             throw std::runtime_error(
                 "distributed IC metadata is missing a rank fragment");
           }
-          const std::uint64_t entry_count = readLe64(gathered, offset);
+          const std::uint64_t entry_count = internal::readLe64(gathered, offset);
           for (std::uint64_t entry = 0U; entry < entry_count; ++entry) {
-            const std::uint32_t file_index = readLe32(gathered, offset);
+            const std::uint32_t file_index = internal::readLe32(gathered, offset);
             if (file_index >= fragments.size() || fragments[file_index]) {
               throw std::runtime_error(
                   "distributed IC file fragment is duplicated or out of range");
@@ -3088,6 +3130,17 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
              ++file_index) {
           IcSchemaSummary schema = fragments[file_index]->first;
           IcManifest fragment = std::move(fragments[file_index]->second);
+          if (fragment.canonical_source_manifest_verified) {
+            if (manifest.canonical_source_manifest_verified &&
+                manifest.canonical_source_manifest_sha256 !=
+                    fragment.canonical_source_manifest_sha256) {
+              throw std::runtime_error(
+                  "distributed canonical IC fragments disagree on manifest binding");
+            }
+            manifest.canonical_source_manifest_verified = true;
+            manifest.canonical_source_manifest_sha256 =
+                fragment.canonical_source_manifest_sha256;
+          }
           if (schema.num_files_per_snapshot != paths.size() ||
               schema.total_count_by_type != baseline.total_count_by_type ||
               schema.total_count_high_word != baseline.total_count_high_word ||
@@ -3123,6 +3176,11 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
           for (IcFieldManifest& field : fragment.fields) {
             field.source_file_index = static_cast<std::uint32_t>(file_index);
           }
+          for (IcMissingFieldContract& contract :
+               fragment.missing_field_contracts) {
+            contract.source_file_index =
+                static_cast<std::uint32_t>(file_index);
+          }
           appendManifestLists(manifest, std::move(fragment));
         }
         if (summed != manifest.num_part_total) {
@@ -3152,6 +3210,9 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
               supplied.num_part_this_file != manifest.num_part_this_file ||
               supplied.num_part_total != manifest.num_part_total ||
               supplied.species_policy != manifest.species_policy ||
+              !missingFieldContractsEqual(
+                  supplied.missing_field_contracts,
+                  manifest.missing_field_contracts) ||
               supplied.fields.size() != manifest.fields.size()) {
             throw std::runtime_error(
                 "supplied distributed IC manifest does not match inspected "
@@ -3275,9 +3336,9 @@ void validateChunkCoverage(
                   (id ^ (id >> 33U) ^ (id << 11U)) %
                   static_cast<std::uint64_t>(mpi_context.worldSize()));
               auto& bucket = prepared[static_cast<std::size_t>(validator)];
-              appendLe64(bucket, id);
-              appendLe32(bucket, source_count);
-              appendLe32(bucket, final_count);
+              internal::appendLe64(bucket, id);
+              internal::appendLe32(bucket, source_count);
+              internal::appendLe32(bucket, final_count);
             };
             for (const ParticleRecord& record : source_records) {
               append_entry(record.id, 1U, 0U);
@@ -3313,9 +3374,9 @@ void validateChunkCoverage(
             std::size_t offset = 0U;
             while (offset < received.size()) {
               decoded.push_back(BalanceEntry{
-                  .id = readLe64(received, offset),
-                  .source_count = readLe32(received, offset),
-                  .final_count = readLe32(received, offset)});
+                  .id = internal::readLe64(received, offset),
+                  .source_count = internal::readLe32(received, offset),
+                  .final_count = internal::readLe32(received, offset)});
             }
             return decoded;
           });
@@ -3540,7 +3601,7 @@ void validateChunkCoverage(
                 const int validator = static_cast<int>(
                     (id ^ (id >> 33U) ^ (id << 11U)) %
                     static_cast<std::uint64_t>(mpi_context.worldSize()));
-                appendLe64(
+                internal::appendLe64(
                     prepared[static_cast<std::size_t>(validator)], id);
               }
               return prepared;
@@ -3565,7 +3626,7 @@ void validateChunkCoverage(
           round_ids.reserve(received.size() / 8U);
           std::size_t offset = 0U;
           while (offset < received.size()) {
-            round_ids.push_back(readLe64(received, offset));
+            round_ids.push_back(internal::readLe64(received, offset));
           }
           round_vector_capacity =
               static_cast<std::uint64_t>(round_ids.capacity()) *
@@ -3751,6 +3812,8 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
   if (!mpi_context.isEnabled() || mpi_context.worldSize() == 1) {
     return readGadgetArepoHdf5Ic(ic_path, config, options);
   }
+  std::uint64_t collective_phase_count = 0U;
+  CollectivePhaseCounterScope collective_counter_scope(collective_phase_count);
   runCollectivePhaseVoid(
       mpi_context, "IC distributed configuration validation", [&]() {
         if (options.chunk_particle_count == 0U) {
@@ -3776,7 +3839,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
           mpi_context, "IC local manifest serialization", [&]() {
             return serializeIcManifestJson(inspection.manifest);
           });
-  const std::string local_manifest_digest = sha256Hex(
+  const std::string local_manifest_digest = icSha256Hex(
       std::string_view(local_manifest_json));
   std::string root_manifest_digest =
       mpi_context.isRoot() ? local_manifest_digest : std::string{};
@@ -3819,10 +3882,15 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
         value.substr(0, equals));
   }
   result.report.unsupported_fields = inspection.manifest.dropped_fields;
+  result.report.manifest_verified =
+      inspection.manifest.canonical_source_manifest_verified;
+  result.report.verified_manifest_sha256 =
+      inspection.manifest.canonical_source_manifest_sha256;
 
   struct RoutingConfiguration {
     double box_size = 0.0;
     std::size_t chunk_particle_count = 0U;
+    std::size_t batch_particle_count = 0U;
   };
   const RoutingConfiguration routing =
       runCollectivePhase<RoutingConfiguration>(
@@ -3833,41 +3901,74 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
             values.chunk_particle_count = std::min(
                 options.chunk_particle_count,
                 config.mode.ic_staging_particle_count);
-            if (values.chunk_particle_count == 0U) {
+            values.batch_particle_count =
+                config.mode.ic_staging_particle_count;
+            if (values.chunk_particle_count == 0U ||
+                values.batch_particle_count == 0U) {
               throw std::invalid_argument(
                   "distributed IC staging particle count must be positive");
             }
             return values;
           });
 
-  std::uint64_t global_chunk_index = 0U;
+  std::uint64_t global_batch_index = 0U;
   std::set<std::size_t> assigned_files;
   std::array<double, 5> local_source_mass{};
+  std::unordered_map<std::size_t, IcReaderSession> reader_sessions;
   for (std::size_t file_index = 0;
        file_index < inspection.manifest.source_files.size(); ++file_index) {
     for (std::size_t type_index = 0; type_index < kParticleTypeCount;
          ++type_index) {
       const std::size_t total = static_cast<std::size_t>(
           inspection.manifest.num_part_this_file[file_index][type_index]);
-      for (std::size_t start = 0; start < total;
-           start += routing.chunk_particle_count, ++global_chunk_index) {
-        const std::size_t count = std::min(
-            routing.chunk_particle_count, total - start);
+      for (std::size_t batch_start = 0U; batch_start < total;
+           batch_start += routing.batch_particle_count,
+           ++global_batch_index) {
+        const std::size_t batch_count = std::min(
+            routing.batch_particle_count, total - batch_start);
         const int reader_rank = static_cast<int>(
-            global_chunk_index %
+            global_batch_index %
             static_cast<std::uint64_t>(mpi_context.worldSize()));
 
         std::vector<ParticleRecord> records =
             runCollectivePhase<std::vector<ParticleRecord>>(
-                mpi_context, "IC chunk read and scientific conversion", [&]() {
+                mpi_context, "IC batch read and scientific conversion", [&]() {
                   if (mpi_context.worldRank() != reader_rank) {
                     return std::vector<ParticleRecord>{};
                   }
-                  std::vector<ParticleRecord> local_records = readRecordChunk(
-                      inspection, file_index, type_index, start, count, config,
-                      options, result.report.counters);
+                  auto session = reader_sessions.find(file_index);
+                  if (session == reader_sessions.end()) {
+                    session = reader_sessions.try_emplace(
+                        file_index,
+                        inspection.manifest.source_files[file_index],
+                        inspection.manifest.source_file_sizes_bytes[file_index],
+                        inspection.manifest.source_sha256[file_index],
+                        result.report.counters).first;
+                  }
+                  std::vector<ParticleRecord> local_records;
+                  local_records.reserve(batch_count);
+                  for (std::size_t chunk_start = batch_start;
+                       chunk_start < batch_start + batch_count;
+                       chunk_start += routing.chunk_particle_count) {
+                    const std::size_t chunk_count = std::min(
+                        routing.chunk_particle_count,
+                        batch_start + batch_count - chunk_start);
+                    std::vector<ParticleRecord> chunk = readRecordChunk(
+                        session->second, inspection, file_index, type_index,
+                        chunk_start, chunk_count, config, options,
+                        result.report.counters);
+                    local_records.insert(
+                        local_records.end(),
+                        std::make_move_iterator(chunk.begin()),
+                        std::make_move_iterator(chunk.end()));
+                    checkedCounterAdd(
+                        result.report.counters.chunks_assigned, 1U,
+                        "chunks_assigned");
+                  }
                   assigned_files.insert(file_index);
-                  ++result.report.counters.chunks_assigned;
+                  checkedCounterAdd(
+                      result.report.counters.routing_batch_count, 1U,
+                      "routing_batch_count");
                   for (const ParticleRecord& record : local_records) {
                     if (record.species >= local_source_mass.size()) {
                       throw std::runtime_error(
@@ -3878,11 +3979,13 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                   return local_records;
                 });
         validateChunkCoverage(
-            mpi_context, file_index, type_index, start, count, reader_rank);
+            mpi_context, file_index, type_index, batch_start, batch_count,
+            reader_rank);
 
         std::vector<std::vector<std::uint8_t>> per_rank =
             runCollectivePhase<std::vector<std::vector<std::uint8_t>>>(
-                mpi_context, "IC owner calculation and serialization", [&]() {
+                mpi_context, "IC batched owner calculation and serialization",
+                [&]() {
                   injectIcTestFault(mpi_context, "owner_serialization");
                   std::vector<std::vector<std::uint8_t>> buckets(
                       static_cast<std::size_t>(mpi_context.worldSize()));
@@ -3891,7 +3994,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                       const int owner = ownerForX(
                           record.x, routing.box_size,
                           mpi_context.worldSize());
-                      serializeRecord(
+                      internal::serializeIcRecord(
                           record, buckets[static_cast<std::size_t>(owner)]);
                     }
                     checkedCounterAdd(
@@ -3934,17 +4037,17 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
             runCollectivePhase<std::vector<ParticleRecord>>(
                 mpi_context, "IC wire validation and deserialization", [&]() {
                   injectIcTestFault(mpi_context, "payload_validation");
-                  if (inbound_bytes.size() % kWireRecordBytes != 0U) {
+                  if (inbound_bytes.size() % internal::kIcWireRecordBytes != 0U) {
                     throw std::runtime_error(
                         "distributed IC wire payload has invalid length");
                   }
                   std::vector<ParticleRecord> decoded;
-                  decoded.reserve(inbound_bytes.size() / kWireRecordBytes);
+                  decoded.reserve(inbound_bytes.size() / internal::kIcWireRecordBytes);
                   std::size_t offset = 0U;
                   while (offset < inbound_bytes.size()) {
                     injectIcTestFault(mpi_context, "deserialization");
                     ParticleRecord record =
-                        deserializeRecord(inbound_bytes, offset);
+                        internal::deserializeIcRecord(inbound_bytes, offset);
                     if (record.species >= 5U) {
                       throw std::runtime_error(
                           "distributed IC wire record has invalid species");
@@ -4025,6 +4128,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
       result.report.counters.metadata_bytes_read +
       result.report.counters.hash_bytes_read +
       result.report.counters.payload_bytes_read;
+  result.report.counters.collective_phase_count = collective_phase_count;
   return result;
 #endif
 }

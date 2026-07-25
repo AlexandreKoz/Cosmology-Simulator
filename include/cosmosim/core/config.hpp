@@ -92,6 +92,14 @@ enum class InitialConditionSpeciesPolicy {
   kTracer,
 };
 
+enum class InitialConditionMissingFieldPolicy {
+  kReject,
+  kReconstruct,
+  kUseConfigValue,
+  kDialectDefinedDefault,
+  kPreserveUnavailable,
+};
+
 enum class FeedbackMode {
   kThermal,
   kKinetic,
@@ -349,6 +357,24 @@ struct ModeConfig {
       InitialConditionSpeciesPolicy::kReject;
   InitialConditionSpeciesPolicy ic_part_type3_policy =
       InitialConditionSpeciesPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_gas_internal_energy_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_gas_density_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_star_formation_time_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_star_initial_mass_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_star_metallicity_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  InitialConditionMissingFieldPolicy ic_bh_mdot_policy =
+      InitialConditionMissingFieldPolicy::kReject;
+  double ic_gas_internal_energy_value_code = 0.0;
+  double ic_gas_density_value_code = 0.0;
+  double ic_star_formation_time_value = 0.0;
+  double ic_star_initial_mass_value_code = 0.0;
+  double ic_star_metallicity_value = 0.0;
+  double ic_bh_mdot_value_code = 0.0;
   bool zoom_high_res_region = false;
   std::string zoom_region_file;
   ZoomLongRangeStrategy zoom_long_range_strategy =
@@ -480,6 +506,8 @@ void writeNormalizedConfigSnapshot(
     InitialConditionVelocityConvention convention);
 [[nodiscard]] std::string initialConditionSpeciesPolicyToString(
     InitialConditionSpeciesPolicy policy);
+[[nodiscard]] std::string initialConditionMissingFieldPolicyToString(
+    InitialConditionMissingFieldPolicy policy);
 [[nodiscard]] std::string modeHydroBoundaryToString(ModeHydroBoundary boundary);
 [[nodiscard]] std::string modeGravityBoundaryToString(ModeGravityBoundary boundary);
 [[nodiscard]] std::string feedbackModeToString(FeedbackMode mode);

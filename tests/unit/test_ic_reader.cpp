@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -178,6 +179,14 @@ class Hdf5Handle {
   Hdf5Handle(const Hdf5Handle&) = delete;
   Hdf5Handle& operator=(const Hdf5Handle&) = delete;
   Hdf5Handle(Hdf5Handle&& other) noexcept : handle_(other.handle_) { other.handle_ = -1; }
+  Hdf5Handle& operator=(Hdf5Handle&& other) noexcept {
+    if (this != &other) {
+      this->~Hdf5Handle();
+      handle_ = other.handle_;
+      other.handle_ = -1;
+    }
+    return *this;
+  }
   ~Hdf5Handle() {
     if (handle_ >= 0) {
       const H5I_type_t type = H5Iget_type(handle_);
@@ -210,6 +219,18 @@ void writeHeaderAttributeU32x6(hid_t header_group, const char* name, const std::
   assert(H5Awrite(attr.get(), H5T_NATIVE_UINT32, values.data()) >= 0);
 }
 
+void writeHeaderAttributeI32x6(
+    hid_t header_group, const char* name,
+    const std::array<std::int32_t, 6>& values) {
+  hsize_t dims[1] = {6};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle attr(H5Acreate2(
+      header_group, name, H5T_STD_I32LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(attr.get() >= 0);
+  assert(H5Awrite(attr.get(), H5T_NATIVE_INT32, values.data()) >= 0);
+}
+
 void writeHeaderAttributeF64x6(hid_t header_group, const char* name, const std::array<double, 6>& values) {
   hsize_t dims[1] = {6};
   Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
@@ -232,6 +253,16 @@ void writeHeaderAttributeU32(hid_t header_group, const char* name, std::uint32_t
   assert(H5Awrite(attr.get(), H5T_NATIVE_UINT32, &value) >= 0);
 }
 
+void writeHeaderAttributeI32(
+    hid_t header_group, const char* name, std::int32_t value) {
+  Hdf5Handle space(H5Screate(H5S_SCALAR));
+  Hdf5Handle attr(H5Acreate2(
+      header_group, name, H5T_STD_I32LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(attr.get() >= 0);
+  assert(H5Awrite(attr.get(), H5T_NATIVE_INT32, &value) >= 0);
+}
+
 void writeHeaderAttributeString(
     hid_t header_group, const char* name, const std::string& value) {
   Hdf5Handle space(H5Screate(H5S_SCALAR));
@@ -245,11 +276,13 @@ void writeHeaderAttributeString(
   assert(H5Awrite(attr.get(), type.get(), value.c_str()) >= 0);
 }
 
-void writeCanonicalHeaderAttributes(hid_t header_group, bool valid_schema) {
+void writeCanonicalHeaderAttributes(
+    hid_t header_group, bool valid_schema, std::string_view digest,
+    std::string_view sidecar_name, std::string_view marker_name) {
   writeHeaderAttributeString(
       header_group, "ChuiIcSchemaName",
       valid_schema ? "chui_canonical_v1" : "unknown_canonical_schema");
-  writeHeaderAttributeU32(header_group, "ChuiIcSchemaVersion", 1U);
+  writeHeaderAttributeU32(header_group, "ChuiIcSchemaVersion", 2U);
   writeHeaderAttributeF64(
       header_group, "ChuiLengthUnitToSI", 3.0856775814913673e19);
   writeHeaderAttributeF64(
@@ -260,7 +293,11 @@ void writeCanonicalHeaderAttributes(hid_t header_group, bool valid_schema) {
   writeHeaderAttributeString(
       header_group, "ChuiVelocityConvention", "physical_peculiar");
   writeHeaderAttributeString(
-      header_group, "ConversionManifestSha256", std::string(64U, 'a'));
+      header_group, "ConversionManifestSha256", std::string(digest));
+  writeHeaderAttributeString(
+      header_group, "ConversionManifestSidecar", std::string(sidecar_name));
+  writeHeaderAttributeString(
+      header_group, "ConversionBundleMarker", std::string(marker_name));
 }
 
 void writeRequiredHeaderWithTotals(
@@ -269,8 +306,19 @@ void writeRequiredHeaderWithTotals(
     const std::array<std::uint32_t, 6>& totals,
     std::uint32_t num_files,
     double scale_factor = 1.0,
-    double box_size = 50000.0) {
-  writeHeaderAttributeU32x6(header_group, "NumPart_ThisFile", counts);
+    double box_size = 50000.0,
+    bool signed_arepo_counts = true) {
+  if (signed_arepo_counts) {
+    std::array<std::int32_t, 6> signed_counts{};
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+      assert(counts[i] <= static_cast<std::uint32_t>(INT32_MAX));
+      signed_counts[i] = static_cast<std::int32_t>(counts[i]);
+    }
+    writeHeaderAttributeI32x6(
+        header_group, "NumPart_ThisFile", signed_counts);
+  } else {
+    writeHeaderAttributeU32x6(header_group, "NumPart_ThisFile", counts);
+  }
   writeHeaderAttributeU32x6(header_group, "NumPart_Total", totals);
   writeHeaderAttributeU32x6(
       header_group, "NumPart_Total_HighWord", {0, 0, 0, 0, 0, 0});
@@ -283,7 +331,14 @@ void writeRequiredHeaderWithTotals(
   writeHeaderAttributeF64(header_group, "Omega0", 0.315);
   writeHeaderAttributeF64(header_group, "OmegaLambda", 0.685);
   writeHeaderAttributeF64(header_group, "HubbleParam", 0.674);
-  writeHeaderAttributeU32(header_group, "NumFilesPerSnapshot", num_files);
+  if (signed_arepo_counts) {
+    assert(num_files <= static_cast<std::uint32_t>(INT32_MAX));
+    writeHeaderAttributeI32(
+        header_group, "NumFilesPerSnapshot",
+        static_cast<std::int32_t>(num_files));
+  } else {
+    writeHeaderAttributeU32(header_group, "NumFilesPerSnapshot", num_files);
+  }
 }
 
 void writeRequiredHeader(
@@ -308,6 +363,28 @@ void writeDataset1dIds(hid_t group, const char* name, const std::vector<std::uin
   Hdf5Handle dataset(H5Dcreate2(group, name, H5T_STD_U64LE, space.get(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   assert(dataset.get() >= 0);
   assert(H5Dwrite(dataset.get(), H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) >= 0);
+}
+
+void writeDatasetBytes(
+    hid_t group, const char* name, const std::string& values) {
+  hsize_t dims[1] = {values.size()};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle dataset(H5Dcreate2(
+      group, name, H5T_STD_U8LE, space.get(), H5P_DEFAULT, H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(dataset.get() >= 0);
+  assert(H5Dwrite(
+             dataset.get(), H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL,
+             H5P_DEFAULT, values.data()) >= 0);
+}
+
+void writeTextFile(
+    const std::filesystem::path& path, const std::string& value) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  assert(output);
+  output.write(value.data(), static_cast<std::streamsize>(value.size()));
+  output.flush();
+  assert(output);
 }
 
 void writeDataset2dVec3(hid_t group, const char* name, const std::vector<double>& values) {
@@ -348,15 +425,22 @@ void writeDataset2dVec3F32(
 
 std::filesystem::path writeMinimalIcFile(
     bool include_density,
-    bool duplicate_ids = false) {
+    bool duplicate_ids = false,
+    bool signed_arepo_counts = true) {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() /
       (duplicate_ids
            ? "cosmosim_ic_reader_duplicate_ids.hdf5"
-           : (include_density ? "cosmosim_ic_reader_gas_present.hdf5" : "cosmosim_ic_reader_gas_missing_density.hdf5"));
+           : (include_density
+                  ? (signed_arepo_counts
+                         ? "cosmosim_ic_reader_gas_present_signed.hdf5"
+                         : "cosmosim_ic_reader_gas_present_unsigned.hdf5")
+                  : "cosmosim_ic_reader_gas_missing_density.hdf5"));
   Hdf5Handle file(H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
-  writeRequiredHeader(header.get(), {2, 0, 0, 0, 0, 0});
+  writeRequiredHeaderWithTotals(
+      header.get(), {2, 0, 0, 0, 0, 0}, {2, 0, 0, 0, 0, 0}, 1U,
+      1.0, 50000.0, signed_arepo_counts);
 
   Hdf5Handle gas(H5Gcreate2(file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeDataset2dVec3(gas.get(), "Coordinates", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0});
@@ -412,23 +496,58 @@ std::filesystem::path writeDimensionalGasBlackHoleIcFile() {
   return path;
 }
 
+std::filesystem::path canonicalSidecarPath(
+    const std::filesystem::path& canonical_path) {
+  return canonical_path.string() + ".manifest.json";
+}
+
+std::filesystem::path canonicalMarkerPath(
+    const std::filesystem::path& canonical_path) {
+  return canonical_path.string() + ".complete";
+}
+
+void removeCanonicalBundle(const std::filesystem::path& canonical_path) {
+  std::filesystem::remove(canonical_path);
+  std::filesystem::remove(canonicalSidecarPath(canonical_path));
+  std::filesystem::remove(canonicalMarkerPath(canonical_path));
+}
+
 std::filesystem::path writeCanonicalDmIcFile(bool valid_schema) {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() /
       (valid_schema ? "cosmosim_ic_reader_canonical.hdf5"
                     : "cosmosim_ic_reader_bad_canonical.hdf5");
+  removeCanonicalBundle(path);
+  const std::string manifest_json =
+      cosmosim::io::serializeIcManifestJson(makeValidManifest());
+  const std::string digest = cosmosim::io::icSha256Hex(manifest_json);
+  const auto sidecar_path = canonicalSidecarPath(path);
+  const auto marker_path = canonicalMarkerPath(path);
+
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(
       file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeRequiredHeader(header.get(), {0, 1, 0, 0, 0, 0});
-  writeCanonicalHeaderAttributes(header.get(), valid_schema);
+  writeCanonicalHeaderAttributes(
+      header.get(), valid_schema, digest, sidecar_path.filename().string(),
+      marker_path.filename().string());
+  Hdf5Handle provenance(H5Gcreate2(
+      file.get(), "/Provenance", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDatasetBytes(provenance.get(), "ConversionManifestJson", manifest_json);
   Hdf5Handle dm(H5Gcreate2(
       file.get(), "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeDataset2dVec3(dm.get(), "Coordinates", {10.0, 20.0, 30.0});
   writeDataset2dVec3(dm.get(), "Velocities", {2.0, 3.0, 4.0});
   writeDataset1d(dm.get(), "Masses", {5.0});
   writeDataset1dIds(dm.get(), "ParticleIDs", {301});
+  file = Hdf5Handle{};
+  writeTextFile(sidecar_path, manifest_json);
+  writeTextFile(
+      marker_path,
+      "chui_ic_bundle_v1\nsha256=" + digest +
+          "\ncanonical=" + path.filename().string() +
+          "\nmanifest=" + sidecar_path.filename().string() + "\n");
   return path;
 }
 
@@ -513,7 +632,8 @@ std::vector<std::filesystem::path> writeMultifileDmSet(
         file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
     writeRequiredHeaderWithTotals(
         header.get(), {0, 1, 0, 0, 0, 0}, {0, 2, 0, 0, 0, 0}, 2U,
-        1.0, inconsistent_box && file_index == 1U ? 49000.0 : 50000.0);
+        1.0, inconsistent_box && file_index == 1U ? 49000.0 : 50000.0,
+        file_index == 0U);
     Hdf5Handle dm(H5Gcreate2(
         file.get(), "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
     if (inconsistent_schema && file_index == 1U) {
@@ -562,6 +682,22 @@ cosmosim::core::SimulationConfig makeExplicitBridgeConfig() {
   return config;
 }
 
+void removeDataset(
+    const std::filesystem::path& path,
+    const char* group_name,
+    const char* dataset_name) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle group(H5Gopen2(file.get(), group_name, H5P_DEFAULT));
+  assert(file.get() >= 0 && group.get() >= 0);
+  assert(H5Ldelete(group.get(), dataset_name, H5P_DEFAULT) >= 0);
+}
+
+void expectIcReadFailure(
+    const std::filesystem::path& path,
+    const cosmosim::core::SimulationConfig& config,
+    std::string_view expected_text);
+
 void testCanonicalHeaderContract() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.mode.ic_convention =
@@ -576,7 +712,9 @@ void testCanonicalHeaderContract() {
   assert(result.state.particles.size() == 1U);
   assert(result.state.particles.position_x_comoving[0] == 10.0);
   assert(std::abs(result.state.particles.velocity_x_peculiar[0] - 2.0) < 1.0e-12);
-  std::filesystem::remove(canonical_path);
+  assert(result.report.manifest_verified);
+  assert(result.report.verified_manifest_sha256.size() == 64U);
+  removeCanonicalBundle(canonical_path);
 
   const auto invalid_path = writeCanonicalDmIcFile(false);
   bool invalid_rejected = false;
@@ -588,7 +726,20 @@ void testCanonicalHeaderContract() {
         std::string::npos;
   }
   assert(invalid_rejected);
-  std::filesystem::remove(invalid_path);
+  removeCanonicalBundle(invalid_path);
+
+  const auto tampered_path = writeCanonicalDmIcFile(true);
+  writeTextFile(canonicalSidecarPath(tampered_path), "{}\n");
+  bool tamper_rejected = false;
+  try {
+    (void)cosmosim::io::readGadgetArepoHdf5Ic(tampered_path, config);
+  } catch (const std::runtime_error& error) {
+    tamper_rejected =
+        std::string(error.what()).find("sidecar manifest SHA-256") !=
+        std::string::npos;
+  }
+  assert(tamper_rejected);
+  removeCanonicalBundle(tampered_path);
 }
 
 void testHdf5StarSidecarAndMultifileSchema() {
@@ -603,6 +754,44 @@ void testHdf5StarSidecarAndMultifileSchema() {
   assert(star_result.state.star_particles.metallicity_mass_fraction[0] == 0.02);
   std::filesystem::remove(star_path);
 
+  auto missing_star_path = writeMinimalStarIcFile();
+  removeDataset(
+      missing_star_path, "/PartType4", "GFM_StellarFormationTime");
+  expectIcReadFailure(
+      missing_star_path, config,
+      "/PartType4/StellarFormationTime is missing and its normalized missing-field policy is reject");
+  missing_star_path = writeMinimalStarIcFile();
+  removeDataset(
+      missing_star_path, "/PartType4", "GFM_StellarFormationTime");
+  config.mode.ic_star_formation_time_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault;
+  const auto defaulted_star =
+      cosmosim::io::readGadgetArepoHdf5Ic(missing_star_path, config);
+  assert(defaulted_star.state.star_particles.formation_scale_factor[0] == 1.0);
+  assert(!defaulted_star.report.defaulted_fields.empty());
+  std::filesystem::remove(missing_star_path);
+  config.mode.ic_star_formation_time_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kReject;
+
+  const auto unsigned_path = writeMinimalIcFile(true, false, false);
+  const auto unsigned_result = cosmosim::io::readGadgetArepoHdf5Ic(
+      unsigned_path, config,
+      cosmosim::io::IcImportOptions{.chunk_particle_count = 1U});
+  assert(unsigned_result.state.particles.size() == 2U);
+  assert(unsigned_result.report.counters.chunks_assigned == 2U);
+  assert(unsigned_result.report.counters.source_file_open_count == 1U);
+  assert(unsigned_result.report.counters.source_dataset_open_count > 0U);
+  assert(unsigned_result.report.counters.source_dataset_open_count < 14U);
+  const auto unsigned_header = std::find_if(
+      unsigned_result.report.manifest->fields.begin(),
+      unsigned_result.report.manifest->fields.end(),
+      [](const cosmosim::io::IcFieldManifest& field) {
+        return field.dataset_path == "/Header/NumPart_ThisFile";
+      });
+  assert(unsigned_header != unsigned_result.report.manifest->fields.end());
+  assert(!unsigned_header->is_signed && unsigned_header->byte_width == 4U);
+  std::filesystem::remove(unsigned_path);
+
   const auto paths = writeMultifileDmSet("cosmosim_ic_reader_multifile");
   const auto result = cosmosim::io::readGadgetArepoHdf5Ic(
       paths.front(), config,
@@ -611,6 +800,15 @@ void testHdf5StarSidecarAndMultifileSchema() {
   assert(result.report.manifest->num_files_per_snapshot == 2U);
   assert(result.report.counters.files_assigned == 2U);
   assert(result.report.counters.chunks_assigned == 2U);
+  bool observed_signed_count = false;
+  bool observed_unsigned_count = false;
+  for (const auto& field : result.report.manifest->fields) {
+    if (field.dataset_path == "/Header/NumPart_ThisFile") {
+      observed_signed_count = observed_signed_count || field.is_signed;
+      observed_unsigned_count = observed_unsigned_count || !field.is_signed;
+    }
+  }
+  assert(observed_signed_count && observed_unsigned_count);
   bool observed_float32 = false;
   bool observed_scalar_attribute = false;
   for (const auto& field : result.report.manifest->fields) {
@@ -739,31 +937,42 @@ void testHdf5GasThermoMapping() {
   std::filesystem::remove(path);
 }
 
+void expectIcReadFailure(
+    const std::filesystem::path& path,
+    const cosmosim::core::SimulationConfig& config,
+    std::string_view expected_text);
+
 void testHdf5GasOptionalDensityMissingBehavior() {
   auto config = makeExplicitBridgeConfig();
   config.output.run_name = "ic_reader_hdf5_optional";
-  const std::filesystem::path path = writeMinimalIcFile(false);
+  auto path = writeMinimalIcFile(true);
+  removeDataset(path, "/PartType0", "InternalEnergy");
+  expectIcReadFailure(
+      path, config,
+      "/PartType0/InternalEnergy is missing and its normalized missing-field policy is reject");
 
-  const cosmosim::io::IcReadResult result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
-  assert(result.state.gas_cells.density_code[0] == 0.0);
-  assert(result.state.gas_cells.density_code[1] == 0.0);
+  path = writeMinimalIcFile(false);
+  expectIcReadFailure(
+      path, config,
+      "/PartType0/Density is missing and its normalized missing-field policy is reject");
 
-  bool recorded_missing_density = false;
-  bool recorded_defaulted_density = false;
-  for (const std::string& value : result.report.missing_optional_fields) {
-    if (value == "/PartType0/Density") {
-      recorded_missing_density = true;
-      break;
-    }
-  }
-  for (const std::string& value : result.report.defaulted_fields) {
-    if (value == "/PartType0/Density=zero") {
-      recorded_defaulted_density = true;
-      break;
-    }
-  }
-  assert(recorded_missing_density);
-  assert(recorded_defaulted_density);
+  path = writeMinimalIcFile(false);
+  config.mode.ic_gas_density_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kUseConfigValue;
+  config.mode.ic_gas_density_value_code = 3.25;
+  const auto result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+  assert(result.state.gas_cells.density_code[0] == 3.25);
+  assert(result.state.gas_cells.density_code[1] == 3.25);
+  assert(result.report.manifest.has_value());
+  const auto contract = std::find_if(
+      result.report.manifest->missing_field_contracts.begin(),
+      result.report.manifest->missing_field_contracts.end(),
+      [](const cosmosim::io::IcMissingFieldContract& value) {
+        return value.field_path == "/PartType0/Density";
+      });
+  assert(contract != result.report.manifest->missing_field_contracts.end());
+  assert(contract->policy == cosmosim::io::IcMissingFieldPolicy::kUseConfigValue);
+  assert(contract->configured_value_code == 3.25);
   std::filesystem::remove(path);
 }
 
@@ -795,12 +1004,11 @@ void testSharedDimensionalConversionContract() {
       direct.state.particles.velocity_x_peculiar[0] -
       1.0 / std::sqrt(0.5)) < 1.0e-12);
   assert(std::abs(direct.state.particles.mass_code[0] - 2.0) < 1.0e-12);
-  assert(std::abs(direct.state.gas_cells.internal_energy_code[0] - 8.0) < 1.0e-12);
+  assert(std::abs(direct.state.gas_cells.internal_energy_code[0] - 4.0) < 1.0e-12);
   assert(std::abs(direct.state.gas_cells.density_code[0] - 0.0625) < 1.0e-12);
   assert(std::abs(direct.state.black_holes.subgrid_mass_code[0] - 6.0) < 1.0e-12);
   assert(std::abs(
-      direct.state.black_holes.accretion_rate_code[0] -
-      0.25 * std::sqrt(0.5)) < 1.0e-12);
+      direct.state.black_holes.accretion_rate_code[0] - 0.25) < 1.0e-12);
 
   const cosmosim::io::IcManifest manifest = *direct.report.manifest;
   const auto manifest_driven = cosmosim::io::readGadgetArepoHdf5Ic(
@@ -817,6 +1025,20 @@ void testSharedDimensionalConversionContract() {
   assert(manifest_driven.state.gas_cells.density_code ==
          direct.state.gas_cells.density_code);
   assert(manifest_driven.state.black_holes.accretion_rate_code ==
+         direct.state.black_holes.accretion_rate_code);
+
+  auto physical_velocity_config = config;
+  physical_velocity_config.mode.ic_bridge_velocity_convention =
+      cosmosim::core::InitialConditionVelocityConvention::kPhysicalPeculiar;
+  const auto physical_velocity = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, physical_velocity_config, cosmosim::io::IcImportOptions{
+          .validate_runtime_cosmology = false});
+  assert(std::abs(
+      physical_velocity.state.particles.velocity_x_peculiar[0] - 1.0) <
+      1.0e-12);
+  assert(physical_velocity.state.gas_cells.internal_energy_code ==
+         direct.state.gas_cells.internal_energy_code);
+  assert(physical_velocity.state.black_holes.accretion_rate_code ==
          direct.state.black_holes.accretion_rate_code);
   std::filesystem::remove(path);
 }
@@ -835,6 +1057,23 @@ void testHdf5BlackHoleAndValidationFailures() {
   assert(black_hole_result.state.black_holes.subgrid_mass_code[0] == 7.0);
   assert(black_hole_result.state.black_holes.accretion_rate_code[0] > 0.0);
   std::filesystem::remove(black_hole_path);
+
+  auto missing_mdot_path = writeMinimalBlackHoleIcFile();
+  removeDataset(missing_mdot_path, "/PartType5", "BH_Mdot");
+  expectIcReadFailure(
+      missing_mdot_path, config,
+      "/PartType5/BH_Mdot is missing and its normalized missing-field policy is reject");
+  missing_mdot_path = writeMinimalBlackHoleIcFile();
+  removeDataset(missing_mdot_path, "/PartType5", "BH_Mdot");
+  config.mode.ic_bh_mdot_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault;
+  const auto defaulted_bh =
+      cosmosim::io::readGadgetArepoHdf5Ic(missing_mdot_path, config);
+  assert(defaulted_bh.state.black_holes.accretion_rate_code[0] == 0.0);
+  assert(!defaulted_bh.report.defaulted_fields.empty());
+  std::filesystem::remove(missing_mdot_path);
+  config.mode.ic_bh_mdot_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kReject;
 
   const std::filesystem::path family2_path = writeMinimalFamily2IcFile();
   bool implicit_family2_rejected = false;
@@ -931,6 +1170,55 @@ void expectIcReadFailure(
   }
   assert(rejected);
   std::filesystem::remove(path);
+}
+
+void replaceNumFilesWithSignedValue(
+    const std::filesystem::path& path, std::int64_t value) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(H5Adelete(header.get(), "NumFilesPerSnapshot") >= 0);
+  Hdf5Handle space(H5Screate(H5S_SCALAR));
+  Hdf5Handle attribute(H5Acreate2(
+      header.get(), "NumFilesPerSnapshot", H5T_STD_I64LE, space.get(),
+      H5P_DEFAULT, H5P_DEFAULT));
+  assert(H5Awrite(attribute.get(), H5T_NATIVE_INT64, &value) >= 0);
+}
+
+void replaceNumFilesWithUnsignedValue(
+    const std::filesystem::path& path, std::uint64_t value) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(H5Adelete(header.get(), "NumFilesPerSnapshot") >= 0);
+  Hdf5Handle space(H5Screate(H5S_SCALAR));
+  Hdf5Handle attribute(H5Acreate2(
+      header.get(), "NumFilesPerSnapshot", H5T_STD_U64LE, space.get(),
+      H5P_DEFAULT, H5P_DEFAULT));
+  assert(H5Awrite(attribute.get(), H5T_NATIVE_UINT64, &value) >= 0);
+}
+
+void replaceNumFilesWithFloatingValue(
+    const std::filesystem::path& path, double value) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(H5Adelete(header.get(), "NumFilesPerSnapshot") >= 0);
+  Hdf5Handle space(H5Screate(H5S_SCALAR));
+  Hdf5Handle attribute(H5Acreate2(
+      header.get(), "NumFilesPerSnapshot", H5T_IEEE_F64LE, space.get(),
+      H5P_DEFAULT, H5P_DEFAULT));
+  assert(H5Awrite(attribute.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
+}
+
+void replaceThisFileWithSignedCounts(
+    const std::filesystem::path& path,
+    const std::array<std::int32_t, 6>& values) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(H5Adelete(header.get(), "NumPart_ThisFile") >= 0);
+  writeHeaderAttributeI32x6(header.get(), "NumPart_ThisFile", values);
 }
 
 void replaceHeaderCountAttributeWithShape(
@@ -1051,6 +1339,23 @@ void testHdf5MalformedSchemaSafety() {
   path = writeMinimalIcFile(true);
   replaceHeaderCountAttributeWithShape(path, "NumPart_ThisFile", 5U);
   expectIcReadFailure(path, config, "expected [6]");
+
+  path = writeMinimalIcFile(true);
+  replaceThisFileWithSignedCounts(path, {-1, 0, 0, 0, 0, 0});
+  expectIcReadFailure(path, config, "negative particle count");
+
+  path = writeMinimalIcFile(true);
+  replaceNumFilesWithSignedValue(path, -1);
+  expectIcReadFailure(path, config, "must be non-negative");
+
+  path = writeMinimalIcFile(true);
+  replaceNumFilesWithUnsignedValue(
+      path, static_cast<std::uint64_t>(UINT32_MAX) + 1ULL);
+  expectIcReadFailure(path, config, "exceeds uint32 range");
+
+  path = writeMinimalIcFile(true);
+  replaceNumFilesWithFloatingValue(path, 1.0);
+  expectIcReadFailure(path, config, "invalid datatype class");
 
   path = writeMinimalIcFile(true);
   {

@@ -1913,3 +1913,36 @@ MPI tests, and clean packaging rules. CPU/HDF5/sanitizer evidence is recorded by
 the repair report. MPI runtime acceptance remains external because `MPI_CXX` is unavailable
 in the repair environment; this is an evidence blocker, not a source-level
 waiver.
+
+## 2026-07-25 Campaign B scientific-correctness and streaming completion pass
+
+- Accepted real AREPO signed `NumPart_ThisFile` and `NumFilesPerSnapshot`
+  attributes through checked wide intermediates while preserving datatype
+  signedness/width/rank/extent in manifest schema v4; negative, overflow,
+  floating, and malformed attributes fail closed.
+- Replaced path-forced velocity powers with field-specific contracts:
+  `Velocities` alone uses the selected snapshot velocity convention;
+  `InternalEnergy` and `BH_Mdot` use independent `L^2/T^2` and `M/T`
+  conversions. Independent golden tests cover nontrivial `a`, `h`, and units.
+- Added typed missing-field policy/config/provenance contracts. Gas
+  thermodynamics, stellar sidecars, and BH accretion reject by default;
+  configured or dialect defaults are explicit and audited. Unsupported AREPO
+  wind birth times and canonical tracer mapping fail early.
+- Canonical schema version 2 embeds normalized manifest JSON, recomputes and
+  verifies SHA-256 against the sidecar, requires a completion marker, and records
+  verified status. Converter finalization is a rollback-capable HDF5 + manifest
+  + marker bundle transaction with fault tests.
+- Replaced converter full-state materialization with direct
+  source-chunk-to-canonical hyperslab appends and bounded external duplicate-ID
+  merge. Converter evidence records peak batch/chunk capacity and explicitly
+  states that no complete `SimulationState` was materialized.
+- Added persistent payload reader sessions with source size/hash revalidation and
+  cached dataset handles. Distributed routing now groups multiple chunks into a
+  configured bounded batch and exchanges once per batch.
+- Split the field-conversion catalog, canonical-bundle verifier, persistent
+  reader session, byte codec, endian-stable record codec, and SHA-256 into
+  narrow source units; the record codec has an independent test. The remaining
+  `ic_reader_file_set.cpp` is still large and is tracked as a maintainability
+  follow-up rather than misreported as fully split.
+- HDF5 focused unit/config/capability/converter tests pass. MPI configuration is
+  blocked by missing `MPI_CXX`; distributed capability remains provisional.

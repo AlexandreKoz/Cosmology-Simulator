@@ -452,6 +452,32 @@ parseInitialConditionVelocityConvention(const std::string& value) {
       "' (supported: reject, dark_matter, star, black_hole, tracer)");
 }
 
+[[nodiscard]] InitialConditionMissingFieldPolicy
+parseInitialConditionMissingFieldPolicy(
+    const std::string& value,
+    const std::string& key) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "reject") {
+    return InitialConditionMissingFieldPolicy::kReject;
+  }
+  if (lower == "reconstruct") {
+    return InitialConditionMissingFieldPolicy::kReconstruct;
+  }
+  if (lower == "use_config_value") {
+    return InitialConditionMissingFieldPolicy::kUseConfigValue;
+  }
+  if (lower == "dialect_defined_default") {
+    return InitialConditionMissingFieldPolicy::kDialectDefinedDefault;
+  }
+  if (lower == "preserve_unavailable") {
+    return InitialConditionMissingFieldPolicy::kPreserveUnavailable;
+  }
+  throw ConfigError(
+      "key '" + key + "': invalid value '" + value +
+      "' (supported: reject, reconstruct, use_config_value, "
+      "dialect_defined_default, preserve_unavailable)");
+}
+
 [[nodiscard]] GravitySolver parseGravitySolver(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "treepm") {
@@ -806,6 +832,18 @@ struct ConfigKeySpec {
       {"mode.ic_staging_particle_count", "65536"},
       {"mode.ic_part_type2_policy", "reject"},
       {"mode.ic_part_type3_policy", "reject"},
+      {"mode.ic_gas_internal_energy_policy", "reject"},
+      {"mode.ic_gas_density_policy", "reject"},
+      {"mode.ic_star_formation_time_policy", "reject"},
+      {"mode.ic_star_initial_mass_policy", "reject"},
+      {"mode.ic_star_metallicity_policy", "reject"},
+      {"mode.ic_bh_mdot_policy", "reject"},
+      {"mode.ic_gas_internal_energy_value_code", "0"},
+      {"mode.ic_gas_density_value_code", "0"},
+      {"mode.ic_star_formation_time_value", "0"},
+      {"mode.ic_star_initial_mass_value_code", "0"},
+      {"mode.ic_star_metallicity_value", "0"},
+      {"mode.ic_bh_mdot_value_code", "0"},
       {"mode.zoom_high_res_region", "false"},
       {"mode.zoom_region_file", ""},
       {"mode.zoom_long_range_strategy", "disabled"},
@@ -1316,12 +1354,14 @@ void validateConfig(const SimulationConfig& config) {
           "mode.ic_manifest_file must be empty when mode.ic_convention=generated");
     }
   } else {
-    if (config.mode.ic_file.empty() || config.mode.ic_file == "generated") {
+    const bool manifest_mode =
+        config.mode.ic_convention == InitialConditionConvention::kManifestV1;
+    if (!manifest_mode &&
+        (config.mode.ic_file.empty() || config.mode.ic_file == "generated")) {
       throw ConfigError(
           "external initial-condition conventions require a non-generated mode.ic_file path");
     }
-    if (config.mode.ic_convention == InitialConditionConvention::kManifestV1 &&
-        config.mode.ic_manifest_file.empty()) {
+    if (manifest_mode && config.mode.ic_manifest_file.empty()) {
       throw ConfigError(
           "mode.ic_convention=manifest_v1 requires mode.ic_manifest_file");
     }
@@ -1385,6 +1425,64 @@ void validateConfig(const SimulationConfig& config) {
       }
     }
   }
+
+  const auto validate_missing_policy = [&config](
+                                           InitialConditionMissingFieldPolicy policy,
+                                           double configured_value,
+                                           std::string_view policy_key,
+                                           std::string_view value_key,
+                                           bool require_positive) {
+    if (policy == InitialConditionMissingFieldPolicy::kReconstruct) {
+      throw ConfigError(
+          std::string(policy_key) +
+          "=reconstruct is not implemented by gadget_arepo_bridge_v1; "
+          "select reject or an explicit supported value policy");
+    }
+    if (policy == InitialConditionMissingFieldPolicy::kPreserveUnavailable) {
+      throw ConfigError(
+          std::string(policy_key) +
+          "=preserve_unavailable is not supported because the current runtime "
+          "sidecars do not carry availability masks");
+    }
+    if (policy == InitialConditionMissingFieldPolicy::kUseConfigValue) {
+      const bool valid = std::isfinite(configured_value) &&
+          (require_positive ? configured_value > 0.0 : configured_value >= 0.0);
+      if (!valid) {
+        throw ConfigError(
+            std::string(value_key) +
+            (require_positive
+                 ? " must be finite and > 0 when the matching policy is use_config_value"
+                 : " must be finite and >= 0 when the matching policy is use_config_value"));
+      }
+    }
+  };
+  validate_missing_policy(
+      config.mode.ic_gas_internal_energy_policy,
+      config.mode.ic_gas_internal_energy_value_code,
+      "mode.ic_gas_internal_energy_policy",
+      "mode.ic_gas_internal_energy_value_code", true);
+  validate_missing_policy(
+      config.mode.ic_gas_density_policy,
+      config.mode.ic_gas_density_value_code,
+      "mode.ic_gas_density_policy", "mode.ic_gas_density_value_code", true);
+  validate_missing_policy(
+      config.mode.ic_star_formation_time_policy,
+      config.mode.ic_star_formation_time_value,
+      "mode.ic_star_formation_time_policy",
+      "mode.ic_star_formation_time_value", true);
+  validate_missing_policy(
+      config.mode.ic_star_initial_mass_policy,
+      config.mode.ic_star_initial_mass_value_code,
+      "mode.ic_star_initial_mass_policy",
+      "mode.ic_star_initial_mass_value_code", true);
+  validate_missing_policy(
+      config.mode.ic_star_metallicity_policy,
+      config.mode.ic_star_metallicity_value,
+      "mode.ic_star_metallicity_policy",
+      "mode.ic_star_metallicity_value", false);
+  validate_missing_policy(
+      config.mode.ic_bh_mdot_policy, config.mode.ic_bh_mdot_value_code,
+      "mode.ic_bh_mdot_policy", "mode.ic_bh_mdot_value_code", false);
   if (config.mode.zoom_region_radius_mpc_comoving < 0.0) {
     throw ConfigError("mode.zoom_region_radius must be >= 0");
   }
@@ -1524,6 +1622,42 @@ void validateConfig(const SimulationConfig& config) {
          << initialConditionSpeciesPolicyToString(
                 frozen.config.mode.ic_part_type3_policy)
          << '\n';
+  stream << "ic_gas_internal_energy_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_gas_internal_energy_policy)
+         << '\n';
+  stream << "ic_gas_density_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_gas_density_policy)
+         << '\n';
+  stream << "ic_star_formation_time_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_star_formation_time_policy)
+         << '\n';
+  stream << "ic_star_initial_mass_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_star_initial_mass_policy)
+         << '\n';
+  stream << "ic_star_metallicity_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_star_metallicity_policy)
+         << '\n';
+  stream << "ic_bh_mdot_policy = "
+         << initialConditionMissingFieldPolicyToString(
+                frozen.config.mode.ic_bh_mdot_policy)
+         << '\n';
+  stream << "ic_gas_internal_energy_value_code = "
+         << frozen.config.mode.ic_gas_internal_energy_value_code << '\n';
+  stream << "ic_gas_density_value_code = "
+         << frozen.config.mode.ic_gas_density_value_code << '\n';
+  stream << "ic_star_formation_time_value = "
+         << frozen.config.mode.ic_star_formation_time_value << '\n';
+  stream << "ic_star_initial_mass_value_code = "
+         << frozen.config.mode.ic_star_initial_mass_value_code << '\n';
+  stream << "ic_star_metallicity_value = "
+         << frozen.config.mode.ic_star_metallicity_value << '\n';
+  stream << "ic_bh_mdot_value_code = "
+         << frozen.config.mode.ic_bh_mdot_value_code << '\n';
   stream << "zoom_high_res_region = " << (frozen.config.mode.zoom_high_res_region ? "true" : "false")
          << '\n';
   stream << "zoom_region_file = " << frozen.config.mode.zoom_region_file << '\n';
@@ -1864,6 +1998,72 @@ void validateConfig(const SimulationConfig& config) {
               entries, consumed, "mode.ic_part_type3_policy",
               defaultFor("mode.ic_part_type3_policy")),
           "mode.ic_part_type3_policy");
+  frozen.config.mode.ic_gas_internal_energy_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_gas_internal_energy_policy",
+              defaultFor("mode.ic_gas_internal_energy_policy")),
+          "mode.ic_gas_internal_energy_policy");
+  frozen.config.mode.ic_gas_density_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_gas_density_policy",
+              defaultFor("mode.ic_gas_density_policy")),
+          "mode.ic_gas_density_policy");
+  frozen.config.mode.ic_star_formation_time_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_star_formation_time_policy",
+              defaultFor("mode.ic_star_formation_time_policy")),
+          "mode.ic_star_formation_time_policy");
+  frozen.config.mode.ic_star_initial_mass_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_star_initial_mass_policy",
+              defaultFor("mode.ic_star_initial_mass_policy")),
+          "mode.ic_star_initial_mass_policy");
+  frozen.config.mode.ic_star_metallicity_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_star_metallicity_policy",
+              defaultFor("mode.ic_star_metallicity_policy")),
+          "mode.ic_star_metallicity_policy");
+  frozen.config.mode.ic_bh_mdot_policy =
+      parseInitialConditionMissingFieldPolicy(
+          requireString(
+              entries, consumed, "mode.ic_bh_mdot_policy",
+              defaultFor("mode.ic_bh_mdot_policy")),
+          "mode.ic_bh_mdot_policy");
+  frozen.config.mode.ic_gas_internal_energy_value_code = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_gas_internal_energy_value_code",
+          defaultFor("mode.ic_gas_internal_energy_value_code")),
+      "mode.ic_gas_internal_energy_value_code");
+  frozen.config.mode.ic_gas_density_value_code = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_gas_density_value_code",
+          defaultFor("mode.ic_gas_density_value_code")),
+      "mode.ic_gas_density_value_code");
+  frozen.config.mode.ic_star_formation_time_value = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_star_formation_time_value",
+          defaultFor("mode.ic_star_formation_time_value")),
+      "mode.ic_star_formation_time_value");
+  frozen.config.mode.ic_star_initial_mass_value_code = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_star_initial_mass_value_code",
+          defaultFor("mode.ic_star_initial_mass_value_code")),
+      "mode.ic_star_initial_mass_value_code");
+  frozen.config.mode.ic_star_metallicity_value = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_star_metallicity_value",
+          defaultFor("mode.ic_star_metallicity_value")),
+      "mode.ic_star_metallicity_value");
+  frozen.config.mode.ic_bh_mdot_value_code = parseFloating(
+      requireString(
+          entries, consumed, "mode.ic_bh_mdot_value_code",
+          defaultFor("mode.ic_bh_mdot_value_code")),
+      "mode.ic_bh_mdot_value_code");
   if (!has_explicit_ic_convention && frozen.config.mode.ic_file != "generated") {
     throw ConfigError(
         "mode.ic_convention is required for external initial conditions; the runtime will not guess unit, frame, scale-factor, velocity, or species conventions from mode.ic_file");
@@ -2710,6 +2910,24 @@ std::string initialConditionSpeciesPolicyToString(
   }
   throw ConfigError(
       "unhandled InitialConditionSpeciesPolicy enum value during serialization");
+}
+
+std::string initialConditionMissingFieldPolicyToString(
+    InitialConditionMissingFieldPolicy policy) {
+  switch (policy) {
+    case InitialConditionMissingFieldPolicy::kReject:
+      return "reject";
+    case InitialConditionMissingFieldPolicy::kReconstruct:
+      return "reconstruct";
+    case InitialConditionMissingFieldPolicy::kUseConfigValue:
+      return "use_config_value";
+    case InitialConditionMissingFieldPolicy::kDialectDefinedDefault:
+      return "dialect_defined_default";
+    case InitialConditionMissingFieldPolicy::kPreserveUnavailable:
+      return "preserve_unavailable";
+  }
+  throw ConfigError(
+      "unhandled InitialConditionMissingFieldPolicy enum value during serialization");
 }
 
 std::string modeHydroBoundaryToString(ModeHydroBoundary boundary) {

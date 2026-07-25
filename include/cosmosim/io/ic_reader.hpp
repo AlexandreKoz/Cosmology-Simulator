@@ -73,6 +73,14 @@ enum class IcSpeciesPolicy : std::uint8_t {
   kTracer = 7,
 };
 
+enum class IcMissingFieldPolicy : std::uint8_t {
+  kReject = 0,
+  kReconstruct = 1,
+  kUseConfigValue = 2,
+  kDialectDefinedDefault = 3,
+  kPreserveUnavailable = 4,
+};
+
 enum class IcScalarClass : std::uint8_t {
   kFloatingPoint = 0,
   kInteger = 1,
@@ -122,10 +130,18 @@ struct IcFieldManifest {
   std::string conversion_equation;
 };
 
+struct IcMissingFieldContract {
+  std::uint32_t source_file_index = 0;
+  std::string field_path;
+  IcMissingFieldPolicy policy = IcMissingFieldPolicy::kReject;
+  double configured_value_code = 0.0;
+  std::string resolution;
+};
+
 struct IcManifest {
   std::string schema_name = "chui_ic_audit_manifest";
-  std::uint32_t schema_version = 3;
-  std::string converter_version = "chui_ic_converter_v2";
+  std::uint32_t schema_version = 4;
+  std::string converter_version = "chui_ic_converter_v4";
   IcDialect dialect = IcDialect::kGadgetArepoBridgeV1;
   std::string dialect_version = "1";
   std::vector<std::filesystem::path> source_files;
@@ -134,6 +150,8 @@ struct IcManifest {
   std::vector<std::string> source_sha256;
   std::string source_manifest_file;
   std::string source_manifest_sha256;
+  bool canonical_source_manifest_verified = false;
+  std::string canonical_source_manifest_sha256;
   std::vector<std::string> original_header_attributes;
   std::vector<std::array<std::uint64_t, 6>> num_part_this_file;
   std::array<std::uint64_t, 6> num_part_total{};
@@ -160,6 +178,7 @@ struct IcManifest {
   std::vector<std::string> rejected_fields;
   std::vector<std::string> preserved_auxiliary_fields;
   std::vector<std::string> conversion_equations;
+  std::vector<IcMissingFieldContract> missing_field_contracts;
   std::vector<std::string> warnings;
 };
 
@@ -243,6 +262,10 @@ struct IcImportCounters {
   std::uint64_t bytes_sent = 0;
   std::uint64_t bytes_received = 0;
   std::uint64_t peak_staging_bytes = 0;
+  std::uint64_t source_file_open_count = 0;
+  std::uint64_t source_dataset_open_count = 0;
+  std::uint64_t routing_batch_count = 0;
+  std::uint64_t collective_phase_count = 0;
   std::uint64_t final_local_particle_count = 0;
   std::uint64_t final_local_gas_cell_count = 0;
   std::uint64_t final_local_star_count = 0;
@@ -259,6 +282,8 @@ struct IcImportReport {
   std::vector<std::string> unsupported_fields;
   IcImportCounters counters;
   bool already_partitioned = false;
+  bool manifest_verified = false;
+  std::string verified_manifest_sha256;
 };
 
 struct IcReadResult {
