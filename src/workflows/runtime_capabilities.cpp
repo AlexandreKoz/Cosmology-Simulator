@@ -76,7 +76,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"canonical_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
        RuntimeCapabilityStatus::kSupported,
-       "Typed no-guess generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, strict audit-manifest v4 validation, signed-or-unsigned AREPO count attributes, field-specific conversion contracts, explicit missing-field policies, verified canonical bundles, and source-chunk-to-canonical streaming conversion are available."},
+       "Typed no-guess generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, authoritative manifest source/policy contracts, strict audit-manifest v4 validation, signed-or-unsigned AREPO count attributes, field-specific conversion contracts, verified canonical bundles, fail-closed single-file local-count limits, and source-chunk-to-canonical streaming conversion are available."},
 #else
        RuntimeCapabilityStatus::kUnsupported,
        "This build has COSMOSIM_ENABLE_HDF5=OFF, so external HDF5 IC import and canonical conversion are unavailable."},
@@ -84,7 +84,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"multifile_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
        RuntimeCapabilityStatus::kSupported,
-       "NumFilesPerSnapshot discovery accepts validated signed or unsigned AREPO integer storage, cross-file header/schema validation preserves source integer metadata, 64-bit totals are reconstructed safely, source identity is revalidated during persistent reader sessions, and exact serial duplicate-ID checks are implemented."},
+       "NumFilesPerSnapshot discovery accepts validated signed or unsigned AREPO integer storage, cross-file header/schema validation preserves source integer metadata, 64-bit totals are reconstructed safely, persistent sessions perform start/end path-identity and SHA-256 validation, and exact serial duplicate-ID checks are implemented; same-descriptor hashing is not claimed."},
 #else
        RuntimeCapabilityStatus::kUnsupported,
        "This build has COSMOSIM_ENABLE_HDF5=OFF."},
@@ -92,7 +92,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {"distributed_ic_import",
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
        RuntimeCapabilityStatus::kProvisional,
-       "Persistent HDF5 reader sessions, bounded multi-chunk routing batches, exact route/identity audits, and MPI acceptance tests are present, but runtime acceptance remains provisional until the required one-, two-, and four-rank matrix passes on a real MPI/HDF5/FFTW installation."},
+       "Stable file-to-reader ownership, one payload session per nonempty file, a three-full-hash-pass-per-file ceiling, bounded multi-chunk routing batches, counted main/exact-audit exchanges, rank-consistent fault phases, and MPI acceptance tests are present, but runtime acceptance remains provisional until the required one-, two-, and four-rank matrix passes on a real MPI/HDF5/FFTW installation."},
 #else
        RuntimeCapabilityStatus::kUnsupported,
        "Distributed IC ingestion requires both COSMOSIM_ENABLE_HDF5=ON and COSMOSIM_ENABLE_MPI=ON in this build."},

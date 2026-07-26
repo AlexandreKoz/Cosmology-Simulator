@@ -10,6 +10,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
 
 #include <hdf5.h>
 
@@ -35,8 +36,31 @@ class IcReaderSession {
       const IcFieldManifest& field,
       IcImportCounters& counters);
 
+  // Revalidate the path identity and complete-file digest after the final
+  // payload read. This is explicit because destructors must not throw.
+  void revalidateSourceIdentity(IcImportCounters& counters) const;
+
  private:
+  struct SourceIdentity {
+    std::uint64_t size_bytes = 0U;
+    std::filesystem::file_time_type last_write_time{};
+    std::uint64_t device = 0U;
+    std::uint64_t inode = 0U;
+    bool has_native_identity = false;
+  };
+
+  [[nodiscard]] static SourceIdentity captureSourceIdentity(
+      const std::filesystem::path& path);
+  static void requireSameIdentity(
+      const SourceIdentity& expected,
+      const SourceIdentity& observed,
+      const std::filesystem::path& path,
+      std::string_view phase);
+
   std::filesystem::path m_path;
+  std::uint64_t m_expected_size_bytes = 0U;
+  std::string m_expected_sha256;
+  SourceIdentity m_open_identity;
   Hdf5Handle m_file;
   std::unordered_map<std::string, Hdf5Handle> m_datasets;
 };

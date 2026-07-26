@@ -79,10 +79,13 @@ continues through the established ownership initialization path.
 Before stepping, distributed import verifies a canonical manifest digest, exact global
 ID uniqueness, exact file/chunk coverage, per-chunk source-to-final ID balance,
 ownership completeness and exclusivity, species counts and mass totals, all-axis
-finite/domain-valid fields, and sidecar invariants. File inspection and hashing are
-assigned across ranks rather than repeated by rank zero. Rank-local failures are voted
-at phase boundaries before any later collective so malformed input terminates
-collectively rather than stranding peers in MPI. Distributed IC capability remains
+finite/domain-valid fields, and sidecar invariants. File inspection and payload
+reading are assigned by stable `file_index % world_size` ownership. Full-file hashing
+is bounded by three passes per source file and does not grow with routing batches.
+Potentially throwing digest, session construction, serialization/accounting,
+post-exchange, source-to-final audit, and completion-identity phases vote before
+any later collective so malformed input terminates collectively rather than
+stranding peers in MPI. Distributed IC capability remains
 provisional until the registered MPI acceptance matrix passes on a dependency-complete
 system.
 

@@ -1,5 +1,12 @@
 # Campaign B acceptance repair report
 
+> **Historical report — superseded 2026-07-26.** This document records the
+> earlier Campaign B acceptance pass and must not be used as the current closure
+> verdict. The authoritative final repair record is
+> `docs/repair/campaign_b_final_acceptance_exec_plan.md`. Real MPI np1/np2/np4
+> runtime acceptance remains environment-blocked until executed on a
+> dependency-complete installation.
+
 Date: 2026-07-24
 
 ## Verdict

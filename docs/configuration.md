@@ -114,8 +114,12 @@ External initial conditions are never selected by filename alone. The typed
   are mandatory. There are no kpc/Msun/km/s or frame defaults.
 - `manifest_v1`: loads the strict versioned audit manifest named by
   `mode.ic_manifest_file`; relative source paths are resolved from the manifest.
-  `mode.ic_file` is not required. If it is supplied, it must resolve to the same
-  first source member or validation fails as a conflicting authority.
+  `mode.ic_file` is not required. If it is supplied, it is only a compatibility
+  consistency check and must resolve to the same first source member or runtime
+  startup fails as a conflicting authority. Source order, hashes, field
+  contracts, species policy, and missing-field policy/value pairs are owned by
+  the manifest; direct-bridge policy keys are not duplicate scientific
+  authorities in this mode.
 
 An external `mode.ic_file` without an explicitly written `mode.ic_convention`
 fails validation. This prevents the runtime from guessing h scaling, coordinate

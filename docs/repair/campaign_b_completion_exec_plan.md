@@ -1,5 +1,9 @@
 # Campaign B completion execution plan
 
+> **Historical execution plan — superseded 2026-07-26.** The current Campaign B
+> final-acceptance implementation, evidence, limitations, and closure matrix are
+> recorded in `campaign_b_final_acceptance_exec_plan.md`.
+
 ## Task classification
 
 Mode: **REPAIR + CAMPAIGN B COMPLETION + PACKAGING**.

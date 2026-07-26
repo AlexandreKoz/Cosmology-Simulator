@@ -1,5 +1,20 @@
 # Repair open issues
 
+## 2026-07-26 Campaign B distributed acceptance evidence
+
+Campaign B source-level closure is implemented for manifest authority,
+rank-consistent failure phases, stable per-file readers, bounded complete-file
+hashing, start/end source identity validation, collective-cost counters,
+canonical one-file count safety, IC subsystem decomposition, and clean source
+packaging. Focused HDF5 tests and MPI-enabled static syntax checks pass.
+
+The remaining Campaign B item is environment evidence, not an accepted source
+waiver: this repair environment has no `MPI_CXX`, so the registered np1/np2/np4
+distributed IC correctness, fault-injection, and scaling tests were not executed.
+Runtime capability reporting must remain provisional until the exact MPI preset
+and focused commands recorded in the final acceptance report pass on a
+dependency-complete host.
+
 ## 2026-07-08 remaining MPI acceptance limitations
 
 The complete local `mpi-hdf5-fftw-debug` inventory now passes 150/150, and the
@@ -348,6 +363,6 @@ pre-existing harness behavior is diagnosed on the normal validation system.
 | ID | Status | Area | Resolution in this pass | Remaining boundary |
 |---|---|---|---|---|
 | CAMPAIGN-B-MPI-ACCEPTANCE-20260725 | Environment-blocked | Distributed IC runtime | Persistent HDF5 sessions, bounded multi-chunk batches, route/accounting counters, and the np1/np2/np4 source test matrix are present. | Configure/build/run `mpi-hdf5-fftw-debug` on a dependency-complete machine; do not promote `distributed_ic_import` until it passes. |
-| CAMPAIGN-B-COLLECTIVE-GUARDS-20260725 | Partially closed | MPI failure consensus | Existing guarded phases cover read, routing, exchange, decode, append, reconciliation, and final audits; new batch/session operations were placed inside guarded reader phases. | Perform runtime fault execution under MPI and continue narrowing any accounting operation that can allocate/throw between guarded phases. |
+| CAMPAIGN-B-COLLECTIVE-GUARDS-20260725 | Environment-blocked runtime evidence | MPI failure consensus | Final acceptance guards manifest digest, reader-session creation, serialization, post-exchange, source/final, duplicate-audit, identity-revalidation, append, and final-state phases; rank-specific finite-time fault tests are registered and MPI-enabled syntax checks pass. | Execute the registered fault matrix under real MPI; no source-level seam is intentionally waived. |
 | CAMPAIGN-B-INITIAL-REBALANCE-20260725 | Open | Distributed IC ownership | Deterministic x-slab ingestion ownership is documented and existing runtime rebalance ownership was preserved. | Measure imported work imbalance and invoke the existing legal rebalance path before the first expensive production phase when a configured threshold is exceeded; validate under clustered and zoom ICs. |
-| CAMPAIGN-B-IC-SOURCE-SPLIT-20260725 | Partially closed | IC maintainability | Conversion catalog, canonical-bundle verification, persistent reader session, byte codec, record codec, and SHA-256 were moved to narrow source units; the record codec has a dedicated test and the streaming API is isolated behind an internal header. | Split HDF5 schema inspection, serial ingestion, distributed ingestion, and distributed audit from the remaining 4,136-line `ic_reader_file_set.cpp` without creating a replacement monolith. |
+| CAMPAIGN-B-IC-SOURCE-SPLIT-20260725 | Closed | IC maintainability | The 4,136-line monolith was removed and replaced by responsibility-based manifest/schema, serial, streaming, and distributed units; every IC source is below 2,000 lines and structural CI rejects reintroduction or private-header leakage. | Preserve the structural gate as the subsystem evolves. |

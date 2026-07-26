@@ -5,6 +5,11 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 namespace cosmosim::io::internal {
 namespace {
@@ -22,12 +27,60 @@ void checkedCounterAdd(
 
 }  // namespace
 
+IcReaderSession::SourceIdentity IcReaderSession::captureSourceIdentity(
+    const std::filesystem::path& path) {
+  SourceIdentity identity;
+  std::error_code error;
+  identity.size_bytes = std::filesystem::file_size(path, error);
+  if (error) {
+    throw std::runtime_error(
+        "failed to inspect IC source size for " + path.string() + ": " +
+        error.message());
+  }
+  identity.last_write_time = std::filesystem::last_write_time(path, error);
+  if (error) {
+    throw std::runtime_error(
+        "failed to inspect IC source timestamp for " + path.string() + ": " +
+        error.message());
+  }
+#if !defined(_WIN32)
+  struct stat native_stat {};
+  if (::stat(path.c_str(), &native_stat) != 0) {
+    throw std::runtime_error(
+        "failed to inspect native IC source identity for " + path.string());
+  }
+  identity.device = static_cast<std::uint64_t>(native_stat.st_dev);
+  identity.inode = static_cast<std::uint64_t>(native_stat.st_ino);
+  identity.has_native_identity = true;
+#endif
+  return identity;
+}
+
+void IcReaderSession::requireSameIdentity(
+    const SourceIdentity& expected,
+    const SourceIdentity& observed,
+    const std::filesystem::path& path,
+    std::string_view phase) {
+  const bool native_changed =
+      expected.has_native_identity && observed.has_native_identity &&
+      (expected.device != observed.device || expected.inode != observed.inode);
+  if (expected.size_bytes != observed.size_bytes || native_changed ||
+      expected.last_write_time != observed.last_write_time) {
+    throw std::runtime_error(
+        "IC source identity changed " + std::string(phase) + " for " +
+        path.string());
+  }
+}
+
 IcReaderSession::IcReaderSession(
     const std::filesystem::path& path,
     std::uint64_t expected_size_bytes,
     std::string_view expected_sha256,
     IcImportCounters& counters)
     : m_path(path),
+      m_expected_size_bytes(expected_size_bytes),
+      m_expected_sha256(expected_sha256),
+      m_open_identity(captureSourceIdentity(path)),
       m_file(H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT)) {
   if (!m_file.valid()) {
     throw std::runtime_error(
@@ -35,19 +88,61 @@ IcReaderSession::IcReaderSession(
   }
   checkedCounterAdd(
       counters.source_file_open_count, 1U, "source_file_open_count");
-  const std::uint64_t observed_size = std::filesystem::file_size(path);
-  if (observed_size != expected_size_bytes) {
+  const SourceIdentity after_open = captureSourceIdentity(path);
+  requireSameIdentity(
+      m_open_identity, after_open, path, "while opening the HDF5 session");
+  if (after_open.size_bytes != expected_size_bytes) {
     throw std::runtime_error(
         "IC source identity changed before payload read: file size mismatch for " +
         path.string());
   }
   const std::string observed_sha256 = icSha256FileHex(path);
-  checkedCounterAdd(counters.hash_bytes_read, observed_size, "hash_bytes_read");
+  checkedCounterAdd(
+      counters.full_file_hash_pass_count, 1U,
+      "full_file_hash_pass_count");
+  checkedCounterAdd(
+      counters.hash_bytes_read, after_open.size_bytes, "hash_bytes_read");
+  const SourceIdentity after_hash = captureSourceIdentity(path);
+  requireSameIdentity(
+      after_open, after_hash, path, "during initial SHA-256 validation");
   if (observed_sha256 != expected_sha256) {
     throw std::runtime_error(
         "IC source identity changed before payload read: SHA-256 mismatch for " +
         path.string());
   }
+  checkedCounterAdd(
+      counters.source_identity_validation_count, 1U,
+      "source_identity_validation_count");
+  m_open_identity = after_hash;
+}
+
+void IcReaderSession::revalidateSourceIdentity(
+    IcImportCounters& counters) const {
+  const SourceIdentity before_hash = captureSourceIdentity(m_path);
+  requireSameIdentity(
+      m_open_identity, before_hash, m_path, "before session completion");
+  if (before_hash.size_bytes != m_expected_size_bytes) {
+    throw std::runtime_error(
+        "IC source size changed during payload ingestion for " +
+        m_path.string());
+  }
+  const std::string observed_sha256 = icSha256FileHex(m_path);
+  checkedCounterAdd(
+      counters.full_file_hash_pass_count, 1U,
+      "full_file_hash_pass_count");
+  checkedCounterAdd(
+      counters.hash_bytes_read, before_hash.size_bytes, "hash_bytes_read");
+  const SourceIdentity after_hash = captureSourceIdentity(m_path);
+  requireSameIdentity(
+      before_hash, after_hash, m_path, "during completion SHA-256 validation");
+  if (observed_sha256 != m_expected_sha256) {
+    throw std::runtime_error(
+        "IC source content changed during payload ingestion for " +
+        m_path.string());
+  }
+  checkedCounterAdd(
+      counters.source_identity_validation_count, 1U,
+      "source_identity_validation_count");
 }
 
 hid_t IcReaderSession::dataset(

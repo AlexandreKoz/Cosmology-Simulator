@@ -42,6 +42,12 @@ HDF5, manifest, and marker are written as `.part` members and finalized as one
 recoverable bundle. Any write, digest, or rename failure removes partial and
 orphaned final members.
 
+The canonical converter currently emits one HDF5 member. It fails before file
+creation when any `NumPart_ThisFile` family would exceed `UINT32_MAX`, because
+that header attribute has no high-word companion. Accepted total counts retain
+`NumPart_Total` plus `NumPart_Total_HighWord`; the converter never silently
+truncates a one-file local count.
+
 Canonical IC, science snapshot, and restart remain deliberately separate
 schemas: canonical IC is audited import/interchange state; snapshot is analysis
 output; restart is exact execution continuation.

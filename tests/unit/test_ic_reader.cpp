@@ -11,12 +11,45 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/ic_reader.hpp"
+#include "io/internal/ic_canonical_limits.hpp"
+#include "io/internal/ic_reader_session.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
 #endif
 
 namespace {
+
+
+void testCanonicalSingleFileCountLimit() {
+  std::array<std::uint64_t, 6> counts{};
+  counts[0] = static_cast<std::uint64_t>(UINT32_MAX);
+  cosmosim::io::internal::validateCanonicalSingleFileCounts(counts);
+
+  counts[0] = static_cast<std::uint64_t>(UINT32_MAX) + 1ULL;
+  bool rejected = false;
+  try {
+    cosmosim::io::internal::validateCanonicalSingleFileCounts(counts);
+  } catch (const std::length_error& error) {
+    rejected = std::string(error.what()).find("PartType0") !=
+        std::string::npos;
+  }
+  assert(rejected);
+
+  counts = {};
+  counts[1] = static_cast<std::uint64_t>(UINT32_MAX);
+  counts[4] = static_cast<std::uint64_t>(UINT32_MAX);
+  cosmosim::io::internal::validateCanonicalSingleFileCounts(counts);
+  counts[4] += 1ULL;
+  rejected = false;
+  try {
+    cosmosim::io::internal::validateCanonicalSingleFileCounts(counts);
+  } catch (const std::length_error& error) {
+    rejected = std::string(error.what()).find("PartType4") !=
+        std::string::npos;
+  }
+  assert(rejected);
+}
 
 cosmosim::io::IcManifest makeValidManifest() {
   cosmosim::io::IcManifest manifest;
@@ -900,6 +933,9 @@ void testHdf5GasThermoMapping() {
   assert(result.report.manifest.has_value());
   assert(result.report.manifest->dialect ==
          cosmosim::io::IcDialect::kGadgetArepoBridgeV1);
+  assert(result.report.counters.source_file_open_count == 1U);
+  assert(result.report.counters.full_file_hash_pass_count == 3U);
+  assert(result.report.counters.source_identity_validation_count == 2U);
   assert(result.state.cells.center_x_comoving[0] == result.state.particles.position_x_comoving[0]);
 
   auto mismatched_manifest = *result.report.manifest;
@@ -921,6 +957,22 @@ void testHdf5GasThermoMapping() {
         std::string::npos;
   }
   assert(supplied_schema_rejected);
+
+  auto hash_mismatched_manifest = *result.report.manifest;
+  hash_mismatched_manifest.source_sha256.front() = std::string(64U, '0');
+  hash_mismatched_manifest.source_provenance_ids.front() =
+      "sha256:" + hash_mismatched_manifest.source_sha256.front();
+  bool supplied_hash_rejected = false;
+  try {
+    (void)cosmosim::io::readGadgetArepoHdf5Ic(
+        path, config,
+        cosmosim::io::IcImportOptions{.manifest = &hash_mismatched_manifest});
+  } catch (const std::runtime_error& error) {
+    supplied_hash_rejected =
+        std::string(error.what()).find("SHA-256") != std::string::npos ||
+        std::string(error.what()).find("provenance") != std::string::npos;
+  }
+  assert(supplied_hash_rejected);
 
   bool found_thermo_bypass = false;
   bool found_metallicity_unsupported = false;
@@ -973,6 +1025,23 @@ void testHdf5GasOptionalDensityMissingBehavior() {
   assert(contract != result.report.manifest->missing_field_contracts.end());
   assert(contract->policy == cosmosim::io::IcMissingFieldPolicy::kUseConfigValue);
   assert(contract->configured_value_code == 3.25);
+
+  auto manifest_authority_config = config;
+  manifest_authority_config.mode.ic_gas_density_policy =
+      cosmosim::core::InitialConditionMissingFieldPolicy::kReject;
+  manifest_authority_config.mode.ic_gas_density_value_code = 0.0;
+  const std::filesystem::path ignored_requested_path =
+      path.parent_path() / "manifest_authority_ignored_source.hdf5";
+  const auto manifest_authoritative =
+      cosmosim::io::readGadgetArepoHdf5Ic(
+          ignored_requested_path, manifest_authority_config,
+          cosmosim::io::IcImportOptions{
+              .manifest = &*result.report.manifest});
+  assert(manifest_authoritative.state.gas_cells.density_code[0] == 3.25);
+  assert(manifest_authoritative.state.gas_cells.density_code[1] == 3.25);
+  assert(
+      manifest_authoritative.report.provenance_authority ==
+      "supplied_manifest_v1");
   std::filesystem::remove(path);
 }
 
@@ -1071,9 +1140,17 @@ void testHdf5BlackHoleAndValidationFailures() {
       cosmosim::io::readGadgetArepoHdf5Ic(missing_mdot_path, config);
   assert(defaulted_bh.state.black_holes.accretion_rate_code[0] == 0.0);
   assert(!defaulted_bh.report.defaulted_fields.empty());
-  std::filesystem::remove(missing_mdot_path);
+  assert(defaulted_bh.report.manifest.has_value());
   config.mode.ic_bh_mdot_policy =
       cosmosim::core::InitialConditionMissingFieldPolicy::kReject;
+  const auto manifest_defaulted_bh =
+      cosmosim::io::readGadgetArepoHdf5Ic(
+          missing_mdot_path, config,
+          cosmosim::io::IcImportOptions{
+              .manifest = &*defaulted_bh.report.manifest});
+  assert(
+      manifest_defaulted_bh.state.black_holes.accretion_rate_code[0] == 0.0);
+  std::filesystem::remove(missing_mdot_path);
 
   const std::filesystem::path family2_path = writeMinimalFamily2IcFile();
   bool implicit_family2_rejected = false;
@@ -1329,6 +1406,111 @@ void testTracerParentAndHostRemap() {
       "tracer parent must resolve to a gas cell on the same final owner rank");
 }
 
+
+void testReaderSessionSourceIdentity() {
+  using cosmosim::io::IcImportCounters;
+  using cosmosim::io::internal::IcReaderSession;
+
+  auto path = writeMinimalIcFile(true);
+  const std::uint64_t size = std::filesystem::file_size(path);
+  const std::string sha = cosmosim::io::icSha256FileHex(path);
+  {
+    IcImportCounters counters;
+    IcReaderSession session(path, size, sha, counters);
+    session.revalidateSourceIdentity(counters);
+    assert(counters.source_file_open_count == 1U);
+    assert(counters.full_file_hash_pass_count == 2U);
+    assert(counters.source_identity_validation_count == 2U);
+    assert(counters.hash_bytes_read == 2U * size);
+  }
+
+  bool hash_mismatch_rejected = false;
+  try {
+    IcImportCounters counters;
+    IcReaderSession session(path, size, std::string(64U, '0'), counters);
+    static_cast<void>(session);
+  } catch (const std::runtime_error& error) {
+    hash_mismatch_rejected =
+        std::string(error.what()).find("SHA-256 mismatch") !=
+        std::string::npos;
+  }
+  assert(hash_mismatch_rejected);
+
+  {
+    IcImportCounters counters;
+    IcReaderSession session(path, size, sha, counters);
+    std::ofstream append(path, std::ios::binary | std::ios::app);
+    append.put('\0');
+    append.close();
+    bool size_change_rejected = false;
+    try {
+      session.revalidateSourceIdentity(counters);
+    } catch (const std::runtime_error& error) {
+      size_change_rejected =
+          std::string(error.what()).find("identity changed") !=
+              std::string::npos ||
+          std::string(error.what()).find("size changed") !=
+              std::string::npos;
+    }
+    assert(size_change_rejected);
+  }
+  std::filesystem::remove(path);
+
+  path = writeMinimalIcFile(true);
+  const auto replacement = std::filesystem::path(path.string() + ".replacement");
+  const auto displaced = std::filesystem::path(path.string() + ".displaced");
+  std::filesystem::copy_file(path, replacement);
+  const std::uint64_t replacement_size = std::filesystem::file_size(path);
+  const std::string replacement_sha = cosmosim::io::icSha256FileHex(path);
+  {
+    IcImportCounters counters;
+    IcReaderSession session(
+        path, replacement_size, replacement_sha, counters);
+    std::filesystem::rename(path, displaced);
+    std::filesystem::rename(replacement, path);
+    bool replacement_rejected = false;
+    try {
+      session.revalidateSourceIdentity(counters);
+    } catch (const std::runtime_error& error) {
+      replacement_rejected =
+          std::string(error.what()).find("identity changed") !=
+          std::string::npos;
+    }
+    assert(replacement_rejected);
+  }
+  std::filesystem::remove(path);
+  std::filesystem::remove(displaced);
+
+  path = writeMinimalIcFile(true);
+  const std::uint64_t mutation_size = std::filesystem::file_size(path);
+  const std::string mutation_sha = cosmosim::io::icSha256FileHex(path);
+  {
+    IcImportCounters counters;
+    IcReaderSession session(path, mutation_size, mutation_sha, counters);
+    std::fstream mutation(
+        path, std::ios::binary | std::ios::in | std::ios::out);
+    mutation.seekg(-1, std::ios::end);
+    char value = 0;
+    mutation.read(&value, 1);
+    value = static_cast<char>(value ^ 0x01);
+    mutation.seekp(-1, std::ios::end);
+    mutation.write(&value, 1);
+    mutation.close();
+    bool mutation_rejected = false;
+    try {
+      session.revalidateSourceIdentity(counters);
+    } catch (const std::runtime_error& error) {
+      mutation_rejected =
+          std::string(error.what()).find("identity changed") !=
+              std::string::npos ||
+          std::string(error.what()).find("content changed") !=
+              std::string::npos;
+    }
+    assert(mutation_rejected);
+  }
+  std::filesystem::remove(path);
+}
+
 void testHdf5MalformedSchemaSafety() {
   const auto config = makeExplicitBridgeConfig();
 
@@ -1431,6 +1613,7 @@ void testHdf5MalformedSchemaSafety() {
 }  // namespace
 
 int main() {
+  testCanonicalSingleFileCountLimit();
   testManifestValidationAndConversions();
   testGeneratedIsolatedIcSpeciesAndOwnership();
   testGeneratedConverterDefaultAudit();
@@ -1443,6 +1626,7 @@ int main() {
   testSharedDimensionalConversionContract();
   testHdf5BlackHoleAndValidationFailures();
   testTracerParentAndHostRemap();
+  testReaderSessionSourceIdentity();
   testHdf5MalformedSchemaSafety();
 #endif
   return 0;

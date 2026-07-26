@@ -69,7 +69,8 @@ restart truth.
 
 After initial state construction, every rank emits one
 `io.ic_ingestion.summary` event in subsystem `io.initial_conditions`. Its
-payload includes:
+payload records the single `provenance_authority` selected for the import and
+includes:
 
 - `files_assigned`
 - `chunks_assigned`
@@ -82,6 +83,12 @@ payload includes:
 - `bytes_received`
 - `manifest_metadata_bytes_communicated`
 - `records_read`, `records_converted`, and `records_routed`
+- `source_file_open_count`, `source_dataset_open_count`
+- `full_file_hash_pass_count`, `source_identity_validation_count`
+- `routing_batch_count`, `reader_batches_assigned`, `reader_records_assigned`, `reader_record_imbalance`
+- `main_exchange_count`, `exact_audit_exchange_count`
+- `routing_collective_phase_count`, `collective_phase_count`
+- `wall_time_nanoseconds`
 - `peak_staging_bytes`
 - final local particle, gas, star, black-hole, and tracer counts
 - `already_partitioned`
@@ -97,11 +104,15 @@ includes all simultaneously live coordinate, velocity, mass, ID, gas, star,
 black-hole, tracer, `ParticleRecord`, nested per-peer, flattened exchange,
 count/displacement, decode, coverage, and ID-reconciliation buffers. The exact global duplicate-ID audit
 uses rank-local sorted temporary runs and a bounded-memory external merge; disk
-run bytes are not RAM staging and are removed before import returns. For a
-distributed fixture, the required evidence is that each source file is hashed
-once, each source chunk is assigned once, each source ID balances against one
-final ID, and no rank allocates authoritative arrays sized to the global
-particle count merely because MPI is enabled.
+run bytes are not RAM staging and are removed before import returns. For a distributed fixture, the required evidence is that each nonempty source
+file has one stable payload reader/session, complete-file SHA-256 work is bounded
+by three passes per source file (inspection, session start, session completion)
+independent of batch count, each source chunk is assigned once, reader-record imbalance is reported as the maximum minus minimum assigned-record count across ranks, main exchanges
+scale with routing batches rather than source chunks, each source ID balances
+against one final ID, and no rank allocates authoritative arrays sized to the
+global particle count merely because MPI is enabled. `main_exchange_count` and
+`routing_collective_phase_count` are global protocol counters recorded on rank
+zero; byte counters remain rank-local and may be reduced by the caller.
 
 These counters are scalability evidence, not a substitute for scientific
 validation. Exact distributed duplicate-ID, count, mass, ownership, provenance,

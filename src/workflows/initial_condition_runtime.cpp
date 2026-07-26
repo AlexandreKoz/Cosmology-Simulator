@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -188,6 +189,7 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
         "ReferenceWorkflowOptions cannot override scheduler identity records while resuming a restart payload");
   }
 
+  const auto ingestion_start = std::chrono::steady_clock::now();
   io::IcReadResult ic_result;
   const bool restoring = options.restart_state_override != nullptr;
   if (restoring) {
@@ -200,6 +202,14 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
         "initial_state_override=caller_supplied");
   } else {
     ic_result = loadInitialConditions(m_frozen_config, m_services);
+  }
+
+  const auto ingestion_end = std::chrono::steady_clock::now();
+  const auto ingestion_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      ingestion_end - ingestion_start);
+  if (ingestion_duration.count() > 0) {
+    ic_result.report.counters.wall_time_nanoseconds =
+        static_cast<std::uint64_t>(ingestion_duration.count());
   }
 
   std::filesystem::path manifest_path;
@@ -219,12 +229,22 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
       .severity = core::RuntimeEventSeverity::kInfo,
       .subsystem = "io.initial_conditions",
       .message = "initial-condition ingestion completed with explicit provenance and bounded staging counters",
-      .payload = {{"files_assigned", std::to_string(counters.files_assigned)},
+      .payload = {{"provenance_authority", ic_result.report.provenance_authority},
+                  {"files_assigned", std::to_string(counters.files_assigned)},
                   {"chunks_assigned", std::to_string(counters.chunks_assigned)},
                   {"source_file_open_count", std::to_string(counters.source_file_open_count)},
                   {"source_dataset_open_count", std::to_string(counters.source_dataset_open_count)},
+                  {"full_file_hash_pass_count", std::to_string(counters.full_file_hash_pass_count)},
+                  {"source_identity_validation_count", std::to_string(counters.source_identity_validation_count)},
                   {"routing_batch_count", std::to_string(counters.routing_batch_count)},
+                  {"reader_batches_assigned", std::to_string(counters.reader_batches_assigned)},
+                  {"reader_records_assigned", std::to_string(counters.reader_records_assigned)},
+                  {"reader_record_imbalance", std::to_string(counters.reader_record_imbalance)},
+                  {"main_exchange_count", std::to_string(counters.main_exchange_count)},
+                  {"exact_audit_exchange_count", std::to_string(counters.exact_audit_exchange_count)},
                   {"collective_phase_count", std::to_string(counters.collective_phase_count)},
+                  {"routing_collective_phase_count", std::to_string(counters.routing_collective_phase_count)},
+                  {"wall_time_nanoseconds", std::to_string(counters.wall_time_nanoseconds)},
                   {"metadata_bytes_read", std::to_string(counters.metadata_bytes_read)},
                   {"hash_bytes_read", std::to_string(counters.hash_bytes_read)},
                   {"payload_bytes_read", std::to_string(counters.payload_bytes_read)},

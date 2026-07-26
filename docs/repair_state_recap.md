@@ -1946,3 +1946,32 @@ waiver.
   follow-up rather than misreported as fully split.
 - HDF5 focused unit/config/capability/converter tests pass. MPI configuration is
   blocked by missing `MPI_CXX`; distributed capability remains provisional.
+
+## 2026-07-26 Campaign B final acceptance source closure
+
+- Made supplied schema-v4 manifests the sole runtime scientific authority for
+  source order, hashes, aliases/conversions, species policy, and normalized
+  missing-field policy/value contracts. Manifest startup no longer requires
+  `mode.ic_file`; an optional path is only a conflict check.
+- Closed the remaining pre-collective exception seams for manifest digest,
+  serialization and exchange accounting, exact source/final reconciliation,
+  duplicate-audit staging, reader-session creation, and completion identity
+  validation. Added finite-time rank-selective fault fixtures for each seam.
+- Replaced batch-index reader rotation with deterministic per-file reader
+  ownership and one persistent payload session. Full-file hashing is bounded at
+  three passes per source file independent of batch count.
+- Strengthened source-session identity with size/time and native device/inode
+  checks where available, plus SHA-256 validation at session start and end.
+  Same-descriptor hashing is not claimed.
+- Added observable reader imbalance, routing/main/exact-audit exchange counts,
+  logical collective phases, bytes, bounded staging, and ingestion wall time.
+- Made canonical single-file output fail before HDF5 creation when any
+  `NumPart_ThisFile` family count exceeds `UINT32_MAX`.
+- Removed the 4,136-line IC monolith. The largest replacement source is below
+  2,000 lines, and structural CI prevents a replacement monolith or private
+  header leakage.
+- Removed the two Windows ADS sidecars and added recursive source-only packaging.
+- Focused HDF5 production-path, reader, capability, and structure tests pass.
+  MPI-enabled source/test syntax passes, but runtime np1/np2/np4 acceptance is
+  environment-blocked because `MPI_CXX` is unavailable; distributed capability
+  therefore remains provisional.

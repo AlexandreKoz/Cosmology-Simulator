@@ -1,0 +1,57 @@
+file(GLOB _ic_sources "@CMAKE_SOURCE_DIR@/src/io/ic_*.cpp")
+foreach(_file IN LISTS _ic_sources)
+  file(STRINGS "${_file}" _lines)
+  list(LENGTH _lines _line_count)
+  if(_line_count GREATER 2000)
+    message(FATAL_ERROR
+      "Campaign B IC source ${_file} is ${_line_count} lines; limit is 2000")
+  endif()
+endforeach()
+
+
+foreach(_required_unit IN ITEMS
+    "@CMAKE_SOURCE_DIR@/src/io/ic_failure_protocol.cpp"
+    "@CMAKE_SOURCE_DIR@/src/io/ic_distributed_audit.cpp")
+  if(NOT EXISTS "${_required_unit}")
+    message(FATAL_ERROR "Required Campaign B IC unit missing: ${_required_unit}")
+  endif()
+endforeach()
+
+if(EXISTS "@CMAKE_SOURCE_DIR@/src/io/ic_reader_file_set.cpp")
+  message(FATAL_ERROR
+    "Campaign B monolith src/io/ic_reader_file_set.cpp must not be reintroduced")
+endif()
+if(EXISTS "@CMAKE_SOURCE_DIR@/src/io/ic_utils.cpp" OR
+   EXISTS "@CMAKE_SOURCE_DIR@/src/io/ic_utils.hpp" OR
+   EXISTS "@CMAKE_SOURCE_DIR@/src/io/ic_utils.hh")
+  message(FATAL_ERROR "Generic IC utility dumping-ground file detected")
+endif()
+
+set(_allowed_users
+  "@CMAKE_SOURCE_DIR@/src/io/ic_file_set_manifest.cpp"
+  "@CMAKE_SOURCE_DIR@/src/io/ic_stream_ingestion.cpp"
+  "@CMAKE_SOURCE_DIR@/src/io/ic_serial_ingestion.cpp"
+  "@CMAKE_SOURCE_DIR@/src/io/ic_distributed_audit.cpp"
+  "@CMAKE_SOURCE_DIR@/src/io/ic_distributed_ingestion.cpp")
+file(GLOB_RECURSE _candidate_sources
+  "@CMAKE_SOURCE_DIR@/include/*.hpp"
+  "@CMAKE_SOURCE_DIR@/include/*.hh"
+  "@CMAKE_SOURCE_DIR@/src/*.cpp"
+  "@CMAKE_SOURCE_DIR@/src/*.hpp"
+  "@CMAKE_SOURCE_DIR@/tools/*.cpp")
+foreach(_file IN LISTS _candidate_sources)
+  if(_file STREQUAL "@CMAKE_SOURCE_DIR@/src/io/internal/ic_file_set_common.hpp")
+    continue()
+  endif()
+  file(READ "${_file}" _content)
+  string(FIND "${_content}" "io/internal/ic_file_set_common.hpp" _match)
+  if(NOT _match EQUAL -1)
+    list(FIND _allowed_users "${_file}" _allowed_index)
+    if(_allowed_index EQUAL -1)
+      message(FATAL_ERROR
+        "Private IC file-set header leaked into ${_file}")
+    endif()
+  endif()
+endforeach()
+
+message(STATUS "Campaign B IC decomposition passed: all IC sources <=2000 lines")

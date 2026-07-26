@@ -304,7 +304,12 @@ add_library(cosmosim_io STATIC
   src/io/ic_manifest.cpp
   src/io/ic_record_codec.cpp
   src/io/ic_reader.cpp
-  src/io/ic_reader_file_set.cpp
+  src/io/ic_file_set_manifest.cpp
+  src/io/ic_stream_ingestion.cpp
+  src/io/ic_serial_ingestion.cpp
+  src/io/ic_failure_protocol.cpp
+  src/io/ic_distributed_audit.cpp
+  src/io/ic_distributed_ingestion.cpp
   src/io/ic_canonical_bundle.cpp
   src/io/ic_conversion_catalog.cpp
   src/io/ic_reader_session.cpp
@@ -1006,13 +1011,20 @@ if(COSMOSIM_ENABLE_TESTS)
                    LABELS "mpi;hdf5;distributed;ic;reconciliation;malformed;runtime_truth")
     endforeach()
     foreach(fault_phase IN ITEMS
+        manifest_digest
+        reader_session_creation
         owner_serialization
+        serialization_accounting
         send_layout
+        post_exchange_accounting
         payload_validation
         deserialization
+        source_final_reconciliation
+        source_final_accounting
+        global_id_audit_accounting
         sidecar_append
-        final_state
-        source_final_reconciliation)
+        source_identity_revalidation
+        final_state)
       add_test(
         NAME integration_distributed_ic_reader_fault_${fault_phase}_mpi_two_rank
         COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
@@ -1072,7 +1084,25 @@ if(COSMOSIM_ENABLE_TESTS)
     endif()
   endif()
 
+  if(COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_initial_condition_manifest_runtime
+      tests/integration/test_initial_condition_manifest_runtime.cpp)
+    target_include_directories(
+      test_integration_initial_condition_manifest_runtime
+      PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(
+      test_integration_initial_condition_manifest_runtime PRIVATE cosmosim_all)
+    add_test(
+      NAME integration_initial_condition_manifest_runtime
+      COMMAND test_integration_initial_condition_manifest_runtime)
+    cosmosim_mark_runtime_truth_test(
+      integration_initial_condition_manifest_runtime
+      integration hdf5 ic manifest runtime_truth)
+  endif()
+
   add_executable(test_unit_ic_reader tests/unit/test_ic_reader.cpp)
+  target_include_directories(
+    test_unit_ic_reader PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(test_unit_ic_reader PRIVATE cosmosim_io)
   add_test(NAME unit_ic_reader COMMAND test_unit_ic_reader)
 
@@ -1217,6 +1247,15 @@ if(COSMOSIM_ENABLE_TESTS)
     @ONLY)
   add_test(NAME integration_core_dependency_direction
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_core_dependency_direction.cmake")
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_ic_decomposition_structure.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_ic_decomposition_structure.cmake"
+    @ONLY)
+  add_test(NAME integration_ic_decomposition_structure
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_ic_decomposition_structure.cmake")
+  set_tests_properties(integration_ic_decomposition_structure
+    PROPERTIES LABELS "architecture;hdf5;ic;runtime_truth")
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_decomposition_structure.cmake.in"

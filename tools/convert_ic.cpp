@@ -25,6 +25,7 @@
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/io/ic_reader.hpp"
 #include "io/internal/ic_stream_ingestion.hpp"
+#include "io/internal/ic_canonical_limits.hpp"
 
 namespace {
 
@@ -888,6 +889,7 @@ class CanonicalStreamingWriter {
       }
       counts[target] += count;
     }
+    cosmosim::io::internal::validateCanonicalSingleFileCounts(counts);
     return counts;
   }
 

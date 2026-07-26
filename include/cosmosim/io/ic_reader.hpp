@@ -264,8 +264,17 @@ struct IcImportCounters {
   std::uint64_t peak_staging_bytes = 0;
   std::uint64_t source_file_open_count = 0;
   std::uint64_t source_dataset_open_count = 0;
+  std::uint64_t full_file_hash_pass_count = 0;
+  std::uint64_t source_identity_validation_count = 0;
   std::uint64_t routing_batch_count = 0;
+  std::uint64_t reader_batches_assigned = 0;
+  std::uint64_t reader_records_assigned = 0;
+  std::uint64_t reader_record_imbalance = 0;
+  std::uint64_t main_exchange_count = 0;
+  std::uint64_t exact_audit_exchange_count = 0;
   std::uint64_t collective_phase_count = 0;
+  std::uint64_t routing_collective_phase_count = 0;
+  std::uint64_t wall_time_nanoseconds = 0;
   std::uint64_t final_local_particle_count = 0;
   std::uint64_t final_local_gas_cell_count = 0;
   std::uint64_t final_local_star_count = 0;
@@ -284,6 +293,7 @@ struct IcImportReport {
   bool already_partitioned = false;
   bool manifest_verified = false;
   std::string verified_manifest_sha256;
+  std::string provenance_authority;
 };
 
 struct IcReadResult {

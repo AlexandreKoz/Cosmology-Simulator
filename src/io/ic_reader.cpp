@@ -55,6 +55,7 @@ IcReadResult buildGeneratedIsolatedIc(
     std::size_t gas_particle_count,
     std::uint64_t particle_id_seed) {
   IcReadResult result;
+  result.report.provenance_authority = "generated_runtime_config";
   const std::size_t total_particle_count = dark_matter_particle_count + gas_particle_count;
   result.state.resizeParticles(total_particle_count);
   result.state.resizeCells(gas_particle_count);

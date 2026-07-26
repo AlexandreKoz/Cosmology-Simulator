@@ -13,7 +13,13 @@ Authoritative interfaces:
 - `src/io/ic_conversion_catalog.cpp`
 - `src/io/ic_canonical_bundle.cpp`
 - `src/io/ic_reader_session.cpp`
-- `src/io/ic_reader_file_set.cpp`
+- `src/io/ic_file_set_manifest.cpp`
+- `src/io/ic_stream_ingestion.cpp`
+- `src/io/ic_serial_ingestion.cpp`
+- `src/io/ic_failure_protocol.cpp`
+- `src/io/ic_distributed_audit.cpp`
+- `src/io/ic_distributed_ingestion.cpp`
+- `src/io/internal/ic_file_set_common.hpp`
 - `src/io/ic_byte_codec.cpp`
 - `src/io/ic_record_codec.cpp`
 - `src/io/ic_sha256.cpp`
@@ -25,17 +31,24 @@ Authoritative interfaces:
 `mode.ic_convention` is one of `generated`, `chui_canonical_v1`,
 `gadget_arepo_bridge_v1`, or `manifest_v1`.
 
+The import report records exactly one `provenance_authority` value:
+`supplied_manifest_v1`, `canonical_embedded_manifest_v2`,
+`runtime_config_and_inspected_source`, or `generated_runtime_config`.
+
 A direct bridge requires explicit source length, mass, and velocity SI-per-code
 factors, source coordinate frame, source velocity convention, all relevant
 Hubble and scale-factor exponents, and PartType2/3 policies. Zero or unspecified
 scientific values are fail-closed sentinels.
 
-Manifest mode requires only `mode.ic_manifest_file`; source files are derived
-from the manifest. A separately supplied non-generated `mode.ic_file` is
-accepted only when it resolves to the same first source member, otherwise the
-configuration is rejected as conflicting provenance. In the converter,
-manifest mode also derives species and missing-field policies/values from the
-manifest; policy CLI overrides are rejected rather than silently ignored.
+Manifest mode requires only `mode.ic_manifest_file`; source files and their order
+are derived from the manifest. A separately supplied non-generated
+`mode.ic_file` is accepted only when it resolves to the same first source member,
+otherwise runtime startup rejects conflicting provenance. Species mappings,
+field paths/aliases, conversion contracts, and normalized missing-field
+policies/replacement values are taken from the supplied manifest. Current
+runtime configuration policies are not re-applied during source inspection.
+The source is inspected only to verify hashes, metadata, schema, and the
+manifest's scientific contracts against reality.
 
 ## Real AREPO header integer compatibility
 
@@ -63,11 +76,15 @@ field schema. Per-file counts must match dataset extents and sum to declared
 totals.
 
 Discovery records path, size, header metadata, and SHA-256. Payload ingestion
-then opens a persistent reader session per assigned file, revalidates file size,
-rehashes the source, and keeps the HDF5 file and opened dataset handles stable
-across multiple chunks. A changed source fails before its payload is accepted.
-This guarantees that the validated payload comes from a file with the same size
-and SHA-256 as the inspected source while the session handle remains open.
+then opens one persistent reader session on the deterministic owner of each
+source file, revalidates path identity and size, hashes before payload reads,
+keeps the HDF5 file and opened dataset handles stable across all batches for
+that file, and revalidates identity plus SHA-256 at session completion. On POSIX
+systems the identity token includes device and inode; portable fallback evidence
+uses size and last-write time. The current HDF5 abstraction does not claim that
+SHA-256 is computed through the HDF5 library's exact open descriptor. Instead,
+pre/post path identities must match the open-session identity, and any detected
+replacement, truncation, timestamp change, or content mutation fails closed.
 
 ## Audit manifest schema v4
 
@@ -184,14 +201,29 @@ sorted runs and a fixed-fan-in external merge. Header counters record chunk
 capacity, peak batch records, reader staging bytes, flow identity, and
 `ChuiConverterFullStateMaterialized=0`.
 
+Canonical output is currently a single HDF5 file. Because
+`NumPart_ThisFile` has no high-word companion in the GADGET/AREPO header
+contract, conversion rejects any family count above `UINT32_MAX` before the
+output file is created. `NumPart_Total` and `NumPart_Total_HighWord` remain
+64-bit-safe for accepted outputs. No truncated or finalized artifact is left on
+this format-limit failure.
+
 ## Distributed runtime status
 
-The distributed reader keeps per-file HDF5 sessions and dataset handles open
-across chunks. Several deterministic chunks are accumulated into bounded
-per-peer buffers up to `mode.ic_staging_particle_count`, then exchanged once per
-routing batch. Exact route, source/final identity, duplicate, count, mass, and
-ownership audits remain enabled. Initial x-slab ownership is ingestion
-ownership; it is not a claim of final work balance.
+The distributed reader assigns file `i` to reader rank `i % world_size`; every
+batch for that file remains on that rank, so files remain distributed without
+rotating one file through every reader. One payload HDF5 session is opened per
+nonempty source file. Including inspection, session-start validation, and
+session-completion validation, the tested full-file SHA-256 ceiling is three
+passes per source file and is independent of chunk or routing-batch count.
+Several deterministic chunks are accumulated into bounded per-peer buffers up
+to `mode.ic_staging_particle_count`, then one main exchange is performed per
+routing batch. Exact source-to-final and global duplicate-ID audit exchanges are
+separately counted. The exact-audit path remains the only production behavior;
+no weaker integrity mode is silently selected. Global/species counts, mass
+totals, ownership completeness, route loss/duplication detection, and duplicate
+ID rejection remain mandatory. Initial x-slab ownership is ingestion ownership;
+it is not a claim of final work balance.
 
 The source and MPI test matrix are present, but this capability remains
 `provisional` because the Campaign B completion environment had no `MPI_CXX`

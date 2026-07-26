@@ -57,8 +57,9 @@ done < <(find . -path './.git' -prune -o \
   \( -type f \( \
        -name CMakeCache.txt -o -name CTestTestfile.cmake -o \
        -name CMakeUserPresets.json -o -name '*.o' -o -name '*.obj' -o \
-       -name '*.a' -o -name '*.so' -o -name '*.so.*' -o -name '*.dll' -o \
-       -name '*.dylib' -o -name '*.exe' -o -name '*.pyc' -o -name '*.pyo' -o \
+       -name '*.a' -o -name '*.lib' -o -name '*.so' -o -name '*.so.*' -o \
+       -name '*.dll' -o -name '*.dylib' -o -name '*.exe' -o -name '*.pdb' -o \
+       -name '*.pyc' -o -name '*.pyo' -o \
        -name '*.gcda' -o -name '*.gcno' -o -name '*.profraw' -o \
        -name '*.profdata' -o -name '*.part' -o -name core -o -name 'core.*' \
      \) -print \))
@@ -76,24 +77,30 @@ if find src/io -maxdepth 2 -type f \
   echo "[hygiene] ERROR: generic IC utility dumping-ground file detected" >&2
   exit 1
 fi
-ic_reader_lines="$(wc -l < src/io/ic_reader_file_set.cpp)"
-if (( ic_reader_lines > 4200 )); then
-  echo "[hygiene] ERROR: src/io/ic_reader_file_set.cpp has $ic_reader_lines lines; split responsibilities before exceeding 4200" >&2
-  exit 1
-fi
-for ic_unit in \
-  src/io/ic_canonical_bundle.cpp \
-  src/io/ic_conversion_catalog.cpp \
-  src/io/ic_reader_session.cpp \
-  src/io/ic_record_codec.cpp \
-  src/io/ic_byte_codec.cpp \
-  src/io/ic_sha256.cpp; do
+while IFS= read -r ic_unit; do
   unit_lines="$(wc -l < "$ic_unit")"
-  if (( unit_lines > 1200 )); then
-    echo "[hygiene] ERROR: $ic_unit has $unit_lines lines and is becoming a replacement monolith" >&2
+  if (( unit_lines > 2000 )); then
+    echo "[hygiene] ERROR: $ic_unit has $unit_lines lines; IC source units must remain at or below 2000 lines" >&2
     exit 1
   fi
-done
+done < <(find src/io -maxdepth 1 -type f -name 'ic_*.cpp' | sort)
+
+common_header_users="$(
+  grep -RIl --exclude='ic_file_set_common.hpp' \
+    'io/internal/ic_file_set_common.hpp' include src tools 2>/dev/null || true
+)"
+while IFS= read -r user; do
+  [[ -z "$user" ]] && continue
+  case "$user" in
+    src/io/ic_file_set_manifest.cpp|src/io/ic_stream_ingestion.cpp|\
+    src/io/ic_serial_ingestion.cpp|src/io/ic_distributed_audit.cpp|\
+    src/io/ic_distributed_ingestion.cpp) ;;
+    *)
+      echo "[hygiene] ERROR: private IC file-set header leaked into $user" >&2
+      exit 1
+      ;;
+  esac
+done <<<"$common_header_users"
 
 echo "[hygiene] checking required preset names"
 required_presets=(

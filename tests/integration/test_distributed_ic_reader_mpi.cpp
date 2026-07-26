@@ -684,6 +684,23 @@ int main(int argc, char** argv) {
     assert(small_global == 64U);
     assert(large_global == 256U);
     assert(large_global == 4U * small_global);
+    const std::uint64_t small_batches = mpi_context.allreduceSumUint64(
+        small.report.counters.routing_batch_count);
+    const std::uint64_t large_batches = mpi_context.allreduceSumUint64(
+        large.report.counters.routing_batch_count);
+    const std::uint64_t small_chunks = mpi_context.allreduceSumUint64(
+        small.report.counters.chunks_assigned);
+    const std::uint64_t large_chunks = mpi_context.allreduceSumUint64(
+        large.report.counters.chunks_assigned);
+    const std::uint64_t small_main_exchanges = mpi_context.allreduceSumUint64(
+        small.report.counters.main_exchange_count);
+    const std::uint64_t large_main_exchanges = mpi_context.allreduceSumUint64(
+        large.report.counters.main_exchange_count);
+    assert(small_batches < small_chunks);
+    assert(large_batches < large_chunks);
+    assert(small_main_exchanges == small_batches);
+    assert(large_main_exchanges == large_batches);
+    assert(large_batches > small_batches);
     assert(
         large.report.counters.peak_staging_bytes <=
         small.report.counters.peak_staging_bytes + 64U * 1024U);
@@ -766,10 +783,34 @@ int main(int argc, char** argv) {
         result.report.counters.source_file_open_count);
     const std::uint64_t global_dataset_opens = mpi_context.allreduceSumUint64(
         result.report.counters.source_dataset_open_count);
+    const std::uint64_t global_hash_passes = mpi_context.allreduceSumUint64(
+        result.report.counters.full_file_hash_pass_count);
+    const std::uint64_t global_reader_batches = mpi_context.allreduceSumUint64(
+        result.report.counters.reader_batches_assigned);
+    const std::uint64_t global_reader_records = mpi_context.allreduceSumUint64(
+        result.report.counters.reader_records_assigned);
+    const std::uint64_t global_reader_imbalance = mpi_context.allreduceSumUint64(
+        result.report.counters.reader_record_imbalance);
+    const std::uint64_t global_main_exchanges = mpi_context.allreduceSumUint64(
+        result.report.counters.main_exchange_count);
+    const std::uint64_t global_exact_audit_exchanges =
+        mpi_context.allreduceSumUint64(
+            result.report.counters.exact_audit_exchange_count);
+    const std::uint64_t global_routing_collective_phases =
+        mpi_context.allreduceSumUint64(
+            result.report.counters.routing_collective_phase_count);
     assert(global_batches > 0U && global_batches <= expected_chunks);
     if (!policy_mode) assert(global_batches < expected_chunks);
-    assert(global_file_opens > 0U && global_file_opens <= global_batches);
+    assert(global_file_opens == K_MEMBER_COUNT);
+    assert(global_hash_passes <= 3U * K_MEMBER_COUNT);
     assert(global_dataset_opens > 0U);
+    assert(global_reader_batches == global_batches);
+    assert(global_reader_records == expected_global);
+    assert(global_reader_imbalance <= expected_global);
+    assert(global_main_exchanges == global_batches);
+    assert(global_exact_audit_exchanges >= global_batches);
+    assert(global_routing_collective_phases > global_batches);
+    assert(global_routing_collective_phases <= 32U * global_batches);
     const std::uint64_t global_collective_phases =
         mpi_context.allreduceSumUint64(
             result.report.counters.collective_phase_count);
