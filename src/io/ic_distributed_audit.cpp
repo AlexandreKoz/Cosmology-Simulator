@@ -8,11 +8,14 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "io/internal/ic_byte_codec.hpp"
 #include "io/internal/ic_failure_protocol.hpp"
 #include "io/internal/ic_file_set_common.hpp"
+#include "io/internal/ic_mpi_collectives.hpp"
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -30,6 +33,7 @@ using failure_protocol_internal::alltoallBytes;
 using failure_protocol_internal::injectIcTestFault;
 using failure_protocol_internal::runCollectivePhase;
 using failure_protocol_internal::runCollectivePhaseVoid;
+using mpi_collective_internal::mpiAllreduce;
 
 [[nodiscard]] int ownerForX(double x, double box_size, int world_size) {
   if (!std::isfinite(x) || !(box_size > 0.0) || x < 0.0 || x > box_size * (1.0 + 1.0e-12)) throw std::runtime_error("converted IC coordinate is outside the periodic box");
@@ -37,11 +41,22 @@ using failure_protocol_internal::runCollectivePhaseVoid;
   const double fraction=x/box_size;const int owner=std::min(world_size-1,static_cast<int>(fraction*world_size));return std::max(0,owner);
 }
 
+[[nodiscard]] std::uint64_t checkedCapacityBytes(
+    std::size_t capacity,
+    std::size_t element_size,
+    std::string_view label) {
+  if (element_size != 0U &&
+      capacity > std::numeric_limits<std::uint64_t>::max() / element_size) {
+    throw std::overflow_error(std::string(label) + " capacity overflow");
+  }
+  return static_cast<std::uint64_t>(capacity) * element_size;
+}
+
 [[nodiscard]] std::uint64_t nestedByteCapacity(
     const std::vector<std::vector<std::uint8_t>>& buckets) {
-  std::uint64_t bytes =
-      static_cast<std::uint64_t>(buckets.capacity()) *
-      sizeof(std::vector<std::uint8_t>);
+  std::uint64_t bytes = checkedCapacityBytes(
+      buckets.capacity(), sizeof(std::vector<std::uint8_t>),
+      "IC nested bucket table");
   for (const auto& bucket : buckets) {
     if (bytes > std::numeric_limits<std::uint64_t>::max() -
             bucket.capacity()) {
@@ -62,7 +77,7 @@ void validateChunkCoverage(
   const int local_completed =
       mpi_context.worldRank() == reader_rank ? 1 : 0;
   int global_completed = 0;
-  MPI_Allreduce(
+  mpiAllreduce(
       &local_completed, &global_completed, 1, MPI_INT, MPI_SUM,
       MPI_COMM_WORLD);
   if (global_completed != 1) {
@@ -76,8 +91,8 @@ void validateChunkCoverage(
       static_cast<std::uint64_t>(count);
   std::uint64_t minimum = 0U;
   std::uint64_t maximum = 0U;
-  MPI_Allreduce(&token, &minimum, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
-  MPI_Allreduce(&token, &maximum, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  mpiAllreduce(&token, &minimum, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+  mpiAllreduce(&token, &maximum, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
   if (minimum != maximum) {
     throw std::runtime_error(
         "distributed IC ranks disagree on the active chunk token");
@@ -183,17 +198,29 @@ void validateChunkCoverage(
         return 0;
       });
   int any_bad = 0;
-  MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  mpiAllreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   if (any_bad != 0) {
     throw std::runtime_error(
         "distributed IC source and final ID multisets do not reconcile "
         "exactly");
   }
-  return std::max(
-      nestedByteCapacity(buckets) + exchange_peak,
-      static_cast<std::uint64_t>(received.capacity()) +
-          static_cast<std::uint64_t>(entries.capacity()) *
-              sizeof(BalanceEntry));
+  return runCollectivePhase<std::uint64_t>(
+      mpi_context, "IC source-to-final audit capacity accounting", [&]() {
+        injectIcTestFault(mpi_context, "exact_audit_capacity_accounting");
+        std::uint64_t exchange_storage = nestedByteCapacity(buckets);
+        checkedCounterAdd(
+            exchange_storage, exchange_peak,
+            "source-to-final audit exchange storage");
+        std::uint64_t decoded_storage =
+            static_cast<std::uint64_t>(received.capacity());
+        checkedCounterAdd(
+            decoded_storage,
+            checkedCapacityBytes(
+                entries.capacity(), sizeof(BalanceEntry),
+                "source-to-final audit decoded storage"),
+            "source-to-final audit decoded storage");
+        return std::max(exchange_storage, decoded_storage);
+      });
 }
 
 [[nodiscard]] std::uint64_t exactDistributedIdAudit(
@@ -239,24 +266,39 @@ void validateChunkCoverage(
   TemporaryAuditDirectory audit_cleanup{audit_directory};
 
   const std::uint64_t local_rounds =
-      (local_ids.size() + validated_batch_count - 1U) /
-      validated_batch_count;
+      runCollectivePhase<std::uint64_t>(
+          mpi_context, "IC global ID audit round accounting", [&]() {
+            if (local_ids.empty()) {
+              return std::uint64_t{0};
+            }
+            return 1U + static_cast<std::uint64_t>(
+                (local_ids.size() - 1U) / validated_batch_count);
+          });
   std::uint64_t rounds = 0U;
-  MPI_Allreduce(
+  mpiAllreduce(
       &local_rounds, &rounds, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  counters.distributed_id_audit_round_count = rounds;
 
   std::vector<std::optional<std::filesystem::path>> sorted_run_levels;
   std::uint64_t next_run_index = 0U;
   std::uint64_t peak_bytes = 0U;
 
   const auto pathStorageBytes = [&]() {
-    std::uint64_t bytes =
-        static_cast<std::uint64_t>(sorted_run_levels.capacity()) *
-        sizeof(std::optional<std::filesystem::path>);
+    std::uint64_t bytes = checkedCapacityBytes(
+        sorted_run_levels.capacity(),
+        sizeof(std::optional<std::filesystem::path>),
+        "ID-audit path table");
     for (const auto& path : sorted_run_levels) {
       if (path.has_value()) {
+        if (path->native().capacity() >
+            std::numeric_limits<std::uint64_t>::max() /
+                sizeof(std::filesystem::path::value_type)) {
+          throw std::overflow_error("ID-audit path storage overflow");
+        }
         checkedCounterAdd(
-            bytes, path->native().capacity() * sizeof(std::filesystem::path::value_type),
+            bytes,
+            static_cast<std::uint64_t>(path->native().capacity()) *
+                sizeof(std::filesystem::path::value_type),
             "ID-audit path storage");
       }
     }
@@ -413,9 +455,9 @@ void validateChunkCoverage(
           while (offset < received.size()) {
             round_ids.push_back(internal::readLe64(received, offset));
           }
-          round_vector_capacity =
-              static_cast<std::uint64_t>(round_ids.capacity()) *
-              sizeof(std::uint64_t);
+          round_vector_capacity = checkedCapacityBytes(
+              round_ids.capacity(), sizeof(std::uint64_t),
+              "ID-audit round vector");
           std::sort(round_ids.begin(), round_ids.end());
           if (std::adjacent_find(round_ids.begin(), round_ids.end()) !=
               round_ids.end()) {
@@ -447,7 +489,7 @@ void validateChunkCoverage(
           return 0;
         });
     int any_duplicate = 0;
-    MPI_Allreduce(
+    mpiAllreduce(
         &local_duplicate, &any_duplicate, 1, MPI_INT, MPI_MAX,
         MPI_COMM_WORLD);
     if (any_duplicate != 0) {
@@ -455,10 +497,23 @@ void validateChunkCoverage(
           "distributed IC import contains duplicate particle IDs across "
           "files or ranks");
     }
-    peak_bytes = std::max(
-        peak_bytes,
-        nestedByteCapacity(buckets) + exchange_peak + round_vector_capacity +
-            pathStorageBytes());
+    runCollectivePhaseVoid(
+        mpi_context, "IC global ID audit capacity accounting", [&]() {
+          injectIcTestFault(
+              mpi_context, "duplicate_audit_capacity_accounting");
+          std::uint64_t round_peak = nestedByteCapacity(buckets);
+          checkedCounterAdd(
+              round_peak, exchange_peak, "global ID audit exchange storage");
+          checkedCounterAdd(
+              round_peak, round_vector_capacity,
+              "global ID audit round-vector storage");
+          injectIcTestFault(mpi_context, "audit_path_storage_accounting");
+          checkedCounterAdd(
+              round_peak, pathStorageBytes(),
+              "global ID audit path storage");
+          injectIcTestFault(mpi_context, "audit_peak_staging_accounting");
+          peak_bytes = std::max(peak_bytes, round_peak);
+        });
   }
 
   const int local_cross_level_duplicate = runCollectivePhase<int>(
@@ -484,7 +539,7 @@ void validateChunkCoverage(
         return 0;
       });
   int any_cross_level_duplicate = 0;
-  MPI_Allreduce(
+  mpiAllreduce(
       &local_cross_level_duplicate, &any_cross_level_duplicate, 1, MPI_INT,
       MPI_MAX, MPI_COMM_WORLD);
   if (any_cross_level_duplicate != 0) {
@@ -492,7 +547,11 @@ void validateChunkCoverage(
         "distributed IC import contains duplicate particle IDs across files "
         "or ranks");
   }
-  return std::max(peak_bytes, pathStorageBytes());
+  return runCollectivePhase<std::uint64_t>(
+      mpi_context, "IC global ID audit final capacity accounting", [&]() {
+        injectIcTestFault(mpi_context, "audit_path_storage_accounting");
+        return std::max(peak_bytes, pathStorageBytes());
+      });
 }
 
 void validateDistributedTotals(
@@ -533,13 +592,13 @@ void validateDistributedTotals(
   std::array<std::uint64_t, 5> global_counts{};
   std::array<double, 5> global_final_mass{};
   std::array<double, 5> global_source_mass{};
-  MPI_Allreduce(
+  mpiAllreduce(
       local.counts.data(), global_counts.data(), 5, MPI_UINT64_T, MPI_SUM,
       MPI_COMM_WORLD);
-  MPI_Allreduce(
+  mpiAllreduce(
       local.masses.data(), global_final_mass.data(), 5, MPI_DOUBLE, MPI_SUM,
       MPI_COMM_WORLD);
-  MPI_Allreduce(
+  mpiAllreduce(
       local_source_mass.data(), global_source_mass.data(), 5, MPI_DOUBLE,
       MPI_SUM, MPI_COMM_WORLD);
 

@@ -308,3 +308,38 @@ PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_pa
 ## AMR temporal restart state (v18)
 
 `cosmosim_restart_v19` introduced `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. The current `cosmosim_restart_v21` retains it and the v20 `/gravity_force_cache`, then adds ordered code-time output events. None are part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.
+
+
+## Initial-condition import report counters
+
+`IcImportReport` is runtime/profiling metadata rather than a new HDF5 snapshot
+schema. Its Campaign B distributed counters distinguish:
+
+- logical consensus phases: `logical_consensus_phase_count` and
+  `routing_logical_consensus_phase_count`;
+- compatibility aliases: `collective_phase_count` and
+  `routing_collective_phase_count` (same logical meaning);
+- actual MPI calls: `mpi_collective_call_count`, routing/non-routing totals,
+  and per-operation counters for `Allreduce`, `Bcast`, `Gather`, `Gatherv`,
+  `Alltoall`, and `Alltoallv`;
+- normalized cost: `collectives_per_million_records`;
+- stable-reader, file/dataset-open, full-hash, source-identity, batch,
+  exchange, byte, staging, imbalance, `distributed_id_audit_round_count`, and
+  final owner-local state counters.
+
+For a successful version-1 routing batch,
+`routing_mpi_collective_call_count == 30 * routing_batch_count` on every MPI
+rank. The successful non-routing protocol is also exact:
+
+```text
+nonrouting_mpi_collective_call_count
+  = 40
+  + (validate_runtime_cosmology ? 1 : 0)
+  + source_file_count
+  + 10 * distributed_id_audit_round_count
+  + mpi_bcast_call_count
+```
+
+The per-operation counters sum exactly to the total, and all ranks must report
+the same actual-call count. These report fields do not alter canonical
+GADGET/AREPO group, dataset, or header names.

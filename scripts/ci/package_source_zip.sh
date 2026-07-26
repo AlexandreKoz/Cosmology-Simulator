@@ -12,14 +12,20 @@ mkdir -p "$staging_root"
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='build/' --exclude='build-*/' --exclude='cmake-build-*/' \
+  --exclude='CMakeFiles/' --exclude='Testing/' --exclude='_deps/' \
   --exclude='integration_outputs/' --exclude='validation_outputs/' \
   --exclude='test_outputs/' --exclude='output/' \
   --exclude='.pytest_cache/' --exclude='__pycache__/' \
   --exclude='.mypy_cache/' --exclude='.ruff_cache/' \
+  --exclude='.ipynb_checkpoints/' --exclude='vcpkg_installed/' \
+  --exclude='CMakeCache.txt' --exclude='CTestTestfile.cmake' \
+  --exclude='CMakeUserPresets.json' --exclude='*.zip' \
   --exclude='*.pyc' --exclude='*.pyo' --exclude='*.part' \
   --exclude='*.o' --exclude='*.obj' --exclude='*.a' --exclude='*.lib' \
   --exclude='*.so' --exclude='*.so.*' --exclude='*.dll' --exclude='*.dylib' \
-  --exclude='*.exe' --exclude='*.pdb' --exclude='core' --exclude='core.*' \
+  --exclude='*.exe' --exclude='*.pdb' --exclude='*.gcda' --exclude='*.gcno' \
+  --exclude='*.profraw' --exclude='*.profdata' \
+  --exclude='core' --exclude='core.*' \
   --exclude='*Zone.Identifier*' --exclude='*#Uf03aZone.Identifier*' \
   "$repo_root/" "$staging_root/"
 
@@ -36,12 +42,23 @@ mkdir -p "$(dirname "$output_zip")"
 )
 unzip -t "$output_zip" >/dev/null
 
+archive_roots="$(unzip -Z1 "$output_zip" | awk -F/ 'NF {print $1}' | sort -u)"
+if [[ "$archive_roots" != "$archive_root" ]]; then
+  echo "[package] ERROR: archive must contain exactly one repository root '$archive_root'" >&2
+  printf '[package] observed roots:
+%s
+' "$archive_roots" >&2
+  exit 1
+fi
+
 if unzip -Z1 "$output_zip" | grep -E \
-  '(^|/)(build|build-[^/]*|cmake-build-[^/]*|CMakeFiles|Testing|_deps|integration_outputs|validation_outputs|test_outputs|output|\.pytest_cache|__pycache__|\.mypy_cache|\.ruff_cache|\.ipynb_checkpoints|vcpkg_installed)(/|$)|(^|/)(CMakeCache\.txt|CTestTestfile\.cmake|CMakeUserPresets\.json|core|core\.[^/]+)$|Zone\.Identifier|#Uf03aZone\.Identifier|\.(o|obj|a|lib|so|dll|dylib|exe|pdb|pyc|pyo|gcda|gcno|profraw|profdata|part)$' \
+  '(^|/)(build|build-[^/]*|cmake-build-[^/]*|CMakeFiles|Testing|_deps|integration_outputs|validation_outputs|test_outputs|output|\.pytest_cache|__pycache__|\.mypy_cache|\.ruff_cache|\.ipynb_checkpoints|vcpkg_installed)(/|$)|(^|/)(CMakeCache\.txt|CTestTestfile\.cmake|CMakeUserPresets\.json|core|core\.[^/]+)$|Zone\.Identifier|#Uf03aZone\.Identifier|\.(o|obj|a|lib|so|dll|dylib|exe|pdb|pyc|pyo|gcda|gcno|profraw|profdata|part|zip)$' \
   >/dev/null; then
   echo "[package] ERROR: archive denylist matched generated or ADS content" >&2
   exit 1
 fi
 
+entry_count="$(unzip -Z1 "$output_zip" | wc -l)"
 echo "[package] source ZIP ready: $output_zip"
+echo "[package] archive entries: $entry_count"
 sha256sum "$output_zip"

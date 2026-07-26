@@ -86,8 +86,16 @@ includes:
 - `source_file_open_count`, `source_dataset_open_count`
 - `full_file_hash_pass_count`, `source_identity_validation_count`
 - `routing_batch_count`, `reader_batches_assigned`, `reader_records_assigned`, `reader_record_imbalance`
-- `main_exchange_count`, `exact_audit_exchange_count`
-- `routing_collective_phase_count`, `collective_phase_count`
+- `main_exchange_count`, `exact_audit_exchange_count`, `distributed_id_audit_round_count`
+- `logical_consensus_phase_count`, `routing_logical_consensus_phase_count`
+- compatibility aliases `collective_phase_count`, `routing_collective_phase_count`
+  (logical phases only)
+- `mpi_collective_call_count`, `routing_mpi_collective_call_count`,
+  `nonrouting_mpi_collective_call_count`
+- `mpi_allreduce_call_count`, `mpi_bcast_call_count`,
+  `mpi_gather_call_count`, `mpi_gatherv_call_count`,
+  `mpi_alltoall_call_count`, `mpi_alltoallv_call_count`
+- `collectives_per_million_records`
 - `wall_time_nanoseconds`
 - `peak_staging_bytes`
 - final local particle, gas, star, black-hole, and tracer counts
@@ -110,9 +118,36 @@ by three passes per source file (inspection, session start, session completion)
 independent of batch count, each source chunk is assigned once, reader-record imbalance is reported as the maximum minus minimum assigned-record count across ranks, main exchanges
 scale with routing batches rather than source chunks, each source ID balances
 against one final ID, and no rank allocates authoritative arrays sized to the
-global particle count merely because MPI is enabled. `main_exchange_count` and
+global particle count merely because MPI is enabled. `main_exchange_count` and the compatibility
 `routing_collective_phase_count` are global protocol counters recorded on rank
-zero; byte counters remain rank-local and may be reduced by the caller.
+zero; byte counters remain rank-local and may be reduced by the caller. The
+compatibility collective fields count logical rank-consistent protocol phases,
+not raw MPI calls. Actual production communicator calls are counted centrally by
+the `mpi_*_call_count` fields. Their per-kind sum equals
+`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 30
+calls per successful routing batch in protocol version 1 (22 consensus votes,
+three coverage reductions, two `Alltoall`/`Alltoallv` pairs, and one exact
+reconciliation reduction). Fixed discovery, manifest, final audit, and
+finalization calls are reported by `nonrouting_mpi_collective_call_count`.
+For protocol version 1 the successful-path identity is:
+
+```text
+routing_mpi_collective_call_count
+  = 30 * routing_batch_count
+
+nonrouting_mpi_collective_call_count
+  = 40
+  + (validate_runtime_cosmology ? 1 : 0)
+  + source_file_count
+  + 10 * distributed_id_audit_round_count
+  + mpi_bcast_call_count
+```
+
+The `mpi_bcast_call_count` term is explicit because length-prefixed metadata
+broadcasts may require more than one 64 MiB payload chunk. The distributed MPI
+acceptance test checks both identities rather than applying an arbitrary loose
+ceiling. `collectives_per_million_records` uses the globally routed record
+count and is zero when no records are routed.
 
 These counters are scalability evidence, not a substitute for scientific
 validation. Exact distributed duplicate-ID, count, mass, ownership, provenance,

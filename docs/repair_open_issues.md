@@ -1,19 +1,26 @@
 # Repair open issues
 
-## 2026-07-26 Campaign B distributed acceptance evidence
+## 2026-07-26 Campaign B distributed final-gate evidence
 
-Campaign B source-level closure is implemented for manifest authority,
-rank-consistent failure phases, stable per-file readers, bounded complete-file
-hashing, start/end source identity validation, collective-cost counters,
-canonical one-file count safety, IC subsystem decomposition, and clean source
-packaging. Focused HDF5 tests and MPI-enabled static syntax checks pass.
+The final source micro-patch now validates every non-null supplied manifest,
+uses `manifest.dialect` for distributed inspection, executes canonical bundle
+verification on supplied canonical manifests, guards the remaining exact-audit
+capacity/path accounting seams, and instruments actual production MPI
+collective calls separately from logical consensus phases. The registered MPI
+matrix asserts 30 calls per routing batch and the exact non-routing formula,
+including duplicate-audit rounds and chunked Bcasts. Stable per-file readers,
+the three-hash-pass ceiling, exact count/mass/ownership/route/ID audits,
+source identity, large-count protection, and the decomposed IC structure remain
+intact.
 
-The remaining Campaign B item is environment evidence, not an accepted source
-waiver: this repair environment has no `MPI_CXX`, so the registered np1/np2/np4
-distributed IC correctness, fault-injection, and scaling tests were not executed.
-Runtime capability reporting must remain provisional until the exact MPI preset
-and focused commands recorded in the final acceptance report pass on a
-dependency-complete host.
+The remaining Campaign B item is external runtime evidence, not a source waiver:
+this repair environment has no `MPI_CXX`, so the registered np1/np2/np4
+canonical-manifest, malformed-input, fault-injection, counter-agreement, and
+scaling matrix cannot execute here. Distributed capability must remain
+`provisional` until those exact tests pass on a dependency-complete host. The
+final handoff must also be the exact archive produced by
+`scripts/ci/package_source_zip.sh`, not an independently uploaded working-tree
+ZIP.
 
 ## 2026-07-08 remaining MPI acceptance limitations
 

@@ -476,3 +476,19 @@ Canonical examples are in `configs/`:
 - `isolated_cluster.param.txt`
 - `cooling_relaxation.param.txt`
 - `configs/release/release_smoke_*.param.txt`
+
+
+## Campaign B supplied-manifest authority
+
+For `mode.ic_convention = manifest_v1`, `mode.ic_manifest_file` is the only
+required source authority. `mode.ic_file` is optional and, when present, must
+resolve to the same first source member. The validated manifest controls source
+order, dialect, hashes, schema aliases, conversions, missing-field contracts and
+replacement values, and species policy. Runtime configuration does not reapply
+parallel scientific policies over the manifest.
+
+The equivalent C++ APIs follow the same rule: any non-null supplied manifest is
+validated or rejected; an incomplete manifest never falls back to source
+discovery or live configuration. Distributed canonical manifests select
+canonical inspection and therefore require a valid embedded/sidecar/marker
+bundle.

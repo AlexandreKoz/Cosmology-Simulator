@@ -83,11 +83,22 @@ finite/domain-valid fields, and sidecar invariants. File inspection and payload
 reading are assigned by stable `file_index % world_size` ownership. Full-file hashing
 is bounded by three passes per source file and does not grow with routing batches.
 Potentially throwing digest, session construction, serialization/accounting,
-post-exchange, source-to-final audit, and completion-identity phases vote before
-any later collective so malformed input terminates collectively rather than
-stranding peers in MPI. Distributed IC capability remains
-provisional until the registered MPI acceptance matrix passes on a dependency-complete
-system.
+post-exchange, source-to-final audit, duplicate-audit path/capacity accounting,
+and completion-identity phases vote before any later collective so malformed
+input terminates collectively rather than stranding peers in MPI. Every supplied
+manifest is validated at the public reader boundary, and its dialect controls
+distributed inspection; canonical supplied manifests cannot bypass bundle
+verification.
+
+The workflow records logical consensus phases separately from actual production
+MPI calls. All IC `Allreduce`, `Bcast`, `Gather`, `Gatherv`, `Alltoall`, and
+`Alltoallv` calls pass through the instrumented IC wrapper. Successful routing
+uses 30 actual calls per batch under protocol version 1. Non-routing cost is
+`40 + runtime_cosmology_vote + source_file_count +
+10 * distributed_id_audit_round_count + mpi_bcast_call_count`; the Bcast term
+preserves truthful accounting when metadata spans multiple 64 MiB chunks.
+Distributed IC capability remains provisional until the registered MPI
+acceptance matrix passes on a dependency-complete system.
 
 The validated audit manifest is written by rank zero as `ic_manifest.json` in the run
 directory. Every rank emits `io.ic_ingestion.summary` counters through the shared

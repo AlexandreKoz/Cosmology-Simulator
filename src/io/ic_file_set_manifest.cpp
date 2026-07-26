@@ -1119,6 +1119,14 @@ void recordRootSchemaDisposition(
   SourceFileInspection result;
   result.path = path;
   result.schema = readHeader(header.get());
+  const bool source_declares_canonical =
+      attributeExists(header.get(), "ChuiIcSchemaName");
+  if (dialect == IcDialect::kGadgetArepoBridgeV1 &&
+      source_declares_canonical) {
+    throw std::runtime_error(
+        "IC source declares chui_canonical_v1 but the authoritative dialect "
+        "is gadget_arepo_bridge_v1");
+  }
   if (dialect == IcDialect::kChuiCanonicalV1) {
     const CanonicalBundleVerification verification =
         verifyCanonicalBundle(path, file.get(), header.get());
@@ -1450,8 +1458,7 @@ void recordRootSchemaDisposition(
     const std::filesystem::path& requested,
     const core::SimulationConfig& config,
     const IcImportOptions& options) {
-  const bool has_authoritative_manifest =
-      options.manifest != nullptr && !options.manifest->source_sha256.empty();
+  const bool has_authoritative_manifest = options.manifest != nullptr;
   const std::filesystem::path first_source =
       has_authoritative_manifest && !options.manifest->source_files.empty()
       ? options.manifest->source_files.front()

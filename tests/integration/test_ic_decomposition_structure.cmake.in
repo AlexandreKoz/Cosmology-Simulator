@@ -10,6 +10,7 @@ endforeach()
 
 
 foreach(_required_unit IN ITEMS
+    "@CMAKE_SOURCE_DIR@/src/io/ic_mpi_collectives.cpp"
     "@CMAKE_SOURCE_DIR@/src/io/ic_failure_protocol.cpp"
     "@CMAKE_SOURCE_DIR@/src/io/ic_distributed_audit.cpp")
   if(NOT EXISTS "${_required_unit}")
@@ -50,6 +51,21 @@ foreach(_file IN LISTS _candidate_sources)
     if(_allowed_index EQUAL -1)
       message(FATAL_ERROR
         "Private IC file-set header leaked into ${_file}")
+    endif()
+  endif()
+endforeach()
+
+set(_mpi_collective_wrapper "@CMAKE_SOURCE_DIR@/src/io/ic_mpi_collectives.cpp")
+foreach(_file IN LISTS _candidate_sources)
+  if(_file STREQUAL "${_mpi_collective_wrapper}")
+    continue()
+  endif()
+  file(READ "${_file}" _content)
+  string(REGEX MATCH "MPI_(Allreduce|Bcast|Gather|Gatherv|Alltoall|Alltoallv)[ \t\r\n]*[(]" _raw_collective "${_content}")
+  if(_raw_collective)
+    if(_file MATCHES "/src/io/ic_(distributed_ingestion|distributed_audit|failure_protocol)[.]cpp$")
+      message(FATAL_ERROR
+        "Distributed IC production source bypasses MPI collective instrumentation: ${_file}")
     endif()
   endif()
 endforeach()

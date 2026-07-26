@@ -50,6 +50,20 @@ runtime configuration policies are not re-applied during source inspection.
 The source is inspected only to verify hashes, metadata, schema, and the
 manifest's scientific contracts against reality.
 
+At the public serial, streaming, and distributed C++ entry points, every non-null
+`IcImportOptions::manifest` is validated immediately. Authority is never inferred
+from a non-empty SHA vector or another partial-field heuristic: an incomplete or
+invalid supplied manifest is rejected before scientific ingestion. In the MPI
+reader that validation participates in the rank-consistent failure protocol.
+
+For distributed inspection, a validated supplied manifest also selects the
+scientific dialect. `chui_canonical_v1` supplied manifests execute the complete
+canonical bundle verifier (embedded manifest bytes, HDF5 digest, sidecar, marker,
+exact byte agreement, source identity, and source SHA-256); bridge manifests use
+bridge inspection. A canonical source paired with a bridge manifest, or a bridge
+source paired with a canonical manifest, fails explicitly rather than silently
+changing dialect.
+
 ## Real AREPO header integer compatibility
 
 `NumPart_ThisFile` and `NumFilesPerSnapshot` accept signed or unsigned HDF5
@@ -229,3 +243,14 @@ The source and MPI test matrix are present, but this capability remains
 `provisional` because the Campaign B completion environment had no `MPI_CXX`
 wrapper and could not execute the one-, two-, and four-rank acceptance matrix.
 No MPI, FFTW, FFTW-MPI, or parallel-HDF5 pass is claimed.
+
+The distributed report distinguishes logical failure-consensus phases from
+actual MPI calls. Production IC collectives are routed through one instrumented
+wrapper layer and reported as total, routing/non-routing, and per-operation
+(`Allreduce`, `Bcast`, `Gather`, `Gatherv`, `Alltoall`, `Alltoallv`) counts. A
+successful routing batch has a protocol-derived cost of exactly 30 actual MPI
+collective calls in version 1. The non-routing identity is
+`40 + runtime_cosmology_vote + source_file_count +
+10 * distributed_id_audit_round_count + mpi_bcast_call_count`, where the Bcast
+term remains explicit for chunked metadata. Runtime validation of both formulas
+remains part of the dependency-complete np1/np2/np4 acceptance matrix.

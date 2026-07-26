@@ -35,6 +35,7 @@
 #include "io/internal/ic_distributed_audit.hpp"
 #include "io/internal/ic_failure_protocol.hpp"
 #include "io/internal/ic_hdf5_handle.hpp"
+#include "io/internal/ic_mpi_collectives.hpp"
 #include "io/internal/ic_reader_session.hpp"
 #include "io/internal/ic_record_codec.hpp"
 #include "io/internal/ic_stream_ingestion.hpp"
@@ -69,6 +70,12 @@ using failure_protocol_internal::injectIcTestFault;
 using failure_protocol_internal::mutateIcTestRoute;
 using failure_protocol_internal::runCollectivePhase;
 using failure_protocol_internal::runCollectivePhaseVoid;
+using mpi_collective_internal::MpiCollectiveCallCounts;
+using mpi_collective_internal::MpiCollectiveCounterScope;
+using mpi_collective_internal::RoutingMpiCollectiveScope;
+using mpi_collective_internal::mpiAllreduce;
+using mpi_collective_internal::mpiGather;
+using mpi_collective_internal::mpiGatherv;
 #endif
 
 namespace {
@@ -243,7 +250,7 @@ void appendLengthPrefixedString(
         return std::vector<int>(
             static_cast<std::size_t>(mpi_context.worldSize()));
       });
-  MPI_Gather(
+  mpiGather(
       &local_count, 1, MPI_INT,
       mpi_context.isRoot() ? counts.data() : nullptr, 1, MPI_INT, 0,
       MPI_COMM_WORLD);
@@ -275,7 +282,7 @@ void appendLengthPrefixedString(
         return prepared;
       });
 
-  MPI_Gatherv(
+  mpiGatherv(
       local_bytes.empty() ? nullptr : local_bytes.data(), local_count, MPI_BYTE,
       mpi_context.isRoot() && !layout.bytes.empty() ? layout.bytes.data() : nullptr,
       mpi_context.isRoot() ? counts.data() : nullptr,
@@ -347,13 +354,13 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
     const core::SimulationConfig& config,
     const parallel::MpiContext& mpi_context,
     const IcImportOptions& options) {
-  const bool has_authoritative_manifest =
-      options.manifest != nullptr && !options.manifest->source_sha256.empty();
-  const IcDialect dialect =
-      config.mode.ic_convention ==
-              core::InitialConditionConvention::kChuiCanonicalV1
-          ? IcDialect::kChuiCanonicalV1
-          : IcDialect::kGadgetArepoBridgeV1;
+  const bool has_authoritative_manifest = options.manifest != nullptr;
+  const IcDialect dialect = has_authoritative_manifest
+      ? options.manifest->dialect
+      : (config.mode.ic_convention ==
+                 core::InitialConditionConvention::kChuiCanonicalV1
+             ? IcDialect::kChuiCanonicalV1
+             : IcDialect::kGadgetArepoBridgeV1);
   std::array<IcSpeciesPolicy, kParticleTypeCount> species_policy{
       IcSpeciesPolicy::kGas,
       IcSpeciesPolicy::kDarkMatter,
@@ -708,6 +715,8 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
   }
   std::uint64_t collective_phase_count = 0U;
   CollectivePhaseCounterScope collective_counter_scope(collective_phase_count);
+  MpiCollectiveCallCounts mpi_collective_counts;
+  MpiCollectiveCounterScope mpi_collective_counter_scope(mpi_collective_counts);
   runCollectivePhaseVoid(
       mpi_context, "IC distributed configuration validation", [&]() {
         if (options.chunk_particle_count == 0U) {
@@ -716,6 +725,9 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
         if (config.mode.ic_staging_particle_count == 0U) {
           throw std::invalid_argument(
               "distributed IC staging particle count must be positive");
+        }
+        if (options.manifest != nullptr) {
+          validateIcManifest(*options.manifest);
         }
       });
 
@@ -746,7 +758,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
   const int local_digest_mismatch =
       local_manifest_digest == root_manifest_digest ? 0 : 1;
   int any_digest_mismatch = 0;
-  MPI_Allreduce(
+  mpiAllreduce(
       &local_digest_mismatch, &any_digest_mismatch, 1, MPI_INT, MPI_MAX,
       MPI_COMM_WORLD);
   if (any_digest_mismatch != 0) {
@@ -833,6 +845,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
            batch_start += routing.batch_particle_count) {
         const std::size_t batch_count = std::min(
             routing.batch_particle_count, total - batch_start);
+        RoutingMpiCollectiveScope routing_mpi_collective_scope;
         const std::uint64_t batch_collective_begin = collective_phase_count;
 
         std::vector<ParticleRecord> records =
@@ -1088,10 +1101,10 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                 result.report.counters.reader_records_assigned;
             std::uint64_t minimum = 0U;
             std::uint64_t maximum = 0U;
-            MPI_Allreduce(
+            mpiAllreduce(
                 &local_records, &minimum, 1, MPI_UINT64_T, MPI_MIN,
                 MPI_COMM_WORLD);
-            MPI_Allreduce(
+            mpiAllreduce(
                 &local_records, &maximum, 1, MPI_UINT64_T, MPI_MAX,
                 MPI_COMM_WORLD);
             return std::array<std::uint64_t, 2>{minimum, maximum};
@@ -1126,7 +1139,38 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
       result.report.counters.metadata_bytes_read +
       result.report.counters.hash_bytes_read +
       result.report.counters.payload_bytes_read;
+  const std::uint64_t local_routed_records =
+      result.report.counters.records_routed;
+  std::uint64_t global_routed_records = 0U;
+  mpiAllreduce(
+      &local_routed_records, &global_routed_records, 1, MPI_UINT64_T, MPI_SUM,
+      MPI_COMM_WORLD);
+  result.report.counters.logical_consensus_phase_count =
+      collective_phase_count;
   result.report.counters.collective_phase_count = collective_phase_count;
+  result.report.counters.routing_logical_consensus_phase_count =
+      result.report.counters.routing_collective_phase_count;
+  result.report.counters.mpi_collective_call_count =
+      mpi_collective_counts.total;
+  result.report.counters.routing_mpi_collective_call_count =
+      mpi_collective_counts.routing_total;
+  result.report.counters.nonrouting_mpi_collective_call_count =
+      mpi_collective_counts.total >= mpi_collective_counts.routing_total
+      ? mpi_collective_counts.total - mpi_collective_counts.routing_total
+      : 0U;
+  result.report.counters.mpi_allreduce_call_count =
+      mpi_collective_counts.allreduce;
+  result.report.counters.mpi_bcast_call_count = mpi_collective_counts.bcast;
+  result.report.counters.mpi_gather_call_count = mpi_collective_counts.gather;
+  result.report.counters.mpi_gatherv_call_count = mpi_collective_counts.gatherv;
+  result.report.counters.mpi_alltoall_call_count = mpi_collective_counts.alltoall;
+  result.report.counters.mpi_alltoallv_call_count =
+      mpi_collective_counts.alltoallv;
+  if (global_routed_records > 0U) {
+    result.report.counters.collectives_per_million_records =
+        static_cast<double>(mpi_collective_counts.total) * 1.0e6 /
+        static_cast<double>(global_routed_records);
+  }
   return result;
 #endif
 }

@@ -307,6 +307,7 @@ add_library(cosmosim_io STATIC
   src/io/ic_file_set_manifest.cpp
   src/io/ic_stream_ingestion.cpp
   src/io/ic_serial_ingestion.cpp
+  src/io/ic_mpi_collectives.cpp
   src/io/ic_failure_protocol.cpp
   src/io/ic_distributed_audit.cpp
   src/io/ic_distributed_ingestion.cpp
@@ -969,7 +970,12 @@ if(COSMOSIM_ENABLE_TESTS)
         PROPERTIES PROCESSORS ${rank_count} TIMEOUT 60
                    LABELS "mpi;hdf5;distributed;ic;mixed_species;runtime_truth")
     endforeach()
-    foreach(acceptance_mode IN ITEMS canonical manifest alternate type_policy)
+    foreach(acceptance_mode IN ITEMS
+        canonical
+        manifest
+        canonical_manifest
+        alternate
+        type_policy)
       foreach(rank_count IN ITEMS 1 2 4)
         add_test(
           NAME integration_distributed_ic_reader_${acceptance_mode}_mpi_${rank_count}_rank
@@ -982,6 +988,26 @@ if(COSMOSIM_ENABLE_TESTS)
                      LABELS "mpi;hdf5;distributed;ic;equivalence;runtime_truth")
       endforeach()
     endforeach()
+    foreach(manifest_failure_mode IN ITEMS
+        canonical_manifest_tampered_sidecar
+        canonical_manifest_missing_marker
+        canonical_manifest_bad_digest
+        canonical_manifest_source_hash_mismatch
+        canonical_manifest_source_path_mismatch
+        canonical_manifest_bridge_dialect
+        bridge_manifest_canonical_dialect
+        invalid_manifest)
+      add_test(
+        NAME integration_distributed_ic_reader_${manifest_failure_mode}_mpi_two_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_distributed_ic_reader_mpi>
+                ${manifest_failure_mode} ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_distributed_ic_reader_${manifest_failure_mode}_mpi_two_rank
+        PROPERTIES PROCESSORS 2 TIMEOUT 30
+                   LABELS "mpi;hdf5;distributed;ic;manifest;malformed;runtime_truth")
+    endforeach()
+
     foreach(rank_count IN ITEMS 2 4)
       add_test(
         NAME integration_distributed_ic_reader_scaling_mpi_${rank_count}_rank
@@ -1022,6 +1048,10 @@ if(COSMOSIM_ENABLE_TESTS)
         source_final_reconciliation
         source_final_accounting
         global_id_audit_accounting
+        exact_audit_capacity_accounting
+        duplicate_audit_capacity_accounting
+        audit_path_storage_accounting
+        audit_peak_staging_accounting
         sidecar_append
         source_identity_revalidation
         final_state)

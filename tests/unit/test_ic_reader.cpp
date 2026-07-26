@@ -951,10 +951,12 @@ void testHdf5GasThermoMapping() {
     (void)cosmosim::io::readGadgetArepoHdf5Ic(
         path, config,
         cosmosim::io::IcImportOptions{.manifest = &mismatched_manifest});
-  } catch (const std::runtime_error& error) {
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
     supplied_schema_rejected =
-        std::string(error.what()).find("schema does not match") !=
-        std::string::npos;
+        message.find("schema does not match") != std::string::npos ||
+        message.find("datatype/rank/dimensions/count are inconsistent") !=
+            std::string::npos;
   }
   assert(supplied_schema_rejected);
 
@@ -973,6 +975,41 @@ void testHdf5GasThermoMapping() {
         std::string(error.what()).find("provenance") != std::string::npos;
   }
   assert(supplied_hash_rejected);
+
+  const auto expect_invalid_supplied_manifest = [&](
+      const cosmosim::io::IcManifest& manifest,
+      std::string_view expected_text) {
+    bool rejected = false;
+    try {
+      (void)cosmosim::io::readGadgetArepoHdf5Ic(
+          path, config,
+          cosmosim::io::IcImportOptions{.manifest = &manifest});
+    } catch (const std::exception& error) {
+      rejected = std::string(error.what()).find(expected_text) !=
+          std::string::npos;
+    }
+    assert(rejected);
+  };
+
+  auto empty_hash_manifest = *result.report.manifest;
+  empty_hash_manifest.source_sha256.clear();
+  expect_invalid_supplied_manifest(
+      empty_hash_manifest, "one count/hash/size/header record");
+
+  auto incomplete_source_manifest = *result.report.manifest;
+  incomplete_source_manifest.original_header_attributes.clear();
+  expect_invalid_supplied_manifest(
+      incomplete_source_manifest, "one count/hash/size/header record");
+
+  auto invalid_dialect_manifest = *result.report.manifest;
+  invalid_dialect_manifest.dialect_version = "99";
+  expect_invalid_supplied_manifest(
+      invalid_dialect_manifest, "unsupported IC dialect version");
+
+  auto mismatched_vector_manifest = *result.report.manifest;
+  mismatched_vector_manifest.source_file_sizes_bytes.push_back(1U);
+  expect_invalid_supplied_manifest(
+      mismatched_vector_manifest, "one count/hash/size/header record");
 
   bool found_thermo_bypass = false;
   bool found_metallicity_unsupported = false;
@@ -1162,22 +1199,17 @@ void testHdf5BlackHoleAndValidationFailures() {
         std::string::npos;
   }
   assert(implicit_family2_rejected);
-  cosmosim::io::IcSchemaSummary family2_schema;
-  family2_schema.count_by_type = {0, 0, 1, 0, 0, 0};
-  family2_schema.total_count_by_type = family2_schema.count_by_type;
-  family2_schema.mass_table = {0, 0, 0, 0, 0, 0};
-  family2_schema.num_files_per_snapshot = 1U;
-  family2_schema.box_size = 50000.0;
-  family2_schema.scale_factor = 1.0;
-  family2_schema.redshift = 0.0;
-  family2_schema.omega_matter = 0.315;
-  family2_schema.omega_lambda = 0.685;
-  family2_schema.hubble_param = 0.674;
+  auto family2_config = config;
+  family2_config.mode.ic_part_type2_policy =
+      cosmosim::core::InitialConditionSpeciesPolicy::kDarkMatter;
+  const auto family2_inspection = cosmosim::io::readGadgetArepoHdf5Ic(
+      family2_path, family2_config);
+  assert(family2_inspection.report.manifest.has_value());
   cosmosim::io::IcManifest family2_manifest =
-      cosmosim::io::makeGadgetArepoBridgeV1Manifest(
-          family2_path, family2_schema);
-  family2_manifest.species_policy[2] =
-      cosmosim::io::IcSpeciesPolicy::kCollisionlessFamily2AsDarkMatter;
+      *family2_inspection.report.manifest;
+  assert(
+      family2_manifest.species_policy[2] ==
+      cosmosim::io::IcSpeciesPolicy::kCollisionlessFamily2AsDarkMatter);
   const cosmosim::io::IcReadResult family2_result =
       cosmosim::io::readGadgetArepoHdf5Ic(
           family2_path,

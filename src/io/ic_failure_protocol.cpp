@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "io/internal/ic_record_codec.hpp"
+#include "io/internal/ic_mpi_collectives.hpp"
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -17,6 +18,11 @@
 namespace cosmosim::io::failure_protocol_internal {
 
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
+using mpi_collective_internal::mpiAllreduce;
+using mpi_collective_internal::mpiAlltoall;
+using mpi_collective_internal::mpiAlltoallv;
+using mpi_collective_internal::mpiBcast;
+
 namespace {
 
 thread_local std::uint64_t* g_collective_phase_counter = nullptr;
@@ -38,7 +44,7 @@ std::string collectiveFailureMessage(
     std::string_view phase) {
   const int local_failed = local_failure ? 1 : 0;
   int failed_count = 0;
-  MPI_Allreduce(
+  mpiAllreduce(
       &local_failed, &failed_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (failed_count == 0) {
     return {};
@@ -46,7 +52,7 @@ std::string collectiveFailureMessage(
   int candidate = local_failure ? mpi_context.worldRank()
                                 : mpi_context.worldSize();
   int failure_rank = mpi_context.worldSize();
-  MPI_Allreduce(
+  mpiAllreduce(
       &candidate, &failure_rank, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 
   static constexpr std::size_t kMaximumMessageBytes = 4095U;
@@ -65,8 +71,8 @@ std::string collectiveFailureMessage(
         std::min(message_length, kMaximumMessageBytes));
     std::copy_n(message, length, buffer.data());
   }
-  MPI_Bcast(&length, 1, MPI_UINT32_T, failure_rank, MPI_COMM_WORLD);
-  MPI_Bcast(
+  mpiBcast(&length, 1, MPI_UINT32_T, failure_rank, MPI_COMM_WORLD);
+  mpiBcast(
       buffer.data(), static_cast<int>(buffer.size()), MPI_CHAR, failure_rank,
       MPI_COMM_WORLD);
   return std::string(phase) + " failed on rank " +
@@ -182,7 +188,7 @@ std::string broadcastRootString(
     const parallel::MpiContext& mpi_context,
     std::string root_value) {
   std::uint64_t length = mpi_context.isRoot() ? root_value.size() : 0U;
-  MPI_Bcast(&length, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+  mpiBcast(&length, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
   runCollectivePhaseVoid(
       mpi_context, "root-string receive allocation", [&]() {
         if (length > std::numeric_limits<std::size_t>::max()) {
@@ -195,7 +201,7 @@ std::string broadcastRootString(
        offset += kBroadcastChunk) {
     const int chunk = static_cast<int>(
         std::min(kBroadcastChunk, length - offset));
-    MPI_Bcast(
+    mpiBcast(
         root_value.data() + static_cast<std::size_t>(offset), chunk, MPI_CHAR,
         0, MPI_COMM_WORLD);
   }
@@ -243,7 +249,7 @@ std::vector<std::uint8_t> alltoallBytes(
         return prepared;
       });
 
-  MPI_Alltoall(
+  mpiAlltoall(
       layout.send_counts.data(), 1, MPI_INT, layout.receive_counts.data(), 1,
       MPI_INT, MPI_COMM_WORLD);
 
@@ -287,7 +293,7 @@ std::vector<std::uint8_t> alltoallBytes(
         return prepared;
       });
 
-  MPI_Alltoallv(
+  mpiAlltoallv(
       buffers.send.data(), layout.send_counts.data(),
       layout.send_displacements.data(), MPI_BYTE, buffers.receive.data(),
       layout.receive_counts.data(), layout.receive_displacements.data(),

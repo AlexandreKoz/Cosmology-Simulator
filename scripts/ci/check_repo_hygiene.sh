@@ -102,6 +102,18 @@ while IFS= read -r user; do
   esac
 done <<<"$common_header_users"
 
+if [[ ! -f src/io/ic_mpi_collectives.cpp ]] ||
+   [[ ! -f src/io/internal/ic_mpi_collectives.hpp ]]; then
+  echo "[hygiene] ERROR: centralized IC MPI collective instrumentation is missing" >&2
+  exit 1
+fi
+for distributed_source in   src/io/ic_distributed_ingestion.cpp   src/io/ic_distributed_audit.cpp   src/io/ic_failure_protocol.cpp; do
+  if grep -Eq 'MPI_(Allreduce|Bcast|Gather|Gatherv|Alltoall|Alltoallv)[[:space:]]*\('       "$distributed_source"; then
+    echo "[hygiene] ERROR: $distributed_source bypasses IC MPI collective instrumentation" >&2
+    exit 1
+  fi
+done
+
 echo "[hygiene] checking required preset names"
 required_presets=(
   "cpu-only-debug"

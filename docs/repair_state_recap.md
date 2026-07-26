@@ -1975,3 +1975,29 @@ waiver.
   MPI-enabled source/test syntax passes, but runtime np1/np2/np4 acceptance is
   environment-blocked because `MPI_CXX` is unavailable; distributed capability
   therefore remains provisional.
+
+
+## 2026-07-26 Campaign B distributed final-gate micro-patch
+
+- Every supplied manifest pointer is now validated or rejected at serial,
+  streaming, and distributed entry; the old non-empty-hash authority heuristic
+  is removed.
+- Distributed source inspection derives its dialect from the validated supplied
+  manifest. Supplied canonical manifests execute embedded/sidecar/digest/marker
+  verification, and bridge/canonical mismatches fail explicitly.
+- Exact source/final and duplicate-ID audit capacity, path-storage, and peak
+  accounting are rank-consistent guarded phases with finite-time fault seams.
+- A central IC MPI wrapper counts actual `Allreduce`, `Bcast`, `Gather`,
+  `Gatherv`, `Alltoall`, and `Alltoallv` calls with saturating `noexcept`
+  increments. Logical phases remain separately named; routing protocol v1 costs
+  exactly 30 actual collective calls per successful batch. The non-routing
+  identity is versioned as `40 + runtime_cosmology_vote + source_file_count +
+  10 * distributed_id_audit_round_count + mpi_bcast_call_count`.
+- The distributed regression inventory now includes supplied canonical manifests,
+  exact direct-versus-supplied canonical state equivalence, canonical
+  tampering/missing-marker/bad-digest cases, source-path/hash mismatches,
+  dialect mismatches, invalid manifests, per-counter rank agreement and exact
+  cost formulas, and the remaining audit-accounting faults.
+- Distributed runtime acceptance remains provisional where MPI execution is
+  unavailable; serial/HDF5 and clean-package evidence is recorded in the final
+  execution plan and handoff report.

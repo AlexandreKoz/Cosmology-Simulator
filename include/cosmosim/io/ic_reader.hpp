@@ -272,8 +272,25 @@ struct IcImportCounters {
   std::uint64_t reader_record_imbalance = 0;
   std::uint64_t main_exchange_count = 0;
   std::uint64_t exact_audit_exchange_count = 0;
+  std::uint64_t distributed_id_audit_round_count = 0;
+  // Logical protocol phases that perform rank-consistent failure voting.
+  std::uint64_t logical_consensus_phase_count = 0;
+  std::uint64_t routing_logical_consensus_phase_count = 0;
+  // Compatibility aliases retained for existing report consumers. They are
+  // logical phases, not raw MPI call counts.
   std::uint64_t collective_phase_count = 0;
   std::uint64_t routing_collective_phase_count = 0;
+  // Actual production MPI collective calls made by distributed IC ingestion.
+  std::uint64_t mpi_collective_call_count = 0;
+  std::uint64_t routing_mpi_collective_call_count = 0;
+  std::uint64_t nonrouting_mpi_collective_call_count = 0;
+  std::uint64_t mpi_allreduce_call_count = 0;
+  std::uint64_t mpi_bcast_call_count = 0;
+  std::uint64_t mpi_gather_call_count = 0;
+  std::uint64_t mpi_gatherv_call_count = 0;
+  std::uint64_t mpi_alltoall_call_count = 0;
+  std::uint64_t mpi_alltoallv_call_count = 0;
+  double collectives_per_million_records = 0.0;
   std::uint64_t wall_time_nanoseconds = 0;
   std::uint64_t final_local_particle_count = 0;
   std::uint64_t final_local_gas_cell_count = 0;
@@ -281,6 +298,20 @@ struct IcImportCounters {
   std::uint64_t final_local_black_hole_count = 0;
   std::uint64_t final_local_tracer_count = 0;
 };
+
+// Successful routing batches execute 22 logical consensus phases, three
+// coverage reductions, two Alltoall/Alltoallv exchange pairs, and one exact
+// reconciliation reduction: 30 actual communicator-wide calls per batch.
+inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV1 = 30U;
+// Non-routing calls consist of a 40-call fixed protocol, one source-identity
+// completion vote per source file, ten calls per global duplicate-ID audit
+// round, one optional runtime-cosmology vote, and the measured Bcast calls
+// whose count depends on metadata payload chunking.
+inline constexpr std::uint64_t kIcNonroutingMpiCollectiveFixedCallsV1 = 40U;
+inline constexpr std::uint64_t
+    kIcNonroutingMpiCollectiveCallsPerSourceFileV1 = 1U;
+inline constexpr std::uint64_t
+    kIcNonroutingMpiCollectiveCallsPerIdAuditRoundV1 = 10U;
 
 struct IcImportReport {
   IcSchemaSummary schema;

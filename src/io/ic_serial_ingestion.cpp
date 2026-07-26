@@ -67,6 +67,9 @@ IcReadResult readGadgetArepoHdf5Ic(
   if (options.chunk_particle_count == 0U) {
     throw std::invalid_argument("chunk_particle_count must be positive");
   }
+  if (options.manifest != nullptr) {
+    validateIcManifest(*options.manifest);
+  }
   Inspection inspection = inspectFileSet(ic_path, config, options);
   if (options.validate_runtime_cosmology) {
     validateRuntimeCosmology(inspection.manifest, config);
@@ -159,6 +162,9 @@ IcImportReport internal::streamGadgetArepoHdf5Ic(
   if (!on_manifest_ready || !on_record_batch) {
     throw std::invalid_argument(
         "streaming IC ingestion requires manifest and record callbacks");
+  }
+  if (options.manifest != nullptr) {
+    validateIcManifest(*options.manifest);
   }
   Inspection inspection = inspectFileSet(ic_path, config, options);
   if (options.validate_runtime_cosmology) {

@@ -146,6 +146,23 @@ void writeTextFile(
   assert(output);
 }
 
+void overwriteStringAttribute(
+    const std::filesystem::path& path,
+    const char* attribute_name,
+    std::string_view value) {
+  Hdf5Handle file(
+      H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  assert(file.get() >= 0);
+  Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+  assert(header.get() >= 0);
+  Hdf5Handle attribute(H5Aopen(header.get(), attribute_name, H5P_DEFAULT));
+  assert(attribute.get() >= 0);
+  Hdf5Handle type(H5Aget_type(attribute.get()));
+  assert(type.get() >= 0);
+  std::string storage(value);
+  assert(H5Awrite(attribute.get(), type.get(), storage.c_str()) >= 0);
+}
+
 [[nodiscard]] std::string canonicalAuditJson() {
   cosmosim::io::IcManifest manifest;
   manifest.source_files = {"clean_room_arepo_source.hdf5"};
@@ -624,6 +641,76 @@ void writePolicyMember(
       value.substr(0U, prefix.size()) == prefix;
 }
 
+void assertCounterAgreesAcrossRanks(std::uint64_t local_value) {
+  std::uint64_t minimum = 0U;
+  std::uint64_t maximum = 0U;
+  MPI_Allreduce(
+      &local_value, &minimum, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(
+      &local_value, &maximum, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  assert(minimum == maximum);
+}
+
+void assertEquivalentImportedState(
+    const cosmosim::core::SimulationState& direct,
+    const cosmosim::core::SimulationState& supplied) {
+  assert(direct.particles.position_x_comoving ==
+         supplied.particles.position_x_comoving);
+  assert(direct.particles.position_y_comoving ==
+         supplied.particles.position_y_comoving);
+  assert(direct.particles.position_z_comoving ==
+         supplied.particles.position_z_comoving);
+  assert(direct.particles.velocity_x_peculiar ==
+         supplied.particles.velocity_x_peculiar);
+  assert(direct.particles.velocity_y_peculiar ==
+         supplied.particles.velocity_y_peculiar);
+  assert(direct.particles.velocity_z_peculiar ==
+         supplied.particles.velocity_z_peculiar);
+  assert(direct.particles.mass_code == supplied.particles.mass_code);
+
+  assert(direct.particle_sidecar.particle_id ==
+         supplied.particle_sidecar.particle_id);
+  assert(direct.particle_sidecar.species_tag ==
+         supplied.particle_sidecar.species_tag);
+  assert(direct.particle_sidecar.owning_rank ==
+         supplied.particle_sidecar.owning_rank);
+
+  assert(direct.cells.center_x_comoving == supplied.cells.center_x_comoving);
+  assert(direct.cells.center_y_comoving == supplied.cells.center_y_comoving);
+  assert(direct.cells.center_z_comoving == supplied.cells.center_z_comoving);
+  assert(direct.cells.mass_code == supplied.cells.mass_code);
+
+  assert(direct.gas_cells.gas_cell_id == supplied.gas_cells.gas_cell_id);
+  assert(direct.gas_cells.parent_particle_id ==
+         supplied.gas_cells.parent_particle_id);
+  assert(direct.gas_cells.density_code == supplied.gas_cells.density_code);
+  assert(direct.gas_cells.internal_energy_code ==
+         supplied.gas_cells.internal_energy_code);
+  assert(direct.gas_cells.temperature_code ==
+         supplied.gas_cells.temperature_code);
+
+  assert(direct.star_particles.particle_index ==
+         supplied.star_particles.particle_index);
+  assert(direct.star_particles.formation_scale_factor ==
+         supplied.star_particles.formation_scale_factor);
+  assert(direct.star_particles.birth_mass_code ==
+         supplied.star_particles.birth_mass_code);
+  assert(direct.star_particles.metallicity_mass_fraction ==
+         supplied.star_particles.metallicity_mass_fraction);
+
+  assert(direct.black_holes.particle_index ==
+         supplied.black_holes.particle_index);
+  assert(direct.black_holes.subgrid_mass_code ==
+         supplied.black_holes.subgrid_mass_code);
+  assert(direct.black_holes.accretion_rate_code ==
+         supplied.black_holes.accretion_rate_code);
+  assert(direct.black_holes.feedback_energy_code ==
+         supplied.black_holes.feedback_energy_code);
+
+  assert(direct.tracers.particle_index == supplied.tracers.particle_index);
+  assert(direct.metadata.scale_factor == supplied.metadata.scale_factor);
+}
+
 void setFaultInjection(std::string_view mode) {
   if (!startsWith(mode, "fault_")) {
     return;
@@ -647,9 +734,16 @@ int main(int argc, char** argv) {
   const bool fault_mode = startsWith(mode, "fault_");
   const bool route_mutation =
       mode == "route_loss" || mode == "route_duplicate";
-  const bool canonical_mode = mode == "canonical";
+  const bool canonical_manifest_mode =
+      startsWith(mode, "canonical_manifest");
+  const bool canonical_mode =
+      mode == "canonical" || canonical_manifest_mode;
   const bool alternate_mode = mode == "alternate";
-  const bool manifest_mode = mode == "manifest";
+  const bool bridge_manifest_canonical_dialect =
+      mode == "bridge_manifest_canonical_dialect";
+  const bool invalid_manifest_mode = mode == "invalid_manifest";
+  const bool manifest_mode = mode == "manifest" || canonical_manifest_mode ||
+      invalid_manifest_mode || bridge_manifest_canonical_dialect;
   const bool policy_mode = mode == "type_policy";
   if ((fault_mode || route_mutation) && world_size < 2) {
     MPI_Finalize();
@@ -750,10 +844,52 @@ int main(int argc, char** argv) {
     config.mode.ic_convention =
         cosmosim::core::InitialConditionConvention::kManifestV1;
     config.mode.ic_manifest_file = "in_memory_mpi_acceptance_manifest.json";
+
+    if (invalid_manifest_mode) {
+      supplied_manifest->source_sha256.clear();
+    } else if (mode == "canonical_manifest_source_hash_mismatch") {
+      supplied_manifest->source_sha256.front() = std::string(64U, '0');
+      supplied_manifest->source_provenance_ids.front() =
+          "sha256:" + supplied_manifest->source_sha256.front();
+    } else if (mode == "canonical_manifest_source_path_mismatch") {
+      supplied_manifest->source_files.front() =
+          std::filesystem::path(base.string() + ".missing.hdf5");
+    } else if (mode == "canonical_manifest_bridge_dialect") {
+      supplied_manifest->dialect =
+          cosmosim::io::IcDialect::kGadgetArepoBridgeV1;
+      supplied_manifest->canonical_source_manifest_verified = false;
+      supplied_manifest->canonical_source_manifest_sha256.clear();
+    } else if (bridge_manifest_canonical_dialect) {
+      supplied_manifest->dialect = cosmosim::io::IcDialect::kChuiCanonicalV1;
+      supplied_manifest->canonical_source_manifest_verified = false;
+      supplied_manifest->canonical_source_manifest_sha256.clear();
+    }
   }
 
+  if (world_rank == 0 && mode == "canonical_manifest_tampered_sidecar") {
+    writeTextFile(first.string() + ".manifest.json", "tampered manifest");
+  } else if (world_rank == 0 &&
+             mode == "canonical_manifest_missing_marker") {
+    std::filesystem::remove(first.string() + ".complete");
+  } else if (world_rank == 0 &&
+             mode == "canonical_manifest_bad_digest") {
+    overwriteStringAttribute(
+        first, "ConversionManifestSha256", std::string(64U, '0'));
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  const bool manifest_rejection_expected =
+      invalid_manifest_mode ||
+      mode == "canonical_manifest_tampered_sidecar" ||
+      mode == "canonical_manifest_missing_marker" ||
+      mode == "canonical_manifest_bad_digest" ||
+      mode == "canonical_manifest_source_hash_mismatch" ||
+      mode == "canonical_manifest_source_path_mismatch" ||
+      mode == "canonical_manifest_bridge_dialect" ||
+      bridge_manifest_canonical_dialect;
   const bool rejection_expected =
-      duplicate_ids || fault_mode || route_mutation;
+      duplicate_ids || fault_mode || route_mutation ||
+      manifest_rejection_expected;
   bool rejected_as_expected = false;
   try {
     cosmosim::io::IcImportOptions import_options;
@@ -761,11 +897,34 @@ int main(int argc, char** argv) {
     if (supplied_manifest.has_value()) {
       import_options.manifest = &*supplied_manifest;
     }
+    std::optional<cosmosim::io::IcReadResult> direct_canonical_result;
+    if (mode == "canonical_manifest") {
+      auto direct_config = makeCanonicalConfig();
+      direct_canonical_result =
+          cosmosim::io::readDistributedGadgetArepoHdf5Ic(
+              first, direct_config, mpi_context,
+              cosmosim::io::IcImportOptions{.chunk_particle_count = 7U});
+    }
     const auto result = cosmosim::io::readDistributedGadgetArepoHdf5Ic(
         first, config, mpi_context, import_options);
     assert(!rejection_expected);
+    if (direct_canonical_result.has_value()) {
+      assertEquivalentImportedState(
+          direct_canonical_result->state, result.state);
+    }
     assert(result.report.already_partitioned);
     assert(result.state.validateOwnershipInvariants());
+    if (canonical_mode) {
+      assert(result.report.manifest_verified);
+      assert(!result.report.verified_manifest_sha256.empty());
+    }
+    if (canonical_manifest_mode) {
+      assert(result.report.provenance_authority == "supplied_manifest_v1");
+      assert(result.report.manifest.has_value());
+      assert(
+          result.report.manifest->dialect ==
+          cosmosim::io::IcDialect::kChuiCanonicalV1);
+    }
 
     const std::uint64_t expected_global = policy_mode
         ? 16U
@@ -815,6 +974,82 @@ int main(int argc, char** argv) {
         mpi_context.allreduceSumUint64(
             result.report.counters.collective_phase_count);
     assert(global_collective_phases > global_batches);
+
+    if (world_size > 1) {
+      const std::uint64_t local_actual_collectives =
+          result.report.counters.mpi_collective_call_count;
+      assertCounterAgreesAcrossRanks(local_actual_collectives);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.routing_mpi_collective_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.nonrouting_mpi_collective_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_allreduce_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_bcast_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_gather_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_gatherv_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_alltoall_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.mpi_alltoallv_call_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.logical_consensus_phase_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.routing_logical_consensus_phase_count);
+      assertCounterAgreesAcrossRanks(
+          result.report.counters.distributed_id_audit_round_count);
+      assert(local_actual_collectives > 0U);
+      assert(
+          result.report.counters.routing_mpi_collective_call_count ==
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV1 *
+              global_batches);
+      assert(
+          result.report.counters.nonrouting_mpi_collective_call_count +
+              result.report.counters.routing_mpi_collective_call_count ==
+          local_actual_collectives);
+      const std::uint64_t expected_nonrouting_collectives =
+          cosmosim::io::kIcNonroutingMpiCollectiveFixedCallsV1 +
+          (import_options.validate_runtime_cosmology ? 1U : 0U) +
+          cosmosim::io::kIcNonroutingMpiCollectiveCallsPerSourceFileV1 *
+              K_MEMBER_COUNT +
+          cosmosim::io::kIcNonroutingMpiCollectiveCallsPerIdAuditRoundV1 *
+              result.report.counters.distributed_id_audit_round_count +
+          result.report.counters.mpi_bcast_call_count;
+      assert(
+          result.report.counters.nonrouting_mpi_collective_call_count ==
+          expected_nonrouting_collectives);
+      assert(
+          local_actual_collectives ==
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV1 *
+                  global_batches +
+              expected_nonrouting_collectives);
+      assert(
+          result.report.counters.mpi_allreduce_call_count +
+              result.report.counters.mpi_bcast_call_count +
+              result.report.counters.mpi_gather_call_count +
+              result.report.counters.mpi_gatherv_call_count +
+              result.report.counters.mpi_alltoall_call_count +
+              result.report.counters.mpi_alltoallv_call_count ==
+          local_actual_collectives);
+      assert(
+          result.report.counters.logical_consensus_phase_count ==
+          result.report.counters.collective_phase_count);
+      assert(
+          result.report.counters.routing_logical_consensus_phase_count ==
+          result.report.counters.routing_collective_phase_count);
+      const double expected_collectives_per_million =
+          static_cast<double>(local_actual_collectives) * 1.0e6 /
+          static_cast<double>(expected_global);
+      assert(std::abs(
+          result.report.counters.collectives_per_million_records -
+          expected_collectives_per_million) < 1.0e-9);
+    } else {
+      assert(result.report.counters.mpi_collective_call_count == 0U);
+      assert(result.report.counters.collectives_per_million_records == 0.0);
+    }
     assert(
         mpi_context.allreduceSumUint64(
             result.report.counters.records_read) == expected_global);
