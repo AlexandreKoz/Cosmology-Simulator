@@ -1,5 +1,14 @@
 # Campaign B distributed final gates execution plan
 
+> **2026-07-30 packaging correction:** the G6 handoff claims in the original
+> closeout were invalidated by the final-gates adversarial audit. The uploaded
+> ZIP still contained two ADS sidecars, and the old packaging script silently
+> removed `src/core/` and `include/cosmosim/core/`. Packaging evidence is now
+> superseded by `docs/repair/campaign_b_package_completeness_exec_plan.md`.
+> Scientific/source conclusions below remain historical evidence for the
+> distributed final-gate micro-patch; archive acceptance is governed by the new
+> package-completeness plan and exact script-generated handoff.
+
 Mode: repair and final Campaign B distributed acceptance.
 
 Suggested PR title:
@@ -182,14 +191,23 @@ and open-issue documentation now distinguish:
 
 Distributed capability remains `provisional`; no MPI runtime pass is claimed.
 
-### G6 — Handoff hygiene
+### G6 — Handoff hygiene (corrected 2026-07-30)
 
-- Removed both encoded ADS sidecars.
-- Strengthened `scripts/ci/package_source_zip.sh` to stage, recursively audit,
-  archive, run `unzip -t`, enforce one repository root, apply the archive
-  denylist, count entries, and print SHA-256.
-- Strengthened repository hygiene to require the MPI wrapper and reject raw
-  production collectives.
+The original G6 closure was rejected by adversarial revalidation. The repaired
+handoff now:
+
+- deletes the two ADS sidecars from the actual tree;
+- removes the destructive generic `core`/`core.*` exclusions;
+- rejects crash-dump-style names only for regular files;
+- verifies one shared sentinel set in staged and extracted trees;
+- compares staged/extracted file paths, symlink targets, and SHA-256 values;
+- runs extracted-tree hygiene, CPU CMake configuration, and builds
+  `cosmosim_core` plus `cosmosim_harness`;
+- registers `integration_source_package_completeness` as a release-labelled
+  regression without recursive CTest invocation.
+
+Exact commands and final archive evidence are maintained in
+`docs/repair/campaign_b_package_completeness_exec_plan.md`.
 
 ## Files changed
 
@@ -360,13 +378,13 @@ pass is claimed.
 | G4-3 | environment-blocked | Scaling test exists; MPI runtime unavailable |
 | G5-1 | closed | Docs match source and limitations |
 | G5-2 | closed | Distributed capability remains provisional |
-| G6-1 | closed | Source-tree hygiene prepared; final rerun occurs before packaging |
-| G6-2 | closed | Packaging script is the only handoff path |
-| G6-3 | closed | Final clean archive produced after generated-tree cleanup |
-| G6-4 | closed | Script performs `unzip -t`, root, and denylist checks |
-| G6-5 | closed | Packaging output reports SHA-256 |
-| G7-1 | closed | CPU 132/132 passed across bounded invocations |
-| G7-2 | partially closed | 135/136 HDF5; runtime smoke hit unchanged 300-second timeout |
+| G6-1 | closed | ADS sidecars deleted; actual/staged/extracted hygiene passes |
+| G6-2 | closed | Repaired script is the only handoff path; generic core exclusions removed |
+| G6-3 | closed | Package regression proves clean, source-complete, buildable extraction |
+| G6-4 | closed | Adds sentinels, inventories, hashes, extracted hygiene/configure/build |
+| G6-5 | closed | Exact immutable script output reports SHA-256 and archive metrics |
+| G7-1 | closed | CPU 133/133, including package regression |
+| G7-2 | closed | HDF5 137/137; runtime smoke passed in 82.05 s |
 | G7-3 | environment-blocked | `MPI_CXX` unavailable; syntax compilation passed |
 | G7-4 | closed | Exact commands listed below |
 
@@ -410,9 +428,11 @@ timeout 300s ctest --preset test-mpi-hdf5-fftw-debug \
   -R '^integration_distributed_ic_reader_(canonical_manifest|scaling)_mpi_(1|2|4)_rank$'
 ```
 
-## Final verdict
+## Final verdict (corrected 2026-07-30)
 
-Source-side Campaign B final-gate defects are closed. Distributed runtime
-acceptance is environment-blocked until the registered MPI matrix executes on a
-host with a working MPI C++ toolchain. The capability must remain provisional
-until that evidence exists.
+Campaign B scientific/source implementation and serial CPU/HDF5 validation are
+accepted. The source-package completeness defect is closed by the repaired,
+build-validating packaging path and its dedicated regression. Real distributed
+runtime acceptance remains environment-blocked because `MPI_CXX` is unavailable;
+`distributed_ic_import` therefore remains provisional until the documented
+np1/np2/np4 and fault matrices pass on a dependency-complete host.

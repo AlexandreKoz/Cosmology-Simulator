@@ -1312,6 +1312,15 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_release_readiness_artifacts
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_release_readiness_artifacts.cmake")
 
+  if(UNIX)
+    add_test(NAME integration_source_package_completeness
+             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/ci/test_source_package_completeness.sh")
+    set_tests_properties(integration_source_package_completeness PROPERTIES
+      LABELS "integration;release;packaging;source_distribution"
+      RUN_SERIAL TRUE
+      TIMEOUT 1800)
+  endif()
+
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_truth_ctest_labels.cmake.in"
     "${CMAKE_BINARY_DIR}/test_runtime_truth_ctest_labels.cmake"

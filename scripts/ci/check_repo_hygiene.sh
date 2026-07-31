@@ -114,6 +114,29 @@ for distributed_source in   src/io/ic_distributed_ingestion.cpp   src/io/ic_dist
   fi
 done
 
+echo "[hygiene] checking source-package guardrails"
+for package_script in \
+  scripts/ci/source_package_common.sh \
+  scripts/ci/package_source_zip.sh \
+  scripts/ci/test_source_package_completeness.sh; do
+  if [[ ! -f "$package_script" ]]; then
+    echo "[hygiene] ERROR: required source-package script is missing: $package_script" >&2
+    exit 1
+  fi
+  bash -n "$package_script"
+done
+if grep -Eq -- "--exclude=(['\"])?core(\.\*)?(['\"])?([[:space:]]|$)" \
+    scripts/ci/source_package_common.sh scripts/ci/package_source_zip.sh; then
+  echo "[hygiene] ERROR: source packaging must not exclude generic core/core.* paths" >&2
+  exit 1
+fi
+if ! grep -Fq -- "-type f" scripts/ci/source_package_common.sh ||
+   ! grep -Fq -- "-name core" scripts/ci/source_package_common.sh ||
+   ! grep -Fq -- "-name 'core.*'" scripts/ci/source_package_common.sh; then
+  echo "[hygiene] ERROR: crash-dump-name checks must be restricted to regular files" >&2
+  exit 1
+fi
+
 echo "[hygiene] checking required preset names"
 required_presets=(
   "cpu-only-debug"

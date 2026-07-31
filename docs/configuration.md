@@ -492,3 +492,26 @@ validated or rejected; an incomplete manifest never falls back to source
 discovery or live configuration. Distributed canonical manifests select
 canonical inspection and therefore require a valid embedded/sidecar/marker
 bundle.
+
+## Campaign B capability and source-handoff status
+
+No user configuration key or scientific ingestion policy changed in the final
+source-package repair. Supplied-manifest authority and canonical bundle
+validation remain as documented above.
+
+Release packaging is now a build-validating source-distribution gate:
+
+```bash
+bash scripts/ci/package_source_zip.sh /absolute/path/to/source.zip archive_root
+```
+
+The command fails unless the actual source tree, staged tree, and extracted
+archive are free of ADS/generated artifacts; required source sentinels exist;
+staged and extracted file inventories and hashes match; and the extracted copy
+configures with `cpu-only-debug` and builds `cosmosim_core` plus
+`cosmosim_harness`.
+
+This packaging closure does not promote distributed runtime capability. With
+MPI/HDF5 enabled, `distributed_ic_import` remains `provisional` until the real
+np1/np2/np4 and fault-injection acceptance matrix passes on a host with a
+working MPI C++ toolchain.

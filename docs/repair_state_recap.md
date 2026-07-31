@@ -2001,3 +2001,28 @@ waiver.
 - Distributed runtime acceptance remains provisional where MPI execution is
   unavailable; serial/HDF5 and clean-package evidence is recorded in the final
   execution plan and handoff report.
+
+## 2026-07-30 Campaign B source-package completeness closure
+
+- Reproduced the final-gates audit against the submitted archive: two encoded
+  ADS sidecars made actual-tree hygiene fail, while the packaging script's
+  unanchored `core`/`core.*` exclusions removed `src/core/` and
+  `include/cosmosim/core/`, yielding a clean-looking but unconfigurable archive.
+- Deleted the actual ADS sidecars and replaced ambiguous crash-dump exclusion
+  with fail-closed checks restricted to regular files. Directories named
+  `core` are legitimate and must survive staging and extraction.
+- Added shared package sentinels, regular-file SHA-256 manifests, symlink-target
+  manifests, staged/extracted inventory equivalence, extracted-tree hygiene,
+  fresh CPU CMake configuration, and required `cosmosim_core`/
+  `cosmosim_harness` builds to the real packaging script.
+- Added the release-labelled `integration_source_package_completeness`
+  regression. It also proves a regular `core.1234` candidate is rejected and no
+  failed archive is retained.
+- Validation: CPU 133/133; HDF5 137/137; focused Campaign B HDF5 7/7. The totals
+  are one higher than the prior baselines because of the new package test.
+- MPI configuration remains environment-blocked because `mpi-cxx`/`MPI_CXX` is
+  unavailable. Five distributed-IC translation units pass strict
+  declaration-only syntax compilation, but no rank test is claimed.
+- Campaign B source and archive-completeness acceptance are closed. Distributed
+  runtime capability remains `provisional` until the documented np1/np2/np4
+  and fault matrices execute successfully.

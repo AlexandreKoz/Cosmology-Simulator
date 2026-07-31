@@ -1,5 +1,26 @@
 # Repair open issues
 
+## 2026-07-30 Campaign B packaging closure and remaining MPI gate
+
+The adversarial handoff defects are closed in source: the two actual ADS
+sidecars are removed; the packaging path no longer excludes legitimate
+`core` directories; one shared sentinel inventory is checked before and after
+compression; staged/extracted paths, symlink targets, and SHA-256 values are
+compared; and a fresh extracted copy passes hygiene, CPU configuration, and the
+required core builds. `integration_source_package_completeness` passes directly
+and under both CPU and HDF5 CTest inventories.
+
+Current supported evidence is CPU 133/133, HDF5 137/137, and the focused
+Campaign B HDF5 set 7/7. The only Campaign B acceptance item still
+**environment-blocked** is real MPI execution: this environment cannot find
+`mpi-cxx` or `MPI_CXX`, so np1/np2/np4 and fault-injection tests were not
+launched. `distributed_ic_import` must remain `provisional` until those exact
+commands pass on a dependency-complete host.
+
+The immutable final archive SHA-256 is reported by the packaging script and
+handoff response rather than embedded in source documentation, because embedding
+an archive's own hash would mutate the archive.
+
 ## 2026-07-26 Campaign B distributed final-gate evidence
 
 The final source micro-patch now validates every non-null supplied manifest,
