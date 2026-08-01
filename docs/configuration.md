@@ -515,3 +515,25 @@ This packaging closure does not promote distributed runtime capability. With
 MPI/HDF5 enabled, `distributed_ic_import` remains `provisional` until the real
 np1/np2/np4 and fault-injection acceptance matrix passes on a host with a
 working MPI C++ toolchain.
+
+## Adaptive bound–Jeans star formation
+
+`physics.star_formation_model` is typed and accepts `legacy_schmidt_threshold` or `adaptive_bound_jeans`. Existing configurations without an explicit selector retain the legacy default; new reference profiles must select the adaptive model explicitly.
+
+Adaptive keys:
+
+- `sf_epsilon_ff`: local collapse efficiency; the reference profile uses `1.0` only after bound/Jeans/convergence filtering.
+- `sf_bound_alpha_vir_max`: strict upper bound on the local support parameter.
+- `sf_require_converging_flow`: require negative physical peculiar-flow divergence.
+- `sf_collapse_timescale`: `free_fall` or `minimum_free_fall_or_compression`.
+- `sf_jeans_mass_floor_code`: Jeans comparison floor.
+- `sf_star_particle_mass_policy`: `fixed` or `gas_resolution_fraction`.
+- `sf_target_star_particle_mass_code`, `sf_min_star_particle_mass_code`, `sf_max_star_particle_mass_code`.
+- `sf_target_star_particle_mass_fraction`.
+- `sf_max_spawn_particles_per_cell_step`.
+- `sf_max_fractional_mass_conversion`.
+- `sf_min_remaining_gas_fraction`, `sf_min_remaining_gas_mass_code`.
+- `sf_random_seed`.
+- `sf_temperature_safety_ceiling_k`; zero disables it.
+
+Mass-valued keys accept raw code mass or explicit `kg`, `g`, and `msun` suffixes. Normalized configuration stores code-unit numbers and includes every key in the configuration hash. Unknown or misspelled keys fail parsing. `enable_star_formation=false` bypasses the production scan and consumes no star-formation random draw.

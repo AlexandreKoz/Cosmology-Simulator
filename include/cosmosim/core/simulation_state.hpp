@@ -113,6 +113,8 @@ struct GasCellSidecar {
   AlignedVector<double> density_code;
   AlignedVector<double> pressure_code;
   AlignedVector<double> internal_energy_code;
+  // Conserved gas metal mass. Metallicity is derived as metal_mass_code / cell mass.
+  AlignedVector<double> metal_mass_code;
   AlignedVector<double> temperature_code;
   AlignedVector<double> sound_speed_code;
 
@@ -127,6 +129,11 @@ struct StarParticleSidecar {
   AlignedVector<double> formation_scale_factor;
   AlignedVector<double> birth_mass_code;
   AlignedVector<double> metallicity_mass_fraction;
+  // Immutable decomposition-invariant birth identity.
+  AlignedVector<std::uint64_t> birth_key;
+  AlignedVector<std::uint64_t> parent_gas_cell_id;
+  AlignedVector<std::uint64_t> birth_tick;
+  AlignedVector<std::uint32_t> birth_ordinal;
   // Explicit stellar evolution bookkeeping lanes for auditable enrichment.
   AlignedVector<double> stellar_age_years_last;
   AlignedVector<double> stellar_returned_mass_cumulative_code;
@@ -410,11 +417,13 @@ struct PendingFluxRegisterRecord {
   double coarse_momentum_y_flux_integral_code = 0.0;
   double coarse_momentum_z_flux_integral_code = 0.0;
   double coarse_total_energy_flux_integral_code = 0.0;
+  double coarse_metal_mass_flux_integral_code = 0.0;
   double fine_mass_flux_integral_code = 0.0;
   double fine_momentum_x_flux_integral_code = 0.0;
   double fine_momentum_y_flux_integral_code = 0.0;
   double fine_momentum_z_flux_integral_code = 0.0;
   double fine_total_energy_flux_integral_code = 0.0;
+  double fine_metal_mass_flux_integral_code = 0.0;
 
   [[nodiscard]] bool hasCoarseContribution() const noexcept { return coarse_face_count > 0U; }
   [[nodiscard]] bool hasCompleteFineSubstepCoverage() const noexcept {
@@ -434,11 +443,13 @@ struct AmrTemporalBoundaryHistoryCellRecord {
   double start_momentum_density_y_comoving = 0.0;
   double start_momentum_density_z_comoving = 0.0;
   double start_total_energy_density_comoving = 0.0;
+  double start_metal_mass_density_comoving = 0.0;
   double end_mass_density_comoving = 0.0;
   double end_momentum_density_x_comoving = 0.0;
   double end_momentum_density_y_comoving = 0.0;
   double end_momentum_density_z_comoving = 0.0;
   double end_total_energy_density_comoving = 0.0;
+  double end_metal_mass_density_comoving = 0.0;
 };
 
 struct AmrTemporalBoundaryHistoryRecord {
@@ -558,6 +569,7 @@ struct GasCellMigrationFields {
   double density_code = 0.0;
   double pressure_code = 0.0;
   double internal_energy_code = 0.0;
+  double metal_mass_code = 0.0;
   double temperature_code = 0.0;
   double sound_speed_code = 0.0;
 };
@@ -634,6 +646,10 @@ struct StarParticleMigrationFields {
   double formation_scale_factor = 0.0;
   double birth_mass_code = 0.0;
   double metallicity_mass_fraction = 0.0;
+  std::uint64_t birth_key = 0;
+  std::uint64_t parent_gas_cell_id = 0;
+  std::uint64_t birth_tick = 0;
+  std::uint32_t birth_ordinal = 0;
   double stellar_age_years_last = 0.0;
   double stellar_returned_mass_cumulative_code = 0.0;
   double stellar_returned_metals_cumulative_code = 0.0;

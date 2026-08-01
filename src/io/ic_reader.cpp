@@ -91,6 +91,7 @@ IcReadResult buildGeneratedIsolatedIc(
     result.state.gas_cells.density_code[i] = 1.0;
     result.state.gas_cells.pressure_code[i] = 1.0;
     result.state.gas_cells.internal_energy_code[i] = 1.5;
+    result.state.gas_cells.metal_mass_code[i] = 0.0;
     result.state.gas_cells.temperature_code[i] = 1.0e4;
     result.state.gas_cells.sound_speed_code[i] = 1.0;
   }

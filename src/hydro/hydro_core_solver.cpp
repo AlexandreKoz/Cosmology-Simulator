@@ -271,6 +271,7 @@ HydroConservedState& HydroConservedState::operator+=(const HydroConservedState& 
   momentum_density_y_comoving += rhs.momentum_density_y_comoving;
   momentum_density_z_comoving += rhs.momentum_density_z_comoving;
   total_energy_density_comoving += rhs.total_energy_density_comoving;
+  metal_mass_density_comoving += rhs.metal_mass_density_comoving;
   return *this;
 }
 
@@ -280,6 +281,7 @@ HydroConservedState& HydroConservedState::operator-=(const HydroConservedState& 
   momentum_density_y_comoving -= rhs.momentum_density_y_comoving;
   momentum_density_z_comoving -= rhs.momentum_density_z_comoving;
   total_energy_density_comoving -= rhs.total_energy_density_comoving;
+  metal_mass_density_comoving -= rhs.metal_mass_density_comoving;
   return *this;
 }
 
@@ -299,6 +301,7 @@ HydroConservedState operator*(double scalar, HydroConservedState state) {
   state.momentum_density_y_comoving *= scalar;
   state.momentum_density_z_comoving *= scalar;
   state.total_energy_density_comoving *= scalar;
+  state.metal_mass_density_comoving *= scalar;
   return state;
 }
 
@@ -309,6 +312,7 @@ HydroConservationTotals& HydroConservationTotals::operator+=(const HydroConserva
   momentum_z += rhs.momentum_z;
   total_energy += rhs.total_energy;
   internal_energy += rhs.internal_energy;
+  metal_mass += rhs.metal_mass;
   return *this;
 }
 
@@ -319,6 +323,7 @@ HydroConservationTotals& HydroConservationTotals::operator-=(const HydroConserva
   momentum_z -= rhs.momentum_z;
   total_energy -= rhs.total_energy;
   internal_energy -= rhs.internal_energy;
+  metal_mass -= rhs.metal_mass;
   return *this;
 }
 
@@ -337,7 +342,8 @@ HydroConservedStateSoa::HydroConservedStateSoa(std::size_t cell_count)
       m_momentum_density_x_comoving(cell_count, 0.0),
       m_momentum_density_y_comoving(cell_count, 0.0),
       m_momentum_density_z_comoving(cell_count, 0.0),
-      m_total_energy_density_comoving(cell_count, 0.0) {}
+      m_total_energy_density_comoving(cell_count, 0.0),
+      m_metal_mass_density_comoving(cell_count, 0.0) {}
 
 void HydroConservedStateSoa::resize(std::size_t cell_count) {
   m_mass_density_comoving.resize(cell_count, 0.0);
@@ -345,6 +351,7 @@ void HydroConservedStateSoa::resize(std::size_t cell_count) {
   m_momentum_density_y_comoving.resize(cell_count, 0.0);
   m_momentum_density_z_comoving.resize(cell_count, 0.0);
   m_total_energy_density_comoving.resize(cell_count, 0.0);
+  m_metal_mass_density_comoving.resize(cell_count, 0.0);
 }
 
 std::size_t HydroConservedStateSoa::size() const { return m_mass_density_comoving.size(); }
@@ -355,7 +362,8 @@ HydroConservedState HydroConservedStateSoa::loadCell(std::size_t cell_index) con
       .momentum_density_x_comoving = m_momentum_density_x_comoving.at(cell_index),
       .momentum_density_y_comoving = m_momentum_density_y_comoving.at(cell_index),
       .momentum_density_z_comoving = m_momentum_density_z_comoving.at(cell_index),
-      .total_energy_density_comoving = m_total_energy_density_comoving.at(cell_index)};
+      .total_energy_density_comoving = m_total_energy_density_comoving.at(cell_index),
+      .metal_mass_density_comoving = m_metal_mass_density_comoving.at(cell_index)};
 }
 
 void HydroConservedStateSoa::storeCell(std::size_t cell_index, const HydroConservedState& cell_state) {
@@ -364,6 +372,7 @@ void HydroConservedStateSoa::storeCell(std::size_t cell_index, const HydroConser
   m_momentum_density_y_comoving.at(cell_index) = cell_state.momentum_density_y_comoving;
   m_momentum_density_z_comoving.at(cell_index) = cell_state.momentum_density_z_comoving;
   m_total_energy_density_comoving.at(cell_index) = cell_state.total_energy_density_comoving;
+  m_metal_mass_density_comoving.at(cell_index) = cell_state.metal_mass_density_comoving;
 }
 
 std::span<double> HydroConservedStateSoa::massDensityComoving() { return m_mass_density_comoving; }
@@ -376,13 +385,16 @@ std::span<double> HydroConservedStateSoa::momentumDensityZComoving() { return m_
 std::span<const double> HydroConservedStateSoa::momentumDensityZComoving() const { return m_momentum_density_z_comoving; }
 std::span<double> HydroConservedStateSoa::totalEnergyDensityComoving() { return m_total_energy_density_comoving; }
 std::span<const double> HydroConservedStateSoa::totalEnergyDensityComoving() const { return m_total_energy_density_comoving; }
+std::span<double> HydroConservedStateSoa::metalMassDensityComoving() { return m_metal_mass_density_comoving; }
+std::span<const double> HydroConservedStateSoa::metalMassDensityComoving() const { return m_metal_mass_density_comoving; }
 
 HydroPrimitiveCacheSoa::HydroPrimitiveCacheSoa(std::size_t cell_count)
     : m_rho_comoving(cell_count, 0.0),
       m_vel_x_peculiar(cell_count, 0.0),
       m_vel_y_peculiar(cell_count, 0.0),
       m_vel_z_peculiar(cell_count, 0.0),
-      m_pressure_comoving(cell_count, 0.0) {}
+      m_pressure_comoving(cell_count, 0.0),
+      m_metallicity_mass_fraction(cell_count, 0.0) {}
 
 void HydroPrimitiveCacheSoa::resize(std::size_t cell_count) {
   m_rho_comoving.resize(cell_count, 0.0);
@@ -390,6 +402,7 @@ void HydroPrimitiveCacheSoa::resize(std::size_t cell_count) {
   m_vel_y_peculiar.resize(cell_count, 0.0);
   m_vel_z_peculiar.resize(cell_count, 0.0);
   m_pressure_comoving.resize(cell_count, 0.0);
+  m_metallicity_mass_fraction.resize(cell_count, 0.0);
 }
 
 std::size_t HydroPrimitiveCacheSoa::size() const { return m_rho_comoving.size(); }
@@ -400,7 +413,8 @@ HydroPrimitiveState HydroPrimitiveCacheSoa::loadCell(std::size_t cell_index) con
       .vel_x_peculiar = m_vel_x_peculiar.at(cell_index),
       .vel_y_peculiar = m_vel_y_peculiar.at(cell_index),
       .vel_z_peculiar = m_vel_z_peculiar.at(cell_index),
-      .pressure_comoving = m_pressure_comoving.at(cell_index)};
+      .pressure_comoving = m_pressure_comoving.at(cell_index),
+      .metallicity_mass_fraction = m_metallicity_mass_fraction.at(cell_index)};
 }
 
 void HydroPrimitiveCacheSoa::storeCell(std::size_t cell_index, const HydroPrimitiveState& primitive_state) {
@@ -409,6 +423,7 @@ void HydroPrimitiveCacheSoa::storeCell(std::size_t cell_index, const HydroPrimit
   m_vel_y_peculiar.at(cell_index) = primitive_state.vel_y_peculiar;
   m_vel_z_peculiar.at(cell_index) = primitive_state.vel_z_peculiar;
   m_pressure_comoving.at(cell_index) = primitive_state.pressure_comoving;
+  m_metallicity_mass_fraction.at(cell_index) = primitive_state.metallicity_mass_fraction;
 }
 
 HydroConservedState ComovingGravityExpansionSource::sourceForCell(
@@ -473,6 +488,7 @@ HydroConservedState ComovingGravityExpansionSource::sourceForCell(
   source.total_energy_density_comoving =
       work_gravity - hubble_rate *
           (2.0 * kinetic_energy_density + 3.0 * primitive.pressure_comoving);
+  source.metal_mass_density_comoving = 0.0;
   return source;
 }
 
@@ -513,6 +529,8 @@ HydroConservedState HydroCoreSolver::conservedFromPrimitive(
   conserved.momentum_density_z_comoving = primitive.rho_comoving * primitive.vel_z_peculiar;
   conserved.total_energy_density_comoving =
       primitive.pressure_comoving / (adiabatic_index - 1.0) + 0.5 * primitive.rho_comoving * velocity_squared;
+  conserved.metal_mass_density_comoving = primitive.rho_comoving *
+      std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0);
   return conserved;
 }
 
@@ -537,6 +555,8 @@ HydroPrimitiveState HydroCoreSolver::primitiveFromConserved(
       inv_rho;
   const double internal_density = conserved.total_energy_density_comoving - kinetic_density;
   primitive.pressure_comoving = std::max((adiabatic_index - 1.0) * internal_density, k_small);
+  primitive.metallicity_mass_fraction = std::clamp(
+      conserved.metal_mass_density_comoving * inv_rho, 0.0, 1.0);
   return primitive;
 }
 
@@ -571,6 +591,7 @@ HydroConservationTotals HydroCoreSolver::conservationTotals(
     totals.total_energy += state.total_energy_density_comoving * geometry.cell_volume_comoving;
     totals.internal_energy +=
         (state.total_energy_density_comoving - kinetic_density) * geometry.cell_volume_comoving;
+    totals.metal_mass += state.metal_mass_density_comoving * geometry.cell_volume_comoving;
   }
   return totals;
 }

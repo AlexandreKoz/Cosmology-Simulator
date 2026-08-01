@@ -15,10 +15,10 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
-  // v21 adds restart-authoritative code-time output cadence.  v20 gravity
-  // force caches and all older documented compatibility paths are retained.
-  std::string name = "cosmosim_restart_v21";
-  std::uint32_t version = 21;
+  // v22 adds conserved gas metal mass and immutable star-birth identity.
+  // v21 code-time output cadence and all older documented compatibility paths are retained.
+  std::string name = "cosmosim_restart_v22";
+  std::uint32_t version = 22;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();

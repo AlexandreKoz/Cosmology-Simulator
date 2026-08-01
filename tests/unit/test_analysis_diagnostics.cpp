@@ -252,6 +252,39 @@ void testProvisionalHeavyDiagnosticsRequireExplicitPolicy() {
   std::filesystem::remove_all(output_root);
 }
 
+
+void testStarFormationHistoryCsvUsesBirthState() {
+  cosmosim::core::SimulationConfig config = makeConfig();
+  config.output.run_name = "unit_sfr_history";
+  const std::filesystem::path output_root =
+      std::filesystem::path(config.output.output_directory) / config.output.run_name;
+  std::filesystem::remove_all(output_root);
+
+  cosmosim::analysis::DiagnosticsEngine engine(config);
+  cosmosim::core::SimulationState state = makeSingleModeState();
+  state.star_particles.resize(2);
+  state.star_particles.formation_scale_factor[0] = 0.2;
+  state.star_particles.formation_scale_factor[1] = 0.8;
+  state.star_particles.birth_mass_code[0] = 2.0;
+  state.star_particles.birth_mass_code[1] = 3.0;
+  const auto bundle = engine.generateBundle(
+      state, 4, 0.9, cosmosim::analysis::DiagnosticClass::kScienceLight);
+  engine.writeBundle(bundle);
+
+  const std::filesystem::path history_path = output_root / "sfr_history.csv";
+  assert(std::filesystem::exists(history_path));
+  std::ifstream history(history_path);
+  const std::string text(
+      (std::istreambuf_iterator<char>(history)), std::istreambuf_iterator<char>());
+  assert(text.find(
+      "scale_factor,redshift,formed_mass_code,cumulative_stellar_birth_mass_code") !=
+      std::string::npos);
+  assert(text.find(",2,2\n") != std::string::npos);
+  assert(text.find(",3,5\n") != std::string::npos);
+  assert(!std::filesystem::exists(history_path.string() + ".part"));
+  std::filesystem::remove_all(output_root);
+}
+
 void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
   cosmosim::core::SimulationConfig blocked_config = makeConfig();
   blocked_config.analysis.diagnostics_execution_policy =
@@ -302,6 +335,7 @@ int main() {
   testDetailedPowerSpectrumContractAndEmptyBins();
   testDerivedDiagnosticsSanity();
   testProvisionalHeavyDiagnosticsRequireExplicitPolicy();
+  testStarFormationHistoryCsvUsesBirthState();
   testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords();
   return 0;
 }

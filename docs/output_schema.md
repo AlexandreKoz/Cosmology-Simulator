@@ -343,3 +343,18 @@ nonrouting_mpi_collective_call_count
 The per-operation counters sum exactly to the total, and all ranks must report
 the same actual-call count. These report fields do not alter canonical
 GADGET/AREPO group, dataset, or header names.
+
+## Star formation and gas metals
+
+Gas snapshots write canonical `PartType0/Metallicity`, derived from conserved `metal_mass_code / gas_mass_code`, plus `GasCellIDs` for stable mesh identity. On read, gas metallicity is converted back into conserved metal mass.
+
+Star snapshots write canonical `PartType4/Coordinates`, `Velocities`, `Masses`, `ParticleIDs`, and `Metallicity`, plus:
+
+- `StellarFormationTime`;
+- `BirthMass`;
+- `StarFormationBirthKey`;
+- `ParentGasCellID`;
+- `BirthIntegrationTick`;
+- `BirthOrdinal`.
+
+The analysis root writes `sfr_history.csv` atomically through a `.part` file. Columns are `scale_factor`, `redshift`, `formed_mass_code`, and `cumulative_stellar_birth_mass_code`. Values are reconstructed from actual star sidecar birth masses and formation scale factors, not from an analytic rate estimate.

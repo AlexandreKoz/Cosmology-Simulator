@@ -8,7 +8,7 @@
 
 namespace cosmosim::io::internal {
 
-inline constexpr std::size_t kIcWireRecordBytes = 168U;
+inline constexpr std::size_t kIcWireRecordBytes = 176U;
 
 struct IcParticleRecord {
   std::uint64_t id = 0;
@@ -22,6 +22,7 @@ struct IcParticleRecord {
   double mass = 0.0;
   double gas_density = 0.0;
   double gas_internal_energy = 0.0;
+  double gas_metallicity = 0.0;
   double star_formation = 0.0;
   double star_birth_mass = 0.0;
   double star_metallicity = 0.0;

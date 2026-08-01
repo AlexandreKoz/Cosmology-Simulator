@@ -175,6 +175,15 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     std::span<const double> returned_metals_delta_code,
     double dt_code) const {
   StellarFeedbackStepReport report;
+  const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
+  if (geometry_view.cell_center_y_comoving.size() != cell_count ||
+      geometry_view.cell_center_z_comoving.size() != cell_count ||
+      deposition_view.cell_mass_code.size() < cell_count ||
+      deposition_view.gas_density_code.size() < cell_count ||
+      deposition_view.gas_internal_energy_code.size() < cell_count ||
+      deposition_view.gas_metal_mass_code.size() < cell_count) {
+    throw std::invalid_argument("stellar-feedback deposition views do not cover every gas cell");
+  }
   if (!m_config.enabled || dt_code <= 0.0 || state.star_particles.size() == 0) {
     state.sidecars.upsert(buildMetadataSidecar(report));
     return report;
@@ -254,6 +263,7 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
 
         deposition_view.cell_mass_code[cell_index] += mass_add;
         deposition_view.gas_density_code[cell_index] += mass_add;
+        deposition_view.gas_metal_mass_code[cell_index] += metals_add;
 
         if (m_config.variant == StellarFeedbackVariant::kDelayedCooling) {
           star_report.delayed_cooling_applied = true;
@@ -319,6 +329,7 @@ StellarFeedbackStepReport StellarFeedbackModel::apply(
       .cell_mass_code = state.cells.mass_code,
       .gas_density_code = state.gas_cells.density_code,
       .gas_internal_energy_code = state.gas_cells.internal_energy_code,
+      .gas_metal_mass_code = state.gas_cells.metal_mass_code,
   };
   return applyWithViews(
       state, module_state, geometry_view, deposition_view, active_star_indices,

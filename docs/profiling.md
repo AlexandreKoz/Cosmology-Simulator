@@ -161,3 +161,7 @@ Documentation changes still need auditable developer workflow checks:
 - docs reference scan benchmark (`bench_docs_reference_scan`)
 
 These hooks ensure core docs remain present and internally referenced as the codebase evolves.
+
+## Star-formation profiling
+
+`bench_star_formation_spawn` profiles three explicit adaptive-model phases: `eligibility_no_births`, `eligibility_sparse_births`, and `dense_birth_plan_and_batch_append`. Each line reports `cells_per_second`, `births_per_second`, `bytes_allocated_per_step`, `allocation_count_per_step`, and `peak_temporary_memory_upper_bound_bytes`. The peak is an upper bound because the tracker includes storage retained by the appended authoritative particle and stellar sidecars as well as temporary planning storage. The implementation uses one particle resize, one star-sidecar resize, one species-index rebuild, no collective inside the cell loop, no full existing-particle-ID scan, and no allocation node per candidate or newborn ID. Compare allocation counts across cell-count sweeps: a fixed number of vector/sidecar growth allocations is acceptable, while allocation growth proportional to candidate count is a regression.

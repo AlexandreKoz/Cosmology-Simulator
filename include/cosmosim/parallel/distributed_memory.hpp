@@ -650,6 +650,7 @@ struct HydroGhostCellPayloadRecord {
   double momentum_density_y_comoving = 0.0;
   double momentum_density_z_comoving = 0.0;
   double total_energy_density_comoving = 0.0;
+  double metal_mass_density_comoving = 0.0;
 };
 
 struct AmrPatchExchangeDescriptor {
@@ -693,6 +694,7 @@ struct HydroConservativeFluxCorrectionRecord {
   double delta_momentum_density_y_comoving = 0.0;
   double delta_momentum_density_z_comoving = 0.0;
   double delta_total_energy_density_comoving = 0.0;
+  double delta_metal_mass_density_comoving = 0.0;
 };
 
 struct AmrPatchCellPayloadRecord {
@@ -759,11 +761,13 @@ struct AmrFluxRegisterPayloadRecord {
   double coarse_momentum_y_flux_code = 0.0;
   double coarse_momentum_z_flux_code = 0.0;
   double coarse_total_energy_flux_code = 0.0;
+  double coarse_metal_mass_flux_code = 0.0;
   double fine_mass_flux_code = 0.0;
   double fine_momentum_x_flux_code = 0.0;
   double fine_momentum_y_flux_code = 0.0;
   double fine_momentum_z_flux_code = 0.0;
   double fine_total_energy_flux_code = 0.0;
+  double fine_metal_mass_flux_code = 0.0;
   double face_area_comov = 0.0;
   double coarse_area_comov = 0.0;
   double fine_area_comov = 0.0;

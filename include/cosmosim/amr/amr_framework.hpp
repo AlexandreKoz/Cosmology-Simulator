@@ -18,6 +18,7 @@ struct ConservedState {
   double momentum_y_code = 0.0;
   double momentum_z_code = 0.0;
   double total_energy_code = 0.0;
+  double metal_mass_code = 0.0;
 
   ConservedState& operator+=(const ConservedState& rhs);
   ConservedState& operator-=(const ConservedState& rhs);
@@ -192,6 +193,7 @@ struct RefluxDiagnostics {
   double corrected_momentum_y_code = 0.0;
   double corrected_momentum_z_code = 0.0;
   double corrected_total_energy_code = 0.0;
+  double corrected_metal_mass_code = 0.0;
   double corrected_energy_code = 0.0;
   double corrected_internal_energy_code = 0.0;
 };

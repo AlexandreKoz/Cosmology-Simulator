@@ -267,7 +267,12 @@ constexpr double k_geometry_tol = 1.0e-10;
       .vel_x_peculiar = state.gas_cells.velocity_x_peculiar[row],
       .vel_y_peculiar = state.gas_cells.velocity_y_peculiar[row],
       .vel_z_peculiar = state.gas_cells.velocity_z_peculiar[row],
-      .pressure_comoving = pressure};
+      .pressure_comoving = pressure,
+      .metallicity_mass_fraction = std::clamp(
+          state.gas_cells.metal_mass_code[row] /
+              std::max(state.cells.mass_code[row], 1.0e-30),
+          0.0,
+          1.0)};
 }
 
 [[nodiscard]] ConservedState volumeIntegratedForRow(
@@ -283,7 +288,8 @@ constexpr double k_geometry_tol = 1.0e-10;
       .momentum_x_code = density.momentum_density_x_comoving * volume,
       .momentum_y_code = density.momentum_density_y_comoving * volume,
       .momentum_z_code = density.momentum_density_z_comoving * volume,
-      .total_energy_code = density.total_energy_density_comoving * volume};
+      .total_energy_code = density.total_energy_density_comoving * volume,
+      .metal_mass_code = density.metal_mass_density_comoving * volume};
 }
 
 
@@ -339,7 +345,8 @@ void writeVolumeIntegratedToRow(
       .momentum_density_x_comoving = volume_state.momentum_x_code / volume,
       .momentum_density_y_comoving = volume_state.momentum_y_code / volume,
       .momentum_density_z_comoving = volume_state.momentum_z_code / volume,
-      .total_energy_density_comoving = volume_state.total_energy_code / volume};
+      .total_energy_density_comoving = volume_state.total_energy_code / volume,
+      .metal_mass_density_comoving = volume_state.metal_mass_code / volume};
   hydro::HydroPrimitiveState primitive =
       hydro::HydroCoreSolver::primitiveFromConserved(density_state, options.adiabatic_index);
   primitive.rho_comoving = std::max(primitive.rho_comoving, options.density_floor);
@@ -352,6 +359,8 @@ void writeVolumeIntegratedToRow(
   state.gas_cells.velocity_x_peculiar[row] = primitive.vel_x_peculiar;
   state.gas_cells.velocity_y_peculiar[row] = primitive.vel_y_peculiar;
   state.gas_cells.velocity_z_peculiar[row] = primitive.vel_z_peculiar;
+  state.gas_cells.metal_mass_code[row] =
+      std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) * state.cells.mass_code[row];
   state.gas_cells.sound_speed_code[row] =
       std::sqrt(std::max(0.0, options.adiabatic_index * primitive.pressure_comoving / primitive.rho_comoving));
   state.gas_cells.temperature_code[row] = state.gas_cells.internal_energy_code[row];
@@ -723,6 +732,8 @@ void scatterAmrHydroConservedState(
     state.gas_cells.sound_speed_code[*row] = std::sqrt(std::max(0.0, adiabatic_index * pressure / rho));
     state.gas_cells.temperature_code[*row] = state.gas_cells.internal_energy_code[*row];
     state.cells.mass_code[*row] = rho * patch_geometry.geometry.cell_volume_comoving;
+    state.gas_cells.metal_mass_code[*row] =
+        std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) * state.cells.mass_code[*row];
 
     const auto parent_id = state.parentParticleIdForGasCellId(cell.gas_cell_id);
     if (parent_id.has_value() && parent_use_count[*parent_id] == 1U) {
@@ -802,6 +813,7 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
     conserved.momentum_density_y_comoving -= delta_flux.momentum_y_code;
     conserved.momentum_density_z_comoving -= delta_flux.momentum_z_code;
     conserved.total_energy_density_comoving -= delta_flux.total_energy_code;
+    conserved.metal_mass_density_comoving -= delta_flux.metal_mass_code;
     const double old_internal_density = old_primitive.pressure_comoving / (adiabatic_index - 1.0);
     const hydro::HydroPrimitiveState primitive =
         hydro::HydroCoreSolver::primitiveFromConserved(conserved, adiabatic_index);
@@ -816,6 +828,8 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
         std::max(primitive.rho_comoving, 1.0e-14)));
     state.gas_cells.temperature_code[row] = state.gas_cells.internal_energy_code[row];
     state.cells.mass_code[row] = primitive.rho_comoving * volume;
+    state.gas_cells.metal_mass_code[row] =
+        std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) * state.cells.mass_code[row];
     const double new_internal_density = primitive.pressure_comoving / (adiabatic_index - 1.0);
 
     diagnostics.corrected_cells += 1U;
@@ -824,6 +838,7 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
     diagnostics.corrected_momentum_y_code += std::abs(delta_flux.momentum_y_code * volume);
     diagnostics.corrected_momentum_z_code += std::abs(delta_flux.momentum_z_code * volume);
     diagnostics.corrected_total_energy_code += std::abs(delta_flux.total_energy_code * volume);
+    diagnostics.corrected_metal_mass_code += std::abs(delta_flux.metal_mass_code * volume);
     diagnostics.corrected_energy_code += std::abs(delta_flux.total_energy_code * volume);
     diagnostics.corrected_internal_energy_code += std::abs((new_internal_density - old_internal_density) * volume);
   }
@@ -867,6 +882,7 @@ void addFluxIntegral(
     double& momentum_y,
     double& momentum_z,
     double& total_energy,
+    double& metal_mass,
     const ConservedState& flux,
     double area_comov,
     double dt_code) {
@@ -876,6 +892,7 @@ void addFluxIntegral(
   momentum_y += flux.momentum_y_code * scale;
   momentum_z += flux.momentum_z_code * scale;
   total_energy += flux.total_energy_code * scale;
+  metal_mass += flux.metal_mass_code * scale;
 }
 
 [[nodiscard]] ConservedState averageFluxFromIntegral(
@@ -884,6 +901,7 @@ void addFluxIntegral(
     double momentum_y,
     double momentum_z,
     double total_energy,
+    double metal_mass,
     double area_comov,
     double dt_code) {
   const double denom = area_comov * dt_code;
@@ -895,7 +913,8 @@ void addFluxIntegral(
       .momentum_x_code = momentum_x / denom,
       .momentum_y_code = momentum_y / denom,
       .momentum_z_code = momentum_z / denom,
-      .total_energy_code = total_energy / denom};
+      .total_energy_code = total_energy / denom,
+      .metal_mass_code = metal_mass / denom};
 }
 
 void validatePendingCompatible(
@@ -958,6 +977,7 @@ void validatePendingCompatible(
           pending.coarse_momentum_y_flux_integral_code,
           pending.coarse_momentum_z_flux_integral_code,
           pending.coarse_total_energy_flux_integral_code,
+          pending.coarse_metal_mass_flux_integral_code,
           area,
           dt),
       .fine_face_flux_code = averageFluxFromIntegral(
@@ -966,6 +986,7 @@ void validatePendingCompatible(
           pending.fine_momentum_y_flux_integral_code,
           pending.fine_momentum_z_flux_integral_code,
           pending.fine_total_energy_flux_integral_code,
+          pending.fine_metal_mass_flux_integral_code,
           area,
           dt),
       .face_area_comov = area,
@@ -1014,6 +1035,7 @@ void accumulateDiagnostics(ProductionAmrHydroDiagnostics& lhs, const ProductionA
   lhs.reflux.corrected_momentum_y_code += rhs.reflux.corrected_momentum_y_code;
   lhs.reflux.corrected_momentum_z_code += rhs.reflux.corrected_momentum_z_code;
   lhs.reflux.corrected_total_energy_code += rhs.reflux.corrected_total_energy_code;
+  lhs.reflux.corrected_metal_mass_code += rhs.reflux.corrected_metal_mass_code;
   lhs.reflux.corrected_energy_code += rhs.reflux.corrected_energy_code;
   lhs.reflux.corrected_internal_energy_code += rhs.reflux.corrected_internal_energy_code;
 }
@@ -1071,6 +1093,7 @@ std::size_t mergeFluxRegistersIntoPendingStore(
           pending->coarse_momentum_y_flux_integral_code,
           pending->coarse_momentum_z_flux_integral_code,
           pending->coarse_total_energy_flux_integral_code,
+          pending->coarse_metal_mass_flux_integral_code,
           entry.coarse_face_flux_code,
           entry.coarse_area_comov,
           entry.dt_code);
@@ -1084,6 +1107,7 @@ std::size_t mergeFluxRegistersIntoPendingStore(
           pending->fine_momentum_y_flux_integral_code,
           pending->fine_momentum_z_flux_integral_code,
           pending->fine_total_energy_flux_integral_code,
+          pending->fine_metal_mass_flux_integral_code,
           entry.fine_face_flux_code,
           entry.fine_area_comov,
           entry.dt_code);
@@ -1130,6 +1154,7 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
     diagnostics.corrected_momentum_y_code += one.corrected_momentum_y_code;
     diagnostics.corrected_momentum_z_code += one.corrected_momentum_z_code;
     diagnostics.corrected_total_energy_code += one.corrected_total_energy_code;
+    diagnostics.corrected_metal_mass_code += one.corrected_metal_mass_code;
     diagnostics.corrected_energy_code += one.corrected_energy_code;
     diagnostics.corrected_internal_energy_code += one.corrected_internal_energy_code;
     if (one.complete_register_count == 1U) {
@@ -1612,6 +1637,7 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   diagnostics.reflux.corrected_momentum_y_code += post_child_reflux.corrected_momentum_y_code;
   diagnostics.reflux.corrected_momentum_z_code += post_child_reflux.corrected_momentum_z_code;
   diagnostics.reflux.corrected_total_energy_code += post_child_reflux.corrected_total_energy_code;
+  diagnostics.reflux.corrected_metal_mass_code += post_child_reflux.corrected_metal_mass_code;
   diagnostics.reflux.corrected_energy_code += post_child_reflux.corrected_energy_code;
   diagnostics.reflux.corrected_internal_energy_code += post_child_reflux.corrected_internal_energy_code;
   diagnostics.pending_register_applied_count += post_child_reflux.complete_register_count;

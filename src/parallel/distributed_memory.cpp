@@ -2246,11 +2246,16 @@ void validateHydroGhostCellPayloadRecord(const HydroGhostCellPayloadRecord& reco
       !std::isfinite(record.momentum_density_x_comoving) ||
       !std::isfinite(record.momentum_density_y_comoving) ||
       !std::isfinite(record.momentum_density_z_comoving) ||
-      !std::isfinite(record.total_energy_density_comoving)) {
+      !std::isfinite(record.total_energy_density_comoving) ||
+      !std::isfinite(record.metal_mass_density_comoving)) {
     throw std::invalid_argument("hydro ghost cell payload contains non-finite conserved state");
   }
   if (record.mass_density_comoving <= 0.0) {
     throw std::invalid_argument("hydro ghost cell payload requires positive mass density");
+  }
+  if (record.metal_mass_density_comoving < 0.0 ||
+      record.metal_mass_density_comoving > record.mass_density_comoving * (1.0 + 1.0e-12)) {
+    throw std::invalid_argument("hydro ghost cell payload contains invalid metal mass density");
   }
 }
 
@@ -2341,11 +2346,13 @@ void validateAmrFluxRegisterPayloadRecord(const AmrFluxRegisterPayloadRecord& re
       record.coarse_momentum_y_flux_code,
       record.coarse_momentum_z_flux_code,
       record.coarse_total_energy_flux_code,
+      record.coarse_metal_mass_flux_code,
       record.fine_mass_flux_code,
       record.fine_momentum_x_flux_code,
       record.fine_momentum_y_flux_code,
       record.fine_momentum_z_flux_code,
       record.fine_total_energy_flux_code,
+      record.fine_metal_mass_flux_code,
       record.face_area_comov,
       record.coarse_area_comov,
       record.fine_area_comov,
@@ -2368,7 +2375,8 @@ void validateHydroConservativeFluxCorrectionRecord(const HydroConservativeFluxCo
       !std::isfinite(record.delta_momentum_density_x_comoving) ||
       !std::isfinite(record.delta_momentum_density_y_comoving) ||
       !std::isfinite(record.delta_momentum_density_z_comoving) ||
-      !std::isfinite(record.delta_total_energy_density_comoving)) {
+      !std::isfinite(record.delta_total_energy_density_comoving) ||
+      !std::isfinite(record.delta_metal_mass_density_comoving)) {
     throw std::invalid_argument("hydro conservative flux correction contains non-finite state");
   }
 }

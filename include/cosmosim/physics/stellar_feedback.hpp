@@ -55,6 +55,7 @@ struct StellarFeedbackDepositionView {
   std::span<double> cell_mass_code;
   std::span<double> gas_density_code;
   std::span<double> gas_internal_energy_code;
+  std::span<double> gas_metal_mass_code;
 };
 
 struct StellarFeedbackBudget {

@@ -140,6 +140,7 @@ void GasCellSidecar::resize(std::size_t count) {
   density_code.resize(count);
   pressure_code.resize(count);
   internal_energy_code.resize(count);
+  metal_mass_code.resize(count);
   temperature_code.resize(count);
   sound_speed_code.resize(count);
 }
@@ -152,7 +153,8 @@ bool GasCellSidecar::isConsistent() const noexcept {
          velocity_x_peculiar.size() == expected && velocity_y_peculiar.size() == expected &&
          velocity_z_peculiar.size() == expected &&
          pressure_code.size() == expected && internal_energy_code.size() == expected &&
-         temperature_code.size() == expected && sound_speed_code.size() == expected;
+         metal_mass_code.size() == expected && temperature_code.size() == expected &&
+         sound_speed_code.size() == expected;
 }
 
 void StarParticleSidecar::resize(std::size_t count) {
@@ -160,6 +162,10 @@ void StarParticleSidecar::resize(std::size_t count) {
   formation_scale_factor.resize(count);
   birth_mass_code.resize(count);
   metallicity_mass_fraction.resize(count);
+  birth_key.resize(count);
+  parent_gas_cell_id.resize(count);
+  birth_tick.resize(count);
+  birth_ordinal.resize(count);
   stellar_age_years_last.resize(count);
   stellar_returned_mass_cumulative_code.resize(count);
   stellar_returned_metals_cumulative_code.resize(count);
@@ -176,7 +182,9 @@ std::size_t StarParticleSidecar::size() const noexcept { return particle_index.s
 bool StarParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_index.size();
   if (formation_scale_factor.size() != expected || birth_mass_code.size() != expected ||
-      metallicity_mass_fraction.size() != expected || stellar_age_years_last.size() != expected ||
+      metallicity_mass_fraction.size() != expected || birth_key.size() != expected ||
+      parent_gas_cell_id.size() != expected || birth_tick.size() != expected ||
+      birth_ordinal.size() != expected || stellar_age_years_last.size() != expected ||
       stellar_returned_mass_cumulative_code.size() != expected ||
       stellar_returned_metals_cumulative_code.size() != expected ||
       stellar_feedback_energy_cumulative_erg.size() != expected) {

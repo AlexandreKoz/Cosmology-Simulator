@@ -173,6 +173,7 @@ void requireValidAmrPatchMigrationFields(const AmrPatchMigrationFields& fields, 
   fields.density_code = state.gas_cells.density_code[row];
   fields.pressure_code = state.gas_cells.pressure_code[row];
   fields.internal_energy_code = state.gas_cells.internal_energy_code[row];
+  fields.metal_mass_code = state.gas_cells.metal_mass_code[row];
   fields.temperature_code = state.gas_cells.temperature_code[row];
   fields.sound_speed_code = state.gas_cells.sound_speed_code[row];
   requireValidGasCellMigrationFields(fields, caller);
@@ -199,6 +200,7 @@ void writeGasCellFieldsToRow(
   gas_cells.density_code[row] = fields.density_code;
   gas_cells.pressure_code[row] = fields.pressure_code;
   gas_cells.internal_energy_code[row] = fields.internal_energy_code;
+  gas_cells.metal_mass_code[row] = fields.metal_mass_code;
   gas_cells.temperature_code[row] = fields.temperature_code;
   gas_cells.sound_speed_code[row] = fields.sound_speed_code;
 }
@@ -456,6 +458,10 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
       record.star_fields.formation_scale_factor = star_particles.formation_scale_factor[row];
       record.star_fields.birth_mass_code = star_particles.birth_mass_code[row];
       record.star_fields.metallicity_mass_fraction = star_particles.metallicity_mass_fraction[row];
+      record.star_fields.birth_key = star_particles.birth_key[row];
+      record.star_fields.parent_gas_cell_id = star_particles.parent_gas_cell_id[row];
+      record.star_fields.birth_tick = star_particles.birth_tick[row];
+      record.star_fields.birth_ordinal = star_particles.birth_ordinal[row];
       record.star_fields.stellar_age_years_last = star_particles.stellar_age_years_last[row];
       record.star_fields.stellar_returned_mass_cumulative_code =
           star_particles.stellar_returned_mass_cumulative_code[row];
@@ -843,6 +849,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       destination->formation_scale_factor[row] = star_particles.formation_scale_factor[source];
       destination->birth_mass_code[row] = star_particles.birth_mass_code[source];
       destination->metallicity_mass_fraction[row] = star_particles.metallicity_mass_fraction[source];
+      destination->birth_key[row] = star_particles.birth_key[source];
+      destination->parent_gas_cell_id[row] = star_particles.parent_gas_cell_id[source];
+      destination->birth_tick[row] = star_particles.birth_tick[source];
+      destination->birth_ordinal[row] = star_particles.birth_ordinal[source];
       destination->stellar_age_years_last[row] = star_particles.stellar_age_years_last[source];
       destination->stellar_returned_mass_cumulative_code[row] =
           star_particles.stellar_returned_mass_cumulative_code[source];
@@ -869,6 +879,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       destination->formation_scale_factor[row] = inbound.star_fields.formation_scale_factor;
       destination->birth_mass_code[row] = inbound.star_fields.birth_mass_code;
       destination->metallicity_mass_fraction[row] = inbound.star_fields.metallicity_mass_fraction;
+      destination->birth_key[row] = inbound.star_fields.birth_key;
+      destination->parent_gas_cell_id[row] = inbound.star_fields.parent_gas_cell_id;
+      destination->birth_tick[row] = inbound.star_fields.birth_tick;
+      destination->birth_ordinal[row] = inbound.star_fields.birth_ordinal;
       destination->stellar_age_years_last[row] = inbound.star_fields.stellar_age_years_last;
       destination->stellar_returned_mass_cumulative_code[row] =
           inbound.star_fields.stellar_returned_mass_cumulative_code;

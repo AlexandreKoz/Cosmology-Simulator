@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
 
@@ -310,6 +311,37 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
     const std::string& key) {
   const double in_mpc = parseLengthMpc(value, default_unit, key);
   return in_mpc * 1.0e3;
+}
+
+[[nodiscard]] double massUnitSi(const std::string& unit) {
+  const std::string normalized = toLower(unit);
+  if (normalized == "kg") {
+    return 1.0;
+  }
+  if (normalized == "g") {
+    return constants::k_gram_si;
+  }
+  if (normalized == "msun") {
+    return constants::k_solar_mass_si;
+  }
+  throw ConfigError(
+      "unsupported mass unit '" + unit + "' (supported: kg, g, msun)");
+}
+
+[[nodiscard]] double parseMassCode(
+    const std::string& value,
+    const std::string& default_code_mass_unit,
+    const std::string& key) {
+  const auto [magnitude, provided_unit] = splitMagnitudeUnit(value);
+  const std::string source_unit =
+      provided_unit.empty() ? default_code_mass_unit : provided_unit;
+  try {
+    return magnitude * massUnitSi(source_unit) /
+        massUnitSi(default_code_mass_unit);
+  } catch (const ConfigError&) {
+    throw ConfigError(
+        "key '" + key + "': unsupported unit in value '" + value + "'");
+  }
 }
 
 [[nodiscard]] std::string requireString(
@@ -609,6 +641,43 @@ parseInitialConditionMissingFieldPolicy(
       return "global_coarse_plus_focused_highres_correction";
   }
   throw ConfigError("unhandled ZoomLongRangeStrategy enum value during serialization");
+}
+
+[[nodiscard]] StarFormationModelKind parseStarFormationModelKind(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "legacy_schmidt_threshold") {
+    return StarFormationModelKind::kLegacySchmidtThreshold;
+  }
+  if (lower == "adaptive_bound_jeans") {
+    return StarFormationModelKind::kAdaptiveBoundJeans;
+  }
+  throw ConfigError(
+      "physics.star_formation_model must be one of: legacy_schmidt_threshold, adaptive_bound_jeans");
+}
+
+[[nodiscard]] StarFormationCollapseTimescale parseStarFormationCollapseTimescale(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "free_fall") {
+    return StarFormationCollapseTimescale::kFreeFall;
+  }
+  if (lower == "minimum_free_fall_or_compression") {
+    return StarFormationCollapseTimescale::kMinimumFreeFallOrCompression;
+  }
+  throw ConfigError(
+      "physics.sf_collapse_timescale must be one of: free_fall, minimum_free_fall_or_compression");
+}
+
+[[nodiscard]] StarParticleMassPolicy parseStarParticleMassPolicy(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "fixed") {
+    return StarParticleMassPolicy::kFixed;
+  }
+  if (lower == "gas_resolution_fraction") {
+    return StarParticleMassPolicy::kGasResolutionFraction;
+  }
+  throw ConfigError(
+      "physics.sf_star_particle_mass_policy must be one of: fixed, gas_resolution_fraction");
 }
 
 [[nodiscard]] FeedbackMode parseFeedbackMode(const std::string& value) {
@@ -915,11 +984,25 @@ struct ConfigKeySpec {
       {"physics.cooling_model", "primordial"},
       {"physics.metal_line_table_path", ""},
       {"physics.temperature_floor_k", "100.0"},
+      {"physics.star_formation_model", "legacy_schmidt_threshold"},
       {"physics.sf_density_threshold_code", "10.0"},
       {"physics.sf_temperature_threshold_k", "1.0e4"},
       {"physics.sf_min_converging_flow_rate_code", "0.0"},
       {"physics.sf_epsilon_ff", "0.01"},
+      {"physics.sf_bound_alpha_vir_max", "1.0"},
+      {"physics.sf_require_converging_flow", "true"},
+      {"physics.sf_collapse_timescale", "free_fall"},
+      {"physics.sf_jeans_mass_floor_code", "100.0"},
+      {"physics.sf_star_particle_mass_policy", "fixed"},
+      {"physics.sf_target_star_particle_mass_code", "0.1"},
+      {"physics.sf_target_star_particle_mass_fraction", "0.25"},
       {"physics.sf_min_star_particle_mass_code", "0.1"},
+      {"physics.sf_max_star_particle_mass_code", "1.0e30"},
+      {"physics.sf_max_spawn_particles_per_cell_step", "8"},
+      {"physics.sf_max_fractional_mass_conversion", "0.25"},
+      {"physics.sf_min_remaining_gas_fraction", "0.01"},
+      {"physics.sf_min_remaining_gas_mass_code", "1.0e-12"},
+      {"physics.sf_temperature_safety_ceiling_k", "0.0"},
       {"physics.sf_stochastic_spawning", "true"},
       {"physics.sf_random_seed", "123456789"},
       {"physics.fb_mode", "thermal_kinetic_momentum"},
@@ -1085,7 +1168,16 @@ void validateConfig(const SimulationConfig& config) {
       {config.physics.sf_temperature_threshold_k, "physics.sf_temperature_threshold_k"},
       {config.physics.sf_min_converging_flow_rate_code, "physics.sf_min_converging_flow_rate_code"},
       {config.physics.sf_epsilon_ff, "physics.sf_epsilon_ff"},
+      {config.physics.sf_bound_alpha_vir_max, "physics.sf_bound_alpha_vir_max"},
+      {config.physics.sf_jeans_mass_floor_code, "physics.sf_jeans_mass_floor_code"},
+      {config.physics.sf_target_star_particle_mass_code, "physics.sf_target_star_particle_mass_code"},
+      {config.physics.sf_target_star_particle_mass_fraction, "physics.sf_target_star_particle_mass_fraction"},
       {config.physics.sf_min_star_particle_mass_code, "physics.sf_min_star_particle_mass_code"},
+      {config.physics.sf_max_star_particle_mass_code, "physics.sf_max_star_particle_mass_code"},
+      {config.physics.sf_max_fractional_mass_conversion, "physics.sf_max_fractional_mass_conversion"},
+      {config.physics.sf_min_remaining_gas_fraction, "physics.sf_min_remaining_gas_fraction"},
+      {config.physics.sf_min_remaining_gas_mass_code, "physics.sf_min_remaining_gas_mass_code"},
+      {config.physics.sf_temperature_safety_ceiling_k, "physics.sf_temperature_safety_ceiling_k"},
       {config.physics.fb_epsilon_thermal, "physics.fb_epsilon_thermal"},
       {config.physics.fb_epsilon_kinetic, "physics.fb_epsilon_kinetic"},
       {config.physics.fb_epsilon_momentum, "physics.fb_epsilon_momentum"},
@@ -1251,10 +1343,34 @@ void validateConfig(const SimulationConfig& config) {
   if (config.physics.sf_density_threshold_code <= 0.0 ||
       config.physics.sf_temperature_threshold_k <= 0.0 ||
       config.physics.sf_min_star_particle_mass_code <= 0.0) {
-    throw ConfigError("star formation thresholds and min star mass must be > 0");
+    throw ConfigError("legacy star formation thresholds and min star mass must be > 0");
   }
   if (config.physics.sf_epsilon_ff < 0.0 || config.physics.sf_epsilon_ff > 1.0) {
     throw ConfigError("physics.sf_epsilon_ff must be in [0, 1]");
+  }
+  if (config.physics.sf_bound_alpha_vir_max <= 0.0 ||
+      config.physics.sf_jeans_mass_floor_code < 0.0) {
+    throw ConfigError(
+        "physics.sf_bound_alpha_vir_max must be > 0 and sf_jeans_mass_floor_code must be >= 0");
+  }
+  if (config.physics.sf_target_star_particle_mass_code <= 0.0 ||
+      config.physics.sf_target_star_particle_mass_fraction <= 0.0 ||
+      config.physics.sf_target_star_particle_mass_fraction > 1.0 ||
+      config.physics.sf_max_star_particle_mass_code < config.physics.sf_min_star_particle_mass_code) {
+    throw ConfigError(
+        "star-particle target mass must be > 0, target fraction in (0, 1], and max mass >= min mass");
+  }
+  if (config.physics.sf_max_spawn_particles_per_cell_step == 0U) {
+    throw ConfigError("physics.sf_max_spawn_particles_per_cell_step must be > 0");
+  }
+  if (config.physics.sf_max_fractional_mass_conversion <= 0.0 ||
+      config.physics.sf_max_fractional_mass_conversion >= 1.0 ||
+      config.physics.sf_min_remaining_gas_fraction < 0.0 ||
+      config.physics.sf_min_remaining_gas_fraction >= 1.0 ||
+      config.physics.sf_min_remaining_gas_mass_code < 0.0 ||
+      config.physics.sf_temperature_safety_ceiling_k < 0.0) {
+    throw ConfigError(
+        "star-formation conversion/remnant fractions must be in their documented ranges and mass/temperature floors non-negative");
   }
   if (config.physics.fb_epsilon_thermal < 0.0 || config.physics.fb_epsilon_kinetic < 0.0 ||
       config.physics.fb_epsilon_momentum < 0.0) {
@@ -1751,13 +1867,39 @@ void validateConfig(const SimulationConfig& config) {
   stream << "cooling_model = " << coolingModelToString(frozen.config.physics.cooling_model) << '\n';
   stream << "metal_line_table_path = " << frozen.config.physics.metal_line_table_path << '\n';
   stream << "temperature_floor_k = " << frozen.config.physics.temperature_floor_k << '\n';
+  stream << "star_formation_model = "
+         << starFormationModelKindToString(frozen.config.physics.star_formation_model) << '\n';
   stream << "sf_density_threshold_code = " << frozen.config.physics.sf_density_threshold_code << '\n';
   stream << "sf_temperature_threshold_k = " << frozen.config.physics.sf_temperature_threshold_k << '\n';
   stream << "sf_min_converging_flow_rate_code = " << frozen.config.physics.sf_min_converging_flow_rate_code
          << '\n';
   stream << "sf_epsilon_ff = " << frozen.config.physics.sf_epsilon_ff << '\n';
+  stream << "sf_bound_alpha_vir_max = " << frozen.config.physics.sf_bound_alpha_vir_max << '\n';
+  stream << "sf_require_converging_flow = "
+         << (frozen.config.physics.sf_require_converging_flow ? "true" : "false") << '\n';
+  stream << "sf_collapse_timescale = "
+         << starFormationCollapseTimescaleToString(frozen.config.physics.sf_collapse_timescale) << '\n';
+  stream << "sf_jeans_mass_floor_code = " << frozen.config.physics.sf_jeans_mass_floor_code << '\n';
+  stream << "sf_star_particle_mass_policy = "
+         << starParticleMassPolicyToString(frozen.config.physics.sf_star_particle_mass_policy) << '\n';
+  stream << "sf_target_star_particle_mass_code = "
+         << frozen.config.physics.sf_target_star_particle_mass_code << '\n';
+  stream << "sf_target_star_particle_mass_fraction = "
+         << frozen.config.physics.sf_target_star_particle_mass_fraction << '\n';
   stream << "sf_min_star_particle_mass_code = "
          << frozen.config.physics.sf_min_star_particle_mass_code << '\n';
+  stream << "sf_max_star_particle_mass_code = "
+         << frozen.config.physics.sf_max_star_particle_mass_code << '\n';
+  stream << "sf_max_spawn_particles_per_cell_step = "
+         << frozen.config.physics.sf_max_spawn_particles_per_cell_step << '\n';
+  stream << "sf_max_fractional_mass_conversion = "
+         << frozen.config.physics.sf_max_fractional_mass_conversion << '\n';
+  stream << "sf_min_remaining_gas_fraction = "
+         << frozen.config.physics.sf_min_remaining_gas_fraction << '\n';
+  stream << "sf_min_remaining_gas_mass_code = "
+         << frozen.config.physics.sf_min_remaining_gas_mass_code << '\n';
+  stream << "sf_temperature_safety_ceiling_k = "
+         << frozen.config.physics.sf_temperature_safety_ceiling_k << '\n';
   stream << "sf_stochastic_spawning = "
          << (frozen.config.physics.sf_stochastic_spawning ? "true" : "false") << '\n';
   stream << "sf_random_seed = " << frozen.config.physics.sf_random_seed << '\n';
@@ -2354,6 +2496,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.temperature_floor_k = parseFloating(
       requireString(entries, consumed, "physics.temperature_floor_k", "100.0"),
       "physics.temperature_floor_k");
+  frozen.config.physics.star_formation_model = parseStarFormationModelKind(
+      requireString(entries, consumed, "physics.star_formation_model",
+                    defaultFor("physics.star_formation_model")));
   frozen.config.physics.sf_density_threshold_code = parseFloating(
       requireString(entries, consumed, "physics.sf_density_threshold_code", "10.0"),
       "physics.sf_density_threshold_code");
@@ -2366,9 +2511,52 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.sf_epsilon_ff = parseFloating(
       requireString(entries, consumed, "physics.sf_epsilon_ff", "0.01"),
       "physics.sf_epsilon_ff");
-  frozen.config.physics.sf_min_star_particle_mass_code = parseFloating(
+  frozen.config.physics.sf_bound_alpha_vir_max = parseFloating(
+      requireString(entries, consumed, "physics.sf_bound_alpha_vir_max", "1.0"),
+      "physics.sf_bound_alpha_vir_max");
+  frozen.config.physics.sf_require_converging_flow = parseBool(
+      requireString(entries, consumed, "physics.sf_require_converging_flow", "true"),
+      "physics.sf_require_converging_flow");
+  frozen.config.physics.sf_collapse_timescale = parseStarFormationCollapseTimescale(
+      requireString(entries, consumed, "physics.sf_collapse_timescale", "free_fall"));
+  frozen.config.physics.sf_jeans_mass_floor_code = parseMassCode(
+      requireString(entries, consumed, "physics.sf_jeans_mass_floor_code", "100.0"),
+      frozen.config.units.mass_unit,
+      "physics.sf_jeans_mass_floor_code");
+  frozen.config.physics.sf_star_particle_mass_policy = parseStarParticleMassPolicy(
+      requireString(entries, consumed, "physics.sf_star_particle_mass_policy", "fixed"));
+  frozen.config.physics.sf_target_star_particle_mass_code = parseMassCode(
+      requireString(entries, consumed, "physics.sf_target_star_particle_mass_code", "0.1"),
+      frozen.config.units.mass_unit,
+      "physics.sf_target_star_particle_mass_code");
+  frozen.config.physics.sf_target_star_particle_mass_fraction = parseFloating(
+      requireString(entries, consumed, "physics.sf_target_star_particle_mass_fraction", "0.25"),
+      "physics.sf_target_star_particle_mass_fraction");
+  frozen.config.physics.sf_min_star_particle_mass_code = parseMassCode(
       requireString(entries, consumed, "physics.sf_min_star_particle_mass_code", "0.1"),
+      frozen.config.units.mass_unit,
       "physics.sf_min_star_particle_mass_code");
+  frozen.config.physics.sf_max_star_particle_mass_code = parseMassCode(
+      requireString(entries, consumed, "physics.sf_max_star_particle_mass_code", "1.0e30"),
+      frozen.config.units.mass_unit,
+      "physics.sf_max_star_particle_mass_code");
+  frozen.config.physics.sf_max_spawn_particles_per_cell_step =
+      static_cast<std::uint32_t>(parseNumber<unsigned int>(
+          requireString(entries, consumed, "physics.sf_max_spawn_particles_per_cell_step", "8"),
+          "physics.sf_max_spawn_particles_per_cell_step"));
+  frozen.config.physics.sf_max_fractional_mass_conversion = parseFloating(
+      requireString(entries, consumed, "physics.sf_max_fractional_mass_conversion", "0.25"),
+      "physics.sf_max_fractional_mass_conversion");
+  frozen.config.physics.sf_min_remaining_gas_fraction = parseFloating(
+      requireString(entries, consumed, "physics.sf_min_remaining_gas_fraction", "0.01"),
+      "physics.sf_min_remaining_gas_fraction");
+  frozen.config.physics.sf_min_remaining_gas_mass_code = parseMassCode(
+      requireString(entries, consumed, "physics.sf_min_remaining_gas_mass_code", "1.0e-12"),
+      frozen.config.units.mass_unit,
+      "physics.sf_min_remaining_gas_mass_code");
+  frozen.config.physics.sf_temperature_safety_ceiling_k = parseFloating(
+      requireString(entries, consumed, "physics.sf_temperature_safety_ceiling_k", "0.0"),
+      "physics.sf_temperature_safety_ceiling_k");
   frozen.config.physics.sf_stochastic_spawning = parseBool(
       requireString(entries, consumed, "physics.sf_stochastic_spawning", "true"),
       "physics.sf_stochastic_spawning");
@@ -2954,6 +3142,36 @@ std::string modeGravityBoundaryToString(ModeGravityBoundary boundary) {
       return "isolated_monopole";
   }
   throw ConfigError("unhandled ModeGravityBoundary enum value during serialization");
+}
+
+std::string starFormationModelKindToString(StarFormationModelKind model) {
+  switch (model) {
+    case StarFormationModelKind::kLegacySchmidtThreshold:
+      return "legacy_schmidt_threshold";
+    case StarFormationModelKind::kAdaptiveBoundJeans:
+      return "adaptive_bound_jeans";
+  }
+  throw ConfigError("unhandled StarFormationModelKind enum value during serialization");
+}
+
+std::string starFormationCollapseTimescaleToString(StarFormationCollapseTimescale mode) {
+  switch (mode) {
+    case StarFormationCollapseTimescale::kFreeFall:
+      return "free_fall";
+    case StarFormationCollapseTimescale::kMinimumFreeFallOrCompression:
+      return "minimum_free_fall_or_compression";
+  }
+  throw ConfigError("unhandled StarFormationCollapseTimescale enum value during serialization");
+}
+
+std::string starParticleMassPolicyToString(StarParticleMassPolicy policy) {
+  switch (policy) {
+    case StarParticleMassPolicy::kFixed:
+      return "fixed";
+    case StarParticleMassPolicy::kGasResolutionFraction:
+      return "gas_resolution_fraction";
+  }
+  throw ConfigError("unhandled StarParticleMassPolicy enum value during serialization");
 }
 
 std::string feedbackModeToString(FeedbackMode mode) {

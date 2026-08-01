@@ -19,6 +19,7 @@ int main() {
   input.mass = 7.5;
   input.gas_density = 8.5;
   input.gas_internal_energy = 9.5;
+  input.gas_metallicity = 0.015;
   input.star_formation = 0.25;
   input.star_birth_mass = 10.5;
   input.star_metallicity = 0.02;
@@ -45,6 +46,7 @@ int main() {
   assert(output.mass == input.mass);
   assert(output.gas_density == input.gas_density);
   assert(output.gas_internal_energy == input.gas_internal_energy);
+  assert(output.gas_metallicity == input.gas_metallicity);
   assert(output.star_formation == input.star_formation);
   assert(output.star_birth_mass == input.star_birth_mass);
   assert(output.star_metallicity == input.star_metallicity);

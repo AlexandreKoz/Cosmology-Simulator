@@ -1066,6 +1066,40 @@ void testDerivedRuntimeSerializationUsesCanonicalNames() {
   assert(serialized.find("time_end_code") == std::string::npos);
 }
 
+
+void testStarFormationMassParametersAcceptUnits() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[units]\n"
+      "mass_unit = kg\n"
+      "[mode]\n"
+      "mode = zoom_in\n"
+      "[physics]\n"
+      "star_formation_model = adaptive_bound_jeans\n"
+      "sf_jeans_mass_floor_code = 2 msun\n"
+      "sf_target_star_particle_mass_code = 3 msun\n"
+      "sf_min_star_particle_mass_code = 1 msun\n"
+      "sf_max_star_particle_mass_code = 10 msun\n"
+      "sf_min_remaining_gas_mass_code = 0.5 msun\n",
+      "sf_mass_units");
+  const double solar_mass_kg = 1.98847e30;
+  assert(std::abs(frozen.config.physics.sf_jeans_mass_floor_code - 2.0 * solar_mass_kg) /
+             solar_mass_kg < 1.0e-12);
+  assert(std::abs(frozen.config.physics.sf_target_star_particle_mass_code - 3.0 * solar_mass_kg) /
+             solar_mass_kg < 1.0e-12);
+  assert(frozen.normalized_text.find("sf_jeans_mass_floor_code = ") != std::string::npos);
+
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[physics]\n"
+        "sf_target_star_particle_mass_code = 4 bananas\n",
+        "sf_bad_mass_unit");
+  } catch (const cosmosim::core::ConfigError&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
 void testProductionHierarchicalRungsFailClosed() {
   const auto production = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n", "production_single_rung_default");
@@ -1150,6 +1184,7 @@ int main() {
   testAdversarialPhysicsAndCosmologyDependenciesFail();
   testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
+  testStarFormationMassParametersAcceptUnits();
   testProductionHierarchicalRungsFailClosed();
   testOutputCodeTimeCadenceValidationAndRoundtrip();
   return 0;

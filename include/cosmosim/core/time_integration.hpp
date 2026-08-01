@@ -338,6 +338,14 @@ struct StepContext {
   const LambdaCdmBackground* cosmology_background = nullptr;
   const ModePolicy* mode_policy = nullptr;
   ProfilerSession* profiler_session = nullptr;
+  // Non-owning scheduler seams used by source modules that append new particles at
+  // the legal source mutation boundary. Unit tests may leave these null.
+  HierarchicalTimeBinScheduler* particle_scheduler = nullptr;
+  HierarchicalTimeBinScheduler* gas_cell_scheduler = nullptr;
+  // Per-step append-only sink for authoritative numeric IDs created by legal
+  // source mutations. The workflow ownership ledger consumes these IDs before
+  // any subsequent decomposition or migration validation.
+  std::vector<std::uint64_t>* newly_created_particle_ids = nullptr;
   CosmologicalStepFactors timeline_step;
   StepBoundaryState boundary;
   PmRefreshDirective pm_refresh_directive;
@@ -603,6 +611,9 @@ struct TimeStepGasCellCriteriaView {
   std::span<const double> density_code;
   std::span<const double> temperature_code;
   std::span<const double> sound_speed_code;
+  // Peculiar-velocity divergence evaluated with physical cell spacing, in
+  // inverse code-time units. Invalid/non-patch cells carry NaN and are ignored.
+  std::span<const double> velocity_divergence_code;
   std::span<const double> accel_x_comoving;
   std::span<const double> accel_y_comoving;
   std::span<const double> accel_z_comoving;

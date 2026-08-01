@@ -20,6 +20,7 @@ void serializeIcRecord(
   appendDouble(output, record.mass);
   appendDouble(output, record.gas_density);
   appendDouble(output, record.gas_internal_energy);
+  appendDouble(output, record.gas_metallicity);
   appendDouble(output, record.star_formation);
   appendDouble(output, record.star_birth_mass);
   appendDouble(output, record.star_metallicity);
@@ -54,6 +55,7 @@ IcParticleRecord deserializeIcRecord(
   record.mass = readDouble(bytes, offset);
   record.gas_density = readDouble(bytes, offset);
   record.gas_internal_energy = readDouble(bytes, offset);
+  record.gas_metallicity = readDouble(bytes, offset);
   record.star_formation = readDouble(bytes, offset);
   record.star_birth_mass = readDouble(bytes, offset);
   record.star_metallicity = readDouble(bytes, offset);

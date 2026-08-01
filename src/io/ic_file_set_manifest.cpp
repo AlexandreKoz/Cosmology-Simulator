@@ -1351,12 +1351,13 @@ void recordRootSchemaDisposition(
             config.mode.ic_gas_density_value_code,
             "no dialect-defined default exists");
       }
-      if (add("Metallicity", {"Metallicity", "GFM_Metallicity"}, false,
-              IcFieldSemantics::kIntensive,
-              IcVelocityConvention::kNotVelocity,
-              IcFieldDisposition::kDropped)) {
-        result.dropped_fields.push_back(
-            group_path + "/Metallicity: no gas metallicity lane");
+      if (!add("Metallicity", {"Metallicity", "GFM_Metallicity"}, false,
+               IcFieldSemantics::kIntensive)) {
+        resolve_missing(
+            group_path + "/Metallicity",
+            core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault,
+            0.0,
+            "use zero gas metallicity as the explicit dialect default");
       }
       if (add("SmoothingLength",
               {"SmoothingLength", "Hsml", "Smoothing_Length"}, false,

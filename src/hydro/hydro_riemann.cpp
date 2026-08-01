@@ -39,6 +39,8 @@ constexpr double k_small = 1.0e-14;
 
   const HydroConservedState conserved = HydroCoreSolver::conservedFromPrimitive(primitive, adiabatic_index);
   flux.total_energy_density_comoving = (conserved.total_energy_density_comoving + primitive.pressure_comoving) * vel_n;
+  flux.metal_mass_density_comoving =
+      primitive.rho_comoving * std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) * vel_n;
   return flux;
 }
 
@@ -180,6 +182,8 @@ HydroConservedState HllcRiemannSolver::computeFlux(
     if (!std::isfinite(star.total_energy_density_comoving) || star.total_energy_density_comoving <= 0.0) {
       return HydroConservedState{};
     }
+    star.metal_mass_density_comoving =
+        rho_star * std::clamp(prim.metallicity_mass_fraction, 0.0, 1.0);
     return star;
   };
 

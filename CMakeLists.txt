@@ -685,6 +685,33 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_star_formation_box tests/integration/test_star_formation_box.cpp)
   target_link_libraries(test_integration_star_formation_box PRIVATE cosmosim_all)
   add_test(NAME integration_star_formation_box COMMAND test_integration_star_formation_box)
+
+  add_executable(test_integration_star_formation_source_runtime tests/integration/test_star_formation_source_runtime.cpp)
+  target_link_libraries(test_integration_star_formation_source_runtime PRIVATE cosmosim_all)
+  add_test(NAME integration_star_formation_source_runtime COMMAND test_integration_star_formation_source_runtime)
+  set_tests_properties(integration_star_formation_source_runtime PROPERTIES LABELS "integration;runtime_truth;star_formation;p0")
+
+  add_executable(test_integration_star_formation_mpi tests/integration/test_star_formation_mpi.cpp)
+  target_link_libraries(test_integration_star_formation_mpi PRIVATE cosmosim_all)
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    foreach(star_formation_mpi_mode IN ITEMS base repartition restart)
+      if(star_formation_mpi_mode STREQUAL "base")
+        set(star_formation_mpi_test_name integration_star_formation_mpi_two_rank)
+      elseif(star_formation_mpi_mode STREQUAL "repartition")
+        set(star_formation_mpi_test_name integration_star_formation_mpi_repartition_two_rank)
+      else()
+        set(star_formation_mpi_test_name integration_star_formation_restart_mpi_two_rank)
+      endif()
+      add_test(
+        NAME ${star_formation_mpi_test_name}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_star_formation_mpi>
+                ${star_formation_mpi_mode} ${MPIEXEC_POSTFLAGS})
+      cosmosim_mark_runtime_truth_test(
+        ${star_formation_mpi_test_name}
+        mpi distributed star_formation restart ownership reproducibility integration)
+    endforeach()
+  endif()
   add_executable(test_integration_black_hole_agn_toy tests/integration/test_black_hole_agn_toy.cpp)
   target_link_libraries(test_integration_black_hole_agn_toy PRIVATE cosmosim_all)
   add_test(NAME integration_black_hole_agn_toy COMMAND test_integration_black_hole_agn_toy)

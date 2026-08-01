@@ -799,6 +799,42 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
   out << "]\n";
   out << "}\n";
 
+  if (!bundle.star_formation_history.empty()) {
+    const std::filesystem::path history_path =
+        diagnosticsOutputDirectory().parent_path() / "sfr_history.csv";
+    std::filesystem::path partial_path = history_path;
+    partial_path += ".part";
+    std::ofstream history(partial_path, std::ios::trunc);
+    if (!history) {
+      throw std::runtime_error(
+          "failed to open star-formation history path: " + partial_path.string());
+    }
+    history << std::setprecision(17);
+    history << "scale_factor,redshift,formed_mass_code,cumulative_stellar_birth_mass_code\n";
+    double cumulative_birth_mass_code = 0.0;
+    for (const StarFormationHistoryBin& bin : bundle.star_formation_history) {
+      cumulative_birth_mass_code += bin.formed_mass_code;
+      const double redshift = bin.scale_factor_center > 0.0
+          ? 1.0 / bin.scale_factor_center - 1.0
+          : std::numeric_limits<double>::infinity();
+      history << bin.scale_factor_center << ',' << redshift << ','
+              << bin.formed_mass_code << ',' << cumulative_birth_mass_code << '\n';
+    }
+    history.close();
+    if (!history) {
+      throw std::runtime_error(
+          "failed while writing star-formation history path: " + partial_path.string());
+    }
+    std::error_code remove_error;
+    std::filesystem::remove(history_path, remove_error);
+    std::error_code rename_error;
+    std::filesystem::rename(partial_path, history_path, rename_error);
+    if (rename_error) {
+      throw std::runtime_error(
+          "failed to finalize star-formation history path: " + rename_error.message());
+    }
+  }
+
   if (!bundle.xy_projection_density_code.empty()) {
     const std::filesystem::path quicklook = quicklookPath(bundle);
     std::ofstream csv(quicklook);

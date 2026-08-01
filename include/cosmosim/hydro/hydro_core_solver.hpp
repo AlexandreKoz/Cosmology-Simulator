@@ -24,6 +24,8 @@ struct HydroPrimitiveState {
   double vel_y_peculiar = 0.0;
   double vel_z_peculiar = 0.0;
   double pressure_comoving = 0.0;
+  // Passive gas metal mass fraction, reconstructed with the hydrodynamic state.
+  double metallicity_mass_fraction = 0.0;
 };
 
 // Cell-centered conserved variables in comoving coordinates.
@@ -36,6 +38,8 @@ struct HydroConservedState {
   double momentum_density_y_comoving = 0.0;
   double momentum_density_z_comoving = 0.0;
   double total_energy_density_comoving = 0.0;
+  // Conserved passive scalar rho * Z.
+  double metal_mass_density_comoving = 0.0;
 
   HydroConservedState& operator+=(const HydroConservedState& rhs);
   HydroConservedState& operator-=(const HydroConservedState& rhs);
@@ -70,12 +74,16 @@ class HydroConservedStateSoa {
   [[nodiscard]] std::span<double> totalEnergyDensityComoving();
   [[nodiscard]] std::span<const double> totalEnergyDensityComoving() const;
 
+  [[nodiscard]] std::span<double> metalMassDensityComoving();
+  [[nodiscard]] std::span<const double> metalMassDensityComoving() const;
+
  private:
   std::vector<double> m_mass_density_comoving;
   std::vector<double> m_momentum_density_x_comoving;
   std::vector<double> m_momentum_density_y_comoving;
   std::vector<double> m_momentum_density_z_comoving;
   std::vector<double> m_total_energy_density_comoving;
+  std::vector<double> m_metal_mass_density_comoving;
 };
 
 class HydroPrimitiveCacheSoa {
@@ -94,6 +102,7 @@ class HydroPrimitiveCacheSoa {
   std::vector<double> m_vel_y_peculiar;
   std::vector<double> m_vel_z_peculiar;
   std::vector<double> m_pressure_comoving;
+  std::vector<double> m_metallicity_mass_fraction;
 };
 
 struct HydroPatchColdData {
@@ -254,6 +263,7 @@ struct HydroConservationTotals {
   double momentum_z = 0.0;
   double total_energy = 0.0;
   double internal_energy = 0.0;
+  double metal_mass = 0.0;
 
   HydroConservationTotals& operator+=(const HydroConservationTotals& rhs);
   HydroConservationTotals& operator-=(const HydroConservationTotals& rhs);

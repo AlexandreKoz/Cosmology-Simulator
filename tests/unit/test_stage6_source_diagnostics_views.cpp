@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -104,6 +105,7 @@ void testStellarFeedbackGeometryAndDepositionViewsAreSufficientForHotLoop() {
       .cell_mass_code = state.cells.mass_code,
       .gas_density_code = state.gas_cells.density_code,
       .gas_internal_energy_code = state.gas_cells.internal_energy_code,
+      .gas_metal_mass_code = state.gas_cells.metal_mass_code,
   };
   const std::uint32_t active_star = 0;
   const double returned_mass = 0.5;
@@ -114,6 +116,8 @@ void testStellarFeedbackGeometryAndDepositionViewsAreSufficientForHotLoop() {
   assert(report.counters.feedback_stars == 1);
   assert(report.counters.target_cells_visited == 1);
   assert(state.cells.mass_code[0] > 10.0 || state.cells.mass_code[1] > 10.0);
+  assert(state.gas_cells.metal_mass_code[0] > 0.0 || state.gas_cells.metal_mass_code[1] > 0.0);
+  assert(std::abs((state.gas_cells.metal_mass_code[0] + state.gas_cells.metal_mass_code[1]) - returned_metals) < 1.0e-12);
 }
 
 

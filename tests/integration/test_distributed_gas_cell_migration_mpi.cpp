@@ -118,6 +118,7 @@ cosmosim::core::SimulationState makeState() {
     state.gas_cells.internal_energy_code[row] = 2.5;
     state.gas_cells.temperature_code[row] = 1.0;
     state.gas_cells.sound_speed_code[row] = 1.0;
+    state.gas_cells.metal_mass_code[row] = 0.02 * state.cells.mass_code[row];
     records.push_back(core::GasCellIdentityRecord{
         .gas_cell_id = seed.gas_cell_id,
         .parent_particle_id = seed.parent_particle_id,
@@ -183,6 +184,13 @@ int main() {
   const std::uint64_t local_cell_count = resumed_restart.state.cells.size();
   const std::uint64_t global_cell_count = cosmosim::parallel::MpiContext{}.allreduceSumUint64(local_cell_count);
   assert(global_cell_count == 3U);
+  double local_metal_mass = 0.0;
+  for (const double metal_mass_code : resumed_restart.state.gas_cells.metal_mass_code) {
+    local_metal_mass += metal_mass_code;
+  }
+  const double global_metal_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(local_metal_mass);
+  const double expected_global_metal_mass = 0.02 * (0.1 + 0.12 + 0.09);
+  assert(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12);
   MPI_Finalize();
 #endif
   return 0;

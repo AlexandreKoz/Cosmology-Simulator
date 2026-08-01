@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/workflows/output_restart_runtime.hpp"
@@ -90,7 +91,7 @@ class TimeCoordinator {
       const ReferenceWorkflowOptions& options,
       core::SimulationState& state,
       const core::LambdaCdmBackground* cosmology_background,
-      std::span<const std::uint64_t> expected_global_particle_ids,
+      std::vector<std::uint64_t>& expected_global_particle_ids,
       ReferenceWorkflowReport& report,
       core::ProfilerSession& profiler,
       const core::ModePolicy& mode_policy,
@@ -140,6 +141,10 @@ class TimeCoordinator {
   HydroAmrRuntime& m_hydro_amr;
   RuntimeExecutionPlan m_execution_plan;
   const internal::MigrationBalanceRuntime& m_migration_balance;
+  // Cleared for each KDK step and populated only by legal source-stage births.
+  // Keeping this distinct from the ownership ledger prevents migrations from
+  // being mistaken for particle creation.
+  std::vector<std::uint64_t> m_newly_created_particle_ids;
   core::StepOrchestrator m_lifecycle;
 };
 

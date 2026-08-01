@@ -19,6 +19,7 @@ void assertConservedClose(
   assert(std::abs(actual.momentum_y_code - expected.momentum_y_code) < k_tolerance);
   assert(std::abs(actual.momentum_z_code - expected.momentum_z_code) < k_tolerance);
   assert(std::abs(actual.total_energy_code - expected.total_energy_code) < k_tolerance);
+  assert(std::abs(actual.metal_mass_code - expected.metal_mass_code) < k_tolerance);
 }
 
 void testRefineAndDerefineLifecycle() {
@@ -43,6 +44,7 @@ void testRefineAndDerefineLifecycle() {
     cell.momentum_y_code = -0.25;
     cell.momentum_z_code = 0.125;
     cell.total_energy_code = 2.0;
+    cell.metal_mass_code = 0.02;
   }
   const auto parent_total_before_refine = root_patch->totalConserved();
 
@@ -89,6 +91,7 @@ void testConservativeProlongRestrict() {
       .momentum_y_code = -2.0,
       .momentum_z_code = 1.5,
       .total_energy_code = 16.0,
+      .metal_mass_code = 0.8,
   };
 
   const auto fine = cosmosim::amr::ConservativeTransfer::prolongateFromCoarse(coarse, 8);
@@ -123,6 +126,7 @@ void testRefinePatchInitializesChildrenConservatively() {
     root_conserved[i].momentum_y_code = -0.5 * row;
     root_conserved[i].momentum_z_code = 0.75 * row;
     root_conserved[i].total_energy_code = 2.0 * row;
+    root_conserved[i].metal_mass_code = 0.02 * row;
 
     root_metrics[i].density_code = 3.0 + row;
     root_metrics[i].pressure_code = 1.5 + row;
@@ -201,6 +205,7 @@ void testDerefineRestrictsModifiedChildrenAndArchivesIds() {
       child_conserved[cell_index].momentum_y_code = -0.25 * row;
       child_conserved[cell_index].momentum_z_code = 0.125 * row;
       child_conserved[cell_index].total_energy_code = 3.0 + 0.75 * row;
+      child_conserved[cell_index].metal_mass_code = 0.01 * row;
       expected_restricted_total += child_conserved[cell_index];
 
       child_metrics[cell_index].particle_count = static_cast<std::uint32_t>((cell_index % 3U) + 1U);
@@ -250,6 +255,7 @@ void testRefluxCorrection() {
   auto conserved = root_patch->conservedView();
   conserved[0].mass_code = 10.0;
   conserved[0].total_energy_code = 20.0;
+  conserved[0].metal_mass_code = 1.0;
 
   const double coarse_volume = root_patch->cellVolumeComov();
   const double dt_code = 0.25;
@@ -262,6 +268,8 @@ void testRefluxCorrection() {
   entry.fine_face_flux_code.mass_code = 3.0;
   entry.coarse_face_flux_code.total_energy_code = 4.0;
   entry.fine_face_flux_code.total_energy_code = 6.0;
+  entry.coarse_face_flux_code.metal_mass_code = 0.25;
+  entry.fine_face_flux_code.metal_mass_code = 0.50;
   entry.face_area_comov = area;
   entry.dt_code = dt_code;
 
@@ -270,10 +278,14 @@ void testRefluxCorrection() {
 
   const double expected_mass = 10.0 - ((3.0 - 2.0) * area * dt_code / coarse_volume);
   const double expected_energy = 20.0 - ((6.0 - 4.0) * area * dt_code / coarse_volume);
+  const double expected_metal = 1.0 - ((0.50 - 0.25) * area * dt_code / coarse_volume);
 
   conserved = root_patch->conservedView();
   assert(std::abs(conserved[0].mass_code - expected_mass) < k_tolerance);
   assert(std::abs(conserved[0].total_energy_code - expected_energy) < k_tolerance);
+  assert(std::abs(conserved[0].metal_mass_code - expected_metal) < k_tolerance);
+  assert(std::abs(diag.corrected_metal_mass_code -
+                  std::abs((0.50 - 0.25) * area * dt_code / coarse_volume)) < k_tolerance);
 }
 
 }  // namespace

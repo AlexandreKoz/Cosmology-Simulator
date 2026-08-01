@@ -447,3 +447,28 @@ ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
 ctest --test-dir build/mpi-hdf5-fftw-debug --output-on-failure \
   -R 'integration_distributed_ic_reader'
 ```
+
+## Adaptive bound–Jeans star-formation validation
+
+Acceptance coverage includes physical/comoving conversion, gradient norm, virial and Jeans transitions, converging/static/expanding flow, free-fall/compression times, exact exponential depletion, source timestep limits, stable RNG golden vectors, row/rank-offset invariance, unbiased stochastic ensembles, multi-particle count consistency, conservative mass/momentum/metals, internal-energy sink accounting, invalid-state rejection, disabled no-op behavior, legacy compatibility, actual `SourceRuntime` gradient/metal use, snapshot round-trip, restart schema coverage, AMR metal transport, feedback metal return, and distributed ownership ledgers.
+
+The affordable repository tests establish implementation correctness and deterministic contracts. They do not constitute observational calibration of an isolated disk or cosmological galaxy population. Resolution studies, long-duration feedback-regulated disks, and external cross-code comparisons remain release-validation work.
+
+### Adaptive bound--Jeans star-formation acceptance
+
+The campaign adds `unit_star_formation`, `integration_star_formation_box`, and
+`integration_star_formation_source_runtime` for the analytic model, conservative
+batch mutation, real production hydro gradients/metallicity, parent gas-particle
+gravity-mirror refresh, snapshot/restart fields, and disabled/legacy behavior.
+The MPI-enabled HDF5 configuration additionally registers:
+
+- `integration_star_formation_mpi_two_rank` (owner-only spawning, including a rank
+  with zero eligible local cells, against a one-rank physical reference);
+- `integration_star_formation_mpi_repartition_two_rank` (birth-key, mass, and ID
+  invariance under ownership exchange);
+- `integration_star_formation_restart_mpi_two_rank` (direct versus checkpointed
+  continuation with exact birth records and gas mass).
+
+These MPI cases are source- and syntax-validated in environments without MPI, but
+acceptance may be claimed only after they execute under `mpiexec -n 2` in an
+MPI+HDF5 build.

@@ -68,7 +68,8 @@ namespace {
       .momentum_x_code = flux.momentum_density_x_comoving,
       .momentum_y_code = flux.momentum_density_y_comoving,
       .momentum_z_code = flux.momentum_density_z_comoving,
-      .total_energy_code = flux.total_energy_density_comoving};
+      .total_energy_code = flux.total_energy_density_comoving,
+      .metal_mass_code = flux.metal_mass_density_comoving};
 }
 
 void validateCompatibleRegisterRecord(
@@ -107,6 +108,7 @@ ConservedState& ConservedState::operator+=(const ConservedState& rhs) {
   momentum_y_code += rhs.momentum_y_code;
   momentum_z_code += rhs.momentum_z_code;
   total_energy_code += rhs.total_energy_code;
+  metal_mass_code += rhs.metal_mass_code;
   return *this;
 }
 
@@ -116,6 +118,7 @@ ConservedState& ConservedState::operator-=(const ConservedState& rhs) {
   momentum_y_code -= rhs.momentum_y_code;
   momentum_z_code -= rhs.momentum_z_code;
   total_energy_code -= rhs.total_energy_code;
+  metal_mass_code -= rhs.metal_mass_code;
   return *this;
 }
 
@@ -125,6 +128,7 @@ ConservedState& ConservedState::operator*=(double factor) {
   momentum_y_code *= factor;
   momentum_z_code *= factor;
   total_energy_code *= factor;
+  metal_mass_code *= factor;
   return *this;
 }
 
@@ -669,6 +673,7 @@ RefluxDiagnostics RefluxSynchronizer::apply(
     diagnostics.corrected_momentum_y_code += std::abs(delta_flux.momentum_y_code);
     diagnostics.corrected_momentum_z_code += std::abs(delta_flux.momentum_z_code);
     diagnostics.corrected_total_energy_code += std::abs(delta_flux.total_energy_code);
+    diagnostics.corrected_metal_mass_code += std::abs(delta_flux.metal_mass_code);
     diagnostics.corrected_energy_code += std::abs(delta_flux.total_energy_code);
     diagnostics.corrected_internal_energy_code += std::abs(delta_flux.total_energy_code);
   }

@@ -100,6 +100,21 @@ enum class InitialConditionMissingFieldPolicy {
   kPreserveUnavailable,
 };
 
+enum class StarFormationModelKind {
+  kLegacySchmidtThreshold,
+  kAdaptiveBoundJeans,
+};
+
+enum class StarFormationCollapseTimescale {
+  kFreeFall,
+  kMinimumFreeFallOrCompression,
+};
+
+enum class StarParticleMassPolicy {
+  kFixed,
+  kGasResolutionFraction,
+};
+
 enum class FeedbackMode {
   kThermal,
   kKinetic,
@@ -205,11 +220,27 @@ struct PhysicsConfig {
   CoolingModel cooling_model = CoolingModel::kPrimordial;
   std::string metal_line_table_path;
   double temperature_floor_k = 100.0;
+  StarFormationModelKind star_formation_model = StarFormationModelKind::kLegacySchmidtThreshold;
   double sf_density_threshold_code = 10.0;
   double sf_temperature_threshold_k = 1.0e4;
   double sf_min_converging_flow_rate_code = 0.0;
   double sf_epsilon_ff = 0.01;
+  double sf_bound_alpha_vir_max = 1.0;
+  bool sf_require_converging_flow = true;
+  StarFormationCollapseTimescale sf_collapse_timescale =
+      StarFormationCollapseTimescale::kFreeFall;
+  double sf_jeans_mass_floor_code = 100.0;
+  StarParticleMassPolicy sf_star_particle_mass_policy =
+      StarParticleMassPolicy::kFixed;
+  double sf_target_star_particle_mass_code = 0.1;
+  double sf_target_star_particle_mass_fraction = 0.25;
   double sf_min_star_particle_mass_code = 0.1;
+  double sf_max_star_particle_mass_code = 1.0e30;
+  std::uint32_t sf_max_spawn_particles_per_cell_step = 8;
+  double sf_max_fractional_mass_conversion = 0.25;
+  double sf_min_remaining_gas_fraction = 0.01;
+  double sf_min_remaining_gas_mass_code = 1.0e-12;
+  double sf_temperature_safety_ceiling_k = 0.0;
   bool sf_stochastic_spawning = true;
   std::uint64_t sf_random_seed = 123456789ull;
   FeedbackMode fb_mode = FeedbackMode::kThermalKineticMomentum;
@@ -510,7 +541,10 @@ void writeNormalizedConfigSnapshot(
     InitialConditionMissingFieldPolicy policy);
 [[nodiscard]] std::string modeHydroBoundaryToString(ModeHydroBoundary boundary);
 [[nodiscard]] std::string modeGravityBoundaryToString(ModeGravityBoundary boundary);
-[[nodiscard]] std::string feedbackModeToString(FeedbackMode mode);
+[[nodiscard]] [[nodiscard]] std::string starFormationModelKindToString(StarFormationModelKind model);
+[[nodiscard]] std::string starFormationCollapseTimescaleToString(StarFormationCollapseTimescale mode);
+[[nodiscard]] std::string starParticleMassPolicyToString(StarParticleMassPolicy policy);
+std::string feedbackModeToString(FeedbackMode mode);
 [[nodiscard]] std::string feedbackVariantToString(FeedbackVariant variant);
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);

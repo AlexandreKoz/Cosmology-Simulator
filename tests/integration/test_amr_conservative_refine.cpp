@@ -16,6 +16,7 @@ void assertConservedClose(
   assert(std::abs(actual.momentum_y_code - expected.momentum_y_code) < k_tolerance);
   assert(std::abs(actual.momentum_z_code - expected.momentum_z_code) < k_tolerance);
   assert(std::abs(actual.total_energy_code - expected.total_energy_code) < k_tolerance);
+  assert(std::abs(actual.metal_mass_code - expected.metal_mass_code) < k_tolerance);
 }
 
 void seedRefinementState(cosmosim::amr::AmrPatch& patch) {
@@ -28,6 +29,7 @@ void seedRefinementState(cosmosim::amr::AmrPatch& patch) {
     conserved[i].momentum_y_code = -0.25 * row;
     conserved[i].momentum_z_code = 0.375 * row;
     conserved[i].total_energy_code = 4.0 + 2.0 * row;
+    conserved[i].metal_mass_code = 0.03 * row;
 
     metrics[i].density_code = (i == 0) ? 32.0 : 0.5 + row;
     metrics[i].pressure_code = 0.25 + row;

@@ -1,66 +1,121 @@
-# Star formation module
+# Star formation
 
-The baseline star-formation module implements a Schmidt-Kennicutt-inspired volumetric law for eligible gas:
+CHUÍ provides two explicitly named stellar-population birth models:
+
+- `legacy_schmidt_threshold`: the historical density/temperature/convergence prescription retained for old configurations, restarts, and controlled comparisons.
+- `adaptive_bound_jeans`: the reference production model for new baryonic and zoom-in profiles.
+
+Star particles represent coeval stellar populations. They are not individual stars, sink particles, accreting clusters, or molecular-cloud control volumes.
+
+## Adaptive eligibility
+
+Only active, locally owned, non-ghost leaf gas cells with positive finite mass, density, and volume are considered. Production inputs come from authoritative patch geometry, gas state, velocity fields, `GasCellIdentityMap`, and conserved gas metal mass.
+
+For stored comoving density and geometry,
 
 \[
-\dot{\rho}_{*} = \epsilon_{\mathrm{ff}} \frac{\rho_{\mathrm{gas}}}{t_{\mathrm{ff}}},\qquad
- t_{\mathrm{ff}} = \sqrt{\frac{3\pi}{32 G \rho_{\mathrm{gas}}}}
+\rho_{\rm phys}=\rho_{\rm comov}/a^3,\qquad
+\Delta x_{\rm phys}=a\,V_{\rm comov}^{1/3}.
 \]
 
-## Eligibility criteria
+For proper storage, the scale-factor conversions are omitted. The effective cell length is the cube root of the actual cell volume. The production velocity-gradient tensor is evaluated from peculiar velocities using physical patch spacing, so its entries have inverse code-time units. The model records this as `physical_inverse_time_patch_finite_difference`.
 
-A gas cell is eligible when all checks pass:
+The local support parameter is
 
-- `density_code >= physics.sf_density_threshold_code`
-- `temperature_k <= physics.sf_temperature_threshold_k`
-- `velocity_divergence_code <= physics.sf_min_converging_flow_rate_code`
-- positive gas mass
+\[
+\alpha_{\rm vir}=
+\frac{\lVert\nabla\otimes\mathbf v\rVert_F^2+2(c_s/\Delta x_{\rm phys})^2}
+{8\pi G\rho_{\rm phys}},
+\]
 
-These checks are separated from rate evaluation and spawn logic in `StarFormationModel`.
+and eligibility requires `alpha_vir < sf_bound_alpha_vir_max`. No magnetic or subgrid-turbulent support is fabricated when those validated state variables do not exist.
 
-## Time-stepping integration
+The thermal Jeans mass convention is
 
-`StarFormationCallback` hooks the module into the `kSourceTerms` stage of
-`core::StepOrchestrator`, so star formation can run inside the standard kick-drift-kick loop
-instead of only in standalone tests/tools.
+\[
+M_J=\frac{\pi^{5/2}}{6}\frac{c_s^3}{G^{3/2}\rho_{\rm phys}^{1/2}},
+\]
 
-## Spawn modes
+with eligibility requiring
 
-- **Deterministic** (`physics.sf_stochastic_spawning=false`):
-  - formed mass over `dt` is transferred directly from gas to one spawned star particle.
-- **Stochastic** (`physics.sf_stochastic_spawning=true`):
-  - expected mass is converted to a Poisson-like draw around
-    `lambda = expected_mass / physics.sf_min_star_particle_mass_code`.
-  - spawn count uses `floor(lambda)` plus one Bernoulli trial from a reproducible hash RNG.
+\[
+M_J < \max(M_{J,\rm floor},M_{\rm cell}).
+\]
 
-## Conservation and bookkeeping
+When `sf_require_converging_flow=true`, the peculiar-flow divergence must be negative. The compression time is `-1/div(v)`.
 
-For every spawn event:
+## Rate and timestep contract
 
-- gas mass is reduced in `cells.mass_code`.
-- gas density is scaled by the same mass fraction in `gas_cells.density_code`.
-- one star particle is appended with species tag `kStar`.
-- star sidecar metadata is written:
-  - `formation_scale_factor`
-  - `birth_mass_code`
-  - `metallicity_mass_fraction`
+The free-fall time is
 
-A module sidecar block named `star_formation` stores run counters and normalized parameters for restart/provenance workflows.
+\[
+t_{\rm ff}=\sqrt{\frac{3\pi}{32G\rho_{\rm phys}}}.
+\]
 
-## Config and provenance implications
+`sf_collapse_timescale` selects either `free_fall` or `minimum_free_fall_or_compression`. The exact finite-step expected converted fraction is
 
-New normalized config fields in `[physics]`:
+\[
+f_*=1-\exp(-\epsilon_{\rm ff}\Delta t/t_{\rm sf}).
+\]
 
-- `sf_density_threshold_code`
-- `sf_temperature_threshold_k`
-- `sf_min_converging_flow_rate_code`
-- `sf_epsilon_ff`
-- `sf_min_star_particle_mass_code`
-- `sf_stochastic_spawning`
-- `sf_random_seed`
+The implementation uses `expm1` for small arguments. The scheduler registers the corresponding source limit
 
-Assumptions (conservative baseline):
+\[
+\Delta t_{\max}=-\frac{t_{\rm sf}}{\epsilon_{\rm ff}}\ln(1-f_{\max}),
+\]
 
-1. `density_code` and `mass_code` are internally consistent code units.
-2. newborn stars inherit cell center position and are initialized with zero peculiar velocity.
-3. one star sidecar row is emitted per spawn event to keep downstream stellar-evolution hooks explicit.
+including the compression time when that collapse-time mode is selected. The mutation path still checks bounds defensively, but clipping is not the primary timestep policy.
+
+## Stochastic spawning and identity
+
+The target mass is fixed or a fraction of the parent gas resolution. The sampler uses integer-plus-Bernoulli spawning with an adjusted feasible target when needed so both possible outcomes obey gas-mass, minimum-particle-mass, maximum-particle-mass, and maximum-count constraints without biased post-draw clipping.
+
+The counter-based draw is keyed by:
+
+- global star-formation seed;
+- stable `gas_cell_id`;
+- global integration tick;
+- birth-attempt ordinal;
+- RNG key-schema version.
+
+It excludes dense row, MPI rank, thread number, pointer value, and iteration order. Birth keys additionally include the model schema version. Numeric particle IDs are deterministic hashes of birth keys, use a reserved generated-ID domain, are collision-checked locally before mutation, and are checked by the exact distributed ownership ledger before migration and at workflow completion.
+
+## Conservative transfer
+
+For total birth mass `dm`, the newborn population inherits the parent centroid, peculiar velocity, and metallicity. Gas mass, density, pressure, and conserved metal mass are reduced consistently while gas specific internal energy and velocity remain unchanged. The ledgers record:
+
+- equal gas mass removed and star mass created;
+- equal gas momentum removed and stellar momentum created;
+- equal gas metal mass removed and stellar metal mass created;
+- removed gas internal energy as `star_formation_internal_energy_sink_code`;
+- stellar kinetic energy represented by newborn particle mass and velocity.
+
+The code does not claim conservation of hydrodynamic internal energy across conversion: that removed thermal energy is an explicit sink ledger, not a collisionless particle degree of freedom.
+
+After a production birth batch, the source runtime refreshes generic gas-particle compatibility/gravity mirrors from the authoritative owned gas cells. This prevents the next gravity boundary from seeing both pre-birth gas mass and newborn stellar mass; multiple gas cells sharing one lineage particle are aggregated deterministically by stable gas-cell ID.
+
+Births are planned, sorted by stable gas identity, validated, allocated in one batch, appended in one particle resize and one stellar-sidecar resize, and followed by one species-index rebuild. New stars enter scheduler bin zero at the next legal tick, receive no retroactive force kick, and become visible at the next force boundary.
+
+## Metals, AMR, MPI, restart, and output
+
+`metal_mass_code` is the authoritative gas metallicity scalar. Hydro fluxes, AMR prolongation/restriction/refluxing, temporal boundary state, MPI ghost exchange/migration, cooling, stellar feedback, snapshots, and restarts use that same conserved authority. Derived metallicity is `metal_mass_code / gas_mass_code` with zero-mass protection.
+
+Only owned leaf cells spawn. Covered coarse cells and ghosts are rejected. Stable gas-cell identity survives row reorder and migration. Source-created particle IDs are appended to a distinct ownership-origin ledger before any rebalance, so migration is not mistaken for particle creation.
+
+Restart schema 22 persists gas metal state, AMR metal registers/history, star birth identity, scheduler state, RNG metadata, and source sidecars. Schema 21 remains explicitly loadable with zero/default initialization for fields that did not exist there.
+
+Snapshots use canonical GADGET-style names. Gas writes `PartType0/Metallicity`; stars write `PartType4/Metallicity`, `StellarFormationTime`, `BirthMass`, and the CHUÍ birth-identity datasets documented in `output_schema.md`. Science-light diagnostics write `sfr_history.csv` from actual stellar birth mass and formation scale factor.
+
+## Configuration
+
+Mass-valued `*_code` parameters accept either a raw code-unit number or an explicit `kg`, `g`, or `msun` suffix and are normalized to the configured code mass unit. See `configs/adaptive_bound_jeans_isolated_galaxy.param.txt`.
+
+The adaptive model does not use a fixed density threshold as its physical trigger. `sf_temperature_safety_ceiling_k=0` disables the optional numerical ceiling. Historical threshold keys retain their meaning only in legacy mode.
+
+## Scope and limitations
+
+This is a validated reference star-particle birth model, not a complete calibrated galaxy-formation model. It does not implement sink accretion/merging, individual-star IMF sampling, molecular chemistry, radiation hydrodynamics, MHD support, cosmic rays, or a new feedback calibration. Galaxy-scale credibility still depends on cooling, stellar evolution, feedback, enrichment, hydrodynamic response, resolution studies, and comparison against external reference calculations.
+
+## Particle-ID collision contract
+
+Numeric star-particle IDs are deterministic hashes of the immutable birth key. Each source stage sorts and checks the complete local newborn-ID batch before mutation. The workflow then performs exact global duplicate, missing, and unexpected ID validation through the distributed ownership acceptance ledger. This avoids a full scan of the existing particle array and avoids per-birth allocator nodes while retaining an explicit collision-failure contract.

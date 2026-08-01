@@ -42,6 +42,7 @@ constexpr std::uint32_t k_restart_schema_v18 = 18;
 constexpr std::uint32_t k_restart_schema_v19 = 19;
 constexpr std::uint32_t k_restart_schema_v20 = 20;
 constexpr std::uint32_t k_restart_schema_v21 = 21;
+constexpr std::uint32_t k_restart_schema_v22 = 22;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
 constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
 constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
@@ -49,6 +50,7 @@ constexpr std::string_view k_restart_schema_name_v17 = "cosmosim_restart_v17";
 constexpr std::string_view k_restart_schema_name_v18 = "cosmosim_restart_v18";
 constexpr std::string_view k_restart_schema_name_v19 = "cosmosim_restart_v19";
 constexpr std::string_view k_restart_schema_name_v20 = "cosmosim_restart_v20";
+constexpr std::string_view k_restart_schema_name_v21 = "cosmosim_restart_v21";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 constexpr std::string_view k_gas_cell_scheduler_identity_key = "gas_cell_id";
 
@@ -716,6 +718,9 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
   requireHdf5Dataset1d(file, "/state/gas_cells/density_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/pressure_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/internal_energy_code");
+  if (schema_version >= k_restart_schema_v22) {
+    requireHdf5Dataset1d(file, "/state/gas_cells/metal_mass_code");
+  }
   requireHdf5Dataset1d(file, "/state/gas_cells/temperature_code");
   requireHdf5Dataset1d(file, "/state/gas_cells/sound_speed_code");
   if (schema_version >= k_restart_schema_v18) {
@@ -767,6 +772,10 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
                                      "fine_total_energy_flux_integral_code"}) {
       requireHdf5Dataset1d(file, std::string("/state/amr_pending_flux_registers/") + std::string(dataset));
     }
+    if (schema_version >= k_restart_schema_v22) {
+      requireHdf5Dataset1d(file, "/state/amr_pending_flux_registers/coarse_metal_mass_flux_integral_code");
+      requireHdf5Dataset1d(file, "/state/amr_pending_flux_registers/fine_metal_mass_flux_integral_code");
+    }
   }
   if (schema_version >= k_restart_schema_v18) {
     Hdf5Handle temporal_group = openRequiredGroup(file, "/state/amr_temporal_boundary_history");
@@ -781,6 +790,10 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
                                      "end_momentum_density_y_comoving", "end_momentum_density_z_comoving",
                                      "end_total_energy_density_comoving"}) {
       requireHdf5Dataset1d(file, std::string("/state/amr_temporal_boundary_history/") + std::string(dataset));
+    }
+    if (schema_version >= k_restart_schema_v22) {
+      requireHdf5Dataset1d(file, "/state/amr_temporal_boundary_history/start_metal_mass_density_comoving");
+      requireHdf5Dataset1d(file, "/state/amr_temporal_boundary_history/end_metal_mass_density_comoving");
     }
   }
   requireHdf5Dataset1d(file, "/state/species_count_by_species");
@@ -1000,6 +1013,11 @@ void writeStarSidecarGroup(hid_t state_group, const core::StarParticleSidecar& s
       H5T_IEEE_F64LE,
       H5T_NATIVE_DOUBLE,
       stars.metallicity_mass_fraction);
+  writeDataset1d(star_group.get(), "birth_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, stars.birth_key);
+  writeDataset1d(
+      star_group.get(), "parent_gas_cell_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, stars.parent_gas_cell_id);
+  writeDataset1d(star_group.get(), "birth_tick", H5T_STD_U64LE, H5T_NATIVE_UINT64, stars.birth_tick);
+  writeDataset1d(star_group.get(), "birth_ordinal", H5T_STD_U32LE, H5T_NATIVE_UINT32, stars.birth_ordinal);
   writeDataset1d(
       star_group.get(),
       "stellar_age_years_last",
@@ -1056,6 +1074,19 @@ void readStarSidecarGroup(hid_t state_group, core::StarParticleSidecar& stars) {
   stars.birth_mass_code = readDataset1dAligned<double>(star_group.get(), "birth_mass_code", H5T_NATIVE_DOUBLE);
   stars.metallicity_mass_fraction =
       readDataset1dAligned<double>(star_group.get(), "metallicity_mass_fraction", H5T_NATIVE_DOUBLE);
+  if (H5Lexists(star_group.get(), "birth_key", H5P_DEFAULT) > 0) {
+    stars.birth_key = readDataset1dAligned<std::uint64_t>(star_group.get(), "birth_key", H5T_NATIVE_UINT64);
+    stars.parent_gas_cell_id =
+        readDataset1dAligned<std::uint64_t>(star_group.get(), "parent_gas_cell_id", H5T_NATIVE_UINT64);
+    stars.birth_tick = readDataset1dAligned<std::uint64_t>(star_group.get(), "birth_tick", H5T_NATIVE_UINT64);
+    stars.birth_ordinal =
+        readDataset1dAligned<std::uint32_t>(star_group.get(), "birth_ordinal", H5T_NATIVE_UINT32);
+  } else {
+    stars.birth_key.assign(stars.particle_index.size(), 0U);
+    stars.parent_gas_cell_id.assign(stars.particle_index.size(), 0U);
+    stars.birth_tick.assign(stars.particle_index.size(), 0U);
+    stars.birth_ordinal.assign(stars.particle_index.size(), 0U);
+  }
   stars.stellar_age_years_last =
       readDataset1dAligned<double>(star_group.get(), "stellar_age_years_last", H5T_NATIVE_DOUBLE);
   stars.stellar_returned_mass_cumulative_code = readDataset1dAligned<double>(
@@ -1225,7 +1256,7 @@ void readGasCellIdentityGroup(hid_t state_group, core::SimulationState& state, s
 
 void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxRegisterStore& store) {
   Hdf5Handle group(openOrCreateGroup(state_group, "amr_pending_flux_registers"));
-  writeScalarU32Attribute(group.get(), "schema_version", 1U);
+  writeScalarU32Attribute(group.get(), "schema_version", 2U);
   const auto records = store.records();
   std::vector<std::uint64_t> register_key;
   std::vector<std::uint64_t> coarse_patch_id;
@@ -1252,11 +1283,13 @@ void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxReg
   std::vector<double> coarse_momentum_y_flux_integral_code;
   std::vector<double> coarse_momentum_z_flux_integral_code;
   std::vector<double> coarse_total_energy_flux_integral_code;
+  std::vector<double> coarse_metal_mass_flux_integral_code;
   std::vector<double> fine_mass_flux_integral_code;
   std::vector<double> fine_momentum_x_flux_integral_code;
   std::vector<double> fine_momentum_y_flux_integral_code;
   std::vector<double> fine_momentum_z_flux_integral_code;
   std::vector<double> fine_total_energy_flux_integral_code;
+  std::vector<double> fine_metal_mass_flux_integral_code;
   register_key.reserve(records.size());
   for (const core::PendingFluxRegisterRecord& record : records) {
     register_key.push_back(record.register_key);
@@ -1284,11 +1317,13 @@ void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxReg
     coarse_momentum_y_flux_integral_code.push_back(record.coarse_momentum_y_flux_integral_code);
     coarse_momentum_z_flux_integral_code.push_back(record.coarse_momentum_z_flux_integral_code);
     coarse_total_energy_flux_integral_code.push_back(record.coarse_total_energy_flux_integral_code);
+    coarse_metal_mass_flux_integral_code.push_back(record.coarse_metal_mass_flux_integral_code);
     fine_mass_flux_integral_code.push_back(record.fine_mass_flux_integral_code);
     fine_momentum_x_flux_integral_code.push_back(record.fine_momentum_x_flux_integral_code);
     fine_momentum_y_flux_integral_code.push_back(record.fine_momentum_y_flux_integral_code);
     fine_momentum_z_flux_integral_code.push_back(record.fine_momentum_z_flux_integral_code);
     fine_total_energy_flux_integral_code.push_back(record.fine_total_energy_flux_integral_code);
+    fine_metal_mass_flux_integral_code.push_back(record.fine_metal_mass_flux_integral_code);
   }
   writeDataset1d(group.get(), "register_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, register_key);
   writeDataset1d(group.get(), "coarse_patch_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, coarse_patch_id);
@@ -1315,11 +1350,13 @@ void writePendingFluxRegisterGroup(hid_t state_group, const core::PendingFluxReg
   writeDataset1d(group.get(), "coarse_momentum_y_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_momentum_y_flux_integral_code);
   writeDataset1d(group.get(), "coarse_momentum_z_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_momentum_z_flux_integral_code);
   writeDataset1d(group.get(), "coarse_total_energy_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_total_energy_flux_integral_code);
+  writeDataset1d(group.get(), "coarse_metal_mass_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, coarse_metal_mass_flux_integral_code);
   writeDataset1d(group.get(), "fine_mass_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_mass_flux_integral_code);
   writeDataset1d(group.get(), "fine_momentum_x_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_x_flux_integral_code);
   writeDataset1d(group.get(), "fine_momentum_y_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_y_flux_integral_code);
   writeDataset1d(group.get(), "fine_momentum_z_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_momentum_z_flux_integral_code);
   writeDataset1d(group.get(), "fine_total_energy_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_total_energy_flux_integral_code);
+  writeDataset1d(group.get(), "fine_metal_mass_flux_integral_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, fine_metal_mass_flux_integral_code);
 }
 
 void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& state, std::uint32_t schema_version) {
@@ -1357,12 +1394,20 @@ void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& stat
   const auto coarse_momentum_y_flux_integral_code = readDataset1d<double>(group.get(), "coarse_momentum_y_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto coarse_momentum_z_flux_integral_code = readDataset1d<double>(group.get(), "coarse_momentum_z_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto coarse_total_energy_flux_integral_code = readDataset1d<double>(group.get(), "coarse_total_energy_flux_integral_code", H5T_NATIVE_DOUBLE);
+  const std::size_t n = register_key.size();
+  const auto coarse_metal_mass_flux_integral_code =
+      H5Lexists(group.get(), "coarse_metal_mass_flux_integral_code", H5P_DEFAULT) > 0
+          ? readDataset1d<double>(group.get(), "coarse_metal_mass_flux_integral_code", H5T_NATIVE_DOUBLE)
+          : std::vector<double>(n, 0.0);
   const auto fine_mass_flux_integral_code = readDataset1d<double>(group.get(), "fine_mass_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto fine_momentum_x_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_x_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto fine_momentum_y_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_y_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto fine_momentum_z_flux_integral_code = readDataset1d<double>(group.get(), "fine_momentum_z_flux_integral_code", H5T_NATIVE_DOUBLE);
   const auto fine_total_energy_flux_integral_code = readDataset1d<double>(group.get(), "fine_total_energy_flux_integral_code", H5T_NATIVE_DOUBLE);
-  const std::size_t n = register_key.size();
+  const auto fine_metal_mass_flux_integral_code =
+      H5Lexists(group.get(), "fine_metal_mass_flux_integral_code", H5P_DEFAULT) > 0
+          ? readDataset1d<double>(group.get(), "fine_metal_mass_flux_integral_code", H5T_NATIVE_DOUBLE)
+          : std::vector<double>(n, 0.0);
   const bool sizes_match = coarse_patch_id.size() == n && coarse_gas_cell_id.size() == n && coarse_cell_index.size() == n &&
       level.size() == n && axis.size() == n && orientation.size() == n && expected_area_comov.size() == n &&
       coarse_area_accumulated_comov.size() == n && fine_area_accumulated_comov.size() == n && interval_start_code.size() == n &&
@@ -1371,9 +1416,11 @@ void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& stat
       fine_face_count.size() == n && gas_cell_identity_generation.size() == n && patch_geometry_generation.size() == n &&
       coarse_mass_flux_integral_code.size() == n && coarse_momentum_x_flux_integral_code.size() == n &&
       coarse_momentum_y_flux_integral_code.size() == n && coarse_momentum_z_flux_integral_code.size() == n &&
-      coarse_total_energy_flux_integral_code.size() == n && fine_mass_flux_integral_code.size() == n &&
+      coarse_total_energy_flux_integral_code.size() == n && coarse_metal_mass_flux_integral_code.size() == n &&
+      fine_mass_flux_integral_code.size() == n &&
       fine_momentum_x_flux_integral_code.size() == n && fine_momentum_y_flux_integral_code.size() == n &&
-      fine_momentum_z_flux_integral_code.size() == n && fine_total_energy_flux_integral_code.size() == n;
+      fine_momentum_z_flux_integral_code.size() == n && fine_total_energy_flux_integral_code.size() == n &&
+      fine_metal_mass_flux_integral_code.size() == n;
   if (!sizes_match) {
     throw std::runtime_error("/state/amr_pending_flux_registers datasets must have matching lengths");
   }
@@ -1406,11 +1453,13 @@ void readPendingFluxRegisterGroup(hid_t state_group, core::SimulationState& stat
         .coarse_momentum_y_flux_integral_code = coarse_momentum_y_flux_integral_code[i],
         .coarse_momentum_z_flux_integral_code = coarse_momentum_z_flux_integral_code[i],
         .coarse_total_energy_flux_integral_code = coarse_total_energy_flux_integral_code[i],
+        .coarse_metal_mass_flux_integral_code = coarse_metal_mass_flux_integral_code[i],
         .fine_mass_flux_integral_code = fine_mass_flux_integral_code[i],
         .fine_momentum_x_flux_integral_code = fine_momentum_x_flux_integral_code[i],
         .fine_momentum_y_flux_integral_code = fine_momentum_y_flux_integral_code[i],
         .fine_momentum_z_flux_integral_code = fine_momentum_z_flux_integral_code[i],
-        .fine_total_energy_flux_integral_code = fine_total_energy_flux_integral_code[i]});
+        .fine_total_energy_flux_integral_code = fine_total_energy_flux_integral_code[i],
+        .fine_metal_mass_flux_integral_code = fine_metal_mass_flux_integral_code[i]});
   }
   state.pending_flux_registers.assign(std::move(records));
 }
@@ -1420,7 +1469,7 @@ void writeAmrTemporalBoundaryHistoryGroup(
     hid_t state_group,
     const core::AmrTemporalBoundaryHistoryStore& store) {
   Hdf5Handle group(openOrCreateGroup(state_group, "amr_temporal_boundary_history"));
-  writeScalarU32Attribute(group.get(), "schema_version", 1U);
+  writeScalarU32Attribute(group.get(), "schema_version", 2U);
   std::vector<std::uint64_t> patch_id;
   std::vector<std::uint8_t> patch_level;
   std::vector<std::uint64_t> patch_geometry_fingerprint;
@@ -1437,11 +1486,13 @@ void writeAmrTemporalBoundaryHistoryGroup(
   std::vector<double> start_momentum_density_y_comoving;
   std::vector<double> start_momentum_density_z_comoving;
   std::vector<double> start_total_energy_density_comoving;
+  std::vector<double> start_metal_mass_density_comoving;
   std::vector<double> end_mass_density_comoving;
   std::vector<double> end_momentum_density_x_comoving;
   std::vector<double> end_momentum_density_y_comoving;
   std::vector<double> end_momentum_density_z_comoving;
   std::vector<double> end_total_energy_density_comoving;
+  std::vector<double> end_metal_mass_density_comoving;
   const auto records = store.records();
   patch_id.reserve(records.size());
   std::uint64_t offset = 0U;
@@ -1463,11 +1514,13 @@ void writeAmrTemporalBoundaryHistoryGroup(
       start_momentum_density_y_comoving.push_back(cell.start_momentum_density_y_comoving);
       start_momentum_density_z_comoving.push_back(cell.start_momentum_density_z_comoving);
       start_total_energy_density_comoving.push_back(cell.start_total_energy_density_comoving);
+      start_metal_mass_density_comoving.push_back(cell.start_metal_mass_density_comoving);
       end_mass_density_comoving.push_back(cell.end_mass_density_comoving);
       end_momentum_density_x_comoving.push_back(cell.end_momentum_density_x_comoving);
       end_momentum_density_y_comoving.push_back(cell.end_momentum_density_y_comoving);
       end_momentum_density_z_comoving.push_back(cell.end_momentum_density_z_comoving);
       end_total_energy_density_comoving.push_back(cell.end_total_energy_density_comoving);
+      end_metal_mass_density_comoving.push_back(cell.end_metal_mass_density_comoving);
       ++offset;
     }
   }
@@ -1487,11 +1540,13 @@ void writeAmrTemporalBoundaryHistoryGroup(
   writeDataset1d(group.get(), "start_momentum_density_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_momentum_density_y_comoving);
   writeDataset1d(group.get(), "start_momentum_density_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_momentum_density_z_comoving);
   writeDataset1d(group.get(), "start_total_energy_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_total_energy_density_comoving);
+  writeDataset1d(group.get(), "start_metal_mass_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, start_metal_mass_density_comoving);
   writeDataset1d(group.get(), "end_mass_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_mass_density_comoving);
   writeDataset1d(group.get(), "end_momentum_density_x_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_x_comoving);
   writeDataset1d(group.get(), "end_momentum_density_y_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_y_comoving);
   writeDataset1d(group.get(), "end_momentum_density_z_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_momentum_density_z_comoving);
   writeDataset1d(group.get(), "end_total_energy_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_total_energy_density_comoving);
+  writeDataset1d(group.get(), "end_metal_mass_density_comoving", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, end_metal_mass_density_comoving);
 }
 
 void readAmrTemporalBoundaryHistoryGroup(
@@ -1516,7 +1571,8 @@ void readAmrTemporalBoundaryHistoryGroup(
   if (!group.valid()) {
     throw std::runtime_error("restart reader: v18 restart is missing /state/amr_temporal_boundary_history");
   }
-  if (readScalarU32Attribute(group.get(), "schema_version") != 1U) {
+  const std::uint32_t temporal_schema_version = readScalarU32Attribute(group.get(), "schema_version");
+  if (temporal_schema_version != 1U && temporal_schema_version != 2U) {
     throw std::runtime_error("restart reader: unsupported /state/amr_temporal_boundary_history schema_version");
   }
   const auto patch_id = readDataset1d<std::uint64_t>(group.get(), "patch_id", H5T_NATIVE_UINT64);
@@ -1535,22 +1591,30 @@ void readAmrTemporalBoundaryHistoryGroup(
   const auto start_momentum_density_y_comoving = readDataset1d<double>(group.get(), "start_momentum_density_y_comoving", H5T_NATIVE_DOUBLE);
   const auto start_momentum_density_z_comoving = readDataset1d<double>(group.get(), "start_momentum_density_z_comoving", H5T_NATIVE_DOUBLE);
   const auto start_total_energy_density_comoving = readDataset1d<double>(group.get(), "start_total_energy_density_comoving", H5T_NATIVE_DOUBLE);
+  const std::size_t nc = gas_cell_id.size();
+  const auto start_metal_mass_density_comoving =
+      H5Lexists(group.get(), "start_metal_mass_density_comoving", H5P_DEFAULT) > 0
+          ? readDataset1d<double>(group.get(), "start_metal_mass_density_comoving", H5T_NATIVE_DOUBLE)
+          : std::vector<double>(nc, 0.0);
   const auto end_mass_density_comoving = readDataset1d<double>(group.get(), "end_mass_density_comoving", H5T_NATIVE_DOUBLE);
   const auto end_momentum_density_x_comoving = readDataset1d<double>(group.get(), "end_momentum_density_x_comoving", H5T_NATIVE_DOUBLE);
   const auto end_momentum_density_y_comoving = readDataset1d<double>(group.get(), "end_momentum_density_y_comoving", H5T_NATIVE_DOUBLE);
   const auto end_momentum_density_z_comoving = readDataset1d<double>(group.get(), "end_momentum_density_z_comoving", H5T_NATIVE_DOUBLE);
   const auto end_total_energy_density_comoving = readDataset1d<double>(group.get(), "end_total_energy_density_comoving", H5T_NATIVE_DOUBLE);
+  const auto end_metal_mass_density_comoving =
+      H5Lexists(group.get(), "end_metal_mass_density_comoving", H5P_DEFAULT) > 0
+          ? readDataset1d<double>(group.get(), "end_metal_mass_density_comoving", H5T_NATIVE_DOUBLE)
+          : std::vector<double>(nc, 0.0);
   const std::size_t n = patch_id.size();
-  const std::size_t nc = gas_cell_id.size();
   const bool record_sizes = patch_level.size() == n && patch_geometry_fingerprint.size() == n &&
       gas_cell_identity_generation.size() == n && interval_start_code.size() == n && interval_end_code.size() == n &&
       end_state_valid.size() == n && cell_offset.size() == n && cell_count.size() == n;
   const bool cell_sizes = patch_local_cell.size() == nc && start_mass_density_comoving.size() == nc &&
       start_momentum_density_x_comoving.size() == nc && start_momentum_density_y_comoving.size() == nc &&
       start_momentum_density_z_comoving.size() == nc && start_total_energy_density_comoving.size() == nc &&
-      end_mass_density_comoving.size() == nc && end_momentum_density_x_comoving.size() == nc &&
+      start_metal_mass_density_comoving.size() == nc && end_mass_density_comoving.size() == nc && end_momentum_density_x_comoving.size() == nc &&
       end_momentum_density_y_comoving.size() == nc && end_momentum_density_z_comoving.size() == nc &&
-      end_total_energy_density_comoving.size() == nc;
+      end_total_energy_density_comoving.size() == nc && end_metal_mass_density_comoving.size() == nc;
   if (!record_sizes || !cell_sizes) {
     throw std::runtime_error("/state/amr_temporal_boundary_history datasets must have matching lengths");
   }
@@ -1583,11 +1647,13 @@ void readAmrTemporalBoundaryHistoryGroup(
           .start_momentum_density_y_comoving = start_momentum_density_y_comoving[k],
           .start_momentum_density_z_comoving = start_momentum_density_z_comoving[k],
           .start_total_energy_density_comoving = start_total_energy_density_comoving[k],
+          .start_metal_mass_density_comoving = start_metal_mass_density_comoving[k],
           .end_mass_density_comoving = end_mass_density_comoving[k],
           .end_momentum_density_x_comoving = end_momentum_density_x_comoving[k],
           .end_momentum_density_y_comoving = end_momentum_density_y_comoving[k],
           .end_momentum_density_z_comoving = end_momentum_density_z_comoving[k],
-          .end_total_energy_density_comoving = end_total_energy_density_comoving[k]});
+          .end_total_energy_density_comoving = end_total_energy_density_comoving[k],
+          .end_metal_mass_density_comoving = end_metal_mass_density_comoving[k]});
     }
     records.push_back(std::move(record));
   }
@@ -1610,12 +1676,18 @@ void validateAmrTemporalBoundaryHistoryForRestart(const core::SimulationState& s
           !finite_state(cell.start_momentum_density_y_comoving) ||
           !finite_state(cell.start_momentum_density_z_comoving) ||
           !finite_state(cell.start_total_energy_density_comoving) ||
+          !finite_state(cell.start_metal_mass_density_comoving) ||
           !finite_state(cell.end_mass_density_comoving) ||
           !finite_state(cell.end_momentum_density_x_comoving) ||
           !finite_state(cell.end_momentum_density_y_comoving) ||
           !finite_state(cell.end_momentum_density_z_comoving) ||
           !finite_state(cell.end_total_energy_density_comoving) ||
-          cell.start_mass_density_comoving <= 0.0 || cell.end_mass_density_comoving <= 0.0) {
+          !finite_state(cell.end_metal_mass_density_comoving) ||
+          cell.start_mass_density_comoving <= 0.0 || cell.end_mass_density_comoving <= 0.0 ||
+          cell.start_metal_mass_density_comoving < 0.0 ||
+          cell.end_metal_mass_density_comoving < 0.0 ||
+          cell.start_metal_mass_density_comoving > cell.start_mass_density_comoving ||
+          cell.end_metal_mass_density_comoving > cell.end_mass_density_comoving) {
         throw std::runtime_error("restart reader: temporal history contains inadmissible conserved state");
       }
       for (std::size_t j = 0; j < i; ++j) {
@@ -1683,6 +1755,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(gas_group.get(), "density_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.density_code);
   writeDataset1d(gas_group.get(), "pressure_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.pressure_code);
   writeDataset1d(gas_group.get(), "internal_energy_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.internal_energy_code);
+  writeDataset1d(gas_group.get(), "metal_mass_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.metal_mass_code);
   writeDataset1d(gas_group.get(), "temperature_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.temperature_code);
   writeDataset1d(gas_group.get(), "sound_speed_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.gas_cells.sound_speed_code);
 
@@ -1853,6 +1926,12 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
       readDataset1dAligned<double>(gas_group.get(), "velocity_z_peculiar", H5T_NATIVE_DOUBLE);
   state.gas_cells.pressure_code = readDataset1dAligned<double>(gas_group.get(), "pressure_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.internal_energy_code = readDataset1dAligned<double>(gas_group.get(), "internal_energy_code", H5T_NATIVE_DOUBLE);
+  if (H5Lexists(gas_group.get(), "metal_mass_code", H5P_DEFAULT) > 0) {
+    state.gas_cells.metal_mass_code =
+        readDataset1dAligned<double>(gas_group.get(), "metal_mass_code", H5T_NATIVE_DOUBLE);
+  } else {
+    state.gas_cells.metal_mass_code.assign(state.cells.size(), 0.0);
+  }
   state.gas_cells.temperature_code = readDataset1dAligned<double>(gas_group.get(), "temperature_code", H5T_NATIVE_DOUBLE);
   state.gas_cells.sound_speed_code = readDataset1dAligned<double>(gas_group.get(), "sound_speed_code", H5T_NATIVE_DOUBLE);
 
@@ -2266,6 +2345,7 @@ const RestartSchema& restartSchema() {
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
   return file_schema_version == restartSchema().version ||
+      file_schema_version == k_restart_schema_v21 ||
       file_schema_version == k_restart_schema_v20 ||
       file_schema_version == k_restart_schema_v19 ||
       file_schema_version == k_restart_schema_v18 ||
@@ -2278,6 +2358,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
       "simulation_state_lanes_and_metadata",
       "particle_identity_softening_and_drift_epoch_lanes",
       "gas_cell_identity_lanes",
+      "gas_metal_mass_and_star_birth_identity_lanes",
       "hydro_geometry_patch_state",
       "amr_pending_flux_register_state",
       "amr_temporal_boundary_history_state",
@@ -2305,7 +2386,8 @@ std::uint64_t restartPayloadIntegrityHashImpl(
     bool include_temporal_boundary_history,
     bool include_gas_cell_scheduler,
     bool include_gravity_force_cache,
-    bool include_output_time_cadence) {
+    bool include_output_time_cadence,
+    bool include_star_formation_v22) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -2428,6 +2510,9 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_any_vec(state.gas_cells.density_code);
   append_any_vec(state.gas_cells.pressure_code);
   append_any_vec(state.gas_cells.internal_energy_code);
+  if (include_star_formation_v22) {
+    append_any_vec(state.gas_cells.metal_mass_code);
+  }
   append_any_vec(state.gas_cells.temperature_code);
   append_any_vec(state.gas_cells.sound_speed_code);
   if (include_gas_identity_records) {
@@ -2509,11 +2594,17 @@ std::uint64_t restartPayloadIntegrityHashImpl(
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_y_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_z_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_total_energy_flux_integral_code));
+      if (include_star_formation_v22) {
+        append_u64(std::bit_cast<std::uint64_t>(record.coarse_metal_mass_flux_integral_code));
+      }
       append_u64(std::bit_cast<std::uint64_t>(record.fine_mass_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_x_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_y_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_z_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_total_energy_flux_integral_code));
+      if (include_star_formation_v22) {
+        append_u64(std::bit_cast<std::uint64_t>(record.fine_metal_mass_flux_integral_code));
+      }
     }
   }
   if (include_temporal_boundary_history) {
@@ -2550,11 +2641,17 @@ std::uint64_t restartPayloadIntegrityHashImpl(
         append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_y_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_z_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_total_energy_density_comoving));
+        if (include_star_formation_v22) {
+          append_u64(std::bit_cast<std::uint64_t>(cell.start_metal_mass_density_comoving));
+        }
         append_u64(std::bit_cast<std::uint64_t>(cell.end_mass_density_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_x_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_y_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_z_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_total_energy_density_comoving));
+        if (include_star_formation_v22) {
+          append_u64(std::bit_cast<std::uint64_t>(cell.end_metal_mass_density_comoving));
+        }
       }
     }
   }
@@ -2562,6 +2659,12 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);
   append_any_vec(state.star_particles.metallicity_mass_fraction);
+  if (include_star_formation_v22) {
+    append_any_vec(state.star_particles.birth_key);
+    append_any_vec(state.star_particles.parent_gas_cell_id);
+    append_any_vec(state.star_particles.birth_tick);
+    append_any_vec(state.star_particles.birth_ordinal);
+  }
   append_any_vec(state.star_particles.stellar_age_years_last);
   append_any_vec(state.star_particles.stellar_returned_mass_cumulative_code);
   append_any_vec(state.star_particles.stellar_returned_metals_cumulative_code);
@@ -2703,7 +2806,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true, true);
+  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true, true, true);
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -2947,8 +3050,11 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
       schema_name == k_restart_schema_name_v19 && schema_version == k_restart_schema_v19;
   const bool legacy_v20_schema =
       schema_name == k_restart_schema_name_v20 && schema_version == k_restart_schema_v20;
+  const bool legacy_v21_schema =
+      schema_name == k_restart_schema_name_v21 && schema_version == k_restart_schema_v21;
   if ((!current_schema && !legacy_v14_schema && !legacy_v15_schema && !legacy_v16_schema &&
-       !legacy_v17_schema && !legacy_v18_schema && !legacy_v19_schema && !legacy_v20_schema) ||
+       !legacy_v17_schema && !legacy_v18_schema && !legacy_v19_schema && !legacy_v20_schema &&
+       !legacy_v21_schema) ||
       !isRestartSchemaCompatible(schema_version)) {
     throw std::runtime_error(
         "restart schema is not compatible: file='" + schema_name + "' v" + std::to_string(schema_version) +
@@ -3126,7 +3232,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
           schema_version >= k_restart_schema_v18,
           schema_version >= k_restart_schema_v19,
           schema_version >= k_restart_schema_v20,
-          schema_version >= k_restart_schema_v21);
+          schema_version >= k_restart_schema_v21,
+          schema_version >= k_restart_schema_v22);
   if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
     throw std::runtime_error("restart payload integrity hash mismatch");
   }

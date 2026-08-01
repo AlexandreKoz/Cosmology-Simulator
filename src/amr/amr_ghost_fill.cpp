@@ -229,7 +229,8 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
       std::isfinite(state.momentum_density_x_comoving) &&
       std::isfinite(state.momentum_density_y_comoving) &&
       std::isfinite(state.momentum_density_z_comoving) &&
-      std::isfinite(state.total_energy_density_comoving);
+      std::isfinite(state.total_energy_density_comoving) &&
+      std::isfinite(state.metal_mass_density_comoving);
 }
 
 [[nodiscard]] hydro::HydroConservedState temporalStateForCell(
@@ -298,13 +299,15 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
       .momentum_density_x_comoving = cell_it->start_momentum_density_x_comoving,
       .momentum_density_y_comoving = cell_it->start_momentum_density_y_comoving,
       .momentum_density_z_comoving = cell_it->start_momentum_density_z_comoving,
-      .total_energy_density_comoving = cell_it->start_total_energy_density_comoving};
+      .total_energy_density_comoving = cell_it->start_total_energy_density_comoving,
+      .metal_mass_density_comoving = cell_it->start_metal_mass_density_comoving};
   const hydro::HydroConservedState end{
       .mass_density_comoving = cell_it->end_mass_density_comoving,
       .momentum_density_x_comoving = cell_it->end_momentum_density_x_comoving,
       .momentum_density_y_comoving = cell_it->end_momentum_density_y_comoving,
       .momentum_density_z_comoving = cell_it->end_momentum_density_z_comoving,
-      .total_energy_density_comoving = cell_it->end_total_energy_density_comoving};
+      .total_energy_density_comoving = cell_it->end_total_energy_density_comoving,
+      .metal_mass_density_comoving = cell_it->end_metal_mass_density_comoving};
   const hydro::HydroConservedState result = (1.0 - alpha) * start + alpha * end;
   if (!finiteConserved(result) || result.mass_density_comoving <= 0.0) {
     ++diagnostics.temporal_history_invalid_rejections;
@@ -481,7 +484,12 @@ void markStaleRemoteTarget(
       .vel_x_peculiar = state.gas_cells.velocity_x_peculiar[row],
       .vel_y_peculiar = state.gas_cells.velocity_y_peculiar[row],
       .vel_z_peculiar = state.gas_cells.velocity_z_peculiar[row],
-      .pressure_comoving = state.gas_cells.pressure_code[row]};
+      .pressure_comoving = state.gas_cells.pressure_code[row],
+      .metallicity_mass_fraction = std::clamp(
+          state.gas_cells.metal_mass_code[row] /
+              std::max(state.cells.mass_code[row], 1.0e-30),
+          0.0,
+          1.0)};
   const auto conserved = hydro::HydroCoreSolver::conservedFromPrimitive(primitive, adiabatic_index);
   if (!finiteConserved(conserved) || conserved.mass_density_comoving <= 0.0) {
     throw std::runtime_error("AMR temporal history source state is non-finite or non-positive");
@@ -495,6 +503,7 @@ void assignStart(core::AmrTemporalBoundaryHistoryCellRecord& record, const hydro
   record.start_momentum_density_y_comoving = state.momentum_density_y_comoving;
   record.start_momentum_density_z_comoving = state.momentum_density_z_comoving;
   record.start_total_energy_density_comoving = state.total_energy_density_comoving;
+  record.start_metal_mass_density_comoving = state.metal_mass_density_comoving;
 }
 
 void assignEnd(core::AmrTemporalBoundaryHistoryCellRecord& record, const hydro::HydroConservedState& state) {
@@ -503,6 +512,7 @@ void assignEnd(core::AmrTemporalBoundaryHistoryCellRecord& record, const hydro::
   record.end_momentum_density_y_comoving = state.momentum_density_y_comoving;
   record.end_momentum_density_z_comoving = state.momentum_density_z_comoving;
   record.end_total_energy_density_comoving = state.total_energy_density_comoving;
+  record.end_metal_mass_density_comoving = state.metal_mass_density_comoving;
 }
 
 }  // namespace

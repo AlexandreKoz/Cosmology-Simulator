@@ -31,6 +31,7 @@
 #include "workflows/internal/cartesian_gas_cell_layout.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
+#include "workflows/internal/star_formation_geometry.hpp"
 #include "cosmosim/workflows/migration_balance_runtime.hpp"
 #include "cosmosim/workflows/output_restart_runtime.hpp"
 
@@ -170,6 +171,7 @@ struct AdaptiveTimeStepCriteriaStorage {
   std::vector<double> cell_width_x_code;
   std::vector<double> cell_width_y_code;
   std::vector<double> cell_width_z_code;
+  std::vector<double> velocity_divergence_code;
 };
 
 struct LocalGasCellCflMetadata {
@@ -284,6 +286,7 @@ struct LocalGasCellCflMetadata {
     std::span<const double> cell_accel_x,
     std::span<const double> cell_accel_y,
     std::span<const double> cell_accel_z,
+    double scale_factor,
     AdaptiveTimeStepCriteriaStorage& storage) {
   state.requireGasCellIdentityMapCoversDenseRows("adaptive time-bin view construction");
   const auto particle_row_by_id = internal::buildParticleRowById(state);
@@ -302,6 +305,31 @@ struct LocalGasCellCflMetadata {
   storage.cell_width_x_code = std::move(cfl_metadata.cell_width_x_code);
   storage.cell_width_y_code = std::move(cfl_metadata.cell_width_y_code);
   storage.cell_width_z_code = std::move(cfl_metadata.cell_width_z_code);
+  storage.velocity_divergence_code.assign(
+      state.cells.size(), std::numeric_limits<double>::quiet_NaN());
+  const double length_to_physical = config.units.coordinate_frame ==
+          core::CoordinateFrame::kComoving
+      ? std::max(scale_factor, 1.0e-12)
+      : 1.0;
+  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const internal::StarFormationPatchCellGeometry geometry =
+        internal::starFormationPatchCellGeometry(state, cell_index);
+    if (!geometry.valid) {
+      continue;
+    }
+    const double dvx_dx = internal::starFormationDerivativeAtCell(
+        state.gas_cells.velocity_x_peculiar, geometry, 0,
+        geometry.dx_stored * length_to_physical, cell_index);
+    const double dvy_dy = internal::starFormationDerivativeAtCell(
+        state.gas_cells.velocity_y_peculiar, geometry, 1,
+        geometry.dy_stored * length_to_physical, cell_index);
+    const double dvz_dz = internal::starFormationDerivativeAtCell(
+        state.gas_cells.velocity_z_peculiar, geometry, 2,
+        geometry.dz_stored * length_to_physical, cell_index);
+    if (std::isfinite(dvx_dx) && std::isfinite(dvy_dy) && std::isfinite(dvz_dz)) {
+      storage.velocity_divergence_code[cell_index] = dvx_dx + dvy_dy + dvz_dz;
+    }
+  }
   return core::AdaptiveTimeStepCriteriaView{
       .particles = core::TimeStepParticleCriteriaView{
           .velocity_x_peculiar = state.particles.velocity_x_peculiar,
@@ -331,6 +359,7 @@ struct LocalGasCellCflMetadata {
           .density_code = state.gas_cells.density_code,
           .temperature_code = state.gas_cells.temperature_code,
           .sound_speed_code = state.gas_cells.sound_speed_code,
+          .velocity_divergence_code = storage.velocity_divergence_code,
           .accel_x_comoving = cell_accel_x,
           .accel_y_comoving = cell_accel_y,
           .accel_z_comoving = cell_accel_z,
@@ -372,6 +401,7 @@ void updateAdaptiveTimeBinsFromView(
       view.gas_cells.velocity_z_peculiar.size() != cell_count ||
       view.gas_cells.temperature_code.size() != cell_count ||
       view.gas_cells.sound_speed_code.size() != cell_count ||
+      view.gas_cells.velocity_divergence_code.size() != cell_count ||
       view.gas_cells.gas_particle_index_by_cell.size() != cell_count ||
       view.gas_cells.gas_cell_id_by_cell.size() != cell_count ||
       view.gas_cells.patch_id_by_cell.size() != cell_count ||
@@ -404,19 +434,58 @@ void updateAdaptiveTimeBinsFromView(
         integrator_state.time_si_per_code);
   }
   const auto star_formation_dt_for_cell = [&](std::uint32_t cell_index) -> std::optional<double> {
-    if (!config.physics.enable_star_formation || cell_index >= cell_count) {
+    if (!config.physics.enable_star_formation || cell_index >= cell_count ||
+        config.physics.sf_epsilon_ff <= 0.0) {
       return std::nullopt;
     }
     const double gas_mass = view.gas_cells.cell_mass_code[cell_index];
-    const double rho = view.gas_cells.density_code[cell_index];
+    const double stored_density = view.gas_cells.density_code[cell_index];
     const double temperature = view.gas_cells.temperature_code[cell_index];
-    if (gas_mass <= 0.0 || rho < config.physics.sf_density_threshold_code ||
-        temperature > config.physics.sf_temperature_threshold_k || config.physics.sf_epsilon_ff <= 0.0) {
+    if (!(gas_mass > 0.0) || !(stored_density > 0.0) ||
+        !std::isfinite(gas_mass) || !std::isfinite(stored_density) || !std::isfinite(temperature)) {
       return std::nullopt;
     }
+    if (config.physics.star_formation_model ==
+        core::StarFormationModelKind::kLegacySchmidtThreshold) {
+      if (stored_density < config.physics.sf_density_threshold_code ||
+          temperature > config.physics.sf_temperature_threshold_k) {
+        return std::nullopt;
+      }
+      const double t_ff_code = std::sqrt(3.0 * core::constants::k_pi /
+          (32.0 * newton_g_code * std::max(stored_density, 1.0e-30)));
+      return std::max(
+          1.0e-12,
+          config.numerics.source_max_fractional_change * t_ff_code /
+              config.physics.sf_epsilon_ff);
+    }
+
+    if (config.physics.sf_temperature_safety_ceiling_k > 0.0 &&
+        temperature > config.physics.sf_temperature_safety_ceiling_k) {
+      return std::nullopt;
+    }
+    const double scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
+    const double physical_density = config.units.coordinate_frame == core::CoordinateFrame::kComoving
+        ? stored_density / (scale_factor * scale_factor * scale_factor)
+        : stored_density;
     const double t_ff_code = std::sqrt(3.0 * core::constants::k_pi /
-        (32.0 * newton_g_code * std::max(rho, 1.0e-30)));
-    return std::max(1.0e-12, config.numerics.source_max_fractional_change * t_ff_code / config.physics.sf_epsilon_ff);
+        (32.0 * newton_g_code * std::max(physical_density, 1.0e-30)));
+    double collapse_time_code = t_ff_code;
+    if (config.physics.sf_collapse_timescale ==
+        core::StarFormationCollapseTimescale::kMinimumFreeFallOrCompression) {
+      const double divergence_code = view.gas_cells.velocity_divergence_code[cell_index];
+      if (std::isfinite(divergence_code) && divergence_code < 0.0) {
+        collapse_time_code = std::min(t_ff_code, -1.0 / divergence_code);
+      }
+    }
+    const double maximum_fraction = std::clamp(
+        std::min(
+            config.physics.sf_max_fractional_mass_conversion,
+            config.numerics.source_max_fractional_change),
+        1.0e-12,
+        1.0 - 1.0e-12);
+    const double dt_limit = -collapse_time_code * std::log1p(-maximum_fraction) /
+        config.physics.sf_epsilon_ff;
+    return std::max(1.0e-12, dt_limit);
   };
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
     if (!config.physics.enable_black_hole_agn || particle_index >= view.particles.species_tag.size() ||
@@ -576,6 +645,7 @@ void updateAdaptiveTimeBinFamilies(
       cell_accel_x,
       cell_accel_y,
       cell_accel_z,
+      integrator_state.current_scale_factor,
       storage);
   updateAdaptiveTimeBinsFromView(
       view,
@@ -755,7 +825,7 @@ void TimeCoordinator::runRungZeroSegment(
     const ReferenceWorkflowOptions& options,
     core::SimulationState& state,
     const core::LambdaCdmBackground* cosmology_background,
-    std::span<const std::uint64_t> expected_global_particle_ids,
+    std::vector<std::uint64_t>& expected_global_particle_ids,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
     const core::ModePolicy& mode_policy,
@@ -894,6 +964,7 @@ void TimeCoordinator::runRungZeroSegment(
     active_set.globally_complete_active_set =
         global_active_particle_count == global_particle_count &&
         global_active_cell_count == global_cell_count;
+    m_newly_created_particle_ids.clear();
     executeSingleStep(
         state,
         integrator_state,
@@ -904,6 +975,10 @@ void TimeCoordinator::runRungZeroSegment(
         &profiler,
         particle_scheduler.currentTick(),
         requested_boundary);
+    expected_global_particle_ids.insert(
+        expected_global_particle_ids.end(),
+        m_newly_created_particle_ids.begin(),
+        m_newly_created_particle_ids.end());
     if (resume_dt_after_step > 0.0) {
       integrator_state.dt_time_code = resume_dt_after_step;
     }
@@ -1063,6 +1138,9 @@ void TimeCoordinator::dispatchStage(
     core::StepContext& context,
     bool require_output_safe_boundary) {
   (void)require_output_safe_boundary;
+  context.particle_scheduler = &m_time_state.m_particle_scheduler;
+  context.gas_cell_scheduler = &m_time_state.m_gas_cell_scheduler;
+  context.newly_created_particle_ids = &m_newly_created_particle_ids;
   const std::string stage_name =
       "stage." + std::string(core::integrationStageName(context.stage));
   COSMOSIM_PROFILE_SCOPE(context.profiler_session, stage_name);

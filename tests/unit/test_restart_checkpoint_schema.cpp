@@ -31,8 +31,9 @@ int main() {
       "Restart payload must not expose transient workspace state");
 
   const auto& schema = cosmosim::io::restartSchema();
-  assert(schema.name == "cosmosim_restart_v21");
-  assert(schema.version == 21);
+  assert(schema.name == "cosmosim_restart_v22");
+  assert(schema.version == 22);
+  assert(cosmosim::io::isRestartSchemaCompatible(21));
   assert(cosmosim::io::isRestartSchemaCompatible(20));
   assert(cosmosim::io::isRestartSchemaCompatible(15));
   assert(cosmosim::io::isRestartSchemaCompatible(14));
@@ -42,6 +43,7 @@ int main() {
   assert(checklist.front() == "simulation_state_lanes_and_metadata");
   bool saw_softening = false;
   bool saw_gas_identity = false;
+  bool saw_star_formation_state = false;
   bool saw_hydro_geometry = false;
   bool saw_species_sidecars = false;
   bool saw_output_cadence = false;
@@ -53,6 +55,8 @@ int main() {
   for (const std::string_view item : checklist) {
     saw_softening = saw_softening || item == "particle_identity_softening_and_drift_epoch_lanes";
     saw_gas_identity = saw_gas_identity || item == "gas_cell_identity_lanes";
+    saw_star_formation_state =
+        saw_star_formation_state || item == "gas_metal_mass_and_star_birth_identity_lanes";
     saw_hydro_geometry = saw_hydro_geometry || item == "hydro_geometry_patch_state";
     saw_species_sidecars = saw_species_sidecars || item == "species_specific_sidecars";
     saw_output_cadence = saw_output_cadence || item == "output_cadence_persistent_state";
@@ -64,6 +68,7 @@ int main() {
   }
   assert(saw_softening);
   assert(saw_gas_identity);
+  assert(saw_star_formation_state);
   assert(saw_hydro_geometry);
   assert(saw_species_sidecars);
   assert(saw_output_cadence);

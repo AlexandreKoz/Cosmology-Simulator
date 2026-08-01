@@ -48,6 +48,7 @@ void assertConservedClose(
   assert(std::abs(actual.momentum_y_code - expected.momentum_y_code) < k_tolerance);
   assert(std::abs(actual.momentum_z_code - expected.momentum_z_code) < k_tolerance);
   assert(std::abs(actual.total_energy_code - expected.total_energy_code) < k_tolerance);
+  assert(std::abs(actual.metal_mass_code - expected.metal_mass_code) < k_tolerance);
 }
 
 }  // namespace
@@ -95,6 +96,7 @@ int main() {
               .momentum_y_code = -0.75 - 0.0625 * stamp,
               .momentum_z_code = 1.25 + 0.03125 * stamp,
               .total_energy_code = 2.0 + 0.5 * stamp,
+              .metal_mass_code = 0.001 * stamp,
           };
           expected_parent[parent_index] += child_conserved[child_index];
 

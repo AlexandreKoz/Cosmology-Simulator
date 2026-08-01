@@ -186,9 +186,11 @@ void validateRecordScientificState(
   if (policy == IcSpeciesPolicy::kGas) {
     if (!std::isfinite(record.gas_density) || record.gas_density < 0.0 ||
         !std::isfinite(record.gas_internal_energy) ||
-        record.gas_internal_energy < 0.0) {
+        record.gas_internal_energy < 0.0 ||
+        !std::isfinite(record.gas_metallicity) ||
+        record.gas_metallicity < 0.0 || record.gas_metallicity > 1.0) {
       throw std::runtime_error(
-          "gas density and internal energy must be finite and non-negative");
+          "gas density, internal energy, and metallicity must be finite and physical");
     }
   } else if (policy == IcSpeciesPolicy::kStar) {
     if (!std::isfinite(record.star_formation)) {
@@ -249,6 +251,7 @@ void validateRecordScientificState(
   std::vector<double> mass;
   std::vector<double> gas_u;
   std::vector<double> gas_rho;
+  std::vector<double> gas_metal;
   std::vector<double> star_time;
   std::vector<double> star_birth;
   std::vector<double> star_metal;
@@ -320,6 +323,15 @@ void validateRecordScientificState(
       const auto& contract = requireMissingFieldContract(
           manifest, file_index, prefix + "Density");
       gas_rho.assign(count, resolveMissingScalarValue(contract, 0.0));
+    }
+    if (const auto* field =
+            findField(manifest, file_index, prefix + "Metallicity")) {
+      readChunkDouble(
+          session, *field, start, count, 1U, gas_metal, counters);
+    } else {
+      const auto& contract = requireMissingFieldContract(
+          manifest, file_index, prefix + "Metallicity");
+      gas_metal.assign(count, resolveMissingScalarValue(contract, 0.0));
     }
   }
 
@@ -421,6 +433,7 @@ void validateRecordScientificState(
     if (policy == IcSpeciesPolicy::kGas) {
       record.gas_density = gas_rho[i];
       record.gas_internal_energy = gas_u[i];
+      record.gas_metallicity = gas_metal[i];
     } else if (policy == IcSpeciesPolicy::kStar) {
       record.star_formation = star_time[i];
       record.star_birth_mass = star_birth[i];
@@ -453,6 +466,7 @@ void validateRecordScientificState(
   account_vector(mass);
   account_vector(gas_u);
   account_vector(gas_rho);
+  account_vector(gas_metal);
   account_vector(star_time);
   account_vector(star_birth);
   account_vector(star_metal);
@@ -477,7 +491,7 @@ void validateRecordScientificState(
 void appendRecords(core::SimulationState& state,const std::vector<ParticleRecord>& records,std::uint32_t owner_rank){const std::size_t old_particles=state.particles.size();std::size_t gas_count=0,star_count=0,bh_count=0,tracer_count=0;for(const auto& r:records){if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kGas))++gas_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kStar))++star_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole))++bh_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kTracer))++tracer_count;}
   const std::size_t old_gas=state.cells.size(),old_stars=state.star_particles.size(),old_bh=state.black_holes.size(),old_tracers=state.tracers.size();state.resizeParticles(old_particles+records.size());state.resizeCells(old_gas+gas_count);state.star_particles.resize(old_stars+star_count);state.black_holes.resize(old_bh+bh_count);state.tracers.resize(old_tracers+tracer_count);std::size_t gas_row=old_gas,star_row=old_stars,bh_row=old_bh,tracer_row=old_tracers;
   for(std::size_t i=0;i<records.size();++i){const auto& r=records[i];const std::size_t p=old_particles+i;state.particles.position_x_comoving[p]=r.x;state.particles.position_y_comoving[p]=r.y;state.particles.position_z_comoving[p]=r.z;state.particles.velocity_x_peculiar[p]=r.vx;state.particles.velocity_y_peculiar[p]=r.vy;state.particles.velocity_z_peculiar[p]=r.vz;state.particles.mass_code[p]=r.mass;state.particles.time_bin[p]=0U;state.particle_sidecar.particle_id[p]=r.id;state.particle_sidecar.species_tag[p]=r.species;state.particle_sidecar.owning_rank[p]=owner_rank;state.particle_sidecar.sfc_key[p]=0U;state.particle_sidecar.particle_flags[p]=0U;state.particle_sidecar.last_drift_time_code[p]=0.0;state.particle_sidecar.last_drift_scale_factor[p]=1.0;
-    if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kGas)){state.cells.center_x_comoving[gas_row]=r.x;state.cells.center_y_comoving[gas_row]=r.y;state.cells.center_z_comoving[gas_row]=r.z;state.cells.mass_code[gas_row]=r.mass;state.cells.time_bin[gas_row]=0U;state.cells.patch_index[gas_row]=0U;state.gas_cells.gas_cell_id[gas_row]=r.id;state.gas_cells.parent_particle_id[gas_row]=r.id;state.gas_cells.velocity_x_peculiar[gas_row]=r.vx;state.gas_cells.velocity_y_peculiar[gas_row]=r.vy;state.gas_cells.velocity_z_peculiar[gas_row]=r.vz;state.gas_cells.density_code[gas_row]=r.gas_density;state.gas_cells.internal_energy_code[gas_row]=r.gas_internal_energy;state.gas_cells.pressure_code[gas_row]=0.0;state.gas_cells.temperature_code[gas_row]=0.0;state.gas_cells.sound_speed_code[gas_row]=0.0;++gas_row;}
+    if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kGas)){state.cells.center_x_comoving[gas_row]=r.x;state.cells.center_y_comoving[gas_row]=r.y;state.cells.center_z_comoving[gas_row]=r.z;state.cells.mass_code[gas_row]=r.mass;state.cells.time_bin[gas_row]=0U;state.cells.patch_index[gas_row]=0U;state.gas_cells.gas_cell_id[gas_row]=r.id;state.gas_cells.parent_particle_id[gas_row]=r.id;state.gas_cells.velocity_x_peculiar[gas_row]=r.vx;state.gas_cells.velocity_y_peculiar[gas_row]=r.vy;state.gas_cells.velocity_z_peculiar[gas_row]=r.vz;state.gas_cells.density_code[gas_row]=r.gas_density;state.gas_cells.internal_energy_code[gas_row]=r.gas_internal_energy;state.gas_cells.metal_mass_code[gas_row]=r.gas_metallicity*r.mass;state.gas_cells.pressure_code[gas_row]=0.0;state.gas_cells.temperature_code[gas_row]=0.0;state.gas_cells.sound_speed_code[gas_row]=0.0;++gas_row;}
     else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kStar)){state.star_particles.particle_index[star_row]=static_cast<std::uint32_t>(p);state.star_particles.formation_scale_factor[star_row]=r.star_formation;state.star_particles.birth_mass_code[star_row]=r.star_birth_mass;state.star_particles.metallicity_mass_fraction[star_row]=r.star_metallicity;state.star_particles.stellar_age_years_last[star_row]=0.0;state.star_particles.stellar_returned_mass_cumulative_code[star_row]=0.0;state.star_particles.stellar_returned_metals_cumulative_code[star_row]=0.0;state.star_particles.stellar_feedback_energy_cumulative_erg[star_row]=0.0;for(std::size_t c=0;c<3U;++c){state.star_particles.stellar_returned_mass_channel_cumulative_code[c][star_row]=0.0;state.star_particles.stellar_returned_metals_channel_cumulative_code[c][star_row]=0.0;state.star_particles.stellar_feedback_energy_channel_cumulative_erg[c][star_row]=0.0;}++star_row;}
     else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)){state.black_holes.particle_index[bh_row]=static_cast<std::uint32_t>(p);state.black_holes.host_cell_index[bh_row]=kInvalidIndex;state.black_holes.subgrid_mass_code[bh_row]=r.bh_mass;state.black_holes.accretion_rate_code[bh_row]=r.bh_mdot;state.black_holes.feedback_energy_code[bh_row]=0.0;state.black_holes.eddington_ratio[bh_row]=0.0;state.black_holes.cumulative_accreted_mass_code[bh_row]=0.0;state.black_holes.cumulative_feedback_energy_code[bh_row]=0.0;state.black_holes.duty_cycle_active_time_code[bh_row]=0.0;state.black_holes.duty_cycle_total_time_code[bh_row]=0.0;++bh_row;}
     else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kTracer)){state.tracers.particle_index[tracer_row]=static_cast<std::uint32_t>(p);state.tracers.parent_particle_id[tracer_row]=r.tracer_parent;state.tracers.injection_step[tracer_row]=r.tracer_injection;state.tracers.host_cell_index[tracer_row]=r.tracer_host;state.tracers.mass_fraction_of_host[tracer_row]=r.tracer_fraction;state.tracers.last_host_mass_code[tracer_row]=r.tracer_last_host_mass;state.tracers.cumulative_exchanged_mass_code[tracer_row]=r.tracer_exchanged_mass;++tracer_row;}

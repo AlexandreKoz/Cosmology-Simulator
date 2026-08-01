@@ -32,6 +32,7 @@ void testPrimitiveConservedRoundTrip() {
   primitive.vel_y_peculiar = -0.5;
   primitive.vel_z_peculiar = 0.75;
   primitive.pressure_comoving = 3.0;
+  primitive.metallicity_mass_fraction = 0.125;
 
   const double gamma = 5.0 / 3.0;
   const cosmosim::hydro::HydroConservedState conserved =
@@ -44,6 +45,9 @@ void testPrimitiveConservedRoundTrip() {
   assert(std::abs(round_trip.vel_y_peculiar - primitive.vel_y_peculiar) < k_tol);
   assert(std::abs(round_trip.vel_z_peculiar - primitive.vel_z_peculiar) < k_tol);
   assert(std::abs(round_trip.pressure_comoving - primitive.pressure_comoving) < k_tol);
+  assert(std::abs(round_trip.metallicity_mass_fraction - primitive.metallicity_mass_fraction) < k_tol);
+  assert(std::abs(conserved.metal_mass_density_comoving -
+                  primitive.rho_comoving * primitive.metallicity_mass_fraction) < k_tol);
 }
 
 void testMusclReconstructionProducesFiniteStates() {
@@ -153,6 +157,25 @@ void testRiemannSymmetryRegression() {
   const auto flux = solver.computeFlux(left, right, face, 1.4);
   assert(std::abs(flux.mass_density_comoving) < k_tol);
   assert(std::abs(flux.momentum_density_x_comoving - 1.0) < 1.0e-8);
+}
+
+
+void testPassiveMetalFlux() {
+  cosmosim::hydro::HydroPrimitiveState left;
+  left.rho_comoving = 2.0;
+  left.vel_x_peculiar = 0.5;
+  left.pressure_comoving = 1.0;
+  left.metallicity_mass_fraction = 0.2;
+  const cosmosim::hydro::HydroPrimitiveState right = left;
+  const cosmosim::hydro::HydroFace face{
+      .owner_cell = 0,
+      .neighbor_cell = 1,
+      .area_comoving = 1.0,
+      .normal_x = 1.0};
+  cosmosim::hydro::HllcRiemannSolver solver;
+  const auto flux = solver.computeFlux(left, right, face, 1.4);
+  assert(std::abs(flux.mass_density_comoving - 1.0) < 1.0e-10);
+  assert(std::abs(flux.metal_mass_density_comoving - 0.2) < 1.0e-10);
 }
 
 void testProfileFallbackCountersAreStepLocal() {
@@ -486,6 +509,7 @@ int main() {
   testMusclReconstructionProducesFiniteStates();
   testComovingSourceTermSanity();
   testRiemannSymmetryRegression();
+  testPassiveMetalFlux();
   testProfileFallbackCountersAreStepLocal();
   testActiveSetFullCoverageMatchesFullAdvance();
   testActivePeriodicGhostFluxUpdatesWrappedRealCell();

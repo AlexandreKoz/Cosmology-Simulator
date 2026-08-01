@@ -355,3 +355,9 @@ intentionally reordered before resume. It proves the exercised local workflow pa
 multi-rank migration/repartition restart. Validation posture remains: CI guards;
 deterministic regression and restart equivalence; multi-resolution reference convergence;
 cross-code comparison; then science-readiness benchmarks.
+
+## Restart schema 22: star formation and conserved metals
+
+Schema 22 adds persistent gas `metal_mass_code`, AMR metal flux registers, temporal coarse-boundary metal history, star birth key/parent/tick/ordinal fields, and the associated scheduler/source metadata. The stochastic continuation key uses the restored global integration tick and stable gas-cell identity.
+
+Schema 21 remains explicitly readable. Fields absent from schema 21 are initialized through the documented backward-load defaults rather than silently reinterpreting an old payload under the new adaptive model. A historical restart retains its normalized model selector and configuration hash; changing model is an explicit configuration/restart compatibility decision.

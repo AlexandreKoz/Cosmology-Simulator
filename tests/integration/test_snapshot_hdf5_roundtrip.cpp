@@ -55,6 +55,43 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
   state.particle_sidecar.species_tag[4] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
   state.particle_sidecar.species_tag[5] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
   state.particle_sidecar.species_tag[6] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kTracer);
+
+  state.particles.mass_code[2] = state.cells.mass_code[0];
+  state.particles.mass_code[3] = state.cells.mass_code[1];
+  for (std::size_t gas_row = 0; gas_row < 2; ++gas_row) {
+    const std::size_t particle_index = gas_row + 2;
+    state.cells.center_x_comoving[gas_row] = state.particles.position_x_comoving[particle_index];
+    state.cells.center_y_comoving[gas_row] = state.particles.position_y_comoving[particle_index];
+    state.cells.center_z_comoving[gas_row] = state.particles.position_z_comoving[particle_index];
+    state.gas_cells.gas_cell_id[gas_row] = 9000 + gas_row;
+    state.gas_cells.parent_particle_id[gas_row] = state.particle_sidecar.particle_id[particle_index];
+    state.gas_cells.velocity_x_peculiar[gas_row] = state.particles.velocity_x_peculiar[particle_index];
+    state.gas_cells.velocity_y_peculiar[gas_row] = state.particles.velocity_y_peculiar[particle_index];
+    state.gas_cells.velocity_z_peculiar[gas_row] = state.particles.velocity_z_peculiar[particle_index];
+    state.gas_cells.internal_energy_code[gas_row] = 2.5 + static_cast<double>(gas_row);
+    state.gas_cells.density_code[gas_row] = 4.0 + static_cast<double>(gas_row);
+    state.gas_cells.metal_mass_code[gas_row] = state.cells.mass_code[gas_row] * (0.01 + 0.01 * gas_row);
+  }
+  state.restoreGasCellIdentityRecords(
+      {
+          {.gas_cell_id = 9000, .parent_particle_id = 1002, .owning_patch_id = 0, .local_cell_row = 0},
+          {.gas_cell_id = 9001, .parent_particle_id = 1003, .owning_patch_id = 0, .local_cell_row = 1},
+      },
+      1U);
+
+  state.star_particles.resize(2);
+  for (std::size_t star_row = 0; star_row < 2; ++star_row) {
+    const std::size_t particle_index = star_row + 4;
+    state.star_particles.particle_index[star_row] = static_cast<std::uint32_t>(particle_index);
+    state.star_particles.formation_scale_factor[star_row] = 0.25 + 0.05 * star_row;
+    state.star_particles.birth_mass_code[star_row] = state.particles.mass_code[particle_index];
+    state.star_particles.metallicity_mass_fraction[star_row] = 0.015 + 0.005 * star_row;
+    state.star_particles.birth_key[star_row] = 0xabc000ULL + star_row;
+    state.star_particles.parent_gas_cell_id[star_row] = 9000 + star_row;
+    state.star_particles.birth_tick[star_row] = 77 + star_row;
+    state.star_particles.birth_ordinal[star_row] = static_cast<std::uint32_t>(star_row);
+  }
+
   state.tracers.resize(1);
   state.tracers.particle_index[0] = 6;
   state.tracers.parent_particle_id[0] = 1005;
@@ -234,6 +271,23 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.state.tracers.host_cell_index[0] == 1);
   assert(std::abs(roundtrip.state.tracers.mass_fraction_of_host[0] - 0.25) < 1.0e-12);
   assert(std::abs(roundtrip.state.tracers.cumulative_exchanged_mass_code[0] - 0.1) < 1.0e-12);
+  assert(roundtrip.state.cells.size() == 2);
+  assert(roundtrip.state.gas_cells.gas_cell_id[0] == 9000);
+  assert(roundtrip.state.gas_cells.gas_cell_id[1] == 9001);
+  assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[0] - 0.1) < 1.0e-12);
+  assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[1] - 0.3) < 1.0e-12);
+  assert(roundtrip.state.star_particles.size() == 2);
+  for (std::size_t star_row = 0; star_row < 2; ++star_row) {
+    assert(roundtrip.state.star_particles.birth_key[star_row] == state.star_particles.birth_key[star_row]);
+    assert(roundtrip.state.star_particles.parent_gas_cell_id[star_row] ==
+           state.star_particles.parent_gas_cell_id[star_row]);
+    assert(roundtrip.state.star_particles.birth_tick[star_row] == state.star_particles.birth_tick[star_row]);
+    assert(roundtrip.state.star_particles.birth_ordinal[star_row] == state.star_particles.birth_ordinal[star_row]);
+    assert(std::abs(roundtrip.state.star_particles.birth_mass_code[star_row] -
+                    state.star_particles.birth_mass_code[star_row]) < 1.0e-12);
+    assert(std::abs(roundtrip.state.star_particles.metallicity_mass_fraction[star_row] -
+                    state.star_particles.metallicity_mass_fraction[star_row]) < 1.0e-12);
+  }
   assert(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() == state.particles.size());
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     const std::uint64_t id = state.particle_sidecar.particle_id[i];

@@ -274,12 +274,16 @@ struct HydroBoundaryCellAdvertisement {
     const double dmy = after.momentum_density_y_comoving - before.momentum_density_y_comoving;
     const double dmz = after.momentum_density_z_comoving - before.momentum_density_z_comoving;
     const double de = after.total_energy_density_comoving - before.total_energy_density_comoving;
+    const double dmz_metal =
+        after.metal_mass_density_comoving - before.metal_mass_density_comoving;
     report.rejected_remote_delta_l1 += std::abs(dm);
     report.rejected_remote_delta_l1 += std::abs(dmx);
     report.rejected_remote_delta_l1 += std::abs(dmy);
     report.rejected_remote_delta_l1 += std::abs(dmz);
     report.rejected_remote_delta_l1 += std::abs(de);
-    if (dm != 0.0 || dmx != 0.0 || dmy != 0.0 || dmz != 0.0 || de != 0.0) {
+    report.rejected_remote_delta_l1 += std::abs(dmz_metal);
+    if (dm != 0.0 || dmx != 0.0 || dmy != 0.0 || dmz != 0.0 || de != 0.0 ||
+        dmz_metal != 0.0) {
       parallel::HydroConservativeFluxCorrectionRecord record;
       record.gas_cell_id = snapshot.gas_cell_ids[i];
       record.parent_particle_id = snapshot.parent_particle_ids[i];
@@ -290,6 +294,7 @@ struct HydroBoundaryCellAdvertisement {
       record.delta_momentum_density_y_comoving = dmy;
       record.delta_momentum_density_z_comoving = dmz;
       record.delta_total_energy_density_comoving = de;
+      record.delta_metal_mass_density_comoving = dmz_metal;
       parallel::validateHydroConservativeFluxCorrectionRecord(record);
       report.correction_records.push_back(record);
     }
@@ -415,6 +420,11 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[cell_index],
           .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[cell_index],
           .pressure_comoving = pressure,
+          .metallicity_mass_fraction = std::clamp(
+              context.state.gas_cells.metal_mass_code[cell_index] /
+                  std::max(context.state.cells.mass_code[cell_index], 1.0e-30),
+              0.0,
+              1.0),
       };
       if (cell_index >= m_geometry_row_by_dense_row.size()) {
         throw std::out_of_range("hydro callback dense row is outside Cartesian geometry map");
@@ -451,6 +461,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
     std::vector<double> temperature(context.state.cells.size(), 0.0);
     std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
+      const double gas_mass_code = context.state.cells.mass_code[cell_index];
+      metallicity[cell_index] = gas_mass_code > 0.0
+          ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
+          : 0.0;
+      temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
+    }
     const auto& dense_accel_x = m_gravity_callback.cellAccelX();
     const auto& dense_accel_y = m_gravity_callback.cellAccelY();
     const auto& dense_accel_z = m_gravity_callback.cellAccelZ();
@@ -564,6 +581,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       owned.momentum_density_y_comoving += correction.delta_momentum_density_y_comoving;
       owned.momentum_density_z_comoving += correction.delta_momentum_density_z_comoving;
       owned.total_energy_density_comoving += correction.delta_total_energy_density_comoving;
+      owned.metal_mass_density_comoving += correction.delta_metal_mass_density_comoving;
       m_conserved.storeCell(geometry_row, owned);
       ++applied_flux_corrections;
       applied_flux_delta_l1 += std::abs(correction.delta_mass_density_comoving);
@@ -571,6 +589,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_y_comoving);
       applied_flux_delta_l1 += std::abs(correction.delta_momentum_density_z_comoving);
       applied_flux_delta_l1 += std::abs(correction.delta_total_energy_density_comoving);
+      applied_flux_delta_l1 += std::abs(correction.delta_metal_mass_density_comoving);
     }
     if (context.profiler_session != nullptr) {
       context.profiler_session->recordEvent(core::RuntimeEvent{
@@ -616,6 +635,9 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       context.state.gas_cells.internal_energy_code[cell_index] =
           primitive.pressure_comoving / ((k_gamma_adiabatic - 1.0) * std::max(primitive.rho_comoving, k_density_floor));
       context.state.cells.mass_code[cell_index] = primitive.rho_comoving * m_geometry.cell_volume_comoving;
+      context.state.gas_cells.metal_mass_code[cell_index] =
+          std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) *
+          context.state.cells.mass_code[cell_index];
       context.state.gas_cells.velocity_x_peculiar[cell_index] = primitive.vel_x_peculiar;
       context.state.gas_cells.velocity_y_peculiar[cell_index] = primitive.vel_y_peculiar;
       context.state.gas_cells.velocity_z_peculiar[cell_index] = primitive.vel_z_peculiar;
@@ -947,7 +969,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .momentum_density_x_comoving = state.momentum_density_x_comoving,
           .momentum_density_y_comoving = state.momentum_density_y_comoving,
           .momentum_density_z_comoving = state.momentum_density_z_comoving,
-          .total_energy_density_comoving = state.total_energy_density_comoving});
+          .total_energy_density_comoving = state.total_energy_density_comoving,
+          .metal_mass_density_comoving = state.metal_mass_density_comoving});
     }
     const auto global_payloads = parallel::executeBlockingHydroGhostCellPayloadExchange(
         m_mpi_context,
@@ -980,7 +1003,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .momentum_density_x_comoving = payload.momentum_density_x_comoving,
           .momentum_density_y_comoving = payload.momentum_density_y_comoving,
           .momentum_density_z_comoving = payload.momentum_density_z_comoving,
-          .total_energy_density_comoving = payload.total_energy_density_comoving});
+          .total_energy_density_comoving = payload.total_energy_density_comoving,
+          .metal_mass_density_comoving = payload.metal_mass_density_comoving});
     }
     if (received_face_keys.size() != requests.size()) {
       throw std::runtime_error("hydro remote boundary ghost refresh did not receive every requested ghost cell");
@@ -1014,6 +1038,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
     std::vector<double> temperature(context.state.cells.size(), 0.0);
     std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
+      const double gas_mass_code = context.state.cells.mass_code[cell_index];
+      metallicity[cell_index] = gas_mass_code > 0.0
+          ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
+          : 0.0;
+      temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
+    }
     const hydro::HydroSourceContext source_context{
         .update = update,
         .gravity_accel_x_peculiar = m_gravity_callback.cellAccelX(),
@@ -1166,11 +1197,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         record.coarse_momentum_y_flux_code = entry.coarse_face_flux_code.momentum_y_code;
         record.coarse_momentum_z_flux_code = entry.coarse_face_flux_code.momentum_z_code;
         record.coarse_total_energy_flux_code = entry.coarse_face_flux_code.total_energy_code;
+        record.coarse_metal_mass_flux_code = entry.coarse_face_flux_code.metal_mass_code;
         record.fine_mass_flux_code = entry.fine_face_flux_code.mass_code;
         record.fine_momentum_x_flux_code = entry.fine_face_flux_code.momentum_x_code;
         record.fine_momentum_y_flux_code = entry.fine_face_flux_code.momentum_y_code;
         record.fine_momentum_z_flux_code = entry.fine_face_flux_code.momentum_z_code;
         record.fine_total_energy_flux_code = entry.fine_face_flux_code.total_energy_code;
+        record.fine_metal_mass_flux_code = entry.fine_face_flux_code.metal_mass_code;
         record.face_area_comov = entry.face_area_comov;
         record.coarse_area_comov = entry.coarse_area_comov;
         record.fine_area_comov = entry.fine_area_comov;
@@ -1211,13 +1244,15 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                 .momentum_x_code = payload.coarse_momentum_x_flux_code,
                 .momentum_y_code = payload.coarse_momentum_y_flux_code,
                 .momentum_z_code = payload.coarse_momentum_z_flux_code,
-                .total_energy_code = payload.coarse_total_energy_flux_code},
+                .total_energy_code = payload.coarse_total_energy_flux_code,
+                .metal_mass_code = payload.coarse_metal_mass_flux_code},
             .fine_face_flux_code = amr::ConservedState{
                 .mass_code = payload.fine_mass_flux_code,
                 .momentum_x_code = payload.fine_momentum_x_flux_code,
                 .momentum_y_code = payload.fine_momentum_y_flux_code,
                 .momentum_z_code = payload.fine_momentum_z_flux_code,
-                .total_energy_code = payload.fine_total_energy_flux_code},
+                .total_energy_code = payload.fine_total_energy_flux_code,
+                .metal_mass_code = payload.fine_metal_mass_flux_code},
             .face_area_comov = payload.face_area_comov,
             .coarse_area_comov = payload.coarse_area_comov,
             .fine_area_comov = payload.fine_area_comov,
@@ -1241,6 +1276,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         amr_diagnostics.reflux.corrected_momentum_y_code += remote_reflux.corrected_momentum_y_code;
         amr_diagnostics.reflux.corrected_momentum_z_code += remote_reflux.corrected_momentum_z_code;
         amr_diagnostics.reflux.corrected_total_energy_code += remote_reflux.corrected_total_energy_code;
+        amr_diagnostics.reflux.corrected_metal_mass_code += remote_reflux.corrected_metal_mass_code;
         amr_diagnostics.reflux.corrected_energy_code += remote_reflux.corrected_energy_code;
         amr_diagnostics.reflux.corrected_internal_energy_code += remote_reflux.corrected_internal_energy_code;
       }
@@ -1279,6 +1315,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                       {"reflux_corrected_momentum_y", std::to_string(amr_diagnostics.reflux.corrected_momentum_y_code)},
                       {"reflux_corrected_momentum_z", std::to_string(amr_diagnostics.reflux.corrected_momentum_z_code)},
                       {"reflux_corrected_total_energy", std::to_string(amr_diagnostics.reflux.corrected_total_energy_code)},
+                      {"reflux_corrected_metal_mass", std::to_string(amr_diagnostics.reflux.corrected_metal_mass_code)},
                       {"reflux_corrected_energy", std::to_string(amr_diagnostics.reflux.corrected_energy_code)},
                       {"reflux_corrected_internal_energy", std::to_string(amr_diagnostics.reflux.corrected_internal_energy_code)},
                       {"reflux_complete_register_count", std::to_string(amr_diagnostics.reflux.complete_register_count)},

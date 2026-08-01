@@ -527,7 +527,12 @@ hydro::HydroConservedStateSoa loadAmrHydroConservedState(
         .vel_x_peculiar = state.gas_cells.velocity_x_peculiar.at(row),
         .vel_y_peculiar = state.gas_cells.velocity_y_peculiar.at(row),
         .vel_z_peculiar = state.gas_cells.velocity_z_peculiar.at(row),
-        .pressure_comoving = std::max(state.gas_cells.pressure_code.at(row), 1.0e-14)};
+        .pressure_comoving = std::max(state.gas_cells.pressure_code.at(row), 1.0e-14),
+        .metallicity_mass_fraction = std::clamp(
+            state.gas_cells.metal_mass_code.at(row) /
+                std::max(state.cells.mass_code.at(row), 1.0e-30),
+            0.0,
+            1.0)};
     conserved.storeCell(
         patch_cell,
         hydro::HydroCoreSolver::conservedFromPrimitive(primitive, adiabatic_index));
