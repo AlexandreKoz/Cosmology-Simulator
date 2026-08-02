@@ -79,7 +79,7 @@ struct BirthRecord {
   config.min_remaining_gas_mass_code = 1.0;
   config.stochastic_spawning = true;
   config.random_seed = 0x1234abcd5678ef90ULL;
-  config.metadata_schema_version = 2U;
+  config.metadata_schema_version = 3U;
   return config;
 }
 

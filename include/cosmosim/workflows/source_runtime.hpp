@@ -7,6 +7,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace cosmosim::workflows {
 
@@ -23,6 +24,7 @@ class SourceRuntime {
 [[nodiscard]] std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::SimulationConfig& config,
     const core::UnitSystem& units,
-    std::uint32_t world_rank);
+    std::uint32_t world_rank,
+    const parallel::MpiContext& mpi_context);
 
 }  // namespace cosmosim::workflows

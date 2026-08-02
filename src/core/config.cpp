@@ -18,6 +18,7 @@
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
+#include "cosmosim/core/units.hpp"
 
 namespace cosmosim::core {
 namespace {
@@ -344,6 +345,86 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
   }
 }
 
+[[nodiscard]] double timeUnitSi(const std::string& unit) {
+  const std::string normalized = toLower(unit);
+  if (normalized == "s" || normalized == "sec" || normalized == "second") return 1.0;
+  if (normalized == "yr" || normalized == "year") return (constants::k_seconds_per_megayear / 1.0e6);
+  if (normalized == "myr") return 1.0e6 * (constants::k_seconds_per_megayear / 1.0e6);
+  if (normalized == "gyr") return 1.0e9 * (constants::k_seconds_per_megayear / 1.0e6);
+  throw ConfigError("unsupported time unit '" + unit + "' (supported: code, s, yr, Myr, Gyr)");
+}
+
+[[nodiscard]] double parseTimeCode(
+    const std::string& value,
+    const UnitsConfig& unit_config,
+    const std::string& key) {
+  const auto [magnitude, provided_unit] = splitMagnitudeUnit(value);
+  if (provided_unit.empty() || provided_unit == "code") return magnitude;
+  try {
+    const UnitSystem units = makeUnitSystem(
+        unit_config.length_unit, unit_config.mass_unit, unit_config.velocity_unit);
+    return magnitude * timeUnitSi(provided_unit) / units.timeSiPerCode();
+  } catch (const ConfigError&) {
+    throw ConfigError("key '" + key + "': unsupported unit in value '" + value + "'");
+  }
+}
+
+
+[[nodiscard]] double parseNumberDensityCgs(
+    const std::string& value,
+    const std::string& key) {
+  const auto [magnitude, provided_unit] = splitMagnitudeUnit(value);
+  const std::string unit = toLower(provided_unit);
+  if (unit.empty() || unit == "cm^-3" || unit == "cm-3" || unit == "1/cm3" ||
+      unit == "cm^{-3}") {
+    return magnitude;
+  }
+  if (unit == "m^-3" || unit == "m-3" || unit == "1/m3" || unit == "m^{-3}") {
+    return magnitude * 1.0e-6;
+  }
+  throw ConfigError(
+      "key '" + key + "': unsupported number-density unit in value '" + value +
+      "' (supported: cm^-3, m^-3)");
+}
+
+[[nodiscard]] double parseTemperatureKelvin(
+    const std::string& value,
+    const std::string& key) {
+  const auto [magnitude, provided_unit] = splitMagnitudeUnit(value);
+  const std::string unit = toLower(provided_unit);
+  if (unit.empty() || unit == "k" || unit == "kelvin") {
+    return magnitude;
+  }
+  throw ConfigError(
+      "key '" + key + "': unsupported temperature unit in value '" + value +
+      "' (supported: K)");
+}
+
+[[nodiscard]] double parseSpecificEnergyCode(
+    const std::string& value,
+    const UnitsConfig& unit_config,
+    const std::string& key) {
+  const auto [magnitude, provided_unit] = splitMagnitudeUnit(value);
+  const std::string unit = toLower(provided_unit);
+  if (unit.empty() || unit == "code") {
+    return magnitude;
+  }
+  const UnitSystem units = makeUnitSystem(
+      unit_config.length_unit, unit_config.mass_unit, unit_config.velocity_unit);
+  double specific_energy_si = 0.0;
+  if (unit == "j/kg" || unit == "m2/s2" || unit == "m^2/s^2") {
+    specific_energy_si = magnitude;
+  } else if (unit == "erg/g" || unit == "cm2/s2" || unit == "cm^2/s^2") {
+    specific_energy_si = magnitude * 1.0e-4;
+  } else {
+    throw ConfigError(
+        "key '" + key + "': unsupported specific-energy unit in value '" + value +
+        "' (supported: code, J/kg, erg/g)");
+  }
+  const double velocity_si_per_code = units.velocity_si_per_code;
+  return specific_energy_si / (velocity_si_per_code * velocity_si_per_code);
+}
+
 [[nodiscard]] std::string requireString(
     std::map<std::string, ParsedEntry>& entries,
     std::set<std::string>& consumed,
@@ -651,8 +732,32 @@ parseInitialConditionMissingFieldPolicy(
   if (lower == "adaptive_bound_jeans") {
     return StarFormationModelKind::kAdaptiveBoundJeans;
   }
+  if (lower == "effective_multiphase_tng_like") {
+    return StarFormationModelKind::kEffectiveMultiphaseTngLike;
+  }
   throw ConfigError(
-      "physics.star_formation_model must be one of: legacy_schmidt_threshold, adaptive_bound_jeans");
+      "physics.star_formation_model must be one of: legacy_schmidt_threshold, adaptive_bound_jeans, effective_multiphase_tng_like");
+}
+
+[[nodiscard]] EffectiveIsmEosRelaxation parseEffectiveIsmEosRelaxation(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "instantaneous") return EffectiveIsmEosRelaxation::kInstantaneous;
+  if (lower == "finite_timescale") return EffectiveIsmEosRelaxation::kFiniteTimescale;
+  throw ConfigError("physics.sf_effective_eos_relaxation must be one of: instantaneous, finite_timescale");
+}
+
+[[nodiscard]] EffectiveIsmBirthMassConvention parseEffectiveIsmBirthMassConvention(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "initial_ssp_mass") return EffectiveIsmBirthMassConvention::kInitialSspMass;
+  if (lower == "long_lived_mass") return EffectiveIsmBirthMassConvention::kLongLivedMass;
+  throw ConfigError("physics.sf_effective_birth_mass_convention must be one of: initial_ssp_mass, long_lived_mass");
+}
+
+[[nodiscard]] EffectiveIsmFeedbackCoupling parseEffectiveIsmFeedbackCoupling(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "external_feedback_calibrated") return EffectiveIsmFeedbackCoupling::kExternalFeedbackCalibrated;
+  if (lower == "effective_eos_only") return EffectiveIsmFeedbackCoupling::kEffectiveEosOnly;
+  throw ConfigError("physics.sf_effective_feedback_coupling must be one of: external_feedback_calibrated, effective_eos_only");
 }
 
 [[nodiscard]] StarFormationCollapseTimescale parseStarFormationCollapseTimescale(
@@ -1005,6 +1110,24 @@ struct ConfigKeySpec {
       {"physics.sf_temperature_safety_ceiling_k", "0.0"},
       {"physics.sf_stochastic_spawning", "true"},
       {"physics.sf_random_seed", "123456789"},
+      {"physics.sf_effective_parameter_set", "chui_sh03_tng_like_v1"},
+      {"physics.sf_effective_n_h_threshold", "0.13"},
+      {"physics.sf_effective_min_baryon_overdensity", "0.0"},
+      {"physics.sf_effective_t_star_at_threshold", "2.2 Gyr"},
+      {"physics.sf_effective_evaporation_factor_at_threshold", "1000.0"},
+      {"physics.sf_effective_evaporation_density_exponent", "-0.8"},
+      {"physics.sf_effective_cold_phase_temperature", "1000.0"},
+      {"physics.sf_effective_supernova_specific_energy_code", "1.0e5"},
+      {"physics.sf_effective_massive_star_fraction", "0.1"},
+      {"physics.sf_effective_q_eos", "0.3"},
+      {"physics.sf_effective_isothermal_temperature", "1.0e4"},
+      {"physics.sf_effective_hot_excess_tolerance", "1.0"},
+      {"physics.sf_effective_eos_relaxation", "instantaneous"},
+      {"physics.sf_effective_eos_relaxation_timescale", "0.0 code"},
+      {"physics.sf_effective_eos_table_bins", "256"},
+      {"physics.sf_effective_eos_max_density_ratio", "1.0e6"},
+      {"physics.sf_effective_birth_mass_convention", "initial_ssp_mass"},
+      {"physics.sf_effective_feedback_coupling", "external_feedback_calibrated"},
       {"physics.fb_mode", "thermal_kinetic_momentum"},
       {"physics.fb_variant", "none"},
       {"physics.fb_use_returned_mass_budget", "true"},
@@ -1178,6 +1301,19 @@ void validateConfig(const SimulationConfig& config) {
       {config.physics.sf_min_remaining_gas_fraction, "physics.sf_min_remaining_gas_fraction"},
       {config.physics.sf_min_remaining_gas_mass_code, "physics.sf_min_remaining_gas_mass_code"},
       {config.physics.sf_temperature_safety_ceiling_k, "physics.sf_temperature_safety_ceiling_k"},
+      {config.physics.sf_effective_n_h_threshold_cgs, "physics.sf_effective_n_h_threshold"},
+      {config.physics.sf_effective_min_baryon_overdensity, "physics.sf_effective_min_baryon_overdensity"},
+      {config.physics.sf_effective_t_star_at_threshold_code, "physics.sf_effective_t_star_at_threshold"},
+      {config.physics.sf_effective_evaporation_factor_at_threshold, "physics.sf_effective_evaporation_factor_at_threshold"},
+      {config.physics.sf_effective_evaporation_density_exponent, "physics.sf_effective_evaporation_density_exponent"},
+      {config.physics.sf_effective_cold_phase_temperature_k, "physics.sf_effective_cold_phase_temperature"},
+      {config.physics.sf_effective_supernova_specific_energy_code, "physics.sf_effective_supernova_specific_energy_code"},
+      {config.physics.sf_effective_massive_star_fraction, "physics.sf_effective_massive_star_fraction"},
+      {config.physics.sf_effective_q_eos, "physics.sf_effective_q_eos"},
+      {config.physics.sf_effective_isothermal_temperature_k, "physics.sf_effective_isothermal_temperature"},
+      {config.physics.sf_effective_hot_excess_tolerance, "physics.sf_effective_hot_excess_tolerance"},
+      {config.physics.sf_effective_eos_relaxation_timescale_code, "physics.sf_effective_eos_relaxation_timescale"},
+      {config.physics.sf_effective_eos_max_density_ratio, "physics.sf_effective_eos_max_density_ratio"},
       {config.physics.fb_epsilon_thermal, "physics.fb_epsilon_thermal"},
       {config.physics.fb_epsilon_kinetic, "physics.fb_epsilon_kinetic"},
       {config.physics.fb_epsilon_momentum, "physics.fb_epsilon_momentum"},
@@ -1371,6 +1507,29 @@ void validateConfig(const SimulationConfig& config) {
       config.physics.sf_temperature_safety_ceiling_k < 0.0) {
     throw ConfigError(
         "star-formation conversion/remnant fractions must be in their documented ranges and mass/temperature floors non-negative");
+  }
+  if (config.physics.sf_effective_n_h_threshold_cgs <= 0.0 ||
+      config.physics.sf_effective_min_baryon_overdensity < 0.0 ||
+      config.physics.sf_effective_t_star_at_threshold_code <= 0.0 ||
+      config.physics.sf_effective_evaporation_factor_at_threshold <= 0.0 ||
+      config.physics.sf_effective_cold_phase_temperature_k <= 0.0 ||
+      config.physics.sf_effective_supernova_specific_energy_code <= 0.0 ||
+      config.physics.sf_effective_massive_star_fraction < 0.0 ||
+      config.physics.sf_effective_massive_star_fraction >= 1.0 ||
+      config.physics.sf_effective_q_eos < 0.0 ||
+      config.physics.sf_effective_q_eos > 1.0 ||
+      config.physics.sf_effective_isothermal_temperature_k <= 0.0 ||
+      config.physics.sf_effective_hot_excess_tolerance < 0.0 ||
+      config.physics.sf_effective_eos_relaxation_timescale_code < 0.0 ||
+      config.physics.sf_effective_eos_table_bins < 8U ||
+      config.physics.sf_effective_eos_max_density_ratio <= 1.0) {
+    throw ConfigError("effective multiphase star-formation parameters are outside their supported ranges");
+  }
+  if (config.physics.star_formation_model == StarFormationModelKind::kEffectiveMultiphaseTngLike &&
+      config.physics.sf_effective_feedback_coupling == EffectiveIsmFeedbackCoupling::kEffectiveEosOnly &&
+      config.physics.enable_feedback) {
+    throw ConfigError(
+        "physics.enable_feedback must be false when sf_effective_feedback_coupling=effective_eos_only");
   }
   if (config.physics.fb_epsilon_thermal < 0.0 || config.physics.fb_epsilon_kinetic < 0.0 ||
       config.physics.fb_epsilon_momentum < 0.0) {
@@ -1903,6 +2062,24 @@ void validateConfig(const SimulationConfig& config) {
   stream << "sf_stochastic_spawning = "
          << (frozen.config.physics.sf_stochastic_spawning ? "true" : "false") << '\n';
   stream << "sf_random_seed = " << frozen.config.physics.sf_random_seed << '\n';
+  stream << "sf_effective_parameter_set = " << frozen.config.physics.sf_effective_parameter_set << '\n';
+  stream << "sf_effective_n_h_threshold = " << frozen.config.physics.sf_effective_n_h_threshold_cgs << '\n';
+  stream << "sf_effective_min_baryon_overdensity = " << frozen.config.physics.sf_effective_min_baryon_overdensity << '\n';
+  stream << "sf_effective_t_star_at_threshold = " << frozen.config.physics.sf_effective_t_star_at_threshold_code << " code\n";
+  stream << "sf_effective_evaporation_factor_at_threshold = " << frozen.config.physics.sf_effective_evaporation_factor_at_threshold << '\n';
+  stream << "sf_effective_evaporation_density_exponent = " << frozen.config.physics.sf_effective_evaporation_density_exponent << '\n';
+  stream << "sf_effective_cold_phase_temperature = " << frozen.config.physics.sf_effective_cold_phase_temperature_k << '\n';
+  stream << "sf_effective_supernova_specific_energy_code = " << frozen.config.physics.sf_effective_supernova_specific_energy_code << '\n';
+  stream << "sf_effective_massive_star_fraction = " << frozen.config.physics.sf_effective_massive_star_fraction << '\n';
+  stream << "sf_effective_q_eos = " << frozen.config.physics.sf_effective_q_eos << '\n';
+  stream << "sf_effective_isothermal_temperature = " << frozen.config.physics.sf_effective_isothermal_temperature_k << '\n';
+  stream << "sf_effective_hot_excess_tolerance = " << frozen.config.physics.sf_effective_hot_excess_tolerance << '\n';
+  stream << "sf_effective_eos_relaxation = " << effectiveIsmEosRelaxationToString(frozen.config.physics.sf_effective_eos_relaxation) << '\n';
+  stream << "sf_effective_eos_relaxation_timescale = " << frozen.config.physics.sf_effective_eos_relaxation_timescale_code << " code\n";
+  stream << "sf_effective_eos_table_bins = " << frozen.config.physics.sf_effective_eos_table_bins << '\n';
+  stream << "sf_effective_eos_max_density_ratio = " << frozen.config.physics.sf_effective_eos_max_density_ratio << '\n';
+  stream << "sf_effective_birth_mass_convention = " << effectiveIsmBirthMassConventionToString(frozen.config.physics.sf_effective_birth_mass_convention) << '\n';
+  stream << "sf_effective_feedback_coupling = " << effectiveIsmFeedbackCouplingToString(frozen.config.physics.sf_effective_feedback_coupling) << '\n';
   stream << "fb_mode = " << feedbackModeToString(frozen.config.physics.fb_mode) << '\n';
   stream << "fb_variant = " << feedbackVariantToString(frozen.config.physics.fb_variant) << '\n';
   stream << "fb_use_returned_mass_budget = "
@@ -2563,6 +2740,56 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.sf_random_seed = static_cast<std::uint64_t>(parseNumber<unsigned long long>(
       requireString(entries, consumed, "physics.sf_random_seed", "123456789"),
       "physics.sf_random_seed"));
+  frozen.config.physics.sf_effective_parameter_set = requireString(
+      entries, consumed, "physics.sf_effective_parameter_set", "chui_sh03_tng_like_v1");
+  frozen.config.physics.sf_effective_n_h_threshold_cgs = parseNumberDensityCgs(
+      requireString(entries, consumed, "physics.sf_effective_n_h_threshold", "0.13 cm^-3"),
+      "physics.sf_effective_n_h_threshold");
+  frozen.config.physics.sf_effective_min_baryon_overdensity = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_min_baryon_overdensity", "0.0"),
+      "physics.sf_effective_min_baryon_overdensity");
+  frozen.config.physics.sf_effective_t_star_at_threshold_code = parseTimeCode(
+      requireString(entries, consumed, "physics.sf_effective_t_star_at_threshold", "2.2 Gyr"),
+      frozen.config.units, "physics.sf_effective_t_star_at_threshold");
+  frozen.config.physics.sf_effective_evaporation_factor_at_threshold = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_evaporation_factor_at_threshold", "1000.0"),
+      "physics.sf_effective_evaporation_factor_at_threshold");
+  frozen.config.physics.sf_effective_evaporation_density_exponent = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_evaporation_density_exponent", "-0.8"),
+      "physics.sf_effective_evaporation_density_exponent");
+  frozen.config.physics.sf_effective_cold_phase_temperature_k = parseTemperatureKelvin(
+      requireString(entries, consumed, "physics.sf_effective_cold_phase_temperature", "1000 K"),
+      "physics.sf_effective_cold_phase_temperature");
+  frozen.config.physics.sf_effective_supernova_specific_energy_code = parseSpecificEnergyCode(
+      requireString(entries, consumed, "physics.sf_effective_supernova_specific_energy_code", "1.0e5 code"),
+      frozen.config.units, "physics.sf_effective_supernova_specific_energy_code");
+  frozen.config.physics.sf_effective_massive_star_fraction = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_massive_star_fraction", "0.1"),
+      "physics.sf_effective_massive_star_fraction");
+  frozen.config.physics.sf_effective_q_eos = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_q_eos", "0.3"),
+      "physics.sf_effective_q_eos");
+  frozen.config.physics.sf_effective_isothermal_temperature_k = parseTemperatureKelvin(
+      requireString(entries, consumed, "physics.sf_effective_isothermal_temperature", "1.0e4 K"),
+      "physics.sf_effective_isothermal_temperature");
+  frozen.config.physics.sf_effective_hot_excess_tolerance = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_hot_excess_tolerance", "1.0"),
+      "physics.sf_effective_hot_excess_tolerance");
+  frozen.config.physics.sf_effective_eos_relaxation = parseEffectiveIsmEosRelaxation(
+      requireString(entries, consumed, "physics.sf_effective_eos_relaxation", "instantaneous"));
+  frozen.config.physics.sf_effective_eos_relaxation_timescale_code = parseTimeCode(
+      requireString(entries, consumed, "physics.sf_effective_eos_relaxation_timescale", "0.0 code"),
+      frozen.config.units, "physics.sf_effective_eos_relaxation_timescale");
+  frozen.config.physics.sf_effective_eos_table_bins = static_cast<std::uint32_t>(parseNumber<unsigned int>(
+      requireString(entries, consumed, "physics.sf_effective_eos_table_bins", "256"),
+      "physics.sf_effective_eos_table_bins"));
+  frozen.config.physics.sf_effective_eos_max_density_ratio = parseFloating(
+      requireString(entries, consumed, "physics.sf_effective_eos_max_density_ratio", "1.0e6"),
+      "physics.sf_effective_eos_max_density_ratio");
+  frozen.config.physics.sf_effective_birth_mass_convention = parseEffectiveIsmBirthMassConvention(
+      requireString(entries, consumed, "physics.sf_effective_birth_mass_convention", "initial_ssp_mass"));
+  frozen.config.physics.sf_effective_feedback_coupling = parseEffectiveIsmFeedbackCoupling(
+      requireString(entries, consumed, "physics.sf_effective_feedback_coupling", "external_feedback_calibrated"));
   frozen.config.physics.fb_mode = parseFeedbackMode(
       requireString(entries, consumed, "physics.fb_mode", defaultFor("physics.fb_mode")));
   frozen.config.physics.fb_variant = parseFeedbackVariant(
@@ -3150,6 +3377,8 @@ std::string starFormationModelKindToString(StarFormationModelKind model) {
       return "legacy_schmidt_threshold";
     case StarFormationModelKind::kAdaptiveBoundJeans:
       return "adaptive_bound_jeans";
+    case StarFormationModelKind::kEffectiveMultiphaseTngLike:
+      return "effective_multiphase_tng_like";
   }
   throw ConfigError("unhandled StarFormationModelKind enum value during serialization");
 }
@@ -3172,6 +3401,30 @@ std::string starParticleMassPolicyToString(StarParticleMassPolicy policy) {
       return "gas_resolution_fraction";
   }
   throw ConfigError("unhandled StarParticleMassPolicy enum value during serialization");
+}
+
+std::string effectiveIsmEosRelaxationToString(EffectiveIsmEosRelaxation mode) {
+  switch (mode) {
+    case EffectiveIsmEosRelaxation::kInstantaneous: return "instantaneous";
+    case EffectiveIsmEosRelaxation::kFiniteTimescale: return "finite_timescale";
+  }
+  throw ConfigError("unhandled EffectiveIsmEosRelaxation enum value during serialization");
+}
+
+std::string effectiveIsmBirthMassConventionToString(EffectiveIsmBirthMassConvention mode) {
+  switch (mode) {
+    case EffectiveIsmBirthMassConvention::kInitialSspMass: return "initial_ssp_mass";
+    case EffectiveIsmBirthMassConvention::kLongLivedMass: return "long_lived_mass";
+  }
+  throw ConfigError("unhandled EffectiveIsmBirthMassConvention enum value during serialization");
+}
+
+std::string effectiveIsmFeedbackCouplingToString(EffectiveIsmFeedbackCoupling mode) {
+  switch (mode) {
+    case EffectiveIsmFeedbackCoupling::kExternalFeedbackCalibrated: return "external_feedback_calibrated";
+    case EffectiveIsmFeedbackCoupling::kEffectiveEosOnly: return "effective_eos_only";
+  }
+  throw ConfigError("unhandled EffectiveIsmFeedbackCoupling enum value during serialization");
 }
 
 std::string feedbackModeToString(FeedbackMode mode) {

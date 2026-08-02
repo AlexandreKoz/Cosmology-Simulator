@@ -1,0 +1,91 @@
+schema_version = 1
+
+[units]
+length_unit = kpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = physical
+
+[mode]
+mode = isolated_galaxy
+ic_file = isolated_galaxy_ics.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e19
+ic_bridge_source_mass_unit_to_si = 1.98847e30
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = physical_peculiar
+ic_bridge_length_hubble_exponent = 0
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = 0
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
+zoom_high_res_region = false
+hydro_boundary = open
+gravity_boundary = isolated_monopole
+
+[cosmology]
+omega_matter = 0.31
+omega_lambda = 0.69
+omega_baryon = 0.0486
+hubble_param = 0.677
+sigma8 = 0.81
+scalar_index_ns = 0.966
+box_size = 400 kpc
+
+[numerics]
+time_begin_code = 0.0
+time_end_code = 1.0
+max_global_steps = 3000
+hierarchical_max_rung = 0
+amr_max_level = 11
+gravity_softening = 0.05 kpc
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = cic
+treepm_enable_window_deconvolution = false
+treepm_update_cadence_steps = 1
+
+[physics]
+enable_star_formation = true
+star_formation_model = legacy_schmidt_threshold
+sf_epsilon_ff = 1.0
+sf_bound_alpha_vir_max = 1.0
+sf_require_converging_flow = true
+sf_collapse_timescale = minimum_free_fall_or_compression
+sf_jeans_mass_floor_code = 100 msun
+sf_star_particle_mass_policy = gas_resolution_fraction
+sf_target_star_particle_mass_code = 100 msun
+sf_target_star_particle_mass_fraction = 0.25
+sf_min_star_particle_mass_code = 1 msun
+sf_max_star_particle_mass_code = 1000000 msun
+sf_max_spawn_particles_per_cell_step = 8
+sf_max_fractional_mass_conversion = 0.25
+sf_min_remaining_gas_fraction = 0.01
+sf_min_remaining_gas_mass_code = 1 msun
+sf_temperature_safety_ceiling_k = 0.0
+sf_stochastic_spawning = true
+sf_random_seed = 123456789
+
+[analysis]
+enable_diagnostics = true
+diagnostics_execution_policy = run_health_and_light_science
+run_health_interval_steps = 1
+science_light_interval_steps = 10
+sf_history_bin_count = 64
+
+[output]
+run_name = adaptive_bound_jeans_isolated_galaxy
+output_directory = outputs/isolated_galaxy
+output_stem = snapshot
+restart_stem = restart
+snapshot_interval_steps = 50
+write_restarts = true
+
+[parallel]
+mpi_ranks_expected = 1
+omp_threads = 8
+gpu_devices = 0
+deterministic_reduction = true

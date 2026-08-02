@@ -22,6 +22,7 @@ treepm_update_cadence_steps = 1
 [physics]
 enable_cooling = true
 enable_star_formation = true
+star_formation_model = effective_multiphase_tng_like
 enable_feedback = true
 enable_black_hole_agn = false
 

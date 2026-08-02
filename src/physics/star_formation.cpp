@@ -85,20 +85,230 @@ void incrementRejectionCounter(
       ++counters.rejected_jeans_stable;
       break;
     case StarFormationRejectionReason::kLegacyDensity:
+      ++counters.rejected_legacy_density_threshold;
+      break;
     case StarFormationRejectionReason::kLegacyTemperature:
-    case StarFormationRejectionReason::kMassFloor:
-      ++counters.rejected_mass_floor;
+      ++counters.rejected_legacy_temperature_threshold;
+      break;
+    case StarFormationRejectionReason::kAdaptiveMassFloor:
+      ++counters.rejected_adaptive_mass_floor;
+      break;
+    case StarFormationRejectionReason::kEffectiveBelowDensityThreshold:
+      ++counters.rejected_effective_below_density_threshold;
+      break;
+    case StarFormationRejectionReason::kEffectiveBelowOverdensityThreshold:
+      ++counters.rejected_effective_below_overdensity_threshold;
+      break;
+    case StarFormationRejectionReason::kEffectiveHotAboveEos:
+      ++counters.rejected_effective_hot_above_eos;
+      break;
+    case StarFormationRejectionReason::kEffectiveInvalidEquilibrium:
+      ++counters.rejected_effective_invalid_equilibrium;
       break;
   }
 }
 
-[[nodiscard]] std::uint64_t particleIdFromBirthKey(std::uint64_t birth_key) {
-  std::uint64_t particle_id = kGeneratedParticleIdTag | (splitmix64(birth_key ^ kParticleIdDomain) & ~kGeneratedParticleIdTag);
-  if (particle_id == 0U) {
-    particle_id = kGeneratedParticleIdTag | 1U;
-  }
-  return particle_id;
+
+void accumulateStarFormationCounters(StarFormationCounters& cumulative, const StarFormationCounters& latest) {
+  cumulative.scanned_cells += latest.scanned_cells;
+  cumulative.rejected_inactive += latest.rejected_inactive;
+  cumulative.rejected_not_owned += latest.rejected_not_owned;
+  cumulative.rejected_non_leaf += latest.rejected_non_leaf;
+  cumulative.rejected_ghost += latest.rejected_ghost;
+  cumulative.rejected_invalid_state += latest.rejected_invalid_state;
+  cumulative.rejected_non_positive_mass += latest.rejected_non_positive_mass;
+  cumulative.rejected_non_positive_volume += latest.rejected_non_positive_volume;
+  cumulative.rejected_not_converging += latest.rejected_not_converging;
+  cumulative.rejected_unbound += latest.rejected_unbound;
+  cumulative.rejected_jeans_stable += latest.rejected_jeans_stable;
+  cumulative.rejected_legacy_density_threshold += latest.rejected_legacy_density_threshold;
+  cumulative.rejected_legacy_temperature_threshold += latest.rejected_legacy_temperature_threshold;
+  cumulative.rejected_adaptive_mass_floor += latest.rejected_adaptive_mass_floor;
+  cumulative.rejected_effective_below_density_threshold += latest.rejected_effective_below_density_threshold;
+  cumulative.rejected_effective_below_overdensity_threshold += latest.rejected_effective_below_overdensity_threshold;
+  cumulative.rejected_effective_hot_above_eos += latest.rejected_effective_hot_above_eos;
+  cumulative.rejected_effective_invalid_equilibrium += latest.rejected_effective_invalid_equilibrium;
+  cumulative.eligible_cells += latest.eligible_cells;
+  cumulative.effective_cells_scanned += latest.effective_cells_scanned;
+  cumulative.effective_cells_above_threshold += latest.effective_cells_above_threshold;
+  cumulative.effective_cells_on_eos += latest.effective_cells_on_eos;
+  cumulative.effective_cells_hot_above_eos += latest.effective_cells_hot_above_eos;
+  cumulative.effective_cells_invalid_equilibrium += latest.effective_cells_invalid_equilibrium;
+  cumulative.spawn_events += latest.spawn_events;
+  cumulative.spawned_particles += latest.spawned_particles;
+  cumulative.effective_cold_gas_mass_code += latest.effective_cold_gas_mass_code;
+  cumulative.effective_instantaneous_sfr_code += latest.effective_instantaneous_sfr_code;
+  cumulative.expected_spawn_mass_code += latest.expected_spawn_mass_code;
+  cumulative.spawned_mass_code += latest.spawned_mass_code;
+  cumulative.gas_mass_removed_code += latest.gas_mass_removed_code;
+  cumulative.star_mass_created_code += latest.star_mass_created_code;
+  cumulative.mass_residual_code += latest.mass_residual_code;
+  cumulative.gas_momentum_removed_x_code += latest.gas_momentum_removed_x_code;
+  cumulative.gas_momentum_removed_y_code += latest.gas_momentum_removed_y_code;
+  cumulative.gas_momentum_removed_z_code += latest.gas_momentum_removed_z_code;
+  cumulative.star_momentum_created_x_code += latest.star_momentum_created_x_code;
+  cumulative.star_momentum_created_y_code += latest.star_momentum_created_y_code;
+  cumulative.star_momentum_created_z_code += latest.star_momentum_created_z_code;
+  cumulative.momentum_residual_norm_code += latest.momentum_residual_norm_code;
+  cumulative.gas_metal_mass_removed_code += latest.gas_metal_mass_removed_code;
+  cumulative.star_metal_mass_created_code += latest.star_metal_mass_created_code;
+  cumulative.metal_mass_residual_code += latest.metal_mass_residual_code;
+  cumulative.gas_internal_energy_removed_code += latest.gas_internal_energy_removed_code;
+  cumulative.star_kinetic_energy_created_code += latest.star_kinetic_energy_created_code;
+  cumulative.star_formation_internal_energy_sink_code += latest.star_formation_internal_energy_sink_code;
+  if (latest.effective_min_cold_fraction > 0.0 && (cumulative.effective_min_cold_fraction == 0.0 || latest.effective_min_cold_fraction < cumulative.effective_min_cold_fraction)) cumulative.effective_min_cold_fraction = latest.effective_min_cold_fraction;
+  if (latest.effective_min_pressure_code > 0.0 && (cumulative.effective_min_pressure_code == 0.0 || latest.effective_min_pressure_code < cumulative.effective_min_pressure_code)) cumulative.effective_min_pressure_code = latest.effective_min_pressure_code;
+  if (latest.minimum_free_fall_time_code > 0.0 && (cumulative.minimum_free_fall_time_code == 0.0 || latest.minimum_free_fall_time_code < cumulative.minimum_free_fall_time_code)) cumulative.minimum_free_fall_time_code = latest.minimum_free_fall_time_code;
+  if (latest.minimum_collapse_time_code > 0.0 && (cumulative.minimum_collapse_time_code == 0.0 || latest.minimum_collapse_time_code < cumulative.minimum_collapse_time_code)) cumulative.minimum_collapse_time_code = latest.minimum_collapse_time_code;
+  cumulative.effective_max_cold_fraction = std::max(cumulative.effective_max_cold_fraction, latest.effective_max_cold_fraction);
+  cumulative.effective_max_pressure_code = std::max(cumulative.effective_max_pressure_code, latest.effective_max_pressure_code);
+  cumulative.maximum_spawn_probability = std::max(cumulative.maximum_spawn_probability, latest.maximum_spawn_probability);
+  cumulative.maximum_fractional_mass_conversion = std::max(cumulative.maximum_fractional_mass_conversion, latest.maximum_fractional_mass_conversion);
 }
+
+void writeStarFormationCounters(
+    std::ostringstream& stream,
+    std::string_view prefix,
+    const StarFormationCounters& counters) {
+  stream << prefix << "scanned_cells=" << counters.scanned_cells << "\n";
+  stream << prefix << "rejected_inactive=" << counters.rejected_inactive << "\n";
+  stream << prefix << "rejected_not_owned=" << counters.rejected_not_owned << "\n";
+  stream << prefix << "rejected_non_leaf=" << counters.rejected_non_leaf << "\n";
+  stream << prefix << "rejected_ghost=" << counters.rejected_ghost << "\n";
+  stream << prefix << "rejected_invalid_state=" << counters.rejected_invalid_state << "\n";
+  stream << prefix << "rejected_non_positive_mass=" << counters.rejected_non_positive_mass << "\n";
+  stream << prefix << "rejected_non_positive_volume=" << counters.rejected_non_positive_volume << "\n";
+  stream << prefix << "rejected_not_converging=" << counters.rejected_not_converging << "\n";
+  stream << prefix << "rejected_unbound=" << counters.rejected_unbound << "\n";
+  stream << prefix << "rejected_jeans_stable=" << counters.rejected_jeans_stable << "\n";
+  stream << prefix << "rejected_legacy_density_threshold=" << counters.rejected_legacy_density_threshold << "\n";
+  stream << prefix << "rejected_legacy_temperature_threshold=" << counters.rejected_legacy_temperature_threshold << "\n";
+  stream << prefix << "rejected_adaptive_mass_floor=" << counters.rejected_adaptive_mass_floor << "\n";
+  stream << prefix << "rejected_effective_below_density_threshold=" << counters.rejected_effective_below_density_threshold << "\n";
+  stream << prefix << "rejected_effective_below_overdensity_threshold=" << counters.rejected_effective_below_overdensity_threshold << "\n";
+  stream << prefix << "rejected_effective_hot_above_eos=" << counters.rejected_effective_hot_above_eos << "\n";
+  stream << prefix << "rejected_effective_invalid_equilibrium=" << counters.rejected_effective_invalid_equilibrium << "\n";
+  stream << prefix << "eligible_cells=" << counters.eligible_cells << "\n";
+  stream << prefix << "effective_cells_scanned=" << counters.effective_cells_scanned << "\n";
+  stream << prefix << "effective_cells_above_threshold=" << counters.effective_cells_above_threshold << "\n";
+  stream << prefix << "effective_cells_on_eos=" << counters.effective_cells_on_eos << "\n";
+  stream << prefix << "effective_cells_hot_above_eos=" << counters.effective_cells_hot_above_eos << "\n";
+  stream << prefix << "effective_cells_invalid_equilibrium=" << counters.effective_cells_invalid_equilibrium << "\n";
+  stream << prefix << "spawn_events=" << counters.spawn_events << "\n";
+  stream << prefix << "spawned_particles=" << counters.spawned_particles << "\n";
+  stream << prefix << "effective_cold_gas_mass_code=" << counters.effective_cold_gas_mass_code << "\n";
+  stream << prefix << "effective_instantaneous_sfr_code=" << counters.effective_instantaneous_sfr_code << "\n";
+  stream << prefix << "expected_spawn_mass_code=" << counters.expected_spawn_mass_code << "\n";
+  stream << prefix << "spawned_mass_code=" << counters.spawned_mass_code << "\n";
+  stream << prefix << "gas_mass_removed_code=" << counters.gas_mass_removed_code << "\n";
+  stream << prefix << "star_mass_created_code=" << counters.star_mass_created_code << "\n";
+  stream << prefix << "mass_residual_code=" << counters.mass_residual_code << "\n";
+  stream << prefix << "gas_momentum_removed_x_code=" << counters.gas_momentum_removed_x_code << "\n";
+  stream << prefix << "gas_momentum_removed_y_code=" << counters.gas_momentum_removed_y_code << "\n";
+  stream << prefix << "gas_momentum_removed_z_code=" << counters.gas_momentum_removed_z_code << "\n";
+  stream << prefix << "star_momentum_created_x_code=" << counters.star_momentum_created_x_code << "\n";
+  stream << prefix << "star_momentum_created_y_code=" << counters.star_momentum_created_y_code << "\n";
+  stream << prefix << "star_momentum_created_z_code=" << counters.star_momentum_created_z_code << "\n";
+  stream << prefix << "momentum_residual_norm_code=" << counters.momentum_residual_norm_code << "\n";
+  stream << prefix << "gas_metal_mass_removed_code=" << counters.gas_metal_mass_removed_code << "\n";
+  stream << prefix << "star_metal_mass_created_code=" << counters.star_metal_mass_created_code << "\n";
+  stream << prefix << "metal_mass_residual_code=" << counters.metal_mass_residual_code << "\n";
+  stream << prefix << "gas_internal_energy_removed_code=" << counters.gas_internal_energy_removed_code << "\n";
+  stream << prefix << "star_kinetic_energy_created_code=" << counters.star_kinetic_energy_created_code << "\n";
+  stream << prefix << "star_formation_internal_energy_sink_code=" << counters.star_formation_internal_energy_sink_code << "\n";
+  stream << prefix << "effective_min_cold_fraction=" << counters.effective_min_cold_fraction << "\n";
+  stream << prefix << "effective_min_pressure_code=" << counters.effective_min_pressure_code << "\n";
+  stream << prefix << "minimum_free_fall_time_code=" << counters.minimum_free_fall_time_code << "\n";
+  stream << prefix << "minimum_collapse_time_code=" << counters.minimum_collapse_time_code << "\n";
+  stream << prefix << "effective_max_cold_fraction=" << counters.effective_max_cold_fraction << "\n";
+  stream << prefix << "effective_max_pressure_code=" << counters.effective_max_pressure_code << "\n";
+  stream << prefix << "maximum_spawn_probability=" << counters.maximum_spawn_probability << "\n";
+  stream << prefix << "maximum_fractional_mass_conversion=" << counters.maximum_fractional_mass_conversion << "\n";
+}
+
+[[nodiscard]] StarFormationCounters cumulativeCountersFromState(const core::SimulationState& state) {
+  StarFormationCounters counters;
+  const core::ModuleSidecarBlock* block = state.sidecars.find("star_formation");
+  if (block == nullptr || block->payload.empty()) return counters;
+  std::string text;
+  text.reserve(block->payload.size());
+  for (const std::byte value : block->payload) text.push_back(static_cast<char>(value));
+  std::unordered_map<std::string, std::string> values;
+  std::istringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    const std::size_t split = line.find('=');
+    if (split != std::string::npos) values.emplace(line.substr(0, split), line.substr(split + 1U));
+  }
+  const auto read_u64 = [&](std::string_view name, std::uint64_t& target) {
+    const auto it = values.find("cumulative." + std::string(name));
+    if (it != values.end()) target = static_cast<std::uint64_t>(std::stoull(it->second));
+  };
+  const auto read_double = [&](std::string_view name, double& target) {
+    const auto it = values.find("cumulative." + std::string(name));
+    if (it != values.end()) target = std::stod(it->second);
+  };
+  try {
+    read_u64("scanned_cells", counters.scanned_cells);
+    read_u64("rejected_inactive", counters.rejected_inactive);
+    read_u64("rejected_not_owned", counters.rejected_not_owned);
+    read_u64("rejected_non_leaf", counters.rejected_non_leaf);
+    read_u64("rejected_ghost", counters.rejected_ghost);
+    read_u64("rejected_invalid_state", counters.rejected_invalid_state);
+    read_u64("rejected_non_positive_mass", counters.rejected_non_positive_mass);
+    read_u64("rejected_non_positive_volume", counters.rejected_non_positive_volume);
+    read_u64("rejected_not_converging", counters.rejected_not_converging);
+    read_u64("rejected_unbound", counters.rejected_unbound);
+    read_u64("rejected_jeans_stable", counters.rejected_jeans_stable);
+    read_u64("rejected_legacy_density_threshold", counters.rejected_legacy_density_threshold);
+    read_u64("rejected_legacy_temperature_threshold", counters.rejected_legacy_temperature_threshold);
+    read_u64("rejected_adaptive_mass_floor", counters.rejected_adaptive_mass_floor);
+    read_u64("rejected_effective_below_density_threshold", counters.rejected_effective_below_density_threshold);
+    read_u64("rejected_effective_below_overdensity_threshold", counters.rejected_effective_below_overdensity_threshold);
+    read_u64("rejected_effective_hot_above_eos", counters.rejected_effective_hot_above_eos);
+    read_u64("rejected_effective_invalid_equilibrium", counters.rejected_effective_invalid_equilibrium);
+    read_u64("eligible_cells", counters.eligible_cells);
+    read_u64("effective_cells_scanned", counters.effective_cells_scanned);
+    read_u64("effective_cells_above_threshold", counters.effective_cells_above_threshold);
+    read_u64("effective_cells_on_eos", counters.effective_cells_on_eos);
+    read_u64("effective_cells_hot_above_eos", counters.effective_cells_hot_above_eos);
+    read_u64("effective_cells_invalid_equilibrium", counters.effective_cells_invalid_equilibrium);
+    read_u64("spawn_events", counters.spawn_events);
+    read_u64("spawned_particles", counters.spawned_particles);
+    read_double("effective_cold_gas_mass_code", counters.effective_cold_gas_mass_code);
+    read_double("effective_instantaneous_sfr_code", counters.effective_instantaneous_sfr_code);
+    read_double("expected_spawn_mass_code", counters.expected_spawn_mass_code);
+    read_double("spawned_mass_code", counters.spawned_mass_code);
+    read_double("gas_mass_removed_code", counters.gas_mass_removed_code);
+    read_double("star_mass_created_code", counters.star_mass_created_code);
+    read_double("mass_residual_code", counters.mass_residual_code);
+    read_double("gas_momentum_removed_x_code", counters.gas_momentum_removed_x_code);
+    read_double("gas_momentum_removed_y_code", counters.gas_momentum_removed_y_code);
+    read_double("gas_momentum_removed_z_code", counters.gas_momentum_removed_z_code);
+    read_double("star_momentum_created_x_code", counters.star_momentum_created_x_code);
+    read_double("star_momentum_created_y_code", counters.star_momentum_created_y_code);
+    read_double("star_momentum_created_z_code", counters.star_momentum_created_z_code);
+    read_double("momentum_residual_norm_code", counters.momentum_residual_norm_code);
+    read_double("gas_metal_mass_removed_code", counters.gas_metal_mass_removed_code);
+    read_double("star_metal_mass_created_code", counters.star_metal_mass_created_code);
+    read_double("metal_mass_residual_code", counters.metal_mass_residual_code);
+    read_double("gas_internal_energy_removed_code", counters.gas_internal_energy_removed_code);
+    read_double("star_kinetic_energy_created_code", counters.star_kinetic_energy_created_code);
+    read_double("star_formation_internal_energy_sink_code", counters.star_formation_internal_energy_sink_code);
+    read_double("effective_min_cold_fraction", counters.effective_min_cold_fraction);
+    read_double("effective_min_pressure_code", counters.effective_min_pressure_code);
+    read_double("minimum_free_fall_time_code", counters.minimum_free_fall_time_code);
+    read_double("minimum_collapse_time_code", counters.minimum_collapse_time_code);
+    read_double("effective_max_cold_fraction", counters.effective_max_cold_fraction);
+    read_double("effective_max_pressure_code", counters.effective_max_pressure_code);
+    read_double("maximum_spawn_probability", counters.maximum_spawn_probability);
+    read_double("maximum_fractional_mass_conversion", counters.maximum_fractional_mass_conversion);
+  } catch (const std::exception&) {
+    return StarFormationCounters{};
+  }
+  return counters;
+}
+
 
 struct StarBirthPlan {
   std::uint64_t gas_cell_id = 0;
@@ -151,7 +361,104 @@ double starFormationUniform01(
   return static_cast<double>(bits >> 11U) * kU01Scale;
 }
 
-StarFormationModel::StarFormationModel(StarFormationConfig config) : m_config(std::move(config)) {
+std::uint64_t starFormationParticleIdFromBirthKey(
+    std::uint64_t birth_key,
+    std::uint32_t collision_ordinal) {
+  std::uint64_t particle_id = kGeneratedParticleIdTag |
+      (splitmix64(birth_key ^ kParticleIdDomain ^
+          splitmix64(static_cast<std::uint64_t>(collision_ordinal))) & ~kGeneratedParticleIdTag);
+  if (particle_id == 0U) particle_id = kGeneratedParticleIdTag | 1U;
+  return particle_id;
+}
+
+std::vector<std::uint64_t> precommitStarParticleIdsExact(
+    std::span<const std::uint64_t> existing_particle_ids,
+    std::span<const std::uint64_t> birth_keys) {
+  std::vector<std::uint64_t> occupied(existing_particle_ids.begin(), existing_particle_ids.end());
+  std::sort(occupied.begin(), occupied.end());
+  if ((!occupied.empty() && occupied.front() == 0U) ||
+      std::adjacent_find(occupied.begin(), occupied.end()) != occupied.end()) {
+    throw std::runtime_error("ParticleIdRegistry: existing particle IDs are zero or duplicated");
+  }
+
+  std::vector<std::uint64_t> sorted_birth_keys(birth_keys.begin(), birth_keys.end());
+  std::sort(sorted_birth_keys.begin(), sorted_birth_keys.end());
+  if ((!sorted_birth_keys.empty() && sorted_birth_keys.front() == 0U) ||
+      std::adjacent_find(sorted_birth_keys.begin(), sorted_birth_keys.end()) !=
+          sorted_birth_keys.end()) {
+    throw std::runtime_error(
+        "ParticleIdRegistry: zero or duplicate immutable birth key in precommit batch");
+  }
+
+  struct CandidateRecord {
+    std::uint64_t particle_id = 0U;
+    std::uint64_t birth_key = 0U;
+    std::size_t original_index = 0U;
+    std::uint32_t collision_ordinal = 0U;
+  };
+  std::vector<CandidateRecord> candidates;
+  candidates.reserve(birth_keys.size());
+  for (std::size_t index = 0; index < birth_keys.size(); ++index) {
+    candidates.push_back(CandidateRecord{
+        .particle_id = starFormationParticleIdFromBirthKey(birth_keys[index], 0U),
+        .birth_key = birth_keys[index],
+        .original_index = index,
+        .collision_ordinal = 0U,
+    });
+  }
+
+  for (std::uint32_t pass = 0U; pass < 1024U; ++pass) {
+    std::sort(candidates.begin(), candidates.end(), [](const CandidateRecord& lhs,
+                                                       const CandidateRecord& rhs) {
+      if (lhs.particle_id != rhs.particle_id) return lhs.particle_id < rhs.particle_id;
+      return lhs.birth_key < rhs.birth_key;
+    });
+    bool had_collision = false;
+    std::size_t begin = 0U;
+    while (begin < candidates.size()) {
+      std::size_t end_group = begin + 1U;
+      while (end_group < candidates.size() &&
+             candidates[end_group].particle_id == candidates[begin].particle_id) {
+        ++end_group;
+      }
+      const bool collides_existing = std::binary_search(
+          occupied.begin(), occupied.end(), candidates[begin].particle_id);
+      const std::size_t first_to_rehash = collides_existing ? begin : begin + 1U;
+      for (std::size_t index = first_to_rehash; index < end_group; ++index) {
+        CandidateRecord& candidate = candidates[index];
+        if (candidate.collision_ordinal == std::numeric_limits<std::uint32_t>::max()) {
+          throw std::runtime_error(
+              "ParticleIdRegistry: deterministic collision ordinal overflow");
+        }
+        ++candidate.collision_ordinal;
+        candidate.particle_id = starFormationParticleIdFromBirthKey(
+            candidate.birth_key, candidate.collision_ordinal);
+        had_collision = true;
+      }
+      begin = end_group;
+    }
+    if (!had_collision) {
+      std::vector<std::uint64_t> result(birth_keys.size(), 0U);
+      for (const CandidateRecord& candidate : candidates) {
+        result[candidate.original_index] = candidate.particle_id;
+      }
+      return result;
+    }
+  }
+  throw std::runtime_error(
+      "ParticleIdRegistry: deterministic collision resolution exhausted");
+}
+
+std::vector<std::uint64_t> LocalParticleIdRegistry::precommit(
+    const core::SimulationState& state,
+    std::span<const std::uint64_t> birth_keys) {
+  return precommitStarParticleIdsExact(state.particle_sidecar.particle_id, birth_keys);
+}
+
+StarFormationModel::StarFormationModel(
+    StarFormationConfig config,
+    std::shared_ptr<const EffectiveMultiphaseEosTable> effective_eos_table)
+    : m_config(std::move(config)), m_effective_eos_table(std::move(effective_eos_table)) {
   if (!finitePositive(m_config.newton_g_code)) {
     throw std::invalid_argument("StarFormationModel: newton_g_code must be finite and > 0");
   }
@@ -180,13 +487,21 @@ StarFormationModel::StarFormationModel(StarFormationConfig config) : m_config(st
         !finitePositive(m_config.temperature_threshold_k)) {
       throw std::invalid_argument("StarFormationModel: legacy thresholds must be finite and > 0");
     }
-  } else {
+  } else if (m_config.model == core::StarFormationModelKind::kAdaptiveBoundJeans) {
     if (!finitePositive(m_config.bound_alpha_vir_max) ||
         !finiteNonNegative(m_config.jeans_mass_floor_code) ||
         !finitePositive(m_config.target_star_particle_mass_code) ||
         !(m_config.target_star_particle_mass_fraction > 0.0 &&
           m_config.target_star_particle_mass_fraction <= 1.0)) {
       throw std::invalid_argument("StarFormationModel: invalid adaptive_bound_jeans parameters");
+    }
+  } else {
+    if (m_effective_eos_table == nullptr ||
+        !finiteNonNegative(m_config.effective_min_baryon_overdensity) ||
+        !finiteNonNegative(m_config.effective_hot_excess_tolerance) ||
+        m_config.effective_massive_star_fraction < 0.0 ||
+        m_config.effective_massive_star_fraction >= 1.0) {
+      throw std::invalid_argument("StarFormationModel: effective multiphase model requires a valid EOS table");
     }
   }
 }
@@ -326,7 +641,7 @@ StarFormationCellOutcome StarFormationModel::evaluateCell(
     outcome.physical_density_code = cell.gas_density_code;
     outcome.physical_cell_scale_code =
         finitePositive(cell.cell_volume_code) ? std::cbrt(cell.cell_volume_code) : 0.0;
-  } else {
+  } else if (m_config.model == core::StarFormationModelKind::kAdaptiveBoundJeans) {
     if (cell.gas_cell_id == 0U) {
       outcome.rejection_reason = StarFormationRejectionReason::kInvalidState;
       return outcome;
@@ -366,33 +681,93 @@ StarFormationCellOutcome StarFormationModel::evaluateCell(
       outcome.rejection_reason = StarFormationRejectionReason::kJeansStable;
       return outcome;
     }
+  } else {
+    if (cell.gas_cell_id == 0U || m_effective_eos_table == nullptr ||
+        !finitePositive(cell.gas_specific_internal_energy_code)) {
+      outcome.rejection_reason = StarFormationRejectionReason::kEffectiveInvalidEquilibrium;
+      return outcome;
+    }
+    outcome.physical_density_code = physicalDensityCode(cell.gas_density_code, scale_factor);
+    outcome.physical_cell_scale_code = finitePositive(cell.cell_volume_code)
+        ? physicalCellScaleCode(cell.cell_volume_code, scale_factor)
+        : 0.0;
+    const EffectiveMultiphaseEosLookup equilibrium =
+        m_effective_eos_table->lookup(outcome.physical_density_code);
+    if (!equilibrium.above_threshold) {
+      outcome.rejection_reason = StarFormationRejectionReason::kEffectiveBelowDensityThreshold;
+      return outcome;
+    }
+    if (cell.is_cosmological && m_config.effective_min_baryon_overdensity > 0.0 &&
+        cell.baryon_overdensity < m_config.effective_min_baryon_overdensity) {
+      outcome.rejection_reason = StarFormationRejectionReason::kEffectiveBelowOverdensityThreshold;
+      return outcome;
+    }
+    if (!equilibrium.valid || !finitePositive(equilibrium.entry.star_formation_timescale_code) ||
+        !finiteNonNegative(equilibrium.entry.cold_mass_fraction)) {
+      outcome.rejection_reason = StarFormationRejectionReason::kEffectiveInvalidEquilibrium;
+      return outcome;
+    }
+    outcome.cold_mass_fraction = equilibrium.entry.cold_mass_fraction;
+    outcome.effective_specific_internal_energy_code =
+        equilibrium.entry.specific_internal_energy_eff_code;
+    outcome.effective_pressure_code = (m_effective_eos_table->config().adiabatic_index - 1.0) *
+        cell.gas_density_code * outcome.effective_specific_internal_energy_code;
+    outcome.effective_signal_speed_squared_code =
+        equilibrium.entry.signal_speed_squared_code;
+    if (cell.gas_specific_internal_energy_code >
+        outcome.effective_specific_internal_energy_code *
+            (1.0 + m_config.effective_hot_excess_tolerance)) {
+      outcome.rejection_reason = StarFormationRejectionReason::kEffectiveHotAboveEos;
+      return outcome;
+    }
+    outcome.collapse_time_code = equilibrium.entry.star_formation_timescale_code;
+    outcome.free_fall_time_code = freeFallTimeCode(outcome.physical_density_code);
+    outcome.compression_time_code = compressionTimeCode(cell.velocity_divergence_code);
   }
 
   outcome.eligible = true;
   outcome.rejection_reason = StarFormationRejectionReason::kNone;
-  outcome.free_fall_time_code = freeFallTimeCode(outcome.physical_density_code);
-  outcome.compression_time_code = compressionTimeCode(cell.velocity_divergence_code);
-  outcome.collapse_time_code = outcome.free_fall_time_code;
-  if (m_config.collapse_timescale ==
-      core::StarFormationCollapseTimescale::kMinimumFreeFallOrCompression) {
-    outcome.collapse_time_code = std::min(outcome.free_fall_time_code, outcome.compression_time_code);
+  if (m_config.model != core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+    outcome.free_fall_time_code = freeFallTimeCode(outcome.physical_density_code);
+    outcome.compression_time_code = compressionTimeCode(cell.velocity_divergence_code);
+    outcome.collapse_time_code = outcome.free_fall_time_code;
+    if (m_config.collapse_timescale ==
+        core::StarFormationCollapseTimescale::kMinimumFreeFallOrCompression) {
+      outcome.collapse_time_code = std::min(outcome.free_fall_time_code, outcome.compression_time_code);
+    }
+    outcome.sfr_density_rate_code = m_config.epsilon_ff * outcome.physical_density_code /
+        std::max(outcome.collapse_time_code, kTimeFloor);
+  } else {
+    const double long_lived_factor =
+        m_config.effective_birth_mass_convention == core::EffectiveIsmBirthMassConvention::kLongLivedMass
+        ? (1.0 - m_config.effective_massive_star_fraction)
+        : 1.0;
+    outcome.sfr_density_rate_code = long_lived_factor * outcome.cold_mass_fraction *
+        outcome.physical_density_code / std::max(outcome.collapse_time_code, kTimeFloor);
   }
-  outcome.sfr_density_rate_code = m_config.epsilon_ff * outcome.physical_density_code /
-      std::max(outcome.collapse_time_code, kTimeFloor);
 
-  if (!(dt_code > 0.0) || m_config.epsilon_ff <= 0.0 ||
-      !finitePositive(outcome.collapse_time_code)) {
+  if (!(dt_code > 0.0) || !finitePositive(outcome.collapse_time_code)) {
     return outcome;
   }
 
   double expected_mass_code = 0.0;
   if (m_config.model == core::StarFormationModelKind::kLegacySchmidtThreshold) {
+    if (m_config.epsilon_ff <= 0.0) return outcome;
     expected_mass_code = m_config.epsilon_ff * cell.gas_mass_code * dt_code /
         std::max(outcome.collapse_time_code, kTimeFloor);
-  } else {
+  } else if (m_config.model == core::StarFormationModelKind::kAdaptiveBoundJeans) {
+    if (m_config.epsilon_ff <= 0.0) return outcome;
     const double exponent = -m_config.epsilon_ff * dt_code /
         std::max(outcome.collapse_time_code, kTimeFloor);
     expected_mass_code = cell.gas_mass_code * (-std::expm1(exponent));
+  } else {
+    const double long_lived_factor =
+        m_config.effective_birth_mass_convention == core::EffectiveIsmBirthMassConvention::kLongLivedMass
+        ? (1.0 - m_config.effective_massive_star_fraction)
+        : 1.0;
+    const double rate_per_mass = long_lived_factor * outcome.cold_mass_fraction /
+        std::max(outcome.collapse_time_code, kTimeFloor);
+    expected_mass_code = cell.gas_mass_code * (-std::expm1(-rate_per_mass * dt_code));
   }
 
   const double max_by_step = cell.gas_mass_code * m_config.max_fractional_mass_conversion;
@@ -531,7 +906,8 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
     std::span<const StarFormationCellInput> cell_inputs,
     double dt_code,
     double scale_factor,
-    std::uint64_t global_integration_tick) const {
+    std::uint64_t global_integration_tick,
+    ParticleIdPrecommit* id_precommit) const {
   StarFormationStepReport report;
   if (!m_config.enabled || !(dt_code > 0.0)) {
     return report;
@@ -543,13 +919,40 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
 
   for (const StarFormationCellInput& cell : cell_inputs) {
     ++report.counters.scanned_cells;
+    if (m_config.model == core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+      ++report.counters.effective_cells_scanned;
+    }
     const StarFormationCellOutcome outcome = evaluateCell(
         cell, dt_code, scale_factor, global_integration_tick);
     if (!outcome.eligible) {
       incrementRejectionCounter(report.counters, outcome.rejection_reason);
+      if (outcome.rejection_reason == StarFormationRejectionReason::kEffectiveHotAboveEos) {
+        ++report.counters.effective_cells_hot_above_eos;
+      } else if (outcome.rejection_reason == StarFormationRejectionReason::kEffectiveInvalidEquilibrium) {
+        ++report.counters.effective_cells_invalid_equilibrium;
+      }
       continue;
     }
     ++report.counters.eligible_cells;
+    if (m_config.model == core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+      ++report.counters.effective_cells_above_threshold;
+      ++report.counters.effective_cells_on_eos;
+      report.counters.effective_cold_gas_mass_code += outcome.cold_mass_fraction * cell.gas_mass_code;
+      report.counters.effective_instantaneous_sfr_code +=
+          outcome.sfr_density_rate_code * cell.cell_volume_code;
+      report.counters.effective_min_cold_fraction = std::min(
+          report.counters.effective_min_cold_fraction, outcome.cold_mass_fraction);
+      report.counters.effective_max_cold_fraction = std::max(
+          report.counters.effective_max_cold_fraction, outcome.cold_mass_fraction);
+      if (report.counters.effective_min_pressure_code == 0.0) {
+        report.counters.effective_min_pressure_code = outcome.effective_pressure_code;
+      } else {
+        report.counters.effective_min_pressure_code = std::min(
+            report.counters.effective_min_pressure_code, outcome.effective_pressure_code);
+      }
+      report.counters.effective_max_pressure_code = std::max(
+          report.counters.effective_max_pressure_code, outcome.effective_pressure_code);
+    }
     report.counters.expected_spawn_mass_code += outcome.expected_spawn_mass_code;
     if (outcome.free_fall_time_code > 0.0 && std::isfinite(outcome.free_fall_time_code)) {
       if (report.counters.minimum_free_fall_time_code == 0.0) {
@@ -614,8 +1017,10 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   }
 
   if (plans.empty()) {
+    StarFormationCounters cumulative = cumulativeCountersFromState(state);
+    accumulateStarFormationCounters(cumulative, report.counters);
     state.sidecars.upsert(buildMetadataSidecar(
-        report.counters, state.metadata.normalized_config_hash_hex));
+        report.counters, state.metadata.normalized_config_hash_hex, &cumulative));
     return report;
   }
 
@@ -647,23 +1052,21 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   // complete local birth batch without a full scan of the existing particle set
   // or one heap allocation per ID. The workflow ownership gate performs the exact
   // global duplicate-ID check after legal source mutation and before acceptance.
-  std::vector<std::uint64_t> new_particle_ids;
   std::vector<std::uint64_t> new_birth_keys;
-  new_particle_ids.reserve(total_new_particles);
   new_birth_keys.reserve(total_new_particles);
   for (const StarBirthPlan& plan : plans) {
     for (std::uint32_t ordinal = 0U; ordinal < plan.spawn_count; ++ordinal) {
-      const std::uint64_t birth_key = starFormationBirthKey(
-          plan.gas_cell_id, plan.birth_tick, ordinal, m_config.metadata_schema_version);
-      new_birth_keys.push_back(birth_key);
-      new_particle_ids.push_back(particleIdFromBirthKey(birth_key));
+      new_birth_keys.push_back(starFormationBirthKey(
+          plan.gas_cell_id, plan.birth_tick, ordinal, m_config.metadata_schema_version));
     }
   }
-  std::vector<std::uint64_t> sorted_new_particle_ids = new_particle_ids;
-  std::sort(sorted_new_particle_ids.begin(), sorted_new_particle_ids.end());
-  if (std::adjacent_find(sorted_new_particle_ids.begin(), sorted_new_particle_ids.end()) !=
-      sorted_new_particle_ids.end()) {
-    throw std::runtime_error("StarFormationModel: deterministic particle-ID collision in birth batch");
+  LocalParticleIdRegistry local_registry;
+  ParticleIdPrecommit& registry = id_precommit != nullptr
+      ? *id_precommit
+      : static_cast<ParticleIdPrecommit&>(local_registry);
+  const std::vector<std::uint64_t> new_particle_ids = registry.precommit(state, new_birth_keys);
+  if (new_particle_ids.size() != new_birth_keys.size()) {
+    throw std::runtime_error("StarFormationModel: particle-ID precommit returned the wrong batch size");
   }
 
   const std::size_t old_particle_count = state.particles.size();
@@ -782,8 +1185,10 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   state.species.count_by_species[static_cast<std::size_t>(core::ParticleSpecies::kStar)] +=
       report.counters.spawned_particles;
   state.rebuildSpeciesIndex();
+  StarFormationCounters cumulative = cumulativeCountersFromState(state);
+  accumulateStarFormationCounters(cumulative, report.counters);
   state.sidecars.upsert(buildMetadataSidecar(
-      report.counters, state.metadata.normalized_config_hash_hex));
+      report.counters, state.metadata.normalized_config_hash_hex, &cumulative));
   return report;
 }
 
@@ -860,16 +1265,17 @@ StarFormationStepReport StarFormationModel::apply(
 
 core::ModuleSidecarBlock StarFormationModel::buildMetadataSidecar(
     const StarFormationCounters& counters,
-    std::string_view configuration_hash) const {
+    std::string_view configuration_hash,
+    const StarFormationCounters* cumulative_counters) const {
   std::ostringstream stream;
   stream << "module_name=star_formation\n";
   stream << "model_name=" << core::starFormationModelKindToString(m_config.model) << "\n";
   stream << "model_schema_version=" << m_config.metadata_schema_version << "\n";
   stream << "rng_algorithm=splitmix64_counter_keyed\n";
   stream << "rng_key_schema_version=" << kStarFormationRngKeySchemaVersion << "\n";
-  stream << "particle_id_collision_detection=local_birth_batch_and_global_ownership_acceptance\n";
+  stream << "particle_id_collision_detection=exact_existing_local_and_distributed_precommit\n";
   stream << "configuration_hash=" << configuration_hash << "\n";
-  stream << "counter_scope=latest_source_stage\n";
+  stream << "counter_scope=latest_and_cumulative_source_stages\n";
   stream << "physical_density_convention="
          << (m_config.density_is_comoving ? "rho_stored_div_a_cubed" : "stored_density_is_physical") << "\n";
   stream << "velocity_gradient_convention=physical_inverse_time_patch_finite_difference\n";
@@ -880,6 +1286,8 @@ core::ModuleSidecarBlock StarFormationModel::buildMetadataSidecar(
   stream << "bound_alpha_vir_max=" << m_config.bound_alpha_vir_max << "\n";
   stream << "jeans_mass_floor_code=" << m_config.jeans_mass_floor_code << "\n";
   stream << "random_seed=" << m_config.random_seed << "\n";
+  // Flat latest-step compatibility fields remain available while the complete
+  // namespaced latest/cumulative ledgers provide restart-persistent accounting.
   stream << "scanned_cells=" << counters.scanned_cells << "\n";
   stream << "eligible_cells=" << counters.eligible_cells << "\n";
   stream << "spawn_events=" << counters.spawn_events << "\n";
@@ -892,6 +1300,17 @@ core::ModuleSidecarBlock StarFormationModel::buildMetadataSidecar(
   stream << "gas_internal_energy_removed_code=" << counters.gas_internal_energy_removed_code << "\n";
   stream << "star_formation_internal_energy_sink_code="
          << counters.star_formation_internal_energy_sink_code << "\n";
+  writeStarFormationCounters(stream, "latest.", counters);
+  writeStarFormationCounters(
+      stream, "cumulative.", cumulative_counters != nullptr ? *cumulative_counters : counters);
+  if (m_effective_eos_table != nullptr) {
+    stream << "effective_eos_schema_version=" << kEffectiveMultiphaseEosSchemaVersion << "\n";
+    stream << "effective_eos_parameter_set=" << m_effective_eos_table->config().parameter_set << "\n";
+    stream << "effective_eos_table_hash=" << m_effective_eos_table->tableHashHex() << "\n";
+    stream << "effective_eos_table_bins=" << m_effective_eos_table->entries().size() << "\n";
+    stream << "effective_eos_density_threshold_code=" << m_effective_eos_table->thresholdDensityPhysCode() << "\n";
+    stream << "effective_eos_cooling_reference=" << m_effective_eos_table->coolingReferenceDescription() << "\n";
+  }
 
   const std::string text = stream.str();
   core::ModuleSidecarBlock block;
@@ -928,6 +1347,10 @@ StarFormationConfig makeStarFormationConfig(const core::PhysicsConfig& physics_c
   config.temperature_safety_ceiling_k = physics_config.sf_temperature_safety_ceiling_k;
   config.stochastic_spawning = physics_config.sf_stochastic_spawning;
   config.random_seed = physics_config.sf_random_seed;
+  config.effective_min_baryon_overdensity = physics_config.sf_effective_min_baryon_overdensity;
+  config.effective_hot_excess_tolerance = physics_config.sf_effective_hot_excess_tolerance;
+  config.effective_massive_star_fraction = physics_config.sf_effective_massive_star_fraction;
+  config.effective_birth_mass_convention = physics_config.sf_effective_birth_mass_convention;
   return config;
 }
 
@@ -1007,6 +1430,12 @@ const StarFormationStepReport& StarFormationCallback::lastStepReport() const noe
 }
 
 void StarFormationCallback::ensureFieldSizes(std::size_t cell_count) {
+  if (m_model.config().model != core::StarFormationModelKind::kLegacySchmidtThreshold &&
+      (m_velocity_divergence_code.size() < cell_count ||
+       m_metallicity_mass_fraction.size() < cell_count)) {
+    throw std::runtime_error(
+        "StarFormationCallback: adaptive/effective models require explicitly injected authoritative fields; use SourceRuntime in production");
+  }
   if (m_velocity_divergence_code.size() < cell_count) {
     m_velocity_divergence_code.resize(cell_count, 0.0);
   }

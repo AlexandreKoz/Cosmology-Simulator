@@ -9,14 +9,19 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
-#include <unordered_set>
 #include <vector>
 
 #include "cosmosim/physics/black_hole_agn.hpp"
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 #include "cosmosim/physics/star_formation.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/star_formation_geometry.hpp"
+
+#if COSMOSIM_ENABLE_MPI
+#include <mpi.h>
+#endif
 
 namespace cosmosim::workflows {
 namespace {
@@ -34,6 +39,124 @@ namespace {
   result.geometry_is_comoving = config.units.coordinate_frame == core::CoordinateFrame::kComoving;
   return result;
 }
+
+[[nodiscard]] std::shared_ptr<const physics::EffectiveMultiphaseEosTable>
+makeRuntimeEffectiveEosTable(
+    const core::SimulationConfig& config,
+    const core::UnitSystem& units) {
+  if (!config.physics.enable_star_formation ||
+      config.physics.star_formation_model !=
+          core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+    return nullptr;
+  }
+  return std::make_shared<const physics::EffectiveMultiphaseEosTable>(
+      physics::makeEffectiveMultiphaseEosConfig(config.physics),
+      units,
+      physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
+}
+
+[[nodiscard]] std::vector<std::uint64_t> allGatherUint64(
+    const parallel::MpiContext& mpi_context,
+    std::span<const std::uint64_t> local_values) {
+  if (!mpi_context.isEnabled()) {
+    return std::vector<std::uint64_t>(local_values.begin(), local_values.end());
+  }
+#if COSMOSIM_ENABLE_MPI
+  const int world_size = mpi_context.worldSize();
+  const std::uint64_t local_count = static_cast<std::uint64_t>(local_values.size());
+  std::vector<std::uint64_t> counts(static_cast<std::size_t>(world_size), 0U);
+  MPI_Allgather(
+      const_cast<std::uint64_t*>(&local_count), 1, MPI_UINT64_T,
+      counts.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD);
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> displacements(static_cast<std::size_t>(world_size), 0);
+  std::uint64_t total = 0U;
+  for (int rank = 0; rank < world_size; ++rank) {
+    if (counts[static_cast<std::size_t>(rank)] >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("particle-ID precommit count exceeds MPI int range");
+    }
+    recv_counts[static_cast<std::size_t>(rank)] =
+        static_cast<int>(counts[static_cast<std::size_t>(rank)]);
+    if (rank > 0) {
+      displacements[static_cast<std::size_t>(rank)] =
+          displacements[static_cast<std::size_t>(rank - 1)] +
+          recv_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total += counts[static_cast<std::size_t>(rank)];
+  }
+  std::vector<std::uint64_t> gathered(static_cast<std::size_t>(total), 0U);
+  MPI_Allgatherv(
+      const_cast<std::uint64_t*>(local_values.data()),
+      static_cast<int>(local_values.size()), MPI_UINT64_T,
+      gathered.data(), recv_counts.data(), displacements.data(),
+      MPI_UINT64_T, MPI_COMM_WORLD);
+  return gathered;
+#else
+  throw std::runtime_error("distributed particle-ID precommit requires an MPI build");
+#endif
+}
+
+class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit {
+ public:
+  explicit DistributedParticleIdRegistry(const parallel::MpiContext& mpi_context)
+      : m_mpi_context(mpi_context) {}
+
+  [[nodiscard]] std::vector<std::uint64_t> precommit(
+      const core::SimulationState& state,
+      std::span<const std::uint64_t> birth_keys) override {
+    if (!m_initialized) {
+      m_occupied = allGatherUint64(m_mpi_context, state.particle_sidecar.particle_id);
+      std::sort(m_occupied.begin(), m_occupied.end());
+      if ((!m_occupied.empty() && m_occupied.front() == 0U) ||
+          std::adjacent_find(m_occupied.begin(), m_occupied.end()) != m_occupied.end()) {
+        throw std::runtime_error(
+            "ParticleIdRegistry: zero or duplicate existing ID during distributed initialization");
+      }
+      m_initialized = true;
+    }
+
+    std::vector<std::uint64_t> global_birth_keys = allGatherUint64(m_mpi_context, birth_keys);
+    std::sort(global_birth_keys.begin(), global_birth_keys.end());
+    if ((!global_birth_keys.empty() && global_birth_keys.front() == 0U) ||
+        std::adjacent_find(global_birth_keys.begin(), global_birth_keys.end()) !=
+            global_birth_keys.end()) {
+      throw std::runtime_error(
+          "ParticleIdRegistry: duplicate immutable birth key across owner ranks before mutation");
+    }
+
+    const std::vector<std::uint64_t> global_ids =
+        physics::precommitStarParticleIdsExact(m_occupied, global_birth_keys);
+    const std::size_t occupied_before = m_occupied.size();
+    m_occupied.insert(m_occupied.end(), global_ids.begin(), global_ids.end());
+    std::inplace_merge(
+        m_occupied.begin(), m_occupied.begin() + static_cast<std::ptrdiff_t>(occupied_before),
+        m_occupied.end());
+    if (std::adjacent_find(m_occupied.begin(), m_occupied.end()) != m_occupied.end()) {
+      throw std::runtime_error(
+          "ParticleIdRegistry: exact distributed precommit produced a duplicate ID");
+    }
+
+    std::vector<std::uint64_t> local_ids;
+    local_ids.reserve(birth_keys.size());
+    for (const std::uint64_t birth_key : birth_keys) {
+      const auto it = std::lower_bound(
+          global_birth_keys.begin(), global_birth_keys.end(), birth_key);
+      if (it == global_birth_keys.end() || *it != birth_key) {
+        throw std::runtime_error(
+            "ParticleIdRegistry: local birth key missing from global precommit");
+      }
+      const std::size_t index = static_cast<std::size_t>(it - global_birth_keys.begin());
+      local_ids.push_back(global_ids[index]);
+    }
+    return local_ids;
+  }
+
+ private:
+  const parallel::MpiContext& m_mpi_context;
+  bool m_initialized = false;
+  std::vector<std::uint64_t> m_occupied;
+};
 
 [[nodiscard]] physics::BlackHoleAgnConfig makeRuntimeBlackHoleAgnConfig(
     const core::PhysicsConfig& physics_config,
@@ -59,11 +182,25 @@ class SourceRuntimeImpl final : public SourceRuntime {
   SourceRuntimeImpl(
       const core::SimulationConfig& config,
       const core::UnitSystem& units,
-      std::uint32_t world_rank)
-      : m_star_formation(makeRuntimeStarFormationConfig(config, units)),
+      std::uint32_t world_rank,
+      const parallel::MpiContext& mpi_context)
+      : m_units(units),
+        m_effective_eos_table(makeRuntimeEffectiveEosTable(config, units)),
+        m_star_formation(makeRuntimeStarFormationConfig(config, units), m_effective_eos_table),
         m_black_hole(makeRuntimeBlackHoleAgnConfig(config.physics, units)),
+        m_particle_id_registry(mpi_context),
         m_world_rank(world_rank),
-        m_coordinate_frame(config.units.coordinate_frame) {}
+        m_coordinate_frame(config.units.coordinate_frame),
+        m_is_cosmological(
+            config.mode.mode == core::SimulationMode::kCosmoCube ||
+            config.mode.mode == core::SimulationMode::kZoomIn) {
+    const double hubble_si = config.cosmology.hubble_param *
+        core::constants::k_hubble_100_km_s_mpc_si;
+    const double hubble_code = hubble_si * units.timeSiPerCode();
+    const double g_code = newtonGCodeFromUnits(units);
+    m_mean_baryon_density0_code = 3.0 * hubble_code * hubble_code /
+        (8.0 * core::constants::k_pi * g_code) * config.cosmology.omega_baryon;
+  }
 
   void execute(SourceMutationStageView& view) override {
     view.requireFresh();
@@ -72,7 +209,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
         {{RuntimeResourceKey::kSourceMutationState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticleIdentity, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kParticleSpeciesIndex, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kAmrPatchState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kEffectiveIsmThermodynamics, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kSourceTerms) {
@@ -94,7 +236,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
           m_star_formation_inputs,
           context.integrator_state.dt_time_code,
           context.integrator_state.current_scale_factor,
-          context.integrator_state.step_index);
+          context.integrator_state.step_index,
+          &m_particle_id_registry);
       if (report.counters.spawned_particles > 0U) {
         const std::size_t particle_count_after_birth = context.state.particles.size();
         if (particle_count_after_birth < particle_count_before_birth ||
@@ -178,6 +321,17 @@ class SourceRuntimeImpl final : public SourceRuntime {
       input.gas_density_code = state.gas_cells.density_code[cell_index];
       input.gas_temperature_k = state.gas_cells.temperature_code[cell_index];
       input.gas_sound_speed_code = state.gas_cells.sound_speed_code[cell_index];
+      input.gas_specific_internal_energy_code =
+          state.gas_cells.internal_energy_code[cell_index];
+      input.is_cosmological = m_is_cosmological;
+      if (m_is_cosmological && m_mean_baryon_density0_code > 0.0 && scale_factor > 0.0) {
+        const double density_phys = m_coordinate_frame == core::CoordinateFrame::kComoving
+            ? input.gas_density_code / (scale_factor * scale_factor * scale_factor)
+            : input.gas_density_code;
+        const double mean_density_phys = m_mean_baryon_density0_code /
+            (scale_factor * scale_factor * scale_factor);
+        input.baryon_overdensity = density_phys / std::max(mean_density_phys, 1.0e-30);
+      }
       input.velocity_x_peculiar = state.gas_cells.velocity_x_peculiar[cell_index];
       input.velocity_y_peculiar = state.gas_cells.velocity_y_peculiar[cell_index];
       input.velocity_z_peculiar = state.gas_cells.velocity_z_peculiar[cell_index];
@@ -253,10 +407,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
   }
 
+  core::UnitSystem m_units;
+  std::shared_ptr<const physics::EffectiveMultiphaseEosTable> m_effective_eos_table;
   physics::StarFormationModel m_star_formation;
   physics::BlackHoleAgnModel m_black_hole;
+  DistributedParticleIdRegistry m_particle_id_registry;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
+  bool m_is_cosmological = false;
+  double m_mean_baryon_density0_code = 0.0;
   std::vector<std::uint32_t> m_full_cell_indices;
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
   std::vector<physics::BlackHoleSeedCandidate> m_seed_candidates;
@@ -267,8 +426,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
 std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::SimulationConfig& config,
     const core::UnitSystem& units,
-    std::uint32_t world_rank) {
-  return std::make_unique<SourceRuntimeImpl>(config, units, world_rank);
+    std::uint32_t world_rank,
+    const parallel::MpiContext& mpi_context) {
+  return std::make_unique<SourceRuntimeImpl>(config, units, world_rank, mpi_context);
 }
 
 }  // namespace cosmosim::workflows

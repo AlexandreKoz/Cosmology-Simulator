@@ -472,3 +472,10 @@ The MPI-enabled HDF5 configuration additionally registers:
 These MPI cases are source- and syntax-validated in environments without MPI, but
 acceptance may be claimed only after they execute under `mpiexec -n 2` in an
 MPI+HDF5 build.
+
+
+## Star-formation completion validation
+
+`validation_star_formation_models` validates the deterministic EOS table, threshold continuity, monotonic pressure, positive closure signal speed, interpolation, adaptive resolution response, exact timestep subdivision, and stochastic ensemble expectation. Running the executable with an output directory generates machine-readable files under `validation/star_formation/`. Production-runtime integration covers explicit profile selection, authoritative hydro inputs, covered-coarse rejection, leaf-only spawning, dense-row/patch reorder invariance, conservative birth, restart, and HDF5 fields.
+
+The retained data are analytic and controlled-model validation. `validation_metadata.txt` explicitly records that no long-duration isolated-disk or observational calibration was performed. MPI acceptance requires the registered two-rank tests to execute in an MPI+HDF5 environment.

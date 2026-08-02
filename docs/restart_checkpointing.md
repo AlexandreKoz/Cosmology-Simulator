@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v21`) persists:
+The restart schema (`cosmosim_restart_v22`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -124,7 +124,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: write current v21; read v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
+- Current compatibility policy: write current v22; read v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
 - v14 compatibility materializes `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
   and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
@@ -275,7 +275,7 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ## AMR pending flux-register restart lanes (v17)
 
-Restart schema v17 introduced pending AMR flux-register state; current v21 checkpoints retain it under:
+Restart schema v17 introduced pending AMR flux-register state; current v22 checkpoints retain it under:
 
 ```text
 /state/amr_pending_flux_registers
@@ -305,7 +305,7 @@ This proves the exercised single-rank pending-register restart path. It does not
 
 ## AMR temporal boundary-history restart lanes (v18)
 
-Restart schema v19 introduced `/state/amr_temporal_boundary_history`; current `cosmosim_restart_v21` retains it for open local AMR
+Restart schema v19 introduced `/state/amr_temporal_boundary_history`; current `cosmosim_restart_v22` retains it for open local AMR
 coarse intervals. Each history record persists patch ID/level, geometry fingerprint, gas identity generation,
 interval start/end, completion state, and stable-ID patch-local conserved start/end records. The restart
 payload integrity hash includes this store for v18 payloads.
@@ -325,7 +325,7 @@ coarse boundary history exists.
 
 ## Gas-cell scheduler persistence (v19)
 
-Schema v19 introduced a separate gas-cell time-bin state; current v21 (`cosmosim_restart_v21`) persists it in
+Schema v19 introduced a separate gas-cell time-bin state; current v22 (`cosmosim_restart_v22`) persists it in
 `/gas_cell_scheduler`. Its identity key is explicitly `gas_cell_id`, not
 `parent_particle_id` and not a dense local row. The group contains `gas_cell_id`,
 `bin_index`, `next_activation_tick`, `active_flag`, and `pending_bin_index`, together with
@@ -361,3 +361,10 @@ cross-code comparison; then science-readiness benchmarks.
 Schema 22 adds persistent gas `metal_mass_code`, AMR metal flux registers, temporal coarse-boundary metal history, star birth key/parent/tick/ordinal fields, and the associated scheduler/source metadata. The stochastic continuation key uses the restored global integration tick and stable gas-cell identity.
 
 Schema 21 remains explicitly readable. Fields absent from schema 21 are initialized through the documented backward-load defaults rather than silently reinterpreting an old payload under the new adaptive model. A historical restart retains its normalized model selector and configuration hash; changing model is an explicit configuration/restart compatibility decision.
+
+
+## Star formation and effective-ISM continuation
+
+Restart schema v22 persists gas metal mass, stellar immutable birth identity, scheduler sidecars, integration tick, module metadata, and latest/cumulative star-formation ledgers. The effective EOS itself is reconstructed deterministically from normalized configuration and cooling policy; the restart-persistent `effective_multiphase_ism` sidecar records parameter set, EOS schema, table hash, cooling reference, and latest/cumulative energy adjustments for verification. Derived cold fractions and pressures are recomputed rather than stored as writable authorities.
+
+The particle-ID registry is reconstructed exactly from loaded particle IDs and then updated incrementally. A restart cannot silently select a different star-formation model or EOS table.

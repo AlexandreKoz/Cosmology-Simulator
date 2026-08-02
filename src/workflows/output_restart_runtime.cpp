@@ -90,10 +90,11 @@ namespace {
   if (config.physics.enable_star_formation && config.physics.sf_stochastic_spawning) {
     stochastic_state.modules.push_back(io::StochasticModulePersistentState{
         .module_name = "star_formation",
-        .schema_version = 1,
-        .rng_policy = "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)",
+        .schema_version = 2,
+        .rng_policy =
+            "stateless_splitmix64(global_seed,gas_cell_id,global_integration_tick,birth_ordinal,model_schema_version)",
         .random_seed = config.physics.sf_random_seed,
-        .rank_local_seed_offset = rank_local_seed_offset,
+        .rank_local_seed_offset = 0U,
         .last_committed_step_index = integrator_state.step_index,
         .deterministic_from_serialized_inputs = true,
     });

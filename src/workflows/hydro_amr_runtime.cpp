@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -20,6 +21,8 @@
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/profiling.hpp"
+#include "cosmosim/core/units.hpp"
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/hydro/hydro_boundary_conditions.hpp"
 #include "cosmosim/hydro/hydro_cartesian_patch.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
@@ -325,7 +328,24 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
             .pressure_floor = k_pressure_floor,
             .enable_muscl_hancock_predictor = true,
             .adiabatic_index = k_gamma_adiabatic,
-        }) {}
+        }) {
+    if (m_config.physics.enable_star_formation &&
+        m_config.physics.star_formation_model ==
+            core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+      core::UnitSystem units = core::makeUnitSystem(
+          m_config.units.length_unit,
+          m_config.units.mass_unit,
+          m_config.units.velocity_unit);
+      physics::EffectiveMultiphaseEosTable table(
+          physics::makeEffectiveMultiphaseEosConfig(m_config.physics),
+          std::move(units),
+          physics::makeEffectiveIsmReferenceCoolingProvider(m_config.physics));
+      m_effective_ism_closure =
+          std::make_unique<physics::EffectiveIsmThermodynamicClosure>(std::move(table));
+      m_effective_ism_energy_source =
+          std::make_unique<physics::EffectiveIsmEnergyRelaxationSource>(*m_effective_ism_closure);
+    }
+  }
 
   [[nodiscard]] const hydro::HydroProfileEvent& lastHydroProfile() const noexcept { return m_last_hydro_profile; }
   [[nodiscard]] const internal::SolverGhostRefreshReport&
@@ -359,6 +379,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
          {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kAmrPatchState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kEffectiveIsmThermodynamics, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead}});
@@ -390,9 +411,11 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
       }
       runProductionAmrHydroPath(context);
+      persistEffectiveIsmDiagnostics(context.state);
       return;
     }
     if (context.state.cells.size() == 0U) {
+      persistEffectiveIsmDiagnostics(context.state);
       return;
     }
 
@@ -420,6 +443,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[cell_index],
           .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[cell_index],
           .pressure_comoving = pressure,
+          .specific_internal_energy_code = std::max(
+              context.state.gas_cells.internal_energy_code[cell_index], k_pressure_floor),
+          .signal_speed_squared_code = std::max(
+              context.state.gas_cells.sound_speed_code[cell_index] *
+                  context.state.gas_cells.sound_speed_code[cell_index],
+              k_pressure_floor),
+          .uses_effective_ism = false,
           .metallicity_mass_fraction = std::clamp(
               context.state.gas_cells.metal_mass_code[cell_index] /
                   std::max(context.state.cells.mass_code[cell_index], 1.0e-30),
@@ -493,11 +523,16 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .hydrogen_number_density_cgs = hydrogen_number_density,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
+        .thermodynamic_closure = m_effective_ism_closure.get(),
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
 
     hydro::ComovingGravityExpansionSource gravity_source;
-    std::array<const hydro::HydroSourceTerm*, 1> sources{&gravity_source};
+    std::vector<const hydro::HydroSourceTerm*> sources{&gravity_source};
+    if (m_effective_ism_energy_source != nullptr) {
+      m_effective_ism_energy_source->resetLedger();
+      sources.push_back(m_effective_ism_energy_source.get());
+    }
     m_solver.advancePatchActiveSetWithScratch(
         m_conserved,
         m_geometry,
@@ -628,12 +663,28 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         throw std::out_of_range("hydro primitive store dense row is outside Cartesian geometry map");
       }
       const std::uint32_t geometry_row = m_geometry_row_by_dense_row[cell_index];
-      const hydro::HydroPrimitiveState primitive =
-          hydro::HydroCoreSolver::primitiveFromConserved(m_conserved.loadCell(geometry_row), k_gamma_adiabatic);
+      const hydro::HydroConservedState stored_conserved = m_conserved.loadCell(geometry_row);
+      hydro::HydroPrimitiveState primitive =
+          hydro::HydroCoreSolver::primitiveFromConserved(stored_conserved, k_gamma_adiabatic);
+      if (m_effective_ism_closure != nullptr) {
+        const auto closure = m_effective_ism_closure->evaluate(
+            cell_index,
+            stored_conserved,
+            primitive,
+            update.scale_factor,
+            source_context.redshift);
+        if (closure.valid && closure.pressure_comoving > 0.0) {
+          primitive.pressure_comoving = closure.pressure_comoving;
+          primitive.signal_speed_squared_code = closure.signal_speed_squared_code;
+          primitive.uses_effective_ism = closure.uses_effective_ism;
+        }
+      }
       context.state.gas_cells.density_code[cell_index] = primitive.rho_comoving;
       context.state.gas_cells.pressure_code[cell_index] = primitive.pressure_comoving;
       context.state.gas_cells.internal_energy_code[cell_index] =
-          primitive.pressure_comoving / ((k_gamma_adiabatic - 1.0) * std::max(primitive.rho_comoving, k_density_floor));
+          primitive.specific_internal_energy_code;
+      context.state.gas_cells.sound_speed_code[cell_index] =
+          std::sqrt(std::max(primitive.signal_speed_squared_code, 0.0));
       context.state.cells.mass_code[cell_index] = primitive.rho_comoving * m_geometry.cell_volume_comoving;
       context.state.gas_cells.metal_mass_code[cell_index] =
           std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) *
@@ -645,9 +696,68 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 
     internal::synchronizeParentParticleCompatibilityMirrors(
         context.state, world_rank, "hydro callback parent compatibility mirror");
+    persistEffectiveIsmDiagnostics(context.state);
   }
 
  private:
+  void persistEffectiveIsmDiagnostics(core::SimulationState& state) const {
+    if (m_effective_ism_energy_source == nullptr || m_effective_ism_closure == nullptr) return;
+    const physics::EffectiveIsmEnergyLedger latest = m_effective_ism_energy_source->ledger();
+    double cumulative_added = 0.0;
+    double cumulative_removed = 0.0;
+    double cumulative_net = 0.0;
+    std::uint64_t cumulative_cells = 0U;
+    if (const core::ModuleSidecarBlock* prior = state.sidecars.find("effective_multiphase_ism");
+        prior != nullptr) {
+      std::string text;
+      text.reserve(prior->payload.size());
+      for (const std::byte value : prior->payload) text.push_back(static_cast<char>(value));
+      std::istringstream lines(text);
+      std::string line;
+      while (std::getline(lines, line)) {
+        const auto split = line.find('=');
+        if (split == std::string::npos) continue;
+        const std::string key = line.substr(0, split);
+        const std::string value = line.substr(split + 1U);
+        try {
+          if (key == "cumulative.energy_added_code") cumulative_added = std::stod(value);
+          else if (key == "cumulative.energy_removed_code") cumulative_removed = std::stod(value);
+          else if (key == "cumulative.net_energy_adjustment_code") cumulative_net = std::stod(value);
+          else if (key == "cumulative.adjusted_cell_count") cumulative_cells = std::stoull(value);
+        } catch (const std::exception&) {
+          cumulative_added = cumulative_removed = cumulative_net = 0.0;
+          cumulative_cells = 0U;
+          break;
+        }
+      }
+    }
+    cumulative_added += latest.energy_added_code;
+    cumulative_removed += latest.energy_removed_code;
+    cumulative_net += latest.net_energy_adjustment_code;
+    cumulative_cells += latest.adjusted_cell_count;
+    std::ostringstream stream;
+    stream << "module_name=effective_multiphase_ism\n";
+    stream << "schema_version=" << physics::kEffectiveMultiphaseEosSchemaVersion << "\n";
+    stream << "parameter_set=" << m_effective_ism_closure->table().config().parameter_set << "\n";
+    stream << "table_hash=" << m_effective_ism_closure->table().tableHashHex() << "\n";
+    stream << "cooling_reference=" << m_effective_ism_closure->table().coolingReferenceDescription() << "\n";
+    stream << "latest.energy_added_code=" << latest.energy_added_code << "\n";
+    stream << "latest.energy_removed_code=" << latest.energy_removed_code << "\n";
+    stream << "latest.net_energy_adjustment_code=" << latest.net_energy_adjustment_code << "\n";
+    stream << "latest.adjusted_cell_count=" << latest.adjusted_cell_count << "\n";
+    stream << "cumulative.energy_added_code=" << cumulative_added << "\n";
+    stream << "cumulative.energy_removed_code=" << cumulative_removed << "\n";
+    stream << "cumulative.net_energy_adjustment_code=" << cumulative_net << "\n";
+    stream << "cumulative.adjusted_cell_count=" << cumulative_cells << "\n";
+    const std::string text = stream.str();
+    core::ModuleSidecarBlock block;
+    block.module_name = "effective_multiphase_ism";
+    block.schema_version = physics::kEffectiveMultiphaseEosSchemaVersion;
+    block.payload.resize(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) block.payload[i] = static_cast<std::byte>(text[i]);
+    state.sidecars.upsert(std::move(block));
+  }
+
   [[nodiscard]] static hydro::HydroBoundaryKind hydroBoundaryKindFromModePolicy(
       core::BoundaryCondition boundary_condition) {
     switch (boundary_condition) {
@@ -1053,10 +1163,15 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .hydrogen_number_density_cgs = hydrogen_number_density,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
+        .thermodynamic_closure = m_effective_ism_closure.get(),
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
     hydro::ComovingGravityExpansionSource gravity_source;
-    std::array<const hydro::HydroSourceTerm*, 1> sources{&gravity_source};
+    std::vector<const hydro::HydroSourceTerm*> sources{&gravity_source};
+    if (m_effective_ism_energy_source != nullptr) {
+      m_effective_ism_energy_source->resetLedger();
+      sources.push_back(m_effective_ism_energy_source.get());
+    }
     const amr::ProductionAmrHydroOptions amr_options{
         .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
         .adiabatic_index = k_gamma_adiabatic,
@@ -1290,6 +1405,38 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           m_riemann_solver,
           sources,
           amr_options);
+    }
+    if (m_effective_ism_closure != nullptr) {
+      const double redshift = source_context.redshift;
+      for (std::size_t row = 0; row < context.state.cells.size(); ++row) {
+        const double rho = std::max(context.state.gas_cells.density_code[row], k_density_floor);
+        hydro::HydroPrimitiveState primitive{
+            .rho_comoving = rho,
+            .vel_x_peculiar = context.state.gas_cells.velocity_x_peculiar[row],
+            .vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[row],
+            .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[row],
+            .pressure_comoving = std::max(context.state.gas_cells.pressure_code[row], k_pressure_floor),
+            .specific_internal_energy_code = std::max(context.state.gas_cells.internal_energy_code[row], k_pressure_floor),
+            .signal_speed_squared_code = std::max(
+                context.state.gas_cells.sound_speed_code[row] *
+                    context.state.gas_cells.sound_speed_code[row],
+                k_pressure_floor),
+            .uses_effective_ism = false,
+            .metallicity_mass_fraction = context.state.cells.mass_code[row] > 0.0
+                ? std::clamp(context.state.gas_cells.metal_mass_code[row] /
+                    context.state.cells.mass_code[row], 0.0, 1.0)
+                : 0.0,
+        };
+        const hydro::HydroConservedState conserved =
+            hydro::HydroCoreSolver::conservedFromPrimitive(primitive, k_gamma_adiabatic);
+        const auto closure = m_effective_ism_closure->evaluate(
+            row, conserved, primitive, update.scale_factor, redshift);
+        if (closure.valid && closure.pressure_comoving > 0.0) {
+          context.state.gas_cells.pressure_code[row] = closure.pressure_comoving;
+          context.state.gas_cells.sound_speed_code[row] =
+              std::sqrt(std::max(closure.signal_speed_squared_code, 0.0));
+        }
+      }
     }
     internal::synchronizeParentParticleCompatibilityMirrors(
         context.state,
@@ -1609,6 +1756,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   hydro::HydroCoreSolver m_solver;
   hydro::MusclHancockReconstruction m_reconstruction;
   hydro::HllcRiemannSolver m_riemann_solver;
+  std::unique_ptr<physics::EffectiveIsmThermodynamicClosure> m_effective_ism_closure;
+  std::unique_ptr<physics::EffectiveIsmEnergyRelaxationSource> m_effective_ism_energy_source;
   hydro::HydroConservedStateSoa m_conserved;
   hydro::HydroScratchBuffers m_scratch;
   hydro::HydroPrimitiveCacheSoa m_primitive_cache;

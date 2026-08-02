@@ -1,0 +1,5 @@
+validation_scope=analytic_and_controlled_model_validation
+observational_calibration=false
+isolated_disk_long_run=false
+effective_eos_table_hash=8817bc42e9aea915
+parameter_set=chui_sh03_tng_like_v1

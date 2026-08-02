@@ -261,6 +261,7 @@ namespace {
                         readWrite(RuntimeResourceKey::kHydroConservedState),
                         readWrite(RuntimeResourceKey::kHydroPrimitiveState),
                         readWrite(RuntimeResourceKey::kAmrPatchState),
+                        readWrite(RuntimeResourceKey::kEffectiveIsmThermodynamics),
                         read(RuntimeResourceKey::kGravityAcceleration),
                         read(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
@@ -303,14 +304,20 @@ namespace {
           .resources = {readWrite(RuntimeResourceKey::kSourceMutationState),
                         readWrite(RuntimeResourceKey::kParticlePosition),
                         readWrite(RuntimeResourceKey::kParticleVelocity),
+                        readWrite(RuntimeResourceKey::kParticleIdentity),
+                        readWrite(RuntimeResourceKey::kParticleSpeciesIndex),
                         readWrite(RuntimeResourceKey::kHydroConservedState),
+                        read(RuntimeResourceKey::kHydroPrimitiveState),
+                        read(RuntimeResourceKey::kAmrPatchState),
+                        read(RuntimeResourceKey::kEffectiveIsmThermodynamics),
                         readWrite(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
       }},
       .factory = [&config = inputs.config, &units = inputs.units,
-                  world_rank = inputs.world_rank](const RuntimeModuleFactoryContext&) {
+                  world_rank = inputs.world_rank,
+                  &mpi_context = inputs.services.mpi_context](const RuntimeModuleFactoryContext&) {
         std::shared_ptr<SourceRuntime> owner(
-            makeSourceRuntime(config, units, world_rank));
+            makeSourceRuntime(config, units, world_rank, mpi_context));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{

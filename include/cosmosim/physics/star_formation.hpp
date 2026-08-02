@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,10 +12,11 @@
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
 
 namespace cosmosim::physics {
 
-inline constexpr std::uint32_t kStarFormationModelSchemaVersion = 2;
+inline constexpr std::uint32_t kStarFormationModelSchemaVersion = 3;
 inline constexpr std::uint32_t kStarFormationRngKeySchemaVersion = 1;
 
 struct StarFormationConfig {
@@ -46,6 +48,13 @@ struct StarFormationConfig {
   double temperature_safety_ceiling_k = 0.0;
   bool stochastic_spawning = true;
   std::uint64_t random_seed = 123456789ull;
+
+  double effective_min_baryon_overdensity = 0.0;
+  double effective_hot_excess_tolerance = 1.0;
+  double effective_massive_star_fraction = 0.1;
+  core::EffectiveIsmBirthMassConvention effective_birth_mass_convention =
+      core::EffectiveIsmBirthMassConvention::kInitialSspMass;
+
   double newton_g_code = core::constants::k_newton_g_si;
   bool density_is_comoving = false;
   bool geometry_is_comoving = true;
@@ -66,7 +75,11 @@ enum class StarFormationRejectionReason : std::uint8_t {
   kJeansStable,
   kLegacyDensity,
   kLegacyTemperature,
-  kMassFloor,
+  kAdaptiveMassFloor,
+  kEffectiveBelowDensityThreshold,
+  kEffectiveBelowOverdensityThreshold,
+  kEffectiveHotAboveEos,
+  kEffectiveInvalidEquilibrium,
 };
 
 struct StarFormationCellInput {
@@ -91,6 +104,9 @@ struct StarFormationCellInput {
   double velocity_gradient_frobenius_sq_code = 0.0;
   double gas_metal_mass_code = 0.0;
   double metallicity_mass_fraction = 0.0;  // legacy/injected compatibility lane
+  double gas_specific_internal_energy_code = 0.0;
+  double baryon_overdensity = 0.0;
+  bool is_cosmological = false;
   double center_x_comoving = 0.0;
   double center_y_comoving = 0.0;
   double center_z_comoving = 0.0;
@@ -120,8 +136,25 @@ struct StarFormationCounters {
   std::uint64_t rejected_not_converging = 0;
   std::uint64_t rejected_unbound = 0;
   std::uint64_t rejected_jeans_stable = 0;
-  std::uint64_t rejected_mass_floor = 0;
+  std::uint64_t rejected_legacy_density_threshold = 0;
+  std::uint64_t rejected_legacy_temperature_threshold = 0;
+  std::uint64_t rejected_adaptive_mass_floor = 0;
+  std::uint64_t rejected_effective_below_density_threshold = 0;
+  std::uint64_t rejected_effective_below_overdensity_threshold = 0;
+  std::uint64_t rejected_effective_hot_above_eos = 0;
+  std::uint64_t rejected_effective_invalid_equilibrium = 0;
   std::uint64_t eligible_cells = 0;
+  std::uint64_t effective_cells_scanned = 0;
+  std::uint64_t effective_cells_above_threshold = 0;
+  std::uint64_t effective_cells_on_eos = 0;
+  std::uint64_t effective_cells_hot_above_eos = 0;
+  std::uint64_t effective_cells_invalid_equilibrium = 0;
+  double effective_cold_gas_mass_code = 0.0;
+  double effective_instantaneous_sfr_code = 0.0;
+  double effective_min_cold_fraction = 1.0;
+  double effective_max_cold_fraction = 0.0;
+  double effective_min_pressure_code = 0.0;
+  double effective_max_pressure_code = 0.0;
   std::uint64_t spawn_events = 0;
   std::uint64_t spawned_particles = 0;
   double expected_spawn_mass_code = 0.0;
@@ -159,6 +192,10 @@ struct StarFormationCellOutcome {
   double free_fall_time_code = 0.0;
   double compression_time_code = 0.0;
   double collapse_time_code = 0.0;
+  double cold_mass_fraction = 0.0;
+  double effective_specific_internal_energy_code = 0.0;
+  double effective_pressure_code = 0.0;
+  double effective_signal_speed_squared_code = 0.0;
   double sfr_density_rate_code = 0.0;
   double expected_spawn_mass_code = 0.0;
   std::uint32_t spawned_particle_count = 0;
@@ -187,9 +224,36 @@ struct StarFormationStepReport {
     std::uint32_t birth_attempt_ordinal,
     std::uint32_t rng_key_schema_version = kStarFormationRngKeySchemaVersion);
 
+[[nodiscard]] std::uint64_t starFormationParticleIdFromBirthKey(
+    std::uint64_t birth_key,
+    std::uint32_t collision_ordinal = 0U);
+
+// Exact, allocation-bounded batch precommit used by local and distributed registries.
+// Existing IDs and immutable birth keys are validated before any state mutation.
+[[nodiscard]] std::vector<std::uint64_t> precommitStarParticleIdsExact(
+    std::span<const std::uint64_t> existing_particle_ids,
+    std::span<const std::uint64_t> birth_keys);
+
+class ParticleIdPrecommit {
+ public:
+  virtual ~ParticleIdPrecommit() = default;
+  [[nodiscard]] virtual std::vector<std::uint64_t> precommit(
+      const core::SimulationState& state,
+      std::span<const std::uint64_t> birth_keys) = 0;
+};
+
+class LocalParticleIdRegistry final : public ParticleIdPrecommit {
+ public:
+  [[nodiscard]] std::vector<std::uint64_t> precommit(
+      const core::SimulationState& state,
+      std::span<const std::uint64_t> birth_keys) override;
+};
+
 class StarFormationModel {
  public:
-  explicit StarFormationModel(StarFormationConfig config);
+  explicit StarFormationModel(
+      StarFormationConfig config,
+      std::shared_ptr<const EffectiveMultiphaseEosTable> effective_eos_table = nullptr);
 
   [[nodiscard]] const StarFormationConfig& config() const noexcept;
   [[nodiscard]] bool isEligible(const StarFormationCellInput& cell) const;
@@ -218,7 +282,8 @@ class StarFormationModel {
       std::span<const StarFormationCellInput> cell_inputs,
       double dt_code,
       double scale_factor,
-      std::uint64_t global_integration_tick) const;
+      std::uint64_t global_integration_tick,
+      ParticleIdPrecommit* id_precommit = nullptr) const;
 
   [[nodiscard]] StarFormationStepReport applyFromView(
       core::SimulationState& state,
@@ -240,7 +305,8 @@ class StarFormationModel {
 
   [[nodiscard]] core::ModuleSidecarBlock buildMetadataSidecar(
       const StarFormationCounters& counters,
-      std::string_view configuration_hash = {}) const;
+      std::string_view configuration_hash = {},
+      const StarFormationCounters* cumulative_counters = nullptr) const;
 
  private:
   [[nodiscard]] StarFormationCellOutcome evaluateCell(
@@ -250,6 +316,7 @@ class StarFormationModel {
       std::uint64_t global_integration_tick) const;
 
   StarFormationConfig m_config;
+  std::shared_ptr<const EffectiveMultiphaseEosTable> m_effective_eos_table;
 };
 
 [[nodiscard]] StarFormationConfig makeStarFormationConfig(const core::PhysicsConfig& physics_config);

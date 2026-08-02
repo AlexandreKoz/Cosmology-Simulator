@@ -92,6 +92,7 @@ namespace {
         case Key::kHydroConservedState: return Mode::kReadWrite;
         case Key::kHydroPrimitiveState: return Mode::kReadWrite;
         case Key::kAmrPatchState: return Mode::kReadWrite;
+        case Key::kEffectiveIsmThermodynamics: return Mode::kReadWrite;
         case Key::kGravityAcceleration: return Mode::kRead;
         case Key::kMigrationOwnership: return Mode::kRead;
         case Key::kIntegratorTruth: return Mode::kRead;
@@ -102,7 +103,12 @@ namespace {
         case Key::kSourceMutationState: return Mode::kReadWrite;
         case Key::kParticlePosition: return Mode::kReadWrite;
         case Key::kParticleVelocity: return Mode::kReadWrite;
+        case Key::kParticleIdentity: return Mode::kReadWrite;
+        case Key::kParticleSpeciesIndex: return Mode::kReadWrite;
         case Key::kHydroConservedState: return Mode::kReadWrite;
+        case Key::kHydroPrimitiveState: return Mode::kRead;
+        case Key::kAmrPatchState: return Mode::kRead;
+        case Key::kEffectiveIsmThermodynamics: return Mode::kRead;
         case Key::kMigrationOwnership: return Mode::kReadWrite;
         case Key::kIntegratorTruth: return Mode::kRead;
         default: return std::nullopt;
@@ -342,11 +348,14 @@ std::string_view runtimeResourceKeyName(RuntimeResourceKey resource) noexcept {
   switch (resource) {
     case RuntimeResourceKey::kParticlePosition: return "particle_position";
     case RuntimeResourceKey::kParticleVelocity: return "particle_velocity";
+    case RuntimeResourceKey::kParticleIdentity: return "particle_identity";
+    case RuntimeResourceKey::kParticleSpeciesIndex: return "particle_species_index";
     case RuntimeResourceKey::kParticleGravitySource: return "particle_gravity_source";
     case RuntimeResourceKey::kGravityAcceleration: return "gravity_acceleration";
     case RuntimeResourceKey::kHydroConservedState: return "hydro_conserved_state";
     case RuntimeResourceKey::kHydroPrimitiveState: return "hydro_primitive_state";
     case RuntimeResourceKey::kAmrPatchState: return "amr_patch_state";
+    case RuntimeResourceKey::kEffectiveIsmThermodynamics: return "effective_ism_thermodynamics";
     case RuntimeResourceKey::kSourceMutationState: return "source_mutation_state";
     case RuntimeResourceKey::kMigrationOwnership: return "migration_ownership";
     case RuntimeResourceKey::kSchedulerTruth: return "scheduler_truth";

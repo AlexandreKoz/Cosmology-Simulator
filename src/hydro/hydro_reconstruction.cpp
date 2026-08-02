@@ -22,6 +22,16 @@ constexpr double k_small = 1.0e-14;
     state.pressure_comoving = pressure_floor;
     changed = true;
   }
+  if (state.specific_internal_energy_code <= 0.0) {
+    state.specific_internal_energy_code = pressure_floor /
+        std::max(state.rho_comoving, rho_floor);
+    changed = true;
+  }
+  if (state.signal_speed_squared_code <= 0.0) {
+    state.signal_speed_squared_code = state.pressure_comoving /
+        std::max(state.rho_comoving, rho_floor);
+    changed = true;
+  }
   const double metallicity_before = state.metallicity_mass_fraction;
   state.metallicity_mass_fraction = std::clamp(state.metallicity_mass_fraction, 0.0, 1.0);
   changed = changed || state.metallicity_mass_fraction != metallicity_before;
@@ -65,6 +75,8 @@ void addScaledSlope(HydroPrimitiveState& state, const HydroPrimitiveState& slope
   state.vel_y_peculiar += scale * slope.vel_y_peculiar;
   state.vel_z_peculiar += scale * slope.vel_z_peculiar;
   state.pressure_comoving += scale * slope.pressure_comoving;
+  state.specific_internal_energy_code += scale * slope.specific_internal_energy_code;
+  state.signal_speed_squared_code += scale * slope.signal_speed_squared_code;
   state.metallicity_mass_fraction += scale * slope.metallicity_mass_fraction;
 }
 
@@ -218,6 +230,9 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
       .vel_y_peculiar = limited(left_minus.vel_y_peculiar, left_state.vel_y_peculiar, right_state.vel_y_peculiar),
       .vel_z_peculiar = limited(left_minus.vel_z_peculiar, left_state.vel_z_peculiar, right_state.vel_z_peculiar),
       .pressure_comoving = limited(left_minus.pressure_comoving, left_state.pressure_comoving, right_state.pressure_comoving),
+      .specific_internal_energy_code = limited(left_minus.specific_internal_energy_code, left_state.specific_internal_energy_code, right_state.specific_internal_energy_code),
+      .signal_speed_squared_code = limited(left_minus.signal_speed_squared_code, left_state.signal_speed_squared_code, right_state.signal_speed_squared_code),
+      .uses_effective_ism = left_state.uses_effective_ism,
       .metallicity_mass_fraction = limited(
           left_minus.metallicity_mass_fraction,
           left_state.metallicity_mass_fraction,
@@ -228,6 +243,9 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
       .vel_y_peculiar = limited(left_state.vel_y_peculiar, right_state.vel_y_peculiar, right_plus.vel_y_peculiar),
       .vel_z_peculiar = limited(left_state.vel_z_peculiar, right_state.vel_z_peculiar, right_plus.vel_z_peculiar),
       .pressure_comoving = limited(left_state.pressure_comoving, right_state.pressure_comoving, right_plus.pressure_comoving),
+      .specific_internal_energy_code = limited(left_state.specific_internal_energy_code, right_state.specific_internal_energy_code, right_plus.specific_internal_energy_code),
+      .signal_speed_squared_code = limited(left_state.signal_speed_squared_code, right_state.signal_speed_squared_code, right_plus.signal_speed_squared_code),
+      .uses_effective_ism = right_state.uses_effective_ism,
       .metallicity_mass_fraction = limited(
           left_state.metallicity_mass_fraction,
           right_state.metallicity_mass_fraction,
@@ -248,8 +266,14 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
       const double dux_dt = -u_normal * slope.vel_x_peculiar;
       const double duy_dt = -u_normal * slope.vel_y_peculiar;
       const double duz_dt = -u_normal * slope.vel_z_peculiar;
+      const double effective_gamma = state.signal_speed_squared_code > 0.0
+          ? std::max(state.rho_comoving * state.signal_speed_squared_code /
+              std::max(state.pressure_comoving, k_small), 1.0)
+          : m_policy.adiabatic_index;
       const double dp_dt = -u_normal * slope.pressure_comoving -
-          m_policy.adiabatic_index * state.pressure_comoving * slope_u_normal;
+          effective_gamma * state.pressure_comoving * slope_u_normal;
+      const double du_int_dt = -u_normal * slope.specific_internal_energy_code;
+      const double dc2_dt = -u_normal * slope.signal_speed_squared_code;
       const double dz_dt = -u_normal * slope.metallicity_mass_fraction;
 
       state.rho_comoving += -0.5 * cfl * drho_dt;
@@ -263,6 +287,8 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
           ? duz_dt - slope.pressure_comoving * inv_rho
           : duz_dt);
       state.pressure_comoving += -0.5 * cfl * dp_dt;
+      state.specific_internal_energy_code += -0.5 * cfl * du_int_dt;
+      state.signal_speed_squared_code += -0.5 * cfl * dc2_dt;
       state.metallicity_mass_fraction += -0.5 * cfl * dz_dt;
     };
 

@@ -188,9 +188,9 @@ void testCounterRngGoldenVectorsAndRankInvariance() {
   assert(nearlyEqual(u0, 0.8626457080226616, 1.0e-15));
   assert(nearlyEqual(u1, 0.19965097066605675, 1.0e-15));
   assert(cosmosim::physics::starFormationBirthKey(42ULL, 99ULL, 0U) ==
-         0x7572a540acdbf584ULL);
+         0x8e0bd954b3c945d8ULL);
   assert(cosmosim::physics::starFormationBirthKey(42ULL, 99ULL, 1U) ==
-         0x4d4f92f0b00c40d8ULL);
+         0x2abc3ab2e08a53d4ULL);
 
   const auto config = makeAdaptiveConfig();
   cosmosim::physics::StarFormationModel model(config);
@@ -311,6 +311,29 @@ void testDenseRowReorderInvariance() {
   assert(state_a.particle_sidecar.particle_id == state_b.particle_sidecar.particle_id);
 }
 
+void testExactParticleIdPrecommitCollisionResolution() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1);
+  const std::uint64_t birth_key = cosmosim::physics::starFormationBirthKey(90210ULL, 77ULL, 0U);
+  const std::uint64_t occupied = cosmosim::physics::starFormationParticleIdFromBirthKey(birth_key, 0U);
+  state.particle_sidecar.particle_id[0] = occupied;
+  cosmosim::physics::LocalParticleIdRegistry registry;
+  const std::array<std::uint64_t, 1> keys{birth_key};
+  const auto ids = registry.precommit(state, keys);
+  assert(ids.size() == 1U);
+  assert(ids[0] != occupied);
+  assert(ids[0] == cosmosim::physics::starFormationParticleIdFromBirthKey(birth_key, 1U));
+
+  bool duplicate_rejected = false;
+  try {
+    const std::array<std::uint64_t, 2> duplicates{birth_key, birth_key};
+    (void)registry.precommit(state, duplicates);
+  } catch (const std::runtime_error&) {
+    duplicate_rejected = true;
+  }
+  assert(duplicate_rejected);
+}
+
 void testInvalidAndDisabledNoOp() {
   auto config = makeAdaptiveConfig();
   cosmosim::physics::StarFormationModel model(config);
@@ -379,6 +402,7 @@ int main() {
   testUnbiasedSamplingNearMassCap();
   testConservativeMultiParticleBirth();
   testDenseRowReorderInvariance();
+  testExactParticleIdPrecommitCollisionResolution();
   testInvalidAndDisabledNoOp();
   testLegacyTimeIntegrationCallbackHook();
   return 0;

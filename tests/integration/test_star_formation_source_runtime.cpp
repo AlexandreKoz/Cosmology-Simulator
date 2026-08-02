@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -55,7 +56,8 @@ namespace {
   stream << "sf_min_remaining_gas_mass_code = 1.0\n";
   stream << "sf_temperature_safety_ceiling_k = 0.0\n";
   stream << "sf_stochastic_spawning = false\n";
-  stream << "sf_random_seed = 987654321\n\n";
+  stream << "sf_random_seed = 987654321\n";
+  stream << "sf_effective_t_star_at_threshold = 1.0e-9 code\n\n";
   stream << "[output]\n";
   stream << "run_name = " << run_name << "\n";
   stream << "output_directory = integration_outputs\n";
@@ -139,12 +141,215 @@ namespace {
   return state;
 }
 
+[[nodiscard]] cosmosim::core::SimulationState makeCoveredCoarseHierarchyState(bool reverse_rows) {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2);
+  state.resizeCells(2);
+  state.resizePatches(2);
+
+  state.patches.patch_id[0] = 9101;
+  state.patches.parent_patch_id[0] = 0;
+  state.patches.level[0] = 0;
+  state.patches.first_cell[0] = reverse_rows ? 1 : 0;
+  state.patches.cell_count[0] = 1;
+  state.patches.owning_rank[0] = 0;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 0.001;
+  state.patches.extent_y_comoving[0] = 0.001;
+  state.patches.extent_z_comoving[0] = 0.001;
+  state.patches.cell_dim_x[0] = 1;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
+
+  state.patches.patch_id[1] = 9102;
+  state.patches.parent_patch_id[1] = 9101;
+  state.patches.level[1] = 1;
+  state.patches.first_cell[1] = reverse_rows ? 0 : 1;
+  state.patches.cell_count[1] = 1;
+  state.patches.owning_rank[1] = 0;
+  state.patches.origin_x_comoving[1] = 0.0;
+  state.patches.origin_y_comoving[1] = 0.0;
+  state.patches.origin_z_comoving[1] = 0.0;
+  state.patches.extent_x_comoving[1] = 0.0005;
+  state.patches.extent_y_comoving[1] = 0.0005;
+  state.patches.extent_z_comoving[1] = 0.0005;
+  state.patches.cell_dim_x[1] = 1;
+  state.patches.cell_dim_y[1] = 1;
+  state.patches.cell_dim_z[1] = 1;
+
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities;
+  for (std::uint32_t logical = 0; logical < 2; ++logical) {
+    const bool child = logical == 1U;
+    const std::uint32_t row = reverse_rows ? 1U - logical : logical;
+    const std::uint64_t particle_id = 9201U + logical;
+    const std::uint64_t gas_cell_id = 9301U + logical;
+    state.particles.position_x_comoving[row] = child ? 0.00025 : 0.0005;
+    state.particles.position_y_comoving[row] = child ? 0.00025 : 0.0005;
+    state.particles.position_z_comoving[row] = child ? 0.00025 : 0.0005;
+    state.particles.mass_code[row] = 1.0e6;
+    state.particle_sidecar.particle_id[row] = particle_id;
+    state.particle_sidecar.sfc_key[row] = particle_id;
+    state.particle_sidecar.species_tag[row] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    state.particle_sidecar.owning_rank[row] = 0;
+    state.cells.center_x_comoving[row] = state.particles.position_x_comoving[row];
+    state.cells.center_y_comoving[row] = state.particles.position_y_comoving[row];
+    state.cells.center_z_comoving[row] = state.particles.position_z_comoving[row];
+    state.cells.mass_code[row] = 1.0e6;
+    state.cells.patch_index[row] = child ? 1U : 0U;
+    state.gas_cells.gas_cell_id[row] = gas_cell_id;
+    state.gas_cells.parent_particle_id[row] = particle_id;
+    state.gas_cells.density_code[row] = 1.0e15;
+    state.gas_cells.pressure_code[row] = 1.0e3;
+    state.gas_cells.internal_energy_code[row] = 1.0e-3;
+    state.gas_cells.temperature_code[row] = 100.0;
+    state.gas_cells.sound_speed_code[row] = 1.0e-3;
+    state.gas_cells.metal_mass_code[row] = 2.0e4;
+    identities.push_back({
+        .gas_cell_id = gas_cell_id,
+        .parent_particle_id = particle_id,
+        .owning_patch_id = child ? 9102U : 9101U,
+        .local_cell_row = row,
+    });
+  }
+  state.species.count_by_species.fill(0);
+  state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 2;
+  state.rebuildSpeciesIndex();
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  return state;
+}
+
+[[nodiscard]] cosmosim::core::SimulationState makeSingleLevelEffectiveState(
+    std::uint32_t level,
+    double extent_code,
+    std::uint64_t gas_cell_id) {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1);
+  state.resizeCells(1);
+  state.resizePatches(1);
+  state.patches.patch_id[0] = 9400U + level;
+  state.patches.level[0] = level;
+  state.patches.first_cell[0] = 0U;
+  state.patches.cell_count[0] = 1U;
+  state.patches.owning_rank[0] = 0U;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = extent_code;
+  state.patches.extent_y_comoving[0] = extent_code;
+  state.patches.extent_z_comoving[0] = extent_code;
+  state.patches.cell_dim_x[0] = 1U;
+  state.patches.cell_dim_y[0] = 1U;
+  state.patches.cell_dim_z[0] = 1U;
+  const std::uint64_t particle_id = 9500U + level;
+  state.particles.position_x_comoving[0] = 0.5 * extent_code;
+  state.particles.position_y_comoving[0] = 0.5 * extent_code;
+  state.particles.position_z_comoving[0] = 0.5 * extent_code;
+  state.particles.mass_code[0] = 1.0e6;
+  state.particle_sidecar.particle_id[0] = particle_id;
+  state.particle_sidecar.sfc_key[0] = particle_id;
+  state.particle_sidecar.species_tag[0] =
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+  state.particle_sidecar.owning_rank[0] = 0U;
+  state.cells.center_x_comoving[0] = state.particles.position_x_comoving[0];
+  state.cells.center_y_comoving[0] = state.particles.position_y_comoving[0];
+  state.cells.center_z_comoving[0] = state.particles.position_z_comoving[0];
+  state.cells.mass_code[0] = 1.0e6;
+  state.cells.patch_index[0] = 0U;
+  state.gas_cells.gas_cell_id[0] = gas_cell_id;
+  state.gas_cells.parent_particle_id[0] = particle_id;
+  state.gas_cells.density_code[0] = 1.0e15;
+  state.gas_cells.pressure_code[0] = 1.0e3;
+  state.gas_cells.internal_energy_code[0] = 1.0e-3;
+  state.gas_cells.temperature_code[0] = 100.0;
+  state.gas_cells.sound_speed_code[0] = 1.0e-3;
+  state.gas_cells.metal_mass_code[0] = 2.0e4;
+  state.species.count_by_species.fill(0U);
+  state.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 1U;
+  state.rebuildSpeciesIndex();
+  state.replaceGasCellIdentityRecords({{
+      .gas_cell_id = gas_cell_id,
+      .parent_particle_id = particle_id,
+      .owning_patch_id = state.patches.patch_id[0],
+      .local_cell_row = 0U,
+  }});
+  return state;
+}
+
+[[nodiscard]] bool stagePrecedes(
+    const cosmosim::workflows::ReferenceWorkflowReport& report,
+    std::string_view earlier,
+    std::string_view later) {
+  const auto first = std::find(report.stage_sequence.begin(), report.stage_sequence.end(), earlier);
+  const auto second = std::find(report.stage_sequence.begin(), report.stage_sequence.end(), later);
+  return first != report.stage_sequence.end() && second != report.stage_sequence.end() && first < second;
+}
+
+[[nodiscard]] cosmosim::workflows::ReferenceWorkflowReport runEffectiveHierarchyCase(
+    const std::filesystem::path& output_root,
+    std::string_view run_name,
+    const cosmosim::core::SimulationState& state) {
+  std::string config_text = buildConfig(run_name);
+  const std::string adaptive = "star_formation_model = adaptive_bound_jeans";
+  config_text.replace(config_text.find(adaptive), adaptive.size(),
+                      "star_formation_model = effective_multiphase_tng_like");
+  config_text.replace(config_text.find("sf_max_spawn_particles_per_cell_step = 8"),
+                      std::string("sf_max_spawn_particles_per_cell_step = 8").size(),
+                      "sf_max_spawn_particles_per_cell_step = 1");
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      config_text, "test_star_formation_amr_source_runtime");
+  cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+  return runner.run(
+      output_root,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .dt_time_code = 1.0e-9,
+          .write_outputs = COSMOSIM_ENABLE_HDF5 != 0,
+          .initial_state_override = &state,
+          .max_steps_override = 1,
+      });
+}
+
 [[nodiscard]] cosmosim::workflows::ReferenceWorkflowReport runCase(
     const std::filesystem::path& output_root,
     std::string_view run_name,
     const cosmosim::core::SimulationState& state) {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       buildConfig(run_name), "test_star_formation_source_runtime");
+  cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+  return runner.run(
+      output_root,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .dt_time_code = 1.0e-9,
+          .write_outputs = COSMOSIM_ENABLE_HDF5 != 0,
+          .initial_state_override = &state,
+          .max_steps_override = 1,
+      });
+}
+
+[[nodiscard]] std::string moduleSidecarText(
+    const cosmosim::core::SimulationState& state,
+    std::string_view module_name) {
+  const auto* block = state.sidecars.find(std::string(module_name));
+  if (block == nullptr) return {};
+  return std::string(
+      reinterpret_cast<const char*>(block->payload.data()), block->payload.size());
+}
+
+[[nodiscard]] cosmosim::workflows::ReferenceWorkflowReport runEffectiveCase(
+    const std::filesystem::path& output_root,
+    std::string_view run_name,
+    const cosmosim::core::SimulationState& state) {
+  std::string config_text = buildConfig(run_name);
+  const std::string adaptive = "star_formation_model = adaptive_bound_jeans";
+  config_text.replace(config_text.find(adaptive), adaptive.size(),
+                      "star_formation_model = effective_multiphase_tng_like");
+  // Effective parameters rely on the typed reference defaults; the explicit
+  // selector alone changes the unresolved-ISM closure for this fixture.
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      config_text, "test_star_formation_source_runtime_effective");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   return runner.run(
       output_root,
@@ -167,15 +372,55 @@ int main() {
   const auto expanding_state = makeState(false);
   const auto converging_report = runCase(output_root, "sf_runtime_converging", converging_state);
   const auto expanding_report = runCase(output_root, "sf_runtime_expanding", expanding_state);
+  const auto effective_report = runEffectiveCase(
+      output_root, "sf_runtime_effective", converging_state);
+  const auto hierarchy_report = runEffectiveHierarchyCase(
+      output_root, "sf_runtime_amr_hierarchy", makeCoveredCoarseHierarchyState(false));
+  const auto reordered_hierarchy_report = runEffectiveHierarchyCase(
+      output_root, "sf_runtime_amr_hierarchy_reordered", makeCoveredCoarseHierarchyState(true));
+  const auto level0_report = runEffectiveHierarchyCase(
+      output_root, "sf_runtime_effective_level0",
+      makeSingleLevelEffectiveState(0U, 0.001, 9601U));
+  const auto level1_report = runEffectiveHierarchyCase(
+      output_root, "sf_runtime_effective_level1",
+      makeSingleLevelEffectiveState(1U, 0.0005, 9602U));
 
   assert(converging_report.completed_steps == 1);
   assert(expanding_report.completed_steps == 1);
+  assert(effective_report.completed_steps == 1);
+  assert(hierarchy_report.completed_steps == 1);
+  assert(reordered_hierarchy_report.completed_steps == 1);
+  assert(level0_report.completed_steps == 1);
+  assert(level1_report.completed_steps == 1);
   assert(converging_report.local_particle_count > 3);
   assert(expanding_report.local_particle_count == 3);
+  assert(effective_report.local_particle_count > 3);
+  // The covered coarse cell is rejected; exactly one authoritative fine child
+  // creates one star even when dense rows are reordered.
+  assert(hierarchy_report.local_particle_count == 3);
+  assert(reordered_hierarchy_report.local_particle_count == 3);
+  // The physical threshold is independent of AMR level and both synchronized
+  // single-level representations produce exactly one birth.
+  assert(level0_report.local_particle_count == 2);
+  assert(level1_report.local_particle_count == 2);
+  // The production integration order keeps hydro/AMR synchronization ahead of
+  // the source stage, so covered coarse and fine representations are not both used.
+  assert(stagePrecedes(hierarchy_report, "hydro_update", "source_terms"));
 
 #if COSMOSIM_ENABLE_HDF5
   assert(converging_report.restart_roundtrip_ok);
+  assert(effective_report.restart_roundtrip_ok);
   const auto restart = cosmosim::io::readRestartCheckpointHdf5(converging_report.restart_path);
+  const std::string sf_sidecar = moduleSidecarText(restart.state, "star_formation");
+  assert(sf_sidecar.find("counter_scope=latest_and_cumulative_source_stages") != std::string::npos);
+  assert(sf_sidecar.find("cumulative.spawned_particles=") != std::string::npos);
+  assert(sf_sidecar.find("cumulative.mass_residual_code=") != std::string::npos);
+  const auto effective_restart =
+      cosmosim::io::readRestartCheckpointHdf5(effective_report.restart_path);
+  const std::string effective_sidecar =
+      moduleSidecarText(effective_restart.state, "effective_multiphase_ism");
+  assert(effective_sidecar.find("table_hash=") != std::string::npos);
+  assert(effective_sidecar.find("cumulative.energy_added_code=") != std::string::npos);
   assert(restart.state.star_particles.size() == converging_report.local_particle_count - 3);
   double gas_particle_mass_code = 0.0;
   double stellar_particle_mass_code = 0.0;

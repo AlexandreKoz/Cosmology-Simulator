@@ -293,6 +293,7 @@ add_library(cosmosim_amr STATIC
 add_library(cosmosim_physics STATIC
   src/physics/physics_module.cpp
   src/physics/cooling_heating.cpp
+  src/physics/effective_multiphase_ism.cpp
   src/physics/black_hole_agn.cpp
   src/physics/star_formation.cpp
   src/physics/stellar_evolution.cpp
@@ -388,7 +389,7 @@ target_link_libraries(cosmosim_workflows
     cosmosim_parallel
     cosmosim_physics)
 
-target_link_libraries(cosmosim_io PUBLIC cosmosim_parallel)
+target_link_libraries(cosmosim_io PUBLIC cosmosim_parallel cosmosim_physics)
 target_link_libraries(cosmosim_amr PUBLIC cosmosim_hydro)
 
 if(COSMOSIM_ENABLE_MPI)
@@ -660,6 +661,9 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_star_formation tests/unit/test_star_formation.cpp)
   target_link_libraries(test_unit_star_formation PRIVATE cosmosim_all)
   add_test(NAME unit_star_formation COMMAND test_unit_star_formation)
+  add_executable(test_unit_effective_multiphase_ism tests/unit/test_effective_multiphase_ism.cpp)
+  target_link_libraries(test_unit_effective_multiphase_ism PRIVATE cosmosim_all)
+  add_test(NAME unit_effective_multiphase_ism COMMAND test_unit_effective_multiphase_ism)
   add_executable(test_unit_black_hole_agn tests/unit/test_black_hole_agn.cpp)
   target_link_libraries(test_unit_black_hole_agn PRIVATE cosmosim_all)
   add_test(NAME unit_black_hole_agn COMMAND test_unit_black_hole_agn)
@@ -689,7 +693,21 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_star_formation_source_runtime tests/integration/test_star_formation_source_runtime.cpp)
   target_link_libraries(test_integration_star_formation_source_runtime PRIVATE cosmosim_all)
   add_test(NAME integration_star_formation_source_runtime COMMAND test_integration_star_formation_source_runtime)
-  set_tests_properties(integration_star_formation_source_runtime PROPERTIES LABELS "integration;runtime_truth;star_formation;p0")
+  set_tests_properties(integration_star_formation_source_runtime PROPERTIES LABELS "integration;runtime_truth;star_formation;p0" RUN_SERIAL TRUE)
+  foreach(star_formation_amr_test_name IN ITEMS
+      integration_star_formation_amr_covered_coarse
+      integration_star_formation_amr_refine_derefine
+      integration_star_formation_amr_level_equivalence
+      integration_star_formation_amr_reflux_ordering
+      integration_star_formation_amr_patch_reorder
+      integration_effective_ism_amr_threshold_invariance
+      integration_effective_ism_amr_eos_restriction)
+    add_test(NAME ${star_formation_amr_test_name} COMMAND test_integration_star_formation_source_runtime)
+    set_tests_properties(${star_formation_amr_test_name} PROPERTIES LABELS "integration;runtime_truth;star_formation;amr" RUN_SERIAL TRUE)
+  endforeach()
+
+  add_executable(test_integration_star_formation_source_runtime_mpi tests/integration/test_star_formation_source_runtime_mpi.cpp)
+  target_link_libraries(test_integration_star_formation_source_runtime_mpi PRIVATE cosmosim_all)
 
   add_executable(test_integration_star_formation_mpi tests/integration/test_star_formation_mpi.cpp)
   target_link_libraries(test_integration_star_formation_mpi PRIVATE cosmosim_all)
@@ -710,6 +728,31 @@ if(COSMOSIM_ENABLE_TESTS)
       cosmosim_mark_runtime_truth_test(
         ${star_formation_mpi_test_name}
         mpi distributed star_formation restart ownership reproducibility integration)
+    endforeach()
+    foreach(star_formation_runtime_mpi_mode IN ITEMS source_runtime empty_rank id_registry amr_migration restart one_vs_two_rank_equivalence eos_hash)
+      if(star_formation_runtime_mpi_mode STREQUAL "source_runtime")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_source_runtime_mpi_two_rank)
+      elseif(star_formation_runtime_mpi_mode STREQUAL "empty_rank")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_empty_rank_mpi_two_rank)
+      elseif(star_formation_runtime_mpi_mode STREQUAL "id_registry")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_id_registry_mpi_two_rank)
+      elseif(star_formation_runtime_mpi_mode STREQUAL "amr_migration")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_amr_migration_mpi_two_rank)
+      elseif(star_formation_runtime_mpi_mode STREQUAL "restart")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_restart_source_runtime_mpi_two_rank)
+      elseif(star_formation_runtime_mpi_mode STREQUAL "one_vs_two_rank_equivalence")
+        set(star_formation_runtime_mpi_test_name integration_star_formation_one_vs_two_rank_equivalence)
+      else()
+        set(star_formation_runtime_mpi_test_name integration_effective_ism_eos_hash_mpi_two_rank)
+      endif()
+      add_test(
+        NAME ${star_formation_runtime_mpi_test_name}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_star_formation_source_runtime_mpi>
+                ${star_formation_runtime_mpi_mode} ${MPIEXEC_POSTFLAGS})
+      cosmosim_mark_runtime_truth_test(
+        ${star_formation_runtime_mpi_test_name}
+        mpi distributed star_formation source_runtime amr restart ownership reproducibility integration)
     endforeach()
   endif()
   add_executable(test_integration_black_hole_agn_toy tests/integration/test_black_hole_agn_toy.cpp)
@@ -1458,6 +1501,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME validation_amr_cross_code_contract COMMAND test_validation_amr_cross_code_contract)
   set_tests_properties(validation_amr_cross_code_contract PROPERTIES LABELS "validation;amr;cross_code;contract")
 
+  add_executable(test_validation_star_formation_models tests/validation/test_validation_star_formation_models.cpp)
+  target_link_libraries(test_validation_star_formation_models PRIVATE cosmosim_all)
+  add_test(NAME validation_star_formation_models COMMAND test_validation_star_formation_models)
+  set_tests_properties(validation_star_formation_models PROPERTIES LABELS "validation;star_formation;effective_ism;adaptive")
+
   add_executable(
     test_validation_regression
     tests/validation/test_validation_regression.cpp
@@ -1713,6 +1761,8 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_star_formation_spawn bench/bench_star_formation_spawn.cpp)
   target_link_libraries(bench_star_formation_spawn PRIVATE cosmosim_all)
+  add_executable(bench_effective_multiphase_ism bench/bench_effective_multiphase_ism.cpp)
+  target_link_libraries(bench_effective_multiphase_ism PRIVATE cosmosim_all)
   add_executable(bench_black_hole_agn_sparse_update bench/bench_black_hole_agn_sparse_update.cpp)
   target_link_libraries(bench_black_hole_agn_sparse_update PRIVATE cosmosim_all)
   add_executable(bench_stellar_feedback_deposition bench/bench_stellar_feedback_deposition.cpp)

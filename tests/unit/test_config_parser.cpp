@@ -1100,6 +1100,46 @@ void testStarFormationMassParametersAcceptUnits() {
   assert(rejected);
 }
 
+
+void testEffectiveMultiphaseConfigurationContract() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = cosmo_cube\n"
+      "[physics]\n"
+      "enable_star_formation = true\n"
+      "star_formation_model = effective_multiphase_tng_like\n"
+      "sf_effective_n_h_threshold = 0.13 cm^-3\n"
+      "sf_effective_t_star_at_threshold = 2.2 Gyr\n"
+      "sf_effective_q_eos = 0.3\n"
+      "sf_effective_feedback_coupling = external_feedback_calibrated\n",
+      "effective_multiphase_config");
+  assert(frozen.config.physics.star_formation_model ==
+         cosmosim::core::StarFormationModelKind::kEffectiveMultiphaseTngLike);
+  assert(std::abs(frozen.config.physics.sf_effective_n_h_threshold_cgs - 0.13) < 1.0e-14);
+  assert(frozen.config.physics.sf_effective_t_star_at_threshold_code > 0.0);
+  assert(std::abs(frozen.config.physics.sf_effective_q_eos - 0.3) < 1.0e-14);
+  assert(frozen.normalized_text.find(
+             "star_formation_model = effective_multiphase_tng_like") != std::string::npos);
+  assert(frozen.normalized_text.find("sf_effective_parameter_set = chui_sh03_tng_like_v1") !=
+         std::string::npos);
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "effective_multiphase_config_roundtrip");
+  assert(reparsed.provenance.config_hash == frozen.provenance.config_hash);
+
+  for (const char* invalid : {
+           "[mode]\nmode = cosmo_cube\n[physics]\nstar_formation_model = unknown_model\n",
+           "[mode]\nmode = cosmo_cube\n[physics]\nstar_formation_model = effective_multiphase_tng_like\nsf_effective_q_eos = 1.1\n",
+           "[mode]\nmode = cosmo_cube\n[physics]\nstar_formation_model = effective_multiphase_tng_like\nsf_effective_n_h_threshold = -0.1 cm^-3\n",
+           "[mode]\nmode = cosmo_cube\n[physics]\nenable_feedback = true\nstar_formation_model = effective_multiphase_tng_like\nsf_effective_feedback_coupling = effective_eos_only\n"}) {
+    bool rejected = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(invalid, "invalid_effective_config");
+    } catch (const cosmosim::core::ConfigError&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 void testProductionHierarchicalRungsFailClosed() {
   const auto production = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n", "production_single_rung_default");
@@ -1185,6 +1225,7 @@ int main() {
   testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
   testStarFormationMassParametersAcceptUnits();
+  testEffectiveMultiphaseConfigurationContract();
   testProductionHierarchicalRungsFailClosed();
   testOutputCodeTimeCadenceValidationAndRoundtrip();
   return 0;

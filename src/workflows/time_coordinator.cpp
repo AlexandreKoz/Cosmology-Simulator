@@ -23,6 +23,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
 #include "cosmosim/workflows/runtime_module_registry.hpp"
@@ -418,6 +419,15 @@ void updateAdaptiveTimeBinsFromView(
       config.units.mass_unit,
       config.units.velocity_unit);
   const double newton_g_code = newtonGCodeFromUnits(runtime_units);
+  std::optional<physics::EffectiveMultiphaseEosTable> effective_eos_table;
+  if (config.physics.enable_star_formation &&
+      config.physics.star_formation_model ==
+          core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+    effective_eos_table.emplace(
+        physics::makeEffectiveMultiphaseEosConfig(config.physics),
+        runtime_units,
+        physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
+  }
   const double gravity_scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
   std::optional<double> cosmology_dt;
   if (integrator_state.current_scale_factor > 0.0 && config.cosmology.hubble_param > 0.0) {
@@ -435,7 +445,9 @@ void updateAdaptiveTimeBinsFromView(
   }
   const auto star_formation_dt_for_cell = [&](std::uint32_t cell_index) -> std::optional<double> {
     if (!config.physics.enable_star_formation || cell_index >= cell_count ||
-        config.physics.sf_epsilon_ff <= 0.0) {
+        (config.physics.star_formation_model !=
+             core::StarFormationModelKind::kEffectiveMultiphaseTngLike &&
+         config.physics.sf_epsilon_ff <= 0.0)) {
       return std::nullopt;
     }
     const double gas_mass = view.gas_cells.cell_mass_code[cell_index];
@@ -459,14 +471,36 @@ void updateAdaptiveTimeBinsFromView(
               config.physics.sf_epsilon_ff);
     }
 
-    if (config.physics.sf_temperature_safety_ceiling_k > 0.0 &&
-        temperature > config.physics.sf_temperature_safety_ceiling_k) {
-      return std::nullopt;
-    }
     const double scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
     const double physical_density = config.units.coordinate_frame == core::CoordinateFrame::kComoving
         ? stored_density / (scale_factor * scale_factor * scale_factor)
         : stored_density;
+    if (config.physics.star_formation_model ==
+        core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+      if (!effective_eos_table.has_value()) return std::nullopt;
+      const auto equilibrium = effective_eos_table->lookup(physical_density);
+      if (!equilibrium.above_threshold || !equilibrium.valid ||
+          equilibrium.entry.cold_mass_fraction <= 0.0) {
+        return std::nullopt;
+      }
+      const double long_lived_factor =
+          config.physics.sf_effective_birth_mass_convention ==
+              core::EffectiveIsmBirthMassConvention::kLongLivedMass
+          ? (1.0 - config.physics.sf_effective_massive_star_fraction)
+          : 1.0;
+      const double rate_per_mass = long_lived_factor *
+          equilibrium.entry.cold_mass_fraction /
+          std::max(equilibrium.entry.star_formation_timescale_code, 1.0e-30);
+      const double maximum_fraction = std::clamp(
+          std::min(config.physics.sf_max_fractional_mass_conversion,
+                   config.numerics.source_max_fractional_change),
+          1.0e-12, 1.0 - 1.0e-12);
+      return std::max(1.0e-12, -std::log1p(-maximum_fraction) / rate_per_mass);
+    }
+    if (config.physics.sf_temperature_safety_ceiling_k > 0.0 &&
+        temperature > config.physics.sf_temperature_safety_ceiling_k) {
+      return std::nullopt;
+    }
     const double t_ff_code = std::sqrt(3.0 * core::constants::k_pi /
         (32.0 * newton_g_code * std::max(physical_density, 1.0e-30)));
     double collapse_time_code = t_ff_code;

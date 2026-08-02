@@ -537,3 +537,18 @@ Adaptive keys:
 - `sf_temperature_safety_ceiling_k`; zero disables it.
 
 Mass-valued keys accept raw code mass or explicit `kg`, `g`, and `msun` suffixes. Normalized configuration stores code-unit numbers and includes every key in the configuration hash. Unknown or misspelled keys fail parsing. `enable_star_formation=false` bypasses the production scan and consumes no star-formation random draw.
+
+
+## Star-formation model selection
+
+All star-forming profiles must explicitly set one of:
+
+```text
+physics.star_formation_model = legacy_schmidt_threshold
+physics.star_formation_model = adaptive_bound_jeans
+physics.star_formation_model = effective_multiphase_tng_like
+```
+
+The effective model provides typed keys for physical `sf_effective_n_h_threshold`, optional baryon overdensity, threshold timescale, evaporation law, cold/SN energies, massive-star fraction, `q_eos`, isothermal reference, hot-excess tolerance, relaxation policy, table resolution/range, SSP birth-mass convention, and feedback coupling. Number density accepts `cm^-3` or `m^-3`; temperatures accept `K`; times accept code, seconds, years, Myr, or Gyr; specific energy accepts code, J/kg, or erg/g. All resolved values enter normalized configuration and the config hash.
+
+Known-inconsistent combinations, including `effective_eos_only` with explicit feedback enabled, fail validation. Shared particle-mass, stochastic, conversion, and remnant-gas keys are not duplicated for the effective model.

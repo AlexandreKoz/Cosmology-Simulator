@@ -1,5 +1,7 @@
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -28,12 +30,28 @@ void checkExample(const std::filesystem::path& path, cosmosim::core::SimulationM
   assert(std::filesystem::exists(run_dir / "normalized_config.param.txt"));
 }
 
+void checkEveryStarFormingProfileSelectsModel(const std::filesystem::path& config_root) {
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(config_root)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".txt") continue;
+    std::ifstream stream(entry.path());
+    std::ostringstream content;
+    content << stream.rdbuf();
+    const std::string text = content.str();
+    if (text.find("enable_star_formation = true") != std::string::npos) {
+      assert(text.find("star_formation_model = ") != std::string::npos);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   const std::filesystem::path source_dir = COSMOSIM_SOURCE_DIR;
+  checkEveryStarFormingProfileSelectsModel(source_dir / "configs");
   checkExample(source_dir / "configs/cosmo_cube.param.txt", cosmosim::core::SimulationMode::kCosmoCube);
   checkExample(source_dir / "configs/zoom_in.param.txt", cosmosim::core::SimulationMode::kZoomIn);
+  assert(cosmosim::core::loadFrozenConfigFromFile(source_dir / "configs/zoom_in.param.txt").config.physics.star_formation_model == cosmosim::core::StarFormationModelKind::kAdaptiveBoundJeans);
+  assert(cosmosim::core::loadFrozenConfigFromFile(source_dir / "configs/cosmo_cube.param.txt").config.physics.star_formation_model == cosmosim::core::StarFormationModelKind::kEffectiveMultiphaseTngLike);
   checkExample(source_dir / "configs/isolated_galaxy.param.txt", cosmosim::core::SimulationMode::kIsolatedGalaxy);
   checkExample(source_dir / "configs/isolated_cluster.param.txt", cosmosim::core::SimulationMode::kIsolatedCluster);
   checkExample(

@@ -1,9 +1,10 @@
 # Star formation
 
-CHUÍ provides two explicitly named stellar-population birth models:
+CHUÍ provides three explicitly named stellar-population birth models:
 
 - `legacy_schmidt_threshold`: the historical density/temperature/convergence prescription retained for old configurations, restarts, and controlled comparisons.
-- `adaptive_bound_jeans`: the reference production model for new baryonic and zoom-in profiles.
+- `adaptive_bound_jeans`: the resolved/semi-resolved collapse model for high-resolution zoom-in and isolated-disk work.
+- `effective_multiphase_tng_like`: an SH03/TNG-inspired unresolved-ISM model for coarse cosmological baryonic volumes and population studies.
 
 Star particles represent coeval stellar populations. They are not individual stars, sink particles, accreting clusters, or molecular-cloud control volumes.
 
@@ -119,3 +120,16 @@ This is a validated reference star-particle birth model, not a complete calibrat
 ## Particle-ID collision contract
 
 Numeric star-particle IDs are deterministic hashes of the immutable birth key. Each source stage sorts and checks the complete local newborn-ID batch before mutation. The workflow then performs exact global duplicate, missing, and unexpected ID validation through the distributed ownership acceptance ledger. This avoids a full scan of the existing particle array and avoids per-birth allocator nodes while retaining an explicit collision-failure contract.
+
+
+## Shared birth pipeline and exact ID precommit
+
+All production models share one plan/precommit/apply backend. Local physics determines eligibility and expected mass; the backend owns deterministic sampling, exact collision-checked IDs, conservation, batch append, scheduler and stellar sidecars, gravity invalidation, and diagnostics. Particle IDs are checked against existing and same-batch IDs before any gas mutation. MPI precommit gathers immutable birth keys once after planning and resolves collisions deterministically without changing physical birth decisions.
+
+## Effective multiphase model
+
+The equations, pressure closure, cooling interaction, parameter provenance, feedback policy, and limitations are documented in `docs/effective_multiphase_ism.md` and RFC 0002. The effective pressure and derivative signal speed enter the hydro reconstruction/Riemann/CFL path; they are not merely eligibility diagnostics.
+
+## Profile policy
+
+Every shipped configuration with `enable_star_formation = true` explicitly declares `star_formation_model`. High-resolution zoom and resolved-disk examples select `adaptive_bound_jeans`; coarse cubes and population-oriented references select `effective_multiphase_tng_like`; only clearly named compatibility fixtures select the legacy model.

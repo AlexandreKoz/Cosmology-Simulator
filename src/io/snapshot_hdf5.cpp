@@ -4,8 +4,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,6 +17,8 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/version.hpp"
 #include "cosmosim/io/io_contract.hpp"
+#include "cosmosim/core/units.hpp"
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -594,6 +598,17 @@ void writeGadgetArepoSnapshotHdf5(
 
   const core::SimulationState& state = *payload.state;
   const core::SimulationConfig& config = *payload.config;
+  std::optional<physics::EffectiveMultiphaseEosTable> effective_eos_table;
+  if (config.physics.enable_star_formation &&
+      config.physics.star_formation_model ==
+          core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+    const core::UnitSystem units = core::makeUnitSystem(
+        config.units.length_unit, config.units.mass_unit, config.units.velocity_unit);
+    effective_eos_table.emplace(
+        physics::makeEffectiveMultiphaseEosConfig(config.physics),
+        units,
+        physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
+  }
   std::vector<std::int64_t> tracer_row_by_particle(state.particles.size(), -1);
   std::vector<std::int64_t> star_row_by_particle(state.particles.size(), -1);
   std::unordered_map<std::uint64_t, std::size_t> gas_row_by_parent_particle_id;
@@ -814,6 +829,11 @@ void writeGadgetArepoSnapshotHdf5(
       std::vector<double> internal_energy(indices.size(), 0.0);
       std::vector<double> density(indices.size(), 0.0);
       std::vector<double> metallicity(indices.size(), 0.0);
+      std::vector<double> star_formation_rate(indices.size(), 0.0);
+      std::vector<double> cold_cloud_mass_fraction(indices.size(), 0.0);
+      std::vector<double> effective_pressure(indices.size(), 0.0);
+      std::vector<double> effective_internal_energy(indices.size(), 0.0);
+      std::vector<std::uint8_t> is_on_effective_eos(indices.size(), 0U);
       std::vector<std::uint64_t> gas_cell_ids(indices.size(), 0U);
       for (std::size_t i = 0; i < indices.size(); ++i) {
         const std::uint32_t particle_index = indices[i];
@@ -831,10 +851,51 @@ void writeGadgetArepoSnapshotHdf5(
             ? std::clamp(state.gas_cells.metal_mass_code[gas_row] / gas_mass, 0.0, 1.0)
             : 0.0;
         gas_cell_ids[i] = state.gas_cells.gas_cell_id[gas_row];
+        if (effective_eos_table.has_value()) {
+          const double scale_factor = std::max(state.metadata.scale_factor, 1.0e-12);
+          const double density_phys = config.units.coordinate_frame == core::CoordinateFrame::kComoving
+              ? density[i] / (scale_factor * scale_factor * scale_factor)
+              : density[i];
+          const auto equilibrium = effective_eos_table->lookup(density_phys);
+          if (equilibrium.above_threshold && equilibrium.valid &&
+              internal_energy[i] <= equilibrium.entry.specific_internal_energy_eff_code *
+                  (1.0 + config.physics.sf_effective_hot_excess_tolerance)) {
+            const double long_lived_factor =
+                config.physics.sf_effective_birth_mass_convention ==
+                    core::EffectiveIsmBirthMassConvention::kLongLivedMass
+                ? (1.0 - config.physics.sf_effective_massive_star_fraction)
+                : 1.0;
+            star_formation_rate[i] = gas_mass * long_lived_factor *
+                equilibrium.entry.cold_mass_fraction /
+                std::max(equilibrium.entry.star_formation_timescale_code, 1.0e-30);
+            cold_cloud_mass_fraction[i] = equilibrium.entry.cold_mass_fraction;
+            effective_pressure[i] = equilibrium.entry.pressure_phys_code;
+            effective_internal_energy[i] = equilibrium.entry.specific_internal_energy_eff_code;
+            is_on_effective_eos[i] = 1U;
+          }
+        } else if (config.physics.enable_star_formation &&
+                   config.physics.star_formation_model ==
+                       core::StarFormationModelKind::kLegacySchmidtThreshold &&
+                   density[i] >= config.physics.sf_density_threshold_code &&
+                   state.gas_cells.temperature_code[gas_row] <=
+                       config.physics.sf_temperature_threshold_k) {
+          const core::UnitSystem units = core::makeUnitSystem(
+              config.units.length_unit, config.units.mass_unit, config.units.velocity_unit);
+          const double g_code = core::newtonGravitationalConstantCode(units);
+          const double t_ff = std::sqrt(3.0 * 3.14159265358979323846 /
+              (32.0 * g_code * std::max(density[i], 1.0e-30)));
+          star_formation_rate[i] = config.physics.sf_epsilon_ff * gas_mass /
+              std::max(t_ff, 1.0e-30);
+        }
       }
       writeDataset1d(type_group.get(), "InternalEnergy", internal_energy.data(), indices.size(), policy);
       writeDataset1d(type_group.get(), "Density", density.data(), indices.size(), policy);
       writeDataset1d(type_group.get(), "Metallicity", metallicity.data(), indices.size(), policy);
+      writeDataset1d(type_group.get(), "StarFormationRate", star_formation_rate.data(), indices.size(), policy);
+      writeDataset1d(type_group.get(), "ColdCloudMassFraction", cold_cloud_mass_fraction.data(), indices.size(), policy);
+      writeDataset1d(type_group.get(), "EffectivePressure", effective_pressure.data(), indices.size(), policy);
+      writeDataset1d(type_group.get(), "EffectiveInternalEnergy", effective_internal_energy.data(), indices.size(), policy);
+      writeDataset1dU8(type_group.get(), "IsOnEffectiveEos", is_on_effective_eos.data(), indices.size(), policy);
       writeDataset1dU64(type_group.get(), "GasCellIDs", gas_cell_ids.data(), indices.size(), policy);
     }
     if (type_index == 4) {

@@ -163,6 +163,11 @@ void testRoundtripMixedSpeciesSnapshot() {
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   assert(inspect_file >= 0);
   assert(H5Aexists(inspect_file, "cosmosim_file_kind") > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/StarFormationRate", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/ColdCloudMassFraction", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/EffectivePressure", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/EffectiveInternalEnergy", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/IsOnEffectiveEos", H5P_DEFAULT) > 0);
   hid_t inspect_header = H5Gopen2(inspect_file, "/Header", H5P_DEFAULT);
   assert(inspect_header >= 0);
   double box_x = 0.0;

@@ -24,6 +24,14 @@ struct HydroPrimitiveState {
   double vel_y_peculiar = 0.0;
   double vel_z_peculiar = 0.0;
   double pressure_comoving = 0.0;
+  // Specific internal energy carried by the conserved total-energy lane. This
+  // is explicit because a barotropic/effective closure need not satisfy
+  // P=(gamma-1)rho*u.
+  double specific_internal_energy_code = 0.0;
+  // Characteristic signal speed squared used by reconstruction/Riemann/CFL.
+  // For ideal gas this is gamma*P/rho; effective closures provide dP/drho.
+  double signal_speed_squared_code = 0.0;
+  bool uses_effective_ism = false;
   // Passive gas metal mass fraction, reconstructed with the hydrodynamic state.
   double metallicity_mass_fraction = 0.0;
 };
@@ -102,6 +110,9 @@ class HydroPrimitiveCacheSoa {
   std::vector<double> m_vel_y_peculiar;
   std::vector<double> m_vel_z_peculiar;
   std::vector<double> m_pressure_comoving;
+  std::vector<double> m_specific_internal_energy_code;
+  std::vector<double> m_signal_speed_squared_code;
+  std::vector<std::uint8_t> m_uses_effective_ism;
   std::vector<double> m_metallicity_mass_fraction;
 };
 
@@ -239,6 +250,25 @@ struct HydroUpdateContext {
   double hubble_rate_code = 0.0;
 };
 
+struct HydroThermodynamicClosureResult {
+  double pressure_comoving = 0.0;
+  double signal_speed_squared_code = 0.0;
+  double target_specific_internal_energy_code = 0.0;
+  bool uses_effective_ism = false;
+  bool valid = true;
+};
+
+class HydroThermodynamicClosure {
+ public:
+  virtual ~HydroThermodynamicClosure() = default;
+  [[nodiscard]] virtual HydroThermodynamicClosureResult evaluate(
+      std::size_t cell_index,
+      const HydroConservedState& conserved,
+      const HydroPrimitiveState& ideal_primitive,
+      double scale_factor,
+      double redshift) const = 0;
+};
+
 struct HydroSourceContext {
   HydroUpdateContext update;
   // Scale-free comoving gravitational kernel A from TreePM. The comoving
@@ -249,6 +279,7 @@ struct HydroSourceContext {
   std::span<const double> hydrogen_number_density_cgs;
   std::span<const double> metallicity_mass_fraction;
   std::span<const double> temperature_k;
+  const HydroThermodynamicClosure* thermodynamic_closure = nullptr;
   double redshift = 0.0;
 };
 

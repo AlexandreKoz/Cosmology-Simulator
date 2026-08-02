@@ -1,0 +1,2 @@
+sample_count,expected_mean_mass_code,realized_mean_mass_code,standard_error_code
+20000,0.031403958673945138,0.033450000000000001,0.0012332426779338745

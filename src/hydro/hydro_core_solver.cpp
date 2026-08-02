@@ -143,35 +143,53 @@ void fillPrimitiveCache(
     const HydroActiveSetView& active_set,
     const HydroPatchGeometry& geometry,
     double adiabatic_index,
+    const HydroSourceContext& source_context,
     HydroPrimitiveCacheSoa& primitive_cache) {
   if (primitive_cache.size() != conserved.size()) {
     primitive_cache.resize(conserved.size());
   }
 
+  const auto closedPrimitive = [&](std::size_t cell_index) {
+    const HydroConservedState cell = conserved.loadCell(cell_index);
+    HydroPrimitiveState primitive = HydroCoreSolver::primitiveFromConserved(cell, adiabatic_index);
+    if (source_context.thermodynamic_closure != nullptr) {
+      const HydroThermodynamicClosureResult closure =
+          source_context.thermodynamic_closure->evaluate(
+              cell_index, cell, primitive, source_context.update.scale_factor, source_context.redshift);
+      if (closure.valid && closure.pressure_comoving > 0.0 &&
+          closure.signal_speed_squared_code > 0.0) {
+        primitive.pressure_comoving = closure.pressure_comoving;
+        primitive.signal_speed_squared_code = closure.signal_speed_squared_code;
+        primitive.uses_effective_ism = closure.uses_effective_ism;
+      }
+    }
+    return primitive;
+  };
+
   for (std::size_t cell_index : active_set.active_cells) {
     primitive_cache.storeCell(
         cell_index,
-        HydroCoreSolver::primitiveFromConserved(conserved.loadCell(cell_index), adiabatic_index));
+        closedPrimitive(cell_index));
   }
   for (std::size_t face_index : active_set.active_faces) {
     const HydroFace& face = geometry.faces[face_index];
     primitive_cache.storeCell(
         face.owner_cell,
-        HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.owner_cell), adiabatic_index));
+        closedPrimitive(face.owner_cell));
     if (face.neighbor_cell != k_invalid_cell_index) {
       primitive_cache.storeCell(
           face.neighbor_cell,
-          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.neighbor_cell), adiabatic_index));
+          closedPrimitive(face.neighbor_cell));
     }
     if (face.owner_minus_cell != k_invalid_cell_index) {
       primitive_cache.storeCell(
           face.owner_minus_cell,
-          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.owner_minus_cell), adiabatic_index));
+          closedPrimitive(face.owner_minus_cell));
     }
     if (face.neighbor_plus_cell != k_invalid_cell_index) {
       primitive_cache.storeCell(
           face.neighbor_plus_cell,
-          HydroCoreSolver::primitiveFromConserved(conserved.loadCell(face.neighbor_plus_cell), adiabatic_index));
+          closedPrimitive(face.neighbor_plus_cell));
     }
   }
 }
@@ -394,6 +412,9 @@ HydroPrimitiveCacheSoa::HydroPrimitiveCacheSoa(std::size_t cell_count)
       m_vel_y_peculiar(cell_count, 0.0),
       m_vel_z_peculiar(cell_count, 0.0),
       m_pressure_comoving(cell_count, 0.0),
+      m_specific_internal_energy_code(cell_count, 0.0),
+      m_signal_speed_squared_code(cell_count, 0.0),
+      m_uses_effective_ism(cell_count, 0U),
       m_metallicity_mass_fraction(cell_count, 0.0) {}
 
 void HydroPrimitiveCacheSoa::resize(std::size_t cell_count) {
@@ -402,6 +423,9 @@ void HydroPrimitiveCacheSoa::resize(std::size_t cell_count) {
   m_vel_y_peculiar.resize(cell_count, 0.0);
   m_vel_z_peculiar.resize(cell_count, 0.0);
   m_pressure_comoving.resize(cell_count, 0.0);
+  m_specific_internal_energy_code.resize(cell_count, 0.0);
+  m_signal_speed_squared_code.resize(cell_count, 0.0);
+  m_uses_effective_ism.resize(cell_count, 0U);
   m_metallicity_mass_fraction.resize(cell_count, 0.0);
 }
 
@@ -414,6 +438,9 @@ HydroPrimitiveState HydroPrimitiveCacheSoa::loadCell(std::size_t cell_index) con
       .vel_y_peculiar = m_vel_y_peculiar.at(cell_index),
       .vel_z_peculiar = m_vel_z_peculiar.at(cell_index),
       .pressure_comoving = m_pressure_comoving.at(cell_index),
+      .specific_internal_energy_code = m_specific_internal_energy_code.at(cell_index),
+      .signal_speed_squared_code = m_signal_speed_squared_code.at(cell_index),
+      .uses_effective_ism = m_uses_effective_ism.at(cell_index) != 0U,
       .metallicity_mass_fraction = m_metallicity_mass_fraction.at(cell_index)};
 }
 
@@ -423,6 +450,9 @@ void HydroPrimitiveCacheSoa::storeCell(std::size_t cell_index, const HydroPrimit
   m_vel_y_peculiar.at(cell_index) = primitive_state.vel_y_peculiar;
   m_vel_z_peculiar.at(cell_index) = primitive_state.vel_z_peculiar;
   m_pressure_comoving.at(cell_index) = primitive_state.pressure_comoving;
+  m_specific_internal_energy_code.at(cell_index) = primitive_state.specific_internal_energy_code;
+  m_signal_speed_squared_code.at(cell_index) = primitive_state.signal_speed_squared_code;
+  m_uses_effective_ism.at(cell_index) = primitive_state.uses_effective_ism ? 1U : 0U;
   m_metallicity_mass_fraction.at(cell_index) = primitive_state.metallicity_mass_fraction;
 }
 
@@ -527,8 +557,11 @@ HydroConservedState HydroCoreSolver::conservedFromPrimitive(
   conserved.momentum_density_x_comoving = primitive.rho_comoving * primitive.vel_x_peculiar;
   conserved.momentum_density_y_comoving = primitive.rho_comoving * primitive.vel_y_peculiar;
   conserved.momentum_density_z_comoving = primitive.rho_comoving * primitive.vel_z_peculiar;
+  const double specific_internal_energy = primitive.specific_internal_energy_code > 0.0
+      ? primitive.specific_internal_energy_code
+      : primitive.pressure_comoving / ((adiabatic_index - 1.0) * primitive.rho_comoving);
   conserved.total_energy_density_comoving =
-      primitive.pressure_comoving / (adiabatic_index - 1.0) + 0.5 * primitive.rho_comoving * velocity_squared;
+      primitive.rho_comoving * specific_internal_energy + 0.5 * primitive.rho_comoving * velocity_squared;
   conserved.metal_mass_density_comoving = primitive.rho_comoving *
       std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0);
   return conserved;
@@ -554,7 +587,11 @@ HydroPrimitiveState HydroCoreSolver::primitiveFromConserved(
        conserved.momentum_density_z_comoving * conserved.momentum_density_z_comoving) *
       inv_rho;
   const double internal_density = conserved.total_energy_density_comoving - kinetic_density;
+  primitive.specific_internal_energy_code = std::max(internal_density * inv_rho, k_small);
   primitive.pressure_comoving = std::max((adiabatic_index - 1.0) * internal_density, k_small);
+  primitive.signal_speed_squared_code = std::max(
+      adiabatic_index * primitive.pressure_comoving * inv_rho, k_small);
+  primitive.uses_effective_ism = false;
   primitive.metallicity_mass_fraction = std::clamp(
       conserved.metal_mass_density_comoving * inv_rho, 0.0, 1.0);
   return primitive;
@@ -740,7 +777,8 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
   conservation_report.before = conservationTotals(conserved, geometry, scratch.full_active_cells);
   conservation_report.cell_count = static_cast<std::uint64_t>(scratch.full_active_cells.size());
   if (primitive_cache != nullptr) {
-    fillPrimitiveCache(conserved, active_set, geometry, m_adiabatic_index, *primitive_cache);
+    fillPrimitiveCache(
+        conserved, active_set, geometry, m_adiabatic_index, source_context, *primitive_cache);
   }
 
   const auto total_start = std::chrono::steady_clock::now();
@@ -847,7 +885,22 @@ void HydroCoreSolver::advancePatchActiveSetWithScratch(
     }
     conserved.storeCell(cell_index, updated);
     if (primitive_cache != nullptr) {
-      primitive_cache->storeCell(cell_index, primitiveFromConserved(updated, m_adiabatic_index));
+      HydroPrimitiveState updated_primitive = primitiveFromConserved(updated, m_adiabatic_index);
+      if (source_context.thermodynamic_closure != nullptr) {
+        const HydroThermodynamicClosureResult closure = source_context.thermodynamic_closure->evaluate(
+            cell_index,
+            updated,
+            updated_primitive,
+            source_context.update.scale_factor,
+            source_context.redshift);
+        if (closure.valid && closure.pressure_comoving > 0.0 &&
+            closure.signal_speed_squared_code > 0.0) {
+          updated_primitive.pressure_comoving = closure.pressure_comoving;
+          updated_primitive.signal_speed_squared_code = closure.signal_speed_squared_code;
+          updated_primitive.uses_effective_ism = closure.uses_effective_ism;
+        }
+      }
+      primitive_cache->storeCell(cell_index, updated_primitive);
     }
   }
   const auto source_stop = std::chrono::steady_clock::now();

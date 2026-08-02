@@ -103,6 +103,22 @@ enum class InitialConditionMissingFieldPolicy {
 enum class StarFormationModelKind {
   kLegacySchmidtThreshold,
   kAdaptiveBoundJeans,
+  kEffectiveMultiphaseTngLike,
+};
+
+enum class EffectiveIsmEosRelaxation {
+  kInstantaneous,
+  kFiniteTimescale,
+};
+
+enum class EffectiveIsmBirthMassConvention {
+  kInitialSspMass,
+  kLongLivedMass,
+};
+
+enum class EffectiveIsmFeedbackCoupling {
+  kExternalFeedbackCalibrated,
+  kEffectiveEosOnly,
 };
 
 enum class StarFormationCollapseTimescale {
@@ -243,6 +259,31 @@ struct PhysicsConfig {
   double sf_temperature_safety_ceiling_k = 0.0;
   bool sf_stochastic_spawning = true;
   std::uint64_t sf_random_seed = 123456789ull;
+
+  // SH03/TNG-inspired unresolved multiphase-ISM closure. Values are a
+  // versioned CHUI reference parameter set, not an exact IllustrisTNG match.
+  std::string sf_effective_parameter_set = "chui_sh03_tng_like_v1";
+  double sf_effective_n_h_threshold_cgs = 0.13;
+  double sf_effective_min_baryon_overdensity = 0.0;
+  double sf_effective_t_star_at_threshold_code = 1.0;
+  double sf_effective_evaporation_factor_at_threshold = 1000.0;
+  double sf_effective_evaporation_density_exponent = -0.8;
+  double sf_effective_cold_phase_temperature_k = 1000.0;
+  double sf_effective_supernova_specific_energy_code = 1.0e5;
+  double sf_effective_massive_star_fraction = 0.1;
+  double sf_effective_q_eos = 0.3;
+  double sf_effective_isothermal_temperature_k = 1.0e4;
+  double sf_effective_hot_excess_tolerance = 1.0;
+  EffectiveIsmEosRelaxation sf_effective_eos_relaxation =
+      EffectiveIsmEosRelaxation::kInstantaneous;
+  double sf_effective_eos_relaxation_timescale_code = 0.0;
+  std::uint32_t sf_effective_eos_table_bins = 256;
+  double sf_effective_eos_max_density_ratio = 1.0e6;
+  EffectiveIsmBirthMassConvention sf_effective_birth_mass_convention =
+      EffectiveIsmBirthMassConvention::kInitialSspMass;
+  EffectiveIsmFeedbackCoupling sf_effective_feedback_coupling =
+      EffectiveIsmFeedbackCoupling::kExternalFeedbackCalibrated;
+
   FeedbackMode fb_mode = FeedbackMode::kThermalKineticMomentum;
   FeedbackVariant fb_variant = FeedbackVariant::kNone;
   bool fb_use_returned_mass_budget = true;
@@ -544,6 +585,9 @@ void writeNormalizedConfigSnapshot(
 [[nodiscard]] [[nodiscard]] std::string starFormationModelKindToString(StarFormationModelKind model);
 [[nodiscard]] std::string starFormationCollapseTimescaleToString(StarFormationCollapseTimescale mode);
 [[nodiscard]] std::string starParticleMassPolicyToString(StarParticleMassPolicy policy);
+[[nodiscard]] std::string effectiveIsmEosRelaxationToString(EffectiveIsmEosRelaxation mode);
+[[nodiscard]] std::string effectiveIsmBirthMassConventionToString(EffectiveIsmBirthMassConvention mode);
+[[nodiscard]] std::string effectiveIsmFeedbackCouplingToString(EffectiveIsmFeedbackCoupling mode);
 std::string feedbackModeToString(FeedbackMode mode);
 [[nodiscard]] std::string feedbackVariantToString(FeedbackVariant variant);
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);

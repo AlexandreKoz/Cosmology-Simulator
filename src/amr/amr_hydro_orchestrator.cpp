@@ -1376,6 +1376,7 @@ namespace {
         .hydrogen_number_density_cgs = hydrogen,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
+        .thermodynamic_closure = global_source_context.thermodynamic_closure,
         .redshift = global_source_context.redshift};
 
     const auto widths = cellWidths(patch_geometry.patch);

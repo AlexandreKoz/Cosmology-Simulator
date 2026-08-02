@@ -14,8 +14,12 @@ constexpr double k_small = 1.0e-14;
   return ax * bx + ay * by + az * bz;
 }
 
-[[nodiscard]] double soundSpeed(double rho_comoving, double pressure_comoving, double adiabatic_index) {
-  return std::sqrt(adiabatic_index * std::max(pressure_comoving, k_small) / std::max(rho_comoving, k_small));
+[[nodiscard]] double soundSpeed(const HydroPrimitiveState& primitive, double adiabatic_index) {
+  const double c_squared = primitive.signal_speed_squared_code > 0.0
+      ? primitive.signal_speed_squared_code
+      : adiabatic_index * std::max(primitive.pressure_comoving, k_small) /
+          std::max(primitive.rho_comoving, k_small);
+  return std::sqrt(std::max(c_squared, k_small));
 }
 
 [[nodiscard]] HydroConservedState eulerPhysicalFlux(
@@ -58,8 +62,8 @@ constexpr double k_small = 1.0e-14;
   const double vel_n_left = dot3(left_state.vel_x_peculiar, left_state.vel_y_peculiar, left_state.vel_z_peculiar, face.normal_x, face.normal_y, face.normal_z);
   const double vel_n_right = dot3(right_state.vel_x_peculiar, right_state.vel_y_peculiar, right_state.vel_z_peculiar, face.normal_x, face.normal_y, face.normal_z);
 
-  const double c_left = soundSpeed(left_state.rho_comoving, left_state.pressure_comoving, adiabatic_index);
-  const double c_right = soundSpeed(right_state.rho_comoving, right_state.pressure_comoving, adiabatic_index);
+  const double c_left = soundSpeed(left_state, adiabatic_index);
+  const double c_right = soundSpeed(right_state, adiabatic_index);
 
   const double s_left = std::min(vel_n_left - c_left, vel_n_right - c_right);
   const double s_right = std::max(vel_n_left + c_left, vel_n_right + c_right);
@@ -116,8 +120,8 @@ HydroConservedState HllcRiemannSolver::computeFlux(
   const double un_right = dot3(right_state.vel_x_peculiar, right_state.vel_y_peculiar, right_state.vel_z_peculiar,
       face.normal_x, face.normal_y, face.normal_z);
 
-  const double c_left = soundSpeed(left_state.rho_comoving, left_state.pressure_comoving, adiabatic_index);
-  const double c_right = soundSpeed(right_state.rho_comoving, right_state.pressure_comoving, adiabatic_index);
+  const double c_left = soundSpeed(left_state, adiabatic_index);
+  const double c_right = soundSpeed(right_state, adiabatic_index);
 
   const double s_left = std::min(un_left - c_left, un_right - c_right);
   const double s_right = std::max(un_left + c_left, un_right + c_right);
