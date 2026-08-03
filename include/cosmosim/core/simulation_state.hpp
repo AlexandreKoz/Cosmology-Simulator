@@ -138,7 +138,17 @@ struct StarParticleSidecar {
   AlignedVector<double> stellar_age_years_last;
   AlignedVector<double> stellar_returned_mass_cumulative_code;
   AlignedVector<double> stellar_returned_metals_cumulative_code;
+  // Newly synthesized metals are tracked separately from total ejected metals.
+  AlignedVector<double> stellar_newly_synthesized_metals_cumulative_code;
   AlignedVector<double> stellar_feedback_energy_cumulative_erg;
+  // Restart- and migration-authoritative unresolved enrichment budgets.
+  AlignedVector<double> enrichment_carry_mass_code;
+  AlignedVector<double> enrichment_carry_metals_code;
+  AlignedVector<double> enrichment_carry_feedback_energy_erg;
+  AlignedVector<double> enrichment_carry_momentum_code;
+  AlignedVector<double> stellar_deposited_mass_cumulative_code;
+  AlignedVector<double> stellar_deposited_metals_cumulative_code;
+  AlignedVector<double> stellar_deposited_feedback_energy_cumulative_erg;
   std::array<AlignedVector<double>, 3> stellar_returned_mass_channel_cumulative_code;
   std::array<AlignedVector<double>, 3> stellar_returned_metals_channel_cumulative_code;
   std::array<AlignedVector<double>, 3> stellar_feedback_energy_channel_cumulative_erg;
@@ -653,7 +663,15 @@ struct StarParticleMigrationFields {
   double stellar_age_years_last = 0.0;
   double stellar_returned_mass_cumulative_code = 0.0;
   double stellar_returned_metals_cumulative_code = 0.0;
+  double stellar_newly_synthesized_metals_cumulative_code = 0.0;
   double stellar_feedback_energy_cumulative_erg = 0.0;
+  double enrichment_carry_mass_code = 0.0;
+  double enrichment_carry_metals_code = 0.0;
+  double enrichment_carry_feedback_energy_erg = 0.0;
+  double enrichment_carry_momentum_code = 0.0;
+  double stellar_deposited_mass_cumulative_code = 0.0;
+  double stellar_deposited_metals_cumulative_code = 0.0;
+  double stellar_deposited_feedback_energy_cumulative_erg = 0.0;
   std::array<double, 3> stellar_returned_mass_channel_cumulative_code{};
   std::array<double, 3> stellar_returned_metals_channel_cumulative_code{};
   std::array<double, 3> stellar_feedback_energy_channel_cumulative_erg{};

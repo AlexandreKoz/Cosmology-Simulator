@@ -77,7 +77,15 @@ void populateState(cosmosim::core::SimulationState& state) {
   state.star_particles.stellar_age_years_last[0] = 1.25e7;
   state.star_particles.stellar_returned_mass_cumulative_code[0] = 0.4;
   state.star_particles.stellar_returned_metals_cumulative_code[0] = 0.03;
+  state.star_particles.stellar_newly_synthesized_metals_cumulative_code[0] = 0.012;
   state.star_particles.stellar_feedback_energy_cumulative_erg[0] = 5.0e49;
+  state.star_particles.enrichment_carry_mass_code[0] = 0.07;
+  state.star_particles.enrichment_carry_metals_code[0] = 0.004;
+  state.star_particles.enrichment_carry_feedback_energy_erg[0] = 2.0e47;
+  state.star_particles.enrichment_carry_momentum_code[0] = 3.0;
+  state.star_particles.stellar_deposited_mass_cumulative_code[0] = 0.33;
+  state.star_particles.stellar_deposited_metals_cumulative_code[0] = 0.026;
+  state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[0] = 4.98e49;
   for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
     state.star_particles.stellar_returned_mass_channel_cumulative_code[channel][0] =
         0.01 * static_cast<double>(channel + 1);
@@ -448,8 +456,25 @@ void testRestartRoundtrip() {
       restored.state.star_particles.stellar_returned_metals_cumulative_code ==
       state.star_particles.stellar_returned_metals_cumulative_code);
   assert(
+      restored.state.star_particles.stellar_newly_synthesized_metals_cumulative_code ==
+      state.star_particles.stellar_newly_synthesized_metals_cumulative_code);
+  assert(
       restored.state.star_particles.stellar_feedback_energy_cumulative_erg ==
       state.star_particles.stellar_feedback_energy_cumulative_erg);
+  assert(restored.state.star_particles.enrichment_carry_mass_code ==
+         state.star_particles.enrichment_carry_mass_code);
+  assert(restored.state.star_particles.enrichment_carry_metals_code ==
+         state.star_particles.enrichment_carry_metals_code);
+  assert(restored.state.star_particles.enrichment_carry_feedback_energy_erg ==
+         state.star_particles.enrichment_carry_feedback_energy_erg);
+  assert(restored.state.star_particles.enrichment_carry_momentum_code ==
+         state.star_particles.enrichment_carry_momentum_code);
+  assert(restored.state.star_particles.stellar_deposited_mass_cumulative_code ==
+         state.star_particles.stellar_deposited_mass_cumulative_code);
+  assert(restored.state.star_particles.stellar_deposited_metals_cumulative_code ==
+         state.star_particles.stellar_deposited_metals_cumulative_code);
+  assert(restored.state.star_particles.stellar_deposited_feedback_energy_cumulative_erg ==
+         state.star_particles.stellar_deposited_feedback_energy_cumulative_erg);
   for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
     assert(
         restored.state.star_particles.stellar_returned_mass_channel_cumulative_code[channel] ==

@@ -123,7 +123,15 @@ void accountStarSidecar(MemoryReportBuilder& builder, const StarParticleSidecar&
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_age_years_last", stars.stellar_age_years_last);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_returned_mass_cumulative_code", stars.stellar_returned_mass_cumulative_code);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_returned_metals_cumulative_code", stars.stellar_returned_metals_cumulative_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_newly_synthesized_metals_cumulative_code", stars.stellar_newly_synthesized_metals_cumulative_code);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_feedback_energy_cumulative_erg", stars.stellar_feedback_energy_cumulative_erg);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.enrichment_carry_mass_code", stars.enrichment_carry_mass_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.enrichment_carry_metals_code", stars.enrichment_carry_metals_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.enrichment_carry_feedback_energy_erg", stars.enrichment_carry_feedback_energy_erg);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.enrichment_carry_momentum_code", stars.enrichment_carry_momentum_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_deposited_mass_cumulative_code", stars.stellar_deposited_mass_cumulative_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_deposited_metals_cumulative_code", stars.stellar_deposited_metals_cumulative_code);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.stellar_deposited_feedback_energy_cumulative_erg", stars.stellar_deposited_feedback_energy_cumulative_erg);
   for (std::size_t i = 0; i < stars.stellar_returned_mass_channel_cumulative_code.size(); ++i) {
     addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.returned_mass_channel." + std::to_string(i), stars.stellar_returned_mass_channel_cumulative_code[i]);
     addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.returned_metals_channel." + std::to_string(i), stars.stellar_returned_metals_channel_cumulative_code[i]);

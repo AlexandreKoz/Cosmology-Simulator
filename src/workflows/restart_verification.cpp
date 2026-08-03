@@ -69,7 +69,15 @@ namespace {
       restored.star_particles.stellar_age_years_last == reference.star_particles.stellar_age_years_last &&
       restored.star_particles.stellar_returned_mass_cumulative_code == reference.star_particles.stellar_returned_mass_cumulative_code &&
       restored.star_particles.stellar_returned_metals_cumulative_code == reference.star_particles.stellar_returned_metals_cumulative_code &&
+      restored.star_particles.stellar_newly_synthesized_metals_cumulative_code == reference.star_particles.stellar_newly_synthesized_metals_cumulative_code &&
       restored.star_particles.stellar_feedback_energy_cumulative_erg == reference.star_particles.stellar_feedback_energy_cumulative_erg &&
+      restored.star_particles.enrichment_carry_mass_code == reference.star_particles.enrichment_carry_mass_code &&
+      restored.star_particles.enrichment_carry_metals_code == reference.star_particles.enrichment_carry_metals_code &&
+      restored.star_particles.enrichment_carry_feedback_energy_erg == reference.star_particles.enrichment_carry_feedback_energy_erg &&
+      restored.star_particles.enrichment_carry_momentum_code == reference.star_particles.enrichment_carry_momentum_code &&
+      restored.star_particles.stellar_deposited_mass_cumulative_code == reference.star_particles.stellar_deposited_mass_cumulative_code &&
+      restored.star_particles.stellar_deposited_metals_cumulative_code == reference.star_particles.stellar_deposited_metals_cumulative_code &&
+      restored.star_particles.stellar_deposited_feedback_energy_cumulative_erg == reference.star_particles.stellar_deposited_feedback_energy_cumulative_erg &&
       restored.star_particles.stellar_returned_mass_channel_cumulative_code == reference.star_particles.stellar_returned_mass_channel_cumulative_code &&
       restored.star_particles.stellar_returned_metals_channel_cumulative_code == reference.star_particles.stellar_returned_metals_channel_cumulative_code &&
       restored.star_particles.stellar_feedback_energy_channel_cumulative_erg == reference.star_particles.stellar_feedback_energy_channel_cumulative_erg &&

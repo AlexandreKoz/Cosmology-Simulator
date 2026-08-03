@@ -539,6 +539,52 @@ fb_mode = hidden_magic
   assert(threw);
 }
 
+void testMetalDiffusionConfigurationContract() {
+  const std::string good_text = R"(
+[mode]
+mode = zoom_in
+[numerics]
+hierarchical_max_rung = 0
+[physics]
+metal_species_mode = total_only
+enable_metal_diffusion = true
+metal_diffusion_model = smagorinsky
+metal_diffusion_time_integrator = rkl2
+metal_diffusion_coefficient = 0.075
+metal_diffusion_cfl = 0.35
+metal_diffusion_max_subcycles = 64
+metal_diffusion_max_rkl_stages = 48
+metal_diffusion_coefficient_floor_code = 0.0
+metal_diffusion_coefficient_ceiling_code = 100.0
+)";
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      good_text, "metal_diffusion_good");
+  assert(frozen.config.physics.metal_species_mode ==
+         cosmosim::core::MetalSpeciesMode::kTotalOnly);
+  assert(frozen.config.physics.metal_diffusion_model ==
+         cosmosim::core::MetalDiffusionModel::kSmagorinsky);
+  assert(frozen.config.physics.metal_diffusion_time_integrator ==
+         cosmosim::core::MetalDiffusionTimeIntegrator::kRkl2);
+  assert(frozen.normalized_text.find("metal_diffusion_coefficient = 0.075") !=
+         std::string::npos);
+  const auto roundtrip = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "metal_diffusion_roundtrip");
+  assert(roundtrip.provenance.config_hash == frozen.provenance.config_hash);
+
+  for (const char* invalid : {
+           "[mode]\nmode = zoom_in\n[physics]\nenable_metal_diffusion = true\nmetal_diffusion_model = none\n",
+           "[mode]\nmode = zoom_in\n[physics]\nenable_metal_diffusion = true\nmetal_diffusion_model = smagorinsky\nmetal_diffusion_coefficient = 0.0\n",
+           "[mode]\nmode = zoom_in\n[physics]\nmetal_species_mode = core_elements\n"}) {
+    bool rejected = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(invalid, "metal_diffusion_bad");
+    } catch (const cosmosim::core::ConfigError&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 void testCoolingPolicyEnumsAndValidation() {
   const std::string good_text = R"(
 [mode]
@@ -1210,6 +1256,7 @@ int main() {
   testUrlsWindowsPathsAndQuotedHashesAreNotTruncated();
   testDeprecatedAliasesAndCanonicalCollision();
   testFeedbackConfigKeysAndValidation();
+  testMetalDiffusionConfigurationContract();
   testCoolingPolicyEnumsAndValidation();
   testDiagnosticsExecutionPolicyValidation();
   testEnumSerializationIsFailFastWithoutUnknownFallback();

@@ -22,3 +22,12 @@ The normalized config dump preserves these keys in stable order for restart/snap
 - Primordial baseline uses a compact analytic cooling/heating fit intended as a stable reference implementation, not a full collisional network.
 - Metal-line contribution is optional and table-driven; missing table assets fail at load time if table cooling is requested.
 - Self-shielding currently exposes `none` and `rahmati13_like` as explicit, parameterized approximations.
+
+## Metal authority after enrichment and mixing
+
+Cooling consumes scalar metallicity derived from authoritative gas metal mass,
+not a separately mutable cached abundance. Enrichment and diffusion update the
+gas authority and refresh compatibility mirrors before the next legal source or
+cooling boundary. Element-resolved cooling is not inferred from scalar
+`Metallicity`; `metal_species_mode=core_elements` remains rejected until a
+compatible abundance/yield/cooling schema is implemented.

@@ -49,6 +49,23 @@ void testScaleFactorDependence() {
   assert(std::abs(background.eFactor(a) - e) < 1.0e-12);
 }
 
+void testEinsteinDeSitterCosmicTimeIntegral() {
+  cosmosim::core::CosmologyBackgroundConfig cfg;
+  cfg.hubble_param = 0.7;
+  cfg.omega_matter = 1.0;
+  cfg.omega_lambda = 0.0;
+  cfg.omega_radiation = 0.0;
+  cfg.omega_curvature = 0.0;
+  const cosmosim::core::LambdaCdmBackground background(cfg);
+  constexpr double a_begin = 0.125;
+  constexpr double a_end = 0.8;
+  const double expected = (2.0 / (3.0 * background.hubble0Si())) *
+      (std::pow(a_end, 1.5) - std::pow(a_begin, 1.5));
+  const double actual = background.cosmicTimeIntervalSi(a_begin, a_end);
+  assert(std::abs(actual - expected) / expected < 5.0e-10);
+  assert(background.cosmicTimeIntervalSi(a_end, a_end) == 0.0);
+}
+
 void testComovingPhysicalConversions() {
   const double a = 0.25;
   const double x_comoving = 16.0;
@@ -140,6 +157,7 @@ omega_lambda = 0.7
 int main() {
   testHubbleAndCriticalDensityAtAOne();
   testScaleFactorDependence();
+  testEinsteinDeSitterCosmicTimeIntegral();
   testComovingPhysicalConversions();
   testUnitsConversions();
   testStableHash();

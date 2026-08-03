@@ -34,13 +34,14 @@ struct StellarFeedbackConfig {
   double epsilon_momentum = 0.1;
   double sn_energy_erg_per_mass_code = 1.0e49;
   double momentum_code_per_mass_code = 3.0e3;
+  // Converts physical total energy in erg to code total energy (M_code V_code^2).
+  double total_energy_code_per_erg = 1.0;
   std::uint32_t neighbor_count = 8;
   double delayed_cooling_time_code = 0.0;
   double stochastic_event_probability = 0.25;
   std::uint64_t random_seed = 42424242ull;
-  std::uint32_t metadata_schema_version = 1;
+  std::uint32_t metadata_schema_version = 2;
 };
-
 
 struct StellarFeedbackGeometryView {
   std::span<const double> particle_position_x_comoving;
@@ -49,6 +50,10 @@ struct StellarFeedbackGeometryView {
   std::span<const double> cell_center_x_comoving;
   std::span<const double> cell_center_y_comoving;
   std::span<const double> cell_center_z_comoving;
+  // Optional filters. Empty spans retain legacy local-state behavior.
+  std::span<const std::uint64_t> gas_cell_id;
+  std::span<const std::uint8_t> is_owned_leaf;
+  std::span<const std::uint32_t> candidate_cell_indices;
 };
 
 struct StellarFeedbackDepositionView {
@@ -56,6 +61,8 @@ struct StellarFeedbackDepositionView {
   std::span<double> gas_density_code;
   std::span<double> gas_internal_energy_code;
   std::span<double> gas_metal_mass_code;
+  // Optional. If absent, volume is derived once from old mass/old density.
+  std::span<const double> cell_volume_code;
 };
 
 struct StellarFeedbackBudget {
@@ -117,8 +124,9 @@ struct StellarFeedbackStepReport {
   std::vector<StellarFeedbackStarReport> star_reports;
 };
 
+// Compatibility mirror. Persistent carry authority lives in StarParticleSidecar
+// so restart and migration cannot lose unresolved budgets.
 struct StellarFeedbackModuleState {
-  // Sidecar-style bookkeeping kept outside core hot particle layout.
   std::vector<double> last_returned_mass_cumulative_code;
   std::vector<double> carry_mass_code;
   std::vector<double> carry_metals_code;
@@ -138,6 +146,11 @@ class StellarFeedbackModel {
       double source_mass_code,
       double returned_mass_code,
       double returned_metals_code) const;
+  [[nodiscard]] StellarFeedbackBudget computeBudgetFromEnergy(
+      double source_mass_code,
+      double returned_mass_code,
+      double returned_metals_code,
+      double feedback_energy_erg) const;
 
   [[nodiscard]] std::vector<StellarFeedbackTarget> selectTargets(
       const StellarFeedbackGeometryView& geometry_view,
@@ -154,7 +167,8 @@ class StellarFeedbackModel {
       std::span<const std::uint32_t> active_star_indices,
       std::span<const double> returned_mass_delta_code,
       std::span<const double> returned_metals_delta_code,
-      double dt_code) const;
+      double dt_code,
+      std::span<const double> feedback_energy_delta_erg = {}) const;
 
   [[nodiscard]] StellarFeedbackStepReport apply(
       core::SimulationState& state,
@@ -162,18 +176,22 @@ class StellarFeedbackModel {
       std::span<const std::uint32_t> active_star_indices,
       std::span<const double> returned_mass_delta_code,
       std::span<const double> returned_metals_delta_code,
-      double dt_code) const;
+      double dt_code,
+      std::span<const double> feedback_energy_delta_erg = {}) const;
 
-  [[nodiscard]] core::ModuleSidecarBlock buildMetadataSidecar(const StellarFeedbackStepReport& report) const;
+  [[nodiscard]] core::ModuleSidecarBlock buildMetadataSidecar(
+      const StellarFeedbackStepReport& report) const;
 
  private:
   [[nodiscard]] static std::string modeToString(StellarFeedbackMode mode);
   [[nodiscard]] static std::string variantToString(StellarFeedbackVariant variant);
-  [[nodiscard]] bool stochasticEventFires(std::uint32_t star_index, std::uint64_t step_seed) const;
+  [[nodiscard]] bool stochasticEventFires(
+      std::uint32_t star_index, std::uint64_t step_seed) const;
 
   StellarFeedbackConfig m_config;
 };
 
-[[nodiscard]] StellarFeedbackConfig makeStellarFeedbackConfig(const core::PhysicsConfig& physics_config);
+[[nodiscard]] StellarFeedbackConfig makeStellarFeedbackConfig(
+    const core::PhysicsConfig& physics_config);
 
 }  // namespace cosmosim::physics

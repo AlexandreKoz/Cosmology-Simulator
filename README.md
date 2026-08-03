@@ -65,3 +65,13 @@ CosmoSim treats reproducibility as a first-order requirement:
 - stable naming constraints for output stems.
 
 These rules are implemented in the core and I/O interfaces and documented in [`docs/configuration.md`](docs/configuration.md) and [`docs/output_schema.md`](docs/output_schema.md).
+
+### Delayed metal enrichment and turbulent mixing
+
+CHUÍ now contains a production-wired scalar metal subsystem with exact FLRW SSP
+age intervals, persistent delayed-return budgets, dimensionally conservative
+mass/metal/energy deposition, Smagorinsky metal diffusion, explicit SSPRK2 and
+RKL2 integration, restart lanes, HDF5 model metadata, and metal-budget
+diagnostics. The default remains memory-light `total_only`; element-resolved
+mode and cross-rank/coarse-fine mixing remain fail-closed or documented future
+work. See `docs/metals_enrichment_and_mixing.md`.

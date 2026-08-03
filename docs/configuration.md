@@ -552,3 +552,24 @@ physics.star_formation_model = effective_multiphase_tng_like
 The effective model provides typed keys for physical `sf_effective_n_h_threshold`, optional baryon overdensity, threshold timescale, evaporation law, cold/SN energies, massive-star fraction, `q_eos`, isothermal reference, hot-excess tolerance, relaxation policy, table resolution/range, SSP birth-mass convention, and feedback coupling. Number density accepts `cm^-3` or `m^-3`; temperatures accept `K`; times accept code, seconds, years, Myr, or Gyr; specific energy accepts code, J/kg, or erg/g. All resolved values enter normalized configuration and the config hash.
 
 Known-inconsistent combinations, including `effective_eos_only` with explicit feedback enabled, fail validation. Shared particle-mass, stochastic, conversion, and remnant-gas keys are not duplicated for the effective model.
+
+### Metals, delayed enrichment, and turbulent mixing
+
+The scalar total-metal mode is the compatibility and memory-efficient default.
+
+- `metal_species_mode`: `total_only` (default). `core_elements` is reserved and currently rejected fail-closed.
+- `stellar_evolution_require_production_table`: default `false`; when true, a non-empty production-calibrated v2 table is required.
+- `enable_metal_diffusion`: default `false`.
+- `metal_diffusion_model`: `none` (default) or `smagorinsky`.
+- `metal_diffusion_time_integrator`: `explicit_subcycling` (default) or `rkl2`.
+- `metal_diffusion_coefficient`: default `0.05`; dimensionless Smagorinsky calibration coefficient.
+- `metal_diffusion_cfl`: default `0.4`, accepted range `(0, 0.5]`.
+- `metal_diffusion_max_subcycles`: default `128`.
+- `metal_diffusion_max_rkl_stages`: default `64`, minimum `2`.
+- `metal_diffusion_coefficient_floor_code`: default `0`.
+- `metal_diffusion_coefficient_ceiling_code`: default `1e30`.
+
+Diffusion requires `hierarchical_max_rung = 0`. Enabling diffusion with model
+`none`, a non-positive coefficient, invalid stage limits, or invalid coefficient
+bounds is rejected during typed configuration loading. See
+`docs/metals_enrichment_and_mixing.md` for current AMR/MPI scope.

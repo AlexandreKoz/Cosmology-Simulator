@@ -373,3 +373,21 @@ Gas snapshots retain canonical GADGET-style fields and add derived diagnostics:
 ```
 
 These are analysis fields, not additional conserved authorities. Effective temperature inferred from `EffectiveInternalEnergy` is a pseudo-temperature representing unresolved pressure support, not the temperature of either subgrid phase. Gas `Metallicity` remains derived from conserved metal mass.
+
+## Metals metadata and enrichment restart lanes
+
+The canonical scalar dataset name remains `Metallicity` for gas and stars.
+`GasCellSidecar::metal_mass_code` is the gas authority; the dataset is derived at
+write time. The HDF5 `/Header` records:
+
+- `MetalSpeciesMode`;
+- `MetalDiffusionModel`;
+- `MetalDiffusionTimeIntegrator`;
+- `MetalDiffusionCoefficient`;
+- `StellarEvolutionTablePath`.
+
+The normalized configuration and its hash remain the complete model-identity
+record. Restart state additionally stores cumulative newly synthesized metals,
+unresolved enrichment mass/metals/energy/momentum, and cumulative deposited
+mass/metals/energy. Missing new lanes in a legacy restart default to zero under
+the existing backward-compatibility policy.

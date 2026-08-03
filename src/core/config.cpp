@@ -853,6 +853,29 @@ parseInitialConditionMissingFieldPolicy(
   throw ConfigError("key 'physics.cooling_model': invalid value '" + value + "'");
 }
 
+[[nodiscard]] MetalSpeciesMode parseMetalSpeciesMode(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "total_only") return MetalSpeciesMode::kTotalOnly;
+  if (lower == "core_elements") return MetalSpeciesMode::kCoreElements;
+  throw ConfigError("physics.metal_species_mode must be one of: total_only, core_elements");
+}
+
+[[nodiscard]] MetalDiffusionModel parseMetalDiffusionModel(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "none") return MetalDiffusionModel::kNone;
+  if (lower == "smagorinsky") return MetalDiffusionModel::kSmagorinsky;
+  throw ConfigError("physics.metal_diffusion_model must be one of: none, smagorinsky");
+}
+
+[[nodiscard]] MetalDiffusionTimeIntegrator parseMetalDiffusionTimeIntegrator(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "explicit_subcycling") return MetalDiffusionTimeIntegrator::kExplicitSubcycling;
+  if (lower == "rkl2") return MetalDiffusionTimeIntegrator::kRkl2;
+  throw ConfigError(
+      "physics.metal_diffusion_time_integrator must be one of: explicit_subcycling, rkl2");
+}
+
 [[nodiscard]] IntegratorTimeVariable parseIntegratorTimeVariable(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "scale_factor" || lower == "a") {
@@ -1142,6 +1165,17 @@ struct ConfigKeySpec {
       {"physics.fb_random_seed", "42424242"},
       {"physics.stellar_evolution_table_path", ""},
       {"physics.stellar_evolution_hubble_time_years", "1.44e10"},
+      {"physics.stellar_evolution_require_production_table", "false"},
+      {"physics.metal_species_mode", "total_only"},
+      {"physics.enable_metal_diffusion", "false"},
+      {"physics.metal_diffusion_model", "none"},
+      {"physics.metal_diffusion_time_integrator", "explicit_subcycling"},
+      {"physics.metal_diffusion_coefficient", "0.05"},
+      {"physics.metal_diffusion_cfl", "0.4"},
+      {"physics.metal_diffusion_max_subcycles", "128"},
+      {"physics.metal_diffusion_max_rkl_stages", "64"},
+      {"physics.metal_diffusion_coefficient_floor_code", "0.0"},
+      {"physics.metal_diffusion_coefficient_ceiling_code", "1.0e30"},
       {"physics.enable_black_hole_agn", "false"},
       {"physics.bh_seed_halo_mass_threshold_code", "1.0e3"},
       {"physics.bh_seed_mass_code", "1.0"},
@@ -1548,6 +1582,41 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.physics.stellar_evolution_hubble_time_years <= 0.0) {
     throw ConfigError("physics.stellar_evolution_hubble_time_years must be > 0");
+  }
+  if (config.physics.stellar_evolution_require_production_table &&
+      config.physics.stellar_evolution_table_path.empty()) {
+    throw ConfigError(
+        "physics.stellar_evolution_table_path is required when "
+        "stellar_evolution_require_production_table=true");
+  }
+  if (config.physics.metal_species_mode == MetalSpeciesMode::kCoreElements) {
+    throw ConfigError(
+        "physics.metal_species_mode=core_elements is not enabled in schema v2; "
+        "use total_only until element yield/cooling provenance is supplied");
+  }
+  if (config.physics.enable_metal_diffusion) {
+    if (config.physics.metal_diffusion_model == MetalDiffusionModel::kNone) {
+      throw ConfigError("metal diffusion is enabled but metal_diffusion_model=none");
+    }
+    if (!(config.physics.metal_diffusion_coefficient > 0.0) ||
+        !(config.physics.metal_diffusion_cfl > 0.0) ||
+        config.physics.metal_diffusion_cfl > 0.5) {
+      throw ConfigError(
+          "metal diffusion requires coefficient > 0 and cfl in (0, 0.5]");
+    }
+    if (config.physics.metal_diffusion_max_subcycles == 0U ||
+        config.physics.metal_diffusion_max_rkl_stages < 2U) {
+      throw ConfigError("metal diffusion stage/subcycle limits are invalid");
+    }
+    if (config.physics.metal_diffusion_coefficient_floor_code < 0.0 ||
+        config.physics.metal_diffusion_coefficient_ceiling_code <=
+            config.physics.metal_diffusion_coefficient_floor_code) {
+      throw ConfigError("metal diffusion coefficient floor/ceiling are invalid");
+    }
+    if (config.numerics.hierarchical_max_rung != 0) {
+      throw ConfigError(
+          "metal diffusion currently requires numerics.hierarchical_max_rung=0");
+    }
   }
   if (config.physics.bh_seed_halo_mass_threshold_code <= 0.0 || config.physics.bh_seed_mass_code <= 0.0 ||
       config.physics.bh_seed_max_per_cell == 0) {
@@ -2096,6 +2165,28 @@ void validateConfig(const SimulationConfig& config) {
   stream << "stellar_evolution_table_path = " << frozen.config.physics.stellar_evolution_table_path << '\n';
   stream << "stellar_evolution_hubble_time_years = "
          << frozen.config.physics.stellar_evolution_hubble_time_years << '\n';
+  stream << "stellar_evolution_require_production_table = "
+         << (frozen.config.physics.stellar_evolution_require_production_table ? "true" : "false") << '\n';
+  stream << "metal_species_mode = "
+         << metalSpeciesModeToString(frozen.config.physics.metal_species_mode) << '\n';
+  stream << "enable_metal_diffusion = "
+         << (frozen.config.physics.enable_metal_diffusion ? "true" : "false") << '\n';
+  stream << "metal_diffusion_model = "
+         << metalDiffusionModelToString(frozen.config.physics.metal_diffusion_model) << '\n';
+  stream << "metal_diffusion_time_integrator = "
+         << metalDiffusionTimeIntegratorToString(
+                frozen.config.physics.metal_diffusion_time_integrator) << '\n';
+  stream << "metal_diffusion_coefficient = "
+         << frozen.config.physics.metal_diffusion_coefficient << '\n';
+  stream << "metal_diffusion_cfl = " << frozen.config.physics.metal_diffusion_cfl << '\n';
+  stream << "metal_diffusion_max_subcycles = "
+         << frozen.config.physics.metal_diffusion_max_subcycles << '\n';
+  stream << "metal_diffusion_max_rkl_stages = "
+         << frozen.config.physics.metal_diffusion_max_rkl_stages << '\n';
+  stream << "metal_diffusion_coefficient_floor_code = "
+         << frozen.config.physics.metal_diffusion_coefficient_floor_code << '\n';
+  stream << "metal_diffusion_coefficient_ceiling_code = "
+         << frozen.config.physics.metal_diffusion_coefficient_ceiling_code << '\n';
   stream << "enable_black_hole_agn = " << (frozen.config.physics.enable_black_hole_agn ? "true" : "false")
          << '\n';
   stream << "bh_seed_halo_mass_threshold_code = " << frozen.config.physics.bh_seed_halo_mass_threshold_code
@@ -2829,6 +2920,38 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.stellar_evolution_hubble_time_years = parseFloating(
       requireString(entries, consumed, "physics.stellar_evolution_hubble_time_years", "1.44e10"),
       "physics.stellar_evolution_hubble_time_years");
+  frozen.config.physics.stellar_evolution_require_production_table = parseBool(
+      requireString(entries, consumed, "physics.stellar_evolution_require_production_table", "false"),
+      "physics.stellar_evolution_require_production_table");
+  frozen.config.physics.metal_species_mode = parseMetalSpeciesMode(
+      requireString(entries, consumed, "physics.metal_species_mode", "total_only"));
+  frozen.config.physics.enable_metal_diffusion = parseBool(
+      requireString(entries, consumed, "physics.enable_metal_diffusion", "false"),
+      "physics.enable_metal_diffusion");
+  frozen.config.physics.metal_diffusion_model = parseMetalDiffusionModel(
+      requireString(entries, consumed, "physics.metal_diffusion_model", "none"));
+  frozen.config.physics.metal_diffusion_time_integrator = parseMetalDiffusionTimeIntegrator(
+      requireString(entries, consumed, "physics.metal_diffusion_time_integrator", "explicit_subcycling"));
+  frozen.config.physics.metal_diffusion_coefficient = parseFloating(
+      requireString(entries, consumed, "physics.metal_diffusion_coefficient", "0.05"),
+      "physics.metal_diffusion_coefficient");
+  frozen.config.physics.metal_diffusion_cfl = parseFloating(
+      requireString(entries, consumed, "physics.metal_diffusion_cfl", "0.4"),
+      "physics.metal_diffusion_cfl");
+  frozen.config.physics.metal_diffusion_max_subcycles = static_cast<std::uint32_t>(
+      parseNumber<unsigned int>(
+          requireString(entries, consumed, "physics.metal_diffusion_max_subcycles", "128"),
+          "physics.metal_diffusion_max_subcycles"));
+  frozen.config.physics.metal_diffusion_max_rkl_stages = static_cast<std::uint32_t>(
+      parseNumber<unsigned int>(
+          requireString(entries, consumed, "physics.metal_diffusion_max_rkl_stages", "64"),
+          "physics.metal_diffusion_max_rkl_stages"));
+  frozen.config.physics.metal_diffusion_coefficient_floor_code = parseFloating(
+      requireString(entries, consumed, "physics.metal_diffusion_coefficient_floor_code", "0.0"),
+      "physics.metal_diffusion_coefficient_floor_code");
+  frozen.config.physics.metal_diffusion_coefficient_ceiling_code = parseFloating(
+      requireString(entries, consumed, "physics.metal_diffusion_coefficient_ceiling_code", "1.0e30"),
+      "physics.metal_diffusion_coefficient_ceiling_code");
   frozen.config.physics.enable_black_hole_agn = parseBool(
       requireString(entries, consumed, "physics.enable_black_hole_agn", "false"),
       "physics.enable_black_hole_agn");
@@ -3484,6 +3607,32 @@ std::string coolingModelToString(CoolingModel model) {
       return "primordial_metal_line";
   }
   throw ConfigError("unhandled CoolingModel enum value during serialization");
+}
+
+std::string metalSpeciesModeToString(MetalSpeciesMode mode) {
+  switch (mode) {
+    case MetalSpeciesMode::kTotalOnly: return "total_only";
+    case MetalSpeciesMode::kCoreElements: return "core_elements";
+  }
+  throw ConfigError("unhandled MetalSpeciesMode enum value during serialization");
+}
+
+std::string metalDiffusionModelToString(MetalDiffusionModel model) {
+  switch (model) {
+    case MetalDiffusionModel::kNone: return "none";
+    case MetalDiffusionModel::kSmagorinsky: return "smagorinsky";
+  }
+  throw ConfigError("unhandled MetalDiffusionModel enum value during serialization");
+}
+
+std::string metalDiffusionTimeIntegratorToString(
+    MetalDiffusionTimeIntegrator integrator) {
+  switch (integrator) {
+    case MetalDiffusionTimeIntegrator::kExplicitSubcycling: return "explicit_subcycling";
+    case MetalDiffusionTimeIntegrator::kRkl2: return "rkl2";
+  }
+  throw ConfigError(
+      "unhandled MetalDiffusionTimeIntegrator enum value during serialization");
 }
 
 std::string integratorTimeVariableToString(IntegratorTimeVariable variable) {

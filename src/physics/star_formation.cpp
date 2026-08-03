@@ -1124,7 +1124,15 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
       state.star_particles.stellar_age_years_last[star_index] = 0.0;
       state.star_particles.stellar_returned_mass_cumulative_code[star_index] = 0.0;
       state.star_particles.stellar_returned_metals_cumulative_code[star_index] = 0.0;
+      state.star_particles.stellar_newly_synthesized_metals_cumulative_code[star_index] = 0.0;
       state.star_particles.stellar_feedback_energy_cumulative_erg[star_index] = 0.0;
+      state.star_particles.enrichment_carry_mass_code[star_index] = 0.0;
+      state.star_particles.enrichment_carry_metals_code[star_index] = 0.0;
+      state.star_particles.enrichment_carry_feedback_energy_erg[star_index] = 0.0;
+      state.star_particles.enrichment_carry_momentum_code[star_index] = 0.0;
+      state.star_particles.stellar_deposited_mass_cumulative_code[star_index] = 0.0;
+      state.star_particles.stellar_deposited_metals_cumulative_code[star_index] = 0.0;
+      state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[star_index] = 0.0;
       for (std::size_t channel = 0;
            channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size();
            ++channel) {

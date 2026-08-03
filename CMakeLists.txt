@@ -298,6 +298,7 @@ add_library(cosmosim_physics STATIC
   src/physics/star_formation.cpp
   src/physics/stellar_evolution.cpp
   src/physics/stellar_feedback.cpp
+  src/physics/metal_diffusion.cpp
   src/physics/tracer_support.cpp)
 add_library(cosmosim_io STATIC
   src/io/io_module.cpp
@@ -588,6 +589,7 @@ if(COSMOSIM_ENABLE_TESTS)
 
   add_executable(test_unit_stage6_source_diagnostics_views tests/unit/test_stage6_source_diagnostics_views.cpp)
   target_link_libraries(test_unit_stage6_source_diagnostics_views PRIVATE cosmosim_all)
+  target_compile_definitions(test_unit_stage6_source_diagnostics_views PRIVATE COSMOSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME unit_stage6_source_diagnostics_views COMMAND test_unit_stage6_source_diagnostics_views)
   cosmosim_mark_runtime_truth_test(unit_stage6_source_diagnostics_views active_views sidecar)
 
@@ -670,7 +672,11 @@ if(COSMOSIM_ENABLE_TESTS)
 
   add_executable(test_unit_stellar_evolution tests/unit/test_stellar_evolution.cpp)
   target_link_libraries(test_unit_stellar_evolution PRIVATE cosmosim_all)
+  target_compile_definitions(test_unit_stellar_evolution PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME unit_stellar_evolution COMMAND test_unit_stellar_evolution)
+  add_executable(test_unit_metal_diffusion tests/unit/test_metal_diffusion.cpp)
+  target_link_libraries(test_unit_metal_diffusion PRIVATE cosmosim_all)
+  add_test(NAME unit_metal_diffusion COMMAND test_unit_metal_diffusion)
   add_executable(test_unit_stellar_feedback tests/unit/test_stellar_feedback.cpp)
   target_link_libraries(test_unit_stellar_feedback PRIVATE cosmosim_all)
   add_test(NAME unit_stellar_feedback COMMAND test_unit_stellar_feedback)
@@ -684,6 +690,7 @@ if(COSMOSIM_ENABLE_TESTS)
 
   add_executable(test_integration_stellar_evolution_ssp tests/integration/test_stellar_evolution_ssp.cpp)
   target_link_libraries(test_integration_stellar_evolution_ssp PRIVATE cosmosim_all)
+  target_compile_definitions(test_integration_stellar_evolution_ssp PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME integration_stellar_evolution_ssp COMMAND test_integration_stellar_evolution_ssp)
 
   add_executable(test_integration_star_formation_box tests/integration/test_star_formation_box.cpp)
@@ -1758,6 +1765,11 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_stellar_evolution_bookkeeping bench/bench_stellar_evolution_bookkeeping.cpp)
   target_link_libraries(bench_stellar_evolution_bookkeeping PRIVATE cosmosim_all)
+  add_executable(bench_metal_enrichment bench/bench_metal_enrichment.cpp)
+  target_link_libraries(bench_metal_enrichment PRIVATE cosmosim_all)
+  target_compile_definitions(bench_metal_enrichment PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  add_executable(bench_metal_diffusion bench/bench_metal_diffusion.cpp)
+  target_link_libraries(bench_metal_diffusion PRIVATE cosmosim_all)
 
   add_executable(bench_star_formation_spawn bench/bench_star_formation_spawn.cpp)
   target_link_libraries(bench_star_formation_spawn PRIVATE cosmosim_all)

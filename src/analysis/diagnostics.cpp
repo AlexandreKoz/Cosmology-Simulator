@@ -102,6 +102,79 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
 
 }  // namespace
 
+MetalBudgetDiagnostics computeMetalBudgetDiagnostics(
+    const core::SimulationState& state) {
+  MetalBudgetDiagnostics diagnostics;
+  double gas_mass_total = 0.0;
+  double metal_free_gas_mass = 0.0;
+  diagnostics.minimum_gas_metallicity = std::numeric_limits<double>::infinity();
+  for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    const double gas_mass = state.cells.mass_code[cell_index];
+    const double metal_mass = state.gas_cells.metal_mass_code[cell_index];
+    if (!std::isfinite(gas_mass) || !std::isfinite(metal_mass) ||
+        gas_mass < 0.0 || metal_mass < 0.0 || metal_mass > gas_mass) {
+      ++diagnostics.invalid_gas_states;
+      continue;
+    }
+    const double metallicity = gas_mass > 0.0 ? metal_mass / gas_mass : 0.0;
+    diagnostics.gas_metal_mass_code += metal_mass;
+    gas_mass_total += gas_mass;
+    diagnostics.minimum_gas_metallicity = std::min(
+        diagnostics.minimum_gas_metallicity, metallicity);
+    diagnostics.maximum_gas_metallicity = std::max(
+        diagnostics.maximum_gas_metallicity, metallicity);
+    if (metal_mass == 0.0) {
+      metal_free_gas_mass += gas_mass;
+    }
+  }
+  if (state.cells.size() == 0U || !std::isfinite(diagnostics.minimum_gas_metallicity)) {
+    diagnostics.minimum_gas_metallicity = 0.0;
+  }
+  diagnostics.mass_weighted_mean_gas_metallicity = gas_mass_total > 0.0
+      ? diagnostics.gas_metal_mass_code / gas_mass_total : 0.0;
+  diagnostics.metal_free_gas_mass_fraction = gas_mass_total > 0.0
+      ? metal_free_gas_mass / gas_mass_total : 0.0;
+
+  for (std::size_t star_index = 0;
+       star_index < state.star_particles.size(); ++star_index) {
+    const double birth_metals =
+        state.star_particles.birth_mass_code[star_index] *
+        state.star_particles.metallicity_mass_fraction[star_index];
+    const double returned_metals =
+        state.star_particles.stellar_returned_metals_cumulative_code[star_index];
+    const double new_metals =
+        state.star_particles.stellar_newly_synthesized_metals_cumulative_code[star_index];
+    const double returned_birth_metals = std::max(returned_metals - new_metals, 0.0);
+    diagnostics.stellar_birth_metal_mass_code += birth_metals;
+    diagnostics.stellar_locked_metal_mass_code +=
+        std::max(birth_metals - returned_birth_metals, 0.0);
+    diagnostics.cumulative_newly_synthesized_metal_mass_code += new_metals;
+    diagnostics.cumulative_returned_metal_mass_code += returned_metals;
+    diagnostics.cumulative_deposited_metal_mass_code +=
+        state.star_particles.stellar_deposited_metals_cumulative_code[star_index];
+    diagnostics.unresolved_carried_metal_mass_code +=
+        state.star_particles.enrichment_carry_metals_code[star_index];
+  }
+  diagnostics.enrichment_deposition_residual_code =
+      diagnostics.cumulative_returned_metal_mass_code -
+      diagnostics.cumulative_deposited_metal_mass_code -
+      diagnostics.unresolved_carried_metal_mass_code;
+  return diagnostics;
+}
+
+double globalMetalAuditResidualCode(
+    const MetalBudgetDiagnostics& diagnostics,
+    double initial_total_metal_mass_code,
+    double escaped_metal_mass_code) noexcept {
+  const double accounted_final = diagnostics.gas_metal_mass_code +
+      diagnostics.stellar_locked_metal_mass_code +
+      diagnostics.unresolved_carried_metal_mass_code;
+  return accounted_final -
+      (initial_total_metal_mass_code +
+       diagnostics.cumulative_newly_synthesized_metal_mass_code -
+       escaped_metal_mass_code);
+}
+
 std::string_view powerSpectrumMassAssignmentLabel(
     PowerSpectrumMassAssignment assignment) noexcept {
   switch (assignment) {

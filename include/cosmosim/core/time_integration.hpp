@@ -614,6 +614,9 @@ struct TimeStepGasCellCriteriaView {
   // Peculiar-velocity divergence evaluated with physical cell spacing, in
   // inverse code-time units. Invalid/non-patch cells carry NaN and are ignored.
   std::span<const double> velocity_divergence_code;
+  // Local conservative parabolic limit for the configured metal-diffusion
+  // operator. Infinity means diffusion imposes no limit for this cell.
+  std::span<const double> metal_diffusion_dt_code;
   std::span<const double> accel_x_comoving;
   std::span<const double> accel_y_comoving;
   std::span<const double> accel_z_comoving;

@@ -467,8 +467,22 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
           star_particles.stellar_returned_mass_cumulative_code[row];
       record.star_fields.stellar_returned_metals_cumulative_code =
           star_particles.stellar_returned_metals_cumulative_code[row];
+      record.star_fields.stellar_newly_synthesized_metals_cumulative_code =
+          star_particles.stellar_newly_synthesized_metals_cumulative_code[row];
       record.star_fields.stellar_feedback_energy_cumulative_erg =
           star_particles.stellar_feedback_energy_cumulative_erg[row];
+      record.star_fields.enrichment_carry_mass_code = star_particles.enrichment_carry_mass_code[row];
+      record.star_fields.enrichment_carry_metals_code = star_particles.enrichment_carry_metals_code[row];
+      record.star_fields.enrichment_carry_feedback_energy_erg =
+          star_particles.enrichment_carry_feedback_energy_erg[row];
+      record.star_fields.enrichment_carry_momentum_code =
+          star_particles.enrichment_carry_momentum_code[row];
+      record.star_fields.stellar_deposited_mass_cumulative_code =
+          star_particles.stellar_deposited_mass_cumulative_code[row];
+      record.star_fields.stellar_deposited_metals_cumulative_code =
+          star_particles.stellar_deposited_metals_cumulative_code[row];
+      record.star_fields.stellar_deposited_feedback_energy_cumulative_erg =
+          star_particles.stellar_deposited_feedback_energy_cumulative_erg[row];
       for (std::size_t channel = 0; channel < record.star_fields.stellar_returned_mass_channel_cumulative_code.size();
            ++channel) {
         record.star_fields.stellar_returned_mass_channel_cumulative_code[channel] =
@@ -858,8 +872,22 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
           star_particles.stellar_returned_mass_cumulative_code[source];
       destination->stellar_returned_metals_cumulative_code[row] =
           star_particles.stellar_returned_metals_cumulative_code[source];
+      destination->stellar_newly_synthesized_metals_cumulative_code[row] =
+          star_particles.stellar_newly_synthesized_metals_cumulative_code[source];
       destination->stellar_feedback_energy_cumulative_erg[row] =
           star_particles.stellar_feedback_energy_cumulative_erg[source];
+      destination->enrichment_carry_mass_code[row] = star_particles.enrichment_carry_mass_code[source];
+      destination->enrichment_carry_metals_code[row] = star_particles.enrichment_carry_metals_code[source];
+      destination->enrichment_carry_feedback_energy_erg[row] =
+          star_particles.enrichment_carry_feedback_energy_erg[source];
+      destination->enrichment_carry_momentum_code[row] =
+          star_particles.enrichment_carry_momentum_code[source];
+      destination->stellar_deposited_mass_cumulative_code[row] =
+          star_particles.stellar_deposited_mass_cumulative_code[source];
+      destination->stellar_deposited_metals_cumulative_code[row] =
+          star_particles.stellar_deposited_metals_cumulative_code[source];
+      destination->stellar_deposited_feedback_energy_cumulative_erg[row] =
+          star_particles.stellar_deposited_feedback_energy_cumulative_erg[source];
       for (std::size_t channel = 0; channel < destination->stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
         destination->stellar_returned_mass_channel_cumulative_code[channel][row] =
             star_particles.stellar_returned_mass_channel_cumulative_code[channel][source];
@@ -888,8 +916,22 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
           inbound.star_fields.stellar_returned_mass_cumulative_code;
       destination->stellar_returned_metals_cumulative_code[row] =
           inbound.star_fields.stellar_returned_metals_cumulative_code;
+      destination->stellar_newly_synthesized_metals_cumulative_code[row] =
+          inbound.star_fields.stellar_newly_synthesized_metals_cumulative_code;
       destination->stellar_feedback_energy_cumulative_erg[row] =
           inbound.star_fields.stellar_feedback_energy_cumulative_erg;
+      destination->enrichment_carry_mass_code[row] = inbound.star_fields.enrichment_carry_mass_code;
+      destination->enrichment_carry_metals_code[row] = inbound.star_fields.enrichment_carry_metals_code;
+      destination->enrichment_carry_feedback_energy_erg[row] =
+          inbound.star_fields.enrichment_carry_feedback_energy_erg;
+      destination->enrichment_carry_momentum_code[row] =
+          inbound.star_fields.enrichment_carry_momentum_code;
+      destination->stellar_deposited_mass_cumulative_code[row] =
+          inbound.star_fields.stellar_deposited_mass_cumulative_code;
+      destination->stellar_deposited_metals_cumulative_code[row] =
+          inbound.star_fields.stellar_deposited_metals_cumulative_code;
+      destination->stellar_deposited_feedback_energy_cumulative_erg[row] =
+          inbound.star_fields.stellar_deposited_feedback_energy_cumulative_erg;
       for (std::size_t channel = 0; channel < inbound.star_fields.stellar_returned_mass_channel_cumulative_code.size();
            ++channel) {
         destination->stellar_returned_mass_channel_cumulative_code[channel][row] =

@@ -210,12 +210,16 @@ void testStellarEvolutionUsesNarrowRuntimeView() {
   state.star_particles.particle_index[0] = 2;
   state.star_particles.birth_mass_code[0] = 5.0;
   state.star_particles.formation_scale_factor[0] = 0.5;
+  state.star_particles.metallicity_mass_fraction[0] = 0.01;
 
   cosmosim::physics::StellarEvolutionConfig config;
   config.enabled = true;
   config.hubble_time_years = 1.0e10;
   cosmosim::physics::StellarEvolutionBookkeeper bookkeeper(
-      config, cosmosim::physics::StellarEvolutionTable::makeBuiltinReference());
+      config,
+      cosmosim::physics::StellarEvolutionTable::loadFromTextFile(
+          std::string(COSMOSIM_SOURCE_DIR) +
+          "/resources/stellar_evolution/test_synthetic_v2.txt"));
 
   const std::uint32_t active_star = 0;
   cosmosim::physics::StellarEvolutionRuntimeView view{
@@ -223,6 +227,7 @@ void testStellarEvolutionUsesNarrowRuntimeView() {
       .particle_index = state.star_particles.particle_index,
       .birth_mass_code = state.star_particles.birth_mass_code,
       .formation_scale_factor = state.star_particles.formation_scale_factor,
+      .birth_metallicity_mass_fraction = state.star_particles.metallicity_mass_fraction,
       .stellar_age_years_last = state.star_particles.stellar_age_years_last,
       .stellar_returned_mass_cumulative_code = state.star_particles.stellar_returned_mass_cumulative_code,
       .stellar_returned_metals_cumulative_code = state.star_particles.stellar_returned_metals_cumulative_code,

@@ -348,7 +348,15 @@ void visitStarSidecarLanes(StarParticleSidecar& sidecar, Visitor&& visitor) {
   visitor(sidecar.stellar_age_years_last);
   visitor(sidecar.stellar_returned_mass_cumulative_code);
   visitor(sidecar.stellar_returned_metals_cumulative_code);
+  visitor(sidecar.stellar_newly_synthesized_metals_cumulative_code);
   visitor(sidecar.stellar_feedback_energy_cumulative_erg);
+  visitor(sidecar.enrichment_carry_mass_code);
+  visitor(sidecar.enrichment_carry_metals_code);
+  visitor(sidecar.enrichment_carry_feedback_energy_erg);
+  visitor(sidecar.enrichment_carry_momentum_code);
+  visitor(sidecar.stellar_deposited_mass_cumulative_code);
+  visitor(sidecar.stellar_deposited_metals_cumulative_code);
+  visitor(sidecar.stellar_deposited_feedback_energy_cumulative_erg);
   for (std::size_t channel = 0; channel < sidecar.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
     visitor(sidecar.stellar_returned_mass_channel_cumulative_code[channel]);
     visitor(sidecar.stellar_returned_metals_channel_cumulative_code[channel]);

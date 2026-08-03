@@ -133,6 +133,30 @@ struct RunHealthCounters {
   std::uint64_t non_positive_particle_mass = 0;
 };
 
+struct MetalBudgetDiagnostics {
+  double gas_metal_mass_code = 0.0;
+  double stellar_birth_metal_mass_code = 0.0;
+  double stellar_locked_metal_mass_code = 0.0;
+  double cumulative_newly_synthesized_metal_mass_code = 0.0;
+  double cumulative_returned_metal_mass_code = 0.0;
+  double cumulative_deposited_metal_mass_code = 0.0;
+  double unresolved_carried_metal_mass_code = 0.0;
+  double enrichment_deposition_residual_code = 0.0;
+  double minimum_gas_metallicity = 0.0;
+  double maximum_gas_metallicity = 0.0;
+  double mass_weighted_mean_gas_metallicity = 0.0;
+  double metal_free_gas_mass_fraction = 0.0;
+  std::uint64_t invalid_gas_states = 0;
+};
+
+[[nodiscard]] MetalBudgetDiagnostics computeMetalBudgetDiagnostics(
+    const core::SimulationState& state);
+
+[[nodiscard]] double globalMetalAuditResidualCode(
+    const MetalBudgetDiagnostics& diagnostics,
+    double initial_total_metal_mass_code,
+    double escaped_metal_mass_code = 0.0) noexcept;
+
 
 struct ParticleDiagnosticsView {
   std::span<const double> position_x_comoving;

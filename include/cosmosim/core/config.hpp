@@ -160,6 +160,21 @@ enum class CoolingModel {
   kPrimordialMetalLine,
 };
 
+enum class MetalSpeciesMode {
+  kTotalOnly,
+  kCoreElements,
+};
+
+enum class MetalDiffusionModel {
+  kNone,
+  kSmagorinsky,
+};
+
+enum class MetalDiffusionTimeIntegrator {
+  kExplicitSubcycling,
+  kRkl2,
+};
+
 enum class IntegratorTimeVariable {
   kScaleFactor,
   kLogScaleFactor,
@@ -298,6 +313,22 @@ struct PhysicsConfig {
   std::uint64_t fb_random_seed = 42424242ull;
   std::string stellar_evolution_table_path;
   double stellar_evolution_hubble_time_years = 1.44e10;
+  bool stellar_evolution_require_production_table = false;
+
+  // Total metal mass remains authoritative. Element mode is reserved until a
+  // complete sidecar/yield/cooling schema is selected; validation fails closed.
+  MetalSpeciesMode metal_species_mode = MetalSpeciesMode::kTotalOnly;
+  bool enable_metal_diffusion = false;
+  MetalDiffusionModel metal_diffusion_model = MetalDiffusionModel::kNone;
+  MetalDiffusionTimeIntegrator metal_diffusion_time_integrator =
+      MetalDiffusionTimeIntegrator::kExplicitSubcycling;
+  double metal_diffusion_coefficient = 0.05;
+  double metal_diffusion_cfl = 0.4;
+  std::uint32_t metal_diffusion_max_subcycles = 128;
+  std::uint32_t metal_diffusion_max_rkl_stages = 64;
+  double metal_diffusion_coefficient_floor_code = 0.0;
+  double metal_diffusion_coefficient_ceiling_code = 1.0e30;
+
   bool enable_black_hole_agn = false;
   double bh_seed_halo_mass_threshold_code = 1.0e3;
   double bh_seed_mass_code = 1.0;
@@ -593,6 +624,10 @@ std::string feedbackModeToString(FeedbackMode mode);
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);
 [[nodiscard]] std::string coolingModelToString(CoolingModel model);
+[[nodiscard]] std::string metalSpeciesModeToString(MetalSpeciesMode mode);
+[[nodiscard]] std::string metalDiffusionModelToString(MetalDiffusionModel model);
+[[nodiscard]] std::string metalDiffusionTimeIntegratorToString(
+    MetalDiffusionTimeIntegrator integrator);
 [[nodiscard]] std::string integratorTimeVariableToString(IntegratorTimeVariable variable);
 
 }  // namespace cosmosim::core

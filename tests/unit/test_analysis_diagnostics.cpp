@@ -328,6 +328,38 @@ void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
   assert(found_power_record);
 }
 
+void testMetalBudgetDiagnosticsCloseReturnedDepositAndCarry() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(2);
+  state.cells.mass_code[0] = 10.0;
+  state.cells.mass_code[1] = 20.0;
+  state.gas_cells.metal_mass_code[0] = 0.1;
+  state.gas_cells.metal_mass_code[1] = 0.0;
+  state.star_particles.resize(1);
+  state.star_particles.birth_mass_code[0] = 5.0;
+  state.star_particles.metallicity_mass_fraction[0] = 0.02;
+  state.star_particles.stellar_returned_metals_cumulative_code[0] = 0.03;
+  state.star_particles.stellar_newly_synthesized_metals_cumulative_code[0] = 0.01;
+  state.star_particles.stellar_deposited_metals_cumulative_code[0] = 0.025;
+  state.star_particles.enrichment_carry_metals_code[0] = 0.005;
+
+  const auto diagnostics =
+      cosmosim::analysis::computeMetalBudgetDiagnostics(state);
+  assert(std::abs(diagnostics.gas_metal_mass_code - 0.1) < 1.0e-15);
+  assert(std::abs(diagnostics.stellar_birth_metal_mass_code - 0.1) < 1.0e-15);
+  assert(std::abs(diagnostics.stellar_locked_metal_mass_code - 0.08) < 1.0e-15);
+  assert(std::abs(diagnostics.enrichment_deposition_residual_code) < 1.0e-15);
+  assert(std::abs(diagnostics.mass_weighted_mean_gas_metallicity -
+                  (0.1 / 30.0)) < 1.0e-15);
+  assert(std::abs(diagnostics.metal_free_gas_mass_fraction - (2.0 / 3.0)) < 1.0e-15);
+  assert(diagnostics.invalid_gas_states == 0U);
+
+  const double initial_metals = 0.1 + 0.1;
+  const double residual = cosmosim::analysis::globalMetalAuditResidualCode(
+      diagnostics, initial_metals, 0.0);
+  assert(std::abs(residual + 0.025) < 1.0e-15);
+}
+
 }  // namespace
 
 int main() {
@@ -337,5 +369,6 @@ int main() {
   testProvisionalHeavyDiagnosticsRequireExplicitPolicy();
   testStarFormationHistoryCsvUsesBirthState();
   testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords();
+  testMetalBudgetDiagnosticsCloseReturnedDepositAndCarry();
   return 0;
 }

@@ -24,6 +24,7 @@
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
+#include "cosmosim/physics/metal_diffusion.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
 #include "cosmosim/workflows/runtime_module_registry.hpp"
@@ -173,6 +174,7 @@ struct AdaptiveTimeStepCriteriaStorage {
   std::vector<double> cell_width_y_code;
   std::vector<double> cell_width_z_code;
   std::vector<double> velocity_divergence_code;
+  std::vector<double> metal_diffusion_dt_code;
 };
 
 struct LocalGasCellCflMetadata {
@@ -308,6 +310,8 @@ struct LocalGasCellCflMetadata {
   storage.cell_width_z_code = std::move(cfl_metadata.cell_width_z_code);
   storage.velocity_divergence_code.assign(
       state.cells.size(), std::numeric_limits<double>::quiet_NaN());
+  storage.metal_diffusion_dt_code.assign(
+      state.cells.size(), std::numeric_limits<double>::infinity());
   const double length_to_physical = config.units.coordinate_frame ==
           core::CoordinateFrame::kComoving
       ? std::max(scale_factor, 1.0e-12)
@@ -318,17 +322,51 @@ struct LocalGasCellCflMetadata {
     if (!geometry.valid) {
       continue;
     }
-    const double dvx_dx = internal::starFormationDerivativeAtCell(
-        state.gas_cells.velocity_x_peculiar, geometry, 0,
-        geometry.dx_stored * length_to_physical, cell_index);
-    const double dvy_dy = internal::starFormationDerivativeAtCell(
-        state.gas_cells.velocity_y_peculiar, geometry, 1,
-        geometry.dy_stored * length_to_physical, cell_index);
-    const double dvz_dz = internal::starFormationDerivativeAtCell(
-        state.gas_cells.velocity_z_peculiar, geometry, 2,
-        geometry.dz_stored * length_to_physical, cell_index);
-    if (std::isfinite(dvx_dx) && std::isfinite(dvy_dy) && std::isfinite(dvz_dz)) {
-      storage.velocity_divergence_code[cell_index] = dvx_dx + dvy_dy + dvz_dz;
+    const std::array<std::span<const double>, 3> velocity_fields{
+        state.gas_cells.velocity_x_peculiar,
+        state.gas_cells.velocity_y_peculiar,
+        state.gas_cells.velocity_z_peculiar};
+    const std::array<double, 3> spacing_phys_code{
+        geometry.dx_stored * length_to_physical,
+        geometry.dy_stored * length_to_physical,
+        geometry.dz_stored * length_to_physical};
+    physics::MetalDiffusionVelocityGradient velocity_gradient;
+    bool gradient_valid = true;
+    for (int component = 0; component < 3; ++component) {
+      for (int axis = 0; axis < 3; ++axis) {
+        velocity_gradient.grad[component][axis] =
+            internal::starFormationDerivativeAtCell(
+                velocity_fields[component], geometry, axis,
+                spacing_phys_code[axis], cell_index);
+        gradient_valid = gradient_valid &&
+            std::isfinite(velocity_gradient.grad[component][axis]);
+      }
+    }
+    if (gradient_valid) {
+      storage.velocity_divergence_code[cell_index] =
+          velocity_gradient.grad[0][0] + velocity_gradient.grad[1][1] +
+          velocity_gradient.grad[2][2];
+      if (config.physics.enable_metal_diffusion &&
+          config.physics.metal_diffusion_model ==
+              core::MetalDiffusionModel::kSmagorinsky) {
+        const double filter_length = std::cbrt(
+            spacing_phys_code[0] * spacing_phys_code[1] * spacing_phys_code[2]);
+        const double strain = physics::traceFreeStrainMagnitude(velocity_gradient);
+        const double kappa = std::clamp(
+            config.physics.metal_diffusion_coefficient * filter_length *
+                filter_length * strain,
+            config.physics.metal_diffusion_coefficient_floor_code,
+            config.physics.metal_diffusion_coefficient_ceiling_code);
+        if (kappa > 0.0) {
+          const double minimum_spacing_squared = std::min({
+              spacing_phys_code[0] * spacing_phys_code[0],
+              spacing_phys_code[1] * spacing_phys_code[1],
+              spacing_phys_code[2] * spacing_phys_code[2]});
+          storage.metal_diffusion_dt_code[cell_index] =
+              config.physics.metal_diffusion_cfl * minimum_spacing_squared /
+              (6.0 * kappa);
+        }
+      }
     }
   }
   return core::AdaptiveTimeStepCriteriaView{
@@ -361,6 +399,7 @@ struct LocalGasCellCflMetadata {
           .temperature_code = state.gas_cells.temperature_code,
           .sound_speed_code = state.gas_cells.sound_speed_code,
           .velocity_divergence_code = storage.velocity_divergence_code,
+          .metal_diffusion_dt_code = storage.metal_diffusion_dt_code,
           .accel_x_comoving = cell_accel_x,
           .accel_y_comoving = cell_accel_y,
           .accel_z_comoving = cell_accel_z,
@@ -403,6 +442,7 @@ void updateAdaptiveTimeBinsFromView(
       view.gas_cells.temperature_code.size() != cell_count ||
       view.gas_cells.sound_speed_code.size() != cell_count ||
       view.gas_cells.velocity_divergence_code.size() != cell_count ||
+      view.gas_cells.metal_diffusion_dt_code.size() != cell_count ||
       view.gas_cells.gas_particle_index_by_cell.size() != cell_count ||
       view.gas_cells.gas_cell_id_by_cell.size() != cell_count ||
       view.gas_cells.patch_id_by_cell.size() != cell_count ||
@@ -609,6 +649,13 @@ void updateAdaptiveTimeBinsFromView(
       if (const auto source_dt = star_formation_dt_for_cell(cell_index); source_dt.has_value()) {
         scheduler.submitCandidateTimeStep(
             cell_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_cell_star_formation_source");
+      }
+      const double diffusion_dt = view.gas_cells.metal_diffusion_dt_code[cell_index];
+      if (config.physics.enable_metal_diffusion && std::isfinite(diffusion_dt) &&
+          diffusion_dt > 0.0) {
+        scheduler.submitCandidateTimeStep(
+            cell_index, diffusion_dt, limits, core::TimeStepCandidateSource::kSourceTerm,
+            "gas_cell_metal_diffusion_parabolic");
       }
     });
     return;

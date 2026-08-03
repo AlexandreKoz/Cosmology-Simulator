@@ -9,12 +9,16 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 #include "cosmosim/physics/star_formation.hpp"
+#include "cosmosim/physics/stellar_evolution.hpp"
+#include "cosmosim/physics/stellar_feedback.hpp"
+#include "cosmosim/physics/metal_diffusion.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/star_formation_geometry.hpp"
@@ -37,6 +41,27 @@ namespace {
   result.newton_g_code = newtonGCodeFromUnits(units);
   result.density_is_comoving = config.units.coordinate_frame == core::CoordinateFrame::kComoving;
   result.geometry_is_comoving = config.units.coordinate_frame == core::CoordinateFrame::kComoving;
+  return result;
+}
+
+[[nodiscard]] physics::StellarFeedbackConfig makeRuntimeStellarFeedbackConfig(
+    const core::SimulationConfig& config,
+    const core::UnitSystem& units) {
+  physics::StellarFeedbackConfig result =
+      physics::makeStellarFeedbackConfig(config.physics);
+  // Mass and metal return is part of stellar evolution even when energetic
+  // feedback is disabled. Keep the deposition transaction enabled and zero only
+  // the energy/momentum coupling in that case.
+  result.enabled = config.physics.enable_stellar_evolution;
+  if (!config.physics.enable_feedback) {
+    result.epsilon_thermal = 0.0;
+    result.epsilon_kinetic = 0.0;
+    result.epsilon_momentum = 0.0;
+  }
+  constexpr double k_joule_per_erg = 1.0e-7;
+  result.total_energy_code_per_erg = k_joule_per_erg /
+      (units.mass_si_per_code * units.velocity_si_per_code *
+       units.velocity_si_per_code);
   return result;
 }
 
@@ -187,6 +212,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
       : m_units(units),
         m_effective_eos_table(makeRuntimeEffectiveEosTable(config, units)),
         m_star_formation(makeRuntimeStarFormationConfig(config, units), m_effective_eos_table),
+        m_stellar_evolution(
+            physics::makeStellarEvolutionConfig(config.physics),
+            physics::loadStellarEvolutionTable(config.physics)),
+        m_stellar_feedback(makeRuntimeStellarFeedbackConfig(config, units)),
+        m_metal_diffusion(physics::makeMetalDiffusionConfig(config.physics)),
         m_black_hole(makeRuntimeBlackHoleAgnConfig(config.physics, units)),
         m_particle_id_registry(mpi_context),
         m_world_rank(world_rank),
@@ -274,6 +304,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
       }
     }
 
+    executeStellarEvolutionAndEnrichment(context);
+    executeMetalDiffusion(context);
+
     (void)m_black_hole.apply(
         context.state,
         m_seed_candidates,
@@ -282,6 +315,277 @@ class SourceRuntimeImpl final : public SourceRuntime {
   }
 
  private:
+  void buildOwnedLeafCellMetadata(const core::StepContext& context) {
+    const core::SimulationState& state = context.state;
+    const std::size_t cell_count = state.cells.size();
+    m_cell_volume_code.assign(cell_count, 0.0);
+    m_owned_leaf_mask.assign(cell_count, 0U);
+    m_feedback_candidate_cells.clear();
+    m_feedback_candidate_cells.reserve(cell_count);
+    std::unordered_set<std::uint64_t> patch_ids_with_children;
+    patch_ids_with_children.reserve(state.patches.size());
+    for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+      const std::uint64_t parent_id = state.patches.parent_patch_id[patch_index];
+      if (parent_id != 0U) {
+        patch_ids_with_children.insert(parent_id);
+      }
+    }
+    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      const PatchCellGeometry geometry = starFormationPatchCellGeometry(state, cell_index);
+      bool owned_leaf = true;
+      double volume = state.gas_cells.density_code[cell_index] > 0.0
+          ? state.cells.mass_code[cell_index] /
+                state.gas_cells.density_code[cell_index]
+          : 0.0;
+      if (geometry.valid) {
+        volume = geometry.dx_stored * geometry.dy_stored * geometry.dz_stored;
+        owned_leaf = state.patches.owning_rank[geometry.patch_index] == m_world_rank &&
+            starFormationPatchIsLeaf(
+                state, geometry.patch_index, patch_ids_with_children);
+      }
+      m_cell_volume_code[cell_index] = volume;
+      m_owned_leaf_mask[cell_index] = owned_leaf ? 1U : 0U;
+      if (owned_leaf) {
+        m_feedback_candidate_cells.push_back(cell_index);
+      }
+    }
+  }
+
+  void buildActiveStarRows(const core::StepContext& context) {
+    const core::SimulationState& state = context.state;
+    m_active_star_indices.clear();
+    if (!context.active_set.particles_are_subset ||
+        context.active_set.particle_indices.empty()) {
+      m_active_star_indices.resize(state.star_particles.size());
+      std::iota(m_active_star_indices.begin(), m_active_star_indices.end(), 0U);
+      return;
+    }
+    std::unordered_set<std::uint32_t> active_particles(
+        context.active_set.particle_indices.begin(),
+        context.active_set.particle_indices.end());
+    for (std::uint32_t star_index = 0;
+         star_index < state.star_particles.size(); ++star_index) {
+      if (active_particles.contains(
+              state.star_particles.particle_index[star_index])) {
+        m_active_star_indices.push_back(star_index);
+      }
+    }
+  }
+
+  [[nodiscard]] double elapsedStellarEvolutionYears(
+      const core::StepContext& context) const {
+    constexpr double k_seconds_per_year = 31557600.0;
+    double elapsed_si = context.timeline_step.dt_time_si;
+    if (m_is_cosmological && context.cosmology_background != nullptr &&
+        context.timeline_step.scale_factor_begin > 0.0 &&
+        context.timeline_step.scale_factor_end >=
+            context.timeline_step.scale_factor_begin) {
+      elapsed_si = context.cosmology_background->cosmicTimeIntervalSi(
+          context.timeline_step.scale_factor_begin,
+          context.timeline_step.scale_factor_end);
+    } else if (!(elapsed_si > 0.0)) {
+      elapsed_si = context.integrator_state.dt_time_code * m_units.timeSiPerCode();
+    }
+    return std::max(elapsed_si / k_seconds_per_year, 0.0);
+  }
+
+  void executeStellarEvolutionAndEnrichment(core::StepContext& context) {
+    if (!m_stellar_evolution.config().enabled ||
+        context.state.star_particles.size() == 0U) {
+      return;
+    }
+    buildActiveStarRows(context);
+    if (m_active_star_indices.empty()) {
+      return;
+    }
+    buildOwnedLeafCellMetadata(context);
+    const double elapsed_years = elapsedStellarEvolutionYears(context);
+    const physics::StellarEvolutionStepReport evolution_report =
+        m_stellar_evolution.evaluateElapsedYears(
+            context.state, m_active_star_indices, elapsed_years);
+
+    const std::size_t star_count = context.state.star_particles.size();
+    m_returned_mass_delta_code.assign(star_count, 0.0);
+    m_returned_metals_delta_code.assign(star_count, 0.0);
+    m_feedback_energy_delta_erg.assign(star_count, 0.0);
+    for (const physics::StellarEvolutionStarBudget& budget :
+         evolution_report.budgets) {
+      m_returned_mass_delta_code[budget.star_index] =
+          budget.interval.returned_mass_code;
+      m_returned_metals_delta_code[budget.star_index] =
+          budget.interval.returned_metals_code;
+      m_feedback_energy_delta_erg[budget.star_index] =
+          budget.interval.feedback_energy_erg;
+    }
+
+    const physics::StellarFeedbackGeometryView geometry_view{
+        .particle_position_x_comoving =
+            context.state.particles.position_x_comoving,
+        .particle_position_y_comoving =
+            context.state.particles.position_y_comoving,
+        .particle_position_z_comoving =
+            context.state.particles.position_z_comoving,
+        .cell_center_x_comoving = context.state.cells.center_x_comoving,
+        .cell_center_y_comoving = context.state.cells.center_y_comoving,
+        .cell_center_z_comoving = context.state.cells.center_z_comoving,
+        .gas_cell_id = context.state.gas_cells.gas_cell_id,
+        .is_owned_leaf = m_owned_leaf_mask,
+        .candidate_cell_indices = m_feedback_candidate_cells,
+    };
+    physics::StellarFeedbackDepositionView deposition_view{
+        .cell_mass_code = context.state.cells.mass_code,
+        .gas_density_code = context.state.gas_cells.density_code,
+        .gas_internal_energy_code =
+            context.state.gas_cells.internal_energy_code,
+        .gas_metal_mass_code = context.state.gas_cells.metal_mass_code,
+        .cell_volume_code = m_cell_volume_code,
+    };
+    (void)m_stellar_feedback.applyWithViews(
+        context.state, m_stellar_feedback_state, geometry_view,
+        deposition_view, m_active_star_indices, m_returned_mass_delta_code,
+        m_returned_metals_delta_code, context.integrator_state.dt_time_code,
+        m_feedback_energy_delta_erg);
+
+    // The returned budget is now either deposited or durably attached to its
+    // source star. Only after that transaction succeeds may stellar mass and
+    // cumulative SSP bookkeeping advance.
+    m_stellar_evolution.commitBudgets(context.state, evolution_report);
+    internal::synchronizeParentParticleCompatibilityMirrors(
+        context.state, m_world_rank,
+        "SourceRuntime stellar-evolution enrichment batch");
+  }
+
+  void executeMetalDiffusion(core::StepContext& context) {
+    if (!m_metal_diffusion.config().enabled || context.state.cells.size() == 0U) {
+      return;
+    }
+    buildOwnedLeafCellMetadata(context);
+    const double scale_factor = m_coordinate_frame == core::CoordinateFrame::kComoving
+        ? std::max(context.integrator_state.current_scale_factor, 1.0e-12)
+        : 1.0;
+    m_diffusion_cells.clear();
+    m_diffusion_cells.resize(context.state.cells.size());
+    for (std::uint32_t cell_index = 0;
+         cell_index < context.state.cells.size(); ++cell_index) {
+      const PatchCellGeometry geometry =
+          starFormationPatchCellGeometry(context.state, cell_index);
+      const double volume_stored = m_cell_volume_code[cell_index];
+      const double volume_phys = volume_stored * scale_factor * scale_factor *
+          scale_factor;
+      physics::MetalDiffusionCell cell;
+      cell.gas_cell_id = context.state.gas_cells.gas_cell_id[cell_index];
+      cell.gas_mass_code = context.state.cells.mass_code[cell_index];
+      cell.metal_mass_code =
+          context.state.gas_cells.metal_mass_code[cell_index];
+      cell.volume_code = volume_phys;
+      cell.density_code = volume_phys > 0.0
+          ? cell.gas_mass_code / volume_phys : 0.0;
+      cell.filter_length_code = volume_phys > 0.0
+          ? std::cbrt(volume_phys) : 0.0;
+      cell.is_owned_leaf = m_owned_leaf_mask[cell_index] != 0U;
+      if (geometry.valid && cell.is_owned_leaf) {
+        const std::array<std::span<const double>, 3> velocity_fields{
+            context.state.gas_cells.velocity_x_peculiar,
+            context.state.gas_cells.velocity_y_peculiar,
+            context.state.gas_cells.velocity_z_peculiar};
+        const std::array<double, 3> spacing{
+            geometry.dx_stored * scale_factor,
+            geometry.dy_stored * scale_factor,
+            geometry.dz_stored * scale_factor};
+        for (int component = 0; component < 3; ++component) {
+          for (int axis = 0; axis < 3; ++axis) {
+            cell.velocity_gradient.grad[component][axis] =
+                starFormationDerivativeAtCell(
+                    velocity_fields[component], geometry, axis,
+                    spacing[axis], cell_index);
+          }
+        }
+      }
+      m_diffusion_cells[cell_index] = cell;
+    }
+
+    m_diffusion_faces.clear();
+    for (std::uint32_t patch_index = 0;
+         patch_index < context.state.patches.size(); ++patch_index) {
+      if (context.state.patches.owning_rank[patch_index] != m_world_rank) {
+        continue;
+      }
+      const std::uint32_t first = context.state.patches.first_cell[patch_index];
+      const std::uint32_t nx = context.state.patches.cell_dim_x[patch_index];
+      const std::uint32_t ny = context.state.patches.cell_dim_y[patch_index];
+      const std::uint32_t nz = context.state.patches.cell_dim_z[patch_index];
+      if (nx == 0U || ny == 0U || nz == 0U) {
+        continue;
+      }
+      const double dx = context.state.patches.extent_x_comoving[patch_index] /
+          static_cast<double>(nx) * scale_factor;
+      const double dy = context.state.patches.extent_y_comoving[patch_index] /
+          static_cast<double>(ny) * scale_factor;
+      const double dz = context.state.patches.extent_z_comoving[patch_index] /
+          static_cast<double>(nz) * scale_factor;
+      const auto row = [first, nx, ny](std::uint32_t i, std::uint32_t j,
+                                      std::uint32_t k) {
+        return first + i + nx * (j + ny * k);
+      };
+      for (std::uint32_t k = 0; k < nz; ++k) {
+        for (std::uint32_t j = 0; j < ny; ++j) {
+          for (std::uint32_t i = 0; i < nx; ++i) {
+            const std::uint32_t left = row(i, j, k);
+            if (i + 1U < nx) {
+              m_diffusion_faces.push_back({
+                  .left_cell = left, .right_cell = row(i + 1U, j, k),
+                  .area_code = dy * dz, .center_distance_code = dx});
+            }
+            if (j + 1U < ny) {
+              m_diffusion_faces.push_back({
+                  .left_cell = left, .right_cell = row(i, j + 1U, k),
+                  .area_code = dx * dz, .center_distance_code = dy});
+            }
+            if (k + 1U < nz) {
+              m_diffusion_faces.push_back({
+                  .left_cell = left, .right_cell = row(i, j, k + 1U),
+                  .area_code = dx * dy, .center_distance_code = dz});
+            }
+          }
+        }
+      }
+    }
+    if (m_diffusion_faces.empty()) {
+      return;
+    }
+    const physics::MetalDiffusionStepReport report = m_metal_diffusion.advance(
+        m_diffusion_cells, m_diffusion_faces,
+        context.integrator_state.dt_time_code);
+    for (std::uint32_t cell_index = 0;
+         cell_index < context.state.cells.size(); ++cell_index) {
+      if (m_diffusion_cells[cell_index].is_owned_leaf) {
+        context.state.gas_cells.metal_mass_code[cell_index] =
+            m_diffusion_cells[cell_index].metal_mass_code;
+      }
+    }
+    std::ostringstream metadata;
+    metadata << "module=metal_diffusion\n";
+    metadata << "model=" << core::metalDiffusionModelToString(
+        m_metal_diffusion.config().model) << "\n";
+    metadata << "time_integrator=" <<
+        core::metalDiffusionTimeIntegratorToString(
+            m_metal_diffusion.config().time_integrator) << "\n";
+    metadata << "stable_dt_code=" << report.stable_dt_code << "\n";
+    metadata << "subcycles=" << report.subcycles << "\n";
+    metadata << "rkl_stages=" << report.rkl_stages << "\n";
+    metadata << "conservation_residual_code=" <<
+        report.conservation_residual_code << "\n";
+    const std::string text = metadata.str();
+    core::ModuleSidecarBlock sidecar;
+    sidecar.module_name = "metal_diffusion";
+    sidecar.schema_version = 1U;
+    sidecar.payload.resize(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      sidecar.payload[i] = static_cast<std::byte>(text[i]);
+    }
+    context.state.sidecars.upsert(std::move(sidecar));
+  }
+
   void buildStarFormationInputs(
       const core::StepContext& context,
       std::span<const std::uint32_t> active_cells) {
@@ -410,6 +714,10 @@ class SourceRuntimeImpl final : public SourceRuntime {
   core::UnitSystem m_units;
   std::shared_ptr<const physics::EffectiveMultiphaseEosTable> m_effective_eos_table;
   physics::StarFormationModel m_star_formation;
+  physics::StellarEvolutionBookkeeper m_stellar_evolution;
+  physics::StellarFeedbackModel m_stellar_feedback;
+  physics::MetalDiffusionModel m_metal_diffusion;
+  physics::StellarFeedbackModuleState m_stellar_feedback_state;
   physics::BlackHoleAgnModel m_black_hole;
   DistributedParticleIdRegistry m_particle_id_registry;
   std::uint32_t m_world_rank = 0;
@@ -418,6 +726,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
   double m_mean_baryon_density0_code = 0.0;
   std::vector<std::uint32_t> m_full_cell_indices;
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
+  std::vector<std::uint32_t> m_active_star_indices;
+  std::vector<double> m_returned_mass_delta_code;
+  std::vector<double> m_returned_metals_delta_code;
+  std::vector<double> m_feedback_energy_delta_erg;
+  std::vector<double> m_cell_volume_code;
+  std::vector<std::uint8_t> m_owned_leaf_mask;
+  std::vector<std::uint32_t> m_feedback_candidate_cells;
+  std::vector<physics::MetalDiffusionCell> m_diffusion_cells;
+  std::vector<physics::MetalDiffusionFace> m_diffusion_faces;
   std::vector<physics::BlackHoleSeedCandidate> m_seed_candidates;
 };
 

@@ -1036,6 +1036,22 @@ void writeStarSidecarGroup(hid_t state_group, const core::StarParticleSidecar& s
       H5T_IEEE_F64LE,
       H5T_NATIVE_DOUBLE,
       stars.stellar_returned_metals_cumulative_code);
+  writeDataset1d(star_group.get(), "stellar_newly_synthesized_metals_cumulative_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.stellar_newly_synthesized_metals_cumulative_code);
+  writeDataset1d(star_group.get(), "enrichment_carry_mass_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.enrichment_carry_mass_code);
+  writeDataset1d(star_group.get(), "enrichment_carry_metals_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.enrichment_carry_metals_code);
+  writeDataset1d(star_group.get(), "enrichment_carry_feedback_energy_erg",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.enrichment_carry_feedback_energy_erg);
+  writeDataset1d(star_group.get(), "enrichment_carry_momentum_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.enrichment_carry_momentum_code);
+  writeDataset1d(star_group.get(), "stellar_deposited_mass_cumulative_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.stellar_deposited_mass_cumulative_code);
+  writeDataset1d(star_group.get(), "stellar_deposited_metals_cumulative_code",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.stellar_deposited_metals_cumulative_code);
+  writeDataset1d(star_group.get(), "stellar_deposited_feedback_energy_cumulative_erg",
+      H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, stars.stellar_deposited_feedback_energy_cumulative_erg);
   writeDataset1d(
       star_group.get(),
       "stellar_feedback_energy_cumulative_erg",
@@ -1093,6 +1109,27 @@ void readStarSidecarGroup(hid_t state_group, core::StarParticleSidecar& stars) {
       star_group.get(), "stellar_returned_mass_cumulative_code", H5T_NATIVE_DOUBLE);
   stars.stellar_returned_metals_cumulative_code = readDataset1dAligned<double>(
       star_group.get(), "stellar_returned_metals_cumulative_code", H5T_NATIVE_DOUBLE);
+  const std::size_t star_count = stars.particle_index.size();
+  auto read_optional_double_lane = [&](const char* name) {
+    if (H5Lexists(star_group.get(), name, H5P_DEFAULT) > 0) {
+      return readDataset1dAligned<double>(star_group.get(), name, H5T_NATIVE_DOUBLE);
+    }
+    return core::AlignedVector<double>(star_count, 0.0);
+  };
+  stars.stellar_newly_synthesized_metals_cumulative_code =
+      read_optional_double_lane("stellar_newly_synthesized_metals_cumulative_code");
+  stars.enrichment_carry_mass_code = read_optional_double_lane("enrichment_carry_mass_code");
+  stars.enrichment_carry_metals_code = read_optional_double_lane("enrichment_carry_metals_code");
+  stars.enrichment_carry_feedback_energy_erg =
+      read_optional_double_lane("enrichment_carry_feedback_energy_erg");
+  stars.enrichment_carry_momentum_code =
+      read_optional_double_lane("enrichment_carry_momentum_code");
+  stars.stellar_deposited_mass_cumulative_code =
+      read_optional_double_lane("stellar_deposited_mass_cumulative_code");
+  stars.stellar_deposited_metals_cumulative_code =
+      read_optional_double_lane("stellar_deposited_metals_cumulative_code");
+  stars.stellar_deposited_feedback_energy_cumulative_erg =
+      read_optional_double_lane("stellar_deposited_feedback_energy_cumulative_erg");
   stars.stellar_feedback_energy_cumulative_erg = readDataset1dAligned<double>(
       star_group.get(), "stellar_feedback_energy_cumulative_erg", H5T_NATIVE_DOUBLE);
 
@@ -2668,7 +2705,15 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_any_vec(state.star_particles.stellar_age_years_last);
   append_any_vec(state.star_particles.stellar_returned_mass_cumulative_code);
   append_any_vec(state.star_particles.stellar_returned_metals_cumulative_code);
+  append_any_vec(state.star_particles.stellar_newly_synthesized_metals_cumulative_code);
   append_any_vec(state.star_particles.stellar_feedback_energy_cumulative_erg);
+  append_any_vec(state.star_particles.enrichment_carry_mass_code);
+  append_any_vec(state.star_particles.enrichment_carry_metals_code);
+  append_any_vec(state.star_particles.enrichment_carry_feedback_energy_erg);
+  append_any_vec(state.star_particles.enrichment_carry_momentum_code);
+  append_any_vec(state.star_particles.stellar_deposited_mass_cumulative_code);
+  append_any_vec(state.star_particles.stellar_deposited_metals_cumulative_code);
+  append_any_vec(state.star_particles.stellar_deposited_feedback_energy_cumulative_erg);
   for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
     append_any_vec(state.star_particles.stellar_returned_mass_channel_cumulative_code[channel]);
     append_any_vec(state.star_particles.stellar_returned_metals_channel_cumulative_code[channel]);

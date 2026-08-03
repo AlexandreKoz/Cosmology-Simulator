@@ -174,6 +174,37 @@ void writeScalarUint32Attribute(hid_t location, const std::string& key, std::uin
   }
 }
 
+[[nodiscard]] const char* metalSpeciesModeLabel(core::MetalSpeciesMode mode) {
+  switch (mode) {
+    case core::MetalSpeciesMode::kTotalOnly:
+      return "total_only";
+    case core::MetalSpeciesMode::kCoreElements:
+      return "core_elements";
+  }
+  throw std::logic_error("unhandled metal species mode");
+}
+
+[[nodiscard]] const char* metalDiffusionModelLabel(core::MetalDiffusionModel model) {
+  switch (model) {
+    case core::MetalDiffusionModel::kNone:
+      return "none";
+    case core::MetalDiffusionModel::kSmagorinsky:
+      return "smagorinsky";
+  }
+  throw std::logic_error("unhandled metal diffusion model");
+}
+
+[[nodiscard]] const char* metalDiffusionIntegratorLabel(
+    core::MetalDiffusionTimeIntegrator integrator) {
+  switch (integrator) {
+    case core::MetalDiffusionTimeIntegrator::kExplicitSubcycling:
+      return "explicit_subcycling";
+    case core::MetalDiffusionTimeIntegrator::kRkl2:
+      return "rkl2";
+  }
+  throw std::logic_error("unhandled metal diffusion integrator");
+}
+
 void writeHeaderArrays(
     hid_t header_group,
     const std::array<std::uint64_t, 6>& part_count,
@@ -664,6 +695,23 @@ void writeGadgetArepoSnapshotHdf5(
   writeScalarStringAttribute(header_group.get(), "CosmoSimSchemaName", schema.schema_name);
   writeScalarUint32Attribute(header_group.get(), "CosmoSimSchemaVersion", schema.schema_version);
   writeScalarStringAttribute(header_group.get(), "CosmoSimBuild", core::buildProvenance());
+  writeScalarStringAttribute(
+      header_group.get(), "MetalSpeciesMode",
+      metalSpeciesModeLabel(config.physics.metal_species_mode));
+  writeScalarStringAttribute(
+      header_group.get(), "MetalDiffusionModel",
+      metalDiffusionModelLabel(config.physics.metal_diffusion_model));
+  writeScalarStringAttribute(
+      header_group.get(), "MetalDiffusionTimeIntegrator",
+      metalDiffusionIntegratorLabel(config.physics.metal_diffusion_time_integrator));
+  writeScalarDoubleAttribute(
+      header_group.get(), "MetalDiffusionCoefficient",
+      config.physics.metal_diffusion_coefficient);
+  writeScalarStringAttribute(
+      header_group.get(), "StellarEvolutionTablePath",
+      config.physics.stellar_evolution_table_path.empty()
+          ? "builtin_zero_yield"
+          : config.physics.stellar_evolution_table_path);
 
   Hdf5Handle config_group(
       H5Gcreate2(file.get(), std::string(schema.config_group).c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));

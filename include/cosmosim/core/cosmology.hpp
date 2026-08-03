@@ -25,6 +25,14 @@ class LambdaCdmBackground {
   [[nodiscard]] double hubbleSi(double scale_factor) const;
   // rho_crit(a) = 3 H(a)^2 / (8 pi G), SI units [kg m^-3].
   [[nodiscard]] double criticalDensitySi(double scale_factor) const;
+  // Exact FLRW elapsed proper time: integral da / (a H(a)), SI seconds.
+  [[nodiscard]] double cosmicTimeIntervalSi(
+      double scale_factor_begin,
+      double scale_factor_end) const;
+  // Proper cosmic time since a configurable positive lower bound.
+  [[nodiscard]] double cosmicTimeSinceScaleFactorSi(
+      double scale_factor,
+      double lower_scale_factor = 1.0e-8) const;
 
  private:
   CosmologyBackgroundConfig m_config;

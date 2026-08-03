@@ -1,49 +1,38 @@
-# Stellar Evolution and Enrichment Bookkeeping
+# Stellar evolution and enrichment bookkeeping
 
-This module tracks table-driven stellar mass return, metal yield, and feedback-energy budgets without performing deposition.
+The production implementation and scientific rationale are documented in
+[`metals_enrichment_and_mixing.md`](metals_enrichment_and_mixing.md).
 
-## Configuration keys
+## Configuration
 
-Under `[physics]` in param.txt:
+Under `[physics]`:
 
-- `enable_stellar_evolution` (`true|false`): toggles bookkeeping updates.
-- `stellar_evolution_table_path` (string path): optional resource path to a table file.
-  - Empty path uses the built-in reference table.
-- `stellar_evolution_hubble_time_years` (float): age proxy conversion for `dt_code` and `a/a_birth` to years.
+- `enable_stellar_evolution` enables delayed SSP bookkeeping and source-runtime deposition;
+- `stellar_evolution_table_path` selects a v2 age-by-birth-metallicity table;
+- `stellar_evolution_require_production_table=true` rejects the built-in zero-yield compatibility table;
+- `stellar_evolution_hubble_time_years` is retained only for configuration compatibility and legacy isolated API calls. Production cosmological ages use the FLRW integral.
 
-## Table format
+## V2 table rows
 
-Whitespace-delimited rows with 13 numeric columns:
+Each whitespace-delimited row contains 22 values:
 
-1. `age_yr`
-2. `return_fraction_total`
-3. `metal_yield_fraction_total`
-4. `energy_erg_per_initial_mass_code`
-5. `return_winds`
-6. `return_ccsn`
-7. `return_snia`
-8. `metal_winds`
-9. `metal_ccsn`
-10. `metal_snia`
-11. `energy_winds`
-12. `energy_ccsn`
-13. `energy_snia`
+1. birth metallicity;
+2. SSP age in years;
+3. cumulative returned mass fraction;
+4. cumulative total ejected metal fraction;
+5. cumulative newly synthesized metal fraction;
+6. cumulative event count per initial code mass;
+7. cumulative energy in erg per initial code mass;
+8-10. returned mass fractions for winds/AGB, CCSN, SNIa;
+11-13. total ejected metal fractions by channel;
+14-16. newly synthesized metal fractions by channel;
+17-19. event counts by channel;
+20-22. energies by channel.
 
-Optional metadata comments in file header:
+Metadata comments use `# key = value`; supported keys include table ID/version,
+source papers/repository, redistribution license, SHA-256, IMF, stellar mass
+range, solar abundance reference, and `production_calibrated`.
 
-- `# table_id = <id>`
-- `# table_version = <version>`
-
-A sample is provided at `resources/stellar_evolution/default_v1.txt`.
-
-## Provenance and outputs
-
-Each step updates the `stellar_evolution` module sidecar with:
-
-- `schema_version`
-- `table_id`
-- `table_version`
-- `table_source_path`
-- aggregate returned mass/metals/energy counters
-
-Per-star cumulative bookkeeping is stored in `StarParticleSidecar` lanes, including channel-specific cumulative mass/metals/energy.
+The deterministic test table is `resources/stellar_evolution/test_synthetic_v2.txt`.
+It is synthetic and non-production. `resources/stellar_evolution/default_v1.txt`
+is retained only as historical source data and is not accepted by the v2 production loader.

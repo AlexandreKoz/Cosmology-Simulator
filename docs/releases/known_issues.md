@@ -115,3 +115,11 @@ for publishable DMO production or AREPO/GADGET-class gravity parity.
 - Scope: final Phase 3 integration closeout.
 - Impact: current audit cycle did not reach a full hard-gate pass; periodic/zoom integration and reference-workflow/schema lanes include failing tests, and distributed MPI+FFTW command bundle is environment-blocked.
 - Mitigation: resolve blockers listed in `docs/treepm_phase3_closeout.md` before claiming Phase 3 completion.
+
+## Metals enrichment and diffusion scope
+
+- `metal_species_mode=core_elements` is intentionally rejected; no individual-element sidecar or element cooling schema is released.
+- Stellar enrichment target discovery and mutation are local-rank only; cross-rank deposition is not claimed.
+- Production diffusion currently covers owned leaf patch-internal faces, not same-level inter-patch, coarse-fine reflux, or MPI interfaces.
+- Momentum feedback remains a persistent unresolved budget until a conservative momentum/total-energy deposition operator is available.
+- The built-in SSP table is zero-yield and non-calibrated. No licensed production yield table is bundled.

@@ -169,7 +169,15 @@ void StarParticleSidecar::resize(std::size_t count) {
   stellar_age_years_last.resize(count);
   stellar_returned_mass_cumulative_code.resize(count);
   stellar_returned_metals_cumulative_code.resize(count);
+  stellar_newly_synthesized_metals_cumulative_code.resize(count);
   stellar_feedback_energy_cumulative_erg.resize(count);
+  enrichment_carry_mass_code.resize(count);
+  enrichment_carry_metals_code.resize(count);
+  enrichment_carry_feedback_energy_erg.resize(count);
+  enrichment_carry_momentum_code.resize(count);
+  stellar_deposited_mass_cumulative_code.resize(count);
+  stellar_deposited_metals_cumulative_code.resize(count);
+  stellar_deposited_feedback_energy_cumulative_erg.resize(count);
   for (std::size_t channel = 0; channel < stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
     stellar_returned_mass_channel_cumulative_code[channel].resize(count);
     stellar_returned_metals_channel_cumulative_code[channel].resize(count);
@@ -187,7 +195,15 @@ bool StarParticleSidecar::isConsistent() const noexcept {
       birth_ordinal.size() != expected || stellar_age_years_last.size() != expected ||
       stellar_returned_mass_cumulative_code.size() != expected ||
       stellar_returned_metals_cumulative_code.size() != expected ||
-      stellar_feedback_energy_cumulative_erg.size() != expected) {
+      stellar_newly_synthesized_metals_cumulative_code.size() != expected ||
+      stellar_feedback_energy_cumulative_erg.size() != expected ||
+      enrichment_carry_mass_code.size() != expected ||
+      enrichment_carry_metals_code.size() != expected ||
+      enrichment_carry_feedback_energy_erg.size() != expected ||
+      enrichment_carry_momentum_code.size() != expected ||
+      stellar_deposited_mass_cumulative_code.size() != expected ||
+      stellar_deposited_metals_cumulative_code.size() != expected ||
+      stellar_deposited_feedback_energy_cumulative_erg.size() != expected) {
     return false;
   }
 
