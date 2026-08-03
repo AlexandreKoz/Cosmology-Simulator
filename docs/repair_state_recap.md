@@ -1,5 +1,8 @@
 # Repair state recap (post-repair audit snapshot)
 
+> **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
+
+
 ## 2026-07-13 gravity/MPI final regression closure
 
 - Determined that the former

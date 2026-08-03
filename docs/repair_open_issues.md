@@ -1,5 +1,8 @@
 # Repair open issues
 
+> **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
+
+
 ## 2026-07-30 Campaign B packaging closure and remaining MPI gate
 
 The adversarial handoff defects are closed in source: the two actual ADS

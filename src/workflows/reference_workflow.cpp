@@ -13,9 +13,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstddef>
 #include <filesystem>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -42,6 +44,17 @@
 
 namespace cosmosim::workflows {
 namespace {
+
+[[nodiscard]] bool runtimePhaseDiagnosticsEnabled() {
+  const char* value = std::getenv("COSMOSIM_RUNTIME_PHASE_DIAGNOSTICS");
+  return value != nullptr && std::string_view(value) != "0";
+}
+
+void traceRuntimePhase(std::string_view phase) {
+  if (runtimePhaseDiagnosticsEnabled()) {
+    std::cerr << "runtime_phase=" << phase << '\n' << std::flush;
+  }
+}
 
 [[nodiscard]] std::string formatRuntimeDouble(double value) {
   std::ostringstream stream;
@@ -327,10 +340,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
     core::validateModePolicy(config, mode_policy);
 
+    traceRuntimePhase("initial_conditions_begin");
     const internal::InitialConditionRuntime initial_conditions(
         m_frozen_config, runtime_services);
     internal::InitialConditionStartupResult startup =
         initial_conditions.materialize(options, report.run_directory);
+    traceRuntimePhase("initial_conditions_complete");
     report.ic_manifest_path = startup.manifest_path;
     core::SimulationState state = std::move(startup.state);
     profiler.setMemoryReport(core::collectSimulationMemoryReport(state));
@@ -451,6 +466,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         config.mode.zoom_region_file.empty()
         ? std::filesystem::path{}
         : resolveConfigRelativePath(m_frozen_config, std::filesystem::path(config.mode.zoom_region_file));
+    traceRuntimePhase("runtime_composition_begin");
     internal::ReferenceRuntimeComposition runtime_composition =
         internal::buildReferenceRuntimeComposition(
             internal::ReferenceRuntimeCompositionInputs{
@@ -469,6 +485,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                 .world_rank = static_cast<std::uint32_t>(
                     std::max(mpi_context.worldRank(), 0)),
             });
+    traceRuntimePhase("runtime_composition_complete");
     GravityRuntime& gravity_callback = *runtime_composition.gravity;
     if (restoring_from_restart) {
       const io::RestartReadResult& restart = *options.restart_state_override;
@@ -566,6 +583,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         hydro_callback,
         std::move(runtime_composition.execution_plan),
         migration_balance);
+    traceRuntimePhase("time_coordinator_begin");
     time_coordinator.runRungZeroSegment(
         config,
         options,
@@ -576,6 +594,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         profiler,
         mode_policy,
         restoring_from_restart);
+    traceRuntimePhase("time_coordinator_complete");
 
     report.final_state_digest = computeStateDigest(state, integrator_state);
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
@@ -669,7 +688,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                      report.global_particle_partition_identity_match ? "true" : "false"},
                     {"final_state_digest", std::to_string(report.final_state_digest)}},
     });
+    traceRuntimePhase("final_artifact_flush_begin");
     flushCommonArtifacts(m_frozen_config, profiler, report);
+    traceRuntimePhase("run_complete");
     return report;
   } catch (const std::exception& ex) {
     profiler.recordEvent(core::RuntimeEvent{

@@ -726,6 +726,19 @@ void removeDataset(
   assert(H5Ldelete(group.get(), dataset_name, H5P_DEFAULT) >= 0);
 }
 
+void replaceDataset1d(
+    const std::filesystem::path& path,
+    const char* group_name,
+    const char* dataset_name,
+    const std::vector<double>& values) {
+  Hdf5Handle file(H5Fopen(
+      path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  Hdf5Handle group(H5Gopen2(file.get(), group_name, H5P_DEFAULT));
+  assert(file.get() >= 0 && group.get() >= 0);
+  assert(H5Ldelete(group.get(), dataset_name, H5P_DEFAULT) >= 0);
+  writeDataset1d(group.get(), dataset_name, values);
+}
+
 void expectIcReadFailure(
     const std::filesystem::path& path,
     const cosmosim::core::SimulationConfig& config,
@@ -1011,19 +1024,52 @@ void testHdf5GasThermoMapping() {
   expect_invalid_supplied_manifest(
       mismatched_vector_manifest, "one count/hash/size/header record");
 
-  bool found_thermo_bypass = false;
-  bool found_metallicity_unsupported = false;
+  assert(std::abs(result.state.gas_cells.metal_mass_code[0] - 0.10) <
+         1.0e-12);
+  assert(std::abs(result.state.gas_cells.metal_mass_code[1] - 0.18) <
+         1.0e-12);
+  const auto metallicity_field = std::find_if(
+      result.report.manifest->fields.begin(),
+      result.report.manifest->fields.end(),
+      [](const cosmosim::io::IcFieldManifest& field) {
+        return field.dataset_path == "/PartType0/Metallicity";
+      });
+  assert(metallicity_field != result.report.manifest->fields.end());
+  assert(metallicity_field->disposition ==
+         cosmosim::io::IcFieldDisposition::kConverted);
+  assert(metallicity_field->semantics ==
+         cosmosim::io::IcFieldSemantics::kIntensive);
+  assert(metallicity_field->conversion_equation.find("target = stored") !=
+         std::string::npos);
+  assert(std::find(
+             result.report.manifest->converted_fields.begin(),
+             result.report.manifest->converted_fields.end(),
+             "/PartType0/Metallicity") !=
+         result.report.manifest->converted_fields.end());
+  assert(std::find(
+             result.report.manifest->conversion_equations.begin(),
+             result.report.manifest->conversion_equations.end(),
+             metallicity_field->conversion_equation) !=
+         result.report.manifest->conversion_equations.end());
   for (const std::string& value : result.report.unsupported_fields) {
-    if (value.find("thermodynamic fields currently bypassed") != std::string::npos) {
-      found_thermo_bypass = true;
-    }
-    if (value.find("PartType0/Metallicity") != std::string::npos) {
-      found_metallicity_unsupported = true;
-    }
+    assert(value.find("thermodynamic fields currently bypassed") ==
+           std::string::npos);
+    assert(value.find("PartType0/Metallicity") == std::string::npos);
   }
-  assert(!found_thermo_bypass);
-  assert(found_metallicity_unsupported);
   std::filesystem::remove(path);
+
+  for (const std::vector<double>& invalid_values : {
+           std::vector<double>{-0.01, 0.03},
+           std::vector<double>{1.01, 0.03},
+           std::vector<double>{
+               std::numeric_limits<double>::quiet_NaN(), 0.03}}) {
+    const auto invalid_path = writeMinimalIcFile(true);
+    replaceDataset1d(
+        invalid_path, "/PartType0", "Metallicity", invalid_values);
+    expectIcReadFailure(
+        invalid_path, config,
+        "density, internal energy, and metallicity must be finite and physical");
+  }
 }
 
 void expectIcReadFailure(
@@ -1034,7 +1080,29 @@ void expectIcReadFailure(
 void testHdf5GasOptionalDensityMissingBehavior() {
   auto config = makeExplicitBridgeConfig();
   config.output.run_name = "ic_reader_hdf5_optional";
+
   auto path = writeMinimalIcFile(true);
+  removeDataset(path, "/PartType0", "Metallicity");
+  const auto zero_metallicity =
+      cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+  assert(zero_metallicity.state.gas_cells.metal_mass_code[0] == 0.0);
+  assert(zero_metallicity.state.gas_cells.metal_mass_code[1] == 0.0);
+  assert(zero_metallicity.report.manifest.has_value());
+  const auto metallicity_contract = std::find_if(
+      zero_metallicity.report.manifest->missing_field_contracts.begin(),
+      zero_metallicity.report.manifest->missing_field_contracts.end(),
+      [](const cosmosim::io::IcMissingFieldContract& value) {
+        return value.field_path == "/PartType0/Metallicity";
+      });
+  assert(metallicity_contract !=
+         zero_metallicity.report.manifest->missing_field_contracts.end());
+  assert(metallicity_contract->policy ==
+         cosmosim::io::IcMissingFieldPolicy::kDialectDefinedDefault);
+  assert(metallicity_contract->resolution.find("zero gas metallicity") !=
+         std::string::npos);
+  std::filesystem::remove(path);
+
+  path = writeMinimalIcFile(true);
   removeDataset(path, "/PartType0", "InternalEnergy");
   expectIcReadFailure(
       path, config,

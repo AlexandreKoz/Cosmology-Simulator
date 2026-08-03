@@ -6,6 +6,8 @@ The flagship science target is physically credible zoom-in galaxy formation from
 
 ## Documentation map
 
+- **Current snapshot truth:** [`CURRENT_STATUS.md`](CURRENT_STATUS.md)
+
 - **User workflow**
   - Build and dependency setup: [`docs/build_instructions.md`](docs/build_instructions.md)
   - Runtime parameter reference (GADGET/AREPO-style `param.txt`): [`docs/configuration.md`](docs/configuration.md)
@@ -40,7 +42,7 @@ surface-by-surface verdict and numerical evidence are maintained in
 - `include/cosmosim/` — public API headers by module.
 - `src/` — implementation and ownership boundaries.
 - `docs/` — user and developer documentation.
-- `configs/` — normalized example parameter files.
+- `configs/` — canonical and compatibility-checked `.param.txt` profiles; see `configs/README.md`.
 - `validation/` — validation input decks and tolerances.
 - `tests/unit`, `tests/integration`, `tests/validation` — test ladder.
 - `bench/` — benchmark and profiling hooks.

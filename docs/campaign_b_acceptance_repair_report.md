@@ -1,5 +1,8 @@
 # Campaign B acceptance repair report
 
+> **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
+
+
 > **Historical report — superseded 2026-07-26.** This document records the
 > earlier Campaign B acceptance pass and must not be used as the current closure
 > verdict. The authoritative final repair record is

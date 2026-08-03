@@ -1,5 +1,8 @@
 # Repair Closeout Report (P01–P19)
 
+> **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
+
+
 _Date: 2026-04-07 (UTC)_
 
 ## Gate decision

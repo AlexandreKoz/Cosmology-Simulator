@@ -51,8 +51,33 @@ namespace cosmosim::io::file_set_internal {
 #if COSMOSIM_ENABLE_HDF5
 using internal::IcReaderSession;
 
-[[nodiscard]] const IcFieldManifest* findField(const IcManifest& manifest,std::size_t file_index,std::string_view path){const auto it=std::find_if(manifest.fields.begin(),manifest.fields.end(),[&](const IcFieldManifest& field){return field.source_file_index==file_index&&field.dataset_path==path;});return it==manifest.fields.end()?nullptr:&*it;}
-[[nodiscard]] const IcFieldManifest& requireField(const IcManifest& manifest,std::size_t file_index,std::string_view path){const auto* field=findField(manifest,file_index,path);if(field==nullptr)throw std::runtime_error("manifest lacks inspected field "+std::string(path)+" for file "+std::to_string(file_index));return *field;}
+[[nodiscard]] const IcFieldManifest* findField(
+    const IcManifest& manifest,
+    std::size_t file_index,
+    std::string_view path) {
+  const auto it = std::find_if(
+      manifest.fields.begin(),
+      manifest.fields.end(),
+      [&](const IcFieldManifest& field) {
+        return field.source_file_index == file_index &&
+            field.dataset_path == path;
+      });
+  return it == manifest.fields.end() ? nullptr : &*it;
+}
+
+[[nodiscard]] const IcFieldManifest& requireField(
+    const IcManifest& manifest,
+    std::size_t file_index,
+    std::string_view path) {
+  const auto* field = findField(manifest, file_index, path);
+  if (field == nullptr) {
+    throw std::runtime_error(
+        "manifest lacks inspected field " + std::string(path) +
+        " for file " + std::to_string(file_index));
+  }
+  return *field;
+}
+
 [[nodiscard]] const IcMissingFieldContract& requireMissingFieldContract(
     const IcManifest& manifest,
     std::size_t file_index,
@@ -488,13 +513,266 @@ void validateRecordScientificState(
   return records;
 }
 
-void appendRecords(core::SimulationState& state,const std::vector<ParticleRecord>& records,std::uint32_t owner_rank){const std::size_t old_particles=state.particles.size();std::size_t gas_count=0,star_count=0,bh_count=0,tracer_count=0;for(const auto& r:records){if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kGas))++gas_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kStar))++star_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole))++bh_count;else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kTracer))++tracer_count;}
-  const std::size_t old_gas=state.cells.size(),old_stars=state.star_particles.size(),old_bh=state.black_holes.size(),old_tracers=state.tracers.size();state.resizeParticles(old_particles+records.size());state.resizeCells(old_gas+gas_count);state.star_particles.resize(old_stars+star_count);state.black_holes.resize(old_bh+bh_count);state.tracers.resize(old_tracers+tracer_count);std::size_t gas_row=old_gas,star_row=old_stars,bh_row=old_bh,tracer_row=old_tracers;
-  for(std::size_t i=0;i<records.size();++i){const auto& r=records[i];const std::size_t p=old_particles+i;state.particles.position_x_comoving[p]=r.x;state.particles.position_y_comoving[p]=r.y;state.particles.position_z_comoving[p]=r.z;state.particles.velocity_x_peculiar[p]=r.vx;state.particles.velocity_y_peculiar[p]=r.vy;state.particles.velocity_z_peculiar[p]=r.vz;state.particles.mass_code[p]=r.mass;state.particles.time_bin[p]=0U;state.particle_sidecar.particle_id[p]=r.id;state.particle_sidecar.species_tag[p]=r.species;state.particle_sidecar.owning_rank[p]=owner_rank;state.particle_sidecar.sfc_key[p]=0U;state.particle_sidecar.particle_flags[p]=0U;state.particle_sidecar.last_drift_time_code[p]=0.0;state.particle_sidecar.last_drift_scale_factor[p]=1.0;
-    if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kGas)){state.cells.center_x_comoving[gas_row]=r.x;state.cells.center_y_comoving[gas_row]=r.y;state.cells.center_z_comoving[gas_row]=r.z;state.cells.mass_code[gas_row]=r.mass;state.cells.time_bin[gas_row]=0U;state.cells.patch_index[gas_row]=0U;state.gas_cells.gas_cell_id[gas_row]=r.id;state.gas_cells.parent_particle_id[gas_row]=r.id;state.gas_cells.velocity_x_peculiar[gas_row]=r.vx;state.gas_cells.velocity_y_peculiar[gas_row]=r.vy;state.gas_cells.velocity_z_peculiar[gas_row]=r.vz;state.gas_cells.density_code[gas_row]=r.gas_density;state.gas_cells.internal_energy_code[gas_row]=r.gas_internal_energy;state.gas_cells.metal_mass_code[gas_row]=r.gas_metallicity*r.mass;state.gas_cells.pressure_code[gas_row]=0.0;state.gas_cells.temperature_code[gas_row]=0.0;state.gas_cells.sound_speed_code[gas_row]=0.0;++gas_row;}
-    else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kStar)){state.star_particles.particle_index[star_row]=static_cast<std::uint32_t>(p);state.star_particles.formation_scale_factor[star_row]=r.star_formation;state.star_particles.birth_mass_code[star_row]=r.star_birth_mass;state.star_particles.metallicity_mass_fraction[star_row]=r.star_metallicity;state.star_particles.stellar_age_years_last[star_row]=0.0;state.star_particles.stellar_returned_mass_cumulative_code[star_row]=0.0;state.star_particles.stellar_returned_metals_cumulative_code[star_row]=0.0;state.star_particles.stellar_newly_synthesized_metals_cumulative_code[star_row]=0.0;state.star_particles.stellar_feedback_energy_cumulative_erg[star_row]=0.0;state.star_particles.enrichment_carry_mass_code[star_row]=0.0;state.star_particles.enrichment_carry_metals_code[star_row]=0.0;state.star_particles.enrichment_carry_feedback_energy_erg[star_row]=0.0;state.star_particles.enrichment_carry_momentum_code[star_row]=0.0;state.star_particles.stellar_deposited_mass_cumulative_code[star_row]=0.0;state.star_particles.stellar_deposited_metals_cumulative_code[star_row]=0.0;state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[star_row]=0.0;for(std::size_t c=0;c<3U;++c){state.star_particles.stellar_returned_mass_channel_cumulative_code[c][star_row]=0.0;state.star_particles.stellar_returned_metals_channel_cumulative_code[c][star_row]=0.0;state.star_particles.stellar_feedback_energy_channel_cumulative_erg[c][star_row]=0.0;}++star_row;}
-    else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)){state.black_holes.particle_index[bh_row]=static_cast<std::uint32_t>(p);state.black_holes.host_cell_index[bh_row]=kInvalidIndex;state.black_holes.subgrid_mass_code[bh_row]=r.bh_mass;state.black_holes.accretion_rate_code[bh_row]=r.bh_mdot;state.black_holes.feedback_energy_code[bh_row]=0.0;state.black_holes.eddington_ratio[bh_row]=0.0;state.black_holes.cumulative_accreted_mass_code[bh_row]=0.0;state.black_holes.cumulative_feedback_energy_code[bh_row]=0.0;state.black_holes.duty_cycle_active_time_code[bh_row]=0.0;state.black_holes.duty_cycle_total_time_code[bh_row]=0.0;++bh_row;}
-    else if(r.species==static_cast<std::uint32_t>(core::ParticleSpecies::kTracer)){state.tracers.particle_index[tracer_row]=static_cast<std::uint32_t>(p);state.tracers.parent_particle_id[tracer_row]=r.tracer_parent;state.tracers.injection_step[tracer_row]=r.tracer_injection;state.tracers.host_cell_index[tracer_row]=r.tracer_host;state.tracers.mass_fraction_of_host[tracer_row]=r.tracer_fraction;state.tracers.last_host_mass_code[tracer_row]=r.tracer_last_host_mass;state.tracers.cumulative_exchanged_mass_code[tracer_row]=r.tracer_exchanged_mass;++tracer_row;}
+namespace {
+
+struct AppendSpeciesCounts {
+  std::size_t gas = 0U;
+  std::size_t stars = 0U;
+  std::size_t black_holes = 0U;
+  std::size_t tracers = 0U;
+};
+
+struct AppendRowCursors {
+  std::size_t gas = 0U;
+  std::size_t stars = 0U;
+  std::size_t black_holes = 0U;
+  std::size_t tracers = 0U;
+};
+
+[[nodiscard]] core::ParticleSpecies recordSpecies(
+    const ParticleRecord& record) {
+  return static_cast<core::ParticleSpecies>(record.species);
+}
+
+[[nodiscard]] AppendSpeciesCounts countAppendSpecies(
+    const std::vector<ParticleRecord>& records) {
+  AppendSpeciesCounts counts;
+  for (const ParticleRecord& record : records) {
+    switch (recordSpecies(record)) {
+      case core::ParticleSpecies::kGas:
+        ++counts.gas;
+        break;
+      case core::ParticleSpecies::kStar:
+        ++counts.stars;
+        break;
+      case core::ParticleSpecies::kBlackHole:
+        ++counts.black_holes;
+        break;
+      case core::ParticleSpecies::kTracer:
+        ++counts.tracers;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
+}
+
+void requireAppendCursor(
+    std::size_t cursor,
+    std::size_t end,
+    std::string_view species_name) {
+  if (cursor >= end) {
+    throw std::logic_error(
+        "IC append row cursor exceeded reserved " +
+        std::string(species_name) + " rows");
+  }
+}
+
+[[nodiscard]] double conservedGasMetalMassCode(
+    const ParticleRecord& record) {
+  const double metal_mass_code = record.gas_metallicity * record.mass;
+  const double tolerance =
+      32.0 * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, record.mass);
+  if (!std::isfinite(metal_mass_code) || metal_mass_code < 0.0 ||
+      metal_mass_code > record.mass + tolerance) {
+    throw std::runtime_error(
+        "gas metallicity conversion produced a non-physical conserved "
+        "metal mass");
+  }
+  return std::min(metal_mass_code, record.mass);
+}
+
+void appendParticleRecord(
+    core::SimulationState& state,
+    std::size_t particle_index,
+    const ParticleRecord& record,
+    std::uint32_t owner_rank) {
+  state.particles.position_x_comoving[particle_index] = record.x;
+  state.particles.position_y_comoving[particle_index] = record.y;
+  state.particles.position_z_comoving[particle_index] = record.z;
+  state.particles.velocity_x_peculiar[particle_index] = record.vx;
+  state.particles.velocity_y_peculiar[particle_index] = record.vy;
+  state.particles.velocity_z_peculiar[particle_index] = record.vz;
+  state.particles.mass_code[particle_index] = record.mass;
+  state.particles.time_bin[particle_index] = 0U;
+  state.particle_sidecar.particle_id[particle_index] = record.id;
+  state.particle_sidecar.species_tag[particle_index] = record.species;
+  state.particle_sidecar.owning_rank[particle_index] = owner_rank;
+  state.particle_sidecar.sfc_key[particle_index] = 0U;
+  state.particle_sidecar.particle_flags[particle_index] = 0U;
+  state.particle_sidecar.last_drift_time_code[particle_index] = 0.0;
+  state.particle_sidecar.last_drift_scale_factor[particle_index] = 1.0;
+}
+
+void appendGasRecord(
+    core::SimulationState& state,
+    std::size_t gas_row,
+    const ParticleRecord& record) {
+  state.cells.center_x_comoving[gas_row] = record.x;
+  state.cells.center_y_comoving[gas_row] = record.y;
+  state.cells.center_z_comoving[gas_row] = record.z;
+  state.cells.mass_code[gas_row] = record.mass;
+  state.cells.time_bin[gas_row] = 0U;
+  state.cells.patch_index[gas_row] = 0U;
+
+  state.gas_cells.gas_cell_id[gas_row] = record.id;
+  state.gas_cells.parent_particle_id[gas_row] = record.id;
+  state.gas_cells.velocity_x_peculiar[gas_row] = record.vx;
+  state.gas_cells.velocity_y_peculiar[gas_row] = record.vy;
+  state.gas_cells.velocity_z_peculiar[gas_row] = record.vz;
+  state.gas_cells.density_code[gas_row] = record.gas_density;
+  state.gas_cells.internal_energy_code[gas_row] = record.gas_internal_energy;
+  state.gas_cells.metal_mass_code[gas_row] =
+      conservedGasMetalMassCode(record);
+  state.gas_cells.pressure_code[gas_row] = 0.0;
+  state.gas_cells.temperature_code[gas_row] = 0.0;
+  state.gas_cells.sound_speed_code[gas_row] = 0.0;
+}
+
+void appendStarRecord(
+    core::SimulationState& state,
+    std::size_t star_row,
+    std::size_t particle_index,
+    const ParticleRecord& record) {
+  state.star_particles.particle_index[star_row] =
+      static_cast<std::uint32_t>(particle_index);
+  state.star_particles.formation_scale_factor[star_row] =
+      record.star_formation;
+  state.star_particles.birth_mass_code[star_row] = record.star_birth_mass;
+  state.star_particles.metallicity_mass_fraction[star_row] =
+      record.star_metallicity;
+  state.star_particles.stellar_age_years_last[star_row] = 0.0;
+  state.star_particles.stellar_returned_mass_cumulative_code[star_row] = 0.0;
+  state.star_particles.stellar_returned_metals_cumulative_code[star_row] = 0.0;
+  state.star_particles.stellar_newly_synthesized_metals_cumulative_code[
+      star_row] = 0.0;
+  state.star_particles.stellar_feedback_energy_cumulative_erg[star_row] = 0.0;
+  state.star_particles.enrichment_carry_mass_code[star_row] = 0.0;
+  state.star_particles.enrichment_carry_metals_code[star_row] = 0.0;
+  state.star_particles.enrichment_carry_feedback_energy_erg[star_row] = 0.0;
+  state.star_particles.enrichment_carry_momentum_code[star_row] = 0.0;
+  state.star_particles.stellar_deposited_mass_cumulative_code[star_row] = 0.0;
+  state.star_particles.stellar_deposited_metals_cumulative_code[star_row] = 0.0;
+  state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[
+      star_row] = 0.0;
+  for (std::size_t channel = 0; channel < 3U; ++channel) {
+    state.star_particles.stellar_returned_mass_channel_cumulative_code[
+        channel][star_row] = 0.0;
+    state.star_particles.stellar_returned_metals_channel_cumulative_code[
+        channel][star_row] = 0.0;
+    state.star_particles.stellar_feedback_energy_channel_cumulative_erg[
+        channel][star_row] = 0.0;
+  }
+}
+
+void appendBlackHoleRecord(
+    core::SimulationState& state,
+    std::size_t black_hole_row,
+    std::size_t particle_index,
+    const ParticleRecord& record) {
+  state.black_holes.particle_index[black_hole_row] =
+      static_cast<std::uint32_t>(particle_index);
+  state.black_holes.host_cell_index[black_hole_row] = kInvalidIndex;
+  state.black_holes.subgrid_mass_code[black_hole_row] = record.bh_mass;
+  state.black_holes.accretion_rate_code[black_hole_row] = record.bh_mdot;
+  state.black_holes.feedback_energy_code[black_hole_row] = 0.0;
+  state.black_holes.eddington_ratio[black_hole_row] = 0.0;
+  state.black_holes.cumulative_accreted_mass_code[black_hole_row] = 0.0;
+  state.black_holes.cumulative_feedback_energy_code[black_hole_row] = 0.0;
+  state.black_holes.duty_cycle_active_time_code[black_hole_row] = 0.0;
+  state.black_holes.duty_cycle_total_time_code[black_hole_row] = 0.0;
+}
+
+void appendTracerRecord(
+    core::SimulationState& state,
+    std::size_t tracer_row,
+    std::size_t particle_index,
+    const ParticleRecord& record) {
+  state.tracers.particle_index[tracer_row] =
+      static_cast<std::uint32_t>(particle_index);
+  state.tracers.parent_particle_id[tracer_row] = record.tracer_parent;
+  state.tracers.injection_step[tracer_row] = record.tracer_injection;
+  state.tracers.host_cell_index[tracer_row] = record.tracer_host;
+  state.tracers.mass_fraction_of_host[tracer_row] = record.tracer_fraction;
+  state.tracers.last_host_mass_code[tracer_row] =
+      record.tracer_last_host_mass;
+  state.tracers.cumulative_exchanged_mass_code[tracer_row] =
+      record.tracer_exchanged_mass;
+}
+
+}  // namespace
+
+void appendRecords(
+    core::SimulationState& state,
+    const std::vector<ParticleRecord>& records,
+    std::uint32_t owner_rank) {
+  const std::size_t old_particles = state.particles.size();
+  const std::size_t old_gas = state.cells.size();
+  const std::size_t old_stars = state.star_particles.size();
+  const std::size_t old_black_holes = state.black_holes.size();
+  const std::size_t old_tracers = state.tracers.size();
+  const AppendSpeciesCounts counts = countAppendSpecies(records);
+
+  state.resizeParticles(old_particles + records.size());
+  state.resizeCells(old_gas + counts.gas);
+  state.star_particles.resize(old_stars + counts.stars);
+  state.black_holes.resize(old_black_holes + counts.black_holes);
+  state.tracers.resize(old_tracers + counts.tracers);
+
+  AppendRowCursors cursors{
+      .gas = old_gas,
+      .stars = old_stars,
+      .black_holes = old_black_holes,
+      .tracers = old_tracers};
+  const AppendRowCursors ends{
+      .gas = old_gas + counts.gas,
+      .stars = old_stars + counts.stars,
+      .black_holes = old_black_holes + counts.black_holes,
+      .tracers = old_tracers + counts.tracers};
+
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    const ParticleRecord& record = records[i];
+    const std::size_t particle_index = old_particles + i;
+    appendParticleRecord(state, particle_index, record, owner_rank);
+
+    switch (recordSpecies(record)) {
+      case core::ParticleSpecies::kGas:
+        requireAppendCursor(cursors.gas, ends.gas, "gas");
+        appendGasRecord(state, cursors.gas++, record);
+        break;
+      case core::ParticleSpecies::kStar:
+        requireAppendCursor(cursors.stars, ends.stars, "star");
+        appendStarRecord(state, cursors.stars++, particle_index, record);
+        break;
+      case core::ParticleSpecies::kBlackHole:
+        requireAppendCursor(
+            cursors.black_holes, ends.black_holes, "black-hole");
+        appendBlackHoleRecord(
+            state, cursors.black_holes++, particle_index, record);
+        break;
+      case core::ParticleSpecies::kTracer:
+        requireAppendCursor(cursors.tracers, ends.tracers, "tracer");
+        appendTracerRecord(state, cursors.tracers++, particle_index, record);
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (cursors.gas != ends.gas || cursors.stars != ends.stars ||
+      cursors.black_holes != ends.black_holes ||
+      cursors.tracers != ends.tracers) {
+    throw std::logic_error(
+        "IC append row counts did not match reserved species sidecars");
+  }
+  if (state.particles.size() != old_particles + records.size() ||
+      state.cells.size() != ends.gas ||
+      state.star_particles.size() != ends.stars ||
+      state.black_holes.size() != ends.black_holes ||
+      state.tracers.size() != ends.tracers) {
+    throw std::logic_error("IC append postcondition failed");
   }
 }
 
@@ -562,9 +840,56 @@ void finalizeImportedState(
       manifest.box_size, target);
 }
 
-void validateRuntimeCosmology(const IcManifest& manifest,const core::SimulationConfig& config){const double box_code=convertedBoxSizeCode(manifest,config);const core::UnitSystem target=core::makeUnitSystem(config.units.length_unit,config.units.mass_unit,config.units.velocity_unit);const core::UnitSystem mpc=core::makeUnitSystem("mpc","msun","km_s");const double box_mpc=box_code*target.length_si_per_code/mpc.length_si_per_code;if(!nearlyEqual(manifest.scale_factor,config.numerics.a_begin)||!nearlyEqual(manifest.omega_matter,config.cosmology.omega_matter)||!nearlyEqual(manifest.omega_lambda,config.cosmology.omega_lambda)||!nearlyEqual(manifest.hubble_param,config.cosmology.hubble_param)||!nearlyEqual(box_mpc,config.cosmology.box_size_x_mpc_comoving)||!nearlyEqual(box_mpc,config.cosmology.box_size_y_mpc_comoving)||!nearlyEqual(box_mpc,config.cosmology.box_size_z_mpc_comoving))throw std::runtime_error("IC manifest cosmology/BoxSize/start epoch does not match frozen runtime configuration");}
+void validateRuntimeCosmology(
+    const IcManifest& manifest,
+    const core::SimulationConfig& config) {
+  const double box_code = convertedBoxSizeCode(manifest, config);
+  const core::UnitSystem target = core::makeUnitSystem(
+      config.units.length_unit,
+      config.units.mass_unit,
+      config.units.velocity_unit);
+  const core::UnitSystem mpc = core::makeUnitSystem("mpc", "msun", "km_s");
+  const double box_mpc =
+      box_code * target.length_si_per_code / mpc.length_si_per_code;
 
-void validateSerialCountsAndIds(const core::SimulationState& state,const IcManifest& manifest){std::uint64_t expected=0;for(auto count:manifest.num_part_total){if(expected>std::numeric_limits<std::uint64_t>::max()-count)throw std::overflow_error("global particle count overflow");expected+=count;}if(state.particles.size()!=expected)throw std::runtime_error("IC import particle count mismatch");std::vector<std::uint64_t> ids(state.particle_sidecar.particle_id.begin(),state.particle_sidecar.particle_id.end());std::sort(ids.begin(),ids.end());if(std::adjacent_find(ids.begin(),ids.end())!=ids.end())throw std::runtime_error("IC import contains duplicate particle IDs");}
+  const bool matches_runtime =
+      nearlyEqual(manifest.scale_factor, config.numerics.a_begin) &&
+      nearlyEqual(manifest.omega_matter, config.cosmology.omega_matter) &&
+      nearlyEqual(manifest.omega_lambda, config.cosmology.omega_lambda) &&
+      nearlyEqual(manifest.hubble_param, config.cosmology.hubble_param) &&
+      nearlyEqual(box_mpc, config.cosmology.box_size_x_mpc_comoving) &&
+      nearlyEqual(box_mpc, config.cosmology.box_size_y_mpc_comoving) &&
+      nearlyEqual(box_mpc, config.cosmology.box_size_z_mpc_comoving);
+  if (!matches_runtime) {
+    throw std::runtime_error(
+        "IC manifest cosmology/BoxSize/start epoch does not match frozen "
+        "runtime configuration");
+  }
+}
+
+void validateSerialCountsAndIds(
+    const core::SimulationState& state,
+    const IcManifest& manifest) {
+  std::uint64_t expected = 0;
+  for (const auto count : manifest.num_part_total) {
+    if (expected > std::numeric_limits<std::uint64_t>::max() - count) {
+      throw std::overflow_error("global particle count overflow");
+    }
+    expected += count;
+  }
+  if (state.particles.size() != expected) {
+    throw std::runtime_error("IC import particle count mismatch");
+  }
+
+  std::vector<std::uint64_t> ids(
+      state.particle_sidecar.particle_id.begin(),
+      state.particle_sidecar.particle_id.end());
+  std::sort(ids.begin(), ids.end());
+  if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) {
+    throw std::runtime_error("IC import contains duplicate particle IDs");
+  }
+}
+
 
 #endif  // COSMOSIM_ENABLE_HDF5
 

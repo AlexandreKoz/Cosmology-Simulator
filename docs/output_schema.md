@@ -56,8 +56,8 @@ output; restart is exact execution continuation.
 
 Current schema identity:
 
-- `schema_name = gadget_arepo_v4`
-- `schema_version = 4`
+- `schema_name = gadget_arepo_v5`
+- `schema_version = 5`
 
 Logical groups:
 
@@ -74,6 +74,18 @@ Canonical fields and accepted read aliases:
 - `ParticleIDs` (`ParticleIDs`, `ParticleID`, `ID`)
 
 `SnapshotIoPolicy` controls compression, chunk size, and whether alias groups are emitted.
+
+### Authoritative gas-cell identity in snapshot v5
+
+`/PartType0` row count and ordering come from authoritative dense gas-cell state, not from a one-gas-particle-per-cell assumption. Each row is written exactly once with cell coordinates, cell-local velocity, gas mass, thermodynamic fields, and derived canonical `Metallicity`. Identity is represented by:
+
+- `ParticleIDs` and `GasCellIDs`: stable `gas_cell_id`;
+- `ParentParticleIDs`: optional parent value;
+- `HasParentParticle`: `uint8` validity mask (`0` or `1`);
+- `OwningPatchIDs`: stable owning patch identity;
+- `GasIdentitySchemaVersion=1` and descriptive semantics attributes.
+
+The representation preserves parentless cells and multiple cells sharing one parent without invention or collapse. The reader accepts legacy v4/external files that lack these lanes by applying the documented one-to-one fallback (`gas_cell_id=ParticleIDs`, parent valid, owning patch `0`).
 
 The snapshot reader reports the decoded `Time`, `Redshift`, axis-aware box size,
 `Omega0`, `OmegaLambda`, `OmegaBaryon`, and `HubbleParam` header values. Production
@@ -273,7 +285,7 @@ When changing snapshot/restart/provenance fields:
 
 ## Compatibility notes (2026-04-20)
 
-- Snapshot schema was intentionally bumped to `gadget_arepo_v4` (`schema_version = 4`)
+- Historical snapshot schema v4 was intentionally introduced as `gadget_arepo_v4` (`schema_version = 4`); current snapshot identity is v5
   to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
 - No external `/PartType*` dataset names were changed.
 - Restart schema version/name are now `cosmosim_restart_v22`, version `22`. It retains the v20 force cache and adds restart-authoritative code-time output cadence with an explicit v20 compatibility default of disabled.

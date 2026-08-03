@@ -77,21 +77,46 @@ namespace cosmosim::workflows::internal {
           config.cosmology.hubble_param)) {
     return fail("snapshot Header cosmology/time metadata mismatch");
   }
-  if (restored.state.particles.size() != expected.particles.size() ||
+  expected.requireGasCellIdentityMapCoversDenseRows(
+      "snapshot roundtrip expected state");
+  restored.state.requireGasCellIdentityMapCoversDenseRows(
+      "snapshot roundtrip restored state");
+
+  std::size_t expected_non_gas_particle_count = 0U;
+  for (std::size_t i = 0; i < expected.particles.size(); ++i) {
+    const auto species = static_cast<core::ParticleSpecies>(
+        expected.particle_sidecar.species_tag[i]);
+    if (species != core::ParticleSpecies::kGas) {
+      ++expected_non_gas_particle_count;
+    }
+  }
+  const std::size_t expected_snapshot_particle_count =
+      expected_non_gas_particle_count + expected.cells.size();
+  if (restored.state.particles.size() != expected_snapshot_particle_count ||
+      restored.state.cells.size() != expected.cells.size() ||
       !restored.state.validateUniqueParticleIds() ||
       !expected.validateUniqueParticleIds()) {
-    return fail("snapshot particle count or stable-ID uniqueness mismatch");
+    return fail("snapshot particle/cell count or stable-ID uniqueness mismatch");
   }
 
   std::unordered_map<std::uint64_t, std::size_t> restored_index_by_id;
   restored_index_by_id.reserve(restored.state.particles.size());
   for (std::size_t i = 0; i < restored.state.particles.size(); ++i) {
-    restored_index_by_id.emplace(restored.state.particle_sidecar.particle_id[i], i);
+    restored_index_by_id.emplace(
+        restored.state.particle_sidecar.particle_id[i], i);
   }
+  std::unordered_map<std::uint64_t, std::size_t> expected_index_by_id;
+  expected_index_by_id.reserve(expected.particles.size());
+  for (std::size_t i = 0; i < expected.particles.size(); ++i) {
+    expected_index_by_id.emplace(expected.particle_sidecar.particle_id[i], i);
+  }
+
   const bool expected_has_softening =
-      expected.particle_sidecar.gravity_softening_comoving.size() == expected.particles.size();
+      expected.particle_sidecar.gravity_softening_comoving.size() ==
+      expected.particles.size();
   const bool expected_has_softening_mask =
-      expected.particle_sidecar.has_gravity_softening_override.size() == expected.particles.size();
+      expected.particle_sidecar.has_gravity_softening_override.size() ==
+      expected.particles.size();
   if (expected_has_softening !=
           (restored.state.particle_sidecar.gravity_softening_comoving.size() ==
            restored.state.particles.size()) ||
@@ -100,8 +125,15 @@ namespace cosmosim::workflows::internal {
            restored.state.particles.size())) {
     return fail("snapshot gravity-softening sidecar presence mismatch");
   }
+
   for (std::size_t expected_i = 0; expected_i < expected.particles.size(); ++expected_i) {
-    const std::uint64_t particle_id = expected.particle_sidecar.particle_id[expected_i];
+    const auto species = static_cast<core::ParticleSpecies>(
+        expected.particle_sidecar.species_tag[expected_i]);
+    if (species == core::ParticleSpecies::kGas) {
+      continue;
+    }
+    const std::uint64_t particle_id =
+        expected.particle_sidecar.particle_id[expected_i];
     const auto restored_it = restored_index_by_id.find(particle_id);
     if (restored_it == restored_index_by_id.end()) {
       return fail("snapshot is missing particle_id=" + std::to_string(particle_id));
@@ -109,7 +141,8 @@ namespace cosmosim::workflows::internal {
     const std::size_t restored_i = restored_it->second;
     if (restored.state.particle_sidecar.species_tag[restored_i] !=
         expected.particle_sidecar.species_tag[expected_i]) {
-      return fail("snapshot species mismatch for particle_id=" + std::to_string(particle_id));
+      return fail("snapshot species mismatch for particle_id=" +
+                  std::to_string(particle_id));
     }
     const std::array expected_values{
         expected.particles.position_x_comoving[expected_i],
@@ -128,21 +161,124 @@ namespace cosmosim::workflows::internal {
         restored.state.particles.velocity_z_peculiar[restored_i],
         restored.state.particles.mass_code[restored_i]};
     for (std::size_t component = 0; component < expected_values.size(); ++component) {
-      if (!snapshotScalarEquivalent(expected_values[component], restored_values[component])) {
+      if (!snapshotScalarEquivalent(
+              expected_values[component], restored_values[component])) {
         return fail(
             "snapshot phase-space/mass mismatch for particle_id=" +
             std::to_string(particle_id));
       }
     }
-    if (expected_has_softening && !snapshotScalarEquivalent(
+    if (expected_has_softening &&
+        !snapshotScalarEquivalent(
             expected.particle_sidecar.gravity_softening_comoving[expected_i],
             restored.state.particle_sidecar.gravity_softening_comoving[restored_i])) {
-      return fail("snapshot softening mismatch for particle_id=" + std::to_string(particle_id));
+      return fail("snapshot softening mismatch for particle_id=" +
+                  std::to_string(particle_id));
     }
     if (expected_has_softening_mask &&
         expected.particle_sidecar.has_gravity_softening_override[expected_i] !=
             restored.state.particle_sidecar.has_gravity_softening_override[restored_i]) {
-      return fail("snapshot softening mask mismatch for particle_id=" + std::to_string(particle_id));
+      return fail("snapshot softening mask mismatch for particle_id=" +
+                  std::to_string(particle_id));
+    }
+  }
+
+  for (std::size_t expected_row = 0; expected_row < expected.cells.size(); ++expected_row) {
+    const core::GasCellIdentityRecord* expected_identity =
+        expected.gas_cell_identity.findByLocalRow(
+            static_cast<std::uint32_t>(expected_row));
+    if (expected_identity == nullptr) {
+      return fail("source gas-cell identity row is missing");
+    }
+    const auto restored_row =
+        restored.state.rowForGasCellId(expected_identity->gas_cell_id);
+    if (!restored_row.has_value()) {
+      return fail("snapshot is missing gas_cell_id=" +
+                  std::to_string(expected_identity->gas_cell_id));
+    }
+    const core::GasCellIdentityRecord* restored_identity =
+        restored.state.gas_cell_identity.findByLocalRow(*restored_row);
+    if (restored_identity == nullptr ||
+        restored_identity->parent_particle_id !=
+            expected_identity->parent_particle_id ||
+        restored_identity->owning_patch_id != expected_identity->owning_patch_id) {
+      return fail("snapshot gas identity mismatch for gas_cell_id=" +
+                  std::to_string(expected_identity->gas_cell_id));
+    }
+
+    const std::array expected_values{
+        expected.cells.center_x_comoving[expected_row],
+        expected.cells.center_y_comoving[expected_row],
+        expected.cells.center_z_comoving[expected_row],
+        expected.gas_cells.velocity_x_peculiar[expected_row],
+        expected.gas_cells.velocity_y_peculiar[expected_row],
+        expected.gas_cells.velocity_z_peculiar[expected_row],
+        expected.cells.mass_code[expected_row],
+        expected.gas_cells.internal_energy_code[expected_row],
+        expected.gas_cells.density_code[expected_row],
+        expected.gas_cells.metal_mass_code[expected_row]};
+    const std::array restored_values{
+        restored.state.cells.center_x_comoving[*restored_row],
+        restored.state.cells.center_y_comoving[*restored_row],
+        restored.state.cells.center_z_comoving[*restored_row],
+        restored.state.gas_cells.velocity_x_peculiar[*restored_row],
+        restored.state.gas_cells.velocity_y_peculiar[*restored_row],
+        restored.state.gas_cells.velocity_z_peculiar[*restored_row],
+        restored.state.cells.mass_code[*restored_row],
+        restored.state.gas_cells.internal_energy_code[*restored_row],
+        restored.state.gas_cells.density_code[*restored_row],
+        restored.state.gas_cells.metal_mass_code[*restored_row]};
+    for (std::size_t component = 0; component < expected_values.size(); ++component) {
+      if (!snapshotScalarEquivalent(
+              expected_values[component], restored_values[component])) {
+        return fail("snapshot gas field mismatch for gas_cell_id=" +
+                    std::to_string(expected_identity->gas_cell_id));
+      }
+    }
+
+    const auto restored_particle_it =
+        restored_index_by_id.find(expected_identity->gas_cell_id);
+    if (restored_particle_it == restored_index_by_id.end()) {
+      return fail("snapshot gas proxy particle is missing for gas_cell_id=" +
+                  std::to_string(expected_identity->gas_cell_id));
+    }
+    const std::size_t restored_particle_index = restored_particle_it->second;
+    if (static_cast<core::ParticleSpecies>(
+            restored.state.particle_sidecar.species_tag[restored_particle_index]) !=
+        core::ParticleSpecies::kGas) {
+      return fail("snapshot gas proxy has the wrong species");
+    }
+
+    double expected_softening = 0.0;
+    std::uint8_t expected_softening_mask = 0U;
+    if (expected_identity->parent_particle_id.has_value()) {
+      const auto parent_it =
+          expected_index_by_id.find(*expected_identity->parent_particle_id);
+      if (parent_it != expected_index_by_id.end()) {
+        if (expected_has_softening) {
+          expected_softening =
+              expected.particle_sidecar.gravity_softening_comoving[parent_it->second];
+        }
+        if (expected_has_softening_mask) {
+          expected_softening_mask =
+              expected.particle_sidecar.has_gravity_softening_override[parent_it->second];
+        }
+      }
+    }
+    if (expected_has_softening &&
+        !snapshotScalarEquivalent(
+            expected_softening,
+            restored.state.particle_sidecar.gravity_softening_comoving[
+                restored_particle_index])) {
+      return fail("snapshot gas softening mismatch for gas_cell_id=" +
+                  std::to_string(expected_identity->gas_cell_id));
+    }
+    if (expected_has_softening_mask &&
+        expected_softening_mask !=
+            restored.state.particle_sidecar.has_gravity_softening_override[
+                restored_particle_index]) {
+      return fail("snapshot gas softening mask mismatch for gas_cell_id=" +
+                  std::to_string(expected_identity->gas_cell_id));
     }
   }
 

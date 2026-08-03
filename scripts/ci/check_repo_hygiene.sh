@@ -70,6 +70,22 @@ if (( ${#bad_artifacts[@]} > 0 )); then
   exit 1
 fi
 
+echo "[hygiene] checking authoritative simulation configuration format"
+while IFS= read -r config_file; do
+  config_name="${config_file##*/}"
+  if [[ ! "$config_name" =~ ^[a-z0-9]+(_[a-z0-9]+)*\.param\.txt$ ]]; then
+    echo "[hygiene] ERROR: simulation config must use lower_snake_case .param.txt: ${config_file#./}" >&2
+    exit 1
+  fi
+done < <(find configs -type f ! -name '*.md' -print | sort)
+
+if find configs -type f \( -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \) | grep -q .; then
+  echo "[hygiene] ERROR: YAML/JSON simulation input found under configs/; use .param.txt" >&2
+  exit 1
+fi
+cmake -DCOSMOSIM_SOURCE_DIR="$repo_root" \
+  -P "$repo_root/cmake/check_config_aliases.cmake"
+
 echo "[hygiene] checking IC subsystem structural guardrails"
 if find src/io -maxdepth 2 -type f \
     \( -name 'ic_utils.cpp' -o -name 'ic_utils.hpp' -o -name 'ic_utils.hh' \) \

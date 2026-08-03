@@ -946,3 +946,7 @@ state while preserving current numerical order inside trusted built-in owners.
 than documentation-only metadata. They do not dynamically instrument trusted
 built-in memory accesses, and descriptor scope remains stage composition—not
 restart-schema, migration-schema, or timestep-criteria registration.
+
+## 2026-08-02 — Authoritative `.param.txt` configuration format
+
+Accepted `docs/architecture/adr_param_txt_configuration_format.md`. Simulation inputs, examples, release profiles, normalized copies, and fixtures use lower-snake-case `.param.txt`. YAML/JSON input claims in older design or naming material are superseded; generated JSON metadata remains valid.

@@ -1,6 +1,6 @@
 # Configuration reference
 
-CosmoSim uses a GADGET/AREPO-style `param.txt` workflow and normalizes it into a typed, validated `SimulationConfig` before execution.
+CosmoSim uses a GADGET/AREPO-style `.param.txt` workflow and normalizes it into a typed, validated `SimulationConfig` before execution. `.param.txt` is the authoritative simulation-input format for runtime decks, examples, release profiles, and test fixtures. YAML and JSON are not accepted alternative simulation-input formats; JSON remains appropriate for generated provenance, manifests, counters, profiles, and capability reports. See `docs/architecture/adr_param_txt_configuration_format.md`.
 
 Authoritative structures: `include/cosmosim/core/config.hpp` and `src/core/config.cpp`.
 

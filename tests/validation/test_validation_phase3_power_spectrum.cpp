@@ -110,8 +110,23 @@ int main() {
     requireOrThrow(rel_l2 <= 0.45, msg.str());
   }
 
-  const std::filesystem::path root = COSMOSIM_SOURCE_DIR;
-  writeSpectrumJson(root / "validation" / "reference" / "phase3" / "power_spectrum_low.json", coarse);
-  writeSpectrumJson(root / "validation" / "reference" / "phase3" / "power_spectrum_high.json", fine);
+  const std::filesystem::path output_root =
+      COSMOSIM_VALIDATION_OUTPUT_DIR;
+  const std::filesystem::path low_path =
+      output_root / "power_spectrum_low.json";
+  const std::filesystem::path high_path =
+      output_root / "power_spectrum_high.json";
+  std::filesystem::remove_all(output_root);
+  writeSpectrumJson(low_path, coarse);
+  writeSpectrumJson(high_path, fine);
+  requireOrThrow(
+      std::filesystem::exists(low_path) &&
+          std::filesystem::file_size(low_path) > 0U,
+      "low-resolution power-spectrum artifact was not written");
+  requireOrThrow(
+      std::filesystem::exists(high_path) &&
+          std::filesystem::file_size(high_path) > 0U,
+      "high-resolution power-spectrum artifact was not written");
+  std::filesystem::remove_all(output_root);
   return 0;
 }

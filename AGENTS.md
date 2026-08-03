@@ -84,7 +84,7 @@ Do not edit a subsystem before identifying its owner, public interface, persiste
 ## 6) Configuration, schema, and reproducibility gates
 
 - Do not introduce a second configuration system.
-- Keep the existing param-style user UX mapped into the typed, validated config path.
+- Keep `.param.txt` as the authoritative simulation-input format mapped into the typed, validated config path; do not add YAML/JSON input aliases.
 - No new config key without typed validation, normalized dump support, docs updates, and tests.
 - No renamed or repurposed config key without compatibility behavior or explicit migration notes.
 - No silent snapshot/restart/provenance schema changes.

@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -110,6 +111,79 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
   state.rebuildSpeciesIndex();
 }
 
+void testDecoupledGasIdentityRoundtrip() {
+#if COSMOSIM_ENABLE_HDF5
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.output.run_name = "snapshot_decoupled_gas_identity";
+
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2U);
+  state.resizeCells(3U);
+  for (std::size_t particle_index = 0; particle_index < 2U; ++particle_index) {
+    state.particle_sidecar.particle_id[particle_index] = 5001U + particle_index;
+    state.particle_sidecar.species_tag[particle_index] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    state.particle_sidecar.owning_rank[particle_index] = 0U;
+    state.particles.mass_code[particle_index] = 1.0;
+  }
+  for (std::size_t row = 0; row < 3U; ++row) {
+    state.cells.center_x_comoving[row] = 0.1 + 0.2 * static_cast<double>(row);
+    state.cells.center_y_comoving[row] = 0.2 + 0.1 * static_cast<double>(row);
+    state.cells.center_z_comoving[row] = 0.3 + 0.05 * static_cast<double>(row);
+    state.cells.mass_code[row] = 2.0 + static_cast<double>(row);
+    state.cells.patch_index[row] = 0U;
+    state.gas_cells.velocity_x_peculiar[row] = 0.01 * static_cast<double>(row + 1U);
+    state.gas_cells.velocity_y_peculiar[row] = -0.02 * static_cast<double>(row + 1U);
+    state.gas_cells.velocity_z_peculiar[row] = 0.03 * static_cast<double>(row + 1U);
+    state.gas_cells.density_code[row] = 4.0 + static_cast<double>(row);
+    state.gas_cells.internal_energy_code[row] = 5.0 + static_cast<double>(row);
+    state.gas_cells.metal_mass_code[row] = 0.01 * state.cells.mass_code[row];
+  }
+  state.replaceGasCellIdentityRecords({
+      {.gas_cell_id = 7001U,
+       .parent_particle_id = std::nullopt,
+       .owning_patch_id = 42U,
+       .local_cell_row = 0U},
+      {.gas_cell_id = 7002U,
+       .parent_particle_id = 5001U,
+       .owning_patch_id = 42U,
+       .local_cell_row = 1U},
+      {.gas_cell_id = 7003U,
+       .parent_particle_id = 5001U,
+       .owning_patch_id = 43U,
+       .local_cell_row = 2U},
+  });
+  state.rebuildSpeciesIndex();
+
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      "cosmosim_snapshot_decoupled_gas_identity.hdf5";
+  cosmosim::io::SnapshotWritePayload payload;
+  payload.state = &state;
+  payload.config = &config;
+  payload.normalized_config_text = "schema_version = 1\n";
+  payload.provenance = cosmosim::core::makeProvenanceRecord(
+      "gas_identity", "gas_identity", 0);
+  cosmosim::io::writeGadgetArepoSnapshotHdf5(path, payload);
+
+  const auto roundtrip =
+      cosmosim::io::readGadgetArepoSnapshotHdf5(path, config);
+  assert(roundtrip.report.schema_version == 5U);
+  assert(roundtrip.state.cells.size() == 3U);
+  assert(roundtrip.state.gas_cell_identity.size() == 3U);
+  assert(!roundtrip.state.parentParticleIdForGasCellId(7001U).has_value());
+  assert(roundtrip.state.parentParticleIdForGasCellId(7002U).value() == 5001U);
+  assert(roundtrip.state.parentParticleIdForGasCellId(7003U).value() == 5001U);
+  assert(roundtrip.state.gas_cell_identity.rowsForParentParticleId(5001U).size() == 2U);
+  assert(roundtrip.state.owningPatchIdForGasCellId(7001U).value() == 42U);
+  assert(roundtrip.state.owningPatchIdForGasCellId(7003U).value() == 43U);
+  assert(roundtrip.state.cells.center_x_comoving[0] == state.cells.center_x_comoving[0]);
+  assert(roundtrip.state.cells.center_x_comoving[2] == state.cells.center_x_comoving[2]);
+  assert(roundtrip.state.cells.mass_code[1] == state.cells.mass_code[1]);
+  std::filesystem::remove(path);
+#endif
+}
+
 void testRoundtripMixedSpeciesSnapshot() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "snapshot_roundtrip";
@@ -164,6 +238,9 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(inspect_file >= 0);
   assert(H5Aexists(inspect_file, "cosmosim_file_kind") > 0);
   assert(H5Lexists(inspect_file, "/PartType0/StarFormationRate", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/ParentParticleIDs", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/HasParentParticle", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/OwningPatchIDs", H5P_DEFAULT) > 0);
   assert(H5Lexists(inspect_file, "/PartType0/ColdCloudMassFraction", H5P_DEFAULT) > 0);
   assert(H5Lexists(inspect_file, "/PartType0/EffectivePressure", H5P_DEFAULT) > 0);
   assert(H5Lexists(inspect_file, "/PartType0/EffectiveInternalEnergy", H5P_DEFAULT) > 0);
@@ -279,6 +356,8 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.state.cells.size() == 2);
   assert(roundtrip.state.gas_cells.gas_cell_id[0] == 9000);
   assert(roundtrip.state.gas_cells.gas_cell_id[1] == 9001);
+  assert(roundtrip.state.parentParticleIdForGasCellId(9000).value() == 1002);
+  assert(roundtrip.state.parentParticleIdForGasCellId(9001).value() == 1003);
   assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[0] - 0.1) < 1.0e-12);
   assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[1] - 0.3) < 1.0e-12);
   assert(roundtrip.state.star_particles.size() == 2);
@@ -293,12 +372,13 @@ void testRoundtripMixedSpeciesSnapshot() {
     assert(std::abs(roundtrip.state.star_particles.metallicity_mass_fraction[star_row] -
                     state.star_particles.metallicity_mass_fraction[star_row]) < 1.0e-12);
   }
-  assert(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() == state.particles.size());
-  for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const std::uint64_t id = state.particle_sidecar.particle_id[i];
+  assert(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() ==
+         roundtrip.state.particles.size());
+  const auto assert_softening_for_id = [&](
+      const std::uint64_t particle_id, const double expected_softening) {
     std::size_t roundtrip_index = roundtrip.state.particles.size();
     for (std::size_t j = 0; j < roundtrip.state.particles.size(); ++j) {
-      if (roundtrip.state.particle_sidecar.particle_id[j] == id) {
+      if (roundtrip.state.particle_sidecar.particle_id[j] == particle_id) {
         roundtrip_index = j;
         break;
       }
@@ -306,8 +386,19 @@ void testRoundtripMixedSpeciesSnapshot() {
     assert(roundtrip_index < roundtrip.state.particles.size());
     assert(std::abs(
                roundtrip.state.particle_sidecar.gravity_softening_comoving[roundtrip_index] -
-               state.particle_sidecar.gravity_softening_comoving[i]) < 1.0e-12);
+               expected_softening) < 1.0e-12);
+  };
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const auto species = static_cast<cosmosim::core::ParticleSpecies>(
+        state.particle_sidecar.species_tag[i]);
+    if (species != cosmosim::core::ParticleSpecies::kGas) {
+      assert_softening_for_id(
+          state.particle_sidecar.particle_id[i],
+          state.particle_sidecar.gravity_softening_comoving[i]);
+    }
   }
+  assert_softening_for_id(9000U, state.particle_sidecar.gravity_softening_comoving[2]);
+  assert_softening_for_id(9001U, state.particle_sidecar.gravity_softening_comoving[3]);
 
   double checksum_in = 0.0;
   double checksum_out = 0.0;
@@ -461,6 +552,7 @@ void testMassTableFallbackSnapshotImport() {
 }  // namespace
 
 int main() {
+  testDecoupledGasIdentityRoundtrip();
   testRoundtripMixedSpeciesSnapshot();
   testMassTableFallbackSnapshotImport();
   return 0;

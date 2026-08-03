@@ -640,14 +640,22 @@ void writeGadgetArepoSnapshotHdf5(
         units,
         physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
   }
+  state.requireGasCellIdentityMapCoversDenseRows("snapshot writer");
+  if (state.cells.size() != state.gas_cells.size()) {
+    throw std::runtime_error(
+        "snapshot writer: CellSoa and GasCellSidecar row counts must match");
+  }
+
   std::vector<std::int64_t> tracer_row_by_particle(state.particles.size(), -1);
   std::vector<std::int64_t> star_row_by_particle(state.particles.size(), -1);
-  std::unordered_map<std::uint64_t, std::size_t> gas_row_by_parent_particle_id;
-  gas_row_by_parent_particle_id.reserve(state.gas_cells.size());
-  for (std::size_t gas_row = 0; gas_row < state.gas_cells.size(); ++gas_row) {
-    const std::uint64_t parent_particle_id = state.gas_cells.parent_particle_id[gas_row];
-    if (parent_particle_id != 0U) {
-      gas_row_by_parent_particle_id.emplace(parent_particle_id, gas_row);
+  std::unordered_map<std::uint64_t, std::size_t> particle_index_by_id;
+  particle_index_by_id.reserve(state.particles.size());
+  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    const std::uint64_t particle_id = state.particle_sidecar.particle_id[particle_index];
+    if (particle_id == 0U ||
+        !particle_index_by_id.emplace(particle_id, particle_index).second) {
+      throw std::runtime_error(
+          "snapshot writer: particle IDs must be nonzero and unique");
     }
   }
   for (std::size_t star_row = 0; star_row < state.star_particles.size(); ++star_row) {
@@ -666,9 +674,13 @@ void writeGadgetArepoSnapshotHdf5(
   std::array<std::uint64_t, 6> count_by_type{};
   std::array<double, 6> mass_table{};
 
+  count_by_type[0] = static_cast<std::uint64_t>(state.cells.size());
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const std::size_t type_index = mapSpeciesTagToPartType(state.particle_sidecar.species_tag[i]);
-    ++count_by_type[type_index];
+    const std::size_t type_index =
+        mapSpeciesTagToPartType(state.particle_sidecar.species_tag[i]);
+    if (type_index != 0U) {
+      ++count_by_type[type_index];
+    }
   }
 
   const std::filesystem::path parent_dir = output_path.parent_path();
@@ -834,16 +846,46 @@ void writeGadgetArepoSnapshotHdf5(
       payload.provenance.gravity_pm_fft_backend);
 
   for (std::size_t type_index = 0; type_index < schema.part_type_group.size(); ++type_index) {
-    const std::vector<std::uint32_t> indices = collectGlobalIndicesForPartType(state, type_index);
-    if (indices.empty()) {
+    std::vector<std::uint32_t> indices;
+    std::size_t row_count = 0U;
+    if (type_index == 0U) {
+      row_count = state.cells.size();
+    } else {
+      indices = collectGlobalIndicesForPartType(state, type_index);
+      row_count = indices.size();
+    }
+    if (row_count == 0U) {
       continue;
     }
 
-    std::vector<double> coords;
-    std::vector<double> velocities;
-    std::vector<double> masses;
-    std::vector<std::uint64_t> ids;
-    packCoords(state, indices, coords, velocities, masses, ids);
+    std::vector<double> coords(row_count * 3U, 0.0);
+    std::vector<double> velocities(row_count * 3U, 0.0);
+    std::vector<double> masses(row_count, 0.0);
+    std::vector<std::uint64_t> ids(row_count, 0U);
+    if (type_index == 0U) {
+      for (std::size_t gas_row = 0; gas_row < row_count; ++gas_row) {
+        const core::GasCellIdentityRecord* identity =
+            state.gas_cell_identity.findByLocalRow(
+                static_cast<std::uint32_t>(gas_row));
+        if (identity == nullptr || identity->gas_cell_id == 0U) {
+          throw std::runtime_error(
+              "snapshot writer: authoritative gas-cell identity row is missing");
+        }
+        coords[gas_row * 3U + 0U] = state.cells.center_x_comoving[gas_row];
+        coords[gas_row * 3U + 1U] = state.cells.center_y_comoving[gas_row];
+        coords[gas_row * 3U + 2U] = state.cells.center_z_comoving[gas_row];
+        velocities[gas_row * 3U + 0U] =
+            state.gas_cells.velocity_x_peculiar[gas_row];
+        velocities[gas_row * 3U + 1U] =
+            state.gas_cells.velocity_y_peculiar[gas_row];
+        velocities[gas_row * 3U + 2U] =
+            state.gas_cells.velocity_z_peculiar[gas_row];
+        masses[gas_row] = state.cells.mass_code[gas_row];
+        ids[gas_row] = identity->gas_cell_id;
+      }
+    } else {
+      packCoords(state, indices, coords, velocities, masses, ids);
+    }
 
     Hdf5Handle type_group(H5Gcreate2(
         file.get(),
@@ -855,100 +897,211 @@ void writeGadgetArepoSnapshotHdf5(
       throw std::runtime_error("failed creating part type group");
     }
 
-    writeDataset2d3(type_group.get(), schema.coordinates.canonical_name, coords, indices.size(), policy);
-    writeDataset2d3(type_group.get(), schema.velocities.canonical_name, velocities, indices.size(), policy);
-    writeDataset1d(type_group.get(), schema.masses.canonical_name, masses.data(), indices.size(), policy);
-    writeDataset1dU64(type_group.get(), schema.particle_ids.canonical_name, ids.data(), indices.size(), policy);
+    writeDataset2d3(
+        type_group.get(), schema.coordinates.canonical_name, coords, row_count,
+        policy);
+    writeDataset2d3(
+        type_group.get(), schema.velocities.canonical_name, velocities,
+        row_count, policy);
+    writeDataset1d(
+        type_group.get(), schema.masses.canonical_name, masses.data(),
+        row_count, policy);
+    writeDataset1dU64(
+        type_group.get(), schema.particle_ids.canonical_name, ids.data(),
+        row_count, policy);
+
     if (!state.particle_sidecar.gravity_softening_comoving.empty()) {
-      std::vector<double> particle_softening(indices.size(), 0.0);
-      for (std::size_t i = 0; i < indices.size(); ++i) {
-        particle_softening[i] = state.particle_sidecar.gravity_softening_comoving[indices[i]];
-      }
-      writeDataset1d(type_group.get(), "GravitySofteningComoving", particle_softening.data(), indices.size(), policy);
-      if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
-        std::vector<std::uint8_t> override_mask(indices.size(), 0U);
-        for (std::size_t i = 0; i < indices.size(); ++i) {
-          override_mask[i] = state.particle_sidecar.has_gravity_softening_override[indices[i]];
+      std::vector<double> particle_softening(row_count, 0.0);
+      std::vector<std::uint8_t> override_mask(row_count, 0U);
+      bool has_override_mask =
+          !state.particle_sidecar.has_gravity_softening_override.empty();
+      if (type_index == 0U) {
+        for (std::size_t gas_row = 0; gas_row < row_count; ++gas_row) {
+          const core::GasCellIdentityRecord* identity =
+              state.gas_cell_identity.findByLocalRow(
+                  static_cast<std::uint32_t>(gas_row));
+          if (identity == nullptr || !identity->parent_particle_id.has_value()) {
+            continue;
+          }
+          const auto particle_it =
+              particle_index_by_id.find(*identity->parent_particle_id);
+          if (particle_it == particle_index_by_id.end()) {
+            continue;
+          }
+          particle_softening[gas_row] =
+              state.particle_sidecar.gravity_softening_comoving[
+                  particle_it->second];
+          if (has_override_mask) {
+            override_mask[gas_row] =
+                state.particle_sidecar.has_gravity_softening_override[
+                    particle_it->second];
+          }
         }
-        writeDataset1dU8(type_group.get(), "GravitySofteningOverrideMask", override_mask.data(), indices.size(), policy);
+      } else {
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+          particle_softening[i] =
+              state.particle_sidecar.gravity_softening_comoving[indices[i]];
+          if (has_override_mask) {
+            override_mask[i] =
+                state.particle_sidecar.has_gravity_softening_override[
+                    indices[i]];
+          }
+        }
+      }
+      writeDataset1d(
+          type_group.get(), "GravitySofteningComoving",
+          particle_softening.data(), row_count, policy);
+      if (has_override_mask) {
+        writeDataset1dU8(
+            type_group.get(), "GravitySofteningOverrideMask",
+            override_mask.data(), row_count, policy);
       }
     }
-    if (type_index == 0) {
-      std::vector<double> internal_energy(indices.size(), 0.0);
-      std::vector<double> density(indices.size(), 0.0);
-      std::vector<double> metallicity(indices.size(), 0.0);
-      std::vector<double> star_formation_rate(indices.size(), 0.0);
-      std::vector<double> cold_cloud_mass_fraction(indices.size(), 0.0);
-      std::vector<double> effective_pressure(indices.size(), 0.0);
-      std::vector<double> effective_internal_energy(indices.size(), 0.0);
-      std::vector<std::uint8_t> is_on_effective_eos(indices.size(), 0U);
-      std::vector<std::uint64_t> gas_cell_ids(indices.size(), 0U);
-      for (std::size_t i = 0; i < indices.size(); ++i) {
-        const std::uint32_t particle_index = indices[i];
-        const std::uint64_t particle_id = state.particle_sidecar.particle_id[particle_index];
-        const auto row_it = gas_row_by_parent_particle_id.find(particle_id);
-        if (row_it == gas_row_by_parent_particle_id.end()) {
+
+    if (type_index == 0U) {
+      std::vector<double> internal_energy(row_count, 0.0);
+      std::vector<double> density(row_count, 0.0);
+      std::vector<double> metallicity(row_count, 0.0);
+      std::vector<double> star_formation_rate(row_count, 0.0);
+      std::vector<double> cold_cloud_mass_fraction(row_count, 0.0);
+      std::vector<double> effective_pressure(row_count, 0.0);
+      std::vector<double> effective_internal_energy(row_count, 0.0);
+      std::vector<std::uint8_t> is_on_effective_eos(row_count, 0U);
+      std::vector<std::uint64_t> gas_cell_ids(row_count, 0U);
+      std::vector<std::uint64_t> parent_particle_ids(row_count, 0U);
+      std::vector<std::uint8_t> has_parent_particle(row_count, 0U);
+      std::vector<std::uint64_t> owning_patch_ids(row_count, 0U);
+
+      for (std::size_t gas_row = 0; gas_row < row_count; ++gas_row) {
+        const core::GasCellIdentityRecord* identity =
+            state.gas_cell_identity.findByLocalRow(
+                static_cast<std::uint32_t>(gas_row));
+        if (identity == nullptr) {
           throw std::runtime_error(
-              "snapshot writer: gas particle lacks authoritative gas-cell sidecar row");
+              "snapshot writer: gas-cell identity map does not cover dense rows");
         }
-        const std::size_t gas_row = row_it->second;
-        internal_energy[i] = state.gas_cells.internal_energy_code[gas_row];
-        density[i] = state.gas_cells.density_code[gas_row];
+        internal_energy[gas_row] =
+            state.gas_cells.internal_energy_code[gas_row];
+        density[gas_row] = state.gas_cells.density_code[gas_row];
         const double gas_mass = state.cells.mass_code[gas_row];
-        metallicity[i] = gas_mass > 0.0
-            ? std::clamp(state.gas_cells.metal_mass_code[gas_row] / gas_mass, 0.0, 1.0)
+        metallicity[gas_row] = gas_mass > 0.0
+            ? std::clamp(
+                  state.gas_cells.metal_mass_code[gas_row] / gas_mass, 0.0,
+                  1.0)
             : 0.0;
-        gas_cell_ids[i] = state.gas_cells.gas_cell_id[gas_row];
+        gas_cell_ids[gas_row] = identity->gas_cell_id;
+        owning_patch_ids[gas_row] = identity->owning_patch_id;
+        if (identity->parent_particle_id.has_value()) {
+          if (*identity->parent_particle_id == 0U) {
+            throw std::runtime_error(
+                "snapshot writer: present gas parent identity must be nonzero");
+          }
+          parent_particle_ids[gas_row] = *identity->parent_particle_id;
+          has_parent_particle[gas_row] = 1U;
+        }
+
         if (effective_eos_table.has_value()) {
-          const double scale_factor = std::max(state.metadata.scale_factor, 1.0e-12);
-          const double density_phys = config.units.coordinate_frame == core::CoordinateFrame::kComoving
-              ? density[i] / (scale_factor * scale_factor * scale_factor)
-              : density[i];
+          const double scale_factor =
+              std::max(state.metadata.scale_factor, 1.0e-12);
+          const double density_phys =
+              config.units.coordinate_frame == core::CoordinateFrame::kComoving
+              ? density[gas_row] /
+                    (scale_factor * scale_factor * scale_factor)
+              : density[gas_row];
           const auto equilibrium = effective_eos_table->lookup(density_phys);
           if (equilibrium.above_threshold && equilibrium.valid &&
-              internal_energy[i] <= equilibrium.entry.specific_internal_energy_eff_code *
-                  (1.0 + config.physics.sf_effective_hot_excess_tolerance)) {
+              internal_energy[gas_row] <=
+                  equilibrium.entry.specific_internal_energy_eff_code *
+                      (1.0 +
+                       config.physics.sf_effective_hot_excess_tolerance)) {
             const double long_lived_factor =
                 config.physics.sf_effective_birth_mass_convention ==
                     core::EffectiveIsmBirthMassConvention::kLongLivedMass
-                ? (1.0 - config.physics.sf_effective_massive_star_fraction)
+                ? (1.0 -
+                   config.physics.sf_effective_massive_star_fraction)
                 : 1.0;
-            star_formation_rate[i] = gas_mass * long_lived_factor *
+            star_formation_rate[gas_row] =
+                gas_mass * long_lived_factor *
                 equilibrium.entry.cold_mass_fraction /
-                std::max(equilibrium.entry.star_formation_timescale_code, 1.0e-30);
-            cold_cloud_mass_fraction[i] = equilibrium.entry.cold_mass_fraction;
-            effective_pressure[i] = equilibrium.entry.pressure_phys_code;
-            effective_internal_energy[i] = equilibrium.entry.specific_internal_energy_eff_code;
-            is_on_effective_eos[i] = 1U;
+                std::max(
+                    equilibrium.entry.star_formation_timescale_code, 1.0e-30);
+            cold_cloud_mass_fraction[gas_row] =
+                equilibrium.entry.cold_mass_fraction;
+            effective_pressure[gas_row] =
+                equilibrium.entry.pressure_phys_code;
+            effective_internal_energy[gas_row] =
+                equilibrium.entry.specific_internal_energy_eff_code;
+            is_on_effective_eos[gas_row] = 1U;
           }
-        } else if (config.physics.enable_star_formation &&
-                   config.physics.star_formation_model ==
-                       core::StarFormationModelKind::kLegacySchmidtThreshold &&
-                   density[i] >= config.physics.sf_density_threshold_code &&
-                   state.gas_cells.temperature_code[gas_row] <=
-                       config.physics.sf_temperature_threshold_k) {
+        } else if (
+            config.physics.enable_star_formation &&
+            config.physics.star_formation_model ==
+                core::StarFormationModelKind::kLegacySchmidtThreshold &&
+            density[gas_row] >=
+                config.physics.sf_density_threshold_code &&
+            state.gas_cells.temperature_code[gas_row] <=
+                config.physics.sf_temperature_threshold_k) {
           const core::UnitSystem units = core::makeUnitSystem(
-              config.units.length_unit, config.units.mass_unit, config.units.velocity_unit);
+              config.units.length_unit, config.units.mass_unit,
+              config.units.velocity_unit);
           const double g_code = core::newtonGravitationalConstantCode(units);
-          const double t_ff = std::sqrt(3.0 * 3.14159265358979323846 /
-              (32.0 * g_code * std::max(density[i], 1.0e-30)));
-          star_formation_rate[i] = config.physics.sf_epsilon_ff * gas_mass /
+          const double t_ff = std::sqrt(
+              3.0 * 3.14159265358979323846 /
+              (32.0 * g_code *
+               std::max(density[gas_row], 1.0e-30)));
+          star_formation_rate[gas_row] =
+              config.physics.sf_epsilon_ff * gas_mass /
               std::max(t_ff, 1.0e-30);
         }
       }
-      writeDataset1d(type_group.get(), "InternalEnergy", internal_energy.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "Density", density.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "Metallicity", metallicity.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "StarFormationRate", star_formation_rate.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "ColdCloudMassFraction", cold_cloud_mass_fraction.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "EffectivePressure", effective_pressure.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "EffectiveInternalEnergy", effective_internal_energy.data(), indices.size(), policy);
-      writeDataset1dU8(type_group.get(), "IsOnEffectiveEos", is_on_effective_eos.data(), indices.size(), policy);
-      writeDataset1dU64(type_group.get(), "GasCellIDs", gas_cell_ids.data(), indices.size(), policy);
+
+      writeScalarUint32Attribute(type_group.get(), "GasIdentitySchemaVersion", 1U);
+      writeScalarStringAttribute(
+          type_group.get(), "GasParticleIdsSemantics", "stable_gas_cell_id");
+      writeScalarStringAttribute(
+          type_group.get(), "GasParentIdentitySemantics",
+          "ParentParticleIDs valid where HasParentParticle=1");
+      writeDataset1d(
+          type_group.get(), "InternalEnergy", internal_energy.data(), row_count,
+          policy);
+      writeDataset1d(
+          type_group.get(), "Density", density.data(), row_count, policy);
+      writeDataset1d(
+          type_group.get(), "Metallicity", metallicity.data(), row_count,
+          policy);
+      writeDataset1d(
+          type_group.get(), "StarFormationRate", star_formation_rate.data(),
+          row_count, policy);
+      writeDataset1d(
+          type_group.get(), "ColdCloudMassFraction",
+          cold_cloud_mass_fraction.data(), row_count, policy);
+      writeDataset1d(
+          type_group.get(), "EffectivePressure", effective_pressure.data(),
+          row_count, policy);
+      writeDataset1d(
+          type_group.get(), "EffectiveInternalEnergy",
+          effective_internal_energy.data(), row_count, policy);
+      writeDataset1dU8(
+          type_group.get(), "IsOnEffectiveEos", is_on_effective_eos.data(),
+          row_count, policy);
+      writeDataset1dU64(
+          type_group.get(), "GasCellIDs", gas_cell_ids.data(), row_count,
+          policy);
+      writeDataset1dU64(
+          type_group.get(), "ParentParticleIDs", parent_particle_ids.data(),
+          row_count, policy);
+      writeDataset1dU8(
+          type_group.get(), "HasParentParticle", has_parent_particle.data(),
+          row_count, policy);
+      writeDataset1dU64(
+          type_group.get(), "OwningPatchIDs", owning_patch_ids.data(),
+          row_count, policy);
     }
-    if (type_index == 4) {
+
+    if (type_index == 4U) {
       std::vector<double> metallicity(indices.size(), 0.0);
-      std::vector<double> formation_time(indices.size(), state.metadata.scale_factor);
+      std::vector<double> formation_time(
+          indices.size(), state.metadata.scale_factor);
       std::vector<double> birth_mass(indices.size(), 0.0);
       std::vector<std::uint64_t> birth_key(indices.size(), 0U);
       std::vector<std::uint64_t> parent_gas_cell_id(indices.size(), 0U);
@@ -961,74 +1114,114 @@ void writeGadgetArepoSnapshotHdf5(
               "snapshot writer: star particle lacks authoritative stellar sidecar row");
         }
         const std::size_t row = static_cast<std::size_t>(star_row);
-        metallicity[i] = state.star_particles.metallicity_mass_fraction[row];
-        formation_time[i] = state.star_particles.formation_scale_factor[row];
+        metallicity[i] =
+            state.star_particles.metallicity_mass_fraction[row];
+        formation_time[i] =
+            state.star_particles.formation_scale_factor[row];
         birth_mass[i] = state.star_particles.birth_mass_code[row];
         birth_key[i] = state.star_particles.birth_key[row];
-        parent_gas_cell_id[i] = state.star_particles.parent_gas_cell_id[row];
+        parent_gas_cell_id[i] =
+            state.star_particles.parent_gas_cell_id[row];
         birth_tick[i] = state.star_particles.birth_tick[row];
         birth_ordinal[i] = state.star_particles.birth_ordinal[row];
       }
-      writeDataset1d(type_group.get(), "Metallicity", metallicity.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "StellarFormationTime", formation_time.data(), indices.size(), policy);
-      writeDataset1d(type_group.get(), "BirthMass", birth_mass.data(), indices.size(), policy);
-      writeDataset1dU64(type_group.get(), "StarFormationBirthKey", birth_key.data(), indices.size(), policy);
-      writeDataset1dU64(type_group.get(), "ParentGasCellID", parent_gas_cell_id.data(), indices.size(), policy);
-      writeDataset1dU64(type_group.get(), "BirthIntegrationTick", birth_tick.data(), indices.size(), policy);
+      writeDataset1d(
+          type_group.get(), "Metallicity", metallicity.data(), indices.size(),
+          policy);
+      writeDataset1d(
+          type_group.get(), "StellarFormationTime", formation_time.data(),
+          indices.size(), policy);
+      writeDataset1d(
+          type_group.get(), "BirthMass", birth_mass.data(), indices.size(),
+          policy);
+      writeDataset1dU64(
+          type_group.get(), "StarFormationBirthKey", birth_key.data(),
+          indices.size(), policy);
+      writeDataset1dU64(
+          type_group.get(), "ParentGasCellID", parent_gas_cell_id.data(),
+          indices.size(), policy);
+      writeDataset1dU64(
+          type_group.get(), "BirthIntegrationTick", birth_tick.data(),
+          indices.size(), policy);
       hsize_t ordinal_dims[1] = {static_cast<hsize_t>(indices.size())};
       Hdf5Handle ordinal_space(H5Screate_simple(1, ordinal_dims, nullptr));
-      Hdf5Handle ordinal_properties = createDatasetProperties(indices.size(), 1, policy);
+      Hdf5Handle ordinal_properties =
+          createDatasetProperties(indices.size(), 1, policy);
       Hdf5Handle ordinal_dataset(H5Dcreate2(
-          type_group.get(), "BirthOrdinal", H5T_STD_U32LE, ordinal_space.get(), H5P_DEFAULT,
-          ordinal_properties.get(), H5P_DEFAULT));
+          type_group.get(), "BirthOrdinal", H5T_STD_U32LE,
+          ordinal_space.get(), H5P_DEFAULT, ordinal_properties.get(),
+          H5P_DEFAULT));
       if (!ordinal_dataset.valid() ||
-          H5Dwrite(ordinal_dataset.get(), H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                   birth_ordinal.data()) < 0) {
-        throw std::runtime_error("failed to write stellar BirthOrdinal dataset");
+          H5Dwrite(
+              ordinal_dataset.get(), H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL,
+              H5P_DEFAULT, birth_ordinal.data()) < 0) {
+        throw std::runtime_error(
+            "failed to write stellar BirthOrdinal dataset");
       }
     }
-    if (type_index == 3) {
-      std::vector<std::uint64_t> parent_particle_id(indices.size(), 0);
-      std::vector<std::uint64_t> injection_step(indices.size(), 0);
-      std::vector<std::uint32_t> host_cell_index(indices.size(), 0);
+
+    if (type_index == 3U) {
+      std::vector<std::uint64_t> parent_particle_id(indices.size(), 0U);
+      std::vector<std::uint64_t> injection_step(indices.size(), 0U);
+      std::vector<std::uint32_t> host_cell_index(indices.size(), 0U);
       std::vector<double> mass_fraction_of_host(indices.size(), 0.0);
-      std::vector<double> cumulative_exchanged_mass_code(indices.size(), 0.0);
+      std::vector<double> cumulative_exchanged_mass_code(
+          indices.size(), 0.0);
       for (std::size_t i = 0; i < indices.size(); ++i) {
         const std::int64_t tracer_row = tracer_row_by_particle[indices[i]];
         if (tracer_row < 0) {
           continue;
         }
-        parent_particle_id[i] = state.tracers.parent_particle_id[tracer_row];
+        parent_particle_id[i] =
+            state.tracers.parent_particle_id[tracer_row];
         injection_step[i] = state.tracers.injection_step[tracer_row];
         host_cell_index[i] = state.tracers.host_cell_index[tracer_row];
-        mass_fraction_of_host[i] = state.tracers.mass_fraction_of_host[tracer_row];
+        mass_fraction_of_host[i] =
+            state.tracers.mass_fraction_of_host[tracer_row];
         cumulative_exchanged_mass_code[i] =
             state.tracers.cumulative_exchanged_mass_code[tracer_row];
       }
-      writeDataset1dU64(type_group.get(), "TracerParentParticleID", parent_particle_id.data(), indices.size(), policy);
-      writeDataset1dU64(type_group.get(), "TracerInjectionStep", injection_step.data(), indices.size(), policy);
+      writeDataset1dU64(
+          type_group.get(), "TracerParentParticleID",
+          parent_particle_id.data(), indices.size(), policy);
+      writeDataset1dU64(
+          type_group.get(), "TracerInjectionStep", injection_step.data(),
+          indices.size(), policy);
       hsize_t dims[1] = {static_cast<hsize_t>(indices.size())};
       Hdf5Handle dataspace(H5Screate_simple(1, dims, nullptr));
-      Hdf5Handle properties = createDatasetProperties(indices.size(), 1, policy);
+      Hdf5Handle properties =
+          createDatasetProperties(indices.size(), 1, policy);
       Hdf5Handle host_ds(H5Dcreate2(
-          type_group.get(), "TracerHostCellIndex", H5T_STD_U32LE, dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
+          type_group.get(), "TracerHostCellIndex", H5T_STD_U32LE,
+          dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
       Hdf5Handle frac_ds(H5Dcreate2(
-          type_group.get(), "TracerMassFractionOfHost", H5T_IEEE_F64LE, dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
+          type_group.get(), "TracerMassFractionOfHost", H5T_IEEE_F64LE,
+          dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
       Hdf5Handle exchange_ds(H5Dcreate2(
-          type_group.get(), "TracerCumulativeExchangedMassCode", H5T_IEEE_F64LE, dataspace.get(), H5P_DEFAULT, properties.get(), H5P_DEFAULT));
+          type_group.get(), "TracerCumulativeExchangedMassCode",
+          H5T_IEEE_F64LE, dataspace.get(), H5P_DEFAULT, properties.get(),
+          H5P_DEFAULT));
       if (!host_ds.valid() ||
-          H5Dwrite(host_ds.get(), H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, host_cell_index.data()) < 0 ||
+          H5Dwrite(
+              host_ds.get(), H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL,
+              H5P_DEFAULT, host_cell_index.data()) < 0 ||
           !frac_ds.valid() ||
-          H5Dwrite(frac_ds.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, mass_fraction_of_host.data()) < 0 ||
+          H5Dwrite(
+              frac_ds.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
+              H5P_DEFAULT, mass_fraction_of_host.data()) < 0 ||
           !exchange_ds.valid() ||
-          H5Dwrite(exchange_ds.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, cumulative_exchanged_mass_code.data()) < 0) {
+          H5Dwrite(
+              exchange_ds.get(), H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
+              H5P_DEFAULT, cumulative_exchanged_mass_code.data()) < 0) {
         throw std::runtime_error("failed to write tracer sidecar datasets");
       }
     }
 
     if (policy.write_particle_type_alias_groups) {
       const std::string alias_group_path = toTypeAliasPath(type_index);
-      H5Lcreate_hard(file.get(), std::string(schema.part_type_group[type_index]).c_str(), file.get(), alias_group_path.c_str(), H5P_DEFAULT, H5P_DEFAULT);
+      H5Lcreate_hard(
+          file.get(), std::string(schema.part_type_group[type_index]).c_str(),
+          file.get(), alias_group_path.c_str(), H5P_DEFAULT, H5P_DEFAULT);
     }
   }
 
@@ -1134,6 +1327,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   std::vector<double> gas_density_code;
   std::vector<double> gas_metallicity_mass_fraction;
   std::vector<std::uint64_t> gas_cell_id;
+  std::vector<std::uint64_t> gas_parent_particle_id;
+  std::vector<std::uint8_t> gas_has_parent_particle;
+  std::vector<std::uint64_t> gas_owning_patch_id;
   std::vector<std::uint32_t> star_particle_index;
   std::vector<double> star_metallicity_mass_fraction;
   std::vector<double> star_formation_scale_factor;
@@ -1200,6 +1396,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     std::vector<double> gas_density_chunk;
     std::vector<double> gas_metallicity_chunk;
     std::vector<std::uint64_t> gas_cell_id_chunk;
+    std::vector<std::uint64_t> gas_parent_particle_id_chunk;
+    std::vector<std::uint8_t> gas_has_parent_particle_chunk;
+    std::vector<std::uint64_t> gas_owning_patch_id_chunk;
     std::vector<double> star_metallicity_chunk;
     std::vector<double> star_formation_time_chunk;
     std::vector<double> star_birth_mass_chunk;
@@ -1251,30 +1450,76 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     } else {
       softening_override_mask_chunk.clear();
     }
-    if (type_index == 0) {
+    if (type_index == 0U) {
       if (hdf5PathExists(group.get(), "InternalEnergy")) {
-        readDatasetChunk1d(group.get(), "InternalEnergy", 0, local_count, gas_internal_energy_chunk);
+        readDatasetChunk1d(
+            group.get(), "InternalEnergy", 0, local_count,
+            gas_internal_energy_chunk);
       } else {
         gas_internal_energy_chunk.assign(local_count, 0.0);
-        result.report.defaulted_fields.push_back("/PartType0/InternalEnergy=zero");
+        result.report.defaulted_fields.push_back(
+            "/PartType0/InternalEnergy=zero");
       }
       if (hdf5PathExists(group.get(), "Density")) {
-        readDatasetChunk1d(group.get(), "Density", 0, local_count, gas_density_chunk);
+        readDatasetChunk1d(
+            group.get(), "Density", 0, local_count, gas_density_chunk);
       } else {
         gas_density_chunk.assign(local_count, 0.0);
-        result.report.defaulted_fields.push_back("/PartType0/Density=zero");
+        result.report.defaulted_fields.push_back(
+            "/PartType0/Density=zero");
       }
       if (hdf5PathExists(group.get(), "Metallicity")) {
-        readDatasetChunk1d(group.get(), "Metallicity", 0, local_count, gas_metallicity_chunk);
+        readDatasetChunk1d(
+            group.get(), "Metallicity", 0, local_count,
+            gas_metallicity_chunk);
       } else {
         gas_metallicity_chunk.assign(local_count, 0.0);
-        result.report.defaulted_fields.push_back("/PartType0/Metallicity=zero");
+        result.report.defaulted_fields.push_back(
+            "/PartType0/Metallicity=zero");
       }
       if (hdf5PathExists(group.get(), "GasCellIDs")) {
-        readDatasetChunkIds(group.get(), "GasCellIDs", 0, local_count, gas_cell_id_chunk);
+        readDatasetChunkIds(
+            group.get(), "GasCellIDs", 0, local_count, gas_cell_id_chunk);
       } else {
         gas_cell_id_chunk = ids_chunk;
-        result.report.defaulted_fields.push_back("/PartType0/GasCellIDs=ParticleIDs");
+        result.report.defaulted_fields.push_back(
+            "/PartType0/GasCellIDs=ParticleIDs");
+      }
+
+      if (hdf5PathExists(group.get(), "ParentParticleIDs")) {
+        readDatasetChunkIds(
+            group.get(), "ParentParticleIDs", 0, local_count,
+            gas_parent_particle_id_chunk);
+        if (hdf5PathExists(group.get(), "HasParentParticle")) {
+          readDatasetChunk1dU8(
+              group.get(), "HasParentParticle", 0, local_count,
+              gas_has_parent_particle_chunk);
+        } else {
+          gas_has_parent_particle_chunk.resize(local_count, 0U);
+          for (std::size_t i = 0; i < local_count; ++i) {
+            gas_has_parent_particle_chunk[i] =
+                gas_parent_particle_id_chunk[i] != 0U ? 1U : 0U;
+          }
+          result.report.defaulted_fields.push_back(
+              "/PartType0/HasParentParticle=ParentParticleIDs!=0");
+        }
+      } else {
+        // v4 and external GADGET/AREPO compatibility: PartType0 rows were
+        // particle-bound and ParticleIDs doubled as parent identities.
+        gas_parent_particle_id_chunk = ids_chunk;
+        gas_has_parent_particle_chunk.assign(local_count, 1U);
+        result.report.defaulted_fields.push_back(
+            "/PartType0/ParentParticleIDs=ParticleIDs(legacy)");
+      }
+
+      if (hdf5PathExists(group.get(), "OwningPatchIDs")) {
+        readDatasetChunkIds(
+            group.get(), "OwningPatchIDs", 0, local_count,
+            gas_owning_patch_id_chunk);
+      } else {
+        gas_owning_patch_id_chunk.assign(local_count, 0U);
+        result.report.defaulted_fields.push_back(
+            "/PartType0/OwningPatchIDs=0");
       }
     }
     if (type_index == 4) {
@@ -1374,6 +1619,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         gas_density_code.push_back(gas_density_chunk[i]);
         gas_metallicity_mass_fraction.push_back(gas_metallicity_chunk[i]);
         gas_cell_id.push_back(gas_cell_id_chunk[i]);
+        gas_parent_particle_id.push_back(gas_parent_particle_id_chunk[i]);
+        gas_has_parent_particle.push_back(gas_has_parent_particle_chunk[i]);
+        gas_owning_patch_id.push_back(gas_owning_patch_id_chunk[i]);
       }
       if (type_index == 4) {
         star_particle_index.push_back(static_cast<std::uint32_t>(global_i));
@@ -1411,8 +1659,17 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     result.state.gas_cells.gas_cell_id[i] = gas_cell_id[i] != 0U
         ? gas_cell_id[i]
         : result.state.particle_sidecar.particle_id[particle_index];
+    if (gas_has_parent_particle[i] > 1U) {
+      throw std::runtime_error(
+          "snapshot reader: HasParentParticle values must be 0 or 1");
+    }
+    if (gas_has_parent_particle[i] != 0U &&
+        gas_parent_particle_id[i] == 0U) {
+      throw std::runtime_error(
+          "snapshot reader: present gas parent identity must be nonzero");
+    }
     result.state.gas_cells.parent_particle_id[i] =
-        result.state.particle_sidecar.particle_id[particle_index];
+        gas_has_parent_particle[i] != 0U ? gas_parent_particle_id[i] : 0U;
     result.state.gas_cells.velocity_x_peculiar[i] =
         result.state.particles.velocity_x_peculiar[particle_index];
     result.state.gas_cells.velocity_y_peculiar[i] =
@@ -1453,8 +1710,10 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     for (std::size_t i = 0; i < gas_particle_index.size(); ++i) {
       identity_records.push_back(core::GasCellIdentityRecord{
           .gas_cell_id = result.state.gas_cells.gas_cell_id[i],
-          .parent_particle_id = result.state.gas_cells.parent_particle_id[i],
-          .owning_patch_id = 0U,
+          .parent_particle_id = gas_has_parent_particle[i] != 0U
+              ? std::optional<std::uint64_t>(gas_parent_particle_id[i])
+              : std::nullopt,
+          .owning_patch_id = gas_owning_patch_id[i],
           .local_cell_row = static_cast<std::uint32_t>(i),
       });
     }

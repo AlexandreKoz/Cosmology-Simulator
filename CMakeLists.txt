@@ -42,6 +42,25 @@ function(cosmosim_require_private_cxx20 target_name)
   endif()
 endfunction()
 
+function(cosmosim_enable_test_assertions target_name)
+  if(MSVC)
+    target_compile_options(${target_name} PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(${target_name} PRIVATE -UNDEBUG)
+  endif()
+endfunction()
+
+function(cosmosim_apply_test_target_defaults)
+  get_property(cosmosim_build_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(cosmosim_target_name IN LISTS cosmosim_build_targets)
+    get_target_property(cosmosim_target_type ${cosmosim_target_name} TYPE)
+    if(cosmosim_target_name MATCHES "^test_" AND
+       cosmosim_target_type STREQUAL "EXECUTABLE")
+      cosmosim_enable_test_assertions(${cosmosim_target_name})
+    endif()
+  endforeach()
+endfunction()
+
 option(COSMOSIM_ENABLE_MPI "Enable MPI backend" OFF)
 option(COSMOSIM_ENABLE_HDF5 "Enable HDF5 I/O backend" OFF)
 option(COSMOSIM_ENABLE_FFTW "Enable FFTW backend" OFF)
@@ -451,6 +470,11 @@ endif()
 if(COSMOSIM_ENABLE_TESTS)
   enable_testing()
 
+  add_executable(
+    test_unit_assertions_enabled
+    tests/unit/test_assertions_enabled.cpp)
+  add_test(NAME unit_assertions_enabled COMMAND test_unit_assertions_enabled)
+
   add_executable(test_unit_header_smoke tests/unit/test_header_smoke.cpp)
   target_link_libraries(test_unit_header_smoke PRIVATE cosmosim_all)
   add_test(NAME unit_header_smoke COMMAND test_unit_header_smoke)
@@ -823,6 +847,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_transform_fuzz_invariants COMMAND test_integration_transform_fuzz_invariants)
   cosmosim_mark_runtime_truth_test(integration_transform_fuzz_invariants migration sidecar gas softening active_views)
   add_test(NAME validation_transform_fuzz_invariants_long COMMAND test_integration_transform_fuzz_invariants --long)
+  set_tests_properties(
+    integration_transform_fuzz_invariants
+    validation_transform_fuzz_invariants_long
+    PROPERTIES RESOURCE_LOCK transform_fuzz_hdf5)
   set_tests_properties(validation_transform_fuzz_invariants_long PROPERTIES LABELS "validation;integration;fuzz")
 
   add_executable(test_integration_softening_ownership_invariants tests/integration/test_softening_ownership_invariants.cpp)
@@ -1322,6 +1350,11 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_config_examples PRIVATE cosmosim_all)
   target_compile_definitions(test_integration_config_examples PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME integration_config_examples COMMAND test_integration_config_examples)
+  add_test(
+    NAME integration_config_alias_consistency
+    COMMAND ${CMAKE_COMMAND}
+      -DCOSMOSIM_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_config_aliases.cmake)
   add_executable(test_integration_provenance_roundtrip tests/integration/test_provenance_roundtrip.cpp)
   target_link_libraries(test_integration_provenance_roundtrip PRIVATE cosmosim_core)
   add_test(NAME integration_provenance_roundtrip COMMAND test_integration_provenance_roundtrip)
@@ -1523,6 +1556,21 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME validation_regression COMMAND test_validation_regression)
   set_tests_properties(validation_regression PROPERTIES LABELS "validation;regression")
 
+  add_executable(
+    test_validation_phase3_power_spectrum
+    tests/validation/test_validation_phase3_power_spectrum.cpp)
+  target_link_libraries(
+    test_validation_phase3_power_spectrum PRIVATE cosmosim_analysis cosmosim_core)
+  target_compile_definitions(
+    test_validation_phase3_power_spectrum
+    PRIVATE COSMOSIM_VALIDATION_OUTPUT_DIR="${CMAKE_BINARY_DIR}/validation_outputs/phase3_power_spectrum")
+  add_test(
+    NAME validation_phase3_power_spectrum
+    COMMAND test_validation_phase3_power_spectrum)
+  set_tests_properties(
+    validation_phase3_power_spectrum
+    PROPERTIES LABELS "validation;analysis;power_spectrum;phase3")
+
   add_executable(test_validation_phase2_mpi_gravity tests/validation/test_validation_phase2_mpi_gravity.cpp)
   target_link_libraries(test_validation_phase2_mpi_gravity PRIVATE cosmosim_all)
   add_test(NAME validation_phase2_mpi_gravity_single_rank COMMAND test_validation_phase2_mpi_gravity)
@@ -1634,6 +1682,7 @@ if(COSMOSIM_ENABLE_TESTS)
     endif()
   endif()
 
+  cosmosim_apply_test_target_defaults()
   cosmosim_apply_test_defaults()
 endif()
 

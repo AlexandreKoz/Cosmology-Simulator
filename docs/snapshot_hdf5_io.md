@@ -17,8 +17,8 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
   - `NumPart_ThisFile`, `NumPart_Total`, `NumPart_Total_HighWord`, `MassTable`
   - `Time`, `Redshift`, `BoxSize` (legacy scalar alias), `CosmoSimBoxSizeX`, `CosmoSimBoxSizeY`, `CosmoSimBoxSizeZ`, `CosmoSimBoxSizeVec`, `Omega0`, `OmegaLambda`, `OmegaBaryon`, `HubbleParam`
 - Snapshot schema metadata:
-  - `CosmoSimSchemaName="gadget_arepo_v4"`
-  - `CosmoSimSchemaVersion=4`
+  - `CosmoSimSchemaName="gadget_arepo_v5"`
+  - `CosmoSimSchemaVersion=5`
 - Config metadata group:
   - `/Config` attribute `normalized` containing normalized text config dump
 - Provenance metadata group:
@@ -35,7 +35,9 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
 ## Dataset aliasing and compatibility
 
 - Canonical export writes `/PartTypeX` groups and standard GADGET/AREPO dataset names (`Coordinates`, `Velocities`, `Masses`, `ParticleIDs`) without renaming them.
-- Additional CosmoSim diagnostic/continuation mirrors, such as per-particle softening and tracer host-coupling lanes, remain optional schema-versioned additions under the current `gadget_arepo_v4` metadata.
+- In schema v5, `/PartType0` rows are emitted directly from authoritative dense gas-cell state. `ParticleIDs` and `GasCellIDs` carry stable `gas_cell_id`; `ParentParticleIDs` is paired with the `uint8` validity lane `HasParentParticle`, and `OwningPatchIDs` preserves patch identity. Parentless cells are not assigned invented parents, and cells that share a parent remain separate rows.
+- Readers preserve v5 identity exactly. Legacy v4/external snapshots without the auxiliary lanes retain the prior one-to-one fallback (`gas_cell_id=ParticleIDs`, parent valid, patch `0`) for compatibility.
+- Additional CosmoSim diagnostic/continuation mirrors, such as per-particle softening and tracer host-coupling lanes, remain optional schema-versioned additions under the current `gadget_arepo_v5` metadata.
 - Optional alias hard links `/ParticleTypeX` are written for tolerant downstream readers.
 - Reader accepts aliases for common fields:
   - `Coordinates|Position|POS`
@@ -51,8 +53,8 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
 
 ## Conservative assumptions
 
-- Current writer serializes particles by species mapping:
-  - gas -> PartType0
+- Current writer serializes non-gas particles by species mapping and serializes gas from authoritative dense gas-cell rows:
+  - gas cells -> PartType0
   - dark matter -> PartType1
   - tracers -> PartType3
   - stars -> PartType4
