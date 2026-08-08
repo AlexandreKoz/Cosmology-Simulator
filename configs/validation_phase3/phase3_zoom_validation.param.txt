@@ -33,7 +33,7 @@ run_health_interval_steps = 1
 science_light_interval_steps = 2
 science_heavy_interval_steps = 1
 diagnostics_execution_policy = all_including_provisional
-power_spectrum_mesh_n = 24
+power_spectrum_mesh_n = 16
 power_spectrum_bin_count = 12
 quicklook_grid_n = 32
 

@@ -39,7 +39,7 @@ constexpr double k_initial_scale_factor = 0.1;
 constexpr double k_linear_density_amplitude = 5.0e-3;
 constexpr double k_step_dt_code = 5.0e-6;
 constexpr std::uint64_t k_direct_steps = 2U;
-constexpr std::size_t k_power_spectrum_mesh_n = 12U;
+constexpr std::size_t k_power_spectrum_mesh_n = 16U;
 constexpr std::size_t k_power_spectrum_bin_count = 32U;
 
 struct ParallelRuntime {

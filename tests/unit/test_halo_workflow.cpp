@@ -1,4 +1,8 @@
 #include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 #include "cosmosim/analysis/halo_workflow.hpp"
 
@@ -110,10 +114,51 @@ void testPeriodicBoundaryGroupMatchesReference() {
   assert(spatial.subhalo_candidates.empty());
 }
 
+void testPersistedFinderIdentityMatchesCatalog() {
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.output.run_name = "unit_halo_provenance";
+  config.output.output_directory =
+      std::filesystem::temp_directory_path() / "chui_halo_provenance_unit";
+  config.cosmology.box_size_mpc_comoving = 1.0;
+
+  cosmosim::analysis::FofConfig fof;
+  fof.linking_length_factor_mean_interparticle = 0.30;
+  fof.min_group_size = 2;
+  cosmosim::analysis::FofHaloFinder finder(fof);
+  const auto state = makeTwoGroupState();
+  const auto view = cosmosim::analysis::buildHaloParticleView(state);
+
+  const auto spatial = finder.buildCatalogFromView(view, config, 7, 0.5);
+  const auto reference = finder.buildCatalogReferenceAllPairsFromView(view, config, 7, 0.5);
+  assert(spatial.halo_finder != reference.halo_finder);
+
+  cosmosim::analysis::HaloWorkflowPlanner planner(config);
+  std::filesystem::create_directories(config.output.output_directory);
+  const std::filesystem::path output_directory(config.output.output_directory);
+  const auto spatial_path = output_directory / "spatial.json";
+  const auto reference_path = output_directory / "reference.json";
+  planner.writeHaloCatalog(spatial, spatial_path);
+  planner.writeHaloCatalog(reference, reference_path);
+
+  auto read_all = [](const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+  };
+  const std::string spatial_json = read_all(spatial_path);
+  const std::string reference_json = read_all(reference_path);
+  assert(spatial_json.find("\"halo_finder\": \"" + spatial.halo_finder + "\"") !=
+         std::string::npos);
+  assert(reference_json.find("\"halo_finder\": \"" + reference.halo_finder + "\"") !=
+         std::string::npos);
+  std::filesystem::remove_all(output_directory);
+}
+
 }  // namespace
 
 int main() {
   testFofFindsTwoGroups();
   testPeriodicBoundaryGroupMatchesReference();
+  testPersistedFinderIdentityMatchesCatalog();
   return 0;
 }

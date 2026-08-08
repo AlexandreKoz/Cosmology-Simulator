@@ -395,7 +395,9 @@ struct AnalysisConfig {
 
 struct ParallelConfig {
   int mpi_ranks_expected = 1;
-  // Reserved execution knob. Must remain 1 until an OpenMP backend is actually compiled and wired.
+  // OpenMP team request: 0 uses the runtime default, 1 requests serial execution,
+  // and N > 1 requests N threads when this binary was built with OpenMP.
+  // Builds without OpenMP reject requests above one during validation.
   int omp_threads = 1;
   int gpu_devices = 0;
   bool deterministic_reduction = true;

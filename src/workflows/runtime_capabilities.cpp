@@ -63,6 +63,49 @@ std::string_view runtimeCapabilityStatusName(
   return "unsupported";
 }
 
+std::string_view runtimeImplementationMaturityName(
+    RuntimeImplementationMaturity maturity) noexcept {
+  switch (maturity) {
+    case RuntimeImplementationMaturity::kNotApplicable:
+      return "not_applicable";
+    case RuntimeImplementationMaturity::kProductionScalable:
+      return "production_scalable";
+    case RuntimeImplementationMaturity::kReference:
+      return "reference";
+  }
+  return "not_applicable";
+}
+
+std::string_view runtimeScientificMaturityName(
+    RuntimeScientificMaturity maturity) noexcept {
+  switch (maturity) {
+    case RuntimeScientificMaturity::kNotApplicable:
+      return "not_applicable";
+    case RuntimeScientificMaturity::kProvisional:
+      return "provisional";
+    case RuntimeScientificMaturity::kValidated:
+      return "validated";
+  }
+  return "not_applicable";
+}
+
+std::string_view runtimeScalabilityClassName(
+    RuntimeScalabilityClass scalability) noexcept {
+  switch (scalability) {
+    case RuntimeScalabilityClass::kNotApplicable:
+      return "not_applicable";
+    case RuntimeScalabilityClass::kLight:
+      return "light";
+    case RuntimeScalabilityClass::kModerate:
+      return "moderate";
+    case RuntimeScalabilityClass::kScalableFft:
+      return "scalable_fft";
+    case RuntimeScalabilityClass::kHeavyReference:
+      return "heavy_reference";
+  }
+  return "not_applicable";
+}
+
 RuntimeCapabilityReport buildRuntimeCapabilityReport(
     const core::SimulationConfig& config) {
   const core::OpenMpRuntimeInfo omp = core::openMpRuntimeInfo();
@@ -154,12 +197,22 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
       {.name = "production_fft_power_spectrum", .status = RuntimeCapabilityStatus::kSupported,
        .requested = config.analysis.enable_diagnostics, .compiled = true,
        .dependency_available = true, .runtime_available = true,
-       .active = config.analysis.enable_diagnostics,
+       .eligible = config.analysis.diagnostics_execution_policy ==
+               core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
+       .scheduled = config.analysis.enable_diagnostics &&
+           config.analysis.diagnostics_execution_policy ==
+               core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
+       .active = config.analysis.enable_diagnostics &&
+           config.analysis.diagnostics_execution_policy ==
+               core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
+       .implementation_maturity = RuntimeImplementationMaturity::kProductionScalable,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .scalability = RuntimeScalabilityClass::kScalableFft,
        .detail =
 #if COSMOSIM_ENABLE_FFTW
-           "Power spectrum uses FFTW O(N^3 log N) transforms; direct DFT remains an explicit validation oracle."},
+           "FFT-backed power spectrum is computationally production-scalable through FFTW; science validation remains provisional and scheduling requires the provisional-science policy; direct DFT remains an explicit reference oracle."},
 #else
-           "Power spectrum uses the built-in radix-2 O(N^3 log N) FFT on power-of-two meshes; direct DFT remains an explicit validation oracle."},
+           "FFT-backed power spectrum is computationally production-scalable through the built-in radix-2 backend on power-of-two meshes; science validation remains provisional and scheduling requires the provisional-science policy; direct DFT remains an explicit reference oracle."},
 #endif
       {.name = "production_diagnostics", .status = RuntimeCapabilityStatus::kSupported,
        .requested = config.analysis.enable_diagnostics, .compiled = true,
@@ -178,6 +231,17 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
                  core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
        .detail = "Only diagnostics explicitly marked provisional remain gated behind the opt-in policy."},
   };
+  for (RuntimeCapability& capability : report.capabilities) {
+    if (!capability.eligible && capability.runtime_available &&
+        capability.status != RuntimeCapabilityStatus::kUnsupported &&
+        capability.name != "production_fft_power_spectrum") {
+      capability.eligible = true;
+    }
+    if (!capability.scheduled && capability.active &&
+        capability.name != "production_fft_power_spectrum") {
+      capability.scheduled = true;
+    }
+  }
   return report;
 }
 
@@ -206,8 +270,16 @@ std::string serializeRuntimeCapabilityReportJson(
         ", \"compiled\": " + std::string(capability.compiled ? "true" : "false") +
         ", \"dependency_available\": " + std::string(capability.dependency_available ? "true" : "false") +
         ", \"runtime_available\": " + std::string(capability.runtime_available ? "true" : "false") +
+        ", \"eligible\": " + std::string(capability.eligible ? "true" : "false") +
+        ", \"scheduled\": " + std::string(capability.scheduled ? "true" : "false") +
         ", \"active\": " + std::string(capability.active ? "true" : "false") +
-        ", \"detail\": \"" + escapeJson(capability.detail) + "\"}";
+        ", \"implementation_maturity\": \"" +
+        std::string(runtimeImplementationMaturityName(capability.implementation_maturity)) +
+        "\", \"scientific_maturity\": \"" +
+        std::string(runtimeScientificMaturityName(capability.scientific_maturity)) +
+        "\", \"scalability\": \"" +
+        std::string(runtimeScalabilityClassName(capability.scalability)) +
+        "\", \"detail\": \"" + escapeJson(capability.detail) + "\"}";
     json += index + 1U == report.capabilities.size() ? "\n" : ",\n";
   }
   json += "  ]\n}\n";

@@ -72,6 +72,32 @@ void testPowerSpectrumHasSignalAndFiniteModes() {
   assert(total_modes > 0);
 }
 
+void testPowerOfTwoFallbackMeshEightExecutes() {
+  auto config = makeConfig();
+  config.analysis.power_spectrum_mesh_n = 8;
+  config.analysis.power_spectrum_bin_count = 6;
+  cosmosim::analysis::DiagnosticsEngine engine(config);
+  const auto state = makeSingleModeState();
+  const auto estimate = engine.computePowerSpectrumEstimate(
+      state, cosmosim::analysis::PowerSpectrumEstimateOptions{
+                 .mesh_n = 8,
+                 .bin_count = 6,
+                 .mass_assignment =
+                     cosmosim::analysis::PowerSpectrumMassAssignment::kCloudInCell,
+                 .window_correction = cosmosim::analysis::PowerSpectrumWindowCorrection::kNone,
+                 .shot_noise_policy =
+                     cosmosim::analysis::PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction,
+             });
+  assert(estimate.options.mesh_n == 8);
+  assert(estimate.bins.size() == 6);
+  std::uint64_t modes = 0;
+  for (const auto& bin : estimate.bins) {
+    modes += bin.mode_count;
+    assert(std::isfinite(bin.power_code_volume));
+  }
+  assert(modes == 8U * 8U * 8U - 1U);
+}
+
 void testDetailedPowerSpectrumContractAndEmptyBins() {
   cosmosim::analysis::DiagnosticsEngine engine(makeConfig());
   const cosmosim::core::SimulationState state = makeSingleModeState();
@@ -307,11 +333,13 @@ void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
   for (const auto& record : blocked_bundle.records) {
     if (record.name == "power_spectrum") {
       found_power_record = true;
-      assert(record.tier == cosmosim::analysis::DiagnosticTier::kReferenceScience);
+      assert(record.tier == cosmosim::analysis::DiagnosticTier::kProvisionalScience);
+      assert(record.implementation_maturity ==
+             cosmosim::analysis::DiagnosticImplementationMaturity::kProductionScalable);
       assert(record.maturity == cosmosim::analysis::DiagnosticMaturity::kProvisional);
-      assert(record.scalability == cosmosim::analysis::DiagnosticScalability::kHeavyReference);
+      assert(record.scalability == cosmosim::analysis::DiagnosticScalability::kScalableFft);
       assert(!record.executed);
-      assert(record.policy_note == "blocked_by_execution_policy");
+      assert(record.policy_note == "blocked_by_scientific_validation_policy");
     }
   }
   assert(found_power_record);
@@ -328,7 +356,11 @@ void testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords() {
     if (record.name == "power_spectrum") {
       found_power_record = true;
       assert(record.executed);
-      assert(record.policy_note == "reference_only_non_default");
+      assert(record.implementation_maturity ==
+             cosmosim::analysis::DiagnosticImplementationMaturity::kProductionScalable);
+      assert(record.maturity == cosmosim::analysis::DiagnosticMaturity::kProvisional);
+      assert(record.scalability == cosmosim::analysis::DiagnosticScalability::kScalableFft);
+      assert(record.policy_note == "scientifically_provisional_scalable_fft");
     }
   }
   assert(found_power_record);
@@ -370,6 +402,7 @@ void testMetalBudgetDiagnosticsCloseReturnedDepositAndCarry() {
 
 int main() {
   testPowerSpectrumHasSignalAndFiniteModes();
+  testPowerOfTwoFallbackMeshEightExecutes();
   testDetailedPowerSpectrumContractAndEmptyBins();
   testDerivedDiagnosticsSanity();
   testProvisionalHeavyDiagnosticsRequireExplicitPolicy();

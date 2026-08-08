@@ -9,7 +9,7 @@ four ranks, including empty ranks, exact same-topology restart continuation,
 an independent periodic Ewald comparison, and a deterministic binned 3D power
 spectrum artifact from the production-workflow Zel'dovich gate.
 
-That spectrum proof uses a `12^3` CIC mesh with matched assignment-window
+That spectrum proof uses a `12^3` CIC (historical 2026-07-13 baseline; current built-in-FFT fixture is `16^3` CIC) mesh with matched assignment-window
 deconvolution and 32 requested bins. It accounts for all 1727 non-DC mesh
 modes, retains four empty bins explicitly, reports rather than subtracts the
 `V/N = 0.015625` Poisson level, and emits a versioned JSON artifact. The

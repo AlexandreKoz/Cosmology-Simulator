@@ -24,23 +24,37 @@ enum class DiagnosticTier : std::uint8_t {
   kInfrastructureHealth = 0,
   kValidatedScience = 1,
   kReferenceScience = 2,
+  kProvisionalScience = 3,
 };
 
+// Scientific validation maturity is deliberately separate from computational
+// implementation maturity. A scalable algorithm may still await publication-grade
+// science validation without being mislabeled as a reference implementation.
 enum class DiagnosticMaturity : std::uint8_t {
   kProduction = 0,
   kValidated = 1,
   kProvisional = 2,
 };
 
+enum class DiagnosticImplementationMaturity : std::uint8_t {
+  kProductionScalable = 0,
+  kReference = 1,
+};
+
 enum class DiagnosticScalability : std::uint8_t {
   kCheap = 0,
   kModerate = 1,
   kHeavyReference = 2,
+  kScalableFft = 3,
 };
 
 struct DiagnosticRecord {
   std::string name;
   DiagnosticTier tier = DiagnosticTier::kInfrastructureHealth;
+  DiagnosticImplementationMaturity implementation_maturity =
+      DiagnosticImplementationMaturity::kProductionScalable;
+  // This field is scientific validation maturity; the serialized schema exposes
+  // the same value explicitly as scientific_maturity.
   DiagnosticMaturity maturity = DiagnosticMaturity::kProduction;
   DiagnosticScalability scalability = DiagnosticScalability::kCheap;
   bool executed = false;

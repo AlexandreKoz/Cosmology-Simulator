@@ -212,7 +212,7 @@ Ewald-anchored integration regression, not an analytic LCDM growth proof.
 
 The detailed spectrum estimator reported the same values at np1--np4:
 
-- mesh and requested bins: `12^3` CIC and `32` linear-k bins;
+- mesh and requested bins: `12^3` CIC (historical 2026-07-13 baseline; current built-in-FFT fixture is `16^3` CIC) and `32` linear-k bins;
 - non-DC discrete Fourier modes accounted for: `1727`, with `4` requested
   bins explicitly empty;
 - CIC Poisson shot-noise level `V/N`: `0.015625` code-volume units;

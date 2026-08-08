@@ -1477,6 +1477,16 @@ void validateConfig(const SimulationConfig& config) {
       config.analysis.quicklook_grid_n < 4) {
     throw ConfigError("analysis mesh/bin settings must be within conservative minimum bounds");
   }
+#if !COSMOSIM_ENABLE_FFTW
+  const auto power_spectrum_mesh_n =
+      static_cast<unsigned int>(config.analysis.power_spectrum_mesh_n);
+  if ((power_spectrum_mesh_n & (power_spectrum_mesh_n - 1U)) != 0U) {
+    throw ConfigError(
+        "analysis.power_spectrum_mesh_n must be a power of two when this binary uses "
+        "the built-in radix-2 FFT backend; rebuild with COSMOSIM_ENABLE_FFTW=ON "
+        "to use FFTW-supported non-power-of-two mesh sizes");
+  }
+#endif
   if (config.analysis.halo_fof_linking_length_factor <= 0.0 ||
       config.analysis.halo_fof_linking_length_factor > 1.0) {
     throw ConfigError("analysis.halo_fof_linking_length_factor must be in (0, 1]");

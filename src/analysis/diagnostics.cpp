@@ -200,6 +200,8 @@ void forwardFft3d(std::vector<std::complex<double>>& field, std::size_t n) {
       return "validated_science";
     case DiagnosticTier::kReferenceScience:
       return "reference_science";
+    case DiagnosticTier::kProvisionalScience:
+      return "provisional_science";
   }
   throw std::logic_error("unhandled DiagnosticTier enum value during serialization");
 }
@@ -216,6 +218,18 @@ void forwardFft3d(std::vector<std::complex<double>>& field, std::size_t n) {
   throw std::logic_error("unhandled DiagnosticMaturity enum value during serialization");
 }
 
+[[nodiscard]] const char* diagnosticImplementationMaturityLabel(
+    DiagnosticImplementationMaturity maturity) {
+  switch (maturity) {
+    case DiagnosticImplementationMaturity::kProductionScalable:
+      return "production_scalable";
+    case DiagnosticImplementationMaturity::kReference:
+      return "reference";
+  }
+  throw std::logic_error(
+      "unhandled DiagnosticImplementationMaturity enum value during serialization");
+}
+
 [[nodiscard]] const char* diagnosticScalabilityLabel(DiagnosticScalability scalability) {
   switch (scalability) {
     case DiagnosticScalability::kCheap:
@@ -224,6 +238,8 @@ void forwardFft3d(std::vector<std::complex<double>>& field, std::size_t n) {
       return "moderate";
     case DiagnosticScalability::kHeavyReference:
       return "heavy_reference";
+    case DiagnosticScalability::kScalableFft:
+      return "scalable_fft";
   }
   throw std::logic_error("unhandled DiagnosticScalability enum value during serialization");
 }
@@ -1141,10 +1157,13 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
   }
 
   if (diagnostic_class == DiagnosticClass::kScienceHeavy) {
-    const bool heavy_allowed =
+    // The FFT estimator is computationally production-scalable but remains
+    // scientifically provisional. The opt-in policy therefore controls scheduling,
+    // not which numerical backend is used once scheduled.
+    const bool power_spectrum_scheduled =
         (m_config.analysis.diagnostics_execution_policy ==
          core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
-    if (heavy_allowed) {
+    if (power_spectrum_scheduled) {
       bundle.power_spectrum = computePowerSpectrum(
           view.particles,
           static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
@@ -1152,11 +1171,14 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
     }
     bundle.records.push_back(DiagnosticRecord{
         .name = "power_spectrum",
-        .tier = DiagnosticTier::kReferenceScience,
+        .tier = DiagnosticTier::kProvisionalScience,
+        .implementation_maturity = DiagnosticImplementationMaturity::kProductionScalable,
         .maturity = DiagnosticMaturity::kProvisional,
-        .scalability = DiagnosticScalability::kHeavyReference,
-        .executed = heavy_allowed,
-        .policy_note = heavy_allowed ? "reference_only_non_default" : "blocked_by_execution_policy",
+        .scalability = DiagnosticScalability::kScalableFft,
+        .executed = power_spectrum_scheduled,
+        .policy_note = power_spectrum_scheduled
+            ? "scientifically_provisional_scalable_fft"
+            : "blocked_by_scientific_validation_policy",
     });
   }
 
@@ -1215,7 +1237,10 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
   for (std::size_t i = 0; i < bundle.records.size(); ++i) {
     const auto& record = bundle.records[i];
     out << (i == 0 ? "" : ", ") << "{\"name\": \"" << record.name << "\", \"tier\": \""
-        << diagnosticTierLabel(record.tier) << "\", \"maturity\": \"" << diagnosticMaturityLabel(record.maturity)
+        << diagnosticTierLabel(record.tier) << "\", \"implementation_maturity\": \""
+        << diagnosticImplementationMaturityLabel(record.implementation_maturity)
+        << "\", \"scientific_maturity\": \"" << diagnosticMaturityLabel(record.maturity)
+        << "\", \"maturity\": \"" << diagnosticMaturityLabel(record.maturity)
         << "\", \"scalability\": \"" << diagnosticScalabilityLabel(record.scalability)
         << "\", \"executed\": " << (record.executed ? "true" : "false") << ", \"policy_note\": \""
         << record.policy_note << "\"}";

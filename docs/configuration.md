@@ -411,6 +411,8 @@ schema v21.
 - `run_health_interval_steps`, `science_light_interval_steps`, `science_heavy_interval_steps`
 - `retention_bundle_count`
 - `power_spectrum_mesh_n`, `power_spectrum_bin_count`, `sf_history_bin_count`, `quicklook_grid_n`
+  - with the built-in FFT backend (`COSMOSIM_ENABLE_FFTW=OFF`), `power_spectrum_mesh_n` must be a power of two; the parser rejects unsupported meshes before execution;
+  - FFTW-enabled builds accept FFTW-supported mesh sizes.
 - `diagnostics_stem`, `halo_catalog_stem`, `merger_tree_stem`
 - `halo_fof_linking_length_factor`, `halo_fof_min_group_size`
 - `halo_include_gas`, `halo_include_stars`, `halo_include_black_holes`
@@ -419,7 +421,7 @@ Diagnostics maturity policy:
 
 - `run_health_only`: only infrastructure health counters run.
 - `run_health_and_light_science` (default): run-health + validated lightweight science diagnostics.
-- `all_including_provisional`: also enables provisional/reference heavy diagnostics (currently the direct-summation power spectrum).
+- `all_including_provisional`: also schedules scientifically provisional diagnostics. The power-spectrum estimator is computationally scalable FFT-backed; its direct DFT exists only as an explicit validation oracle.
 
 ## `[parallel]`
 

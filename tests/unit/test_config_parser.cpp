@@ -3,6 +3,7 @@
 #include <string>
 #include <type_traits>
 
+#include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/provenance.hpp"
 
@@ -1206,6 +1207,32 @@ void testProductionHierarchicalRungsFailClosed() {
   assert(rejected);
 }
 
+void testPowerSpectrumMeshMatchesCompiledFftBackend() {
+  const std::string non_power_of_two =
+      "[mode]\nmode = zoom_in\n[analysis]\npower_spectrum_mesh_n = 6\n";
+#if COSMOSIM_ENABLE_FFTW
+  const auto accepted = cosmosim::core::loadFrozenConfigFromString(
+      non_power_of_two, "fftw_non_power_of_two_mesh");
+  assert(accepted.config.analysis.power_spectrum_mesh_n == 6);
+#else
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        non_power_of_two, "builtin_fft_non_power_of_two_mesh");
+  } catch (const cosmosim::core::ConfigError& error) {
+    const std::string message = error.what();
+    rejected = message.find("analysis.power_spectrum_mesh_n") != std::string::npos &&
+        message.find("power of two") != std::string::npos;
+  }
+  assert(rejected);
+#endif
+
+  const auto valid = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[analysis]\npower_spectrum_mesh_n = 8\n",
+      "fft_power_of_two_mesh");
+  assert(valid.config.analysis.power_spectrum_mesh_n == 8);
+}
+
 void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[output]\n"
@@ -1274,6 +1301,7 @@ int main() {
   testStarFormationMassParametersAcceptUnits();
   testEffectiveMultiphaseConfigurationContract();
   testProductionHierarchicalRungsFailClosed();
+  testPowerSpectrumMeshMatchesCompiledFftBackend();
   testOutputCodeTimeCadenceValidationAndRoundtrip();
   return 0;
 }

@@ -44,7 +44,7 @@ The authoritative decision is
 - Rank-count-changing restart and asynchronous output are unsupported.
 - Distributed IC import is provisional when MPI+HDF5 are enabled and still
   requires its dependency-complete rank matrix.
-- Heavy/provisional diagnostics require explicit opt-in.
+- Scientifically provisional diagnostics require explicit opt-in. The FFT-backed power spectrum is computationally scalable but remains scientifically provisional until the validation ladder is closed.
 - Distributed FOF rank-boundary correctness has a provisional MPI root-merge
   path; root catalog assembly remains a scaling limit and is reported as such.
 - No physical bound-subhalo finder is claimed; catalogs do not fabricate host

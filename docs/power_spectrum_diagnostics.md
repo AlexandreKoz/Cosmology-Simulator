@@ -41,7 +41,7 @@ map to `Mpc_comoving^-1` and `Mpc_comoving^3`.
 
 ## Validation use and limits
 
-The controlled DMO Zel'dovich gate uses a `12^3` CIC mesh, 32 linear shells,
+The controlled DMO Zel'dovich gate uses a `16^3` CIC mesh, 32 linear shells,
 assignment-window deconvolution, and reported-but-not-subtracted Poisson noise.
 The narrow first-mode shell measures linear growth from
 `sqrt(P_evolved / P_initial)`. Unit coverage checks policy labels, units,
@@ -58,7 +58,7 @@ and agree with `Delta D` within 7.5 percent; the two measured increments must
 agree with each other within relative `1e-3`. This prevents a zero-growth
 spectrum from passing a loose order-unity comparison.
 
-The 2026-07-13 controlled gate measured fundamental powers
+The historical 2026-07-13 `12^3` controlled gate measured fundamental powers
 `2.1315894140899176e-6` and `2.1827523417862502e-6`, giving
 `sqrt(P_evolved/P_initial)=1.011929959672577` versus expected scale-factor
 growth `1.0119399775244009`. After normalizing only `world_size`, MPI np1--np4
@@ -67,7 +67,7 @@ JSON artifacts had SHA-256
 A true non-MPI serial run and MPI-world-one run emitted byte-identical JSON
 (SHA-256
 `8acbf3d6826250ca4fbabb0761511ff1178cbb7c20472cb2d8c8073dd16d355c`).
-These are reproducibility checks for the controlled fixture, not a performance
+Those hashes and powers belong to the historical `12^3` fixture. The current built-in-FFT-compatible fixture uses `16^3`; it must produce its own acceptance artifact before the historical numeric baseline is reused. These are reproducibility checks for the controlled fixture, not a performance
 or high-dynamic-range claim.
 
 No config key, snapshot schema, restart schema, or provenance schema changes are

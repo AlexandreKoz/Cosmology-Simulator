@@ -64,12 +64,41 @@ void testCapabilityTruth() {
   assert(threw);
 }
 
+void testPowerSpectrumCapabilitySchedulingTruth() {
+  auto blocked = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  blocked.analysis.enable_diagnostics = true;
+  blocked.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthAndLightScience;
+  const auto blocked_report = cosmosim::workflows::buildRuntimeCapabilityReport(blocked);
+  const auto& blocked_fft = blocked_report.require("production_fft_power_spectrum");
+  assert(blocked_fft.requested);
+  assert(!blocked_fft.eligible);
+  assert(!blocked_fft.scheduled);
+  assert(!blocked_fft.active);
+  assert(blocked_fft.implementation_maturity ==
+         cosmosim::workflows::RuntimeImplementationMaturity::kProductionScalable);
+  assert(blocked_fft.scientific_maturity ==
+         cosmosim::workflows::RuntimeScientificMaturity::kProvisional);
+  assert(blocked_fft.scalability ==
+         cosmosim::workflows::RuntimeScalabilityClass::kScalableFft);
+
+  auto allowed = blocked;
+  allowed.analysis.diagnostics_execution_policy =
+      cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+  const auto allowed_report = cosmosim::workflows::buildRuntimeCapabilityReport(allowed);
+  const auto& allowed_fft = allowed_report.require("production_fft_power_spectrum");
+  assert(allowed_fft.requested);
+  assert(allowed_fft.eligible);
+  assert(allowed_fft.scheduled);
+  assert(allowed_fft.active);
+}
+
 void testJsonSerialization() {
   const auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   const auto report = cosmosim::workflows::buildRuntimeCapabilityReport(config);
   const std::string json =
       cosmosim::workflows::serializeRuntimeCapabilityReportJson(report);
-  assert(json.find("\"schema_version\": 2") != std::string::npos);
+  assert(json.find("\"schema_version\": 3") != std::string::npos);
   assert(json.find("\"name\": \"rank_remappable_restart\"") !=
          std::string::npos);
   assert(json.find("\"status\": \"unsupported\"") !=
@@ -89,6 +118,7 @@ void testJsonSerialization() {
 
 int main() {
   testCapabilityTruth();
+  testPowerSpectrumCapabilitySchedulingTruth();
   testJsonSerialization();
   return 0;
 }

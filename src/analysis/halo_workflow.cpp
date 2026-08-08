@@ -19,6 +19,22 @@
 namespace cosmosim::analysis {
 namespace {
 
+[[nodiscard]] std::string escapeJson(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char ch : value) {
+    switch (ch) {
+      case '\\': escaped += "\\\\"; break;
+      case '"': escaped += "\\\""; break;
+      case '\n': escaped += "\\n"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\t': escaped += "\\t"; break;
+      default: escaped.push_back(ch); break;
+    }
+  }
+  return escaped;
+}
+
 [[nodiscard]] double wrapPeriodicDelta(double delta_comov, double box_size_comov) {
   if (box_size_comov <= 0.0) {
     return delta_comov;
@@ -868,7 +884,7 @@ void HaloWorkflowPlanner::writeHaloCatalog(const HaloCatalog& catalog, const std
   out << "  \"normalized_config_hash\": " << catalog.normalized_config_hash << ",\n";
   out << "  \"snapshot_step_index\": " << catalog.snapshot_step_index << ",\n";
   out << "  \"snapshot_scale_factor\": " << catalog.snapshot_scale_factor << ",\n";
-  out << "  \"halo_finder\": \"fof\",\n";
+  out << "  \"halo_finder\": \"" << escapeJson(catalog.halo_finder) << "\",\n";
   out << "  \"halos\": [\n";
   for (std::size_t i = 0; i < catalog.halos.size(); ++i) {
     const auto& h = catalog.halos[i];

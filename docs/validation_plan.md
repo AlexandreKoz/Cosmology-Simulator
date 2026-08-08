@@ -363,7 +363,7 @@ Command-backed results from the MPI+HDF5+FFTW build on 2026-07-13:
 
 The DMO gate retains the independent direct particle-mode diagnostic and now
 also runs a deterministic binned three-dimensional `P(k)` estimator. The
-estimator deposits on a `12^3` CIC mesh, deconvolves the matched assignment
+estimator deposits on a `12^3` CIC (historical 2026-07-13 baseline; current built-in-FFT fixture is `16^3` CIC) mesh, deconvolves the matched assignment
 window, uses 32 linear-k bins to the three-dimensional mesh corner, excludes
 DC, accounts for all 1727 remaining discrete modes, retains four empty bins,
 and reports without subtracting the `V/N = 0.015625` Poisson level. Its
