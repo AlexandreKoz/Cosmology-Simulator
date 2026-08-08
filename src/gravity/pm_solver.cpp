@@ -20,6 +20,7 @@
 #include <limits>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/device_buffer.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
 #if COSMOSIM_ENABLE_CUDA
@@ -804,18 +805,21 @@ void checkedMpiRecordLayoutToByteLayout(
 }
 
 [[nodiscard]] std::uint64_t bytesForGridSweep(std::size_t cell_count) {
-  return static_cast<std::uint64_t>(cell_count * sizeof(double));
+  const std::size_t bytes = core::checkedSizeMultiply(
+      cell_count, sizeof(double), "PM grid sweep bytes");
+  return core::checkedIntegralNarrow<std::uint64_t>(bytes, "PM grid sweep bytes");
 }
 
 [[nodiscard]] std::uint64_t bytesForParticles(std::size_t particle_count) {
-  return static_cast<std::uint64_t>(particle_count * sizeof(double) * 4U);
+  const std::size_t bytes_per_particle = core::checkedSizeMultiply(
+      sizeof(double), 4U, "PM particle profile bytes per particle");
+  const std::size_t bytes = core::checkedSizeMultiply(
+      particle_count, bytes_per_particle, "PM particle profile bytes");
+  return core::checkedIntegralNarrow<std::uint64_t>(bytes, "PM particle profile bytes");
 }
 
 [[nodiscard]] std::size_t checkedProduct(std::size_t a, std::size_t b, std::string_view context) {
-  if (a != 0U && b > std::numeric_limits<std::size_t>::max() / a) {
-    throw std::overflow_error(std::string(context) + " size product overflows size_t");
-  }
-  return a * b;
+  return core::checkedSizeMultiply(a, b, context);
 }
 
 [[nodiscard]] std::uint64_t checkedBytesForCount(
@@ -1493,7 +1497,7 @@ class PmSolver::Impl {
       }
       double split_filter = 1.0;
       if (options.tree_pm_split_scale_comoving > 0.0) {
-        split_filter = treePmGaussianFourierLongRangeFilter(std::sqrt(k2), options.tree_pm_split_scale_comoving);
+        split_filter = treePmGaussianFourierLongRangeFilterUnchecked(std::sqrt(k2), options.tree_pm_split_scale_comoving);
       }
       plan.poisson_kernel[index] = prefactor * window_correction * split_filter / k2;
       plan.grad_kx[index] = kx;
@@ -1786,7 +1790,7 @@ class PmSolver::Impl {
 };
 
 std::size_t PmGridShape::cellCount() const {
-  return nx * ny * nz;
+  return checkedProduct(checkedProduct(nx, ny, "PmGridShape::cellCount"), nz, "PmGridShape::cellCount");
 }
 
 bool PmGridShape::isValid() const {
@@ -1869,7 +1873,7 @@ bool PmGridStorage::ownsFullDomain() const noexcept {
   return m_layout.ownsFullDomain();
 }
 
-std::size_t PmGridStorage::localCellCount() const noexcept {
+std::size_t PmGridStorage::localCellCount() const {
   return m_layout.localCellCount();
 }
 
@@ -4919,10 +4923,10 @@ void PmSolver::solveForParticles(
       core::DeviceBufferDouble accel_y_device(accel_y.size());
       core::DeviceBufferDouble accel_z_device(accel_z.size());
 
-      pos_x_device.copyFromHost(pos_x, stream);
-      pos_y_device.copyFromHost(pos_y, stream);
-      pos_z_device.copyFromHost(pos_z, stream);
-      mass_device.copyFromHost(mass, stream);
+      pos_x_device.copyFromHostAsync(pos_x, stream);
+      pos_y_device.copyFromHostAsync(pos_y, stream);
+      pos_z_device.copyFromHostAsync(pos_z, stream);
+      mass_device.copyFromHostAsync(mass, stream);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing H2D particle copy");
       }
@@ -4959,7 +4963,7 @@ void PmSolver::solveForParticles(
       }
 
       const auto copy_density_start = std::chrono::steady_clock::now();
-      density_device.copyToHost(grid.density(), stream);
+      density_device.copyToHostAsync(grid.density(), stream);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing D2H density copy");
       }
@@ -4976,9 +4980,9 @@ void PmSolver::solveForParticles(
       solvePoissonPeriodic(grid, options, profile);
 
       const auto copy_forces_start = std::chrono::steady_clock::now();
-      force_x_device.copyFromHost(grid.force_x(), stream);
-      force_y_device.copyFromHost(grid.force_y(), stream);
-      force_z_device.copyFromHost(grid.force_z(), stream);
+      force_x_device.copyFromHostAsync(grid.force_x(), stream);
+      force_y_device.copyFromHostAsync(grid.force_y(), stream);
+      force_z_device.copyFromHostAsync(grid.force_z(), stream);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing H2D force copy");
       }
@@ -5017,9 +5021,9 @@ void PmSolver::solveForParticles(
       }
 
       const auto copy_accel_start = std::chrono::steady_clock::now();
-      accel_x_device.copyToHost(accel_x, stream);
-      accel_y_device.copyToHost(accel_y, stream);
-      accel_z_device.copyToHost(accel_z, stream);
+      accel_x_device.copyToHostAsync(accel_x, stream);
+      accel_y_device.copyToHostAsync(accel_y, stream);
+      accel_z_device.copyToHostAsync(accel_z, stream);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing D2H acceleration copy");
       }

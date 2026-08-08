@@ -296,6 +296,15 @@ void validateTreePmPreflight(
   };
   validate_epsilon_lane(softening_view.source_particle_epsilon_comoving);
   validate_epsilon_lane(softening_view.target_particle_epsilon_comoving);
+  const auto validate_species_lane = [](std::span<const std::uint32_t> lane) {
+    for (const std::uint32_t species_tag : lane) {
+      if (!core::isValidParticleSpeciesTag(species_tag)) {
+        throw std::invalid_argument("TreePM species sidecars contain an invalid species tag");
+      }
+    }
+  };
+  validate_species_lane(softening_view.source_species_tag);
+  validate_species_lane(softening_view.target_species_tag);
   if (softening_view.species_policy.enabled) {
     for (const double epsilon :
          softening_view.species_policy.epsilon_comoving_by_species) {
@@ -454,7 +463,7 @@ void validateTreePmPreflight(
     return true;
   }
   const double pair_softening_max =
-      combineSofteningPairEpsilon(node_softening_max_comoving, target_softening_comoving);
+      combineSofteningPairEpsilonUnchecked(node_softening_max_comoving, target_softening_comoving);
   const double envelope_radius = 2.0 * half_size + 2.0 * pair_softening_max;
   return r > envelope_radius;
 }
@@ -547,11 +556,11 @@ struct GatheredParticleField {
   const double r2 = dx * dx + dy * dy + dz * dz;
   const double r = std::sqrt(std::max(r2, 1.0e-30));
   const double pair_epsilon =
-      combineSofteningPairEpsilon(nodes.softening_max_comoving[node_index], target_softening_comoving);
+      combineSofteningPairEpsilonUnchecked(nodes.softening_max_comoving[node_index], target_softening_comoving);
   const double eps2 = pair_epsilon * pair_epsilon;
   const double denom = std::max(r2 + eps2, 1.0e-30);
   const double softened_inv_r3 = 1.0 / (denom * std::sqrt(denom));
-  const double split_factor = treePmGaussianShortRangeForceFactor(r, split_scale_comoving);
+  const double split_factor = treePmGaussianShortRangeForceFactorUnchecked(r, split_scale_comoving);
   const double prefactor = options.gravitational_constant_code;
 
   double ax = prefactor * nodes.mass_code[node_index] * split_factor * softened_inv_r3 * dx;
@@ -2308,15 +2317,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               continue;
             }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
-            const double split_factor = treePmGaussianShortRangeForceFactor(sr, options.split_policy.split_scale_comoving);
+            const double split_factor = treePmGaussianShortRangeForceFactorUnchecked(sr, options.split_policy.split_scale_comoving);
             const double source_softening =
                 resolveSourceSofteningEpsilon(source_index, options.tree_options.softening, softening_view);
-            const double pair_epsilon = combineSofteningPairEpsilon(source_softening, target_softening_comoving);
+            const double pair_epsilon = combineSofteningPairEpsilonUnchecked(source_softening, target_softening_comoving);
             // Contract: short-range residual is the softened tree force multiplied by the
             // Gaussian real-space residual factor so that tree+PM composes to the unsplit
             // softened force before explicit r_cut truncation.
             const double softened_factor =
-                softenedInvR3(sr2, pair_epsilon) * split_factor * options.tree_options.gravitational_constant_code;
+                softenedInvR3Unchecked(sr2, pair_epsilon) * split_factor * options.tree_options.gravitational_constant_code;
             ax += softened_factor * mass_code[source_index] * sx;
             ay += softened_factor * mass_code[source_index] * sy;
             az += softened_factor * mass_code[source_index] * sz;
@@ -3038,13 +3047,13 @@ TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy
   diagnostics.split_scale_comoving = split_policy.split_scale_comoving;
   diagnostics.cutoff_radius_comoving = split_policy.cutoff_radius_comoving;
   diagnostics.short_range_factor_at_split =
-      treePmGaussianShortRangeForceFactor(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
+      treePmGaussianShortRangeForceFactorUnchecked(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
   diagnostics.long_range_factor_at_split =
-      treePmGaussianLongRangeForceFactor(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
+      treePmGaussianLongRangeForceFactorUnchecked(split_policy.split_scale_comoving, split_policy.split_scale_comoving);
   diagnostics.short_range_factor_at_cutoff =
-      treePmGaussianShortRangeForceFactor(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
+      treePmGaussianShortRangeForceFactorUnchecked(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
   diagnostics.long_range_factor_at_cutoff =
-      treePmGaussianLongRangeForceFactor(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
+      treePmGaussianLongRangeForceFactorUnchecked(split_policy.cutoff_radius_comoving, split_policy.split_scale_comoving);
   diagnostics.composition_error_at_split = std::abs(
       diagnostics.short_range_factor_at_split + diagnostics.long_range_factor_at_split - 1.0);
 
@@ -3056,8 +3065,8 @@ TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy
       4.0 * split_policy.split_scale_comoving,
   };
   for (const double radius_comoving : radii) {
-    const double composed = treePmGaussianShortRangeForceFactor(radius_comoving, split_policy.split_scale_comoving) +
-        treePmGaussianLongRangeForceFactor(radius_comoving, split_policy.split_scale_comoving);
+    const double composed = treePmGaussianShortRangeForceFactorUnchecked(radius_comoving, split_policy.split_scale_comoving) +
+        treePmGaussianLongRangeForceFactorUnchecked(radius_comoving, split_policy.split_scale_comoving);
     diagnostics.max_relative_composition_error = std::max(
         diagnostics.max_relative_composition_error,
         std::abs(composed - 1.0) / std::max(1.0, std::abs(composed)));

@@ -1423,8 +1423,12 @@ void validateConfig(const SimulationConfig& config) {
     throw ConfigError(
         "output requires snapshot_interval_steps > 0 or snapshot_interval_time_code > 0");
   }
-  if (config.parallel.mpi_ranks_expected <= 0 || config.parallel.omp_threads <= 0) {
-    throw ConfigError("parallel settings require positive mpi_ranks_expected and omp_threads");
+  if (config.parallel.mpi_ranks_expected <= 0) {
+    throw ConfigError("parallel.mpi_ranks_expected must be positive");
+  }
+  if (config.parallel.omp_threads != 1) {
+    throw ConfigError(
+        "parallel.omp_threads must be 1: this build/runtime contract has no OpenMP execution backend yet");
   }
   if (config.parallel.gpu_devices < 0) {
     throw ConfigError("parallel.gpu_devices must be >= 0");
@@ -2311,8 +2315,8 @@ void validateConfig(const SimulationConfig& config) {
   validateRequiredSchema(entries);
   applyDeprecatedAliases(entries, consumed, frozen);
 
-  frozen.config.schema_version = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "schema_version", "1"), "schema_version"));
+  frozen.config.schema_version = parseNumber<int>(
+      requireString(entries, consumed, "schema_version", "1"), "schema_version");
 
   frozen.config.units.length_unit =
       toLower(requireString(entries, consumed, "units.length_unit", frozen.config.units.length_unit));
@@ -2618,14 +2622,14 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.source_max_fractional_change = parseFloating(
       requireString(entries, consumed, "numerics.source_max_fractional_change", defaultFor("numerics.source_max_fractional_change")),
       "numerics.source_max_fractional_change");
-  frozen.config.numerics.max_global_steps = static_cast<int>(parseNumber<long>(
+  frozen.config.numerics.max_global_steps = parseNumber<int>(
       requireString(entries, consumed, "numerics.max_global_steps", "1024"),
-      "numerics.max_global_steps"));
-  frozen.config.numerics.hierarchical_max_rung = static_cast<int>(parseNumber<long>(
+      "numerics.max_global_steps");
+  frozen.config.numerics.hierarchical_max_rung = parseNumber<int>(
       requireString(entries, consumed, "numerics.hierarchical_max_rung", "0"),
-      "numerics.hierarchical_max_rung"));
-  frozen.config.numerics.amr_max_level = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level"));
+      "numerics.hierarchical_max_rung");
+  frozen.config.numerics.amr_max_level = parseNumber<int>(
+      requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level");
   frozen.config.numerics.gravity_softening_kpc_comoving = parseLengthKpc(
       requireString(entries, consumed, "numerics.gravity_softening", "1.0 kpc"),
       frozen.config.units.length_unit,
@@ -2656,22 +2660,22 @@ void validateConfig(const SimulationConfig& config) {
         "numerics.treepm_pm_grid_nx, numerics.treepm_pm_grid_ny, and numerics.treepm_pm_grid_nz must be specified together");
   }
   if (has_pm_grid_nx) {
-    frozen.config.numerics.treepm_pm_grid_nx = static_cast<int>(parseNumber<long>(
+    frozen.config.numerics.treepm_pm_grid_nx = parseNumber<int>(
         requireString(entries, consumed, "numerics.treepm_pm_grid_nx", defaultFor("numerics.treepm_pm_grid_nx")),
-        "numerics.treepm_pm_grid_nx"));
-    frozen.config.numerics.treepm_pm_grid_ny = static_cast<int>(parseNumber<long>(
+        "numerics.treepm_pm_grid_nx");
+    frozen.config.numerics.treepm_pm_grid_ny = parseNumber<int>(
         requireString(entries, consumed, "numerics.treepm_pm_grid_ny", defaultFor("numerics.treepm_pm_grid_ny")),
-        "numerics.treepm_pm_grid_ny"));
-    frozen.config.numerics.treepm_pm_grid_nz = static_cast<int>(parseNumber<long>(
+        "numerics.treepm_pm_grid_ny");
+    frozen.config.numerics.treepm_pm_grid_nz = parseNumber<int>(
         requireString(entries, consumed, "numerics.treepm_pm_grid_nz", defaultFor("numerics.treepm_pm_grid_nz")),
-        "numerics.treepm_pm_grid_nz"));
+        "numerics.treepm_pm_grid_nz");
     if (has_pm_grid_scalar) {
       consumed.insert("numerics.treepm_pm_grid");
     }
   } else {
-    const int pm_grid_scalar = static_cast<int>(parseNumber<long>(
+    const int pm_grid_scalar = parseNumber<int>(
         requireString(entries, consumed, "numerics.treepm_pm_grid", defaultFor("numerics.treepm_pm_grid")),
-        "numerics.treepm_pm_grid"));
+        "numerics.treepm_pm_grid");
     frozen.config.numerics.treepm_pm_grid_nx = pm_grid_scalar;
     frozen.config.numerics.treepm_pm_grid_ny = pm_grid_scalar;
     frozen.config.numerics.treepm_pm_grid_nz = pm_grid_scalar;
@@ -2721,13 +2725,13 @@ void validateConfig(const SimulationConfig& config) {
           "numerics.treepm_enable_window_deconvolution",
           defaultFor("numerics.treepm_enable_window_deconvolution")),
       "numerics.treepm_enable_window_deconvolution");
-  frozen.config.numerics.treepm_update_cadence_steps = static_cast<int>(parseNumber<long>(
+  frozen.config.numerics.treepm_update_cadence_steps = parseNumber<int>(
       requireString(
           entries,
           consumed,
           "numerics.treepm_update_cadence_steps",
           defaultFor("numerics.treepm_update_cadence_steps")),
-      "numerics.treepm_update_cadence_steps"));
+      "numerics.treepm_update_cadence_steps");
   frozen.config.numerics.treepm_pm_decomposition_mode = parsePmDecompositionMode(requireString(
       entries,
       consumed,
@@ -2809,9 +2813,9 @@ void validateConfig(const SimulationConfig& config) {
       frozen.config.units.mass_unit,
       "physics.sf_max_star_particle_mass_code");
   frozen.config.physics.sf_max_spawn_particles_per_cell_step =
-      static_cast<std::uint32_t>(parseNumber<unsigned int>(
+      parseNumber<std::uint32_t>(
           requireString(entries, consumed, "physics.sf_max_spawn_particles_per_cell_step", "8"),
-          "physics.sf_max_spawn_particles_per_cell_step"));
+          "physics.sf_max_spawn_particles_per_cell_step");
   frozen.config.physics.sf_max_fractional_mass_conversion = parseFloating(
       requireString(entries, consumed, "physics.sf_max_fractional_mass_conversion", "0.25"),
       "physics.sf_max_fractional_mass_conversion");
@@ -2828,9 +2832,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.sf_stochastic_spawning = parseBool(
       requireString(entries, consumed, "physics.sf_stochastic_spawning", "true"),
       "physics.sf_stochastic_spawning");
-  frozen.config.physics.sf_random_seed = static_cast<std::uint64_t>(parseNumber<unsigned long long>(
+  frozen.config.physics.sf_random_seed = parseNumber<std::uint64_t>(
       requireString(entries, consumed, "physics.sf_random_seed", "123456789"),
-      "physics.sf_random_seed"));
+      "physics.sf_random_seed");
   frozen.config.physics.sf_effective_parameter_set = requireString(
       entries, consumed, "physics.sf_effective_parameter_set", "chui_sh03_tng_like_v1");
   frozen.config.physics.sf_effective_n_h_threshold_cgs = parseNumberDensityCgs(
@@ -2871,9 +2875,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.sf_effective_eos_relaxation_timescale_code = parseTimeCode(
       requireString(entries, consumed, "physics.sf_effective_eos_relaxation_timescale", "0.0 code"),
       frozen.config.units, "physics.sf_effective_eos_relaxation_timescale");
-  frozen.config.physics.sf_effective_eos_table_bins = static_cast<std::uint32_t>(parseNumber<unsigned int>(
+  frozen.config.physics.sf_effective_eos_table_bins = parseNumber<std::uint32_t>(
       requireString(entries, consumed, "physics.sf_effective_eos_table_bins", "256"),
-      "physics.sf_effective_eos_table_bins"));
+      "physics.sf_effective_eos_table_bins");
   frozen.config.physics.sf_effective_eos_max_density_ratio = parseFloating(
       requireString(entries, consumed, "physics.sf_effective_eos_max_density_ratio", "1.0e6"),
       "physics.sf_effective_eos_max_density_ratio");
@@ -2903,18 +2907,18 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.fb_momentum_code_per_mass_code = parseFloating(
       requireString(entries, consumed, "physics.fb_momentum_code_per_mass_code", "3.0e3"),
       "physics.fb_momentum_code_per_mass_code");
-  frozen.config.physics.fb_neighbor_count = static_cast<std::uint32_t>(parseNumber<unsigned>(
+  frozen.config.physics.fb_neighbor_count = parseNumber<std::uint32_t>(
       requireString(entries, consumed, "physics.fb_neighbor_count", "8"),
-      "physics.fb_neighbor_count"));
+      "physics.fb_neighbor_count");
   frozen.config.physics.fb_delayed_cooling_time_code = parseFloating(
       requireString(entries, consumed, "physics.fb_delayed_cooling_time_code", "0.0"),
       "physics.fb_delayed_cooling_time_code");
   frozen.config.physics.fb_stochastic_event_probability = parseFloating(
       requireString(entries, consumed, "physics.fb_stochastic_event_probability", "0.25"),
       "physics.fb_stochastic_event_probability");
-  frozen.config.physics.fb_random_seed = static_cast<std::uint64_t>(parseNumber<unsigned long long>(
+  frozen.config.physics.fb_random_seed = parseNumber<std::uint64_t>(
       requireString(entries, consumed, "physics.fb_random_seed", "42424242"),
-      "physics.fb_random_seed"));
+      "physics.fb_random_seed");
   frozen.config.physics.stellar_evolution_table_path =
       requireString(entries, consumed, "physics.stellar_evolution_table_path", "");
   frozen.config.physics.stellar_evolution_hubble_time_years = parseFloating(
@@ -2938,14 +2942,12 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.metal_diffusion_cfl = parseFloating(
       requireString(entries, consumed, "physics.metal_diffusion_cfl", "0.4"),
       "physics.metal_diffusion_cfl");
-  frozen.config.physics.metal_diffusion_max_subcycles = static_cast<std::uint32_t>(
-      parseNumber<unsigned int>(
-          requireString(entries, consumed, "physics.metal_diffusion_max_subcycles", "128"),
-          "physics.metal_diffusion_max_subcycles"));
-  frozen.config.physics.metal_diffusion_max_rkl_stages = static_cast<std::uint32_t>(
-      parseNumber<unsigned int>(
-          requireString(entries, consumed, "physics.metal_diffusion_max_rkl_stages", "64"),
-          "physics.metal_diffusion_max_rkl_stages"));
+  frozen.config.physics.metal_diffusion_max_subcycles = parseNumber<std::uint32_t>(
+      requireString(entries, consumed, "physics.metal_diffusion_max_subcycles", "128"),
+      "physics.metal_diffusion_max_subcycles");
+  frozen.config.physics.metal_diffusion_max_rkl_stages = parseNumber<std::uint32_t>(
+      requireString(entries, consumed, "physics.metal_diffusion_max_rkl_stages", "64"),
+      "physics.metal_diffusion_max_rkl_stages");
   frozen.config.physics.metal_diffusion_coefficient_floor_code = parseFloating(
       requireString(entries, consumed, "physics.metal_diffusion_coefficient_floor_code", "0.0"),
       "physics.metal_diffusion_coefficient_floor_code");
@@ -2961,9 +2963,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.bh_seed_mass_code = parseFloating(
       requireString(entries, consumed, "physics.bh_seed_mass_code", "1.0"),
       "physics.bh_seed_mass_code");
-  frozen.config.physics.bh_seed_max_per_cell = static_cast<std::uint32_t>(parseNumber<unsigned>(
+  frozen.config.physics.bh_seed_max_per_cell = parseNumber<std::uint32_t>(
       requireString(entries, consumed, "physics.bh_seed_max_per_cell", "1"),
-      "physics.bh_seed_max_per_cell"));
+      "physics.bh_seed_max_per_cell");
   frozen.config.physics.bh_alpha_bondi = parseFloating(
       requireString(entries, consumed, "physics.bh_alpha_bondi", "1.0"),
       "physics.bh_alpha_bondi");
@@ -3014,22 +3016,22 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.output.restart_stem = sanitizeStem(
       requireString(entries, consumed, "output.restart_stem", frozen.config.output.restart_stem),
       "output.restart_stem");
-  frozen.config.output.snapshot_interval_steps = static_cast<int>(parseNumber<long>(
+  frozen.config.output.snapshot_interval_steps = parseNumber<int>(
       requireString(entries, consumed, "output.snapshot_interval_steps", "64"),
-      "output.snapshot_interval_steps"));
+      "output.snapshot_interval_steps");
   frozen.config.output.snapshot_interval_time_code = parseFloating(
       requireString(entries, consumed, "output.snapshot_interval_time_code", "0.0"),
       "output.snapshot_interval_time_code");
   frozen.config.output.write_restarts = parseBool(
       requireString(entries, consumed, "output.write_restarts", "true"), "output.write_restarts");
 
-  frozen.config.parallel.mpi_ranks_expected = static_cast<int>(parseNumber<long>(
+  frozen.config.parallel.mpi_ranks_expected = parseNumber<int>(
       requireString(entries, consumed, "parallel.mpi_ranks_expected", "1"),
-      "parallel.mpi_ranks_expected"));
-  frozen.config.parallel.omp_threads = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "parallel.omp_threads", "1"), "parallel.omp_threads"));
-  frozen.config.parallel.gpu_devices = static_cast<int>(parseNumber<long>(
-      requireString(entries, consumed, "parallel.gpu_devices", "0"), "parallel.gpu_devices"));
+      "parallel.mpi_ranks_expected");
+  frozen.config.parallel.omp_threads = parseNumber<int>(
+      requireString(entries, consumed, "parallel.omp_threads", "1"), "parallel.omp_threads");
+  frozen.config.parallel.gpu_devices = parseNumber<int>(
+      requireString(entries, consumed, "parallel.gpu_devices", "0"), "parallel.gpu_devices");
   frozen.config.parallel.deterministic_reduction =
       parseBool(requireString(entries, consumed, "parallel.deterministic_reduction", "true"),
                 "parallel.deterministic_reduction");
@@ -3132,30 +3134,30 @@ void validateConfig(const SimulationConfig& config) {
       consumed,
       "analysis.diagnostics_execution_policy",
       diagnosticsExecutionPolicyToString(frozen.config.analysis.diagnostics_execution_policy)));
-  frozen.config.analysis.run_health_interval_steps = static_cast<int>(parseNumber<long>(
+  frozen.config.analysis.run_health_interval_steps = parseNumber<int>(
       requireString(entries, consumed, "analysis.run_health_interval_steps", "1"),
-      "analysis.run_health_interval_steps"));
-  frozen.config.analysis.science_light_interval_steps = static_cast<int>(parseNumber<long>(
+      "analysis.run_health_interval_steps");
+  frozen.config.analysis.science_light_interval_steps = parseNumber<int>(
       requireString(entries, consumed, "analysis.science_light_interval_steps", "8"),
-      "analysis.science_light_interval_steps"));
-  frozen.config.analysis.science_heavy_interval_steps = static_cast<int>(parseNumber<long>(
+      "analysis.science_light_interval_steps");
+  frozen.config.analysis.science_heavy_interval_steps = parseNumber<int>(
       requireString(entries, consumed, "analysis.science_heavy_interval_steps", "64"),
-      "analysis.science_heavy_interval_steps"));
-  frozen.config.analysis.retention_bundle_count = static_cast<int>(parseNumber<long>(
+      "analysis.science_heavy_interval_steps");
+  frozen.config.analysis.retention_bundle_count = parseNumber<int>(
       requireString(entries, consumed, "analysis.retention_bundle_count", "8"),
-      "analysis.retention_bundle_count"));
-  frozen.config.analysis.power_spectrum_mesh_n = static_cast<int>(parseNumber<long>(
+      "analysis.retention_bundle_count");
+  frozen.config.analysis.power_spectrum_mesh_n = parseNumber<int>(
       requireString(entries, consumed, "analysis.power_spectrum_mesh_n", "16"),
-      "analysis.power_spectrum_mesh_n"));
-  frozen.config.analysis.power_spectrum_bin_count = static_cast<int>(parseNumber<long>(
+      "analysis.power_spectrum_mesh_n");
+  frozen.config.analysis.power_spectrum_bin_count = parseNumber<int>(
       requireString(entries, consumed, "analysis.power_spectrum_bin_count", "12"),
-      "analysis.power_spectrum_bin_count"));
-  frozen.config.analysis.sf_history_bin_count = static_cast<int>(parseNumber<long>(
+      "analysis.power_spectrum_bin_count");
+  frozen.config.analysis.sf_history_bin_count = parseNumber<int>(
       requireString(entries, consumed, "analysis.sf_history_bin_count", "16"),
-      "analysis.sf_history_bin_count"));
-  frozen.config.analysis.quicklook_grid_n = static_cast<int>(parseNumber<long>(
+      "analysis.sf_history_bin_count");
+  frozen.config.analysis.quicklook_grid_n = parseNumber<int>(
       requireString(entries, consumed, "analysis.quicklook_grid_n", "32"),
-      "analysis.quicklook_grid_n"));
+      "analysis.quicklook_grid_n");
   frozen.config.analysis.diagnostics_stem = sanitizeStem(
       requireString(entries, consumed, "analysis.diagnostics_stem", frozen.config.analysis.diagnostics_stem),
       "analysis.diagnostics_stem");
@@ -3172,9 +3174,9 @@ void validateConfig(const SimulationConfig& config) {
           "analysis.halo_fof_linking_length_factor",
           "0.2"),
       "analysis.halo_fof_linking_length_factor");
-  frozen.config.analysis.halo_fof_min_group_size = static_cast<int>(parseNumber<long>(
+  frozen.config.analysis.halo_fof_min_group_size = parseNumber<int>(
       requireString(entries, consumed, "analysis.halo_fof_min_group_size", "16"),
-      "analysis.halo_fof_min_group_size"));
+      "analysis.halo_fof_min_group_size");
   frozen.config.analysis.halo_include_gas = parseBool(
       requireString(entries, consumed, "analysis.halo_include_gas", "true"),
       "analysis.halo_include_gas");
@@ -3329,15 +3331,15 @@ std::string serializeDerivedRuntimeConfig(const DerivedRuntimeConfig& derived_co
   stream << "treepm_pm_grid_ny=" << derived_config.treepm_pm_grid_shape[1] << '\n';
   stream << "treepm_pm_grid_nz=" << derived_config.treepm_pm_grid_shape[2] << '\n';
   stream << "gravity_softening_dark_matter_kpc_comoving="
-         << derived_config.gravity_softening_kpc_comoving_by_species[0] << '\n';
+         << derived_config.gravity_softening_kpc_comoving_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] << '\n';
   stream << "gravity_softening_gas_kpc_comoving="
-         << derived_config.gravity_softening_kpc_comoving_by_species[1] << '\n';
+         << derived_config.gravity_softening_kpc_comoving_by_species[particleSpeciesIndex(ParticleSpecies::kGas)] << '\n';
   stream << "gravity_softening_star_kpc_comoving="
-         << derived_config.gravity_softening_kpc_comoving_by_species[2] << '\n';
+         << derived_config.gravity_softening_kpc_comoving_by_species[particleSpeciesIndex(ParticleSpecies::kStar)] << '\n';
   stream << "gravity_softening_black_hole_kpc_comoving="
-         << derived_config.gravity_softening_kpc_comoving_by_species[3] << '\n';
+         << derived_config.gravity_softening_kpc_comoving_by_species[particleSpeciesIndex(ParticleSpecies::kBlackHole)] << '\n';
   stream << "gravity_softening_tracer_kpc_comoving="
-         << derived_config.gravity_softening_kpc_comoving_by_species[4] << '\n';
+         << derived_config.gravity_softening_kpc_comoving_by_species[particleSpeciesIndex(ParticleSpecies::kTracer)] << '\n';
   stream << "normalized_config_hash_hex=" << derived_config.normalized_config_hash_hex << '\n';
   return stream.str();
 }

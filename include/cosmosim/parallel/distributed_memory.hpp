@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/profiling.hpp"
 
 namespace cosmosim::parallel {
@@ -862,8 +864,9 @@ struct PmSlabLayout {
   [[nodiscard]] std::size_t local_nx() const noexcept {
     return owned_x.extentX();
   }
-  [[nodiscard]] std::size_t localCellCount() const noexcept {
-    return local_nx() * global_ny * global_nz;
+  [[nodiscard]] std::size_t localCellCount() const {
+    return core::checkedSizeProduct3(
+        local_nx(), global_ny, global_nz, "PmSlabLayout::localCellCount");
   }
   [[nodiscard]] bool isValid() const noexcept;
   [[nodiscard]] bool ownsGlobalX(std::size_t global_x) const noexcept {
@@ -967,6 +970,14 @@ inline bool PmSlabLayout::isValid() const noexcept {
     return false;
   }
   if (owned_x.begin_x > owned_x.end_x || owned_x.end_x > global_nx) {
+    return false;
+  }
+  const std::size_t local_nx_value = owned_x.extentX();
+  if (local_nx_value != 0U && global_ny > std::numeric_limits<std::size_t>::max() / local_nx_value) {
+    return false;
+  }
+  const std::size_t local_xy = local_nx_value * global_ny;
+  if (local_xy != 0U && global_nz > std::numeric_limits<std::size_t>::max() / local_xy) {
     return false;
   }
   const PmSlabRange expected = pmOwnedXRangeForRank(global_nx, world_size, world_rank);

@@ -117,6 +117,9 @@ class HaloCatalogSchema {
   [[nodiscard]] static std::vector<std::string_view> mergerTreeFields();
 };
 
+// Deterministic all-pairs FOF reference implementation. Its O(N^2) neighbor search is
+// intended for controlled validation/post-processing sizes; runtime capability metadata
+// must not present this class as a production-scale cosmological halo finder.
 class FofHaloFinder {
  public:
   explicit FofHaloFinder(FofConfig config);

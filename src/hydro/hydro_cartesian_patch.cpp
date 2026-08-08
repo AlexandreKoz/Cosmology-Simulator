@@ -1,5 +1,7 @@
 #include "cosmosim/hydro/hydro_cartesian_patch.hpp"
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -12,32 +14,26 @@ void validateSpec(const HydroCartesianPatchSpec& spec) {
   if (spec.nx == 0 || spec.ny == 0 || spec.nz == 0) {
     throw std::invalid_argument("Cartesian hydro patch dimensions must be positive");
   }
-  if (spec.cell_width_x_comoving <= 0.0 ||
-      spec.cell_width_y_comoving <= 0.0 ||
-      spec.cell_width_z_comoving <= 0.0) {
-    throw std::invalid_argument("Cartesian hydro patch cell widths must be positive");
+  if (!std::isfinite(spec.origin_x_comoving) || !std::isfinite(spec.origin_y_comoving) ||
+      !std::isfinite(spec.origin_z_comoving)) {
+    throw std::invalid_argument("Cartesian hydro patch origins must be finite");
+  }
+  if (!std::isfinite(spec.cell_width_x_comoving) || spec.cell_width_x_comoving <= 0.0 ||
+      !std::isfinite(spec.cell_width_y_comoving) || spec.cell_width_y_comoving <= 0.0 ||
+      !std::isfinite(spec.cell_width_z_comoving) || spec.cell_width_z_comoving <= 0.0) {
+    throw std::invalid_argument("Cartesian hydro patch cell widths must be finite and positive");
   }
 }
 
-[[nodiscard]] std::size_t productOrThrow(std::size_t nx, std::size_t ny, std::size_t nz) {
-  if (nx > std::numeric_limits<std::size_t>::max() / ny) {
-    throw std::overflow_error("Cartesian hydro patch dimensions overflow");
-  }
-  const std::size_t xy = nx * ny;
-  if (xy > std::numeric_limits<std::size_t>::max() / nz) {
-    throw std::overflow_error("Cartesian hydro patch dimensions overflow");
-  }
-  return xy * nz;
-}
 
 }  // namespace
 
-std::size_t HydroPatchGeometry::cellCount() const noexcept {
-  return nx * ny * nz;
+std::size_t HydroPatchGeometry::cellCount() const {
+  return core::checkedSizeProduct3(nx, ny, nz, "HydroPatchGeometry::cellCount");
 }
 
-std::size_t HydroPatchGeometry::totalCellStorageCount() const noexcept {
-  return cellCount() + ghost_cells.size();
+std::size_t HydroPatchGeometry::totalCellStorageCount() const {
+  return core::checkedSizeAdd(cellCount(), ghost_cells.size(), "HydroPatchGeometry::totalCellStorageCount");
 }
 
 std::size_t HydroPatchGeometry::linearCellIndex(std::size_t i, std::size_t j, std::size_t k) const {
@@ -61,29 +57,39 @@ std::size_t HydroPatchGeometry::neighborCell(
     std::size_t row,
     int di,
     int dj,
-    int dk) const noexcept {
-  if (row >= cellCount() || nx == 0 || ny == 0 || nz == 0) {
+    int dk) const {
+  if (nx == 0 || ny == 0 || nz == 0 || row >= cellCount()) {
     return k_invalid_cell_index;
   }
   const std::size_t i = row % nx;
   const std::size_t j = (row / nx) % ny;
-  const std::size_t k = row / (nx * ny);
-  const int ni = static_cast<int>(i) + di;
-  const int nj = static_cast<int>(j) + dj;
-  const int nk = static_cast<int>(k) + dk;
-  if (ni < 0 || nj < 0 || nk < 0 ||
-      ni >= static_cast<int>(nx) ||
-      nj >= static_cast<int>(ny) ||
-      nk >= static_cast<int>(nz)) {
+  const std::size_t k = row / core::checkedSizeMultiply(nx, ny, "HydroPatchGeometry::neighborCell");
+
+  const auto apply_delta = [](std::size_t index, int delta, std::size_t extent) -> std::size_t {
+    if (delta < 0) {
+      const std::size_t magnitude = static_cast<std::size_t>(-static_cast<long long>(delta));
+      return magnitude > index ? k_invalid_cell_index : index - magnitude;
+    }
+    const std::size_t magnitude = static_cast<std::size_t>(delta);
+    if (magnitude >= extent || index > extent - 1U - magnitude) {
+      return k_invalid_cell_index;
+    }
+    return index + magnitude;
+  };
+
+  const std::size_t ni = apply_delta(i, di, nx);
+  const std::size_t nj = apply_delta(j, dj, ny);
+  const std::size_t nk = apply_delta(k, dk, nz);
+  if (ni == k_invalid_cell_index || nj == k_invalid_cell_index || nk == k_invalid_cell_index) {
     return k_invalid_cell_index;
   }
-  return (static_cast<std::size_t>(nk) * ny + static_cast<std::size_t>(nj)) * nx +
-      static_cast<std::size_t>(ni);
+  return (nk * ny + nj) * nx + ni;
 }
 
 HydroPatchGeometry makeCartesianPatchGeometry(const HydroCartesianPatchSpec& spec) {
   validateSpec(spec);
-  const std::size_t cell_count = productOrThrow(spec.nx, spec.ny, spec.nz);
+  const std::size_t cell_count = core::checkedSizeProduct3(
+      spec.nx, spec.ny, spec.nz, "makeCartesianPatchGeometry");
 
   HydroPatchGeometry geometry;
   geometry.nx = spec.nx;
@@ -97,11 +103,28 @@ HydroPatchGeometry makeCartesianPatchGeometry(const HydroCartesianPatchSpec& spe
   geometry.cell_width_z_comoving = spec.cell_width_z_comoving;
   geometry.cell_volume_comoving =
       spec.cell_width_x_comoving * spec.cell_width_y_comoving * spec.cell_width_z_comoving;
+  const double x_face_area = spec.cell_width_y_comoving * spec.cell_width_z_comoving;
+  const double y_face_area = spec.cell_width_x_comoving * spec.cell_width_z_comoving;
+  const double z_face_area = spec.cell_width_x_comoving * spec.cell_width_y_comoving;
+  if (!std::isfinite(geometry.cell_volume_comoving) || geometry.cell_volume_comoving <= 0.0 ||
+      !std::isfinite(x_face_area) || !std::isfinite(y_face_area) || !std::isfinite(z_face_area)) {
+    throw std::overflow_error("Cartesian hydro patch derived volume/face areas must be finite and positive");
+  }
 
-  const std::size_t x_faces = (spec.nx > 1) ? (spec.nx - 1U) * spec.ny * spec.nz : 0U;
-  const std::size_t y_faces = (spec.ny > 1) ? spec.nx * (spec.ny - 1U) * spec.nz : 0U;
-  const std::size_t z_faces = (spec.nz > 1) ? spec.nx * spec.ny * (spec.nz - 1U) : 0U;
-  geometry.faces.reserve(x_faces + y_faces + z_faces);
+  const std::size_t x_faces = (spec.nx > 1U)
+      ? core::checkedSizeProduct3(spec.nx - 1U, spec.ny, spec.nz, "Cartesian hydro x-face count")
+      : 0U;
+  const std::size_t y_faces = (spec.ny > 1U)
+      ? core::checkedSizeProduct3(spec.nx, spec.ny - 1U, spec.nz, "Cartesian hydro y-face count")
+      : 0U;
+  const std::size_t z_faces = (spec.nz > 1U)
+      ? core::checkedSizeProduct3(spec.nx, spec.ny, spec.nz - 1U, "Cartesian hydro z-face count")
+      : 0U;
+  const std::size_t face_count = core::checkedSizeAdd(
+      core::checkedSizeAdd(x_faces, y_faces, "Cartesian hydro face count"),
+      z_faces,
+      "Cartesian hydro face count");
+  geometry.faces.reserve(face_count);
 
   for (std::size_t k = 0; k < spec.nz; ++k) {
     for (std::size_t j = 0; j < spec.ny; ++j) {
@@ -113,7 +136,7 @@ HydroPatchGeometry makeCartesianPatchGeometry(const HydroCartesianPatchSpec& spe
             .neighbor_cell = neighbor,
             .owner_minus_cell = geometry.neighborCell(owner, -1, 0, 0),
             .neighbor_plus_cell = geometry.neighborCell(neighbor, 1, 0, 0),
-            .area_comoving = spec.cell_width_y_comoving * spec.cell_width_z_comoving,
+            .area_comoving = x_face_area,
             .normal_x = 1.0,
             .normal_y = 0.0,
             .normal_z = 0.0,
@@ -132,7 +155,7 @@ HydroPatchGeometry makeCartesianPatchGeometry(const HydroCartesianPatchSpec& spe
             .neighbor_cell = neighbor,
             .owner_minus_cell = geometry.neighborCell(owner, 0, -1, 0),
             .neighbor_plus_cell = geometry.neighborCell(neighbor, 0, 1, 0),
-            .area_comoving = spec.cell_width_x_comoving * spec.cell_width_z_comoving,
+            .area_comoving = y_face_area,
             .normal_x = 0.0,
             .normal_y = 1.0,
             .normal_z = 0.0,
@@ -151,7 +174,7 @@ HydroPatchGeometry makeCartesianPatchGeometry(const HydroCartesianPatchSpec& spe
             .neighbor_cell = neighbor,
             .owner_minus_cell = geometry.neighborCell(owner, 0, 0, -1),
             .neighbor_plus_cell = geometry.neighborCell(neighbor, 0, 0, 1),
-            .area_comoving = spec.cell_width_x_comoving * spec.cell_width_y_comoving,
+            .area_comoving = z_face_area,
             .normal_x = 0.0,
             .normal_y = 0.0,
             .normal_z = 1.0,

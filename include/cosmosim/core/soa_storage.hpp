@@ -88,30 +88,29 @@ class SoaFieldArray {
     return std::span<const T>(m_values.data(), m_values.size());
   }
 
-  [[nodiscard]] T& operator[](std::size_t index) noexcept {
-#ifndef NDEBUG
+  // Conventional unchecked element access for already-validated hot paths.
+  [[nodiscard]] T& operator[](std::size_t index) noexcept { return m_values[index]; }
+  [[nodiscard]] const T& operator[](std::size_t index) const noexcept { return m_values[index]; }
+
+  // Always-checked access for public/boundary code.
+  [[nodiscard]] T& at(std::size_t index) {
     if (index >= m_values.size()) {
-      throw std::out_of_range("SoaFieldArray.operator[]: index out of range");
+      throw std::out_of_range("SoaFieldArray.at: index out of range");
     }
-#endif
     return m_values[index];
   }
 
-  [[nodiscard]] const T& operator[](std::size_t index) const noexcept {
-#ifndef NDEBUG
+  [[nodiscard]] const T& at(std::size_t index) const {
     if (index >= m_values.size()) {
-      throw std::out_of_range("SoaFieldArray.operator[]: index out of range");
+      throw std::out_of_range("SoaFieldArray.at: index out of range");
     }
-#endif
     return m_values[index];
   }
 
   void swapErase(std::size_t index) {
-#ifndef NDEBUG
     if (index >= m_values.size()) {
       throw std::out_of_range("SoaFieldArray.swapErase: index out of range");
     }
-#endif
     if (index + 1 < m_values.size()) {
       m_values[index] = m_values.back();
     }
@@ -146,37 +145,49 @@ class SoaFieldArray {
 };
 
 template <typename T>
+void gatherSpanUnchecked(
+    std::span<const T> source,
+    std::span<const std::uint32_t> indices,
+    std::span<T> destination) noexcept {
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    destination[i] = source[indices[i]];
+  }
+}
+
+template <typename T>
 void gatherSpan(std::span<const T> source, std::span<const std::uint32_t> indices, std::span<T> destination) {
-  // Gather into a compact destination span for active-set kernels.
   if (destination.size() != indices.size()) {
     throw std::invalid_argument("gatherSpan: destination size must match indices size");
   }
-  for (std::size_t i = 0; i < indices.size(); ++i) {
-    const std::uint32_t source_index = indices[i];
-#ifndef NDEBUG
+  for (const std::uint32_t source_index : indices) {
     if (source_index >= source.size()) {
       throw std::out_of_range("gatherSpan: source index out of range");
     }
-#endif
-    destination[i] = source[source_index];
+  }
+  gatherSpanUnchecked(source, indices, destination);
+}
+
+template <typename T>
+void scatterSpanUnchecked(
+    std::span<const T> source,
+    std::span<const std::uint32_t> indices,
+    std::span<T> destination) noexcept {
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    destination[indices[i]] = source[i];
   }
 }
 
 template <typename T>
 void scatterSpan(std::span<const T> source, std::span<const std::uint32_t> indices, std::span<T> destination) {
-  // Scatter compact computed values back into sparse destination indices.
   if (source.size() != indices.size()) {
     throw std::invalid_argument("scatterSpan: source size must match indices size");
   }
-  for (std::size_t i = 0; i < indices.size(); ++i) {
-    const std::uint32_t destination_index = indices[i];
-#ifndef NDEBUG
+  for (const std::uint32_t destination_index : indices) {
     if (destination_index >= destination.size()) {
       throw std::out_of_range("scatterSpan: destination index out of range");
     }
-#endif
-    destination[destination_index] = source[i];
   }
+  scatterSpanUnchecked(source, indices, destination);
 }
 
 enum class ParticleSoaField : std::uint8_t {

@@ -230,6 +230,8 @@ class DiagnosticsEngine {
   [[nodiscard]] RunHealthCounters computeRunHealth(const DiagnosticsStateView& view) const;
   [[nodiscard]] RunHealthCounters computeRunHealth(const core::SimulationState& state) const;
 
+  // Convenience wrapper over the deterministic direct-DFT reference estimator below.
+  // Keep this path on validation-scale meshes until an FFT-backed production estimator is wired.
   [[nodiscard]] std::vector<PowerSpectrumBin> computePowerSpectrum(
       const ParticleDiagnosticsView& particles,
       std::size_t mesh_n,

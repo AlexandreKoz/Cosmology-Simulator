@@ -6,7 +6,7 @@
 
 namespace cosmosim::core {
 struct IntegratorState;
-struct SimulationState;
+class SimulationState;
 class HierarchicalTimeBinScheduler;
 }
 

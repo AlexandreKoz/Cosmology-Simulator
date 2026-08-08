@@ -11,23 +11,17 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/particle_species.hpp"
 #include "cosmosim/core/soa_storage.hpp"
 
 namespace cosmosim::core {
 
 class HierarchicalTimeBinScheduler;
-
-// Canonical species tags used in sidecar accounting and invariant checks.
-enum class ParticleSpecies : std::uint8_t {
-  kDarkMatter = 0,
-  kGas = 1,
-  kStar = 2,
-  kBlackHole = 3,
-  kTracer = 4,
-};
 
 struct ParticleSoa {
   // Authoritative owner for persistent gravity-hot particle truth in SimulationState.
@@ -234,7 +228,7 @@ class GasCellIdentityMap {
   [[nodiscard]] std::vector<std::uint32_t> rowsForPatch(std::uint64_t owning_patch_id) const;
 
  private:
-  bool rebuildLookupTables() noexcept;
+  bool rebuildLookupTables();
 
   std::vector<GasCellIdentityRecord> m_records;
   std::unordered_map<std::uint64_t, std::size_t> m_index_by_gas_cell_id;
@@ -279,7 +273,7 @@ struct PatchSoa {
 
 struct SpeciesContainer {
   // Explicit species counts; used as an auditable ownership ledger.
-  std::array<std::uint64_t, 5> count_by_species{};
+  std::array<std::uint64_t, k_particle_species_count> count_by_species{};
 
   [[nodiscard]] std::uint64_t totalCount() const noexcept;
   [[nodiscard]] bool isConsistentWith(const ParticleSidecar& sidecar) const noexcept;
@@ -287,12 +281,12 @@ struct SpeciesContainer {
 
 struct ParticleSpeciesIndex {
   // Explicit species-local to global particle index mapping.
-  std::array<AlignedVector<std::uint32_t>, 5> global_index_by_species;
+  std::array<AlignedVector<std::uint32_t>, k_particle_species_count> global_index_by_species;
   AlignedVector<std::uint32_t> local_index_by_global;
 
   void rebuild(const ParticleSidecar& sidecar);
-  [[nodiscard]] std::size_t count(ParticleSpecies species) const noexcept;
-  [[nodiscard]] std::span<const std::uint32_t> globalIndices(ParticleSpecies species) const noexcept;
+  [[nodiscard]] std::size_t count(ParticleSpecies species) const;
+  [[nodiscard]] std::span<const std::uint32_t> globalIndices(ParticleSpecies species) const;
   [[nodiscard]] std::uint32_t localIndex(std::uint32_t global_index) const;
   [[nodiscard]] std::uint32_t globalIndex(ParticleSpecies species, std::uint32_t local_index) const;
 };
@@ -977,7 +971,12 @@ class ScratchAllocator {
 
   template <typename T>
   [[nodiscard]] T* allocateArray(std::size_t count) {
-    auto* raw = allocateBytes(sizeof(T) * count, alignof(T));
+    static_assert(
+        std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>,
+        "ScratchAllocator.allocateArray supports only trivial scratch element types");
+    const std::size_t bytes = checkedSizeMultiply(
+        sizeof(T), count, "ScratchAllocator.allocateArray");
+    auto* raw = allocateBytes(bytes, alignof(T));
     return reinterpret_cast<T*>(raw);
   }
 };

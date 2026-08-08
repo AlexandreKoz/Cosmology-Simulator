@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 
 #if COSMOSIM_ENABLE_CUDA
 #include <cuda_runtime.h>
@@ -41,13 +42,16 @@ class DeviceBufferDouble {
     }
     release();
     m_count = count;
+    const std::size_t bytes = checkedSizeMultiply(
+        m_count, sizeof(double), "DeviceBufferDouble::resize");
 #if COSMOSIM_ENABLE_CUDA
-    if (m_count > 0 && cudaMalloc(&m_device_ptr, m_count * sizeof(double)) != cudaSuccess) {
+    if (m_count > 0 && cudaMalloc(&m_device_ptr, bytes) != cudaSuccess) {
       m_device_ptr = nullptr;
       m_count = 0;
       throw std::runtime_error("cudaMalloc failed for DeviceBufferDouble");
     }
 #else
+    (void)bytes;
     m_host_shadow.resize(m_count, 0.0);
 #endif
   }
@@ -62,48 +66,52 @@ class DeviceBufferDouble {
   [[nodiscard]] const double* data() const { return m_host_shadow.data(); }
 #endif
 
-  double copyFromHost(std::span<const double> host, void* stream_handle = nullptr) {
+  // CUDA mode is asynchronous: the host source must remain valid until the supplied
+  // stream is synchronized. CPU fallback completes before returning.
+  std::size_t copyFromHostAsync(
+      std::span<const double> host,
+      void* stream_handle = nullptr) {
     if (host.size() != m_count) {
-      throw std::invalid_argument("DeviceBufferDouble::copyFromHost span size mismatch");
+      throw std::invalid_argument("DeviceBufferDouble::copyFromHostAsync span size mismatch");
     }
+    const std::size_t bytes = checkedSizeMultiply(
+        m_count, sizeof(double), "DeviceBufferDouble::copyFromHostAsync");
 #if COSMOSIM_ENABLE_CUDA
     auto stream = reinterpret_cast<cudaStream_t>(stream_handle);
     cudaError_t status = cudaMemcpyAsync(
-        m_device_ptr,
-        host.data(),
-        m_count * sizeof(double),
-        cudaMemcpyHostToDevice,
-        stream);
+        m_device_ptr, host.data(), bytes, cudaMemcpyHostToDevice, stream);
     if (status != cudaSuccess) {
       throw std::runtime_error("cudaMemcpyAsync host->device failed");
     }
-    return static_cast<double>(m_count * sizeof(double));
 #else
-    std::memcpy(m_host_shadow.data(), host.data(), m_count * sizeof(double));
-    return static_cast<double>(m_count * sizeof(double));
+    (void)stream_handle;
+    std::memcpy(m_host_shadow.data(), host.data(), bytes);
 #endif
+    return bytes;
   }
 
-  double copyToHost(std::span<double> host, void* stream_handle = nullptr) const {
+  // CUDA mode is asynchronous: the host destination must not be consumed until the
+  // supplied stream is synchronized. CPU fallback completes before returning.
+  std::size_t copyToHostAsync(
+      std::span<double> host,
+      void* stream_handle = nullptr) const {
     if (host.size() != m_count) {
-      throw std::invalid_argument("DeviceBufferDouble::copyToHost span size mismatch");
+      throw std::invalid_argument("DeviceBufferDouble::copyToHostAsync span size mismatch");
     }
+    const std::size_t bytes = checkedSizeMultiply(
+        m_count, sizeof(double), "DeviceBufferDouble::copyToHostAsync");
 #if COSMOSIM_ENABLE_CUDA
     auto stream = reinterpret_cast<cudaStream_t>(stream_handle);
     cudaError_t status = cudaMemcpyAsync(
-        host.data(),
-        m_device_ptr,
-        m_count * sizeof(double),
-        cudaMemcpyDeviceToHost,
-        stream);
+        host.data(), m_device_ptr, bytes, cudaMemcpyDeviceToHost, stream);
     if (status != cudaSuccess) {
       throw std::runtime_error("cudaMemcpyAsync device->host failed");
     }
-    return static_cast<double>(m_count * sizeof(double));
 #else
-    std::memcpy(host.data(), m_host_shadow.data(), m_count * sizeof(double));
-    return static_cast<double>(m_count * sizeof(double));
+    (void)stream_handle;
+    std::memcpy(host.data(), m_host_shadow.data(), bytes);
 #endif
+    return bytes;
   }
 
  private:

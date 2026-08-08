@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_framework.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
 namespace cosmosim::amr {
@@ -33,14 +34,7 @@ struct PatchLocalCellIndex {
   if (nx == 0U || ny == 0U || nz == 0U) {
     throw std::invalid_argument(std::string(context) + ": patch cell dimensions must be positive");
   }
-  if (nx > std::numeric_limits<std::size_t>::max() / ny) {
-    throw std::overflow_error(std::string(context) + ": patch cell dimensions overflow");
-  }
-  const std::size_t xy = nx * ny;
-  if (xy > std::numeric_limits<std::size_t>::max() / nz) {
-    throw std::overflow_error(std::string(context) + ": patch cell dimensions overflow");
-  }
-  return xy * nz;
+  return core::checkedSizeProduct3(nx, ny, nz, context);
 }
 
 [[nodiscard]] inline std::size_t linearPatchCellIndex(
@@ -60,18 +54,28 @@ struct PatchLocalCellIndex {
   for (std::size_t axis = 0; axis < 3; ++axis) {
     const double extent = patch.extent_comov[axis];
     const std::uint16_t dim = patch.cell_dims[axis];
-    if (extent <= 0.0) {
-      throw std::invalid_argument(std::string(context) + ": patch extents must be positive");
-    }
     const double lower = patch.origin_comov[axis];
-    const double upper = patch.origin_comov[axis] + extent;
-    const double scale = std::max({1.0, std::abs(lower), std::abs(upper), std::abs(point_comov[axis])});
-    if (point_comov[axis] < lower - 1.0e-10 * scale ||
-        point_comov[axis] >= upper + 1.0e-10 * scale) {
+    const double point = point_comov[axis];
+    if (!std::isfinite(extent) || extent <= 0.0 || !std::isfinite(lower) || !std::isfinite(point)) {
+      throw std::invalid_argument(
+          std::string(context) + ": patch origin, extent, and point coordinates must be finite; extents must be positive");
+    }
+    const double upper = lower + extent;
+    if (!std::isfinite(upper)) {
+      throw std::overflow_error(std::string(context) + ": patch upper bound is not finite");
+    }
+    const double scale = std::max({1.0, std::abs(lower), std::abs(upper), std::abs(point)});
+    if (point < lower - 1.0e-10 * scale || point >= upper + 1.0e-10 * scale) {
       throw std::runtime_error(std::string(context) + ": gas-cell center lies outside explicit patch geometry");
     }
     const double cell_width = extent / static_cast<double>(dim);
-    double coordinate = (point_comov[axis] - lower) / cell_width;
+    if (!std::isfinite(cell_width) || cell_width <= 0.0) {
+      throw std::invalid_argument(std::string(context) + ": derived patch cell width must be finite and positive");
+    }
+    double coordinate = (point - lower) / cell_width;
+    if (!std::isfinite(coordinate)) {
+      throw std::invalid_argument(std::string(context) + ": derived patch-local coordinate must be finite");
+    }
     coordinate = std::clamp(coordinate, 0.0, static_cast<double>(dim) - 1.0e-12);
     ijk[axis] = static_cast<std::size_t>(coordinate);
     if (ijk[axis] >= dim) {

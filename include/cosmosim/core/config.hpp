@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "cosmosim/core/particle_species.hpp"
+
 namespace cosmosim::core {
 
 enum class SimulationMode {
@@ -393,6 +395,7 @@ struct AnalysisConfig {
 
 struct ParallelConfig {
   int mpi_ranks_expected = 1;
+  // Reserved execution knob. Must remain 1 until an OpenMP backend is actually compiled and wired.
   int omp_threads = 1;
   int gpu_devices = 0;
   bool deterministic_reduction = true;
@@ -567,7 +570,7 @@ struct DerivedRuntimeConfig {
   double t_code_end = 1.0;
   std::array<double, 3> box_size_mpc_comoving{};
   std::array<int, 3> treepm_pm_grid_shape{};
-  std::array<double, 5> gravity_softening_kpc_comoving_by_species{};
+  std::array<double, k_particle_species_count> gravity_softening_kpc_comoving_by_species{};
   std::uint64_t normalized_config_hash = 0;
   std::string normalized_config_hash_hex;
 };

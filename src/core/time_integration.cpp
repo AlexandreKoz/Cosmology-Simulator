@@ -1,5 +1,7 @@
 #include "cosmosim/core/time_integration.hpp"
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1140,7 +1142,12 @@ void StepOrchestrator::executeSchedulerSubstep(
       requested_boundary_kind);
 }
 
-HierarchicalTimeBinScheduler::HierarchicalTimeBinScheduler(std::uint8_t max_bin) : m_max_bin(max_bin) {}
+HierarchicalTimeBinScheduler::HierarchicalTimeBinScheduler(std::uint8_t max_bin) : m_max_bin(max_bin) {
+  if (max_bin > k_max_representable_bin) {
+    throw std::invalid_argument(
+        "HierarchicalTimeBinScheduler: max_bin exceeds the 64-bit tick representation limit");
+  }
+}
 
 void HierarchicalTimeBinScheduler::reset(
     std::uint32_t element_count,
@@ -1185,7 +1192,8 @@ void HierarchicalTimeBinScheduler::appendElements(
     return;
   }
   const std::uint8_t clamped_bin = clampBin(initial_bin);
-  const std::uint32_t old_count = static_cast<std::uint32_t>(m_hot.size());
+  const std::uint32_t old_count = checkedIntegralNarrow<std::uint32_t>(
+      m_hot.size(), "HierarchicalTimeBinScheduler::appendElements existing element count");
   const std::uint32_t total_count = old_count + new_element_count;
   if (total_count < old_count) {
     throw std::overflow_error("HierarchicalTimeBinScheduler::appendElements element count overflow");
@@ -1405,6 +1413,14 @@ TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() con
 }
 
 void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistentState& persistent_state) {
+  if (persistent_state.max_bin > k_max_representable_bin) {
+    throw std::invalid_argument(
+        "TimeBinPersistentState max_bin exceeds the 64-bit tick representation limit");
+  }
+  if (persistent_state.bin_index.size() > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error(
+        "TimeBinPersistentState element count exceeds the scheduler uint32 index representation");
+  }
   if (persistent_state.bin_index.size() != persistent_state.next_activation_tick.size() ||
       persistent_state.bin_index.size() != persistent_state.active_flag.size() ||
       persistent_state.bin_index.size() != persistent_state.pending_bin_index.size()) {
@@ -1443,7 +1459,8 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
     m_hot.bin_index[element_index] = bin;
     auto& members = m_elements_by_bin[bin];
     m_position_in_bin[element_index] = members.size();
-    members.push_back(static_cast<std::uint32_t>(element_index));
+    members.push_back(checkedIntegralNarrow<std::uint32_t>(
+        element_index, "HierarchicalTimeBinScheduler::importPersistentState element index"));
   }
 
   m_active_elements.clear();
@@ -2401,15 +2418,15 @@ double computeCosmologyExpansionTimeStep(
 double advanceScaleFactorByCosmicTime(
     const LambdaCdmBackground& background,
     double scale_factor,
-    double dt_time_code,
+    double dt_time_si,
     std::uint32_t midpoint_samples) {
-  if (scale_factor <= 0.0) {
-    throw std::invalid_argument("scale_factor must be positive");
+  if (!std::isfinite(scale_factor) || scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be finite and positive");
   }
-  if (dt_time_code < 0.0) {
-    throw std::invalid_argument("dt_time_code must be non-negative");
+  if (!std::isfinite(dt_time_si) || dt_time_si < 0.0) {
+    throw std::invalid_argument("dt_time_si must be finite and non-negative");
   }
-  if (dt_time_code == 0.0) {
+  if (dt_time_si == 0.0) {
     return scale_factor;
   }
 
@@ -2422,7 +2439,7 @@ double advanceScaleFactorByCosmicTime(
   const std::uint32_t samples = std::max<std::uint32_t>(midpoint_samples, 8U);
   for (std::uint32_t iter = 0; iter < 256U; ++iter) {
     const double covered = midpointIntegrateCosmicTime(background, scale_factor, hi, samples);
-    if (covered >= dt_time_code) {
+    if (covered >= dt_time_si) {
       break;
     }
     lo = hi;
@@ -2432,7 +2449,7 @@ double advanceScaleFactorByCosmicTime(
     }
   }
 
-  if (midpointIntegrateCosmicTime(background, scale_factor, hi, samples) < dt_time_code) {
+  if (midpointIntegrateCosmicTime(background, scale_factor, hi, samples) < dt_time_si) {
     throw std::runtime_error("failed to bracket FLRW scale-factor advance");
   }
 
@@ -2440,7 +2457,7 @@ double advanceScaleFactorByCosmicTime(
   for (std::uint32_t iter = 0; iter < 96U; ++iter) {
     const double mid = 0.5 * (lo + hi);
     const double covered = midpointIntegrateCosmicTime(background, scale_factor, mid, samples);
-    if (covered < dt_time_code) {
+    if (covered < dt_time_si) {
       lo = mid;
     } else {
       hi = mid;

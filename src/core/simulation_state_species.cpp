@@ -11,11 +11,6 @@
 
 namespace cosmosim::core {
 namespace {
-constexpr std::size_t k_species_count = 5;
-
-[[nodiscard]] bool isValidSpeciesTag(std::uint32_t value) {
-  return value <= static_cast<std::uint32_t>(ParticleSpecies::kTracer);
-}
 
 [[nodiscard]] std::size_t findRequiredSidecarRow(
     std::span<const std::uint32_t> particle_indices,
@@ -52,7 +47,7 @@ void appendModuleRowPayload(ModuleSidecarBlock* block, std::uint64_t particle_id
 }
 
 [[nodiscard]] ParticleSpecies speciesFromTagOrThrow(std::uint32_t species_tag, const char* caller) {
-  if (!isValidSpeciesTag(species_tag)) {
+  if (!isValidParticleSpeciesTag(species_tag)) {
     throw std::invalid_argument(std::string(caller) + ": invalid species tag");
   }
   return static_cast<ParticleSpecies>(species_tag);
@@ -72,7 +67,7 @@ void appendModuleRowPayload(ModuleSidecarBlock* block, std::uint64_t particle_id
     case ModuleSidecarRequirementKind::kSparse:
       return false;
     case ModuleSidecarRequirementKind::kSpeciesMask: {
-      if (!isValidSpeciesTag(record.species_tag)) {
+      if (!isValidParticleSpeciesTag(record.species_tag)) {
         return false;
       }
       const std::uint32_t bit = record.species_tag;
@@ -292,9 +287,9 @@ std::uint64_t SpeciesContainer::totalCount() const noexcept {
 }
 
 bool SpeciesContainer::isConsistentWith(const ParticleSidecar& sidecar) const noexcept {
-  std::array<std::uint64_t, k_species_count> measured{};
+  std::array<std::uint64_t, k_particle_species_count> measured{};
   for (const auto tag : sidecar.species_tag) {
-    if (!isValidSpeciesTag(tag)) {
+    if (!isValidParticleSpeciesTag(tag)) {
       return false;
     }
     ++measured.at(tag);
@@ -310,7 +305,7 @@ void ParticleSpeciesIndex::rebuild(const ParticleSidecar& sidecar) {
   local_index_by_global.resize(sidecar.size());
   for (std::size_t global_index = 0; global_index < sidecar.size(); ++global_index) {
     const auto tag = sidecar.species_tag[global_index];
-    if (!isValidSpeciesTag(tag)) {
+    if (!isValidParticleSpeciesTag(tag)) {
       throw std::invalid_argument("ParticleSpeciesIndex.rebuild: invalid species tag");
     }
     auto& species_indices = global_index_by_species[tag];
@@ -319,12 +314,12 @@ void ParticleSpeciesIndex::rebuild(const ParticleSidecar& sidecar) {
   }
 }
 
-std::size_t ParticleSpeciesIndex::count(ParticleSpecies species) const noexcept {
-  return global_index_by_species[static_cast<std::uint32_t>(species)].size();
+std::size_t ParticleSpeciesIndex::count(ParticleSpecies species) const {
+  return global_index_by_species[particleSpeciesIndex(species)].size();
 }
 
-std::span<const std::uint32_t> ParticleSpeciesIndex::globalIndices(ParticleSpecies species) const noexcept {
-  return global_index_by_species[static_cast<std::uint32_t>(species)];
+std::span<const std::uint32_t> ParticleSpeciesIndex::globalIndices(ParticleSpecies species) const {
+  return global_index_by_species[particleSpeciesIndex(species)];
 }
 
 std::uint32_t ParticleSpeciesIndex::localIndex(std::uint32_t global_index) const {
@@ -335,7 +330,7 @@ std::uint32_t ParticleSpeciesIndex::localIndex(std::uint32_t global_index) const
 }
 
 std::uint32_t ParticleSpeciesIndex::globalIndex(ParticleSpecies species, std::uint32_t local_index) const {
-  const auto& species_indices = global_index_by_species[static_cast<std::uint32_t>(species)];
+  const auto& species_indices = global_index_by_species[particleSpeciesIndex(species)];
   if (local_index >= species_indices.size()) {
     throw std::out_of_range("ParticleSpeciesIndex.globalIndex: local index out of range");
   }
@@ -594,7 +589,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
 
   auto require_inbound_sidecar_contract = [destination_expects_softening_value, &commit](
                                            const ParticleMigrationRecord& inbound) {
-    if (!isValidSpeciesTag(inbound.species_tag)) {
+    if (!isValidParticleSpeciesTag(inbound.species_tag)) {
       throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
     }
 
@@ -1187,7 +1182,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
 
   species.count_by_species.fill(0);
   for (const auto tag : particle_sidecar.species_tag) {
-    if (!isValidSpeciesTag(tag)) {
+    if (!isValidParticleSpeciesTag(tag)) {
       throw std::invalid_argument("commitParticleMigration: invalid species tag in rebuilt sidecar");
     }
     ++species.count_by_species[tag];

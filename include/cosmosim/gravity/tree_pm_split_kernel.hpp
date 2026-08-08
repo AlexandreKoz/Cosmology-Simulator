@@ -56,7 +56,9 @@ inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
   return policy;
 }
 
-[[nodiscard]] inline double treePmGaussianShortRangeForceFactor(double distance_comoving, double split_scale_comoving) {
+[[nodiscard]] inline double treePmGaussianShortRangeForceFactorUnchecked(
+    double distance_comoving,
+    double split_scale_comoving) noexcept {
   if (distance_comoving <= 0.0) {
     return 0.0;
   }
@@ -65,13 +67,53 @@ inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
   return std::erfc(q) + 2.0 * inv_sqrt_pi * q * std::exp(-q * q);
 }
 
-[[nodiscard]] inline double treePmGaussianLongRangeForceFactor(double distance_comoving, double split_scale_comoving) {
-  return 1.0 - treePmGaussianShortRangeForceFactor(distance_comoving, split_scale_comoving);
+[[nodiscard]] inline double treePmGaussianShortRangeForceFactor(
+    double distance_comoving,
+    double split_scale_comoving) {
+  if (!std::isfinite(distance_comoving) || distance_comoving < 0.0) {
+    throw std::invalid_argument("TreePM distance_comoving must be finite and non-negative");
+  }
+  if (!std::isfinite(split_scale_comoving) || split_scale_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM split_scale_comoving must be finite and positive");
+  }
+  return treePmGaussianShortRangeForceFactorUnchecked(distance_comoving, split_scale_comoving);
 }
 
-[[nodiscard]] inline double treePmGaussianFourierLongRangeFilter(double wave_number_comoving, double split_scale_comoving) {
+[[nodiscard]] inline double treePmGaussianLongRangeForceFactorUnchecked(
+    double distance_comoving,
+    double split_scale_comoving) noexcept {
+  return 1.0 - treePmGaussianShortRangeForceFactorUnchecked(distance_comoving, split_scale_comoving);
+}
+
+[[nodiscard]] inline double treePmGaussianLongRangeForceFactor(
+    double distance_comoving,
+    double split_scale_comoving) {
+  if (!std::isfinite(distance_comoving) || distance_comoving < 0.0) {
+    throw std::invalid_argument("TreePM distance_comoving must be finite and non-negative");
+  }
+  if (!std::isfinite(split_scale_comoving) || split_scale_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM split_scale_comoving must be finite and positive");
+  }
+  return treePmGaussianLongRangeForceFactorUnchecked(distance_comoving, split_scale_comoving);
+}
+
+[[nodiscard]] inline double treePmGaussianFourierLongRangeFilterUnchecked(
+    double wave_number_comoving,
+    double split_scale_comoving) noexcept {
   const double product = wave_number_comoving * split_scale_comoving;
   return std::exp(-(product * product));
+}
+
+[[nodiscard]] inline double treePmGaussianFourierLongRangeFilter(
+    double wave_number_comoving,
+    double split_scale_comoving) {
+  if (!std::isfinite(wave_number_comoving) || wave_number_comoving < 0.0) {
+    throw std::invalid_argument("TreePM wave_number_comoving must be finite and non-negative");
+  }
+  if (!std::isfinite(split_scale_comoving) || split_scale_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM split_scale_comoving must be finite and positive");
+  }
+  return treePmGaussianFourierLongRangeFilterUnchecked(wave_number_comoving, split_scale_comoving);
 }
 
 }  // namespace cosmosim::gravity

@@ -108,7 +108,7 @@ class PmGridStorage {
   [[nodiscard]] const PmGridShape& shape() const;
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const;
   [[nodiscard]] bool ownsFullDomain() const noexcept;
-  [[nodiscard]] std::size_t localCellCount() const noexcept;
+  [[nodiscard]] std::size_t localCellCount() const;
 
   [[nodiscard]] std::span<double> density();
   [[nodiscard]] std::span<const double> density() const;

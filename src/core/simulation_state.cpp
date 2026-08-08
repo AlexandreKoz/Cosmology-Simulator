@@ -58,24 +58,27 @@ bool GasCellIdentityMap::empty() const noexcept { return m_records.empty(); }
 
 std::uint64_t GasCellIdentityMap::generation() const noexcept { return m_generation; }
 
-bool GasCellIdentityMap::rebuildLookupTables() noexcept {
-  m_index_by_gas_cell_id.clear();
-  m_index_by_local_row.clear();
-  m_index_by_gas_cell_id.reserve(m_records.size());
-  m_index_by_local_row.reserve(m_records.size());
+bool GasCellIdentityMap::rebuildLookupTables() {
+  std::unordered_map<std::uint64_t, std::size_t> index_by_gas_cell_id;
+  std::unordered_map<std::uint32_t, std::size_t> index_by_local_row;
+  index_by_gas_cell_id.reserve(m_records.size());
+  index_by_local_row.reserve(m_records.size());
 
   for (std::size_t index = 0; index < m_records.size(); ++index) {
     const auto& record = m_records[index];
     if (record.gas_cell_id == 0U) {
       return false;
     }
-    if (!m_index_by_gas_cell_id.emplace(record.gas_cell_id, index).second) {
+    if (!index_by_gas_cell_id.emplace(record.gas_cell_id, index).second) {
       return false;
     }
-    if (!m_index_by_local_row.emplace(record.local_cell_row, index).second) {
+    if (!index_by_local_row.emplace(record.local_cell_row, index).second) {
       return false;
     }
   }
+
+  m_index_by_gas_cell_id.swap(index_by_gas_cell_id);
+  m_index_by_local_row.swap(index_by_local_row);
   return true;
 }
 
@@ -241,19 +244,28 @@ MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacit
     : m_storage(initial_capacity_bytes), m_offset_bytes(0) {}
 
 std::byte* MonotonicScratchAllocator::allocateBytes(std::size_t bytes, std::size_t alignment) {
-  if (alignment == 0 || (alignment & (alignment - 1U)) != 0) {
-    throw std::invalid_argument("MonotonicScratchAllocator.allocateBytes: alignment must be power-of-two");
-  }
+  const std::size_t aligned_offset = checkedAlignUpSize(
+      m_offset_bytes, alignment, "MonotonicScratchAllocator.allocateBytes");
 
   if (bytes == 0) {
-    return m_storage.data() + m_offset_bytes;
+    if (aligned_offset > m_storage.size()) {
+      m_storage.resize(aligned_offset);
+    }
+    return m_storage.empty() ? nullptr : m_storage.data() + aligned_offset;
   }
 
-  const std::size_t aligned_offset = (m_offset_bytes + alignment - 1U) & ~(alignment - 1U);
-  const std::size_t required_size = aligned_offset + bytes;
+  const std::size_t required_size = checkedSizeAdd(
+      aligned_offset, bytes, "MonotonicScratchAllocator.allocateBytes");
 
   if (required_size > m_storage.size()) {
-    const std::size_t grow_size = std::max(required_size, std::max<std::size_t>(1024, m_storage.size() * 2));
+    std::size_t doubled_capacity = m_storage.size();
+    if (doubled_capacity <= std::numeric_limits<std::size_t>::max() / 2U) {
+      doubled_capacity *= 2U;
+    } else {
+      doubled_capacity = std::numeric_limits<std::size_t>::max();
+    }
+    const std::size_t grow_size =
+        std::max(required_size, std::max<std::size_t>(1024U, doubled_capacity));
     m_storage.resize(grow_size);
   }
 

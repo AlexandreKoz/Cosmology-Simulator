@@ -57,6 +57,8 @@ void validateOptions(const TreeGravityOptions& options) {
       !std::isfinite(options.relative_force_acceleration_floor_code) ||
       options.relative_force_acceleration_floor_code <= 0.0 ||
       !std::isfinite(options.gravitational_constant_code) || options.gravitational_constant_code <= 0.0 ||
+      !std::isfinite(options.softening.epsilon_comoving) || options.softening.epsilon_comoving < 0.0 ||
+      options.softening.kernel != TreeSofteningKernel::kPlummer ||
       options.max_leaf_size == 0) {
     throw std::invalid_argument("Invalid tree gravity options");
   }
@@ -136,7 +138,7 @@ void validateOptions(const TreeGravityOptions& options) {
     return true;
   }
   const double pair_softening_max =
-      combineSofteningPairEpsilon(node_softening_max_comoving, target_softening_comoving);
+      combineSofteningPairEpsilonUnchecked(node_softening_max_comoving, target_softening_comoving);
   const double envelope_radius = 2.0 * half_size + 2.0 * pair_softening_max;
   return r > envelope_radius;
 }
@@ -151,7 +153,7 @@ void validateOptions(const TreeGravityOptions& options) {
     const TreeGravityOptions& options) {
   const double r2 = dx * dx + dy * dy + dz * dz;
   const double pair_epsilon =
-      combineSofteningPairEpsilon(nodes.softening_max_comoving[node_index], target_softening_comoving);
+      combineSofteningPairEpsilonUnchecked(nodes.softening_max_comoving[node_index], target_softening_comoving);
   const double eps2 = pair_epsilon * pair_epsilon;
   const double denom = std::max(r2 + eps2, 1.0e-30);
 
@@ -560,10 +562,10 @@ void TreeGravitySolver::evaluateActiveSet(
             const double sy = pos_y_comoving[source_index] - py;
             const double sz = pos_z_comoving[source_index] - pz;
             const double sr2 = sx * sx + sy * sy + sz * sz;
-            const double pair_epsilon = combineSofteningPairEpsilon(
+            const double pair_epsilon = combineSofteningPairEpsilonUnchecked(
                 m_source_softening_epsilon_comoving[source_index], target_softening_comoving);
             const double factor = options.gravitational_constant_code * mass_code[source_index] *
-                softenedInvR3(sr2, pair_epsilon);
+                softenedInvR3Unchecked(sr2, pair_epsilon);
             ax += factor * sx;
             ay += factor * sy;
             az += factor * sz;

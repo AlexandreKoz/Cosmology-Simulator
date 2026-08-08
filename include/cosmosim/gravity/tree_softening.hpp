@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <string>
+
+#include "cosmosim/core/particle_species.hpp"
 
 namespace cosmosim::gravity {
 
@@ -19,7 +22,7 @@ struct TreeSofteningPolicy {
 };
 
 struct TreeSofteningSpeciesPolicy {
-  static constexpr std::size_t kSpeciesCapacity = 5;
+  static constexpr std::size_t kSpeciesCapacity = core::k_particle_species_count;
   std::array<double, kSpeciesCapacity> epsilon_comoving_by_species{};
   bool enabled = false;
 };
@@ -40,6 +43,22 @@ struct TreeSofteningView {
   TreeSofteningSpeciesPolicy species_policy{};
 };
 
+inline void validateTreeSofteningPolicy(const TreeSofteningPolicy& policy) {
+  if (policy.kernel != TreeSofteningKernel::kPlummer) {
+    throw std::invalid_argument("Unsupported tree softening kernel");
+  }
+  if (!std::isfinite(policy.epsilon_comoving) || policy.epsilon_comoving < 0.0) {
+    throw std::invalid_argument("Tree softening epsilon_comoving must be finite and non-negative");
+  }
+}
+
+inline double validatedSofteningEpsilon(double epsilon_comoving, const char* context) {
+  if (!std::isfinite(epsilon_comoving) || epsilon_comoving < 0.0) {
+    throw std::invalid_argument(std::string(context) + " must be finite and non-negative");
+  }
+  return epsilon_comoving;
+}
+
 [[nodiscard]] inline double resolveSourceSofteningEpsilon(
     std::size_t source_index,
     const TreeSofteningPolicy& fallback,
@@ -53,7 +72,8 @@ struct TreeSofteningView {
         throw std::invalid_argument("source softening override mask has incompatible size");
       }
       if (view.source_particle_epsilon_override_mask[source_index] != 0U) {
-        return view.source_particle_epsilon_comoving[source_index];
+        return validatedSofteningEpsilon(
+            view.source_particle_epsilon_comoving[source_index], "source softening override");
       }
     }
   }
@@ -61,11 +81,15 @@ struct TreeSofteningView {
     if (source_index >= view.source_species_tag.size()) {
       throw std::out_of_range("source species index out of range");
     }
-    const std::size_t species = static_cast<std::size_t>(view.source_species_tag[source_index]);
-    if (species < view.species_policy.epsilon_comoving_by_species.size()) {
-      return view.species_policy.epsilon_comoving_by_species[species];
+    const std::uint32_t species_tag = view.source_species_tag[source_index];
+    if (!core::isValidParticleSpeciesTag(species_tag)) {
+      throw std::invalid_argument("source species tag is outside the canonical species range");
     }
+    return validatedSofteningEpsilon(
+        view.species_policy.epsilon_comoving_by_species[species_tag],
+        "source species softening");
   }
+  validateTreeSofteningPolicy(fallback);
   return fallback.epsilon_comoving;
 }
 
@@ -83,7 +107,8 @@ struct TreeSofteningView {
         throw std::invalid_argument("target softening override mask has incompatible size");
       }
       if (view.target_particle_epsilon_override_mask[target_active_slot] != 0U) {
-        return view.target_particle_epsilon_comoving[target_active_slot];
+        return validatedSofteningEpsilon(
+            view.target_particle_epsilon_comoving[target_active_slot], "target softening override");
       }
     }
   } else if (!view.source_particle_epsilon_comoving.empty()) {
@@ -95,7 +120,8 @@ struct TreeSofteningView {
         throw std::invalid_argument("target source-index softening override mask has incompatible size");
       }
       if (view.source_particle_epsilon_override_mask[target_source_index] != 0U) {
-        return view.source_particle_epsilon_comoving[target_source_index];
+        return validatedSofteningEpsilon(
+            view.source_particle_epsilon_comoving[target_source_index], "target source-index softening override");
       }
     }
   }
@@ -105,20 +131,27 @@ struct TreeSofteningView {
       if (target_active_slot >= view.target_species_tag.size()) {
         throw std::out_of_range("target species index out of range");
       }
-      const std::size_t species = static_cast<std::size_t>(view.target_species_tag[target_active_slot]);
-      if (species < view.species_policy.epsilon_comoving_by_species.size()) {
-        return view.species_policy.epsilon_comoving_by_species[species];
+      const std::uint32_t species_tag = view.target_species_tag[target_active_slot];
+      if (!core::isValidParticleSpeciesTag(species_tag)) {
+        throw std::invalid_argument("target species tag is outside the canonical species range");
       }
+      return validatedSofteningEpsilon(
+          view.species_policy.epsilon_comoving_by_species[species_tag],
+          "target species softening");
     } else if (!view.source_species_tag.empty()) {
       if (target_source_index >= view.source_species_tag.size()) {
         throw std::out_of_range("target source-index species index out of range");
       }
-      const std::size_t species = static_cast<std::size_t>(view.source_species_tag[target_source_index]);
-      if (species < view.species_policy.epsilon_comoving_by_species.size()) {
-        return view.species_policy.epsilon_comoving_by_species[species];
+      const std::uint32_t species_tag = view.source_species_tag[target_source_index];
+      if (!core::isValidParticleSpeciesTag(species_tag)) {
+        throw std::invalid_argument("target source-index species tag is outside the canonical species range");
       }
+      return validatedSofteningEpsilon(
+          view.species_policy.epsilon_comoving_by_species[species_tag],
+          "target source-index species softening");
     }
   }
+  validateTreeSofteningPolicy(fallback);
   return fallback.epsilon_comoving;
 }
 
@@ -129,13 +162,23 @@ struct TreeSofteningView {
   return resolveTargetSofteningEpsilon(target_active_slot, target_active_slot, fallback, view);
 }
 
-[[nodiscard]] inline double combineSofteningPairEpsilon(double epsilon_source_comoving, double epsilon_target_comoving) {
-  // Conservative pair law: the interaction uses the larger of the two softenings.
-  // This preserves symmetry and avoids over-hardening mixed-resolution/species pairs.
+[[nodiscard]] inline double combineSofteningPairEpsilonUnchecked(
+    double epsilon_source_comoving,
+    double epsilon_target_comoving) noexcept {
   return std::max(epsilon_source_comoving, epsilon_target_comoving);
 }
 
-[[nodiscard]] inline double softenedInvR3(double squared_distance, double epsilon_comoving) {
+[[nodiscard]] inline double combineSofteningPairEpsilon(
+    double epsilon_source_comoving,
+    double epsilon_target_comoving) {
+  validatedSofteningEpsilon(epsilon_source_comoving, "source pair softening");
+  validatedSofteningEpsilon(epsilon_target_comoving, "target pair softening");
+  return combineSofteningPairEpsilonUnchecked(epsilon_source_comoving, epsilon_target_comoving);
+}
+
+[[nodiscard]] inline double softenedInvR3Unchecked(
+    double squared_distance,
+    double epsilon_comoving) noexcept {
   const double epsilon2 = epsilon_comoving * epsilon_comoving;
   const double denominator = std::pow(squared_distance + epsilon2, 1.5);
   if (denominator <= 0.0) {
@@ -144,7 +187,16 @@ struct TreeSofteningView {
   return 1.0 / denominator;
 }
 
+[[nodiscard]] inline double softenedInvR3(double squared_distance, double epsilon_comoving) {
+  if (!std::isfinite(squared_distance) || squared_distance < 0.0) {
+    throw std::invalid_argument("squared_distance must be finite and non-negative");
+  }
+  validatedSofteningEpsilon(epsilon_comoving, "softening epsilon_comoving");
+  return softenedInvR3Unchecked(squared_distance, epsilon_comoving);
+}
+
 [[nodiscard]] inline double softenedInvR3(double squared_distance, const TreeSofteningPolicy& policy) {
+  validateTreeSofteningPolicy(policy);
   return softenedInvR3(squared_distance, policy.epsilon_comoving);
 }
 

@@ -33,7 +33,7 @@ inline constexpr std::array<ModuleDescriptor, k_module_names.size()>
         {"physics", "physics.*", "star_sidecar;black_hole_sidecar;tracer_sidecar", "source_terms", "source_rate", "source_sidecars;module_sidecars", "species_sidecars", "source_conservation", "fixed_global_timestep", "local_source_subcycling_unsupported"},
         {"io", "output.*;mode.ic_file", "schema_maps;provenance", "initial_conditions;output_boundary;restart", "none", "all_authoritative_runtime_state", "none", "roundtrip_verification", "canonical_external_ic_import", "rank_remap_unsupported"},
         {"analysis", "analysis.*", "read_only_diagnostic_views", "analysis_hooks", "none", "diagnostic_policy", "none", "run_health;science_diagnostics", "production_diagnostics", "provisional_requires_opt_in"},
-        {"parallel", "parallel.*", "ownership;ghost_epoch;decomposition_epoch", "collectives;ghost_exchange;migration", "none", "distributed_topology", "all_authoritative_migration_records", "communication;load_balance", "fixed_global_timestep", "distributed_ic_import_unsupported"},
+        {"parallel", "parallel.*", "ownership;ghost_epoch;decomposition_epoch", "collectives;ghost_exchange;migration", "none", "distributed_topology", "all_authoritative_migration_records", "communication;load_balance", "fixed_global_timestep", "distributed_ic_import_provisional_mpi_hdf5;openmp_execution_unimplemented"},
         {"utils", "none", "none", "none", "none", "none", "none", "none", "none", "must_not_own_runtime_policy"},
     }};
 

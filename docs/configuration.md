@@ -425,6 +425,10 @@ Diagnostics maturity policy:
 
 - `mpi_ranks_expected`, `omp_threads`, `gpu_devices`
 
+CPU thread execution contract:
+
+- `omp_threads` is currently required to be `1`. The repository does not yet wire an OpenMP backend into the production execution policy, so values greater than one fail configuration validation instead of being silently ignored.
+
 GPU execution contract:
 
 - `gpu_devices = 0` keeps PM execution on the host.

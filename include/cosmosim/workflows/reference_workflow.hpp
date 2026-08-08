@@ -11,7 +11,7 @@
 #include "cosmosim/core/time_integration.hpp"
 
 namespace cosmosim::core {
-struct SimulationState;
+class SimulationState;
 }
 
 namespace cosmosim::io {

@@ -653,6 +653,7 @@ class TimeStepCriteriaRegistry {
 class HierarchicalTimeBinScheduler {
  public:
   static constexpr std::uint8_t k_unset_pending_bin = 0xFF;
+  static constexpr std::uint8_t k_max_representable_bin = 62;
 
   explicit HierarchicalTimeBinScheduler(std::uint8_t max_bin = 0);
 
@@ -901,7 +902,7 @@ void assertHydroCflStable(
 [[nodiscard]] double advanceScaleFactorByCosmicTime(
     const LambdaCdmBackground& background,
     double scale_factor,
-    double dt_time_code,
+    double dt_time_si,
     std::uint32_t midpoint_samples = 64);
 
 // dt estimate for an intended delta-a increment around the current scale factor.

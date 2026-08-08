@@ -206,15 +206,15 @@ struct HydroPatchGeometry {
   std::vector<HydroGhostCell> ghost_cells;
   std::vector<HydroFluxRegisterFace> flux_register_faces;
 
-  [[nodiscard]] std::size_t cellCount() const noexcept;
-  [[nodiscard]] std::size_t totalCellStorageCount() const noexcept;
+  [[nodiscard]] std::size_t cellCount() const;
+  [[nodiscard]] std::size_t totalCellStorageCount() const;
   [[nodiscard]] std::size_t linearCellIndex(std::size_t i, std::size_t j, std::size_t k) const;
   [[nodiscard]] std::array<std::size_t, 3> cellIjk(std::size_t row) const;
   [[nodiscard]] std::size_t neighborCell(
       std::size_t row,
       int di,
       int dj,
-      int dk) const noexcept;
+      int dk) const;
 };
 
 struct HydroFluxRegisterRecord {
