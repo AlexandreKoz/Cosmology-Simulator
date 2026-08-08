@@ -13,6 +13,10 @@
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
+namespace cosmosim::parallel {
+class MpiContext;
+}
+
 namespace cosmosim::analysis {
 
 constexpr std::uint64_t k_unbound_halo_id = std::numeric_limits<std::uint64_t>::max();
@@ -69,18 +73,26 @@ struct MergerTreePlan {
   std::vector<MergerTreeNodePlan> nodes;
 };
 
+enum class FofNeighborSearch : std::uint8_t {
+  kSpatialHash = 0,
+  kAllPairsReference = 1,
+};
+
 struct FofConfig {
   double linking_length_factor_mean_interparticle = 0.2;
   std::uint64_t min_group_size = 16;
   bool include_gas = true;
   bool include_stars = true;
   bool include_black_holes = true;
+  FofNeighborSearch neighbor_search = FofNeighborSearch::kSpatialHash;
 };
 
 struct FofProfilingCounters {
   std::uint64_t candidate_particle_count = 0;
   std::uint64_t pair_checks = 0;
   std::uint64_t pair_links = 0;
+  std::uint64_t occupied_spatial_cells = 0;
+  FofNeighborSearch neighbor_search = FofNeighborSearch::kSpatialHash;
   double linking_length_comov = 0.0;
 };
 
@@ -99,9 +111,22 @@ struct HaloParticleView {
 
 [[nodiscard]] HaloParticleView buildHaloParticleView(const core::SimulationState& state);
 
+struct DistributedHaloCatalogResult {
+  // Full global catalog exists on root_rank. Other ranks receive local stable-ID
+  // membership labels without replicating the full global particle payload.
+  HaloCatalog root_catalog;
+  std::vector<std::uint64_t> local_halo_id_by_particle;
+  int root_rank = 0;
+  bool has_global_catalog = false;
+};
+
 struct HaloWorkflowReport {
   HaloCatalog catalog;
   MergerTreePlan tree_plan;
+  // In distributed mode this contains membership labels for the caller's local
+  // particle ordering on every rank; the full catalog/tree are root-owned.
+  std::vector<std::uint64_t> local_halo_id_by_particle;
+  bool has_global_catalog = true;
   FofProfilingCounters profiling;
   std::filesystem::path halo_catalog_path;
   std::filesystem::path merger_tree_plan_path;
@@ -117,14 +142,20 @@ class HaloCatalogSchema {
   [[nodiscard]] static std::vector<std::string_view> mergerTreeFields();
 };
 
-// Deterministic all-pairs FOF reference implementation. Its O(N^2) neighbor search is
-// intended for controlled validation/post-processing sizes; runtime capability metadata
-// must not present this class as a production-scale cosmological halo finder.
+// Production FOF uses a periodic spatial hash/cell-linked neighbor search. The
+// all-pairs implementation remains available explicitly as a small-N numerical oracle.
 class FofHaloFinder {
  public:
   explicit FofHaloFinder(FofConfig config);
 
   [[nodiscard]] HaloCatalog buildCatalogFromView(
+      const HaloParticleView& particles,
+      const core::SimulationConfig& config,
+      std::uint64_t snapshot_step_index,
+      double snapshot_scale_factor,
+      FofProfilingCounters* profiling = nullptr) const;
+
+  [[nodiscard]] HaloCatalog buildCatalogReferenceAllPairsFromView(
       const HaloParticleView& particles,
       const core::SimulationConfig& config,
       std::uint64_t snapshot_step_index,
@@ -137,6 +168,19 @@ class FofHaloFinder {
       std::uint64_t snapshot_step_index,
       double snapshot_scale_factor,
       FofProfilingCounters* profiling = nullptr) const;
+
+  // Correctness-first MPI ownership path. Local particles are packed to root,
+  // grouped once with the same production spatial hash, and stable membership
+  // labels are broadcast back by particle ID. This closes rank-boundary halo
+  // splitting without returning to all-pairs candidate search.
+  [[nodiscard]] DistributedHaloCatalogResult buildDistributedCatalogFromView(
+      const HaloParticleView& local_particles,
+      const core::SimulationConfig& config,
+      const parallel::MpiContext& mpi_context,
+      std::uint64_t snapshot_step_index,
+      double snapshot_scale_factor,
+      int root_rank = 0,
+      FofProfilingCounters* root_profiling = nullptr) const;
 
  private:
   [[nodiscard]] bool includeSpecies(core::ParticleSpecies species) const noexcept;
@@ -164,6 +208,14 @@ class HaloWorkflowPlanner {
       std::uint64_t snapshot_step_index,
       double snapshot_scale_factor,
       const HaloCatalog* previous_catalog = nullptr) const;
+
+  [[nodiscard]] HaloWorkflowReport runSnapshotWorkflowDistributed(
+      const core::SimulationState& local_state,
+      const parallel::MpiContext& mpi_context,
+      std::uint64_t snapshot_step_index,
+      double snapshot_scale_factor,
+      const HaloCatalog* previous_root_catalog = nullptr,
+      int root_rank = 0) const;
 
   void writeHaloCatalog(const HaloCatalog& catalog, const std::filesystem::path& path) const;
   void writeMergerTreePlan(const MergerTreePlan& tree_plan, const std::filesystem::path& path) const;

@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/profiling.hpp"
@@ -256,7 +257,9 @@ void flushCommonArtifacts(
 }  // namespace
 
 ReferenceWorkflowRunner::ReferenceWorkflowRunner(core::FrozenConfig frozen_config)
-    : m_frozen_config(std::move(frozen_config)) {}
+    : m_frozen_config(std::move(frozen_config)) {
+  core::configureOpenMpThreads(m_frozen_config.config.parallel.omp_threads);
+}
 
 const core::FrozenConfig& ReferenceWorkflowRunner::frozenConfig() const noexcept {
   return m_frozen_config;

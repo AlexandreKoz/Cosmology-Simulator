@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
@@ -211,10 +212,10 @@ void applyDeprecatedAliases(
 
 [[nodiscard]] bool parseBool(const std::string& value, const std::string& key) {
   const std::string lower = toLower(trim(value));
-  if (lower == "1" || lower == "true" || lower == "on" || lower == "yes") {
+  if (lower == "true") {
     return true;
   }
-  if (lower == "0" || lower == "false" || lower == "off" || lower == "no") {
+  if (lower == "false") {
     return false;
   }
   throw ConfigError("key '" + key + "': invalid boolean value '" + value + "'");
@@ -1426,10 +1427,15 @@ void validateConfig(const SimulationConfig& config) {
   if (config.parallel.mpi_ranks_expected <= 0) {
     throw ConfigError("parallel.mpi_ranks_expected must be positive");
   }
-  if (config.parallel.omp_threads != 1) {
-    throw ConfigError(
-        "parallel.omp_threads must be 1: this build/runtime contract has no OpenMP execution backend yet");
+  if (config.parallel.omp_threads < 0) {
+    throw ConfigError("parallel.omp_threads must be >= 0 (0 selects the runtime default)");
   }
+#if !COSMOSIM_HAVE_OPENMP
+  if (config.parallel.omp_threads > 1) {
+    throw ConfigError(
+        "parallel.omp_threads > 1 requires a binary built with OpenMP support");
+  }
+#endif
   if (config.parallel.gpu_devices < 0) {
     throw ConfigError("parallel.gpu_devices must be >= 0");
   }

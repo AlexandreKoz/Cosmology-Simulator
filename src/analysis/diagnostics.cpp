@@ -1,5 +1,8 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 
+#include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -13,6 +16,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+
+
+#if COSMOSIM_ENABLE_FFTW
+#include <fftw3.h>
+#endif
 
 namespace cosmosim::analysis {
 namespace {
@@ -38,6 +46,138 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
 
 [[nodiscard]] double magnitude(const std::array<double, 3>& v) {
   return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+
+[[nodiscard]] bool isPowerOfTwo(std::size_t value) noexcept {
+  return value != 0 && (value & (value - 1U)) == 0;
+}
+
+void radix2Fft1d(std::span<std::complex<double>> data) {
+  const std::size_t n = data.size();
+  if (!isPowerOfTwo(n)) {
+    throw std::invalid_argument("built-in FFT backend requires power-of-two line length");
+  }
+  for (std::size_t i = 1, j = 0; i < n; ++i) {
+    std::size_t bit = n >> 1U;
+    for (; (j & bit) != 0U; bit >>= 1U) {
+      j ^= bit;
+    }
+    j ^= bit;
+    if (i < j) {
+      std::swap(data[i], data[j]);
+    }
+  }
+  for (std::size_t length = 2; length <= n; length <<= 1U) {
+    const double angle = -k_two_pi / static_cast<double>(length);
+    const std::complex<double> w_length{std::cos(angle), std::sin(angle)};
+    for (std::size_t base = 0; base < n; base += length) {
+      std::complex<double> w{1.0, 0.0};
+      const std::size_t half = length >> 1U;
+      for (std::size_t j = 0; j < half; ++j) {
+        const std::complex<double> even = data[base + j];
+        const std::complex<double> odd = data[base + j + half] * w;
+        data[base + j] = even + odd;
+        data[base + j + half] = even - odd;
+        w *= w_length;
+      }
+    }
+    if (length == n) {
+      break;
+    }
+  }
+}
+
+void builtInFft3d(std::vector<std::complex<double>>& field, std::size_t n) {
+  if (!isPowerOfTwo(n)) {
+    throw std::invalid_argument(
+        "production power spectrum requires FFTW or a power-of-two mesh for the built-in FFT backend");
+  }
+  const std::ptrdiff_t line_count = static_cast<std::ptrdiff_t>(n * n);
+
+  // Z lines are contiguous.
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+#endif
+  {
+    std::vector<std::complex<double>> line(n);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp for schedule(static)
+#endif
+    for (std::ptrdiff_t line_index = 0; line_index < line_count; ++line_index) {
+      const std::size_t x = static_cast<std::size_t>(line_index) / n;
+      const std::size_t y = static_cast<std::size_t>(line_index) % n;
+      const std::size_t base = flatten(x, y, 0, n);
+      std::copy_n(field.begin() + static_cast<std::ptrdiff_t>(base), n, line.begin());
+      radix2Fft1d(line);
+      std::copy(line.begin(), line.end(), field.begin() + static_cast<std::ptrdiff_t>(base));
+    }
+  }
+
+  // Y lines.
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+#endif
+  {
+    std::vector<std::complex<double>> line(n);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp for schedule(static)
+#endif
+    for (std::ptrdiff_t line_index = 0; line_index < line_count; ++line_index) {
+      const std::size_t x = static_cast<std::size_t>(line_index) / n;
+      const std::size_t z = static_cast<std::size_t>(line_index) % n;
+      for (std::size_t y = 0; y < n; ++y) {
+        line[y] = field[flatten(x, y, z, n)];
+      }
+      radix2Fft1d(line);
+      for (std::size_t y = 0; y < n; ++y) {
+        field[flatten(x, y, z, n)] = line[y];
+      }
+    }
+  }
+
+  // X lines.
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+#endif
+  {
+    std::vector<std::complex<double>> line(n);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp for schedule(static)
+#endif
+    for (std::ptrdiff_t line_index = 0; line_index < line_count; ++line_index) {
+      const std::size_t y = static_cast<std::size_t>(line_index) / n;
+      const std::size_t z = static_cast<std::size_t>(line_index) % n;
+      for (std::size_t x = 0; x < n; ++x) {
+        line[x] = field[flatten(x, y, z, n)];
+      }
+      radix2Fft1d(line);
+      for (std::size_t x = 0; x < n; ++x) {
+        field[flatten(x, y, z, n)] = line[x];
+      }
+    }
+  }
+}
+
+void forwardFft3d(std::vector<std::complex<double>>& field, std::size_t n) {
+#if COSMOSIM_ENABLE_FFTW
+  static_assert(sizeof(std::complex<double>) == sizeof(fftw_complex));
+  fftw_plan plan = fftw_plan_dft_3d(
+      static_cast<int>(n),
+      static_cast<int>(n),
+      static_cast<int>(n),
+      reinterpret_cast<fftw_complex*>(field.data()),
+      reinterpret_cast<fftw_complex*>(field.data()),
+      FFTW_FORWARD,
+      FFTW_ESTIMATE);
+  if (plan == nullptr) {
+    throw std::runtime_error("failed to create FFTW plan for production power spectrum");
+  }
+  fftw_execute(plan);
+  fftw_destroy_plan(plan);
+#else
+  builtInFft3d(field, n);
+#endif
 }
 
 [[nodiscard]] const char* diagnosticClassLabel(DiagnosticClass cls) {
@@ -341,6 +481,239 @@ PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
     throw std::invalid_argument("power spectrum estimate requires mesh_n >= 2 and bin_count > 0");
   }
   if (options.mesh_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("power spectrum mesh size exceeds FFT signed dimension range");
+  }
+  if (particles.position_x_comoving.size() != particles.mass_code.size() ||
+      particles.position_y_comoving.size() != particles.mass_code.size() ||
+      particles.position_z_comoving.size() != particles.mass_code.size()) {
+    throw std::invalid_argument("power spectrum estimate particle position/mass lane sizes differ");
+  }
+  if (options.window_correction != PowerSpectrumWindowCorrection::kNone &&
+      options.window_correction != PowerSpectrumWindowCorrection::kDeconvolveAssignmentWindow) {
+    throw std::invalid_argument("power spectrum estimate received an unknown window-correction policy");
+  }
+  if (options.shot_noise_policy != PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction &&
+      options.shot_noise_policy != PowerSpectrumShotNoisePolicy::kSubtractPoisson) {
+    throw std::invalid_argument("power spectrum estimate received an unknown shot-noise policy");
+  }
+
+  const double box_size_code = m_config.cosmology.box_size_mpc_comoving;
+  if (!std::isfinite(box_size_code) || box_size_code <= 0.0) {
+    throw std::invalid_argument("power spectrum estimate requires a finite positive box size");
+  }
+  const std::size_t mesh_n = options.mesh_n;
+  const std::size_t mesh_xy = core::checkedSizeMultiply(
+      mesh_n, mesh_n, "power spectrum FFT mesh xy");
+  const std::size_t mesh_count = core::checkedSizeMultiply(
+      mesh_xy, mesh_n, "power spectrum FFT mesh xyz");
+  const double cell_size_code = box_size_code / static_cast<double>(mesh_n);
+  std::vector<double> mass_mesh(mesh_count, 0.0);
+  double total_mass_code = 0.0;
+  double mass_square_sum_code = 0.0;
+
+  const auto wrap_coordinate = [box_size_code](double coordinate) {
+    double wrapped = std::fmod(coordinate, box_size_code);
+    if (wrapped < 0.0) {
+      wrapped += box_size_code;
+    }
+    if (wrapped >= box_size_code) {
+      wrapped = 0.0;
+    }
+    return wrapped;
+  };
+
+  for (std::size_t particle = 0; particle < particles.mass_code.size(); ++particle) {
+    const double mass_code = particles.mass_code[particle];
+    const double x_code = particles.position_x_comoving[particle];
+    const double y_code = particles.position_y_comoving[particle];
+    const double z_code = particles.position_z_comoving[particle];
+    if (!std::isfinite(mass_code) || mass_code <= 0.0 || !finite3(x_code, y_code, z_code)) {
+      throw std::invalid_argument(
+          "power spectrum estimate requires finite positions and positive finite masses");
+    }
+    const std::array<double, 3> scaled{
+        wrap_coordinate(x_code) / cell_size_code,
+        wrap_coordinate(y_code) / cell_size_code,
+        wrap_coordinate(z_code) / cell_size_code,
+    };
+    if (options.mass_assignment == PowerSpectrumMassAssignment::kNearestGridPoint) {
+      const std::size_t ix = std::min(mesh_n - 1, static_cast<std::size_t>(scaled[0]));
+      const std::size_t iy = std::min(mesh_n - 1, static_cast<std::size_t>(scaled[1]));
+      const std::size_t iz = std::min(mesh_n - 1, static_cast<std::size_t>(scaled[2]));
+      mass_mesh[flatten(ix, iy, iz, mesh_n)] += mass_code;
+    } else if (options.mass_assignment == PowerSpectrumMassAssignment::kCloudInCell) {
+      std::array<std::size_t, 3> lower{};
+      std::array<std::size_t, 3> upper{};
+      std::array<double, 3> upper_weight{};
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        lower[axis] = std::min(mesh_n - 1, static_cast<std::size_t>(scaled[axis]));
+        upper[axis] = (lower[axis] + 1) % mesh_n;
+        upper_weight[axis] = scaled[axis] - std::floor(scaled[axis]);
+      }
+      for (std::size_t dx = 0; dx < 2; ++dx) {
+        const double wx = dx == 0 ? 1.0 - upper_weight[0] : upper_weight[0];
+        const std::size_t ix = dx == 0 ? lower[0] : upper[0];
+        for (std::size_t dy = 0; dy < 2; ++dy) {
+          const double wy = dy == 0 ? 1.0 - upper_weight[1] : upper_weight[1];
+          const std::size_t iy = dy == 0 ? lower[1] : upper[1];
+          for (std::size_t dz = 0; dz < 2; ++dz) {
+            const double wz = dz == 0 ? 1.0 - upper_weight[2] : upper_weight[2];
+            const std::size_t iz = dz == 0 ? lower[2] : upper[2];
+            mass_mesh[flatten(ix, iy, iz, mesh_n)] += mass_code * wx * wy * wz;
+          }
+        }
+      }
+    } else {
+      throw std::invalid_argument("power spectrum estimate received an unknown mass-assignment policy");
+    }
+    total_mass_code += mass_code;
+    mass_square_sum_code += mass_code * mass_code;
+  }
+  if (!std::isfinite(total_mass_code) || total_mass_code <= 0.0 ||
+      !std::isfinite(mass_square_sum_code)) {
+    throw std::invalid_argument("power spectrum estimate has no finite positive total mass");
+  }
+
+  const double mean_cell_mass_code = total_mass_code / static_cast<double>(mesh_count);
+  std::vector<std::complex<double>> fourier(mesh_count);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (std::ptrdiff_t index = 0; index < static_cast<std::ptrdiff_t>(mesh_count); ++index) {
+    const std::size_t i = static_cast<std::size_t>(index);
+    fourier[i] = std::complex<double>{mass_mesh[i] / mean_cell_mass_code - 1.0, 0.0};
+  }
+  mass_mesh.clear();
+  mass_mesh.shrink_to_fit();
+  forwardFft3d(fourier, mesh_n);
+
+  const std::size_t nyquist_mode = mesh_n / 2;
+  const double k_fundamental_code = k_two_pi / box_size_code;
+  const double k_max_code =
+      std::sqrt(3.0) * static_cast<double>(nyquist_mode) * k_fundamental_code;
+  const double bin_width_code = k_max_code / static_cast<double>(options.bin_count);
+  const double volume_code = box_size_code * box_size_code * box_size_code;
+  const double shot_noise_code_volume =
+      volume_code * mass_square_sum_code / (total_mass_code * total_mass_code);
+  const int assignment_window_exponent =
+      options.mass_assignment == PowerSpectrumMassAssignment::kCloudInCell ? 2 : 1;
+
+  std::vector<double> power_sum(options.bin_count, 0.0);
+  std::vector<double> k_sum(options.bin_count, 0.0);
+  std::vector<std::uint64_t> mode_count(options.bin_count, 0);
+
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+#endif
+  {
+    std::vector<double> local_power(options.bin_count, 0.0);
+    std::vector<double> local_k(options.bin_count, 0.0);
+    std::vector<std::uint64_t> local_count(options.bin_count, 0);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp for schedule(static)
+#endif
+    for (std::ptrdiff_t flat_mode = 0;
+         flat_mode < static_cast<std::ptrdiff_t>(mesh_count);
+         ++flat_mode) {
+      const std::size_t mode = static_cast<std::size_t>(flat_mode);
+      const std::size_t nx = mode / mesh_xy;
+      const std::size_t remainder = mode % mesh_xy;
+      const std::size_t ny = remainder / mesh_n;
+      const std::size_t nz = remainder % mesh_n;
+      const int kx_int = nx <= nyquist_mode
+          ? static_cast<int>(nx)
+          : static_cast<int>(nx) - static_cast<int>(mesh_n);
+      const int ky_int = ny <= nyquist_mode
+          ? static_cast<int>(ny)
+          : static_cast<int>(ny) - static_cast<int>(mesh_n);
+      const int kz_int = nz <= nyquist_mode
+          ? static_cast<int>(nz)
+          : static_cast<int>(nz) - static_cast<int>(mesh_n);
+      if (kx_int == 0 && ky_int == 0 && kz_int == 0) {
+        continue;
+      }
+      const double k_magnitude_code = std::sqrt(
+          static_cast<double>(kx_int) * static_cast<double>(kx_int) +
+          static_cast<double>(ky_int) * static_cast<double>(ky_int) +
+          static_cast<double>(kz_int) * static_cast<double>(kz_int)) *
+          k_fundamental_code;
+      const std::size_t bin_index = std::min(
+          options.bin_count - 1,
+          static_cast<std::size_t>(k_magnitude_code / bin_width_code));
+      const std::complex<double> delta_k = fourier[mode] / static_cast<double>(mesh_count);
+      double power_code_volume = volume_code * std::norm(delta_k);
+      if (options.window_correction ==
+          PowerSpectrumWindowCorrection::kDeconvolveAssignmentWindow) {
+        const auto axis_window = [mesh_n, assignment_window_exponent](int mode_index) {
+          return std::pow(
+              sinc(std::numbers::pi_v<double> * static_cast<double>(mode_index) /
+                   static_cast<double>(mesh_n)),
+              assignment_window_exponent);
+        };
+        const double assignment_window =
+            axis_window(kx_int) * axis_window(ky_int) * axis_window(kz_int);
+        power_code_volume /= std::max(assignment_window * assignment_window, 1.0e-24);
+      }
+      if (options.shot_noise_policy == PowerSpectrumShotNoisePolicy::kSubtractPoisson) {
+        power_code_volume -= shot_noise_code_volume;
+      }
+      local_power[bin_index] += power_code_volume;
+      local_k[bin_index] += k_magnitude_code;
+      ++local_count[bin_index];
+    }
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp critical(cosmosim_power_spectrum_bin_merge)
+#endif
+    {
+      for (std::size_t bin = 0; bin < options.bin_count; ++bin) {
+        power_sum[bin] += local_power[bin];
+        k_sum[bin] += local_k[bin];
+        mode_count[bin] += local_count[bin];
+      }
+    }
+  }
+
+  PowerSpectrumEstimate estimate;
+  estimate.options = options;
+  estimate.box_size_code = box_size_code;
+  estimate.k_fundamental_code = k_fundamental_code;
+  estimate.k_axis_nyquist_code = static_cast<double>(nyquist_mode) * k_fundamental_code;
+  estimate.poisson_shot_noise_code_volume = shot_noise_code_volume;
+  estimate.bins.reserve(options.bin_count);
+  for (std::size_t bin_index = 0; bin_index < options.bin_count; ++bin_index) {
+    const bool empty = mode_count[bin_index] == 0;
+    const double lower_code = static_cast<double>(bin_index) * bin_width_code;
+    const double upper_code = static_cast<double>(bin_index + 1) * bin_width_code;
+    estimate.bins.push_back(PowerSpectrumEstimateBin{
+        .bin_index = bin_index,
+        .k_lower_code = lower_code,
+        .k_upper_code = upper_code,
+        .k_center_code = empty
+            ? 0.5 * (lower_code + upper_code)
+            : k_sum[bin_index] / static_cast<double>(mode_count[bin_index]),
+        .power_code_volume = empty
+            ? 0.0
+            : power_sum[bin_index] / static_cast<double>(mode_count[bin_index]),
+        .mode_count = mode_count[bin_index],
+        .empty = empty,
+    });
+  }
+  return estimate;
+}
+
+PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
+    const core::SimulationState& state,
+    const PowerSpectrumEstimateOptions& options) const {
+  return computePowerSpectrumEstimate(buildDiagnosticsStateView(state).particles, options);
+}
+
+PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimateReferenceDirectDft(
+    const ParticleDiagnosticsView& particles,
+    const PowerSpectrumEstimateOptions& options) const {
+  if (options.mesh_n < 2 || options.bin_count == 0) {
+    throw std::invalid_argument("power spectrum estimate requires mesh_n >= 2 and bin_count > 0");
+  }
+  if (options.mesh_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error("power spectrum mesh size exceeds signed mode-index range");
   }
   if (particles.position_x_comoving.size() != particles.mass_code.size() ||
@@ -545,10 +918,11 @@ PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
   return estimate;
 }
 
-PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
+PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimateReferenceDirectDft(
     const core::SimulationState& state,
     const PowerSpectrumEstimateOptions& options) const {
-  return computePowerSpectrumEstimate(buildDiagnosticsStateView(state).particles, options);
+  return computePowerSpectrumEstimateReferenceDirectDft(
+      buildDiagnosticsStateView(state).particles, options);
 }
 
 std::vector<StarFormationHistoryBin> DiagnosticsEngine::computeStarFormationHistory(

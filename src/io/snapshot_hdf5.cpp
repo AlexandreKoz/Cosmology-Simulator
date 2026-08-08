@@ -687,7 +687,7 @@ void writeGadgetArepoSnapshotHdf5(
   if (!parent_dir.empty()) {
     std::filesystem::create_directories(parent_dir);
   }
-  const std::filesystem::path temp_path = output_path.string() + ".tmp";
+  const std::filesystem::path temp_path = output_path.string() + ".part";
 
   Hdf5Handle file(H5Fcreate(temp_path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   if (!file.valid()) {

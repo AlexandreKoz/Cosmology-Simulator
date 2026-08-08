@@ -4907,6 +4907,7 @@ void PmSolver::solveForParticles(
     if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) {
       throw std::runtime_error("Failed to create CUDA stream for PM solve");
     }
+    const core::CudaStreamView stream_view{stream};
 
     try {
       const auto copy_h2d_start = std::chrono::steady_clock::now();
@@ -4923,10 +4924,10 @@ void PmSolver::solveForParticles(
       core::DeviceBufferDouble accel_y_device(accel_y.size());
       core::DeviceBufferDouble accel_z_device(accel_z.size());
 
-      pos_x_device.copyFromHostAsync(pos_x, stream);
-      pos_y_device.copyFromHostAsync(pos_y, stream);
-      pos_z_device.copyFromHostAsync(pos_z, stream);
-      mass_device.copyFromHostAsync(mass, stream);
+      pos_x_device.copyFromHostAsync(pos_x, stream_view);
+      pos_y_device.copyFromHostAsync(pos_y, stream_view);
+      pos_z_device.copyFromHostAsync(pos_z, stream_view);
+      mass_device.copyFromHostAsync(mass, stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing H2D particle copy");
       }
@@ -4952,7 +4953,7 @@ void PmSolver::solveForParticles(
           pos_z_device.data(),
           mass_device.data(),
           density_device.data(),
-          stream);
+          stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing PM assignment kernel");
       }
@@ -4963,7 +4964,7 @@ void PmSolver::solveForParticles(
       }
 
       const auto copy_density_start = std::chrono::steady_clock::now();
-      density_device.copyToHostAsync(grid.density(), stream);
+      density_device.copyToHostAsync(grid.density(), stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing D2H density copy");
       }
@@ -4980,9 +4981,9 @@ void PmSolver::solveForParticles(
       solvePoissonPeriodic(grid, options, profile);
 
       const auto copy_forces_start = std::chrono::steady_clock::now();
-      force_x_device.copyFromHostAsync(grid.force_x(), stream);
-      force_y_device.copyFromHostAsync(grid.force_y(), stream);
-      force_z_device.copyFromHostAsync(grid.force_z(), stream);
+      force_x_device.copyFromHostAsync(grid.force_x(), stream_view);
+      force_y_device.copyFromHostAsync(grid.force_y(), stream_view);
+      force_z_device.copyFromHostAsync(grid.force_z(), stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing H2D force copy");
       }
@@ -5010,7 +5011,7 @@ void PmSolver::solveForParticles(
           accel_x_device.data(),
           accel_y_device.data(),
           accel_z_device.data(),
-          stream);
+          stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing PM interpolation kernel");
       }
@@ -5021,9 +5022,9 @@ void PmSolver::solveForParticles(
       }
 
       const auto copy_accel_start = std::chrono::steady_clock::now();
-      accel_x_device.copyToHostAsync(accel_x, stream);
-      accel_y_device.copyToHostAsync(accel_y, stream);
-      accel_z_device.copyToHostAsync(accel_z, stream);
+      accel_x_device.copyToHostAsync(accel_x, stream_view);
+      accel_y_device.copyToHostAsync(accel_y, stream_view);
+      accel_z_device.copyToHostAsync(accel_z, stream_view);
       if (cudaStreamSynchronize(stream) != cudaSuccess) {
         throw std::runtime_error("Failed while synchronizing D2H acceleration copy");
       }

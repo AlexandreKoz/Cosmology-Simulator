@@ -102,12 +102,12 @@ Do not edit a subsystem before identifying its owner, public interface, persiste
 
 ## 8) Naming and file-placement rules
 
-- Files and directories are `lower_snake` except externally mandated files such as `AGENTS.md`, `CMakeLists.txt`, `CMakePresets.json`, and `.github/copilot-instructions.md`.
-- C++ types are `PascalCase`.
-- Functions and methods are `camelCase`.
-- Variables and parameters are `lower_snake`.
-- Class/struct data members use `m_lower_snake`.
-- Use `_code`, `_si`, `_cgs`, `_phys`, `_comov`, `_x`, `_y`, `_z`, `_begin`, and `_end` when ambiguity exists.
+- `docs/naming_conventions.md` and `docs/file_naming_conventions.md` are the repository-authoritative v2 rulebooks.
+- Files/directories are `lower_snake` except externally mandated names; public headers use `.hpp`, C++ implementations use `.cpp`, and simulation configs use `.param.txt`.
+- C++ types are `PascalCase`; functions/methods are `camelCase`; variables/parameters are `lower_snake`.
+- Encapsulated private/protected members use `m_lower_snake`; public POD/record fields remain unprefixed `lower_snake`.
+- Scoped enum values use `kPascalCase`; C++ `constexpr` constants use the established `k_lower_snake` convention.
+- Use `_code`, `_si`, `_cgs`, `_phys`, `_comoving`, `_x`, `_y`, `_z`, `_begin`, and `_end` when ambiguity exists.
 - Preserve canonical GADGET/AREPO-style HDF5 group and dataset names exactly.
 
 ## 9) Patch hygiene

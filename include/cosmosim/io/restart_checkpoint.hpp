@@ -27,7 +27,7 @@ struct RestartSchema {
 
 struct RestartWritePolicy {
   bool enable_fsync_finalize = false;
-  std::string temporary_suffix = ".tmp";
+  std::string temporary_suffix = ".part";
 };
 
 struct RestartPersistentStateView {

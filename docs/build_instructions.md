@@ -111,3 +111,33 @@ in the build directory. Keep these artifacts for reproducibility and incident de
 - Missing HDF5: set `-DHDF5_ROOT=/path/to/hdf5`.
 - Missing FFTW in feature preset: set `-DPKG_CONFIG_PATH=/path/to/fftw/lib/pkgconfig`.
 - Custom toolchain paths: copy `CMakeUserPresets.json.example` to `CMakeUserPresets.json` and edit locally (do not commit).
+
+
+## OpenMP shared-memory execution
+
+OpenMP is enabled by default when CMake can find `OpenMP::OpenMP_CXX` and may be
+disabled explicitly with `-DCOSMOSIM_ENABLE_OPENMP=OFF`. In an OpenMP build,
+`parallel.omp_threads = N` controls the actual runtime team size; `0` requests
+the runtime default. A non-OpenMP build remains functional but rejects thread
+requests above one. Runtime capability output reports the compiled, requested,
+and active thread state. Current real OpenMP work includes the active Tree
+gravity traversal and production FFT analysis.
+
+## Install/export consumer
+
+CosmoSim installs public headers, the generated `build_config.hpp`, libraries,
+and CMake package metadata. A downstream CMake project can use:
+
+```cmake
+find_package(CosmoSim CONFIG REQUIRED)
+target_link_libraries(my_target PRIVATE CosmoSim::core CosmoSim::analysis)
+```
+
+A typical local validation is:
+
+```bash
+cmake --install build/cpu-only-debug --prefix /tmp/cosmosim-install
+cmake -S /path/to/consumer -B /tmp/cosmosim-consumer \
+  -DCMAKE_PREFIX_PATH=/tmp/cosmosim-install
+cmake --build /tmp/cosmosim-consumer
+```

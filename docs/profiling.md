@@ -1,5 +1,16 @@
 # Profiling and benchmark workflow
 
+## OpenMP concurrency contract
+
+`ProfilerSession` and `CounterRegistry` use per-thread shards. Worker threads
+record scopes, events, byte counts, and counters without a global mutex on each
+operation. The first use by a thread registers its shard under a short mutex;
+report generation and reset are quiescent-boundary operations that merge shards
+deterministically after worker activity has joined. `AllocatorStats` uses atomic
+accounting. Callers must not request a report/reset while worker threads are
+still mutating the same session.
+
+
 CosmoSim benchmarks are lightweight hooks for performance trend visibility, not proofs of correctness.
 
 ## Benchmark directory structure

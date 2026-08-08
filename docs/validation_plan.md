@@ -382,8 +382,9 @@ position error `0`, maximum velocity error
 were byte-identical with SHA-256
 `8acbf3d6826250ca4fbabb0761511ff1178cbb7c20472cb2d8c8073dd16d355c`.
 This closes the missing-artifact blocker for the controlled gate, but the
-direct-DFT implementation and tiny linear fixture are not a performant
-large-mesh estimator or publishable/high-dynamic-range DMO campaign. The
+retained direct-DFT oracle and tiny linear fixture are not by themselves a
+publishable/high-dynamic-range DMO campaign; the production estimator is now
+FFT-backed and must still earn large-mesh scaling and aliasing evidence. The
 estimator's normalization, window, bin, unit, and empty-bin contract is
 maintained in `docs/power_spectrum_diagnostics.md`.
 

@@ -2536,6 +2536,100 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+
+std::vector<std::uint8_t> MpiContext::gatherBytesToRoot(
+    std::span<const std::uint8_t> local_bytes,
+    int root_rank) const {
+  if (root_rank < 0 || root_rank >= m_world_size) {
+    throw std::invalid_argument("MpiContext::gatherBytesToRoot invalid root rank");
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    const std::uint64_t local_count_overflow =
+        local_bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ? 1U : 0U;
+    std::uint64_t any_count_overflow = 0U;
+    MPI_Allreduce(
+        &local_count_overflow, &any_count_overflow, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    if (any_count_overflow != 0U) {
+      throw std::overflow_error(
+          "MpiContext::gatherBytesToRoot at least one local payload exceeds MPI count range");
+    }
+    const int local_count = static_cast<int>(local_bytes.size());
+    std::vector<int> recv_counts(m_world_rank == root_rank ? static_cast<std::size_t>(m_world_size) : 0U);
+    MPI_Gather(&local_count, 1, MPI_INT,
+               recv_counts.empty() ? nullptr : recv_counts.data(), 1, MPI_INT,
+               root_rank, MPI_COMM_WORLD);
+
+    std::vector<int> displacements;
+    std::vector<std::uint8_t> gathered;
+    std::uint64_t total_bytes = 0U;
+    if (m_world_rank == root_rank) {
+      for (const int count : recv_counts) {
+        if (count < 0) {
+          total_bytes = static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U;
+          break;
+        }
+        total_bytes += static_cast<std::uint64_t>(count);
+      }
+    }
+    // All ranks learn whether the collective can be represented before any
+    // rank enters Gatherv, avoiding a root-only throw that would deadlock peers.
+    MPI_Bcast(&total_bytes, 1, MPI_UINT64_T, root_rank, MPI_COMM_WORLD);
+    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("MpiContext::gatherBytesToRoot payload exceeds MPI count range");
+    }
+    if (m_world_rank == root_rank) {
+      displacements.resize(recv_counts.size(), 0);
+      std::size_t total = 0;
+      for (std::size_t i = 0; i < recv_counts.size(); ++i) {
+        displacements[i] = static_cast<int>(total);
+        total += static_cast<std::size_t>(recv_counts[i]);
+      }
+      gathered.resize(total);
+    }
+    MPI_Gatherv(local_bytes.empty() ? nullptr : local_bytes.data(), local_count, MPI_BYTE,
+                gathered.empty() ? nullptr : gathered.data(),
+                recv_counts.empty() ? nullptr : recv_counts.data(),
+                displacements.empty() ? nullptr : displacements.data(), MPI_BYTE,
+                root_rank, MPI_COMM_WORLD);
+    return gathered;
+  }
+#endif
+  if (root_rank != 0) {
+    throw std::invalid_argument("serial MpiContext only supports root rank 0");
+  }
+  return {local_bytes.begin(), local_bytes.end()};
+}
+
+std::vector<std::uint8_t> MpiContext::broadcastBytesFromRoot(
+    std::span<const std::uint8_t> root_bytes,
+    int root_rank) const {
+  if (root_rank < 0 || root_rank >= m_world_size) {
+    throw std::invalid_argument("MpiContext::broadcastBytesFromRoot invalid root rank");
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t byte_count = m_world_rank == root_rank
+        ? static_cast<std::uint64_t>(root_bytes.size()) : 0U;
+    MPI_Bcast(&byte_count, 1, MPI_UINT64_T, root_rank, MPI_COMM_WORLD);
+    if (byte_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("MpiContext::broadcastBytesFromRoot payload exceeds MPI count range");
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_count));
+    if (m_world_rank == root_rank && !root_bytes.empty()) {
+      std::copy(root_bytes.begin(), root_bytes.end(), bytes.begin());
+    }
+    MPI_Bcast(bytes.empty() ? nullptr : bytes.data(), static_cast<int>(bytes.size()), MPI_BYTE,
+              root_rank, MPI_COMM_WORLD);
+    return bytes;
+  }
+#endif
+  if (root_rank != 0) {
+    throw std::invalid_argument("serial MpiContext only supports root rank 0");
+  }
+  return {root_bytes.begin(), root_bytes.end()};
+}
+
 namespace {
 
 constexpr std::uint32_t k_tree_pseudo_wire_version = 1U;

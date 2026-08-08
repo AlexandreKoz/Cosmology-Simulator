@@ -14,6 +14,19 @@ void testCapabilityTruth() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.numerics.hierarchical_max_rung = 0;
   const auto report = cosmosim::workflows::buildRuntimeCapabilityReport(config);
+  const auto& openmp = report.require("openmp_execution");
+#if COSMOSIM_HAVE_OPENMP
+  assert(openmp.compiled);
+  assert(openmp.runtime_available);
+#else
+  assert(!openmp.compiled);
+#endif
+  assert(report.require("production_fof_halo_finder").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
+  assert(report.require("production_fft_power_spectrum").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
+  assert(report.require("bound_subhalo_finder").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
   assert(report.require("fixed_global_timestep").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
   assert(report.require("production_hierarchical_local_timestep").status ==
@@ -56,7 +69,7 @@ void testJsonSerialization() {
   const auto report = cosmosim::workflows::buildRuntimeCapabilityReport(config);
   const std::string json =
       cosmosim::workflows::serializeRuntimeCapabilityReportJson(report);
-  assert(json.find("\"schema_version\": 1") != std::string::npos);
+  assert(json.find("\"schema_version\": 2") != std::string::npos);
   assert(json.find("\"name\": \"rank_remappable_restart\"") !=
          std::string::npos);
   assert(json.find("\"status\": \"unsupported\"") !=

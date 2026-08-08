@@ -155,7 +155,8 @@ ProvenanceRecord makeProvenanceRecord(
                             ",hdf5=" + std::to_string(COSMOSIM_ENABLE_HDF5) +
                             ",fftw=" + std::to_string(COSMOSIM_ENABLE_FFTW) +
                             ",cuda=" + std::to_string(COSMOSIM_ENABLE_CUDA) +
-                            ",python=" + std::to_string(COSMOSIM_ENABLE_PYTHON);
+                            ",python=" + std::to_string(COSMOSIM_ENABLE_PYTHON) +
+                            ",openmp=" + std::to_string(COSMOSIM_HAVE_OPENMP);
   record.config_hash_hex = config_hash_hex;
   record.normalized_config_hash_hex = config_hash_hex;
   record.timestamp_utc = utcTimestampNowIso8601();

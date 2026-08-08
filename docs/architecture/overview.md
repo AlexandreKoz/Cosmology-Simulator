@@ -54,7 +54,7 @@ only; they contain no `StepContext` or state-recovery API. Built-in owners enter
 the existing rung-zero bodies through a source-private bridge that validates the
 grant first. Timestep criteria, restart schemas, and migration payload schemas
 remain owned by their dedicated services rather than by module descriptors.
-`core::moduleDescriptors()` remains a compile-time layer/capability catalog; it
+`core::moduleDescriptors()` is a compile-time structural layer catalog; it
 does not drive runtime stage dispatch.
 
 ## External initial-condition boundary
@@ -93,3 +93,12 @@ allocation. See [`distributed_ic_ingestion.md`](distributed_ic_ingestion.md).
 - Validation ladder: [`../validation_plan.md`](../validation_plan.md)
 - Profiling workflow: [`../profiling.md`](../profiling.md)
 - Distributed IC ingestion: [`distributed_ic_ingestion.md`](distributed_ic_ingestion.md)
+
+
+## Runtime capability authority
+
+`workflows::RuntimeCapabilityReport` is the single typed authority for capability
+status. It distinguishes requested, compiled, dependency-available,
+runtime-available, active, and maturity status. The core module registry carries
+only structural layer/dependency ownership and must not duplicate runtime
+capability truth as handwritten strings.

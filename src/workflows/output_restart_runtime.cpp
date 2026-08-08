@@ -18,6 +18,7 @@
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/provenance.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
@@ -180,6 +181,10 @@ namespace {
   record.normalized_config = frozen_config.normalized_text;
   record.derived_runtime_state =
       core::serializeDerivedRuntimeConfig(core::deriveRuntimeConfig(frozen_config));
+  const core::OpenMpRuntimeInfo openmp = core::openMpRuntimeInfo();
+  record.derived_runtime_state += "openmp_compiled=" + std::string(openmp.compiled ? "true" : "false") + "\n";
+  record.derived_runtime_state += "openmp_requested_threads=" + std::to_string(openmp.requested_threads) + "\n";
+  record.derived_runtime_state += "openmp_active_threads=" + std::to_string(openmp.configured_threads) + "\n";
   const double dx = config.cosmology.box_size_x_mpc_comoving /
       static_cast<double>(config.numerics.treepm_pm_grid_nx);
   const double dy = config.cosmology.box_size_y_mpc_comoving /

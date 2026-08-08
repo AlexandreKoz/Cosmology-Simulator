@@ -153,11 +153,3 @@ class ReferenceWorkflowRunner {
 };
 
 }  // namespace cosmosim::workflows
-
-namespace cosmosim::core {
-// Transitional namespace compatibility aliases.
-// TODO(architecture): remove these aliases after downstream callers migrate to cosmosim::workflows.
-using ReferenceWorkflowOptions = workflows::ReferenceWorkflowOptions;
-using ReferenceWorkflowReport = workflows::ReferenceWorkflowReport;
-using ReferenceWorkflowRunner = workflows::ReferenceWorkflowRunner;
-}  // namespace cosmosim::core

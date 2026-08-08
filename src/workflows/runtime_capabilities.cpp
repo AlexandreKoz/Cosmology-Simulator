@@ -1,9 +1,10 @@
 #include "cosmosim/workflows/runtime_capabilities.hpp"
 
+#include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
+
 #include <fstream>
 #include <stdexcept>
-
-#include "cosmosim/core/build_config.hpp"
 
 namespace cosmosim::workflows {
 namespace {
@@ -64,57 +65,118 @@ std::string_view runtimeCapabilityStatusName(
 
 RuntimeCapabilityReport buildRuntimeCapabilityReport(
     const core::SimulationConfig& config) {
+  const core::OpenMpRuntimeInfo omp = core::openMpRuntimeInfo();
   RuntimeCapabilityReport report;
   report.capabilities = {
-      {"fixed_global_timestep", RuntimeCapabilityStatus::kSupported,
-       "Production ReferenceWorkflow KDK with hierarchical_max_rung=0."},
-      {"adaptive_global_timestep", RuntimeCapabilityStatus::kUnsupported,
-       "Criteria currently constrain scheduler bins; they do not yet resize the global base interval."},
-      {"production_hierarchical_local_timestep",
-       RuntimeCapabilityStatus::kUnsupported,
-       "Per-element drift/kick epochs are not yet complete in the production KDK path."},
-      {"canonical_external_ic_import",
+      {.name = "fixed_global_timestep", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = true, .compiled = true, .dependency_available = true,
+       .runtime_available = true, .active = config.numerics.hierarchical_max_rung == 0,
+       .detail = "Production ReferenceWorkflow KDK with hierarchical_max_rung=0."},
+      {.name = "adaptive_global_timestep", .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = false, .compiled = false, .dependency_available = true,
+       .runtime_available = false, .active = false,
+       .detail = "Criteria constrain scheduler bins; they do not yet resize the global base interval."},
+      {.name = "production_hierarchical_local_timestep", .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.numerics.hierarchical_max_rung != 0, .compiled = false,
+       .dependency_available = true, .runtime_available = false, .active = false,
+       .detail = "Per-element drift/kick epochs are not yet complete in the production KDK path."},
+      {.name = "canonical_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
-       RuntimeCapabilityStatus::kSupported,
-       "Typed no-guess generated/chui_canonical_v1/gadget_arepo_bridge_v1/manifest_v1 selection, authoritative manifest source/policy contracts, strict audit-manifest v4 validation, signed-or-unsigned AREPO count attributes, field-specific conversion contracts, verified canonical bundles, fail-closed single-file local-count limits, and source-chunk-to-canonical streaming conversion are available."},
+       .status = RuntimeCapabilityStatus::kSupported, .requested = !config.mode.ic_file.empty(),
+       .compiled = true, .dependency_available = true, .runtime_available = true,
+       .active = !config.mode.ic_file.empty(),
+       .detail = "Typed HDF5 IC import/conversion with schema and provenance validation is compiled in."},
 #else
-       RuntimeCapabilityStatus::kUnsupported,
-       "This build has COSMOSIM_ENABLE_HDF5=OFF, so external HDF5 IC import and canonical conversion are unavailable."},
+       .status = RuntimeCapabilityStatus::kUnsupported, .requested = !config.mode.ic_file.empty(),
+       .compiled = false, .dependency_available = false, .runtime_available = false,
+       .active = false, .detail = "This build has COSMOSIM_ENABLE_HDF5=OFF."},
 #endif
-      {"multifile_external_ic_import",
+      {.name = "multifile_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
-       RuntimeCapabilityStatus::kSupported,
-       "NumFilesPerSnapshot discovery accepts validated signed or unsigned AREPO integer storage, cross-file header/schema validation preserves source integer metadata, 64-bit totals are reconstructed safely, persistent sessions perform start/end path-identity and SHA-256 validation, and exact serial duplicate-ID checks are implemented; same-descriptor hashing is not claimed."},
+       .status = RuntimeCapabilityStatus::kSupported, .requested = false,
+       .compiled = true, .dependency_available = true, .runtime_available = true,
+       .active = false, .detail = "Validated multi-file HDF5 ingestion is compiled in."},
 #else
-       RuntimeCapabilityStatus::kUnsupported,
-       "This build has COSMOSIM_ENABLE_HDF5=OFF."},
+       .status = RuntimeCapabilityStatus::kUnsupported, .requested = false,
+       .compiled = false, .dependency_available = false, .runtime_available = false,
+       .active = false, .detail = "This build has COSMOSIM_ENABLE_HDF5=OFF."},
 #endif
-      {"distributed_ic_import",
+      {.name = "distributed_ic_import",
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
-       RuntimeCapabilityStatus::kProvisional,
-       "Stable file-to-reader ownership, one payload session per nonempty file, a three-full-hash-pass-per-file ceiling, bounded multi-chunk routing batches, counted main/exact-audit exchanges, rank-consistent fault phases, and MPI acceptance tests are present, but runtime acceptance remains provisional until the required one-, two-, and four-rank matrix passes on a real MPI/HDF5/FFTW installation."},
+       .status = RuntimeCapabilityStatus::kProvisional, .requested = config.parallel.mpi_ranks_expected > 1,
+       .compiled = true, .dependency_available = true, .runtime_available = true,
+       .active = config.parallel.mpi_ranks_expected > 1,
+       .detail = "MPI+HDF5 distributed IC ingestion is implemented; production acceptance remains provisional pending the full rank matrix."},
 #else
-       RuntimeCapabilityStatus::kUnsupported,
-       "Distributed IC ingestion requires both COSMOSIM_ENABLE_HDF5=ON and COSMOSIM_ENABLE_MPI=ON in this build."},
+       .status = RuntimeCapabilityStatus::kUnsupported, .requested = config.parallel.mpi_ranks_expected > 1,
+       .compiled = false, .dependency_available = false, .runtime_available = false,
+       .active = false, .detail = "Distributed IC ingestion requires MPI and HDF5 in this build."},
 #endif
-      {"rank_remappable_restart", RuntimeCapabilityStatus::kUnsupported,
-       "Restart schema v21 supports same-world-size rank-local continuation only."},
-      {"asynchronous_output", RuntimeCapabilityStatus::kUnsupported,
-       "Snapshot and checkpoint writes are synchronous at restart-safe boundaries."},
-      {"openmp_execution", RuntimeCapabilityStatus::kUnsupported,
-       "OpenMP is not wired into the current execution backend; parallel.omp_threads is therefore required to be 1."},
-      {"reference_fof_halo_finder", RuntimeCapabilityStatus::kProvisional,
-       "The current FOF implementation is an all-pairs reference path for controlled validation sizes, not a production cosmological halo finder."},
-      {"direct_dft_power_spectrum", RuntimeCapabilityStatus::kProvisional,
-       "The direct DFT estimator is a reference/provisional diagnostic and requires the heavy diagnostics opt-in for practical use."},
-      {"production_diagnostics", RuntimeCapabilityStatus::kSupported,
-       "Run-health and validated lightweight diagnostics follow the typed execution policy."},
-      {"provisional_diagnostics",
-       config.analysis.diagnostics_execution_policy ==
-               core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional
+      {.name = "rank_remappable_restart", .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = false, .compiled = false, .dependency_available = true,
+       .runtime_available = false, .active = false,
+       .detail = "Restart currently supports same-world-size rank-local continuation only."},
+      {.name = "asynchronous_output", .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = false, .compiled = false, .dependency_available = true,
+       .runtime_available = false, .active = false,
+       .detail = "Snapshot/checkpoint writes are synchronous at restart-safe boundaries."},
+      {.name = "openmp_execution",
+       .status = omp.compiled ? RuntimeCapabilityStatus::kSupported : RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.parallel.omp_threads == 0 || config.parallel.omp_threads > 1,
+       .compiled = omp.compiled, .dependency_available = omp.compiled,
+       .runtime_available = omp.compiled, .active = omp.compiled && omp.configured_threads > 1,
+       .detail = omp.compiled
+           ? "OpenMP is compiled in; Tree gravity and production FFT analysis execute real shared-memory parallel loops; active_threads=" +
+                 std::to_string(omp.configured_threads) + ", requested_threads=" +
+                 std::to_string(omp.requested_threads) + "."
+           : "This binary was built without OpenMP; thread requests above one are rejected."},
+      {.name = "production_fof_halo_finder", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = config.analysis.halo_on_the_fly, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.analysis.halo_on_the_fly,
+       .detail = "Production FOF candidate search uses a periodic cell-linked spatial hash; all-pairs remains only as an explicit small-N oracle."},
+      {.name = "distributed_fof_halo_merge",
+#if COSMOSIM_ENABLE_MPI
+       .status = RuntimeCapabilityStatus::kProvisional,
+       .requested = config.parallel.mpi_ranks_expected > 1 && config.analysis.halo_on_the_fly,
+       .compiled = true, .dependency_available = true, .runtime_available = true,
+       .active = config.parallel.mpi_ranks_expected > 1 && config.analysis.halo_on_the_fly,
+       .detail = "Cross-rank FOF correctness uses a root-gather global spatial-hash union and broadcasts stable particle-ID membership labels; candidate search is scalable but root catalog assembly remains a distributed-scaling limit."},
+#else
+       .status = RuntimeCapabilityStatus::kUnsupported, .requested = false,
+       .compiled = false, .dependency_available = false, .runtime_available = false,
+       .active = false, .detail = "Distributed FOF merge requires an MPI-enabled build."},
+#endif
+      {.name = "bound_subhalo_finder", .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = false, .compiled = false, .dependency_available = true,
+       .runtime_available = false, .active = false,
+       .detail = "No physical bound-substructure finder is claimed; halo catalogs emit no fabricated subhalo entries."},
+      {.name = "production_fft_power_spectrum", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = config.analysis.enable_diagnostics, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.analysis.enable_diagnostics,
+       .detail =
+#if COSMOSIM_ENABLE_FFTW
+           "Power spectrum uses FFTW O(N^3 log N) transforms; direct DFT remains an explicit validation oracle."},
+#else
+           "Power spectrum uses the built-in radix-2 O(N^3 log N) FFT on power-of-two meshes; direct DFT remains an explicit validation oracle."},
+#endif
+      {.name = "production_diagnostics", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = config.analysis.enable_diagnostics, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.analysis.enable_diagnostics,
+       .detail = "Run-health and scalable science diagnostics follow the typed execution policy."},
+      {.name = "provisional_diagnostics",
+       .status = config.analysis.diagnostics_execution_policy ==
+                     core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional
            ? RuntimeCapabilityStatus::kProvisional
            : RuntimeCapabilityStatus::kUnsupported,
-       "Heavy reference diagnostics require explicit all_including_provisional opt-in."},
+       .requested = config.analysis.diagnostics_execution_policy ==
+                    core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
+       .compiled = true, .dependency_available = true, .runtime_available = true,
+       .active = config.analysis.diagnostics_execution_policy ==
+                 core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional,
+       .detail = "Only diagnostics explicitly marked provisional remain gated behind the opt-in policy."},
   };
   return report;
 }
@@ -140,7 +202,12 @@ std::string serializeRuntimeCapabilityReportJson(
     json += "    {\"name\": \"" + escapeJson(capability.name) +
         "\", \"status\": \"" +
         std::string(runtimeCapabilityStatusName(capability.status)) +
-        "\", \"detail\": \"" + escapeJson(capability.detail) + "\"}";
+        "\", \"requested\": " + std::string(capability.requested ? "true" : "false") +
+        ", \"compiled\": " + std::string(capability.compiled ? "true" : "false") +
+        ", \"dependency_available\": " + std::string(capability.dependency_available ? "true" : "false") +
+        ", \"runtime_available\": " + std::string(capability.runtime_available ? "true" : "false") +
+        ", \"active\": " + std::string(capability.active ? "true" : "false") +
+        ", \"detail\": \"" + escapeJson(capability.detail) + "\"}";
     json += index + 1U == report.capabilities.size() ? "\n" : ",\n";
   }
   json += "  ]\n}\n";

@@ -616,13 +616,13 @@ void writeNormalizedConfigSnapshot(
     InitialConditionMissingFieldPolicy policy);
 [[nodiscard]] std::string modeHydroBoundaryToString(ModeHydroBoundary boundary);
 [[nodiscard]] std::string modeGravityBoundaryToString(ModeGravityBoundary boundary);
-[[nodiscard]] [[nodiscard]] std::string starFormationModelKindToString(StarFormationModelKind model);
+[[nodiscard]] std::string starFormationModelKindToString(StarFormationModelKind model);
 [[nodiscard]] std::string starFormationCollapseTimescaleToString(StarFormationCollapseTimescale mode);
 [[nodiscard]] std::string starParticleMassPolicyToString(StarParticleMassPolicy policy);
 [[nodiscard]] std::string effectiveIsmEosRelaxationToString(EffectiveIsmEosRelaxation mode);
 [[nodiscard]] std::string effectiveIsmBirthMassConventionToString(EffectiveIsmBirthMassConvention mode);
 [[nodiscard]] std::string effectiveIsmFeedbackCouplingToString(EffectiveIsmFeedbackCoupling mode);
-std::string feedbackModeToString(FeedbackMode mode);
+[[nodiscard]] std::string feedbackModeToString(FeedbackMode mode);
 [[nodiscard]] std::string feedbackVariantToString(FeedbackVariant variant);
 [[nodiscard]] std::string uvBackgroundModelToString(UvBackgroundModel model);
 [[nodiscard]] std::string selfShieldingModelToString(SelfShieldingModel model);

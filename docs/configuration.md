@@ -427,7 +427,7 @@ Diagnostics maturity policy:
 
 CPU thread execution contract:
 
-- `omp_threads` is currently required to be `1`. The repository does not yet wire an OpenMP backend into the production execution policy, so values greater than one fail configuration validation instead of being silently ignored.
+- `omp_threads = 0` selects the OpenMP runtime default when OpenMP is compiled in; positive values request an explicit team size. Builds without OpenMP reject values greater than one. Tree-gravity active-set traversal and production FFT analysis contain real OpenMP work when available.
 
 GPU execution contract:
 

@@ -1,4 +1,4 @@
-# Halo/Subhalo and Merger-Tree Workflow (v1 planning scaffold)
+# Halo/Subhalo and Merger-Tree Workflow (v2 production FOF)
 
 ## Scope and ownership boundaries
 
@@ -25,8 +25,10 @@
 - Finder: Friends-of-Friends with periodic minimum-image metric in comoving coordinates.
 - Candidate species: dark matter always; gas, stars, BH toggled by config; tracers excluded.
 - Group IDs are deterministic per snapshot by sorting accepted groups with minimum particle ID.
-- Complexity is O(N^2) pair checks in v1; this is intentionally explicit as a planning scaffold and not a distributed production halo finder.
-- Subhalo entries are placeholders derived from host halos; no bound-particle subhalo finder is claimed.
+- Production FOF candidate generation uses a periodic cell-linked spatial hash and searches only neighboring cells, giving approximately O(N) candidate staging for well-behaved cosmological distributions rather than all-pairs O(N^2).
+- The former all-pairs implementation remains explicitly available as a deterministic small-N reference oracle.
+- MPI rank-boundary correctness is implemented through a provisional root-merge path: compact rank-local particle records are gathered to the root, one global spatial-hash union is computed, and stable particle-ID membership labels are broadcast back to owners. This is correctness-preserving but root assembly remains a distributed scaling limit.
+- No physical bound-subhalo finder is implemented. The v2 catalog emits an empty subhalo collection rather than fabricating each host halo as its own subhalo.
 - Merger-tree entries are a **plan scaffold** and do not yet provide validated progenitor/descendant matching.
 
 ## Config keys

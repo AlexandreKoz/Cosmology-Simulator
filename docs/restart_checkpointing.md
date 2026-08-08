@@ -133,7 +133,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 
 ## Atomic write semantics
 
-Writers always emit to `<final>.tmp` first and only then rename into final path.
+Writers always emit to `<final>.part` first and only then rename into final path.
 Finalization uses a direct rename of the temp artifact (no pre-remove step), so the old
 restart path is never explicitly deleted before replacement. This preserves atomic replace
 behavior on filesystems where `rename` is atomic.

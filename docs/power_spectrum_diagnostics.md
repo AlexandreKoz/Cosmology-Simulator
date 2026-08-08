@@ -2,16 +2,18 @@
 
 ## Scope
 
-`DiagnosticsEngine::computePowerSpectrumEstimate` is the explicit deterministic
-three-dimensional estimator used by controlled validation cases. It is an
-additive interface; the existing compact `computePowerSpectrum` overloads keep
-their historical NGP/no-deconvolution behavior and continue to omit empty bins.
+`DiagnosticsEngine::computePowerSpectrumEstimate` is the production deterministic
+three-dimensional estimator. It deposits the mesh once and transforms it with
+FFTW when that dependency is enabled, otherwise with the built-in radix-2 3-D
+FFT for power-of-two meshes. The resulting transform cost is `O(N_mesh^3 log
+N_mesh)` rather than the historical direct transform. The compact
+`computePowerSpectrum` overloads keep their historical NGP/no-deconvolution
+behavior and continue to omit empty bins.
 
-The detailed estimator accepts explicit mesh, bin-count, mass-assignment,
-assignment-window, and Poisson shot-noise policies. It returns every requested
-bin, including empty bins, together with its policy and normalization metadata.
-It remains a direct-DFT reference implementation with `O(N_mesh^6)` work and is
-not a high-dynamic-range or distributed production-analysis claim.
+`computePowerSpectrumEstimateReferenceDirectDft` preserves the old direct DFT
+as an explicit small-mesh numerical oracle. Focused tests compare the FFT-backed
+production estimator against that oracle; the reference path is not selected by
+production workflow calls.
 
 ## Estimator contract
 

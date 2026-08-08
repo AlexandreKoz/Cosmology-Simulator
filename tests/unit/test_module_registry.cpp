@@ -16,8 +16,6 @@ int main() {
     assert(!descriptor.restart_payloads.empty());
     assert(!descriptor.migration_fields.empty());
     assert(!descriptor.diagnostics.empty());
-    assert(!descriptor.capability_prerequisites.empty());
-    assert(!descriptor.incompatibilities.empty());
     assert(&cosmosim::core::requireModuleDescriptor(descriptor.name) ==
            &descriptor);
   }

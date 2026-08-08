@@ -18,11 +18,16 @@ enum class RuntimeCapabilityStatus : unsigned char {
 struct RuntimeCapability {
   std::string name;
   RuntimeCapabilityStatus status = RuntimeCapabilityStatus::kUnsupported;
+  bool requested = false;
+  bool compiled = false;
+  bool dependency_available = false;
+  bool runtime_available = false;
+  bool active = false;
   std::string detail;
 };
 
 struct RuntimeCapabilityReport {
-  unsigned int schema_version = 1;
+  unsigned int schema_version = 2;
   std::vector<RuntimeCapability> capabilities;
 
   [[nodiscard]] const RuntimeCapability& require(std::string_view name) const;

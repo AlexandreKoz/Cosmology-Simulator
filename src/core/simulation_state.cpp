@@ -218,7 +218,7 @@ std::vector<std::uint32_t> buildGasCellNewToOldRowMap(
   return new_to_old;
 }
 
-bool ParticleReorderMap::isConsistent(std::size_t particle_count) const noexcept {
+bool ParticleReorderMap::isConsistent(std::size_t particle_count) const {
   if (old_to_new_index.size() != particle_count || new_to_old_index.size() != particle_count) {
     return false;
   }

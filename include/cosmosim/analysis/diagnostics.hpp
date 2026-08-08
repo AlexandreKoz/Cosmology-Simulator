@@ -230,8 +230,8 @@ class DiagnosticsEngine {
   [[nodiscard]] RunHealthCounters computeRunHealth(const DiagnosticsStateView& view) const;
   [[nodiscard]] RunHealthCounters computeRunHealth(const core::SimulationState& state) const;
 
-  // Convenience wrapper over the deterministic direct-DFT reference estimator below.
-  // Keep this path on validation-scale meshes until an FFT-backed production estimator is wired.
+  // Production convenience wrapper. The estimator uses an O(N^3 log N) FFT backend;
+  // the direct DFT remains available explicitly as a small-mesh numerical oracle.
   [[nodiscard]] std::vector<PowerSpectrumBin> computePowerSpectrum(
       const ParticleDiagnosticsView& particles,
       std::size_t mesh_n,
@@ -241,14 +241,19 @@ class DiagnosticsEngine {
       std::size_t mesh_n,
       std::size_t bin_count) const;
 
-  // Detailed deterministic reference estimator used when assignment/window/
-  // noise policy and empty-bin representation must be explicit and
-  // reproducible. Its direct DFT is intended for controlled validation meshes,
-  // not high-dynamic-range production analysis.
+  // Production FFT-backed estimator with explicit assignment/window/noise policy.
   [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimate(
       const ParticleDiagnosticsView& particles,
       const PowerSpectrumEstimateOptions& options) const;
   [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimate(
+      const core::SimulationState& state,
+      const PowerSpectrumEstimateOptions& options) const;
+
+  // Deterministic O(N^6) direct-DFT reference oracle for validation-scale meshes.
+  [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimateReferenceDirectDft(
+      const ParticleDiagnosticsView& particles,
+      const PowerSpectrumEstimateOptions& options) const;
+  [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimateReferenceDirectDft(
       const core::SimulationState& state,
       const PowerSpectrumEstimateOptions& options) const;
 

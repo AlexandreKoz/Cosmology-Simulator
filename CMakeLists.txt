@@ -9,6 +9,8 @@ project(
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(cosmosim_feature_summary)
 include(cosmosim_find_fftw)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +64,7 @@ function(cosmosim_apply_test_target_defaults)
 endfunction()
 
 option(COSMOSIM_ENABLE_MPI "Enable MPI backend" OFF)
+option(COSMOSIM_ENABLE_OPENMP "Enable OpenMP shared-memory backend when available" ON)
 option(COSMOSIM_ENABLE_HDF5 "Enable HDF5 I/O backend" OFF)
 option(COSMOSIM_ENABLE_FFTW "Enable FFTW backend" OFF)
 option(COSMOSIM_ENABLE_CUDA "Enable CUDA/cuFFT backend" OFF)
@@ -188,6 +191,17 @@ if(CMAKE_BUILD_TYPE STREQUAL "")
 endif()
 
 # Dependencies gated by explicit feature options.
+set(COSMOSIM_HAVE_OPENMP OFF)
+if(COSMOSIM_ENABLE_OPENMP)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+  if(OpenMP_CXX_FOUND)
+    set(COSMOSIM_HAVE_OPENMP ON)
+    message(STATUS "CosmoSim OpenMP backend enabled")
+  else()
+    message(STATUS "CosmoSim OpenMP backend requested but unavailable; building serial fallback")
+  endif()
+endif()
+
 if(COSMOSIM_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
@@ -260,12 +274,14 @@ add_library(cosmosim_core STATIC
   src/core/simulation_mode.cpp
   src/core/time_integration.cpp
   src/core/profiling.cpp
-  src/core/memory_accounting.cpp)
+  src/core/memory_accounting.cpp
+  src/core/openmp_runtime.cpp)
 
 target_include_directories(cosmosim_core
   PUBLIC
-    ${PROJECT_SOURCE_DIR}/include
-    ${COSMOSIM_GENERATED_INCLUDE_DIR}
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${COSMOSIM_GENERATED_INCLUDE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src)
 
@@ -278,12 +294,16 @@ target_compile_definitions(cosmosim_core
     COSMOSIM_VERSION_PATCH=${PROJECT_VERSION_PATCH}
     COSMOSIM_ENABLE_PROFILING=$<BOOL:${COSMOSIM_ENABLE_PROFILING}>)
 
+
+if(COSMOSIM_HAVE_OPENMP)
+  target_link_libraries(cosmosim_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 if(COSMOSIM_ENABLE_LTO)
   set_property(TARGET cosmosim_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 add_library(cosmosim_gravity STATIC
-  src/gravity/gravity_module.cpp
   src/gravity/pm_solver.cpp
   src/gravity/tree_ordering.cpp
   src/gravity/tree_gravity.cpp
@@ -297,20 +317,17 @@ if(COSMOSIM_ENABLE_CUDA)
     CUDA_STANDARD_REQUIRED ON)
 endif()
 add_library(cosmosim_hydro STATIC
-  src/hydro/hydro_module.cpp
   src/hydro/hydro_boundary_conditions.cpp
   src/hydro/hydro_cartesian_patch.cpp
   src/hydro/hydro_core_solver.cpp
   src/hydro/hydro_reconstruction.cpp
   src/hydro/hydro_riemann.cpp)
 add_library(cosmosim_amr STATIC
-  src/amr/amr_module.cpp
   src/amr/amr_framework.cpp
   src/amr/amr_hydro_geometry.cpp
   src/amr/amr_ghost_fill.cpp
   src/amr/amr_hydro_orchestrator.cpp)
 add_library(cosmosim_physics STATIC
-  src/physics/physics_module.cpp
   src/physics/cooling_heating.cpp
   src/physics/effective_multiphase_ism.cpp
   src/physics/black_hole_agn.cpp
@@ -320,7 +337,6 @@ add_library(cosmosim_physics STATIC
   src/physics/metal_diffusion.cpp
   src/physics/tracer_support.cpp)
 add_library(cosmosim_io STATIC
-  src/io/io_module.cpp
   src/io/internal/io_contract.cpp
   src/io/ic_manifest.cpp
   src/io/ic_record_codec.cpp
@@ -340,16 +356,12 @@ add_library(cosmosim_io STATIC
   src/io/snapshot_hdf5.cpp
   src/io/restart_checkpoint.cpp)
 add_library(cosmosim_analysis STATIC
-  src/analysis/analysis_module.cpp
   src/analysis/diagnostics.cpp
   src/analysis/halo_workflow.cpp)
 add_library(cosmosim_parallel STATIC
-  src/parallel/parallel_module.cpp
   src/parallel/distributed_memory.cpp)
-add_library(cosmosim_utils STATIC
-  src/utils/utils_module.cpp)
-
 target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
+target_link_libraries(cosmosim_analysis PUBLIC cosmosim_parallel)
 
 add_library(cosmosim_workflows STATIC
   src/workflows/analysis_runtime.cpp
@@ -381,14 +393,14 @@ set(COSMOSIM_MODULE_LIBS
   cosmosim_io
   cosmosim_analysis
   cosmosim_parallel
-  cosmosim_utils
   cosmosim_workflows)
 
 foreach(module_lib IN LISTS COSMOSIM_MODULE_LIBS)
   target_include_directories(${module_lib}
     PUBLIC
-      ${PROJECT_SOURCE_DIR}/include
-      ${COSMOSIM_GENERATED_INCLUDE_DIR}
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+      $<BUILD_INTERFACE:${COSMOSIM_GENERATED_INCLUDE_DIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
       ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(${module_lib} PUBLIC cosmosim_core)
@@ -428,6 +440,7 @@ endif()
 if(COSMOSIM_ENABLE_FFTW)
   target_compile_definitions(cosmosim_gravity PRIVATE COSMOSIM_FFTW_PLANNER_FLAGS=${COSMOSIM_FFTW_PLANNER_FLAGS})
   target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_TARGET})
+  target_link_libraries(cosmosim_analysis PUBLIC ${COSMOSIM_FFTW_TARGET})
   if(COSMOSIM_ENABLE_MPI)
     # pm_solver.cpp includes mpi.h/fftw3-mpi.h and calls MPI collectives in
     # distributed slab paths. Link MPI directly here instead of relying on an
@@ -447,8 +460,78 @@ target_link_libraries(cosmosim_all
     cosmosim_core
     ${COSMOSIM_MODULE_LIBS})
 
+set_target_properties(cosmosim_core PROPERTIES EXPORT_NAME core)
+set_target_properties(cosmosim_gravity PROPERTIES EXPORT_NAME gravity)
+set_target_properties(cosmosim_hydro PROPERTIES EXPORT_NAME hydro)
+set_target_properties(cosmosim_amr PROPERTIES EXPORT_NAME amr)
+set_target_properties(cosmosim_physics PROPERTIES EXPORT_NAME physics)
+set_target_properties(cosmosim_io PROPERTIES EXPORT_NAME io)
+set_target_properties(cosmosim_analysis PROPERTIES EXPORT_NAME analysis)
+set_target_properties(cosmosim_parallel PROPERTIES EXPORT_NAME parallel)
+set_target_properties(cosmosim_workflows PROPERTIES EXPORT_NAME workflows)
+set_target_properties(cosmosim_all PROPERTIES EXPORT_NAME all)
+
+add_library(CosmoSim::core ALIAS cosmosim_core)
+add_library(CosmoSim::gravity ALIAS cosmosim_gravity)
+add_library(CosmoSim::hydro ALIAS cosmosim_hydro)
+add_library(CosmoSim::amr ALIAS cosmosim_amr)
+add_library(CosmoSim::physics ALIAS cosmosim_physics)
+add_library(CosmoSim::io ALIAS cosmosim_io)
+add_library(CosmoSim::analysis ALIAS cosmosim_analysis)
+add_library(CosmoSim::parallel ALIAS cosmosim_parallel)
+add_library(CosmoSim::workflows ALIAS cosmosim_workflows)
+add_library(CosmoSim::all ALIAS cosmosim_all)
+
 add_executable(cosmosim_harness src/core/harness_main.cpp)
 target_link_libraries(cosmosim_harness PRIVATE cosmosim_all)
+
+
+set(COSMOSIM_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/CosmoSim")
+set(COSMOSIM_INSTALL_TARGETS
+  cosmosim_core
+  cosmosim_gravity
+  cosmosim_hydro
+  cosmosim_amr
+  cosmosim_physics
+  cosmosim_io
+  cosmosim_analysis
+  cosmosim_parallel
+  cosmosim_workflows
+  cosmosim_all)
+
+install(TARGETS ${COSMOSIM_INSTALL_TARGETS}
+  EXPORT CosmoSimTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/cosmosim"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  FILES_MATCHING PATTERN "*.hpp")
+install(FILES
+  "${COSMOSIM_GENERATED_INCLUDE_DIR}/cosmosim/core/build_config.hpp"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/cosmosim/core")
+
+configure_package_config_file(
+  "${PROJECT_SOURCE_DIR}/cmake/templates/CosmoSimConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/CosmoSimConfig.cmake"
+  INSTALL_DESTINATION "${COSMOSIM_INSTALL_CMAKEDIR}")
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/CosmoSimConfigVersion.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY SameMajorVersion)
+
+install(EXPORT CosmoSimTargets
+  FILE CosmoSimTargets.cmake
+  NAMESPACE CosmoSim::
+  DESTINATION "${COSMOSIM_INSTALL_CMAKEDIR}")
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/CosmoSimConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/CosmoSimConfigVersion.cmake"
+  "${PROJECT_SOURCE_DIR}/cmake/cosmosim_find_fftw.cmake"
+  "${PROJECT_SOURCE_DIR}/cmake/FindFFTW3.cmake"
+  DESTINATION "${COSMOSIM_INSTALL_CMAKEDIR}")
 
 
 if(COSMOSIM_ENABLE_PYTHON)

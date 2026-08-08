@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include "cosmosim/core/device_buffer.hpp"
+
 namespace cosmosim::gravity {
 
 struct PmCudaAssignLaunch {
@@ -31,7 +33,7 @@ void pmCudaAssignDensityCic(
     const double* pos_z_device,
     const double* mass_device,
     double* density_device,
-    void* stream_handle);
+    core::CudaStreamView stream);
 
 void pmCudaInterpolateForcesCic(
     const PmCudaInterpLaunch& launch,
@@ -44,6 +46,6 @@ void pmCudaInterpolateForcesCic(
     double* accel_x_device,
     double* accel_y_device,
     double* accel_z_device,
-    void* stream_handle);
+    core::CudaStreamView stream);
 
 }  // namespace cosmosim::gravity

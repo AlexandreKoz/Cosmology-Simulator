@@ -1,4 +1,5 @@
 #include "cosmosim/gravity/tree_gravity.hpp"
+#include "cosmosim/core/build_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -474,119 +475,138 @@ void TreeGravitySolver::evaluateActiveSet(
     throw std::invalid_argument("Tree gravity target species sidecar size must match active-set size");
   }
 
+  // Validate all failure-capable per-target inputs before entering the OpenMP
+  // traversal. The hot tree walk therefore remains exception-free and each
+  // active target owns a disjoint acceleration output slot.
+  std::vector<double> target_softening_by_active(active_particle_index.size(), 0.0);
+  for (std::size_t active_i = 0; active_i < active_particle_index.size(); ++active_i) {
+    const std::uint32_t particle_index = active_particle_index[active_i];
+    if (particle_index >= pos_x_comoving.size()) {
+      throw std::out_of_range("Active particle index exceeds particle count");
+    }
+    target_softening_by_active[active_i] =
+        resolveTargetSofteningEpsilon(active_i, particle_index, options.softening, softening_view);
+  }
+
   const auto traversal_start = std::chrono::steady_clock::now();
   std::uint64_t accepted_nodes = 0;
   std::uint64_t opened_nodes = 0;
   std::uint64_t visited_nodes = 0;
   std::uint64_t pp_interactions = 0;
 
-  std::vector<std::uint32_t> stack;
-  stack.reserve(256);
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel reduction(+ : accepted_nodes, opened_nodes, visited_nodes, pp_interactions)
+#endif
+  {
+    std::vector<std::uint32_t> stack;
+    stack.reserve(256);
 
-  for (std::size_t active_i = 0; active_i < active_particle_index.size(); ++active_i) {
-    const std::uint32_t particle_index = active_particle_index[active_i];
-    if (particle_index >= pos_x_comoving.size()) {
-      throw std::out_of_range("Active particle index exceeds particle count");
-    }
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp for schedule(dynamic, 8)
+#endif
+    for (std::ptrdiff_t active_slot = 0;
+         active_slot < static_cast<std::ptrdiff_t>(active_particle_index.size());
+         ++active_slot) {
+      const std::size_t active_i = static_cast<std::size_t>(active_slot);
+      const std::uint32_t particle_index = active_particle_index[active_i];
+      const double px = pos_x_comoving[particle_index];
+      const double py = pos_y_comoving[particle_index];
+      const double pz = pos_z_comoving[particle_index];
+      const double target_softening_comoving = target_softening_by_active[active_i];
+      const bool previous_acceleration_supplied = !previous_acceleration_magnitude_code.empty();
+      const double previous_acceleration_code = previous_acceleration_supplied
+          ? previous_acceleration_magnitude_code[active_i]
+          : 0.0;
+      const bool previous_acceleration_available =
+          previous_acceleration_supplied && std::isfinite(previous_acceleration_code);
 
-    const double px = pos_x_comoving[particle_index];
-    const double py = pos_y_comoving[particle_index];
-    const double pz = pos_z_comoving[particle_index];
-    const double target_softening_comoving =
-        resolveTargetSofteningEpsilon(active_i, particle_index, options.softening, softening_view);
-    const bool previous_acceleration_supplied = !previous_acceleration_magnitude_code.empty();
-    const double previous_acceleration_code = previous_acceleration_supplied
-        ? previous_acceleration_magnitude_code[active_i]
-        : 0.0;
-    const bool previous_acceleration_available =
-        previous_acceleration_supplied && std::isfinite(previous_acceleration_code);
+      double ax = 0.0;
+      double ay = 0.0;
+      double az = 0.0;
 
-    double ax = 0.0;
-    double ay = 0.0;
-    double az = 0.0;
+      stack.clear();
+      stack.push_back(0U);
 
-    stack.clear();
-    stack.push_back(0U);
+      while (!stack.empty()) {
+        const std::uint32_t node_index = stack.back();
+        stack.pop_back();
+        ++visited_nodes;
 
-    while (!stack.empty()) {
-      const std::uint32_t node_index = stack.back();
-      stack.pop_back();
-      ++visited_nodes;
+        const double dx = m_nodes.com_x_comoving[node_index] - px;
+        const double dy = m_nodes.com_y_comoving[node_index] - py;
+        const double dz = m_nodes.com_z_comoving[node_index] - pz;
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        const double half_size = m_nodes.half_size_comoving[node_index];
+        const double center_dx = m_nodes.center_x_comoving[node_index] - m_nodes.com_x_comoving[node_index];
+        const double center_dy = m_nodes.center_y_comoving[node_index] - m_nodes.com_y_comoving[node_index];
+        const double center_dz = m_nodes.center_z_comoving[node_index] - m_nodes.com_z_comoving[node_index];
+        const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
+        const bool is_leaf = m_nodes.child_count[node_index] == 0;
+        const bool target_inside_node = !is_leaf &&
+            options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
+            std::abs(px - m_nodes.center_x_comoving[node_index]) <= half_size &&
+            std::abs(py - m_nodes.center_y_comoving[node_index]) <= half_size &&
+            std::abs(pz - m_nodes.center_z_comoving[node_index]) <= half_size;
+        const double r = std::sqrt(r2 + 1.0e-30);
+        const bool mac_accept = acceptNodeByMac(
+            is_leaf,
+            target_inside_node,
+            half_size,
+            com_offset,
+            m_nodes.mass_code[node_index],
+            r2,
+            previous_acceleration_available,
+            previous_acceleration_code,
+            options);
+        const bool softening_accept = passesSofteningEnvelopeGuard(
+            is_leaf,
+            half_size,
+            r,
+            target_softening_comoving,
+            m_nodes.softening_min_comoving[node_index],
+            m_nodes.softening_max_comoving[node_index]);
+        const bool accept = mac_accept && softening_accept;
 
-      const double dx = m_nodes.com_x_comoving[node_index] - px;
-      const double dy = m_nodes.com_y_comoving[node_index] - py;
-      const double dz = m_nodes.com_z_comoving[node_index] - pz;
-      const double r2 = dx * dx + dy * dy + dz * dz;
-      const double half_size = m_nodes.half_size_comoving[node_index];
-      const double center_dx = m_nodes.center_x_comoving[node_index] - m_nodes.com_x_comoving[node_index];
-      const double center_dy = m_nodes.center_y_comoving[node_index] - m_nodes.com_y_comoving[node_index];
-      const double center_dz = m_nodes.center_z_comoving[node_index] - m_nodes.com_z_comoving[node_index];
-      const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
-      const bool is_leaf = m_nodes.child_count[node_index] == 0;
-      const bool target_inside_node = !is_leaf &&
-          options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
-          std::abs(px - m_nodes.center_x_comoving[node_index]) <= half_size &&
-          std::abs(py - m_nodes.center_y_comoving[node_index]) <= half_size &&
-          std::abs(pz - m_nodes.center_z_comoving[node_index]) <= half_size;
-      const double r = std::sqrt(r2 + 1.0e-30);
-      const bool mac_accept = acceptNodeByMac(
-          is_leaf,
-          target_inside_node,
-          half_size,
-          com_offset,
-          m_nodes.mass_code[node_index],
-          r2,
-          previous_acceleration_available,
-          previous_acceleration_code,
-          options);
-      const bool softening_accept = passesSofteningEnvelopeGuard(
-          is_leaf,
-          half_size,
-          r,
-          target_softening_comoving,
-          m_nodes.softening_min_comoving[node_index],
-          m_nodes.softening_max_comoving[node_index]);
-      const bool accept = mac_accept && softening_accept;
-
-      if (accept) {
-        ++accepted_nodes;
-        if (is_leaf) {
-          const std::uint32_t begin = m_nodes.particle_begin[node_index];
-          const std::uint32_t end = begin + m_nodes.particle_count[node_index];
-          for (std::uint32_t sorted_i = begin; sorted_i < end; ++sorted_i) {
-            const std::uint32_t source_index = m_ordering.sorted_particle_index[sorted_i];
-            if (source_index == particle_index) {
-              continue;
+        if (accept) {
+          ++accepted_nodes;
+          if (is_leaf) {
+            const std::uint32_t begin = m_nodes.particle_begin[node_index];
+            const std::uint32_t leaf_end = begin + m_nodes.particle_count[node_index];
+            for (std::uint32_t sorted_i = begin; sorted_i < leaf_end; ++sorted_i) {
+              const std::uint32_t source_index = m_ordering.sorted_particle_index[sorted_i];
+              if (source_index == particle_index) {
+                continue;
+              }
+              const double sx = pos_x_comoving[source_index] - px;
+              const double sy = pos_y_comoving[source_index] - py;
+              const double sz = pos_z_comoving[source_index] - pz;
+              const double sr2 = sx * sx + sy * sy + sz * sz;
+              const double pair_epsilon = combineSofteningPairEpsilonUnchecked(
+                  m_source_softening_epsilon_comoving[source_index], target_softening_comoving);
+              const double factor = options.gravitational_constant_code * mass_code[source_index] *
+                  softenedInvR3Unchecked(sr2, pair_epsilon);
+              ax += factor * sx;
+              ay += factor * sy;
+              az += factor * sz;
+              ++pp_interactions;
             }
-            const double sx = pos_x_comoving[source_index] - px;
-            const double sy = pos_y_comoving[source_index] - py;
-            const double sz = pos_z_comoving[source_index] - pz;
-            const double sr2 = sx * sx + sy * sy + sz * sz;
-            const double pair_epsilon = combineSofteningPairEpsilonUnchecked(
-                m_source_softening_epsilon_comoving[source_index], target_softening_comoving);
-            const double factor = options.gravitational_constant_code * mass_code[source_index] *
-                softenedInvR3Unchecked(sr2, pair_epsilon);
-            ax += factor * sx;
-            ay += factor * sy;
-            az += factor * sz;
-            ++pp_interactions;
+          } else {
+            const auto contrib = monopolePlusQuadrupoleAccel(
+                m_nodes, node_index, dx, dy, dz, target_softening_comoving, options);
+            ax += contrib[0];
+            ay += contrib[1];
+            az += contrib[2];
           }
         } else {
-          const auto contrib =
-              monopolePlusQuadrupoleAccel(m_nodes, node_index, dx, dy, dz, target_softening_comoving, options);
-          ax += contrib[0];
-          ay += contrib[1];
-          az += contrib[2];
+          ++opened_nodes;
+          pushChildrenNearFirst(m_nodes, node_index, px, py, pz, stack);
         }
-      } else {
-        ++opened_nodes;
-        pushChildrenNearFirst(m_nodes, node_index, px, py, pz, stack);
       }
-    }
 
-    accel_x_comoving[active_i] = ax;
-    accel_y_comoving[active_i] = ay;
-    accel_z_comoving[active_i] = az;
+      accel_x_comoving[active_i] = ax;
+      accel_y_comoving[active_i] = ay;
+      accel_z_comoving[active_i] = az;
+    }
   }
 
   if (profile != nullptr) {

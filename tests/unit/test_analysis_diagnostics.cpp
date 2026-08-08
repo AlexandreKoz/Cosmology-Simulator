@@ -85,6 +85,12 @@ void testDetailedPowerSpectrumContractAndEmptyBins() {
           cosmosim::analysis::PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction,
   };
   const auto estimate = engine.computePowerSpectrumEstimate(state, options);
+  const auto reference = engine.computePowerSpectrumEstimateReferenceDirectDft(state, options);
+  assert(reference.bins.size() == estimate.bins.size());
+  for (std::size_t i = 0; i < estimate.bins.size(); ++i) {
+    assert(reference.bins[i].mode_count == estimate.bins[i].mode_count);
+    assert(std::abs(reference.bins[i].power_code_volume - estimate.bins[i].power_code_volume) < 1.0e-10);
+  }
 
   assert(estimate.options.mesh_n == options.mesh_n);
   assert(estimate.options.bin_count == options.bin_count);

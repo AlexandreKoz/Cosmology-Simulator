@@ -1,6 +1,7 @@
 #include "cosmosim/core/profiling.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iomanip>
 #include <optional>
@@ -132,59 +133,167 @@ void writeNodeJson(std::ostream& out, const std::vector<ProfileNode>& nodes, std
 
 }  // namespace
 
+namespace {
+std::atomic<std::uint64_t> g_next_counter_registry_id{1};
+std::atomic<std::uint64_t> g_next_profiler_session_id{1};
+}
+
 void AllocatorStats::recordAllocate(std::uint64_t bytes) {
-  ++m_stats.alloc_calls;
-  m_stats.bytes_allocated += bytes;
-  m_stats.live_bytes += bytes;
-  m_stats.peak_live_bytes = std::max(m_stats.peak_live_bytes, m_stats.live_bytes);
+  m_alloc_calls.fetch_add(1, std::memory_order_relaxed);
+  m_bytes_allocated.fetch_add(bytes, std::memory_order_relaxed);
+  const std::uint64_t live = m_live_bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+  std::uint64_t peak = m_peak_live_bytes.load(std::memory_order_relaxed);
+  while (peak < live &&
+         !m_peak_live_bytes.compare_exchange_weak(
+             peak, live, std::memory_order_relaxed, std::memory_order_relaxed)) {
+  }
 }
 
 void AllocatorStats::recordFree(std::uint64_t bytes) {
-  ++m_stats.free_calls;
-  m_stats.bytes_freed += bytes;
-  m_stats.live_bytes = (bytes > m_stats.live_bytes) ? 0 : (m_stats.live_bytes - bytes);
+  m_free_calls.fetch_add(1, std::memory_order_relaxed);
+  m_bytes_freed.fetch_add(bytes, std::memory_order_relaxed);
+  std::uint64_t live = m_live_bytes.load(std::memory_order_relaxed);
+  while (true) {
+    const std::uint64_t replacement = bytes > live ? 0 : live - bytes;
+    if (m_live_bytes.compare_exchange_weak(
+            live, replacement, std::memory_order_relaxed, std::memory_order_relaxed)) {
+      break;
+    }
+  }
 }
 
-AllocatorStatsSnapshot AllocatorStats::snapshot() const noexcept { return m_stats; }
+AllocatorStatsSnapshot AllocatorStats::snapshot() const noexcept {
+  return AllocatorStatsSnapshot{
+      .alloc_calls = m_alloc_calls.load(std::memory_order_relaxed),
+      .free_calls = m_free_calls.load(std::memory_order_relaxed),
+      .bytes_allocated = m_bytes_allocated.load(std::memory_order_relaxed),
+      .bytes_freed = m_bytes_freed.load(std::memory_order_relaxed),
+      .peak_live_bytes = m_peak_live_bytes.load(std::memory_order_relaxed),
+      .live_bytes = m_live_bytes.load(std::memory_order_relaxed),
+  };
+}
 
-void AllocatorStats::reset() noexcept { m_stats = {}; }
+void AllocatorStats::reset() noexcept {
+  m_alloc_calls.store(0, std::memory_order_relaxed);
+  m_free_calls.store(0, std::memory_order_relaxed);
+  m_bytes_allocated.store(0, std::memory_order_relaxed);
+  m_bytes_freed.store(0, std::memory_order_relaxed);
+  m_peak_live_bytes.store(0, std::memory_order_relaxed);
+  m_live_bytes.store(0, std::memory_order_relaxed);
+}
+
+CounterRegistry::CounterRegistry()
+    : m_registry_id(g_next_counter_registry_id.fetch_add(1, std::memory_order_relaxed)) {}
+
+CounterRegistry::ThreadShard& CounterRegistry::localShard() {
+  struct TlsBinding {
+    std::uint64_t registry_id;
+    ThreadShard* shard;
+  };
+  thread_local std::vector<TlsBinding> bindings;
+  for (const TlsBinding& binding : bindings) {
+    if (binding.registry_id == m_registry_id) {
+      return *binding.shard;
+    }
+  }
+  auto shard = std::make_unique<ThreadShard>();
+  ThreadShard* shard_ptr = shard.get();
+  {
+    std::lock_guard lock(m_registration_mutex);
+    m_shards.push_back(std::move(shard));
+  }
+  bindings.push_back(TlsBinding{m_registry_id, shard_ptr});
+  return *shard_ptr;
+}
 
 void CounterRegistry::addCount(std::string_view key, std::uint64_t delta) {
-  m_counts[std::string(key)] += delta;
+  localShard().counts[std::string(key)] += delta;
 }
 
 void CounterRegistry::setCount(std::string_view key, std::uint64_t value) {
-  m_counts[std::string(key)] = value;
+  std::lock_guard lock(m_registration_mutex);
+  const std::string owned_key(key);
+  m_base_counts[owned_key] = value;
+  for (auto& shard : m_shards) {
+    shard->counts.erase(owned_key);
+  }
 }
 
 std::uint64_t CounterRegistry::count(std::string_view key) const {
-  const auto it = m_counts.find(std::string(key));
-  return (it == m_counts.end()) ? 0 : it->second;
+  const auto snapshot = snapshotEntries();
+  const auto it = snapshot.find(std::string(key));
+  return it == snapshot.end() ? 0 : it->second;
 }
 
-const std::unordered_map<std::string, std::uint64_t>& CounterRegistry::entries() const noexcept { return m_counts; }
-
-void CounterRegistry::reset() { m_counts.clear(); }
-
-ProfilerSession::ProfilerSession(bool enabled) : m_enabled(enabled) {
-  m_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+std::unordered_map<std::string, std::uint64_t> CounterRegistry::snapshotEntries() const {
+  // Called at reporting/synchronization boundaries after worker threads join.
+  std::lock_guard lock(m_registration_mutex);
+  auto merged = m_base_counts;
+  for (const auto& shard : m_shards) {
+    for (const auto& [key, value] : shard->counts) {
+      merged[key] += value;
+    }
+  }
+  return merged;
 }
 
-void ProfilerSession::setEnabled(bool enabled) noexcept { m_enabled = enabled; }
+void CounterRegistry::reset() {
+  std::lock_guard lock(m_registration_mutex);
+  m_base_counts.clear();
+  for (auto& shard : m_shards) {
+    shard->counts.clear();
+  }
+}
 
-bool ProfilerSession::enabled() const noexcept { return m_enabled; }
+ProfilerSession::ThreadShard::ThreadShard() {
+  nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+}
+
+ProfilerSession::ProfilerSession(bool enabled)
+    : m_session_id(g_next_profiler_session_id.fetch_add(1, std::memory_order_relaxed)),
+      m_enabled(enabled) {
+  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+}
+
+ProfilerSession::ThreadShard& ProfilerSession::localShard() {
+  struct TlsBinding {
+    std::uint64_t session_id;
+    ThreadShard* shard;
+  };
+  thread_local std::vector<TlsBinding> bindings;
+  for (const TlsBinding& binding : bindings) {
+    if (binding.session_id == m_session_id) {
+      return *binding.shard;
+    }
+  }
+  auto shard = std::make_unique<ThreadShard>();
+  ThreadShard* shard_ptr = shard.get();
+  {
+    std::lock_guard lock(m_registration_mutex);
+    m_shards.push_back(std::move(shard));
+  }
+  bindings.push_back(TlsBinding{m_session_id, shard_ptr});
+  return *shard_ptr;
+}
+
+void ProfilerSession::setEnabled(bool enabled) noexcept {
+  m_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool ProfilerSession::enabled() const noexcept {
+  return m_enabled.load(std::memory_order_relaxed);
+}
 
 void ProfilerSession::beginScope(std::string_view phase_name) {
-  if (!m_enabled) {
+  if (!enabled()) {
     return;
   }
-
-  const std::size_t parent_index = m_scope_stack.empty() ? rootNodeIndex() : m_scope_stack.back().node_index;
-  const std::size_t node_index = findOrCreateChild(parent_index, phase_name);
-
-  ProfileNode& node = m_nodes[node_index];
-  ++node.call_count;
-  m_scope_stack.push_back(ActiveScope{
+  ThreadShard& shard = localShard();
+  const std::size_t parent_index =
+      shard.scope_stack.empty() ? rootNodeIndex() : shard.scope_stack.back().node_index;
+  const std::size_t node_index = findOrCreateChild(shard, parent_index, phase_name);
+  ++shard.nodes[node_index].call_count;
+  shard.scope_stack.push_back(ActiveScope{
       .node_index = node_index,
       .start = Clock::now(),
       .child_elapsed_ms = 0.0,
@@ -192,85 +301,157 @@ void ProfilerSession::beginScope(std::string_view phase_name) {
 }
 
 void ProfilerSession::endScope() {
-  if (!m_enabled) {
+  if (!enabled()) {
     return;
   }
-  if (m_scope_stack.empty()) {
-    throw std::logic_error("ProfilerSession::endScope called with empty scope stack");
+  ThreadShard& shard = localShard();
+  if (shard.scope_stack.empty()) {
+    throw std::logic_error("ProfilerSession::endScope called with empty thread-local scope stack");
   }
-
-  ActiveScope scope = m_scope_stack.back();
-  m_scope_stack.pop_back();
-
-  const auto end = Clock::now();
-  const double elapsed_ms =
-      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - scope.start).count();
-
-  ProfileNode& node = m_nodes[scope.node_index];
+  ActiveScope scope = shard.scope_stack.back();
+  shard.scope_stack.pop_back();
+  const double elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+      Clock::now() - scope.start).count();
+  ProfileNode& node = shard.nodes[scope.node_index];
   node.inclusive_ms += elapsed_ms;
-  const double exclusive_ms = std::max(0.0, elapsed_ms - scope.child_elapsed_ms);
-  node.exclusive_ms += exclusive_ms;
-
-  if (!m_scope_stack.empty()) {
-    m_scope_stack.back().child_elapsed_ms += elapsed_ms;
+  node.exclusive_ms += std::max(0.0, elapsed_ms - scope.child_elapsed_ms);
+  if (!shard.scope_stack.empty()) {
+    shard.scope_stack.back().child_elapsed_ms += elapsed_ms;
   }
 }
 
 void ProfilerSession::addBytesMoved(std::uint64_t bytes) {
-  if (!m_enabled) {
+  if (!enabled()) {
     return;
   }
-  const std::size_t node_index = m_scope_stack.empty() ? rootNodeIndex() : m_scope_stack.back().node_index;
-  m_nodes[node_index].bytes_moved += bytes;
+  ThreadShard& shard = localShard();
+  const std::size_t node_index =
+      shard.scope_stack.empty() ? rootNodeIndex() : shard.scope_stack.back().node_index;
+  shard.nodes[node_index].bytes_moved += bytes;
 }
 
 CounterRegistry& ProfilerSession::counters() noexcept { return m_counters; }
-
 const CounterRegistry& ProfilerSession::counters() const noexcept { return m_counters; }
-
 AllocatorStats& ProfilerSession::allocatorStats() noexcept { return m_allocator_stats; }
-
 const AllocatorStats& ProfilerSession::allocatorStats() const noexcept { return m_allocator_stats; }
 
-const std::vector<ProfileNode>& ProfilerSession::nodes() const noexcept { return m_nodes; }
+std::size_t ProfilerSession::findOrCreateChild(
+    ThreadShard& shard,
+    std::size_t parent_index,
+    std::string_view phase_name) {
+  const std::string phase_key(phase_name);
+  const auto it = shard.nodes[parent_index].child_lookup.find(phase_key);
+  if (it != shard.nodes[parent_index].child_lookup.end()) {
+    return it->second;
+  }
+  const std::size_t child_index = shard.nodes.size();
+  shard.nodes.push_back(ProfileNode{.name = phase_key, .call_count = 0});
+  shard.nodes[parent_index].children.push_back(child_index);
+  shard.nodes[parent_index].child_lookup.emplace(phase_key, child_index);
+  return child_index;
+}
+
+void ProfilerSession::rebuildMergedNodes() const {
+  std::lock_guard lock(m_registration_mutex);
+  m_merged_nodes.clear();
+  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+
+  const auto merge_node = [&](auto&& self,
+                              const std::vector<ProfileNode>& source,
+                              std::size_t source_index,
+                              std::size_t target_index) -> void {
+    const ProfileNode& source_node = source[source_index];
+    ProfileNode& target = m_merged_nodes[target_index];
+    target.call_count += source_node.call_count;
+    target.inclusive_ms += source_node.inclusive_ms;
+    target.exclusive_ms += source_node.exclusive_ms;
+    target.bytes_moved += source_node.bytes_moved;
+    for (const std::size_t source_child : source_node.children) {
+      const std::string& name = source[source_child].name;
+      std::size_t target_child = 0;
+      const auto existing = m_merged_nodes[target_index].child_lookup.find(name);
+      if (existing == m_merged_nodes[target_index].child_lookup.end()) {
+        target_child = m_merged_nodes.size();
+        m_merged_nodes.push_back(ProfileNode{.name = name, .call_count = 0});
+        m_merged_nodes[target_index].children.push_back(target_child);
+        m_merged_nodes[target_index].child_lookup.emplace(name, target_child);
+      } else {
+        target_child = existing->second;
+      }
+      self(self, source, source_child, target_child);
+    }
+  };
+
+  for (const auto& shard : m_shards) {
+    merge_node(merge_node, shard->nodes, rootNodeIndex(), rootNodeIndex());
+  }
+}
+
+const std::vector<ProfileNode>& ProfilerSession::nodes() const {
+  rebuildMergedNodes();
+  return m_merged_nodes;
+}
 
 std::size_t ProfilerSession::rootNodeIndex() const noexcept { return 0; }
 
-void ProfilerSession::recordEvent(RuntimeEvent event) { m_events.push_back(std::move(event)); }
+void ProfilerSession::recordEvent(RuntimeEvent event) {
+  ThreadShard& shard = localShard();
+  shard.events.push_back(SequencedEvent{
+      .sequence = m_next_event_sequence.fetch_add(1, std::memory_order_relaxed),
+      .event = std::move(event),
+  });
+}
 
-const std::vector<RuntimeEvent>& ProfilerSession::events() const noexcept { return m_events; }
+void ProfilerSession::rebuildMergedEvents() const {
+  std::lock_guard lock(m_registration_mutex);
+  std::vector<const SequencedEvent*> ordered;
+  for (const auto& shard : m_shards) {
+    for (const SequencedEvent& event : shard->events) {
+      ordered.push_back(&event);
+    }
+  }
+  std::sort(ordered.begin(), ordered.end(), [](const SequencedEvent* lhs, const SequencedEvent* rhs) {
+    return lhs->sequence < rhs->sequence;
+  });
+  m_merged_events.clear();
+  m_merged_events.reserve(ordered.size());
+  for (const SequencedEvent* event : ordered) {
+    m_merged_events.push_back(event->event);
+  }
+}
 
-void ProfilerSession::setMemoryReport(MemoryReport report) { m_memory_report = std::move(report); }
+const std::vector<RuntimeEvent>& ProfilerSession::events() const {
+  rebuildMergedEvents();
+  return m_merged_events;
+}
+
+void ProfilerSession::setMemoryReport(MemoryReport report) {
+  m_memory_report = std::move(report);
+}
 
 const MemoryReport* ProfilerSession::memoryReport() const noexcept {
   return m_memory_report.has_value() ? &(*m_memory_report) : nullptr;
 }
 
 void ProfilerSession::reset() {
-  m_nodes.clear();
-  m_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
-  m_scope_stack.clear();
+  std::lock_guard lock(m_registration_mutex);
+  for (auto& shard : m_shards) {
+    shard->nodes.clear();
+    shard->nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+    shard->scope_stack.clear();
+    shard->events.clear();
+  }
   m_counters.reset();
   m_allocator_stats.reset();
-  m_events.clear();
+  m_next_event_sequence.store(0, std::memory_order_relaxed);
+  m_merged_nodes.clear();
+  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+  m_merged_events.clear();
   m_memory_report.reset();
 }
 
-std::size_t ProfilerSession::findOrCreateChild(std::size_t parent_index, std::string_view phase_name) {
-  const std::string phase_key(phase_name);
-  const auto it = m_nodes[parent_index].child_lookup.find(phase_key);
-  if (it != m_nodes[parent_index].child_lookup.end()) {
-    return it->second;
-  }
-
-  const std::size_t child_index = m_nodes.size();
-  m_nodes.push_back(ProfileNode{.name = phase_key, .call_count = 0});
-  m_nodes[parent_index].children.push_back(child_index);
-  m_nodes[parent_index].child_lookup.emplace(phase_key, child_index);
-  return child_index;
-}
-
-ScopedProfile::ScopedProfile(ProfilerSession* session, std::string_view phase_name) : m_session(session) {
+ScopedProfile::ScopedProfile(ProfilerSession* session, std::string_view phase_name)
+    : m_session(session) {
   if (m_session != nullptr) {
     m_session->beginScope(phase_name);
   }
@@ -309,7 +490,7 @@ void writeProfilerReportJson(const ProfilerSession& session, const std::filesyst
 
   out << "  \"counters\": {";
   bool first = true;
-  for (const auto& [key, value] : session.counters().entries()) {
+  for (const auto& [key, value] : session.counters().snapshotEntries()) {
     out << (first ? "\n" : ",\n");
     out << "    \"" << escapeJson(key) << "\": " << value;
     first = false;

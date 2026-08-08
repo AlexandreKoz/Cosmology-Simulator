@@ -1,6 +1,6 @@
 # Current repository status
 
-**Authority date:** 2026-08-02  
+**Authority date:** 2026-08-08  
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 
 This file is the concise current-status entry point. Build-specific dependency
@@ -18,7 +18,7 @@ The authoritative decision is
 
 ## Supported paths in this snapshot
 
-- C++20 CPU Debug and Release builds.
+- C++20 CPU Debug and Release builds, with optional CMake-discovered OpenMP shared-memory execution.
 - Fixed-global-step scheduler-driven reference workflow
   (`hierarchical_max_rung=0`).
 - CPU TreePM/hydrodynamics/AMR and current subgrid modules at the validation
@@ -29,7 +29,13 @@ The authoritative decision is
   stable `gas_cell_id`, optional parent-particle identity, and owning-patch
   identity.
 - `.param.txt` normalization to `normalized_config.param.txt`, provenance, and
-  runtime capability emission.
+  typed runtime capability emission.
+- Production FOF candidate search uses periodic cell-linked spatial hashing; the
+  direct all-pairs implementation is retained only as a small-N oracle.
+- Production power-spectrum analysis uses FFTW when enabled or the built-in
+  radix-2 3-D FFT on power-of-two meshes; direct DFT is a validation oracle.
+- Installed CMake package/export support includes generated public build
+  configuration headers and `CosmoSim::` imported targets.
 
 ## Provisional or unavailable capabilities
 
@@ -39,6 +45,10 @@ The authoritative decision is
 - Distributed IC import is provisional when MPI+HDF5 are enabled and still
   requires its dependency-complete rank matrix.
 - Heavy/provisional diagnostics require explicit opt-in.
+- Distributed FOF rank-boundary correctness has a provisional MPI root-merge
+  path; root catalog assembly remains a scaling limit and is reported as such.
+- No physical bound-subhalo finder is claimed; catalogs do not fabricate host
+  halos as subhalos.
 - Large-rank scaling, publication-grade cosmology validation, GPU production
   certification, calibrated AGN, element-resolved metals, and cross-rank or
   coarse-fine metal mixing are not claimed.

@@ -67,7 +67,7 @@ using AlignedVector = std::vector<T, AlignedAllocator<T, 64>>;
 // Single field lane for SoA storage:
 // - contiguous memory
 // - explicit size/capacity controls
-// - optional debug-only bounds checks
+// - checked public boundary operations plus explicit unchecked hot-path access
 // This class intentionally does not add indirection or virtual dispatch.
 template <typename T>
 class SoaFieldArray {

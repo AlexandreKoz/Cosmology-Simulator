@@ -1,9 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -32,19 +35,38 @@ class AllocatorStats {
   void reset() noexcept;
 
  private:
-  AllocatorStatsSnapshot m_stats;
+  std::atomic<std::uint64_t> m_alloc_calls{0};
+  std::atomic<std::uint64_t> m_free_calls{0};
+  std::atomic<std::uint64_t> m_bytes_allocated{0};
+  std::atomic<std::uint64_t> m_bytes_freed{0};
+  std::atomic<std::uint64_t> m_peak_live_bytes{0};
+  std::atomic<std::uint64_t> m_live_bytes{0};
 };
 
 class CounterRegistry {
  public:
+  CounterRegistry();
+
+  // addCount is lock-free after a thread's first registration: each worker
+  // writes only to its thread-local shard. setCount/reset are synchronization-
+  // boundary operations and must not race with addCount for the same registry.
   void addCount(std::string_view key, std::uint64_t delta = 1);
   void setCount(std::string_view key, std::uint64_t value);
   [[nodiscard]] std::uint64_t count(std::string_view key) const;
-  [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& entries() const noexcept;
+  [[nodiscard]] std::unordered_map<std::string, std::uint64_t> snapshotEntries() const;
   void reset();
 
  private:
-  std::unordered_map<std::string, std::uint64_t> m_counts;
+  struct ThreadShard {
+    std::unordered_map<std::string, std::uint64_t> counts;
+  };
+
+  [[nodiscard]] ThreadShard& localShard();
+
+  std::uint64_t m_registry_id = 0;
+  mutable std::mutex m_registration_mutex;
+  std::vector<std::unique_ptr<ThreadShard>> m_shards;
+  std::unordered_map<std::string, std::uint64_t> m_base_counts;
 };
 
 struct ProfileNode {
@@ -94,10 +116,12 @@ class ProfilerSession {
   AllocatorStats& allocatorStats() noexcept;
   const AllocatorStats& allocatorStats() const noexcept;
 
-  [[nodiscard]] const std::vector<ProfileNode>& nodes() const noexcept;
+  // Snapshot accessors merge per-thread shards and therefore require a quiescent
+  // profiling boundary (for example, after an OpenMP region has joined).
+  [[nodiscard]] const std::vector<ProfileNode>& nodes() const;
   [[nodiscard]] std::size_t rootNodeIndex() const noexcept;
   void recordEvent(RuntimeEvent event);
-  [[nodiscard]] const std::vector<RuntimeEvent>& events() const noexcept;
+  [[nodiscard]] const std::vector<RuntimeEvent>& events() const;
   void setMemoryReport(MemoryReport report);
   [[nodiscard]] const MemoryReport* memoryReport() const noexcept;
 
@@ -110,15 +134,38 @@ class ProfilerSession {
     double child_elapsed_ms = 0.0;
   };
 
-  bool m_enabled = false;
-  std::vector<ProfileNode> m_nodes;
-  std::vector<ActiveScope> m_scope_stack;
+  struct SequencedEvent {
+    std::uint64_t sequence = 0;
+    RuntimeEvent event;
+  };
+
+  struct ThreadShard {
+    std::vector<ProfileNode> nodes;
+    std::vector<ActiveScope> scope_stack;
+    std::vector<SequencedEvent> events;
+
+    ThreadShard();
+  };
+
+  [[nodiscard]] ThreadShard& localShard();
+  [[nodiscard]] std::size_t findOrCreateChild(
+      ThreadShard& shard,
+      std::size_t parent_index,
+      std::string_view phase_name);
+  void rebuildMergedNodes() const;
+  void rebuildMergedEvents() const;
+
+  std::uint64_t m_session_id = 0;
+  std::atomic<bool> m_enabled{false};
+  mutable std::mutex m_registration_mutex;
+  std::vector<std::unique_ptr<ThreadShard>> m_shards;
   CounterRegistry m_counters;
   AllocatorStats m_allocator_stats;
-  std::vector<RuntimeEvent> m_events;
+  std::atomic<std::uint64_t> m_next_event_sequence{0};
+  mutable std::vector<ProfileNode> m_merged_nodes;
+  mutable std::vector<RuntimeEvent> m_merged_events;
   std::optional<MemoryReport> m_memory_report;
 
-  [[nodiscard]] std::size_t findOrCreateChild(std::size_t parent_index, std::string_view phase_name);
 };
 
 class ScopedProfile {

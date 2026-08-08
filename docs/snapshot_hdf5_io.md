@@ -47,7 +47,7 @@ centralized in `GadgetArepoSchemaMap` and are not scattered through solver modul
 
 ## Safety and determinism
 
-- Writer uses a `*.tmp` path and atomic rename finalize in the same directory.
+- Writer uses a `*.part` path and atomic rename finalize in the same directory.
 - Dataset chunking is explicit through `SnapshotIoPolicy::chunk_particle_count`.
 - Compression is optional and surfaced through policy.
 

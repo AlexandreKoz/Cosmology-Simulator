@@ -306,9 +306,11 @@ scalability claim here.
 
 ### Scientific-validation blockers
 
-- The validated power-spectrum path is deliberately small and direct-DFT
-  based; it has no interlacing, PCS deposition, survey-window treatment, or
-  large-mesh performance/aliasing certification.
+- The production power-spectrum path is FFT-backed (FFTW when enabled, otherwise
+  the built-in radix-2 backend for power-of-two meshes) and is cross-checked
+  against the retained direct-DFT oracle on small meshes. It still has no
+  interlacing, PCS deposition, survey-window treatment, or publication-scale
+  large-mesh aliasing/performance certification.
 - Ewald certification is unsoftened and small-N; adaptive/heterogeneous
   softening requires a separate accuracy envelope.
 - CIC is not certified for the current default mesh/split target.
@@ -343,8 +345,8 @@ scalability claim here.
   communication-volume equivalence evidence.
 - Add sparse-peer PM transport while retaining the collective path as a
   correctness reference until equivalence is proven.
-- Extend the deterministic 3D `P(k)` reference path with an FFT-backed
-  production-scale implementation, optional interlacing/PCS, and explicit
-  equivalence tests against the current direct-DFT correctness reference.
+- Extend the FFT-backed 3D `P(k)` production path with optional interlacing/PCS
+  and a documented large-mesh scaling/aliasing campaign; retain the direct-DFT
+  implementation strictly as the small-mesh correctness oracle.
 - Run large DMO resolution/scaling and science-validation campaigns before any
   publishable or external-code-parity claim.

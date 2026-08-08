@@ -7,6 +7,8 @@
 #include <system_error>
 
 #include "cosmosim/core/profiling.hpp"
+#include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
 
 namespace {
 
@@ -151,6 +153,36 @@ void testOperationalReportIncludesMemoryAccounting() {
   std::filesystem::remove(path, cleanup_error);
 }
 
+
+void testOpenMpThreadLocalAggregation() {
+#if COSMOSIM_HAVE_OPENMP
+  cosmosim::core::configureOpenMpThreads(2);
+  const int workers = cosmosim::core::configuredOpenMpThreadCount();
+  assert(workers >= 1);
+  cosmosim::core::ProfilerSession session(true);
+#pragma omp parallel
+  {
+    cosmosim::core::ScopedProfile scope(&session, "omp_worker");
+    for (int i = 0; i < 100; ++i) {
+      session.counters().addCount("omp.iterations", 1);
+    }
+    session.addBytesMoved(64);
+  }
+  assert(session.counters().count("omp.iterations") == static_cast<std::uint64_t>(workers) * 100U);
+  const auto& nodes = session.nodes();
+  bool found = false;
+  for (const auto& node : nodes) {
+    if (node.name == "omp_worker") {
+      assert(node.call_count == static_cast<std::uint64_t>(workers));
+      assert(node.bytes_moved == static_cast<std::uint64_t>(workers) * 64U);
+      found = true;
+    }
+  }
+  assert(found);
+  cosmosim::core::configureOpenMpThreads(1);
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -159,5 +191,6 @@ int main() {
   testJsonAndCsvReportWriters();
   testOperationalEventReportWriter();
   testOperationalReportIncludesMemoryAccounting();
+  testOpenMpThreadLocalAggregation();
   return 0;
 }

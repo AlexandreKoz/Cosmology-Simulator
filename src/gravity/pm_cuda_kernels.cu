@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -167,14 +168,27 @@ void pmCudaAssignDensityCic(
     const double* pos_z_device,
     const double* mass_device,
     double* density_device,
-    void* stream_handle) {
-  const cudaStream_t stream = static_cast<cudaStream_t>(stream_handle);
+    core::CudaStreamView stream_view) {
+  const cudaStream_t stream = stream_view.nativeHandle();
+  const std::size_t cell_count = core::checkedSizeProduct3(
+      launch.nx, launch.ny, launch.nz, "PM CUDA density grid");
+  const std::size_t density_bytes = core::checkedSizeMultiply(
+      cell_count, sizeof(double), "PM CUDA density grid bytes");
   throwOnCudaError(
-      cudaMemsetAsync(density_device, 0, launch.nx * launch.ny * launch.nz * sizeof(double), stream),
+      cudaMemsetAsync(density_device, 0, density_bytes, stream),
       "cudaMemsetAsync density");
+  if (launch.particle_count == 0U) {
+    return;
+  }
 
-  constexpr int threads_per_block = 256;
-  const int blocks = static_cast<int>((launch.particle_count + threads_per_block - 1U) / threads_per_block);
+  constexpr std::size_t threads_per_block = 256U;
+  const std::size_t block_numerator = core::checkedSizeAdd(
+      launch.particle_count, threads_per_block - 1U, "PM CUDA assignment block count");
+  const std::size_t blocks_size = block_numerator / threads_per_block;
+  if (blocks_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("PM CUDA assignment block count exceeds int range");
+  }
+  const int blocks = static_cast<int>(blocks_size);
   assignDensityKernel<<<blocks, threads_per_block, 0, stream>>>(
       launch,
       pos_x_device,
@@ -196,10 +210,19 @@ void pmCudaInterpolateForcesCic(
     double* accel_x_device,
     double* accel_y_device,
     double* accel_z_device,
-    void* stream_handle) {
-  const cudaStream_t stream = static_cast<cudaStream_t>(stream_handle);
-  constexpr int threads_per_block = 256;
-  const int blocks = static_cast<int>((launch.particle_count + threads_per_block - 1U) / threads_per_block);
+    core::CudaStreamView stream_view) {
+  const cudaStream_t stream = stream_view.nativeHandle();
+  if (launch.particle_count == 0U) {
+    return;
+  }
+  constexpr std::size_t threads_per_block = 256U;
+  const std::size_t block_numerator = core::checkedSizeAdd(
+      launch.particle_count, threads_per_block - 1U, "PM CUDA interpolation block count");
+  const std::size_t blocks_size = block_numerator / threads_per_block;
+  if (blocks_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("PM CUDA interpolation block count exceeds int range");
+  }
+  const int blocks = static_cast<int>(blocks_size);
   interpolateForcesKernel<<<blocks, threads_per_block, 0, stream>>>(
       launch,
       pos_x_device,
