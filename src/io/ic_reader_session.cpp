@@ -76,10 +76,12 @@ IcReaderSession::IcReaderSession(
     const std::filesystem::path& path,
     std::uint64_t expected_size_bytes,
     std::string_view expected_sha256,
+    IcIntegrityMode integrity_mode,
     IcImportCounters& counters)
     : m_path(path),
       m_expected_size_bytes(expected_size_bytes),
       m_expected_sha256(expected_sha256),
+      m_integrity_mode(integrity_mode),
       m_open_identity(captureSourceIdentity(path)),
       m_file(H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT)) {
   if (!m_file.valid()) {
@@ -112,29 +114,43 @@ IcReaderSession::IcReaderSession(
   m_open_identity = after_open;
 }
 
+IcReaderSession::IcReaderSession(
+    const std::filesystem::path& path,
+    std::uint64_t expected_size_bytes,
+    std::string_view expected_sha256,
+    IcImportCounters& counters)
+    : IcReaderSession(
+          path, expected_size_bytes, expected_sha256,
+          IcIntegrityMode::kStrictFullRehash, counters) {}
+
 void IcReaderSession::revalidateSourceIdentity(
     IcImportCounters& counters) const {
-  const SourceIdentity before_hash = captureSourceIdentity(m_path);
+  const SourceIdentity before_completion = captureSourceIdentity(m_path);
   requireSameIdentity(
-      m_open_identity, before_hash, m_path, "before session completion");
-  if (before_hash.size_bytes != m_expected_size_bytes) {
+      m_open_identity, before_completion, m_path, "before session completion");
+  if (before_completion.size_bytes != m_expected_size_bytes) {
     throw std::runtime_error(
         "IC source size changed during payload ingestion for " +
         m_path.string());
   }
-  const std::string observed_sha256 = icSha256FileHex(m_path);
-  checkedCounterAdd(
-      counters.full_file_hash_pass_count, 1U,
-      "full_file_hash_pass_count");
-  checkedCounterAdd(
-      counters.hash_bytes_read, before_hash.size_bytes, "hash_bytes_read");
-  const SourceIdentity after_hash = captureSourceIdentity(m_path);
-  requireSameIdentity(
-      before_hash, after_hash, m_path, "during completion SHA-256 validation");
-  if (observed_sha256 != m_expected_sha256) {
-    throw std::runtime_error(
-        "IC source SHA-256 mismatch after payload ingestion for " +
-        m_path.string() + "; source content changed after inspection");
+
+  if (m_integrity_mode == IcIntegrityMode::kStrictFullRehash) {
+    const std::string observed_sha256 = icSha256FileHex(m_path);
+    checkedCounterAdd(
+        counters.full_file_hash_pass_count, 1U,
+        "full_file_hash_pass_count");
+    checkedCounterAdd(
+        counters.hash_bytes_read, before_completion.size_bytes,
+        "hash_bytes_read");
+    const SourceIdentity after_hash = captureSourceIdentity(m_path);
+    requireSameIdentity(
+        before_completion, after_hash, m_path,
+        "during completion SHA-256 validation");
+    if (observed_sha256 != m_expected_sha256) {
+      throw std::runtime_error(
+          "IC source SHA-256 mismatch after payload ingestion for " +
+          m_path.string() + "; source content changed after inspection");
+    }
   }
   checkedCounterAdd(
       counters.source_identity_validation_count, 1U,

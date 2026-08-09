@@ -227,14 +227,16 @@ this format-limit failure.
 The distributed reader assigns file `i` to reader rank `i % world_size`; every
 batch for that file remains on that rank, so files remain distributed without
 rotating one file through every reader. One payload HDF5 session is opened per
-nonempty source file. Including inspection, session-start validation, and
-session-completion validation, the tested full-file SHA-256 ceiling is two
-passes per source file and is independent of chunk or routing-batch count.
+nonempty source file. Default `kVerifiedIdentity` ingestion performs one authoritative
+inspection SHA-256 pass and validates stable source-file identity around ingestion without a
+second whole-file completion scan. Explicit `kStrictFullRehash` performs one additional
+completion SHA-256 pass. Both modes are independent of chunk or routing-batch count.
 Several deterministic chunks are accumulated into bounded per-peer buffers up
 to `mode.ic_staging_particle_count`, then one main exchange is performed per
 routing batch. Exact source-to-final and global duplicate-ID audit exchanges are
-separately counted. The exact-audit path remains the only production behavior;
-no weaker integrity mode is silently selected. Global/species counts, mass
+separately counted. The exact distributed ID-audit path remains mandatory. Source-file integrity mode is explicit:
+`kVerifiedIdentity` is the production default and `kStrictFullRehash` opts into the extra
+content rehash; metadata identity is not mislabeled as cryptographic integrity. Global/species counts, mass
 totals, ownership completeness, route loss/duplication detection, and duplicate
 ID rejection remain mandatory. Initial x-slab ownership is ingestion ownership;
 it is not a claim of final work balance.
@@ -248,8 +250,8 @@ The distributed report distinguishes logical failure-consensus phases from
 actual MPI calls. Production IC collectives are routed through one instrumented
 wrapper layer and reported as total, routing/non-routing, and per-operation
 (`Allreduce`, `Bcast`, `Gather`, `Gatherv`, `Alltoall`, `Alltoallv`) counts. A
-successful routing batch has a protocol-derived cost of exactly 23 actual MPI
-collective calls in version 2. The non-routing identity is
+successful routing batch has a protocol-derived cost of exactly 20 actual MPI
+collective calls in version 3. The non-routing identity is
 `40 + runtime_cosmology_vote + source_file_count +
 10 * distributed_id_audit_round_count + mpi_bcast_call_count`, where the Bcast
 term remains explicit for chunked metadata. Runtime validation of both formulas

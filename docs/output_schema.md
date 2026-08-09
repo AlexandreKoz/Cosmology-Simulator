@@ -80,21 +80,32 @@ current cumulative stellar-evolution state. PartType5 preserves the current blac
 science sidecar using documented `CHUI_` extension names for model-specific quantities.
 
 MPI science output is one logical multifile snapshot set. Every member has local
-`NumPart_ThisFile`, common 64-bit global totals and `NumFilesPerSnapshot`, common generation
-and epoch metadata, and one member index. Root publishes `<generation>.complete` only after
-all members have transactionally completed; the marker binds generation, member count, and
-global counts. CHUÍ reads fail closed when a required multifile marker is absent or disagrees
-with the HDF5 members.
+`NumPart_ThisFile`, common 64-bit global totals and `NumFilesPerSnapshot`, common generation,
+schema/dialect, epoch, box/cosmology, unit/frame, config-hash and governance identity, and one
+contiguous member index in `[0, NumFilesPerSnapshot)`. Discovery resolves one generation/stem
+rather than treating every `.hdf5` file in a directory as one snapshot. Root publishes a
+versioned `chui_snapshot_set_v2` `<generation>.complete` manifest only after all expected
+members have transactionally completed. The manifest binds the common scientific identity,
+exact member filenames/indices/local counts/file sizes, per-member SHA-256 digests, and a root
+SHA-256 over the canonical manifest body. CHUÍ reads fail closed on gaps, mixed scientific
+identity, stale/mismatched members, absent required manifests, or digest disagreement.
 
 CHUÍ currently uses 32-bit dense local row indices, so one member may not exceed
 `UINT32_MAX` rows per PartType. This is explicitly recorded as `CHUILocalIndexWidthBits=32`;
 logical multifile global counts remain 64-bit.
 
 Snapshot writing streams bounded HDF5 hyperslabs instead of materializing full-species
-coordinate/velocity/mass arrays. Snapshot reading has particle/materialization/dataset/
-attribute budgets and strict shape validation. Missing fields are governed by an explicit
-policy; analysis-only partial state cannot silently become evolution-ready. Storage reports
-inspect actual HDF5 creation properties rather than fabricating compression/chunk values.
+coordinate/velocity/mass arrays. Snapshot reading has particle/gas/sidecar/materialization/
+dataset/attribute/member budgets and enforces them cumulatively across a logical multifile
+set, with checked arithmetic before merge. Missing fields for gas, stars, black holes and
+tracers are governed by one explicit policy and all reconstruction/default actions are
+reported. `analysis_ready` and `evolution_ready` are separate: evolution readiness additionally
+proves persistent IDs and runtime-relevant gas identity/parent-or-patch ownership invariants;
+analysis-valid states that cannot safely re-enter evolution remain explicitly analysis-only.
+Storage reports inspect actual HDF5 creation properties rather than fabricating
+compression/chunk values. A direct HDF5 validator independently checks set/header identity,
+required dataset type/shape/counts, finite values, positive masses, box bounds where defined,
+and global nonzero/unique particle IDs without reconstructing the normal `SimulationState`.
 
 See `docs/snapshot_hdf5_io.md` for the detailed contract.
 
@@ -356,7 +367,7 @@ schema. Its Campaign B distributed counters distinguish:
   final owner-local state counters.
 
 For a successful routing-protocol-v2 batch,
-`routing_mpi_collective_call_count == 23 * routing_batch_count` on every MPI
+`routing_mpi_collective_call_count == 20 * routing_batch_count` on every MPI
 rank. The successful non-routing protocol is also exact:
 
 ```text

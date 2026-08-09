@@ -95,13 +95,50 @@ void materializeRootHydroPatchIfMissing(
   if (state.cells.size() == 0U || state.patches.size() != 0U) {
     return;
   }
+
+  // Build and validate the Cartesian geometry before publishing a non-empty
+  // PatchSoa row. Gas-cell identity synchronization validates the complete
+  // patch/cell ownership contract, so exposing a partially initialized patch
+  // creates an invalid intermediate state. Non-Cartesian hydro states remain
+  // valid without a synthetic PatchSoa owner and use parent-particle ownership.
+  const CartesianGasCellLayoutBuildResult layout =
+      buildCartesianGasCellRowLayout(state, config);
+  if (!layout.ok()) {
+    return;
+  }
+
   state.patches.resize(1U);
   state.patches.patch_id[0] = static_cast<std::uint64_t>(world_rank) + 1ULL;
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] =
-      static_cast<std::uint32_t>(state.cells.size());
-  state.patches.owning_rank[0] = static_cast<std::uint32_t>(world_rank);
+      core::checkedIntegralNarrow<std::uint32_t>(
+          state.cells.size(), "root hydro patch cell count");
+  state.patches.owning_rank[0] =
+      core::checkedIntegralNarrow<std::uint32_t>(
+          world_rank, "root hydro patch owning rank");
+  state.patches.origin_x_comoving[0] = layout.layout.spec.origin_x_comoving;
+  state.patches.origin_y_comoving[0] = layout.layout.spec.origin_y_comoving;
+  state.patches.origin_z_comoving[0] = layout.layout.spec.origin_z_comoving;
+  state.patches.extent_x_comoving[0] =
+      layout.layout.spec.cell_width_x_comoving *
+      static_cast<double>(layout.layout.spec.nx);
+  state.patches.extent_y_comoving[0] =
+      layout.layout.spec.cell_width_y_comoving *
+      static_cast<double>(layout.layout.spec.ny);
+  state.patches.extent_z_comoving[0] =
+      layout.layout.spec.cell_width_z_comoving *
+      static_cast<double>(layout.layout.spec.nz);
+  state.patches.cell_dim_x[0] =
+      core::checkedIntegralNarrow<std::uint16_t>(
+          layout.layout.spec.nx, "root hydro patch nx");
+  state.patches.cell_dim_y[0] =
+      core::checkedIntegralNarrow<std::uint16_t>(
+          layout.layout.spec.ny, "root hydro patch ny");
+  state.patches.cell_dim_z[0] =
+      core::checkedIntegralNarrow<std::uint16_t>(
+          layout.layout.spec.nz, "root hydro patch nz");
+
   if (state.cells.patch_index.size() != state.cells.size()) {
     state.cells.patch_index.resize(state.cells.size());
   }
@@ -121,30 +158,9 @@ void materializeRootHydroPatchIfMissing(
     }
   }
 
-  const CartesianGasCellLayoutBuildResult layout =
-      buildCartesianGasCellRowLayout(state, config);
-  if (layout.ok()) {
-    state.patches.origin_x_comoving[0] =
-        layout.layout.spec.origin_x_comoving;
-    state.patches.origin_y_comoving[0] =
-        layout.layout.spec.origin_y_comoving;
-    state.patches.origin_z_comoving[0] =
-        layout.layout.spec.origin_z_comoving;
-    state.patches.extent_x_comoving[0] =
-        layout.layout.spec.cell_width_x_comoving *
-        static_cast<double>(layout.layout.spec.nx);
-    state.patches.extent_y_comoving[0] =
-        layout.layout.spec.cell_width_y_comoving *
-        static_cast<double>(layout.layout.spec.ny);
-    state.patches.extent_z_comoving[0] =
-        layout.layout.spec.cell_width_z_comoving *
-        static_cast<double>(layout.layout.spec.nz);
-    state.patches.cell_dim_x[0] =
-        static_cast<std::uint16_t>(layout.layout.spec.nx);
-    state.patches.cell_dim_y[0] =
-        static_cast<std::uint16_t>(layout.layout.spec.ny);
-    state.patches.cell_dim_z[0] =
-        static_cast<std::uint16_t>(layout.layout.spec.nz);
+  if (!state.patches.isConsistent() || !state.validateOwnershipInvariants()) {
+    throw std::runtime_error(
+        "materializeRootHydroPatchIfMissing produced an inconsistent root hydro patch");
   }
   state.bumpCellIndexGeneration();
 }

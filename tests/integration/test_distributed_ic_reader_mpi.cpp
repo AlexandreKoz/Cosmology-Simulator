@@ -1004,7 +1004,7 @@ int main(int argc, char** argv) {
       assert(local_actual_collectives > 0U);
       assert(
           result.report.counters.routing_mpi_collective_call_count ==
-          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV2 *
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV3 *
               global_batches);
       assert(
           result.report.counters.nonrouting_mpi_collective_call_count +
@@ -1023,7 +1023,7 @@ int main(int argc, char** argv) {
           expected_nonrouting_collectives);
       assert(
           local_actual_collectives ==
-          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV2 *
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV3 *
                   global_batches +
               expected_nonrouting_collectives);
       assert(

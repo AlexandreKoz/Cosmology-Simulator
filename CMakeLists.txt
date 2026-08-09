@@ -74,6 +74,7 @@ option(COSMOSIM_ENABLE_TESTS "Build unit and integration tests" ON)
 option(COSMOSIM_ENABLE_BENCHMARKS "Build benchmark/profiling hooks" ON)
 option(COSMOSIM_ENABLE_PROFILING "Enable built-in profiling instrumentation" ON)
 option(COSMOSIM_ENABLE_LTO "Enable interprocedural optimization (LTO)" OFF)
+option(COSMOSIM_STRICT_IO_WARNINGS "Treat first-party cosmosim_io warnings as errors" OFF)
 
 set(COSMOSIM_FFTW_PLAN_RIGOR
     "ESTIMATE"
@@ -350,6 +351,7 @@ add_library(cosmosim_io STATIC
   src/io/transactional_file.cpp
   src/io/snapshot_conversion.cpp
   src/io/snapshot_set.cpp
+  src/io/snapshot_validator.cpp
   src/io/ic_manifest.cpp
   src/io/ic_record_codec.cpp
   src/io/ic_reader.cpp
@@ -422,6 +424,16 @@ foreach(module_lib IN LISTS COSMOSIM_MODULE_LIBS)
     set_property(TARGET ${module_lib} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
   endif()
 endforeach()
+
+if(COSMOSIM_STRICT_IO_WARNINGS)
+  if(MSVC)
+    target_compile_options(cosmosim_io PRIVATE /W4 /WX /permissive-)
+  else()
+    target_compile_options(cosmosim_io PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+      -Wundef -Wformat=2 -Wnull-dereference -Werror)
+  endif()
+endif()
 
 target_link_libraries(cosmosim_workflows
   PUBLIC
@@ -1158,6 +1170,20 @@ if(COSMOSIM_ENABLE_TESTS)
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_snapshot_set_mpi
+      tests/integration/test_snapshot_set_mpi.cpp)
+    target_link_libraries(test_integration_snapshot_set_mpi PRIVATE cosmosim_all)
+    foreach(snapshot_rank_count IN ITEMS 2 4)
+      add_test(
+        NAME integration_snapshot_set_mpi_${snapshot_rank_count}_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${snapshot_rank_count} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_snapshot_set_mpi> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_snapshot_set_mpi_${snapshot_rank_count}_rank
+        PROPERTIES PROCESSORS ${snapshot_rank_count} TIMEOUT 90
+                   LABELS "mpi;hdf5;distributed;snapshot;archive;runtime_truth")
+    endforeach()
+
     add_executable(test_integration_distributed_ic_reader_mpi
       tests/integration/test_distributed_ic_reader_mpi.cpp)
     target_link_libraries(test_integration_distributed_ic_reader_mpi PRIVATE cosmosim_all)
@@ -1329,6 +1355,12 @@ if(COSMOSIM_ENABLE_TESTS)
       integration_initial_condition_manifest_runtime
       integration hdf5 ic manifest runtime_truth)
   endif()
+
+  add_executable(test_unit_transactional_file tests/unit/test_transactional_file.cpp)
+  target_include_directories(test_unit_transactional_file PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test_unit_transactional_file PRIVATE cosmosim_io)
+  add_test(NAME unit_transactional_file COMMAND test_unit_transactional_file)
+  cosmosim_mark_runtime_truth_test(unit_transactional_file io transaction durability)
 
   add_executable(test_unit_ic_reader tests/unit/test_ic_reader.cpp)
   target_include_directories(

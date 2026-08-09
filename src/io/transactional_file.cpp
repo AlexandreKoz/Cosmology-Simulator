@@ -145,8 +145,10 @@ void syncFileForDurability(const std::filesystem::path& path) {
 
 void syncDirectoryForDurability(const std::filesystem::path& directory) {
 #if defined(_WIN32)
-  // ReplaceFileW / MoveFileExW with MOVEFILE_WRITE_THROUGH provide the Windows
-  // publication durability primitive. Directory handles are not flushed here.
+  // Win32 has no portable POSIX-equivalent directory fsync contract. Durable
+  // publication flushes file contents explicitly and uses supported atomic
+  // replacement/move primitives; directory metadata durability is therefore
+  // reported as platform-limited rather than silently overclaimed.
   static_cast<void>(directory);
 #else
   const std::filesystem::path target = directory.empty() ? std::filesystem::path(".") : directory;
@@ -186,9 +188,13 @@ void atomicReplaceFile(
   const bool destination_exists = std::filesystem::exists(output_path);
   BOOL ok = FALSE;
   if (destination_exists) {
+    // ReplaceFileW provides the strongest supported same-volume replacement
+    // semantics for an existing destination. REPLACEFILE_WRITE_THROUGH is
+    // explicitly unsupported by the Win32 API, so durable mode flushes the
+    // replacement file separately after publication instead of passing that flag.
     ok = ReplaceFileW(
         output_path.c_str(), temporary_path.c_str(), nullptr,
-        REPLACEFILE_WRITE_THROUGH, nullptr, nullptr);
+        0U, nullptr, nullptr);
     if (!ok && GetLastError() == ERROR_FILE_NOT_FOUND) {
       ok = MoveFileExW(
           temporary_path.c_str(), output_path.c_str(),
@@ -207,6 +213,13 @@ void atomicReplaceFile(
   }
   if (!ok) {
     throw std::runtime_error(platformErrorMessage("failed to atomically publish file"));
+  }
+  if (durability == FileDurability::kDurablePublication) {
+    // Flush the now-published file through a supported API. Windows does not
+    // expose a POSIX-equivalent portable directory-fsync contract, so the
+    // durability guarantee is explicitly file-content durability plus the
+    // strongest supported replacement/move publication semantics above.
+    syncFileForDurability(output_path);
   }
 #else
   if (::rename(temporary_path.c_str(), output_path.c_str()) != 0) {

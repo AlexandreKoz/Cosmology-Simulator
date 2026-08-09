@@ -136,92 +136,100 @@ void validateChunkCoverage(
   std::uint64_t exchange_peak = 0U;
   const std::vector<std::uint8_t> received = alltoallBytes(
       mpi_context, buckets, sent, received_bytes, &exchange_peak);
-  runCollectivePhaseVoid(
-      mpi_context, "IC source-to-final audit accounting", [&]() {
-        injectIcTestFault(mpi_context, "source_final_accounting");
-        if (mpi_context.isRoot()) {
-          checkedCounterAdd(
-              counters.exact_audit_exchange_count, 1U,
-              "exact_audit_exchange_count");
-        }
-        checkedCounterAdd(counters.bytes_sent, sent, "bytes_sent");
-        checkedCounterAdd(
-            counters.bytes_received, received_bytes, "bytes_received");
-      });
-
   struct BalanceEntry {
     std::uint64_t id = 0U;
     std::uint32_t source_count = 0U;
     std::uint32_t final_count = 0U;
   };
-  std::vector<BalanceEntry> entries =
-      runCollectivePhase<std::vector<BalanceEntry>>(
-          mpi_context, "IC source-to-final audit decode", [&]() {
+  struct LocalAuditResult {
+    int local_bad = 0;
+    std::uint64_t peak_bytes = 0U;
+  };
+
+  const LocalAuditResult local_audit =
+      runCollectivePhase<LocalAuditResult>(
+          mpi_context,
+          "IC source-to-final audit decode, accounting, and local validation",
+          [&]() {
+            // These operations are all rank-local after the exchange. Keep one
+            // consensus boundary before the global bad-record reduction rather
+            // than synchronizing the same batch repeatedly for bookkeeping.
+            injectIcTestFault(mpi_context, "source_final_accounting");
+            if (mpi_context.isRoot()) {
+              checkedCounterAdd(
+                  counters.exact_audit_exchange_count, 1U,
+                  "exact_audit_exchange_count");
+            }
+            checkedCounterAdd(counters.bytes_sent, sent, "bytes_sent");
+            checkedCounterAdd(
+                counters.bytes_received, received_bytes, "bytes_received");
+
             if (received.size() % 16U != 0U) {
               throw std::runtime_error(
                   "IC source-to-final audit wire size is corrupt");
             }
-            std::vector<BalanceEntry> decoded;
-            decoded.reserve(received.size() / 16U);
+            std::vector<BalanceEntry> entries;
+            entries.reserve(received.size() / 16U);
             std::size_t offset = 0U;
             while (offset < received.size()) {
-              decoded.push_back(BalanceEntry{
+              entries.push_back(BalanceEntry{
                   .id = internal::readLe64(received, offset),
                   .source_count = internal::readLe32(received, offset),
                   .final_count = internal::readLe32(received, offset)});
             }
-            return decoded;
+            std::sort(
+                entries.begin(), entries.end(),
+                [](const BalanceEntry& lhs, const BalanceEntry& rhs) {
+                  return lhs.id < rhs.id;
+                });
+
+            int local_bad = 0;
+            std::size_t begin = 0U;
+            while (begin < entries.size()) {
+              std::size_t entry_end = begin + 1U;
+              std::uint64_t source_count = entries[begin].source_count;
+              std::uint64_t final_count = entries[begin].final_count;
+              while (entry_end < entries.size() &&
+                     entries[entry_end].id == entries[begin].id) {
+                source_count += entries[entry_end].source_count;
+                final_count += entries[entry_end].final_count;
+                ++entry_end;
+              }
+              if (source_count != 1U || final_count != 1U) {
+                local_bad = 1;
+                break;
+              }
+              begin = entry_end;
+            }
+
+            injectIcTestFault(mpi_context, "exact_audit_capacity_accounting");
+            std::uint64_t exchange_storage = nestedByteCapacity(buckets);
+            checkedCounterAdd(
+                exchange_storage, exchange_peak,
+                "source-to-final audit exchange storage");
+            std::uint64_t decoded_storage =
+                static_cast<std::uint64_t>(received.capacity());
+            checkedCounterAdd(
+                decoded_storage,
+                checkedCapacityBytes(
+                    entries.capacity(), sizeof(BalanceEntry),
+                    "source-to-final audit decoded storage"),
+                "source-to-final audit decoded storage");
+            return LocalAuditResult{
+                .local_bad = local_bad,
+                .peak_bytes = std::max(exchange_storage, decoded_storage)};
           });
 
-  const int local_bad = runCollectivePhase<int>(
-      mpi_context, "IC source-to-final audit reduction", [&]() {
-        std::sort(
-            entries.begin(), entries.end(),
-            [](const BalanceEntry& lhs, const BalanceEntry& rhs) {
-              return lhs.id < rhs.id;
-            });
-        std::size_t begin = 0U;
-        while (begin < entries.size()) {
-          std::size_t end = begin + 1U;
-          std::uint64_t source_count = entries[begin].source_count;
-          std::uint64_t final_count = entries[begin].final_count;
-          while (end < entries.size() &&
-                 entries[end].id == entries[begin].id) {
-            source_count += entries[end].source_count;
-            final_count += entries[end].final_count;
-            ++end;
-          }
-          if (source_count != 1U || final_count != 1U) {
-            return 1;
-          }
-          begin = end;
-        }
-        return 0;
-      });
   int any_bad = 0;
-  mpiAllreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  mpiAllreduce(
+      &local_audit.local_bad, &any_bad, 1, MPI_INT, MPI_MAX,
+      MPI_COMM_WORLD);
   if (any_bad != 0) {
     throw std::runtime_error(
         "distributed IC source and final ID multisets do not reconcile "
         "exactly");
   }
-  return runCollectivePhase<std::uint64_t>(
-      mpi_context, "IC source-to-final audit capacity accounting", [&]() {
-        injectIcTestFault(mpi_context, "exact_audit_capacity_accounting");
-        std::uint64_t exchange_storage = nestedByteCapacity(buckets);
-        checkedCounterAdd(
-            exchange_storage, exchange_peak,
-            "source-to-final audit exchange storage");
-        std::uint64_t decoded_storage =
-            static_cast<std::uint64_t>(received.capacity());
-        checkedCounterAdd(
-            decoded_storage,
-            checkedCapacityBytes(
-                entries.capacity(), sizeof(BalanceEntry),
-                "source-to-final audit decoded storage"),
-            "source-to-final audit decoded storage");
-        return std::max(exchange_storage, decoded_storage);
-      });
+  return local_audit.peak_bytes;
 }
 
 [[nodiscard]] std::uint64_t exactDistributedIdAudit(

@@ -806,6 +806,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
       inspection.manifest.canonical_source_manifest_verified;
   result.report.verified_manifest_sha256 =
       inspection.manifest.canonical_source_manifest_sha256;
+  result.report.integrity_mode = options.integrity_mode;
   result.report.provenance_authority = options.manifest != nullptr
       ? "supplied_manifest_v1"
       : (inspection.manifest.canonical_source_manifest_verified
@@ -873,6 +874,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                         inspection.manifest.source_files[file_index],
                         inspection.manifest.source_file_sizes_bytes[file_index],
                         inspection.manifest.source_sha256[file_index],
+                        options.integrity_mode,
                         result.report.counters).first;
                   }
                   std::vector<ParticleRecord> local_records;

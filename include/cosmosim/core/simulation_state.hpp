@@ -843,6 +843,7 @@ class SimulationState {
 
   [[nodiscard]] bool validateOwnershipInvariants() const;
   [[nodiscard]] bool validateUniqueParticleIds() const;
+  [[nodiscard]] bool validatePersistentParticleIds() const;
   void rebuildSpeciesIndex();
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;

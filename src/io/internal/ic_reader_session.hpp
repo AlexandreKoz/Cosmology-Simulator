@@ -25,6 +25,14 @@ class IcReaderSession {
       const std::filesystem::path& path,
       std::uint64_t expected_size_bytes,
       std::string_view expected_sha256,
+      IcIntegrityMode integrity_mode,
+      IcImportCounters& counters);
+  // Compatibility/internal-test overload preserves the historical strict
+  // completion rehash contract. Production call sites pass an explicit mode.
+  IcReaderSession(
+      const std::filesystem::path& path,
+      std::uint64_t expected_size_bytes,
+      std::string_view expected_sha256,
       IcImportCounters& counters);
 
   IcReaderSession(const IcReaderSession&) = delete;
@@ -36,8 +44,9 @@ class IcReaderSession {
       const IcFieldManifest& field,
       IcImportCounters& counters);
 
-  // Revalidate the path identity and complete-file digest after the final
-  // payload read. This is explicit because destructors must not throw.
+  // Revalidate source identity after the final payload read. Strict mode also
+  // recomputes the complete-file digest. This is explicit because destructors
+  // must not throw.
   void revalidateSourceIdentity(IcImportCounters& counters) const;
 
  private:
@@ -60,6 +69,7 @@ class IcReaderSession {
   std::filesystem::path m_path;
   std::uint64_t m_expected_size_bytes = 0U;
   std::string m_expected_sha256;
+  IcIntegrityMode m_integrity_mode = IcIntegrityMode::kVerifiedIdentity;
   SourceIdentity m_open_identity;
   Hdf5Handle m_file;
   std::unordered_map<std::string, Hdf5Handle> m_datasets;

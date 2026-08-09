@@ -65,9 +65,13 @@ using GadgetArepoSchemaMap = ScienceSnapshotSchemaMap;
 
 struct SnapshotReadBudget {
   std::uint64_t max_particles = 1ULL << 34U;
+  std::uint64_t max_gas_cells = 1ULL << 34U;
+  std::uint64_t max_sidecar_rows = 1ULL << 34U;
   std::uint64_t max_materialized_bytes = 1ULL << 40U;
   std::uint64_t max_dataset_bytes = 1ULL << 38U;
   std::uint64_t max_attribute_bytes = 1ULL << 24U;
+  std::uint64_t max_validation_id_bytes = 1ULL << 30U;
+  std::uint32_t max_members = 4096U;
 };
 
 struct SnapshotSetMemberInfo {
@@ -103,6 +107,7 @@ struct SnapshotReadOptions {
   bool require_velocities = true;
   bool allow_mass_table_fallback = true;
   bool require_complete_chui_set = true;
+  bool verify_snapshot_set_member_hashes = true;
   SnapshotDialect dialect = SnapshotDialect::kAuto;
   SnapshotMissingFieldPolicy missing_field_policy =
       SnapshotMissingFieldPolicy::kReject;
@@ -127,7 +132,10 @@ struct SnapshotIoReport {
   std::vector<std::string> unavailable_fields;
   std::string file_kind = "unknown";
   bool restart_compatible = false;
+  bool analysis_ready = false;
   bool evolution_ready = false;
+  std::vector<std::string> evolution_readiness_reasons;
+  std::uint64_t materialized_state_bytes = 0;
   double header_time = 1.0;
   double header_redshift = 0.0;
   double header_box_size_x = 0.0;
@@ -155,16 +163,44 @@ struct SnapshotReadResult {
 
 struct SnapshotSetInspection {
   SnapshotDialect dialect = SnapshotDialect::kAuto;
+  std::string file_kind;
   std::string schema_name;
   std::uint32_t schema_version = 0;
   std::uint32_t num_files_per_snapshot = 0;
   std::array<std::uint64_t, 6> global_part_count{};
   double scale_factor = 1.0;
   double redshift = 0.0;
+  double box_size_x = 0.0;
+  double box_size_y = 0.0;
+  double box_size_z = 0.0;
+  double omega_matter = 0.0;
+  double omega_lambda = 0.0;
+  double omega_baryon = 0.0;
   double hubble_param = 0.0;
+  std::string unit_length;
+  std::string unit_mass;
+  std::string unit_velocity;
+  std::string coordinate_frame;
+  std::string velocity_storage_convention;
+  std::string config_hash_hex;
+  std::string naming_rules_version;
+  std::string file_naming_rules_version;
   std::string generation_id;
   std::vector<std::filesystem::path> member_paths;
+  std::uint64_t total_member_file_bytes = 0;
   bool complete = false;
+};
+
+struct SnapshotValidationReport {
+  bool valid = false;
+  SnapshotSetInspection inspection;
+  std::uint64_t datasets_checked = 0;
+  std::uint64_t scalar_values_checked = 0;
+  std::uint64_t particle_ids_checked = 0;
+  std::uint64_t validation_peak_id_bytes = 0;
+  std::vector<std::string> diagnostics;
+
+  void requireValid() const;
 };
 
 void writeScienceSnapshotHdf5(
@@ -183,6 +219,10 @@ void writeScienceSnapshotHdf5(
     const SnapshotReadOptions& options);
 
 [[nodiscard]] SnapshotSetInspection inspectSnapshotSet(
+    const std::filesystem::path& input_path,
+    const SnapshotReadOptions& options = {});
+
+[[nodiscard]] SnapshotValidationReport validateSnapshotSetHdf5(
     const std::filesystem::path& input_path,
     const SnapshotReadOptions& options = {});
 

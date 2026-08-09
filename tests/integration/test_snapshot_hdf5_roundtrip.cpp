@@ -198,6 +198,9 @@ void testDecoupledGasIdentityRoundtrip() {
   assert(std::abs(roundtrip.state.cells.center_x_comoving[0] - state.cells.center_x_comoving[0]) < 1.0e-14);
   assert(std::abs(roundtrip.state.cells.center_x_comoving[2] - state.cells.center_x_comoving[2]) < 1.0e-14);
   assert(std::abs(roundtrip.state.cells.mass_code[1] - state.cells.mass_code[1]) < 1.0e-14);
+  assert(roundtrip.report.analysis_ready);
+  assert(!roundtrip.report.evolution_ready);
+  assert(!roundtrip.report.evolution_readiness_reasons.empty());
   std::filesystem::remove(path);
 #endif
 }
@@ -251,6 +254,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   policy.compression_level = 1;
   policy.chunk_particle_count = 2;
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
+  cosmosim::io::validateSnapshotSetHdf5(snapshot_path).requireValid();
 
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   assert(inspect_file >= 0);
@@ -599,6 +603,79 @@ void testMassTableFallbackSnapshotImport() {
 }
 
 
+void testPersistentIdAndMissingFieldContracts() {
+#if COSMOSIM_ENABLE_HDF5
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.output.run_name = "snapshot_missing_contracts";
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 10.0;
+  config.cosmology.box_size_z_mpc_comoving = 10.0;
+  config.cosmology.box_size_mpc_comoving = 10.0;
+
+  cosmosim::core::SimulationState invalid_ids;
+  invalid_ids.resizeParticles(1U);
+  invalid_ids.metadata.scale_factor = 0.5;
+  invalid_ids.particles.mass_code[0] = 1.0;
+  invalid_ids.particle_sidecar.particle_id[0] = 0U;
+  invalid_ids.particle_sidecar.species_tag[0] =
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+  invalid_ids.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 1U;
+  invalid_ids.rebuildSpeciesIndex();
+  cosmosim::io::SnapshotWritePayload invalid_payload;
+  invalid_payload.state = &invalid_ids;
+  invalid_payload.config = &config;
+  invalid_payload.normalized_config_text = "schema_version=1\n";
+  invalid_payload.provenance = cosmosim::core::makeProvenanceRecord(
+      "zero_id", "zero_id", 0, invalid_payload.normalized_config_text);
+  const auto zero_path = std::filesystem::temp_directory_path() / "cosmosim_zero_id_snapshot.hdf5";
+  bool zero_rejected = false;
+  try {
+    cosmosim::io::writeScienceSnapshotHdf5(zero_path, invalid_payload);
+  } catch (const std::exception&) {
+    zero_rejected = true;
+  }
+  assert(zero_rejected);
+  std::filesystem::remove(zero_path);
+
+  cosmosim::core::SimulationState state;
+  fillMixedSpeciesState(state);
+  const auto path = std::filesystem::temp_directory_path() / "cosmosim_missing_star_tracer_fields.hdf5";
+  cosmosim::io::SnapshotWritePayload payload;
+  payload.state = &state;
+  payload.config = &config;
+  payload.normalized_config_text = "schema_version=1\n";
+  payload.provenance = cosmosim::core::makeProvenanceRecord(
+      "missing_fields", "missing_fields", 0, payload.normalized_config_text);
+  cosmosim::io::writeScienceSnapshotHdf5(path, payload);
+  hid_t file = H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(file >= 0);
+  assert(H5Ldelete(file, "/PartType4/Metallicity", H5P_DEFAULT) >= 0);
+  assert(H5Ldelete(file, "/PartType3/TracerParentParticleID", H5P_DEFAULT) >= 0);
+  assert(H5Fclose(file) >= 0);
+
+  bool reject_missing = false;
+  try {
+    static_cast<void>(cosmosim::io::readGadgetArepoSnapshotHdf5(path, config));
+  } catch (const std::runtime_error&) {
+    reject_missing = true;
+  }
+  assert(reject_missing);
+  assert(!cosmosim::io::validateSnapshotSetHdf5(path).valid);
+
+  cosmosim::io::SnapshotReadOptions unavailable_options;
+  unavailable_options.missing_field_policy =
+      cosmosim::io::SnapshotMissingFieldPolicy::kMarkUnavailable;
+  const auto unavailable =
+      cosmosim::io::readGadgetArepoSnapshotHdf5(path, config, unavailable_options);
+  assert(containsString(unavailable.report.unavailable_fields, "/PartType4/Metallicity"));
+  assert(containsString(unavailable.report.unavailable_fields, "/PartType3/TracerParentParticleID"));
+  assert(unavailable.report.analysis_ready);
+  assert(!unavailable.report.evolution_ready);
+  std::filesystem::remove(path);
+#endif
+}
+
 void testSnapshotSetCompletionContract() {
 #if COSMOSIM_ENABLE_HDF5
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
@@ -608,15 +685,31 @@ void testSnapshotSetCompletionContract() {
   config.cosmology.box_size_z_mpc_comoving = 6.0;
   config.cosmology.box_size_mpc_comoving = 10.0;
 
-  cosmosim::core::SimulationState state;
-  fillMixedSpeciesState(state);
-  const std::array<std::uint64_t, 6> global_counts = {4U, 4U, 0U, 2U, 4U, 2U};
+  const std::array<std::uint64_t, 6> global_counts = {0U, 4U, 0U, 0U, 0U, 0U};
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() / "cosmosim_snapshot_set_contract";
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
 
   for (std::uint32_t member_index = 0; member_index < 2U; ++member_index) {
+    cosmosim::core::SimulationState state;
+    state.resizeParticles(2U);
+    state.metadata.scale_factor = 0.5;
+    for (std::size_t row = 0; row < 2U; ++row) {
+      state.particles.position_x_comoving[row] = 0.5 + member_index + 0.1 * row;
+      state.particles.position_y_comoving[row] = 0.5 + 0.1 * row;
+      state.particles.position_z_comoving[row] = 0.5 + 0.1 * row;
+      state.particles.mass_code[row] = 1.0;
+      state.particle_sidecar.particle_id[row] =
+          1U + static_cast<std::uint64_t>(member_index) * 100U + row;
+      state.particle_sidecar.species_tag[row] =
+          static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+      state.particle_sidecar.owning_rank[row] = member_index;
+    }
+    state.species.count_by_species[
+        static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 2U;
+    state.rebuildSpeciesIndex();
+
     cosmosim::io::SnapshotWritePayload payload;
     payload.state = &state;
     payload.config = &config;
@@ -644,9 +737,42 @@ void testSnapshotSetCompletionContract() {
   const auto complete = cosmosim::io::inspectSnapshotSet(directory);
   assert(complete.complete);
   assert(complete.member_paths.size() == 2U);
+  cosmosim::io::validateSnapshotSetHdf5(directory).requireValid();
+  const auto merged = cosmosim::io::readCosmoSimScienceSnapshotHdf5(directory, config);
+  assert(merged.state.particles.size() == 4U);
+  assert(merged.report.analysis_ready);
+  assert(merged.report.evolution_ready);
+  assert(merged.state.validatePersistentParticleIds());
+
+  cosmosim::io::SnapshotReadOptions constrained;
+  constrained.budget.max_particles = 3U;
+  bool budget_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::readCosmoSimScienceSnapshotHdf5(
+        directory, config, constrained));
+  } catch (const std::length_error&) {
+    budget_rejected = true;
+  }
+  assert(budget_rejected);
+
+  cosmosim::io::SnapshotReadOptions byte_constrained;
+  byte_constrained.budget.max_materialized_bytes = 1U;
+  bool byte_budget_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::readCosmoSimScienceSnapshotHdf5(
+        directory, config, byte_constrained));
+  } catch (const std::length_error&) {
+    byte_budget_rejected = true;
+  }
+  assert(byte_budget_rejected);
 
   // Marker presence alone is insufficient: it must bind the set metadata.
   const std::filesystem::path marker = directory / "snapshot_set_generation.complete";
+  std::ifstream original_marker_stream(marker);
+  const std::string original_marker(
+      (std::istreambuf_iterator<char>(original_marker_stream)),
+      std::istreambuf_iterator<char>());
+  assert(!original_marker.empty());
   {
     std::ofstream stream(marker, std::ios::trunc);
     stream << "schema=chui_snapshot_set_v1\n"
@@ -655,6 +781,32 @@ void testSnapshotSetCompletionContract() {
            << "global_part_count=1,1,0,0,0,0\n";
   }
   assert(!cosmosim::io::inspectSnapshotSet(directory).complete);
+
+  // Restore the valid strong manifest, then prove member-level scientific
+  // disagreement is rejected independently of manifest presence.
+  {
+    std::ofstream stream(marker, std::ios::trunc);
+    stream << original_marker;
+  }
+  const auto member_one = directory / "snap_042.1.hdf5";
+  hid_t mismatch_file = H5Fopen(member_one.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  assert(mismatch_file >= 0);
+  hid_t mismatch_header = H5Gopen2(mismatch_file, "/Header", H5P_DEFAULT);
+  assert(mismatch_header >= 0);
+  hid_t omega_attr = H5Aopen(mismatch_header, "OmegaBaryon", H5P_DEFAULT);
+  assert(omega_attr >= 0);
+  double omega_baryon = 0.123456789;
+  assert(H5Awrite(omega_attr, H5T_NATIVE_DOUBLE, &omega_baryon) >= 0);
+  H5Aclose(omega_attr);
+  H5Gclose(mismatch_header);
+  H5Fclose(mismatch_file);
+  bool member_mismatch_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::inspectSnapshotSet(directory));
+  } catch (const std::runtime_error&) {
+    member_mismatch_rejected = true;
+  }
+  assert(member_mismatch_rejected);
   std::filesystem::remove_all(directory);
 #endif
 }
@@ -665,6 +817,7 @@ int main() {
   testDecoupledGasIdentityRoundtrip();
   testRoundtripMixedSpeciesSnapshot();
   testMassTableFallbackSnapshotImport();
+  testPersistentIdAndMissingFieldContracts();
   testSnapshotSetCompletionContract();
   return 0;
 }

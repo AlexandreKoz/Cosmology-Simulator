@@ -231,7 +231,19 @@ struct IcSchemaSummary {
     const std::filesystem::path& ic_path,
     const IcSchemaSummary& schema);
 
+enum class IcIntegrityMode {
+  // Trust the authoritative inspection SHA-256, then prove the source path
+  // identity (size/timestamp/native identity where available) remained stable
+  // through payload ingestion. This is the production default and avoids a
+  // second whole-file content pass.
+  kVerifiedIdentity,
+  // Recompute the complete-file SHA-256 after payload ingestion in addition to
+  // stable path identity checks. Use when source mutation risk outweighs I/O cost.
+  kStrictFullRehash,
+};
+
 struct IcImportOptions {
+  IcIntegrityMode integrity_mode = IcIntegrityMode::kVerifiedIdentity;
   bool require_velocities = true;
   bool require_particle_ids = true;
   bool allow_mass_table_fallback = true;
@@ -304,9 +316,14 @@ struct IcImportCounters {
 
 // Protocol v2 collapses bookkeeping/fault boundaries into existing phases and
 // combines receive-layout construction with exchange-buffer allocation. A
-// successful routing batch therefore executes 15 logical consensus phases,
-// three coverage reductions, two Alltoall/Alltoallv exchange pairs, and one
-// exact reconciliation reduction: 23 communicator-wide calls per batch.
+// Protocol v3 folds post-exchange reconciliation accounting, wire decode,
+// local multiset validation, and capacity accounting into one rank-local phase
+// followed by one exact global reduction. A successful routing batch therefore
+// executes 12 logical consensus phases, three coverage reductions, two
+// Alltoall/Alltoallv exchange pairs, and one exact reconciliation reduction:
+// 20 communicator-wide calls per batch.
+inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV3 = 20U;
+// Retained so archived protocol-v2 reports/tests remain interpretable.
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV2 = 23U;
 // Retained only so archived reports/tests can interpret protocol-v1 counters.
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV1 = 30U;
@@ -321,6 +338,7 @@ inline constexpr std::uint64_t
     kIcNonroutingMpiCollectiveCallsPerIdAuditRoundV1 = 10U;
 
 struct IcImportReport {
+  IcIntegrityMode integrity_mode = IcIntegrityMode::kVerifiedIdentity;
   IcSchemaSummary schema;
   std::optional<IcManifest> manifest;
   std::vector<std::string> present_aliases;

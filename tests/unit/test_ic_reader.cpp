@@ -964,9 +964,16 @@ void testHdf5GasThermoMapping() {
   assert(result.report.manifest->dialect ==
          cosmosim::io::IcDialect::kGadgetArepoBridgeV1);
   assert(result.report.counters.source_file_open_count == 1U);
-  assert(result.report.counters.full_file_hash_pass_count == 2U);
+  assert(result.report.integrity_mode == cosmosim::io::IcIntegrityMode::kVerifiedIdentity);
+  assert(result.report.counters.full_file_hash_pass_count == 1U);
   assert(result.report.counters.source_identity_validation_count == 2U);
   assert(result.state.cells.center_x_comoving[0] == result.state.particles.position_x_comoving[0]);
+
+  cosmosim::io::IcImportOptions strict_options;
+  strict_options.integrity_mode = cosmosim::io::IcIntegrityMode::kStrictFullRehash;
+  const auto strict_result =
+      cosmosim::io::readGadgetArepoHdf5Ic(path, config, strict_options);
+  assert(strict_result.report.counters.full_file_hash_pass_count == 2U);
 
   auto mismatched_manifest = *result.report.manifest;
   const auto coordinate_field = std::find_if(

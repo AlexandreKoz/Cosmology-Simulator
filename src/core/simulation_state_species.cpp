@@ -364,6 +364,17 @@ bool SimulationState::validateUniqueParticleIds() const {
   return true;
 }
 
+bool SimulationState::validatePersistentParticleIds() const {
+  std::unordered_set<std::uint64_t> ids;
+  ids.reserve(particle_sidecar.particle_id.size());
+  for (const auto id : particle_sidecar.particle_id) {
+    if (id == 0U || !ids.insert(id).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
 ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecies species_tag) const {
   const auto indices = particle_species_index.globalIndices(species_tag);
 

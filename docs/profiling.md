@@ -124,9 +124,10 @@ black-hole, tracer, `ParticleRecord`, nested per-peer, flattened exchange,
 count/displacement, decode, coverage, and ID-reconciliation buffers. The exact global duplicate-ID audit
 uses rank-local sorted temporary runs and a bounded-memory external merge; disk
 run bytes are not RAM staging and are removed before import returns. For a distributed fixture, the required evidence is that each nonempty source
-file has one stable payload reader/session, complete-file SHA-256 work is bounded
-by two passes per source file (inspection, session start, session completion)
-independent of batch count, each source chunk is assigned once, reader-record imbalance is reported as the maximum minus minimum assigned-record count across ranks, main exchanges
+file has one stable payload reader/session. In the default verified-identity mode, complete-file
+SHA-256 work is one inspection pass per source file plus stable file-identity validation around
+ingestion; explicit strict-full-rehash mode performs one additional completion SHA-256 pass.
+The hash-pass count is independent of batch count, each source chunk is assigned once, reader-record imbalance is reported as the maximum minus minimum assigned-record count across ranks, main exchanges
 scale with routing batches rather than source chunks, each source ID balances
 against one final ID, and no rank allocates authoritative arrays sized to the
 global particle count merely because MPI is enabled. `main_exchange_count` and the compatibility
@@ -135,16 +136,16 @@ zero; byte counters remain rank-local and may be reduced by the caller. The
 compatibility collective fields count logical rank-consistent protocol phases,
 not raw MPI calls. Actual production communicator calls are counted centrally by
 the `mpi_*_call_count` fields. Their per-kind sum equals
-`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 23
-calls per successful routing batch in routing protocol version 2 (15 consensus votes,
+`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 20
+calls per successful routing batch in routing protocol version 3 (12 consensus votes,
 three coverage reductions, two `Alltoall`/`Alltoallv` pairs, and one exact
 reconciliation reduction). Fixed discovery, manifest, final audit, and
 finalization calls are reported by `nonrouting_mpi_collective_call_count`.
-For routing protocol version 2 the successful-path identity is:
+For routing protocol version 3 the successful-path identity is:
 
 ```text
 routing_mpi_collective_call_count
-  = 23 * routing_batch_count
+  = 20 * routing_batch_count
 
 nonrouting_mpi_collective_call_count
   = 40

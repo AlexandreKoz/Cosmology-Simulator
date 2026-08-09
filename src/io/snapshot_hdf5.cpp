@@ -22,7 +22,11 @@
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "io/internal/snapshot_conversion.hpp"
+#include "io/internal/snapshot_field_contract.hpp"
+#include "io/internal/snapshot_readiness.hpp"
+#include "io/internal/snapshot_set_internal.hpp"
 #include "io/internal/transactional_file.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -887,8 +891,16 @@ const GadgetArepoSchemaMap& gadgetArepoSchemaMap() {
 
 void SnapshotReadResult::requireEvolutionReady() const {
   if (!report.evolution_ready) {
-    throw std::runtime_error(
-        "snapshot read result is analysis-only/partial and is not safe to evolve");
+    std::string message =
+        "snapshot read result is analysis-only/partial and is not safe to evolve";
+    if (!report.evolution_readiness_reasons.empty()) {
+      message += ": ";
+      for (std::size_t i = 0; i < report.evolution_readiness_reasons.size(); ++i) {
+        if (i != 0U) message += "; ";
+        message += report.evolution_readiness_reasons[i];
+      }
+    }
+    throw std::runtime_error(message);
   }
 }
 
@@ -939,7 +951,7 @@ void writeScienceSnapshotHdf5(
         "snapshot writer: CellSoa and GasCellSidecar row counts must match");
   }
 
-  if (!state.validateUniqueParticleIds()) {
+  if (!state.validatePersistentParticleIds()) {
     throw std::runtime_error(
         "snapshot writer: persistent particle IDs must be nonzero and unique");
   }
@@ -1284,58 +1296,19 @@ void writeScienceSnapshotHdf5(
       writeScalarStringAttribute(
           type_group.get(), "GasParentIdentitySemantics",
           "ParentParticleIDs valid where HasParentParticle=1");
-      add_double("InternalEnergy");
-      add_double("Density");
-      add_double("Metallicity");
-      if (policy.write_optional_pressure) {
-        add_double("Pressure");
+    }
+    // The required native field list is shared with the independent validator,
+    // so schema additions cannot silently update only one side of the contract.
+    internal::forEachRequiredChuiSnapshotField(type_index, [&](const auto& field) {
+      switch (field.storage) {
+        case internal::SnapshotFieldStorage::kFloat64: add_double(field.name); break;
+        case internal::SnapshotFieldStorage::kUint64: add_u64(field.name); break;
+        case internal::SnapshotFieldStorage::kUint32: add_u32(field.name); break;
+        case internal::SnapshotFieldStorage::kUint8: add_u8(field.name); break;
       }
-      add_double("CHUI_TemperatureCode");
-      add_double("CHUI_SoundSpeedCode");
-      add_double("StarFormationRate");
-      add_double("ColdCloudMassFraction");
-      add_double("EffectivePressure");
-      add_double("EffectiveInternalEnergy");
-      add_u8("IsOnEffectiveEos");
-      add_u64("GasCellIDs");
-      add_u64("ParentParticleIDs");
-      add_u8("HasParentParticle");
-      add_u64("OwningPatchIDs");
-    } else if (type_index == 4U) {
-      add_double("Metallicity");
-      add_double("StellarFormationTime");
-      add_double("BirthMass");
-      add_u64("StarFormationBirthKey");
-      add_u64("ParentGasCellID");
-      add_u64("BirthIntegrationTick");
-      add_u32("BirthOrdinal");
-      add_double("CHUI_StellarAgeYearsLast");
-      add_double("CHUI_StellarReturnedMassCumulative");
-      add_double("CHUI_StellarReturnedMetalsCumulative");
-      add_double("CHUI_StellarNewlySynthesizedMetalsCumulative");
-      add_double("CHUI_StellarFeedbackEnergyCumulativeErg");
-      add_double("CHUI_StellarDepositedMassCumulative");
-      add_double("CHUI_StellarDepositedMetalsCumulative");
-      add_double("CHUI_StellarDepositedFeedbackEnergyCumulativeErg");
-    } else if (type_index == 3U) {
-      add_u64("TracerParentParticleID");
-      add_u64("TracerInjectionStep");
-      add_u32("TracerHostCellIndex");
-      add_double("TracerMassFractionOfHost");
-      add_double("TracerLastHostMassCode");
-      add_double("TracerCumulativeExchangedMassCode");
-    } else if (type_index == 5U) {
-      // CHUI extensions are explicitly prefixed rather than masquerading as
-      // canonical AREPO fields whose exact semantics may differ by model.
-      add_double("CHUI_BHSubgridMass");
-      add_double("CHUI_BHAccretionRateMsunPerYr");
-      add_double("CHUI_BHFeedbackEnergyCode");
-      add_double("CHUI_BHEddingtonRatio");
-      add_double("CHUI_BHCumulativeAccretedMass");
-      add_double("CHUI_BHCumulativeFeedbackEnergyCode");
-      add_double("CHUI_BHDutyCycleActiveTimeCode");
-      add_double("CHUI_BHDutyCycleTotalTimeCode");
-      add_u32("CHUI_BHHostCellIndex");
+    });
+    if (type_index == 0U && policy.write_optional_pressure) {
+      add_double("Pressure");
     }
 
     const std::size_t chunk_rows = std::min(policy.chunk_particle_count, row_count);
@@ -1633,6 +1606,10 @@ void writeScienceSnapshotHdf5(
   }
   }  // close all HDF5 identifiers before filesystem publication
   transaction.publish();
+  if (member.num_files_per_snapshot > 1U) {
+    internal::writeSnapshotMemberIntegritySidecar(
+        output_path, member, policy.durable_publication);
+  }
 #endif
 }
 
@@ -1775,6 +1752,14 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     }
     total_count_u64 += count;
   }
+  if (header_counts[0] > options.budget.max_gas_cells) {
+    throw std::length_error("snapshot reader: gas-cell read budget exceeded");
+  }
+  const std::uint64_t sidecar_rows = header_counts[0] + header_counts[3] +
+      header_counts[4] + header_counts[5];
+  if (sidecar_rows > options.budget.max_sidecar_rows) {
+    throw std::length_error("snapshot reader: sidecar-row read budget exceeded");
+  }
   const std::uint64_t base_bytes_per_particle =
       7U * sizeof(double) + sizeof(std::uint64_t) + 4U * sizeof(std::uint32_t);
   if (total_count_u64 != 0U &&
@@ -1829,6 +1814,30 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   std::vector<double> black_hole_duty_cycle_total_time_code;
 
   auto missing_double_field = [&](std::string_view field, std::size_t count, std::vector<double>& target, double documented_default) {
+    if (options.missing_field_policy == SnapshotMissingFieldPolicy::kReject) {
+      throw std::runtime_error("snapshot import: required scientific field is missing: " + std::string(field));
+    }
+    target.assign(count, documented_default);
+    if (options.missing_field_policy == SnapshotMissingFieldPolicy::kMarkUnavailable) {
+      result.report.unavailable_fields.push_back(std::string(field));
+    } else {
+      result.report.defaulted_fields.push_back(std::string(field) + "=documented_default");
+    }
+  };
+
+  auto missing_u64_field = [&](std::string_view field, std::size_t count, std::vector<std::uint64_t>& target, std::uint64_t documented_default) {
+    if (options.missing_field_policy == SnapshotMissingFieldPolicy::kReject) {
+      throw std::runtime_error("snapshot import: required scientific field is missing: " + std::string(field));
+    }
+    target.assign(count, documented_default);
+    if (options.missing_field_policy == SnapshotMissingFieldPolicy::kMarkUnavailable) {
+      result.report.unavailable_fields.push_back(std::string(field));
+    } else {
+      result.report.defaulted_fields.push_back(std::string(field) + "=documented_default");
+    }
+  };
+
+  auto missing_u32_field = [&](std::string_view field, std::size_t count, std::vector<std::uint32_t>& target, std::uint32_t documented_default) {
     if (options.missing_field_policy == SnapshotMissingFieldPolicy::kReject) {
       throw std::runtime_error("snapshot import: required scientific field is missing: " + std::string(field));
     }
@@ -2003,34 +2012,25 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         readDatasetChunk1d(
             group.get(), "Pressure", 0, local_count, gas_pressure_chunk);
       } else {
-        gas_pressure_chunk.assign(local_count, 0.0);
-        result.report.unavailable_fields.push_back("/PartType0/Pressure");
+        missing_double_field("/PartType0/Pressure", local_count, gas_pressure_chunk, 0.0);
       }
       if (hdf5PathExists(group.get(), "CHUI_TemperatureCode")) {
         readDatasetChunk1d(
             group.get(), "CHUI_TemperatureCode", 0, local_count,
             gas_temperature_chunk);
-      } else if (chui_authored && schema_version >= 6U) {
+      } else {
         missing_double_field(
             "/PartType0/CHUI_TemperatureCode", local_count,
             gas_temperature_chunk, 0.0);
-      } else {
-        gas_temperature_chunk.assign(local_count, 0.0);
-        result.report.unavailable_fields.push_back(
-            "/PartType0/CHUI_TemperatureCode");
       }
       if (hdf5PathExists(group.get(), "CHUI_SoundSpeedCode")) {
         readDatasetChunk1d(
             group.get(), "CHUI_SoundSpeedCode", 0, local_count,
             gas_sound_speed_chunk);
-      } else if (chui_authored && schema_version >= 6U) {
+      } else {
         missing_double_field(
             "/PartType0/CHUI_SoundSpeedCode", local_count,
             gas_sound_speed_chunk, 0.0);
-      } else {
-        gas_sound_speed_chunk.assign(local_count, 0.0);
-        result.report.unavailable_fields.push_back(
-            "/PartType0/CHUI_SoundSpeedCode");
       }
       if (hdf5PathExists(group.get(), "Metallicity")) {
         readDatasetChunk1d(
@@ -2066,13 +2066,19 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
           result.report.defaulted_fields.push_back(
               "/PartType0/HasParentParticle=ParentParticleIDs!=0");
         }
-      } else {
-        // v4 and external GADGET/AREPO compatibility: PartType0 rows were
-        // particle-bound and ParticleIDs doubled as parent identities.
+      } else if (chui_authored && schema_version < 6U) {
+        // Historical CHUI science snapshots were particle-bound: the PartType0
+        // ParticleID was the parent particle identity. This reconstruction is
+        // versioned legacy behavior, not a general AREPO/GADGET assumption.
         gas_parent_particle_id_chunk = ids_chunk;
         gas_has_parent_particle_chunk.assign(local_count, 1U);
         result.report.defaulted_fields.push_back(
-            "/PartType0/ParentParticleIDs=ParticleIDs(legacy)");
+            "/PartType0/ParentParticleIDs=ParticleIDs(legacy_chui_schema)");
+      } else {
+        missing_u64_field(
+            "/PartType0/ParentParticleIDs", local_count,
+            gas_parent_particle_id_chunk, 0U);
+        gas_has_parent_particle_chunk.assign(local_count, 0U);
       }
 
       if (hdf5PathExists(group.get(), "OwningPatchIDs")) {
@@ -2080,46 +2086,56 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
             group.get(), "OwningPatchIDs", 0, local_count,
             gas_owning_patch_id_chunk);
       } else {
-        gas_owning_patch_id_chunk.assign(local_count, 0U);
-        result.report.defaulted_fields.push_back(
-            "/PartType0/OwningPatchIDs=0");
+        missing_u64_field(
+            "/PartType0/OwningPatchIDs", local_count,
+            gas_owning_patch_id_chunk, 0U);
       }
     }
     if (type_index == 4) {
       if (hdf5PathExists(group.get(), "Metallicity")) {
         readDatasetChunk1d(group.get(), "Metallicity", 0, local_count, star_metallicity_chunk);
       } else {
-        star_metallicity_chunk.assign(local_count, 0.0);
+        missing_double_field("/PartType4/Metallicity", local_count, star_metallicity_chunk, 0.0);
       }
       if (hdf5PathExists(group.get(), "StellarFormationTime")) {
         readDatasetChunk1d(group.get(), "StellarFormationTime", 0, local_count, star_formation_time_chunk);
       } else {
-        star_formation_time_chunk.assign(local_count, result.state.metadata.scale_factor);
+        missing_double_field(
+            "/PartType4/StellarFormationTime", local_count, star_formation_time_chunk,
+            result.state.metadata.scale_factor);
       }
       if (hdf5PathExists(group.get(), "BirthMass")) {
         readDatasetChunk1d(group.get(), "BirthMass", 0, local_count, star_birth_mass_chunk);
       } else {
+        if (options.missing_field_policy == SnapshotMissingFieldPolicy::kReject) {
+          throw std::runtime_error("snapshot import: required scientific field is missing: /PartType4/BirthMass");
+        }
         star_birth_mass_chunk = mass_chunk;
+        if (options.missing_field_policy == SnapshotMissingFieldPolicy::kMarkUnavailable) {
+          result.report.unavailable_fields.push_back("/PartType4/BirthMass");
+        } else {
+          result.report.defaulted_fields.push_back("/PartType4/BirthMass=current_mass_explicit_default");
+        }
       }
       if (hdf5PathExists(group.get(), "StarFormationBirthKey")) {
         readDatasetChunkIds(group.get(), "StarFormationBirthKey", 0, local_count, star_birth_key_chunk);
       } else {
-        star_birth_key_chunk.assign(local_count, 0U);
+        missing_u64_field("/PartType4/StarFormationBirthKey", local_count, star_birth_key_chunk, 0U);
       }
       if (hdf5PathExists(group.get(), "ParentGasCellID")) {
         readDatasetChunkIds(group.get(), "ParentGasCellID", 0, local_count, star_parent_gas_cell_id_chunk);
       } else {
-        star_parent_gas_cell_id_chunk.assign(local_count, 0U);
+        missing_u64_field("/PartType4/ParentGasCellID", local_count, star_parent_gas_cell_id_chunk, 0U);
       }
       if (hdf5PathExists(group.get(), "BirthIntegrationTick")) {
         readDatasetChunkIds(group.get(), "BirthIntegrationTick", 0, local_count, star_birth_tick_chunk);
       } else {
-        star_birth_tick_chunk.assign(local_count, 0U);
+        missing_u64_field("/PartType4/BirthIntegrationTick", local_count, star_birth_tick_chunk, 0U);
       }
       if (hdf5PathExists(group.get(), "BirthOrdinal")) {
         readDatasetChunkU32(group.get(), "BirthOrdinal", 0, local_count, star_birth_ordinal_chunk);
       } else {
-        star_birth_ordinal_chunk.assign(local_count, 0U);
+        missing_u32_field("/PartType4/BirthOrdinal", local_count, star_birth_ordinal_chunk, 0U);
       }
       auto read_star_extension = [&](std::string_view name, std::vector<double>& values) {
         if (hdf5PathExists(group.get(), std::string(name))) {
@@ -2144,33 +2160,34 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       if (hdf5PathExists(group.get(), "TracerParentParticleID")) {
         readDatasetChunkIds(group.get(), "TracerParentParticleID", 0, local_count, tracer_parent_chunk);
       } else {
-        tracer_parent_chunk.assign(local_count, 0);
+        missing_u64_field("/PartType3/TracerParentParticleID", local_count, tracer_parent_chunk, 0U);
       }
       if (hdf5PathExists(group.get(), "TracerInjectionStep")) {
         readDatasetChunkIds(group.get(), "TracerInjectionStep", 0, local_count, tracer_step_chunk);
       } else {
-        tracer_step_chunk.assign(local_count, 0);
+        missing_u64_field("/PartType3/TracerInjectionStep", local_count, tracer_step_chunk, 0U);
       }
       if (hdf5PathExists(group.get(), "TracerHostCellIndex")) {
         readDatasetChunkU32(group.get(), "TracerHostCellIndex", 0, local_count, tracer_host_chunk);
       } else {
-        tracer_host_chunk.assign(local_count, 0);
+        missing_u32_field(
+            "/PartType3/TracerHostCellIndex", local_count, tracer_host_chunk,
+            core::kInvalidGasCellRow);
       }
       if (hdf5PathExists(group.get(), "TracerMassFractionOfHost")) {
         readDatasetChunk1d(group.get(), "TracerMassFractionOfHost", 0, local_count, tracer_fraction_chunk);
       } else {
-        tracer_fraction_chunk.assign(local_count, 0.0);
+        missing_double_field("/PartType3/TracerMassFractionOfHost", local_count, tracer_fraction_chunk, 0.0);
       }
       if (hdf5PathExists(group.get(), "TracerLastHostMassCode")) {
         readDatasetChunk1d(group.get(), "TracerLastHostMassCode", 0, local_count, tracer_last_host_mass_chunk);
       } else {
-        tracer_last_host_mass_chunk.assign(local_count, 0.0);
-        result.report.unavailable_fields.push_back("/PartType3/TracerLastHostMassCode");
+        missing_double_field("/PartType3/TracerLastHostMassCode", local_count, tracer_last_host_mass_chunk, 0.0);
       }
       if (hdf5PathExists(group.get(), "TracerCumulativeExchangedMassCode")) {
         readDatasetChunk1d(group.get(), "TracerCumulativeExchangedMassCode", 0, local_count, tracer_exchange_chunk);
       } else {
-        tracer_exchange_chunk.assign(local_count, 0.0);
+        missing_double_field("/PartType3/TracerCumulativeExchangedMassCode", local_count, tracer_exchange_chunk, 0.0);
       }
     }
     if (type_index == 5) {
@@ -2195,8 +2212,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       if (hdf5PathExists(group.get(), "CHUI_BHHostCellIndex")) {
         readDatasetChunkU32(group.get(), "CHUI_BHHostCellIndex", 0, local_count, bh_host_cell_chunk);
       } else {
-        bh_host_cell_chunk.assign(local_count, 0U);
-        result.report.unavailable_fields.push_back("/PartType5/CHUI_BHHostCellIndex");
+        missing_u32_field(
+            "/PartType5/CHUI_BHHostCellIndex", local_count, bh_host_cell_chunk,
+            core::kInvalidGasCellRow);
       }
     }
 
@@ -2590,9 +2608,13 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     }
   }
 
-  result.report.evolution_ready =
-      result.report.unavailable_fields.empty() && result.state.validateOwnershipInvariants() &&
-      result.state.validateUniqueParticleIds();
+  const core::MemoryReport memory_report = core::collectSimulationMemoryReport(result.state);
+  result.report.materialized_state_bytes = memory_report.totals.persistent_total_bytes;
+  if (result.report.materialized_state_bytes > options.budget.max_materialized_bytes) {
+    throw std::length_error(
+        "snapshot reader: actual materialized SimulationState exceeds max_materialized_bytes");
+  }
+  internal::updateSnapshotReadiness(result.state, &result.report);
   return result;
 #endif
 }

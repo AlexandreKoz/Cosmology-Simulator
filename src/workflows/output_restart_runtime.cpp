@@ -447,12 +447,14 @@ bool maybeWriteOutputs(
             snapshot_directory, generation_id,
             core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot completion member count"),
             global_counts, false);
-        const io::SnapshotSetInspection inspection =
-            io::inspectSnapshotSet(snapshot_directory);
-        if (!inspection.complete || inspection.global_part_count != global_counts ||
-            inspection.num_files_per_snapshot != static_cast<std::uint32_t>(topology.world_size)) {
+        const io::SnapshotValidationReport validation =
+            io::validateSnapshotSetHdf5(snapshot_directory);
+        validation.requireValid();
+        if (validation.inspection.global_part_count != global_counts ||
+            validation.inspection.num_files_per_snapshot !=
+                static_cast<std::uint32_t>(topology.world_size)) {
           throw std::runtime_error(
-              "independent snapshot-set structural validation failed after publication");
+              "independent snapshot-set validation disagrees with runtime global metadata");
         }
       } catch (...) {
         completion_failure = std::current_exception();
@@ -468,7 +470,7 @@ bool maybeWriteOutputs(
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = "snapshot member written, scientifically read back, and logical set validated",
+        .message = "snapshot member written, scientifically read back, and independently validated as one logical set",
         .payload = {{"member_path", report.snapshot_path.string()},
                     {"set_path", report.snapshot_set_path.string()},
                     {"generation_id", generation_id},

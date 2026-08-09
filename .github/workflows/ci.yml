@@ -42,6 +42,49 @@ jobs:
             -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wundef -Wformat=2 -Wnull-dereference -Werror"
           cmake --build build/core-strict --target cosmosim_core --parallel 2
 
+  io_strict_warnings:
+    needs: hygiene
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install I/O strict-warning toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ clang cmake ninja-build pkg-config libhdf5-dev
+      - name: Build cosmosim_io with strict warnings as errors
+        env:
+          CXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+        run: |
+          cmake -S . -B build/io-strict-${{ matrix.compiler }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCOSMOSIM_ENABLE_MPI=OFF \
+            -DCOSMOSIM_ENABLE_HDF5=ON \
+            -DCOSMOSIM_ENABLE_FFTW=OFF \
+            -DCOSMOSIM_ENABLE_CUDA=OFF \
+            -DCOSMOSIM_ENABLE_TESTS=OFF \
+            -DCOSMOSIM_STRICT_IO_WARNINGS=ON
+          cmake --build build/io-strict-${{ matrix.compiler }} --target cosmosim_io --parallel 2
+
+  windows_io_transactional:
+    needs: hygiene
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Windows I/O transaction path
+        run: >-
+          cmake -S . -B build/windows-io -DCMAKE_BUILD_TYPE=Debug
+          -DCOSMOSIM_ENABLE_MPI=OFF -DCOSMOSIM_ENABLE_HDF5=OFF
+          -DCOSMOSIM_ENABLE_FFTW=OFF -DCOSMOSIM_ENABLE_CUDA=OFF
+          -DCOSMOSIM_ENABLE_TESTS=ON
+      - name: Build Windows transactional test
+        run: cmake --build build/windows-io --config Debug --target test_unit_transactional_file --parallel 2
+      - name: Run Windows transactional test
+        run: ctest --test-dir build/windows-io -C Debug -R "^unit_transactional_file$" --output-on-failure
+
   build_test_matrix:
     needs: hygiene
     runs-on: ubuntu-latest
@@ -70,7 +113,7 @@ jobs:
           - configure_preset: mpi-hdf5-fftw-debug
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
-            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_pm_slab_halo_exchange_mpi_two_rank|integration_tree_pm_coupling_periodic_mpi_two_rank|integration_tree_pseudo_hierarchy_exchange_mpi_two_rank|integration_reference_workflow_distributed_treepm_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|integration_distributed_sfc_rebalance_mpi_two_rank|integration_distributed_sfc_rebalance_mpi_three_rank|integration_distributed_gas_cell_migration_mpi_two_rank|integration_reference_workflow_distributed_hydro_mpi_two_rank|integration_reference_workflow_distributed_amr_mpi_two_rank|integration_reference_workflow_distributed_isolated_pm_mpi_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank|validation_phase2_mpi_gravity_four_rank"
+            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_pm_slab_halo_exchange_mpi_two_rank|integration_tree_pm_coupling_periodic_mpi_two_rank|integration_tree_pseudo_hierarchy_exchange_mpi_two_rank|integration_reference_workflow_distributed_treepm_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|integration_snapshot_set_mpi_2_rank|integration_snapshot_set_mpi_4_rank|integration_distributed_sfc_rebalance_mpi_two_rank|integration_distributed_sfc_rebalance_mpi_three_rank|integration_distributed_gas_cell_migration_mpi_two_rank|integration_reference_workflow_distributed_hydro_mpi_two_rank|integration_reference_workflow_distributed_amr_mpi_two_rank|integration_reference_workflow_distributed_isolated_pm_mpi_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank|validation_phase2_mpi_gravity_four_rank"
             apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev"
             run_bench: "0"
     steps:

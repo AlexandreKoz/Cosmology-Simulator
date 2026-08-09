@@ -41,9 +41,10 @@ snapdir_042/
 
 Each member stores its local `NumPart_ThisFile`, common 64-bit logical totals using the
 GADGET-family low/high-word convention where required, a common `NumFilesPerSnapshot`,
-and common generation/cosmology/schema identity. The completion marker is published
-only after every member has finalized successfully, and its generation, member count,
-and global counts are checked against the HDF5 members before a CHUÍ set is accepted.
+and common generation/schema/dialect/epoch/box/cosmology/unit/config/governance identity.
+The completion product is now a versioned `chui_snapshot_set_v2` manifest binding exact member
+filenames, contiguous indices, local/global counts, file sizes and per-member SHA-256 digests
+plus a root manifest digest. A CHUÍ set is accepted only when all members and the manifest agree.
 
 The current in-memory sidecar model still uses 32-bit dense local row indices. Therefore
 **one member is intentionally limited to at most `UINT32_MAX` rows of a PartType**. This
@@ -92,12 +93,12 @@ the same digest.
 
 ## IC ingestion changes
 
-- Normal strict IC ingestion no longer performs the immediate redundant session-open
-  full-file SHA-256 pass. Source inspection establishes the authoritative hash; stable
-  file identity is checked around ingestion; strict completion rehash remains available.
+- Default `kVerifiedIdentity` IC ingestion performs one authoritative inspection SHA-256 pass
+  and stable source-file identity validation around ingestion. Explicit
+  `kStrictFullRehash` adds a completion content rehash when the extra I/O is justified.
 - The distributed wire is v2 and no longer transports all gas/star/BH/tracer sidecars in
   every dark-matter record.
-- Successful routing bookkeeping was consolidated from the historical 30 to 23
+- Successful routing bookkeeping was consolidated from the historical 30, then 23, to 20
   communicator-wide calls per routing batch while retaining exact reconciliation and
   duplicate-ID auditing.
 - MPI wrappers request `MPI_ERRORS_RETURN`, check wrapped operation statuses, and treat a
@@ -123,3 +124,11 @@ The campaign environment provided GCC and HDF5 but not an MPI runtime/developmen
 or Windows. Serial/HDF5 behavior was built and exercised locally. MPI and Windows code
 was implemented behind the existing feature/platform guards and is intended for capable
 CI/hosts; no runtime claim is made for those unavailable environments.
+
+## Post-campaign acceptance closure
+
+The follow-up acceptance-gap campaign strengthens logical-set identity, cumulative read
+budgets, full-species missing-field handling, runtime evolution-readiness classification,
+Windows publication semantics, direct HDF5 validation, MPI snapshot-set CI coverage, and
+I/O strict-warning CI. See `docs/io_post_campaign_acceptance_closure_20260809.md` and
+`docs/repair/io_post_campaign_closure_matrix_20260809.md` for the current closure evidence.
