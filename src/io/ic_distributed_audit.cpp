@@ -7,6 +7,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -227,6 +228,7 @@ void validateChunkCoverage(
     const parallel::MpiContext& mpi_context,
     std::span<const std::uint64_t> local_ids,
     std::size_t batch_count,
+    const std::filesystem::path& scratch_root,
     IcImportCounters& counters) {
   const std::size_t validated_batch_count = runCollectivePhase<std::size_t>(
       mpi_context, "IC global ID audit configuration", [&]() {
@@ -248,15 +250,23 @@ void validateChunkCoverage(
   const std::filesystem::path audit_directory =
       runCollectivePhase<std::filesystem::path>(
           mpi_context, "IC global ID audit temporary storage", [&]() {
+            std::random_device random_device;
+            const std::uint64_t random_token =
+                (static_cast<std::uint64_t>(random_device()) << 32U) ^
+                static_cast<std::uint64_t>(random_device());
             const auto nonce = std::chrono::high_resolution_clock::now()
                                    .time_since_epoch()
                                    .count();
+            const std::filesystem::path base = scratch_root.empty()
+                ? std::filesystem::temp_directory_path()
+                : scratch_root;
+            std::filesystem::create_directories(base);
             std::filesystem::path path =
-                std::filesystem::temp_directory_path() /
-                ("cosmosim_ic_id_audit_" +
-                 std::to_string(mpi_context.worldRank()) + "_" +
-                 std::to_string(nonce));
-            if (!std::filesystem::create_directories(path)) {
+                base / ("cosmosim_ic_id_audit_" +
+                        std::to_string(mpi_context.worldRank()) + "_" +
+                        std::to_string(nonce) + "_" +
+                        std::to_string(random_token));
+            if (!std::filesystem::create_directory(path)) {
               throw std::runtime_error(
                   "failed to create temporary distributed IC ID-audit "
                   "directory");

@@ -16,8 +16,8 @@ inline void validateCanonicalSingleFileCounts(
       throw std::length_error(
           "canonical single-file output cannot represent NumPart_ThisFile "
           "for PartType" + std::to_string(type) + ": count " +
-          std::to_string(counts[type]) + " exceeds UINT32_MAX; use a "
-          "canonical multifile writer");
+          std::to_string(counts[type]) + " exceeds UINT32_MAX; split the "
+          "canonical bundle into supported per-file counts before conversion");
     }
   }
 }

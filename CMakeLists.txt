@@ -347,6 +347,9 @@ add_library(cosmosim_physics STATIC
   src/physics/tracer_support.cpp)
 add_library(cosmosim_io STATIC
   src/io/internal/io_contract.cpp
+  src/io/transactional_file.cpp
+  src/io/snapshot_conversion.cpp
+  src/io/snapshot_set.cpp
   src/io/ic_manifest.cpp
   src/io/ic_record_codec.cpp
   src/io/ic_reader.cpp

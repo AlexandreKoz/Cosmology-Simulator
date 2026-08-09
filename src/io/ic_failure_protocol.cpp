@@ -160,20 +160,19 @@ void mutateIcTestRoute(
   const std::string operation = specification.substr(0U, separator);
   auto bucket = std::find_if(
       per_rank.begin(), per_rank.end(), [](const auto& candidate) {
-        return candidate.size() >= internal::kIcWireRecordBytes;
+        return !candidate.empty();
       });
   if (bucket == per_rank.end()) {
     return;
   }
+  const auto [record_begin, record_size] = internal::lastIcWireRecordSpan(*bucket);
+  if (record_size == 0U) return;
   if (operation == "drop") {
-    bucket->resize(bucket->size() - internal::kIcWireRecordBytes);
+    bucket->resize(record_begin);
   } else if (operation == "duplicate") {
-    const std::size_t record_begin =
-        bucket->size() - internal::kIcWireRecordBytes;
-    bucket->insert(
-        bucket->end(),
-        bucket->begin() + static_cast<std::ptrdiff_t>(record_begin),
-        bucket->end());
+    const std::vector<std::uint8_t> copy(
+        bucket->begin() + static_cast<std::ptrdiff_t>(record_begin), bucket->end());
+    bucket->insert(bucket->end(), copy.begin(), copy.end());
   } else {
     return;
   }
@@ -253,8 +252,12 @@ std::vector<std::uint8_t> alltoallBytes(
       layout.send_counts.data(), 1, MPI_INT, layout.receive_counts.data(), 1,
       MPI_INT, MPI_COMM_WORLD);
 
-  layout = runCollectivePhase<AlltoallLayout>(
-      mpi_context, "IC all-to-all receive-layout preparation", [&]() {
+  struct ExchangeBuffers {
+    std::vector<std::uint8_t> send;
+    std::vector<std::uint8_t> receive;
+  };
+  ExchangeBuffers buffers = runCollectivePhase<ExchangeBuffers>(
+      mpi_context, "IC all-to-all receive-layout and buffer preparation", [&]() {
         for (int rank = 0; rank < world_size; ++rank) {
           const int count =
               layout.receive_counts[static_cast<std::size_t>(rank)];
@@ -270,15 +273,6 @@ std::vector<std::uint8_t> alltoallBytes(
               static_cast<int>(layout.receive_total);
           layout.receive_total += static_cast<std::uint64_t>(count);
         }
-        return std::move(layout);
-      });
-
-  struct ExchangeBuffers {
-    std::vector<std::uint8_t> send;
-    std::vector<std::uint8_t> receive;
-  };
-  ExchangeBuffers buffers = runCollectivePhase<ExchangeBuffers>(
-      mpi_context, "IC all-to-all buffer allocation", [&]() {
         ExchangeBuffers prepared;
         prepared.send.resize(static_cast<std::size_t>(layout.send_total));
         prepared.receive.resize(

@@ -52,60 +52,74 @@ Canonical IC, science snapshot, and restart remain deliberately separate
 schemas: canonical IC is audited import/interchange state; snapshot is analysis
 output; restart is exact execution continuation.
 
-## 1) Snapshot schema (GADGET/AREPO interoperability)
+## 1) Science snapshot schema and external dialects
 
-Current schema identity:
+Current native identity:
 
-- `schema_name = gadget_arepo_v5`
-- `schema_version = 5`
+- `schema_name = chui_science_snapshot_v6`
+- `schema_version = 6`
 
-Logical groups:
+Science snapshots are not restart checkpoints. `/PartTypeN` uses canonical phase-space
+names (`Coordinates`, `Velocities`, `Masses`, `ParticleIDs`) while CHUÍ-specific science
+lanes are explicitly named extensions. `/Header`, `/Config`, `/Parameters`, `/Provenance`,
+and `/Units` make the file self-describing. `NamingRulesVersion` and
+`FileNamingRulesVersion` are persisted.
 
-- `/Header`
-- `/Config`
-- `/Provenance`
-- `/PartType0` ... `/PartType5`
+`SnapshotDialect` separates CHUÍ-native storage from AREPO Format-3 and GADGET-4 HDF5
+semantics. For comoving AREPO/GADGET-family export, the conversion boundary is explicit:
+coordinates and masses carry the configured `h` convention, stored velocities are physical
+peculiar velocity divided by `sqrt(a)`, and density/pressure apply the corresponding `h^2`
+conversion. The inverse conversion is applied on import. Arbitrary external populated
+PartType2/PartType3 groups are rejected unless a species map resolves their meaning.
 
-Canonical fields and accepted read aliases:
+`/PartType0` rows come from authoritative dense gas cells and retain stable `gas_cell_id`,
+optional parent identity, and owning patch. Gas science output includes internal energy,
+density, pressure, metallicity, star-formation/effective-ISM diagnostics where applicable,
+and CHUÍ temperature/sound-speed diagnostics. Stars preserve formation/birth identity and
+current cumulative stellar-evolution state. PartType5 preserves the current black-hole
+science sidecar using documented `CHUI_` extension names for model-specific quantities.
 
-- `Coordinates` (`Coordinates`, `Position`, `POS`)
-- `Velocities` (`Velocities`, `Velocity`, `VEL`)
-- `Masses` (`Masses`, `Mass`)
-- `ParticleIDs` (`ParticleIDs`, `ParticleID`, `ID`)
+MPI science output is one logical multifile snapshot set. Every member has local
+`NumPart_ThisFile`, common 64-bit global totals and `NumFilesPerSnapshot`, common generation
+and epoch metadata, and one member index. Root publishes `<generation>.complete` only after
+all members have transactionally completed; the marker binds generation, member count, and
+global counts. CHUÍ reads fail closed when a required multifile marker is absent or disagrees
+with the HDF5 members.
 
-`SnapshotIoPolicy` controls compression, chunk size, and whether alias groups are emitted.
+CHUÍ currently uses 32-bit dense local row indices, so one member may not exceed
+`UINT32_MAX` rows per PartType. This is explicitly recorded as `CHUILocalIndexWidthBits=32`;
+logical multifile global counts remain 64-bit.
 
-### Authoritative gas-cell identity in snapshot v5
+Snapshot writing streams bounded HDF5 hyperslabs instead of materializing full-species
+coordinate/velocity/mass arrays. Snapshot reading has particle/materialization/dataset/
+attribute budgets and strict shape validation. Missing fields are governed by an explicit
+policy; analysis-only partial state cannot silently become evolution-ready. Storage reports
+inspect actual HDF5 creation properties rather than fabricating compression/chunk values.
 
-`/PartType0` row count and ordering come from authoritative dense gas-cell state, not from a one-gas-particle-per-cell assumption. Each row is written exactly once with cell coordinates, cell-local velocity, gas mass, thermodynamic fields, and derived canonical `Metallicity`. Identity is represented by:
-
-- `ParticleIDs` and `GasCellIDs`: stable `gas_cell_id`;
-- `ParentParticleIDs`: optional parent value;
-- `HasParentParticle`: `uint8` validity mask (`0` or `1`);
-- `OwningPatchIDs`: stable owning patch identity;
-- `GasIdentitySchemaVersion=1` and descriptive semantics attributes.
-
-The representation preserves parentless cells and multiple cells sharing one parent without invention or collapse. The reader accepts legacy v4/external files that lack these lanes by applying the documented one-to-one fallback (`gas_cell_id=ParticleIDs`, parent valid, owning patch `0`).
-
-The snapshot reader reports the decoded `Time`, `Redshift`, axis-aware box size,
-`Omega0`, `OmegaLambda`, `OmegaBaryon`, and `HubbleParam` header values. Production
-roundtrip verification matches those values, schema/file-kind identity, normalized
-config and provenance hashes, and every currently exported per-particle phase-space,
-mass, stable-ID, species, softening, softening-mask, and tracer lane. Matching only
-the particle count is not accepted. A mismatch makes the output step fail closed.
+See `docs/snapshot_hdf5_io.md` for the detailed contract.
 
 ## 2) Restart schema
 
 Current restart identity:
 
-- `name = cosmosim_restart_v22`
-- `version = 21`
+- `name = cosmosim_restart_v23`
+- `version = 23`
 
-Restart schema v21 adds restart-authoritative code-time output cadence under
-`/output_cadence`: `snapshot_interval_time_code` and `next_snapshot_time_code`.
-The next event is also present in `/restart_diagnostics` as a non-authoritative
-audit mirror. Both authoritative fields are covered by the payload integrity hash.
-Legacy v20 reads default these lanes to zero (disabled).
+Schema v23 retains the v22 metal/star-birth state and all v21/v20 continuation state, and
+adds a canonical little-endian SHA-256 payload integrity digest. The legacy 64-bit FNV-1a
+digest remains readable/written only as a compatibility diagnostic; new v23 integrity
+acceptance is bound to `sha256-canonical-le-v1`. Both digests are produced in one logical
+payload traversal rather than hashing the checkpoint state twice.
+
+Checkpoint publication uses the shared transactional-file layer. Bare filenames are valid,
+temporary paths are unique same-directory siblings and can never equal the final path, HDF5
+objects are closed before publication, and the implementation uses platform-specific atomic
+replace plus durable file/directory synchronization when the durable policy is selected. The
+writer never deletes the previous valid checkpoint before publishing its replacement.
+
+`isRestartSchemaCompatible` retains explicit backward read support for v14 through v22.
+Same-world-size rank-local restart remains the documented distributed continuation topology;
+science snapshot topology is independent and may be multifile.
 
 ## H1 workflow force-cache restart note
 
@@ -147,7 +161,7 @@ files with rank-qualified names; they are not a parallel-HDF5/MPIO claim.
 | Restart-only (exact continuation state) | compact `/restart_diagnostics` audit metadata plus full `SimulationState` hot/cold lanes, `StateMetadata`, hydro patch geometry lanes (`CellSoa::patch_index`, gas-cell mirror lanes, authoritative `/state/gas_cell_identity` records, gas-cell velocity/thermodynamic lanes, `PatchSoa` descriptors and ownership), module sidecars + schema versions, `IntegratorState`, scheduler persistent state (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`), distributed TreePM restart state (`decomposition_epoch`, owning-rank table, PM slab layout, cadence/long-range metadata, restart policy), payload integrity hashes. `ParticleSoa::time_bin` and `CellSoa::time_bin` are retained only as derived mirrors/diagnostics; exact continuation imports scheduler state, rejects stale mirror conflicts, and rebuilds mirrors from scheduler authority. For gas cells with a local parent, the cell mirror is validated/rebuilt against the parent gas particle's scheduler entry; parentless cells retain their cell-local mirror until a future cell scheduler authority is introduced. H1 Cartesian CFL widths are derived from persisted cell centers/config and are not serialized as scratch caches. |
 
 Additive softening sidecar persistence:
-- Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/HasGravitySofteningOverride` (`uint8`, optional) are diagnostics/interchange mirrors.
+- Snapshot `/PartTypeN/GravitySofteningComoving` (`float64`, optional; per-particle, comoving units) and `/PartTypeN/GravitySofteningOverrideMask` (`uint8`, optional) are diagnostics/interchange mirrors.
 - Restart `/state/particle_sidecar/gravity_softening_comoving` (`float64`, optional; per-particle, comoving units) and `/state/particle_sidecar/has_gravity_softening_override` (`uint8`, optional) are exact-continuation lanes. The mask is the authority for per-particle override truth; a value lane without a mask is a materialized default/diagnostic mirror and does not create overrides.
 
 Snapshot and restart intentionally remain separate contracts: snapshot is analysis/interchange oriented;
@@ -156,7 +170,7 @@ restart is execution-resume oriented.
 
 ## Stage 2 timestep-authority schema note (2026-05-11)
 
-Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; v19 introduced authoritative gas-cell scheduling, v20 added checkpoint-authoritative gravity force caches, and the active schema is now `cosmosim_restart_v22` with ordered code-time output events. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
+Historical Stage 2 scheduler-authority documentation did not change snapshot/restart/provenance schemas. H2.4 historical material referenced `cosmosim_restart_v17`; v19 introduced authoritative gas-cell scheduling, v20 added checkpoint-authoritative gravity force caches, and the active schema is now `cosmosim_restart_v23` with ordered code-time output events. The compatibility behavior is explicit: restart payloads retain `ParticleSoa::time_bin` and `CellSoa::time_bin` as mirrors for corruption detection, reject stale mirror conflicts against scheduler truth, and rebuild valid parent-backed mirrors from scheduler state on import. Gas-cell parent lineage is optional metadata; parentless cells keep cell-local hydro velocity and timestep mirror lanes without particle velocity access.
 
 ## H1 Hydro Restart Geometry Note
 
@@ -287,12 +301,12 @@ When changing snapshot/restart/provenance fields:
 
 ## Compatibility notes (2026-04-20)
 
-- Historical snapshot schema v4 was intentionally introduced as `gadget_arepo_v4` (`schema_version = 4`); current snapshot identity is v5
-  to add optional per-particle softening sidecar dataset (`GravitySofteningComoving`) per particle group.
+- Historical snapshot schema v4 was introduced as `gadget_arepo_v4`; v5 added optional per-particle softening sidecars.
+  The active science-output schema is now `chui_science_snapshot_v6` (`schema_version = 6`), which separates CHUÍ-native identity from explicit AREPO/GADGET export semantics and supports logical multifile snapshot sets.
 - No external `/PartType*` dataset names were changed.
-- Restart schema version/name are now `cosmosim_restart_v22`, version `22`. It retains the v20 force cache and adds restart-authoritative code-time output cadence with an explicit v20 compatibility default of disabled.
+- Restart schema version/name are now `cosmosim_restart_v23`, version `23`. It retains the v20 force cache and adds restart-authoritative code-time output cadence with an explicit v20 compatibility default of disabled.
 - Restart contract enforcement was tightened: missing continuation-critical metadata, a missing or wrong root file kind, or missing output-cadence state now fails fast with explicit path-aware errors instead of producing weak checkpoints.
-- Restart schema is `cosmosim_restart_v22`; distributed TreePM state, the restart-authoritative gravity force cache, and ordered output-event state are persisted under restart-only data and covered by restart integrity hashing.
+- Restart schema is `cosmosim_restart_v23`; distributed TreePM state, the restart-authoritative gravity force cache, and ordered output-event state are persisted under restart-only data and covered by restart integrity hashing.
 - The reader accepts the documented legacy `cosmosim_restart_v14` particle-bound import path
   by materializing `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with
@@ -321,7 +335,7 @@ PatchSoa now persists restart-authoritative AMR patch geometry lanes: `parent_pa
 
 ## AMR temporal restart state (v18)
 
-`cosmosim_restart_v19` introduced `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. The current `cosmosim_restart_v22` retains it and the v20 `/gravity_force_cache`, then adds ordered code-time output events. None are part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.
+`cosmosim_restart_v19` introduced `/state/amr_temporal_boundary_history` for active local AMR coarse temporal intervals. The current `cosmosim_restart_v23` retains it and the v20 `/gravity_force_cache`, then adds ordered code-time output events. None are part of analysis snapshots. v17 pending flux-register restart state remains supported as a legacy read path.
 
 
 ## Initial-condition import report counters
@@ -341,8 +355,8 @@ schema. Its Campaign B distributed counters distinguish:
   exchange, byte, staging, imbalance, `distributed_id_audit_round_count`, and
   final owner-local state counters.
 
-For a successful version-1 routing batch,
-`routing_mpi_collective_call_count == 30 * routing_batch_count` on every MPI
+For a successful routing-protocol-v2 batch,
+`routing_mpi_collective_call_count == 23 * routing_batch_count` on every MPI
 rank. The successful non-routing protocol is also exact:
 
 ```text

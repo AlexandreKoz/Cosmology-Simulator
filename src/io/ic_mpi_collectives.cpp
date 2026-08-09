@@ -1,5 +1,7 @@
 #include "io/internal/ic_mpi_collectives.hpp"
 
+#include <cstdio>
+#include <exception>
 #include <limits>
 
 namespace cosmosim::io::mpi_collective_internal {
@@ -23,6 +25,38 @@ void saturatingIncrement(std::uint64_t& value) noexcept {
   if (value < std::numeric_limits<std::uint64_t>::max()) {
     ++value;
   }
+}
+
+[[noreturn]] void abortForMpiFailure(
+    MPI_Comm communicator,
+    int status,
+    const char* operation) noexcept {
+  char error_string[MPI_MAX_ERROR_STRING]{};
+  int error_length = 0;
+  const int describe_status =
+      MPI_Error_string(status, error_string, &error_length);
+  if (describe_status == MPI_SUCCESS && error_length > 0) {
+    std::fprintf(
+        stderr, "CosmoSim fatal MPI I/O error in %s: %.*s (status=%d)\n",
+        operation, error_length, error_string, status);
+  } else {
+    std::fprintf(
+        stderr, "CosmoSim fatal MPI I/O error in %s (status=%d)\n",
+        operation, status);
+  }
+  std::fflush(stderr);
+  MPI_Abort(communicator, status);
+  std::terminate();
+}
+
+int requireMpiSuccess(
+    MPI_Comm communicator,
+    int status,
+    const char* operation) noexcept {
+  if (status != MPI_SUCCESS) {
+    abortForMpiFailure(communicator, status, operation);
+  }
+  return status;
 }
 
 void recordCall(CollectiveKind kind) noexcept {
@@ -57,6 +91,11 @@ void recordCall(CollectiveKind kind) noexcept {
 
 }  // namespace
 
+void configureMpiErrorsReturn(MPI_Comm communicator) noexcept {
+  const int status = MPI_Comm_set_errhandler(communicator, MPI_ERRORS_RETURN);
+  requireMpiSuccess(communicator, status, "MPI_Comm_set_errhandler");
+}
+
 MpiCollectiveCounterScope::MpiCollectiveCounterScope(
     MpiCollectiveCallCounts& counts) noexcept
     : m_previous(g_counts) {
@@ -87,8 +126,11 @@ int mpiAllreduce(
     MPI_Op operation,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kAllreduce);
-  return MPI_Allreduce(
-      send_buffer, receive_buffer, count, datatype, operation, communicator);
+  return requireMpiSuccess(
+      communicator,
+      MPI_Allreduce(
+          send_buffer, receive_buffer, count, datatype, operation, communicator),
+      "MPI_Allreduce");
 }
 
 int mpiBcast(
@@ -98,7 +140,9 @@ int mpiBcast(
     int root,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kBcast);
-  return MPI_Bcast(buffer, count, datatype, root, communicator);
+  return requireMpiSuccess(
+      communicator, MPI_Bcast(buffer, count, datatype, root, communicator),
+      "MPI_Bcast");
 }
 
 int mpiGather(
@@ -111,9 +155,12 @@ int mpiGather(
     int root,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kGather);
-  return MPI_Gather(
-      send_buffer, send_count, send_datatype, receive_buffer, receive_count,
-      receive_datatype, root, communicator);
+  return requireMpiSuccess(
+      communicator,
+      MPI_Gather(
+          send_buffer, send_count, send_datatype, receive_buffer, receive_count,
+          receive_datatype, root, communicator),
+      "MPI_Gather");
 }
 
 int mpiGatherv(
@@ -127,9 +174,12 @@ int mpiGatherv(
     int root,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kGatherv);
-  return MPI_Gatherv(
-      send_buffer, send_count, send_datatype, receive_buffer, receive_counts,
-      displacements, receive_datatype, root, communicator);
+  return requireMpiSuccess(
+      communicator,
+      MPI_Gatherv(
+          send_buffer, send_count, send_datatype, receive_buffer, receive_counts,
+          displacements, receive_datatype, root, communicator),
+      "MPI_Gatherv");
 }
 
 int mpiAlltoall(
@@ -141,9 +191,12 @@ int mpiAlltoall(
     MPI_Datatype receive_datatype,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kAlltoall);
-  return MPI_Alltoall(
-      send_buffer, send_count, send_datatype, receive_buffer, receive_count,
-      receive_datatype, communicator);
+  return requireMpiSuccess(
+      communicator,
+      MPI_Alltoall(
+          send_buffer, send_count, send_datatype, receive_buffer, receive_count,
+          receive_datatype, communicator),
+      "MPI_Alltoall");
 }
 
 int mpiAlltoallv(
@@ -157,10 +210,13 @@ int mpiAlltoallv(
     MPI_Datatype receive_datatype,
     MPI_Comm communicator) noexcept {
   recordCall(CollectiveKind::kAlltoallv);
-  return MPI_Alltoallv(
-      send_buffer, send_counts, send_displacements, send_datatype,
-      receive_buffer, receive_counts, receive_displacements,
-      receive_datatype, communicator);
+  return requireMpiSuccess(
+      communicator,
+      MPI_Alltoallv(
+          send_buffer, send_counts, send_displacements, send_datatype,
+          receive_buffer, receive_counts, receive_displacements,
+          receive_datatype, communicator),
+      "MPI_Alltoallv");
 }
 
 #endif

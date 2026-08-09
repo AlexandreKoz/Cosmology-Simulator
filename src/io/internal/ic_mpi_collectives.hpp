@@ -12,6 +12,8 @@ namespace cosmosim::io::mpi_collective_internal {
 
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
 
+void configureMpiErrorsReturn(MPI_Comm communicator) noexcept;
+
 struct MpiCollectiveCallCounts {
   std::uint64_t total = 0U;
   std::uint64_t routing_total = 0U;

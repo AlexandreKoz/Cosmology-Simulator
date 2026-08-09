@@ -72,6 +72,7 @@ using failure_protocol_internal::runCollectivePhase;
 using failure_protocol_internal::runCollectivePhaseVoid;
 using mpi_collective_internal::MpiCollectiveCallCounts;
 using mpi_collective_internal::MpiCollectiveCounterScope;
+using mpi_collective_internal::configureMpiErrorsReturn;
 using mpi_collective_internal::RoutingMpiCollectiveScope;
 using mpi_collective_internal::mpiAllreduce;
 using mpi_collective_internal::mpiGather;
@@ -438,9 +439,9 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
                   dialect, species_policy, config,
                   options, has_authoritative_manifest);
               checkedCounterAdd(
-                  collection.counters.metadata_bytes_read,
-                  source.counters.metadata_bytes_read,
-                  "metadata_bytes_read");
+                  collection.counters.logical_metadata_bytes_read,
+                  source.counters.logical_metadata_bytes_read,
+                  "logical_metadata_bytes_read");
               checkedCounterAdd(
                   collection.counters.hash_bytes_read,
                   source.counters.hash_bytes_read, "hash_bytes_read");
@@ -453,7 +454,7 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
             }
             collection.counters.files_assigned = collection.sources.size();
             collection.counters.bytes_read =
-                collection.counters.metadata_bytes_read +
+                collection.counters.logical_metadata_bytes_read +
                 collection.counters.hash_bytes_read;
             return collection;
           });
@@ -708,11 +709,20 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
 #if !COSMOSIM_ENABLE_HDF5
   static_cast<void>(ic_path);static_cast<void>(config);static_cast<void>(mpi_context);static_cast<void>(options);throw std::runtime_error("COSMOSIM_ENABLE_HDF5=OFF: distributed IC reader unavailable");
 #elif !COSMOSIM_ENABLE_MPI
-  if(mpi_context.worldSize()!=1)throw std::runtime_error("distributed IC reader requires an MPI-enabled build for world_size > 1");return readGadgetArepoHdf5Ic(ic_path,config,options);
+  if (mpi_context.worldSize() != 1) {
+    throw std::runtime_error(
+        "distributed IC reader requires an MPI-enabled build for world_size > 1");
+  }
+  return readGadgetArepoHdf5Ic(ic_path, config, options);
 #else
   if (!mpi_context.isEnabled() || mpi_context.worldSize() == 1) {
     return readGadgetArepoHdf5Ic(ic_path, config, options);
   }
+  // Standard MPI cannot guarantee communicator recovery after a collective
+  // failure. Request return-status reporting so the I/O collective wrappers can
+  // emit a local diagnostic and abort immediately instead of attempting a later
+  // consensus collective on a compromised communicator.
+  configureMpiErrorsReturn(MPI_COMM_WORLD);
   std::uint64_t collective_phase_count = 0U;
   CollectivePhaseCounterScope collective_counter_scope(collective_phase_count);
   MpiCollectiveCallCounts mpi_collective_counts;
@@ -911,6 +921,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                   batch_count, reader_rank);
             });
 
+        std::uint64_t serialized_capacity = 0U;
         std::vector<std::vector<std::uint8_t>> per_rank =
             runCollectivePhase<std::vector<std::vector<std::uint8_t>>>(
                 mpi_context, "IC batched owner calculation and serialization",
@@ -931,61 +942,47 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                         records.size(), "records_routed");
                     mutateIcTestRoute(mpi_context, buckets);
                   }
+                  serialized_capacity = nestedByteCapacity(buckets);
+                  std::uint64_t serialized_size = 0U;
+                  for (const auto& bucket : buckets) {
+                    checkedCounterAdd(
+                        serialized_size, bucket.size(),
+                        "serialized payload size");
+                  }
+                  checkedCounterAdd(
+                      result.report.counters.bytes_serialized, serialized_size,
+                      "bytes_serialized");
+                  // Keep the legacy test fault name, but make it part of this
+                  // already-synchronized phase instead of paying for a
+                  // dedicated global consensus boundary.
+                  injectIcTestFault(mpi_context, "serialization_accounting");
+                  injectIcTestFault(mpi_context, "send_layout");
                   return buckets;
                 });
-        const std::uint64_t serialized_capacity =
-            runCollectivePhase<std::uint64_t>(
-                mpi_context, "IC serialized-capacity accounting", [&]() {
-                  return nestedByteCapacity(per_rank);
-                });
-        runCollectivePhaseVoid(
-            mpi_context, "IC serialization accounting", [&]() {
-              injectIcTestFault(mpi_context, "serialization_accounting");
-              std::uint64_t serialized_size = 0U;
-              for (const auto& bucket : per_rank) {
-                checkedCounterAdd(
-                    serialized_size, bucket.size(),
-                    "serialized payload size");
-              }
-              checkedCounterAdd(
-                  result.report.counters.bytes_serialized, serialized_size,
-                  "bytes_serialized");
-            });
-
-        runCollectivePhaseVoid(
-            mpi_context, "IC send-layout fault-injection boundary", [&]() {
-              injectIcTestFault(mpi_context, "send_layout");
-            });
         std::uint64_t sent = 0U;
         std::uint64_t received_bytes = 0U;
         std::uint64_t exchange_peak = 0U;
         const std::vector<std::uint8_t> inbound_bytes = alltoallBytes(
             mpi_context, per_rank, sent, received_bytes, &exchange_peak);
-        runCollectivePhaseVoid(
-            mpi_context, "IC post-exchange accounting", [&]() {
-              injectIcTestFault(mpi_context, "post_exchange_accounting");
-              if (mpi_context.isRoot()) {
-                checkedCounterAdd(
-                    result.report.counters.main_exchange_count, 1U,
-                    "main_exchange_count");
-              }
-              checkedCounterAdd(
-                  result.report.counters.bytes_sent, sent, "bytes_sent");
-              checkedCounterAdd(
-                  result.report.counters.bytes_received, received_bytes,
-                  "bytes_received");
-            });
-
         std::vector<ParticleRecord> inbound =
             runCollectivePhase<std::vector<ParticleRecord>>(
-                mpi_context, "IC wire validation and deserialization", [&]() {
-                  injectIcTestFault(mpi_context, "payload_validation");
-                  if (inbound_bytes.size() % internal::kIcWireRecordBytes != 0U) {
-                    throw std::runtime_error(
-                        "distributed IC wire payload has invalid length");
+                mpi_context, "IC exchange accounting, wire validation and deserialization", [&]() {
+                  injectIcTestFault(mpi_context, "post_exchange_accounting");
+                  if (mpi_context.isRoot()) {
+                    checkedCounterAdd(
+                        result.report.counters.main_exchange_count, 1U,
+                        "main_exchange_count");
                   }
+                  checkedCounterAdd(
+                      result.report.counters.bytes_sent, sent, "bytes_sent");
+                  checkedCounterAdd(
+                      result.report.counters.bytes_received, received_bytes,
+                      "bytes_received");
+                  injectIcTestFault(mpi_context, "payload_validation");
+                  const std::size_t wire_record_count =
+                      internal::validateIcWireBuffer(inbound_bytes);
                   std::vector<ParticleRecord> decoded;
-                  decoded.reserve(inbound_bytes.size() / internal::kIcWireRecordBytes);
+                  decoded.reserve(wire_record_count);
                   std::size_t offset = 0U;
                   while (offset < inbound_bytes.size()) {
                     injectIcTestFault(mpi_context, "deserialization");
@@ -1034,44 +1031,40 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                   static_cast<std::uint32_t>(mpi_context.worldRank()));
             });
 
-        const std::uint64_t routing_peak =
-            runCollectivePhase<std::uint64_t>(
-                mpi_context, "IC routing staging accounting", [&]() {
-                  std::uint64_t peak = 0U;
-                  checkedCounterAdd(
-                      peak, vectorCapacityBytes(records),
-                      "routing staging bytes");
-                  checkedCounterAdd(
-                      peak, serialized_capacity, "routing staging bytes");
-                  checkedCounterAdd(
-                      peak, exchange_peak, "routing staging bytes");
-                  checkedCounterAdd(
-                      peak, inbound_bytes.capacity(),
-                      "routing staging bytes");
-                  checkedCounterAdd(
-                      peak, vectorCapacityBytes(inbound),
-                      "routing staging bytes");
-                  checkedCounterAdd(
-                      peak, reconciliation_peak, "routing staging bytes");
-                  return peak;
-                });
+        // All operands are capacities of successfully allocated local buffers,
+        // so this diagnostic arithmetic cannot represent a realizable >2^64
+        // byte process. Keep it local instead of adding another global
+        // synchronization solely for bookkeeping.
+        const auto saturatingAddBytes = [](std::uint64_t left,
+                                           std::uint64_t right) noexcept {
+          return right > std::numeric_limits<std::uint64_t>::max() - left
+              ? std::numeric_limits<std::uint64_t>::max()
+              : left + right;
+        };
+        std::uint64_t routing_peak = 0U;
+        routing_peak = saturatingAddBytes(
+            routing_peak, vectorCapacityBytes(records));
+        routing_peak = saturatingAddBytes(routing_peak, serialized_capacity);
+        routing_peak = saturatingAddBytes(routing_peak, exchange_peak);
+        routing_peak = saturatingAddBytes(
+            routing_peak, static_cast<std::uint64_t>(inbound_bytes.capacity()));
+        routing_peak = saturatingAddBytes(
+            routing_peak, vectorCapacityBytes(inbound));
+        routing_peak = saturatingAddBytes(routing_peak, reconciliation_peak);
         result.report.counters.peak_staging_bytes = std::max(
             result.report.counters.peak_staging_bytes, routing_peak);
-        runCollectivePhaseVoid(
-            mpi_context, "IC routing collective accounting", [&]() {
-              const std::uint64_t batch_collective_end =
-                  collective_phase_count;
-              if (batch_collective_end < batch_collective_begin) {
-                throw std::overflow_error(
-                    "IC routing collective counter wrapped");
-              }
-              if (mpi_context.isRoot()) {
-                checkedCounterAdd(
-                    result.report.counters.routing_collective_phase_count,
-                    batch_collective_end - batch_collective_begin,
-                    "routing_collective_phase_count");
-              }
-            });
+
+        const std::uint64_t batch_collective_end = collective_phase_count;
+        if (mpi_context.isRoot()) {
+          const std::uint64_t phase_delta =
+              batch_collective_end >= batch_collective_begin
+              ? batch_collective_end - batch_collective_begin
+              : 0U;
+          result.report.counters.routing_collective_phase_count =
+              saturatingAddBytes(
+                  result.report.counters.routing_collective_phase_count,
+                  phase_delta);
+        }
       }
     }
     runCollectivePhaseVoid(
@@ -1122,7 +1115,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
       result.report.counters.peak_staging_bytes,
       exactDistributedIdAudit(
           mpi_context, result.state.particle_sidecar.particle_id,
-          config.mode.ic_staging_particle_count,
+          config.mode.ic_staging_particle_count, options.scratch_directory,
           result.report.counters));
   validateDistributedTotals(
       mpi_context, result.state, inspection.manifest, local_source_mass);
@@ -1136,9 +1129,9 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
       result.state.black_holes.size();
   result.report.counters.final_local_tracer_count = result.state.tracers.size();
   result.report.counters.bytes_read =
-      result.report.counters.metadata_bytes_read +
+      result.report.counters.logical_metadata_bytes_read +
       result.report.counters.hash_bytes_read +
-      result.report.counters.payload_bytes_read;
+      result.report.counters.logical_payload_bytes_read;
   const std::uint64_t local_routed_records =
       result.report.counters.records_routed;
   std::uint64_t global_routed_records = 0U;

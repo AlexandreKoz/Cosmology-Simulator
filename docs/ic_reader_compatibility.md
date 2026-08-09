@@ -228,7 +228,7 @@ The distributed reader assigns file `i` to reader rank `i % world_size`; every
 batch for that file remains on that rank, so files remain distributed without
 rotating one file through every reader. One payload HDF5 session is opened per
 nonempty source file. Including inspection, session-start validation, and
-session-completion validation, the tested full-file SHA-256 ceiling is three
+session-completion validation, the tested full-file SHA-256 ceiling is two
 passes per source file and is independent of chunk or routing-batch count.
 Several deterministic chunks are accumulated into bounded per-peer buffers up
 to `mode.ic_staging_particle_count`, then one main exchange is performed per
@@ -248,8 +248,8 @@ The distributed report distinguishes logical failure-consensus phases from
 actual MPI calls. Production IC collectives are routed through one instrumented
 wrapper layer and reported as total, routing/non-routing, and per-operation
 (`Allreduce`, `Bcast`, `Gather`, `Gatherv`, `Alltoall`, `Alltoallv`) counts. A
-successful routing batch has a protocol-derived cost of exactly 30 actual MPI
-collective calls in version 1. The non-routing identity is
+successful routing batch has a protocol-derived cost of exactly 23 actual MPI
+collective calls in version 2. The non-routing identity is
 `40 + runtime_cosmology_vote + source_file_count +
 10 * distributed_id_audit_round_count + mpi_bcast_call_count`, where the Bcast
 term remains explicit for chunked metadata. Runtime validation of both formulas

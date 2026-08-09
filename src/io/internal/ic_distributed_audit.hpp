@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,7 @@ void validateChunkCoverage(
     const parallel::MpiContext& mpi_context,
     std::span<const std::uint64_t> local_ids,
     std::size_t batch_count,
+    const std::filesystem::path& scratch_root,
     IcImportCounters& counters);
 
 void validateDistributedTotals(

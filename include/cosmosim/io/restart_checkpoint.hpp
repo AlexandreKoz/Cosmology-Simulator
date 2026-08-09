@@ -15,10 +15,11 @@
 namespace cosmosim::io {
 
 struct RestartSchema {
+  // v23 adds canonical SHA-256 payload integrity while retaining the v22 legacy hash
+  // only for backward compatibility and migration diagnostics.
   // v22 adds conserved gas metal mass and immutable star-birth identity.
-  // v21 code-time output cadence and all older documented compatibility paths are retained.
-  std::string name = "cosmosim_restart_v22";
-  std::uint32_t version = 22;
+  std::string name = "cosmosim_restart_v23";
+  std::uint32_t version = 23;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -26,7 +27,7 @@ struct RestartSchema {
 [[nodiscard]] const std::vector<std::string_view>& exactRestartCompletenessChecklist();
 
 struct RestartWritePolicy {
-  bool enable_fsync_finalize = false;
+  bool enable_fsync_finalize = true;
   std::string temporary_suffix = ".part";
 };
 
@@ -150,8 +151,12 @@ struct RestartReadResult {
   OutputCadencePersistentState output_cadence_state;
   StochasticPersistentState stochastic_state;
   RestartDiagnosticsSummary diagnostics;
+  // Legacy v14-v22 FNV-1a identity retained for compatibility diagnostics.
   std::uint64_t payload_hash = 0;
   std::string payload_hash_hex;
+  // v23+: canonical, endian-independent integrity digest.
+  std::string payload_integrity_algorithm;
+  std::string payload_integrity_sha256_hex;
 };
 
 [[nodiscard]] std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload);

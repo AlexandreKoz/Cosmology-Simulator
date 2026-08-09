@@ -105,9 +105,9 @@ void validateCrossFileSchema(const IcManifest& manifest);
     const IcImportOptions& options,
     IcImportCounters& counters);
 void validateRecordScientificState(
-    const ParticleRecord& record,
+    ParticleRecord& record,
     IcSpeciesPolicy policy,
-    std::uint64_t source_record_index);
+    double box_size);
 void appendRecords(
     core::SimulationState& state,
     const std::vector<ParticleRecord>& records,

@@ -19,9 +19,13 @@
 #include <utility>
 #include <unordered_set>
 #include <span>
+#include <type_traits>
+
+#include "core/internal/sha256.hpp"
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/io_contract.hpp"
+#include "io/internal/transactional_file.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <fcntl.h>
@@ -43,6 +47,7 @@ constexpr std::uint32_t k_restart_schema_v19 = 19;
 constexpr std::uint32_t k_restart_schema_v20 = 20;
 constexpr std::uint32_t k_restart_schema_v21 = 21;
 constexpr std::uint32_t k_restart_schema_v22 = 22;
+constexpr std::uint32_t k_restart_schema_v23 = 23;
 constexpr std::string_view k_restart_schema_name_v14 = "cosmosim_restart_v14";
 constexpr std::string_view k_restart_schema_name_v15 = "cosmosim_restart_v15";
 constexpr std::string_view k_restart_schema_name_v16 = "cosmosim_restart_v16";
@@ -51,6 +56,7 @@ constexpr std::string_view k_restart_schema_name_v18 = "cosmosim_restart_v18";
 constexpr std::string_view k_restart_schema_name_v19 = "cosmosim_restart_v19";
 constexpr std::string_view k_restart_schema_name_v20 = "cosmosim_restart_v20";
 constexpr std::string_view k_restart_schema_name_v21 = "cosmosim_restart_v21";
+constexpr std::string_view k_restart_schema_name_v22 = "cosmosim_restart_v22";
 constexpr std::string_view k_gas_identity_row_policy = "explicit_dense_local_cell_row";
 constexpr std::string_view k_gas_cell_scheduler_identity_key = "gas_cell_id";
 
@@ -71,6 +77,54 @@ constexpr std::string_view k_gas_cell_scheduler_identity_key = "gas_cell_id";
     hash *= k_prime;
   }
   return hash;
+}
+
+
+struct RestartIntegrityDigests {
+  std::uint64_t legacy_fnv1a = 0;
+  std::string sha256_hex;
+};
+
+[[nodiscard]] std::string sha256DigestHex(const std::array<std::uint8_t, 32>& digest) {
+  static constexpr char HEX[] = "0123456789abcdef";
+  std::string out(64U, '0');
+  for (std::size_t i = 0; i < digest.size(); ++i) {
+    out[i * 2U] = HEX[digest[i] >> 4U];
+    out[i * 2U + 1U] = HEX[digest[i] & 0x0fU];
+  }
+  return out;
+}
+
+template <typename T>
+void appendCanonicalSha256(core::internal::Sha256& hash, T value) {
+  using RawT = std::remove_cv_t<T>;
+  static_assert(std::is_arithmetic_v<RawT> || std::is_enum_v<RawT>);
+  if constexpr (std::is_floating_point_v<RawT>) {
+    if constexpr (sizeof(RawT) == sizeof(std::uint64_t)) {
+      appendCanonicalSha256(hash, std::bit_cast<std::uint64_t>(value));
+    } else if constexpr (sizeof(RawT) == sizeof(std::uint32_t)) {
+      appendCanonicalSha256(hash, std::bit_cast<std::uint32_t>(value));
+    }
+  } else if constexpr (std::is_enum_v<RawT>) {
+    using ValueT = std::underlying_type_t<RawT>;
+    using UnsignedT = std::make_unsigned_t<ValueT>;
+    UnsignedT bits = static_cast<UnsignedT>(value);
+    std::array<std::uint8_t, sizeof(UnsignedT)> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      bytes[i] = static_cast<std::uint8_t>(bits & static_cast<UnsignedT>(0xffU));
+      bits >>= 8U;
+    }
+    hash.update(bytes.data(), bytes.size());
+  } else {
+    using UnsignedT = std::make_unsigned_t<RawT>;
+    UnsignedT bits = static_cast<UnsignedT>(value);
+    std::array<std::uint8_t, sizeof(UnsignedT)> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      bytes[i] = static_cast<std::uint8_t>(bits & static_cast<UnsignedT>(0xffU));
+      bits >>= 8U;
+    }
+    hash.update(bytes.data(), bytes.size());
+  }
 }
 
 template <typename VectorLike>
@@ -685,6 +739,10 @@ void validateRestartCheckpointSchema(hid_t file, std::uint32_t schema_version) {
   requireHdf5Attribute(file, "/", "normalized_config_hash_hex");
   requireHdf5Attribute(file, "/", "payload_integrity_hash_hex");
   requireHdf5Attribute(file, "/", "payload_integrity_hash");
+  if (schema_version >= k_restart_schema_v23) {
+    requireHdf5Attribute(file, "/", "payload_integrity_algorithm");
+    requireHdf5Attribute(file, "/", "payload_integrity_sha256_hex");
+  }
   requireHdf5Dataset1d(file, "/normalized_config_text");
   requireHdf5Dataset1d(file, "/provenance_record");
 
@@ -974,31 +1032,6 @@ void writeStringDataset(hid_t group, std::string_view name, const std::string& v
     return H5Gopen2(parent, name.c_str(), H5P_DEFAULT);
   }
   return H5Gcreate2(parent, name.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-}
-
-void maybeFsync(const std::filesystem::path& file_path, bool enabled) {
-  if (!enabled) {
-    return;
-  }
-#if defined(_WIN32)
-  (void)file_path;
-  throw std::runtime_error("restart fsync finalize is not implemented on this platform");
-#else
-  const int fd = ::open(file_path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    throw std::runtime_error(
-        "failed to open restart temporary file for fsync: " + file_path.string() + ": " + std::strerror(errno));
-  }
-  if (::fsync(fd) != 0) {
-    const std::string message = std::strerror(errno);
-    ::close(fd);
-    throw std::runtime_error("failed to fsync restart temporary file: " + file_path.string() + ": " + message);
-  }
-  if (::close(fd) != 0) {
-    throw std::runtime_error(
-        "failed to close restart temporary file after fsync: " + file_path.string() + ": " + std::strerror(errno));
-  }
-#endif
 }
 
 void writeStarSidecarGroup(hid_t state_group, const core::StarParticleSidecar& stars) {
@@ -2382,6 +2415,7 @@ const RestartSchema& restartSchema() {
 
 bool isRestartSchemaCompatible(std::uint32_t file_schema_version) {
   return file_schema_version == restartSchema().version ||
+      file_schema_version == k_restart_schema_v22 ||
       file_schema_version == k_restart_schema_v21 ||
       file_schema_version == k_restart_schema_v20 ||
       file_schema_version == k_restart_schema_v19 ||
@@ -2416,7 +2450,7 @@ const std::vector<std::string_view>& exactRestartCompletenessChecklist() {
   return checklist;
 }
 
-std::uint64_t restartPayloadIntegrityHashImpl(
+RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     const RestartWritePayload& payload,
     bool include_gas_identity_records,
     bool include_pending_flux_registers,
@@ -2489,16 +2523,20 @@ std::uint64_t restartPayloadIntegrityHashImpl(
       payload.stochastic_state, *payload.integrator_state, "restart payload");
 
   std::uint64_t hash = k_offset_basis;
+  core::internal::Sha256 strong_hash;
+  strong_hash.update("cosmosim-restart-payload-v23");
 
-  const auto append_u64 = [&hash](std::uint64_t value) {
+  const auto append_u64 = [&hash, &strong_hash](std::uint64_t value) {
     const std::array<std::byte, sizeof(std::uint64_t)> bytes =
         std::bit_cast<std::array<std::byte, sizeof(std::uint64_t)>>(value);
     hash = fnv1aAppend(hash, bytes);
+    appendCanonicalSha256(strong_hash, value);
   };
 
-  const auto append_string = [&hash, &append_u64](const std::string& value) {
+  const auto append_string = [&hash, &strong_hash, &append_u64](const std::string& value) {
     append_u64(static_cast<std::uint64_t>(value.size()));
     hash = fnv1aAppend(hash, {reinterpret_cast<const std::byte*>(value.data()), value.size()});
+    strong_hash.update(reinterpret_cast<const std::uint8_t*>(value.data()), value.size());
   };
 
   append_string(payload.normalized_config_text);
@@ -2506,11 +2544,14 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   append_string(core::serializeProvenanceRecord(payload.provenance));
   append_string(payload.persistent_state.simulation_state->metadata.serialize());
 
-  const auto append_any_vec = [&hash, &append_u64](const auto& values) {
+  const auto append_any_vec = [&hash, &strong_hash, &append_u64](const auto& values) {
     const auto bytes = asBytesSpan(values);
     append_u64(static_cast<std::uint64_t>(values.size()));
     append_u64(static_cast<std::uint64_t>(bytes.size()));
     hash = fnv1aAppend(hash, bytes);
+    for (const auto value : values) {
+      appendCanonicalSha256(strong_hash, value);
+    }
   };
 
   const core::SimulationState& state = *payload.persistent_state.simulation_state;
@@ -2755,6 +2796,7 @@ std::uint64_t restartPayloadIntegrityHashImpl(
     }
     append_u64(static_cast<std::uint64_t>(block->payload.size()));
     hash = fnv1aAppend(hash, std::span<const std::byte>(block->payload.data(), block->payload.size()));
+    strong_hash.update(reinterpret_cast<const std::uint8_t*>(block->payload.data()), block->payload.size());
   }
 
   append_u64(payload.integrator_state->step_index);
@@ -2847,11 +2889,11 @@ std::uint64_t restartPayloadIntegrityHashImpl(
   }
   append_string(payload.distributed_gravity_state.serialize());
 
-  return hash;
+  return RestartIntegrityDigests{hash, sha256DigestHex(strong_hash.finish())};
 }
 
 std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityHashImpl(payload, true, true, true, true, true, true, true);
+  return restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true).legacy_fnv1a;
 }
 
 std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
@@ -2910,13 +2952,23 @@ void writeRestartCheckpointHdf5(
   validateGravityForceCacheForRestart(
       gravity_force_cache, *payload.persistent_state.simulation_state, "restart writer");
 
-  std::filesystem::create_directories(output_path.parent_path());
-  const std::filesystem::path temporary_path = output_path.string() + policy.temporary_suffix;
+  internal::validateTemporarySuffix(policy.temporary_suffix);
+  internal::TransactionalFileTarget transaction(
+      output_path,
+      policy.temporary_suffix,
+      policy.enable_fsync_finalize
+          ? internal::FileDurability::kDurablePublication
+          : internal::FileDurability::kAtomicVisibility);
 
-  Hdf5Handle file(H5Fcreate(temporary_path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
+  Hdf5Handle file(H5Fcreate(
+      transaction.temporaryPath().string().c_str(),
+      H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   if (!file.valid()) {
-    throw std::runtime_error("failed to create temporary restart file: " + temporary_path.string());
+    throw std::runtime_error("failed to create temporary restart file: " + transaction.temporaryPath().string());
   }
+
+  const RestartIntegrityDigests integrity =
+      restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true);
 
   const auto& shared_names = sharedIoContractNames();
   writeScalarStringAttribute(
@@ -2924,8 +2976,10 @@ void writeRestartCheckpointHdf5(
   writeScalarStringAttribute(file.get(), "restart_schema_name", restartSchema().name);
   writeScalarU32Attribute(file.get(), "restart_schema_version", restartSchema().version);
   writeScalarStringAttribute(file.get(), "normalized_config_hash_hex", payload.normalized_config_hash_hex);
-  writeScalarStringAttribute(file.get(), "payload_integrity_hash_hex", restartPayloadIntegrityHashHex(payload));
-  writeScalarU64Attribute(file.get(), "payload_integrity_hash", restartPayloadIntegrityHash(payload));
+  writeScalarStringAttribute(file.get(), "payload_integrity_hash_hex", hexU64(integrity.legacy_fnv1a));
+  writeScalarU64Attribute(file.get(), "payload_integrity_hash", integrity.legacy_fnv1a);
+  writeScalarStringAttribute(file.get(), "payload_integrity_algorithm", "sha256-canonical-le-v1");
+  writeScalarStringAttribute(file.get(), "payload_integrity_sha256_hex", integrity.sha256_hex);
   writeStringDataset(
       file.get(),
       std::string(shared_names.normalized_config_text_dataset),
@@ -3050,16 +3104,7 @@ void writeRestartCheckpointHdf5(
     throw std::runtime_error("failed to flush temporary restart file");
   }
   file = Hdf5Handle();
-
-  maybeFsync(temporary_path, policy.enable_fsync_finalize);
-
-  std::error_code rename_error;
-  std::filesystem::rename(temporary_path, output_path, rename_error);
-  if (rename_error) {
-    throw std::runtime_error(
-        "failed to atomically finalize restart checkpoint from '" + temporary_path.string() + "' to '" +
-        output_path.string() + "': " + rename_error.message());
-  }
+  transaction.publish();
 #endif
 }
 
@@ -3111,6 +3156,15 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   result.normalized_config_hash_hex = readScalarStringAttribute(file.get(), "normalized_config_hash_hex");
   result.payload_hash_hex = readScalarStringAttribute(file.get(), "payload_integrity_hash_hex");
   result.payload_hash = readScalarU64Attribute(file.get(), "payload_integrity_hash");
+  if (schema_version >= k_restart_schema_v23) {
+    result.payload_integrity_algorithm = readScalarStringAttribute(file.get(), "payload_integrity_algorithm");
+    result.payload_integrity_sha256_hex = readScalarStringAttribute(file.get(), "payload_integrity_sha256_hex");
+    if (result.payload_integrity_algorithm != "sha256-canonical-le-v1") {
+      throw std::runtime_error("unsupported restart payload integrity algorithm: " + result.payload_integrity_algorithm);
+    }
+  } else {
+    result.payload_integrity_algorithm = "fnv1a64-native-legacy";
+  }
 
   const auto& shared_names = sharedIoContractNames();
   result.normalized_config_text =
@@ -3269,8 +3323,8 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
   verify_payload.output_cadence_state = result.output_cadence_state;
   verify_payload.stochastic_state = result.stochastic_state;
 
-  const std::uint64_t computed_hash =
-      restartPayloadIntegrityHashImpl(
+  const RestartIntegrityDigests computed_integrity =
+      restartPayloadIntegrityDigestsImpl(
           verify_payload,
           schema_version >= k_restart_schema_v15,
           schema_version >= k_restart_schema_v17,
@@ -3279,8 +3333,13 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
           schema_version >= k_restart_schema_v20,
           schema_version >= k_restart_schema_v21,
           schema_version >= k_restart_schema_v22);
-  if (computed_hash != result.payload_hash || hexU64(computed_hash) != result.payload_hash_hex) {
-    throw std::runtime_error("restart payload integrity hash mismatch");
+  if (computed_integrity.legacy_fnv1a != result.payload_hash ||
+      hexU64(computed_integrity.legacy_fnv1a) != result.payload_hash_hex) {
+    throw std::runtime_error("restart legacy payload integrity hash mismatch");
+  }
+  if (schema_version >= k_restart_schema_v23 &&
+      computed_integrity.sha256_hex != result.payload_integrity_sha256_hex) {
+    throw std::runtime_error("restart canonical SHA-256 payload integrity mismatch");
   }
 
   return result;

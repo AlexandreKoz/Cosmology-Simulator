@@ -508,8 +508,8 @@ void validateRecordScientificState(
       std::max(counters.peak_staging_bytes, staging_bytes);
   checkedCounterAdd(counters.records_read, count, "records_read");
   checkedCounterAdd(counters.records_converted, count, "records_converted");
-  counters.bytes_read = counters.metadata_bytes_read +
-      counters.hash_bytes_read + counters.payload_bytes_read;
+  counters.bytes_read = counters.logical_metadata_bytes_read +
+      counters.hash_bytes_read + counters.logical_payload_bytes_read;
   return records;
 }
 

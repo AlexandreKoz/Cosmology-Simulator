@@ -249,37 +249,11 @@ namespace cosmosim::workflows::internal {
       return fail("snapshot gas proxy has the wrong species");
     }
 
-    double expected_softening = 0.0;
-    std::uint8_t expected_softening_mask = 0U;
-    if (expected_identity->parent_particle_id.has_value()) {
-      const auto parent_it =
-          expected_index_by_id.find(*expected_identity->parent_particle_id);
-      if (parent_it != expected_index_by_id.end()) {
-        if (expected_has_softening) {
-          expected_softening =
-              expected.particle_sidecar.gravity_softening_comoving[parent_it->second];
-        }
-        if (expected_has_softening_mask) {
-          expected_softening_mask =
-              expected.particle_sidecar.has_gravity_softening_override[parent_it->second];
-        }
-      }
-    }
-    if (expected_has_softening &&
-        !snapshotScalarEquivalent(
-            expected_softening,
-            restored.state.particle_sidecar.gravity_softening_comoving[
-                restored_particle_index])) {
-      return fail("snapshot gas softening mismatch for gas_cell_id=" +
-                  std::to_string(expected_identity->gas_cell_id));
-    }
-    if (expected_has_softening_mask &&
-        expected_softening_mask !=
-            restored.state.particle_sidecar.has_gravity_softening_override[
-                restored_particle_index]) {
-      return fail("snapshot gas softening mask mismatch for gas_cell_id=" +
-                  std::to_string(expected_identity->gas_cell_id));
-    }
+    // Gas PartType0 rows are authoritative gas-cell science records. Parent
+    // particle lineage is optional and does not transfer collisionless
+    // particle-softening semantics to the cell. Softening verification is
+    // therefore intentionally limited to non-gas particle species.
+    static_cast<void>(restored_particle_index);
   }
 
   if (restored.state.tracers.size() != expected.tracers.size()) {

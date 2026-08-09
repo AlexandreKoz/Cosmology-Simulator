@@ -1,4 +1,5 @@
 #include "cosmosim/workflows/output_restart_runtime.hpp"
+#include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 
 #include <algorithm>
@@ -155,6 +156,52 @@ namespace {
       lhs.cell_accel_z_comoving == rhs.cell_accel_z_comoving;
 }
 
+
+[[nodiscard]] std::array<std::uint64_t, 6> snapshotLocalPartCounts(
+    const core::SimulationState& state) {
+  std::array<std::uint64_t, 6> counts{};
+  counts[0] = static_cast<std::uint64_t>(state.cells.size());
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    const auto species = static_cast<core::ParticleSpecies>(state.particle_sidecar.species_tag[i]);
+    switch (species) {
+      case core::ParticleSpecies::kGas:
+        break;  // PartType0 authority is CellSoa, not a duplicate gas-particle row.
+      case core::ParticleSpecies::kDarkMatter: ++counts[1]; break;
+      case core::ParticleSpecies::kTracer: ++counts[3]; break;
+      case core::ParticleSpecies::kStar: ++counts[4]; break;
+      case core::ParticleSpecies::kBlackHole: ++counts[5]; break;
+      default: throw std::runtime_error("snapshot output encountered unsupported particle species");
+    }
+  }
+  return counts;
+}
+
+[[nodiscard]] std::string formatThreeDigitIndex(std::uint64_t index) {
+  std::ostringstream out;
+  out << std::setw(3) << std::setfill('0') << index;
+  return out.str();
+}
+
+[[nodiscard]] std::string snapshotGenerationId(
+    const core::FrozenConfig& frozen_config,
+    std::uint64_t step_index) {
+  std::string hash = frozen_config.provenance.config_hash_hex;
+  if (hash.size() > 12U) hash.resize(12U);
+  return "snap_" + formatThreeDigitIndex(step_index) + "_" + hash;
+}
+
+[[nodiscard]] std::string snapshotMemberFilename(
+    std::string_view stem,
+    std::uint64_t step_index,
+    int world_size,
+    int world_rank) {
+  std::ostringstream out;
+  out << stem << '_' << formatThreeDigitIndex(step_index);
+  if (world_size > 1) out << '.' << world_rank;
+  out << ".hdf5";
+  return out.str();
+}
+
 [[nodiscard]] std::string formatIndexedRankedFileStem(
     std::string_view stem,
     std::uint64_t index,
@@ -289,6 +336,7 @@ bool maybeWriteOutputs(
     const core::HierarchicalTimeBinScheduler& scheduler,
     const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const workflows::GravityRestartStateProvider& gravity_state,
+    const workflows::RuntimeServices& services,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
     bool write_outputs_enabled,
@@ -325,46 +373,107 @@ bool maybeWriteOutputs(
 
   bool output_flushed = false;
   if (snapshot_due) {
-    core::ProvenanceRecord snapshot_provenance =
-        makeGravityAwareProvenanceRecord(frozen_config, config);
-    applyExecutionTopologyToProvenance(&snapshot_provenance, gravity_state.runtimeTopology());
-    snapshot_provenance.gravity_treepm_decomposition_epoch =
-        gravity_state.decompositionEpoch();
-    io::SnapshotWritePayload snapshot_payload;
-    snapshot_payload.state = &state;
-    snapshot_payload.config = &config;
-    snapshot_payload.normalized_config_text = frozen_config.normalized_text;
-    snapshot_payload.provenance = snapshot_provenance;
-    report.snapshot_path = report.run_directory / formatIndexedRankedFileStem(config.output.output_stem, integrator_state.step_index, gravity_state.runtimeTopology().world_size, gravity_state.runtimeTopology().world_rank);
-    io::writeGadgetArepoSnapshotHdf5(report.snapshot_path, snapshot_payload);
-    report.snapshot_roundtrip_executed = true;
-    const io::SnapshotReadResult snapshot_read = io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config);
-    const SnapshotRoundtripVerification snapshot_verification =
-        verifySnapshotRoundtrip(
-        snapshot_read,
-        state,
-        config,
-        frozen_config.normalized_text,
-        snapshot_provenance);
-    report.snapshot_roundtrip_ok = snapshot_verification.ok;
+    const auto topology = gravity_state.runtimeTopology();
+    const std::array<std::uint64_t, 6> local_counts = snapshotLocalPartCounts(state);
+    std::array<std::uint64_t, 6> global_counts{};
+    for (std::size_t i = 0; i < global_counts.size(); ++i) {
+      global_counts[i] = services.mpi_context.allreduceSumUint64(local_counts[i]);
+    }
+    const std::filesystem::path shared_run_directory =
+        report.shared_run_directory.empty() ? report.run_directory : report.shared_run_directory;
+    const std::filesystem::path snapshot_directory =
+        shared_run_directory / ("snapdir_" + formatThreeDigitIndex(integrator_state.step_index));
+    report.snapshot_set_path = snapshot_directory;
+    report.snapshot_path = snapshot_directory / snapshotMemberFilename(
+        config.output.output_stem, integrator_state.step_index,
+        topology.world_size, topology.world_rank);
+    const std::string generation_id =
+        snapshotGenerationId(frozen_config, integrator_state.step_index);
+
+    std::exception_ptr local_snapshot_failure;
+    std::string local_verification_detail;
+    try {
+      core::ProvenanceRecord snapshot_provenance =
+          makeGravityAwareProvenanceRecord(frozen_config, config);
+      applyExecutionTopologyToProvenance(&snapshot_provenance, topology);
+      snapshot_provenance.gravity_treepm_decomposition_epoch =
+          gravity_state.decompositionEpoch();
+      io::SnapshotWritePayload snapshot_payload;
+      snapshot_payload.state = &state;
+      snapshot_payload.config = &config;
+      snapshot_payload.normalized_config_text = frozen_config.normalized_text;
+      snapshot_payload.provenance = snapshot_provenance;
+      snapshot_payload.set_member.member_index =
+          core::checkedIntegralNarrow<std::uint32_t>(topology.world_rank, "snapshot member index");
+      snapshot_payload.set_member.num_files_per_snapshot =
+          core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot member count");
+      snapshot_payload.set_member.global_part_count = global_counts;
+      snapshot_payload.set_member.has_global_part_count = true;
+      snapshot_payload.set_member.generation_id = generation_id;
+
+      io::SnapshotIoPolicy snapshot_policy;
+      snapshot_policy.dialect = config.units.coordinate_frame == core::CoordinateFrame::kComoving
+          ? io::SnapshotDialect::kArepoFormat3
+          : io::SnapshotDialect::kChuiNative;
+      snapshot_policy.durable_publication = false;
+      io::writeScienceSnapshotHdf5(report.snapshot_path, snapshot_payload, snapshot_policy);
+      report.snapshot_roundtrip_executed = true;
+
+      io::SnapshotReadOptions local_read_options;
+      local_read_options.require_complete_chui_set = false;
+      const io::SnapshotReadResult snapshot_read =
+          io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config, local_read_options);
+      const SnapshotRoundtripVerification snapshot_verification =
+          verifySnapshotRoundtrip(
+              snapshot_read, state, config, frozen_config.normalized_text,
+              snapshot_provenance);
+      report.snapshot_roundtrip_ok = snapshot_verification.ok;
+      local_verification_detail = snapshot_verification.detail;
+      if (!report.snapshot_roundtrip_ok) {
+        throw std::runtime_error(
+            "snapshot scientific roundtrip verification failed: " +
+            snapshot_verification.detail);
+      }
+    } catch (...) {
+      local_snapshot_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        local_snapshot_failure, "science snapshot member write/readback");
+
+    std::exception_ptr completion_failure;
+    if (services.mpi_context.isRoot()) {
+      try {
+        io::writeSnapshotSetCompletionMarker(
+            snapshot_directory, generation_id,
+            core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot completion member count"),
+            global_counts, false);
+        const io::SnapshotSetInspection inspection =
+            io::inspectSnapshotSet(snapshot_directory);
+        if (!inspection.complete || inspection.global_part_count != global_counts ||
+            inspection.num_files_per_snapshot != static_cast<std::uint32_t>(topology.world_size)) {
+          throw std::runtime_error(
+              "independent snapshot-set structural validation failed after publication");
+        }
+      } catch (...) {
+        completion_failure = std::current_exception();
+      }
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        completion_failure, "science snapshot set completion");
+
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "snapshot.write.complete",
-        .severity = report.snapshot_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
+        .severity = core::RuntimeEventSeverity::kInfo,
         .subsystem = "io.snapshot",
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = report.snapshot_roundtrip_ok
-            ? "snapshot output written and scientifically verified"
-            : "snapshot output failed scientific roundtrip verification",
-        .payload = {{"path", report.snapshot_path.string()},
-                    {"verification", snapshot_verification.detail}},
+        .message = "snapshot member written, scientifically read back, and logical set validated",
+        .payload = {{"member_path", report.snapshot_path.string()},
+                    {"set_path", report.snapshot_set_path.string()},
+                    {"generation_id", generation_id},
+                    {"verification", local_verification_detail}},
     });
-    if (!report.snapshot_roundtrip_ok) {
-      throw std::runtime_error(
-          "snapshot scientific roundtrip verification failed: " +
-          snapshot_verification.detail);
-    }
     output_flushed = true;
   }
 
@@ -824,6 +933,7 @@ OutputRestartRuntime::OutputRestartRuntime(
     const core::HierarchicalTimeBinScheduler& scheduler,
     const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const GravityRestartStateProvider& gravity_state,
+    const RuntimeServices& services,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
     PendingOutputBoundary& pending_output,
@@ -833,6 +943,7 @@ OutputRestartRuntime::OutputRestartRuntime(
       m_scheduler(scheduler),
       m_gas_cell_scheduler(gas_cell_scheduler),
       m_gravity_state(gravity_state),
+      m_services(services),
       m_report(report),
       m_profiler(profiler),
       m_pending_output(pending_output),
@@ -901,6 +1012,7 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
       m_scheduler,
       m_gas_cell_scheduler,
       m_gravity_state,
+      m_services,
       m_report,
       m_profiler,
       m_write_outputs_enabled,

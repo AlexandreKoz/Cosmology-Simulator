@@ -124,6 +124,23 @@ void testManifestValidationAndConversions() {
   const cosmosim::io::IcManifest decoded =
       cosmosim::io::deserializeIcManifestJson(json);
   assert(decoded.source_sha256 == manifest.source_sha256);
+  cosmosim::io::IcManifest unicode_manifest = manifest;
+  unicode_manifest.warnings.push_back("\xCE\xBB-warning");
+  const std::string unicode_json = cosmosim::io::serializeIcManifestJson(unicode_manifest);
+  const auto unicode_decoded = cosmosim::io::deserializeIcManifestJson(unicode_json);
+  assert(unicode_decoded.warnings.back() == "\xCE\xBB-warning");
+  std::string overflow_json = json;
+  const std::string byte_width_token = "\"byte_width\": 8";
+  const auto byte_width_pos = overflow_json.find(byte_width_token);
+  assert(byte_width_pos != std::string::npos);
+  overflow_json.replace(byte_width_pos, byte_width_token.size(), "\"byte_width\": 300");
+  bool narrowing_rejected = false;
+  try {
+    (void)cosmosim::io::deserializeIcManifestJson(overflow_json);
+  } catch (const std::invalid_argument&) {
+    narrowing_rejected = true;
+  }
+  assert(narrowing_rejected);
   assert(decoded.fields.front().scalar_type == "float64");
   assert(decoded.fields.front().dimensions ==
          manifest.fields.front().dimensions);
@@ -947,7 +964,7 @@ void testHdf5GasThermoMapping() {
   assert(result.report.manifest->dialect ==
          cosmosim::io::IcDialect::kGadgetArepoBridgeV1);
   assert(result.report.counters.source_file_open_count == 1U);
-  assert(result.report.counters.full_file_hash_pass_count == 3U);
+  assert(result.report.counters.full_file_hash_pass_count == 2U);
   assert(result.report.counters.source_identity_validation_count == 2U);
   assert(result.state.cells.center_x_comoving[0] == result.state.particles.position_x_comoving[0]);
 
@@ -1519,16 +1536,16 @@ void testReaderSessionSourceIdentity() {
     IcReaderSession session(path, size, sha, counters);
     session.revalidateSourceIdentity(counters);
     assert(counters.source_file_open_count == 1U);
-    assert(counters.full_file_hash_pass_count == 2U);
+    assert(counters.full_file_hash_pass_count == 1U);
     assert(counters.source_identity_validation_count == 2U);
-    assert(counters.hash_bytes_read == 2U * size);
+    assert(counters.hash_bytes_read == size);
   }
 
   bool hash_mismatch_rejected = false;
   try {
     IcImportCounters counters;
     IcReaderSession session(path, size, std::string(64U, '0'), counters);
-    static_cast<void>(session);
+    session.revalidateSourceIdentity(counters);
   } catch (const std::runtime_error& error) {
     hash_mismatch_rejected =
         std::string(error.what()).find("SHA-256 mismatch") !=

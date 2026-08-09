@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,36 +15,77 @@
 
 namespace cosmosim::io {
 
-struct GadgetArepoFieldAliases {
+// Science-snapshot semantics are explicit. CHUI-native files may contain
+// project extensions; AREPO/GADGET exports use their documented cosmological
+// storage scalings and never rely on a fictional merged dialect.
+enum class SnapshotDialect {
+  kAuto,
+  kChuiNative,
+  kArepoFormat3,
+  kGadget4Hdf5,
+};
+
+enum class SnapshotMissingFieldPolicy {
+  kReject,
+  kMarkUnavailable,
+  kFillDocumentedDefault,
+};
+
+struct SnapshotFieldAliases {
   std::string_view canonical_name;
   std::vector<std::string_view> read_aliases;
 };
 
-struct GadgetArepoSchemaMap {
-  std::string_view schema_name = "gadget_arepo_v5";
-  std::uint32_t schema_version = 5;
+struct ScienceSnapshotSchemaMap {
+  std::string_view schema_name = "chui_science_snapshot_v6";
+  std::uint32_t schema_version = 6;
 
   std::string_view header_group = "/Header";
   std::string_view config_group = "/Config";
+  std::string_view parameters_group = "/Parameters";
   std::string_view provenance_group = "/Provenance";
+  std::string_view units_group = "/Units";
   std::string_view config_normalized_attribute = "normalized";
 
   std::array<std::string_view, 6> part_type_group = {
       "/PartType0", "/PartType1", "/PartType2", "/PartType3", "/PartType4", "/PartType5"};
 
-  GadgetArepoFieldAliases coordinates{"Coordinates", {"Coordinates", "Position", "POS"}};
-  GadgetArepoFieldAliases velocities{"Velocities", {"Velocities", "Velocity", "VEL"}};
-  GadgetArepoFieldAliases masses{"Masses", {"Masses", "Mass"}};
-  GadgetArepoFieldAliases particle_ids{"ParticleIDs", {"ParticleIDs", "ParticleID", "ID"}};
+  SnapshotFieldAliases coordinates{"Coordinates", {"Coordinates", "Position", "POS"}};
+  SnapshotFieldAliases velocities{"Velocities", {"Velocities", "Velocity", "VEL"}};
+  SnapshotFieldAliases masses{"Masses", {"Masses", "Mass"}};
+  SnapshotFieldAliases particle_ids{"ParticleIDs", {"ParticleIDs", "ParticleID", "ID"}};
 };
 
+// Source compatibility aliases. New code should use ScienceSnapshot* names.
+using GadgetArepoFieldAliases = SnapshotFieldAliases;
+using GadgetArepoSchemaMap = ScienceSnapshotSchemaMap;
+
+[[nodiscard]] const ScienceSnapshotSchemaMap& scienceSnapshotSchemaMap();
 [[nodiscard]] const GadgetArepoSchemaMap& gadgetArepoSchemaMap();
+
+struct SnapshotReadBudget {
+  std::uint64_t max_particles = 1ULL << 34U;
+  std::uint64_t max_materialized_bytes = 1ULL << 40U;
+  std::uint64_t max_dataset_bytes = 1ULL << 38U;
+  std::uint64_t max_attribute_bytes = 1ULL << 24U;
+};
+
+struct SnapshotSetMemberInfo {
+  std::uint32_t member_index = 0;
+  std::uint32_t num_files_per_snapshot = 1;
+  std::array<std::uint64_t, 6> global_part_count{};
+  bool has_global_part_count = false;
+  std::string generation_id;
+};
 
 struct SnapshotIoPolicy {
   bool enable_compression = false;
   int compression_level = 4;
   std::size_t chunk_particle_count = 1u << 15;
-  bool write_particle_type_alias_groups = true;
+  bool write_particle_type_alias_groups = false;
+  bool durable_publication = false;
+  SnapshotDialect dialect = SnapshotDialect::kAuto;
+  bool write_optional_pressure = true;
 };
 
 struct SnapshotWritePayload {
@@ -52,24 +94,40 @@ struct SnapshotWritePayload {
   std::string normalized_config_text;
   core::ProvenanceRecord provenance;
   std::string git_sha = "unknown";
+  SnapshotSetMemberInfo set_member;
 };
 
 struct SnapshotReadOptions {
   bool require_ids = true;
+  bool allow_generated_particle_ids = false;
   bool require_velocities = true;
   bool allow_mass_table_fallback = true;
+  bool require_complete_chui_set = true;
+  SnapshotDialect dialect = SnapshotDialect::kAuto;
+  SnapshotMissingFieldPolicy missing_field_policy =
+      SnapshotMissingFieldPolicy::kReject;
+  SnapshotReadBudget budget{};
+  std::array<std::optional<core::ParticleSpecies>, 6> part_type_species_map{};
 };
 
 struct SnapshotIoReport {
-  std::string schema_name = "gadget_arepo_v5";
-  std::uint32_t schema_version = 5;
+  std::string schema_name = "unknown";
+  std::uint32_t schema_version = 0;
+  SnapshotDialect dialect = SnapshotDialect::kAuto;
+  bool storage_policy_known = false;
+  bool storage_policy_mixed = false;
   bool compression_enabled = false;
   int compression_level = 0;
   std::size_t chunk_particle_count = 0;
+  std::uint64_t peak_staging_bytes = 0;
+  std::uint64_t logical_bytes_written = 0;
+  std::uint64_t chunk_write_count = 0;
   std::vector<std::string> present_aliases;
   std::vector<std::string> defaulted_fields;
+  std::vector<std::string> unavailable_fields;
   std::string file_kind = "unknown";
   bool restart_compatible = false;
+  bool evolution_ready = false;
   double header_time = 1.0;
   double header_redshift = 0.0;
   double header_box_size_x = 0.0;
@@ -79,6 +137,11 @@ struct SnapshotIoReport {
   double header_omega_lambda = 0.0;
   double header_omega_baryon = 0.0;
   double header_hubble_param = 0.0;
+  std::uint32_t member_index = 0;
+  std::uint32_t num_files_per_snapshot = 1;
+  std::array<std::uint64_t, 6> local_part_count{};
+  std::array<std::uint64_t, 6> global_part_count{};
+  std::string generation_id;
 };
 
 struct SnapshotReadResult {
@@ -86,8 +149,52 @@ struct SnapshotReadResult {
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   SnapshotIoReport report;
+
+  void requireEvolutionReady() const;
 };
 
+struct SnapshotSetInspection {
+  SnapshotDialect dialect = SnapshotDialect::kAuto;
+  std::string schema_name;
+  std::uint32_t schema_version = 0;
+  std::uint32_t num_files_per_snapshot = 0;
+  std::array<std::uint64_t, 6> global_part_count{};
+  double scale_factor = 1.0;
+  double redshift = 0.0;
+  double hubble_param = 0.0;
+  std::string generation_id;
+  std::vector<std::filesystem::path> member_paths;
+  bool complete = false;
+};
+
+void writeScienceSnapshotHdf5(
+    const std::filesystem::path& output_path,
+    const SnapshotWritePayload& payload,
+    const SnapshotIoPolicy& policy = {});
+
+[[nodiscard]] SnapshotReadResult readCosmoSimScienceSnapshotHdf5(
+    const std::filesystem::path& input_path,
+    const core::SimulationConfig& config,
+    const SnapshotReadOptions& options = {});
+
+[[nodiscard]] SnapshotReadResult importExternalSnapshotHdf5(
+    const std::filesystem::path& input_path,
+    const core::SimulationConfig& config,
+    const SnapshotReadOptions& options);
+
+[[nodiscard]] SnapshotSetInspection inspectSnapshotSet(
+    const std::filesystem::path& input_path,
+    const SnapshotReadOptions& options = {});
+
+void writeSnapshotSetCompletionMarker(
+    const std::filesystem::path& snapshot_directory,
+    std::string_view generation_id,
+    std::uint32_t num_files_per_snapshot,
+    const std::array<std::uint64_t, 6>& global_part_count,
+    bool durable_publication = false);
+
+// Compatibility entry points retained for existing callers. They now use the
+// explicit CHUI science-snapshot implementation rather than a merged dialect.
 void writeGadgetArepoSnapshotHdf5(
     const std::filesystem::path& output_path,
     const SnapshotWritePayload& payload,

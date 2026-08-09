@@ -4,11 +4,23 @@
 #include <cstdint>
 #include <limits>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace cosmosim::io::internal {
 
-inline constexpr std::size_t kIcWireRecordBytes = 176U;
+// Wire v2 is a compact, endian-stable, self-framing record contract.  Every
+// record carries its byte length and species so dark-matter traffic does not
+// pay for gas/star/BH/tracer sidecars.
+inline constexpr std::uint32_t IC_WIRE_MAGIC = 0x32434943U;  // "CIC2" little-endian on wire
+inline constexpr std::uint32_t IC_WIRE_VERSION = 2U;
+inline constexpr std::size_t IC_WIRE_COMMON_BYTES = 80U;
+inline constexpr std::size_t IC_WIRE_DM_BYTES = IC_WIRE_COMMON_BYTES;
+inline constexpr std::size_t IC_WIRE_GAS_BYTES = 104U;
+inline constexpr std::size_t IC_WIRE_STAR_BYTES = 104U;
+inline constexpr std::size_t IC_WIRE_BH_BYTES = 96U;
+inline constexpr std::size_t IC_WIRE_TRACER_BYTES = 124U;
+inline constexpr std::size_t IC_WIRE_MAX_RECORD_BYTES = IC_WIRE_TRACER_BYTES;
 
 struct IcParticleRecord {
   std::uint64_t id = 0;
@@ -36,6 +48,8 @@ struct IcParticleRecord {
   double tracer_exchanged_mass = 0.0;
 };
 
+[[nodiscard]] std::size_t serializedIcRecordBytes(std::uint32_t species);
+
 void serializeIcRecord(
     const IcParticleRecord& record,
     std::vector<std::uint8_t>& output);
@@ -43,5 +57,12 @@ void serializeIcRecord(
 [[nodiscard]] IcParticleRecord deserializeIcRecord(
     std::span<const std::uint8_t> bytes,
     std::size_t& offset);
+
+// Validate all framing without constructing records; returns record count.
+[[nodiscard]] std::size_t validateIcWireBuffer(std::span<const std::uint8_t> bytes);
+
+// Returns [begin, size] for the final complete record, or {size,0} when empty.
+[[nodiscard]] std::pair<std::size_t, std::size_t> lastIcWireRecordSpan(
+    std::span<const std::uint8_t> bytes);
 
 }  // namespace cosmosim::io::internal

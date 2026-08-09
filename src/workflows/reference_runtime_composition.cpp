@@ -365,6 +365,7 @@ namespace {
             inputs.particle_scheduler,
             inputs.gas_cell_scheduler,
             *assembly->gravity,
+            inputs.services,
             inputs.report,
             inputs.profiler,
             inputs.pending_output,

@@ -118,6 +118,7 @@ struct ReferenceWorkflowReport {
   int treepm_update_cadence_steps = 1;
   std::vector<std::string> stage_sequence;
   std::vector<TreePmCadenceRecord> treepm_cadence_records;
+  std::filesystem::path shared_run_directory;
   std::filesystem::path run_directory;
   std::filesystem::path normalized_config_snapshot_path;
   std::filesystem::path profiler_json_path;
@@ -127,6 +128,7 @@ struct ReferenceWorkflowReport {
   std::filesystem::path ic_manifest_path;
   std::filesystem::path restart_path;
   std::filesystem::path snapshot_path;
+  std::filesystem::path snapshot_set_path;
 };
 
 class ReferenceWorkflowRunner {

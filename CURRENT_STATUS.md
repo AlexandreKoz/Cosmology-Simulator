@@ -25,7 +25,7 @@ The authoritative decision is
   levels documented by their module pages.
 - HDF5-enabled canonical/multifile IC ingestion, science snapshots, and
   same-world-size restart continuation when built with HDF5.
-- Snapshot schema `gadget_arepo_v5`, including authoritative gas-cell rows,
+- Snapshot schema `chui_science_snapshot_v6`, with explicit AREPO Format-3 export semantics, logical multifile MPI snapshot sets, authoritative gas-cell rows,
   stable `gas_cell_id`, optional parent-particle identity, and owning-patch
   identity.
 - `.param.txt` normalization to `normalized_config.param.txt`, provenance, and

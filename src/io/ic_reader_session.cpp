@@ -96,24 +96,20 @@ IcReaderSession::IcReaderSession(
         "IC source identity changed before payload read: file size mismatch for " +
         path.string());
   }
-  const std::string observed_sha256 = icSha256FileHex(path);
-  checkedCounterAdd(
-      counters.full_file_hash_pass_count, 1U,
-      "full_file_hash_pass_count");
-  checkedCounterAdd(
-      counters.hash_bytes_read, after_open.size_bytes, "hash_bytes_read");
-  const SourceIdentity after_hash = captureSourceIdentity(path);
-  requireSameIdentity(
-      after_open, after_hash, path, "during initial SHA-256 validation");
-  if (observed_sha256 != expected_sha256) {
-    throw std::runtime_error(
-        "IC source identity changed before payload read: SHA-256 mismatch for " +
+  // The file-set inspection phase already computed and recorded the authoritative
+  // SHA-256. Re-hashing the complete source again immediately after open only
+  // duplicates data movement. Bind the open HDF5 session to stable filesystem
+  // identity here, then perform one strict content rehash at session completion
+  // to prove the inspected bytes did not change during ingestion.
+  if (m_expected_sha256.size() != 64U) {
+    throw std::invalid_argument(
+        "IC reader session requires a 64-hex-character inspected SHA-256 for " +
         path.string());
   }
   checkedCounterAdd(
       counters.source_identity_validation_count, 1U,
       "source_identity_validation_count");
-  m_open_identity = after_hash;
+  m_open_identity = after_open;
 }
 
 void IcReaderSession::revalidateSourceIdentity(
@@ -137,8 +133,8 @@ void IcReaderSession::revalidateSourceIdentity(
       before_hash, after_hash, m_path, "during completion SHA-256 validation");
   if (observed_sha256 != m_expected_sha256) {
     throw std::runtime_error(
-        "IC source content changed during payload ingestion for " +
-        m_path.string());
+        "IC source SHA-256 mismatch after payload ingestion for " +
+        m_path.string() + "; source content changed after inspection");
   }
   checkedCounterAdd(
       counters.source_identity_validation_count, 1U,
@@ -211,8 +207,8 @@ void readChunkDouble(
   const std::uint64_t value_count =
       static_cast<std::uint64_t>(count) * components;
   checkedCounterAdd(
-      counters.payload_bytes_read, value_count * field.byte_width,
-      "payload_bytes_read");
+      counters.logical_payload_bytes_read, value_count * field.byte_width,
+      "logical_payload_bytes_read");
   checkedCounterAdd(
       counters.converted_payload_bytes, value_count * sizeof(double),
       "converted_payload_bytes");
@@ -249,9 +245,9 @@ void readChunkU64(
     throw std::runtime_error("failed ID chunk read for " + field.dataset_path);
   }
   checkedCounterAdd(
-      counters.payload_bytes_read,
+      counters.logical_payload_bytes_read,
       static_cast<std::uint64_t>(count) * field.byte_width,
-      "payload_bytes_read");
+      "logical_payload_bytes_read");
   checkedCounterAdd(
       counters.converted_payload_bytes,
       static_cast<std::uint64_t>(count) * sizeof(std::uint64_t),

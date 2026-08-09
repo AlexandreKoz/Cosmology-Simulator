@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -17,6 +18,9 @@
 
 namespace cosmosim::io::internal {
 namespace {
+
+constexpr std::uint64_t kMaxCanonicalMetadataBytes =
+    16ULL * 1024ULL * 1024ULL;
 
 [[nodiscard]] std::vector<std::uint64_t> attributeDimensions(
     hid_t attribute) {
@@ -56,16 +60,26 @@ namespace {
     if (H5Aread(attribute.get(), type.get(), &raw) < 0) {
       throw std::runtime_error(std::string("failed to read Header/") + name);
     }
-    std::string value = raw == nullptr ? std::string{} : std::string(raw);
+    const std::size_t length =
+        raw == nullptr ? 0U : std::char_traits<char>::length(raw);
+    if (static_cast<std::uint64_t>(length) > kMaxCanonicalMetadataBytes) {
+      if (raw != nullptr) H5free_memory(raw);
+      throw std::length_error(
+          std::string("Header/") + name +
+          " exceeds canonical metadata byte budget");
+    }
+    std::string value = raw == nullptr ? std::string{} : std::string(raw, length);
     if (raw != nullptr) {
       H5free_memory(raw);
     }
     return value;
   }
   const std::size_t width = H5Tget_size(type.get());
-  if (width == 0U) {
-    throw std::runtime_error(
-        std::string("Header/") + name + " has zero-width string type");
+  if (width == 0U ||
+      static_cast<std::uint64_t>(width) > kMaxCanonicalMetadataBytes) {
+    throw std::length_error(
+        std::string("Header/") + name +
+        " has invalid/oversized fixed string type");
   }
   std::vector<char> raw(width + 1U, '\0');
   if (H5Aread(attribute.get(), type.get(), raw.data()) < 0) {
@@ -90,19 +104,35 @@ namespace {
 
 [[nodiscard]] std::string readTextFileExact(
     const std::filesystem::path& path) {
+  std::error_code status_error;
+  const auto status = std::filesystem::status(path, status_error);
+  if (status_error || !std::filesystem::is_regular_file(status)) {
+    throw std::runtime_error(
+        "canonical CHUÍ IC bundle member must be a regular file: " +
+        path.string());
+  }
+  const std::uintmax_t file_bytes = std::filesystem::file_size(path, status_error);
+  if (status_error || file_bytes > kMaxCanonicalMetadataBytes) {
+    throw std::length_error(
+        "canonical CHUÍ IC bundle metadata file exceeds bounded byte budget: " +
+        path.string());
+  }
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     throw std::runtime_error(
         "canonical CHUÍ IC bundle is missing required file: " +
         path.string());
   }
-  std::ostringstream contents;
-  contents << input.rdbuf();
-  if (!input.eof() && input.fail()) {
-    throw std::runtime_error(
-        "failed to read canonical CHUÍ IC bundle file: " + path.string());
+  std::string contents(static_cast<std::size_t>(file_bytes), '\0');
+  if (!contents.empty()) {
+    input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
   }
-  return contents.str();
+  if (!input || static_cast<std::size_t>(input.gcount()) != contents.size()) {
+    throw std::runtime_error(
+        "failed to read canonical CHUÍ IC bundle file completely: " +
+        path.string());
+  }
+  return contents;
 }
 
 [[nodiscard]] std::filesystem::path resolveBundleMember(
@@ -116,7 +146,28 @@ namespace {
         "canonical CHUÍ IC " + std::string(field_name) +
         " must name a sibling file without directory traversal");
   }
-  return (canonical_path.parent_path() / relative).lexically_normal();
+  std::error_code path_error;
+  const std::filesystem::path parent = std::filesystem::weakly_canonical(
+      canonical_path.parent_path(), path_error);
+  if (path_error) {
+    throw std::runtime_error(
+        "failed to resolve canonical CHUÍ IC bundle directory: " +
+        path_error.message());
+  }
+  const std::filesystem::path candidate = std::filesystem::weakly_canonical(
+      canonical_path.parent_path() / relative, path_error);
+  if (path_error || candidate.parent_path() != parent) {
+    throw std::runtime_error(
+        "canonical CHUÍ IC bundle member escapes its sibling directory: " +
+        std::string(field_name));
+  }
+  const auto status = std::filesystem::status(candidate, path_error);
+  if (path_error || !std::filesystem::is_regular_file(status)) {
+    throw std::runtime_error(
+        "canonical CHUÍ IC bundle member is not a regular file: " +
+        candidate.string());
+  }
+  return candidate;
 }
 
 [[nodiscard]] std::string readEmbeddedManifestJson(hid_t file) {
@@ -138,7 +189,8 @@ namespace {
   const std::vector<std::uint64_t> dimensions =
       dataspaceDimensions(space.get());
   if (dimensions.size() != 1U || dimensions.front() == 0U ||
-      dimensions.front() > std::numeric_limits<std::size_t>::max()) {
+      dimensions.front() > std::numeric_limits<std::size_t>::max() ||
+      dimensions.front() > kMaxCanonicalMetadataBytes) {
     throw std::runtime_error(
         "canonical CHUÍ IC embedded manifest must be a non-empty rank-1 byte dataset");
   }

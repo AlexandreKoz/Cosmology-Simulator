@@ -52,6 +52,9 @@ class Hdf5Handle {
       case H5I_DATATYPE:
         H5Tclose(m_handle);
         break;
+      case H5I_GENPROP_LST:
+        H5Pclose(m_handle);
+        break;
       default:
         break;
     }

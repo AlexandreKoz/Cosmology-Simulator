@@ -286,10 +286,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
   ReferenceWorkflowReport report;
   report.world_size = mpi_context.worldSize();
   report.world_rank = mpi_context.worldRank();
+  report.shared_run_directory = computeRunDirectory(config, output_root_override);
   report.run_directory = rankQualifiedRunDirectory(
-      computeRunDirectory(config, output_root_override),
-      report.world_size,
-      report.world_rank);
+      report.shared_run_directory, report.world_size, report.world_rank);
   report.config_compatible = true;
   report.schema_compatible =
       config.schema_version == 1 && io::gadgetArepoSchemaMap().schema_version >= 2 &&

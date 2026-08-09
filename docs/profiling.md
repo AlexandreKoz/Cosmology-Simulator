@@ -85,9 +85,9 @@ includes:
 
 - `files_assigned`
 - `chunks_assigned`
-- `metadata_bytes_read`
+- `logical_metadata_bytes_read`
 - `hash_bytes_read`
-- `payload_bytes_read`
+- `logical_payload_bytes_read`
 - `converted_payload_bytes`
 - `bytes_serialized`
 - `bytes_sent`
@@ -125,7 +125,7 @@ count/displacement, decode, coverage, and ID-reconciliation buffers. The exact g
 uses rank-local sorted temporary runs and a bounded-memory external merge; disk
 run bytes are not RAM staging and are removed before import returns. For a distributed fixture, the required evidence is that each nonempty source
 file has one stable payload reader/session, complete-file SHA-256 work is bounded
-by three passes per source file (inspection, session start, session completion)
+by two passes per source file (inspection, session start, session completion)
 independent of batch count, each source chunk is assigned once, reader-record imbalance is reported as the maximum minus minimum assigned-record count across ranks, main exchanges
 scale with routing batches rather than source chunks, each source ID balances
 against one final ID, and no rank allocates authoritative arrays sized to the
@@ -135,16 +135,16 @@ zero; byte counters remain rank-local and may be reduced by the caller. The
 compatibility collective fields count logical rank-consistent protocol phases,
 not raw MPI calls. Actual production communicator calls are counted centrally by
 the `mpi_*_call_count` fields. Their per-kind sum equals
-`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 30
-calls per successful routing batch in protocol version 1 (22 consensus votes,
+`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 23
+calls per successful routing batch in routing protocol version 2 (15 consensus votes,
 three coverage reductions, two `Alltoall`/`Alltoallv` pairs, and one exact
 reconciliation reduction). Fixed discovery, manifest, final audit, and
 finalization calls are reported by `nonrouting_mpi_collective_call_count`.
-For protocol version 1 the successful-path identity is:
+For routing protocol version 2 the successful-path identity is:
 
 ```text
 routing_mpi_collective_call_count
-  = 30 * routing_batch_count
+  = 23 * routing_batch_count
 
 nonrouting_mpi_collective_call_count
   = 40

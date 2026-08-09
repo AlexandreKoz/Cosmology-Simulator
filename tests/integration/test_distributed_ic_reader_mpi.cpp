@@ -961,7 +961,7 @@ int main(int argc, char** argv) {
     assert(global_batches > 0U && global_batches <= expected_chunks);
     if (!policy_mode) assert(global_batches < expected_chunks);
     assert(global_file_opens == K_MEMBER_COUNT);
-    assert(global_hash_passes <= 3U * K_MEMBER_COUNT);
+    assert(global_hash_passes <= 2U * K_MEMBER_COUNT);
     assert(global_dataset_opens > 0U);
     assert(global_reader_batches == global_batches);
     assert(global_reader_records == expected_global);
@@ -969,7 +969,7 @@ int main(int argc, char** argv) {
     assert(global_main_exchanges == global_batches);
     assert(global_exact_audit_exchanges >= global_batches);
     assert(global_routing_collective_phases > global_batches);
-    assert(global_routing_collective_phases <= 32U * global_batches);
+    assert(global_routing_collective_phases <= 24U * global_batches);
     const std::uint64_t global_collective_phases =
         mpi_context.allreduceSumUint64(
             result.report.counters.collective_phase_count);
@@ -1004,7 +1004,7 @@ int main(int argc, char** argv) {
       assert(local_actual_collectives > 0U);
       assert(
           result.report.counters.routing_mpi_collective_call_count ==
-          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV1 *
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV2 *
               global_batches);
       assert(
           result.report.counters.nonrouting_mpi_collective_call_count +
@@ -1023,7 +1023,7 @@ int main(int argc, char** argv) {
           expected_nonrouting_collectives);
       assert(
           local_actual_collectives ==
-          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV1 *
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV2 *
                   global_batches +
               expected_nonrouting_collectives);
       assert(
@@ -1154,7 +1154,7 @@ int main(int argc, char** argv) {
     }
     assert(result.report.counters.peak_staging_bytes < 512U * 1024U);
     assert(result.report.counters.hash_bytes_read > 0U || world_rank != 0);
-    assert(result.report.counters.payload_bytes_read > 0U ||
+    assert(result.report.counters.logical_payload_bytes_read > 0U ||
            result.report.counters.chunks_assigned == 0U);
   } catch (const std::runtime_error&) {
     rejected_as_expected = rejection_expected;

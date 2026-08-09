@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v22`) persists:
+The restart schema (`cosmosim_restart_v23`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -23,9 +23,20 @@ The restart schema (`cosmosim_restart_v22`) persists:
 - output cadence persistence state for deterministic future snapshot/restart naming and cadence decisions,
 - root file-kind metadata (`cosmosim_file_kind=restart_checkpoint`),
 - compact `/restart_diagnostics` audit metadata,
-- payload integrity hash (FNV-1a 64-bit with explicit string/vector length delimiters).
+- canonical little-endian SHA-256 payload integrity (`sha256-canonical-le-v1`) for v23,
+  plus the legacy FNV-1a 64-bit digest only for backward-compatibility diagnostics.
 
 By design, this differs from GADGET/AREPO-style analysis snapshots where scheduler internals and opaque sidecars are not mandatory.
+
+## Transactional publication (v23)
+
+Checkpoint publication uses the shared transactional-file layer. Bare filenames are valid.
+Temporary siblings are unique and same-directory, an empty/path-like suffix is rejected before
+file creation, HDF5 handles are closed before publication, and the previous valid checkpoint is
+never deliberately removed before the replacement becomes visible. Durable publication fsyncs
+the temporary file and containing directory on POSIX; the guarded Windows path uses
+`FlushFileBuffers` plus `ReplaceFileW`/`MoveFileExW(...WRITE_THROUGH)`. Windows runtime
+behavior remains a platform acceptance item rather than an unexecuted claim.
 
 ## Ordered output timeline events (v21)
 
@@ -115,7 +126,7 @@ change restart ownership semantics.
 
 Restart checkpoints may only be written from a completed, globally coherent restart boundary. The runtime predicate `core::evaluateRestartBoundary(...)` is the narrow contract used by workflow output dispatch and HDF5 restart payload validation. It rejects half-step KDK states, local active-bin substeps, non-restart-safe boundary kinds, and PM refresh transitions with an uncommitted long-range refresh event.
 
-Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v21, so those states must not be serialized as persistent truth.
+Failed restart requests are hard errors, not warnings or silent skips. The diagnostic records the current and last completed boundary kind, `inside_kdk_step`, `last_completed_restart_safe`, local-substep activity, PM refresh legality/commit-pending state, `step_index`, and scheduler tick when available. Intentionally represented half-step or local-substep restart is not implemented in schema v23, so those states must not be serialized as persistent truth.
 
 
 ## Restart diagnostics metadata
@@ -127,7 +138,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: write current v22; read v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
+- Current compatibility policy: write current v23; read v22/v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
 - v14 compatibility materializes `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
   and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
@@ -179,10 +190,10 @@ behavior on filesystems where `rename` is atomic.
   assignment from another rank's checkpoint are intentionally rejected. Each rank is authoritative only for its
   local restart payload under the validated topology. Imported PM/tree/hydro ghosts are transient and are rebuilt
   from owner state after restart; they are not persisted as truth.
-- **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild` for PM mesh-field storage. The v20 force-cache addition, retained by v21, serializes the acceleration cache that the next KDK pre-kick consumes, so `ReferenceWorkflow` does not discard already-committed force state across a restart. PM mesh arrays themselves remain non-persistent and are rebuilt on the next legal refresh opportunity.
+- **Policy:** restart continuation uses `long_range_restart_policy=deterministic_rebuild` for PM mesh-field storage. The v20 force-cache addition, retained by v23, serializes the acceleration cache that the next KDK pre-kick consumes, so `ReferenceWorkflow` does not discard already-committed force state across a restart. PM mesh arrays themselves remain non-persistent and are rebuilt on the next legal refresh opportunity.
 - Tracer restart payload includes host-coupling lanes (`host_cell_index`, `mass_fraction_of_host`,
   `last_host_mass_code`, `cumulative_exchanged_mass_code`) for deterministic continuation.
-- Writer stores both integer and hex payload integrity hashes.
+- Writer stores the canonical SHA-256 digest and also the legacy integer/hex FNV digest for migration diagnostics; both are computed in one logical traversal.
 - Reader recomputes hash and rejects mismatches.
 - Provenance is serialized with the checkpoint for continuation auditing.
 
@@ -278,7 +289,7 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ## AMR pending flux-register restart lanes (v17)
 
-Restart schema v17 introduced pending AMR flux-register state; current v22 checkpoints retain it under:
+Restart schema v17 introduced pending AMR flux-register state; current v23 checkpoints retain it under:
 
 ```text
 /state/amr_pending_flux_registers
@@ -308,7 +319,7 @@ This proves the exercised single-rank pending-register restart path. It does not
 
 ## AMR temporal boundary-history restart lanes (v18)
 
-Restart schema v19 introduced `/state/amr_temporal_boundary_history`; current `cosmosim_restart_v22` retains it for open local AMR
+Restart schema v19 introduced `/state/amr_temporal_boundary_history`; current `cosmosim_restart_v23` retains it for open local AMR
 coarse intervals. Each history record persists patch ID/level, geometry fingerprint, gas identity generation,
 interval start/end, completion state, and stable-ID patch-local conserved start/end records. The restart
 payload integrity hash includes this store for v18 payloads.
@@ -328,7 +339,7 @@ coarse boundary history exists.
 
 ## Gas-cell scheduler persistence (v19)
 
-Schema v19 introduced a separate gas-cell time-bin state; current v22 (`cosmosim_restart_v22`) persists it in
+Schema v19 introduced a separate gas-cell time-bin state; current v23 (`cosmosim_restart_v23`) persists it in
 `/gas_cell_scheduler`. Its identity key is explicitly `gas_cell_id`, not
 `parent_particle_id` and not a dense local row. The group contains `gas_cell_id`,
 `bin_index`, `next_activation_tick`, `active_flag`, and `pending_bin_index`, together with

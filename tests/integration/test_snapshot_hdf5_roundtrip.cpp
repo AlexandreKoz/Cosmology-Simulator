@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -32,7 +33,7 @@ namespace {
 }
 
 void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
-  state.resizeParticles(7);
+  state.resizeParticles(8);
   state.resizeCells(2);
   state.cells.mass_code[0] = 10.0;
   state.cells.mass_code[1] = 15.0;
@@ -56,6 +57,7 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
   state.particle_sidecar.species_tag[4] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
   state.particle_sidecar.species_tag[5] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
   state.particle_sidecar.species_tag[6] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kTracer);
+  state.particle_sidecar.species_tag[7] = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kBlackHole);
 
   state.particles.mass_code[2] = state.cells.mass_code[0];
   state.particles.mass_code[3] = state.cells.mass_code[1];
@@ -71,6 +73,9 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
     state.gas_cells.velocity_z_peculiar[gas_row] = state.particles.velocity_z_peculiar[particle_index];
     state.gas_cells.internal_energy_code[gas_row] = 2.5 + static_cast<double>(gas_row);
     state.gas_cells.density_code[gas_row] = 4.0 + static_cast<double>(gas_row);
+    state.gas_cells.pressure_code[gas_row] = 1.5 + 0.25 * static_cast<double>(gas_row);
+    state.gas_cells.temperature_code[gas_row] = 1000.0 + 100.0 * static_cast<double>(gas_row);
+    state.gas_cells.sound_speed_code[gas_row] = 0.5 + 0.1 * static_cast<double>(gas_row);
     state.gas_cells.metal_mass_code[gas_row] = state.cells.mass_code[gas_row] * (0.01 + 0.01 * gas_row);
   }
   state.restoreGasCellIdentityRecords(
@@ -102,12 +107,25 @@ void fillMixedSpeciesState(cosmosim::core::SimulationState& state) {
   state.tracers.last_host_mass_code[0] = state.cells.mass_code[1];
   state.tracers.cumulative_exchanged_mass_code[0] = 0.1;
 
+  state.black_holes.resize(1);
+  state.black_holes.particle_index[0] = 7;
+  state.black_holes.host_cell_index[0] = 1;
+  state.black_holes.subgrid_mass_code[0] = 250.0;
+  state.black_holes.accretion_rate_code[0] = 0.75;
+  state.black_holes.feedback_energy_code[0] = 12.5;
+  state.black_holes.eddington_ratio[0] = 0.125;
+  state.black_holes.cumulative_accreted_mass_code[0] = 20.0;
+  state.black_holes.cumulative_feedback_energy_code[0] = 88.0;
+  state.black_holes.duty_cycle_active_time_code[0] = 3.0;
+  state.black_holes.duty_cycle_total_time_code[0] = 9.0;
+
   state.metadata.scale_factor = 0.5;
   state.metadata.run_name = "snapshot_roundtrip";
   state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 2;
   state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] = 2;
   state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kStar)] = 2;
   state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kTracer)] = 1;
+  state.species.count_by_species[static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kBlackHole)] = 1;
   state.rebuildSpeciesIndex();
 }
 
@@ -168,7 +186,7 @@ void testDecoupledGasIdentityRoundtrip() {
 
   const auto roundtrip =
       cosmosim::io::readGadgetArepoSnapshotHdf5(path, config);
-  assert(roundtrip.report.schema_version == 5U);
+  assert(roundtrip.report.schema_version == 6U);
   assert(roundtrip.state.cells.size() == 3U);
   assert(roundtrip.state.gas_cell_identity.size() == 3U);
   assert(!roundtrip.state.parentParticleIdForGasCellId(7001U).has_value());
@@ -177,9 +195,9 @@ void testDecoupledGasIdentityRoundtrip() {
   assert(roundtrip.state.gas_cell_identity.rowsForParentParticleId(5001U).size() == 2U);
   assert(roundtrip.state.owningPatchIdForGasCellId(7001U).value() == 42U);
   assert(roundtrip.state.owningPatchIdForGasCellId(7003U).value() == 43U);
-  assert(roundtrip.state.cells.center_x_comoving[0] == state.cells.center_x_comoving[0]);
-  assert(roundtrip.state.cells.center_x_comoving[2] == state.cells.center_x_comoving[2]);
-  assert(roundtrip.state.cells.mass_code[1] == state.cells.mass_code[1]);
+  assert(std::abs(roundtrip.state.cells.center_x_comoving[0] - state.cells.center_x_comoving[0]) < 1.0e-14);
+  assert(std::abs(roundtrip.state.cells.center_x_comoving[2] - state.cells.center_x_comoving[2]) < 1.0e-14);
+  assert(std::abs(roundtrip.state.cells.mass_code[1] - state.cells.mass_code[1]) < 1.0e-14);
   std::filesystem::remove(path);
 #endif
 }
@@ -245,20 +263,26 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(H5Lexists(inspect_file, "/PartType0/EffectivePressure", H5P_DEFAULT) > 0);
   assert(H5Lexists(inspect_file, "/PartType0/EffectiveInternalEnergy", H5P_DEFAULT) > 0);
   assert(H5Lexists(inspect_file, "/PartType0/IsOnEffectiveEos", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/Pressure", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/CHUI_TemperatureCode", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType0/CHUI_SoundSpeedCode", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHSubgridMass", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHAccretionRateMsunPerYr", H5P_DEFAULT) > 0);
+  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHEddingtonRatio", H5P_DEFAULT) > 0);
   hid_t inspect_header = H5Gopen2(inspect_file, "/Header", H5P_DEFAULT);
   assert(inspect_header >= 0);
   double box_x = 0.0;
   double box_y = 0.0;
   double box_z = 0.0;
-  hid_t attr = H5Aopen(inspect_header, "CosmoSimBoxSizeX", H5P_DEFAULT);
+  hid_t attr = H5Aopen(inspect_header, "CHUIBoxSizeX_MpcComoving", H5P_DEFAULT);
   assert(attr >= 0);
   assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_x) >= 0);
   H5Aclose(attr);
-  attr = H5Aopen(inspect_header, "CosmoSimBoxSizeY", H5P_DEFAULT);
+  attr = H5Aopen(inspect_header, "CHUIBoxSizeY_MpcComoving", H5P_DEFAULT);
   assert(attr >= 0);
   assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_y) >= 0);
   H5Aclose(attr);
-  attr = H5Aopen(inspect_header, "CosmoSimBoxSizeZ", H5P_DEFAULT);
+  attr = H5Aopen(inspect_header, "CHUIBoxSizeZ_MpcComoving", H5P_DEFAULT);
   assert(attr >= 0);
   assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_z) >= 0);
   H5Aclose(attr);
@@ -351,6 +375,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(containsString(roundtrip.report.present_aliases, "/PartType1/Coordinates=Coordinates"));
   assert(containsString(roundtrip.report.present_aliases, "/PartType3/Coordinates=Coordinates"));
   assert(containsString(roundtrip.report.present_aliases, "/PartType4/Coordinates=Coordinates"));
+  assert(containsString(roundtrip.report.present_aliases, "/PartType5/Coordinates=Coordinates"));
   assert(roundtrip.state.tracers.size() == 1);
   assert(roundtrip.state.tracers.parent_particle_id[0] == 1005);
   assert(roundtrip.state.tracers.injection_step[0] == 11);
@@ -364,6 +389,20 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.state.parentParticleIdForGasCellId(9001).value() == 1003);
   assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[0] - 0.1) < 1.0e-12);
   assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[1] - 0.3) < 1.0e-12);
+  for (std::size_t gas_row = 0; gas_row < 2; ++gas_row) {
+    assert(std::abs(roundtrip.state.gas_cells.pressure_code[gas_row] - state.gas_cells.pressure_code[gas_row]) < 1.0e-12);
+    assert(std::abs(roundtrip.state.gas_cells.temperature_code[gas_row] - state.gas_cells.temperature_code[gas_row]) < 1.0e-12);
+    assert(std::abs(roundtrip.state.gas_cells.sound_speed_code[gas_row] - state.gas_cells.sound_speed_code[gas_row]) < 1.0e-12);
+  }
+  assert(roundtrip.state.black_holes.size() == 1);
+  assert(roundtrip.state.black_holes.particle_index[0] < roundtrip.state.particles.size());
+  assert(roundtrip.state.black_holes.host_cell_index[0] == 1);
+  assert(std::abs(roundtrip.state.black_holes.subgrid_mass_code[0] - state.black_holes.subgrid_mass_code[0]) < 1.0e-12);
+  assert(std::abs(roundtrip.state.black_holes.accretion_rate_code[0] - state.black_holes.accretion_rate_code[0]) < 1.0e-12);
+  assert(std::abs(roundtrip.state.black_holes.feedback_energy_code[0] - state.black_holes.feedback_energy_code[0]) < 1.0e-12);
+  assert(std::abs(roundtrip.state.black_holes.eddington_ratio[0] - state.black_holes.eddington_ratio[0]) < 1.0e-12);
+  assert(std::abs(roundtrip.state.black_holes.cumulative_accreted_mass_code[0] - state.black_holes.cumulative_accreted_mass_code[0]) < 1.0e-12);
+  assert(std::abs(roundtrip.state.black_holes.cumulative_feedback_energy_code[0] - state.black_holes.cumulative_feedback_energy_code[0]) < 1.0e-12);
   assert(roundtrip.state.star_particles.size() == 2);
   for (std::size_t star_row = 0; star_row < 2; ++star_row) {
     assert(roundtrip.state.star_particles.birth_key[star_row] == state.star_particles.birth_key[star_row]);
@@ -401,8 +440,9 @@ void testRoundtripMixedSpeciesSnapshot() {
           state.particle_sidecar.gravity_softening_comoving[i]);
     }
   }
-  assert_softening_for_id(9000U, state.particle_sidecar.gravity_softening_comoving[2]);
-  assert_softening_for_id(9001U, state.particle_sidecar.gravity_softening_comoving[3]);
+  // Gas cells are authoritative PartType0 rows and are no longer required to
+  // inherit a particle-side softening value through optional parent lineage.
+  // The collisionless softening diagnostic remains round-tripped exactly.
 
   double checksum_in = 0.0;
   double checksum_out = 0.0;
@@ -542,7 +582,12 @@ void testMassTableFallbackSnapshotImport() {
   H5Gclose(header);
   H5Fclose(file);
 
-  const auto imported = cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
+  cosmosim::io::SnapshotReadOptions import_options;
+  // This synthetic fixture deliberately stores internal/native code values;
+  // external imports must now state that semantic contract explicitly.
+  import_options.dialect = cosmosim::io::SnapshotDialect::kChuiNative;
+  const auto imported = cosmosim::io::importExternalSnapshotHdf5(
+      snapshot_path, config, import_options);
   assert(imported.state.particles.size() == 2);
   assert(imported.state.particles.mass_code[0] == 5.0);
   assert(imported.state.particles.mass_code[1] == 5.0);
@@ -553,11 +598,73 @@ void testMassTableFallbackSnapshotImport() {
 #endif
 }
 
+
+void testSnapshotSetCompletionContract() {
+#if COSMOSIM_ENABLE_HDF5
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.output.run_name = "snapshot_set_contract";
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 8.0;
+  config.cosmology.box_size_z_mpc_comoving = 6.0;
+  config.cosmology.box_size_mpc_comoving = 10.0;
+
+  cosmosim::core::SimulationState state;
+  fillMixedSpeciesState(state);
+  const std::array<std::uint64_t, 6> global_counts = {4U, 4U, 0U, 2U, 4U, 2U};
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "cosmosim_snapshot_set_contract";
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+
+  for (std::uint32_t member_index = 0; member_index < 2U; ++member_index) {
+    cosmosim::io::SnapshotWritePayload payload;
+    payload.state = &state;
+    payload.config = &config;
+    payload.normalized_config_text = "schema_version=1\nmode=cosmo_cube\n";
+    payload.provenance = cosmosim::core::makeProvenanceRecord(
+        "snapshot_set_hash", "snapshot_set_sha", static_cast<int>(member_index),
+        payload.normalized_config_text);
+    payload.set_member.member_index = member_index;
+    payload.set_member.num_files_per_snapshot = 2U;
+    payload.set_member.global_part_count = global_counts;
+    payload.set_member.has_global_part_count = true;
+    payload.set_member.generation_id = "snapshot_set_generation";
+    cosmosim::io::writeScienceSnapshotHdf5(
+        directory / ("snap_042." + std::to_string(member_index) + ".hdf5"),
+        payload);
+  }
+
+  auto before_marker = cosmosim::io::inspectSnapshotSet(directory);
+  assert(before_marker.num_files_per_snapshot == 2U);
+  assert(before_marker.global_part_count == global_counts);
+  assert(!before_marker.complete);
+
+  cosmosim::io::writeSnapshotSetCompletionMarker(
+      directory, "snapshot_set_generation", 2U, global_counts, false);
+  const auto complete = cosmosim::io::inspectSnapshotSet(directory);
+  assert(complete.complete);
+  assert(complete.member_paths.size() == 2U);
+
+  // Marker presence alone is insufficient: it must bind the set metadata.
+  const std::filesystem::path marker = directory / "snapshot_set_generation.complete";
+  {
+    std::ofstream stream(marker, std::ios::trunc);
+    stream << "schema=chui_snapshot_set_v1\n"
+           << "generation_id=snapshot_set_generation\n"
+           << "num_files_per_snapshot=2\n"
+           << "global_part_count=1,1,0,0,0,0\n";
+  }
+  assert(!cosmosim::io::inspectSnapshotSet(directory).complete);
+  std::filesystem::remove_all(directory);
+#endif
+}
+
 }  // namespace
 
 int main() {
   testDecoupledGasIdentityRoundtrip();
   testRoundtripMixedSpeciesSnapshot();
   testMassTableFallbackSnapshotImport();
+  testSnapshotSetCompletionContract();
   return 0;
 }

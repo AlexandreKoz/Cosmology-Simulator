@@ -1,8 +1,10 @@
 #include "cosmosim/io/ic_reader.hpp"
+#include "io/internal/transactional_file.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -17,17 +19,35 @@
 namespace cosmosim::io {
 namespace {
 
+constexpr std::size_t kMaxManifestJsonBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kMaxManifestJsonStringBytes = 1U * 1024U * 1024U;
+constexpr std::size_t kMaxManifestJsonDepth = 64U;
+constexpr std::size_t kMaxManifestJsonCollectionEntries = 1U << 20U;
+
 [[nodiscard]] std::string escapeJson(std::string_view value) {
+  static constexpr char HEX[] = "0123456789abcdef";
   std::string result;
   result.reserve(value.size());
-  for (const char ch : value) {
+  for (const char character : value) {
+    const auto byte = static_cast<unsigned char>(character);
+    const char ch = static_cast<char>(byte);
     switch (ch) {
       case '\\': result += "\\\\"; break;
       case '"': result += "\\\""; break;
+      case '\b': result += "\\b"; break;
+      case '\f': result += "\\f"; break;
       case '\n': result += "\\n"; break;
       case '\r': result += "\\r"; break;
       case '\t': result += "\\t"; break;
-      default: result.push_back(ch); break;
+      default:
+        if (byte < 0x20U) {
+          result += "\\u00";
+          result.push_back(HEX[(byte >> 4U) & 0x0fU]);
+          result.push_back(HEX[byte & 0x0fU]);
+        } else {
+          result.push_back(ch);
+        }
+        break;
     }
   }
   return result;
@@ -201,7 +221,7 @@ class JsonParser {
 
   [[nodiscard]] JsonValue parse() {
     skipSpace();
-    JsonValue value = parseValue();
+    JsonValue value = parseValue(0U);
     skipSpace();
     if (m_pos != m_input.size()) {
       fail("trailing content");
@@ -242,18 +262,21 @@ class JsonParser {
     }
   }
 
-  [[nodiscard]] JsonValue parseValue() {
+  [[nodiscard]] JsonValue parseValue(std::size_t depth) {
     skipSpace();
+    if (depth > kMaxManifestJsonDepth) {
+      fail("maximum JSON nesting depth exceeded");
+    }
     if (m_pos >= m_input.size()) {
       fail("unexpected end of input");
     }
 
     const char character = m_input[m_pos];
     if (character == '{') {
-      return parseObject();
+      return parseObject(depth + 1U);
     }
     if (character == '[') {
-      return parseArray();
+      return parseArray(depth + 1U);
     }
     if (character == '"') {
       JsonValue value;
@@ -284,7 +307,7 @@ class JsonParser {
     fail("unexpected token");
   }
 
-  [[nodiscard]] JsonValue parseObject() {
+  [[nodiscard]] JsonValue parseObject(std::size_t depth) {
     require('{');
     JsonValue value;
     value.kind = JsonValue::Kind::kObject;
@@ -299,8 +322,11 @@ class JsonParser {
       }
       std::string key = parseString();
       require(':');
-      if (!value.object.emplace(std::move(key), parseValue()).second) {
+      if (!value.object.emplace(std::move(key), parseValue(depth)).second) {
         fail("duplicate object key");
+      }
+      if (value.object.size() > kMaxManifestJsonCollectionEntries) {
+        fail("object entry budget exceeded");
       }
       if (consume('}')) {
         break;
@@ -310,7 +336,7 @@ class JsonParser {
     return value;
   }
 
-  [[nodiscard]] JsonValue parseArray() {
+  [[nodiscard]] JsonValue parseArray(std::size_t depth) {
     require('[');
     JsonValue value;
     value.kind = JsonValue::Kind::kArray;
@@ -319,7 +345,10 @@ class JsonParser {
     }
 
     while (true) {
-      value.array.push_back(parseValue());
+      value.array.push_back(parseValue(depth));
+      if (value.array.size() > kMaxManifestJsonCollectionEntries) {
+        fail("array entry budget exceeded");
+      }
       if (consume(']')) {
         break;
       }
@@ -328,23 +357,72 @@ class JsonParser {
     return value;
   }
 
+  [[nodiscard]] std::uint32_t parseHex4() {
+    if (m_pos + 4U > m_input.size()) {
+      fail("truncated unicode escape");
+    }
+    std::uint32_t value = 0U;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const char ch = m_input[m_pos++];
+      std::uint32_t digit = 0U;
+      if (ch >= '0' && ch <= '9') digit = static_cast<std::uint32_t>(ch - '0');
+      else if (ch >= 'a' && ch <= 'f') digit = 10U + static_cast<std::uint32_t>(ch - 'a');
+      else if (ch >= 'A' && ch <= 'F') digit = 10U + static_cast<std::uint32_t>(ch - 'A');
+      else fail("invalid hexadecimal digit in unicode escape");
+      value = (value << 4U) | digit;
+    }
+    return value;
+  }
+
+  void appendUtf8(std::string& out, std::uint32_t codepoint) {
+    if (codepoint > 0x10ffffU ||
+        (codepoint >= 0xd800U && codepoint <= 0xdfffU)) {
+      fail("invalid Unicode code point");
+    }
+    if (codepoint <= 0x7fU) {
+      out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7ffU) {
+      out.push_back(static_cast<char>(0xc0U | (codepoint >> 6U)));
+      out.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+    } else if (codepoint <= 0xffffU) {
+      out.push_back(static_cast<char>(0xe0U | (codepoint >> 12U)));
+      out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU)));
+      out.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+    } else {
+      out.push_back(static_cast<char>(0xf0U | (codepoint >> 18U)));
+      out.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3fU)));
+      out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU)));
+      out.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+    }
+    if (out.size() > kMaxManifestJsonStringBytes) {
+      fail("JSON string byte budget exceeded");
+    }
+  }
+
   [[nodiscard]] std::string parseString() {
     require('"');
     std::string result;
     while (m_pos < m_input.size()) {
-      char character = m_input[m_pos++];
+      unsigned char byte = static_cast<unsigned char>(m_input[m_pos++]);
+      const char character = static_cast<char>(byte);
       if (character == '"') {
         return result;
       }
+      if (byte < 0x20U) {
+        fail("unescaped control character in string");
+      }
       if (character != '\\') {
         result.push_back(character);
+        if (result.size() > kMaxManifestJsonStringBytes) {
+          fail("JSON string byte budget exceeded");
+        }
         continue;
       }
       if (m_pos >= m_input.size()) {
         fail("truncated escape");
       }
-      character = m_input[m_pos++];
-      switch (character) {
+      const char escaped = m_input[m_pos++];
+      switch (escaped) {
         case '"': result.push_back('"'); break;
         case '\\': result.push_back('\\'); break;
         case '/': result.push_back('/'); break;
@@ -353,7 +431,30 @@ class JsonParser {
         case 'n': result.push_back('\n'); break;
         case 'r': result.push_back('\r'); break;
         case 't': result.push_back('\t'); break;
+        case 'u': {
+          std::uint32_t codepoint = parseHex4();
+          if (codepoint >= 0xd800U && codepoint <= 0xdbffU) {
+            if (m_pos + 2U > m_input.size() ||
+                m_input[m_pos] != '\\' || m_input[m_pos + 1U] != 'u') {
+              fail("high surrogate must be followed by a low surrogate");
+            }
+            m_pos += 2U;
+            const std::uint32_t low = parseHex4();
+            if (low < 0xdc00U || low > 0xdfffU) {
+              fail("invalid low surrogate");
+            }
+            codepoint = 0x10000U +
+                ((codepoint - 0xd800U) << 10U) + (low - 0xdc00U);
+          } else if (codepoint >= 0xdc00U && codepoint <= 0xdfffU) {
+            fail("unexpected low surrogate");
+          }
+          appendUtf8(result, codepoint);
+          break;
+        }
         default: fail("unsupported string escape");
+      }
+      if (result.size() > kMaxManifestJsonStringBytes) {
+        fail("JSON string byte budget exceeded");
       }
     }
     fail("unterminated string");
@@ -484,6 +585,33 @@ class JsonParser {
         "IC manifest signed integer out of range: " + std::string(name));
   }
   return result_value;
+}
+
+template <typename T>
+[[nodiscard]] T checkedU64Narrow(
+    std::uint64_t value,
+    std::string_view name) {
+  static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+  if (value > static_cast<std::uint64_t>(std::numeric_limits<T>::max())) {
+    throw std::invalid_argument(
+        "IC manifest unsigned integer does not fit target type: " +
+        std::string(name));
+  }
+  return static_cast<T>(value);
+}
+
+template <typename T>
+[[nodiscard]] T checkedI64Narrow(
+    std::int64_t value,
+    std::string_view name) {
+  static_assert(std::is_integral_v<T> && std::is_signed_v<T>);
+  if (value < static_cast<std::int64_t>(std::numeric_limits<T>::min()) ||
+      value > static_cast<std::int64_t>(std::numeric_limits<T>::max())) {
+    throw std::invalid_argument(
+        "IC manifest signed integer does not fit target type: " +
+        std::string(name));
+  }
+  return static_cast<T>(value);
 }
 
 [[nodiscard]] double asDouble(
@@ -1046,22 +1174,27 @@ std::string serializeIcManifestJson(const IcManifest& manifest) {
 }
 
 IcManifest deserializeIcManifestJson(std::string_view json_text) {
+  if (json_text.size() > kMaxManifestJsonBytes) {
+    throw std::length_error("IC manifest exceeds bounded JSON byte budget");
+  }
   const JsonValue root = JsonParser(json_text).parse();
   IcManifest manifest;
   manifest.schema_name =
       asString(member(root, "schema_name"), "schema_name");
-  manifest.schema_version = static_cast<std::uint32_t>(
-      asU64(member(root, "schema_version"), "schema_version"));
+  manifest.schema_version = checkedU64Narrow<std::uint32_t>(
+      asU64(member(root, "schema_version"), "schema_version"),
+      "schema_version");
   manifest.converter_version =
       asString(member(root, "converter_version"), "converter_version");
   manifest.dialect = parseDialect(
       asString(member(root, "dialect"), "dialect"));
   manifest.dialect_version =
       asString(member(root, "dialect_version"), "dialect_version");
-  manifest.num_files_per_snapshot = static_cast<std::uint32_t>(
+  manifest.num_files_per_snapshot = checkedU64Narrow<std::uint32_t>(
       asU64(
           member(root, "num_files_per_snapshot"),
-          "num_files_per_snapshot"));
+          "num_files_per_snapshot"),
+      "num_files_per_snapshot");
 
   for (const JsonValue& value :
        asArray(member(root, "source_files"), "source_files")) {
@@ -1113,7 +1246,11 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
     }
     using TargetValue = typename std::remove_reference_t<decltype(target)>::value_type;
     for (std::size_t i = 0; i < target.size(); ++i) {
-      target[i] = static_cast<TargetValue>(asU64(values[i], name));
+      if constexpr (std::is_same_v<TargetValue, std::uint64_t>) {
+        target[i] = asU64(values[i], name);
+      } else {
+        target[i] = checkedU64Narrow<TargetValue>(asU64(values[i], name), name);
+      }
     }
   };
   fill_u64_six("num_part_total", manifest.num_part_total);
@@ -1152,8 +1289,9 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
   for (const JsonValue& item :
        asArray(member(root, "fields"), "fields")) {
     IcFieldManifest field;
-    field.source_file_index = static_cast<std::uint32_t>(
-        asU64(member(item, "source_file_index"), "source_file_index"));
+    field.source_file_index = checkedU64Narrow<std::uint32_t>(
+        asU64(member(item, "source_file_index"), "source_file_index"),
+        "source_file_index");
     field.dataset_path =
         asString(member(item, "dataset_path"), "dataset_path");
     field.selected_alias =
@@ -1162,13 +1300,13 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
         asString(member(item, "scalar_type"), "scalar_type");
     field.scalar_class = parseScalarClass(
         asString(member(item, "scalar_class"), "scalar_class"));
-    field.byte_width = static_cast<std::uint8_t>(
-        asU64(member(item, "byte_width"), "byte_width"));
+    field.byte_width = checkedU64Narrow<std::uint8_t>(
+        asU64(member(item, "byte_width"), "byte_width"), "byte_width");
     field.is_signed = asBool(member(item, "is_signed"), "is_signed");
     field.byte_order = parseByteOrder(
         asString(member(item, "byte_order"), "byte_order"));
-    field.rank = static_cast<std::uint8_t>(
-        asU64(member(item, "rank"), "rank"));
+    field.rank = checkedU64Narrow<std::uint8_t>(
+        asU64(member(item, "rank"), "rank"), "rank");
     for (const JsonValue& dimension :
          asArray(member(item, "dimensions"), "dimensions")) {
       field.dimensions.push_back(asU64(dimension, "dimensions"));
@@ -1181,18 +1319,23 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
         asDouble(member(item, "hubble_exponent"), "hubble_exponent");
     field.scale_factor_exponent = asDouble(
         member(item, "scale_factor_exponent"), "scale_factor_exponent");
-    field.length_power = static_cast<std::int8_t>(
-        asI64(member(item, "length_power"), "length_power"));
-    field.mass_power = static_cast<std::int8_t>(
-        asI64(member(item, "mass_power"), "mass_power"));
-    field.time_power = static_cast<std::int8_t>(
-        asI64(member(item, "time_power"), "time_power"));
+    field.length_power = checkedI64Narrow<std::int8_t>(
+        asI64(member(item, "length_power"), "length_power"),
+        "length_power");
+    field.mass_power = checkedI64Narrow<std::int8_t>(
+        asI64(member(item, "mass_power"), "mass_power"),
+        "mass_power");
+    field.time_power = checkedI64Narrow<std::int8_t>(
+        asI64(member(item, "time_power"), "time_power"),
+        "time_power");
     field.frame_scale_factor_exponent = asDouble(
         member(item, "frame_scale_factor_exponent"),
         "frame_scale_factor_exponent");
-    field.velocity_convention_power = static_cast<std::uint8_t>(asU64(
-        member(item, "velocity_convention_power"),
-        "velocity_convention_power"));
+    field.velocity_convention_power = checkedU64Narrow<std::uint8_t>(
+        asU64(
+            member(item, "velocity_convention_power"),
+            "velocity_convention_power"),
+        "velocity_convention_power");
     field.coordinate_frame = parseFrame(
         asString(member(item, "coordinate_frame"), "coordinate_frame"));
     field.velocity_convention = parseVelocityConvention(asString(
@@ -1214,8 +1357,9 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
            member(root, "missing_field_contracts"),
            "missing_field_contracts")) {
     IcMissingFieldContract contract;
-    contract.source_file_index = static_cast<std::uint32_t>(
-        asU64(member(item, "source_file_index"), "source_file_index"));
+    contract.source_file_index = checkedU64Narrow<std::uint32_t>(
+        asU64(member(item, "source_file_index"), "source_file_index"),
+        "source_file_index");
     contract.field_path =
         asString(member(item, "field_path"), "field_path");
     contract.policy = parseMissingFieldPolicy(
@@ -1246,48 +1390,40 @@ IcManifest deserializeIcManifestJson(std::string_view json_text) {
 }
 
 IcManifest readIcManifestJson(const std::filesystem::path& input_path) {
+  std::error_code size_error;
+  const std::uintmax_t file_bytes = std::filesystem::file_size(input_path, size_error);
+  if (size_error) {
+    throw std::runtime_error(
+        "failed to inspect IC manifest size: " + input_path.string() +
+        ": " + size_error.message());
+  }
+  if (file_bytes > kMaxManifestJsonBytes) {
+    throw std::length_error(
+        "IC manifest exceeds bounded JSON byte budget: " + input_path.string());
+  }
   std::ifstream input(input_path, std::ios::binary);
   if (!input) {
     throw std::runtime_error(
         "failed to open IC manifest: " + input_path.string());
   }
-  std::ostringstream text;
-  text << input.rdbuf();
-  if (!input.eof() && input.fail()) {
-    throw std::runtime_error(
-        "failed to read IC manifest: " + input_path.string());
+  std::string text(static_cast<std::size_t>(file_bytes), '\0');
+  if (!text.empty()) {
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
   }
-  return deserializeIcManifestJson(text.str());
+  if (!input || static_cast<std::size_t>(input.gcount()) != text.size()) {
+    throw std::runtime_error(
+        "failed to read complete IC manifest: " + input_path.string());
+  }
+  return deserializeIcManifestJson(text);
 }
 
 void writeIcManifestJson(
     const IcManifest& manifest,
     const std::filesystem::path& output_path) {
-  const std::filesystem::path temporary = output_path.string() + ".part";
-  std::ofstream output(
-      temporary, std::ios::binary | std::ios::trunc);
-  if (!output) {
-    throw std::runtime_error(
-        "failed to open IC manifest output: " + temporary.string());
-  }
-  output << serializeIcManifestJson(manifest);
-  output.close();
-  if (!output) {
-    throw std::runtime_error(
-        "failed to write IC manifest output: " + temporary.string());
-  }
-
-  std::error_code error;
-  std::filesystem::rename(temporary, output_path, error);
-  if (error) {
-    std::filesystem::remove(output_path, error);
-    error.clear();
-    std::filesystem::rename(temporary, output_path, error);
-  }
-  if (error) {
-    throw std::runtime_error(
-        "failed to atomically finalize IC manifest: " + error.message());
-  }
+  internal::writeTextFileTransactionally(
+      output_path,
+      serializeIcManifestJson(manifest),
+      internal::FileDurability::kDurablePublication);
 }
 
 }  // namespace cosmosim::io

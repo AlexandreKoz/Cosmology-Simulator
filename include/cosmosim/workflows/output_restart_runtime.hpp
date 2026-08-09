@@ -13,6 +13,10 @@ struct FrozenConfig;
 struct SimulationConfig;
 }
 
+namespace cosmosim::workflows {
+struct RuntimeServices;
+}
+
 namespace cosmosim::io {
 struct OutputCadencePersistentState;
 }
@@ -61,6 +65,7 @@ class OutputRestartRuntime final {
       const core::HierarchicalTimeBinScheduler& scheduler,
       const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
       const workflows::GravityRestartStateProvider& gravity_state,
+      const workflows::RuntimeServices& services,
       ReferenceWorkflowReport& report,
       core::ProfilerSession& profiler,
       PendingOutputBoundary& pending_output,
@@ -74,6 +79,7 @@ class OutputRestartRuntime final {
   const core::HierarchicalTimeBinScheduler& m_scheduler;
   const core::HierarchicalTimeBinScheduler& m_gas_cell_scheduler;
   const workflows::GravityRestartStateProvider& m_gravity_state;
+  const workflows::RuntimeServices& m_services;
   ReferenceWorkflowReport& m_report;
   core::ProfilerSession& m_profiler;
   PendingOutputBoundary& m_pending_output;

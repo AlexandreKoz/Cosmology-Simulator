@@ -133,9 +133,9 @@ IcReadResult readGadgetArepoHdf5Ic(
       result.state.black_holes.size();
   result.report.counters.final_local_tracer_count = result.state.tracers.size();
   result.report.counters.bytes_read =
-      result.report.counters.metadata_bytes_read +
+      result.report.counters.logical_metadata_bytes_read +
       result.report.counters.hash_bytes_read +
-      result.report.counters.payload_bytes_read;
+      result.report.counters.logical_payload_bytes_read;
   return result;
 #endif
 }
@@ -235,9 +235,9 @@ IcImportReport internal::streamGadgetArepoHdf5Ic(
           observed_by_source_type.begin(), observed_by_source_type.end(),
           std::uint64_t{0});
   report.counters.bytes_read =
-      report.counters.metadata_bytes_read +
+      report.counters.logical_metadata_bytes_read +
       report.counters.hash_bytes_read +
-      report.counters.payload_bytes_read;
+      report.counters.logical_payload_bytes_read;
   return report;
 #endif
 }

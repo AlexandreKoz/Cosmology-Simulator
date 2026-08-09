@@ -134,9 +134,7 @@ Before routing and again after wire decode, each record must satisfy:
 - finite positive black-hole subgrid mass and finite non-negative accretion rate;
 - valid tracer parent, host, fraction, and mass-history fields.
 
-The final rank must equal the deterministic x-slab owner. Required gas, star,
-black-hole, and tracer sidecars are transmitted in the same wire record as the
-particle and constructed exactly once.
+The final rank must equal the deterministic x-slab owner. Wire schema v2 transmits one compact common particle record plus only the species-specific payload required for gas, star, black-hole, or tracer state; dark-matter records no longer carry zero-filled sidecar lanes. The decoded sidecars are constructed exactly once.
 
 This x-slab assignment is **ingestion ownership**, chosen for deterministic
 bounded startup and PM locality. It is not a claim of final work-weighted

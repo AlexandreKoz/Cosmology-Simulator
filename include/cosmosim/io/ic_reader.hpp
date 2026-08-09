@@ -236,6 +236,9 @@ struct IcImportOptions {
   bool require_particle_ids = true;
   bool allow_mass_table_fallback = true;
   std::size_t chunk_particle_count = 1u << 16;
+  // Optional run-scoped scratch root for exact distributed audits. Empty uses
+  // the platform temporary directory as a compatibility fallback.
+  std::filesystem::path scratch_directory;
   // Canonical conversion tools may intentionally import a source whose
   // cosmology becomes the output contract rather than matching a run config.
   bool validate_runtime_cosmology = true;
@@ -247,9 +250,9 @@ struct IcImportOptions {
 struct IcImportCounters {
   std::uint64_t files_assigned = 0;
   std::uint64_t chunks_assigned = 0;
-  std::uint64_t metadata_bytes_read = 0;
+  std::uint64_t logical_metadata_bytes_read = 0;
   std::uint64_t hash_bytes_read = 0;
-  std::uint64_t payload_bytes_read = 0;
+  std::uint64_t logical_payload_bytes_read = 0;
   std::uint64_t converted_payload_bytes = 0;
   std::uint64_t bytes_serialized = 0;
   std::uint64_t manifest_metadata_bytes_communicated = 0;
@@ -299,9 +302,13 @@ struct IcImportCounters {
   std::uint64_t final_local_tracer_count = 0;
 };
 
-// Successful routing batches execute 22 logical consensus phases, three
-// coverage reductions, two Alltoall/Alltoallv exchange pairs, and one exact
-// reconciliation reduction: 30 actual communicator-wide calls per batch.
+// Protocol v2 collapses bookkeeping/fault boundaries into existing phases and
+// combines receive-layout construction with exchange-buffer allocation. A
+// successful routing batch therefore executes 15 logical consensus phases,
+// three coverage reductions, two Alltoall/Alltoallv exchange pairs, and one
+// exact reconciliation reduction: 23 communicator-wide calls per batch.
+inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV2 = 23U;
+// Retained only so archived reports/tests can interpret protocol-v1 counters.
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV1 = 30U;
 // Non-routing calls consist of a 40-call fixed protocol, one source-identity
 // completion vote per source file, ten calls per global duplicate-ID audit

@@ -433,8 +433,30 @@ void testRestartRoundtrip() {
   const std::filesystem::path checkpoint_path =
       std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
 
+  // Bare file names are supported. Invalid temp policy must fail before the
+  // previous valid checkpoint is touched.
+  const std::filesystem::path bare_checkpoint_path = "cosmosim_restart_bare_path.hdf5";
+  std::filesystem::remove(bare_checkpoint_path);
+  cosmosim::io::writeRestartCheckpointHdf5(bare_checkpoint_path, payload);
+  assert(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
+         cosmosim::io::restartSchema().version);
+  cosmosim::io::RestartWritePolicy invalid_temp_policy;
+  invalid_temp_policy.temporary_suffix.clear();
+  bool invalid_temp_rejected = false;
+  try {
+    cosmosim::io::writeRestartCheckpointHdf5(bare_checkpoint_path, payload, invalid_temp_policy);
+  } catch (const std::invalid_argument&) {
+    invalid_temp_rejected = true;
+  }
+  assert(invalid_temp_rejected);
+  assert(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
+         cosmosim::io::restartSchema().version);
+  std::filesystem::remove(bare_checkpoint_path);
+
   cosmosim::io::writeRestartCheckpointHdf5(checkpoint_path, payload);
   const cosmosim::io::RestartReadResult restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
+  assert(restored.payload_integrity_algorithm == "sha256-canonical-le-v1");
+  assert(restored.payload_integrity_sha256_hex.size() == 64U);
 
   assert(restored.state.validateOwnershipInvariants());
   cosmosim::core::debugAssertGasCellIdentityContract(restored.state);
@@ -956,9 +978,14 @@ void testRestartRoundtrip() {
   }
   assert(finalize_threw);
   assert(std::filesystem::is_directory(finalize_failure_dir));
-  const std::filesystem::path partial_path = finalize_failure_dir.string() + failure_policy.temporary_suffix;
-  assert(std::filesystem::exists(partial_path));
-  std::filesystem::remove(partial_path);
+  // Transactional publication uses a unique sibling temporary and removes it
+  // on failure; the destination directory remains intact and no predictable
+  // stale .partial artifact is part of the contract anymore.
+  const std::filesystem::path parent = finalize_failure_dir.parent_path();
+  const std::string prefix = finalize_failure_dir.filename().string() + failure_policy.temporary_suffix;
+  for (const auto& entry : std::filesystem::directory_iterator(parent)) {
+    assert(entry.path().filename().string().rfind(prefix, 0U) != 0U);
+  }
   std::filesystem::remove_all(finalize_failure_dir);
 #else
   bool threw = false;

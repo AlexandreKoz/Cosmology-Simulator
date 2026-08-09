@@ -1135,8 +1135,8 @@ void recordRootSchemaDisposition(
   }
   result.original_header_attributes = headerAuditText(result.schema);
   checkedCounterAdd(
-      result.counters.metadata_bytes_read,
-      logicalHeaderPayloadBytes(result.schema), "metadata_bytes_read");
+      result.counters.logical_metadata_bytes_read,
+      logicalHeaderPayloadBytes(result.schema), "logical_metadata_bytes_read");
   result.source_size_bytes = std::filesystem::file_size(path);
   result.source_sha256 = icSha256FileHex(path);
   checkedCounterAdd(
@@ -1450,7 +1450,7 @@ void recordRootSchemaDisposition(
     }
   }
 
-  result.counters.bytes_read = result.counters.metadata_bytes_read +
+  result.counters.bytes_read = result.counters.logical_metadata_bytes_read +
       result.counters.hash_bytes_read;
   return result;
 }
@@ -1600,8 +1600,8 @@ void recordRootSchemaDisposition(
           source.canonical_manifest_sha256;
     }
     checkedCounterAdd(
-        inspection.counters.metadata_bytes_read,
-        source.counters.metadata_bytes_read, "metadata_bytes_read");
+        inspection.counters.logical_metadata_bytes_read,
+        source.counters.logical_metadata_bytes_read, "logical_metadata_bytes_read");
     checkedCounterAdd(
         inspection.counters.hash_bytes_read,
         source.counters.hash_bytes_read, "hash_bytes_read");
@@ -1698,7 +1698,7 @@ void recordRootSchemaDisposition(
   }
   validateIcManifest(manifest);
   inspection.counters.bytes_read =
-      inspection.counters.metadata_bytes_read +
+      inspection.counters.logical_metadata_bytes_read +
       inspection.counters.hash_bytes_read;
   return inspection;
 }
