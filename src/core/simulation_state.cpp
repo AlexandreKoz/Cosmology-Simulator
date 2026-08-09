@@ -240,43 +240,87 @@ bool ParticleReorderMap::isConsistent(std::size_t particle_count) const {
   return true;
 }
 
-MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacity_bytes)
-    : m_storage(initial_capacity_bytes), m_offset_bytes(0) {}
-
-std::byte* MonotonicScratchAllocator::allocateBytes(std::size_t bytes, std::size_t alignment) {
-  const std::size_t aligned_offset = checkedAlignUpSize(
-      m_offset_bytes, alignment, "MonotonicScratchAllocator.allocateBytes");
-
-  if (bytes == 0) {
-    if (aligned_offset > m_storage.size()) {
-      m_storage.resize(aligned_offset);
-    }
-    return m_storage.empty() ? nullptr : m_storage.data() + aligned_offset;
+MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacity_bytes) {
+  if (initial_capacity_bytes > 0U) {
+    m_next_block_capacity_bytes = std::max<std::size_t>(1024U, initial_capacity_bytes);
+    (void)appendBlock(initial_capacity_bytes);
   }
-
-  const std::size_t required_size = checkedSizeAdd(
-      aligned_offset, bytes, "MonotonicScratchAllocator.allocateBytes");
-
-  if (required_size > m_storage.size()) {
-    std::size_t doubled_capacity = m_storage.size();
-    if (doubled_capacity <= std::numeric_limits<std::size_t>::max() / 2U) {
-      doubled_capacity *= 2U;
-    } else {
-      doubled_capacity = std::numeric_limits<std::size_t>::max();
-    }
-    const std::size_t grow_size =
-        std::max(required_size, std::max<std::size_t>(1024U, doubled_capacity));
-    m_storage.resize(grow_size);
-  }
-
-  auto* ptr = m_storage.data() + aligned_offset;
-  m_offset_bytes = required_size;
-  return ptr;
 }
 
-void MonotonicScratchAllocator::reset() { m_offset_bytes = 0; }
+MonotonicScratchAllocator::Block& MonotonicScratchAllocator::appendBlock(
+    std::size_t minimum_capacity_bytes) {
+  const std::size_t capacity = std::max(minimum_capacity_bytes, m_next_block_capacity_bytes);
+  Block block;
+  block.storage = std::make_unique<std::byte[]>(capacity);
+  block.capacity_bytes = capacity;
+  block.offset_bytes = 0U;
+  m_blocks.push_back(std::move(block));
+  m_total_capacity_bytes = checkedSizeAdd(
+      m_total_capacity_bytes, capacity, "MonotonicScratchAllocator.appendBlock total capacity");
 
-std::size_t MonotonicScratchAllocator::capacityBytes() const noexcept { return m_storage.size(); }
+  if (capacity <= std::numeric_limits<std::size_t>::max() / 2U) {
+    m_next_block_capacity_bytes = capacity * 2U;
+  } else {
+    m_next_block_capacity_bytes = std::numeric_limits<std::size_t>::max();
+  }
+  return m_blocks.back();
+}
+
+std::byte* MonotonicScratchAllocator::allocateBytes(std::size_t bytes, std::size_t alignment) {
+  if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+    throw std::invalid_argument(
+        "MonotonicScratchAllocator.allocateBytes: alignment must be a nonzero power of two");
+  }
+  if (bytes == 0U) {
+    return nullptr;
+  }
+
+  const std::size_t worst_case_capacity = checkedSizeAdd(
+      bytes, alignment - 1U, "MonotonicScratchAllocator.allocateBytes block capacity");
+
+  const auto try_allocate_from_block = [&](Block& block) -> std::byte* {
+    if (block.offset_bytes > block.capacity_bytes) {
+      throw std::logic_error("MonotonicScratchAllocator block offset exceeds capacity");
+    }
+    void* candidate = block.storage.get() + block.offset_bytes;
+    std::size_t available = block.capacity_bytes - block.offset_bytes;
+    void* aligned = std::align(alignment, bytes, candidate, available);
+    if (aligned == nullptr) {
+      return nullptr;
+    }
+    auto* aligned_bytes = static_cast<std::byte*>(aligned);
+    const auto aligned_offset = static_cast<std::size_t>(aligned_bytes - block.storage.get());
+    block.offset_bytes = checkedSizeAdd(
+        aligned_offset, bytes, "MonotonicScratchAllocator.allocateBytes");
+    return aligned_bytes;
+  };
+
+  for (std::size_t block_index = m_current_block; block_index < m_blocks.size(); ++block_index) {
+    Block& block = m_blocks[block_index];
+    if (std::byte* allocation = try_allocate_from_block(block); allocation != nullptr) {
+      m_current_block = block_index;
+      return allocation;
+    }
+  }
+
+  Block& block = appendBlock(worst_case_capacity);
+  m_current_block = m_blocks.size() - 1U;
+  if (std::byte* allocation = try_allocate_from_block(block); allocation != nullptr) {
+    return allocation;
+  }
+  throw std::logic_error("MonotonicScratchAllocator internal block sizing error");
+}
+
+void MonotonicScratchAllocator::reset() {
+  for (Block& block : m_blocks) {
+    block.offset_bytes = 0U;
+  }
+  m_current_block = 0U;
+}
+
+std::size_t MonotonicScratchAllocator::capacityBytes() const noexcept {
+  return m_total_capacity_bytes;
+}
 
 ParticleReorderMap buildParticleReorderMap(const SimulationState& state, ParticleReorderMode mode) {
   ParticleReorderMap reorder_map;

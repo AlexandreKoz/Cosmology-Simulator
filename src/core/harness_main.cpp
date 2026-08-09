@@ -13,6 +13,14 @@
 
 namespace {
 
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+void requireMpiSuccess(int result, const char* operation) {
+  if (result != MPI_SUCCESS) {
+    throw std::runtime_error(std::string("MPI failure in ") + operation);
+  }
+}
+#endif
+
 int printUsage(const char* argv0) {
   std::cerr << "Usage: " << argv0 << " <config.param.txt>\n";
   return 2;
@@ -23,13 +31,13 @@ class ExecutableMpiSession {
   ExecutableMpiSession(int* argc, char*** argv) {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
     int finalized = 0;
-    MPI_Finalized(&finalized);
+    requireMpiSuccess(MPI_Finalized(&finalized), "MPI_Finalized");
     if (finalized != 0) {
       throw std::runtime_error("cosmosim_harness cannot start after MPI_Finalize has already completed");
     }
 
     int initialized = 0;
-    MPI_Initialized(&initialized);
+    requireMpiSuccess(MPI_Initialized(&initialized), "MPI_Initialized");
     if (initialized == 0) {
       int provided = MPI_THREAD_SINGLE;
       const int init_result = MPI_Init_thread(argc, argv, MPI_THREAD_FUNNELED, &provided);
@@ -39,11 +47,11 @@ class ExecutableMpiSession {
       m_owns_finalize = true;
       m_thread_level = provided;
     } else {
-      MPI_Query_thread(&m_thread_level);
+      requireMpiSuccess(MPI_Query_thread(&m_thread_level), "MPI_Query_thread");
     }
 
-    MPI_Comm_size(MPI_COMM_WORLD, &m_world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &m_world_rank);
+    requireMpiSuccess(MPI_Comm_size(MPI_COMM_WORLD, &m_world_size), "MPI_Comm_size");
+    requireMpiSuccess(MPI_Comm_rank(MPI_COMM_WORLD, &m_world_rank), "MPI_Comm_rank");
     if (m_thread_level < MPI_THREAD_FUNNELED) {
       std::ostringstream msg;
       msg << "cosmosim_harness MPI thread support is insufficient: expected>=MPI_THREAD_FUNNELED("
@@ -51,9 +59,9 @@ class ExecutableMpiSession {
           << m_world_size;
       if (m_owns_finalize) {
         int finalized = 0;
-        MPI_Finalized(&finalized);
+        requireMpiSuccess(MPI_Finalized(&finalized), "MPI_Finalized");
         if (finalized == 0) {
-          MPI_Finalize();
+          requireMpiSuccess(MPI_Finalize(), "MPI_Finalize");
         }
       }
       throw std::runtime_error(msg.str());
@@ -67,15 +75,14 @@ class ExecutableMpiSession {
   ExecutableMpiSession(const ExecutableMpiSession&) = delete;
   ExecutableMpiSession& operator=(const ExecutableMpiSession&) = delete;
 
-  ~ExecutableMpiSession() {
+  ~ExecutableMpiSession() noexcept {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
     if (!m_owns_finalize) {
       return;
     }
     int finalized = 0;
-    MPI_Finalized(&finalized);
-    if (finalized == 0) {
-      MPI_Finalize();
+    if (MPI_Finalized(&finalized) == MPI_SUCCESS && finalized == 0) {
+      (void)MPI_Finalize();
     }
 #endif
   }
@@ -87,6 +94,16 @@ class ExecutableMpiSession {
     std::ostringstream out;
     out << "rank=" << m_world_rank << '/' << m_world_size;
     return out.str();
+  }
+
+  void abortDistributed(int error_code) const noexcept {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (m_world_size > 1) {
+      (void)MPI_Abort(MPI_COMM_WORLD, error_code);
+    }
+#else
+    (void)error_code;
+#endif
   }
 
  private:
@@ -115,6 +132,22 @@ class ExecutableMpiSession {
   return "rank=0/1";
 }
 
+void abortCurrentMpiWorldIfDistributed(int error_code) noexcept {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  int initialized = 0;
+  int finalized = 0;
+  if (MPI_Initialized(&initialized) == MPI_SUCCESS && MPI_Finalized(&finalized) == MPI_SUCCESS &&
+      initialized != 0 && finalized == 0) {
+    int world_size = 1;
+    if (MPI_Comm_size(MPI_COMM_WORLD, &world_size) == MPI_SUCCESS && world_size > 1) {
+      (void)MPI_Abort(MPI_COMM_WORLD, error_code);
+    }
+  }
+#else
+  (void)error_code;
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -122,7 +155,9 @@ int main(int argc, char** argv) {
     ExecutableMpiSession mpi_session(&argc, &argv);
 
     if (argc != 2) {
-      return printUsage(argc > 0 ? argv[0] : "cosmosim_harness");
+      const int error_code = printUsage(argc > 0 ? argv[0] : "cosmosim_harness");
+      mpi_session.abortDistributed(error_code);
+      return error_code;
     }
 
     try {
@@ -146,10 +181,12 @@ int main(int argc, char** argv) {
       return 0;
     } catch (const std::exception& ex) {
       std::cerr << "cosmosim runtime failed [" << mpi_session.rankPrefix() << "]: " << ex.what() << '\n';
+      mpi_session.abortDistributed(1);
       return 1;
     }
   } catch (const std::exception& ex) {
     std::cerr << "cosmosim runtime failed [" << currentRankPrefix() << "]: " << ex.what() << '\n';
+    abortCurrentMpiWorldIfDistributed(1);
     return 1;
   }
 }

@@ -62,6 +62,19 @@ restart_stem = restart
   assert(frozen.config.numerics.gravity_softening_kpc_comoving == 2.5);
   assert(frozen.config.mode.zoom_high_res_region);
   assert(frozen.config.mode.zoom_region_file == "region_zoom.hdf5");
+
+  std::string malformed = config_text;
+  const std::string valid_value = "gravity_softening = 2.5 kpc";
+  const auto offset = malformed.find(valid_value);
+  assert(offset != std::string::npos);
+  malformed.replace(offset, valid_value.size(), valid_value + " trailing_garbage");
+  bool trailing_threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(malformed, "trailing_tokens");
+  } catch (const cosmosim::core::ConfigError&) {
+    trailing_threw = true;
+  }
+  assert(trailing_threw);
 }
 
 void testDuplicateKeyFails() {

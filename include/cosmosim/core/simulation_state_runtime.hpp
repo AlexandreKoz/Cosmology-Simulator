@@ -2,6 +2,8 @@
 
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <memory>
+
 namespace cosmosim::core {
 
 struct ActiveIndexSet {
@@ -29,6 +31,7 @@ struct ParticleActiveView {
   std::uint64_t source_particle_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
 };
 
 struct CellActiveView {
@@ -46,6 +49,7 @@ struct CellActiveView {
   std::uint64_t source_cell_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
 };
 
 struct GravityParticleKernelView {
@@ -66,6 +70,7 @@ struct GravityParticleKernelView {
   std::uint64_t source_particle_index_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
 };
 
 struct HydroCellKernelView {
@@ -88,6 +93,7 @@ struct HydroCellKernelView {
   std::uint64_t source_gas_cell_identity_generation = 0;
 
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] bool isConsistent() const noexcept;
 };
 
 enum class ParticleReorderMode : std::uint8_t {
@@ -141,7 +147,10 @@ class ScratchAllocator {
 
 class MonotonicScratchAllocator final : public ScratchAllocator {
  public:
-  // Growable monotonic byte arena for transient per-step scratch data.
+  // Pointer-stable segmented monotonic arena for transient per-step scratch data.
+  // Blocks never move after allocation; all returned pointers remain valid until
+  // reset() begins the next scratch epoch or the arena is destroyed. reset()
+  // reuses existing blocks instead of freeing them.
   explicit MonotonicScratchAllocator(std::size_t initial_capacity_bytes = 0);
 
   [[nodiscard]] std::byte* allocateBytes(std::size_t bytes, std::size_t alignment) override;
@@ -150,8 +159,18 @@ class MonotonicScratchAllocator final : public ScratchAllocator {
   [[nodiscard]] std::size_t capacityBytes() const noexcept;
 
  private:
-  std::vector<std::byte> m_storage;
-  std::size_t m_offset_bytes = 0;
+  struct Block {
+    std::unique_ptr<std::byte[]> storage;
+    std::size_t capacity_bytes = 0;
+    std::size_t offset_bytes = 0;
+  };
+
+  [[nodiscard]] Block& appendBlock(std::size_t minimum_capacity_bytes);
+
+  std::vector<Block> m_blocks;
+  std::size_t m_current_block = 0;
+  std::size_t m_total_capacity_bytes = 0;
+  std::size_t m_next_block_capacity_bytes = 1024U;
 };
 
 struct TransientStepWorkspace {
@@ -219,6 +238,12 @@ struct TransientStepWorkspace {
     TransientStepWorkspace& workspace);
 [[nodiscard]] GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
     const SimulationState& state,
+    TransientStepWorkspace& workspace);
+// No-copy all-active path used by the KDK orchestrator. Hot physics lanes alias
+// authoritative ParticleSoa storage directly; only the uint32 scatter/index lane
+// is materialized in workspace.
+[[nodiscard]] GravityParticleKernelView buildGravityParticleKernelViewAllParticlesDirect(
+    SimulationState& state,
     TransientStepWorkspace& workspace);
 
 void scatterGravityParticleKernelView(

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <system_error>
 
@@ -183,6 +184,35 @@ void testOpenMpThreadLocalAggregation() {
 #endif
 }
 
+void testScopeMacroAndEscapedOperationalFields() {
+  cosmosim::core::ProfilerSession session(true);
+  {
+    COSMOSIM_PROFILE_SCOPE(&session, "macro_outer");
+    COSMOSIM_PROFILE_SCOPE(&session, "macro_inner");
+  }
+  session.recordEvent(cosmosim::core::RuntimeEvent{
+      .event_kind = "escaped\tkind",
+      .severity = cosmosim::core::RuntimeEventSeverity::kWarning,
+      .subsystem = "core.profiler",
+      .step_index = 7,
+      .simulation_time_code = std::numeric_limits<double>::quiet_NaN(),
+      .scale_factor = std::numeric_limits<double>::infinity(),
+      .message = "line1\nline2\r\tcontrol\x01",
+      .payload = {{"zeta", "last"}, {"alpha", "first"}},
+  });
+  const auto path = std::filesystem::temp_directory_path() / "cosmosim_profiler_escape_unit.json";
+  cosmosim::core::writeOperationalReportJson(session, path, "escape_test", "hash");
+  std::ifstream in(path);
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  assert(text.find("\\t") != std::string::npos);
+  assert(text.find("\\u0001") != std::string::npos);
+  assert(text.find("\"simulation_time_code\": null") != std::string::npos);
+  assert(text.find("\"scale_factor\": null") != std::string::npos);
+  assert(text.find("\"alpha\": \"first\"") < text.find("\"zeta\": \"last\""));
+  std::error_code cleanup_error;
+  std::filesystem::remove(path, cleanup_error);
+}
+
 }  // namespace
 
 int main() {
@@ -192,5 +222,6 @@ int main() {
   testOperationalEventReportWriter();
   testOperationalReportIncludesMemoryAccounting();
   testOpenMpThreadLocalAggregation();
+  testScopeMacroAndEscapedOperationalFields();
   return 0;
 }

@@ -177,6 +177,9 @@ struct AdaptiveTimeStepCriteriaView {
   TimeStepGasCellCriteriaView gas_cells;
 };
 
+// Criterion hooks return a finite positive timestep in code units. Positive
+// infinity is the sole explicit sentinel for "this criterion imposes no limit";
+// NaN, -infinity, zero, and negative values are contract violations and fail closed.
 using CriteriaHook = std::function<double(std::uint32_t)>;
 
 struct TimeStepCriteriaHooks {

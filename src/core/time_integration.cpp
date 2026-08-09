@@ -201,9 +201,21 @@ void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_
   return 1ULL << exponent;
 }
 
-[[nodiscard]] double finitePositiveOrInf(double value) {
+[[nodiscard]] double requireValidTimeStepCriterion(
+    double value,
+    std::string_view criterion_name,
+    std::uint32_t element_index) {
+  if (std::isinf(value) && value > 0.0) {
+    return value;
+  }
   if (!std::isfinite(value) || value <= 0.0) {
-    return std::numeric_limits<double>::infinity();
+    std::ostringstream out;
+    out << "invalid timestep criterion"
+        << "; criterion=" << criterion_name
+        << "; element=" << element_index
+        << "; value=" << value
+        << "; expected finite positive value or +infinity for explicit no-limit";
+    throw std::runtime_error(out.str());
   }
   return value;
 }
@@ -858,8 +870,12 @@ void StepOrchestrator::executeOutputBoundaryWithDispatcher(
       .cosmology_background = nullptr,
       .mode_policy = nullptr,
       .profiler_session = profiler_session,
+      .particle_scheduler = nullptr,
+      .gas_cell_scheduler = nullptr,
+      .newly_created_particle_ids = nullptr,
       .timeline_step = {},
       .boundary = boundary,
+      .pm_refresh_directive = {},
       .stage = IntegrationStage::kOutputCheck,
   };
 
@@ -948,6 +964,7 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
   integrator_state.current_boundary_kind = boundary.kind;
   integrator_state.inside_kdk_step = true;
 
+  try {
   StepContext context{
       .state = state,
       .integrator_state = integrator_state,
@@ -958,8 +975,12 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
       .cosmology_background = cosmology_background,
       .mode_policy = mode_policy,
       .profiler_session = profiler_session,
+      .particle_scheduler = nullptr,
+      .gas_cell_scheduler = nullptr,
+      .newly_created_particle_ids = nullptr,
       .timeline_step = timeline_step,
       .boundary = boundary,
+      .pm_refresh_directive = {},
       .stage = IntegrationStage::kGravityKickPre,
   };
 
@@ -989,7 +1010,7 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
             active_set.particle_indices,
             *workspace);
       } else {
-        context.active_gravity_particles = buildGravityParticleKernelViewAllParticles(state, *workspace);
+        context.active_gravity_particles = buildGravityParticleKernelViewAllParticlesDirect(state, *workspace);
       }
       context.has_active_gravity_particles = true;
     }
@@ -1096,9 +1117,19 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
   }
 
   integrator_state.inside_kdk_step = false;
+  timeline.commitStep(integrator_state, timeline_step);
   integrator_state.last_completed_boundary_kind = boundary.kind;
   integrator_state.last_completed_restart_safe = boundary.restart_safe;
-  timeline.commitStep(integrator_state, timeline_step);
+  } catch (...) {
+    // Solver callbacks may have already mutated physical state, so pretending to
+    // roll back the complete KDK step would be unsafe. Mark bookkeeping as
+    // incomplete/restart-unsafe and rethrow; callers must abort or rebuild from
+    // a previously committed checkpoint rather than continue from partial truth.
+    integrator_state.inside_kdk_step = false;
+    integrator_state.current_boundary_kind = boundary.kind;
+    integrator_state.last_completed_restart_safe = false;
+    throw;
+  }
 }
 
 void TimeStepCriteriaRegistry::registerCflHook(CriteriaHook hook) { m_hooks.cfl_hook = std::move(hook); }
@@ -1363,10 +1394,14 @@ std::span<const std::uint32_t> HierarchicalTimeBinScheduler::beginSubstep() {
         "HierarchicalTimeBinScheduler::beginSubstep",
         m_current_tick));
   }
+#ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::beginSubstep");
+#endif
   rebuildActiveSet();
   m_substep_open = true;
+#ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::beginSubstep.active_set_created");
+#endif
   return m_active_elements;
 }
 
@@ -1377,6 +1412,25 @@ void HierarchicalTimeBinScheduler::endSubstep() {
         "HierarchicalTimeBinScheduler::endSubstep",
         m_current_tick));
   }
+  if (m_current_tick == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::runtime_error(schedulerContextMessage(
+        "global integer time cannot advance monotonically without overflowing",
+        "HierarchicalTimeBinScheduler::endSubstep",
+        m_current_tick));
+  }
+  for (const std::uint32_t element : m_active_elements) {
+    const std::uint64_t period_ticks = binPeriodTicks(m_hot.bin_index[element]);
+    if (period_ticks > std::numeric_limits<std::uint64_t>::max() - m_current_tick) {
+      throw std::runtime_error(timeBinContextMessage(
+          "next activation tick would overflow before substep commit",
+          "HierarchicalTimeBinScheduler::endSubstep",
+          m_current_tick,
+          element,
+          m_hot.bin_index[element],
+          m_hot.next_activation_tick[element]));
+    }
+  }
+
   (void)reconcileCandidateTransitions();
   applyPendingTransitions();
   for (const std::uint32_t element : m_active_elements) {
@@ -1385,15 +1439,11 @@ void HierarchicalTimeBinScheduler::endSubstep() {
     m_hot.next_activation_tick[element] = m_current_tick + period_ticks;
     m_hot.active_flag[element] = 0;
   }
-  if (m_current_tick == std::numeric_limits<std::uint64_t>::max()) {
-    throw std::runtime_error(schedulerContextMessage(
-        "global integer time cannot advance monotonically without overflowing",
-        "HierarchicalTimeBinScheduler::endSubstep",
-        m_current_tick));
-  }
   ++m_current_tick;
   m_substep_open = false;
+#ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::endSubstep.committed");
+#endif
 }
 
 const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noexcept { return m_hot; }
@@ -2328,11 +2378,14 @@ void assertHydroCflStable(
 }
 
 double computeGravityTimeStep(const GravityTimeStepInput& input, double eta) {
-  if (input.softening_length_code <= 0.0) {
-    throw std::invalid_argument("softening_length_code must be positive");
+  if (!std::isfinite(input.softening_length_code) || input.softening_length_code <= 0.0) {
+    throw std::invalid_argument("softening_length_code must be finite and positive");
   }
-  if (eta <= 0.0) {
-    throw std::invalid_argument("eta must be positive");
+  if (!std::isfinite(input.acceleration_magnitude_code)) {
+    throw std::invalid_argument("acceleration_magnitude_code must be finite");
+  }
+  if (!std::isfinite(eta) || eta <= 0.0) {
+    throw std::invalid_argument("eta must be finite and positive");
   }
 
   const double accel = std::abs(input.acceleration_magnitude_code);
@@ -2366,32 +2419,39 @@ double combineTimeStepCriteria(
     std::uint32_t element_index,
     const TimeStepCriteriaHooks& hooks,
     double fallback_dt_time_code) {
-  if (fallback_dt_time_code <= 0.0) {
-    throw std::invalid_argument("fallback_dt_time_code must be positive");
+  if (!std::isfinite(fallback_dt_time_code) || fallback_dt_time_code <= 0.0) {
+    throw std::invalid_argument("fallback_dt_time_code must be finite and positive");
   }
 
   double dt = fallback_dt_time_code;
   if (hooks.cfl_hook) {
-    dt = std::min(dt, finitePositiveOrInf(hooks.cfl_hook(element_index)));
+    dt = std::min(dt, requireValidTimeStepCriterion(hooks.cfl_hook(element_index), "cfl", element_index));
   }
   if (hooks.gravity_hook) {
-    dt = std::min(dt, finitePositiveOrInf(hooks.gravity_hook(element_index)));
+    dt = std::min(dt, requireValidTimeStepCriterion(hooks.gravity_hook(element_index), "gravity", element_index));
   }
   if (hooks.source_hook) {
-    dt = std::min(dt, finitePositiveOrInf(hooks.source_hook(element_index)));
+    dt = std::min(dt, requireValidTimeStepCriterion(hooks.source_hook(element_index), "source", element_index));
   }
   if (hooks.user_clamp_hook) {
-    dt = std::min(dt, finitePositiveOrInf(hooks.user_clamp_hook(element_index)));
+    dt = std::min(dt, requireValidTimeStepCriterion(hooks.user_clamp_hook(element_index), "user_clamp", element_index));
   }
 
+  if (!std::isfinite(dt) || dt <= 0.0) {
+    throw std::runtime_error("combineTimeStepCriteria produced a non-finite or non-positive accepted timestep");
+  }
   return dt;
 }
 
 double computeScaleFactorRate(const LambdaCdmBackground& background, double scale_factor) {
-  if (scale_factor <= 0.0) {
-    throw std::invalid_argument("scale_factor must be positive");
+  if (!std::isfinite(scale_factor) || scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be finite and positive");
   }
-  return scale_factor * background.hubbleSi(scale_factor);
+  const double rate = scale_factor * background.hubbleSi(scale_factor);
+  if (!std::isfinite(rate) || rate <= 0.0) {
+    throw std::runtime_error("computed scale-factor rate must be finite and positive");
+  }
+  return rate;
 }
 
 double computeCosmologyExpansionTimeStep(
@@ -2400,16 +2460,17 @@ double computeCosmologyExpansionTimeStep(
     double max_delta_ln_a,
     double max_hubble_time_fraction,
     double time_si_per_code) {
-  if (scale_factor <= 0.0) {
-    throw std::invalid_argument("scale_factor must be positive");
+  if (!std::isfinite(scale_factor) || scale_factor <= 0.0) {
+    throw std::invalid_argument("scale_factor must be finite and positive");
   }
-  if (max_delta_ln_a <= 0.0 || max_hubble_time_fraction <= 0.0 ||
-      time_si_per_code <= 0.0 || !std::isfinite(time_si_per_code)) {
-    throw std::invalid_argument("cosmology timestep limits and time_si_per_code must be positive");
+  if (!std::isfinite(max_delta_ln_a) || max_delta_ln_a <= 0.0 ||
+      !std::isfinite(max_hubble_time_fraction) || max_hubble_time_fraction <= 0.0 ||
+      !std::isfinite(time_si_per_code) || time_si_per_code <= 0.0) {
+    throw std::invalid_argument("cosmology timestep limits and time_si_per_code must be finite and positive");
   }
   const double hubble = background.hubbleSi(scale_factor);
-  if (hubble <= 0.0) {
-    throw std::invalid_argument("H(a) must be positive");
+  if (!std::isfinite(hubble) || hubble <= 0.0) {
+    throw std::invalid_argument("H(a) must be finite and positive");
   }
   const double dt_si = std::min(max_delta_ln_a / hubble, max_hubble_time_fraction / hubble);
   return dt_si / time_si_per_code;
@@ -2571,6 +2632,7 @@ RestartBoundaryDecision evaluateRestartBoundary(
       .pm_refresh_commit_pending = pm_sync_state.refresh_commit_pending,
       .step_index = integrator_state.step_index,
       .scheduler_tick = scheduler_tick,
+      .diagnostic = {},
   };
   decision.restart_safe = !decision.inside_kdk_step &&
       decision.last_completed_restart_safe &&

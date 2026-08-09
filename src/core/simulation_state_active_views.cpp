@@ -1,6 +1,8 @@
 #include "cosmosim/core/simulation_state.hpp"
 
 #include <algorithm>
+#include <limits>
+#include <unordered_set>
 
 namespace cosmosim::core {
 
@@ -10,9 +12,36 @@ void ActiveIndexSet::clear() {
 }
 
 std::size_t ParticleActiveView::size() const noexcept { return particle_id.size(); }
+bool ParticleActiveView::isConsistent() const noexcept {
+  const std::size_t expected = particle_id.size();
+  return species_tag.size() == expected && position_x_comoving.size() == expected &&
+      position_y_comoving.size() == expected && position_z_comoving.size() == expected &&
+      velocity_x_peculiar.size() == expected && velocity_y_peculiar.size() == expected &&
+      velocity_z_peculiar.size() == expected && mass_code.size() == expected;
+}
 std::size_t CellActiveView::size() const noexcept { return center_x_comoving.size(); }
+bool CellActiveView::isConsistent() const noexcept {
+  const std::size_t expected = center_x_comoving.size();
+  return center_y_comoving.size() == expected && center_z_comoving.size() == expected &&
+      mass_code.size() == expected && patch_index.size() == expected &&
+      density_code.size() == expected && pressure_code.size() == expected;
+}
 std::size_t GravityParticleKernelView::size() const noexcept { return particle_index.size(); }
+bool GravityParticleKernelView::isConsistent() const noexcept {
+  const std::size_t expected = particle_index.size();
+  return position_x_comoving.size() == expected && position_y_comoving.size() == expected &&
+      position_z_comoving.size() == expected && velocity_x_peculiar.size() == expected &&
+      velocity_y_peculiar.size() == expected && velocity_z_peculiar.size() == expected &&
+      mass_code.size() == expected;
+}
 std::size_t HydroCellKernelView::size() const noexcept { return cell_index.size(); }
+bool HydroCellKernelView::isConsistent() const noexcept {
+  const std::size_t expected = cell_index.size();
+  return gas_cell_id.size() == expected && local_cell_row.size() == expected &&
+      center_x_comoving.size() == expected && center_y_comoving.size() == expected &&
+      center_z_comoving.size() == expected && mass_code.size() == expected &&
+      density_code.size() == expected && pressure_code.size() == expected;
+}
 
 void TransientStepWorkspace::clear() {
   particle_id.clear();
@@ -227,15 +256,49 @@ GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
   };
 }
 
+GravityParticleKernelView buildGravityParticleKernelViewAllParticlesDirect(
+    SimulationState& state,
+    TransientStepWorkspace& workspace) {
+  if (state.particles.size() > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error(
+        "buildGravityParticleKernelViewAllParticlesDirect: local particle count exceeds uint32 index capacity");
+  }
+  workspace.gravity_particle_index.resize(state.particles.size());
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    workspace.gravity_particle_index[i] = static_cast<std::uint32_t>(i);
+  }
+  return GravityParticleKernelView{
+      .particle_index = workspace.gravity_particle_index,
+      .position_x_comoving = state.particles.position_x_comoving,
+      .position_y_comoving = state.particles.position_y_comoving,
+      .position_z_comoving = state.particles.position_z_comoving,
+      .velocity_x_peculiar = state.particles.velocity_x_peculiar,
+      .velocity_y_peculiar = state.particles.velocity_y_peculiar,
+      .velocity_z_peculiar = state.particles.velocity_z_peculiar,
+      .mass_code = state.particles.mass_code,
+      .source_particle_index_generation = state.particleIndexGeneration(),
+  };
+}
+
 void scatterGravityParticleKernelView(const GravityParticleKernelView& view, SimulationState& state) {
   if (view.source_particle_index_generation != state.particleIndexGeneration()) {
     throw std::runtime_error("scatterGravityParticleKernelView: stale particle view generation");
   }
-  for (std::size_t i = 0; i < view.size(); ++i) {
-    const auto destination = view.particle_index[i];
+  if (!view.isConsistent()) {
+    throw std::invalid_argument("scatterGravityParticleKernelView: view lanes have inconsistent sizes");
+  }
+  std::unordered_set<std::uint32_t> destinations;
+  destinations.reserve(view.size());
+  for (const std::uint32_t destination : view.particle_index) {
     if (destination >= state.particles.size()) {
       throw std::out_of_range("scatterGravityParticleKernelView: stale particle index");
     }
+    if (!destinations.insert(destination).second) {
+      throw std::invalid_argument("scatterGravityParticleKernelView: duplicate destination particle index");
+    }
+  }
+  for (std::size_t i = 0; i < view.size(); ++i) {
+    const auto destination = view.particle_index[i];
     state.particles.position_x_comoving[destination] = view.position_x_comoving[i];
     state.particles.position_y_comoving[destination] = view.position_y_comoving[i];
     state.particles.position_z_comoving[destination] = view.position_z_comoving[i];
@@ -314,24 +377,39 @@ void scatterHydroCellKernelView(const HydroCellKernelView& view, SimulationState
   if (view.source_gas_cell_identity_generation != state.gasCellIdentityGeneration()) {
     throw std::runtime_error("scatterHydroCellKernelView: stale gas-cell identity map generation");
   }
+  if (!view.isConsistent()) {
+    throw std::invalid_argument("scatterHydroCellKernelView: view lanes have inconsistent sizes");
+  }
   if (view.size() > 0) {
     state.requireGasCellIdentityMapCoversDenseRows("scatterHydroCellKernelView");
   }
+
+  std::vector<std::uint32_t> destinations(view.size());
+  std::unordered_set<std::uint32_t> unique_destinations;
+  unique_destinations.reserve(view.size());
   for (std::size_t i = 0; i < view.size(); ++i) {
     const auto destination = state.rowForGasCellId(view.gas_cell_id[i]);
-    if (!destination.has_value()) {
-      throw std::out_of_range("scatterHydroCellKernelView: gas_cell_id is not attached to a local cell row");
+    if (!destination.has_value() || *destination >= state.cells.size()) {
+      throw std::out_of_range("scatterHydroCellKernelView: gas_cell_id does not resolve to a valid local cell row");
     }
-    if (*destination >= state.cells.size()) {
-      throw std::out_of_range("scatterHydroCellKernelView: resolved gas-cell row out of range");
+    if (view.local_cell_row[i] != view.cell_index[i]) {
+      throw std::invalid_argument("scatterHydroCellKernelView: local_cell_row/index mirrors disagree");
     }
-    state.cells.center_x_comoving[*destination] = view.center_x_comoving[i];
-    state.cells.center_y_comoving[*destination] = view.center_y_comoving[i];
-    state.cells.center_z_comoving[*destination] = view.center_z_comoving[i];
-    state.cells.mass_code[*destination] = view.mass_code[i];
-    state.gas_cells.density_code[*destination] = view.density_code[i];
-    state.gas_cells.pressure_code[*destination] = view.pressure_code[i];
+    if (!unique_destinations.insert(*destination).second) {
+      throw std::invalid_argument("scatterHydroCellKernelView: duplicate destination gas cell");
+    }
+    destinations[i] = *destination;
+  }
+  for (std::size_t i = 0; i < view.size(); ++i) {
+    const std::uint32_t destination = destinations[i];
+    state.cells.center_x_comoving[destination] = view.center_x_comoving[i];
+    state.cells.center_y_comoving[destination] = view.center_y_comoving[i];
+    state.cells.center_z_comoving[destination] = view.center_z_comoving[i];
+    state.cells.mass_code[destination] = view.mass_code[i];
+    state.gas_cells.density_code[destination] = view.density_code[i];
+    state.gas_cells.pressure_code[destination] = view.pressure_code[i];
   }
 }
+
 
 }  // namespace cosmosim::core

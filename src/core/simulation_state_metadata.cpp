@@ -1,6 +1,8 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
@@ -41,7 +43,7 @@ namespace {
   std::string temp(value);
   char* end = nullptr;
   const double parsed = std::strtod(temp.c_str(), &end);
-  if (end != temp.c_str() + static_cast<std::ptrdiff_t>(temp.size())) {
+  if (end != temp.c_str() + static_cast<std::ptrdiff_t>(temp.size()) || !std::isfinite(parsed)) {
     throw std::invalid_argument(
         "StateMetadata.deserialize: invalid floating-point value for key '" + key + "'");
   }
@@ -64,6 +66,7 @@ std::string StateMetadata::serialize() const {
 
 StateMetadata StateMetadata::deserialize(std::string_view text) {
   StateMetadata metadata;
+  std::unordered_set<std::string> seen_keys;
   std::istringstream in{std::string(text)};
   std::string line;
 
@@ -83,6 +86,9 @@ StateMetadata StateMetadata::deserialize(std::string_view text) {
     if (key.empty()) {
       throw std::invalid_argument("StateMetadata.deserialize: malformed line '" + line + "'");
     }
+    if (!seen_keys.insert(key).second) {
+      throw std::invalid_argument("StateMetadata.deserialize: duplicate key '" + key + "'");
+    }
 
     if (key == "schema_version") {
       metadata.schema_version = parseUint32(value, key);
@@ -100,7 +106,21 @@ StateMetadata StateMetadata::deserialize(std::string_view text) {
       metadata.snapshot_stem = value;
     } else if (key == "restart_stem") {
       metadata.restart_stem = value;
+    } else {
+      throw std::invalid_argument("StateMetadata.deserialize: unknown key '" + key + "'");
     }
+  }
+
+  static const std::array<std::string_view, 8> k_required_keys = {
+      "schema_version", "run_name", "normalized_config_hash", "normalized_config_hash_hex",
+      "step_index", "scale_factor", "snapshot_stem", "restart_stem"};
+  for (const std::string_view key : k_required_keys) {
+    if (!seen_keys.contains(std::string(key))) {
+      throw std::invalid_argument("StateMetadata.deserialize: missing required key '" + std::string(key) + "'");
+    }
+  }
+  if (!(metadata.scale_factor > 0.0)) {
+    throw std::invalid_argument("StateMetadata.deserialize: scale_factor must be finite and positive");
   }
 
   return metadata;
@@ -131,8 +151,11 @@ std::span<const std::byte> ModuleSidecarBlock::rowPayload(std::size_t row) const
     throw std::out_of_range("ModuleSidecarBlock.rowPayload: row out of range");
   }
   const std::size_t stride = static_cast<std::size_t>(row_stride_bytes);
+  if (stride == 0U || row > std::numeric_limits<std::size_t>::max() / stride) {
+    throw std::invalid_argument("ModuleSidecarBlock.rowPayload: particle-indexed row offset overflow");
+  }
   const std::size_t begin = row * stride;
-  if (stride == 0U || begin + stride > payload.size()) {
+  if (begin > payload.size() || stride > payload.size() - begin) {
     throw std::invalid_argument("ModuleSidecarBlock.rowPayload: invalid particle-indexed row layout");
   }
   return std::span<const std::byte>(payload.data() + begin, stride);
@@ -168,12 +191,14 @@ void validateModuleSidecarRequirement(const ModuleSidecarRequirement& requiremen
       }
       break;
     case ModuleSidecarRequirementKind::kGasDensityAtLeast:
-      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U || requirement.threshold_code < 0.0) {
+      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U ||
+          !std::isfinite(requirement.threshold_code) || requirement.threshold_code < 0.0) {
         throw std::invalid_argument("ModuleSidecarRegistry.upsert: gas-density sidecar requirement has invalid predicate parameters");
       }
       break;
     case ModuleSidecarRequirementKind::kBlackHoleAccretionAtLeast:
-      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U || requirement.threshold_code < 0.0) {
+      if (requirement.species_mask != 0U || requirement.particle_flags_mask != 0U ||
+          !std::isfinite(requirement.threshold_code) || requirement.threshold_code < 0.0) {
         throw std::invalid_argument("ModuleSidecarRegistry.upsert: black-hole-accretion sidecar requirement has invalid predicate parameters");
       }
       break;
@@ -213,7 +238,8 @@ void validateModuleSidecarBlock(const ModuleSidecarBlock& block) {
   }
   validateModuleSidecarRequirement(block.requirement);
   const std::size_t stride = static_cast<std::size_t>(block.row_stride_bytes);
-  if (block.payload.size() != stride * block.particle_id_by_row.size()) {
+  if (block.particle_id_by_row.size() > std::numeric_limits<std::size_t>::max() / stride ||
+      block.payload.size() != stride * block.particle_id_by_row.size()) {
     throw std::invalid_argument("ModuleSidecarRegistry.upsert: particle-indexed payload size must equal row_stride_bytes * row_count");
   }
   std::unordered_set<std::uint64_t> seen;

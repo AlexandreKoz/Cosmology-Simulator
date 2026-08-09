@@ -279,6 +279,13 @@ void requireAllFinite(std::initializer_list<std::pair<double, const char*>> valu
 
   std::string unit;
   stream >> unit;
+  stream >> std::ws;
+  if (!stream.eof()) {
+    std::string trailing;
+    std::getline(stream, trailing);
+    throw ConfigError(
+        "invalid value '" + value + "': unexpected trailing token(s) after magnitude/unit");
+  }
   unit = toLower(unit);
   return {magnitude, unit};
 }

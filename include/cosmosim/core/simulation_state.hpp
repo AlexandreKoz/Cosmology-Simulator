@@ -186,6 +186,9 @@ struct TracerParticleSidecar {
 };
 
 inline constexpr std::uint32_t kInvalidGasCellRow = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::size_t kMaxLocalParticleCount = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::size_t kMaxLocalCellCount = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::size_t kMaxLocalPatchCount = std::numeric_limits<std::uint32_t>::max();
 
 struct GasCellIdentityRecord {
   // Design-seam record for future AMR/moving-mesh gas ownership.
@@ -672,7 +675,7 @@ struct StarParticleMigrationFields {
 };
 
 struct BlackHoleParticleMigrationFields {
-  std::uint32_t host_cell_index = 0;
+  std::uint32_t host_cell_index = kInvalidGasCellRow;
   double subgrid_mass_code = 0.0;
   double accretion_rate_code = 0.0;
   double feedback_energy_code = 0.0;
@@ -686,7 +689,7 @@ struct BlackHoleParticleMigrationFields {
 struct TracerParticleMigrationFields {
   std::uint64_t parent_particle_id = 0;
   std::uint64_t injection_step = 0;
-  std::uint32_t host_cell_index = 0;
+  std::uint32_t host_cell_index = kInvalidGasCellRow;
   double mass_fraction_of_host = 0.0;
   double last_host_mass_code = 0.0;
   double cumulative_exchanged_mass_code = 0.0;

@@ -111,6 +111,35 @@ class SingleStageRecorder final : public cosmosim::core::IntegrationCallback {
   std::vector<cosmosim::core::IntegrationStage> observed;
 };
 
+class ThrowingDriftRecorder final : public cosmosim::core::IntegrationCallback {
+ public:
+  std::string_view callbackName() const override { return "throwing_drift"; }
+  std::span<const cosmosim::core::IntegrationStage> integrationStages() const override {
+    return {&stage, 1};
+  }
+  std::span<const cosmosim::core::StageContract> stageContracts() const override {
+    return {&contract, 1};
+  }
+  void onStage(cosmosim::core::StepContext&) override {
+    throw std::runtime_error("injected drift failure");
+  }
+
+ private:
+  cosmosim::core::IntegrationStage stage = cosmosim::core::IntegrationStage::kDrift;
+  cosmosim::core::StageContract contract{
+      .stage = cosmosim::core::IntegrationStage::kDrift,
+      .required_inputs = cosmosim::core::StageDataDomain::kParticles,
+      .mutated_state = cosmosim::core::StageDataDomain::kParticles,
+      .produced_outputs = cosmosim::core::StageDataDomain::kParticles,
+      .allowed_side_effects = cosmosim::core::StageDataDomain::kNone,
+      .sync_requirements = cosmosim::core::StageSyncRequirement::kLocalOnly,
+      .active_set_family = cosmosim::core::StageActiveSetFamily::kActiveParticles,
+      .restart_safety = cosmosim::core::StageSafety::kSafe,
+      .output_safety = cosmosim::core::StageSafety::kSafe,
+      .owner = cosmosim::core::StageSubsystem::kCore,
+  };
+};
+
 class StageRecorder final : public cosmosim::core::IntegrationCallback {
  public:
   std::string_view callbackName() const override { return "stage_recorder"; }
@@ -687,6 +716,20 @@ void testTimeBinMappingAndCriteria() {
   const double dt1 = cosmosim::core::combineTimeStepCriteria(1, registry.hooks(), 0.5);
   assert(std::abs(dt0 - 0.15) < k_tolerance);
   assert(std::abs(dt1 - 0.1) < k_tolerance);
+
+  cosmosim::core::TimeStepCriteriaHooks invalid_hooks;
+  invalid_hooks.cfl_hook = [](std::uint32_t) { return std::numeric_limits<double>::quiet_NaN(); };
+  assert(throwsWithContext(
+      [&]() { (void)cosmosim::core::combineTimeStepCriteria(17, invalid_hooks, 0.5); },
+      "criterion=cfl"));
+  invalid_hooks.cfl_hook = [](std::uint32_t) { return 0.0; };
+  assert(throwsWithContext(
+      [&]() { (void)cosmosim::core::combineTimeStepCriteria(17, invalid_hooks, 0.5); },
+      "element=17"));
+  invalid_hooks.cfl_hook = [](std::uint32_t) { return -1.0; };
+  assert(throwsWithContext(
+      [&]() { (void)cosmosim::core::combineTimeStepCriteria(17, invalid_hooks, 0.5); },
+      "invalid timestep"));
 }
 
 void testHierarchicalSchedulerTransitions() {
@@ -1461,10 +1504,48 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
   assert(std::abs(pm_sync.lastRefreshScaleFactor() - 0.8) < k_tolerance);
 }
 
+void testKdkFailureMarksBookkeepingRestartUnsafe() {
+  cosmosim::core::SimulationState state;
+  cosmosim::core::IntegratorState integrator_state;
+  cosmosim::core::TransientStepWorkspace workspace;
+  integrator_state.dt_time_code = 0.25;
+  integrator_state.last_completed_restart_safe = true;
+
+  ThrowingDriftRecorder throwing;
+  cosmosim::core::StepOrchestrator orchestrator;
+  orchestrator.registerCallback(throwing);
+  const cosmosim::core::ActiveSetDescriptor active_set{};
+  assert(throwsWithContext(
+      [&]() { orchestrator.executeSingleStep(state, integrator_state, active_set, nullptr, &workspace); },
+      "injected drift failure"));
+  assert(!integrator_state.inside_kdk_step);
+  assert(!integrator_state.last_completed_restart_safe);
+  assert(integrator_state.step_index == 0U);
+  assert(integrator_state.current_time_code == 0.0);
+}
+
+void testSchedulerTickOverflowFailsBeforeTransitionCommit() {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(0);
+  cosmosim::core::TimeBinPersistentState persistent;
+  persistent.current_tick = std::numeric_limits<std::uint64_t>::max();
+  persistent.max_bin = 0;
+  persistent.bin_index = {0};
+  persistent.next_activation_tick = {std::numeric_limits<std::uint64_t>::max()};
+  persistent.active_flag = {0};
+  persistent.pending_bin_index = {cosmosim::core::HierarchicalTimeBinScheduler::k_unset_pending_bin};
+  scheduler.importPersistentState(persistent);
+  const auto active = scheduler.beginSubstep();
+  assert(active.size() == 1U && active[0] == 0U);
+  assert(throwsWithContext([&]() { scheduler.endSubstep(); }, "overflow"));
+  assert(scheduler.currentTick() == std::numeric_limits<std::uint64_t>::max());
+}
+
 }  // namespace
 
 int main() {
   testKickDriftKickOrdering();
+  testKdkFailureMarksBookkeepingRestartUnsafe();
+  testSchedulerTickOverflowFailsBeforeTransitionCommit();
   testPmRefreshDirectiveCapturesReasonAndForceEvalTime();
   testLocalForceRefreshDoesNotIssuePmSyncEvent();
   testStageBoundDispatch();

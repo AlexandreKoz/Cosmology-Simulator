@@ -2029,3 +2029,18 @@ waiver.
 - Campaign B source and archive-completeness acceptance are closed. Distributed
   runtime capability remains `provisional` until the documented np1/np2/np4
   and fault matrices execute successfully.
+
+## 2026-08-08 `src/core` adversarial hardening campaign
+
+- Replaced the relocatable vector-backed scratch arena with a reusable segmented monotonic arena. Allocations are pointer-stable for the scratch epoch, over-aligned requests use absolute-address alignment, and allocation/growth arithmetic is checked before wraparound.
+- Strengthened cell/AMR ownership to an exact non-overlapping partition when patch ownership exists, retained an explicit non-AMR zero-patch mode, and standardized `kInvalidGasCellRow` as the hostless black-hole/tracer sentinel instead of relying on empty-container loopholes.
+- Corrected periodic ghost indexing for widths larger than the interior and made wide reflective extension a deliberate repeated reflection that preserves the established first-domain ordering. `.param.txt` magnitude/unit values now reject trailing semantic tokens.
+- Hardened KDK and hierarchical scheduler failure bookkeeping: tick overflow is preflighted before transition mutation, failed stages cannot remain marked inside KDK or restart-safe, and physical callback failure is explicitly treated as an abort/recover-from-checkpoint boundary rather than fictitious full-state rollback. Gas/AMR migration host remaps are prepared and validated before commit.
+- Timestep hooks now fail closed on NaN, negative, zero, or `-inf`; only explicit `+inf` means no constraint. Active-view scatter prevalidates lane consistency, bounds, and duplicate destinations, while the all-particle gravity path aliases canonical hot SoA lanes instead of repacking the full state.
+- Profiling output now uses complete JSON control escaping, JSON-safe non-finite handling, deterministic ordering, CSV quoting, checked `.part` publication, non-throwing RAII scope destruction, and the fixed multi-use scope macro. Memory accounting covers the audited omitted core lanes and uses checked accumulation. Metadata/provenance decoding is strict about malformed/duplicate/unknown values, and root provenance publication is staged through `.part`.
+- Unit/cosmology helpers reject non-finite or non-positive conversion/scale inputs and adaptive cosmology integration reports tolerance non-convergence rather than silently returning a depth-limited estimate. Per-rank particle/cell/patch capacities are explicitly bounded by the retained 32-bit local index contract.
+- MPI topology now records node-local rank for CUDA selection and the harness uses distributed fatal-abort semantics instead of allowing one rank to return into later collectives. CUDA discovery preserves the runtime diagnostic. MPI/CUDA execution was not available in the repair environment, so those runtime paths remain evidence-blocked rather than claimed green.
+- Added a CI `cosmosim_core` strict-warning gate using `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wundef -Wformat=2 -Wnull-dereference -Werror`. The same CPU-only strict core build passes in the repair environment.
+
+Remaining intentional boundaries: active-bin emission still sorts for deterministic order pending a deeper ordered-bin data-structure redesign; migration retains old/new authoritative buffers during prepare/commit to preserve the strong failure guarantee, so peak-RSS optimization needs measured evidence; provenance v6 retains the established 64-bit compatibility hash and limited hardware schema until a separately versioned strong-integrity/hardware-metadata migration is designed.
+

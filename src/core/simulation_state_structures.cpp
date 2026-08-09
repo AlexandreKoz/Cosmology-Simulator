@@ -1,6 +1,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 
 #include <cmath>
+#include <limits>
 
 namespace cosmosim::core {
 
@@ -19,10 +20,20 @@ std::size_t ParticleSoa::size() const noexcept { return position_x_comoving.size
 
 bool ParticleSoa::isConsistent() const noexcept {
   const std::size_t expected = position_x_comoving.size();
-  return position_y_comoving.size() == expected && position_z_comoving.size() == expected &&
-         velocity_x_peculiar.size() == expected && velocity_y_peculiar.size() == expected &&
-         velocity_z_peculiar.size() == expected && mass_code.size() == expected &&
-         time_bin.size() == expected;
+  if (position_y_comoving.size() != expected || position_z_comoving.size() != expected ||
+      velocity_x_peculiar.size() != expected || velocity_y_peculiar.size() != expected ||
+      velocity_z_peculiar.size() != expected || mass_code.size() != expected || time_bin.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(position_x_comoving[i]) || !std::isfinite(position_y_comoving[i]) ||
+        !std::isfinite(position_z_comoving[i]) || !std::isfinite(velocity_x_peculiar[i]) ||
+        !std::isfinite(velocity_y_peculiar[i]) || !std::isfinite(velocity_z_peculiar[i]) ||
+        !std::isfinite(mass_code[i]) || mass_code[i] < 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void ParticleSidecar::resize(std::size_t count) {
@@ -63,6 +74,12 @@ bool ParticleSidecar::isConsistent() const noexcept {
   for (std::size_t i = 0; i < expected; ++i) {
     if (!std::isfinite(last_drift_time_code[i]) || !std::isfinite(last_drift_scale_factor[i]) ||
         last_drift_scale_factor[i] <= 0.0) {
+      return false;
+    }
+    const bool has_softening_override =
+        !has_gravity_softening_override.empty() && has_gravity_softening_override[i] != 0U;
+    if (!gravity_softening_comoving.empty() && has_softening_override &&
+        (!std::isfinite(gravity_softening_comoving[i]) || !(gravity_softening_comoving[i] > 0.0))) {
       return false;
     }
   }
@@ -127,8 +144,17 @@ std::size_t CellSoa::size() const noexcept { return center_x_comoving.size(); }
 
 bool CellSoa::isConsistent() const noexcept {
   const std::size_t expected = center_x_comoving.size();
-  return center_y_comoving.size() == expected && center_z_comoving.size() == expected &&
-         mass_code.size() == expected && time_bin.size() == expected && patch_index.size() == expected;
+  if (center_y_comoving.size() != expected || center_z_comoving.size() != expected ||
+      mass_code.size() != expected || time_bin.size() != expected || patch_index.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(center_x_comoving[i]) || !std::isfinite(center_y_comoving[i]) ||
+        !std::isfinite(center_z_comoving[i]) || !std::isfinite(mass_code[i]) || mass_code[i] < 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void GasCellSidecar::resize(std::size_t count) {
@@ -149,12 +175,25 @@ std::size_t GasCellSidecar::size() const noexcept { return density_code.size(); 
 
 bool GasCellSidecar::isConsistent() const noexcept {
   const std::size_t expected = density_code.size();
-  return gas_cell_id.size() == expected && parent_particle_id.size() == expected &&
-         velocity_x_peculiar.size() == expected && velocity_y_peculiar.size() == expected &&
-         velocity_z_peculiar.size() == expected &&
-         pressure_code.size() == expected && internal_energy_code.size() == expected &&
-         metal_mass_code.size() == expected && temperature_code.size() == expected &&
-         sound_speed_code.size() == expected;
+  if (gas_cell_id.size() != expected || parent_particle_id.size() != expected ||
+      velocity_x_peculiar.size() != expected || velocity_y_peculiar.size() != expected ||
+      velocity_z_peculiar.size() != expected || pressure_code.size() != expected ||
+      internal_energy_code.size() != expected || metal_mass_code.size() != expected ||
+      temperature_code.size() != expected || sound_speed_code.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(velocity_x_peculiar[i]) || !std::isfinite(velocity_y_peculiar[i]) ||
+        !std::isfinite(velocity_z_peculiar[i]) || !std::isfinite(density_code[i]) || density_code[i] < 0.0 ||
+        !std::isfinite(pressure_code[i]) || pressure_code[i] < 0.0 ||
+        !std::isfinite(internal_energy_code[i]) || internal_energy_code[i] < 0.0 ||
+        !std::isfinite(metal_mass_code[i]) || metal_mass_code[i] < 0.0 ||
+        !std::isfinite(temperature_code[i]) || temperature_code[i] < 0.0 ||
+        !std::isfinite(sound_speed_code[i]) || sound_speed_code[i] < 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void StarParticleSidecar::resize(std::size_t count) {
@@ -214,12 +253,26 @@ bool StarParticleSidecar::isConsistent() const noexcept {
       return false;
     }
   }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(formation_scale_factor[i]) || formation_scale_factor[i] < 0.0 ||
+        !std::isfinite(birth_mass_code[i]) || birth_mass_code[i] < 0.0 ||
+        !std::isfinite(metallicity_mass_fraction[i]) || metallicity_mass_fraction[i] < 0.0 ||
+        metallicity_mass_fraction[i] > 1.0 || !std::isfinite(stellar_age_years_last[i]) ||
+        stellar_age_years_last[i] < 0.0 || !std::isfinite(stellar_returned_mass_cumulative_code[i]) ||
+        stellar_returned_mass_cumulative_code[i] < 0.0 ||
+        !std::isfinite(stellar_returned_metals_cumulative_code[i]) ||
+        stellar_returned_metals_cumulative_code[i] < 0.0 ||
+        !std::isfinite(stellar_feedback_energy_cumulative_erg[i]) ||
+        stellar_feedback_energy_cumulative_erg[i] < 0.0) {
+      return false;
+    }
+  }
   return true;
 }
 
 void BlackHoleParticleSidecar::resize(std::size_t count) {
   particle_index.resize(count);
-  host_cell_index.resize(count);
+  host_cell_index.resize(count, kInvalidGasCellRow);
   subgrid_mass_code.resize(count);
   accretion_rate_code.resize(count);
   feedback_energy_code.resize(count);
@@ -234,18 +287,33 @@ std::size_t BlackHoleParticleSidecar::size() const noexcept { return particle_in
 
 bool BlackHoleParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_index.size();
-  return host_cell_index.size() == expected && subgrid_mass_code.size() == expected &&
-         accretion_rate_code.size() == expected && feedback_energy_code.size() == expected &&
-         eddington_ratio.size() == expected && cumulative_accreted_mass_code.size() == expected &&
-         cumulative_feedback_energy_code.size() == expected &&
-         duty_cycle_active_time_code.size() == expected && duty_cycle_total_time_code.size() == expected;
+  if (host_cell_index.size() != expected || subgrid_mass_code.size() != expected ||
+      accretion_rate_code.size() != expected || feedback_energy_code.size() != expected ||
+      eddington_ratio.size() != expected || cumulative_accreted_mass_code.size() != expected ||
+      cumulative_feedback_energy_code.size() != expected || duty_cycle_active_time_code.size() != expected ||
+      duty_cycle_total_time_code.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(subgrid_mass_code[i]) || subgrid_mass_code[i] < 0.0 ||
+        !std::isfinite(accretion_rate_code[i]) || accretion_rate_code[i] < 0.0 ||
+        !std::isfinite(feedback_energy_code[i]) || feedback_energy_code[i] < 0.0 ||
+        !std::isfinite(eddington_ratio[i]) || eddington_ratio[i] < 0.0 ||
+        !std::isfinite(cumulative_accreted_mass_code[i]) || cumulative_accreted_mass_code[i] < 0.0 ||
+        !std::isfinite(cumulative_feedback_energy_code[i]) || cumulative_feedback_energy_code[i] < 0.0 ||
+        !std::isfinite(duty_cycle_active_time_code[i]) || duty_cycle_active_time_code[i] < 0.0 ||
+        !std::isfinite(duty_cycle_total_time_code[i]) || duty_cycle_total_time_code[i] < 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void TracerParticleSidecar::resize(std::size_t count) {
   particle_index.resize(count);
   parent_particle_id.resize(count);
   injection_step.resize(count);
-  host_cell_index.resize(count);
+  host_cell_index.resize(count, kInvalidGasCellRow);
   mass_fraction_of_host.resize(count);
   last_host_mass_code.resize(count);
   cumulative_exchanged_mass_code.resize(count);
@@ -255,9 +323,20 @@ std::size_t TracerParticleSidecar::size() const noexcept { return particle_index
 
 bool TracerParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_index.size();
-  return parent_particle_id.size() == expected && injection_step.size() == expected &&
-         host_cell_index.size() == expected && mass_fraction_of_host.size() == expected &&
-         last_host_mass_code.size() == expected && cumulative_exchanged_mass_code.size() == expected;
+  if (parent_particle_id.size() != expected || injection_step.size() != expected ||
+      host_cell_index.size() != expected || mass_fraction_of_host.size() != expected ||
+      last_host_mass_code.size() != expected || cumulative_exchanged_mass_code.size() != expected) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected; ++i) {
+    if (!std::isfinite(mass_fraction_of_host[i]) || mass_fraction_of_host[i] < 0.0 ||
+        mass_fraction_of_host[i] > 1.0 || !std::isfinite(last_host_mass_code[i]) ||
+        last_host_mass_code[i] < 0.0 || !std::isfinite(cumulative_exchanged_mass_code[i]) ||
+        cumulative_exchanged_mass_code[i] < 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void PatchSoa::resize(std::size_t count) {
@@ -295,15 +374,24 @@ bool PatchSoa::isConsistent() const noexcept {
   for (std::size_t i = 0; i < expected; ++i) {
     const bool has_geometry = extent_x_comoving[i] > 0.0 || extent_y_comoving[i] > 0.0 ||
         extent_z_comoving[i] > 0.0 || cell_dim_x[i] != 0U || cell_dim_y[i] != 0U || cell_dim_z[i] != 0U;
-    if (!has_geometry || cell_count[i] == 0U) {
+    if (cell_count[i] == 0U) {
       continue;
+    }
+    if (!has_geometry) {
+      return false;
     }
     if (!(extent_x_comoving[i] > 0.0 && extent_y_comoving[i] > 0.0 && extent_z_comoving[i] > 0.0) ||
         cell_dim_x[i] == 0U || cell_dim_y[i] == 0U || cell_dim_z[i] == 0U) {
       return false;
     }
-    const std::size_t dims_product = static_cast<std::size_t>(cell_dim_x[i]) *
-        static_cast<std::size_t>(cell_dim_y[i]) * static_cast<std::size_t>(cell_dim_z[i]);
+    const std::size_t dim_x = static_cast<std::size_t>(cell_dim_x[i]);
+    const std::size_t dim_y = static_cast<std::size_t>(cell_dim_y[i]);
+    const std::size_t dim_z = static_cast<std::size_t>(cell_dim_z[i]);
+    if (dim_x > std::numeric_limits<std::size_t>::max() / dim_y ||
+        dim_x * dim_y > std::numeric_limits<std::size_t>::max() / dim_z) {
+      return false;
+    }
+    const std::size_t dims_product = dim_x * dim_y * dim_z;
     if (dims_product != cell_count[i]) {
       return false;
     }

@@ -2,19 +2,31 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <utility>
 
 namespace cosmosim::core {
 namespace {
 
+[[nodiscard]] ProfileNode makeProfileNode(std::string name) {
+  ProfileNode node;
+  node.name = std::move(name);
+  return node;
+}
+
 [[nodiscard]] std::string escapeJson(const std::string& input) {
   std::string out;
   out.reserve(input.size());
-  for (const char c : input) {
+  constexpr char k_hex[] = "0123456789abcdef";
+  for (const char raw_c : input) {
+    const auto c = static_cast<unsigned char>(raw_c);
     switch (c) {
       case '"':
         out += "\\\"";
@@ -22,15 +34,86 @@ namespace {
       case '\\':
         out += "\\\\";
         break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
       case '\n':
         out += "\\n";
         break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
       default:
-        out.push_back(c);
+        if (c < 0x20U) {
+          out += "\\u00";
+          out.push_back(k_hex[(c >> 4U) & 0x0FU]);
+          out.push_back(k_hex[c & 0x0FU]);
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
         break;
     }
   }
   return out;
+}
+
+[[nodiscard]] std::string escapeCsvField(std::string_view input) {
+  if (input.find_first_of(",\"\r\n") == std::string_view::npos) {
+    return std::string(input);
+  }
+  std::string out;
+  out.reserve(input.size() + 2U);
+  out.push_back('"');
+  for (const char c : input) {
+    if (c == '"') {
+      out += "\"\"";
+    } else {
+      out.push_back(c);
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+template <typename Writer>
+void writeAtomically(const std::filesystem::path& output_path, Writer&& writer) {
+  std::filesystem::path part_path = output_path;
+  part_path += ".part";
+  {
+    std::ofstream out(part_path, std::ios::out | std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error("failed to open temporary profiler output path: " + part_path.string());
+    }
+    writer(out);
+    out.flush();
+    if (!out) {
+      throw std::runtime_error("failed while writing profiler output: " + part_path.string());
+    }
+    out.close();
+    if (!out) {
+      throw std::runtime_error("failed while closing profiler output: " + part_path.string());
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::rename(part_path, output_path, ec);
+  if (!ec) {
+    return;
+  }
+
+  // Never delete a previously published report merely to make rename succeed.
+  // POSIX rename replaces atomically; platforms that cannot atomically replace
+  // an existing destination fail closed and preserve the old complete file.
+  std::error_code remove_ec;
+  std::filesystem::remove(part_path, remove_ec);
+  throw std::runtime_error(
+      "failed to atomically finalize profiler output '" + output_path.string() + "': " + ec.message());
 }
 
 [[nodiscard]] const char* runtimeEventSeverityLabel(RuntimeEventSeverity severity) {
@@ -56,7 +139,7 @@ void writeOptionalU64(std::ostream& out, const std::optional<std::uint64_t>& val
 }
 
 void writeOptionalDouble(std::ostream& out, const std::optional<double>& value) {
-  if (value.has_value()) {
+  if (value.has_value() && std::isfinite(*value)) {
     out << std::fixed << std::setprecision(6) << *value;
     return;
   }
@@ -82,7 +165,11 @@ void writeEventJson(std::ostream& out, const RuntimeEvent& event, int indent_lev
   out << field_indent << "\"message\": \"" << escapeJson(event.message) << "\",\n";
   out << field_indent << "\"payload\": {";
   bool first_payload = true;
-  for (const auto& [key, value] : event.payload) {
+  std::vector<std::pair<std::string, std::string>> ordered_payload(event.payload.begin(), event.payload.end());
+  std::sort(ordered_payload.begin(), ordered_payload.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.first < rhs.first;
+  });
+  for (const auto& [key, value] : ordered_payload) {
     out << (first_payload ? "\n" : ",\n");
     out << field_indent << "  \"" << escapeJson(key) << "\": \"" << escapeJson(value) << "\"";
     first_payload = false;
@@ -246,13 +333,13 @@ void CounterRegistry::reset() {
 }
 
 ProfilerSession::ThreadShard::ThreadShard() {
-  nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+  nodes.push_back(makeProfileNode("root"));
 }
 
 ProfilerSession::ProfilerSession(bool enabled)
     : m_session_id(g_next_profiler_session_id.fetch_add(1, std::memory_order_relaxed)),
       m_enabled(enabled) {
-  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+  m_merged_nodes.push_back(makeProfileNode("root"));
 }
 
 ProfilerSession::ThreadShard& ProfilerSession::localShard() {
@@ -301,9 +388,6 @@ void ProfilerSession::beginScope(std::string_view phase_name) {
 }
 
 void ProfilerSession::endScope() {
-  if (!enabled()) {
-    return;
-  }
   ThreadShard& shard = localShard();
   if (shard.scope_stack.empty()) {
     throw std::logic_error("ProfilerSession::endScope called with empty thread-local scope stack");
@@ -345,7 +429,7 @@ std::size_t ProfilerSession::findOrCreateChild(
     return it->second;
   }
   const std::size_t child_index = shard.nodes.size();
-  shard.nodes.push_back(ProfileNode{.name = phase_key, .call_count = 0});
+  shard.nodes.push_back(makeProfileNode(phase_key));
   shard.nodes[parent_index].children.push_back(child_index);
   shard.nodes[parent_index].child_lookup.emplace(phase_key, child_index);
   return child_index;
@@ -354,7 +438,7 @@ std::size_t ProfilerSession::findOrCreateChild(
 void ProfilerSession::rebuildMergedNodes() const {
   std::lock_guard lock(m_registration_mutex);
   m_merged_nodes.clear();
-  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+  m_merged_nodes.push_back(makeProfileNode("root"));
 
   const auto merge_node = [&](auto&& self,
                               const std::vector<ProfileNode>& source,
@@ -372,7 +456,7 @@ void ProfilerSession::rebuildMergedNodes() const {
       const auto existing = m_merged_nodes[target_index].child_lookup.find(name);
       if (existing == m_merged_nodes[target_index].child_lookup.end()) {
         target_child = m_merged_nodes.size();
-        m_merged_nodes.push_back(ProfileNode{.name = name, .call_count = 0});
+        m_merged_nodes.push_back(makeProfileNode(name));
         m_merged_nodes[target_index].children.push_back(target_child);
         m_merged_nodes[target_index].child_lookup.emplace(name, target_child);
       } else {
@@ -384,6 +468,11 @@ void ProfilerSession::rebuildMergedNodes() const {
 
   for (const auto& shard : m_shards) {
     merge_node(merge_node, shard->nodes, rootNodeIndex(), rootNodeIndex());
+  }
+  for (ProfileNode& node : m_merged_nodes) {
+    std::sort(node.children.begin(), node.children.end(), [this](std::size_t lhs, std::size_t rhs) {
+      return m_merged_nodes[lhs].name < m_merged_nodes[rhs].name;
+    });
   }
 }
 
@@ -435,9 +524,14 @@ const MemoryReport* ProfilerSession::memoryReport() const noexcept {
 
 void ProfilerSession::reset() {
   std::lock_guard lock(m_registration_mutex);
+  for (const auto& shard : m_shards) {
+    if (!shard->scope_stack.empty()) {
+      throw std::logic_error("ProfilerSession::reset called while profiling scopes are active");
+    }
+  }
   for (auto& shard : m_shards) {
     shard->nodes.clear();
-    shard->nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+    shard->nodes.push_back(makeProfileNode("root"));
     shard->scope_stack.clear();
     shard->events.clear();
   }
@@ -445,90 +539,97 @@ void ProfilerSession::reset() {
   m_allocator_stats.reset();
   m_next_event_sequence.store(0, std::memory_order_relaxed);
   m_merged_nodes.clear();
-  m_merged_nodes.push_back(ProfileNode{.name = "root", .call_count = 0});
+  m_merged_nodes.push_back(makeProfileNode("root"));
   m_merged_events.clear();
   m_memory_report.reset();
 }
 
 ScopedProfile::ScopedProfile(ProfilerSession* session, std::string_view phase_name)
-    : m_session(session) {
-  if (m_session != nullptr) {
+    : m_session(session), m_active(session != nullptr && session->enabled()) {
+  if (m_active) {
     m_session->beginScope(phase_name);
   }
 }
 
-ScopedProfile::~ScopedProfile() {
-  if (m_session != nullptr) {
-    m_session->endScope();
+ScopedProfile::~ScopedProfile() noexcept {
+  if (m_active) {
+    try {
+      m_session->endScope();
+    } catch (...) {
+      // Profiling is diagnostic infrastructure. Never turn exception unwinding
+      // into std::terminate because a profiling scope was misused.
+    }
   }
 }
 
 void writeProfilerReportJson(const ProfilerSession& session, const std::filesystem::path& output_path) {
-  std::ofstream out(output_path);
-  if (!out) {
-    throw std::runtime_error("failed to open profiler JSON output path");
-  }
+  writeAtomically(output_path, [&](std::ostream& out) {
+    out << "{\n";
+    out << "  \"schema_version\": 1,\n";
+    out << "  \"enabled\": " << (session.enabled() ? "true" : "false") << ",\n";
 
-  out << "{\n";
-  out << "  \"schema_version\": 1,\n";
-  out << "  \"enabled\": " << (session.enabled() ? "true" : "false") << ",\n";
+    const AllocatorStatsSnapshot allocator = session.allocatorStats().snapshot();
+    out << "  \"allocator\": {\n";
+    out << "    \"alloc_calls\": " << allocator.alloc_calls << ",\n";
+    out << "    \"free_calls\": " << allocator.free_calls << ",\n";
+    out << "    \"bytes_allocated\": " << allocator.bytes_allocated << ",\n";
+    out << "    \"bytes_freed\": " << allocator.bytes_freed << ",\n";
+    out << "    \"peak_live_bytes\": " << allocator.peak_live_bytes << ",\n";
+    out << "    \"live_bytes\": " << allocator.live_bytes << "\n";
+    out << "  },\n";
+    if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
+      out << "  \"memory_report\": ";
+      writeMemoryReportJson(out, *report, 2);
+      out << ",\n";
+    }
 
-  const AllocatorStatsSnapshot allocator = session.allocatorStats().snapshot();
-  out << "  \"allocator\": {\n";
-  out << "    \"alloc_calls\": " << allocator.alloc_calls << ",\n";
-  out << "    \"free_calls\": " << allocator.free_calls << ",\n";
-  out << "    \"bytes_allocated\": " << allocator.bytes_allocated << ",\n";
-  out << "    \"bytes_freed\": " << allocator.bytes_freed << ",\n";
-  out << "    \"peak_live_bytes\": " << allocator.peak_live_bytes << ",\n";
-  out << "    \"live_bytes\": " << allocator.live_bytes << "\n";
-  out << "  },\n";
-  if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
-    out << "  \"memory_report\": ";
-    writeMemoryReportJson(out, *report, 2);
-    out << ",\n";
-  }
+    const auto counter_snapshot = session.counters().snapshotEntries();
+    std::vector<std::pair<std::string, std::uint64_t>> counters(
+        counter_snapshot.begin(), counter_snapshot.end());
+    std::sort(counters.begin(), counters.end(), [](const auto& lhs, const auto& rhs) {
+      return lhs.first < rhs.first;
+    });
+    out << "  \"counters\": {";
+    bool first = true;
+    for (const auto& [key, value] : counters) {
+      out << (first ? "\n" : ",\n");
+      out << "    \"" << escapeJson(key) << "\": " << value;
+      first = false;
+    }
+    if (!first) {
+      out << "\n  ";
+    }
+    out << "},\n";
 
-  out << "  \"counters\": {";
-  bool first = true;
-  for (const auto& [key, value] : session.counters().snapshotEntries()) {
-    out << (first ? "\n" : ",\n");
-    out << "    \"" << escapeJson(key) << "\": " << value;
-    first = false;
-  }
-  if (!first) {
-    out << "\n  ";
-  }
-  out << "},\n";
-
-  out << "  \"phases\": ";
-  writeNodeJson(out, session.nodes(), session.rootNodeIndex(), 2);
-  out << "\n}\n";
+    const std::vector<ProfileNode>& nodes = session.nodes();
+    out << "  \"phases\": ";
+    writeNodeJson(out, nodes, session.rootNodeIndex(), 2);
+    out << "\n}\n";
+  });
 }
 
 void writeProfilerReportCsv(const ProfilerSession& session, const std::filesystem::path& output_path) {
-  std::ofstream out(output_path);
-  if (!out) {
-    throw std::runtime_error("failed to open profiler CSV output path");
-  }
+  writeAtomically(output_path, [&](std::ostream& out) {
+    out << "path,call_count,inclusive_ms,exclusive_ms,bytes_moved\n";
 
-  out << "path,call_count,inclusive_ms,exclusive_ms,bytes_moved\n";
+    const std::vector<ProfileNode>& nodes = session.nodes();
+    std::vector<std::pair<std::size_t, std::string>> stack;
+    stack.emplace_back(session.rootNodeIndex(), "root");
 
-  std::vector<std::pair<std::size_t, std::string>> stack;
-  stack.emplace_back(session.rootNodeIndex(), "root");
+    while (!stack.empty()) {
+      const auto [node_index, path] = stack.back();
+      stack.pop_back();
 
-  while (!stack.empty()) {
-    const auto [node_index, path] = stack.back();
-    stack.pop_back();
+      const ProfileNode& node = nodes.at(node_index);
+      out << escapeCsvField(path) << ',' << node.call_count << ',' << std::fixed << std::setprecision(6)
+          << node.inclusive_ms << ',' << node.exclusive_ms << ',' << node.bytes_moved << '\n';
 
-    const ProfileNode& node = session.nodes().at(node_index);
-    out << path << ',' << node.call_count << ',' << std::fixed << std::setprecision(6) << node.inclusive_ms << ','
-        << node.exclusive_ms << ',' << node.bytes_moved << '\n';
-
-    for (auto it = node.children.rbegin(); it != node.children.rend(); ++it) {
-      const ProfileNode& child = session.nodes().at(*it);
-      stack.emplace_back(*it, path + "/" + child.name);
+      for (auto it = node.children.rbegin(); it != node.children.rend(); ++it) {
+        const ProfileNode& child = nodes.at(*it);
+        stack.emplace_back(*it, path + "/" + child.name);
+      }
     }
-  }
+  });
 }
 
 void writeOperationalReportJson(
@@ -536,54 +637,53 @@ void writeOperationalReportJson(
     const std::filesystem::path& output_path,
     std::string_view run_label,
     std::string_view provenance_config_hash_hex) {
-  std::ofstream out(output_path);
-  if (!out) {
-    throw std::runtime_error("failed to open operational diagnostics JSON output path");
-  }
-
-  std::uint64_t warning_count = 0;
-  std::uint64_t error_count = 0;
-  std::uint64_t fatal_count = 0;
-  for (const RuntimeEvent& event : session.events()) {
-    if (event.severity == RuntimeEventSeverity::kWarning) {
-      ++warning_count;
-    } else if (event.severity == RuntimeEventSeverity::kError) {
-      ++error_count;
-    } else if (event.severity == RuntimeEventSeverity::kFatal) {
-      ++fatal_count;
-    }
-  }
-
-  out << "{\n";
-  out << "  \"schema_version\": 1,\n";
-  out << "  \"run_label\": \"" << escapeJson(std::string(run_label)) << "\",\n";
-  out << "  \"provenance_config_hash_hex\": \"" << escapeJson(std::string(provenance_config_hash_hex)) << "\",\n";
-  out << "  \"summary\": {\n";
-  out << "    \"event_count\": " << session.events().size() << ",\n";
-  out << "    \"warning_count\": " << warning_count << ",\n";
-  out << "    \"error_count\": " << error_count << ",\n";
-  out << "    \"fatal_count\": " << fatal_count << ",\n";
-  out << "    \"status\": \"" << (fatal_count > 0 || error_count > 0 ? "error" : "ok") << "\"\n";
-  out << "  },\n";
-  if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
-    out << "  \"memory_report\": ";
-    writeMemoryReportJson(out, *report, 2);
-    out << ",\n";
-  }
-  out << "  \"events\": [";
-  if (!session.events().empty()) {
-    out << "\n";
-    for (std::size_t i = 0; i < session.events().size(); ++i) {
-      writeEventJson(out, session.events()[i], 4);
-      if (i + 1 < session.events().size()) {
-        out << ",";
+  writeAtomically(output_path, [&](std::ostream& out) {
+    const std::vector<RuntimeEvent>& events = session.events();
+    std::uint64_t warning_count = 0;
+    std::uint64_t error_count = 0;
+    std::uint64_t fatal_count = 0;
+    for (const RuntimeEvent& event : events) {
+      if (event.severity == RuntimeEventSeverity::kWarning) {
+        ++warning_count;
+      } else if (event.severity == RuntimeEventSeverity::kError) {
+        ++error_count;
+      } else if (event.severity == RuntimeEventSeverity::kFatal) {
+        ++fatal_count;
       }
-      out << "\n";
     }
-    out << "  ";
-  }
-  out << "]\n";
-  out << "}\n";
+
+    out << "{\n";
+    out << "  \"schema_version\": 1,\n";
+    out << "  \"run_label\": \"" << escapeJson(std::string(run_label)) << "\",\n";
+    out << "  \"provenance_config_hash_hex\": \"" << escapeJson(std::string(provenance_config_hash_hex)) << "\",\n";
+    out << "  \"summary\": {\n";
+    out << "    \"event_count\": " << events.size() << ",\n";
+    out << "    \"warning_count\": " << warning_count << ",\n";
+    out << "    \"error_count\": " << error_count << ",\n";
+    out << "    \"fatal_count\": " << fatal_count << ",\n";
+    out << "    \"status\": \"" << (fatal_count > 0 || error_count > 0 ? "error" : "ok") << "\"\n";
+    out << "  },\n";
+    if (const MemoryReport* report = session.memoryReport(); report != nullptr) {
+      out << "  \"memory_report\": ";
+      writeMemoryReportJson(out, *report, 2);
+      out << ",\n";
+    }
+    out << "  \"events\": [";
+    if (!events.empty()) {
+      out << "\n";
+      for (std::size_t i = 0; i < events.size(); ++i) {
+        writeEventJson(out, events[i], 4);
+        if (i + 1 < events.size()) {
+          out << ',';
+        }
+        out << "\n";
+      }
+      out << "  ";
+    }
+    out << "]\n";
+    out << "}\n";
+  });
 }
+
 
 }  // namespace cosmosim::core

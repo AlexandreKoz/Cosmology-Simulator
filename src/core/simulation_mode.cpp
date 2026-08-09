@@ -35,6 +35,25 @@ void validateGhostBuffers(const Hydro1dGhostBufferView& ghosts) {
   return mode == SimulationMode::kIsolatedGalaxy || mode == SimulationMode::kIsolatedCluster;
 }
 
+[[nodiscard]] std::size_t periodicLeftSourceIndex(
+    std::size_t interior_count,
+    std::size_t left_ghost_count,
+    std::size_t ghost_index) {
+  const std::size_t offset = left_ghost_count % interior_count;
+  return (interior_count - offset + (ghost_index % interior_count)) % interior_count;
+}
+
+[[nodiscard]] std::size_t reflectiveSourceIndex(
+    std::size_t interior_count,
+    std::size_t ghost_index) {
+  // Preserve the established near-boundary ordering (N-1, N-2, ... 0)
+  // and extend it as an even, repeated reflection rather than clamping when
+  // the requested ghost width exceeds the interior width.
+  const std::size_t period = interior_count * 2U;
+  const std::size_t phase = ghost_index % period;
+  return phase < interior_count ? interior_count - 1U - phase : phase - interior_count;
+}
+
 }  // namespace
 
 void fillHydroGhostCells1d(
@@ -54,12 +73,9 @@ void fillHydroGhostCells1d(
   const std::size_t right_ghost_count = ghosts.right_density_code.size();
 
   for (std::size_t i = 0; i < left_ghost_count; ++i) {
-    const std::size_t src = std::min(i, interior_count - 1U);
-    const std::size_t mirrored_src = std::min(interior_count - 1U - src, interior_count - 1U);
-
     switch (boundary_condition) {
       case BoundaryCondition::kPeriodic: {
-        const std::size_t periodic_src = (interior_count - left_ghost_count + i) % interior_count;
+        const std::size_t periodic_src = periodicLeftSourceIndex(interior_count, left_ghost_count, i);
         ghosts.left_density_code[i] = interior.density_code[periodic_src];
         ghosts.left_velocity_normal_code[i] = interior.velocity_normal_code[periodic_src];
         ghosts.left_pressure_code[i] = interior.pressure_code[periodic_src];
@@ -72,6 +88,7 @@ void fillHydroGhostCells1d(
         break;
       }
       case BoundaryCondition::kReflective: {
+        const std::size_t mirrored_src = reflectiveSourceIndex(interior_count, i);
         ghosts.left_density_code[i] = interior.density_code[mirrored_src];
         ghosts.left_velocity_normal_code[i] = -interior.velocity_normal_code[mirrored_src];
         ghosts.left_pressure_code[i] = interior.pressure_code[mirrored_src];
@@ -81,9 +98,6 @@ void fillHydroGhostCells1d(
   }
 
   for (std::size_t i = 0; i < right_ghost_count; ++i) {
-    const std::size_t src = std::min(i, interior_count - 1U);
-    const std::size_t mirrored_src = interior_count - 1U - src;
-
     switch (boundary_condition) {
       case BoundaryCondition::kPeriodic: {
         const std::size_t periodic_src = i % interior_count;
@@ -99,6 +113,7 @@ void fillHydroGhostCells1d(
         break;
       }
       case BoundaryCondition::kReflective: {
+        const std::size_t mirrored_src = reflectiveSourceIndex(interior_count, i);
         ghosts.right_density_code[i] = interior.density_code[mirrored_src];
         ghosts.right_velocity_normal_code[i] = -interior.velocity_normal_code[mirrored_src];
         ghosts.right_pressure_code[i] = interior.pressure_code[mirrored_src];
@@ -123,8 +138,7 @@ void fillGravityPotentialGhostCells1d(
 
   for (std::size_t i = 0; i < left_ghost_potential.size(); ++i) {
     if (boundary_model == GravityBoundaryModel::kPeriodicPoisson) {
-      const std::size_t src = (interior_potential.size() - left_ghost_potential.size() + i) %
-          interior_potential.size();
+      const std::size_t src = periodicLeftSourceIndex(interior_potential.size(), left_ghost_potential.size(), i);
       left_ghost_potential[i] = interior_potential[src];
     } else {
       left_ghost_potential[i] = isolated_reference_potential;

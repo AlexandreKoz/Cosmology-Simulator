@@ -1,7 +1,9 @@
 #include "cosmosim/core/provenance.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -10,8 +12,10 @@
 #include <string_view>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 
 #include "cosmosim/core/build_config.hpp"
+#include <cstdlib>
 
 namespace cosmosim::core {
 namespace {
@@ -34,8 +38,9 @@ namespace {
   constexpr std::uint64_t k_offset_basis = 14695981039346656037ull;
   constexpr std::uint64_t k_prime = 1099511628211ull;
   std::uint64_t hash = k_offset_basis;
-  for (unsigned char c : text) {
-    hash ^= c;
+  for (const char raw_c : text) {
+    const auto c = static_cast<unsigned char>(raw_c);
+    hash ^= static_cast<std::uint64_t>(c);
     hash *= k_prime;
   }
   return hash;
@@ -84,6 +89,44 @@ namespace {
   return out;
 }
 
+[[nodiscard]] int parseIntStrict(std::string_view value, std::string_view key) {
+  int parsed = 0;
+  const auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (ec != std::errc{} || ptr != value.data() + value.size()) {
+    throw std::invalid_argument("invalid integer provenance value for key '" + std::string(key) + "'");
+  }
+  return parsed;
+}
+
+[[nodiscard]] std::uint64_t parseUint64Strict(std::string_view value, std::string_view key) {
+  std::uint64_t parsed = 0;
+  const auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (ec != std::errc{} || ptr != value.data() + value.size()) {
+    throw std::invalid_argument("invalid uint64 provenance value for key '" + std::string(key) + "'");
+  }
+  return parsed;
+}
+
+[[nodiscard]] double parseDoubleStrict(std::string_view value, std::string_view key) {
+  std::string text(value);
+  char* end = nullptr;
+  const double parsed = std::strtod(text.c_str(), &end);
+  if (end != text.c_str() + static_cast<std::ptrdiff_t>(text.size()) || !std::isfinite(parsed)) {
+    throw std::invalid_argument("invalid finite floating provenance value for key '" + std::string(key) + "'");
+  }
+  return parsed;
+}
+
+[[nodiscard]] bool parseBoolStrict(std::string_view value, std::string_view key) {
+  if (value == "true") {
+    return true;
+  }
+  if (value == "false") {
+    return false;
+  }
+  throw std::invalid_argument("invalid boolean provenance value for key '" + std::string(key) + "'");
+}
+
 }  // namespace
 
 std::string collectCompilerId() {
@@ -124,9 +167,13 @@ std::string utcTimestampNowIso8601() {
   const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
   std::tm now_tm{};
 #if defined(_WIN32)
-  gmtime_s(&now_tm, &now_time);
+  if (gmtime_s(&now_tm, &now_time) != 0) {
+    throw std::runtime_error("failed to convert provenance timestamp to UTC");
+  }
 #else
-  gmtime_r(&now_time, &now_tm);
+  if (gmtime_r(&now_time, &now_tm) == nullptr) {
+    throw std::runtime_error("failed to convert provenance timestamp to UTC");
+  }
 #endif
 
   std::ostringstream stream;
@@ -237,16 +284,20 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
   ProvenanceRecord record;
   std::istringstream input{std::string(text)};
   std::string line;
+  std::unordered_set<std::string> seen_keys;
   while (std::getline(input, line)) {
     if (line.empty()) {
       continue;
     }
     const std::size_t pos = line.find('=');
-    if (pos == std::string::npos) {
-      continue;
+    if (pos == std::string::npos || pos == 0U) {
+      throw std::invalid_argument("malformed provenance line: '" + line + "'");
     }
     const std::string key = trim(line.substr(0, pos));
     const std::string value = trim(line.substr(pos + 1));
+    if (key.empty() || !seen_keys.insert(key).second) {
+      throw std::invalid_argument("duplicate or empty provenance key: '" + key + "'");
+    }
     if (key == "schema_version") {
       record.schema_version = value;
     } else if (key == "config_schema_name") {
@@ -278,85 +329,92 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
     } else if (key == "hardware_summary") {
       record.hardware_summary = value;
     } else if (key == "author_rank") {
-      record.author_rank = std::stoi(value);
+      record.author_rank = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_pm_grid") {
-      record.gravity_treepm_pm_grid = std::stoi(value);
+      record.gravity_treepm_pm_grid = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_pm_grid_nx") {
-      record.gravity_treepm_pm_grid_nx = std::stoi(value);
+      record.gravity_treepm_pm_grid_nx = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_pm_grid_ny") {
-      record.gravity_treepm_pm_grid_ny = std::stoi(value);
+      record.gravity_treepm_pm_grid_ny = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_pm_grid_nz") {
-      record.gravity_treepm_pm_grid_nz = std::stoi(value);
+      record.gravity_treepm_pm_grid_nz = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_assignment_scheme") {
       record.gravity_treepm_assignment_scheme = value;
     } else if (key == "gravity_treepm_window_deconvolution") {
-      record.gravity_treepm_window_deconvolution = value == "true";
+      record.gravity_treepm_window_deconvolution = parseBoolStrict(value, key);
     } else if (key == "gravity_treepm_asmth_cells") {
-      record.gravity_treepm_asmth_cells = std::stod(value);
+      record.gravity_treepm_asmth_cells = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_rcut_cells") {
-      record.gravity_treepm_rcut_cells = std::stod(value);
+      record.gravity_treepm_rcut_cells = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_mesh_spacing_mpc_comoving") {
-      record.gravity_treepm_mesh_spacing_mpc_comoving = std::stod(value);
+      record.gravity_treepm_mesh_spacing_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_mesh_spacing_x_mpc_comoving") {
-      record.gravity_treepm_mesh_spacing_x_mpc_comoving = std::stod(value);
+      record.gravity_treepm_mesh_spacing_x_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_mesh_spacing_y_mpc_comoving") {
-      record.gravity_treepm_mesh_spacing_y_mpc_comoving = std::stod(value);
+      record.gravity_treepm_mesh_spacing_y_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_mesh_spacing_z_mpc_comoving") {
-      record.gravity_treepm_mesh_spacing_z_mpc_comoving = std::stod(value);
+      record.gravity_treepm_mesh_spacing_z_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_split_scale_mpc_comoving") {
-      record.gravity_treepm_split_scale_mpc_comoving = std::stod(value);
+      record.gravity_treepm_split_scale_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_cutoff_radius_mpc_comoving") {
-      record.gravity_treepm_cutoff_radius_mpc_comoving = std::stod(value);
+      record.gravity_treepm_cutoff_radius_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_update_cadence_steps") {
-      record.gravity_treepm_update_cadence_steps = std::stoi(value);
+      record.gravity_treepm_update_cadence_steps = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_tree_opening_criterion") {
       record.gravity_treepm_tree_opening_criterion = value;
     } else if (key == "gravity_treepm_tree_opening_theta") {
-      record.gravity_treepm_tree_opening_theta = std::stod(value);
+      record.gravity_treepm_tree_opening_theta = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_tree_relative_force_tolerance") {
-      record.gravity_treepm_tree_relative_force_tolerance = std::stod(value);
+      record.gravity_treepm_tree_relative_force_tolerance = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_tree_relative_force_acceleration_floor") {
-      record.gravity_treepm_tree_relative_force_acceleration_floor = std::stod(value);
+      record.gravity_treepm_tree_relative_force_acceleration_floor = parseDoubleStrict(value, key);
     } else if (key == "gravity_treepm_pm_decomposition_mode") {
       record.gravity_treepm_pm_decomposition_mode = value;
     } else if (key == "gravity_treepm_tree_exchange_batch_bytes") {
-      record.gravity_treepm_tree_exchange_batch_bytes = static_cast<std::uint64_t>(std::stoull(value));
+      record.gravity_treepm_tree_exchange_batch_bytes = parseUint64Strict(value, key);
     } else if (key == "gravity_softening_policy") {
       record.gravity_softening_policy = value;
     } else if (key == "gravity_softening_kernel") {
       record.gravity_softening_kernel = value;
     } else if (key == "gravity_softening_epsilon_kpc_comoving") {
-      record.gravity_softening_epsilon_kpc_comoving = std::stod(value);
+      record.gravity_softening_epsilon_kpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_pm_fft_backend") {
       record.gravity_pm_fft_backend = value;
     } else if (key == "gravity_treepm_decomposition_epoch") {
-      record.gravity_treepm_decomposition_epoch = static_cast<std::uint64_t>(std::stoull(value));
+      record.gravity_treepm_decomposition_epoch = parseUint64Strict(value, key);
     } else if (key == "gravity_treepm_restart_world_size") {
-      record.gravity_treepm_restart_world_size = std::stoi(value);
+      record.gravity_treepm_restart_world_size = parseIntStrict(value, key);
     } else if (key == "gravity_treepm_restart_pm_grid") {
       record.gravity_treepm_restart_pm_grid = value;
     } else if (key == "gravity_treepm_restart_slab_signature") {
       record.gravity_treepm_restart_slab_signature = value;
     } else if (key == "gravity_treepm_restart_kick_opportunity") {
-      record.gravity_treepm_restart_kick_opportunity = static_cast<std::uint64_t>(std::stoull(value));
+      record.gravity_treepm_restart_kick_opportunity = parseUint64Strict(value, key);
     } else if (key == "gravity_treepm_restart_field_version") {
-      record.gravity_treepm_restart_field_version = static_cast<std::uint64_t>(std::stoull(value));
+      record.gravity_treepm_restart_field_version = parseUint64Strict(value, key);
     } else if (key == "gravity_treepm_long_range_restart_policy") {
       record.gravity_treepm_long_range_restart_policy = value;
     } else if (key == "zoom_long_range_strategy") {
       record.zoom_long_range_strategy = value;
     } else if (key == "zoom_region_center_x_mpc_comoving") {
-      record.zoom_region_center_x_mpc_comoving = std::stod(value);
+      record.zoom_region_center_x_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "zoom_region_center_y_mpc_comoving") {
-      record.zoom_region_center_y_mpc_comoving = std::stod(value);
+      record.zoom_region_center_y_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "zoom_region_center_z_mpc_comoving") {
-      record.zoom_region_center_z_mpc_comoving = std::stod(value);
+      record.zoom_region_center_z_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "zoom_region_radius_mpc_comoving") {
-      record.zoom_region_radius_mpc_comoving = std::stod(value);
+      record.zoom_region_radius_mpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "zoom_focused_pm_grid") {
       record.zoom_focused_pm_grid = value;
     } else if (key == "zoom_contamination_radius_mpc_comoving") {
-      record.zoom_contamination_radius_mpc_comoving = std::stod(value);
+      record.zoom_contamination_radius_mpc_comoving = parseDoubleStrict(value, key);
+    } else {
+      throw std::invalid_argument("unknown provenance key: '" + key + "'");
+    }
+  }
+  for (const std::string_view required : {"schema_version", "config_schema_name", "config_schema_version", "config_hash_hex"}) {
+    if (!seen_keys.contains(std::string(required))) {
+      throw std::invalid_argument("missing required provenance key: '" + std::string(required) + "'");
     }
   }
   if (record.gravity_treepm_pm_grid_nx == 0 && record.gravity_treepm_pm_grid > 0) {
@@ -386,11 +444,31 @@ void writeProvenanceRecord(
 
   std::filesystem::create_directories(run_directory);
   const auto path = run_directory / file_name;
-  std::ofstream output(path);
+  auto part_path = path;
+  part_path += ".part";
+  std::ofstream output(part_path, std::ios::out | std::ios::trunc);
   if (!output) {
-    throw std::runtime_error("failed to write provenance record: " + path.string());
+    throw std::runtime_error("failed to write provenance temporary record: " + part_path.string());
   }
   output << serializeProvenanceRecord(record);
+  output.flush();
+  if (!output) {
+    throw std::runtime_error("failed while writing provenance record: " + part_path.string());
+  }
+  output.close();
+  if (!output) {
+    throw std::runtime_error("failed while closing provenance record: " + part_path.string());
+  }
+  std::error_code ec;
+  std::filesystem::rename(part_path, path, ec);
+  if (ec) {
+    // Do not remove an already-published provenance record to force replacement.
+    // On platforms without atomic replacement semantics, preserve the complete
+    // prior record and fail closed instead of creating a publication gap.
+    std::error_code remove_ec;
+    std::filesystem::remove(part_path, remove_ec);
+    throw std::runtime_error("failed to atomically finalize provenance record: " + ec.message());
+  }
 }
 
 ProvenanceRecord readProvenanceRecord(

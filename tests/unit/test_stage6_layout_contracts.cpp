@@ -1,5 +1,7 @@
 #include <cassert>
 #include <cstdint>
+#include <cstddef>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -66,5 +68,51 @@ int main() {
 
   assert(state.particles.mass_code[5] == 42.0);
   assert(state.particle_sidecar.particle_id == before_sidecar);
+
+  auto direct_gravity = cosmosim::core::buildGravityParticleKernelViewAllParticlesDirect(state, workspace);
+  assert(direct_gravity.position_x_comoving.data() == state.particles.position_x_comoving.data());
+  assert(direct_gravity.velocity_x_peculiar.data() == state.particles.velocity_x_peculiar.data());
+  assert(direct_gravity.mass_code.data() == state.particles.mass_code.data());
+  direct_gravity.mass_code[0] = 77.0;
+  assert(state.particles.mass_code[0] == 77.0);
+
+  const std::uint32_t duplicate_idx[] = {2, 2};
+  auto duplicate_view = cosmosim::core::buildGravityParticleKernelView(state, duplicate_idx, workspace);
+  duplicate_view.mass_code[0] = 123.0;
+  duplicate_view.mass_code[1] = 456.0;
+  const double mass_before_duplicate_scatter = state.particles.mass_code[2];
+  bool duplicate_scatter_threw = false;
+  try {
+    cosmosim::core::scatterGravityParticleKernelView(duplicate_view, state);
+  } catch (const std::invalid_argument&) {
+    duplicate_scatter_threw = true;
+  }
+  assert(duplicate_scatter_threw);
+  assert(state.particles.mass_code[2] == mass_before_duplicate_scatter);
+
+  // Regression: growth of the monotonic scratch arena must never invalidate
+  // allocations returned earlier in the same scratch epoch.
+  cosmosim::core::MonotonicScratchAllocator scratch(8);
+  auto* early = scratch.allocateArray<std::uint64_t>(1);
+  assert(early != nullptr);
+  *early = UINT64_C(0x123456789abcdef0);
+  auto* aligned = scratch.allocateBytes(257, 64);
+  assert(aligned != nullptr);
+  assert(reinterpret_cast<std::uintptr_t>(aligned) % 64U == 0U);
+  (void)scratch.allocateBytes(4096, alignof(std::max_align_t));
+  assert(*early == UINT64_C(0x123456789abcdef0));
+  const auto capacity_before_reset = scratch.capacityBytes();
+  scratch.reset();
+  assert(scratch.capacityBytes() == capacity_before_reset);
+  auto* reused = scratch.allocateArray<std::uint64_t>(1);
+  assert(reused != nullptr);
+
+  bool bad_alignment_threw = false;
+  try {
+    (void)scratch.allocateBytes(16, 3);
+  } catch (const std::invalid_argument&) {
+    bad_alignment_threw = true;
+  }
+  assert(bad_alignment_threw);
   return 0;
 }

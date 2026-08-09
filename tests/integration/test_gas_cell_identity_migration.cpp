@@ -201,6 +201,47 @@ void test_stale_gas_ghost_rejection_checks_id_generation_and_epoch() {
   assert(state.validateOwnershipInvariants());
 }
 
+void test_failed_host_remap_leaves_authoritative_state_unchanged() {
+  SimulationState state;
+  state.resizeParticles(2);
+  state.particle_sidecar.particle_id = {9401, 9402};
+  state.particle_sidecar.species_tag = {speciesTag(ParticleSpecies::kTracer), speciesTag(ParticleSpecies::kTracer)};
+  state.particle_sidecar.owning_rank = {0, 0};
+  state.species.count_by_species = {0, 0, 0, 0, 2};
+  state.rebuildSpeciesIndex();
+  state.tracers.resize(2);
+  state.tracers.particle_index = {0, 1};
+  state.tracers.host_cell_index = {2, 99};  // Second row deliberately corrupt.
+
+  state.resizeCells(3);
+  state.gas_cell_identity.assign({
+      {.gas_cell_id = 8501, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 0},
+      {.gas_cell_id = 8502, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 1},
+      {.gas_cell_id = 8503, .parent_particle_id = std::nullopt, .owning_patch_id = 0, .local_cell_row = 2},
+  });
+  mirrorIdentityToSidecars(state);
+  seedGasFields(state);
+
+  const auto original_hosts = state.tracers.host_cell_index;
+  const auto original_gas_ids = state.gas_cells.gas_cell_id;
+  const auto original_generation = state.cellIndexGeneration();
+  GasCellMigrationCommit commit;
+  commit.world_rank = 0;
+  commit.outbound_local_cell_rows = {0};  // Would remap host row 2 -> 1 before the corrupt row fails.
+
+  bool threw = false;
+  try {
+    state.commitGasCellMigration(commit);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+  assert(state.tracers.host_cell_index == original_hosts);
+  assert(state.gas_cells.gas_cell_id == original_gas_ids);
+  assert(state.cells.size() == 3U);
+  assert(state.cellIndexGeneration() == original_generation);
+}
+
 }  // namespace
 
 int main() {
@@ -208,5 +249,6 @@ int main() {
   test_multi_parent_cells_migrate_by_gas_cell_id_not_parent_id();
   test_row_remap_preserves_host_cell_sidecars();
   test_stale_gas_ghost_rejection_checks_id_generation_and_epoch();
+  test_failed_host_remap_leaves_authoritative_state_unchanged();
   return 0;
 }

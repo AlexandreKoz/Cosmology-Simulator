@@ -23,6 +23,25 @@ jobs:
       - name: Repository hygiene checks
         run: bash ./scripts/ci/check_repo_hygiene.sh
 
+  core_strict_warnings:
+    needs: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install C++ toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build
+      - name: Build src/core with strict warnings as errors
+        run: |
+          cmake -S . -B build/core-strict -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCOSMOSIM_ENABLE_MPI=OFF \
+            -DCOSMOSIM_ENABLE_HDF5=OFF \
+            -DCOSMOSIM_ENABLE_FFTW=OFF \
+            -DCOSMOSIM_ENABLE_CUDA=OFF \
+            -DCOSMOSIM_ENABLE_TESTS=OFF \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wundef -Wformat=2 -Wnull-dereference -Werror"
+          cmake --build build/core-strict --target cosmosim_core --parallel 2
+
   build_test_matrix:
     needs: hygiene
     runs-on: ubuntu-latest

@@ -86,6 +86,47 @@ void testGravityBoundaryFillPeriodicAndIsolated() {
   assert(right[1] == -99.0);
 }
 
+void testWideGhostBoundaryFill() {
+  const std::array<double, 5> interior = {10.0, 11.0, 12.0, 13.0, 14.0};
+  std::vector<double> left(7, 0.0);
+  std::vector<double> right(7, 0.0);
+
+  cosmosim::core::fillGravityPotentialGhostCells1d(
+      interior, left, right, cosmosim::core::GravityBoundaryModel::kPeriodicPoisson, -1.0);
+  const std::array<double, 7> expected_left = {13.0, 14.0, 10.0, 11.0, 12.0, 13.0, 14.0};
+  const std::array<double, 7> expected_right = {10.0, 11.0, 12.0, 13.0, 14.0, 10.0, 11.0};
+  assert(std::equal(left.begin(), left.end(), expected_left.begin()));
+  assert(std::equal(right.begin(), right.end(), expected_right.begin()));
+
+  std::vector<double> left_density(7, 0.0);
+  std::vector<double> right_density(7, 0.0);
+  std::vector<double> left_velocity(7, 0.0);
+  std::vector<double> right_velocity(7, 0.0);
+  std::vector<double> left_pressure(7, 0.0);
+  std::vector<double> right_pressure(7, 0.0);
+  cosmosim::core::fillHydroGhostCells1d(
+      {.density_code = interior, .velocity_normal_code = interior, .pressure_code = interior},
+      {.left_density_code = left_density, .right_density_code = right_density,
+       .left_velocity_normal_code = left_velocity, .right_velocity_normal_code = right_velocity,
+       .left_pressure_code = left_pressure, .right_pressure_code = right_pressure},
+      cosmosim::core::BoundaryCondition::kPeriodic);
+  assert(std::equal(left_density.begin(), left_density.end(), expected_left.begin()));
+  assert(std::equal(right_density.begin(), right_density.end(), expected_right.begin()));
+
+  // Reflective extension is repeated reflection, including the boundary cell at
+  // each turn, rather than an accidental clamp once the ghost width exceeds N.
+  cosmosim::core::fillHydroGhostCells1d(
+      {.density_code = interior, .velocity_normal_code = interior, .pressure_code = interior},
+      {.left_density_code = left_density, .right_density_code = right_density,
+       .left_velocity_normal_code = left_velocity, .right_velocity_normal_code = right_velocity,
+       .left_pressure_code = left_pressure, .right_pressure_code = right_pressure},
+      cosmosim::core::BoundaryCondition::kReflective);
+  const std::array<double, 7> expected_reflect_left = {14.0, 13.0, 12.0, 11.0, 10.0, 10.0, 11.0};
+  const std::array<double, 7> expected_reflect_right = {14.0, 13.0, 12.0, 11.0, 10.0, 10.0, 11.0};
+  assert(std::equal(left_density.begin(), left_density.end(), expected_reflect_left.begin()));
+  assert(std::equal(right_density.begin(), right_density.end(), expected_reflect_right.begin()));
+}
+
 }  // namespace
 
 int main() {
@@ -93,5 +134,6 @@ int main() {
   testInvalidModeOverrideFailsValidation();
   testHydroBoundaryFill();
   testGravityBoundaryFillPeriodicAndIsolated();
+  testWideGhostBoundaryFill();
   return 0;
 }

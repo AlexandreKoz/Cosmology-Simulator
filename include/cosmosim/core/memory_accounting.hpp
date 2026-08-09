@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -82,13 +84,23 @@ class MemoryReportBuilder {
 [[nodiscard]] std::string_view memoryLifetimeLabel(MemoryLifetime lifetime) noexcept;
 
 template <typename T>
-[[nodiscard]] constexpr std::uint64_t ownedCapacityBytesForContainer(const T& container) noexcept {
-  return static_cast<std::uint64_t>(container.capacity()) * static_cast<std::uint64_t>(sizeof(typename T::value_type));
+[[nodiscard]] std::uint64_t ownedCapacityBytesForContainer(const T& container) {
+  const std::uint64_t count = static_cast<std::uint64_t>(container.capacity());
+  constexpr std::uint64_t k_element_bytes = static_cast<std::uint64_t>(sizeof(typename T::value_type));
+  if (count > std::numeric_limits<std::uint64_t>::max() / k_element_bytes) {
+    throw std::overflow_error("memory-accounting container capacity byte count overflow");
+  }
+  return count * k_element_bytes;
 }
 
 template <typename T>
-[[nodiscard]] constexpr std::uint64_t referencedBytesForSpan(const T& view_span) noexcept {
-  return static_cast<std::uint64_t>(view_span.size()) * static_cast<std::uint64_t>(sizeof(typename T::value_type));
+[[nodiscard]] std::uint64_t referencedBytesForSpan(const T& view_span) {
+  const std::uint64_t count = static_cast<std::uint64_t>(view_span.size());
+  constexpr std::uint64_t k_element_bytes = static_cast<std::uint64_t>(sizeof(typename T::value_type));
+  if (count > std::numeric_limits<std::uint64_t>::max() / k_element_bytes) {
+    throw std::overflow_error("memory-accounting span byte count overflow");
+  }
+  return count * k_element_bytes;
 }
 
 [[nodiscard]] MemoryReport collectSimulationMemoryReport(

@@ -1,7 +1,10 @@
 #include "cosmosim/core/memory_accounting.hpp"
 
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "cosmosim/core/simulation_state.hpp"
@@ -9,18 +12,46 @@
 namespace cosmosim::core {
 namespace {
 
+[[nodiscard]] std::uint64_t checkedU64Add(std::uint64_t lhs, std::uint64_t rhs, std::string_view context) {
+  if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
+    throw std::overflow_error(std::string(context) + ": uint64 addition overflow");
+  }
+  return lhs + rhs;
+}
+
+[[nodiscard]] std::uint64_t checkedU64Multiply(
+    std::uint64_t lhs,
+    std::uint64_t rhs,
+    std::string_view context) {
+  if (lhs != 0U && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
+    throw std::overflow_error(std::string(context) + ": uint64 multiplication overflow");
+  }
+  return lhs * rhs;
+}
+
 void addTotals(MemoryReport& report, const MemoryEntry& entry) {
   const std::size_t index = memorySubsystemIndex(entry.subsystem);
+  if (index >= static_cast<std::size_t>(MemorySubsystem::kCount)) {
+    throw std::invalid_argument("memory report entry has invalid subsystem");
+  }
   const std::uint64_t bytes = entry.owned_capacity_bytes;
   if (entry.lifetime == MemoryLifetime::kPersistent) {
-    report.totals.persistent_by_subsystem[index] += bytes;
-    report.totals.persistent_total_bytes += bytes;
+    report.totals.persistent_by_subsystem[index] = checkedU64Add(
+        report.totals.persistent_by_subsystem[index], bytes, "persistent subsystem memory total");
+    report.totals.persistent_total_bytes = checkedU64Add(
+        report.totals.persistent_total_bytes, bytes, "persistent memory total");
   } else if (entry.lifetime == MemoryLifetime::kTransient) {
-    report.totals.transient_by_subsystem[index] += bytes;
-    report.totals.transient_total_bytes += bytes;
+    report.totals.transient_by_subsystem[index] = checkedU64Add(
+        report.totals.transient_by_subsystem[index], bytes, "transient subsystem memory total");
+    report.totals.transient_total_bytes = checkedU64Add(
+        report.totals.transient_total_bytes, bytes, "transient memory total");
+  } else if (entry.lifetime == MemoryLifetime::kUnknown) {
+    report.totals.unknown_by_subsystem[index] = checkedU64Add(
+        report.totals.unknown_by_subsystem[index], bytes, "unknown subsystem memory total");
+    report.totals.unknown_total_bytes = checkedU64Add(
+        report.totals.unknown_total_bytes, bytes, "unknown memory total");
   } else {
-    report.totals.unknown_by_subsystem[index] += bytes;
-    report.totals.unknown_total_bytes += bytes;
+    throw std::invalid_argument("memory report entry has invalid lifetime");
   }
 }
 
@@ -36,7 +67,10 @@ void addOwned(
                                .lifetime = lifetime,
                                .label = std::string(label),
                                .owned_capacity_bytes = bytes,
-                               .high_water_bytes = bytes});
+                               .referenced_bytes = 0,
+                               .high_water_bytes = bytes,
+                               .estimate_only = false,
+                               .uncertainty_note = {}});
 }
 
 void addEstimate(
@@ -86,6 +120,7 @@ void accountGasSidecar(MemoryReportBuilder& builder, const GasCellSidecar& gas) 
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.internal_energy_code", gas.internal_energy_code);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.temperature_code", gas.temperature_code);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.sound_speed_code", gas.sound_speed_code);
+  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.metal_mass_code", gas.metal_mass_code);
 }
 
 void accountParticleSidecar(MemoryReportBuilder& builder, const ParticleSidecar& sidecar) {
@@ -117,6 +152,10 @@ void accountSpeciesIndex(MemoryReportBuilder& builder, const ParticleSpeciesInde
 
 void accountStarSidecar(MemoryReportBuilder& builder, const StarParticleSidecar& stars) {
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.particle_index", stars.particle_index);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.birth_key", stars.birth_key);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.parent_gas_cell_id", stars.parent_gas_cell_id);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.birth_tick", stars.birth_tick);
+  addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.birth_ordinal", stars.birth_ordinal);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.formation_scale_factor", stars.formation_scale_factor);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.birth_mass_code", stars.birth_mass_code);
   addOwned(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "star_particles.metallicity_mass_fraction", stars.metallicity_mass_fraction);
@@ -191,6 +230,11 @@ void accountModulePayloads(MemoryReportBuilder& builder, const ModuleSidecarRegi
              MemoryLifetime::kPersistent,
              "module_sidecar." + block->module_name + ".payload",
              block->payload);
+    addOwned(builder,
+             MemorySubsystem::kSidecars,
+             MemoryLifetime::kPersistent,
+             "module_sidecar." + block->module_name + ".particle_id_by_row",
+             block->particle_id_by_row);
   }
 }
 
@@ -206,6 +250,8 @@ void accountWorkspace(MemoryReportBuilder& builder, const TransientStepWorkspace
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.particle_mass_code", workspace.particle_mass_code);
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.gravity_particle_index", workspace.gravity_particle_index);
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_cell_index", workspace.hydro_cell_index);
+  addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_gas_cell_id", workspace.hydro_gas_cell_id);
+  addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_local_cell_row", workspace.hydro_local_cell_row);
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_cell_center_x_comoving", workspace.hydro_cell_center_x_comoving);
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_cell_center_y_comoving", workspace.hydro_cell_center_y_comoving);
   addOwned(builder, MemorySubsystem::kActiveSets, MemoryLifetime::kTransient, "workspace.hydro_cell_center_z_comoving", workspace.hydro_cell_center_z_comoving);
@@ -226,12 +272,25 @@ void accountWorkspace(MemoryReportBuilder& builder, const TransientStepWorkspace
                                .lifetime = MemoryLifetime::kTransient,
                                .label = "workspace.scratch_arena",
                                .owned_capacity_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityBytes()),
-                               .high_water_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityBytes())});
+                               .referenced_bytes = 0,
+                               .high_water_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityBytes()),
+                               .estimate_only = false,
+                               .uncertainty_note = {}});
 }
 
 }  // namespace
 
 void MemoryReportBuilder::addEntry(MemoryEntry entry) {
+  if (entry.label.empty()) {
+    throw std::invalid_argument("memory report entry label must not be empty");
+  }
+  if (memorySubsystemIndex(entry.subsystem) >= static_cast<std::size_t>(MemorySubsystem::kCount)) {
+    throw std::invalid_argument("memory report entry has invalid subsystem");
+  }
+  if (entry.lifetime != MemoryLifetime::kPersistent && entry.lifetime != MemoryLifetime::kTransient &&
+      entry.lifetime != MemoryLifetime::kUnknown) {
+    throw std::invalid_argument("memory report entry has invalid lifetime");
+  }
   addTotals(m_report, entry);
   m_report.entries.push_back(std::move(entry));
 }
@@ -243,7 +302,11 @@ MemoryReport MemoryReportBuilder::finish() && {
       m_report.entries.push_back(MemoryEntry{.subsystem = static_cast<MemorySubsystem>(i),
                                              .lifetime = MemoryLifetime::kUnknown,
                                              .label = "category_present",
-                                             .owned_capacity_bytes = 0});
+                                             .owned_capacity_bytes = 0,
+                                             .referenced_bytes = 0,
+                                             .high_water_bytes = 0,
+                                             .estimate_only = false,
+                                             .uncertainty_note = {}});
     }
   }
   return std::move(m_report);
@@ -336,10 +399,16 @@ MemoryReport collectSimulationMemoryReport(const SimulationState& state, const T
 MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports) {
   MemoryReportBuilder builder;
   std::vector<std::string> notes;
+  std::unordered_set<std::string> ownership_keys;
   for (const MemoryReport& report : reports) {
     for (const MemoryEntry& entry : report.entries) {
       if (entry.label == "category_present") {
         continue;
+      }
+      const std::string key = std::to_string(memorySubsystemIndex(entry.subsystem)) + ":" +
+                              std::to_string(static_cast<unsigned int>(entry.lifetime)) + ":" + entry.label;
+      if (!ownership_keys.insert(key).second) {
+        throw std::invalid_argument("duplicate memory ownership entry while merging reports: " + entry.label);
       }
       builder.addEntry(entry);
     }
@@ -353,7 +422,9 @@ MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports) {
 
 MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input) {
   MemoryReportBuilder builder;
-  const auto bytes = [](std::uint64_t count, std::uint64_t elem_bytes) { return count * elem_bytes; };
+  const auto bytes = [](std::uint64_t count, std::uint64_t elem_bytes) {
+    return checkedU64Multiply(count, elem_bytes, "pre-run memory estimate");
+  };
 
   addEstimate(builder, MemorySubsystem::kParticles, MemoryLifetime::kPersistent, "estimate.particles.hot_soa", bytes(input.particle_capacity, 7 * sizeof(double) + sizeof(std::uint8_t)), "capacity estimate from configured particle count; allocator overhead not included");
   addEstimate(builder, MemorySubsystem::kSidecars, MemoryLifetime::kPersistent, "estimate.particle_sidecars", bytes(input.particle_capacity, 3 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double) + sizeof(std::uint8_t)), "particle metadata/softening sidecar capacity estimate");

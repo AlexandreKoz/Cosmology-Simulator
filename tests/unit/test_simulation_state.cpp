@@ -127,6 +127,33 @@ int main() {
   assert(parsed.step_index == state.metadata.step_index);
   assert(parsed.scale_factor == state.metadata.scale_factor);
 
+  bool metadata_threw = false;
+  try {
+    (void)cosmosim::core::StateMetadata::deserialize(serialized + "run_name=duplicate\n");
+  } catch (const std::invalid_argument&) {
+    metadata_threw = true;
+  }
+  assert(metadata_threw);
+  metadata_threw = false;
+  try {
+    (void)cosmosim::core::StateMetadata::deserialize(serialized + "unknown_key=value\n");
+  } catch (const std::invalid_argument&) {
+    metadata_threw = true;
+  }
+  assert(metadata_threw);
+  std::string nonfinite_metadata = serialized;
+  const std::string scale_entry = "scale_factor=0.5";
+  const auto scale_offset = nonfinite_metadata.find(scale_entry);
+  assert(scale_offset != std::string::npos);
+  nonfinite_metadata.replace(scale_offset, scale_entry.size(), "scale_factor=nan");
+  metadata_threw = false;
+  try {
+    (void)cosmosim::core::StateMetadata::deserialize(nonfinite_metadata);
+  } catch (const std::invalid_argument&) {
+    metadata_threw = true;
+  }
+  assert(metadata_threw);
+
   const auto packet = state.packSpeciesTransferPacket(cosmosim::core::ParticleSpecies::kStar);
   assert(packet.particle_id.size() == 3);
   assert(packet.particle_id[0] == 1002);

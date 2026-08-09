@@ -171,13 +171,14 @@ class ProfilerSession {
 class ScopedProfile {
  public:
   ScopedProfile(ProfilerSession* session, std::string_view phase_name);
-  ~ScopedProfile();
+  ~ScopedProfile() noexcept;
 
   ScopedProfile(const ScopedProfile&) = delete;
   ScopedProfile& operator=(const ScopedProfile&) = delete;
 
  private:
   ProfilerSession* m_session = nullptr;
+  bool m_active = false;
 };
 
 void writeProfilerReportJson(const ProfilerSession& session, const std::filesystem::path& output_path);
@@ -191,8 +192,15 @@ void writeOperationalReportJson(
 }  // namespace cosmosim::core
 
 #if defined(COSMOSIM_ENABLE_PROFILING) && COSMOSIM_ENABLE_PROFILING
+#define COSMOSIM_DETAIL_CONCAT_IMPL(lhs, rhs) lhs##rhs
+#define COSMOSIM_DETAIL_CONCAT(lhs, rhs) COSMOSIM_DETAIL_CONCAT_IMPL(lhs, rhs)
+#if defined(__COUNTER__)
 #define COSMOSIM_PROFILE_SCOPE(session_ptr, phase_name) \
-  ::cosmosim::core::ScopedProfile COSMOSIM_profile_scope_##__LINE__((session_ptr), (phase_name))
+  ::cosmosim::core::ScopedProfile COSMOSIM_DETAIL_CONCAT(cosmosim_profile_scope_, __COUNTER__)((session_ptr), (phase_name))
+#else
+#define COSMOSIM_PROFILE_SCOPE(session_ptr, phase_name) \
+  ::cosmosim::core::ScopedProfile COSMOSIM_DETAIL_CONCAT(cosmosim_profile_scope_, __LINE__)((session_ptr), (phase_name))
+#endif
 #define COSMOSIM_PROFILE_BYTES(session_ptr, bytes) \
   do {                                            \
     if ((session_ptr) != nullptr) {               \

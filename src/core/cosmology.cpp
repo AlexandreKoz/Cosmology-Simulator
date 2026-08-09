@@ -30,8 +30,14 @@ namespace {
   const double right_part = (right - mid) * (f_mid + 4.0 * f_right_mid + f_right) / 6.0;
   const double refined = left_part + right_part;
   const double error = refined - whole;
-  if (depth_remaining <= 0 || std::abs(error) <= 15.0 * tolerance) {
+  if (!std::isfinite(refined) || !std::isfinite(error)) {
+    throw std::runtime_error("adaptive cosmology integration produced a non-finite estimate");
+  }
+  if (std::abs(error) <= 15.0 * tolerance) {
     return refined + error / 15.0;
+  }
+  if (depth_remaining <= 0) {
+    throw std::runtime_error("adaptive cosmology integration failed to converge within recursion limit");
   }
   return adaptiveSimpsonRecursive(
              integrand, left, mid, f_left, f_left_mid, f_mid, left_part,
@@ -59,8 +65,15 @@ namespace {
 
 
 LambdaCdmBackground::LambdaCdmBackground(CosmologyBackgroundConfig config) : m_config(config) {
-  if (m_config.hubble_param <= 0.0) {
-    throw std::invalid_argument("hubble_param must be positive");
+  if (!std::isfinite(m_config.hubble_param) || !(m_config.hubble_param > 0.0)) {
+    throw std::invalid_argument("hubble_param must be finite and positive");
+  }
+  if (!std::isfinite(m_config.omega_matter) || !std::isfinite(m_config.omega_lambda) ||
+      !std::isfinite(m_config.omega_radiation) || !std::isfinite(m_config.omega_curvature)) {
+    throw std::invalid_argument("cosmology density parameters must be finite");
+  }
+  if (m_config.omega_matter < 0.0 || m_config.omega_lambda < 0.0 || m_config.omega_radiation < 0.0) {
+    throw std::invalid_argument("matter, lambda, and radiation density parameters must be non-negative");
   }
 }
 
@@ -71,8 +84,8 @@ double LambdaCdmBackground::hubble0Si() const {
 }
 
 double LambdaCdmBackground::eFactor(double scale_factor) const {
-  if (scale_factor <= 0.0) {
-    throw std::invalid_argument("scale_factor must be positive");
+  if (!std::isfinite(scale_factor) || !(scale_factor > 0.0)) {
+    throw std::invalid_argument("scale_factor must be finite and positive");
   }
   const double a2 = scale_factor * scale_factor;
   const double a3 = a2 * scale_factor;
@@ -81,14 +94,18 @@ double LambdaCdmBackground::eFactor(double scale_factor) const {
   // E(a)^2 = omega_r a^-4 + omega_m a^-3 + omega_k a^-2 + omega_lambda.
   const double density_sum = m_config.omega_radiation / a4 + m_config.omega_matter / a3 +
                              m_config.omega_curvature / a2 + m_config.omega_lambda;
-  if (density_sum <= 0.0) {
-    throw std::invalid_argument("density sum for H(a) must be positive");
+  if (!std::isfinite(density_sum) || !(density_sum > 0.0)) {
+    throw std::invalid_argument("density sum for H(a) must be finite and positive");
   }
   return std::sqrt(density_sum);
 }
 
 double LambdaCdmBackground::hubbleSi(double scale_factor) const {
-  return hubble0Si() * eFactor(scale_factor);
+  const double hubble = hubble0Si() * eFactor(scale_factor);
+  if (!std::isfinite(hubble) || !(hubble > 0.0)) {
+    throw std::runtime_error("H(a) is non-finite or non-positive");
+  }
+  return hubble;
 }
 
 double LambdaCdmBackground::criticalDensitySi(double scale_factor) const {

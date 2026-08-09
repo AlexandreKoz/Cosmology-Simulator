@@ -584,6 +584,7 @@ class MpiContext {
   [[nodiscard]] bool isRoot() const noexcept;
   [[nodiscard]] int worldSize() const noexcept;
   [[nodiscard]] int worldRank() const noexcept;
+  [[nodiscard]] int localRank() const noexcept;
   void validateExpectedWorldSizeOrThrow(int expected_world_size) const;
 
   [[nodiscard]] double allreduceSumDouble(double local_value) const;
@@ -602,6 +603,7 @@ class MpiContext {
   bool m_is_enabled = false;
   int m_world_size = 1;
   int m_world_rank = 0;
+  int m_local_rank = 0;
 };
 
 struct BlockingGhostExchangeResult {
@@ -676,6 +678,7 @@ struct RankDeviceAssignment {
 struct DistributedExecutionTopology {
   int world_size = 1;
   int world_rank = 0;
+  int local_rank = 0;
   bool mpi_enabled = false;
   std::string pm_decomposition_mode = "slab";
   PmSlabLayout pm_slab{};
@@ -686,7 +689,7 @@ struct DistributedExecutionTopology {
 };
 
 [[nodiscard]] RankDeviceAssignment selectRankDeviceAssignment(
-    int world_rank,
+    int local_rank,
     int configured_gpu_devices,
     bool cuda_runtime_available,
     int visible_device_count);

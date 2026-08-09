@@ -1,21 +1,35 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <limits>
+#include <stdexcept>
+
 namespace cosmosim::core {
 
 void SimulationState::resizeParticles(std::size_t count) {
+  if (count > kMaxLocalParticleCount) {
+    throw std::length_error("local particle count exceeds uint32 index capacity; repartition the domain");
+  }
   particles.resize(count);
   particle_sidecar.resize(count);
   bumpParticleIndexGeneration();
 }
 
 void SimulationState::resizeCells(std::size_t count) {
+  if (count > kMaxLocalCellCount) {
+    throw std::length_error("local gas-cell count exceeds uint32 index capacity; repartition the domain");
+  }
   cells.resize(count);
   gas_cells.resize(count);
   gas_cell_identity.clear();
   bumpCellIndexGeneration();
 }
 
-void SimulationState::resizePatches(std::size_t count) { patches.resize(count); }
+void SimulationState::resizePatches(std::size_t count) {
+  if (count > kMaxLocalPatchCount) {
+    throw std::length_error("local AMR patch count exceeds uint32 index capacity; repartition the domain");
+  }
+  patches.resize(count);
+}
 
 bool SimulationState::validateOwnershipInvariants() const {
   if (!particles.isConsistent() || !particle_sidecar.isConsistent() || !cells.isConsistent() ||
@@ -49,17 +63,36 @@ bool SimulationState::validateOwnershipInvariants() const {
   std::vector<std::uint8_t> bh_rows_by_particle(particles.size(), 0);
   std::vector<std::uint8_t> tracer_rows_by_particle(particles.size(), 0);
 
-  for (std::size_t i = 0; i < cells.patch_index.size(); ++i) {
-    if (cells.patch_index[i] >= patches.size() && patches.size() > 0) {
-      return false;
+  if (patches.size() != 0U) {
+    std::vector<std::uint32_t> cell_owner(cells.size(), std::numeric_limits<std::uint32_t>::max());
+    for (std::size_t patch = 0; patch < patches.size(); ++patch) {
+      const std::uint64_t begin = patches.first_cell[patch];
+      const std::uint64_t count = patches.cell_count[patch];
+      if (begin > cells.size() || count > static_cast<std::uint64_t>(cells.size()) - begin) {
+        return false;
+      }
+      const std::uint64_t end = begin + count;
+      for (std::uint64_t cell = begin; cell < end; ++cell) {
+        const auto cell_index = static_cast<std::size_t>(cell);
+        if (cell_owner[cell_index] != std::numeric_limits<std::uint32_t>::max()) {
+          return false;
+        }
+        cell_owner[cell_index] = static_cast<std::uint32_t>(patch);
+      }
     }
-  }
-
-  for (std::size_t patch = 0; patch < patches.size(); ++patch) {
-    const std::uint64_t begin = patches.first_cell[patch];
-    const std::uint64_t count = patches.cell_count[patch];
-    if (begin + count > cells.size()) {
-      return false;
+    for (std::size_t cell = 0; cell < cells.size(); ++cell) {
+      if (cell_owner[cell] == std::numeric_limits<std::uint32_t>::max() ||
+          cells.patch_index[cell] != cell_owner[cell]) {
+        return false;
+      }
+    }
+  } else if (cells.size() != 0U) {
+    // Non-AMR hydro states are allowed to carry cells without PatchSoa ownership.
+    // In that mode patch_index is not authoritative and must remain the neutral zero value.
+    for (const std::uint32_t patch_index : cells.patch_index) {
+      if (patch_index != 0U) {
+        return false;
+      }
     }
   }
 
@@ -81,6 +114,10 @@ bool SimulationState::validateOwnershipInvariants() const {
     if (index >= particles.size()) {
       return false;
     }
+    if (black_holes.host_cell_index[i] != kInvalidGasCellRow &&
+        black_holes.host_cell_index[i] >= cells.size()) {
+      return false;
+    }
     if (particle_sidecar.species_tag[index] != static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) {
       return false;
     }
@@ -94,7 +131,8 @@ bool SimulationState::validateOwnershipInvariants() const {
     if (index >= particles.size()) {
       return false;
     }
-    if (tracers.host_cell_index[i] >= cells.size() && cells.size() > 0) {
+    if (tracers.host_cell_index[i] != kInvalidGasCellRow &&
+        tracers.host_cell_index[i] >= cells.size()) {
       return false;
     }
     if (tracers.mass_fraction_of_host[i] < 0.0 || tracers.last_host_mass_code[i] < 0.0) {

@@ -1,5 +1,7 @@
 #include <cassert>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 #include "cosmosim/core/constants.hpp"
@@ -152,6 +154,71 @@ omega_lambda = 0.7
   assert(std::abs(background.hubble0Si() - expected_h0) / expected_h0 < k_tolerance);
 }
 
+void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
+  cosmosim::core::UnitSystem invalid_units;
+  invalid_units.length_si_per_code = 0.0;
+  bool threw = false;
+  try {
+    (void)invalid_units.lengthCodeToSi(1.0);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::comovingToPhysicalLength(1.0, 0.0);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  cosmosim::core::CosmologyBackgroundConfig invalid_cosmology;
+  invalid_cosmology.hubble_param = std::numeric_limits<double>::quiet_NaN();
+  threw = false;
+  try {
+    (void)cosmosim::core::LambdaCdmBackground(invalid_cosmology);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  cosmosim::core::ProvenanceRecord record;
+  record.config_hash_hex = "abc123";
+  const std::string serialized = cosmosim::core::serializeProvenanceRecord(record);
+  const auto parsed = cosmosim::core::deserializeProvenanceRecord(serialized);
+  assert(parsed.config_hash_hex == record.config_hash_hex);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(serialized + "schema_version=duplicate\n");
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(serialized + "unknown_key=1\n");
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  std::string nonfinite = serialized;
+  const std::string key = "gravity_treepm_asmth_cells=0";
+  const auto offset = nonfinite.find(key);
+  assert(offset != std::string::npos);
+  nonfinite.replace(offset, key.size(), "gravity_treepm_asmth_cells=nan");
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(nonfinite);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -162,5 +229,6 @@ int main() {
   testUnitsConversions();
   testStableHash();
   testDerivedConstantsConsistencyFromNormalizedConfig();
+  testInvalidUnitsCosmologyAndProvenanceFailClosed();
   return 0;
 }

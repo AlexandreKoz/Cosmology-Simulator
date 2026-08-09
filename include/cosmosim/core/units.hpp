@@ -15,6 +15,11 @@ struct UnitSystem {
   double mass_si_per_code = 1.0;
   double velocity_si_per_code = 1.0;
 
+  // Validate the public compatibility representation before numerical use.
+  // The fields remain public for existing callers, but every conversion fails
+  // closed if a caller mutates the unit system into a nonsensical state.
+  void validate() const;
+
   [[nodiscard]] double lengthCodeToSi(double length_code) const;
   [[nodiscard]] double lengthSiToCode(double length_si) const;
 

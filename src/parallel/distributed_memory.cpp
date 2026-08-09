@@ -47,6 +47,22 @@ namespace {
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
   return true;
 }
+
+[[nodiscard]] int queryNodeLocalRank(int fallback_world_rank) {
+  MPI_Comm local_comm = MPI_COMM_NULL;
+  const int split_result = MPI_Comm_split_type(
+      MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &local_comm);
+  if (split_result != MPI_SUCCESS || local_comm == MPI_COMM_NULL) {
+    throw std::runtime_error("MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) failed while determining node-local rank");
+  }
+  int local_rank = fallback_world_rank;
+  const int rank_result = MPI_Comm_rank(local_comm, &local_rank);
+  const int free_result = MPI_Comm_free(&local_comm);
+  if (rank_result != MPI_SUCCESS || free_result != MPI_SUCCESS) {
+    throw std::runtime_error("MPI node-local communicator query failed");
+  }
+  return local_rank;
+}
 #endif
 
 [[nodiscard]] double clampUnit(double value) {
@@ -2471,11 +2487,12 @@ void recordDistributedProfiling(
 MpiContext::MpiContext() {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   m_is_enabled = queryActiveMpiWorld(m_world_size, m_world_rank);
+  m_local_rank = m_is_enabled ? queryNodeLocalRank(m_world_rank) : 0;
 #endif
 }
 
 MpiContext::MpiContext(bool is_enabled, int world_size, int world_rank)
-    : m_is_enabled(is_enabled), m_world_size(world_size), m_world_rank(world_rank) {
+    : m_is_enabled(is_enabled), m_world_size(world_size), m_world_rank(world_rank), m_local_rank(world_rank) {
   if (world_size <= 0) {
     throw std::invalid_argument("MpiContext world_size must be positive");
   }
@@ -2491,6 +2508,8 @@ bool MpiContext::isRoot() const noexcept { return m_world_rank == 0; }
 int MpiContext::worldSize() const noexcept { return m_world_size; }
 
 int MpiContext::worldRank() const noexcept { return m_world_rank; }
+
+int MpiContext::localRank() const noexcept { return m_local_rank; }
 
 void MpiContext::validateExpectedWorldSizeOrThrow(int expected_world_size) const {
   if (expected_world_size <= 0) {
@@ -4357,12 +4376,12 @@ bool RankDeviceAssignment::isValid() const noexcept {
 }
 
 RankDeviceAssignment selectRankDeviceAssignment(
-    int world_rank,
+    int local_rank,
     int configured_gpu_devices,
     bool cuda_runtime_available,
     int visible_device_count) {
-  if (world_rank < 0) {
-    throw std::invalid_argument("world_rank must be non-negative");
+  if (local_rank < 0) {
+    throw std::invalid_argument("local_rank must be non-negative");
   }
   if (configured_gpu_devices < 0) {
     throw std::invalid_argument("configured_gpu_devices must be >= 0");
@@ -4390,7 +4409,7 @@ RankDeviceAssignment selectRankDeviceAssignment(
 
   assignment.uses_cuda = true;
   assignment.active_device_count = configured_gpu_devices;
-  assignment.assigned_device_index = world_rank % configured_gpu_devices;
+  assignment.assigned_device_index = local_rank % configured_gpu_devices;
   return assignment;
 }
 
@@ -4409,11 +4428,12 @@ DistributedExecutionTopology buildDistributedExecutionTopology(
   DistributedExecutionTopology topology;
   topology.world_size = mpi_context.worldSize();
   topology.world_rank = mpi_context.worldRank();
+  topology.local_rank = mpi_context.localRank();
   topology.mpi_enabled = mpi_context.isEnabled();
   topology.pm_decomposition_mode = std::move(pm_decomposition_mode);
   topology.pm_slab = makePmSlabLayout(global_nx, global_ny, global_nz, mpi_context.worldSize(), mpi_context.worldRank());
   topology.device_assignment =
-      selectRankDeviceAssignment(mpi_context.worldRank(), configured_gpu_devices, cuda_runtime_available, visible_device_count);
+      selectRankDeviceAssignment(mpi_context.localRank(), configured_gpu_devices, cuda_runtime_available, visible_device_count);
   if (!topology.device_assignment.isValid()) {
     throw std::runtime_error("constructed distributed execution topology is invalid");
   }

@@ -426,6 +426,42 @@ void test_gas_cell_identity_map_row_remap_by_stable_id() {
   assert(new_to_old[2] == cosmosim::core::kInvalidGasCellRow);
 }
 
+void test_patch_ownership_must_be_exact_partition() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(3);
+  state.resizePatches(2);
+  state.patches.patch_id = {10, 11};
+  state.patches.level = {0, 0};
+  state.patches.first_cell = {0, 1};
+  state.patches.cell_count = {2, 2};  // Deliberate overlap at cell row 1.
+  state.patches.extent_x_comoving = {1.0, 1.0};
+  state.patches.extent_y_comoving = {1.0, 1.0};
+  state.patches.extent_z_comoving = {1.0, 1.0};
+  state.patches.cell_dim_x = {2, 2};
+  state.patches.cell_dim_y = {1, 1};
+  state.patches.cell_dim_z = {1, 1};
+  state.cells.patch_index = {0, 0, 1};
+  state.gas_cells.gas_cell_id = {101, 102, 103};
+  state.gas_cell_identity.assign({
+      {.gas_cell_id = 101, .parent_particle_id = std::nullopt, .owning_patch_id = 10, .local_cell_row = 0},
+      {.gas_cell_id = 102, .parent_particle_id = std::nullopt, .owning_patch_id = 10, .local_cell_row = 1},
+      {.gas_cell_id = 103, .parent_particle_id = std::nullopt, .owning_patch_id = 11, .local_cell_row = 2},
+  });
+  state.synchronizeGasCellIdentityCompatibilityMirrors();
+  assert(!state.validateOwnershipInvariants());
+
+  state.patches.first_cell = {0, 2};
+  state.patches.cell_count = {2, 1};
+  state.patches.cell_dim_x = {2, 1};
+  state.refreshGasCellIdentityMapFromSidecarLanes();
+  assert(state.validateOwnershipInvariants());
+
+  state.patches.first_cell = {0, 3};
+  state.patches.cell_count = {1, 0};  // Deliberate gap at rows 1 and 2.
+  state.patches.cell_dim_x = {1, 0};
+  assert(!state.validateOwnershipInvariants());
+}
+
 }  // namespace
 
 int main() {
@@ -438,5 +474,6 @@ int main() {
   test_gas_cell_reorder_resize_invariants();
   test_decoupled_gas_cell_identity_map_api_shape();
   test_gas_cell_identity_map_row_remap_by_stable_id();
+  test_patch_ownership_must_be_exact_partition();
   return 0;
 }

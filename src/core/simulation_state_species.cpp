@@ -1,4 +1,5 @@
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 
 #include <array>
 #include <algorithm>
@@ -593,12 +594,12 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       throw std::invalid_argument("commitParticleMigration: inbound record has invalid species tag");
     }
 
-    const auto species = static_cast<ParticleSpecies>(inbound.species_tag);
-    const bool requires_star_fields = species == ParticleSpecies::kStar;
-    const bool requires_black_hole_fields = species == ParticleSpecies::kBlackHole;
-    const bool requires_tracer_fields = species == ParticleSpecies::kTracer;
+    const auto particle_species = static_cast<ParticleSpecies>(inbound.species_tag);
+    const bool requires_star_fields = particle_species == ParticleSpecies::kStar;
+    const bool requires_black_hole_fields = particle_species == ParticleSpecies::kBlackHole;
+    const bool requires_tracer_fields = particle_species == ParticleSpecies::kTracer;
 
-    if (inbound.has_gas_cell_fields && species != ParticleSpecies::kGas) {
+    if (inbound.has_gas_cell_fields && particle_species != ParticleSpecies::kGas) {
       throw std::invalid_argument(
           "commitParticleMigration: inbound gas-cell hydro fields do not match species tag");
     }
@@ -850,7 +851,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         kept_rows.push_back(static_cast<std::uint32_t>(row));
       }
     }
-    destination->resize(kept_rows.size());
+    const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
+        commit.inbound_records.begin(), commit.inbound_records.end(),
+        [](const ParticleMigrationRecord& record) { return record.has_star_fields; }));
+    destination->resize(checkedSizeAdd(kept_rows.size(), inbound_count, "commitParticleMigration star rows"));
     for (std::size_t row = 0; row < kept_rows.size(); ++row) {
       const std::size_t source = kept_rows[row];
       const auto old_particle = star_particles.particle_index[source];
@@ -892,13 +896,15 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
             star_particles.stellar_feedback_energy_channel_cumulative_erg[channel][source];
       }
     }
-    for (const auto& inbound : commit.inbound_records) {
+    std::size_t row = kept_rows.size();
+    for (std::size_t inbound_index = 0; inbound_index < commit.inbound_records.size(); ++inbound_index) {
+      const auto& inbound = commit.inbound_records[inbound_index];
       if (!inbound.has_star_fields) {
         continue;
       }
-      const std::size_t row = destination->size();
-      destination->resize(row + 1);
-      destination->particle_index[row] = static_cast<std::uint32_t>(kept_count + (&inbound - commit.inbound_records.data()));
+      destination->particle_index[row] = checkedIntegralNarrow<std::uint32_t>(
+          checkedSizeAdd(kept_count, inbound_index, "commitParticleMigration star particle index"),
+          "commitParticleMigration star particle index");
       destination->formation_scale_factor[row] = inbound.star_fields.formation_scale_factor;
       destination->birth_mass_code[row] = inbound.star_fields.birth_mass_code;
       destination->metallicity_mass_fraction[row] = inbound.star_fields.metallicity_mass_fraction;
@@ -936,6 +942,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         destination->stellar_feedback_energy_channel_cumulative_erg[channel][row] =
             inbound.star_fields.stellar_feedback_energy_channel_cumulative_erg[channel];
       }
+      ++row;
     }
   };
 
@@ -950,7 +957,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         kept_rows.push_back(static_cast<std::uint32_t>(row));
       }
     }
-    destination->resize(kept_rows.size());
+    const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
+        commit.inbound_records.begin(), commit.inbound_records.end(),
+        [](const ParticleMigrationRecord& record) { return record.has_black_hole_fields; }));
+    destination->resize(checkedSizeAdd(kept_rows.size(), inbound_count, "commitParticleMigration black-hole rows"));
     for (std::size_t row = 0; row < kept_rows.size(); ++row) {
       const std::size_t source = kept_rows[row];
       const auto old_particle = black_holes.particle_index[source];
@@ -965,13 +975,15 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       destination->duty_cycle_active_time_code[row] = black_holes.duty_cycle_active_time_code[source];
       destination->duty_cycle_total_time_code[row] = black_holes.duty_cycle_total_time_code[source];
     }
-    for (const auto& inbound : commit.inbound_records) {
+    std::size_t row = kept_rows.size();
+    for (std::size_t inbound_index = 0; inbound_index < commit.inbound_records.size(); ++inbound_index) {
+      const auto& inbound = commit.inbound_records[inbound_index];
       if (!inbound.has_black_hole_fields) {
         continue;
       }
-      const std::size_t row = destination->size();
-      destination->resize(row + 1);
-      destination->particle_index[row] = static_cast<std::uint32_t>(kept_count + (&inbound - commit.inbound_records.data()));
+      destination->particle_index[row] = checkedIntegralNarrow<std::uint32_t>(
+          checkedSizeAdd(kept_count, inbound_index, "commitParticleMigration black-hole particle index"),
+          "commitParticleMigration black-hole particle index");
       destination->host_cell_index[row] = inbound.black_hole_fields.host_cell_index;
       destination->subgrid_mass_code[row] = inbound.black_hole_fields.subgrid_mass_code;
       destination->accretion_rate_code[row] = inbound.black_hole_fields.accretion_rate_code;
@@ -982,6 +994,7 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
           inbound.black_hole_fields.cumulative_feedback_energy_code;
       destination->duty_cycle_active_time_code[row] = inbound.black_hole_fields.duty_cycle_active_time_code;
       destination->duty_cycle_total_time_code[row] = inbound.black_hole_fields.duty_cycle_total_time_code;
+      ++row;
     }
   };
 
@@ -996,7 +1009,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         kept_rows.push_back(static_cast<std::uint32_t>(row));
       }
     }
-    destination->resize(kept_rows.size());
+    const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
+        commit.inbound_records.begin(), commit.inbound_records.end(),
+        [](const ParticleMigrationRecord& record) { return record.has_tracer_fields; }));
+    destination->resize(checkedSizeAdd(kept_rows.size(), inbound_count, "commitParticleMigration tracer rows"));
     for (std::size_t row = 0; row < kept_rows.size(); ++row) {
       const std::size_t source = kept_rows[row];
       const auto old_particle = tracers.particle_index[source];
@@ -1008,19 +1024,22 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       destination->last_host_mass_code[row] = tracers.last_host_mass_code[source];
       destination->cumulative_exchanged_mass_code[row] = tracers.cumulative_exchanged_mass_code[source];
     }
-    for (const auto& inbound : commit.inbound_records) {
+    std::size_t row = kept_rows.size();
+    for (std::size_t inbound_index = 0; inbound_index < commit.inbound_records.size(); ++inbound_index) {
+      const auto& inbound = commit.inbound_records[inbound_index];
       if (!inbound.has_tracer_fields) {
         continue;
       }
-      const std::size_t row = destination->size();
-      destination->resize(row + 1);
-      destination->particle_index[row] = static_cast<std::uint32_t>(kept_count + (&inbound - commit.inbound_records.data()));
+      destination->particle_index[row] = checkedIntegralNarrow<std::uint32_t>(
+          checkedSizeAdd(kept_count, inbound_index, "commitParticleMigration tracer particle index"),
+          "commitParticleMigration tracer particle index");
       destination->parent_particle_id[row] = inbound.tracer_fields.parent_particle_id;
       destination->injection_step[row] = inbound.tracer_fields.injection_step;
       destination->host_cell_index[row] = inbound.tracer_fields.host_cell_index;
       destination->mass_fraction_of_host[row] = inbound.tracer_fields.mass_fraction_of_host;
       destination->last_host_mass_code[row] = inbound.tracer_fields.last_host_mass_code;
       destination->cumulative_exchanged_mass_code[row] = inbound.tracer_fields.cumulative_exchanged_mass_code;
+      ++row;
     }
   };
 
@@ -1032,6 +1051,9 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   rebuildTracerSidecar(&rebuilt_tracers);
   if (rebuild_gas_state) {
     const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
+      if (old_cell_index == kInvalidGasCellRow) {
+        return kInvalidGasCellRow;
+      }
       if (old_cell_index >= old_cell_to_new.size()) {
         throw std::runtime_error("commitParticleMigration: sidecar host_cell_index is outside old CellSoa");
       }
@@ -1042,14 +1064,10 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
       return new_cell_index;
     };
     for (std::size_t row = 0; row < rebuilt_black_holes.size(); ++row) {
-      if (rebuilt_black_holes.host_cell_index[row] < old_cell_to_new.size()) {
-        rebuilt_black_holes.host_cell_index[row] = remap_host_cell(rebuilt_black_holes.host_cell_index[row]);
-      }
+      rebuilt_black_holes.host_cell_index[row] = remap_host_cell(rebuilt_black_holes.host_cell_index[row]);
     }
     for (std::size_t row = 0; row < rebuilt_tracers.size(); ++row) {
-      if (rebuilt_tracers.host_cell_index[row] < old_cell_to_new.size()) {
-        rebuilt_tracers.host_cell_index[row] = remap_host_cell(rebuilt_tracers.host_cell_index[row]);
-      }
+      rebuilt_tracers.host_cell_index[row] = remap_host_cell(rebuilt_tracers.host_cell_index[row]);
     }
   }
 
@@ -1286,6 +1304,9 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
   }
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
+    if (old_cell_index == kInvalidGasCellRow) {
+      return kInvalidGasCellRow;
+    }
     if (old_cell_index >= old_cell_to_new.size()) {
       throw std::runtime_error("commitGasCellMigration: sidecar host_cell_index is outside old CellSoa");
     }
@@ -1295,16 +1316,29 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
     }
     return new_cell_index;
   };
-  for (std::size_t row = 0; row < black_holes.size(); ++row) {
-    black_holes.host_cell_index[row] = remap_host_cell(black_holes.host_cell_index[row]);
+  auto rebuilt_black_hole_hosts = black_holes.host_cell_index;
+  auto rebuilt_tracer_hosts = tracers.host_cell_index;
+  for (std::size_t row = 0; row < rebuilt_black_hole_hosts.size(); ++row) {
+    rebuilt_black_hole_hosts[row] = remap_host_cell(rebuilt_black_hole_hosts[row]);
   }
-  for (std::size_t row = 0; row < tracers.size(); ++row) {
-    tracers.host_cell_index[row] = remap_host_cell(tracers.host_cell_index[row]);
+  for (std::size_t row = 0; row < rebuilt_tracer_hosts.size(); ++row) {
+    rebuilt_tracer_hosts[row] = remap_host_cell(rebuilt_tracer_hosts[row]);
   }
+
+  auto rebuilt_identity_records = gasIdentityRecordsFromSidecars(rebuilt_cells, rebuilt_gas_cells, patches);
+  if (gas_cell_identity.generation() == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("commitGasCellMigration: gas-cell identity generation overflow");
+  }
+  GasCellIdentityMap rebuilt_identity;
+  rebuilt_identity.assignWithGeneration(
+      std::move(rebuilt_identity_records), gas_cell_identity.generation() + 1U);
 
   cells = std::move(rebuilt_cells);
   gas_cells = std::move(rebuilt_gas_cells);
-  replaceGasCellIdentityRecords(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
+  black_holes.host_cell_index = std::move(rebuilt_black_hole_hosts);
+  tracers.host_cell_index = std::move(rebuilt_tracer_hosts);
+  gas_cell_identity = std::move(rebuilt_identity);
+  bumpCellIndexGeneration();
 }
 
 std::vector<AmrPatchMigrationRecord> SimulationState::packAmrPatchMigrationRecords(
@@ -1528,6 +1562,9 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
     new_row_by_gas_cell_id.emplace(rebuilt_gas_cells.gas_cell_id[row], row);
   }
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
+    if (old_cell_index == kInvalidGasCellRow) {
+      return kInvalidGasCellRow;
+    }
     if (old_cell_index >= cells.size()) {
       throw std::runtime_error("commitAmrPatchMigration: sidecar host_cell_index is outside old CellSoa");
     }
@@ -1538,21 +1575,31 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
     }
     return row_it->second;
   };
-  for (std::size_t row = 0; row < black_holes.size(); ++row) {
-    if (black_holes.host_cell_index[row] < cells.size()) {
-      black_holes.host_cell_index[row] = remap_host_cell(black_holes.host_cell_index[row]);
-    }
+  auto rebuilt_black_hole_hosts = black_holes.host_cell_index;
+  auto rebuilt_tracer_hosts = tracers.host_cell_index;
+  for (std::size_t row = 0; row < rebuilt_black_hole_hosts.size(); ++row) {
+    rebuilt_black_hole_hosts[row] = remap_host_cell(rebuilt_black_hole_hosts[row]);
   }
-  for (std::size_t row = 0; row < tracers.size(); ++row) {
-    if (tracers.host_cell_index[row] < cells.size()) {
-      tracers.host_cell_index[row] = remap_host_cell(tracers.host_cell_index[row]);
-    }
+  for (std::size_t row = 0; row < rebuilt_tracer_hosts.size(); ++row) {
+    rebuilt_tracer_hosts[row] = remap_host_cell(rebuilt_tracer_hosts[row]);
   }
+
+  auto rebuilt_identity_records =
+      gasIdentityRecordsFromSidecars(rebuilt_cells, rebuilt_gas_cells, rebuilt_patches);
+  if (gas_cell_identity.generation() == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("commitAmrPatchMigration: gas-cell identity generation overflow");
+  }
+  GasCellIdentityMap rebuilt_identity;
+  rebuilt_identity.assignWithGeneration(
+      std::move(rebuilt_identity_records), gas_cell_identity.generation() + 1U);
 
   patches = std::move(rebuilt_patches);
   cells = std::move(rebuilt_cells);
   gas_cells = std::move(rebuilt_gas_cells);
-  replaceGasCellIdentityRecords(gasIdentityRecordsFromSidecars(cells, gas_cells, patches));
+  black_holes.host_cell_index = std::move(rebuilt_black_hole_hosts);
+  tracers.host_cell_index = std::move(rebuilt_tracer_hosts);
+  gas_cell_identity = std::move(rebuilt_identity);
+  bumpCellIndexGeneration();
 }
 
 }  // namespace cosmosim::core
