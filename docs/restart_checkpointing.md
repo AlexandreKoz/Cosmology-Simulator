@@ -102,10 +102,13 @@ The dense-row acceleration cache is invalidated immediately on such a commit,
 so a checkpoint written after migration honestly stores `cache.valid=false`
 rather than stale row-indexed force history.
 
-`provenance_v6` adds the normalized tree-opening criterion, theta,
-relative-force tolerance, and relative-acceleration floor to snapshot/restart
-audit metadata. This is an additive provenance schema change; it does not make
-those fields separate live authorities or change the v21 restart ownership contract.
+`provenance_v6` introduced the normalized tree-opening criterion, theta,
+relative-force tolerance, and relative-acceleration floor. Current writers emit
+`provenance_v7`, which retains those fields and adds a SHA-256 normalized-config
+integrity digest plus explicit compiler/hardware/runtime descriptors. Readers
+remain backward-compatible with valid v6 records; v6 bytes are never reinterpreted
+as v7. The provenance schema does not create a second live runtime authority or
+change restart ownership semantics.
 
 
 ## Restart-safe boundary contract

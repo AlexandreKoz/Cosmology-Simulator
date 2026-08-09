@@ -153,7 +153,7 @@ recovered; MPI job abort remains the failure boundary.
   CIC/deconvolution-off/lower-cutoff decks retain their values but are not the
   certified profile.
 - Opening criterion, theta, relative tolerance, and acceleration floor are
-  typed, validated, normalized, and recorded in `provenance_v6`.
+  typed, validated, normalized, and recorded in `provenance_v7`.
 
 ## Command-backed evidence snapshot
 

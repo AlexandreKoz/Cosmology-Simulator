@@ -6,6 +6,7 @@
 namespace cosmosim::core {
 
 void ParticleSoa::resize(std::size_t count) {
+  (void)checkedLocalCount(count, kMaxLocalParticleCount, "particle", "ParticleSoa::resize");
   position_x_comoving.resize(count);
   position_y_comoving.resize(count);
   position_z_comoving.resize(count);
@@ -132,6 +133,7 @@ void ParticleSidecar::clearGravitySofteningOverride(std::size_t particle_index) 
 }
 
 void CellSoa::resize(std::size_t count) {
+  (void)checkedLocalCount(count, kMaxLocalCellCount, "gas-cell", "CellSoa::resize");
   center_x_comoving.resize(count);
   center_y_comoving.resize(count);
   center_z_comoving.resize(count);
@@ -158,6 +160,7 @@ bool CellSoa::isConsistent() const noexcept {
 }
 
 void GasCellSidecar::resize(std::size_t count) {
+  (void)checkedLocalCount(count, kMaxLocalCellCount, "gas-cell", "GasCellSidecar::resize");
   gas_cell_id.resize(count);
   parent_particle_id.resize(count);
   velocity_x_peculiar.resize(count);
@@ -340,6 +343,7 @@ bool TracerParticleSidecar::isConsistent() const noexcept {
 }
 
 void PatchSoa::resize(std::size_t count) {
+  (void)checkedLocalCount(count, kMaxLocalPatchCount, "AMR patch", "PatchSoa::resize");
   patch_id.resize(count);
   level.resize(count);
   first_cell.resize(count);

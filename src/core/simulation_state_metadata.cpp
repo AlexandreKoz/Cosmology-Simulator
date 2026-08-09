@@ -1,13 +1,17 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
+
+#include "core/internal/text_codec.hpp"
 
 namespace cosmosim::core {
 namespace {
@@ -52,63 +56,54 @@ namespace {
 }  // namespace
 
 std::string StateMetadata::serialize() const {
+  if (schema_version != 2U && schema_version != 3U) {
+    throw std::invalid_argument("StateMetadata.serialize: unsupported schema_version");
+  }
+  const auto encode_string = [this](std::string_view value) {
+    if (schema_version >= 3U) {
+      return internal::escapeTextLine(value);
+    }
+    if (value.find_first_of("\n\r") != std::string_view::npos) {
+      throw std::invalid_argument(
+          "StateMetadata.serialize: schema v2 cannot represent embedded line breaks; use schema v3");
+    }
+    return std::string(value);
+  };
+
   std::ostringstream out;
   out << "schema_version=" << schema_version << '\n';
-  out << "run_name=" << run_name << '\n';
+  out << "run_name=" << encode_string(run_name) << '\n';
   out << "normalized_config_hash=" << normalized_config_hash << '\n';
-  out << "normalized_config_hash_hex=" << normalized_config_hash_hex << '\n';
+  out << "normalized_config_hash_hex=" << encode_string(normalized_config_hash_hex) << '\n';
   out << "step_index=" << step_index << '\n';
   out << "scale_factor=" << scale_factor << '\n';
-  out << "snapshot_stem=" << snapshot_stem << '\n';
-  out << "restart_stem=" << restart_stem << '\n';
+  out << "snapshot_stem=" << encode_string(snapshot_stem) << '\n';
+  out << "restart_stem=" << encode_string(restart_stem) << '\n';
   return out.str();
 }
 
 StateMetadata StateMetadata::deserialize(std::string_view text) {
-  StateMetadata metadata;
   std::unordered_set<std::string> seen_keys;
+  std::unordered_map<std::string, std::string> raw_values;
   std::istringstream in{std::string(text)};
   std::string line;
 
   while (std::getline(in, line)) {
-    const std::string trimmed = trim(line);
-    if (trimmed.empty()) {
+    if (line.empty()) {
       continue;
     }
-
-    const auto equal_pos = trimmed.find('=');
-    if (equal_pos == std::string::npos || equal_pos == 0) {
+    const auto equal_pos = line.find('=');
+    if (equal_pos == std::string::npos || equal_pos == 0U) {
       throw std::invalid_argument("StateMetadata.deserialize: malformed line '" + line + "'");
     }
-
-    const std::string key = trim(trimmed.substr(0, equal_pos));
-    const std::string value = trim(trimmed.substr(equal_pos + 1));
+    const std::string key = trim(line.substr(0, equal_pos));
     if (key.empty()) {
       throw std::invalid_argument("StateMetadata.deserialize: malformed line '" + line + "'");
     }
     if (!seen_keys.insert(key).second) {
       throw std::invalid_argument("StateMetadata.deserialize: duplicate key '" + key + "'");
     }
-
-    if (key == "schema_version") {
-      metadata.schema_version = parseUint32(value, key);
-    } else if (key == "run_name") {
-      metadata.run_name = value;
-    } else if (key == "normalized_config_hash") {
-      metadata.normalized_config_hash = parseUint64(value, key);
-    } else if (key == "normalized_config_hash_hex") {
-      metadata.normalized_config_hash_hex = value;
-    } else if (key == "step_index") {
-      metadata.step_index = parseUint64(value, key);
-    } else if (key == "scale_factor") {
-      metadata.scale_factor = parseDouble(value, key);
-    } else if (key == "snapshot_stem") {
-      metadata.snapshot_stem = value;
-    } else if (key == "restart_stem") {
-      metadata.restart_stem = value;
-    } else {
-      throw std::invalid_argument("StateMetadata.deserialize: unknown key '" + key + "'");
-    }
+    raw_values.emplace(key, line.substr(equal_pos + 1U));
   }
 
   static const std::array<std::string_view, 8> k_required_keys = {
@@ -119,10 +114,40 @@ StateMetadata StateMetadata::deserialize(std::string_view text) {
       throw std::invalid_argument("StateMetadata.deserialize: missing required key '" + std::string(key) + "'");
     }
   }
+  if (seen_keys.size() != k_required_keys.size()) {
+    for (const auto& [key, value] : raw_values) {
+      (void)value;
+      if (std::find(k_required_keys.begin(), k_required_keys.end(), key) == k_required_keys.end()) {
+        throw std::invalid_argument("StateMetadata.deserialize: unknown key '" + key + "'");
+      }
+    }
+  }
+
+  StateMetadata metadata;
+  metadata.schema_version = parseUint32(trim(raw_values.at("schema_version")), "schema_version");
+  if (metadata.schema_version != 2U && metadata.schema_version != 3U) {
+    throw std::invalid_argument("StateMetadata.deserialize: unsupported schema_version");
+  }
+  const auto decode_string = [&metadata](const std::string& raw, const char* key) {
+    if (metadata.schema_version >= 3U) {
+      return internal::unescapeTextLineStrict(raw, std::string("StateMetadata.deserialize key '") + key + "'");
+    }
+    return trim(raw);
+  };
+
+  metadata.run_name = decode_string(raw_values.at("run_name"), "run_name");
+  metadata.normalized_config_hash = parseUint64(
+      trim(raw_values.at("normalized_config_hash")), "normalized_config_hash");
+  metadata.normalized_config_hash_hex = decode_string(
+      raw_values.at("normalized_config_hash_hex"), "normalized_config_hash_hex");
+  metadata.step_index = parseUint64(trim(raw_values.at("step_index")), "step_index");
+  metadata.scale_factor = parseDouble(trim(raw_values.at("scale_factor")), "scale_factor");
+  metadata.snapshot_stem = decode_string(raw_values.at("snapshot_stem"), "snapshot_stem");
+  metadata.restart_stem = decode_string(raw_values.at("restart_stem"), "restart_stem");
+
   if (!(metadata.scale_factor > 0.0)) {
     throw std::invalid_argument("StateMetadata.deserialize: scale_factor must be finite and positive");
   }
-
   return metadata;
 }
 

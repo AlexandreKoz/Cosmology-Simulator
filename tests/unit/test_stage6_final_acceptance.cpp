@@ -369,7 +369,7 @@ void testRestartPayloadHashIgnoresTransientScratchButCoversPersistentTruth() {
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "stage6_final_acceptance = true\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
-  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "stage6f");
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "stage6f", 0, payload.normalized_config_text);
   payload.distributed_gravity_state.schema_version = 2;
   payload.distributed_gravity_state.world_size = 1;
   payload.distributed_gravity_state.pm_grid_nx = 4;

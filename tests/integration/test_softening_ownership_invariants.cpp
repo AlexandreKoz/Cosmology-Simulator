@@ -368,7 +368,7 @@ void test_softening_override_restart_roundtrip() {
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   state.metadata.run_name = "softening_ownership_roundtrip";
   state.metadata.normalized_config_hash_hex = payload.normalized_config_hash_hex;
-  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef", 0, payload.normalized_config_text);
   payload.distributed_gravity_state.schema_version = 2;
   payload.distributed_gravity_state.world_size = 1;
   payload.distributed_gravity_state.pm_grid_nx = 4;

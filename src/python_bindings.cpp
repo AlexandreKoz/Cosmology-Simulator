@@ -254,7 +254,8 @@ PYBIND11_MODULE(_cosmosim, module) {
         payload.provenance = cosmosim::core::makeProvenanceRecord(
             frozen_config.provenance.config_hash_hex,
             git_sha,
-            0);
+            0,
+            frozen_config.normalized_text);
         payload.provenance.raw_input_config = frozen_config.raw_text;
         payload.provenance.normalized_config = frozen_config.normalized_text;
         payload.provenance.derived_runtime_state = cosmosim::core::serializeDerivedRuntimeConfig(

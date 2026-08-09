@@ -120,6 +120,10 @@ void testStableHash() {
   const std::string hash_a = cosmosim::core::stableConfigHashHex(normalized);
   const std::string hash_b = cosmosim::core::stableConfigHashHex(normalized);
   assert(hash_a == hash_b);
+  assert(cosmosim::core::strongConfigHashSha256Hex("") ==
+         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert(cosmosim::core::strongConfigHashSha256Hex("abc") ==
+         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
 
 void testDerivedConstantsConsistencyFromNormalizedConfig() {
@@ -183,11 +187,26 @@ void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
   }
   assert(threw);
 
-  cosmosim::core::ProvenanceRecord record;
-  record.config_hash_hex = "abc123";
+  const std::string normalized_config = "mode=cosmo_cube\nvalue=1\n";
+  cosmosim::core::ProvenanceRecord record = cosmosim::core::makeProvenanceRecord(
+      cosmosim::core::stableConfigHashHex(normalized_config),
+      "deadbeef",
+      0,
+      normalized_config);
+  record.raw_input_config = "  raw\\value\nline=two\tend  ";
+  record.normalized_config = normalized_config;
+  record.derived_runtime_state = "state=ok\r\nnext=yes";
+  record.compiler_flags = "-O2 -DNAME=\\\"value\\\"";
   const std::string serialized = cosmosim::core::serializeProvenanceRecord(record);
   const auto parsed = cosmosim::core::deserializeProvenanceRecord(serialized);
+  assert(parsed.schema_version == "provenance_v7");
   assert(parsed.config_hash_hex == record.config_hash_hex);
+  assert(parsed.normalized_config_sha256_hex ==
+         cosmosim::core::strongConfigHashSha256Hex(normalized_config));
+  assert(parsed.raw_input_config == record.raw_input_config);
+  assert(parsed.normalized_config == record.normalized_config);
+  assert(parsed.derived_runtime_state == record.derived_runtime_state);
+  assert(parsed.compiler_flags == record.compiler_flags);
 
   threw = false;
   try {
@@ -205,6 +224,43 @@ void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
   }
   assert(threw);
 
+  auto replace_line = [](std::string text, const std::string& key, const std::string& replacement) {
+    const std::string prefix = key + "=";
+    const auto begin = text.find(prefix);
+    assert(begin != std::string::npos);
+    const auto end = text.find('\n', begin);
+    assert(end != std::string::npos);
+    text.replace(begin, end - begin, prefix + replacement);
+    return text;
+  };
+
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(
+        replace_line(serialized, "raw_input_config", "abc\\q"));
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(
+        replace_line(serialized, "raw_input_config", "dangling\\"));
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(
+        replace_line(serialized, "normalized_config_sha256_hex", std::string(64U, '0')));
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
   std::string nonfinite = serialized;
   const std::string key = "gravity_treepm_asmth_cells=0";
   const auto offset = nonfinite.find(key);
@@ -217,6 +273,26 @@ void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
     threw = true;
   }
   assert(threw);
+
+  cosmosim::core::ProvenanceRecord legacy = record;
+  legacy.schema_version = "provenance_v6";
+  legacy.raw_input_config = "legacy\\path\nline";
+  legacy.normalized_config.clear();
+  const auto legacy_parsed = cosmosim::core::deserializeProvenanceRecord(
+      cosmosim::core::serializeProvenanceRecord(legacy));
+  assert(legacy_parsed.schema_version == "provenance_v6");
+  assert(legacy_parsed.raw_input_config == legacy.raw_input_config);
+
+  std::string malformed_legacy = cosmosim::core::serializeProvenanceRecord(legacy);
+  malformed_legacy = replace_line(malformed_legacy, "raw_input_config", "legacy\\q");
+  threw = false;
+  try {
+    (void)cosmosim::core::deserializeProvenanceRecord(malformed_legacy);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
 }
 
 }  // namespace

@@ -174,7 +174,10 @@ namespace {
     const core::FrozenConfig& frozen_config,
     const core::SimulationConfig& config) {
   core::ProvenanceRecord record = core::makeProvenanceRecord(
-      frozen_config.provenance.config_hash_hex, "unknown");
+      frozen_config.provenance.config_hash_hex,
+      "unknown",
+      0,
+      frozen_config.normalized_text);
   record.config_schema_name = "cosmosim_config";
   record.config_schema_version = std::to_string(frozen_config.config.schema_version);
   record.raw_input_config = frozen_config.raw_text;
@@ -244,7 +247,26 @@ namespace {
       std::to_string(config.mode.zoom_focused_pm_grid_ny) + "x" +
       std::to_string(config.mode.zoom_focused_pm_grid_nz);
   record.zoom_contamination_radius_mpc_comoving = config.mode.zoom_contamination_radius_mpc_comoving;
+  record.deterministic_mode = config.parallel.deterministic_reduction ? "deterministic_reduction" : "non_deterministic_reduction";
   return record;
+}
+
+void applyExecutionTopologyToProvenance(
+    core::ProvenanceRecord* record,
+    const parallel::DistributedExecutionTopology& topology) {
+  if (record == nullptr) {
+    throw std::invalid_argument("applyExecutionTopologyToProvenance requires a non-null record");
+  }
+  record->author_rank = topology.world_rank;
+  record->mpi_world_size = topology.world_size;
+  record->mpi_node_local_rank = topology.local_rank;
+  record->mpi_summary = topology.mpi_enabled ? "enabled" : "disabled";
+  if (topology.device_assignment.uses_cuda) {
+    record->gpu_summary = "cuda_device=" + std::to_string(topology.device_assignment.assigned_device_index) +
+        ",visible_devices=" + std::to_string(topology.device_assignment.visible_device_count);
+  } else {
+    record->gpu_summary = "disabled_or_unavailable";
+  }
 }
 
 [[nodiscard]] std::string pmSlabSignature(const parallel::DistributedRestartState& distributed_state) {
@@ -305,6 +327,7 @@ bool maybeWriteOutputs(
   if (snapshot_due) {
     core::ProvenanceRecord snapshot_provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    applyExecutionTopologyToProvenance(&snapshot_provenance, gravity_state.runtimeTopology());
     snapshot_provenance.gravity_treepm_decomposition_epoch =
         gravity_state.decompositionEpoch();
     io::SnapshotWritePayload snapshot_payload;
@@ -363,6 +386,8 @@ bool maybeWriteOutputs(
     restart_payload.gravity_force_cache = &gravity_force_cache;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    applyExecutionTopologyToProvenance(
+        &restart_payload.provenance, gravity_state.runtimeTopology());
     restart_payload.normalized_config_text = frozen_config.normalized_text;
     restart_payload.normalized_config_hash_hex = frozen_config.provenance.config_hash_hex;
     restart_payload.distributed_gravity_state.schema_version = 2;

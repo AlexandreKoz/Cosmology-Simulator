@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/version.hpp"
 #include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/core/units.hpp"
@@ -171,6 +172,14 @@ void writeScalarUint32Attribute(hid_t location, const std::string& key, std::uin
   Hdf5Handle attr(H5Acreate2(location, key.c_str(), H5T_STD_U32LE, scalar_space.get(), H5P_DEFAULT, H5P_DEFAULT));
   if (!attr.valid() || H5Awrite(attr.get(), H5T_NATIVE_UINT32, &value) < 0) {
     throw std::runtime_error("failed to write uint32 attribute: " + key);
+  }
+}
+
+void writeScalarUint64Attribute(hid_t location, const std::string& key, std::uint64_t value) {
+  Hdf5Handle scalar_space(H5Screate(H5S_SCALAR));
+  Hdf5Handle attr(H5Acreate2(location, key.c_str(), H5T_STD_U64LE, scalar_space.get(), H5P_DEFAULT, H5P_DEFAULT));
+  if (!attr.valid() || H5Awrite(attr.get(), H5T_NATIVE_UINT64, &value) < 0) {
+    throw std::runtime_error("failed to write uint64 attribute: " + key);
   }
 }
 
@@ -556,6 +565,17 @@ void readScalarStringAttribute(hid_t location, const std::string& key, std::stri
   return true;
 }
 
+[[nodiscard]] bool readScalarUint64Attribute(hid_t location, const std::string& key, std::uint64_t& out_value) {
+  Hdf5Handle attr(H5Aopen(location, key.c_str(), H5P_DEFAULT));
+  if (!attr.valid()) {
+    return false;
+  }
+  if (H5Aread(attr.get(), H5T_NATIVE_UINT64, &out_value) < 0) {
+    throw std::runtime_error("failed reading attribute: " + key);
+  }
+  return true;
+}
+
 [[nodiscard]] bool readScalarDoubleAttribute(hid_t location, const std::string& key, double& out_value) {
   Hdf5Handle attr(H5Aopen(location, key.c_str(), H5P_DEFAULT));
   if (!attr.valid()) {
@@ -752,6 +772,23 @@ void writeGadgetArepoSnapshotHdf5(
       provenance_group.get(), "derived_runtime_state", payload.provenance.derived_runtime_state);
   writeScalarStringAttribute(provenance_group.get(), "timestamp_utc", payload.provenance.timestamp_utc);
   writeScalarStringAttribute(provenance_group.get(), "hardware_summary", payload.provenance.hardware_summary);
+  if (payload.provenance.schema_version == "provenance_v7") {
+    writeScalarStringAttribute(provenance_group.get(), "integrity_digest_algorithm", payload.provenance.integrity_digest_algorithm);
+    writeScalarStringAttribute(provenance_group.get(), "normalized_config_sha256_hex", payload.provenance.normalized_config_sha256_hex);
+    writeScalarStringAttribute(provenance_group.get(), "compiler_flags", payload.provenance.compiler_flags);
+    writeScalarStringAttribute(provenance_group.get(), "cpu_model", payload.provenance.cpu_model);
+    writeScalarUint32Attribute(provenance_group.get(), "logical_thread_count", payload.provenance.logical_thread_count);
+    writeScalarUint32Attribute(provenance_group.get(), "physical_core_count", payload.provenance.physical_core_count);
+    writeScalarUint64Attribute(provenance_group.get(), "system_ram_bytes", payload.provenance.system_ram_bytes);
+    writeScalarStringAttribute(provenance_group.get(), "host_name", payload.provenance.host_name);
+    writeScalarStringAttribute(provenance_group.get(), "gpu_summary", payload.provenance.gpu_summary);
+    writeScalarStringAttribute(provenance_group.get(), "cuda_runtime_version", payload.provenance.cuda_runtime_version);
+    writeScalarStringAttribute(provenance_group.get(), "cuda_driver_version", payload.provenance.cuda_driver_version);
+    writeScalarStringAttribute(provenance_group.get(), "mpi_summary", payload.provenance.mpi_summary);
+    writeScalarUint32Attribute(provenance_group.get(), "mpi_world_size", cosmosim::core::checkedIntegralNarrow<std::uint32_t>(payload.provenance.mpi_world_size, "snapshot provenance mpi_world_size"));
+    writeScalarUint32Attribute(provenance_group.get(), "mpi_node_local_rank", cosmosim::core::checkedIntegralNarrow<std::uint32_t>(payload.provenance.mpi_node_local_rank, "snapshot provenance mpi_node_local_rank"));
+    writeScalarStringAttribute(provenance_group.get(), "deterministic_mode", payload.provenance.deterministic_mode);
+  }
   writeScalarUint32Attribute(
       provenance_group.get(),
       "gravity_treepm_pm_grid",
@@ -1748,6 +1785,29 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         provenance_group.get(), "derived_runtime_state", result.provenance.derived_runtime_state);
     readScalarStringAttribute(provenance_group.get(), "timestamp_utc", result.provenance.timestamp_utc);
     readScalarStringAttribute(provenance_group.get(), "hardware_summary", result.provenance.hardware_summary);
+    if (result.provenance.schema_version == "provenance_v7") {
+      readScalarStringAttribute(provenance_group.get(), "integrity_digest_algorithm", result.provenance.integrity_digest_algorithm);
+      readScalarStringAttribute(provenance_group.get(), "normalized_config_sha256_hex", result.provenance.normalized_config_sha256_hex);
+      readScalarStringAttribute(provenance_group.get(), "compiler_flags", result.provenance.compiler_flags);
+      readScalarStringAttribute(provenance_group.get(), "cpu_model", result.provenance.cpu_model);
+      static_cast<void>(readScalarUint32Attribute(provenance_group.get(), "logical_thread_count", result.provenance.logical_thread_count));
+      static_cast<void>(readScalarUint32Attribute(provenance_group.get(), "physical_core_count", result.provenance.physical_core_count));
+      static_cast<void>(readScalarUint64Attribute(provenance_group.get(), "system_ram_bytes", result.provenance.system_ram_bytes));
+      readScalarStringAttribute(provenance_group.get(), "host_name", result.provenance.host_name);
+      readScalarStringAttribute(provenance_group.get(), "gpu_summary", result.provenance.gpu_summary);
+      readScalarStringAttribute(provenance_group.get(), "cuda_runtime_version", result.provenance.cuda_runtime_version);
+      readScalarStringAttribute(provenance_group.get(), "cuda_driver_version", result.provenance.cuda_driver_version);
+      readScalarStringAttribute(provenance_group.get(), "mpi_summary", result.provenance.mpi_summary);
+      std::uint32_t mpi_world_size = 0U;
+      std::uint32_t mpi_node_local_rank = 0U;
+      if (readScalarUint32Attribute(provenance_group.get(), "mpi_world_size", mpi_world_size)) {
+        result.provenance.mpi_world_size = cosmosim::core::checkedIntegralNarrow<int>(mpi_world_size, "snapshot provenance mpi_world_size");
+      }
+      if (readScalarUint32Attribute(provenance_group.get(), "mpi_node_local_rank", mpi_node_local_rank)) {
+        result.provenance.mpi_node_local_rank = cosmosim::core::checkedIntegralNarrow<int>(mpi_node_local_rank, "snapshot provenance mpi_node_local_rank");
+      }
+      readScalarStringAttribute(provenance_group.get(), "deterministic_mode", result.provenance.deterministic_mode);
+    }
     std::uint32_t gravity_pm_grid = 0;
     if (readScalarUint32Attribute(provenance_group.get(), "gravity_treepm_pm_grid", gravity_pm_grid)) {
       result.provenance.gravity_treepm_pm_grid = static_cast<int>(gravity_pm_grid);

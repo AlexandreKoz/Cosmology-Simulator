@@ -10,7 +10,7 @@ namespace cosmosim::core {
 
 // Canonical provenance payload written alongside run outputs.
 struct ProvenanceRecord {
-  std::string schema_version = "provenance_v6";
+  std::string schema_version = "provenance_v7";
   std::string config_schema_name = "cosmosim_config";
   std::string config_schema_version = "1";
   std::string git_sha = "unknown";
@@ -20,11 +20,26 @@ struct ProvenanceRecord {
   std::string enabled_features;
   std::string config_hash_hex;
   std::string normalized_config_hash_hex;
+  std::string integrity_digest_algorithm = "sha256";
+  std::string normalized_config_sha256_hex = "unavailable";
   std::string raw_input_config;
   std::string normalized_config;
   std::string derived_runtime_state;
   std::string timestamp_utc;
   std::string hardware_summary;
+  std::string compiler_flags = "unavailable";
+  std::string cpu_model = "unavailable";
+  std::uint32_t logical_thread_count = 0;
+  std::uint32_t physical_core_count = 0;
+  std::uint64_t system_ram_bytes = 0;
+  std::string host_name = "unavailable";
+  std::string gpu_summary = "unavailable";
+  std::string cuda_runtime_version = "unavailable";
+  std::string cuda_driver_version = "unavailable";
+  std::string mpi_summary = "unavailable";
+  int mpi_world_size = 1;
+  int mpi_node_local_rank = 0;
+  std::string deterministic_mode = "unknown";
   int author_rank = 0;
   int gravity_treepm_pm_grid = 0;
   int gravity_treepm_pm_grid_nx = 0;
@@ -75,11 +90,13 @@ struct ProvenanceRecord {
 // Deterministic hashing for normalized configuration text.
 [[nodiscard]] std::uint64_t stableConfigHash(const std::string& normalized_config_text);
 [[nodiscard]] std::string stableConfigHashHex(const std::string& normalized_config_text);
+[[nodiscard]] std::string strongConfigHashSha256Hex(std::string_view normalized_config_text);
 
 [[nodiscard]] ProvenanceRecord makeProvenanceRecord(
     const std::string& config_hash_hex,
     const std::string& git_sha,
-    int rank = 0);
+    int rank = 0,
+    std::string_view normalized_config_text = {});
 
 void writeProvenanceRecord(
     const ProvenanceRecord& record,

@@ -437,7 +437,7 @@ Default production policy is the independently validated profile:
 - `enable_window_deconvolution = true`
 
 This default change is reproducibility-relevant and is captured by normalized
-configuration and `provenance_v6`. Existing explicit CIC/deconvolution-off
+configuration and `provenance_v7`. Existing explicit CIC/deconvolution-off
 decks keep their requested behavior.
 
 ## Accuracy/cost tradeoffs in this stage

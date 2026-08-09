@@ -144,11 +144,13 @@ particle and no species sidecar rows attached to ineligible particles.
 ## Reproducibility and schema implications
 
 `StateMetadata` provides a deterministic key/value serialization surface for schema version, run
-identity, snapshot/restart naming, step index, and normalized config hash fields.
+identity, snapshot/restart naming, step index, and normalized config hash fields. Current schema v3
+uses a strict reversible line codec (`\\`, `\n`, `\r`, `\t`, `\=`, `\xHH`) so permitted
+free-form strings cannot create accidental records; valid schema-v2 metadata remains readable.
 
 Conservative assumptions:
 
-1. Metadata serialization format is line-based key/value text and intentionally minimal.
+1. Metadata serialization format is line-based key/value text with explicit escaping and fail-closed decoding.
 2. Species tags are encoded as a bounded integer enum (0..4).
 3. Patch-to-cell mapping uses contiguous ranges (`first_cell`, `cell_count`) for locality and future
    MPI packing.

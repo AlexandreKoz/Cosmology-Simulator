@@ -155,7 +155,7 @@ The workflow maps the normalized config keys directly to `TreeGravityOptions`:
 - `numerics.treepm_tree_relative_force_tolerance`;
 - `numerics.treepm_tree_relative_force_acceleration_floor`.
 
-The same values are recorded in `provenance_v6`. The default remains
+The same values are recorded in `provenance_v7`. The default remains
 COM-distance opening. The public default
 `TreeGravityOptions::opening_theta` in
 `include/cosmosim/gravity/tree_gravity.hpp` is now `0.7`, aligned with the typed

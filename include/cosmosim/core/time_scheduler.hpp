@@ -263,6 +263,8 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::vector<std::uint32_t>> m_elements_by_bin;
   std::vector<std::size_t> m_position_in_bin;
   std::vector<std::uint32_t> m_active_elements;
+  // Reusable radix-sort staging for deterministic active-index order without O(A log A) comparison sorting.
+  std::vector<std::uint32_t> m_active_sort_scratch;
   TimeBinDiagnostics m_diagnostics;
   std::vector<std::uint8_t> m_candidate_bin_index;
   std::vector<TimeStepCandidateSource> m_candidate_source;

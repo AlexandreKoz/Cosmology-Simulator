@@ -109,7 +109,7 @@ int main() {
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "mode = toy\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
-  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef", 0, payload.normalized_config_text);
   payload.distributed_gravity_state.schema_version = 2;
   payload.distributed_gravity_state.world_size = 1;
   payload.distributed_gravity_state.pm_grid_nx = 4;
@@ -216,7 +216,7 @@ int main() {
     cosmosim::io::RestartWritePayload invalid_metadata = payload;
     invalid_metadata.normalized_config_hash_hex = "0000000000000000";
     invalid_metadata.provenance =
-        cosmosim::core::makeProvenanceRecord(invalid_metadata.normalized_config_hash_hex, "deadbeef");
+        cosmosim::core::makeProvenanceRecord(invalid_metadata.normalized_config_hash_hex, "deadbeef", 0, invalid_metadata.normalized_config_text);
     (void)cosmosim::io::restartPayloadIntegrityHash(invalid_metadata);
   } catch (const std::invalid_argument&) {
     mismatched_metadata_threw = true;
@@ -252,6 +252,12 @@ int main() {
     gas_state.patches.patch_id[0] = 777;
     gas_state.patches.first_cell[0] = 0;
     gas_state.patches.cell_count[0] = 2;
+    gas_state.patches.extent_x_comoving[0] = 2.0;
+    gas_state.patches.extent_y_comoving[0] = 1.0;
+    gas_state.patches.extent_z_comoving[0] = 1.0;
+    gas_state.patches.cell_dim_x[0] = 2;
+    gas_state.patches.cell_dim_y[0] = 1;
+    gas_state.patches.cell_dim_z[0] = 1;
     gas_state.patches.owning_rank[0] = 0;
     gas_state.cells.patch_index[0] = 0;
     gas_state.cells.patch_index[1] = 0;
@@ -314,6 +320,12 @@ int main() {
     parentless_state.patches.level[0] = 0;
     parentless_state.patches.first_cell[0] = 0;
     parentless_state.patches.cell_count[0] = 1;
+    parentless_state.patches.extent_x_comoving[0] = 1.0;
+    parentless_state.patches.extent_y_comoving[0] = 1.0;
+    parentless_state.patches.extent_z_comoving[0] = 1.0;
+    parentless_state.patches.cell_dim_x[0] = 1;
+    parentless_state.patches.cell_dim_y[0] = 1;
+    parentless_state.patches.cell_dim_z[0] = 1;
     parentless_state.patches.owning_rank[0] = 0;
     parentless_state.cells.patch_index[0] = 0;
     parentless_state.gas_cell_identity.assign({

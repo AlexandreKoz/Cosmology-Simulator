@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 #include <stdexcept>
 #include <vector>
@@ -120,12 +121,29 @@ int main() {
   state.metadata.step_index = 17;
   state.metadata.scale_factor = 0.5;
 
+  state.metadata.run_name = "  alpha\nbeta=gamma\t\\delta  ";
+  state.metadata.normalized_config_hash_hex = " hash=with\ttab ";
+  state.metadata.snapshot_stem = "snap\rname";
+  state.metadata.restart_stem = "restart=\\stem";
   const std::string serialized = state.metadata.serialize();
   const auto parsed = cosmosim::core::StateMetadata::deserialize(serialized);
   assert(parsed.run_name == state.metadata.run_name);
   assert(parsed.normalized_config_hash == state.metadata.normalized_config_hash);
+  assert(parsed.normalized_config_hash_hex == state.metadata.normalized_config_hash_hex);
   assert(parsed.step_index == state.metadata.step_index);
   assert(parsed.scale_factor == state.metadata.scale_factor);
+  assert(parsed.snapshot_stem == state.metadata.snapshot_stem);
+  assert(parsed.restart_stem == state.metadata.restart_stem);
+
+  cosmosim::core::StateMetadata legacy_metadata = state.metadata;
+  legacy_metadata.schema_version = 2;
+  legacy_metadata.run_name = "legacy_run";
+  legacy_metadata.normalized_config_hash_hex = "legacy_hash";
+  legacy_metadata.snapshot_stem = "snapshot";
+  legacy_metadata.restart_stem = "restart";
+  const auto legacy_roundtrip = cosmosim::core::StateMetadata::deserialize(legacy_metadata.serialize());
+  assert(legacy_roundtrip.schema_version == 2U);
+  assert(legacy_roundtrip.run_name == legacy_metadata.run_name);
 
   bool metadata_threw = false;
   try {
@@ -141,6 +159,33 @@ int main() {
     metadata_threw = true;
   }
   assert(metadata_threw);
+
+  auto replace_metadata_line = [](std::string text, const std::string& key, const std::string& replacement) {
+    const std::string prefix = key + "=";
+    const auto begin = text.find(prefix);
+    assert(begin != std::string::npos);
+    const auto end = text.find('\n', begin);
+    assert(end != std::string::npos);
+    text.replace(begin, end - begin, prefix + replacement);
+    return text;
+  };
+  metadata_threw = false;
+  try {
+    (void)cosmosim::core::StateMetadata::deserialize(
+        replace_metadata_line(serialized, "run_name", "bad\\q"));
+  } catch (const std::invalid_argument&) {
+    metadata_threw = true;
+  }
+  assert(metadata_threw);
+  metadata_threw = false;
+  try {
+    (void)cosmosim::core::StateMetadata::deserialize(
+        replace_metadata_line(serialized, "run_name", "dangling\\"));
+  } catch (const std::invalid_argument&) {
+    metadata_threw = true;
+  }
+  assert(metadata_threw);
+
   std::string nonfinite_metadata = serialized;
   const std::string scale_entry = "scale_factor=0.5";
   const auto scale_offset = nonfinite_metadata.find(scale_entry);
@@ -432,6 +477,40 @@ int main() {
     }
   }
   assert(found_migrated_star);
+
+  // End-to-end local-index capacity helpers must fail before uint32 narrowing.
+  assert(cosmosim::core::checkedLocalParticleRow(
+             cosmosim::core::kMaxLocalParticleCount - 1U, "test particle capacity") ==
+         std::numeric_limits<std::uint32_t>::max() - 1U);
+  assert(cosmosim::core::checkedLocalCellRow(
+             cosmosim::core::kMaxLocalCellCount - 1U, "test cell capacity") ==
+         std::numeric_limits<std::uint32_t>::max() - 1U);
+  assert(cosmosim::core::checkedLocalPatchCellCount(
+             cosmosim::core::kMaxLocalCellCount, "test patch cell capacity") ==
+         std::numeric_limits<std::uint32_t>::max());
+  if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
+    bool capacity_threw = false;
+    try {
+      (void)cosmosim::core::checkedLocalParticleRow(
+          cosmosim::core::kMaxLocalParticleCount + 1U, "test particle overflow");
+    } catch (const std::length_error&) {
+      capacity_threw = true;
+    }
+    assert(capacity_threw);
+
+    capacity_threw = false;
+    try {
+      (void)cosmosim::core::checkedLocalCountAdd(
+          cosmosim::core::kMaxLocalCellCount,
+          1U,
+          cosmosim::core::kMaxLocalCellCount,
+          "cell",
+          "test migration total overflow");
+    } catch (const std::length_error&) {
+      capacity_threw = true;
+    }
+    assert(capacity_threw);
+  }
 
   return 0;
 }

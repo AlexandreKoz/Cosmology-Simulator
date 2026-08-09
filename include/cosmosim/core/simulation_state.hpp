@@ -190,6 +190,68 @@ inline constexpr std::size_t kMaxLocalParticleCount = std::numeric_limits<std::u
 inline constexpr std::size_t kMaxLocalCellCount = std::numeric_limits<std::uint32_t>::max();
 inline constexpr std::size_t kMaxLocalPatchCount = std::numeric_limits<std::uint32_t>::max();
 
+
+[[nodiscard]] inline std::size_t checkedLocalCount(
+    std::size_t count,
+    std::size_t max_count,
+    std::string_view kind,
+    std::string_view context) {
+  if (count > max_count) {
+    throw std::length_error(
+        std::string(context) + ": local " + std::string(kind) +
+        " count exceeds uint32 index capacity; repartition/redistribute the domain");
+  }
+  return count;
+}
+
+[[nodiscard]] inline std::size_t checkedLocalCountAdd(
+    std::size_t lhs,
+    std::size_t rhs,
+    std::size_t max_count,
+    std::string_view kind,
+    std::string_view context) {
+  const std::size_t total = checkedSizeAdd(lhs, rhs, context);
+  return checkedLocalCount(total, max_count, kind, context);
+}
+
+[[nodiscard]] inline std::uint32_t checkedLocalRow(
+    std::size_t row,
+    std::size_t max_count,
+    std::string_view kind,
+    std::string_view context) {
+  if (row >= max_count) {
+    throw std::length_error(
+        std::string(context) + ": local " + std::string(kind) +
+        " row exceeds uint32 row space; repartition/redistribute the domain");
+  }
+  return checkedIntegralNarrow<std::uint32_t>(row, context);
+}
+
+[[nodiscard]] inline std::uint32_t checkedLocalParticleRow(
+    std::size_t row,
+    std::string_view context) {
+  return checkedLocalRow(row, kMaxLocalParticleCount, "particle", context);
+}
+
+[[nodiscard]] inline std::uint32_t checkedLocalCellRow(
+    std::size_t row,
+    std::string_view context) {
+  return checkedLocalRow(row, kMaxLocalCellCount, "gas-cell", context);
+}
+
+[[nodiscard]] inline std::uint32_t checkedLocalPatchRow(
+    std::size_t row,
+    std::string_view context) {
+  return checkedLocalRow(row, kMaxLocalPatchCount, "AMR patch", context);
+}
+
+[[nodiscard]] inline std::uint32_t checkedLocalPatchCellCount(
+    std::size_t count,
+    std::string_view context) {
+  (void)checkedLocalCount(count, kMaxLocalCellCount, "AMR patch cell", context);
+  return checkedIntegralNarrow<std::uint32_t>(count, context);
+}
+
 struct GasCellIdentityRecord {
   // Design-seam record for future AMR/moving-mesh gas ownership.
   // gas_cell_id is the stable identity and must not be derived from a particle row index.
@@ -296,7 +358,7 @@ struct ParticleSpeciesIndex {
 
 struct StateMetadata {
   // Schema/provenance fields that must remain stable across restart/snapshot workflows.
-  std::uint32_t schema_version = 2;
+  std::uint32_t schema_version = 3;
   std::string run_name = "cosmosim_run";
   std::uint64_t normalized_config_hash = 0;
   std::string normalized_config_hash_hex;

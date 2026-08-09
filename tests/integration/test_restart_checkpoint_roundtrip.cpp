@@ -138,6 +138,12 @@ void populateState(cosmosim::core::SimulationState& state) {
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 3;
+  state.patches.extent_x_comoving[0] = 3.0;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 3;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
 
   state.metadata.run_name = "restart_integration";
   state.metadata.step_index = 77;
@@ -243,7 +249,7 @@ void fillRestartPayload(
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
-  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef", 0, payload.normalized_config_text);
   payload.provenance.gravity_softening_policy = "comoving_fixed";
   payload.provenance.gravity_softening_kernel = "plummer";
   payload.provenance.gravity_softening_epsilon_kpc_comoving = 2.0;
@@ -352,7 +358,7 @@ void testRestartRoundtrip() {
   payload.gas_cell_scheduler = &gas_cell_scheduler;
   payload.normalized_config_text = "schema_version = 1\nmode = zoom_in\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
-  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef", 0, payload.normalized_config_text);
   payload.provenance.gravity_treepm_pm_grid = 32;
   payload.provenance.gravity_treepm_pm_grid_nx = 32;
   payload.provenance.gravity_treepm_pm_grid_ny = 24;
@@ -923,7 +929,7 @@ void testRestartRoundtrip() {
   legacy_softening_state.particle_sidecar.has_gravity_softening_override.clear();
   cosmosim::io::RestartWritePayload legacy_softening_payload = payload;
   legacy_softening_payload.persistent_state.simulation_state = &legacy_softening_state;
-  legacy_softening_payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef");
+  legacy_softening_payload.provenance = cosmosim::core::makeProvenanceRecord(payload.normalized_config_hash_hex, "deadbeef", 0, payload.normalized_config_text);
   legacy_softening_payload.provenance.gravity_softening_policy = payload.provenance.gravity_softening_policy;
   legacy_softening_payload.provenance.gravity_softening_kernel = payload.provenance.gravity_softening_kernel;
   legacy_softening_payload.provenance.gravity_softening_epsilon_kpc_comoving =
@@ -1045,6 +1051,12 @@ void testParentlessGasCellRestartRoundtrip() {
   state.patches.level[0] = 2;
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 2;
+  state.patches.extent_x_comoving[0] = 2.0;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 2;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
   state.patches.owning_rank[0] = 0;
   state.cells.patch_index[0] = 0;
   state.cells.patch_index[1] = 0;

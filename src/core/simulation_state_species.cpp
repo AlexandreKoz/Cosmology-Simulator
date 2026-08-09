@@ -143,7 +143,8 @@ void requireValidAmrPatchMigrationFields(const AmrPatchMigrationFields& fields, 
   if (row >= state.cells.size()) {
     throw std::out_of_range(std::string(caller) + ": local gas-cell row is out of range");
   }
-  state.requireGasCellIdentityMapCoversDenseRows(caller);
+  // Callers validate the dense identity map once at the operation boundary.
+  // Repeating that O(N) validation for every row makes migration packing/rebuild O(N^2).
   const auto* identity = state.gas_cell_identity.findByLocalRow(row);
   if (identity == nullptr) {
     throw std::runtime_error(std::string(caller) + ": gas-cell identity map is missing local row");
@@ -310,8 +311,10 @@ void ParticleSpeciesIndex::rebuild(const ParticleSidecar& sidecar) {
       throw std::invalid_argument("ParticleSpeciesIndex.rebuild: invalid species tag");
     }
     auto& species_indices = global_index_by_species[tag];
-    local_index_by_global[global_index] = static_cast<std::uint32_t>(species_indices.size());
-    species_indices.push_back(static_cast<std::uint32_t>(global_index));
+    local_index_by_global[global_index] = checkedLocalParticleRow(
+        species_indices.size(), "ParticleSpeciesIndex::rebuild species-local row");
+    species_indices.push_back(checkedLocalParticleRow(
+        global_index, "ParticleSpeciesIndex::rebuild global particle row"));
   }
 }
 
@@ -400,6 +403,9 @@ ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecie
 
 std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecordsCore(
     std::span<const std::uint32_t> local_indices) const {
+  if (cells.size() != 0U || gas_cells.size() != 0U) {
+    this->requireGasCellIdentityMapCoversDenseRows("packParticleMigrationRecords");
+  }
   std::vector<ParticleMigrationRecord> records;
   records.reserve(local_indices.size());
   for (const auto index : local_indices) {
@@ -436,7 +442,6 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
 
     if (record.species_tag == static_cast<std::uint32_t>(ParticleSpecies::kGas)) {
       if (cells.size() != 0 || gas_cells.size() != 0) {
-        this->requireGasCellIdentityMapCoversDenseRows("packParticleMigrationRecords");
         const std::vector<std::uint32_t> rows = gas_cell_identity.rowsForParentParticleId(record.particle_id);
         if (rows.size() == 1U) {
           record.has_gas_cell_fields = true;
@@ -699,7 +704,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
   std::size_t kept_count = 0;
   for (std::size_t i = 0; i < particle_count; ++i) {
     if (remove_mask[i] == 0U) {
-      old_to_new[i] = static_cast<std::uint32_t>(kept_count++);
+      old_to_new[i] = checkedLocalParticleRow(
+          kept_count++, "commitParticleMigration kept particle row");
     }
   }
 
@@ -805,15 +811,18 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     }
 
     std::vector<GasCellMigrationFields> final_gas_fields;
-    final_gas_fields.reserve(cells.size() + commit.inbound_records.size());
+    final_gas_fields.reserve(checkedSizeAdd(
+        cells.size(), commit.inbound_records.size(), "commitParticleMigration gas-cell reserve"));
     std::unordered_set<std::uint64_t> final_gas_cell_ids;
-    final_gas_cell_ids.reserve(cells.size() + commit.inbound_records.size());
+    final_gas_cell_ids.reserve(checkedSizeAdd(
+        cells.size(), commit.inbound_records.size(), "migration gas-cell id reserve"));
     for (std::uint32_t row = 0; row < cells.size(); ++row) {
       GasCellMigrationFields fields = gasCellFieldsFromLocalRow(*this, row, 0U, "commitParticleMigration");
       if (fields.has_parent_particle != 0U && removed_particle_ids.contains(fields.parent_particle_id)) {
         continue;
       }
-      const std::uint32_t new_row = static_cast<std::uint32_t>(final_gas_fields.size());
+      const std::uint32_t new_row = checkedLocalCellRow(
+          final_gas_fields.size(), "commitParticleMigration kept gas-cell row");
       old_cell_to_new[row] = new_row;
       fields.destination_local_cell_row = new_row;
       if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {
@@ -826,7 +835,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         continue;
       }
       GasCellMigrationFields fields = inbound.gas_cell_fields;
-      fields.destination_local_cell_row = static_cast<std::uint32_t>(final_gas_fields.size());
+      fields.destination_local_cell_row = checkedLocalCellRow(
+          final_gas_fields.size(), "commitParticleMigration inbound gas-cell row");
       if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {
         throw std::invalid_argument("commitParticleMigration: inbound gas_cell_id duplicates local gas-cell state");
       }
@@ -848,7 +858,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         throw std::runtime_error("commitParticleMigration: stale star sidecar index");
       }
       if (remove_mask[old_particle] == 0U) {
-        kept_rows.push_back(static_cast<std::uint32_t>(row));
+        kept_rows.push_back(checkedLocalParticleRow(
+            row, "commitParticleMigration sidecar row"));
       }
     }
     const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
@@ -954,7 +965,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         throw std::runtime_error("commitParticleMigration: stale black-hole sidecar index");
       }
       if (remove_mask[old_particle] == 0U) {
-        kept_rows.push_back(static_cast<std::uint32_t>(row));
+        kept_rows.push_back(checkedLocalParticleRow(
+            row, "commitParticleMigration sidecar row"));
       }
     }
     const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
@@ -1006,7 +1018,8 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
         throw std::runtime_error("commitParticleMigration: stale tracer sidecar index");
       }
       if (remove_mask[old_particle] == 0U) {
-        kept_rows.push_back(static_cast<std::uint32_t>(row));
+        kept_rows.push_back(checkedLocalParticleRow(
+            row, "commitParticleMigration sidecar row"));
       }
     }
     const std::size_t inbound_count = static_cast<std::size_t>(std::count_if(
@@ -1265,22 +1278,41 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
     mark_remove(stale.local_cell_row, "commitGasCellMigration stale ghost");
   }
 
-  std::vector<GasCellMigrationFields> final_fields;
-  final_fields.reserve(cells.size() + commit.inbound_records.size());
+  std::size_t removed_count = 0U;
+  for (const std::uint8_t removed : remove_mask) {
+    removed_count += removed != 0U ? 1U : 0U;
+  }
+  const std::size_t kept_count = cells.size() - removed_count;
+  const std::size_t final_count = checkedLocalCountAdd(
+      kept_count,
+      commit.inbound_records.size(),
+      kMaxLocalCellCount,
+      "gas-cell",
+      "commitGasCellMigration final cell count");
+
   std::unordered_set<std::uint64_t> final_gas_cell_ids;
-  final_gas_cell_ids.reserve(cells.size() + commit.inbound_records.size());
+  final_gas_cell_ids.reserve(final_count);
   std::vector<std::uint32_t> old_cell_to_new(cells.size(), kInvalidGasCellRow);
+  CellSoa rebuilt_cells;
+  GasCellSidecar rebuilt_gas_cells;
+  rebuilt_cells.resize(final_count);
+  rebuilt_gas_cells.resize(final_count);
+
+  std::size_t write_row = 0U;
   for (std::uint32_t row = 0; row < cells.size(); ++row) {
     if (remove_mask[row] != 0U) {
       continue;
     }
     GasCellMigrationFields fields = gasCellFieldsFromLocalRow(*this, row, 0U, "commitGasCellMigration");
-    fields.destination_local_cell_row = static_cast<std::uint32_t>(final_fields.size());
-    old_cell_to_new[row] = fields.destination_local_cell_row;
+    const std::uint32_t destination_row = checkedLocalCellRow(
+        write_row, "commitGasCellMigration kept destination row");
+    fields.destination_local_cell_row = destination_row;
+    old_cell_to_new[row] = destination_row;
     if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {
       throw std::invalid_argument("commitGasCellMigration: duplicate kept gas_cell_id");
     }
-    final_fields.push_back(fields);
+    writeGasCellFieldsToRow(fields, destination_row, rebuilt_cells, rebuilt_gas_cells);
+    ++write_row;
   }
   for (const GasCellMigrationRecord& inbound : commit.inbound_records) {
     if (inbound.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
@@ -1288,19 +1320,17 @@ void SimulationState::commitGasCellMigration(const GasCellMigrationCommit& commi
     }
     requireValidGasCellMigrationFields(inbound.fields, "commitGasCellMigration");
     GasCellMigrationFields fields = inbound.fields;
-    fields.destination_local_cell_row = static_cast<std::uint32_t>(final_fields.size());
+    const std::uint32_t destination_row = checkedLocalCellRow(
+        write_row, "commitGasCellMigration inbound destination row");
+    fields.destination_local_cell_row = destination_row;
     if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {
       throw std::invalid_argument("commitGasCellMigration: inbound gas_cell_id duplicates local gas-cell state");
     }
-    final_fields.push_back(fields);
+    writeGasCellFieldsToRow(fields, destination_row, rebuilt_cells, rebuilt_gas_cells);
+    ++write_row;
   }
-
-  CellSoa rebuilt_cells;
-  GasCellSidecar rebuilt_gas_cells;
-  rebuilt_cells.resize(final_fields.size());
-  rebuilt_gas_cells.resize(final_fields.size());
-  for (std::uint32_t row = 0; row < final_fields.size(); ++row) {
-    writeGasCellFieldsToRow(final_fields[row], row, rebuilt_cells, rebuilt_gas_cells);
+  if (write_row != final_count) {
+    throw std::runtime_error("commitGasCellMigration: prepared cell count does not match preflight final count");
   }
 
   const auto remap_host_cell = [&](std::uint32_t old_cell_index) {
@@ -1449,7 +1479,8 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
   }
 
   std::unordered_set<std::uint64_t> final_patch_ids;
-  final_patch_ids.reserve(patches.size() + commit.inbound_records.size());
+  final_patch_ids.reserve(checkedSizeAdd(
+      patches.size(), commit.inbound_records.size(), "commitAmrPatchMigration patch-id reserve"));
   for (std::uint32_t patch_index = 0; patch_index < patches.size(); ++patch_index) {
     if (remove_patch[patch_index] != 0U) {
       continue;
@@ -1473,8 +1504,10 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
 
   std::vector<AmrPatchMigrationFields> final_patches;
   std::vector<std::vector<GasCellMigrationFields>> final_cells_by_patch;
-  final_patches.reserve(patches.size() + commit.inbound_records.size());
-  final_cells_by_patch.reserve(patches.size() + commit.inbound_records.size());
+  final_patches.reserve(checkedSizeAdd(
+      patches.size(), commit.inbound_records.size(), "commitAmrPatchMigration patch reserve"));
+  final_cells_by_patch.reserve(checkedSizeAdd(
+      patches.size(), commit.inbound_records.size(), "commitAmrPatchMigration cell-vector reserve"));
   std::unordered_set<std::uint64_t> final_gas_cell_ids;
   final_gas_cell_ids.reserve(cells.size());
 
@@ -1500,7 +1533,8 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
       fields.owning_patch_id = patch.patch_id;
       patch_cells.push_back(fields);
     }
-    patch.cell_count = static_cast<std::uint32_t>(patch_cells.size());
+    patch.cell_count = checkedLocalPatchCellCount(
+        patch_cells.size(), "commitAmrPatchMigration kept patch cell count");
     if (patch.cell_dim_x != 0U || patch.cell_dim_y != 0U || patch.cell_dim_z != 0U) {
       const std::size_t dims_product = static_cast<std::size_t>(patch.cell_dim_x) *
           static_cast<std::size_t>(patch.cell_dim_y) * static_cast<std::size_t>(patch.cell_dim_z);
@@ -1531,8 +1565,14 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
 
   std::size_t total_cell_count = 0;
   for (const auto& patch_cells : final_cells_by_patch) {
-    total_cell_count += patch_cells.size();
+    total_cell_count = checkedLocalCountAdd(
+        total_cell_count,
+        patch_cells.size(),
+        kMaxLocalCellCount,
+        "gas-cell",
+        "commitAmrPatchMigration total final cells");
   }
+  (void)checkedLocalCount(final_patches.size(), kMaxLocalPatchCount, "AMR patch", "commitAmrPatchMigration final patches");
   PatchSoa rebuilt_patches;
   CellSoa rebuilt_cells;
   GasCellSidecar rebuilt_gas_cells;
@@ -1541,11 +1581,14 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
   rebuilt_gas_cells.resize(total_cell_count);
 
   std::uint32_t write_cell = 0;
-  for (std::uint32_t patch_index = 0; patch_index < final_patches.size(); ++patch_index) {
-    AmrPatchMigrationFields patch = final_patches[patch_index];
-    patch.cell_count = static_cast<std::uint32_t>(final_cells_by_patch[patch_index].size());
+  for (std::size_t patch_row = 0; patch_row < final_patches.size(); ++patch_row) {
+    const std::uint32_t patch_index = checkedLocalPatchRow(
+        patch_row, "commitAmrPatchMigration final patch row");
+    AmrPatchMigrationFields patch = final_patches[patch_row];
+    patch.cell_count = checkedLocalPatchCellCount(
+        final_cells_by_patch[patch_row].size(), "commitAmrPatchMigration final patch cell count");
     writePatchFieldsToRow(patch, write_cell, patch.cell_count, patch_index, rebuilt_patches);
-    for (GasCellMigrationFields fields : final_cells_by_patch[patch_index]) {
+    for (GasCellMigrationFields fields : final_cells_by_patch[patch_row]) {
       fields.patch_index = patch_index;
       fields.destination_local_cell_row = write_cell;
       if (!final_gas_cell_ids.insert(fields.gas_cell_id).second) {

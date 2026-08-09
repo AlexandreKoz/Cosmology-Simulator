@@ -234,7 +234,7 @@ GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
   workspace.particle_mass_code.resize(state.particles.size());
 
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    workspace.gravity_particle_index[i] = static_cast<std::uint32_t>(i);
+    workspace.gravity_particle_index[i] = checkedLocalParticleRow(i, "gravity all-particle view row");
   }
   std::copy(state.particles.position_x_comoving.begin(), state.particles.position_x_comoving.end(), workspace.particle_position_x_comoving.begin());
   std::copy(state.particles.position_y_comoving.begin(), state.particles.position_y_comoving.end(), workspace.particle_position_y_comoving.begin());
@@ -259,13 +259,14 @@ GravityParticleKernelView buildGravityParticleKernelViewAllParticles(
 GravityParticleKernelView buildGravityParticleKernelViewAllParticlesDirect(
     SimulationState& state,
     TransientStepWorkspace& workspace) {
-  if (state.particles.size() > std::numeric_limits<std::uint32_t>::max()) {
-    throw std::overflow_error(
-        "buildGravityParticleKernelViewAllParticlesDirect: local particle count exceeds uint32 index capacity");
-  }
+  (void)checkedLocalCount(
+      state.particles.size(),
+      kMaxLocalParticleCount,
+      "particle",
+      "buildGravityParticleKernelViewAllParticlesDirect");
   workspace.gravity_particle_index.resize(state.particles.size());
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    workspace.gravity_particle_index[i] = static_cast<std::uint32_t>(i);
+    workspace.gravity_particle_index[i] = checkedLocalParticleRow(i, "gravity all-particle view row");
   }
   return GravityParticleKernelView{
       .particle_index = workspace.gravity_particle_index,

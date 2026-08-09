@@ -38,6 +38,16 @@ void validateContinuationMetadata(
         std::string(context_label) +
         " provenance.(normalized_config_hash_hex|config_hash_hex) does not match normalized_config_hash_hex");
   }
+  if (provenance.schema_version == "provenance_v7") {
+    if (provenance.integrity_digest_algorithm != "sha256") {
+      throw std::invalid_argument(std::string(context_label) + " provenance_v7 must use SHA-256 integrity digest");
+    }
+    const std::string strong_hash = core::strongConfigHashSha256Hex(normalized_config_text);
+    if (provenance.normalized_config_sha256_hex != strong_hash) {
+      throw std::invalid_argument(
+          std::string(context_label) + " provenance_v7 normalized_config_sha256_hex does not match normalized config");
+    }
+  }
 }
 
 }  // namespace cosmosim::io

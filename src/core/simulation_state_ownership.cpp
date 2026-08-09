@@ -6,18 +6,14 @@
 namespace cosmosim::core {
 
 void SimulationState::resizeParticles(std::size_t count) {
-  if (count > kMaxLocalParticleCount) {
-    throw std::length_error("local particle count exceeds uint32 index capacity; repartition the domain");
-  }
+  (void)checkedLocalCount(count, kMaxLocalParticleCount, "particle", "SimulationState::resizeParticles");
   particles.resize(count);
   particle_sidecar.resize(count);
   bumpParticleIndexGeneration();
 }
 
 void SimulationState::resizeCells(std::size_t count) {
-  if (count > kMaxLocalCellCount) {
-    throw std::length_error("local gas-cell count exceeds uint32 index capacity; repartition the domain");
-  }
+  (void)checkedLocalCount(count, kMaxLocalCellCount, "gas-cell", "SimulationState::resizeCells");
   cells.resize(count);
   gas_cells.resize(count);
   gas_cell_identity.clear();
@@ -25,9 +21,7 @@ void SimulationState::resizeCells(std::size_t count) {
 }
 
 void SimulationState::resizePatches(std::size_t count) {
-  if (count > kMaxLocalPatchCount) {
-    throw std::length_error("local AMR patch count exceeds uint32 index capacity; repartition the domain");
-  }
+  (void)checkedLocalCount(count, kMaxLocalPatchCount, "AMR patch", "SimulationState::resizePatches");
   patches.resize(count);
 }
 
@@ -77,7 +71,7 @@ bool SimulationState::validateOwnershipInvariants() const {
         if (cell_owner[cell_index] != std::numeric_limits<std::uint32_t>::max()) {
           return false;
         }
-        cell_owner[cell_index] = static_cast<std::uint32_t>(patch);
+        cell_owner[cell_index] = checkedLocalPatchRow(patch, "SimulationState::validateOwnershipInvariants patch row");
       }
     }
     for (std::size_t cell = 0; cell < cells.size(); ++cell) {

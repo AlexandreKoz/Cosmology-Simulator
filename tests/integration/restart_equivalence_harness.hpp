@@ -253,7 +253,7 @@ inline io::RestartWritePayload makeRestartEquivalencePayload(
   payload.scheduler = &scheduler;
   payload.normalized_config_text = "stage8_restart_equivalence_harness=1\n";
   payload.normalized_config_hash_hex = core::stableConfigHashHex(payload.normalized_config_text);
-  payload.provenance = core::makeProvenanceRecord(payload.normalized_config_hash_hex, "restart_equivalence", 0U);
+  payload.provenance = core::makeProvenanceRecord(payload.normalized_config_hash_hex, "restart_equivalence", 0, payload.normalized_config_text);
   payload.provenance.normalized_config = payload.normalized_config_text;
   payload.provenance.gravity_treepm_update_cadence_steps = 1U;
   payload.distributed_gravity_state.decomposition_epoch = integrator_state.step_index;

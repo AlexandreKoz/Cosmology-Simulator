@@ -173,14 +173,16 @@ payloads.
 
 `ProvenanceRecord` persists:
 
-- schema tag (`provenance_v6`)
+- schema tag (`provenance_v7`)
 - config schema identity (`config_schema_name`, `config_schema_version`)
 - audit payloads (`raw_input_config`, `normalized_config`, `derived_runtime_state`)
-- deterministic normalized config hash (`normalized_config_hash_hex`)
-- build identity (`git_sha`, compiler id/version, build preset, feature flags)
-- deterministic config hash
-- UTC timestamp and hardware summary
+- deterministic compatibility config hash (`normalized_config_hash_hex`)
+- strong normalized-config integrity (`integrity_digest_algorithm=sha256`, `normalized_config_sha256_hex`)
+- build identity (`git_sha`, compiler id/version, compiler flags, build preset, feature flags)
+- hardware/runtime descriptors (CPU model, logical/physical core counts when known, system RAM, host, GPU/CUDA summary, MPI summary/world size/node-local rank, deterministic mode)
+- UTC timestamp and compatibility hardware summary
 - rank attribution (`author_rank`)
+- compatibility: valid `provenance_v6` text records remain readable; current writers emit v7 and never reinterpret v6 as v7
 - gravity/TreePM reproducibility contract:
   - controls: `gravity_treepm_pm_grid`, `gravity_treepm_assignment_scheme`,
     `gravity_treepm_window_deconvolution`, `gravity_treepm_asmth_cells`,

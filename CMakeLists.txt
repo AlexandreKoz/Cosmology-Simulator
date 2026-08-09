@@ -248,6 +248,15 @@ if(COSMOSIM_SELECTED_PRESET STREQUAL "")
   endif()
 endif()
 
+string(TOUPPER "${CMAKE_BUILD_TYPE}" COSMOSIM_BUILD_TYPE_UPPER)
+set(COSMOSIM_EFFECTIVE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+if(NOT COSMOSIM_BUILD_TYPE_UPPER STREQUAL "" AND DEFINED CMAKE_CXX_FLAGS_${COSMOSIM_BUILD_TYPE_UPPER})
+  string(APPEND COSMOSIM_EFFECTIVE_CXX_FLAGS " ${CMAKE_CXX_FLAGS_${COSMOSIM_BUILD_TYPE_UPPER}}")
+endif()
+string(STRIP "${COSMOSIM_EFFECTIVE_CXX_FLAGS}" COSMOSIM_EFFECTIVE_CXX_FLAGS)
+string(REPLACE "\\" "\\\\" COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED "${COSMOSIM_EFFECTIVE_CXX_FLAGS}")
+string(REPLACE "\"" "\\\"" COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED "${COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED}")
+
 set(COSMOSIM_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 file(MAKE_DIRECTORY "${COSMOSIM_GENERATED_INCLUDE_DIR}/cosmosim/core")
 
@@ -1826,6 +1835,9 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_memory_accounting_overhead bench/bench_memory_accounting_overhead.cpp)
   target_link_libraries(bench_memory_accounting_overhead PRIVATE cosmosim_core)
+
+  add_executable(bench_core_migration_memory bench/bench_core_migration_memory.cpp)
+  target_link_libraries(bench_core_migration_memory PRIVATE cosmosim_core)
 
   add_executable(bench_scheduler_overhead bench/bench_scheduler_overhead.cpp)
   add_executable(bench_analysis_diagnostics_overhead bench/bench_analysis_diagnostics_overhead.cpp)

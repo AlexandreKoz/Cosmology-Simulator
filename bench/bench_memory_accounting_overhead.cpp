@@ -4,11 +4,48 @@
 
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+#include "core_benchmark_process_memory.hpp"
+
+namespace {
+
+std::uint64_t knownOwnedBytes(const cosmosim::core::MemoryReport& report) {
+  std::uint64_t total = 0;
+  for (const auto& entry : report.entries) {
+    if (!entry.estimate_only && entry.lifetime != cosmosim::core::MemoryLifetime::kUnknown) {
+      total += entry.owned_capacity_bytes;
+    }
+  }
+  return total;
+}
+
+std::uint64_t estimatedBytes(const cosmosim::core::MemoryReport& report) {
+  std::uint64_t total = 0;
+  for (const auto& entry : report.entries) {
+    if (entry.estimate_only) {
+      total += entry.owned_capacity_bytes;
+    }
+  }
+  return total;
+}
+
+std::size_t unknownExternalEntryCount(const cosmosim::core::MemoryReport& report) {
+  std::size_t count = 0;
+  for (const auto& entry : report.entries) {
+    if (entry.lifetime == cosmosim::core::MemoryLifetime::kUnknown) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+}  // namespace
 
 int main() {
   constexpr std::size_t k_particle_count = 200000;
   constexpr std::size_t k_cell_count = 100000;
   constexpr int k_iterations = 200;
+
+  const auto baseline_memory = cosmosim::bench::sampleProcessMemory();
 
   cosmosim::core::SimulationState state;
   state.resizeParticles(k_particle_count);
@@ -31,6 +68,12 @@ int main() {
   workspace.hydro_recon_gradient_x.reserve(k_cell_count / 8);
   static_cast<void>(workspace.scratch.allocateBytes(1U << 20U, alignof(double)));
 
+  const auto allocated_memory = cosmosim::bench::sampleProcessMemory();
+  const auto calibration_report = cosmosim::core::collectSimulationMemoryReport(state, &workspace);
+  const std::uint64_t known_owned_bytes = knownOwnedBytes(calibration_report);
+  const std::uint64_t estimated_bytes = estimatedBytes(calibration_report);
+  const std::size_t unknown_entries = unknownExternalEntryCount(calibration_report);
+
   volatile std::uint64_t checksum = 0;
   const auto begin = std::chrono::steady_clock::now();
   for (int iter = 0; iter < k_iterations; ++iter) {
@@ -40,6 +83,7 @@ int main() {
     checksum += report.entries.size();
   }
   const auto end = std::chrono::steady_clock::now();
+  const auto final_memory = cosmosim::bench::sampleProcessMemory();
   const double elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - begin).count();
 
   std::cout << "benchmark=memory_accounting_overhead"
@@ -48,7 +92,26 @@ int main() {
             << " iterations=" << k_iterations
             << " elapsed_ms=" << elapsed_ms
             << " report_us=" << (elapsed_ms * 1000.0 / static_cast<double>(k_iterations))
-            << " checksum=" << checksum
-            << '\n';
+            << " known_owned_bytes=" << known_owned_bytes
+            << " estimated_bytes=" << estimated_bytes
+            << " unknown_external_entries=" << unknown_entries;
+  if (baseline_memory.current_rss_bytes && allocated_memory.current_rss_bytes) {
+    const std::uint64_t baseline = *baseline_memory.current_rss_bytes;
+    const std::uint64_t allocated = *allocated_memory.current_rss_bytes;
+    const std::uint64_t rss_delta = allocated >= baseline ? allocated - baseline : 0U;
+    std::cout << " baseline_rss_bytes=" << baseline
+              << " allocated_rss_bytes=" << allocated
+              << " rss_delta_bytes=" << rss_delta
+              << " known_owned_to_rss_delta_ratio="
+              << (rss_delta > 0U ? static_cast<double>(known_owned_bytes) / static_cast<double>(rss_delta) : 0.0);
+  } else {
+    std::cout << " rss_current=unavailable";
+  }
+  if (final_memory.peak_rss_bytes) {
+    std::cout << " peak_rss_bytes=" << *final_memory.peak_rss_bytes;
+  } else {
+    std::cout << " peak_rss=unavailable";
+  }
+  std::cout << " checksum=" << checksum << '\n';
   return 0;
 }

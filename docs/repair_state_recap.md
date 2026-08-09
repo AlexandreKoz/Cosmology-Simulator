@@ -2044,3 +2044,13 @@ waiver.
 
 Remaining intentional boundaries: active-bin emission still sorts for deterministic order pending a deeper ordered-bin data-structure redesign; migration retains old/new authoritative buffers during prepare/commit to preserve the strong failure guarantee, so peak-RSS optimization needs measured evidence; provenance v6 retains the established 64-bit compatibility hash and limited hardware schema until a separately versioned strong-integrity/hardware-metadata migration is designed.
 
+
+## 2026-08-09 `src/core` final audit-lineage closure campaign
+
+- Added a strict reusable core-internal line codec. `StateMetadata` now writes schema v3 with reversible escaping while reading valid v2, and provenance v6/v7 decoding rejects unknown or dangling escapes.
+- Introduced `provenance_v7` without mutating v6: current records carry a real SHA-256 digest of normalized configuration text plus compiler flags, CPU/RAM/host and MPI/CUDA topology descriptors where available. Valid v6 records remain readable.
+- Centralized the retained 32-bit local-index contract across authoritative resize, migration, AMR and scheduler narrowing paths; `UINT32_MAX` remains the invalid gas-cell-row sentinel.
+- Replaced per-active-set comparison sorting with deterministic reusable radix ordering. Release evidence shows material `beginSubstep` improvement on 100k/500k and fine-bin-heavy scheduler cases while preserving numerical order.
+- Removed accidental O(N^2) gas-cell migration validation by validating dense identity once at the operation boundary, and removed a redundant full migration-field staging copy. 50k-cell peak/steady RSS measurements are ~1.91x mostly-local, ~2.04x moderate, and ~2.31x heavy while retaining prepare/validate/commit.
+- Added process-memory calibration to memory-accounting benchmarks. On the recorded Linux 200k-particle/100k-cell case, known-owned capacity is within ~0.53% of the measured allocation-induced RSS delta; RSS remains explicitly diagnostic rather than treated as exact ownership truth.
+- MPI/CUDA runtime execution remains environment-blocked where the relevant tools/devices are absent; no runtime promotion is claimed from source evidence alone.

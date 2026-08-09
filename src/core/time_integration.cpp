@@ -27,6 +27,37 @@ constexpr std::array<IntegrationStage, 8> k_kick_drift_kick_order = {
     IntegrationStage::kOutputCheck,
 };
 
+// Deterministic LSD radix ordering for unique 32-bit local indices.  Four
+// contiguous byte passes avoid comparison sorting while preserving the existing
+// O(1) swap-with-last bin membership updates.  Scratch capacity is retained
+// across substeps so steady-state scheduling does not allocate.
+void radixSortLocalIndices(
+    std::vector<std::uint32_t>& values,
+    std::vector<std::uint32_t>& scratch) {
+  if (values.size() < 2U) {
+    return;
+  }
+  scratch.resize(values.size());
+  constexpr std::size_t k_radix = 256U;
+  constexpr std::uint32_t k_mask = 0xffU;
+  for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+    std::array<std::size_t, k_radix> offsets{};
+    for (const std::uint32_t value : values) {
+      ++offsets[(value >> shift) & k_mask];
+    }
+    std::size_t prefix = 0U;
+    for (std::size_t bucket = 0; bucket < k_radix; ++bucket) {
+      const std::size_t count = offsets[bucket];
+      offsets[bucket] = prefix;
+      prefix += count;
+    }
+    for (const std::uint32_t value : values) {
+      scratch[offsets[(value >> shift) & k_mask]++] = value;
+    }
+    values.swap(scratch);
+  }
+}
+
 
 [[nodiscard]] std::string stageContractErrorPrefix(std::string_view callback_name, IntegrationStage stage) {
   return "IntegrationCallback '" + std::string(callback_name) + "' stage contract for '" +
@@ -607,7 +638,8 @@ ParticleReorderMap buildParticleReorderMapByScheduler(
       });
   reorder_map.old_to_new_index.resize(state.particles.size());
   for (std::size_t new_index = 0; new_index < reorder_map.new_to_old_index.size(); ++new_index) {
-    reorder_map.old_to_new_index[reorder_map.new_to_old_index[new_index]] = static_cast<std::uint32_t>(new_index);
+    reorder_map.old_to_new_index[reorder_map.new_to_old_index[new_index]] =
+        checkedLocalParticleRow(new_index, "buildParticleReorderMapByScheduler new row");
   }
   return reorder_map;
 }
@@ -1375,7 +1407,8 @@ std::uint64_t HierarchicalTimeBinScheduler::currentTick() const noexcept { retur
 std::uint8_t HierarchicalTimeBinScheduler::maxBin() const noexcept { return m_max_bin; }
 
 std::uint32_t HierarchicalTimeBinScheduler::elementCount() const noexcept {
-  return static_cast<std::uint32_t>(m_hot.size());
+  return checkedIntegralNarrow<std::uint32_t>(
+      m_hot.size(), "HierarchicalTimeBinScheduler::elementCount");
 }
 
 bool HierarchicalTimeBinScheduler::isBinActiveAtTick(std::uint8_t bin_index, std::uint64_t tick) const {
@@ -1519,7 +1552,8 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   for (std::size_t bin = 0; bin < m_elements_by_bin.size(); ++bin) {
-    m_diagnostics.occupancy_by_bin[bin] = static_cast<std::uint32_t>(m_elements_by_bin[bin].size());
+    m_diagnostics.occupancy_by_bin[bin] = checkedIntegralNarrow<std::uint32_t>(
+        m_elements_by_bin[bin].size(), "scheduler bin occupancy");
   }
   validateInternalState("HierarchicalTimeBinScheduler::importPersistentState");
 }
@@ -1651,7 +1685,8 @@ void HierarchicalTimeBinScheduler::rebuildActiveSet() {
 
   for (std::size_t bin = 0; bin < m_elements_by_bin.size(); ++bin) {
     const auto& members = m_elements_by_bin[bin];
-    m_diagnostics.occupancy_by_bin[bin] = static_cast<std::uint32_t>(members.size());
+    m_diagnostics.occupancy_by_bin[bin] = checkedIntegralNarrow<std::uint32_t>(
+        members.size(), "scheduler active-set bin occupancy");
 
     if (!isBinActiveAtTick(static_cast<std::uint8_t>(bin), m_current_tick)) {
       continue;
@@ -1667,9 +1702,10 @@ void HierarchicalTimeBinScheduler::rebuildActiveSet() {
     }
   }
 
-  std::sort(m_active_elements.begin(), m_active_elements.end());
+  radixSortLocalIndices(m_active_elements, m_active_sort_scratch);
 
-  m_diagnostics.active_elements = static_cast<std::uint32_t>(m_active_elements.size());
+  m_diagnostics.active_elements = checkedIntegralNarrow<std::uint32_t>(
+      m_active_elements.size(), "scheduler active element count");
   const auto total_elements = static_cast<double>(m_hot.size());
   m_diagnostics.active_fraction = total_elements > 0.0
       ? static_cast<double>(m_diagnostics.active_elements) / total_elements
@@ -2113,8 +2149,11 @@ void syncGasCellTimeBinMirrorsFromParticleScheduler(
     if (particle_it == state.particle_sidecar.particle_id.end()) {
       throw std::invalid_argument("syncGasCellTimeBinMirrorsFromParticleScheduler: parent particle is not local");
     }
-    const std::uint32_t particle_index =
-        static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
+    const auto particle_distance =
+        std::distance(state.particle_sidecar.particle_id.begin(), particle_it);
+    const std::uint32_t particle_index = checkedLocalParticleRow(
+        static_cast<std::size_t>(particle_distance),
+        "syncGasCellTimeBinMirrorsFromParticleScheduler parent row");
     state.cells.time_bin[cell_index] = persistent.bin_index[particle_index];
   }
 }
@@ -2186,8 +2225,11 @@ bool timeBinMirrorsMatchScheduler(
       if (particle_it == state.particle_sidecar.particle_id.end()) {
         return false;
       }
-      const std::uint32_t particle_index =
-          static_cast<std::uint32_t>(std::distance(state.particle_sidecar.particle_id.begin(), particle_it));
+      const auto particle_distance =
+          std::distance(state.particle_sidecar.particle_id.begin(), particle_it);
+      const std::uint32_t particle_index = checkedLocalParticleRow(
+          static_cast<std::size_t>(particle_distance),
+          "timeBinMirrorsMatchScheduler parent row");
       if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
         return false;
       }
@@ -2231,11 +2273,13 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
   };
   if ((domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
       hot.bin_index.size() < state.particles.size()) {
-    throw_particle(static_cast<std::uint32_t>(hot.bin_index.size()));
+    throw_particle(checkedLocalParticleRow(
+        hot.bin_index.size(), "debugAssertTimeBinMirrorAuthorityInvariant particle scheduler size"));
   }
   if ((domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
       hot.bin_index.size() < state.cells.size()) {
-    throw_cell(static_cast<std::uint32_t>(hot.bin_index.size()));
+    throw_cell(checkedLocalCellRow(
+        hot.bin_index.size(), "debugAssertTimeBinMirrorAuthorityInvariant cell scheduler size"));
   }
   if (domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) {
     for (std::uint32_t i = 0; i < state.particles.size(); ++i) {

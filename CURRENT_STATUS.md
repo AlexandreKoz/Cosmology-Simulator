@@ -1,6 +1,6 @@
 # Current repository status
 
-**Authority date:** 2026-08-08  
+**Authority date:** 2026-08-09  
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 
 This file is the concise current-status entry point. Build-specific dependency
@@ -73,3 +73,6 @@ ctest --test-dir build/cpu-only-release -R '^unit_assertions_enabled$' --output-
 Focused HDF5 acceptance additionally covers IC metallicity, snapshot/restart
 round trips, authoritative gas-cell row ordering, hydro restart equivalence,
 the bounded runtime application smoke, and phase-3 power-spectrum validation.
+
+### 2026-08-09 core audit-lineage closure
+The residual `src/core` integrity campaign closes the metadata/provenance escape gaps, introduces backward-compatible `provenance_v7` SHA-256 integrity, completes checked local-index narrowing, removes comparison sorting from active-set ordering via deterministic radix staging, and establishes measured scheduler/migration/memory-accounting envelopes. Previously closed P0 allocator/ownership/KDK/migration/timestep/profiler repairs remain regression constraints. MPI/CUDA runtime evidence is still environment-dependent and is not promoted without execution.

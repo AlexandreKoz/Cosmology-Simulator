@@ -163,7 +163,7 @@ void testDecoupledGasIdentityRoundtrip() {
   payload.config = &config;
   payload.normalized_config_text = "schema_version = 1\n";
   payload.provenance = cosmosim::core::makeProvenanceRecord(
-      "gas_identity", "gas_identity", 0);
+      "gas_identity", "gas_identity", 0, payload.normalized_config_text);
   cosmosim::io::writeGadgetArepoSnapshotHdf5(path, payload);
 
   const auto roundtrip =
@@ -203,7 +203,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   payload.state = &state;
   payload.config = &config;
   payload.normalized_config_text = "schema_version=1\nmode=zoom_in\n";
-  payload.provenance = cosmosim::core::makeProvenanceRecord("abc123", "deadbeef", 0);
+  payload.provenance = cosmosim::core::makeProvenanceRecord("abc123", "deadbeef", 0, payload.normalized_config_text);
   payload.provenance.gravity_treepm_pm_grid = 9;
   payload.provenance.gravity_treepm_pm_grid_nx = 9;
   payload.provenance.gravity_treepm_pm_grid_ny = 7;
@@ -293,6 +293,10 @@ void testRoundtripMixedSpeciesSnapshot() {
   assert(roundtrip.provenance.schema_version == payload.provenance.schema_version);
   assert(roundtrip.provenance.git_sha == payload.provenance.git_sha);
   assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);
+  assert(roundtrip.provenance.integrity_digest_algorithm == "sha256");
+  assert(
+      roundtrip.provenance.normalized_config_sha256_hex ==
+      cosmosim::core::strongConfigHashSha256Hex(payload.normalized_config_text));
   assert(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
   assert(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
   assert(roundtrip.provenance.gravity_treepm_pm_grid_nx == payload.provenance.gravity_treepm_pm_grid_nx);

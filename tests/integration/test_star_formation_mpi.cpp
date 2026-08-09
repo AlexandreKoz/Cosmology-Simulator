@@ -344,7 +344,7 @@ void assertUniqueParticleIds(std::span<const BirthRecord> records) {
   payload.normalized_config_hash_hex =
       cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   payload.provenance = cosmosim::core::makeProvenanceRecord(
-      payload.normalized_config_hash_hex, "star_formation_mpi_test");
+      payload.normalized_config_hash_hex, "star_formation_mpi_test", 0, payload.normalized_config_text);
   payload.distributed_gravity_state.schema_version = 2U;
   payload.distributed_gravity_state.world_size = world_size;
   payload.distributed_gravity_state.pm_grid_nx = 4U;

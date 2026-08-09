@@ -108,7 +108,7 @@ bool GasCellIdentityMap::coversDenseLocalRows(std::size_t cell_count) const noex
     return false;
   }
   for (std::size_t row = 0; row < cell_count; ++row) {
-    if (m_index_by_local_row.find(static_cast<std::uint32_t>(row)) == m_index_by_local_row.end()) {
+    if (m_index_by_local_row.find(checkedLocalCellRow(row, "GasCellIdentityMap::coversDenseLocalRows")) == m_index_by_local_row.end()) {
       return false;
     }
   }
@@ -348,7 +348,7 @@ ParticleReorderMap buildParticleReorderMap(const SimulationState& state, Particl
   reorder_map.old_to_new_index.resize(state.particles.size());
   for (std::size_t new_index = 0; new_index < reorder_map.new_to_old_index.size(); ++new_index) {
     const auto old_index = reorder_map.new_to_old_index[new_index];
-    reorder_map.old_to_new_index[old_index] = static_cast<std::uint32_t>(new_index);
+    reorder_map.old_to_new_index[old_index] = checkedLocalParticleRow(new_index, "buildParticleReorderMap new particle row");
   }
 
   return reorder_map;
@@ -663,7 +663,7 @@ void refreshGasCellIdentityMapFromParticleBoundState(SimulationState& state) {
         .gas_cell_id = gas_cell_id,
         .parent_particle_id = parent_particle_id,
         .owning_patch_id = owning_patch_id,
-        .local_cell_row = static_cast<std::uint32_t>(cell_index),
+        .local_cell_row = checkedLocalCellRow(cell_index, "SimulationState gas-cell row"),
     });
   }
   state.gas_cell_identity.assign(std::move(records));
@@ -707,7 +707,7 @@ void refreshGasCellIdentityMapFromSidecarLanes(SimulationState& state) {
             ? std::optional<std::uint64_t>{}
             : std::optional<std::uint64_t>{mirrored_parent},
         .owning_patch_id = owning_patch_id,
-        .local_cell_row = static_cast<std::uint32_t>(cell_index),
+        .local_cell_row = checkedLocalCellRow(cell_index, "SimulationState gas-cell row"),
     });
   }
   state.gas_cell_identity.assign(std::move(records));
@@ -722,7 +722,7 @@ bool gasCellIdentityMapMatchesParticleBoundState(const SimulationState& state) {
     return false;
   }
   for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const auto* record = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(cell_index));
+    const auto* record = state.gas_cell_identity.findByLocalRow(checkedLocalCellRow(cell_index, "SimulationState gas-cell row"));
     if (record == nullptr) {
       return false;
     }
@@ -756,7 +756,7 @@ bool gasCellIdentityMapMatchesSidecarLanes(const SimulationState& state) {
     return false;
   }
   for (std::size_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
-    const auto* record = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(cell_index));
+    const auto* record = state.gas_cell_identity.findByLocalRow(checkedLocalCellRow(cell_index, "SimulationState gas-cell row"));
     if (record == nullptr || record->gas_cell_id == 0U) {
       return false;
     }

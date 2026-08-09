@@ -193,7 +193,7 @@ scheduler configurations without per-element kick/drift epochs.
   `p99 <= 5e-2` against an implementation-independent Ewald reference on the
   covered fixtures; CIC failure remains visible.
 - Positive: opening controls and relative-force parameters are normalized,
-  validated, and recorded in `provenance_v6`; restart force history is consumed
+  validated, and recorded in `provenance_v7`; restart force history is consumed
   only when stable-ID/generation compatible.
 - Positive: physical-unit workflows no longer depend on dimensionless
   `G_code=1`, and cosmological scale-factor powers are owned by the particle or
