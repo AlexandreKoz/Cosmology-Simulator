@@ -51,6 +51,11 @@ struct TreePmOptions {
   // response. The workflow owns these epochs; the coordinator owns only its
   // per-instance exchange sequence.
   std::uint64_t decomposition_epoch = 0;
+  // Monotonic identity of the physical source snapshot represented by a PM
+  // field. Reuse is legal only when this generation still matches. The
+  // workflow owns this token; it must advance when source positions/masses or
+  // source membership change.
+  std::uint64_t source_generation = 0;
   std::uint64_t force_epoch = 0;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
   std::uint64_t zoom_high_res_allgather_limit_bytes = 256ULL * 1024ULL * 1024ULL;
@@ -204,6 +209,11 @@ class TreePmCoordinator {
   std::vector<double> m_tree_source_x_comoving;
   std::vector<double> m_tree_source_y_comoving;
   std::vector<double> m_tree_source_z_comoving;
+  // One pair of reusable axis workspaces is sufficient because x/y/z are
+  // unwrapped sequentially. This removes six population-sized allocations per
+  // periodic rebuild while retaining the exact largest-circular-gap algorithm.
+  std::vector<double> m_periodic_wrapped_axis_scratch;
+  std::vector<double> m_periodic_ordered_axis_scratch;
 
   // Reused compact-sidecar scratch arrays to avoid per-step heap churn.
   std::vector<double> m_active_pos_x_comoving;
@@ -242,6 +252,7 @@ class TreePmCoordinator {
   struct LongRangeFieldValidity {
     bool valid = false;
     std::uint64_t decomposition_epoch = 0;
+    std::uint64_t source_generation = 0;
     std::uint64_t force_epoch = 0;
     double scale_factor = 0.0;
     double gravitational_constant_code = 0.0;

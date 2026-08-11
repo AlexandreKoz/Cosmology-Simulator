@@ -17,7 +17,9 @@ int main() {
   state.cells.center_y_comoving[0] = 0.0;
   state.cells.center_z_comoving[0] = 0.0;
   state.cells.time_bin[0] = 0;
+  state.cells.mass_code[0] = 100.0;
   state.gas_cells.density_code[0] = 50.0;
+  state.gas_cells.metal_mass_code[0] = 1.0;
   state.gas_cells.sound_speed_code[0] = 10.0;
   state.gas_cells.internal_energy_code[0] = 1.0;
 

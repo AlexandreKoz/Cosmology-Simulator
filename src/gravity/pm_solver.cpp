@@ -772,26 +772,30 @@ void checkedMpiRecordLayoutToByteLayout(
 
 [[nodiscard]] PmAxisStencil1d makeAxisStencil(double grid_position, PmAssignmentScheme scheme) {
   PmAxisStencil1d stencil{};
-  if (scheme == PmAssignmentScheme::kCic) {
-    const double base = std::floor(grid_position);
-    const std::ptrdiff_t i0 = static_cast<std::ptrdiff_t>(base);
-    const double t = grid_position - base;
-    stencil.offsets = {i0, i0 + 1, 0};
-    stencil.weights = {1.0 - t, t, 0.0};
-    stencil.count = 2;
-    return stencil;
+  switch (scheme) {
+    case PmAssignmentScheme::kCic: {
+      const double base = std::floor(grid_position);
+      const std::ptrdiff_t i0 = static_cast<std::ptrdiff_t>(base);
+      const double t = grid_position - base;
+      stencil.offsets = {i0, i0 + 1, 0};
+      stencil.weights = {1.0 - t, t, 0.0};
+      stencil.count = 2;
+      return stencil;
+    }
+    case PmAssignmentScheme::kTsc: {
+      const double center = std::floor(grid_position + 0.5);
+      const std::ptrdiff_t ic = static_cast<std::ptrdiff_t>(center);
+      const double delta = grid_position - center;
+      const double w_m1 = 0.5 * std::pow(0.5 - delta, 2.0);
+      const double w_0 = 0.75 - delta * delta;
+      const double w_p1 = 0.5 * std::pow(0.5 + delta, 2.0);
+      stencil.offsets = {ic - 1, ic, ic + 1};
+      stencil.weights = {w_m1, w_0, w_p1};
+      stencil.count = 3;
+      return stencil;
+    }
   }
-
-  const double center = std::floor(grid_position + 0.5);
-  const std::ptrdiff_t ic = static_cast<std::ptrdiff_t>(center);
-  const double delta = grid_position - center;
-  const double w_m1 = 0.5 * std::pow(0.5 - delta, 2.0);
-  const double w_0 = 0.75 - delta * delta;
-  const double w_p1 = 0.5 * std::pow(0.5 + delta, 2.0);
-  stencil.offsets = {ic - 1, ic, ic + 1};
-  stencil.weights = {w_m1, w_0, w_p1};
-  stencil.count = 3;
-  return stencil;
+  throw std::invalid_argument("Unknown PM assignment scheme in makeAxisStencil");
 }
 
 [[nodiscard]] int assignmentWindowExponent(PmAssignmentScheme scheme) {
@@ -907,6 +911,41 @@ struct BoxLengths {
 }
 
 void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
+  switch (options.assignment_scheme) {
+    case PmAssignmentScheme::kCic:
+    case PmAssignmentScheme::kTsc:
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid assignment_scheme");
+  }
+  switch (options.boundary_condition) {
+    case PmBoundaryCondition::kPeriodic:
+    case PmBoundaryCondition::kIsolatedOpen:
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid boundary_condition");
+  }
+  switch (options.data_residency) {
+    case PmDataResidencyPolicy::kHostOnly:
+    case PmDataResidencyPolicy::kPreferDevice:
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid data_residency");
+  }
+  switch (options.execution_policy) {
+    case core::ExecutionPolicy::kHostSerial:
+    case core::ExecutionPolicy::kCuda:
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid execution_policy");
+  }
+  switch (options.decomposition_mode) {
+    case core::PmDecompositionMode::kSlab:
+    case core::PmDecompositionMode::kPencil:
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid decomposition_mode");
+  }
   if (!shape.isValid()) {
     throw std::invalid_argument("PM grid shape must be non-zero in all dimensions");
   }
@@ -2175,14 +2214,14 @@ void PmSolver::assignDensity(
   std::optional<std::size_t> first_non_finite_source_index;
   for (std::size_t p = 0; p < mass.size(); ++p) {
     if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p]) ||
-        !std::isfinite(mass[p])) {
+        !std::isfinite(mass[p]) || mass[p] < 0.0) {
       first_non_finite_source_index = p;
       break;
     }
   }
   if (!distributed_slabs && first_non_finite_source_index.has_value()) {
     throw std::invalid_argument(
-        "PmSolver::assignDensity requires finite particle coordinates and masses; particle_index=" +
+        "PmSolver::assignDensity requires finite particle coordinates and finite non-negative masses; particle_index=" +
         std::to_string(*first_non_finite_source_index));
   }
 
@@ -2193,8 +2232,9 @@ void PmSolver::assignDensity(
     if (!grid.slabLayout().ownsGlobalX(record.global_ix)) {
       throw std::invalid_argument("PmSolver::assignDensity received contribution for non-owned PM slab x-index");
     }
-    if (!std::isfinite(record.mass_contribution)) {
-      throw std::invalid_argument("PmSolver::assignDensity received a non-finite mass contribution");
+    if (!std::isfinite(record.mass_contribution) || record.mass_contribution < 0.0) {
+      throw std::invalid_argument(
+          "PmSolver::assignDensity received a non-finite or negative mass contribution");
     }
     grid.density()[grid.linearIndex(record.global_ix, record.global_iy, record.global_iz)] += record.mass_contribution;
   };
@@ -4899,7 +4939,39 @@ void PmSolver::solveForParticles(
     }
   }
 #endif
+  // Backend-independent API contract. Keep this outside the MPI branch so a
+  // single-rank CUDA solve cannot bypass the source/target shape checks that
+  // the host and distributed paths rely on. Multi-rank callers have already
+  // passed the coordinated equivalent above, making these checks deterministic.
   validateOptions(m_shape, options);
+  if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny ||
+      grid.shape().nz != m_shape.nz) {
+    throw std::invalid_argument("PM solver/grid shape mismatch in solveForParticles");
+  }
+  if (!grid.slabLayout().isValid()) {
+    throw std::invalid_argument("PmSolver::solveForParticles requires a valid PM slab layout");
+  }
+  if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() ||
+      pos_x.size() != mass.size() || pos_x.size() != accel_x.size() ||
+      pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
+    throw std::invalid_argument(
+        "Particle coordinate/mass/acceleration spans must match in solveForParticles");
+  }
+#if !COSMOSIM_ENABLE_MPI
+  if (grid.slabLayout().world_size != 1) {
+    throw std::invalid_argument(
+        "PmSolver::solveForParticles distributed slabs require COSMOSIM_ENABLE_MPI=ON");
+  }
+#endif
+  if (grid.slabLayout().world_size == 1) {
+    validateSingleRankFullDomainGridContract(grid, "PmSolver::solveForParticles");
+  }
+#if !COSMOSIM_ENABLE_CUDA
+  if (options.execution_policy == core::ExecutionPolicy::kCuda) {
+    throw std::runtime_error(
+        "PM solve requested execution_policy=cuda, but this build has COSMOSIM_ENABLE_CUDA=OFF");
+  }
+#endif
 
   if (options.execution_policy == core::ExecutionPolicy::kCuda) {
 #if COSMOSIM_ENABLE_CUDA

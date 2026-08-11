@@ -141,6 +141,28 @@ namespace {
   return state;
 }
 
+[[nodiscard]] cosmosim::core::SimulationState makeParentlessGasState() {
+  auto state = makeState(true);
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities(
+      state.gas_cell_identity.records().begin(),
+      state.gas_cell_identity.records().end());
+  identities[1].parent_particle_id = 0U;
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  assert(state.validateOwnershipInvariants());
+  return state;
+}
+
+[[nodiscard]] cosmosim::core::SimulationState makeSharedLineageGasState() {
+  auto state = makeState(true);
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities(
+      state.gas_cell_identity.records().begin(),
+      state.gas_cell_identity.records().end());
+  identities[1].parent_particle_id = identities[0].parent_particle_id;
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  assert(state.validateOwnershipInvariants());
+  return state;
+}
+
 [[nodiscard]] cosmosim::core::SimulationState makeCoveredCoarseHierarchyState(bool reverse_rows) {
   cosmosim::core::SimulationState state;
   state.resizeParticles(2);
@@ -372,6 +394,10 @@ int main() {
   const auto expanding_state = makeState(false);
   const auto converging_report = runCase(output_root, "sf_runtime_converging", converging_state);
   const auto expanding_report = runCase(output_root, "sf_runtime_expanding", expanding_state);
+  const auto parentless_report = runCase(
+      output_root, "sf_runtime_parentless_gas_gravity", makeParentlessGasState());
+  const auto shared_lineage_report = runCase(
+      output_root, "sf_runtime_shared_lineage_gas_gravity", makeSharedLineageGasState());
   const auto effective_report = runEffectiveCase(
       output_root, "sf_runtime_effective", converging_state);
   const auto hierarchy_report = runEffectiveHierarchyCase(
@@ -387,6 +413,8 @@ int main() {
 
   assert(converging_report.completed_steps == 1);
   assert(expanding_report.completed_steps == 1);
+  assert(parentless_report.completed_steps == 1);
+  assert(shared_lineage_report.completed_steps == 1);
   assert(effective_report.completed_steps == 1);
   assert(hierarchy_report.completed_steps == 1);
   assert(reordered_hierarchy_report.completed_steps == 1);

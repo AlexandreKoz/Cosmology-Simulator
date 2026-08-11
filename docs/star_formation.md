@@ -93,7 +93,7 @@ For total birth mass `dm`, the newborn population inherits the parent centroid, 
 
 The code does not claim conservation of hydrodynamic internal energy across conversion: that removed thermal energy is an explicit sink ledger, not a collisionless particle degree of freedom.
 
-After a production birth batch, the source runtime refreshes generic gas-particle compatibility/gravity mirrors from the authoritative owned gas cells. This prevents the next gravity boundary from seeing both pre-birth gas mass and newborn stellar mass; multiple gas cells sharing one lineage particle are aggregated deterministically by stable gas-cell ID.
+After a production birth batch, the source runtime refreshes generic gas-particle compatibility mirrors from the authoritative owned gas cells. Gravity itself consumes owned leaf gas cells directly at their cell centres, so compatibility particles never double-count gas mass. Multiple gas cells may share one lineage particle without collapsing their resolved gravitational mass distribution.
 
 Births are planned, sorted by stable gas identity, validated, allocated in one batch, appended in one particle resize and one stellar-sidecar resize, and followed by one species-index rebuild. New stars enter scheduler bin zero at the next legal tick, receive no retroactive force kick, and become visible at the next force boundary.
 

@@ -665,6 +665,46 @@ void testIsolatedOpenRectangularAssignmentAndInterpolationClipStencils() {
   assert(potential[0] == 0.0);
 }
 
+
+void testPmRejectsInvalidEnumsNegativeMassAndOverflow() {
+  const cosmosim::gravity::PmGridShape shape{4, 4, 4};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  const std::vector<double> x{0.25};
+  const std::vector<double> y{0.25};
+  const std::vector<double> z{0.25};
+  const std::vector<double> negative_mass{-1.0};
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  bool threw = false;
+  try {
+    solver.assignDensity(grid, x, y, z, negative_mass, options, nullptr);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  options.assignment_scheme = static_cast<cosmosim::gravity::PmAssignmentScheme>(99);
+  threw = false;
+  try {
+    const std::vector<double> mass{1.0};
+    solver.assignDensity(grid, x, y, z, mass, options, nullptr);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const cosmosim::gravity::PmGridShape overflow_shape{
+      (std::numeric_limits<std::size_t>::max() / 2U) + 1U, 2U, 2U};
+  threw = false;
+  try {
+    (void)overflow_shape.cellCount();
+  } catch (const std::overflow_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -696,6 +736,7 @@ int main() {
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();
+  testPmRejectsInvalidEnumsNegativeMassAndOverflow();
 
 #if COSMOSIM_ENABLE_MPI
   MPI_Finalize();

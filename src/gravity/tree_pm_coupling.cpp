@@ -75,7 +75,9 @@ struct PeriodicBoxLengths {
 void unwrapPeriodicAxis(
     std::span<const double> input,
     double box_size_comoving,
-    std::vector<double>& output) {
+    std::vector<double>& output,
+    std::vector<double>& wrapped,
+    std::vector<double>& ordered) {
   if (!std::isfinite(box_size_comoving) || box_size_comoving <= 0.0) {
     throw std::invalid_argument("Periodic TreePM tree geometry requires finite positive axis lengths");
   }
@@ -84,7 +86,7 @@ void unwrapPeriodicAxis(
     return;
   }
 
-  std::vector<double> wrapped(input.size(), 0.0);
+  wrapped.assign(input.size(), 0.0);
   for (std::size_t i = 0; i < input.size(); ++i) {
     if (!std::isfinite(input[i])) {
       throw std::invalid_argument("Periodic TreePM tree geometry requires finite source coordinates");
@@ -98,7 +100,7 @@ void unwrapPeriodicAxis(
     wrapped[i] = value;
   }
 
-  std::vector<double> ordered = wrapped;
+  ordered.assign(wrapped.begin(), wrapped.end());
   std::sort(ordered.begin(), ordered.end());
   double anchor = ordered.front();
   if (ordered.size() > 1U) {
@@ -389,6 +391,7 @@ void validateTreePmPreflight(
   mix_double(options.split_policy.split_scale_comoving);
   mix_double(options.split_policy.cutoff_radius_comoving);
   mix(options.decomposition_epoch);
+  mix(options.source_generation);
   mix(options.force_epoch);
   mix(options.tree_exchange_batch_bytes);
   mix(options.enable_zoom_long_range_correction ? 1U : 0U);
@@ -422,6 +425,12 @@ void validateTreePmPreflight(
   if (is_leaf) {
     return true;
   }
+  // Self-force exclusion is independent of the selected MAC. A local node
+  // containing the target also contains that target's source mass and must be
+  // opened before any multipole approximation is considered.
+  if (target_inside_node) {
+    return false;
+  }
   const double r = std::sqrt(r2 + 1.0e-30);
   const double width = 2.0 * half_size;
   if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
@@ -430,9 +439,6 @@ void validateTreePmPreflight(
   if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutComDistance) {
     const double effective_size = width + com_center_offset;
     return (effective_size / r) < options.opening_theta;
-  }
-  if (target_inside_node) {
-    return false;
   }
   if (!previous_acceleration_available) {
     const double effective_size = width + com_center_offset;
@@ -576,14 +582,6 @@ struct GatheredParticleField {
   const double qyy = nodes.quad_yy[node_index];
   const double qyz = nodes.quad_yz[node_index];
   const double qzz = nodes.quad_zz[node_index];
-  const double qrx = qxx * dx + qxy * dy + qxz * dz;
-  const double qry = qxy * dx + qyy * dy + qyz * dz;
-  const double qrz = qxz * dx + qyz * dy + qzz * dz;
-  const double rqr = dx * qrx + dy * qry + dz * qrz;
-  (void)qrx;
-  (void)qry;
-  (void)qrz;
-  (void)rqr;
 
   // A screened/softened radial kernel is not harmonic, so its second-order
   // expansion needs both the traceless quadrupole and the trace of the raw
@@ -1593,6 +1591,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   // the fixed slab owners for the caller's current target decomposition.
   const auto cache_matches_request = [&]() {
     return m_long_range_field_validity.valid &&
+        m_long_range_field_validity.source_generation == options.source_generation &&
         m_long_range_field_validity.force_epoch == options.force_epoch &&
         m_long_range_field_validity.scale_factor == pm_options.scale_factor &&
         m_long_range_field_validity.gravitational_constant_code == pm_options.gravitational_constant_code &&
@@ -1686,6 +1685,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     m_long_range_field_validity = LongRangeFieldValidity{
         .valid = true,
         .decomposition_epoch = options.decomposition_epoch,
+        .source_generation = options.source_generation,
         .force_epoch = options.force_epoch,
         .scale_factor = pm_options.scale_factor,
         .gravitational_constant_code = pm_options.gravitational_constant_code,
@@ -1807,21 +1807,41 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 #endif
 
     if (!high_res_source_x.empty()) {
-      PmGridStorage high_res_coarse_grid(m_shape);
-      m_pm_solver.assignDensity(
-          high_res_coarse_grid,
-          high_res_source_x,
-          high_res_source_y,
-          high_res_source_z,
-          high_res_source_mass,
-          pm_options,
-          profile != nullptr ? &profile->pm_profile : nullptr);
-      if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
-        m_pm_solver.solvePoissonPeriodic(
-            high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
-      } else {
-        m_pm_solver.solvePoissonIsolatedOpen(
-            high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      std::vector<double> high_res_pm_coarse_ax(active_count, 0.0);
+      std::vector<double> high_res_pm_coarse_ay(active_count, 0.0);
+      std::vector<double> high_res_pm_coarse_az(active_count, 0.0);
+
+      // The coarse and focused PM grids can each be a dominant temporary.
+      // Interpolate the coarse contribution while its grid is live and release
+      // it before allocating the focused grid so peak memory is bounded by one
+      // correction mesh rather than their sum.
+      {
+        PmGridStorage high_res_coarse_grid(m_shape);
+        m_pm_solver.assignDensity(
+            high_res_coarse_grid,
+            high_res_source_x,
+            high_res_source_y,
+            high_res_source_z,
+            high_res_source_mass,
+            pm_options,
+            profile != nullptr ? &profile->pm_profile : nullptr);
+        if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+          m_pm_solver.solvePoissonPeriodic(
+              high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+        } else {
+          m_pm_solver.solvePoissonIsolatedOpen(
+              high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+        }
+        m_pm_solver.interpolateForces(
+            high_res_coarse_grid,
+            m_active_pos_x_comoving,
+            m_active_pos_y_comoving,
+            m_active_pos_z_comoving,
+            high_res_pm_coarse_ax,
+            high_res_pm_coarse_ay,
+            high_res_pm_coarse_az,
+            pm_options,
+            profile != nullptr ? &profile->pm_profile : nullptr);
       }
 
       const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(pm_options);
@@ -1882,22 +1902,6 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       zoom_solver.solvePoissonIsolatedOpen(
           high_res_focused_grid, zoom_pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
 
-      std::vector<double> high_res_pm_coarse_ax(active_count, 0.0);
-      std::vector<double> high_res_pm_coarse_ay(active_count, 0.0);
-      std::vector<double> high_res_pm_coarse_az(active_count, 0.0);
-      std::vector<double> high_res_pm_focused_ax(active_count, 0.0);
-      std::vector<double> high_res_pm_focused_ay(active_count, 0.0);
-      std::vector<double> high_res_pm_focused_az(active_count, 0.0);
-      m_pm_solver.interpolateForces(
-          high_res_coarse_grid,
-          m_active_pos_x_comoving,
-          m_active_pos_y_comoving,
-          m_active_pos_z_comoving,
-          high_res_pm_coarse_ax,
-          high_res_pm_coarse_ay,
-          high_res_pm_coarse_az,
-          pm_options,
-          profile != nullptr ? &profile->pm_profile : nullptr);
       std::vector<double> focused_active_x(active_count, focused_half_extent);
       std::vector<double> focused_active_y(active_count, focused_half_extent);
       std::vector<double> focused_active_z(active_count, focused_half_extent);
@@ -1920,19 +1924,22 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
           focused_active_x,
           focused_active_y,
           focused_active_z,
-          high_res_pm_focused_ax,
-          high_res_pm_focused_ay,
-          high_res_pm_focused_az,
+          m_active_zoom_corr_ax_comoving,
+          m_active_zoom_corr_ay_comoving,
+          m_active_zoom_corr_az_comoving,
           zoom_pm_options,
           profile != nullptr ? &profile->pm_profile : nullptr);
 
       for (std::size_t i = 0; i < active_count; ++i) {
         if (options.active_is_high_res[i] == 0U) {
+          m_active_zoom_corr_ax_comoving[i] = 0.0;
+          m_active_zoom_corr_ay_comoving[i] = 0.0;
+          m_active_zoom_corr_az_comoving[i] = 0.0;
           continue;
         }
-        const double corr_x = high_res_pm_focused_ax[i] - high_res_pm_coarse_ax[i];
-        const double corr_y = high_res_pm_focused_ay[i] - high_res_pm_coarse_ay[i];
-        const double corr_z = high_res_pm_focused_az[i] - high_res_pm_coarse_az[i];
+        const double corr_x = m_active_zoom_corr_ax_comoving[i] - high_res_pm_coarse_ax[i];
+        const double corr_y = m_active_zoom_corr_ay_comoving[i] - high_res_pm_coarse_ay[i];
+        const double corr_z = m_active_zoom_corr_az_comoving[i] - high_res_pm_coarse_az[i];
         m_active_zoom_corr_ax_comoving[i] = corr_x;
         m_active_zoom_corr_ay_comoving[i] = corr_y;
         m_active_zoom_corr_az_comoving[i] = corr_z;
@@ -1950,9 +1957,15 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   try {
     if (options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
       const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(options.pm_options);
-      unwrapPeriodicAxis(pos_x_comoving, box_lengths.lx, m_tree_source_x_comoving);
-      unwrapPeriodicAxis(pos_y_comoving, box_lengths.ly, m_tree_source_y_comoving);
-      unwrapPeriodicAxis(pos_z_comoving, box_lengths.lz, m_tree_source_z_comoving);
+      unwrapPeriodicAxis(
+          pos_x_comoving, box_lengths.lx, m_tree_source_x_comoving,
+          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
+      unwrapPeriodicAxis(
+          pos_y_comoving, box_lengths.ly, m_tree_source_y_comoving,
+          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
+      unwrapPeriodicAxis(
+          pos_z_comoving, box_lengths.lz, m_tree_source_z_comoving,
+          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
       tree_source_x = m_tree_source_x_comoving;
       tree_source_y = m_tree_source_y_comoving;
       tree_source_z = m_tree_source_z_comoving;
@@ -2175,7 +2188,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   std::vector<std::uint32_t> stack;
   std::exception_ptr traversal_workspace_failure;
   try {
-    stack.reserve(nodes.size());
+    // DFS storage scales with traversal frontier/depth, not total node count.
+    // Start small and let vector growth reflect actual traversal complexity.
+    stack.reserve(std::min<std::size_t>(nodes.size(), 256U));
   } catch (...) {
     traversal_workspace_failure = std::current_exception();
   }
@@ -3027,9 +3042,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     tree_profile->particle_particle_interactions += pp_interactions;
     tree_profile->traversal_ms +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traversal_start).count();
-    if (!accumulator.active_particle_index.empty()) {
-      tree_profile->average_interactions_per_target = static_cast<double>(tree_profile->particle_particle_interactions) /
-          static_cast<double>(accumulator.active_particle_index.size());
+    tree_profile->traversed_target_count +=
+        static_cast<std::uint64_t>(accumulator.active_particle_index.size());
+    if (tree_profile->traversed_target_count > 0U) {
+      tree_profile->average_interactions_per_target =
+          static_cast<double>(tree_profile->particle_particle_interactions) /
+          static_cast<double>(tree_profile->traversed_target_count);
     }
   }
   m_last_residual_stats.pruned_nodes = cutoff_pruned_nodes;

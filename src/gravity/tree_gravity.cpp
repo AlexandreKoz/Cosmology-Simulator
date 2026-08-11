@@ -2,6 +2,7 @@
 #include "cosmosim/core/build_config.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -19,6 +20,29 @@ struct OctantSpan {
   std::uint32_t begin = 0;
   std::uint32_t end = 0;
 };
+
+[[nodiscard]] std::uint64_t sourceFingerprint(
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving,
+    std::span<const double> mass_code) noexcept {
+  // FNV-1a over the exact source bits. This is intentionally only the legacy
+  // safety path; production workflow callers should provide a non-zero source
+  // generation and avoid an O(N) validation scan on every traversal.
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto mix = [&hash](std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  mix(static_cast<std::uint64_t>(pos_x_comoving.size()));
+  for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
+    mix(std::bit_cast<std::uint64_t>(pos_x_comoving[i]));
+    mix(std::bit_cast<std::uint64_t>(pos_y_comoving[i]));
+    mix(std::bit_cast<std::uint64_t>(pos_z_comoving[i]));
+    mix(std::bit_cast<std::uint64_t>(mass_code[i]));
+  }
+  return hash;
+}
 
 [[nodiscard]] std::uint8_t octantForParticle(
     double x_comoving,
@@ -72,6 +96,13 @@ void validateOptions(const TreeGravityOptions& options) {
     default:
       throw std::invalid_argument("Invalid tree gravity opening criterion");
   }
+  switch (options.multipole_order) {
+    case TreeMultipoleOrder::kMonopole:
+    case TreeMultipoleOrder::kQuadrupole:
+      break;
+    default:
+      throw std::invalid_argument("Invalid tree gravity multipole order");
+  }
 }
 
 [[nodiscard]] bool acceptNodeByComDistanceMac(
@@ -97,6 +128,12 @@ void validateOptions(const TreeGravityOptions& options) {
   if (is_leaf) {
     return true;
   }
+  // Self-force exclusion is a tree invariant, not a MAC-specific feature. An
+  // internal node containing the target also contains its source mass and must
+  // always be opened before any approximation criterion is considered.
+  if (target_inside_node) {
+    return false;
+  }
   const double width = 2.0 * half_size;
   if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
     const double r = std::sqrt(r2 + 1.0e-30);
@@ -106,12 +143,6 @@ void validateOptions(const TreeGravityOptions& options) {
     return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
   }
 
-  // A relative-MAC node containing the target would include the target's own
-  // mass in an accepted multipole. Force it open before applying either the
-  // history-controlled rule or its deterministic first-evaluation fallback.
-  if (target_inside_node) {
-    return false;
-  }
   if (!previous_acceleration_available) {
     return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
   }
@@ -159,8 +190,6 @@ void validateOptions(const TreeGravityOptions& options) {
   const double denom = std::max(r2 + eps2, 1.0e-30);
 
   const double inv_r3 = 1.0 / (denom * std::sqrt(denom));
-  const double inv_r5 = inv_r3 / denom;
-  const double inv_r7 = inv_r5 / denom;
 
   const double gm = options.gravitational_constant_code * nodes.mass_code[node_index];
   double ax = gm * inv_r3 * dx;
@@ -178,17 +207,6 @@ void validateOptions(const TreeGravityOptions& options) {
   const double qyz = nodes.quad_yz[node_index];
   const double qzz = nodes.quad_zz[node_index];
 
-  const double qrx = qxx * dx + qxy * dy + qxz * dz;
-  const double qry = qxy * dx + qyy * dy + qyz * dz;
-  const double qrz = qxz * dx + qyz * dy + qzz * dz;
-  const double rqr = dx * qrx + dy * qry + dz * qrz;
-
-  (void)qrx;
-  (void)qry;
-  (void)qrz;
-  (void)rqr;
-  (void)inv_r5;
-  (void)inv_r7;
 
   // Expand g_i(d) = d_i (|d|^2 + eps^2)^(-3/2) through second
   // order about the node COM.  Q alone is sufficient only for a harmonic
@@ -344,16 +362,45 @@ void TreeNodeSoa::appendMemoryReport(core::MemoryReportBuilder& builder) const {
 }
 
 void TreeGravitySolver::build(
+    const TreeGravitySourceView& source_view,
+    const TreeGravityOptions& options,
+    TreeGravityProfile* profile,
+    const TreeSofteningView& softening_view) {
+  build(
+      source_view.pos_x_comoving,
+      source_view.pos_y_comoving,
+      source_view.pos_z_comoving,
+      source_view.mass_code,
+      options,
+      profile,
+      softening_view,
+      source_view.source_generation);
+}
+
+void TreeGravitySolver::build(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
     const TreeGravityOptions& options,
     TreeGravityProfile* profile,
-    const TreeSofteningView& softening_view) {
+    const TreeSofteningView& softening_view,
+    std::uint64_t source_generation) {
   const auto build_start = std::chrono::steady_clock::now();
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
   validateOptions(options);
+  if (pos_x_comoving.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("Tree gravity source count exceeds the 32-bit tree-index contract");
+  }
+
+  m_build_source_count = pos_x_comoving.size();
+  m_build_source_generation = source_generation;
+  m_build_source_fingerprint = source_generation == 0U
+      ? sourceFingerprint(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code)
+      : 0U;
+  m_build_multipole_order = options.multipole_order;
+  m_build_max_leaf_size = options.max_leaf_size;
+  m_build_softening = options.softening;
 
   m_nodes.clear();
   m_source_softening_epsilon_comoving.clear();
@@ -372,6 +419,7 @@ void TreeGravitySolver::build(
   for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
     m_source_softening_epsilon_comoving[i] = resolveSourceSofteningEpsilon(i, options.softening, softening_view);
   }
+  m_partition_scratch.assign(pos_x_comoving.size(), 0U);
   m_ordering = buildMortonOrdering(pos_x_comoving, pos_y_comoving, pos_z_comoving);
   if (pos_x_comoving.empty()) {
     if (profile != nullptr) {
@@ -388,7 +436,11 @@ void TreeGravitySolver::build(
   const double center_y_comoving = 0.5 * (bounds.min_y_comoving + bounds.max_y_comoving);
   const double center_z_comoving = 0.5 * (bounds.min_z_comoving + bounds.max_z_comoving);
 
-  m_nodes.reserve(pos_x_comoving.size() * 2U);
+  const std::size_t reserve_nodes = pos_x_comoving.size() >
+          (std::numeric_limits<std::size_t>::max() / 2U)
+      ? pos_x_comoving.size()
+      : pos_x_comoving.size() * 2U;
+  m_nodes.reserve(reserve_nodes);
   const std::uint32_t root_index = buildNodeRecursive(
       pos_x_comoving,
       pos_y_comoving,
@@ -433,7 +485,8 @@ void TreeGravitySolver::evaluateActiveSet(
       options,
       profile,
       softening_view,
-      target_view.previous_acceleration_magnitude_code);
+      target_view.previous_acceleration_magnitude_code,
+      source_view.source_generation);
 }
 
 void TreeGravitySolver::evaluateActiveSet(
@@ -448,11 +501,45 @@ void TreeGravitySolver::evaluateActiveSet(
     const TreeGravityOptions& options,
     TreeGravityProfile* profile,
     const TreeSofteningView& softening_view,
-    std::span<const double> previous_acceleration_magnitude_code) const {
+    std::span<const double> previous_acceleration_magnitude_code,
+    std::uint64_t source_generation) const {
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
   validateOptions(options);
   if (!built()) {
     throw std::runtime_error("Tree must be built before traversal");
+  }
+  if (pos_x_comoving.size() != m_build_source_count) {
+    throw std::invalid_argument(
+        "Tree traversal source count differs from the source state used to build the tree");
+  }
+  if (m_build_source_generation != 0U) {
+    if (source_generation == 0U || source_generation != m_build_source_generation) {
+      throw std::invalid_argument(
+          "Tree traversal source generation differs from the source state used to build the tree");
+    }
+  } else {
+    if (sourceFingerprint(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code) !=
+        m_build_source_fingerprint) {
+      throw std::invalid_argument(
+          "Tree traversal source content differs from the legacy source state used to build the tree");
+    }
+    // Legacy callers without a generation token pay an O(N) identity check.
+    // Include resolved source softening so a same-sized sidecar/policy mutation
+    // cannot silently traverse a tree whose cached pair softenings are stale.
+    for (std::size_t source_index = 0; source_index < pos_x_comoving.size(); ++source_index) {
+      if (resolveSourceSofteningEpsilon(source_index, options.softening, softening_view) !=
+          m_source_softening_epsilon_comoving[source_index]) {
+        throw std::invalid_argument(
+            "Tree traversal source softening differs from the legacy source state used to build the tree");
+      }
+    }
+  }
+  if (options.multipole_order != m_build_multipole_order ||
+      options.max_leaf_size != m_build_max_leaf_size ||
+      options.softening.kernel != m_build_softening.kernel ||
+      options.softening.epsilon_comoving != m_build_softening.epsilon_comoving) {
+    throw std::invalid_argument(
+        "Tree traversal options changed a build-time topology/multipole/softening contract; rebuild the tree");
   }
   if (active_particle_index.size() != accel_x_comoving.size() || active_particle_index.size() != accel_y_comoving.size() ||
       active_particle_index.size() != accel_z_comoving.size()) {
@@ -543,7 +630,6 @@ void TreeGravitySolver::evaluateActiveSet(
         const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
         const bool is_leaf = m_nodes.child_count[node_index] == 0;
         const bool target_inside_node = !is_leaf &&
-            options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
             std::abs(px - m_nodes.center_x_comoving[node_index]) <= half_size &&
             std::abs(py - m_nodes.center_y_comoving[node_index]) <= half_size &&
             std::abs(pz - m_nodes.center_z_comoving[node_index]) <= half_size;
@@ -614,11 +700,13 @@ void TreeGravitySolver::evaluateActiveSet(
     profile->accepted_nodes += accepted_nodes;
     profile->opened_nodes += opened_nodes;
     profile->particle_particle_interactions += pp_interactions;
+    profile->traversed_target_count += static_cast<std::uint64_t>(active_particle_index.size());
     profile->traversal_ms +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traversal_start).count();
-    if (!active_particle_index.empty()) {
+    if (profile->traversed_target_count > 0U) {
       profile->average_interactions_per_target =
-          static_cast<double>(profile->particle_particle_interactions) / static_cast<double>(active_particle_index.size());
+          static_cast<double>(profile->particle_particle_interactions) /
+          static_cast<double>(profile->traversed_target_count);
     }
   }
 }
@@ -648,6 +736,9 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
     double half_size_comoving,
     const TreeGravityOptions& options) {
   (void)mass_code;
+  if (m_nodes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("Tree node count exceeds the 32-bit node-index contract");
+  }
   const std::uint32_t node_index = static_cast<std::uint32_t>(m_nodes.size());
   m_nodes.center_x_comoving.push_back(center_x_comoving);
   m_nodes.center_y_comoving.push_back(center_y_comoving);
@@ -693,10 +784,12 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
     octant_offsets[i + 1] = octant_offsets[i] + octant_count[i];
   }
 
-  std::vector<std::uint32_t> scratch(end - begin, 0U);
+  if (m_partition_scratch.size() < m_ordering.sorted_particle_index.size()) {
+    throw std::logic_error("Tree partition workspace is smaller than the source ordering");
+  }
   std::array<std::uint32_t, 8> cursor{};
   for (std::size_t i = 0; i < 8; ++i) {
-    cursor[i] = octant_offsets[i] - begin;
+    cursor[i] = octant_offsets[i];
   }
 
   for (std::uint32_t i = begin; i < end; ++i) {
@@ -704,10 +797,13 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
     const std::uint8_t octant = octantForParticle(
         pos_x_comoving[particle], pos_y_comoving[particle], pos_z_comoving[particle], center_x_comoving, center_y_comoving,
         center_z_comoving);
-    scratch[cursor[octant]++] = particle;
+    m_partition_scratch[cursor[octant]++] = particle;
   }
 
-  std::copy(scratch.begin(), scratch.end(), m_ordering.sorted_particle_index.begin() + begin);
+  std::copy(
+      m_partition_scratch.begin() + begin,
+      m_partition_scratch.begin() + end,
+      m_ordering.sorted_particle_index.begin() + begin);
 
   const std::uint32_t child_base = static_cast<std::uint32_t>(m_nodes.size());
   std::uint8_t non_empty_children = 0;

@@ -326,14 +326,16 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 ### Mutation paths
 
-- Drift callback syncs cell centers from gas particle positions.
+- Eulerian/AMR gas-cell centres are geometry authority and are not drifted through generic gas compatibility particles.
 - Production workflow compaction/migration rebuilds cell arrays from gas-cell/AMR patch payloads keyed by stable `gas_cell_id` and `patch_id`; legacy gas-particle keyed helpers are compatibility-only.
-- Host cell indices for BH/tracers remapped after rebuild.
+- Source transactions refresh compatibility particle mass/velocity mirrors only for legacy I/O/adapters; those mirrors do not control hydro or gas gravity.
+- Host cell indices for BH/tracers are remapped after rebuild.
 
 ### Read paths
 
 - Hydro kernels read from cell/gas arrays (often through active compact views).
-- Migration and diagnostics read gas-particle↔cell correspondence.
+- Gravity consumes each owned authoritative leaf gas cell directly at its cell centre and scatters acceleration back to that cell row. Generic gas compatibility particles are excluded from gravity source mass.
+- Migration and diagnostics may read gas-particle↔cell lineage correspondence where compatibility/provenance is required.
 
 ### Serialization
 
@@ -342,7 +344,8 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 ### Cache/mirror/view
 
-- Cell centers can behave like mirror-of-gas-particles during drift-coupled paths.
+- `parent_particle_id` and generic gas-particle rows are compatibility/provenance mirrors, not cell-position, hydro-mass, or gravity authority.
+- Gravity force-cache validity tracks particle-row, cell-row, and gas-identity generations; refinement/migration invalidates stale cell accelerations.
 
 ### Reorder/resize/migration behavior
 
@@ -600,7 +603,7 @@ boundaries:
 | Physical Newton constant in code units | Frozen `UnitSystem`, converted once through `core::newtonGravitationalConstantCode` | PM/tree option fields and the `gravity.treepm_setup` operational-event value | Re-derive from frozen length/mass/velocity units at workflow construction or restart; never hard-code unity in a physical-unit workflow. |
 | Cosmological force time dependence | `CosmologicalTimeline`; during a step, `StepContext.timeline_step`; after commit, `IntegratorState::{current_scale_factor,current_hubble_rate_code}` | `PmSolveOptions::scale_factor` and PM field-build scale are validity/source-time metadata; `HydroUpdateContext` is a stage-local view | PM and short-range TreePM return scale-free `A`. Collisionless KDK applies its Hubble-drag/kick factors. Post-drift gas hydro uses `timeline_step.scale_factor_end/hubble_end_code` for `A/a^2`, `-H m`, and `-H(2K+3P)` because committed `IntegratorState` is still at step begin. Hydro callbacks must not recompute SI `H(a)`. |
 | Particle decomposition epoch | `GravityStageCallback::m_decomposition_epoch` | Provenance/restart fields and TreePM hierarchy/request/response record epochs | Advance once, on every rank, only after an actual committed ownership change; restore before resumed TreePM use. Rank-local dense-row generations are not this authority. |
-| PM long-range field validity | `TreePmCoordinator::LongRangeFieldValidity` | FFT plans, mesh arrays, halos, and diagnostic build metadata | Reuse requires force epoch, build scale, `G_code`, split/box/assignment/boundary/decomposition-mode/deconvolution compatibility on every rank. Missing/incompatible reuse fails. Particle decomposition alone does not invalidate a fixed-slab PM field. |
+| PM long-range field validity | `TreePmCoordinator::LongRangeFieldValidity` | FFT plans, mesh arrays, halos, and diagnostic build metadata | Reuse requires an explicit physical source generation plus force epoch, build scale, `G_code`, split/box/assignment/boundary/decomposition-mode/deconvolution compatibility on every rank. Missing/incompatible reuse fails. Particle decomposition alone does not invalidate a fixed-slab PM field. |
 | Dense-row gravity force history | `GravityStageCallback` committed force cache plus per-row validity | Relative-MAC previous-acceleration magnitudes and restart `/gravity_force_cache` | Invalidate immediately on a particle ownership/index-generation change; rebuild all locally owned rows before a kick when required. A post-migration checkpoint records invalid rather than stale cache truth. |
 | Gravity timestep acceleration | Post-step adaptive scheduler criteria using committed `IntegratorState.current_scale_factor` | TreePM force lanes store scale-free `A`; `ComovingGravityTimeStepInput` is the transient public view for `eps_com`, `|A|`, and `a` | `computeComovingGravityTimeStep` validates finite positive `a`, converts to comoving-coordinate acceleration `|A|/a^3`, then evaluates `dt_grav=eta sqrt(eps_com/(|A|/a^3))`. Do not pass `A` or `A/a^2` with `eps_com` to the generic coordinate-neutral helper. |
 | Production timestep rung | Frozen config plus particle/gas schedulers constrained to bin zero | State `time_bin` lanes remain scheduler mirrors | `hierarchical_max_rung` must be zero; restart validation requires scheduler `max_bin=0`, committed bins zero, and pending bins zero/unset. Mixed-rung production is blocked until per-element kick/drift epochs exist. |

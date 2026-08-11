@@ -473,7 +473,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // rejecting or persisting stale row ownership.
     m_force_cache_valid = false;
     m_force_cache_particle_index_generation = 0U;
+    m_force_cache_cell_index_generation = 0U;
+    m_force_cache_gas_identity_generation = 0U;
     m_particle_force_cache_valid.clear();
+    m_cell_force_cache_valid.clear();
   }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -490,9 +493,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (!cache.valid) {
       return cache;
     }
-    if (m_force_cache_particle_index_generation != state.particleIndexGeneration()) {
+    if (m_force_cache_particle_index_generation != state.particleIndexGeneration() ||
+        m_force_cache_cell_index_generation != state.cellIndexGeneration() ||
+        m_force_cache_gas_identity_generation != state.gasCellIdentityGeneration()) {
       throw std::runtime_error(
-          "gravity force cache cannot be checkpointed after particle-row ownership changed without refresh");
+          "gravity force cache cannot be checkpointed after particle/cell ownership or gas identity changed without refresh");
     }
     if (m_particle_accel_x.size() != state.particles.size() ||
         m_particle_accel_y.size() != state.particles.size() ||
@@ -525,8 +530,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_cell_accel_y.clear();
       m_cell_accel_z.clear();
       m_particle_force_cache_valid.clear();
+      m_cell_force_cache_valid.clear();
       m_force_cache_valid = false;
       m_force_cache_particle_index_generation = 0U;
+      m_force_cache_cell_index_generation = 0U;
+      m_force_cache_gas_identity_generation = 0U;
       return;
     }
     const auto requireTriplet = [](const std::vector<double>& x,
@@ -611,7 +619,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
     m_force_cache_valid = true;
     m_force_cache_particle_index_generation = state.particleIndexGeneration();
+    m_force_cache_cell_index_generation = state.cellIndexGeneration();
+    m_force_cache_gas_identity_generation = state.gasCellIdentityGeneration();
     m_particle_force_cache_valid.assign(state.particles.size(), 1U);
+    m_cell_force_cache_valid.assign(state.cells.size(), 1U);
   }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
@@ -667,21 +678,35 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const parallel::MpiContext& mpi_context = m_services.mpi_context;
     const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
     const std::size_t particle_count = context.state.particles.size();
-    if (m_force_cache_particle_index_generation !=
-            context.state.particleIndexGeneration() ||
-        m_particle_force_cache_valid.size() != particle_count) {
-      // Migration/repartition may preserve the dense extent while changing row
-      // identity. Acceleration history is not a migration payload, so no row is
-      // considered compatible until that owned particle is explicitly
-      // refreshed in the new generation. Keeping per-row validity prevents a
-      // partial active-set refresh from blessing stale inactive rows.
+    const std::size_t cell_count = context.state.cells.size();
+    const bool particle_cache_generation_changed =
+        m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
+        m_particle_force_cache_valid.size() != particle_count;
+    const bool cell_cache_generation_changed =
+        m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
+        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration() ||
+        m_cell_force_cache_valid.size() != cell_count;
+    if (particle_cache_generation_changed) {
+      // Dense-row identity is not a migration payload. A row is compatible only
+      // after its authoritative source was refreshed in the current generation.
       m_particle_force_cache_valid.assign(particle_count, 0U);
       m_force_cache_particle_index_generation =
           context.state.particleIndexGeneration();
       m_force_cache_valid = false;
     }
+    if (cell_cache_generation_changed) {
+      // AMR refinement/coarsening and gas-cell migration change both dense row
+      // indices and stable gas ownership. Invalidate together so a post-AMR
+      // kick cannot reuse accelerations tied to a superseded leaf population.
+      m_cell_force_cache_valid.assign(cell_count, 0U);
+      m_force_cache_cell_index_generation = context.state.cellIndexGeneration();
+      m_force_cache_gas_identity_generation = context.state.gasCellIdentityGeneration();
+      m_force_cache_valid = false;
+    }
     const bool local_force_cache_incompatible = !m_force_cache_valid ||
-        m_force_cache_particle_index_generation != context.state.particleIndexGeneration();
+        m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
+        m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
+        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration();
     const std::uint64_t incompatible_cache_rank_count =
         mpi_context.allreduceSumUint64(local_force_cache_incompatible ? 1ULL : 0ULL);
     const bool needs_force_cache_rebuild = incompatible_cache_rank_count > 0U;
@@ -772,8 +797,18 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
     m_active_is_high_res.assign(m_local_active_indices.size(), 0U);
     m_active_slot_by_particle.assign(particle_count, -1);
-    for (std::size_t i = 0; i < m_local_active_global_indices.size(); ++i) {
-      m_active_slot_by_particle[m_local_active_global_indices[i]] = static_cast<int>(i);
+    m_active_slot_by_cell.assign(cell_count, -1);
+    constexpr std::uint32_t no_target_row =
+        std::numeric_limits<std::uint32_t>::max();
+    for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
+      if (m_active_target_particle_row[target_slot] != no_target_row) {
+        m_active_slot_by_particle[m_active_target_particle_row[target_slot]] =
+            static_cast<int>(target_slot);
+      }
+      if (m_active_target_cell_row[target_slot] != no_target_row) {
+        m_active_slot_by_cell[m_active_target_cell_row[target_slot]] =
+            static_cast<int>(target_slot);
+      }
     }
     ensureZoomMembershipLoaded(context.state);
     const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
@@ -782,10 +817,26 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_source_is_high_res.assign(m_local_source_x.size(), 0U);
     for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
       if (!m_zoom_high_res_particle_ids.empty()) {
-        const std::uint32_t global_index = m_local_to_global[i];
-        const std::uint64_t particle_id = context.state.particle_sidecar.particle_id[global_index];
-        m_source_is_high_res[i] = m_zoom_high_res_particle_ids.contains(particle_id) ? 1U : 0U;
-        continue;
+        const std::uint32_t particle_row = m_local_source_particle_row[i];
+        if (particle_row != no_target_row) {
+          const std::uint64_t particle_id =
+              context.state.particle_sidecar.particle_id[particle_row];
+          m_source_is_high_res[i] =
+              m_zoom_high_res_particle_ids.contains(particle_id) ? 1U : 0U;
+          continue;
+        }
+        const std::uint32_t cell_row = m_local_source_cell_row[i];
+        if (cell_row != no_target_row) {
+          const auto parent_id =
+              context.state.parentParticleIdForGasCellRow(cell_row);
+          if (parent_id.has_value()) {
+            m_source_is_high_res[i] =
+                m_zoom_high_res_particle_ids.contains(*parent_id) ? 1U : 0U;
+            continue;
+          }
+        }
+        // A parentless refined cell has no particle lineage authority. Fall
+        // back to the explicit spatial zoom region rather than inventing one.
       }
       const double dx = m_local_source_x[i] - m_tree_pm_options.zoom_region_center_x_comoving;
       const double dy = m_local_source_y[i] - m_tree_pm_options.zoom_region_center_y_comoving;
@@ -807,17 +858,38 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_tree_pm_options.tree_options.opening_criterion == gravity::TreeOpeningCriterion::kRelativeForceError &&
         m_force_cache_valid &&
         m_force_cache_particle_index_generation == context.state.particleIndexGeneration() &&
+        m_force_cache_cell_index_generation == context.state.cellIndexGeneration() &&
+        m_force_cache_gas_identity_generation == context.state.gasCellIdentityGeneration() &&
         m_particle_accel_x.size() == particle_count &&
         m_particle_accel_y.size() == particle_count &&
-        m_particle_accel_z.size() == particle_count;
+        m_particle_accel_z.size() == particle_count &&
+        m_cell_accel_x.size() == cell_count &&
+        m_cell_accel_y.size() == cell_count &&
+        m_cell_accel_z.size() == cell_count;
     if (relative_mac_cache_compatible) {
-      m_active_previous_acceleration_magnitude.resize(m_local_active_global_indices.size(), 0.0);
-      for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
-        const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
-        m_active_previous_acceleration_magnitude[active_slot] = std::sqrt(
-            m_particle_accel_x[particle_index] * m_particle_accel_x[particle_index] +
-            m_particle_accel_y[particle_index] * m_particle_accel_y[particle_index] +
-            m_particle_accel_z[particle_index] * m_particle_accel_z[particle_index]);
+      m_active_previous_acceleration_magnitude.resize(
+          m_local_active_indices.size(),
+          std::numeric_limits<double>::quiet_NaN());
+      for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
+        const std::uint32_t particle_row = m_active_target_particle_row[target_slot];
+        if (particle_row != no_target_row &&
+            particle_row < m_particle_force_cache_valid.size() &&
+            m_particle_force_cache_valid[particle_row] != 0U) {
+          m_active_previous_acceleration_magnitude[target_slot] = std::sqrt(
+              m_particle_accel_x[particle_row] * m_particle_accel_x[particle_row] +
+              m_particle_accel_y[particle_row] * m_particle_accel_y[particle_row] +
+              m_particle_accel_z[particle_row] * m_particle_accel_z[particle_row]);
+          continue;
+        }
+        const std::uint32_t cell_row = m_active_target_cell_row[target_slot];
+        if (cell_row != no_target_row &&
+            cell_row < m_cell_force_cache_valid.size() &&
+            m_cell_force_cache_valid[cell_row] != 0U) {
+          m_active_previous_acceleration_magnitude[target_slot] = std::sqrt(
+              m_cell_accel_x[cell_row] * m_cell_accel_x[cell_row] +
+              m_cell_accel_y[cell_row] * m_cell_accel_y[cell_row] +
+              m_cell_accel_z[cell_row] * m_cell_accel_z[cell_row]);
+        }
       }
     }
 
@@ -827,6 +899,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
         .previous_acceleration_magnitude_code = m_active_previous_acceleration_magnitude,
+        .target_pos_x_comoving = m_active_target_pos_x,
+        .target_pos_y_comoving = m_active_target_pos_y,
+        .target_pos_z_comoving = m_active_target_pos_z,
     };
 
     // The integrator owns PM cadence state. At every rank-coordinated force
@@ -918,6 +993,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // after uneven compaction. The workflow advances this shared epoch exactly
     // once, on every rank, after a committed particle-ownership transition.
     m_tree_pm_options.decomposition_epoch = m_decomposition_epoch;
+    // PM cadence currently refreshes at every certified global force boundary.
+    // The integrator-owned field version is therefore the globally consistent
+    // source-snapshot generation (positions, masses, births/deaths/refinement)
+    // rather than merely a cache-use counter. Keep it explicit in TreePM so a
+    // future relaxed cadence cannot accidentally reuse a field after sources
+    // changed while protocol epochs remained equal.
+    m_tree_pm_options.source_generation = decision.field_version;
     m_tree_pm_options.force_epoch = decision.field_version;
 
     if (m_particle_accel_x.size() != particle_count) {
@@ -930,6 +1012,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_cell_accel_x.assign(context.state.cells.size(), 0.0);
       m_cell_accel_y.assign(context.state.cells.size(), 0.0);
       m_cell_accel_z.assign(context.state.cells.size(), 0.0);
+      m_cell_force_cache_valid.assign(context.state.cells.size(), 0U);
+    } else if (m_cell_force_cache_valid.size() != context.state.cells.size()) {
+      m_cell_force_cache_valid.assign(context.state.cells.size(), 0U);
     }
     const gravity::TreeSofteningView softening_view{
         .source_species_tag = std::span<const std::uint32_t>(m_local_source_species_tag.data(), m_local_source_species_tag.size()),
@@ -1130,42 +1215,39 @@ class GravityRuntimeImpl final : public GravityRuntime {
       applyActiveKickFromFreshForce(context);
     }
 
-    for (std::size_t active_slot = 0; active_slot < m_local_active_global_indices.size(); ++active_slot) {
-      const std::uint32_t particle_index = m_local_active_global_indices[active_slot];
-      m_particle_accel_x[particle_index] = m_active_accel_x[active_slot];
-      m_particle_accel_y[particle_index] = m_active_accel_y[active_slot];
-      m_particle_accel_z[particle_index] = m_active_accel_z[active_slot];
-      m_particle_force_cache_valid[particle_index] = 1U;
+    constexpr std::uint32_t no_scatter_row =
+        std::numeric_limits<std::uint32_t>::max();
+    for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
+      const std::uint32_t particle_row = m_active_target_particle_row[target_slot];
+      if (particle_row != no_scatter_row) {
+        m_particle_accel_x[particle_row] = m_active_accel_x[target_slot];
+        m_particle_accel_y[particle_row] = m_active_accel_y[target_slot];
+        m_particle_accel_z[particle_row] = m_active_accel_z[target_slot];
+        m_particle_force_cache_valid[particle_row] = 1U;
+      }
+      const std::uint32_t cell_row = m_active_target_cell_row[target_slot];
+      if (cell_row != no_scatter_row) {
+        m_cell_accel_x[cell_row] = m_active_accel_x[target_slot];
+        m_cell_accel_y[cell_row] = m_active_accel_y[target_slot];
+        m_cell_accel_z[cell_row] = m_active_accel_z[target_slot];
+        m_cell_force_cache_valid[cell_row] = 1U;
+      }
     }
 
-    context.state.requireGasCellIdentityMapCoversDenseRows("gravity callback gas-cell acceleration sync");
-    const auto particle_row_by_id = internal::buildParticleRowById(context.state);
-    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const std::optional<std::uint32_t> gas_particle_index = internal::parentParticleRowForGasCellRow(
-          context.state,
-          static_cast<std::uint32_t>(cell_index),
-          particle_row_by_id,
-          "gravity callback gas-cell acceleration sync");
-      if (!gas_particle_index.has_value()) {
-        m_cell_accel_x[cell_index] = 0.0;
-        m_cell_accel_y[cell_index] = 0.0;
-        m_cell_accel_z[cell_index] = 0.0;
-        continue;
-      }
-      const int active_slot = m_active_slot_by_particle[*gas_particle_index];
-      if (active_slot < 0) {
-        continue;
-      }
-      m_cell_accel_x[cell_index] = m_active_accel_x[static_cast<std::size_t>(active_slot)];
-      m_cell_accel_y[cell_index] = m_active_accel_y[static_cast<std::size_t>(active_slot)];
-      m_cell_accel_z[cell_index] = m_active_accel_z[static_cast<std::size_t>(active_slot)];
-    }
     m_force_cache_particle_index_generation = context.state.particleIndexGeneration();
+    m_force_cache_cell_index_generation = context.state.cellIndexGeneration();
+    m_force_cache_gas_identity_generation = context.state.gasCellIdentityGeneration();
     m_force_cache_valid = true;
     const std::uint32_t local_rank =
         static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
+    const std::uint32_t gas_species_tag =
+        static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
     for (std::size_t particle_index = 0; particle_index < particle_count;
          ++particle_index) {
+      if (context.state.particle_sidecar.species_tag[particle_index] ==
+          gas_species_tag) {
+        continue;
+      }
       if (context.state.particle_sidecar.owning_rank[particle_index] ==
               local_rank &&
           m_particle_force_cache_valid[particle_index] == 0U) {
@@ -1173,6 +1255,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
         break;
       }
     }
+    if (m_force_cache_valid) {
+      for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+        if (m_owned_leaf_cell_mask[cell_index] != 0U &&
+            m_cell_force_cache_valid[cell_index] == 0U) {
+          m_force_cache_valid = false;
+          break;
+        }
+      }
+    }
+
   }
 
  private:
@@ -1240,27 +1332,35 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (!m_force_cache_valid) {
       throw std::runtime_error("gravity kick requested before a coherent force-refresh boundary");
     }
-    if (m_force_cache_particle_index_generation != context.state.particleIndexGeneration()) {
+    if (m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
+        m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
+        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration()) {
       throw std::runtime_error(
-          "gravity cached kick rejected because particle dense-row generation changed since force refresh");
+          "gravity cached kick rejected because particle/cell source identity changed since force refresh");
     }
     const std::size_t particle_count = context.state.particles.size();
     if (m_particle_accel_x.size() != particle_count ||
         m_particle_accel_y.size() != particle_count ||
-        m_particle_accel_z.size() != particle_count) {
-      m_particle_accel_x.resize(particle_count, 0.0);
-      m_particle_accel_y.resize(particle_count, 0.0);
-      m_particle_accel_z.resize(particle_count, 0.0);
+        m_particle_accel_z.size() != particle_count ||
+        m_particle_force_cache_valid.size() != particle_count) {
+      throw std::runtime_error(
+          "gravity cached kick rejected an incomplete particle acceleration cache");
     }
-    rebuildOwnedParticleCompactView(
-        context,
-        context.active_set.particle_indices,
-        SourcePredictionEpoch::kNone);
+    const std::uint32_t local_rank =
+        static_cast<std::uint32_t>(std::max(m_services.mpi_context.worldRank(), 0));
+    const std::uint32_t gas_species_tag =
+        static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
     const double kick_factor = kickFactorForStage(context);
     const double hubble_drag = hubbleDragFactorForStage(context);
-    for (const std::uint32_t particle_index : m_local_active_global_indices) {
-      if (particle_index >= m_particle_force_cache_valid.size() ||
-          m_particle_force_cache_valid[particle_index] == 0U) {
+    for (const std::uint32_t particle_index : context.active_set.particle_indices) {
+      if (particle_index >= particle_count) {
+        throw std::out_of_range("gravity cached kick particle index out of range");
+      }
+      if (context.state.particle_sidecar.owning_rank[particle_index] != local_rank ||
+          context.state.particle_sidecar.species_tag[particle_index] == gas_species_tag) {
+        continue;
+      }
+      if (m_particle_force_cache_valid[particle_index] == 0U) {
         throw std::runtime_error(
             "gravity cached kick rejected an invalid per-particle force row");
       }
@@ -1311,9 +1411,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     };
 
     ++summary.cheap_checks_executed;
-    if (m_local_active_indices.size() != m_local_active_global_indices.size()) {
+    if (m_local_active_indices.size() != m_active_target_particle_row.size() ||
+        m_local_active_indices.size() != m_active_target_cell_row.size() ||
+        m_local_active_indices.size() != m_active_target_pos_x.size() ||
+        m_local_active_indices.size() != m_active_target_pos_y.size() ||
+        m_local_active_indices.size() != m_active_target_pos_z.size()) {
       ++summary.decomposition_sanity_failure_count;
-      failFatal("local active index vectors diverged after compact-view rebuild");
+      failFatal("local gravity target vectors diverged after compact-view rebuild");
     }
     if (m_local_active_indices.size() > m_local_source_x.size()) {
       ++summary.decomposition_sanity_failure_count;
@@ -1439,9 +1543,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
       std::span<const std::uint32_t> active_particles,
       SourcePredictionEpoch prediction_epoch = SourcePredictionEpoch::kNone) {
     const core::SimulationState& state = context.state;
-    const std::uint32_t world_rank = static_cast<std::uint32_t>(m_runtime_topology.world_rank);
+    state.requireGasCellIdentityMapCoversDenseRows(
+        "gravity authoritative gas source rebuild");
+    const std::uint32_t world_rank =
+        static_cast<std::uint32_t>(m_runtime_topology.world_rank);
     const std::size_t particle_count = state.particles.size();
+    const std::size_t cell_count = state.cells.size();
+    constexpr std::uint32_t no_row = std::numeric_limits<std::uint32_t>::max();
+
     m_owned_local_index_by_global.assign(particle_count, -1);
+    m_owned_local_index_by_cell.assign(cell_count, -1);
+    m_owned_leaf_cell_mask.assign(cell_count, 0U);
     m_local_source_x.clear();
     m_local_source_y.clear();
     m_local_source_z.clear();
@@ -1449,37 +1561,132 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_local_source_species_tag.clear();
     m_local_source_softening_comoving.clear();
     m_local_source_softening_override_mask.clear();
-    m_local_to_global.clear();
+    m_local_source_particle_row.clear();
+    m_local_source_cell_row.clear();
     m_source_predicted_inactive_count = 0;
 
     std::vector<std::uint8_t> active_mask;
     if (prediction_epoch != SourcePredictionEpoch::kNone) {
       if (state.particle_sidecar.last_drift_time_code.size() != particle_count ||
           state.particle_sidecar.last_drift_scale_factor.size() != particle_count) {
-        throw std::runtime_error("PM source prediction requires per-particle drift epoch sidecars");
+        throw std::runtime_error(
+            "PM source prediction requires per-particle drift epoch sidecars");
       }
       active_mask.assign(particle_count, 0U);
       for (const std::uint32_t global_index : active_particles) {
         if (global_index >= particle_count) {
-          throw std::out_of_range("gravity callback active particle index out of range");
+          throw std::out_of_range(
+              "gravity callback active particle index out of range");
         }
         active_mask[global_index] = 1U;
       }
     }
 
     const bool periodic_sources =
-        m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kPeriodic;
+        m_tree_pm_options.pm_options.boundary_condition ==
+        gravity::PmBoundaryCondition::kPeriodic;
     const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
     const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
     const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
-    const bool has_softening_values = !state.particle_sidecar.gravity_softening_comoving.empty();
-    const bool has_softening_masks = !state.particle_sidecar.has_gravity_softening_override.empty();
-    for (std::size_t global_index = 0; global_index < particle_count; ++global_index) {
-      const bool is_owned_source = state.particle_sidecar.owning_rank[global_index] == world_rank;
-      const bool is_imported_ghost_source = !is_owned_source &&
-          state.particle_sidecar.owning_rank[global_index] <
-              static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1));
-      if (!is_owned_source && !is_imported_ghost_source) {
+    const bool has_softening_values =
+        !state.particle_sidecar.gravity_softening_comoving.empty();
+    const bool has_softening_masks =
+        !state.particle_sidecar.has_gravity_softening_override.empty();
+    const std::uint32_t gas_species_tag =
+        static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
+    const double gas_softening_comoving = m_tree_pm_species_softening.enabled
+        ? m_tree_pm_species_softening.epsilon_comoving_by_species[
+              static_cast<std::size_t>(core::ParticleSpecies::kGas)]
+        : m_tree_pm_options.tree_options.softening.epsilon_comoving;
+    constexpr double max_certified_softening_to_split_ratio = 0.20;
+    const double split_scale_comoving =
+        m_tree_pm_options.split_policy.split_scale_comoving;
+
+    const auto validateCertifiedTreePmSoftening = [&] (
+        std::uint32_t species_tag,
+        double softening_value,
+        std::uint8_t softening_override) {
+      double effective_softening =
+          m_tree_pm_options.tree_options.softening.epsilon_comoving;
+      if (softening_override != 0U) {
+        effective_softening = softening_value;
+      } else if (m_tree_pm_species_softening.enabled) {
+        if (!core::isValidParticleSpeciesTag(species_tag)) {
+          throw std::invalid_argument(
+              "gravity source species tag is outside the canonical range");
+        }
+        effective_softening =
+            m_tree_pm_species_softening.epsilon_comoving_by_species[species_tag];
+      }
+      if (!std::isfinite(effective_softening) || effective_softening < 0.0) {
+        throw std::invalid_argument(
+            "gravity source effective softening must be finite and non-negative");
+      }
+      if (effective_softening >
+          max_certified_softening_to_split_ratio * split_scale_comoving) {
+        throw std::invalid_argument(
+            "TreePM softening exceeds the certified epsilon/r_s <= 0.20 envelope; "
+            "reduce gravitational softening or increase the TreePM split scale");
+      }
+    };
+
+    const auto appendSource = [&](double source_x,
+                                  double source_y,
+                                  double source_z,
+                                  double source_mass,
+                                  std::uint32_t species_tag,
+                                  double softening_value,
+                                  std::uint8_t softening_override,
+                                  std::uint32_t particle_row,
+                                  std::uint32_t cell_row) {
+      if (!std::isfinite(source_x) || !std::isfinite(source_y) ||
+          !std::isfinite(source_z) || !std::isfinite(source_mass) ||
+          source_mass < 0.0) {
+        throw std::runtime_error(
+            "gravity source rebuild encountered non-finite coordinates or a negative/non-finite mass");
+      }
+      validateCertifiedTreePmSoftening(
+          species_tag, softening_value, softening_override);
+      if (m_local_source_x.size() >=
+          static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::overflow_error(
+            "gravity local source count exceeds TreePM 32-bit source-index contract");
+      }
+      if (periodic_sources) {
+        source_x = wrapPeriodicPosition(source_x, box_size_x);
+        source_y = wrapPeriodicPosition(source_y, box_size_y);
+        source_z = wrapPeriodicPosition(source_z, box_size_z);
+      }
+      const auto source_index =
+          static_cast<std::uint32_t>(m_local_source_x.size());
+      m_local_source_x.push_back(source_x);
+      m_local_source_y.push_back(source_y);
+      m_local_source_z.push_back(source_z);
+      m_local_source_mass.push_back(source_mass);
+      m_local_source_species_tag.push_back(species_tag);
+      m_local_source_particle_row.push_back(particle_row);
+      m_local_source_cell_row.push_back(cell_row);
+      if (has_softening_values) {
+        m_local_source_softening_comoving.push_back(softening_value);
+      }
+      if (has_softening_masks) {
+        m_local_source_softening_override_mask.push_back(softening_override);
+      }
+      return source_index;
+    };
+
+    // Collisionless and compact-object particle state remains particle-owned.
+    // Gas-tagged generic particles are compatibility/lineage mirrors only and
+    // must not duplicate the authoritative gas-cell mass in the gravity source
+    // population. Remote ghost particle copies are also excluded: TreePM owns
+    // its explicit remote-source exchange from each rank's authoritative
+    // owned sources.
+    for (std::size_t global_index = 0; global_index < particle_count;
+         ++global_index) {
+      if (state.particle_sidecar.species_tag[global_index] == gas_species_tag) {
+        continue;
+      }
+      if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
         continue;
       }
       double source_x = state.particles.position_x_comoving[global_index];
@@ -1487,8 +1694,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
       double source_z = state.particles.position_z_comoving[global_index];
       if (prediction_epoch != SourcePredictionEpoch::kNone &&
           active_mask[global_index] == 0U) {
-        const double source_time = state.particle_sidecar.last_drift_time_code[global_index];
-        const double source_scale = state.particle_sidecar.last_drift_scale_factor[global_index];
+        const double source_time =
+            state.particle_sidecar.last_drift_time_code[global_index];
+        const double source_scale =
+            state.particle_sidecar.last_drift_scale_factor[global_index];
         const double evaluation_time =
             prediction_epoch == SourcePredictionEpoch::kStepBegin
             ? context.timeline_step.time_begin_code
@@ -1498,7 +1707,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
             ? context.timeline_step.scale_factor_begin
             : context.timeline_step.scale_factor_end;
         if (source_time > evaluation_time + 1.0e-12 || source_scale <= 0.0) {
-          throw std::runtime_error("inactive PM source has an invalid or future drift epoch");
+          throw std::runtime_error(
+              "inactive PM source has an invalid or future drift epoch");
         }
         double inactive_drift_factor = evaluation_time - source_time;
         if (context.cosmology_background != nullptr) {
@@ -1506,62 +1716,148 @@ class GravityRuntimeImpl final : public GravityRuntime {
               *context.cosmology_background,
               source_scale,
               evaluation_scale,
-              64) / context.timeline_step.time_si_per_code;
+              64) /
+              context.timeline_step.time_si_per_code;
         }
-        if (!std::isfinite(inactive_drift_factor) || inactive_drift_factor < -1.0e-14) {
-          throw std::runtime_error("inactive PM source prediction produced an invalid drift factor");
+        if (!std::isfinite(inactive_drift_factor) ||
+            inactive_drift_factor < -1.0e-14) {
+          throw std::runtime_error(
+              "inactive PM source prediction produced an invalid drift factor");
         }
-        source_x += state.particles.velocity_x_peculiar[global_index] * inactive_drift_factor;
-        source_y += state.particles.velocity_y_peculiar[global_index] * inactive_drift_factor;
-        source_z += state.particles.velocity_z_peculiar[global_index] * inactive_drift_factor;
+        source_x += state.particles.velocity_x_peculiar[global_index] *
+            inactive_drift_factor;
+        source_y += state.particles.velocity_y_peculiar[global_index] *
+            inactive_drift_factor;
+        source_z += state.particles.velocity_z_peculiar[global_index] *
+            inactive_drift_factor;
         ++m_source_predicted_inactive_count;
       }
-      if (periodic_sources) {
-        source_x = wrapPeriodicPosition(source_x, box_size_x);
-        source_y = wrapPeriodicPosition(source_y, box_size_y);
-        source_z = wrapPeriodicPosition(source_z, box_size_z);
+      const double softening_value = has_softening_values
+          ? state.particle_sidecar.gravity_softening_comoving[global_index]
+          : 0.0;
+      const std::uint8_t softening_override = has_softening_masks &&
+              state.particle_sidecar.hasGravitySofteningOverride(global_index)
+          ? 1U
+          : 0U;
+      const std::uint32_t source_index = appendSource(
+          source_x,
+          source_y,
+          source_z,
+          state.particles.mass_code[global_index],
+          state.particle_sidecar.species_tag[global_index],
+          softening_value,
+          softening_override,
+          static_cast<std::uint32_t>(global_index),
+          no_row);
+      m_owned_local_index_by_global[global_index] =
+          static_cast<int>(source_index);
+    }
+
+    // Determine authoritative AMR leaf ownership from patch truth. A legacy
+    // no-patch cell is well-defined only in single-rank mode; distributed gas
+    // gravity must never guess ownership from optional parent-particle lineage.
+    std::unordered_set<std::uint64_t> patch_ids_with_children;
+    patch_ids_with_children.reserve(state.patches.size());
+    for (std::size_t patch_index = 0; patch_index < state.patches.size();
+         ++patch_index) {
+      const std::uint64_t parent_id =
+          state.patches.parent_patch_id[patch_index];
+      if (parent_id != 0U) {
+        patch_ids_with_children.insert(parent_id);
       }
-      if (is_owned_source) {
-        m_owned_local_index_by_global[global_index] = static_cast<int>(m_local_to_global.size());
+    }
+
+    for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      bool is_owned_leaf = true;
+      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
+      if (patch_index < state.patches.size()) {
+        is_owned_leaf =
+            state.patches.owning_rank[patch_index] == world_rank &&
+            !patch_ids_with_children.contains(state.patches.patch_id[patch_index]);
+      } else if (m_runtime_topology.world_size > 1) {
+        throw std::runtime_error(
+            "distributed authoritative gas gravity requires every gas cell to reference an owning AMR patch");
       }
-      m_local_to_global.push_back(static_cast<std::uint32_t>(global_index));
-      m_local_source_x.push_back(source_x);
-      m_local_source_y.push_back(source_y);
-      m_local_source_z.push_back(source_z);
-      m_local_source_mass.push_back(state.particles.mass_code[global_index]);
-      m_local_source_species_tag.push_back(state.particle_sidecar.species_tag[global_index]);
-      if (has_softening_values) {
-        m_local_source_softening_comoving.push_back(state.particle_sidecar.gravity_softening_comoving[global_index]);
+      if (!is_owned_leaf) {
+        continue;
       }
-      if (has_softening_masks) {
-        m_local_source_softening_override_mask.push_back(
-            state.particle_sidecar.hasGravitySofteningOverride(global_index) ? 1U : 0U);
-      }
+      m_owned_leaf_cell_mask[cell_index] = 1U;
+      const std::uint32_t source_index = appendSource(
+          state.cells.center_x_comoving[cell_index],
+          state.cells.center_y_comoving[cell_index],
+          state.cells.center_z_comoving[cell_index],
+          state.cells.mass_code[cell_index],
+          gas_species_tag,
+          gas_softening_comoving,
+          0U,
+          no_row,
+          static_cast<std::uint32_t>(cell_index));
+      m_owned_local_index_by_cell[cell_index] = static_cast<int>(source_index);
     }
 
     m_local_active_indices.clear();
     m_local_active_global_indices.clear();
+    m_active_target_particle_row.clear();
+    m_active_target_cell_row.clear();
+    m_active_target_pos_x.clear();
+    m_active_target_pos_y.clear();
+    m_active_target_pos_z.clear();
     m_active_target_species_tag.clear();
     m_active_target_softening_comoving.clear();
     m_active_target_softening_override_mask.clear();
+
+    const auto appendTarget = [&](std::uint32_t source_index,
+                                  std::uint32_t particle_row,
+                                  std::uint32_t cell_row) {
+      m_local_active_indices.push_back(source_index);
+      m_active_target_particle_row.push_back(particle_row);
+      m_active_target_cell_row.push_back(cell_row);
+      m_active_target_pos_x.push_back(m_local_source_x[source_index]);
+      m_active_target_pos_y.push_back(m_local_source_y[source_index]);
+      m_active_target_pos_z.push_back(m_local_source_z[source_index]);
+      m_active_target_species_tag.push_back(
+          m_local_source_species_tag[source_index]);
+      if (has_softening_values) {
+        m_active_target_softening_comoving.push_back(
+            m_local_source_softening_comoving[source_index]);
+      }
+      if (has_softening_masks) {
+        m_active_target_softening_override_mask.push_back(
+            m_local_source_softening_override_mask[source_index]);
+      }
+    };
+
     for (const std::uint32_t global_index : active_particles) {
       if (global_index >= particle_count) {
-        throw std::out_of_range("gravity callback active particle index out of range");
+        throw std::out_of_range(
+            "gravity callback active particle index out of range");
+      }
+      if (state.particle_sidecar.species_tag[global_index] == gas_species_tag) {
+        continue;
       }
       const int local_index = m_owned_local_index_by_global[global_index];
       if (local_index < 0) {
         continue;
       }
-      const auto local_u32 = static_cast<std::uint32_t>(local_index);
-      m_local_active_indices.push_back(local_u32);
+      const auto source_index = static_cast<std::uint32_t>(local_index);
+      appendTarget(source_index, global_index, no_row);
       m_local_active_global_indices.push_back(global_index);
-      m_active_target_species_tag.push_back(m_local_source_species_tag[local_u32]);
-      if (has_softening_values) {
-        m_active_target_softening_comoving.push_back(m_local_source_softening_comoving[local_u32]);
+    }
+
+    // Rung-zero production currently owns globally synchronized force
+    // refreshes. Compute every owned leaf gas-cell target at those boundaries
+    // so hydro and restart caches never depend on an optional lineage parent.
+    // Future local gas time bins can narrow this list only after carrying a
+    // per-cell force epoch through the scheduler contract.
+    for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      const int local_index = m_owned_local_index_by_cell[cell_index];
+      if (local_index < 0) {
+        continue;
       }
-      if (has_softening_masks) {
-        m_active_target_softening_override_mask.push_back(m_local_source_softening_override_mask[local_u32]);
-      }
+      appendTarget(
+          static_cast<std::uint32_t>(local_index),
+          no_row,
+          static_cast<std::uint32_t>(cell_index));
     }
   }
 
@@ -1591,7 +1887,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<double> m_cell_accel_y;
   std::vector<double> m_cell_accel_z;
   std::vector<int> m_active_slot_by_particle;
+  std::vector<int> m_active_slot_by_cell;
   std::vector<int> m_owned_local_index_by_global;
+  std::vector<int> m_owned_local_index_by_cell;
+  std::vector<std::uint8_t> m_owned_leaf_cell_mask;
   std::vector<double> m_local_source_x;
   std::vector<double> m_local_source_y;
   std::vector<double> m_local_source_z;
@@ -1599,12 +1898,18 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint32_t> m_local_source_species_tag;
   std::vector<double> m_local_source_softening_comoving;
   std::vector<std::uint8_t> m_local_source_softening_override_mask;
+  std::vector<std::uint32_t> m_local_source_particle_row;
+  std::vector<std::uint32_t> m_local_source_cell_row;
+  std::vector<std::uint32_t> m_active_target_particle_row;
+  std::vector<std::uint32_t> m_active_target_cell_row;
+  std::vector<double> m_active_target_pos_x;
+  std::vector<double> m_active_target_pos_y;
+  std::vector<double> m_active_target_pos_z;
   std::vector<std::uint32_t> m_active_target_species_tag;
   std::vector<double> m_active_target_softening_comoving;
   std::vector<std::uint8_t> m_active_target_softening_override_mask;
   std::vector<std::uint8_t> m_source_is_high_res;
   std::vector<std::uint8_t> m_active_is_high_res;
-  std::vector<std::uint32_t> m_local_to_global;
   std::filesystem::path m_zoom_region_path;
   bool m_zoom_membership_loaded = false;
   std::unordered_set<std::uint64_t> m_zoom_high_res_particle_ids;
@@ -1621,7 +1926,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::uint64_t m_long_range_reuse_count = 0;
   bool m_force_cache_valid = false;
   std::uint64_t m_force_cache_particle_index_generation = 0U;
+  std::uint64_t m_force_cache_cell_index_generation = 0U;
+  std::uint64_t m_force_cache_gas_identity_generation = 0U;
   std::vector<std::uint8_t> m_particle_force_cache_valid;
+  std::vector<std::uint8_t> m_cell_force_cache_valid;
   std::uint64_t m_decomposition_epoch = 0U;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;

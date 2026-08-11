@@ -1,5 +1,7 @@
 #include "cosmosim/workflows/analysis_runtime.hpp"
 
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -48,12 +50,24 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
     if (!m_config.analysis.enable_diagnostics) {
       return;
     }
-    const std::uint64_t step = context.integrator_state.step_index;
+    if (context.integrator_state.step_index ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("analysis completed-step index overflows uint64");
+    }
+    // AnalysisHooks observes the fully kicked end-of-step state before the
+    // integrator commits that epoch. Label cadence and science products by the
+    // state being measured, not by the still-committed step-begin metadata.
+    const std::uint64_t step = context.integrator_state.step_index + 1U;
+    const double scale_factor = context.timeline_step.scale_factor_end;
+    if (!std::isfinite(scale_factor) || scale_factor <= 0.0) {
+      throw std::runtime_error(
+          "analysis completed-state scale factor must be finite and positive");
+    }
     const auto run = [&](analysis::DiagnosticClass diagnostic_class) {
       const analysis::DiagnosticsBundle bundle = m_diagnostics.generateBundle(
           context.state,
           step,
-          context.integrator_state.current_scale_factor,
+          scale_factor,
           diagnostic_class,
           context.workspace);
       m_diagnostics.writeBundle(bundle);

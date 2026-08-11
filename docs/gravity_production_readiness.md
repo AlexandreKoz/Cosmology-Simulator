@@ -311,8 +311,14 @@ scalability claim here.
   against the retained direct-DFT oracle on small meshes. It still has no
   interlacing, PCS deposition, survey-window treatment, or publication-scale
   large-mesh aliasing/performance certification.
-- Ewald certification is unsoftened and small-N; adaptive/heterogeneous
-  softening requires a separate accuracy envelope.
+- Ewald certification is unsoftened and small-N. Production TreePM therefore
+  enforces the currently certified fixed/species/particle Plummer-softening
+  envelope `epsilon / r_s <= 0.20`, where `r_s` is the Gaussian split scale.
+  For the implemented Newtonian long-range plus Plummer-short-range split this
+  bounds the analytic split/softening mismatch to below about 0.65% over
+  separation for a pair at the envelope limit; normal reference decks are far
+  inside that ratio. Continuously adaptive gas softening is not enabled by the
+  workflow and still requires a conservation-aware accuracy study before use.
 - CIC is not certified for the current default mesh/split target.
 - Isolated/open PM window deconvolution is unsupported. Focused zoom correction
   forces it off and is outside the global periodic TSC certification.

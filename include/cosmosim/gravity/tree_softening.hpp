@@ -180,10 +180,11 @@ inline double validatedSofteningEpsilon(double epsilon_comoving, const char* con
     double squared_distance,
     double epsilon_comoving) noexcept {
   const double epsilon2 = epsilon_comoving * epsilon_comoving;
-  const double denominator = std::pow(squared_distance + epsilon2, 1.5);
-  if (denominator <= 0.0) {
+  const double softened_r2 = squared_distance + epsilon2;
+  if (softened_r2 <= 0.0) {
     return 0.0;
   }
+  const double denominator = softened_r2 * std::sqrt(softened_r2);
   return 1.0 / denominator;
 }
 

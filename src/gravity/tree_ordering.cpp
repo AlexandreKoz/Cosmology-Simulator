@@ -49,6 +49,11 @@ TreeBounds computeTreeBounds(
   bounds.max_z_comoving = -std::numeric_limits<double>::infinity();
 
   for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
+    if (!std::isfinite(pos_x_comoving[i]) || !std::isfinite(pos_y_comoving[i]) ||
+        !std::isfinite(pos_z_comoving[i])) {
+      throw std::invalid_argument(
+          "Tree bounds requires finite particle coordinates");
+    }
     bounds.min_x_comoving = std::min(bounds.min_x_comoving, pos_x_comoving[i]);
     bounds.min_y_comoving = std::min(bounds.min_y_comoving, pos_y_comoving[i]);
     bounds.min_z_comoving = std::min(bounds.min_z_comoving, pos_z_comoving[i]);
@@ -63,6 +68,11 @@ TreeMortonOrdering buildMortonOrdering(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving) {
+  if (pos_x_comoving.size() >
+      static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error(
+        "Morton ordering exceeds the 32-bit particle-index contract");
+  }
   const TreeBounds bounds = computeTreeBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving);
 
   TreeMortonOrdering ordering;

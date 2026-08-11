@@ -49,6 +49,13 @@ class DriftRuntime final {
       if (context.state.particle_sidecar.owning_rank[particle_index] != world_rank) {
         continue;
       }
+      // Gas-tagged generic particles are compatibility/lineage mirrors. The
+      // authoritative Eulerian/AMR gas geometry lives in CellSoa and must not
+      // acquire a second, independently drifted physical trajectory.
+      if (context.state.particle_sidecar.species_tag[particle_index] ==
+          static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
+        continue;
+      }
       context.state.particles.position_x_comoving[particle_index] +=
           context.state.particles.velocity_x_peculiar[particle_index] * drift_factor;
       context.state.particles.position_y_comoving[particle_index] +=

@@ -12,6 +12,8 @@
 
 namespace cosmosim::physics {
 
+class ParticleIdPrecommit;
+
 struct BlackHoleAgnConfig {
   bool enabled = false;
   double seed_halo_mass_threshold_code = 1.0e3;
@@ -61,10 +63,18 @@ struct BlackHoleAgnAccretionView {
   std::span<double> cumulative_feedback_energy_code;
   std::span<double> duty_cycle_active_time_code;
   std::span<double> duty_cycle_total_time_code;
-  std::span<const double> gas_density_code;
+  std::span<double> gas_mass_code;
+  std::span<double> gas_density_code;
+  std::span<double> gas_metal_mass_code;
   std::span<const double> gas_sound_speed_code;
+  std::span<const double> gas_velocity_x_peculiar;
+  std::span<const double> gas_velocity_y_peculiar;
+  std::span<const double> gas_velocity_z_peculiar;
   std::span<double> gas_internal_energy_code;
   std::span<double> particle_mass_code;
+  std::span<double> particle_velocity_x_peculiar;
+  std::span<double> particle_velocity_y_peculiar;
+  std::span<double> particle_velocity_z_peculiar;
 };
 
 struct BlackHoleAgnCounters {
@@ -73,6 +83,9 @@ struct BlackHoleAgnCounters {
   std::uint64_t seed_candidates = 0;
   std::uint64_t seeded_bh = 0;
   double integrated_accreted_mass_code = 0.0;
+  double gas_mass_removed_code = 0.0;
+  double metal_mass_transferred_code = 0.0;
+  double seeded_mass_code = 0.0;
   double integrated_feedback_energy_code = 0.0;
   double deposited_feedback_energy_code = 0.0;
   double integrated_duty_cycle_active_time_code = 0.0;
@@ -82,6 +95,7 @@ struct BlackHoleAgnCounters {
 struct BlackHoleAgnStepReport {
   BlackHoleAgnCounters counters;
   std::vector<std::uint32_t> seeded_cell_indices;
+  std::vector<std::uint64_t> seeded_particle_ids;
 };
 
 class BlackHoleAgnModel {
@@ -100,8 +114,20 @@ class BlackHoleAgnModel {
 
   [[nodiscard]] BlackHoleAgnCounters applyAccretionFromView(
       BlackHoleAgnAccretionView view,
-      double dt_code) const;
+      double dt_code,
+      double scale_factor = 1.0,
+      bool density_is_comoving = false) const;
 
+  [[nodiscard]] BlackHoleAgnStepReport apply(
+      core::SimulationState& state,
+      std::span<const BlackHoleSeedCandidate> seed_candidates,
+      double dt_code,
+      double scale_factor,
+      bool density_is_comoving,
+      std::uint64_t step_index,
+      ParticleIdPrecommit* id_precommit = nullptr) const;
+
+  // Compatibility overload for isolated/non-cosmological direct callers.
   [[nodiscard]] BlackHoleAgnStepReport apply(
       core::SimulationState& state,
       std::span<const BlackHoleSeedCandidate> seed_candidates,

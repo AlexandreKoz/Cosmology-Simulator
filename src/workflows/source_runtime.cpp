@@ -251,6 +251,19 @@ class SourceRuntimeImpl final : public SourceRuntime {
       throw std::logic_error("source runtime received a non-source stage");
     }
 
+    // SourceTerms executes after drift/hydro on the step-end state while the
+    // committed IntegratorState remains at the step beginning until commitStep().
+    // Make the physical evaluation epoch explicit so every source model sees
+    // the state and cosmological conversion from the same instant.
+    const double source_evaluation_scale_factor = m_is_cosmological
+        ? context.timeline_step.scale_factor_end
+        : 1.0;
+    if (!std::isfinite(source_evaluation_scale_factor) ||
+        source_evaluation_scale_factor <= 0.0) {
+      throw std::runtime_error(
+          "source runtime requires a finite positive source-stage scale factor");
+    }
+
     const std::size_t cell_count = context.state.cells.size();
     if (cell_count > 0U && m_star_formation.config().enabled) {
       std::span<const std::uint32_t> active_cells = context.active_set.cell_indices;
@@ -259,13 +272,13 @@ class SourceRuntimeImpl final : public SourceRuntime {
         std::iota(m_full_cell_indices.begin(), m_full_cell_indices.end(), 0U);
         active_cells = m_full_cell_indices;
       }
-      buildStarFormationInputs(context, active_cells);
+      buildStarFormationInputs(context, active_cells, source_evaluation_scale_factor);
       const std::size_t particle_count_before_birth = context.state.particles.size();
       const physics::StarFormationStepReport report = m_star_formation.applyFromInputs(
           context.state,
           m_star_formation_inputs,
           context.integrator_state.dt_time_code,
-          context.integrator_state.current_scale_factor,
+          source_evaluation_scale_factor,
           context.integrator_state.step_index,
           &m_particle_id_registry);
       if (report.counters.spawned_particles > 0U) {
@@ -276,10 +289,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
           throw std::runtime_error(
               "source runtime star-formation report disagrees with appended particle rows");
         }
-        // Gas cells are the hydro mass authority, while generic gas particles are
-        // compatibility/gravity mirrors. Refresh the affected aggregate authority
-        // once after the batch so the next gravity boundary cannot see both the
-        // pre-birth gas mass and the newborn stellar mass.
+        // Gas cells are the hydro and gas-gravity mass authority; generic gas
+        // particles are compatibility mirrors only. Refresh legacy mirrors once
+        // after the batch so I/O/adapter consumers observe the post-birth mass.
         internal::synchronizeParentParticleCompatibilityMirrors(
             context.state, m_world_rank, "SourceRuntime star-formation batch");
         if (context.newly_created_particle_ids != nullptr) {
@@ -305,13 +317,40 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
 
     executeStellarEvolutionAndEnrichment(context);
-    executeMetalDiffusion(context);
+    executeMetalDiffusion(context, source_evaluation_scale_factor);
 
-    (void)m_black_hole.apply(
+    const physics::BlackHoleAgnStepReport black_hole_report = m_black_hole.apply(
         context.state,
         m_seed_candidates,
         context.integrator_state.dt_time_code,
-        context.integrator_state.step_index);
+        source_evaluation_scale_factor,
+        m_coordinate_frame == core::CoordinateFrame::kComoving,
+        context.integrator_state.step_index,
+        &m_particle_id_registry);
+    if (black_hole_report.counters.gas_mass_removed_code > 0.0) {
+      // Generic gas particles are compatibility mirrors only. Keep them coherent
+      // for I/O/legacy consumers after the authoritative gas->BH transaction.
+      internal::synchronizeParentParticleCompatibilityMirrors(
+          context.state, m_world_rank, "SourceRuntime BH accretion/seeding batch");
+    }
+    if (!black_hole_report.seeded_particle_ids.empty()) {
+      if (context.newly_created_particle_ids != nullptr) {
+        context.newly_created_particle_ids->insert(
+            context.newly_created_particle_ids->end(),
+            black_hole_report.seeded_particle_ids.begin(),
+            black_hole_report.seeded_particle_ids.end());
+      }
+      if (context.particle_scheduler != nullptr) {
+        const std::uint64_t current_tick = context.particle_scheduler->currentTick();
+        if (current_tick == std::numeric_limits<std::uint64_t>::max()) {
+          throw std::overflow_error("source runtime BH activation tick overflows uint64");
+        }
+        context.particle_scheduler->appendElements(
+            static_cast<std::uint32_t>(black_hole_report.seeded_particle_ids.size()),
+            0U,
+            current_tick + 1U);
+      }
+    }
   }
 
  private:
@@ -455,13 +494,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
         "SourceRuntime stellar-evolution enrichment batch");
   }
 
-  void executeMetalDiffusion(core::StepContext& context) {
+  void executeMetalDiffusion(
+      core::StepContext& context,
+      double source_evaluation_scale_factor) {
     if (!m_metal_diffusion.config().enabled || context.state.cells.size() == 0U) {
       return;
     }
     buildOwnedLeafCellMetadata(context);
     const double scale_factor = m_coordinate_frame == core::CoordinateFrame::kComoving
-        ? std::max(context.integrator_state.current_scale_factor, 1.0e-12)
+        ? source_evaluation_scale_factor
         : 1.0;
     m_diffusion_cells.clear();
     m_diffusion_cells.resize(context.state.cells.size());
@@ -588,7 +629,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
 
   void buildStarFormationInputs(
       const core::StepContext& context,
-      std::span<const std::uint32_t> active_cells) {
+      std::span<const std::uint32_t> active_cells,
+      double source_evaluation_scale_factor) {
     const core::SimulationState& state = context.state;
     m_star_formation_inputs.clear();
     m_star_formation_inputs.reserve(active_cells.size());
@@ -602,7 +644,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
       }
     }
 
-    const double scale_factor = context.integrator_state.current_scale_factor;
+    const double scale_factor = source_evaluation_scale_factor;
     const double length_to_physical =
         m_coordinate_frame == core::CoordinateFrame::kComoving ? scale_factor : 1.0;
 

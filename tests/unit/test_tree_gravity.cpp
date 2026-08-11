@@ -466,6 +466,70 @@ void testTargetSpeciesSofteningFallback() {
   assert(std::abs(ax[0] - expected) < k_tolerance);
 }
 
+
+void testSourceGenerationRejectsStaleTree() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 1;
+  const std::vector<double> x{0.0, 1.0, 2.0};
+  const std::vector<double> y(3, 0.0);
+  const std::vector<double> z(3, 0.0);
+  const std::vector<double> mass(3, 1.0);
+  solver.build(x, y, z, mass, options, nullptr, {}, 41U);
+  const std::vector<std::uint32_t> active{0U};
+  std::vector<double> ax(1), ay(1), az(1);
+  bool threw = false;
+  try {
+    solver.evaluateActiveSet(x, y, z, mass, active, ax, ay, az, options, nullptr, {}, {}, 42U);
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testLegacyFingerprintRejectsSameSizeMutation() {
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 1;
+  std::vector<double> x{0.0, 1.0, 2.0};
+  const std::vector<double> y(3, 0.0);
+  const std::vector<double> z(3, 0.0);
+  const std::vector<double> mass(3, 1.0);
+  solver.build(x, y, z, mass, options, nullptr);
+  x[2] = 3.0;
+  const std::vector<std::uint32_t> active{0U};
+  std::vector<double> ax(1), ay(1), az(1);
+  bool threw = false;
+  try {
+    solver.evaluateActiveSet(x, y, z, mass, active, ax, ay, az, options, nullptr);
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testEveryMacOpensTargetContainingNode() {
+  const std::vector<double> x{0.0, 10.0};
+  const std::vector<double> y{0.0, 0.0};
+  const std::vector<double> z{0.0, 0.0};
+  const std::vector<double> mass{1.0, 1.0};
+  for (const auto criterion : {
+           cosmosim::gravity::TreeOpeningCriterion::kBarnesHutGeometric,
+           cosmosim::gravity::TreeOpeningCriterion::kBarnesHutComDistance,
+           cosmosim::gravity::TreeOpeningCriterion::kRelativeForceError}) {
+    cosmosim::gravity::TreeGravitySolver solver;
+    cosmosim::gravity::TreeGravityOptions options;
+    options.opening_criterion = criterion;
+    options.opening_theta = 100.0;
+    options.relative_force_tolerance = 100.0;
+    options.max_leaf_size = 1;
+    options.softening.epsilon_comoving = 0.0;
+    solver.build(x, y, z, mass, options, nullptr);
+    const auto got = evaluateOneTarget(solver, x, y, z, mass, options);
+    assert(std::abs(got.ax - 0.01) < 1.0e-12);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -480,5 +544,8 @@ int main() {
   testRelativeForceErrorMacValidatesOptionsAndHistoryShape();
   testPairSofteningUsesMaxRule();
   testTargetSpeciesSofteningFallback();
+  testSourceGenerationRejectsStaleTree();
+  testLegacyFingerprintRejectsSameSizeMutation();
+  testEveryMacOpensTargetContainingNode();
   return 0;
 }

@@ -48,6 +48,7 @@ struct TreeGravityProfile {
   std::uint64_t opened_nodes = 0;
   std::uint64_t particle_particle_interactions = 0;
   double average_interactions_per_target = 0.0;
+  std::uint64_t traversed_target_count = 0;
 };
 
 // Compact SoA tree node representation with fixed 8-way child fanout sidecars.
@@ -74,6 +75,9 @@ struct TreeNodeSoa {
   std::vector<double> second_moment_trace;
   std::vector<double> softening_min_comoving;
   std::vector<double> softening_max_comoving;
+  // Diagnostic index of the first direct child root created for this node.
+  // Direct children are not guaranteed contiguous because recursive insertion
+  // interleaves descendants; traversal must use child_index.
   std::vector<std::uint32_t> child_base;
   std::vector<std::uint8_t> child_count;
   std::vector<std::uint32_t> child_index;
@@ -93,6 +97,10 @@ class TreeGravitySolver {
     std::span<const double> pos_y_comoving;
     std::span<const double> pos_z_comoving;
     std::span<const double> mass_code;
+    // Non-zero generations are the preferred production contract. They must
+    // identify the exact immutable source state used to build the tree. A zero
+    // generation selects the legacy content-fingerprint fallback.
+    std::uint64_t source_generation = 0;
   };
 
   struct TreeGravityTargetView {
@@ -109,13 +117,20 @@ class TreeGravitySolver {
   TreeGravitySolver() = default;
 
   void build(
+      const TreeGravitySourceView& source_view,
+      const TreeGravityOptions& options,
+      TreeGravityProfile* profile = nullptr,
+      const TreeSofteningView& softening_view = {});
+
+  void build(
       std::span<const double> pos_x_comoving,
       std::span<const double> pos_y_comoving,
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
       const TreeGravityOptions& options,
       TreeGravityProfile* profile = nullptr,
-      const TreeSofteningView& softening_view = {});
+      const TreeSofteningView& softening_view = {},
+      std::uint64_t source_generation = 0);
 
   void evaluateActiveSet(
       const TreeGravitySourceView& source_view,
@@ -136,7 +151,8 @@ class TreeGravitySolver {
       const TreeGravityOptions& options,
       TreeGravityProfile* profile = nullptr,
       const TreeSofteningView& softening_view = {},
-      std::span<const double> previous_acceleration_magnitude_code = {}) const;
+      std::span<const double> previous_acceleration_magnitude_code = {},
+      std::uint64_t source_generation = 0) const;
 
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
@@ -166,6 +182,13 @@ class TreeGravitySolver {
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;
   std::vector<double> m_source_softening_epsilon_comoving;
+  std::vector<std::uint32_t> m_partition_scratch;
+  std::size_t m_build_source_count = 0;
+  std::uint64_t m_build_source_generation = 0;
+  std::uint64_t m_build_source_fingerprint = 0;
+  TreeMultipoleOrder m_build_multipole_order = TreeMultipoleOrder::kMonopole;
+  std::size_t m_build_max_leaf_size = 0;
+  TreeSofteningPolicy m_build_softening{};
 };
 
 }  // namespace cosmosim::gravity

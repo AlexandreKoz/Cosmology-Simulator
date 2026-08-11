@@ -157,10 +157,18 @@ void testBlackHoleAccretionUsesNarrowRuntimeView() {
       .cumulative_feedback_energy_code = state.black_holes.cumulative_feedback_energy_code,
       .duty_cycle_active_time_code = state.black_holes.duty_cycle_active_time_code,
       .duty_cycle_total_time_code = state.black_holes.duty_cycle_total_time_code,
+      .gas_mass_code = state.cells.mass_code,
       .gas_density_code = state.gas_cells.density_code,
+      .gas_metal_mass_code = state.gas_cells.metal_mass_code,
       .gas_sound_speed_code = state.gas_cells.sound_speed_code,
+      .gas_velocity_x_peculiar = state.gas_cells.velocity_x_peculiar,
+      .gas_velocity_y_peculiar = state.gas_cells.velocity_y_peculiar,
+      .gas_velocity_z_peculiar = state.gas_cells.velocity_z_peculiar,
       .gas_internal_energy_code = state.gas_cells.internal_energy_code,
       .particle_mass_code = state.particles.mass_code,
+      .particle_velocity_x_peculiar = state.particles.velocity_x_peculiar,
+      .particle_velocity_y_peculiar = state.particles.velocity_y_peculiar,
+      .particle_velocity_z_peculiar = state.particles.velocity_z_peculiar,
   };
   const auto counters = model.applyAccretionFromView(view, 0.01);
   assert(counters.scanned_bh == 1);
