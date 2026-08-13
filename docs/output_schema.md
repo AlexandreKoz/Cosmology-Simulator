@@ -220,7 +220,11 @@ payloads.
     `gravity_treepm_split_scale_mpc_comoving` (`r_s`),
     `gravity_treepm_cutoff_radius_mpc_comoving` (`r_cut`)
   - softening/backend: `gravity_softening_policy`, `gravity_softening_kernel`,
-    `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`
+    `gravity_softening_epsilon_kpc_comoving`, `gravity_pm_fft_backend`,
+    `gravity_pm_backend_capability`, `gravity_acceptance_profile_id`. The
+    acceptance profile remains `unverified_current_source` until external
+    source-bound release evidence is generated; the executable does not
+    self-certify.
   - restart/debug continuation metadata:
     - `gravity_treepm_decomposition_epoch`
     - `gravity_treepm_restart_world_size`

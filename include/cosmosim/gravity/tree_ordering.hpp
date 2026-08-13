@@ -5,11 +5,13 @@
 #include <span>
 #include <vector>
 
+#include "cosmosim/gravity/tree_index.hpp"
+
 namespace cosmosim::gravity {
 
 // Morton ordering helper for locality-friendly particle reindexing.
 struct TreeMortonOrdering {
-  std::vector<std::uint32_t> sorted_particle_index;
+  std::vector<TreeLocalIndex> sorted_particle_index;
   std::vector<std::uint64_t> morton_key;
 };
 

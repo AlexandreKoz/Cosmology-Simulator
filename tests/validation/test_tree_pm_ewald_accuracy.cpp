@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -30,6 +31,19 @@ constexpr double k_normalized_error_floor_fraction = 1.0e-3;
 constexpr double k_required_net_force_fraction = 1.0e-12;
 constexpr double k_required_periodic_translation_drift = 1.0e-11;
 constexpr double k_asmth_cells = 1.25;
+
+[[nodiscard]] double softeningRatioFromEnvironment() {
+  const char* raw = std::getenv("COSMOSIM_EWALD_SOFTENING_RATIO");
+  if (raw == nullptr || *raw == '\0') {
+    return 0.0;
+  }
+  const double ratio = std::stod(raw);
+  if (!std::isfinite(ratio) || ratio < 0.0 || ratio > 0.20) {
+    throw std::invalid_argument(
+        "COSMOSIM_EWALD_SOFTENING_RATIO must be finite and within the production analytic envelope [0,0.20]");
+  }
+  return ratio;
+}
 #if COSMOSIM_ENABLE_FFTW
 constexpr double k_rcut_cells = 6.25;
 #else
@@ -472,7 +486,6 @@ void validateFixture(const ParticleFixture& fixture) {
       solver_profile.relative_force_acceleration_floor_code;
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.max_leaf_size = solver_profile.max_leaf_size;
-  options.tree_options.softening.epsilon_comoving = 0.0;
 
   const double spacing_x = fixture.box.length_x / static_cast<double>(fixture.pm_shape.nx);
   const double spacing_y = fixture.box.length_y / static_cast<double>(fixture.pm_shape.ny);
@@ -480,6 +493,8 @@ void validateFixture(const ParticleFixture& fixture) {
   const double representative_spacing = std::cbrt(spacing_x * spacing_y * spacing_z);
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       k_asmth_cells, k_rcut_cells, representative_spacing);
+  options.tree_options.softening.epsilon_comoving =
+      softeningRatioFromEnvironment() * options.split_policy.split_scale_comoving;
   return options;
 }
 
@@ -938,7 +953,7 @@ void requirePhysicalInvariants(const AccuracyResult& result) {
           << " required<=" << requiredP99Normalized(result)
           << ", max=" << result.error.max_normalized
           << ", denominator_floor=" << result.error.normalized_floor
-          << ", epsilon=0, G=1, a=1, asmth=" << k_asmth_cells
+          << ", epsilon_over_rs=" << softeningRatioFromEnvironment() << ", G=1, a=1, asmth=" << k_asmth_cells
           << ", rcut=" << k_rcut_cells
           << ", theta=" << result.solver_profile.opening_theta
           << ", multipole=" << multipoleName(result.solver_profile.multipole_order)
@@ -979,7 +994,7 @@ void requireCertifiedAccuracy(const AccuracyResult& result) {
           << " required<=" << requiredRelativeL2(result)
           << ", p99=" << result.error.p99_normalized
           << " required<=" << requiredP99Normalized(result)
-          << ", epsilon=0, G=1, a=1, asmth=" << k_asmth_cells
+          << ", epsilon_over_rs=" << softeningRatioFromEnvironment() << ", G=1, a=1, asmth=" << k_asmth_cells
           << ", rcut=" << k_rcut_cells
           << ", theta=" << result.solver_profile.opening_theta
           << ", multipole=" << multipoleName(result.solver_profile.multipole_order)

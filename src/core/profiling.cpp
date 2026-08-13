@@ -187,7 +187,15 @@ void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int in
   out << indent << "{\n";
   out << field_indent << "\"persistent_total_bytes\": " << report.totals.persistent_total_bytes << ",\n";
   out << field_indent << "\"transient_total_bytes\": " << report.totals.transient_total_bytes << ",\n";
-  out << field_indent << "\"unknown_external_allocations\": true\n";
+  out << field_indent << "\"unknown_external_allocations\": true,\n";
+  out << field_indent << "\"distributed\": {\"valid\": "
+      << (report.distributed.valid ? "true" : "false")
+      << ", \"rank_count\": " << report.distributed.rank_count
+      << ", \"local_owned_bytes\": " << report.distributed.local_owned_bytes
+      << ", \"global_sum_owned_bytes\": " << report.distributed.global_sum_owned_bytes
+      << ", \"rank_max_owned_bytes\": " << report.distributed.rank_max_owned_bytes
+      << ", \"max_to_mean_imbalance_ratio\": "
+      << report.distributed.max_to_mean_imbalance_ratio << "}\n";
   out << indent << "}";
 }
 

@@ -466,6 +466,8 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   write_string("gravity_softening_kernel", record.gravity_softening_kernel);
   stream << "gravity_softening_epsilon_kpc_comoving=" << record.gravity_softening_epsilon_kpc_comoving << '\n';
   write_string("gravity_pm_fft_backend", record.gravity_pm_fft_backend);
+  write_string("gravity_pm_backend_capability", record.gravity_pm_backend_capability);
+  write_string("gravity_acceptance_profile_id", record.gravity_acceptance_profile_id);
   stream << "gravity_treepm_decomposition_epoch=" << record.gravity_treepm_decomposition_epoch << '\n';
   stream << "gravity_treepm_restart_world_size=" << record.gravity_treepm_restart_world_size << '\n';
   write_string("gravity_treepm_restart_pm_grid", record.gravity_treepm_restart_pm_grid);
@@ -642,6 +644,10 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_softening_epsilon_kpc_comoving = parseDoubleStrict(value, key);
     } else if (key == "gravity_pm_fft_backend") {
       record.gravity_pm_fft_backend = string_value(raw, key);
+    } else if (key == "gravity_pm_backend_capability") {
+      record.gravity_pm_backend_capability = string_value(raw, key);
+    } else if (key == "gravity_acceptance_profile_id") {
+      record.gravity_acceptance_profile_id = string_value(raw, key);
     } else if (key == "gravity_treepm_decomposition_epoch") {
       record.gravity_treepm_decomposition_epoch = parseUint64Strict(value, key);
     } else if (key == "gravity_treepm_restart_world_size") {

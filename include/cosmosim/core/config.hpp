@@ -238,6 +238,9 @@ struct NumericsConfig {
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;
   bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
+  // Explicitly test/diagnostic-only. Production workflows fail closed when
+  // TreePM is requested without a production FFT backend.
+  bool treepm_allow_diagnostic_naive_dft = false;
   PmDecompositionMode treepm_pm_decomposition_mode = PmDecompositionMode::kSlab;
   std::uint64_t treepm_tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
 };
@@ -422,6 +425,9 @@ struct ParallelConfig {
   double decomposition_measured_wall_ms_weight = 1.0;
   std::uint64_t isolated_pm_root_workspace_limit_bytes = 256ULL * 1024ULL * 1024ULL;
   std::uint64_t zoom_high_res_allgather_limit_bytes = 256ULL * 1024ULL * 1024ULL;
+  // Optional per-rank gravity peak budget. Zero disables the budget gate but
+  // never disables the estimator/report.
+  std::uint64_t gravity_memory_budget_bytes = 0U;
 };
 
 struct UnitsConfig {

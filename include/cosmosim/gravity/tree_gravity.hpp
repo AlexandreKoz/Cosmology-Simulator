@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/gravity/gravity_state_identity.hpp"
 #include "cosmosim/gravity/tree_ordering.hpp"
 #include "cosmosim/gravity/tree_softening.hpp"
 
@@ -49,6 +50,11 @@ struct TreeGravityProfile {
   std::uint64_t particle_particle_interactions = 0;
   double average_interactions_per_target = 0.0;
   std::uint64_t traversed_target_count = 0;
+  std::uint64_t estimated_node_reserve = 0;
+  std::uint64_t actual_node_count = 0;
+  std::uint64_t node_capacity_high_water = 0;
+  double morton_ordering_ms = 0.0;
+  double topology_build_ms = 0.0;
 };
 
 // Compact SoA tree node representation with fixed 8-way child fanout sidecars.
@@ -86,7 +92,7 @@ struct TreeNodeSoa {
 
   [[nodiscard]] std::size_t size() const;
   void clear();
-  void reserve(std::size_t count);
+  void reserve(std::size_t count, bool include_quadrupoles = true);
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 };
 
@@ -100,7 +106,7 @@ class TreeGravitySolver {
     // Non-zero generations are the preferred production contract. They must
     // identify the exact immutable source state used to build the tree. A zero
     // generation selects the legacy content-fingerprint fallback.
-    std::uint64_t source_generation = 0;
+    GravitySourceGeneration source_generation{};
   };
 
   struct TreeGravityTargetView {
@@ -130,7 +136,7 @@ class TreeGravitySolver {
       const TreeGravityOptions& options,
       TreeGravityProfile* profile = nullptr,
       const TreeSofteningView& softening_view = {},
-      std::uint64_t source_generation = 0);
+      GravitySourceGeneration source_generation = {});
 
   void evaluateActiveSet(
       const TreeGravitySourceView& source_view,
@@ -152,10 +158,12 @@ class TreeGravitySolver {
       TreeGravityProfile* profile = nullptr,
       const TreeSofteningView& softening_view = {},
       std::span<const double> previous_acceleration_magnitude_code = {},
-      std::uint64_t source_generation = 0) const;
+      GravitySourceGeneration source_generation = {}) const;
 
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
+  [[nodiscard]] TreeBuildGeneration treeBuildGeneration() const noexcept;
+  void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
   [[nodiscard]] bool built() const;
@@ -184,7 +192,9 @@ class TreeGravitySolver {
   std::vector<double> m_source_softening_epsilon_comoving;
   std::vector<std::uint32_t> m_partition_scratch;
   std::size_t m_build_source_count = 0;
-  std::uint64_t m_build_source_generation = 0;
+  GravitySourceGeneration m_build_source_generation{};
+  TreeBuildGeneration m_tree_build_generation{};
+  std::size_t m_node_capacity_high_water = 0U;
   std::uint64_t m_build_source_fingerprint = 0;
   TreeMultipoleOrder m_build_multipole_order = TreeMultipoleOrder::kMonopole;
   std::size_t m_build_max_leaf_size = 0;

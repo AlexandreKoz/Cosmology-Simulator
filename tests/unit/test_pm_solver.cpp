@@ -373,8 +373,23 @@ void testPotentialInterpolationCicConsistency() {
 }
 
 void testTreePmBuildGate() {
-  assert(cosmosim::gravity::treePmSupportedByBuild());
-  cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
+  const auto capability = cosmosim::gravity::pmBackendCapability();
+  assert(!cosmosim::gravity::pmBackendCapabilityName(capability).empty());
+  assert(cosmosim::gravity::treePmSupportedByBuild() ==
+         cosmosim::gravity::pmBackendProductionReady());
+  if (cosmosim::gravity::pmBackendProductionReady()) {
+    cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
+  } else {
+    bool rejected = false;
+    try {
+      cosmosim::gravity::requireTreePmSupportOrThrow(cosmosim::core::GravitySolver::kTreePm);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    assert(rejected);
+    cosmosim::gravity::requireTreePmSupportOrThrow(
+        cosmosim::core::GravitySolver::kTreePm, true);
+  }
   const std::string backend = cosmosim::gravity::PmSolver::fftBackendName();
   assert(!backend.empty());
 }
@@ -666,6 +681,45 @@ void testIsolatedOpenRectangularAssignmentAndInterpolationClipStencils() {
 }
 
 
+void testPmBackendArchitectureAndTopologyContract() {
+  const auto architecture = cosmosim::gravity::pmBackendArchitecture();
+  assert(architecture.capability == cosmosim::gravity::pmBackendCapability());
+  assert(!architecture.device_fft);
+  assert(!architecture.device_green_function);
+  assert(!architecture.persistent_device_buffers);
+
+  const cosmosim::gravity::PmGridShape shape{16U, 12U, 8U};
+  const cosmosim::parallel::PmSlabLayout serial_layout{
+      .global_nx = shape.nx,
+      .global_ny = shape.ny,
+      .global_nz = shape.nz,
+      .world_size = 1,
+      .world_rank = 0,
+      .owned_x = {.begin_x = 0U, .end_x = shape.nx},
+  };
+  const auto serial = cosmosim::gravity::describePmDecomposition(
+      shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  assert(serial.topology == cosmosim::gravity::PmDecompositionTopology::kSerial);
+  assert(serial.real_extent.x_count == shape.nx);
+  assert(serial.real_extent.y_count == shape.ny);
+  assert(serial.real_extent.z_count == shape.nz);
+
+  const cosmosim::parallel::PmSlabLayout distributed_layout{
+      .global_nx = shape.nx,
+      .global_ny = shape.ny,
+      .global_nz = shape.nz,
+      .world_size = 4,
+      .world_rank = 1,
+      .owned_x = {.begin_x = 4U, .end_x = 8U},
+  };
+  const auto transposed = cosmosim::gravity::describePmDecomposition(
+      shape, distributed_layout, cosmosim::core::PmDecompositionMode::kPencil);
+  assert(transposed.topology ==
+         cosmosim::gravity::PmDecompositionTopology::kXSlabTransposedSpectral);
+  assert(transposed.real_extent.x_begin == 4U);
+  assert(transposed.real_extent.x_count == 4U);
+}
+
 void testPmRejectsInvalidEnumsNegativeMassAndOverflow() {
   const cosmosim::gravity::PmGridShape shape{4, 4, 4};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -737,6 +791,7 @@ int main() {
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();
   testPmRejectsInvalidEnumsNegativeMassAndOverflow();
+  testPmBackendArchitectureAndTopologyContract();
 
 #if COSMOSIM_ENABLE_MPI
   MPI_Finalize();

@@ -141,7 +141,7 @@ struct PmInterpolationRequestRegistryEntry {
   int expected_sender_rank = -1;
 };
 
-[[nodiscard]] std::string pmRoutingDiagnostic(
+[[nodiscard, maybe_unused]] std::string pmRoutingDiagnostic(
     std::string_view stage,
     int receiver_rank,
     int sender_rank,
@@ -264,7 +264,7 @@ void readAndValidatePmWireHeader(
   }
 }
 
-void encodePmDensityRecord(
+[[maybe_unused]] void encodePmDensityRecord(
     const PmDensityContributionRecord& record,
     std::span<std::uint8_t> bytes) {
   if (bytes.size() != k_pm_density_wire_bytes) {
@@ -286,7 +286,7 @@ void encodePmDensityRecord(
   }
 }
 
-[[nodiscard]] PmDensityContributionRecord decodePmDensityRecord(
+[[nodiscard, maybe_unused]] PmDensityContributionRecord decodePmDensityRecord(
     std::span<const std::uint8_t> bytes) {
   constexpr std::string_view context = "PM density contribution";
   if (bytes.size() != k_pm_density_wire_bytes) {
@@ -310,7 +310,7 @@ void encodePmDensityRecord(
   return record;
 }
 
-void encodePmInterpolationRequest(
+[[maybe_unused]] void encodePmInterpolationRequest(
     const PmInterpolationRequestRecord& record,
     PmWireRecordKind kind,
     std::span<std::uint8_t> bytes) {
@@ -334,7 +334,7 @@ void encodePmInterpolationRequest(
   }
 }
 
-[[nodiscard]] PmInterpolationRequestRecord decodePmInterpolationRequest(
+[[nodiscard, maybe_unused]] PmInterpolationRequestRecord decodePmInterpolationRequest(
     std::span<const std::uint8_t> bytes,
     PmWireRecordKind expected_kind,
     std::string_view context) {
@@ -361,7 +361,7 @@ void encodePmInterpolationRequest(
   return record;
 }
 
-void encodePmForceResponse(
+[[maybe_unused]] void encodePmForceResponse(
     const PmForceContributionRecord& record,
     std::span<std::uint8_t> bytes) {
   if (bytes.size() != k_pm_force_response_wire_bytes) {
@@ -383,7 +383,7 @@ void encodePmForceResponse(
   }
 }
 
-[[nodiscard]] PmForceContributionRecord decodePmForceResponse(
+[[nodiscard, maybe_unused]] PmForceContributionRecord decodePmForceResponse(
     std::span<const std::uint8_t> bytes) {
   constexpr std::string_view context = "PM force response";
   if (bytes.size() != k_pm_force_response_wire_bytes) {
@@ -407,7 +407,7 @@ void encodePmForceResponse(
   return record;
 }
 
-void encodePmPotentialResponse(
+[[maybe_unused]] void encodePmPotentialResponse(
     const PmPotentialContributionRecord& record,
     std::span<std::uint8_t> bytes) {
   if (bytes.size() != k_pm_potential_response_wire_bytes) {
@@ -427,7 +427,7 @@ void encodePmPotentialResponse(
   }
 }
 
-[[nodiscard]] PmPotentialContributionRecord decodePmPotentialResponse(
+[[nodiscard, maybe_unused]] PmPotentialContributionRecord decodePmPotentialResponse(
     std::span<const std::uint8_t> bytes) {
   constexpr std::string_view context = "PM potential response";
   if (bytes.size() != k_pm_potential_response_wire_bytes) {
@@ -449,7 +449,7 @@ void encodePmPotentialResponse(
   return record;
 }
 
-[[nodiscard]] std::size_t checkedPmWireByteCount(
+[[nodiscard, maybe_unused]] std::size_t checkedPmWireByteCount(
     std::size_t record_count,
     std::size_t record_bytes,
     std::string_view context) {
@@ -1015,10 +1015,12 @@ class PmSolver::Impl {
 
   struct PlanKeyHasher {
     [[nodiscard]] std::size_t operator()(const PlanKey& key) const noexcept {
-      std::size_t seed = static_cast<std::size_t>(key.world_size * 1315423911U + key.world_rank);
-      seed ^= key.owned_begin_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-      seed ^= key.owned_end_x + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-      seed ^= static_cast<std::size_t>(key.decomposition_mode) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+      constexpr std::size_t k_hash_magic = static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
+      std::size_t seed = static_cast<std::size_t>(key.world_size) * static_cast<std::size_t>(1315423911U) +
+          static_cast<std::size_t>(key.world_rank);
+      seed ^= key.owned_begin_x + k_hash_magic + (seed << 6U) + (seed >> 2U);
+      seed ^= key.owned_end_x + k_hash_magic + (seed << 6U) + (seed >> 2U);
+      seed ^= static_cast<std::size_t>(key.decomposition_mode) + k_hash_magic + (seed << 6U) + (seed >> 2U);
       return seed;
     }
   };
@@ -1274,7 +1276,7 @@ class PmSolver::Impl {
           nz_complex,
           "PM local Fourier extent");
     }
-    std::size_t allocated_local_complex_size = expected_local_complex_size;
+    [[maybe_unused]] std::size_t allocated_local_complex_size = expected_local_complex_size;
 
 #if COSMOSIM_ENABLE_FFTW
 #if COSMOSIM_ENABLE_MPI
@@ -2069,8 +2071,11 @@ void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const
     builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kPmMesh,
                                        .lifetime = core::MemoryLifetime::kTransient,
                                        .label = std::move(label),
+                                       .current_size_bytes = core::currentSizeBytesForContainer(container),
                                        .owned_capacity_bytes = bytes,
-                                       .high_water_bytes = bytes});
+                                       .high_water_bytes = bytes,
+                                       .estimated_next_step_bytes = bytes,
+                                       .uncertainty_note = {}});
   };
   add("pm_mesh.density", m_density);
   add("pm_mesh.potential", m_potential);
@@ -5163,11 +5168,117 @@ std::size_t PmSolver::planBuildCount() const {
 }
 
 bool treePmSupportedByBuild() {
-  return true;
+  return pmBackendProductionReady();
 }
 
-void requireTreePmSupportOrThrow(core::GravitySolver gravity_solver) {
-  static_cast<void>(gravity_solver);
+PmBackendCapability pmBackendCapability() noexcept {
+#if COSMOSIM_ENABLE_FFTW
+  return PmBackendCapability::kProductionFftw;
+#else
+  return PmBackendCapability::kDiagnosticNaiveDft;
+#endif
+}
+
+std::string_view pmBackendCapabilityName(PmBackendCapability capability) noexcept {
+  switch (capability) {
+    case PmBackendCapability::kUnavailable:
+      return "unavailable";
+    case PmBackendCapability::kDiagnosticNaiveDft:
+      return "diagnostic_naive_dft";
+    case PmBackendCapability::kProductionFftw:
+      return "production_fftw";
+    case PmBackendCapability::kProductionCudaFft:
+      return "production_cuda_fft";
+  }
+  return "unknown";
+}
+
+bool pmBackendProductionReady() noexcept {
+  const PmBackendCapability capability = pmBackendCapability();
+  return capability == PmBackendCapability::kProductionFftw ||
+      capability == PmBackendCapability::kProductionCudaFft;
+}
+
+PmBackendArchitecture pmBackendArchitecture() noexcept {
+  PmBackendArchitecture architecture;
+  architecture.capability = pmBackendCapability();
+#if COSMOSIM_ENABLE_FFTW
+  architecture.host_fft = true;
+#endif
+#if COSMOSIM_ENABLE_CUDA
+  // The present CUDA path performs assignment/interpolation on device but
+  // returns through the host FFT solver. Keep the missing resident stages
+  // explicit so provenance/capability code cannot over-promote it.
+  architecture.device_assignment = true;
+  architecture.device_interpolation = true;
+#endif
+  return architecture;
+}
+
+std::string_view pmDecompositionTopologyName(PmDecompositionTopology topology) noexcept {
+  switch (topology) {
+    case PmDecompositionTopology::kSerial:
+      return "serial";
+    case PmDecompositionTopology::kXSlab:
+      return "x_slab";
+    case PmDecompositionTopology::kXSlabTransposedSpectral:
+      return "x_slab_transposed_spectral";
+    case PmDecompositionTopology::kPencil2D:
+      return "pencil_2d";
+  }
+  return "unknown";
+}
+
+PmDecompositionDescriptor describePmDecomposition(
+    PmGridShape shape,
+    const parallel::PmSlabLayout& layout,
+    core::PmDecompositionMode mode) {
+  if (!shape.isValid() || !layout.isValid() ||
+      layout.global_nx != shape.nx || layout.global_ny != shape.ny || layout.global_nz != shape.nz) {
+    throw std::invalid_argument("PM decomposition descriptor requires a valid layout matching the mesh shape");
+  }
+  PmDecompositionDescriptor descriptor;
+  descriptor.process_grid_x = static_cast<std::size_t>(std::max(layout.world_size, 1));
+  descriptor.process_grid_y = 1U;
+  descriptor.real_extent = PmOwnershipExtent3D{
+      .x_begin = layout.owned_x.begin_x,
+      .x_count = layout.local_nx(),
+      .y_begin = 0U,
+      .y_count = shape.ny,
+      .z_begin = 0U,
+      .z_count = shape.nz,
+  };
+  // Spectral ownership is backend-specific. The current transposed-slab FFTW
+  // implementation fills it internally; zero counts here deliberately mean
+  // "owned by the selected backend contract", not a fabricated pencil range.
+  if (layout.ownsFullDomain()) {
+    descriptor.topology = PmDecompositionTopology::kSerial;
+    descriptor.spectral_extent = descriptor.real_extent;
+  } else if (mode == core::PmDecompositionMode::kPencil) {
+    descriptor.topology = PmDecompositionTopology::kXSlabTransposedSpectral;
+  } else {
+    descriptor.topology = PmDecompositionTopology::kXSlab;
+  }
+  return descriptor;
+}
+
+void requireTreePmSupportOrThrow(
+    core::GravitySolver gravity_solver,
+    bool allow_diagnostic_naive_dft) {
+  if (gravity_solver != core::GravitySolver::kTreePm) {
+    return;
+  }
+  const PmBackendCapability capability = pmBackendCapability();
+  if (pmBackendProductionReady()) {
+    return;
+  }
+  if (capability == PmBackendCapability::kDiagnosticNaiveDft && allow_diagnostic_naive_dft) {
+    return;
+  }
+  throw std::runtime_error(
+      "TreePM production run requires a production FFT backend; this build exposes only " +
+      std::string(pmBackendCapabilityName(capability)) +
+      ". Enable FFTW or use the explicit diagnostic naive-DFT override for tiny validation cases.");
 }
 
 }  // namespace cosmosim::gravity

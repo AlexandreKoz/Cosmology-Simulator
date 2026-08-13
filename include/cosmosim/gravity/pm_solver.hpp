@@ -16,6 +16,53 @@
 
 namespace cosmosim::gravity {
 
+enum class PmBackendCapability : std::uint8_t {
+  kUnavailable = 0,
+  kDiagnosticNaiveDft = 1,
+  kProductionFftw = 2,
+  // Reserved for the future fully device-resident cuFFT path. The present
+  // CUDA staging implementation intentionally does not claim this tier.
+  kProductionCudaFft = 3,
+};
+
+struct PmBackendArchitecture {
+  PmBackendCapability capability = PmBackendCapability::kUnavailable;
+  bool host_fft = false;
+  bool device_assignment = false;
+  bool device_fft = false;
+  bool device_green_function = false;
+  bool device_interpolation = false;
+  bool persistent_device_buffers = false;
+};
+
+// The solver-facing ownership contract is intentionally topology-neutral. The
+// current production implementation supplies serial/x-slab and transposed
+// spectral slab extents; a future 2-D pencil backend can populate the same
+// descriptor without changing TreePM force ownership.
+enum class PmDecompositionTopology : std::uint8_t {
+  kSerial = 0,
+  kXSlab = 1,
+  kXSlabTransposedSpectral = 2,
+  kPencil2D = 3,
+};
+
+struct PmOwnershipExtent3D {
+  std::size_t x_begin = 0;
+  std::size_t x_count = 0;
+  std::size_t y_begin = 0;
+  std::size_t y_count = 0;
+  std::size_t z_begin = 0;
+  std::size_t z_count = 0;
+};
+
+struct PmDecompositionDescriptor {
+  PmDecompositionTopology topology = PmDecompositionTopology::kSerial;
+  std::size_t process_grid_x = 1;
+  std::size_t process_grid_y = 1;
+  PmOwnershipExtent3D real_extent{};
+  PmOwnershipExtent3D spectral_extent{};
+};
+
 enum class PmAssignmentScheme {
   kCic,
   kTsc,
@@ -292,6 +339,17 @@ class PmSolver {
 };
 
 [[nodiscard]] bool treePmSupportedByBuild();
-void requireTreePmSupportOrThrow(core::GravitySolver gravity_solver);
+[[nodiscard]] PmBackendCapability pmBackendCapability() noexcept;
+[[nodiscard]] std::string_view pmBackendCapabilityName(PmBackendCapability capability) noexcept;
+[[nodiscard]] bool pmBackendProductionReady() noexcept;
+[[nodiscard]] PmBackendArchitecture pmBackendArchitecture() noexcept;
+[[nodiscard]] std::string_view pmDecompositionTopologyName(PmDecompositionTopology topology) noexcept;
+[[nodiscard]] PmDecompositionDescriptor describePmDecomposition(
+    PmGridShape shape,
+    const parallel::PmSlabLayout& layout,
+    core::PmDecompositionMode mode);
+void requireTreePmSupportOrThrow(
+    core::GravitySolver gravity_solver,
+    bool allow_diagnostic_naive_dft = false);
 
 }  // namespace cosmosim::gravity

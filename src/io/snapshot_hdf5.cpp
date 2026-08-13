@@ -1230,6 +1230,14 @@ void writeScienceSnapshotHdf5(
       provenance_group.get(),
       "gravity_pm_fft_backend",
       payload.provenance.gravity_pm_fft_backend);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_pm_backend_capability",
+      payload.provenance.gravity_pm_backend_capability);
+  writeScalarStringAttribute(
+      provenance_group.get(),
+      "gravity_acceptance_profile_id",
+      payload.provenance.gravity_acceptance_profile_id);
 
   for (std::size_t type_index = 0; type_index < schema.part_type_group.size(); ++type_index) {
     const std::size_t row_count = static_cast<std::size_t>(count_by_type[type_index]);
@@ -2592,6 +2600,14 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         provenance_group.get(),
         "gravity_pm_fft_backend",
         result.provenance.gravity_pm_fft_backend);
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_pm_backend_capability",
+        result.provenance.gravity_pm_backend_capability);
+    readScalarStringAttribute(
+        provenance_group.get(),
+        "gravity_acceptance_profile_id",
+        result.provenance.gravity_acceptance_profile_id);
     if (result.provenance.gravity_treepm_pm_grid_nx == 0 && result.provenance.gravity_treepm_pm_grid > 0) {
       result.provenance.gravity_treepm_pm_grid_nx = result.provenance.gravity_treepm_pm_grid;
       result.provenance.gravity_treepm_pm_grid_ny = result.provenance.gravity_treepm_pm_grid;

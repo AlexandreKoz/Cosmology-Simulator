@@ -20,6 +20,7 @@ int main() {
   in.config_schema_version = "1";
   in.raw_input_config = "schema_version = 1\nmode = zoom_in\n";
   in.normalized_config = "schema_version = 1\nmode.mode = zoom_in\n";
+  in.normalized_config_sha256_hex = cosmosim::core::strongConfigHashSha256Hex(in.normalized_config);
   in.derived_runtime_state = "t_code_begin=0\nt_code_end=1\n";
   in.timestamp_utc = "2026-04-05T00:00:00Z";
   in.hardware_summary = "logical_threads=8";
@@ -49,6 +50,8 @@ int main() {
   in.gravity_softening_kernel = "plummer";
   in.gravity_softening_epsilon_kpc_comoving = 1.0;
   in.gravity_pm_fft_backend = "fftw3";
+  in.gravity_pm_backend_capability = "production_fftw";
+  in.gravity_acceptance_profile_id = "test-profile";
 
   cosmosim::core::writeProvenanceRecord(in, run_directory);
 
@@ -98,11 +101,16 @@ int main() {
   assert(out.gravity_softening_kernel == in.gravity_softening_kernel);
   assert(out.gravity_softening_epsilon_kpc_comoving == in.gravity_softening_epsilon_kpc_comoving);
   assert(out.gravity_pm_fft_backend == in.gravity_pm_fft_backend);
+  assert(out.gravity_pm_backend_capability == in.gravity_pm_backend_capability);
+  assert(out.gravity_acceptance_profile_id == in.gravity_acceptance_profile_id);
 
   const cosmosim::core::ProvenanceRecord legacy = cosmosim::core::deserializeProvenanceRecord(
-      "schema_version=provenance_v5\n"
+      "schema_version=provenance_v6\n"
+      "config_schema_name=cosmosim_config\n"
+      "config_schema_version=1\n"
+      "config_hash_hex=deadbeefdeadbeef\n"
       "gravity_treepm_pm_grid=32\n");
-  assert(legacy.schema_version == "provenance_v5");
+  assert(legacy.schema_version == "provenance_v6");
   assert(legacy.gravity_treepm_tree_opening_criterion == "com_distance");
   assert(legacy.gravity_treepm_tree_opening_theta == 0.7);
   assert(legacy.gravity_treepm_tree_relative_force_tolerance == 0.005);

@@ -1,5 +1,8 @@
 # Gravity production readiness
 
+> **Historical acceptance record.** This page contains pre-future-proofing gravity evidence and is not a current solver certificate. Current acceptance is governed by `docs/gravity_acceptance_manifest.md`; any material gravity/parallel/integration source change invalidates previous evidence until the source-bound manifest is rerun.
+
+
 _Current-state assessment: 2026-07-13. Historical Phase 2/Phase 3 closeout
 documents remain historical records; this file is the current gravity status._
 

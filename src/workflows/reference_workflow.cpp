@@ -554,13 +554,36 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             {"softening_kernel", "plummer"},
             {"softening_epsilon_kpc_comoving", formatRuntimeDouble(config.numerics.gravity_softening_kpc_comoving)},
             {"pm_fft_backend", gravity::PmSolver::fftBackendName()},
+            {"pm_backend_capability", std::string(gravity::pmBackendCapabilityName(gravity::pmBackendCapability()))},
+            {"gravity_acceptance_profile_id", "unverified_current_source"},
         },
     });
     {
       const std::array startup_reports{
           core::collectSimulationMemoryReport(state),
           gravity_callback.memoryReport()};
-      profiler.setMemoryReport(core::mergeMemoryReports(startup_reports));
+      core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
+      const std::uint64_t local_owned_memory =
+          merged_startup_memory_report.totals.persistent_total_bytes +
+          merged_startup_memory_report.totals.transient_total_bytes;
+      const std::uint64_t global_owned_memory =
+          runtime_services.mpi_context.allreduceSumUint64(local_owned_memory);
+      const std::uint64_t rank_max_owned_memory =
+          runtime_services.mpi_context.allreduceMaxUint64(local_owned_memory);
+      const int memory_rank_count = std::max(runtime_services.mpi_context.worldSize(), 1);
+      const double mean_owned_memory =
+          static_cast<double>(global_owned_memory) / static_cast<double>(memory_rank_count);
+      merged_startup_memory_report.distributed = core::DistributedMemorySummary{
+          .valid = true,
+          .rank_count = memory_rank_count,
+          .local_owned_bytes = local_owned_memory,
+          .global_sum_owned_bytes = global_owned_memory,
+          .rank_max_owned_bytes = rank_max_owned_memory,
+          .max_to_mean_imbalance_ratio = mean_owned_memory > 0.0
+              ? static_cast<double>(rank_max_owned_memory) / mean_owned_memory
+              : 0.0,
+      };
+      profiler.setMemoryReport(std::move(merged_startup_memory_report));
       const core::MemoryReport* runtime_memory_report = profiler.memoryReport();
       if (runtime_memory_report != nullptr) {
         profiler.recordEvent(core::RuntimeEvent{
@@ -573,7 +596,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             .message = "startup memory accounting snapshot including gravity solver workspaces",
             .payload = {{"persistent_total_bytes", std::to_string(runtime_memory_report->totals.persistent_total_bytes)},
                         {"transient_total_bytes", std::to_string(runtime_memory_report->totals.transient_total_bytes)},
-                        {"unknown_total_bytes", std::to_string(runtime_memory_report->totals.unknown_total_bytes)}},
+                        {"unknown_total_bytes", std::to_string(runtime_memory_report->totals.unknown_total_bytes)},
+                        {"rank_max_owned_bytes", std::to_string(runtime_memory_report->distributed.rank_max_owned_bytes)},
+                        {"global_sum_owned_bytes", std::to_string(runtime_memory_report->distributed.global_sum_owned_bytes)},
+                        {"memory_imbalance_ratio", formatRuntimeDouble(runtime_memory_report->distributed.max_to_mean_imbalance_ratio)}},
       });
     }
   }

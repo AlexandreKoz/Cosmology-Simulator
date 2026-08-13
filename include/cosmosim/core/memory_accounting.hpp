@@ -34,9 +34,16 @@ struct MemoryEntry {
   MemorySubsystem subsystem = MemorySubsystem::kParticles;
   MemoryLifetime lifetime = MemoryLifetime::kUnknown;
   std::string label;
+  // Bytes currently occupied by live elements. Capacity is reported
+  // separately because reusable HPC workspaces intentionally retain storage
+  // between steps.
+  std::uint64_t current_size_bytes = 0;
   std::uint64_t owned_capacity_bytes = 0;
   std::uint64_t referenced_bytes = 0;
   std::uint64_t high_water_bytes = 0;
+  // Best estimate for the next force/integration boundary. A zero value means
+  // that the owning component does not have a meaningful prediction yet.
+  std::uint64_t estimated_next_step_bytes = 0;
   bool estimate_only = false;
   std::string uncertainty_note;
 };
@@ -50,10 +57,20 @@ struct MemoryTotals {
   std::uint64_t unknown_total_bytes = 0;
 };
 
+struct DistributedMemorySummary {
+  bool valid = false;
+  int rank_count = 1;
+  std::uint64_t local_owned_bytes = 0;
+  std::uint64_t global_sum_owned_bytes = 0;
+  std::uint64_t rank_max_owned_bytes = 0;
+  double max_to_mean_imbalance_ratio = 1.0;
+};
+
 struct MemoryReport {
   std::vector<MemoryEntry> entries;
   MemoryTotals totals;
   std::vector<std::string> notes;
+  DistributedMemorySummary distributed{};
 };
 
 struct MemoryBudgetEstimateInput {
@@ -89,6 +106,16 @@ template <typename T>
   constexpr std::uint64_t k_element_bytes = static_cast<std::uint64_t>(sizeof(typename T::value_type));
   if (count > std::numeric_limits<std::uint64_t>::max() / k_element_bytes) {
     throw std::overflow_error("memory-accounting container capacity byte count overflow");
+  }
+  return count * k_element_bytes;
+}
+
+template <typename T>
+[[nodiscard]] std::uint64_t currentSizeBytesForContainer(const T& container) {
+  const std::uint64_t count = static_cast<std::uint64_t>(container.size());
+  constexpr std::uint64_t k_element_bytes = static_cast<std::uint64_t>(sizeof(typename T::value_type));
+  if (count > std::numeric_limits<std::uint64_t>::max() / k_element_bytes) {
+    throw std::overflow_error("memory-accounting container size byte count overflow");
   }
   return count * k_element_bytes;
 }

@@ -452,9 +452,16 @@ std::string formatMemoryReportHumanReadable(const MemoryReport& report) {
       << " unknown_total_bytes=" << report.totals.unknown_total_bytes << "\n";
   for (const MemoryEntry& entry : report.entries) {
     out << " - subsystem=" << memorySubsystemLabel(entry.subsystem) << " lifetime=" << memoryLifetimeLabel(entry.lifetime)
-        << " label=" << entry.label << " owned_capacity_bytes=" << entry.owned_capacity_bytes;
+        << " label=" << entry.label;
+    if (entry.current_size_bytes > 0) {
+      out << " current_size_bytes=" << entry.current_size_bytes;
+    }
+    out << " owned_capacity_bytes=" << entry.owned_capacity_bytes;
     if (entry.high_water_bytes > 0) {
       out << " high_water_bytes=" << entry.high_water_bytes;
+    }
+    if (entry.estimated_next_step_bytes > 0) {
+      out << " estimated_next_step_bytes=" << entry.estimated_next_step_bytes;
     }
     if (entry.referenced_bytes > 0) {
       out << " referenced_bytes=" << entry.referenced_bytes;

@@ -355,16 +355,33 @@ periodic rings, same-peer left/right exchange, `Nx < world_size` zero-width
 slabs, and the single-global-plane local-copy case. All three rank counts passed
 in the 2026-07-13 MPI+HDF5+FFTW run.
 
-### Pencil-transposed distributed PM path (current implementation)
+### Transposed-slab distributed PM path and future pencil contract
 
-`numerics.treepm_pm_decomposition_mode = pencil` now activates a transposed distributed FFT path
-when FFTW+MPI distributed plans are available. The path is explicit and does not alias slab mode:
+`numerics.treepm_pm_decomposition_mode = pencil` currently activates FFTW's
+transposed spectral ownership over x-slab real-space ownership when FFTW+MPI
+distributed plans are available. It is an alternate transposed-slab backend,
+not a true 2-D process-grid pencil decomposition:
 
 - real-space ownership remains x-slab (`PmSlabLayout`) for particle-owner deposition/interpolation,
 - forward FFT uses `fftw_mpi_plan_dft_r2c_3d(..., FFTW_MPI_TRANSPOSED_OUT)` and switches spectral ownership to y-partitioned transposed storage,
 - inverse FFT uses `FFTW_MPI_TRANSPOSED_IN` to return from transposed spectral ownership back to x-slab real-space ownership.
 
-This gives a real end-to-end alternate decomposition mode with explicit transpose ownership and sequence while preserving existing slab semantics as fallback.
+The solver-facing `PmDecompositionDescriptor` is now topology-neutral and can
+represent serial, x-slab, transposed-slab spectral ownership, and a future true
+2-D pencil process grid without changing TreePM force ownership. No in-house FFT
+implementation is fabricated by this refactor.
+
+## PM backend capability tiers
+
+Backend existence is separate from production capability. The non-FFTW direct
+DFT is `DiagnosticNaiveDft`; FFTW is `ProductionFftw`. The current CUDA path may
+perform device assignment/interpolation but still uses a host FFT, so it does
+not claim the reserved `ProductionCudaFft` tier. Production TreePM never silently
+falls back to the diagnostic DFT; only the explicit
+`treepm_allow_diagnostic_naive_dft=true` test/diagnostic override permits it.
+`PmBackendArchitecture` records host/device ownership so a future persistent,
+device-resident cuFFT backend can be added without relabeling today's staging
+path.
 
 ## Long-range field cadence and reuse
 

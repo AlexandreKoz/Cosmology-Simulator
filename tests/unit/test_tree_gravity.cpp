@@ -5,11 +5,23 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
+#include "cosmosim/gravity/gravity_memory.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 
 namespace {
+
+static_assert(!std::is_assignable_v<
+    cosmosim::gravity::GravitySourceGeneration&,
+    cosmosim::gravity::PmFieldVersion>);
+static_assert(!std::is_assignable_v<
+    cosmosim::gravity::TreeBuildGeneration&,
+    cosmosim::gravity::DecompositionEpoch>);
+static_assert(!std::is_convertible_v<
+    cosmosim::gravity::ForceEvaluationEpoch,
+    cosmosim::gravity::GravitySourceGeneration>);
 
 constexpr double k_tolerance = 1.0e-10;
 
@@ -475,12 +487,12 @@ void testSourceGenerationRejectsStaleTree() {
   const std::vector<double> y(3, 0.0);
   const std::vector<double> z(3, 0.0);
   const std::vector<double> mass(3, 1.0);
-  solver.build(x, y, z, mass, options, nullptr, {}, 41U);
+  solver.build(x, y, z, mass, options, nullptr, {}, cosmosim::gravity::GravitySourceGeneration{41U});
   const std::vector<std::uint32_t> active{0U};
   std::vector<double> ax(1), ay(1), az(1);
   bool threw = false;
   try {
-    solver.evaluateActiveSet(x, y, z, mass, active, ax, ay, az, options, nullptr, {}, {}, 42U);
+    solver.evaluateActiveSet(x, y, z, mass, active, ax, ay, az, options, nullptr, {}, {}, cosmosim::gravity::GravitySourceGeneration{42U});
   } catch (const std::logic_error&) {
     threw = true;
   }
@@ -530,6 +542,118 @@ void testEveryMacOpensTargetContainingNode() {
   }
 }
 
+
+void testAdaptiveNodeReserveAndMemoryEstimate() {
+  constexpr std::size_t n = 1024;
+  std::vector<double> x(n), y(n), z(n), mass(n, 1.0);
+  for (std::size_t i = 0; i < n; ++i) {
+    x[i] = static_cast<double>(i % 16U) / 16.0;
+    y[i] = static_cast<double>((i / 16U) % 8U) / 8.0;
+    z[i] = static_cast<double>(i / 128U) / 8.0;
+  }
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 16;
+  cosmosim::gravity::TreeGravitySolver solver;
+  cosmosim::gravity::TreeGravityProfile profile;
+  solver.build(x, y, z, mass, options, &profile);
+  assert(profile.estimated_node_reserve < 2U * n);
+  assert(profile.actual_node_count == solver.nodes().size());
+  assert(profile.node_capacity_high_water >= profile.actual_node_count);
+
+  const auto estimate = cosmosim::gravity::estimateGravityMemory({
+      .local_source_count = n,
+      .local_target_count = n,
+      .tree_leaf_size = options.max_leaf_size,
+      .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kMonopole,
+      .pm_shape = {32U, 32U, 32U},
+      .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kCic,
+      .decomposition_mode = cosmosim::core::PmDecompositionMode::kSlab,
+      .mpi_rank_count = 1U,
+  });
+  assert(estimate.known_peak_bytes > 0U);
+  bool budget_rejected = false;
+  try {
+    cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.known_peak_bytes - 1U);
+  } catch (const std::runtime_error&) {
+    budget_rejected = true;
+  }
+  assert(budget_rejected);
+  cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.known_peak_bytes);
+}
+
+void testGasRefinementForceConvergesAtFixedMassAndCom() {
+  constexpr double epsilon = 0.05;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 1U;
+  options.opening_theta = 1.0e-8;
+  options.gravitational_constant_code = 1.0;
+  options.softening.epsilon_comoving = epsilon;
+
+  const auto evaluate_target = [&](const std::vector<double>& source_x,
+                                   const std::vector<double>& source_mass,
+                                   std::uint32_t target_index) {
+    const std::vector<double> zeros(source_x.size(), 0.0);
+    cosmosim::gravity::TreeGravitySolver solver;
+    solver.build(source_x, zeros, zeros, source_mass, options);
+    const std::vector<std::uint32_t> active{target_index};
+    std::vector<double> ax(1, 0.0), ay(1, 0.0), az(1, 0.0);
+    solver.evaluateActiveSet(
+        source_x, zeros, zeros, source_mass, active, ax, ay, az, options);
+    return ax[0];
+  };
+
+  // A zero-mass target at x=10 observes either one coarse source at the COM
+  // or two symmetric child leaves conserving total mass and COM. Refinement
+  // changes the resolved density representation, so exact equality is not the
+  // contract; the far-field difference should be small and non-zero.
+  const double coarse_ax = evaluate_target(
+      std::vector<double>{0.0, 10.0},
+      std::vector<double>{4.0, 0.0},
+      1U);
+  const double refined_ax = evaluate_target(
+      std::vector<double>{-0.1, 0.1, 10.0},
+      std::vector<double>{2.0, 2.0, 0.0},
+      2U);
+  const double relative_difference =
+      std::abs(refined_ax - coarse_ax) / std::abs(coarse_ax);
+  assert(relative_difference > 0.0);
+  assert(relative_difference < 1.0e-3);
+}
+
+void testAuthoritativeGasGeometryMatchesDirectSoftenedReference() {
+  // Rows 1 and 2 model distinct authoritative leaf gas cells. Their lineage
+  // metadata is deliberately irrelevant to gravity: geometry/mass define the
+  // physical sources, so siblings remain distinct and self force is excluded.
+  const std::vector<double> x{0.0, 1.0, 2.5};
+  const std::vector<double> y{0.0, 0.0, 0.0};
+  const std::vector<double> z{0.0, 0.0, 0.0};
+  const std::vector<double> mass{3.0, 2.0, 4.0};
+  constexpr double epsilon = 0.075;
+  cosmosim::gravity::TreeGravityOptions options;
+  options.max_leaf_size = 1;
+  options.opening_theta = 1.0e-6;  // force the direct leaf corpus
+  options.gravitational_constant_code = 1.7;
+  options.softening.epsilon_comoving = epsilon;
+
+  cosmosim::gravity::TreeGravitySolver solver;
+  solver.build(x, y, z, mass, options);
+  const std::vector<std::uint32_t> active{1U};
+  std::vector<double> ax(1, 0.0), ay(1, 0.0), az(1, 0.0);
+  solver.evaluateActiveSet(x, y, z, mass, active, ax, ay, az, options);
+
+  double expected_ax = 0.0;
+  for (std::size_t source = 0; source < x.size(); ++source) {
+    if (source == 1U) continue;
+    const double dx = x[source] - x[1];
+    const double r2 = dx * dx;
+    expected_ax += options.gravitational_constant_code * mass[source] * dx *
+        cosmosim::gravity::softenedInvR3(r2, epsilon);
+  }
+  assert(std::abs(ax[0] - expected_ax) < 1.0e-12);
+  assert(std::abs(ay[0]) < 1.0e-14);
+  assert(std::abs(az[0]) < 1.0e-14);
+}
+
 }  // namespace
 
 int main() {
@@ -547,5 +671,8 @@ int main() {
   testSourceGenerationRejectsStaleTree();
   testLegacyFingerprintRejectsSameSizeMutation();
   testEveryMacOpensTargetContainingNode();
+  testAdaptiveNodeReserveAndMemoryEstimate();
+  testAuthoritativeGasGeometryMatchesDirectSoftenedReference();
+  testGasRefinementForceConvergesAtFixedMassAndCom();
   return 0;
 }

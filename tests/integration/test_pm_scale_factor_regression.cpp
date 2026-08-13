@@ -14,7 +14,7 @@ int main() {
   std::vector<double> x{0.25, 0.75};
   std::vector<double> y{0.5, 0.5};
   std::vector<double> z{0.5, 0.5};
-  std::vector<double> m{1.0, -1.0};
+  std::vector<double> m{1.0, 2.0};
 
   cosmosim::gravity::PmSolveOptions opts;
   opts.box_size_x_mpc_comoving = 1.0;

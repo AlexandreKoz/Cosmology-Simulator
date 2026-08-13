@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/gravity/gravity_state_identity.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
@@ -50,13 +51,14 @@ struct TreePmOptions {
   // Runtime identity carried by every distributed short-range request and
   // response. The workflow owns these epochs; the coordinator owns only its
   // per-instance exchange sequence.
-  std::uint64_t decomposition_epoch = 0;
+  DecompositionEpoch decomposition_epoch{};
   // Monotonic identity of the physical source snapshot represented by a PM
   // field. Reuse is legal only when this generation still matches. The
   // workflow owns this token; it must advance when source positions/masses or
   // source membership change.
-  std::uint64_t source_generation = 0;
-  std::uint64_t force_epoch = 0;
+  GravitySourceGeneration source_generation{};
+  PmFieldVersion pm_field_version{};
+  ForceEvaluationEpoch force_epoch{};
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
   std::uint64_t zoom_high_res_allgather_limit_bytes = 256ULL * 1024ULL * 1024ULL;
 };
@@ -69,6 +71,19 @@ struct TreePmDiagnostics {
   std::uint64_t local_tree_node_count = 0;
   std::uint64_t remote_hierarchy_packet_count = 0;
   std::uint64_t communicating_peer_count = 0;
+  std::uint64_t top_level_domain_leaf_count = 0;
+  std::uint64_t let_candidate_peer_count = 0;
+  std::uint64_t let_exported_target_count = 0;
+  std::uint64_t let_imported_target_count = 0;
+  std::uint64_t let_wire_bytes_sent = 0;
+  std::uint64_t let_wire_bytes_received = 0;
+  std::uint64_t let_high_water_bytes = 0;
+  double let_discovery_ms = 0.0;
+  double let_communication_ms = 0.0;
+  double let_overlap_local_work_ms = 0.0;
+  double let_communication_wait_ms = 0.0;
+  double let_overlap_efficiency = 0.0;
+  double let_remote_traversal_ms = 0.0;
   std::uint64_t pm_solve_count = 0;
   std::uint64_t pm_reuse_count = 0;
   std::uint64_t pm_halo_value_count = 0;
@@ -127,6 +142,13 @@ struct TreePmProfileEvent {
   TreeGravityProfile tree_profile{};
   double tree_short_range_ms = 0.0;
   double coupling_overhead_ms = 0.0;
+  double source_preprocess_ms = 0.0;
+  double let_discovery_ms = 0.0;
+  double let_communication_ms = 0.0;
+  double let_overlap_local_work_ms = 0.0;
+  double let_communication_wait_ms = 0.0;
+  double let_overlap_efficiency = 0.0;
+  double remote_traversal_ms = 0.0;
 };
 
 // Thin coordinator that makes TreePM ownership explicit and auditable.
@@ -184,6 +206,19 @@ class TreePmCoordinator {
     std::uint64_t remote_response_packets = 0;
     std::uint64_t remote_hierarchy_packets = 0;
     std::uint64_t communicating_peer_count = 0;
+    std::uint64_t top_level_domain_leaf_count = 0;
+    std::uint64_t let_candidate_peer_count = 0;
+    std::uint64_t let_exported_target_count = 0;
+    std::uint64_t let_imported_target_count = 0;
+    std::uint64_t let_wire_bytes_sent = 0;
+    std::uint64_t let_wire_bytes_received = 0;
+    std::uint64_t let_high_water_bytes = 0;
+    double let_discovery_ms = 0.0;
+    double let_communication_ms = 0.0;
+    double let_overlap_local_work_ms = 0.0;
+    double let_communication_wait_ms = 0.0;
+    double let_overlap_efficiency = 0.0;
+    double let_remote_traversal_ms = 0.0;
     std::uint64_t remote_request_bytes = 0;
     std::uint64_t remote_response_bytes = 0;
     std::uint64_t remote_request_batches = 0;
@@ -249,11 +284,19 @@ class TreePmCoordinator {
   parallel::PmSlabHaloExchangeResult m_last_pm_slab_halo_exchange{};
   std::uint64_t m_pm_halo_exchange_sequence = 0;
   std::uint64_t m_tree_exchange_sequence = 0;
+  struct LetDomainCache {
+    bool valid = false;
+    DecompositionEpoch decomposition_epoch{};
+    GravitySourceGeneration source_generation{};
+    TreeBuildGeneration tree_build_generation{};
+    std::vector<parallel::TreePseudoParticlePacket> top_level_domain_leaves;
+  } m_let_domain_cache;
   struct LongRangeFieldValidity {
     bool valid = false;
-    std::uint64_t decomposition_epoch = 0;
-    std::uint64_t source_generation = 0;
-    std::uint64_t force_epoch = 0;
+    DecompositionEpoch decomposition_epoch{};
+    GravitySourceGeneration source_generation{};
+    PmFieldVersion pm_field_version{};
+    ForceEvaluationEpoch last_force_epoch{};
     double scale_factor = 0.0;
     double gravitational_constant_code = 0.0;
     double split_scale_comoving = 0.0;

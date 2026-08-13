@@ -233,6 +233,10 @@ Time/scale semantics (anti-ambiguity contract):
   - `treepm_update_cadence_steps` (int, default and currently required value
     `1`; every integrator-issued production force-refresh surface rebuilds the
     PM long-range field)
+  - `treepm_allow_diagnostic_naive_dft` (bool, default `false`; explicit
+    diagnostic/test override permitting the tiny-grid non-FFTW DFT backend.
+    Production TreePM fails before evolution when no production FFT backend is
+    available and this override is false)
   - `treepm_pm_decomposition_mode` (`slab` or `pencil`; default `slab`; `pencil` selects FFTW-MPI transposed spectral ownership while real-space particle deposition/interpolation retains x-slab ownership)
   - `treepm_tree_exchange_batch_bytes` (uint64 bytes, default `4194304`; cap for tree export/import payload chunking in distributed gravity paths)
 
@@ -440,6 +444,7 @@ GPU execution contract:
 - `decomposition_runtime_rebalance_enabled`
 - `decomposition_debug_exact_ownership_audit` (default `false`): keep the routine runtime rebalance path on distributed compact SFC-cut metadata, but run the exact global ownership partition audit after a migration commit in debug/small MPI runs. This exact audit is read-only evidence and is not a production ownership authority.
 - `isolated_pm_root_workspace_limit_bytes` (default `268435456`): maximum rank-0 transient workspace allowed for the current isolated/open PM root-gather path. Multi-rank isolated PM is accepted only inside this explicit small-grid budget and diagnostics must not describe it as scalable.
+- `gravity_memory_budget_bytes` (default `0`, meaning unlimited): gravity-only checked pre-run known-peak budget. The estimator composes runtime staging, tree, PM, and communication workspace and reports external FFT/CUDA allocations separately when their exact size remains backend-owned. Requests above a nonzero budget fail before O(N) gravity staging/tree allocation.
 - `zoom_high_res_allgather_limit_bytes` (default `268435456`): maximum transient four-field high-resolution source payload allowed for the current focused zoom PM correction all-gather. Exceeding it fails before allocation/communication.
 
 Distributed-memory determinism contract (infrastructure scope):

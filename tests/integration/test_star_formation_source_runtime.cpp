@@ -12,6 +12,7 @@
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
 
 namespace {
@@ -37,7 +38,8 @@ namespace {
   stream << "hierarchical_max_rung = 0\n";
   stream << "treepm_pm_grid = 4\n";
   stream << "treepm_enable_window_deconvolution = false\n";
-  stream << "treepm_update_cadence_steps = 1\n\n";
+  stream << "treepm_update_cadence_steps = 1\n";
+  stream << "treepm_allow_diagnostic_naive_dft = true\n\n";
   stream << "[physics]\n";
   stream << "enable_star_formation = true\n";
   stream << "star_formation_model = adaptive_bound_jeans\n";
@@ -392,16 +394,46 @@ int main() {
 
   const auto converging_state = makeState(true);
   const auto expanding_state = makeState(false);
+
+  // Production ownership selection is tested directly: compatibility gas
+  // particles never duplicate authoritative gas-cell mass, lineage metadata
+  // does not change source membership, and covered coarse AMR cells are not
+  // counted alongside their leaf child.
+  const auto converging_gravity_sources =
+      cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+          converging_state, 0U, 1U, "gas gravity ownership acceptance");
+  assert(converging_gravity_sources.particle_rows.empty());
+  assert(converging_gravity_sources.gas_cell_rows.size() == converging_state.cells.size());
+
+  const auto parentless_state = makeParentlessGasState();
+  const auto shared_lineage_state = makeSharedLineageGasState();
+  const auto parentless_gravity_sources =
+      cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+          parentless_state, 0U, 1U, "parentless gas gravity acceptance");
+  const auto shared_lineage_gravity_sources =
+      cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+          shared_lineage_state, 0U, 1U, "shared-lineage gas gravity acceptance");
+  assert(parentless_gravity_sources.gas_cell_rows.size() == converging_gravity_sources.gas_cell_rows.size());
+  assert(shared_lineage_gravity_sources.gas_cell_rows.size() == converging_gravity_sources.gas_cell_rows.size());
+
+  const auto covered_hierarchy_state = makeCoveredCoarseHierarchyState(false);
+  const auto covered_gravity_sources =
+      cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+          covered_hierarchy_state, 0U, 1U, "covered coarse gas gravity acceptance");
+  assert(covered_gravity_sources.particle_rows.empty());
+  assert(covered_gravity_sources.gas_cell_rows.size() == 1U);
+  assert(covered_hierarchy_state.patches.level[
+      covered_hierarchy_state.cells.patch_index[covered_gravity_sources.gas_cell_rows.front()]] == 1U);
   const auto converging_report = runCase(output_root, "sf_runtime_converging", converging_state);
   const auto expanding_report = runCase(output_root, "sf_runtime_expanding", expanding_state);
   const auto parentless_report = runCase(
-      output_root, "sf_runtime_parentless_gas_gravity", makeParentlessGasState());
+      output_root, "sf_runtime_parentless_gas_gravity", parentless_state);
   const auto shared_lineage_report = runCase(
-      output_root, "sf_runtime_shared_lineage_gas_gravity", makeSharedLineageGasState());
+      output_root, "sf_runtime_shared_lineage_gas_gravity", shared_lineage_state);
   const auto effective_report = runEffectiveCase(
       output_root, "sf_runtime_effective", converging_state);
   const auto hierarchy_report = runEffectiveHierarchyCase(
-      output_root, "sf_runtime_amr_hierarchy", makeCoveredCoarseHierarchyState(false));
+      output_root, "sf_runtime_amr_hierarchy", covered_hierarchy_state);
   const auto reordered_hierarchy_report = runEffectiveHierarchyCase(
       output_root, "sf_runtime_amr_hierarchy_reordered", makeCoveredCoarseHierarchyState(true));
   const auto level0_report = runEffectiveHierarchyCase(

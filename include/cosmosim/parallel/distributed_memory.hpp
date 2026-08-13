@@ -589,6 +589,7 @@ class MpiContext {
 
   [[nodiscard]] double allreduceSumDouble(double local_value) const;
   [[nodiscard]] std::uint64_t allreduceSumUint64(std::uint64_t local_value) const;
+  [[nodiscard]] std::uint64_t allreduceMaxUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceXorUint64(std::uint64_t local_value) const;
 
   // Variable-size byte collectives used by correctness-first distributed

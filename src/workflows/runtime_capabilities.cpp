@@ -2,6 +2,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
+#include "cosmosim/gravity/pm_solver.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -111,6 +112,28 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
   const core::OpenMpRuntimeInfo omp = core::openMpRuntimeInfo();
   RuntimeCapabilityReport report;
   report.capabilities = {
+      {.name = "production_treepm_pm_backend",
+       .status = gravity::pmBackendProductionReady()
+           ? RuntimeCapabilityStatus::kSupported
+           : RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.numerics.gravity_solver == core::GravitySolver::kTreePm,
+       .compiled = gravity::pmBackendCapability() != gravity::PmBackendCapability::kUnavailable,
+       .dependency_available = gravity::pmBackendProductionReady(),
+       .runtime_available = gravity::pmBackendProductionReady(),
+       .active = config.numerics.gravity_solver == core::GravitySolver::kTreePm &&
+           (gravity::pmBackendProductionReady() || config.numerics.treepm_allow_diagnostic_naive_dft),
+       .implementation_maturity = gravity::pmBackendProductionReady()
+           ? RuntimeImplementationMaturity::kProductionScalable
+           : RuntimeImplementationMaturity::kReference,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .scalability = gravity::pmBackendProductionReady()
+           ? RuntimeScalabilityClass::kScalableFft
+           : RuntimeScalabilityClass::kHeavyReference,
+       .detail = "TreePM PM backend capability=" +
+           std::string(gravity::pmBackendCapabilityName(gravity::pmBackendCapability())) +
+           (config.numerics.treepm_allow_diagnostic_naive_dft
+                ? "; explicit diagnostic naive-DFT override is enabled."
+                : "; production mode forbids diagnostic naive-DFT fallback.")},
       {.name = "fixed_global_timestep", .status = RuntimeCapabilityStatus::kSupported,
        .requested = true, .compiled = true, .dependency_available = true,
        .runtime_available = true, .active = config.numerics.hierarchical_max_rung == 0,
@@ -254,6 +277,11 @@ void validateRequestedRuntimeCapabilities(
     throw std::invalid_argument(
         "runtime capability production_hierarchical_local_timestep is unsupported: " +
         report.require("production_hierarchical_local_timestep").detail);
+  }
+  if (config.numerics.gravity_solver == core::GravitySolver::kTreePm) {
+    gravity::requireTreePmSupportOrThrow(
+        config.numerics.gravity_solver,
+        config.numerics.treepm_allow_diagnostic_naive_dft);
   }
 }
 

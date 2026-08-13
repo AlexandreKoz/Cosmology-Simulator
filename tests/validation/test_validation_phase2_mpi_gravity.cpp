@@ -427,10 +427,16 @@ void runTreePmEquivalenceCase(
         solve_index == 0 || solve_index == test_case.solve_count - 1;
     const std::uint64_t field_generation =
         (refresh_long_range && solve_index > 0) ? 1U : 0U;
-    last_options.decomposition_epoch =
+    const std::uint64_t decomposition_sequence =
         1000ULL + static_cast<std::uint64_t>(case_index) * 100ULL + field_generation;
-    last_options.force_epoch =
+    const std::uint64_t force_sequence =
         10000ULL + static_cast<std::uint64_t>(case_index) * 100ULL + field_generation;
+    last_options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{decomposition_sequence};
+    last_options.source_generation = cosmosim::gravity::GravitySourceGeneration{force_sequence};
+    last_options.pm_field_version = cosmosim::gravity::PmFieldVersion{field_generation + 1U};
+    last_options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{
+        .sequence = force_sequence,
+        .scale_factor = last_options.pm_options.scale_factor};
     if (test_case.solve_count > 1) {
       dist_coordinator.solveActiveSetWithPmCadence(
           local_x,

@@ -314,6 +314,7 @@ if(COSMOSIM_ENABLE_LTO)
 endif()
 
 add_library(cosmosim_gravity STATIC
+  src/gravity/gravity_memory.cpp
   src/gravity/pm_solver.cpp
   src/gravity/tree_ordering.cpp
   src/gravity/tree_gravity.cpp
@@ -1742,10 +1743,12 @@ if(COSMOSIM_ENABLE_TESTS)
     tests/support/periodic_ewald_reference.cpp)
   target_include_directories(test_validation_tree_pm_ewald_accuracy PRIVATE tests/support)
   target_link_libraries(test_validation_tree_pm_ewald_accuracy PRIVATE cosmosim_gravity)
-  add_test(NAME validation_tree_pm_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
-  set_tests_properties(
-    validation_tree_pm_ewald_accuracy
-    PROPERTIES LABELS "validation;gravity;treepm;periodic;accuracy")
+  if(COSMOSIM_ENABLE_FFTW)
+    add_test(NAME validation_tree_pm_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
+    set_tests_properties(
+      validation_tree_pm_ewald_accuracy
+      PROPERTIES LABELS "validation;gravity;treepm;periodic;accuracy;production_fft")
+  endif()
 
   add_executable(
     test_validation_dmo_zeldovich_workflow

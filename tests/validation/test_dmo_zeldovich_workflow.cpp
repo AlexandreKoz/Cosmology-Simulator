@@ -300,7 +300,10 @@ void requireOrThrow(bool condition, const std::string& message) {
   }
 }
 
-[[nodiscard]] std::string configText(int world_size, std::string_view run_name) {
+[[nodiscard]] std::string configText(
+    int world_size,
+    std::string_view run_name,
+    bool allow_diagnostic_naive_dft = false) {
   std::ostringstream stream;
   stream.precision(17);
   stream << "schema_version = 1\n\n";
@@ -343,7 +346,11 @@ void requireOrThrow(bool condition, const std::string& message) {
   stream << "treepm_tree_relative_force_tolerance = 0.005\n";
   stream << "treepm_tree_relative_force_acceleration_floor = 1e-30\n";
   stream << "treepm_update_cadence_steps = 1\n";
-  stream << "treepm_tree_exchange_batch_bytes = 4096\n\n";
+  stream << "treepm_tree_exchange_batch_bytes = 4096\n";
+  if (allow_diagnostic_naive_dft) {
+    stream << "treepm_allow_diagnostic_naive_dft = true\n";
+  }
+  stream << "\n";
   stream << "[physics]\n";
   stream << "enable_cooling = false\n";
   stream << "enable_star_formation = false\n";
@@ -1239,7 +1246,7 @@ void compareSerialAndSingleRankMpiPhysicalStateArtifacts() {
 void runEmptyRankSmoke(const ParallelRuntime& runtime, const std::filesystem::path& root) {
   const cosmosim::core::SimulationState state = makeSparseEmptyRankState();
   const cosmosim::core::FrozenConfig frozen = cosmosim::core::loadFrozenConfigFromString(
-      configText(runtime.world_size, "dmo_empty_rank_smoke"),
+      configText(runtime.world_size, "dmo_empty_rank_smoke", true),
       "test_dmo_zeldovich_workflow_empty_rank");
   const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   const auto report = runner.run(

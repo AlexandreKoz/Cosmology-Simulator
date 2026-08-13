@@ -278,6 +278,9 @@ namespace {
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;
   record.gravity_pm_fft_backend = gravity::PmSolver::fftBackendName();
+  record.gravity_pm_backend_capability = std::string(
+      gravity::pmBackendCapabilityName(gravity::pmBackendCapability()));
+  record.gravity_acceptance_profile_id = "unverified_current_source";
   switch (config.mode.zoom_long_range_strategy) {
     case core::ZoomLongRangeStrategy::kDisabled:
       record.zoom_long_range_strategy = "disabled";

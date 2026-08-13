@@ -73,7 +73,7 @@ For periodic TreePM, the coordinator therefore constructs a transient derived
 source frame independently on each axis:
 
 1. wrap every finite source coordinate into `[0,L_axis)`;
-2. sort the wrapped lane;
+2. stable-radix order the wrapped lane by its IEEE-754 key;
 3. locate the largest circular gap, with a deterministic anchor tie-break;
 4. unwrap values below the post-gap anchor by adding `L_axis`.
 
@@ -167,85 +167,83 @@ collective round is also legal. Empty ranks contribute zero density and force.
 Partial target-position triplets, mismatched compact lanes, and out-of-range
 source-indexed targets are rejected.
 
-## Distributed hierarchy and request/response protocol
+## Distributed local-essential-tree routing and sparse request/response protocol
 
-The current distributed short-range algorithm is correctness-first and aimed
-at workstations and small clusters:
+The distributed short-range path is locality-driven. It keeps a compact global
+top-level domain map while retaining detailed tree topology only on the source
+rank:
 
-1. each rank builds a tree from rank-owned sources;
-2. every rank contributes a bounded breadth-first hierarchy summary;
-3. target owners use the periodic bounds and `r_cut` to select peer ranks;
-4. selected targets are exported in bounded batches;
-5. each destination evaluates the target against its local source tree;
-6. validated partial accelerations return to the target owner.
+1. each rank builds a tree from rank-owned authoritative sources;
+2. each rank publishes exactly one compact top-level source-domain leaf with
+   owner rank, bounds, source count, source generation, tree-build generation,
+   decomposition epoch, force epoch, and exchange sequence;
+3. target owners traverse those top-level bounds against `r_cut` and construct
+   the actual peer set required by local targets;
+4. an MPI distributed-graph communicator is built from that sparse peer set,
+   including reverse edges so source-only and target-only ranks remain legal;
+5. selected target work is exported only to those peers;
+6. local tree traversal proceeds while the nonblocking neighborhood request
+   payload is in flight;
+7. each destination evaluates received targets against its detailed local tree
+   and returns validated partial accelerations through the same sparse graph.
 
-An empty local tree emits one explicit zero-source root sentinel. It carries
-`source_count=0`, zero mass, the current geometry frame, decomposition epoch,
-force epoch, and exchange sequence. This distinguishes "participated with no
-sources" from missing rank coverage. The sentinel never intersects a cutoff
-query and therefore creates no request or force.
+This is a target-export LET model: remote detailed tree nodes are not globally
+replicated. The globally known structure is intentionally limited to one compact
+domain ownership leaf per rank. Rank count therefore controls only the compact
+top-level routing map; short-range payload communication is determined by
+actual domain/target overlap.
 
-Hierarchy records use a version-1, fixed 152-byte, explicit little-endian wire
-encoding. Short-range requests and responses use version-1 explicit
-little-endian records of 96 and 80 bytes respectively. They do not transmit raw
-C++ object representations or uninitialized padding. Protocol identity covers:
+An empty local tree emits one explicit zero-source top-level sentinel. It carries
+the current geometry frame and semantic identities but never intersects a cutoff
+query. This preserves collective participation for zero-source ranks without
+creating fake gravity work.
 
-- origin, destination, and source ranks as applicable;
-- exchange sequence;
-- decomposition and force epochs;
-- batch token and request ID;
-- target identity;
-- previous-force-scale presence;
-- target coordinates and softening;
-- response acceleration components.
+Top-level domain records use the existing fixed, versioned little-endian tree
+wire schema. Short-range target requests and acceleration responses remain
+versioned little-endian records rather than raw C++ object representations.
+Protocol identity covers source/destination rank, exchange sequence, strong
+decomposition/source/tree/force identities at the serialization boundary, batch
+token, request/target identity, target geometry/softening, previous-force-scale
+presence, and returned acceleration components.
 
-Before an exchange, ranks reach consensus on exchange sequence, epochs, and
-batch-byte policy. Decoders reject wrong versions, misaligned/truncated payloads,
-wrong peers, stale/mixed epochs, non-finite numerical fields, invalid flags,
-duplicate hierarchy IDs, missing/multiple rank roots, out-of-range batch slots,
-unexpected responses, duplicate responses, and incomplete expected-response
-coverage. Count multiplication, cumulative displacements, byte alignment, and
-`MPI int` limits are checked. Every global batch enters request and response
-collectives even when a rank has zero records, using a safe non-null empty
-buffer.
+The compact top-level domain cache is reusable only when every rank agrees that
+its decomposition epoch, gravity source generation, and local tree-build
+generation still match. A collective cache-validity vote is performed before
+any rank skips the top-level exchange, so cache reuse cannot make ranks diverge
+into different collective paths. Under the current rung-zero implementation the
+tree build generation normally advances every solve, so reuse is conservative
+rather than optimistic.
 
-At the public solve boundary the actual active MPI world also fingerprints the
-PM mesh `nx/ny/nz`, physical/operator options, protocol epochs, layout mode, and
-softening metadata before PM collectives. This prevents different per-rank mesh
-shapes or controls from selecting incompatible FFT and exchange paths. An
-MPI-enabled process without an active MPI session remains a serial library
-caller. A collective full-domain serial reference call inside a multi-rank MPI
-job evaluates its short-range residual locally on every rank and does not enter
-the distributed hierarchy exchange.
+Sparse request counts use `MPI_Neighbor_alltoall`; request payloads use
+`MPI_Ineighbor_alltoallv`, allowing useful local traversal to overlap transport;
+responses use `MPI_Neighbor_alltoallv`. The short-range path no longer uses
+communicator-wide `MPI_Alltoall/Alltoallv` payload phases. World collectives are
+still used where they represent true global consensus/failure choreography, and
+the compact one-leaf-per-rank domain map is still globally exchanged.
 
-Failure coordination starts before that wire protocol. A rank-local exception
-while constructing the periodic unwrapped source lanes or building the local
-tree is caught and reduced across the actual MPI world before any rank enters
-the residual hierarchy/request exchange. Constructor-local PM-layout metadata
-is likewise not rejected on one rank in isolation; layout/context coherence is
-checked at solve entry and voted before collective work. Thus a bad rank makes
-every peer leave the same preflight phase instead of stranding peers in the
-next collective.
+Before exchange, ranks agree on protocol identities and batch policy. Decoders
+reject wrong versions, stale/mixed epochs, wrong peers, malformed payloads,
+non-finite fields, duplicate/unexpected responses, and incomplete response
+coverage. Count multiplication, cumulative byte displacements, and `MPI int`
+limits remain checked. Rank-local failures are coordinated before peers enter
+the next matching communication phase.
 
-The same solve-level vote covers post-exchange PM halo-cache commit, allocation
-and filling of compact active-position/PM-force/zoom-correction target buffers,
-and worst-case residual traversal-stack reservation. The traversal stack
-reserves the complete local-node bound before visiting a target, so traversal
-cannot introduce an unvoted growth allocation between later collectives.
+The reusable exchange workspace owns world-sized compact count/displacement
+metadata plus payload buffers that grow only with actual exchanged work. Memory
+reporting exposes current/capacity/high-water bytes. LET diagnostics expose:
 
-Per-peer count/displacement arrays, request/response payloads, remote partial
-accelerations, and expected/received response-count lanes are owned by the
-reusable `TreeExchangeWorkspace`. World-size-dependent allocations occur
-inside the coordinated exchange preflight, and batch-dependent growth occurs
-inside the already coordinated request-preparation phase. These capacities are
-reported by `TreePmCoordinator::memoryReport()` as transient MPI buffers. This
-removes unvoted per-batch response bookkeeping allocations without changing
-force values, wire bytes, or deterministic ordering.
+- candidate and communicating peers;
+- exported and imported targets;
+- sent/received wire bytes;
+- LET workspace high-water;
+- discovery, communication, and remote traversal time;
+- local work overlapped with request transport;
+- communication wait time and overlap efficiency;
+- local/remote interaction work and imbalance metrics.
 
-The hierarchy control plane is still an `MPI_Allgatherv`, and request/response
-data still use communicator-wide `MPI_Alltoallv` count/data phases. Although
-cutoff pruning avoids many payload records, this is not a locally essential
-tree (LET), sparse neighborhood transport, or large-cluster scaling claim.
+The current top-level routing scan is intentionally simple and compact. A future
+hierarchical rank-domain tree can reduce peer-discovery CPU work at very large
+rank counts without changing the target-export protocol or solver ownership.
 
 ## PM cadence and cache validity
 
@@ -261,18 +259,19 @@ field version, last refresh opportunity, build step, and build scale factor,
 and the workflow requires rank consensus before collective PM work.
 
 The coordinator also validates its transient long-range field before honoring
-an explicit lower-level reuse request. Its compatibility signature contains
-the force epoch, force-evaluation scale factor, code gravitational constant,
-split scale, x/y/z box lengths, assignment scheme, boundary condition, PM
-decomposition mode, and window-deconvolution flag. A missing or incompatible
+an explicit lower-level reuse request. Its compatibility signature contains the distinct gravity source generation,
+PM-field version, force-evaluation epoch/scale factor, code gravitational
+constant, split scale, x/y/z box lengths, assignment scheme, boundary condition,
+PM decomposition mode, and window-deconvolution flag. A missing or incompatible
 signature makes reuse fail coherently; it is not silently changed into a solve.
 Explicit refresh/reuse votes are reduced first, and a mixed vote throws before
 any rank enters PM density or FFT collectives. This signature is an invalidation
 guard, not a predictor for cadence greater than one.
 
-Tree topology and hierarchy packets are rebuilt for each force call. Their
-decomposition and force epochs prevent stale packet reuse after migration or a
-field-generation change. The workflow decomposition epoch advances only after
+Tree topology is rebuilt for each current production force call. Its explicit
+`TreeBuildGeneration`, together with `GravitySourceGeneration` and
+`DecompositionEpoch`, prevents stale top-level-domain/LET reuse after source
+mutation, migration, or rebuild. The workflow decomposition epoch advances only after
 an actual globally committed particle-ownership transition and is restored from
 restart; rank-local dense-row generations are not substituted for it. Because
 PM field ownership remains the fixed FFT slab map, particle decomposition epoch

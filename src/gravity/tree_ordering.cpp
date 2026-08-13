@@ -9,6 +9,45 @@
 namespace cosmosim::gravity {
 namespace {
 
+void radixSortMortonOrdering(TreeMortonOrdering& ordering) {
+  const std::size_t count = ordering.morton_key.size();
+  if (count < 2U) {
+    return;
+  }
+
+  std::vector<std::uint64_t> scratch_key(count);
+  std::vector<std::uint32_t> scratch_index(count);
+  bool source_is_primary = true;
+  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+    std::array<std::size_t, 256> bucket_count{};
+    const auto& source_key = source_is_primary ? ordering.morton_key : scratch_key;
+    const auto& source_index = source_is_primary ? ordering.sorted_particle_index : scratch_index;
+    auto& destination_key = source_is_primary ? scratch_key : ordering.morton_key;
+    auto& destination_index = source_is_primary ? scratch_index : ordering.sorted_particle_index;
+
+    for (const std::uint64_t key : source_key) {
+      ++bucket_count[static_cast<std::size_t>((key >> shift) & 0xFFU)];
+    }
+    std::array<std::size_t, 256> bucket_offset{};
+    for (std::size_t bucket = 1U; bucket < bucket_offset.size(); ++bucket) {
+      bucket_offset[bucket] = bucket_offset[bucket - 1U] + bucket_count[bucket - 1U];
+    }
+    for (std::size_t i = 0U; i < count; ++i) {
+      const std::size_t bucket = static_cast<std::size_t>((source_key[i] >> shift) & 0xFFU);
+      const std::size_t destination = bucket_offset[bucket]++;
+      destination_key[destination] = source_key[i];
+      destination_index[destination] = source_index[i];
+    }
+    source_is_primary = !source_is_primary;
+  }
+  // Eight byte passes return the result to the primary arrays. Keep this
+  // assertion-like guard explicit in case the radix width is changed later.
+  if (!source_is_primary) {
+    ordering.morton_key = std::move(scratch_key);
+    ordering.sorted_particle_index = std::move(scratch_index);
+  }
+}
+
 [[nodiscard]] std::uint64_t expandBits21(std::uint32_t value) {
   std::uint64_t x = value & 0x1FFFFFU;
   x = (x | (x << 32U)) & 0x1F00000000FFFFULL;
@@ -93,26 +132,13 @@ TreeMortonOrdering buildMortonOrdering(
     const std::uint32_t qx = static_cast<std::uint32_t>(std::llround(nx * k_grid));
     const std::uint32_t qy = static_cast<std::uint32_t>(std::llround(ny * k_grid));
     const std::uint32_t qz = static_cast<std::uint32_t>(std::llround(nz * k_grid));
-    ordering.sorted_particle_index[i] = static_cast<std::uint32_t>(i);
+    ordering.sorted_particle_index[i] = checkedTreeLocalIndex(i, "Tree Morton particle index exceeds local-index policy");
     ordering.morton_key[i] = morton3D(qx, qy, qz);
   }
 
-  std::vector<std::size_t> order(ordering.sorted_particle_index.size());
-  for (std::size_t i = 0; i < order.size(); ++i) {
-    order[i] = i;
-  }
-  std::stable_sort(order.begin(), order.end(), [&ordering](std::size_t lhs, std::size_t rhs) {
-    return ordering.morton_key[lhs] < ordering.morton_key[rhs];
-  });
-
-  std::vector<std::uint32_t> sorted_particle(order.size());
-  std::vector<std::uint64_t> sorted_key(order.size());
-  for (std::size_t i = 0; i < order.size(); ++i) {
-    sorted_particle[i] = ordering.sorted_particle_index[order[i]];
-    sorted_key[i] = ordering.morton_key[order[i]];
-  }
-  ordering.sorted_particle_index = std::move(sorted_particle);
-  ordering.morton_key = std::move(sorted_key);
+  // Morton keys are fixed-width integers, so a stable byte-radix pass avoids
+  // the former O(N log N) comparison sort and its extra size_t permutation.
+  radixSortMortonOrdering(ordering);
   return ordering;
 }
 

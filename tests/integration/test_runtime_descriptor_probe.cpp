@@ -22,7 +22,8 @@ int main() {
   config_text << "max_global_steps = 1\n";
   config_text << "hierarchical_max_rung = 0\n";
   config_text << "treepm_pm_grid = 9\n";
-  config_text << "treepm_rcut_cells = 3.9\n\n";
+  config_text << "treepm_rcut_cells = 3.9\n";
+  config_text << "treepm_allow_diagnostic_naive_dft = true\n\n";
   config_text << "[output]\n";
   config_text << "run_name = runtime_descriptor_probe\n";
   config_text << "output_directory = integration_outputs\n";

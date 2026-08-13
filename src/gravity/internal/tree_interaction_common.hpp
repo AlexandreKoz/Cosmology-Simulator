@@ -1,0 +1,66 @@
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+
+#include "cosmosim/gravity/tree_gravity.hpp"
+#include "cosmosim/gravity/tree_softening.hpp"
+
+namespace cosmosim::gravity::internal {
+
+[[nodiscard]] inline bool acceptNodeByComDistanceMac(
+    double theta,
+    double half_size,
+    double com_center_offset,
+    double r2) noexcept {
+  const double r = std::sqrt(r2 + 1.0e-30);
+  return ((2.0 * half_size + com_center_offset) / r) < theta;
+}
+
+[[nodiscard]] inline bool acceptNodeByMac(
+    bool is_leaf,
+    bool target_inside_node,
+    double half_size,
+    double com_center_offset,
+    double node_mass_code,
+    double r2,
+    bool previous_acceleration_available,
+    double previous_acceleration_magnitude_code,
+    const TreeGravityOptions& options) noexcept {
+  if (is_leaf) return true;
+  if (target_inside_node) return false;
+  const double width = 2.0 * half_size;
+  if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutGeometric) {
+    return (width / std::sqrt(r2 + 1.0e-30)) < options.opening_theta;
+  }
+  if (options.opening_criterion == TreeOpeningCriterion::kBarnesHutComDistance) {
+    return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
+  }
+  if (!previous_acceleration_available) {
+    return acceptNodeByComDistanceMac(options.opening_theta, half_size, com_center_offset, r2);
+  }
+  const double acceleration_scale_code = std::max(
+      std::abs(previous_acceleration_magnitude_code),
+      options.relative_force_acceleration_floor_code);
+  const double estimated_error_scale =
+      options.gravitational_constant_code * node_mass_code * width * width;
+  const double allowed_error_scale =
+      options.relative_force_tolerance * acceleration_scale_code * r2 * r2;
+  return estimated_error_scale <= allowed_error_scale;
+}
+
+[[nodiscard]] inline bool passesSofteningEnvelopeGuard(
+    bool is_leaf,
+    double half_size,
+    double r,
+    double target_softening_comoving,
+    double node_softening_min_comoving,
+    double node_softening_max_comoving) noexcept {
+  if (is_leaf) return true;
+  if (node_softening_max_comoving - node_softening_min_comoving <= 1.0e-12) return true;
+  const double pair_softening_max = combineSofteningPairEpsilonUnchecked(
+      node_softening_max_comoving, target_softening_comoving);
+  return r > (2.0 * half_size + 2.0 * pair_softening_max);
+}
+
+}  // namespace cosmosim::gravity::internal

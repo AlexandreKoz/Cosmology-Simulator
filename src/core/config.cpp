@@ -1108,6 +1108,7 @@ struct ConfigKeySpec {
       {"numerics.treepm_assignment_scheme", "tsc"},
       {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
+      {"numerics.treepm_allow_diagnostic_naive_dft", "false"},
       {"numerics.treepm_pm_decomposition_mode", "slab"},
       {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
       {"physics.enable_cooling", "true"},
@@ -1233,6 +1234,7 @@ struct ConfigKeySpec {
       {"parallel.decomposition_measured_wall_ms_weight", "1.0"},
       {"parallel.isolated_pm_root_workspace_limit_bytes", "268435456"},
       {"parallel.zoom_high_res_allgather_limit_bytes", "268435456"},
+      {"parallel.gravity_memory_budget_bytes", "0"},
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
@@ -2105,6 +2107,8 @@ void validateConfig(const SimulationConfig& config) {
   stream << "treepm_enable_window_deconvolution = "
          << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
   stream << "treepm_update_cadence_steps = " << frozen.config.numerics.treepm_update_cadence_steps << '\n';
+  stream << "treepm_allow_diagnostic_naive_dft = "
+         << (frozen.config.numerics.treepm_allow_diagnostic_naive_dft ? "true" : "false") << '\n';
   stream << "treepm_pm_decomposition_mode = "
          << pmDecompositionModeToString(frozen.config.numerics.treepm_pm_decomposition_mode) << '\n';
   stream << "treepm_tree_exchange_batch_bytes = "
@@ -2293,6 +2297,8 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.parallel.isolated_pm_root_workspace_limit_bytes << '\n';
   stream << "zoom_high_res_allgather_limit_bytes = "
          << frozen.config.parallel.zoom_high_res_allgather_limit_bytes << '\n';
+  stream << "gravity_memory_budget_bytes = "
+         << frozen.config.parallel.gravity_memory_budget_bytes << '\n';
   stream << "\n[analysis]\n";
   stream << "enable_diagnostics = " << (frozen.config.analysis.enable_diagnostics ? "true" : "false")
          << '\n';
@@ -2755,6 +2761,13 @@ void validateConfig(const SimulationConfig& config) {
           "numerics.treepm_update_cadence_steps",
           defaultFor("numerics.treepm_update_cadence_steps")),
       "numerics.treepm_update_cadence_steps");
+  frozen.config.numerics.treepm_allow_diagnostic_naive_dft = parseBool(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_allow_diagnostic_naive_dft",
+          defaultFor("numerics.treepm_allow_diagnostic_naive_dft")),
+      "numerics.treepm_allow_diagnostic_naive_dft");
   frozen.config.numerics.treepm_pm_decomposition_mode = parsePmDecompositionMode(requireString(
       entries,
       consumed,
@@ -3142,6 +3155,10 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "parallel.zoom_high_res_allgather_limit_bytes",
                     defaultFor("parallel.zoom_high_res_allgather_limit_bytes")),
       "parallel.zoom_high_res_allgather_limit_bytes");
+  frozen.config.parallel.gravity_memory_budget_bytes = parseNumber<std::uint64_t>(
+      requireString(entries, consumed, "parallel.gravity_memory_budget_bytes",
+                    defaultFor("parallel.gravity_memory_budget_bytes")),
+      "parallel.gravity_memory_budget_bytes");
 
   frozen.config.analysis.enable_diagnostics = parseBool(
       requireString(entries, consumed, "analysis.enable_diagnostics", "true"),
@@ -3270,7 +3287,12 @@ void validateConfig(const SimulationConfig& config) {
 ConfigError::ConfigError(const std::string& message) : std::runtime_error(message) {}
 
 SimulationConfig makeUnvalidatedSimulationConfigForTests() {
-  return SimulationConfig(SimulationConfig::ConstructionToken{});
+  SimulationConfig config(SimulationConfig::ConstructionToken{});
+  // Unit/integration fixtures are allowed to exercise the tiny deterministic
+  // naive-DFT backend on builds without FFTW. Parsed production decks remain
+  // fail-closed unless they explicitly opt into the same diagnostic override.
+  config.numerics.treepm_allow_diagnostic_naive_dft = true;
+  return config;
 }
 
 FrozenConfig::FrozenConfig()

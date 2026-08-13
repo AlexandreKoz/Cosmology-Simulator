@@ -22,9 +22,12 @@
 #include <utility>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/units.hpp"
+#include "cosmosim/gravity/gravity_memory.hpp"
+#include "cosmosim/gravity/gravity_source_snapshot.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/particle_ghost_runtime.hpp"
@@ -449,24 +452,101 @@ class GravityRuntimeImpl final : public GravityRuntime {
     return m_cadence_records;
   }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
-  [[nodiscard]] core::MemoryReport memoryReport() const { return m_tree_pm_coordinator.memoryReport(); }
+  [[nodiscard]] core::MemoryReport memoryReport() const {
+    core::MemoryReportBuilder builder;
+    const auto add = [&builder](
+                         core::MemorySubsystem subsystem,
+                         core::MemoryLifetime lifetime,
+                         std::string label,
+                         const auto& container) {
+      const std::uint64_t capacity_bytes = core::ownedCapacityBytesForContainer(container);
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = subsystem,
+          .lifetime = lifetime,
+          .label = std::move(label),
+          .current_size_bytes = core::currentSizeBytesForContainer(container),
+          .owned_capacity_bytes = capacity_bytes,
+          .high_water_bytes = capacity_bytes,
+          .estimated_next_step_bytes = capacity_bytes,
+          .uncertainty_note = {},
+      });
+    };
+    const auto active = [&](std::string label, const auto& container) {
+      add(core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
+          std::move(label), container);
+    };
+    const auto persistent = [&](std::string label, const auto& container) {
+      add(core::MemorySubsystem::kSidecars, core::MemoryLifetime::kPersistent,
+          std::move(label), container);
+    };
+
+    active("gravity_runtime.active_accel_x", m_active_accel_x);
+    active("gravity_runtime.active_accel_y", m_active_accel_y);
+    active("gravity_runtime.active_accel_z", m_active_accel_z);
+    active("gravity_runtime.active_previous_acceleration", m_active_previous_acceleration_magnitude);
+    persistent("gravity_runtime.particle_accel_x", m_particle_accel_x);
+    persistent("gravity_runtime.particle_accel_y", m_particle_accel_y);
+    persistent("gravity_runtime.particle_accel_z", m_particle_accel_z);
+    persistent("gravity_runtime.cell_accel_x", m_cell_accel_x);
+    persistent("gravity_runtime.cell_accel_y", m_cell_accel_y);
+    persistent("gravity_runtime.cell_accel_z", m_cell_accel_z);
+    active("gravity_runtime.active_slot_by_particle", m_active_slot_by_particle);
+    active("gravity_runtime.active_slot_by_cell", m_active_slot_by_cell);
+    active("gravity_runtime.owned_local_index_by_particle", m_owned_local_index_by_global);
+    active("gravity_runtime.owned_local_index_by_cell", m_owned_local_index_by_cell);
+    active("gravity_runtime.owned_leaf_cell_mask", m_owned_leaf_cell_mask);
+    active("gravity_runtime.source_x", m_local_source_x);
+    active("gravity_runtime.source_y", m_local_source_y);
+    active("gravity_runtime.source_z", m_local_source_z);
+    active("gravity_runtime.source_mass", m_local_source_mass);
+    active("gravity_runtime.source_species", m_local_source_species_tag);
+    active("gravity_runtime.source_softening", m_local_source_softening_comoving);
+    active("gravity_runtime.source_softening_mask", m_local_source_softening_override_mask);
+    active("gravity_runtime.source_particle_row", m_local_source_particle_row);
+    active("gravity_runtime.source_cell_row", m_local_source_cell_row);
+    active("gravity_runtime.target_particle_row", m_active_target_particle_row);
+    active("gravity_runtime.target_cell_row", m_active_target_cell_row);
+    active("gravity_runtime.target_species", m_active_target_species_tag);
+    active("gravity_runtime.target_softening", m_active_target_softening_comoving);
+    active("gravity_runtime.target_softening_mask", m_active_target_softening_override_mask);
+    active("gravity_runtime.source_high_res_mask", m_source_is_high_res);
+    active("gravity_runtime.target_high_res_mask", m_active_is_high_res);
+    active("gravity_runtime.local_active_source_index", m_local_active_indices);
+    active("gravity_runtime.local_active_particle_row", m_local_active_global_indices);
+    active("gravity_runtime.force_refresh_particle_rows", m_force_refresh_particle_indices);
+    persistent("gravity_runtime.particle_force_cache_valid", m_particle_force_cache_valid);
+    persistent("gravity_runtime.cell_force_cache_valid", m_cell_force_cache_valid);
+
+    core::MemoryReport owned_report = std::move(builder).finish();
+    core::MemoryReport coordinator_report = m_tree_pm_coordinator.memoryReport();
+    const std::array<core::MemoryReport, 2> reports{
+        std::move(owned_report), std::move(coordinator_report)};
+    core::MemoryReport merged = core::mergeMemoryReports(reports);
+    if (m_has_pre_run_memory_estimate) {
+      merged.notes.push_back(
+          "gravity_pre_run_known_peak_bytes=" +
+          std::to_string(m_last_pre_run_memory_estimate.known_peak_bytes));
+      merged.notes.push_back(
+          "gravity_pre_run_external_backend_unknown_bytes=" +
+          std::to_string(m_last_pre_run_memory_estimate.external_backend_unknown_bytes));
+    }
+    return merged;
+  }
   [[nodiscard]] const parallel::DecompositionRuntimeMeasurements& lastRuntimeDecompositionMeasurements() const noexcept {
     return m_last_decomposition_measurements;
   }
-  [[nodiscard]] std::uint64_t decompositionEpoch() const noexcept { return m_decomposition_epoch; }
+  [[nodiscard]] std::uint64_t decompositionEpoch() const noexcept { return m_decomposition_epoch.value; }
 
   void restoreDecompositionEpoch(std::uint64_t decomposition_epoch) {
     if (m_has_long_range_field || m_last_committed_field_version != 0U) {
       throw std::logic_error("TreePM decomposition epoch must be restored before solver use");
     }
-    m_decomposition_epoch = decomposition_epoch;
+    m_decomposition_epoch = gravity::DecompositionEpoch{decomposition_epoch};
   }
 
   void commitParticleDecompositionChange() {
-    if (m_decomposition_epoch == std::numeric_limits<std::uint64_t>::max()) {
-      throw std::overflow_error("TreePM particle-decomposition epoch overflow");
-    }
-    ++m_decomposition_epoch;
+    m_decomposition_epoch = gravity::nextGravityIdentity(
+        m_decomposition_epoch, "TreePM particle-decomposition epoch overflow");
     // Acceleration lanes are dense-row mirrors and are not part of the
     // migration payload. Invalidate immediately so an output boundary after
     // migration serializes an honest cache.valid=false state instead of
@@ -780,6 +860,34 @@ class GravityRuntimeImpl final : public GravityRuntime {
       force_target_particles = m_force_refresh_particle_indices;
       source_prediction_epoch = SourcePredictionEpoch::kStepBegin;
     }
+
+    // Budget against a conservative per-rank upper bound before materializing
+    // O(N) gravity staging/tree/communication buffers. Canonical state is
+    // deliberately outside this gravity-only budget and is reported by core.
+    const std::size_t conservative_local_source_count = core::checkedSizeAdd(
+        particle_count, cell_count, "gravity pre-run local source count");
+    const std::size_t conservative_local_target_count = core::checkedSizeAdd(
+        force_target_particles.size(), cell_count, "gravity pre-run local target count");
+    m_last_pre_run_memory_estimate = gravity::estimateGravityMemory(
+        gravity::GravityMemoryEstimateInput{
+            .local_source_count = static_cast<std::uint64_t>(conservative_local_source_count),
+            .local_target_count = static_cast<std::uint64_t>(conservative_local_target_count),
+            .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
+            .multipole_order = m_tree_pm_options.tree_options.multipole_order,
+            .pm_shape = m_pm_grid_shape,
+            .assignment_scheme = m_tree_pm_options.pm_options.assignment_scheme,
+            .decomposition_mode = m_tree_pm_options.pm_options.decomposition_mode,
+            .mpi_rank_count = static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1)),
+            .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
+            .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
+            .cuda_resident = m_runtime_topology.usesCuda(),
+            .tree_exchange_batch_bytes = m_tree_pm_options.tree_exchange_batch_bytes,
+        });
+    m_has_pre_run_memory_estimate = true;
+    gravity::enforceGravityMemoryBudget(
+        m_last_pre_run_memory_estimate,
+        m_config.parallel.gravity_memory_budget_bytes);
+
     rebuildOwnedParticleCompactView(
         context,
         force_target_particles,
@@ -899,9 +1007,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
         .previous_acceleration_magnitude_code = m_active_previous_acceleration_magnitude,
-        .target_pos_x_comoving = m_active_target_pos_x,
-        .target_pos_y_comoving = m_active_target_pos_y,
-        .target_pos_z_comoving = m_active_target_pos_z,
     };
 
     // The integrator owns PM cadence state. At every rank-coordinated force
@@ -999,8 +1104,24 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // rather than merely a cache-use counter. Keep it explicit in TreePM so a
     // future relaxed cadence cannot accidentally reuse a field after sources
     // changed while protocol epochs remained equal.
-    m_tree_pm_options.source_generation = decision.field_version;
-    m_tree_pm_options.force_epoch = decision.field_version;
+    m_tree_pm_options.source_generation = gravity::GravitySourceGeneration{decision.field_version};
+    m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
+    m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
+        .sequence = decision.field_version,
+        .scale_factor = force_evaluation_scale_factor,
+    };
+
+    const gravity::GravitySourceSnapshot source_snapshot{
+        .pos_x_comoving = m_local_source_x,
+        .pos_y_comoving = m_local_source_y,
+        .pos_z_comoving = m_local_source_z,
+        .mass_code = m_local_source_mass,
+        .species_tag = m_local_source_species_tag,
+        .generation = m_tree_pm_options.source_generation,
+        .evaluation_epoch = m_tree_pm_options.force_epoch,
+        .contains_predicted_coordinates = m_source_predicted_inactive_count != 0U,
+    };
+    source_snapshot.validate();
 
     if (m_particle_accel_x.size() != particle_count) {
       m_particle_accel_x.assign(particle_count, 0.0);
@@ -1035,10 +1156,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
     };
     gravity::TreePmProfileEvent tree_pm_profile;
     m_tree_pm_coordinator.solveActiveSetWithPmCadence(
-        m_local_source_x,
-        m_local_source_y,
-        m_local_source_z,
-        m_local_source_mass,
+        source_snapshot.pos_x_comoving,
+        source_snapshot.pos_y_comoving,
+        source_snapshot.pos_z_comoving,
+        source_snapshot.mass_code,
         accumulator,
         m_tree_pm_options,
         decision.refresh_long_range_field,
@@ -1151,6 +1272,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"softening_kernel", "plummer"},
                       {"softening_epsilon_kpc_comoving", formatRuntimeDouble(m_config.numerics.gravity_softening_kpc_comoving)},
                       {"pm_fft_backend", m_pm_backend},
+                      {"pm_backend_capability", std::string(gravity::pmBackendCapabilityName(gravity::pmBackendCapability()))},
+                      {"gravity_acceptance_profile_id", "unverified_current_source"},
                       {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
                       {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
                       {"ghost_refresh_sent_bytes", std::to_string(gravity_ghost_refresh.sent_bytes)},
@@ -1162,6 +1285,41 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
                       {"pm_refresh_force_eval_scale_factor", formatRuntimeDouble(context.pm_refresh_directive.force_evaluation_scale_factor)},
                       {"refreshed_long_range_field", decision.refresh_long_range_field ? "true" : "false"}},
+      });
+      const auto decomposition_descriptor = gravity::describePmDecomposition(
+          m_pm_grid_shape,
+          m_tree_pm_coordinator.slabLayout(),
+          m_tree_pm_options.pm_options.decomposition_mode);
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "gravity.treepm_let",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "gravity.treepm",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "locality-driven TreePM short-range communication metrics",
+          .payload = {
+              {"pm_decomposition_architecture", std::string(
+                  gravity::pmDecompositionTopologyName(decomposition_descriptor.topology))},
+              {"top_level_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.top_level_domain_leaf_count)},
+              {"let_candidate_peer_count", std::to_string(m_last_tree_pm_diagnostics.let_candidate_peer_count)},
+              {"communicating_peer_count", std::to_string(m_last_tree_pm_diagnostics.communicating_peer_count)},
+              {"let_exported_target_count", std::to_string(m_last_tree_pm_diagnostics.let_exported_target_count)},
+              {"let_imported_target_count", std::to_string(m_last_tree_pm_diagnostics.let_imported_target_count)},
+              {"let_wire_bytes_sent", std::to_string(m_last_tree_pm_diagnostics.let_wire_bytes_sent)},
+              {"let_wire_bytes_received", std::to_string(m_last_tree_pm_diagnostics.let_wire_bytes_received)},
+              {"let_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.let_high_water_bytes)},
+              {"let_discovery_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_discovery_ms)},
+              {"let_communication_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_ms)},
+              {"let_overlap_local_work_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_overlap_local_work_ms)},
+              {"let_communication_wait_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_wait_ms)},
+              {"let_overlap_efficiency", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_overlap_efficiency)},
+              {"let_remote_traversal_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_remote_traversal_ms)},
+              {"local_pair_evaluations", std::to_string(tree_pm_profile.tree_profile.particle_particle_interactions)},
+              {"remote_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.residual_pair_evaluations)},
+              {"remote_request_packet_imbalance_ratio", formatRuntimeDouble(
+                  m_last_tree_pm_diagnostics.residual_remote_request_packet_imbalance_ratio)},
+          },
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{
           .event_kind = "gravity.zoom_force_diagnostics",
@@ -1412,10 +1570,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     ++summary.cheap_checks_executed;
     if (m_local_active_indices.size() != m_active_target_particle_row.size() ||
-        m_local_active_indices.size() != m_active_target_cell_row.size() ||
-        m_local_active_indices.size() != m_active_target_pos_x.size() ||
-        m_local_active_indices.size() != m_active_target_pos_y.size() ||
-        m_local_active_indices.size() != m_active_target_pos_z.size()) {
+        m_local_active_indices.size() != m_active_target_cell_row.size()) {
       ++summary.decomposition_sanity_failure_count;
       failFatal("local gravity target vectors diverged after compact-view rebuild");
     }
@@ -1594,6 +1749,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
         !state.particle_sidecar.has_gravity_softening_override.empty();
     const std::uint32_t gas_species_tag =
         static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
+    const auto authoritative_source_rows =
+        internal::selectAuthoritativeGravitySourceRows(
+            state,
+            world_rank,
+            static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1)),
+            "gravity authoritative source selection");
     const double gas_softening_comoving = m_tree_pm_species_softening.enabled
         ? m_tree_pm_species_softening.epsilon_comoving_by_species[
               static_cast<std::size_t>(core::ParticleSpecies::kGas)]
@@ -1681,14 +1842,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // population. Remote ghost particle copies are also excluded: TreePM owns
     // its explicit remote-source exchange from each rank's authoritative
     // owned sources.
-    for (std::size_t global_index = 0; global_index < particle_count;
-         ++global_index) {
-      if (state.particle_sidecar.species_tag[global_index] == gas_species_tag) {
-        continue;
-      }
-      if (state.particle_sidecar.owning_rank[global_index] != world_rank) {
-        continue;
-      }
+    for (const std::uint32_t global_index :
+         authoritative_source_rows.particle_rows) {
       double source_x = state.particles.position_x_comoving[global_index];
       double source_y = state.particles.position_y_comoving[global_index];
       double source_z = state.particles.position_z_comoving[global_index];
@@ -1753,34 +1908,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
           static_cast<int>(source_index);
     }
 
-    // Determine authoritative AMR leaf ownership from patch truth. A legacy
-    // no-patch cell is well-defined only in single-rank mode; distributed gas
-    // gravity must never guess ownership from optional parent-particle lineage.
-    std::unordered_set<std::uint64_t> patch_ids_with_children;
-    patch_ids_with_children.reserve(state.patches.size());
-    for (std::size_t patch_index = 0; patch_index < state.patches.size();
-         ++patch_index) {
-      const std::uint64_t parent_id =
-          state.patches.parent_patch_id[patch_index];
-      if (parent_id != 0U) {
-        patch_ids_with_children.insert(parent_id);
-      }
-    }
-
-    for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
-      bool is_owned_leaf = true;
-      const std::uint32_t patch_index = state.cells.patch_index[cell_index];
-      if (patch_index < state.patches.size()) {
-        is_owned_leaf =
-            state.patches.owning_rank[patch_index] == world_rank &&
-            !patch_ids_with_children.contains(state.patches.patch_id[patch_index]);
-      } else if (m_runtime_topology.world_size > 1) {
-        throw std::runtime_error(
-            "distributed authoritative gas gravity requires every gas cell to reference an owning AMR patch");
-      }
-      if (!is_owned_leaf) {
-        continue;
-      }
+    // Gas-cell state is authoritative. The shared selector excludes covered
+    // coarse cells and never relies on optional parent-particle lineage.
+    for (const std::uint32_t cell_index :
+         authoritative_source_rows.gas_cell_rows) {
       m_owned_leaf_cell_mask[cell_index] = 1U;
       const std::uint32_t source_index = appendSource(
           state.cells.center_x_comoving[cell_index],
@@ -1791,7 +1922,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
           gas_softening_comoving,
           0U,
           no_row,
-          static_cast<std::uint32_t>(cell_index));
+          cell_index);
       m_owned_local_index_by_cell[cell_index] = static_cast<int>(source_index);
     }
 
@@ -1799,9 +1930,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_local_active_global_indices.clear();
     m_active_target_particle_row.clear();
     m_active_target_cell_row.clear();
-    m_active_target_pos_x.clear();
-    m_active_target_pos_y.clear();
-    m_active_target_pos_z.clear();
     m_active_target_species_tag.clear();
     m_active_target_softening_comoving.clear();
     m_active_target_softening_override_mask.clear();
@@ -1812,9 +1940,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_local_active_indices.push_back(source_index);
       m_active_target_particle_row.push_back(particle_row);
       m_active_target_cell_row.push_back(cell_row);
-      m_active_target_pos_x.push_back(m_local_source_x[source_index]);
-      m_active_target_pos_y.push_back(m_local_source_y[source_index]);
-      m_active_target_pos_z.push_back(m_local_source_z[source_index]);
       m_active_target_species_tag.push_back(
           m_local_source_species_tag[source_index]);
       if (has_softening_values) {
@@ -1902,9 +2027,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint32_t> m_local_source_cell_row;
   std::vector<std::uint32_t> m_active_target_particle_row;
   std::vector<std::uint32_t> m_active_target_cell_row;
-  std::vector<double> m_active_target_pos_x;
-  std::vector<double> m_active_target_pos_y;
-  std::vector<double> m_active_target_pos_z;
   std::vector<std::uint32_t> m_active_target_species_tag;
   std::vector<double> m_active_target_softening_comoving;
   std::vector<std::uint8_t> m_active_target_softening_override_mask;
@@ -1930,7 +2052,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::uint64_t m_force_cache_gas_identity_generation = 0U;
   std::vector<std::uint8_t> m_particle_force_cache_valid;
   std::vector<std::uint8_t> m_cell_force_cache_valid;
-  std::uint64_t m_decomposition_epoch = 0U;
+  gravity::DecompositionEpoch m_decomposition_epoch{};
+  gravity::GravityMemoryEstimate m_last_pre_run_memory_estimate{};
+  bool m_has_pre_run_memory_estimate = false;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;

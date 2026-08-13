@@ -47,6 +47,7 @@ int main() {
     stream << "treepm_asmth_cells = 1.75\n";
     // Keep this low-cost workflow fixture inside the periodic one-image domain.
     stream << "treepm_rcut_cells = 3.9\n";
+    stream << "treepm_allow_diagnostic_naive_dft = true\n";
     stream << "treepm_assignment_scheme = " << assignment_scheme << '\n';
     stream << "treepm_update_cadence_steps = " << cadence_steps << "\n\n";
     stream << "[output]\n";
@@ -503,6 +504,7 @@ int main() {
   zoom_stream << "treepm_pm_grid = 9\n";
   zoom_stream << "treepm_asmth_cells = 1.25\n";
   zoom_stream << "treepm_rcut_cells = 3.9\n";
+  zoom_stream << "treepm_allow_diagnostic_naive_dft = true\n";
   zoom_stream << "treepm_assignment_scheme = cic\n";
   zoom_stream << "treepm_update_cadence_steps = 1\n\n";
   zoom_stream << "[output]\n";

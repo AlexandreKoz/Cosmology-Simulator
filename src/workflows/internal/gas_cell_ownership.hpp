@@ -6,10 +6,12 @@
 #include <unordered_map>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/workflows/gravity_source_ownership.hpp"
 
 namespace cosmosim::workflows::internal {
 
 using ParticleRowById = std::unordered_map<std::uint64_t, std::uint32_t>;
+
 
 [[nodiscard]] ParticleRowById buildParticleRowById(
     const core::SimulationState& state);

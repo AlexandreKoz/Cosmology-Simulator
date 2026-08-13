@@ -66,6 +66,8 @@ struct ProvenanceRecord {
   std::string gravity_softening_kernel = "unknown";
   double gravity_softening_epsilon_kpc_comoving = 0.0;
   std::string gravity_pm_fft_backend = "unknown";
+  std::string gravity_pm_backend_capability = "unknown";
+  std::string gravity_acceptance_profile_id = "unverified";
   std::uint64_t gravity_treepm_decomposition_epoch = 0;
   int gravity_treepm_restart_world_size = 1;
   std::string gravity_treepm_restart_pm_grid = "0x0x0";

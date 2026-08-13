@@ -920,8 +920,8 @@ void testLongRangeCadenceCacheIsFailClosedAndOwnershipCompatible() {
   options.tree_options.softening.epsilon_comoving = 1.0e-3;
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       1.25, 3.9, 1.0 / static_cast<double>(shape.nx));
-  options.decomposition_epoch = 3U;
-  options.force_epoch = 7U;
+  options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{3U};
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 7U, .scale_factor = 1.0};
 
   cosmosim::gravity::TreePmCoordinator coordinator(shape);
   cosmosim::gravity::TreePmDiagnostics diagnostics;
@@ -934,14 +934,14 @@ void testLongRangeCadenceCacheIsFailClosedAndOwnershipCompatible() {
   force.ax.assign(active.size(), 0.0);
   force.ay.assign(active.size(), 0.0);
   force.az.assign(active.size(), 0.0);
-  options.decomposition_epoch = 4U;
+  options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{4U};
   coordinator.solveActiveSetWithPmCadence(
       pos_x, pos_y, pos_z, mass, accumulator, options, false, nullptr,
       &diagnostics);
   requireOrThrow(diagnostics.pm_reuse_count == 1U,
                  "particle-ownership epoch incorrectly invalidated fixed-slab PM cache");
 
-  options.force_epoch = 8U;
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 8U, .scale_factor = 1.0};
   bool incompatible_reuse_threw = false;
   try {
     coordinator.solveActiveSetWithPmCadence(
@@ -1334,8 +1334,10 @@ void testDistributedEmptyRanksIndependentTargetsAndMigration() {
   options.tree_options.max_leaf_size = 1U;
   options.tree_options.softening.epsilon_comoving = 1.0e-3;
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(1.25, 3.9, 0.125);
-  options.decomposition_epoch = 7U;
-  options.force_epoch = 11U;
+  options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{7U};
+  options.source_generation = cosmosim::gravity::GravitySourceGeneration{11U};
+  options.pm_field_version = cosmosim::gravity::PmFieldVersion{11U};
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 11U, .scale_factor = 1.0};
   options.tree_exchange_batch_bytes = 256U;
 
   const std::size_t global_source_count = world_size == 2 ? 1U : 2U;
@@ -1447,7 +1449,9 @@ void testDistributedEmptyRanksIndependentTargetsAndMigration() {
       .accel_z_comoving = no_force.az,
   };
   cosmosim::gravity::TreePmCoordinator all_empty(pm_shape, layout);
-  options.force_epoch = 12U;
+  options.source_generation = cosmosim::gravity::GravitySourceGeneration{12U};
+  options.pm_field_version = cosmosim::gravity::PmFieldVersion{12U};
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 12U, .scale_factor = 1.0};
   all_empty.solveActiveSet(empty, empty, empty, empty, empty_accumulator, options, nullptr, nullptr);
 
   // Reuse one coordinator across a decomposition transition in which every
@@ -1457,8 +1461,10 @@ void testDistributedEmptyRanksIndependentTargetsAndMigration() {
   std::vector<double> before_y{0.2 + 0.1 * static_cast<double>(world_rank)};
   std::vector<double> before_z{0.4};
   std::vector<double> before_mass{1.0};
-  options.decomposition_epoch = 20U;
-  options.force_epoch = 20U;
+  options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{20U};
+  options.source_generation = cosmosim::gravity::GravitySourceGeneration{20U};
+  options.pm_field_version = cosmosim::gravity::PmFieldVersion{20U};
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 20U, .scale_factor = 1.0};
   migration.solveActiveSet(
       before_x, before_y, before_z, before_mass, empty_accumulator, options, nullptr, nullptr);
   std::vector<double> after_x;
@@ -1473,8 +1479,10 @@ void testDistributedEmptyRanksIndependentTargetsAndMigration() {
       after_mass.push_back(1.0);
     }
   }
-  options.decomposition_epoch = 21U;
-  options.force_epoch = 21U;
+  options.decomposition_epoch = cosmosim::gravity::DecompositionEpoch{21U};
+  options.source_generation = cosmosim::gravity::GravitySourceGeneration{21U};
+  options.pm_field_version = cosmosim::gravity::PmFieldVersion{21U};
+  options.force_epoch = cosmosim::gravity::ForceEvaluationEpoch{.sequence = 21U, .scale_factor = 1.0};
   migration.solveActiveSet(
       after_x, after_y, after_z, after_mass, empty_accumulator, options, nullptr, nullptr);
 }
