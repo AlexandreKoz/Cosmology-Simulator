@@ -1046,6 +1046,40 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
       }
       context.has_active_gravity_particles = true;
     }
+    if (stage == IntegrationStage::kGravityKickPost &&
+        integrator_state.pm_refresh_enabled &&
+        integrator_state.pm_long_range_field_valid &&
+        integrator_state.pm_source_generation != state.gravitySourceGeneration()) {
+      // Hydro/source work may mutate authoritative gas mass, source membership,
+      // or ownership after the scheduled post-drift PM refresh.  A second-kick
+      // force may not silently combine that new source state with the old PM
+      // field.  Until multirate predictor/reuse semantics exist, repair the
+      // mismatch only on an integrator-authorized global refresh surface.
+      if (!boundary.pm_refresh_allowed) {
+        throw std::runtime_error(
+            "gravity source state changed after the scheduled PM refresh on a boundary where long-range repair is illegal");
+      }
+      context.pm_refresh_directive.force_refresh_surface = true;
+      context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kSourceMutationForceRefresh;
+      context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_end;
+      context.pm_refresh_directive.cadence_opportunity_allowed = true;
+      const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
+          integrator_state.step_index,
+          timeline_step.scale_factor_end,
+          integrator_state.pm_long_range_field_valid);
+      context.pm_refresh_directive.has_sync_event = true;
+      context.pm_refresh_directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
+      context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
+      context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
+      context.pm_refresh_directive.field_version = event.field_version;
+      context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
+      context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
+      context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
+      if (!event.refresh_long_range_field) {
+        throw std::runtime_error(
+            "gravity source mutation requires a fresh PM field; cadence reuse is not implemented for changed sources");
+      }
+    }
     if (stage == IntegrationStage::kGravityKickPre) {
       // The initial-condition surface is globally synchronized even when the
       // first hierarchical scheduler tick activates only a subset.  This is
@@ -1102,7 +1136,19 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
     }
     const std::size_t particle_count_before_stage = state.particles.size();
     dispatcher(context, false);
+    // Position drift is an authoritative gravity-source mutation. Hydro and
+    // source stages only force a new source epoch when gas exists; DMO source
+    // callbacks therefore do not manufacture a second PM solve. Lower-level
+    // membership/refinement/migration mutations also advance the same epoch
+    // through SimulationState generation APIs.
+    if (stage == IntegrationStage::kDrift) {
+      // Drift is a globally ordered source-position epoch even on locally
+      // empty ranks. Keeping the generation sequence rank-consistent lets
+      // TreePM reject stale distributed state without synthesizing O(N) hashes.
+      state.bumpGravitySourceGeneration();
+    }
     if ((stage == IntegrationStage::kForceRefresh ||
+         stage == IntegrationStage::kGravityKickPost ||
          (stage == IntegrationStage::kGravityKickPre && context.pm_refresh_directive.has_sync_event)) &&
         context.pm_refresh_directive.has_sync_event) {
       if (!context.pm_refresh_directive.solver_executed) {
@@ -1119,6 +1165,7 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
         };
         integrator_state.pm_sync_state.commitRefresh(event);
         integrator_state.pm_long_range_field_valid = true;
+        integrator_state.pm_source_generation = state.gravitySourceGeneration();
       } else if (!integrator_state.pm_long_range_field_valid) {
         throw std::runtime_error("PM sync reused a long-range field before the integrator marked one valid");
       }

@@ -20,20 +20,32 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE_GLOBS = (
+    # Gravity numerical implementation and public contracts.
     "src/gravity/**/*",
     "include/cosmosim/gravity/**/*",
+    # Distributed ownership/transport used by PM and sparse short-range work.
+    "src/parallel/**/*",
+    "include/cosmosim/parallel/**/*",
+    # Authoritative gravity source assembly and source-state mutation owners.
     "src/workflows/gravity_runtime.cpp",
+    "src/workflows/hydro_amr_runtime.cpp",
+    "src/workflows/source_runtime.cpp",
     "src/workflows/time_coordinator.cpp",
     "src/workflows/reference_workflow.cpp",
     "src/workflows/output_restart_runtime.cpp",
     "src/workflows/runtime_capabilities.cpp",
     "src/workflows/internal/gas_cell_ownership.cpp",
     "include/cosmosim/workflows/gravity_source_ownership.hpp",
-    "src/parallel/**/*",
-    "include/cosmosim/parallel/**/*",
+    # Force/KDK/epoch/configuration semantics that can change scientific meaning.
     "src/core/config.cpp",
+    "src/core/time_integration.cpp",
+    "src/core/simulation_state_ownership.cpp",
     "include/cosmosim/core/config.hpp",
+    "include/cosmosim/core/time_integration.hpp",
+    "include/cosmosim/core/simulation_state.hpp",
+    # Build-feature definitions can change available numerical backends.
     "CMakeLists.txt",
+    "cmake/templates/build_config.hpp.in",
 )
 
 
@@ -92,6 +104,8 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
                 "gravity workflow source ownership/integration semantics",
                 "src/parallel/** and include/cosmosim/parallel/**",
                 "PM/MPI decomposition and gravity configuration contracts",
+                "core force/KDK/source-generation semantics",
+                "gravity-relevant build feature definitions",
             ],
         },
         "build": {

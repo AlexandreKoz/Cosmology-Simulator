@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -12,6 +14,7 @@
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
 
@@ -163,6 +166,196 @@ namespace {
   state.replaceGasCellIdentityRecords(std::move(identities));
   assert(state.validateOwnershipInvariants());
   return state;
+}
+
+[[nodiscard]] cosmosim::core::SimulationState withoutCompatibilityMirrors(
+    cosmosim::core::SimulationState state) {
+  state.resizeParticles(0);
+  state.species.count_by_species.fill(0);
+  state.rebuildSpeciesIndex();
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities(
+      state.gas_cell_identity.records().begin(),
+      state.gas_cell_identity.records().end());
+  for (auto& identity : identities) {
+    identity.parent_particle_id.reset();
+  }
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  assert(state.validateOwnershipInvariants());
+  return state;
+}
+
+[[nodiscard]] cosmosim::core::SimulationState makeRefinementGravityState(bool refined) {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1);
+  state.resizeCells(refined ? 3 : 1);
+  state.resizePatches(refined ? 2 : 1);
+
+  state.particles.position_x_comoving[0] = 0.004;
+  state.particles.position_y_comoving[0] = 0.0005;
+  state.particles.position_z_comoving[0] = 0.0005;
+  state.particles.mass_code[0] = 0.0;
+  state.particle_sidecar.particle_id[0] = 9701;
+  state.particle_sidecar.sfc_key[0] = 9701;
+  state.particle_sidecar.species_tag[0] =
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+  state.particle_sidecar.owning_rank[0] = 0;
+  state.species.count_by_species.fill(0);
+  state.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 1;
+  state.rebuildSpeciesIndex();
+
+  state.patches.patch_id[0] = 9801;
+  state.patches.parent_patch_id[0] = 0;
+  state.patches.level[0] = 0;
+  state.patches.first_cell[0] = 0;
+  state.patches.cell_count[0] = 1;
+  state.patches.owning_rank[0] = 0;
+  state.patches.origin_x_comoving[0] = 0.0005;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 0.001;
+  state.patches.extent_y_comoving[0] = 0.001;
+  state.patches.extent_z_comoving[0] = 0.001;
+  state.patches.cell_dim_x[0] = 1;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
+
+  state.cells.center_x_comoving[0] = 0.001;
+  state.cells.center_y_comoving[0] = 0.0005;
+  state.cells.center_z_comoving[0] = 0.0005;
+  state.cells.mass_code[0] = 2.0e6;
+  state.cells.patch_index[0] = 0;
+  state.gas_cells.gas_cell_id[0] = 9811;
+  state.gas_cells.parent_particle_id[0] = 0;
+
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities;
+  identities.push_back({
+      .gas_cell_id = 9811,
+      .parent_particle_id = std::nullopt,
+      .owning_patch_id = 9801,
+      .local_cell_row = 0,
+  });
+
+  if (refined) {
+    state.patches.patch_id[1] = 9802;
+    state.patches.parent_patch_id[1] = 9801;
+    state.patches.level[1] = 1;
+    state.patches.first_cell[1] = 1;
+    state.patches.cell_count[1] = 2;
+    state.patches.owning_rank[1] = 0;
+    state.patches.origin_x_comoving[1] = 0.0005;
+    state.patches.origin_y_comoving[1] = 0.0;
+    state.patches.origin_z_comoving[1] = 0.0;
+    state.patches.extent_x_comoving[1] = 0.001;
+    state.patches.extent_y_comoving[1] = 0.001;
+    state.patches.extent_z_comoving[1] = 0.001;
+    state.patches.cell_dim_x[1] = 2;
+    state.patches.cell_dim_y[1] = 1;
+    state.patches.cell_dim_z[1] = 1;
+
+    for (std::uint32_t row = 1; row < 3; ++row) {
+      const double x = row == 1 ? 0.00075 : 0.00125;
+      state.cells.center_x_comoving[row] = x;
+      state.cells.center_y_comoving[row] = 0.0005;
+      state.cells.center_z_comoving[row] = 0.0005;
+      state.cells.mass_code[row] = 1.0e6;
+      state.cells.patch_index[row] = 1;
+      state.gas_cells.gas_cell_id[row] = 9811 + row;
+      state.gas_cells.parent_particle_id[row] = 0;
+      identities.push_back({
+          .gas_cell_id = 9811 + row,
+          .parent_particle_id = std::nullopt,
+          .owning_patch_id = 9802,
+          .local_cell_row = row,
+      });
+    }
+  }
+
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  assert(state.validateOwnershipInvariants());
+  return state;
+}
+
+struct AuthoritativeGravityNumericalResult {
+  std::vector<double> x, y, z, mass;
+  std::vector<double> accel_x, accel_y, accel_z;
+  std::size_t particle_source_count = 0;
+  std::size_t gas_source_count = 0;
+};
+
+[[nodiscard]] AuthoritativeGravityNumericalResult solveAuthoritativeGravityNumerically(
+    const cosmosim::core::SimulationState& state,
+    double epsilon_comoving = 1.0e-5) {
+  const auto rows = cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+      state, 0U, 1U, "authoritative gas numerical acceptance");
+  AuthoritativeGravityNumericalResult result;
+  result.particle_source_count = rows.particle_rows.size();
+  result.gas_source_count = rows.gas_cell_rows.size();
+  const std::size_t source_count = result.particle_source_count + result.gas_source_count;
+  result.x.reserve(source_count);
+  result.y.reserve(source_count);
+  result.z.reserve(source_count);
+  result.mass.reserve(source_count);
+  for (const std::uint32_t row : rows.particle_rows) {
+    result.x.push_back(state.particles.position_x_comoving[row]);
+    result.y.push_back(state.particles.position_y_comoving[row]);
+    result.z.push_back(state.particles.position_z_comoving[row]);
+    result.mass.push_back(state.particles.mass_code[row]);
+  }
+  for (const std::uint32_t row : rows.gas_cell_rows) {
+    const auto source = cosmosim::workflows::internal::authoritativeGasGravitySource(
+        state, row, "authoritative gas numerical acceptance");
+    result.x.push_back(source.x_comoving);
+    result.y.push_back(source.y_comoving);
+    result.z.push_back(source.z_comoving);
+    result.mass.push_back(source.mass_code);
+  }
+
+  std::vector<cosmosim::gravity::TreeLocalIndex> active(source_count);
+  for (std::size_t i = 0; i < source_count; ++i) {
+    active[i] = cosmosim::gravity::checkedTreeLocalIndex(
+        i, "authoritative gas numerical acceptance active source");
+  }
+  result.accel_x.assign(source_count, 0.0);
+  result.accel_y.assign(source_count, 0.0);
+  result.accel_z.assign(source_count, 0.0);
+  cosmosim::gravity::TreeGravityOptions options;
+  options.opening_theta = 1.0e-8;
+  options.opening_criterion = cosmosim::gravity::TreeOpeningCriterion::kBarnesHutGeometric;
+  options.multipole_order = cosmosim::gravity::TreeMultipoleOrder::kMonopole;
+  options.max_leaf_size = 1;
+  options.gravitational_constant_code = 1.0;
+  options.softening.epsilon_comoving = epsilon_comoving;
+  cosmosim::gravity::TreeGravitySolver solver;
+  const cosmosim::gravity::GravitySourceGeneration generation{1};
+  solver.build(result.x, result.y, result.z, result.mass, options, nullptr, {}, generation);
+  solver.evaluateActiveSet(
+      result.x, result.y, result.z, result.mass, active,
+      result.accel_x, result.accel_y, result.accel_z,
+      options, nullptr, {}, {}, generation);
+
+  for (std::size_t target = 0; target < source_count; ++target) {
+    std::array<double, 3> direct{};
+    for (std::size_t source = 0; source < source_count; ++source) {
+      if (source == target) continue;
+      const double dx = result.x[source] - result.x[target];
+      const double dy = result.y[source] - result.y[target];
+      const double dz = result.z[source] - result.z[target];
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      const double inv_r3 = cosmosim::gravity::softenedInvR3(r2, epsilon_comoving);
+      direct[0] += result.mass[source] * dx * inv_r3;
+      direct[1] += result.mass[source] * dy * inv_r3;
+      direct[2] += result.mass[source] * dz * inv_r3;
+    }
+    const auto close = [](double actual, double expected) {
+      const double scale = std::max({1.0, std::abs(actual), std::abs(expected)});
+      return std::abs(actual - expected) <= 5.0e-12 * scale;
+    };
+    assert(close(result.accel_x[target], direct[0]));
+    assert(close(result.accel_y[target], direct[1]));
+    assert(close(result.accel_z[target], direct[2]));
+  }
+  return result;
 }
 
 [[nodiscard]] cosmosim::core::SimulationState makeCoveredCoarseHierarchyState(bool reverse_rows) {
@@ -415,6 +608,39 @@ int main() {
           shared_lineage_state, 0U, 1U, "shared-lineage gas gravity acceptance");
   assert(parentless_gravity_sources.gas_cell_rows.size() == converging_gravity_sources.gas_cell_rows.size());
   assert(shared_lineage_gravity_sources.gas_cell_rows.size() == converging_gravity_sources.gas_cell_rows.size());
+
+  const auto parentless_force = solveAuthoritativeGravityNumerically(parentless_state);
+  const auto shared_lineage_force = solveAuthoritativeGravityNumerically(shared_lineage_state);
+  assert(parentless_force.gas_source_count == parentless_state.cells.size());
+  assert(shared_lineage_force.gas_source_count == shared_lineage_state.cells.size());
+  assert(shared_lineage_force.accel_x.size() >= 2U);
+  assert(shared_lineage_force.accel_x[0] != shared_lineage_force.accel_x[1]);
+
+  // Compatibility mirrors must have zero numerical effect on gas gravity.
+  const auto without_mirrors_force = solveAuthoritativeGravityNumerically(
+      withoutCompatibilityMirrors(parentless_state));
+  assert(parentless_force.gas_source_count == without_mirrors_force.gas_source_count);
+  assert(parentless_force.mass == without_mirrors_force.mass);
+  for (std::size_t i = 0; i < parentless_force.accel_x.size(); ++i) {
+    assert(std::abs(parentless_force.accel_x[i] - without_mirrors_force.accel_x[i]) < 1.0e-12);
+    assert(std::abs(parentless_force.accel_y[i] - without_mirrors_force.accel_y[i]) < 1.0e-12);
+    assert(std::abs(parentless_force.accel_z[i] - without_mirrors_force.accel_z[i]) < 1.0e-12);
+  }
+
+  const auto coarse_force = solveAuthoritativeGravityNumerically(makeRefinementGravityState(false));
+  const auto refined_force = solveAuthoritativeGravityNumerically(makeRefinementGravityState(true));
+  assert(coarse_force.gas_source_count == 1U);
+  assert(refined_force.gas_source_count == 2U); // covered coarse parent excluded
+  const double coarse_gas_mass = std::accumulate(
+      coarse_force.mass.begin() + static_cast<std::ptrdiff_t>(coarse_force.particle_source_count),
+      coarse_force.mass.end(), 0.0);
+  const double refined_gas_mass = std::accumulate(
+      refined_force.mass.begin() + static_cast<std::ptrdiff_t>(refined_force.particle_source_count),
+      refined_force.mass.end(), 0.0);
+  assert(std::abs(coarse_gas_mass - refined_gas_mass) < 1.0e-12);
+  // The massless collisionless probe is first in both source arrays. Genuine
+  // refinement changes the discretized force while preserving total mass/COM.
+  assert(std::abs(coarse_force.accel_x[0] - refined_force.accel_x[0]) > 0.0);
 
   const auto covered_hierarchy_state = makeCoveredCoarseHierarchyState(false);
   const auto covered_gravity_sources =

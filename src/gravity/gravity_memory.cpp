@@ -96,8 +96,30 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       "gravity ordering estimate overflow");
   const std::uint64_t acceleration_bytes = checkedMul(
       input.local_target_count,
-      4U * sizeof(double),
+      3U * sizeof(double),
       "gravity acceleration estimate overflow");
+  // The legacy PM interpolation backend still requires contiguous target
+  // coordinates internally. Source-index targets therefore avoid persistent
+  // workflow/coordinator copies, but pay one bounded PM gather triplet while
+  // interpolation is active.
+  const std::uint64_t pm_target_gather_bytes = input.indexed_target_coordinates
+      ? checkedMul(
+          input.local_target_count,
+          3U * sizeof(double),
+          "gravity PM target gather estimate overflow")
+      : 0U;
+  const std::uint64_t periodic_tree_coordinate_bytes = input.periodic_tree_coordinates
+      ? checkedMul(
+          input.local_source_count,
+          5U * sizeof(double),
+          "gravity periodic tree staging estimate overflow")
+      : 0U;
+  const std::uint64_t zoom_active_correction_bytes = input.zoom_enabled
+      ? checkedMul(
+          input.local_target_count,
+          3U * sizeof(double),
+          "gravity zoom active correction estimate overflow")
+      : 0U;
   const std::uint64_t persistent_force_cache_bytes = checkedMul(
       input.local_source_count,
       3U * sizeof(double) + sizeof(std::uint8_t),
@@ -138,7 +160,23 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
               "gravity.estimate.target_index_views", target_view_bytes,
               "targets alias source coordinates by compact local index");
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
-              "gravity.estimate.force_accumulators", acceleration_bytes);
+              "gravity.estimate.force_accumulators", acceleration_bytes,
+              "authoritative compact active acceleration triplet");
+  if (pm_target_gather_bytes > 0U) {
+    addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
+                "gravity.estimate.pm_indexed_target_coordinate_gather", pm_target_gather_bytes,
+                "bounded PM interpolation scratch; no persistent coordinator target triplet");
+  }
+  if (periodic_tree_coordinate_bytes > 0U) {
+    addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
+                "gravity.estimate.periodic_tree_coordinate_staging", periodic_tree_coordinate_bytes,
+                "three unwrapped tree coordinates plus two reused axis-ordering workspaces");
+  }
+  if (zoom_active_correction_bytes > 0U) {
+    addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
+                "gravity.estimate.zoom_active_correction", zoom_active_correction_bytes,
+                "allocated only while zoom long-range correction is enabled");
+  }
   addEstimate(builder, core::MemorySubsystem::kSidecars, core::MemoryLifetime::kPersistent,
               "gravity.estimate.persistent_force_cache", persistent_force_cache_bytes,
               "three acceleration lanes plus validity; exact particle/cell split is runtime-owned");
@@ -166,7 +204,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   GravityMemoryEstimate result;
   result.report = std::move(builder).finish();
   result.report.notes.push_back(
-      "Gravity pre-run estimate uses leaf-derived tree capacity and source-index target views; canonical SimulationState is reported separately.");
+      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, PM indexed-target gather scratch, periodic tree staging, tree workspace, PM fields, optional zoom lanes, persistent force cache, and sparse exchange buffers; canonical SimulationState is reported separately.");
   result.report.notes.push_back(
       std::string("PM estimate profile assignment=") +
       (input.assignment_scheme == PmAssignmentScheme::kTsc ? "tsc" : "cic") +

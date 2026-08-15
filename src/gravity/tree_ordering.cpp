@@ -16,7 +16,7 @@ void radixSortMortonOrdering(TreeMortonOrdering& ordering) {
   }
 
   std::vector<std::uint64_t> scratch_key(count);
-  std::vector<std::uint32_t> scratch_index(count);
+  std::vector<TreeLocalIndex> scratch_index(count);
   bool source_is_primary = true;
   for (unsigned shift = 0U; shift < 64U; shift += 8U) {
     std::array<std::size_t, 256> bucket_count{};
@@ -107,10 +107,9 @@ TreeMortonOrdering buildMortonOrdering(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving) {
-  if (pos_x_comoving.size() >
-      static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+  if (pos_x_comoving.size() > k_tree_local_index_max) {
     throw std::overflow_error(
-        "Morton ordering exceeds the 32-bit particle-index contract");
+        "Morton ordering exceeds the configured local tree-index contract");
   }
   const TreeBounds bounds = computeTreeBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving);
 

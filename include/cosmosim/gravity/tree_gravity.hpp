@@ -84,11 +84,11 @@ struct TreeNodeSoa {
   // Diagnostic index of the first direct child root created for this node.
   // Direct children are not guaranteed contiguous because recursive insertion
   // interleaves descendants; traversal must use child_index.
-  std::vector<std::uint32_t> child_base;
+  std::vector<TreeLocalIndex> child_base;
   std::vector<std::uint8_t> child_count;
-  std::vector<std::uint32_t> child_index;
-  std::vector<std::uint32_t> particle_begin;
-  std::vector<std::uint32_t> particle_count;
+  std::vector<TreeLocalIndex> child_index;
+  std::vector<TreeLocalIndex> particle_begin;
+  std::vector<TreeLocalCount> particle_count;
 
   [[nodiscard]] std::size_t size() const;
   void clear();
@@ -110,7 +110,7 @@ class TreeGravitySolver {
   };
 
   struct TreeGravityTargetView {
-    std::span<const std::uint32_t> active_particle_index;
+    std::span<const TreeLocalIndex> active_particle_index;
     std::span<double> accel_x_comoving;
     std::span<double> accel_y_comoving;
     std::span<double> accel_z_comoving;
@@ -150,7 +150,7 @@ class TreeGravitySolver {
       std::span<const double> pos_y_comoving,
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
-      std::span<const std::uint32_t> active_particle_index,
+      std::span<const TreeLocalIndex> active_particle_index,
       std::span<double> accel_x_comoving,
       std::span<double> accel_y_comoving,
       std::span<double> accel_z_comoving,
@@ -167,13 +167,13 @@ class TreeGravitySolver {
 
  private:
   [[nodiscard]] bool built() const;
-  [[nodiscard]] std::uint32_t buildNodeRecursive(
+  [[nodiscard]] TreeLocalIndex buildNodeRecursive(
       std::span<const double> pos_x_comoving,
       std::span<const double> pos_y_comoving,
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
-      std::uint32_t begin,
-      std::uint32_t end,
+      TreeLocalCount begin,
+      TreeLocalCount end,
       double center_x_comoving,
       double center_y_comoving,
       double center_z_comoving,
@@ -184,13 +184,13 @@ class TreeGravitySolver {
       std::span<const double> pos_y_comoving,
       std::span<const double> pos_z_comoving,
       std::span<const double> mass_code,
-      std::uint32_t node_index,
+      TreeLocalIndex node_index,
       TreeMultipoleOrder multipole_order);
 
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;
   std::vector<double> m_source_softening_epsilon_comoving;
-  std::vector<std::uint32_t> m_partition_scratch;
+  std::vector<TreeLocalIndex> m_partition_scratch;
   std::size_t m_build_source_count = 0;
   GravitySourceGeneration m_build_source_generation{};
   TreeBuildGeneration m_tree_build_generation{};

@@ -307,17 +307,25 @@ void testLocalForceRefreshDoesNotIssuePmSyncEvent() {
   cosmosim::core::TransientStepWorkspace workspace;
   cosmosim::core::StepOrchestrator orchestrator;
   orchestrator.registerCallback(recorder);
-  orchestrator.executeSingleStep(
-      state,
-      integrator_state,
-      local_active,
-      nullptr,
-      &workspace,
-      nullptr,
-      nullptr,
-      std::uint64_t{7},
-      cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+  assert(throwsWithContext(
+      [&]() {
+        orchestrator.executeSingleStep(
+            state,
+            integrator_state,
+            local_active,
+            nullptr,
+            &workspace,
+            nullptr,
+            nullptr,
+            std::uint64_t{7},
+            cosmosim::core::StepBoundaryKind::kPmRefreshPoint);
+      },
+      "gravity source state changed after the scheduled PM refresh"));
 
+  // The local ForceRefresh stage itself still does not manufacture a global PM
+  // sync event. The new source-generation guard fails closed at the post-kick
+  // boundary instead, which is the intended policy while local multirate TreePM
+  // predictor/reuse semantics remain disabled.
   assert(recorder.force_refresh.force_refresh_surface);
   assert(recorder.force_refresh.requires_predicted_inactive_sources);
   assert(!recorder.force_refresh.cadence_opportunity_allowed);

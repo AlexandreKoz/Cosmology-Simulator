@@ -12,6 +12,7 @@
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/execution_policy.hpp"
+#include "cosmosim/gravity/tree_index.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace cosmosim::gravity {
@@ -31,8 +32,11 @@ struct PmBackendArchitecture {
   bool device_assignment = false;
   bool device_fft = false;
   bool device_green_function = false;
+  bool device_gradient = false;
   bool device_interpolation = false;
   bool persistent_device_buffers = false;
+  bool persistent_residency = false;
+  bool distributed_device_fft = false;
 };
 
 // The solver-facing ownership contract is intentionally topology-neutral. The
@@ -80,6 +84,37 @@ struct PmGridShape {
 
   [[nodiscard]] std::size_t cellCount() const;
   [[nodiscard]] bool isValid() const;
+};
+
+// Concrete numerical ownership view used by PM assignment/interpolation and
+// backend remap code. It is a small value type: no virtual dispatch occurs in
+// particle/cell loops. The current implementation adapts serial/x-slab FFTW
+// ownership; a future pencil backend can supply the same operations without
+// rewriting routing kernels.
+class PmDecompositionView {
+ public:
+  PmDecompositionView(
+      PmGridShape shape,
+      parallel::PmSlabLayout layout,
+      core::PmDecompositionMode mode);
+
+  [[nodiscard]] const PmDecompositionDescriptor& descriptor() const noexcept;
+  [[nodiscard]] PmOwnershipExtent3D realExtentForRank(int rank) const;
+  [[nodiscard]] int realOwnerRank(std::size_t global_x) const;
+  [[nodiscard]] bool ownsRealCell(
+      std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept;
+  [[nodiscard]] std::size_t globalToLocalRealIndex(
+      std::size_t global_x, std::size_t global_y, std::size_t global_z) const;
+  [[nodiscard]] bool ownsSpectralCell(
+      std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept;
+  [[nodiscard]] std::size_t globalToLocalSpectralIndex(
+      std::size_t global_x, std::size_t global_y, std::size_t global_z) const;
+
+ private:
+  PmGridShape m_shape{};
+  parallel::PmSlabLayout m_layout{};
+  core::PmDecompositionMode m_mode = core::PmDecompositionMode::kSlab;
+  PmDecompositionDescriptor m_descriptor{};
 };
 
 enum class PmDataResidencyPolicy {
@@ -242,6 +277,11 @@ class PmSolver {
     std::span<double> accel_y_comoving;
     std::span<double> accel_z_comoving;
     PmForceOutputLayout output_layout = PmForceOutputLayout::kCompactActive;
+    // Empty means the coordinate spans are compact target coordinates. When
+    // populated, each active target resolves its coordinates by indexing the
+    // source coordinate spans. This keeps source-index targets compact across
+    // the workflow/coordinator boundary.
+    std::span<const TreeLocalIndex> coordinate_source_index;
   };
 
   explicit PmSolver(PmGridShape shape);

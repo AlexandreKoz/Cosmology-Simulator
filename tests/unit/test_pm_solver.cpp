@@ -686,7 +686,12 @@ void testPmBackendArchitectureAndTopologyContract() {
   assert(architecture.capability == cosmosim::gravity::pmBackendCapability());
   assert(!architecture.device_fft);
   assert(!architecture.device_green_function);
+  assert(!architecture.device_gradient);
+  assert(!architecture.persistent_residency);
+  assert(!architecture.distributed_device_fft);
+#if !COSMOSIM_ENABLE_CUDA
   assert(!architecture.persistent_device_buffers);
+#endif
 
   const cosmosim::gravity::PmGridShape shape{16U, 12U, 8U};
   const cosmosim::parallel::PmSlabLayout serial_layout{
@@ -718,6 +723,20 @@ void testPmBackendArchitectureAndTopologyContract() {
          cosmosim::gravity::PmDecompositionTopology::kXSlabTransposedSpectral);
   assert(transposed.real_extent.x_begin == 4U);
   assert(transposed.real_extent.x_count == 4U);
+
+  const cosmosim::gravity::PmDecompositionView serial_view(
+      shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  assert(serial_view.realOwnerRank(15U) == 0);
+  assert(serial_view.ownsRealCell(3U, 2U, 1U));
+  assert(serial_view.globalToLocalRealIndex(3U, 2U, 1U) == (3U * shape.ny + 2U) * shape.nz + 1U);
+
+  const cosmosim::gravity::PmDecompositionView distributed_view(
+      shape, distributed_layout, cosmosim::core::PmDecompositionMode::kPencil);
+  assert(distributed_view.realOwnerRank(0U) == 0);
+  assert(distributed_view.realOwnerRank(5U) == 1);
+  assert(distributed_view.realOwnerRank(15U) == 3);
+  assert(distributed_view.ownsRealCell(5U, 2U, 1U));
+  assert(!distributed_view.ownsRealCell(2U, 2U, 1U));
 }
 
 void testPmRejectsInvalidEnumsNegativeMassAndOverflow() {

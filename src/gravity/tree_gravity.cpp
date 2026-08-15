@@ -20,8 +20,8 @@ namespace cosmosim::gravity {
 namespace {
 
 struct OctantSpan {
-  std::uint32_t begin = 0;
-  std::uint32_t end = 0;
+  TreeLocalCount begin = 0;
+  TreeLocalCount end = 0;
 };
 
 [[nodiscard]] std::uint64_t sourceFingerprint(
@@ -110,7 +110,7 @@ void validateOptions(const TreeGravityOptions& options) {
 
 [[nodiscard]] std::array<double, 3> monopolePlusQuadrupoleAccel(
     const TreeNodeSoa& nodes,
-    std::uint32_t node_index,
+    TreeLocalIndex node_index,
     double dx,
     double dy,
     double dz,
@@ -178,17 +178,17 @@ void validateOptions(const TreeGravityOptions& options) {
 
 void pushChildrenNearFirst(
     const TreeNodeSoa& nodes,
-    std::uint32_t node_index,
+    TreeLocalIndex node_index,
     double px,
     double py,
     double pz,
-    std::vector<std::uint32_t>& stack) {
-  std::array<std::pair<double, std::uint32_t>, 8> child_dist2{};
+    std::vector<TreeLocalIndex>& stack) {
+  std::array<std::pair<double, TreeLocalIndex>, 8> child_dist2{};
   std::size_t count = 0;
   const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-    const std::uint32_t child = nodes.child_index[child_offset + octant];
-    if (child == std::numeric_limits<std::uint32_t>::max()) {
+    const TreeLocalIndex child = nodes.child_index[child_offset + octant];
+    if (child == kInvalidTreeLocalIndex) {
       continue;
     }
     const double dx = nodes.center_x_comoving[child] - px;
@@ -282,8 +282,9 @@ void TreeNodeSoa::appendMemoryReport(core::MemoryReportBuilder& builder) const {
                                        .label = std::move(label),
                                        .current_size_bytes = core::currentSizeBytesForContainer(container),
                                        .owned_capacity_bytes = bytes,
-                                       .high_water_bytes = bytes,
-                                       .uncertainty_note = {}});
+                                       .high_water_bytes = 0U,
+                                       .estimated_next_step_bytes = 0U,
+                                       .uncertainty_note = "historical lane high-water is not retained after optional lane release; solver reports node-capacity high-water separately"});
   };
   add("tree.nodes.center_x_comoving", center_x_comoving);
   add("tree.nodes.center_y_comoving", center_y_comoving);
@@ -337,7 +338,7 @@ void TreeGravitySolver::build(
   const auto build_start = std::chrono::steady_clock::now();
   validateInputSpans(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code);
   validateOptions(options);
-  if (pos_x_comoving.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+  if (pos_x_comoving.size() > static_cast<std::size_t>(kInvalidTreeLocalIndex)) {
     throw std::overflow_error("Tree gravity source count exceeds the 32-bit tree-index contract");
   }
 
@@ -409,13 +410,13 @@ void TreeGravitySolver::build(
   }
   m_nodes.reserve(reserve_nodes, options.multipole_order == TreeMultipoleOrder::kQuadrupole);
   const auto topology_start = std::chrono::steady_clock::now();
-  const std::uint32_t root_index = buildNodeRecursive(
+  const TreeLocalIndex root_index = buildNodeRecursive(
       pos_x_comoving,
       pos_y_comoving,
       pos_z_comoving,
       mass_code,
       0,
-      static_cast<std::uint32_t>(m_ordering.sorted_particle_index.size()),
+      checkedTreeLocalIndex(m_ordering.sorted_particle_index.size(), "tree ordering exceeds local index policy"),
       center_x_comoving,
       center_y_comoving,
       center_z_comoving,
@@ -472,7 +473,7 @@ void TreeGravitySolver::evaluateActiveSet(
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
-    std::span<const std::uint32_t> active_particle_index,
+    std::span<const TreeLocalIndex> active_particle_index,
     std::span<double> accel_x_comoving,
     std::span<double> accel_y_comoving,
     std::span<double> accel_z_comoving,
@@ -545,7 +546,7 @@ void TreeGravitySolver::evaluateActiveSet(
   // active target owns a disjoint acceleration output slot.
   std::vector<double> target_softening_by_active(active_particle_index.size(), 0.0);
   for (std::size_t active_i = 0; active_i < active_particle_index.size(); ++active_i) {
-    const std::uint32_t particle_index = active_particle_index[active_i];
+    const TreeLocalIndex particle_index = active_particle_index[active_i];
     if (particle_index >= pos_x_comoving.size()) {
       throw std::out_of_range("Active particle index exceeds particle count");
     }
@@ -563,7 +564,7 @@ void TreeGravitySolver::evaluateActiveSet(
 #pragma omp parallel reduction(+ : accepted_nodes, opened_nodes, visited_nodes, pp_interactions)
 #endif
   {
-    std::vector<std::uint32_t> stack;
+    std::vector<TreeLocalIndex> stack;
     stack.reserve(256);
 
 #if COSMOSIM_HAVE_OPENMP
@@ -573,7 +574,7 @@ void TreeGravitySolver::evaluateActiveSet(
          active_slot < static_cast<std::ptrdiff_t>(active_particle_index.size());
          ++active_slot) {
       const std::size_t active_i = static_cast<std::size_t>(active_slot);
-      const std::uint32_t particle_index = active_particle_index[active_i];
+      const TreeLocalIndex particle_index = active_particle_index[active_i];
       const double px = pos_x_comoving[particle_index];
       const double py = pos_y_comoving[particle_index];
       const double pz = pos_z_comoving[particle_index];
@@ -593,7 +594,7 @@ void TreeGravitySolver::evaluateActiveSet(
       stack.push_back(0U);
 
       while (!stack.empty()) {
-        const std::uint32_t node_index = stack.back();
+        const TreeLocalIndex node_index = stack.back();
         stack.pop_back();
         ++visited_nodes;
 
@@ -634,10 +635,10 @@ void TreeGravitySolver::evaluateActiveSet(
         if (accept) {
           ++accepted_nodes;
           if (is_leaf) {
-            const std::uint32_t begin = m_nodes.particle_begin[node_index];
-            const std::uint32_t leaf_end = begin + m_nodes.particle_count[node_index];
-            for (std::uint32_t sorted_i = begin; sorted_i < leaf_end; ++sorted_i) {
-              const std::uint32_t source_index = m_ordering.sorted_particle_index[sorted_i];
+            const TreeLocalCount begin = m_nodes.particle_begin[node_index];
+            const TreeLocalCount leaf_end = begin + m_nodes.particle_count[node_index];
+            for (TreeLocalIndex sorted_i = begin; sorted_i < leaf_end; ++sorted_i) {
+              const TreeLocalIndex source_index = m_ordering.sorted_particle_index[sorted_i];
               if (source_index == particle_index) {
                 continue;
               }
@@ -711,7 +712,8 @@ void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) c
                                        .current_size_bytes = core::currentSizeBytesForContainer(container),
                                        .owned_capacity_bytes = capacity_bytes,
                                        .high_water_bytes = capacity_bytes,
-                                       .uncertainty_note = {}});
+                                       .estimated_next_step_bytes = 0U,
+                                       .uncertainty_note = "retained vector capacity is the observed allocation high-water; next-step requirement is not predicted"});
   };
   add(core::MemorySubsystem::kTree, "tree.ordering.sorted_particle_index", m_ordering.sorted_particle_index);
   add(core::MemorySubsystem::kTree, "tree.ordering.morton_key", m_ordering.morton_key);
@@ -723,23 +725,23 @@ bool TreeGravitySolver::built() const {
   return m_nodes.size() > 0;
 }
 
-std::uint32_t TreeGravitySolver::buildNodeRecursive(
+TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
-    std::uint32_t begin,
-    std::uint32_t end,
+    TreeLocalIndex begin,
+    TreeLocalIndex end,
     double center_x_comoving,
     double center_y_comoving,
     double center_z_comoving,
     double half_size_comoving,
     const TreeGravityOptions& options) {
   (void)mass_code;
-  if (m_nodes.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+  if (m_nodes.size() >= static_cast<std::size_t>(kInvalidTreeLocalIndex)) {
     throw std::overflow_error("Tree node count exceeds the 32-bit node-index contract");
   }
-  const std::uint32_t node_index = static_cast<std::uint32_t>(m_nodes.size());
+  const TreeLocalIndex node_index = checkedTreeLocalIndex(m_nodes.size(), "tree node count exceeds local index policy");
   m_nodes.center_x_comoving.push_back(center_x_comoving);
   m_nodes.center_y_comoving.push_back(center_y_comoving);
   m_nodes.center_z_comoving.push_back(center_z_comoving);
@@ -762,7 +764,7 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   m_nodes.child_base.push_back(0U);
   m_nodes.child_count.push_back(0U);
   for (std::uint8_t i = 0; i < 8U; ++i) {
-    m_nodes.child_index.push_back(std::numeric_limits<std::uint32_t>::max());
+    m_nodes.child_index.push_back(kInvalidTreeLocalIndex);
   }
   m_nodes.particle_begin.push_back(begin);
   m_nodes.particle_count.push_back(end - begin);
@@ -771,16 +773,16 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
     return node_index;
   }
 
-  std::array<std::uint32_t, 8> octant_count{};
-  for (std::uint32_t i = begin; i < end; ++i) {
-    const std::uint32_t particle = m_ordering.sorted_particle_index[i];
+  std::array<TreeLocalCount, 8> octant_count{};
+  for (TreeLocalCount i = begin; i < end; ++i) {
+    const TreeLocalIndex particle = m_ordering.sorted_particle_index[i];
     const std::uint8_t octant = octantForParticle(
         pos_x_comoving[particle], pos_y_comoving[particle], pos_z_comoving[particle], center_x_comoving, center_y_comoving,
         center_z_comoving);
     ++octant_count[octant];
   }
 
-  std::array<std::uint32_t, 9> octant_offsets{};
+  std::array<TreeLocalCount, 9> octant_offsets{};
   octant_offsets[0] = begin;
   for (std::size_t i = 0; i < 8; ++i) {
     octant_offsets[i + 1] = octant_offsets[i] + octant_count[i];
@@ -789,13 +791,13 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
   if (m_partition_scratch.size() < m_ordering.sorted_particle_index.size()) {
     throw std::logic_error("Tree partition workspace is smaller than the source ordering");
   }
-  std::array<std::uint32_t, 8> cursor{};
+  std::array<TreeLocalCount, 8> cursor{};
   for (std::size_t i = 0; i < 8; ++i) {
     cursor[i] = octant_offsets[i];
   }
 
-  for (std::uint32_t i = begin; i < end; ++i) {
-    const std::uint32_t particle = m_ordering.sorted_particle_index[i];
+  for (TreeLocalCount i = begin; i < end; ++i) {
+    const TreeLocalIndex particle = m_ordering.sorted_particle_index[i];
     const std::uint8_t octant = octantForParticle(
         pos_x_comoving[particle], pos_y_comoving[particle], pos_z_comoving[particle], center_x_comoving, center_y_comoving,
         center_z_comoving);
@@ -807,13 +809,13 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
       m_partition_scratch.begin() + end,
       m_ordering.sorted_particle_index.begin() + begin);
 
-  const std::uint32_t child_base = static_cast<std::uint32_t>(m_nodes.size());
+  const TreeLocalIndex child_base = checkedTreeLocalIndex(m_nodes.size(), "tree child base exceeds local index policy");
   std::uint8_t non_empty_children = 0;
   const std::size_t child_slot_offset = static_cast<std::size_t>(node_index) * 8U;
 
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-    const std::uint32_t child_begin = octant_offsets[octant];
-    const std::uint32_t child_end = octant_offsets[octant + 1];
+    const TreeLocalIndex child_begin = octant_offsets[octant];
+    const TreeLocalIndex child_end = octant_offsets[octant + 1];
     if (child_begin == child_end) {
       continue;
     }
@@ -823,7 +825,7 @@ std::uint32_t TreeGravitySolver::buildNodeRecursive(
     const double child_center_y = center_y_comoving + ((octant & 2U) != 0U ? child_half : -child_half);
     const double child_center_z = center_z_comoving + ((octant & 1U) != 0U ? child_half : -child_half);
 
-    const std::uint32_t built_child_index = buildNodeRecursive(
+    const TreeLocalIndex built_child_index = buildNodeRecursive(
         pos_x_comoving,
         pos_y_comoving,
         pos_z_comoving,
@@ -849,17 +851,17 @@ void TreeGravitySolver::accumulateMultipoles(
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving,
     std::span<const double> mass_code,
-    std::uint32_t node_index,
+    TreeLocalIndex node_index,
     TreeMultipoleOrder multipole_order) {
   if (m_nodes.child_count[node_index] == 0U) {
-    const std::uint32_t begin = m_nodes.particle_begin[node_index];
-    const std::uint32_t end = begin + m_nodes.particle_count[node_index];
+    const TreeLocalCount begin = m_nodes.particle_begin[node_index];
+    const TreeLocalCount end = begin + m_nodes.particle_count[node_index];
     double total_mass = 0.0;
     double wx = 0.0;
     double wy = 0.0;
     double wz = 0.0;
-    for (std::uint32_t i = begin; i < end; ++i) {
-      const std::uint32_t particle = m_ordering.sorted_particle_index[i];
+    for (TreeLocalCount i = begin; i < end; ++i) {
+      const TreeLocalIndex particle = m_ordering.sorted_particle_index[i];
       const double m = mass_code[particle];
       m_nodes.softening_min_comoving[node_index] =
           std::min(m_nodes.softening_min_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
@@ -886,8 +888,8 @@ void TreeGravitySolver::accumulateMultipoles(
       double i_yy = 0.0;
       double i_yz = 0.0;
       double i_zz = 0.0;
-      for (std::uint32_t i = begin; i < end; ++i) {
-        const std::uint32_t particle = m_ordering.sorted_particle_index[i];
+      for (TreeLocalCount i = begin; i < end; ++i) {
+        const TreeLocalIndex particle = m_ordering.sorted_particle_index[i];
         const double m = mass_code[particle];
         const double rx = pos_x_comoving[particle] - cx;
         const double ry = pos_y_comoving[particle] - cy;
@@ -918,8 +920,8 @@ void TreeGravitySolver::accumulateMultipoles(
 
   const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-    const std::uint32_t child = m_nodes.child_index[child_offset + octant];
-    if (child == std::numeric_limits<std::uint32_t>::max()) {
+    const TreeLocalIndex child = m_nodes.child_index[child_offset + octant];
+    if (child == kInvalidTreeLocalIndex) {
       continue;
     }
     accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
@@ -957,8 +959,8 @@ void TreeGravitySolver::accumulateMultipoles(
   double second_moment_trace = 0.0;
 
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-    const std::uint32_t child = m_nodes.child_index[child_offset + octant];
-    if (child == std::numeric_limits<std::uint32_t>::max()) {
+    const TreeLocalIndex child = m_nodes.child_index[child_offset + octant];
+    if (child == kInvalidTreeLocalIndex) {
       continue;
     }
     const double dx = m_nodes.com_x_comoving[child] - cx;

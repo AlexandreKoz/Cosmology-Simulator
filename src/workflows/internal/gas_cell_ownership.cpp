@@ -1,6 +1,7 @@
 #include "workflows/internal/gas_cell_ownership.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -9,6 +10,33 @@
 #include <vector>
 
 namespace cosmosim::workflows::internal {
+
+AuthoritativeGasGravitySource authoritativeGasGravitySource(
+    const core::SimulationState& state,
+    std::uint32_t cell_row,
+    std::string_view caller) {
+  if (cell_row >= state.cells.size()) {
+    throw std::out_of_range(
+        std::string(caller) + ": authoritative gas gravity row is outside CellSoa");
+  }
+  const double x = state.cells.center_x_comoving[cell_row];
+  const double y = state.cells.center_y_comoving[cell_row];
+  const double z = state.cells.center_z_comoving[cell_row];
+  const double mass = state.cells.mass_code[cell_row];
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+      !std::isfinite(mass) || mass < 0.0) {
+    throw std::runtime_error(
+        std::string(caller) +
+        ": authoritative gas gravity source has non-finite coordinates or negative/non-finite mass");
+  }
+  return AuthoritativeGasGravitySource{
+      .cell_row = cell_row,
+      .x_comoving = x,
+      .y_comoving = y,
+      .z_comoving = z,
+      .mass_code = mass,
+  };
+}
 
 AuthoritativeGravitySourceRows selectAuthoritativeGravitySourceRows(
     const core::SimulationState& state,

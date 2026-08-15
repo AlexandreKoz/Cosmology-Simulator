@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -19,7 +21,7 @@ struct TreePmForceAccumulatorView {
   // coordinates are read from the source arrays. When all three explicit
   // target-position spans are present, they are authoritative instead;
   // UINT32_MAX then denotes a target with no local source/self identity.
-  std::span<const std::uint32_t> active_particle_index;
+  std::span<const TreeLocalIndex> active_particle_index;
   std::span<double> accel_x_comoving;
   std::span<double> accel_y_comoving;
   std::span<double> accel_z_comoving;
@@ -79,6 +81,7 @@ struct TreePmDiagnostics {
   std::uint64_t let_wire_bytes_received = 0;
   std::uint64_t let_high_water_bytes = 0;
   double let_discovery_ms = 0.0;
+  double let_graph_setup_ms = 0.0;
   double let_communication_ms = 0.0;
   double let_overlap_local_work_ms = 0.0;
   double let_communication_wait_ms = 0.0;
@@ -144,6 +147,7 @@ struct TreePmProfileEvent {
   double coupling_overhead_ms = 0.0;
   double source_preprocess_ms = 0.0;
   double let_discovery_ms = 0.0;
+  double let_graph_setup_ms = 0.0;
   double let_communication_ms = 0.0;
   double let_overlap_local_work_ms = 0.0;
   double let_communication_wait_ms = 0.0;
@@ -157,6 +161,7 @@ class TreePmCoordinator {
   explicit TreePmCoordinator(PmGridShape pm_shape);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout, parallel::MpiContext mpi_context);
+  ~TreePmCoordinator();
 
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
   [[nodiscard]] bool ownsFullPmDomain() const noexcept;
@@ -214,6 +219,7 @@ class TreePmCoordinator {
     std::uint64_t let_wire_bytes_received = 0;
     std::uint64_t let_high_water_bytes = 0;
     double let_discovery_ms = 0.0;
+    double let_graph_setup_ms = 0.0;
     double let_communication_ms = 0.0;
     double let_overlap_local_work_ms = 0.0;
     double let_communication_wait_ms = 0.0;
@@ -250,16 +256,13 @@ class TreePmCoordinator {
   std::vector<double> m_periodic_wrapped_axis_scratch;
   std::vector<double> m_periodic_ordered_axis_scratch;
 
-  // Reused compact-sidecar scratch arrays to avoid per-step heap churn.
-  std::vector<double> m_active_pos_x_comoving;
-  std::vector<double> m_active_pos_y_comoving;
-  std::vector<double> m_active_pos_z_comoving;
-  std::vector<double> m_active_pm_ax_comoving;
-  std::vector<double> m_active_pm_ay_comoving;
-  std::vector<double> m_active_pm_az_comoving;
+  // Zoom correction is optional and owns compact lanes only while the selected
+  // profile enables it. Ordinary source-index targets alias authoritative
+  // source coordinates and PM writes directly into the active force buffer.
   std::vector<double> m_active_zoom_corr_ax_comoving;
   std::vector<double> m_active_zoom_corr_ay_comoving;
   std::vector<double> m_active_zoom_corr_az_comoving;
+  std::array<std::uint64_t, 3> m_zoom_corr_high_water_bytes{};
   struct TreeExchangeWorkspace {
     int world_size = 1;
     std::vector<int> send_counts;
@@ -287,10 +290,12 @@ class TreePmCoordinator {
   struct LetDomainCache {
     bool valid = false;
     DecompositionEpoch decomposition_epoch{};
-    GravitySourceGeneration source_generation{};
-    TreeBuildGeneration tree_build_generation{};
+    std::uint64_t geometry_fingerprint = 0U;
+    bool authoritative_geometry = false;
     std::vector<parallel::TreePseudoParticlePacket> top_level_domain_leaves;
   } m_let_domain_cache;
+  struct SparsePeerGraphCacheOpaque;
+  std::unique_ptr<SparsePeerGraphCacheOpaque> m_sparse_peer_graph_cache;
   struct LongRangeFieldValidity {
     bool valid = false;
     DecompositionEpoch decomposition_epoch{};

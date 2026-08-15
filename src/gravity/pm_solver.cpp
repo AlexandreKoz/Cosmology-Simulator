@@ -1101,6 +1101,57 @@ class PmSolver::Impl {
     std::vector<int> recv_contrib_displs_bytes;
   };
 
+#if COSMOSIM_ENABLE_CUDA
+  // Persistent owner for the CUDA PM staging backend. The currently validated
+  // path still performs FFT/Poisson/gradient on the host, but stream and device
+  // storage no longer have per-call ownership. Reserved FFT/filter workspaces
+  // and an opaque plan slot make the resident backend boundary explicit without
+  // claiming cuFFT execution in builds where it has not been implemented.
+  struct CudaBackendWorkspace {
+    cudaStream_t stream = nullptr;
+    core::DeviceBufferDouble pos_x;
+    core::DeviceBufferDouble pos_y;
+    core::DeviceBufferDouble pos_z;
+    core::DeviceBufferDouble mass;
+    core::DeviceBufferDouble density;
+    core::DeviceBufferDouble force_x;
+    core::DeviceBufferDouble force_y;
+    core::DeviceBufferDouble force_z;
+    core::DeviceBufferDouble accel_x;
+    core::DeviceBufferDouble accel_y;
+    core::DeviceBufferDouble accel_z;
+    core::DeviceBufferDouble fft_workspace;
+    core::DeviceBufferDouble green_filter_workspace;
+    std::uintptr_t fft_plan_handle = 0U;
+
+    ~CudaBackendWorkspace() {
+      if (stream != nullptr) {
+        (void)cudaStreamDestroy(stream);
+      }
+    }
+
+    [[nodiscard]] core::CudaStreamView prepare(
+        std::size_t particle_count, std::size_t grid_cell_count) {
+      if (stream == nullptr &&
+          cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) {
+        throw std::runtime_error("Failed to create persistent CUDA PM stream");
+      }
+      pos_x.resize(particle_count);
+      pos_y.resize(particle_count);
+      pos_z.resize(particle_count);
+      mass.resize(particle_count);
+      density.resize(grid_cell_count);
+      force_x.resize(grid_cell_count);
+      force_y.resize(grid_cell_count);
+      force_z.resize(grid_cell_count);
+      accel_x.resize(particle_count);
+      accel_y.resize(particle_count);
+      accel_z.resize(particle_count);
+      return core::CudaStreamView{stream};
+    }
+  };
+#endif
+
   explicit Impl(PmGridShape shape) : m_shape(shape) {}
 
   ~Impl() {
@@ -1828,6 +1879,9 @@ class PmSolver::Impl {
     InterpolationExchangeBuffers<PmPotentialContributionRecord> buffers;
   } m_potential_exchange{};
   IsolatedOpenWorkspace m_isolated_workspace{};
+#if COSMOSIM_ENABLE_CUDA
+  CudaBackendWorkspace m_cuda_workspace{};
+#endif
 };
 
 std::size_t PmGridShape::cellCount() const {
@@ -2127,6 +2181,8 @@ void PmSolver::assignDensity(
     std::span<const double> mass,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+  const PmDecompositionView decomposition_view(
+      m_shape, grid.slabLayout(), options.decomposition_mode);
 #if COSMOSIM_ENABLE_MPI
   double distributed_preflight_mpi_wait_ms = 0.0;
   int mpi_world_size = 1;
@@ -2362,7 +2418,7 @@ void PmSolver::assignDensity(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, ix);
+        const int destination_rank = decomposition_view.realOwnerRank(ix);
         auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
@@ -2529,7 +2585,7 @@ void PmSolver::assignDensity(
             throw std::invalid_argument("density contribution mesh index is out of range");
           }
           const int expected_owner =
-              parallel::pmOwnerRankForGlobalX(m_shape.nx, grid.slabLayout().world_size, record.global_ix);
+              decomposition_view.realOwnerRank(record.global_ix);
           if (expected_owner != grid.slabLayout().world_rank ||
               expected_owner != static_cast<int>(record.destination_rank)) {
             throw std::invalid_argument(
@@ -3151,11 +3207,25 @@ void PmSolver::interpolateForces(
                 "PmSolver::interpolateForces target-view slab metadata must match MPI_COMM_WORLD");
           }
           const std::size_t local_active_count = target_view.active_particle_index.size();
-          if (local_active_count != target_view.pos_x_comoving.size() ||
-              local_active_count != target_view.pos_y_comoving.size() ||
-              local_active_count != target_view.pos_z_comoving.size()) {
+          const bool indexed_coordinates = !target_view.coordinate_source_index.empty();
+          if ((!indexed_coordinates &&
+               (local_active_count != target_view.pos_x_comoving.size() ||
+                local_active_count != target_view.pos_y_comoving.size() ||
+                local_active_count != target_view.pos_z_comoving.size())) ||
+              (indexed_coordinates &&
+               target_view.coordinate_source_index.size() != local_active_count) ||
+              target_view.pos_x_comoving.size() != target_view.pos_y_comoving.size() ||
+              target_view.pos_x_comoving.size() != target_view.pos_z_comoving.size()) {
             throw std::invalid_argument(
-                "PmSolver::interpolateForces active target coordinate view extents must match");
+                "PmSolver::interpolateForces target coordinate/index view extents must match");
+          }
+          if (indexed_coordinates) {
+            for (const TreeLocalIndex source_index : target_view.coordinate_source_index) {
+              if (static_cast<std::size_t>(source_index) >= target_view.pos_x_comoving.size()) {
+                throw std::out_of_range(
+                    "PmSolver::interpolateForces coordinate source index out of range");
+              }
+            }
           }
           switch (target_view.output_layout) {
             case PmForceOutputLayout::kCompactActive:
@@ -3186,9 +3256,42 @@ void PmSolver::interpolateForces(
   }
 #endif
   const std::size_t active_count = target_view.active_particle_index.size();
-  if (active_count != target_view.pos_x_comoving.size() || active_count != target_view.pos_y_comoving.size() ||
-      active_count != target_view.pos_z_comoving.size()) {
-    throw std::invalid_argument("PmSolver::interpolateForces active target coordinate view extents must match");
+  const bool indexed_coordinates = !target_view.coordinate_source_index.empty();
+  if ((!indexed_coordinates &&
+       (active_count != target_view.pos_x_comoving.size() ||
+        active_count != target_view.pos_y_comoving.size() ||
+        active_count != target_view.pos_z_comoving.size())) ||
+      (indexed_coordinates && target_view.coordinate_source_index.size() != active_count) ||
+      target_view.pos_x_comoving.size() != target_view.pos_y_comoving.size() ||
+      target_view.pos_x_comoving.size() != target_view.pos_z_comoving.size()) {
+    throw std::invalid_argument(
+        "PmSolver::interpolateForces target coordinate/index view extents must match");
+  }
+
+  std::vector<double> gathered_x;
+  std::vector<double> gathered_y;
+  std::vector<double> gathered_z;
+  std::span<const double> target_x = target_view.pos_x_comoving;
+  std::span<const double> target_y = target_view.pos_y_comoving;
+  std::span<const double> target_z = target_view.pos_z_comoving;
+  if (indexed_coordinates) {
+    gathered_x.resize(active_count);
+    gathered_y.resize(active_count);
+    gathered_z.resize(active_count);
+    for (std::size_t active_i = 0; active_i < active_count; ++active_i) {
+      const std::size_t source_i = static_cast<std::size_t>(
+          target_view.coordinate_source_index[active_i]);
+      if (source_i >= target_view.pos_x_comoving.size()) {
+        throw std::out_of_range(
+            "PmSolver::interpolateForces coordinate source index out of range");
+      }
+      gathered_x[active_i] = target_view.pos_x_comoving[source_i];
+      gathered_y[active_i] = target_view.pos_y_comoving[source_i];
+      gathered_z[active_i] = target_view.pos_z_comoving[source_i];
+    }
+    target_x = gathered_x;
+    target_y = gathered_y;
+    target_z = gathered_z;
   }
 
   switch (target_view.output_layout) {
@@ -3200,9 +3303,9 @@ void PmSolver::interpolateForces(
       }
       interpolateForces(
           grid,
-          target_view.pos_x_comoving,
-          target_view.pos_y_comoving,
-          target_view.pos_z_comoving,
+          target_x,
+          target_y,
+          target_z,
           target_view.accel_x_comoving,
           target_view.accel_y_comoving,
           target_view.accel_z_comoving,
@@ -3223,9 +3326,9 @@ void PmSolver::interpolateForces(
       std::vector<double> compact_az(active_count, 0.0);
       interpolateForces(
           grid,
-          target_view.pos_x_comoving,
-          target_view.pos_y_comoving,
-          target_view.pos_z_comoving,
+          target_x,
+          target_y,
+          target_z,
           compact_ax,
           compact_ay,
           compact_az,
@@ -3253,6 +3356,8 @@ void PmSolver::interpolateForces(
     std::span<double> accel_z,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+  const PmDecompositionView decomposition_view(
+      m_shape, grid.slabLayout(), options.decomposition_mode);
 #if COSMOSIM_ENABLE_MPI
   double distributed_preflight_mpi_wait_ms = 0.0;
   int mpi_world_size = 1;
@@ -3508,7 +3613,7 @@ void PmSolver::interpolateForces(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
+        const int destination_rank = decomposition_view.realOwnerRank(ix);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
             continue;
@@ -3755,7 +3860,7 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request x-index is not owned by receiving slab"));
         }
-        const int expected_owner = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, request.global_ix);
+        const int expected_owner = decomposition_view.realOwnerRank(request.global_ix);
         if (expected_owner != grid.slabLayout().world_rank ||
             expected_owner != static_cast<int>(request.destination_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -4091,6 +4196,8 @@ void PmSolver::interpolatePotential(
     std::span<double> potential,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+  const PmDecompositionView decomposition_view(
+      m_shape, grid.slabLayout(), options.decomposition_mode);
 #if COSMOSIM_ENABLE_MPI
   double distributed_preflight_mpi_wait_ms = 0.0;
   int mpi_world_size = 1;
@@ -4333,7 +4440,7 @@ void PmSolver::interpolatePotential(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, ix);
+        const int destination_rank = decomposition_view.realOwnerRank(ix);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
             continue;
@@ -4552,7 +4659,7 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request x-index is not owned by receiving slab"));
         }
-        const int expected_owner = parallel::pmOwnerRankForGlobalX(m_shape.nx, world_size, request.global_ix);
+        const int expected_owner = decomposition_view.realOwnerRank(request.global_ix);
         if (expected_owner != grid.slabLayout().world_rank ||
             expected_owner != static_cast<int>(request.destination_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -4980,27 +5087,24 @@ void PmSolver::solveForParticles(
 
   if (options.execution_policy == core::ExecutionPolicy::kCuda) {
 #if COSMOSIM_ENABLE_CUDA
-    cudaStream_t stream = nullptr;
-    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) {
-      throw std::runtime_error("Failed to create CUDA stream for PM solve");
-    }
-    const core::CudaStreamView stream_view{stream};
+    auto& cuda_workspace = m_impl->m_cuda_workspace;
+    const core::CudaStreamView stream_view = cuda_workspace.prepare(
+        pos_x.size(), m_shape.cellCount());
+    const cudaStream_t stream = cuda_workspace.stream;
+    auto& pos_x_device = cuda_workspace.pos_x;
+    auto& pos_y_device = cuda_workspace.pos_y;
+    auto& pos_z_device = cuda_workspace.pos_z;
+    auto& mass_device = cuda_workspace.mass;
+    auto& density_device = cuda_workspace.density;
+    auto& force_x_device = cuda_workspace.force_x;
+    auto& force_y_device = cuda_workspace.force_y;
+    auto& force_z_device = cuda_workspace.force_z;
+    auto& accel_x_device = cuda_workspace.accel_x;
+    auto& accel_y_device = cuda_workspace.accel_y;
+    auto& accel_z_device = cuda_workspace.accel_z;
 
-    try {
+    {
       const auto copy_h2d_start = std::chrono::steady_clock::now();
-      core::DeviceBufferDouble pos_x_device(pos_x.size());
-      core::DeviceBufferDouble pos_y_device(pos_y.size());
-      core::DeviceBufferDouble pos_z_device(pos_z.size());
-      core::DeviceBufferDouble mass_device(mass.size());
-      core::DeviceBufferDouble density_device(m_shape.cellCount());
-
-      core::DeviceBufferDouble force_x_device(m_shape.cellCount());
-      core::DeviceBufferDouble force_y_device(m_shape.cellCount());
-      core::DeviceBufferDouble force_z_device(m_shape.cellCount());
-      core::DeviceBufferDouble accel_x_device(accel_x.size());
-      core::DeviceBufferDouble accel_y_device(accel_y.size());
-      core::DeviceBufferDouble accel_z_device(accel_z.size());
-
       pos_x_device.copyFromHostAsync(pos_x, stream_view);
       pos_y_device.copyFromHostAsync(pos_y, stream_view);
       pos_z_device.copyFromHostAsync(pos_z, stream_view);
@@ -5109,12 +5213,8 @@ void PmSolver::solveForParticles(
       if (profile != nullptr) {
         profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_accel_stop - copy_accel_start).count();
       }
-    } catch (...) {
-      (void)cudaStreamDestroy(stream);
-      throw;
     }
 
-    (void)cudaStreamDestroy(stream);
     if (profile != nullptr) {
       profile->bytes_moved += bytesForParticles(pos_x.size()) * 2U;
       profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 4U;
@@ -5211,6 +5311,11 @@ PmBackendArchitecture pmBackendArchitecture() noexcept {
   // explicit so provenance/capability code cannot over-promote it.
   architecture.device_assignment = true;
   architecture.device_interpolation = true;
+  architecture.persistent_device_buffers = true;
+  // The staging backend now retains its stream and device workspaces across
+  // solves. Full persistent residency remains false because density/force still
+  // cross the host boundary for FFT/Poisson/gradient.
+  architecture.persistent_residency = false;
 #endif
   return architecture;
 }
@@ -5227,6 +5332,78 @@ std::string_view pmDecompositionTopologyName(PmDecompositionTopology topology) n
       return "pencil_2d";
   }
   return "unknown";
+}
+
+PmDecompositionView::PmDecompositionView(
+    PmGridShape shape,
+    parallel::PmSlabLayout layout,
+    core::PmDecompositionMode mode)
+    : m_shape(shape),
+      m_layout(std::move(layout)),
+      m_mode(mode),
+      m_descriptor(describePmDecomposition(m_shape, m_layout, m_mode)) {}
+
+const PmDecompositionDescriptor& PmDecompositionView::descriptor() const noexcept {
+  return m_descriptor;
+}
+
+PmOwnershipExtent3D PmDecompositionView::realExtentForRank(int rank) const {
+  const parallel::PmSlabRange owned =
+      parallel::pmOwnedXRangeForRank(m_shape.nx, m_layout.world_size, rank);
+  return PmOwnershipExtent3D{
+      .x_begin = owned.begin_x,
+      .x_count = owned.extentX(),
+      .y_begin = 0U,
+      .y_count = m_shape.ny,
+      .z_begin = 0U,
+      .z_count = m_shape.nz,
+  };
+}
+
+int PmDecompositionView::realOwnerRank(std::size_t global_x) const {
+  if (global_x >= m_shape.nx) {
+    throw std::out_of_range("PM real-space global x index is outside the mesh");
+  }
+  return parallel::pmOwnerRankForGlobalX(
+      m_shape.nx, m_layout.world_size, global_x);
+}
+
+bool PmDecompositionView::ownsRealCell(
+    std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept {
+  return m_layout.ownsGlobalCell(global_x, global_y, global_z);
+}
+
+std::size_t PmDecompositionView::globalToLocalRealIndex(
+    std::size_t global_x, std::size_t global_y, std::size_t global_z) const {
+  return m_layout.localLinearIndex(global_x, global_y, global_z);
+}
+
+bool PmDecompositionView::ownsSpectralCell(
+    std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept {
+  const auto& e = m_descriptor.spectral_extent;
+  return e.x_count != 0U && e.y_count != 0U && e.z_count != 0U &&
+      global_x >= e.x_begin && global_x - e.x_begin < e.x_count &&
+      global_y >= e.y_begin && global_y - e.y_begin < e.y_count &&
+      global_z >= e.z_begin && global_z - e.z_begin < e.z_count;
+}
+
+std::size_t PmDecompositionView::globalToLocalSpectralIndex(
+    std::size_t global_x, std::size_t global_y, std::size_t global_z) const {
+  if (!ownsSpectralCell(global_x, global_y, global_z)) {
+    throw std::out_of_range(
+        "PM spectral global index is not owned by this backend view");
+  }
+  const auto& e = m_descriptor.spectral_extent;
+  const std::size_t lx = global_x - e.x_begin;
+  const std::size_t ly = global_y - e.y_begin;
+  const std::size_t lz = global_z - e.z_begin;
+  return core::checkedSizeAdd(
+      core::checkedSizeProduct3(lx, e.y_count, e.z_count,
+                                "PM spectral local index"),
+      core::checkedSizeAdd(
+          core::checkedSizeProduct3(ly, e.z_count, 1U, "PM spectral local index"),
+          lz, "PM spectral local index"),
+      "PM spectral local index");
 }
 
 PmDecompositionDescriptor describePmDecomposition(

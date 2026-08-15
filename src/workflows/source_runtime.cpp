@@ -219,6 +219,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_metal_diffusion(physics::makeMetalDiffusionConfig(config.physics)),
         m_black_hole(makeRuntimeBlackHoleAgnConfig(config.physics, units)),
         m_particle_id_registry(mpi_context),
+        m_mpi_context(mpi_context),
         m_world_rank(world_rank),
         m_coordinate_frame(config.units.coordinate_frame),
         m_is_cosmological(
@@ -265,6 +266,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
 
     const std::size_t cell_count = context.state.cells.size();
+    const bool local_has_mutable_gravity_sources =
+        cell_count > 0U || context.state.star_particles.size() > 0U ||
+        context.state.black_holes.size() > 0U;
+    const std::uint64_t gravity_source_mutation_rank_count =
+        m_mpi_context.allreduceSumUint64(local_has_mutable_gravity_sources ? 1ULL : 0ULL);
     if (cell_count > 0U && m_star_formation.config().enabled) {
       std::span<const std::uint32_t> active_cells = context.active_set.cell_indices;
       if (!context.active_set.cells_are_subset && active_cells.empty()) {
@@ -350,6 +356,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
             0U,
             current_tick + 1U);
       }
+    }
+    if (gravity_source_mutation_rank_count > 0U) {
+      // Source models can change gas/star/BH gravitating mass and membership.
+      // Advance once per globally ordered source stage on every rank so PM/tree
+      // validity follows authoritative state rather than PM refresh sequencing.
+      context.state.bumpGravitySourceGeneration();
     }
   }
 
@@ -762,6 +774,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
   physics::StellarFeedbackModuleState m_stellar_feedback_state;
   physics::BlackHoleAgnModel m_black_hole;
   DistributedParticleIdRegistry m_particle_id_registry;
+  const parallel::MpiContext& m_mpi_context;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
   bool m_is_cosmological = false;

@@ -12,6 +12,9 @@ namespace cosmosim::gravity {
 // This alias centralizes the policy so a future wide-index build can change one
 // contract rather than silently widening every hot structure today.
 using TreeLocalIndex = std::uint32_t;
+using TreeLocalCount = std::uint32_t;
+inline constexpr TreeLocalIndex kInvalidTreeLocalIndex =
+    std::numeric_limits<TreeLocalIndex>::max();
 inline constexpr std::uint64_t k_tree_local_index_max =
     static_cast<std::uint64_t>(std::numeric_limits<TreeLocalIndex>::max());
 

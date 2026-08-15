@@ -152,6 +152,7 @@ struct PmRefreshDirective {
     kNone = 0,
     kInitialForceBootstrap = 1,
     kScheduledForceRefreshStage = 2,
+    kSourceMutationForceRefresh = 3,
   };
   bool force_refresh_surface = false;
   bool cadence_opportunity_allowed = false;
@@ -300,6 +301,9 @@ struct IntegratorState {
   PmSynchronizationState pm_sync_state;
   bool pm_refresh_enabled = false;
   bool pm_long_range_field_valid = false;
+  // Authoritative SimulationState gravity generation represented by the
+  // committed long-range PM field. Zero means unknown/unbound after restart.
+  std::uint64_t pm_source_generation = 0;
 };
 
 // Explicit compact active-set descriptor with optional subset spans.

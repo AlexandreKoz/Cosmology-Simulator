@@ -9,6 +9,7 @@
 #include "cosmosim/cosmosim.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/workflows/gravity_source_ownership.hpp"
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -120,6 +121,32 @@ cosmosim::core::SimulationState makeGlobalState() {
   return state;
 }
 
+void runGravityGasOwnershipContract(int world_size, int world_rank) {
+  auto state = makeGlobalState();
+  // Exercise parentless and shared-lineage legality through the same selector
+  // and accessor used by GravityRuntime. Generic gas particles remain mirrors.
+  state.gas_cells.parent_particle_id[0] = 0U;
+  state.gas_cells.parent_particle_id[1] = 0U;
+  auto rows = cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
+      state, static_cast<std::uint32_t>(world_rank),
+      static_cast<std::uint32_t>(world_size), "mpi authoritative gas gravity contract");
+  assert(rows.particle_rows.empty());
+  double local_mass = 0.0;
+  for (const std::uint32_t row : rows.gas_cell_rows) {
+    local_mass += cosmosim::workflows::internal::authoritativeGasGravitySource(
+        state, row, "mpi authoritative gas gravity contract").mass_code;
+  }
+  std::uint64_t local_count = static_cast<std::uint64_t>(rows.gas_cell_rows.size());
+  const cosmosim::parallel::MpiContext mpi_context{};
+  const std::uint64_t global_count = mpi_context.allreduceSumUint64(local_count);
+  const double global_mass = mpi_context.allreduceSumDouble(local_mass);
+  assert(global_count == 2U);
+  assert(std::abs(global_mass - 2.0e6) <= 1.0e-9);
+  if (world_size == 3 && world_rank == 2) {
+    assert(rows.gas_cell_rows.empty());
+  }
+}
+
 std::uint64_t localStarCount(const cosmosim::core::SimulationState& state) {
   return static_cast<std::uint64_t>(state.star_particles.size());
 }
@@ -139,11 +166,18 @@ int main(int argc, char** argv) {
   int world_rank = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  const std::string mode = argc > 1 ? argv[1] : "source_runtime";
+  if (mode == "gravity_gas_ownership") {
+    if (world_size == 2 || world_size == 3) {
+      runGravityGasOwnershipContract(world_size, world_rank);
+    }
+    MPI_Finalize();
+    return 0;
+  }
   if (world_size != 2) {
     MPI_Finalize();
     return 0;
   }
-  const std::string mode = argc > 1 ? argv[1] : "source_runtime";
   const auto initial_state = makeGlobalState();
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       configText(world_size, "star_formation_source_runtime_mpi_" + mode),

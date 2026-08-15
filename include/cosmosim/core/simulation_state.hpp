@@ -895,6 +895,10 @@ class SimulationState {
   void commitAmrPatchMigration(const AmrPatchMigrationCommit& commit);
   [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
   [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
+  // Monotonic identity of authoritative gravity-relevant source state. This
+  // is owned by SimulationState, not synthesized from PM refresh sequencing.
+  [[nodiscard]] std::uint64_t gravitySourceGeneration() const noexcept;
+  void bumpGravitySourceGeneration() noexcept;
   void bumpParticleIndexGeneration() noexcept;
   void bumpCellIndexGeneration() noexcept;
 
@@ -904,6 +908,7 @@ class SimulationState {
 
   std::uint64_t m_particle_index_generation = 0;
   std::uint64_t m_cell_index_generation = 0;
+  std::uint64_t m_gravity_source_generation = 1;
 };
 
 template <typename T>

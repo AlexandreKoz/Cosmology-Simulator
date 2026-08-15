@@ -868,6 +868,16 @@ if(COSMOSIM_ENABLE_TESTS)
         ${star_formation_mpi_test_name}
         mpi distributed star_formation restart ownership reproducibility integration)
     endforeach()
+    foreach(gravity_gas_np IN ITEMS 2 3)
+      add_test(
+        NAME integration_gravity_gas_ownership_mpi_np${gravity_gas_np}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${gravity_gas_np} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_star_formation_source_runtime_mpi>
+                gravity_gas_ownership ${MPIEXEC_POSTFLAGS})
+      cosmosim_mark_runtime_truth_test(
+        integration_gravity_gas_ownership_mpi_np${gravity_gas_np}
+        mpi distributed gravity gas ownership integration)
+    endforeach()
     foreach(star_formation_runtime_mpi_mode IN ITEMS source_runtime empty_rank id_registry amr_migration restart one_vs_two_rank_equivalence eos_hash)
       if(star_formation_runtime_mpi_mode STREQUAL "source_runtime")
         set(star_formation_runtime_mpi_test_name integration_star_formation_source_runtime_mpi_two_rank)

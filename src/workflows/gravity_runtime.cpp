@@ -467,8 +467,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .current_size_bytes = core::currentSizeBytesForContainer(container),
           .owned_capacity_bytes = capacity_bytes,
           .high_water_bytes = capacity_bytes,
-          .estimated_next_step_bytes = capacity_bytes,
-          .uncertainty_note = {},
+          .estimated_next_step_bytes = 0U,
+          .uncertainty_note = "retained vector capacity is the observed allocation high-water; next-step requirement is not predicted",
       });
     };
     const auto active = [&](std::string label, const auto& container) {
@@ -555,6 +555,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_particle_index_generation = 0U;
     m_force_cache_cell_index_generation = 0U;
     m_force_cache_gas_identity_generation = 0U;
+    m_force_cache_source_generation = 0U;
     m_particle_force_cache_valid.clear();
     m_cell_force_cache_valid.clear();
   }
@@ -575,7 +576,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
     if (m_force_cache_particle_index_generation != state.particleIndexGeneration() ||
         m_force_cache_cell_index_generation != state.cellIndexGeneration() ||
-        m_force_cache_gas_identity_generation != state.gasCellIdentityGeneration()) {
+        m_force_cache_gas_identity_generation != state.gasCellIdentityGeneration() ||
+        m_force_cache_source_generation != state.gravitySourceGeneration()) {
       throw std::runtime_error(
           "gravity force cache cannot be checkpointed after particle/cell ownership or gas identity changed without refresh");
     }
@@ -615,6 +617,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_force_cache_particle_index_generation = 0U;
       m_force_cache_cell_index_generation = 0U;
       m_force_cache_gas_identity_generation = 0U;
+      m_force_cache_source_generation = 0U;
       return;
     }
     const auto requireTriplet = [](const std::vector<double>& x,
@@ -701,6 +704,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_particle_index_generation = state.particleIndexGeneration();
     m_force_cache_cell_index_generation = state.cellIndexGeneration();
     m_force_cache_gas_identity_generation = state.gasCellIdentityGeneration();
+    m_force_cache_source_generation = state.gravitySourceGeneration();
     m_particle_force_cache_valid.assign(state.particles.size(), 1U);
     m_cell_force_cache_valid.assign(state.cells.size(), 1U);
   }
@@ -737,6 +741,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         return "initial_force_bootstrap";
       case core::PmRefreshDirective::Reason::kScheduledForceRefreshStage:
         return "scheduled_force_refresh_stage";
+      case core::PmRefreshDirective::Reason::kSourceMutationForceRefresh:
+        return "source_mutation_force_refresh";
     }
     return "unknown";
   }
@@ -766,6 +772,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
         m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration() ||
         m_cell_force_cache_valid.size() != cell_count;
+    const bool source_cache_generation_changed =
+        m_force_cache_source_generation != context.state.gravitySourceGeneration();
     if (particle_cache_generation_changed) {
       // Dense-row identity is not a migration payload. A row is compatible only
       // after its authoritative source was refreshed in the current generation.
@@ -783,10 +791,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_force_cache_gas_identity_generation = context.state.gasCellIdentityGeneration();
       m_force_cache_valid = false;
     }
+    if (source_cache_generation_changed) {
+      m_particle_force_cache_valid.assign(particle_count, 0U);
+      m_cell_force_cache_valid.assign(cell_count, 0U);
+      m_force_cache_valid = false;
+    }
     const bool local_force_cache_incompatible = !m_force_cache_valid ||
         m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
         m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
-        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration();
+        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration() ||
+        m_force_cache_source_generation != context.state.gravitySourceGeneration();
     const std::uint64_t incompatible_cache_rank_count =
         mpi_context.allreduceSumUint64(local_force_cache_incompatible ? 1ULL : 0ULL);
     const bool needs_force_cache_rebuild = incompatible_cache_rank_count > 0U;
@@ -828,6 +842,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
             ", world_size=" + std::to_string(world_size));
       }
     };
+    requireKickConsensus(context.state.gravitySourceGeneration(), "gravity_source_generation");
 
     const internal::SolverGhostRefreshReport gravity_ghost_refresh =
         internal::refreshParticleGhostsForSolver(
@@ -880,6 +895,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .mpi_rank_count = static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1)),
             .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
             .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
+            .periodic_tree_coordinates =
+                m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kPeriodic,
+            .indexed_target_coordinates = true,
             .cuda_resident = m_runtime_topology.usesCuda(),
             .tree_exchange_batch_bytes = m_tree_pm_options.tree_exchange_batch_bytes,
         });
@@ -1098,18 +1116,23 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // after uneven compaction. The workflow advances this shared epoch exactly
     // once, on every rank, after a committed particle-ownership transition.
     m_tree_pm_options.decomposition_epoch = m_decomposition_epoch;
-    // PM cadence currently refreshes at every certified global force boundary.
-    // The integrator-owned field version is therefore the globally consistent
-    // source-snapshot generation (positions, masses, births/deaths/refinement)
-    // rather than merely a cache-use counter. Keep it explicit in TreePM so a
-    // future relaxed cadence cannot accidentally reuse a field after sources
-    // changed while protocol epochs remained equal.
-    m_tree_pm_options.source_generation = gravity::GravitySourceGeneration{decision.field_version};
+    // Gravity source identity is owned by authoritative SimulationState and is
+    // intentionally independent from PM cadence sequencing. PM field version
+    // answers "which mesh refresh?"; source generation answers "which source
+    // state?"; force epoch answers "which evaluation opportunity?".
+    m_tree_pm_options.source_generation = gravity::GravitySourceGeneration{
+        context.state.gravitySourceGeneration()};
     m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
     m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
-        .sequence = decision.field_version,
+        .sequence = decision.gravity_kick_opportunity,
         .scale_factor = force_evaluation_scale_factor,
     };
+    if (!decision.refresh_long_range_field &&
+        context.integrator_state.pm_source_generation !=
+            context.state.gravitySourceGeneration()) {
+      throw std::runtime_error(
+          "TreePM PM-field reuse rejected because authoritative gravity sources changed since the committed mesh refresh");
+    }
 
     const gravity::GravitySourceSnapshot source_snapshot{
         .pos_x_comoving = m_local_source_x,
@@ -1395,6 +1418,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_particle_index_generation = context.state.particleIndexGeneration();
     m_force_cache_cell_index_generation = context.state.cellIndexGeneration();
     m_force_cache_gas_identity_generation = context.state.gasCellIdentityGeneration();
+    m_force_cache_source_generation = context.state.gravitySourceGeneration();
     m_force_cache_valid = true;
     const std::uint32_t local_rank =
         static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
@@ -1492,7 +1516,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
     if (m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
         m_force_cache_cell_index_generation != context.state.cellIndexGeneration() ||
-        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration()) {
+        m_force_cache_gas_identity_generation != context.state.gasCellIdentityGeneration() ||
+        m_force_cache_source_generation != context.state.gravitySourceGeneration()) {
       throw std::runtime_error(
           "gravity cached kick rejected because particle/cell source identity changed since force refresh");
     }
@@ -1913,11 +1938,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     for (const std::uint32_t cell_index :
          authoritative_source_rows.gas_cell_rows) {
       m_owned_leaf_cell_mask[cell_index] = 1U;
+      const auto gas_source = internal::authoritativeGasGravitySource(
+          state, cell_index, "gravity authoritative gas source rebuild");
       const std::uint32_t source_index = appendSource(
-          state.cells.center_x_comoving[cell_index],
-          state.cells.center_y_comoving[cell_index],
-          state.cells.center_z_comoving[cell_index],
-          state.cells.mass_code[cell_index],
+          gas_source.x_comoving,
+          gas_source.y_comoving,
+          gas_source.z_comoving,
+          gas_source.mass_code,
           gas_species_tag,
           gas_softening_comoving,
           0U,
@@ -2050,6 +2077,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::uint64_t m_force_cache_particle_index_generation = 0U;
   std::uint64_t m_force_cache_cell_index_generation = 0U;
   std::uint64_t m_force_cache_gas_identity_generation = 0U;
+  std::uint64_t m_force_cache_source_generation = 0U;
   std::vector<std::uint8_t> m_particle_force_cache_valid;
   std::vector<std::uint8_t> m_cell_force_cache_valid;
   gravity::DecompositionEpoch m_decomposition_epoch{};

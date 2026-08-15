@@ -13,6 +13,19 @@ struct AuthoritativeGravitySourceRows {
   std::vector<std::uint32_t> gas_cell_rows;
 };
 
+struct AuthoritativeGasGravitySource {
+  std::uint32_t cell_row = 0;
+  double x_comoving = 0.0;
+  double y_comoving = 0.0;
+  double z_comoving = 0.0;
+  double mass_code = 0.0;
+};
+
+[[nodiscard]] AuthoritativeGasGravitySource authoritativeGasGravitySource(
+    const core::SimulationState& state,
+    std::uint32_t cell_row,
+    std::string_view caller);
+
 // Selects only authoritative local gravity source rows. Collisionless and
 // compact-object particles remain particle-owned. Generic gas-tagged particles
 // are compatibility/lineage mirrors and are excluded; owned leaf gas cells are

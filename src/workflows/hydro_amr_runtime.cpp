@@ -412,10 +412,17 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       }
       runProductionAmrHydroPath(context);
       persistEffectiveIsmDiagnostics(context.state);
+      // Every rank advances the same authoritative gravity-source epoch when
+      // any rank owns production gas. This covers gas mass/leaf-topology
+      // mutations without an O(N) source fingerprint.
+      context.state.bumpGravitySourceGeneration();
       return;
     }
     if (context.state.cells.size() == 0U) {
       persistEffectiveIsmDiagnostics(context.state);
+      if (hydro_cell_rank_count > 0U) {
+        context.state.bumpGravitySourceGeneration();
+      }
       return;
     }
 
@@ -697,6 +704,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     internal::synchronizeParentParticleCompatibilityMirrors(
         context.state, world_rank, "hydro callback parent compatibility mirror");
     persistEffectiveIsmDiagnostics(context.state);
+    context.state.bumpGravitySourceGeneration();
   }
 
  private:

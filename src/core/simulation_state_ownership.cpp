@@ -174,8 +174,24 @@ std::uint64_t SimulationState::cellIndexGeneration() const noexcept {
   return m_cell_index_generation;
 }
 
-void SimulationState::bumpParticleIndexGeneration() noexcept { ++m_particle_index_generation; }
+std::uint64_t SimulationState::gravitySourceGeneration() const noexcept {
+  return m_gravity_source_generation;
+}
 
-void SimulationState::bumpCellIndexGeneration() noexcept { ++m_cell_index_generation; }
+void SimulationState::bumpGravitySourceGeneration() noexcept {
+  if (m_gravity_source_generation != std::numeric_limits<std::uint64_t>::max()) {
+    ++m_gravity_source_generation;
+  }
+}
+
+void SimulationState::bumpParticleIndexGeneration() noexcept {
+  ++m_particle_index_generation;
+  bumpGravitySourceGeneration();
+}
+
+void SimulationState::bumpCellIndexGeneration() noexcept {
+  ++m_cell_index_generation;
+  bumpGravitySourceGeneration();
+}
 
 }  // namespace cosmosim::core
