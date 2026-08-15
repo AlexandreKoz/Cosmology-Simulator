@@ -936,6 +936,17 @@ void TimeCoordinator::runRungZeroSegment(
   }
   ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
 
+  const auto install_authoritative_domain_geometry = [&]() {
+    const auto leaves = m_migration_balance.authoritativeTopDomainLeaves(
+        state, m_gravity.decompositionEpoch());
+    m_gravity.installAuthoritativeTopDomainLeaves(leaves);
+  };
+  // Domain geometry is a decomposition-owned contract. Install it once at the
+  // segment boundary (including restart) and again only after ownership
+  // decomposition changes. TreePM validates that moving local sources remain
+  // inside the advertised leaves and falls back conservatively if not.
+  install_authoritative_domain_geometry();
+
   const std::uint64_t run_start_step_index = integrator_state.step_index;
   const std::uint64_t configured_segment_steps = options.max_steps_override > 0
       ? options.max_steps_override
@@ -1009,6 +1020,7 @@ void TimeCoordinator::runRungZeroSegment(
           integrator_state.step_index);
       if (particle_decomposition_changed) {
         m_gravity.commitParticleDecompositionChange();
+        install_authoritative_domain_geometry();
       }
       ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
       syncTimeBinsFromSchedulers(particle_scheduler, gas_cell_scheduler, state);
@@ -1117,6 +1129,7 @@ void TimeCoordinator::runRungZeroSegment(
         integrator_state.step_index);
     if (particle_decomposition_changed) {
       m_gravity.commitParticleDecompositionChange();
+      install_authoritative_domain_geometry();
     }
     ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
     syncTimeBinsFromSchedulers(particle_scheduler, gas_cell_scheduler, state);

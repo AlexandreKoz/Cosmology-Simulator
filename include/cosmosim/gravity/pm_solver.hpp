@@ -86,6 +86,12 @@ struct PmGridShape {
   [[nodiscard]] bool isValid() const;
 };
 
+struct PmGlobalCell {
+  std::size_t x = 0;
+  std::size_t y = 0;
+  std::size_t z = 0;
+};
+
 // Concrete numerical ownership view used by PM assignment/interpolation and
 // backend remap code. It is a small value type: no virtual dispatch occurs in
 // particle/cell loops. The current implementation adapts serial/x-slab FFTW
@@ -97,10 +103,16 @@ class PmDecompositionView {
       PmGridShape shape,
       parallel::PmSlabLayout layout,
       core::PmDecompositionMode mode);
+  PmDecompositionView(
+      PmGridShape shape,
+      PmDecompositionDescriptor descriptor,
+      int world_rank,
+      int world_size);
 
   [[nodiscard]] const PmDecompositionDescriptor& descriptor() const noexcept;
   [[nodiscard]] PmOwnershipExtent3D realExtentForRank(int rank) const;
-  [[nodiscard]] int realOwnerRank(std::size_t global_x) const;
+  [[nodiscard]] int realOwnerRank(PmGlobalCell global_cell) const;
+  [[nodiscard]] int spectralOwnerRank(PmGlobalCell global_cell) const;
   [[nodiscard]] bool ownsRealCell(
       std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept;
   [[nodiscard]] std::size_t globalToLocalRealIndex(
@@ -115,6 +127,8 @@ class PmDecompositionView {
   parallel::PmSlabLayout m_layout{};
   core::PmDecompositionMode m_mode = core::PmDecompositionMode::kSlab;
   PmDecompositionDescriptor m_descriptor{};
+  int m_world_rank = 0;
+  int m_world_size = 1;
 };
 
 enum class PmDataResidencyPolicy {
@@ -292,6 +306,7 @@ class PmSolver {
   PmSolver& operator=(const PmSolver&) = delete;
 
   [[nodiscard]] const PmGridShape& shape() const;
+  void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
   void assignDensity(
       PmGridStorage& grid,

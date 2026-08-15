@@ -503,6 +503,10 @@ void compactStateToCurrentOwner(
     item.x_comov = state.particles.position_x_comoving[particle_index];
     item.y_comov = state.particles.position_y_comoving[particle_index];
     item.z_comov = state.particles.position_z_comoving[particle_index];
+    item.has_spatial_bounds = true;
+    item.min_x_comov = item.max_x_comov = item.x_comov;
+    item.min_y_comov = item.max_y_comov = item.y_comov;
+    item.min_z_comov = item.max_z_comov = item.z_comov;
     item.active_target_count_recent = active_mask[particle_index] != 0U ? 1U : 0U;
     item.remote_tree_interactions_recent = 1U;
     item.memory_bytes = estimateParticleMemoryBytesForDecomposition(state, species_tag);
@@ -555,6 +559,26 @@ void compactStateToCurrentOwner(
     item.x_comov = state.cells.center_x_comoving[first_cell];
     item.y_comov = state.cells.center_y_comoving[first_cell];
     item.z_comov = state.cells.center_z_comoving[first_cell];
+    item.has_spatial_bounds = true;
+    item.min_x_comov = item.max_x_comov = item.x_comov;
+    item.min_y_comov = item.max_y_comov = item.y_comov;
+    item.min_z_comov = item.max_z_comov = item.z_comov;
+    const std::uint64_t patch_end =
+        static_cast<std::uint64_t>(first_cell) +
+        static_cast<std::uint64_t>(state.patches.cell_count[patch_index]);
+    if (patch_end > state.cells.size()) {
+      throw std::runtime_error(
+          "runtime decomposition patch cell range is outside authoritative CellSoa");
+    }
+    for (std::uint64_t cell = first_cell; cell < patch_end; ++cell) {
+      const std::size_t cell_index = static_cast<std::size_t>(cell);
+      item.min_x_comov = std::min(item.min_x_comov, state.cells.center_x_comoving[cell_index]);
+      item.max_x_comov = std::max(item.max_x_comov, state.cells.center_x_comoving[cell_index]);
+      item.min_y_comov = std::min(item.min_y_comov, state.cells.center_y_comoving[cell_index]);
+      item.max_y_comov = std::max(item.max_y_comov, state.cells.center_y_comoving[cell_index]);
+      item.min_z_comov = std::min(item.min_z_comov, state.cells.center_z_comoving[cell_index]);
+      item.max_z_comov = std::max(item.max_z_comov, state.cells.center_z_comoving[cell_index]);
+    }
     item.memory_bytes = static_cast<std::uint64_t>(state.patches.cell_count[patch_index]) *
         static_cast<std::uint64_t>(sizeof(double) * 8U + sizeof(std::uint32_t) * 2U);
     item.work_components = parallel::DecompositionWorkComponents{
@@ -1774,6 +1798,20 @@ parallel::LocalOwnershipIdentitySummary
 MigrationBalanceRuntime::reduceIdentity(
     const core::SimulationState& state) const {
   return reduceLocalParticleIdentitySummary(state, m_services.mpi_context);
+}
+
+std::vector<parallel::TopDomainLeaf>
+MigrationBalanceRuntime::authoritativeTopDomainLeaves(
+    const core::SimulationState& state,
+    std::uint64_t decomposition_epoch) const {
+  const int world_rank = m_services.mpi_context.worldRank();
+  auto local_items = buildRuntimeDecompositionItems(
+      state, m_config, world_rank, {});
+  return parallel::buildAuthoritativeTopDomainLeaves(
+      local_items,
+      makeWorkflowDecompositionConfig(m_config, m_services.mpi_context.worldSize()),
+      world_rank,
+      decomposition_epoch);
 }
 
 bool MigrationBalanceRuntime::rebalance(

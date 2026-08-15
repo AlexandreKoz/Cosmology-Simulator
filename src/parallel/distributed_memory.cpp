@@ -262,6 +262,7 @@ template <typename T>
 }
 
 [[nodiscard]] double stableRelativeError(double measured, double reference, double absolute_error) {
+  (void)measured;
   const double denom = std::max(absoluteValue(reference), std::numeric_limits<double>::min());
   return absolute_error / denom;
 }
@@ -548,6 +549,141 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? (static_cast<double>(plan.metrics.max_memory_bytes) / mean_memory) : 0.0;
 
   return plan;
+}
+
+std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeaves(
+    std::span<const DecompositionItem> local_items,
+    const DecompositionConfig& config,
+    int owner_rank,
+    std::uint64_t decomposition_epoch,
+    std::size_t max_leaves_per_rank) {
+  if (config.world_size <= 0 || owner_rank < 0 || owner_rank >= config.world_size) {
+    throw std::invalid_argument("top-domain leaf builder received invalid rank metadata");
+  }
+  if (max_leaves_per_rank == 0U) {
+    throw std::invalid_argument("top-domain leaf builder requires at least one leaf slot per rank");
+  }
+
+  struct KeyedLocalItem {
+    const DecompositionItem* item = nullptr;
+    std::uint64_t key = 0U;
+  };
+  std::vector<KeyedLocalItem> keyed;
+  keyed.reserve(local_items.size());
+  for (const DecompositionItem& item : local_items) {
+    if (item.current_owner_rank != owner_rank) {
+      continue;
+    }
+    const std::array values{
+        item.x_comov, item.y_comov, item.z_comov,
+        item.has_spatial_bounds ? item.min_x_comov : item.x_comov,
+        item.has_spatial_bounds ? item.max_x_comov : item.x_comov,
+        item.has_spatial_bounds ? item.min_y_comov : item.y_comov,
+        item.has_spatial_bounds ? item.max_y_comov : item.y_comov,
+        item.has_spatial_bounds ? item.min_z_comov : item.z_comov,
+        item.has_spatial_bounds ? item.max_z_comov : item.z_comov};
+    if (std::any_of(values.begin(), values.end(), [](double value) { return !std::isfinite(value); })) {
+      throw std::invalid_argument("top-domain leaf builder found non-finite decomposition geometry");
+    }
+    if (item.has_spatial_bounds &&
+        (item.min_x_comov > item.max_x_comov || item.min_y_comov > item.max_y_comov ||
+         item.min_z_comov > item.max_z_comov)) {
+      throw std::invalid_argument("top-domain leaf builder found inverted decomposition bounds");
+    }
+    keyed.push_back(KeyedLocalItem{.item = &item, .key = sfcKeyForItem(item, config)});
+  }
+
+  std::stable_sort(keyed.begin(), keyed.end(), [](const KeyedLocalItem& lhs, const KeyedLocalItem& rhs) {
+    if (lhs.key != rhs.key) {
+      return lhs.key < rhs.key;
+    }
+    return lhs.item->entity_id < rhs.item->entity_id;
+  });
+  if (keyed.empty()) {
+    return {};
+  }
+
+  const std::size_t leaf_count = std::min(max_leaves_per_rank, keyed.size());
+  std::vector<TopDomainLeaf> leaves;
+  leaves.reserve(leaf_count);
+  for (std::size_t leaf_ordinal = 0U; leaf_ordinal < leaf_count; ++leaf_ordinal) {
+    const std::size_t begin = (leaf_ordinal * keyed.size()) / leaf_count;
+    const std::size_t end = ((leaf_ordinal + 1U) * keyed.size()) / leaf_count;
+    if (begin == end) {
+      continue;
+    }
+    const DecompositionItem& first = *keyed[begin].item;
+    const auto item_bounds = [](const DecompositionItem& item) {
+      return std::array<double, 6>{
+          item.has_spatial_bounds ? item.min_x_comov : item.x_comov,
+          item.has_spatial_bounds ? item.max_x_comov : item.x_comov,
+          item.has_spatial_bounds ? item.min_y_comov : item.y_comov,
+          item.has_spatial_bounds ? item.max_y_comov : item.y_comov,
+          item.has_spatial_bounds ? item.min_z_comov : item.z_comov,
+          item.has_spatial_bounds ? item.max_z_comov : item.z_comov};
+    };
+    const auto first_bounds = item_bounds(first);
+    TopDomainLeaf leaf{
+        .owner_rank = owner_rank,
+        .decomposition_epoch = decomposition_epoch,
+        .sfc_key_begin = keyed[begin].key,
+        .sfc_key_end = keyed[end - 1U].key,
+        .min_x_comov = first_bounds[0],
+        .max_x_comov = first_bounds[1],
+        .min_y_comov = first_bounds[2],
+        .max_y_comov = first_bounds[3],
+        .min_z_comov = first_bounds[4],
+        .max_z_comov = first_bounds[5],
+        .periodic_geometry = true,
+    };
+    std::uint64_t id_hash = 1469598103934665603ULL;
+    const auto mix_id = [&id_hash](std::uint64_t value) {
+      id_hash ^= value;
+      id_hash *= 1099511628211ULL;
+    };
+    mix_id(static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner_rank)));
+    mix_id(leaf.sfc_key_begin);
+    mix_id(leaf.sfc_key_end);
+    for (std::size_t slot = begin; slot < end; ++slot) {
+      const DecompositionItem& item = *keyed[slot].item;
+      const auto bounds = item_bounds(item);
+      leaf.min_x_comov = std::min(leaf.min_x_comov, bounds[0]);
+      leaf.max_x_comov = std::max(leaf.max_x_comov, bounds[1]);
+      leaf.min_y_comov = std::min(leaf.min_y_comov, bounds[2]);
+      leaf.max_y_comov = std::max(leaf.max_y_comov, bounds[3]);
+      leaf.min_z_comov = std::min(leaf.min_z_comov, bounds[4]);
+      leaf.max_z_comov = std::max(leaf.max_z_comov, bounds[5]);
+      leaf.work_weight += weightedLoad(item, config);
+      ++leaf.entity_count;
+    }
+    leaf.domain_leaf_id = id_hash;
+    leaves.push_back(leaf);
+  }
+  return leaves;
+}
+
+std::uint64_t topDomainGeometryFingerprint(
+    std::span<const TopDomainLeaf> leaves) noexcept {
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto mix = [&hash](std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  for (const TopDomainLeaf& leaf : leaves) {
+    mix(leaf.domain_leaf_id);
+    mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(std::max(leaf.owner_rank, 0))));
+    mix(leaf.decomposition_epoch);
+    mix(leaf.sfc_key_begin);
+    mix(leaf.sfc_key_end);
+    mix(std::bit_cast<std::uint64_t>(leaf.min_x_comov));
+    mix(std::bit_cast<std::uint64_t>(leaf.max_x_comov));
+    mix(std::bit_cast<std::uint64_t>(leaf.min_y_comov));
+    mix(std::bit_cast<std::uint64_t>(leaf.max_y_comov));
+    mix(std::bit_cast<std::uint64_t>(leaf.min_z_comov));
+    mix(std::bit_cast<std::uint64_t>(leaf.max_z_comov));
+    mix(leaf.entity_count);
+  }
+  return hash;
 }
 
 void applyRuntimeDecompositionFeedback(
@@ -937,7 +1073,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     metrics.remote_tree_interactions_by_rank[rank] += item.remote_tree_interactions_recent;
     addWorkComponentsToMetrics(metrics, rank, effectiveWorkComponents(item), 1.0);
   };
-  auto finalize_metrics = [](LoadBalanceMetrics& metrics) {
+  [[maybe_unused]] auto finalize_metrics = [](LoadBalanceMetrics& metrics) {
     const auto max_load_it = std::max_element(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end());
     metrics.max_weighted_load = (max_load_it == metrics.weighted_load_by_rank.end()) ? 0.0 : *max_load_it;
     metrics.mean_weighted_load = metrics.weighted_load_by_rank.empty()
@@ -2192,9 +2328,6 @@ void validateTreePseudoParticleDescriptor(const TreePseudoParticleDescriptor& de
   if (descriptor.source_rank < 0) {
     throw std::invalid_argument("tree pseudo-particle source_rank must be non-negative");
   }
-  if (!descriptor.derived_not_authoritative) {
-    throw std::invalid_argument("tree pseudo-particles must be marked as derived non-authoritative state");
-  }
 }
 
 void validateTreePseudoParticlePacket(const TreePseudoParticlePacket& packet) {
@@ -2470,6 +2603,9 @@ void recordDistributedProfiling(
         .severity = metrics.weighted_imbalance_ratio > 1.25 ? core::RuntimeEventSeverity::kWarning
                                                             : core::RuntimeEventSeverity::kInfo,
         .subsystem = "parallel.domain_decomposition",
+        .step_index = std::nullopt,
+        .simulation_time_code = std::nullopt,
+        .scale_factor = std::nullopt,
         .message = "domain decomposition load hotspot attribution",
         .payload = {{"max_rank", std::to_string(max_rank)},
                     {"max_rank_load", std::to_string(*max_rank_it)},
@@ -2707,7 +2843,7 @@ void appendTreeWireDouble(std::vector<std::uint8_t>& bytes, double value) {
   return std::bit_cast<double>(readTreeWireU64(bytes, offset));
 }
 
-[[nodiscard]] std::vector<std::uint8_t> encodeTreePseudoPackets(
+[[nodiscard, maybe_unused]] std::vector<std::uint8_t> encodeTreePseudoPackets(
     std::span<const TreePseudoParticlePacket> packets) {
   if (packets.size() > std::numeric_limits<std::size_t>::max() / k_tree_pseudo_wire_bytes) {
     throw std::overflow_error("tree pseudo-particle wire payload size overflows size_t");
@@ -2745,7 +2881,7 @@ void appendTreeWireDouble(std::vector<std::uint8_t>& bytes, double value) {
   return bytes;
 }
 
-[[nodiscard]] std::vector<TreePseudoParticlePacket> decodeTreePseudoPackets(
+[[nodiscard, maybe_unused]] std::vector<TreePseudoParticlePacket> decodeTreePseudoPackets(
     std::span<const std::uint8_t> bytes) {
   if (bytes.size() % k_tree_pseudo_wire_bytes != 0U) {
     throw std::runtime_error("tree pseudo-particle wire payload is misaligned");
@@ -3041,6 +3177,8 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
     result = decodeTreePseudoPackets(result_wire);
     std::vector<std::uint64_t> per_rank_count(static_cast<std::size_t>(world_size), 0U);
     std::vector<std::uint32_t> per_rank_root_count(static_cast<std::size_t>(world_size), 0U);
+    std::vector<std::uint8_t> per_rank_authoritative(static_cast<std::size_t>(world_size), 0U);
+    std::vector<std::uint8_t> per_rank_derived(static_cast<std::size_t>(world_size), 0U);
     std::vector<std::unordered_set<std::uint64_t>> per_rank_ids(static_cast<std::size_t>(world_size));
     bool have_epoch_contract = false;
     std::uint64_t expected_decomposition_epoch = 0U;
@@ -3065,6 +3203,11 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
         throw std::runtime_error("tree pseudo hierarchy exchange returned mixed epochs or geometry frames");
       }
       const std::size_t source_rank = static_cast<std::size_t>(packet.descriptor.source_rank);
+      if (packet.descriptor.derived_not_authoritative) {
+        per_rank_derived[source_rank] = 1U;
+      } else {
+        per_rank_authoritative[source_rank] = 1U;
+      }
       if (!per_rank_ids[source_rank].insert(packet.descriptor.pseudo_particle_id).second) {
         throw std::runtime_error("tree pseudo hierarchy exchange returned duplicate node identity");
       }
@@ -3077,7 +3220,12 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
       if (per_rank_count[static_cast<std::size_t>(rank)] != counts64[static_cast<std::size_t>(rank)]) {
         throw std::runtime_error("tree pseudo hierarchy exchange source-rank coverage mismatch");
       }
-      if (per_rank_count[static_cast<std::size_t>(rank)] > 0U &&
+      if (per_rank_authoritative[static_cast<std::size_t>(rank)] != 0U &&
+          per_rank_derived[static_cast<std::size_t>(rank)] != 0U) {
+        throw std::runtime_error(
+            "tree top-domain exchange cannot mix authoritative and derived geometry for one rank");
+      }
+      if (per_rank_derived[static_cast<std::size_t>(rank)] != 0U &&
           per_rank_root_count[static_cast<std::size_t>(rank)] != 1U) {
         throw std::runtime_error(
             "tree pseudo hierarchy exchange requires exactly one root descriptor per participating rank");
@@ -3128,7 +3276,7 @@ struct AmrRankEnvelopeRecord {
   return std::max({dx, dy, dz});
 }
 
-[[nodiscard]] AmrRankEnvelopeRecord buildLocalAmrEnvelope(
+[[nodiscard, maybe_unused]] AmrRankEnvelopeRecord buildLocalAmrEnvelope(
     std::span<const AmrPatchPayloadRecord> records,
     int world_rank) {
   AmrRankEnvelopeRecord envelope;
@@ -3167,7 +3315,7 @@ struct AmrRankEnvelopeRecord {
   return (amin - reach) <= bmax && (bmin - reach) <= amax;
 }
 
-[[nodiscard]] bool amrEnvelopeMayNeedPeer(
+[[nodiscard, maybe_unused]] bool amrEnvelopeMayNeedPeer(
     const AmrRankEnvelopeRecord& local,
     const AmrRankEnvelopeRecord& peer) noexcept {
   if (local.has_patches == 0U || peer.has_patches == 0U || local.rank == peer.rank) {
@@ -3188,13 +3336,14 @@ struct AmrRankEnvelopeRecord {
       amrIntervalsOverlap(lhs.origin_z_comoving, amrPatchMaxZ(lhs), rhs.origin_z_comoving, amrPatchMaxZ(rhs), reach);
 }
 
-[[nodiscard]] std::vector<int> discoverCandidateAmrPeers(
+[[nodiscard, maybe_unused]] std::vector<int> discoverCandidateAmrPeers(
     const MpiContext& mpi_context,
     std::span<const AmrPatchPayloadRecord> local_patch_records,
     DirectedAmrExchangeDiagnostics* diagnostics) {
-  const int world_rank = mpi_context.worldRank();
   const int world_size = mpi_context.worldSize();
-  const AmrRankEnvelopeRecord local_envelope = buildLocalAmrEnvelope(local_patch_records, world_rank);
+#if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
+  (void)local_patch_records;
+#endif
   if (!mpi_context.isEnabled() || world_size <= 1) {
     if (diagnostics != nullptr) {
       diagnostics->control_plane_bytes += sizeof(AmrRankEnvelopeRecord);
@@ -3202,6 +3351,8 @@ struct AmrRankEnvelopeRecord {
     return {};
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  const int world_rank = mpi_context.worldRank();
+  const AmrRankEnvelopeRecord local_envelope = buildLocalAmrEnvelope(local_patch_records, world_rank);
   static_assert(std::is_trivially_copyable_v<AmrRankEnvelopeRecord>);
   std::vector<AmrRankEnvelopeRecord> envelopes(static_cast<std::size_t>(world_size));
   MPI_Allgather(
@@ -3297,7 +3448,7 @@ template <typename T>
 #endif
 }
 
-[[nodiscard]] std::uint64_t countInterfaceCandidates(
+[[nodiscard, maybe_unused]] std::uint64_t countInterfaceCandidates(
     std::span<const AmrPatchPayloadRecord> local_records,
     std::span<const AmrPatchPayloadRecord> remote_records) {
   std::uint64_t count = 0;
@@ -3318,6 +3469,9 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
     std::span<const AmrPatchPayloadRecord> local_patch_records,
     std::span<const AmrPatchCellPayloadRecord> local_cell_records,
     std::uint64_t exchange_sequence) {
+#if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
+  (void)exchange_sequence;
+#endif
   const int world_rank = mpi_context.worldRank();
   std::unordered_map<std::uint64_t, std::uint32_t> local_patch_cell_counts;
   local_patch_cell_counts.reserve(local_patch_records.size());
@@ -3451,6 +3605,9 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
     const MpiContext& mpi_context,
     std::span<const AmrFluxRegisterPayloadRecord> local_records,
     std::uint64_t exchange_sequence) {
+#if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
+  (void)exchange_sequence;
+#endif
   const int world_rank = mpi_context.worldRank();
   const int world_size = mpi_context.worldSize();
   for (const AmrFluxRegisterPayloadRecord& record : local_records) {
@@ -3718,6 +3875,9 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
     std::size_t halo_depth_x,
     bool periodic_x,
     std::uint64_t exchange_sequence) {
+#if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
+  (void)exchange_sequence;
+#endif
   PmSlabHaloExchangeResult result;
   std::vector<double> send_left;
   std::vector<double> send_right;
@@ -3726,9 +3886,9 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
   int left_peer = -1;
   int right_peer = -1;
   bool no_exchange = false;
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   int communicator_world_size = 1;
   int communicator_world_rank = 0;
-#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   const bool communicator_mpi_active =
       queryActiveMpiWorld(communicator_world_size, communicator_world_rank);
 #endif
@@ -4168,7 +4328,20 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
             std::span<const std::vector<std::uint32_t>>{},
             ghostRefreshPayloadRecordBytes(),
             expected_epoch),
-        .result = BlockingGhostExchangeResult{.received_ghosts = GhostExchangeBufferSoA{.epoch = expected_epoch}},
+        .result = BlockingGhostExchangeResult{.received_ghosts = GhostExchangeBufferSoA{
+            .epoch = expected_epoch,
+            .entity_id = {},
+            .position_x_comoving = {},
+            .position_y_comoving = {},
+            .position_z_comoving = {},
+            .mass_code = {},
+            .density_code = {},
+            .velocity_x_code = {},
+            .velocity_y_code = {},
+            .velocity_z_code = {},
+            .pressure_code = {},
+            .internal_energy_code = {},
+        }},
     };
   }
 

@@ -1,6 +1,7 @@
 #include "cosmosim/gravity/gravity_memory.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -57,6 +58,10 @@ void addEstimate(
 GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& input) {
   if (input.tree_leaf_size == 0U || input.mpi_rank_count == 0U) {
     throw std::invalid_argument("gravity memory estimate requires non-zero leaf size and rank count");
+  }
+  if (!std::isfinite(input.safety_margin_fraction) || input.safety_margin_fraction < 0.0 ||
+      input.safety_margin_fraction > 1.0) {
+    throw std::invalid_argument("gravity memory safety margin must be finite and within [0,1]");
   }
   const std::uint64_t leaf_size = static_cast<std::uint64_t>(input.tree_leaf_size);
   const std::uint64_t leaf_count = input.local_source_count == 0U
@@ -124,6 +129,21 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       input.local_source_count,
       3U * sizeof(double) + sizeof(std::uint8_t),
       "gravity persistent force cache estimate overflow");
+  const std::uint64_t runtime_particle_map_bytes = checkedMul(
+      input.local_particle_count,
+      3U * sizeof(std::int32_t),
+      "gravity runtime particle map estimate overflow");
+  const std::uint64_t runtime_cell_map_bytes = checkedMul(
+      input.local_cell_count,
+      2U * sizeof(std::int32_t) + sizeof(std::uint8_t),
+      "gravity runtime cell map estimate overflow");
+  const std::uint64_t runtime_refresh_list_bytes = checkedMul(
+      input.local_particle_count, sizeof(std::uint32_t),
+      "gravity runtime refresh-list estimate overflow");
+  const std::uint64_t runtime_mapping_bytes = checkedAdd(
+      checkedAdd(runtime_particle_map_bytes, runtime_cell_map_bytes,
+                 "gravity runtime mapping estimate overflow"),
+      runtime_refresh_list_bytes, "gravity runtime mapping estimate overflow");
 
   const std::uint64_t global_pm_cells = gridCells(input.pm_shape, "gravity PM grid estimate overflow");
   const std::uint64_t local_pm_cells = checkedAdd(
@@ -148,9 +168,24 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t mpi_bytes = input.mpi_rank_count > 1U
       ? checkedMul(input.tree_exchange_batch_bytes, 2U, "gravity exchange estimate overflow")
       : 0U;
-  const std::uint64_t backend_unknown = checkedMul(
-      local_pm_cells, input.cuda_resident ? 6U * sizeof(double) : 2U * sizeof(double),
+  const std::uint64_t cuda_owned_workspace = input.cuda_resident
+      ? checkedAdd(
+            checkedMul(input.local_source_count, 4U * sizeof(double),
+                       "gravity CUDA source workspace estimate overflow"),
+            checkedAdd(
+                checkedMul(input.local_target_count, 3U * sizeof(double),
+                           "gravity CUDA target workspace estimate overflow"),
+                checkedMul(local_pm_cells, 4U * sizeof(double),
+                           "gravity CUDA mesh workspace estimate overflow"),
+                "gravity CUDA workspace estimate overflow"),
+            "gravity CUDA workspace estimate overflow")
+      : 0U;
+  const std::uint64_t modeled_backend_unknown = checkedMul(
+      local_pm_cells, 2U * sizeof(double),
       "gravity backend unknown estimate overflow");
+  const std::uint64_t backend_unknown = checkedAdd(
+      modeled_backend_unknown, input.backend_unknown_reserve_bytes,
+      "gravity backend unknown reserve overflow");
 
   core::MemoryReportBuilder builder;
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
@@ -180,6 +215,9 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   addEstimate(builder, core::MemorySubsystem::kSidecars, core::MemoryLifetime::kPersistent,
               "gravity.estimate.persistent_force_cache", persistent_force_cache_bytes,
               "three acceleration lanes plus validity; exact particle/cell split is runtime-owned");
+  addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
+              "gravity.estimate.runtime_index_and_selection_maps", runtime_mapping_bytes,
+              "active-slot/owned-local maps, leaf mask and force-refresh particle list");
   addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
               "gravity.estimate.tree_nodes", tree_nodes_bytes,
               "leaf-derived estimate; dynamic growth remains possible for adversarial geometry");
@@ -197,6 +235,11 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
                 "gravity.estimate.sparse_tree_exchange", mpi_bytes,
                 "request/response high-water bounded by configured exchange batch policy");
   }
+  if (cuda_owned_workspace > 0U) {
+    addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
+                "gravity.estimate.cuda_owned_persistent_workspace", cuda_owned_workspace,
+                "known PmSolver-owned CUDA source/mesh/acceleration buffers; cuFFT/runtime internals excluded");
+  }
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kUnknown,
               "gravity.estimate.external_fft_or_device_workspace", backend_unknown,
               "backend allocator/plan workspace is not owned by gravity containers");
@@ -204,7 +247,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   GravityMemoryEstimate result;
   result.report = std::move(builder).finish();
   result.report.notes.push_back(
-      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, PM indexed-target gather scratch, periodic tree staging, tree workspace, PM fields, optional zoom lanes, persistent force cache, and sparse exchange buffers; canonical SimulationState is reported separately.");
+      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, optional zoom lanes, persistent force cache, sparse exchange buffers, and known CUDA buffers; canonical SimulationState is reported separately.");
   result.report.notes.push_back(
       std::string("PM estimate profile assignment=") +
       (input.assignment_scheme == PmAssignmentScheme::kTsc ? "tsc" : "cic") +
@@ -223,18 +266,32 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
     }
   }
   result.known_peak_bytes = known_peak;
+  const std::uint64_t base_budget_requirement = checkedAdd(
+      known_peak, backend_unknown, "gravity budget requirement overflow");
+  const long double scaled_requirement = static_cast<long double>(base_budget_requirement) *
+      (1.0L + static_cast<long double>(input.safety_margin_fraction));
+  if (scaled_requirement > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+    throw std::overflow_error("gravity budget safety-margin estimate overflow");
+  }
+  result.budget_required_bytes = static_cast<std::uint64_t>(std::ceil(scaled_requirement));
+  result.report.notes.push_back(
+      "gravity_budget_required_bytes=" + std::to_string(result.budget_required_bytes) +
+      " (known + backend reserve, then configured safety margin)");
   return result;
 }
 
 void enforceGravityMemoryBudget(
     const GravityMemoryEstimate& estimate,
     std::uint64_t budget_bytes) {
-  if (budget_bytes == 0U || estimate.known_peak_bytes <= budget_bytes) {
+  if (budget_bytes == 0U || estimate.budget_required_bytes <= budget_bytes) {
     return;
   }
   throw std::runtime_error(
-      "estimated gravity peak " + std::to_string(estimate.known_peak_bytes) +
-      " bytes exceeds configured per-rank gravity memory budget " +
+      "estimated gravity budget requirement " + std::to_string(estimate.budget_required_bytes) +
+      " bytes (known peak=" + std::to_string(estimate.known_peak_bytes) +
+      ", backend unknown/reserve=" +
+      std::to_string(estimate.external_backend_unknown_bytes) +
+      ") exceeds configured per-rank gravity memory budget " +
       std::to_string(budget_bytes) + " bytes before tree/communication allocation");
 }
 

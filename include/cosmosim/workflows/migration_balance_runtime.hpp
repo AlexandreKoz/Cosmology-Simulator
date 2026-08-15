@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/simulation_state.hpp"
@@ -24,6 +25,14 @@ class MigrationBalanceRuntime {
 
   [[nodiscard]] parallel::LocalOwnershipIdentitySummary reduceIdentity(
       const core::SimulationState& state) const;
+
+  // Build the compact authoritative top-domain representation from the same
+  // decomposition units used for load balancing/migration. This is evaluated
+  // only at decomposition lifecycle boundaries by the time coordinator; it is
+  // not an O(N) per-force-step gravity operation.
+  [[nodiscard]] std::vector<parallel::TopDomainLeaf> authoritativeTopDomainLeaves(
+      const core::SimulationState& state,
+      std::uint64_t decomposition_epoch) const;
 
   [[nodiscard]] bool rebalance(
       core::SimulationState& state,

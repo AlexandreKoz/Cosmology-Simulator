@@ -428,6 +428,11 @@ struct ParallelConfig {
   // Optional per-rank gravity peak budget. Zero disables the budget gate but
   // never disables the estimator/report.
   std::uint64_t gravity_memory_budget_bytes = 0U;
+  // Additional reserve for backend/library allocations not observable through
+  // owner containers plus a fractional margin applied to the complete pre-run
+  // gravity estimate. Defaults preserve the historical budget behavior.
+  std::uint64_t gravity_backend_unknown_reserve_bytes = 0U;
+  double gravity_memory_safety_margin_fraction = 0.0;
 };
 
 struct UnitsConfig {

@@ -57,6 +57,17 @@ struct DecompositionItem {
   double x_comov = 0.0;
   double y_comov = 0.0;
   double z_comov = 0.0;
+  // Optional conservative spatial footprint of this decomposition unit. Point
+  // particles use a degenerate box. AMR patches may span many authoritative
+  // gas-cell centres and therefore publish the complete owned footprint. The
+  // decomposition layer, not gravity, owns this geometry contract.
+  bool has_spatial_bounds = false;
+  double min_x_comov = 0.0;
+  double max_x_comov = 0.0;
+  double min_y_comov = 0.0;
+  double max_y_comov = 0.0;
+  double min_z_comov = 0.0;
+  double max_z_comov = 0.0;
   std::uint64_t active_target_count_recent = 0;
   std::uint64_t remote_tree_interactions_recent = 0;
   double work_units = 1.0;
@@ -115,6 +126,38 @@ struct DecompositionPlan {
   std::vector<RankRange> ranges_by_rank;
   LoadBalanceMetrics metrics;
 };
+
+// Compact authoritative top-domain leaf exported by the decomposition layer
+// for locality-aware consumers such as TreePM. A rank may own multiple leaves.
+// Bounds describe authoritative decomposition units rather than a gravity-tree
+// root, so topology validity is tied to the decomposition epoch/geometry, not
+// the frequency with which a local gravity tree is rebuilt.
+struct TopDomainLeaf {
+  std::uint64_t domain_leaf_id = 0;
+  int owner_rank = -1;
+  std::uint64_t decomposition_epoch = 0;
+  std::uint64_t sfc_key_begin = 0;
+  std::uint64_t sfc_key_end = 0;
+  double min_x_comov = 0.0;
+  double max_x_comov = 0.0;
+  double min_y_comov = 0.0;
+  double max_y_comov = 0.0;
+  double min_z_comov = 0.0;
+  double max_z_comov = 0.0;
+  double work_weight = 0.0;
+  std::uint64_t entity_count = 0;
+  bool periodic_geometry = false;
+};
+
+[[nodiscard]] std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeaves(
+    std::span<const DecompositionItem> local_items,
+    const DecompositionConfig& config,
+    int owner_rank,
+    std::uint64_t decomposition_epoch,
+    std::size_t max_leaves_per_rank = 8U);
+
+[[nodiscard]] std::uint64_t topDomainGeometryFingerprint(
+    std::span<const TopDomainLeaf> leaves) noexcept;
 
 [[nodiscard]] DecompositionPlan buildMortonSfcDecomposition(
     std::span<const DecompositionItem> items,

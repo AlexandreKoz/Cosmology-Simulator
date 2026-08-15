@@ -13,6 +13,8 @@ namespace cosmosim::gravity {
 struct GravityMemoryEstimateInput {
   std::uint64_t local_source_count = 0U;
   std::uint64_t local_target_count = 0U;
+  std::uint64_t local_particle_count = 0U;
+  std::uint64_t local_cell_count = 0U;
   std::size_t tree_leaf_size = 16U;
   TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;
   PmGridShape pm_shape{};
@@ -25,12 +27,15 @@ struct GravityMemoryEstimateInput {
   bool indexed_target_coordinates = true;
   bool cuda_resident = false;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+  std::uint64_t backend_unknown_reserve_bytes = 0U;
+  double safety_margin_fraction = 0.0;
 };
 
 struct GravityMemoryEstimate {
   core::MemoryReport report;
   std::uint64_t known_peak_bytes = 0U;
   std::uint64_t external_backend_unknown_bytes = 0U;
+  std::uint64_t budget_required_bytes = 0U;
   std::uint64_t estimated_tree_nodes = 0U;
 };
 

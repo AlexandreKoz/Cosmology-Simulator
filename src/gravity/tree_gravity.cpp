@@ -609,28 +609,26 @@ void TreeGravitySolver::evaluateActiveSet(
         const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
         const bool is_leaf = m_nodes.child_count[node_index] == 0;
         const bool target_inside_node = !is_leaf &&
-            std::abs(px - m_nodes.center_x_comoving[node_index]) <= half_size &&
-            std::abs(py - m_nodes.center_y_comoving[node_index]) <= half_size &&
-            std::abs(pz - m_nodes.center_z_comoving[node_index]) <= half_size;
-        const double r = std::sqrt(r2 + 1.0e-30);
-        const bool mac_accept = internal::acceptNodeByMac(
-            is_leaf,
-            target_inside_node,
-            half_size,
-            com_offset,
-            m_nodes.mass_code[node_index],
-            r2,
-            previous_acceleration_available,
-            previous_acceleration_code,
+            internal::targetInsideNodeAabbFromCenterDelta(
+                px - m_nodes.center_x_comoving[node_index],
+                py - m_nodes.center_y_comoving[node_index],
+                pz - m_nodes.center_z_comoving[node_index],
+                half_size);
+        const bool accept = internal::acceptNodeByCommonTreePolicy(
+            internal::TreeNodeAcceptanceInput{
+                .is_leaf = is_leaf,
+                .target_inside_node = target_inside_node,
+                .half_size = half_size,
+                .com_center_offset = com_offset,
+                .node_mass_code = m_nodes.mass_code[node_index],
+                .r2 = r2,
+                .previous_acceleration_available = previous_acceleration_available,
+                .previous_acceleration_magnitude_code = previous_acceleration_code,
+                .target_softening_comoving = target_softening_comoving,
+                .node_softening_min_comoving = m_nodes.softening_min_comoving[node_index],
+                .node_softening_max_comoving = m_nodes.softening_max_comoving[node_index],
+            },
             options);
-        const bool softening_accept = internal::passesSofteningEnvelopeGuard(
-            is_leaf,
-            half_size,
-            r,
-            target_softening_comoving,
-            m_nodes.softening_min_comoving[node_index],
-            m_nodes.softening_max_comoving[node_index]);
-        const bool accept = mac_accept && softening_accept;
 
         if (accept) {
           ++accepted_nodes;

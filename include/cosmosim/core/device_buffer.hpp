@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <span>
@@ -74,6 +75,7 @@ class DeviceBufferDouble {
     double* old = m_device_ptr;
     m_device_ptr = replacement;
     m_count = count;
+    m_high_water_count = std::max(m_high_water_count, count);
     if (old != nullptr) {
       (void)cudaFree(old);
     }
@@ -82,10 +84,19 @@ class DeviceBufferDouble {
     std::vector<double> replacement(count, 0.0);
     m_host_shadow.swap(replacement);
     m_count = count;
+    m_high_water_count = std::max(m_high_water_count, count);
 #endif
   }
 
   [[nodiscard]] std::size_t size() const noexcept { return m_count; }
+  [[nodiscard]] std::size_t highWaterSize() const noexcept { return m_high_water_count; }
+  [[nodiscard]] std::size_t sizeBytes() const {
+    return checkedSizeMultiply(m_count, sizeof(double), "DeviceBufferDouble::sizeBytes");
+  }
+  [[nodiscard]] std::size_t highWaterBytes() const {
+    return checkedSizeMultiply(
+        m_high_water_count, sizeof(double), "DeviceBufferDouble::highWaterBytes");
+  }
 
 #if COSMOSIM_ENABLE_CUDA
   [[nodiscard]] double* data() noexcept { return m_device_ptr; }
@@ -188,6 +199,7 @@ class DeviceBufferDouble {
 
   void moveFrom(DeviceBufferDouble&& other) noexcept {
     m_count = other.m_count;
+    m_high_water_count = std::max(m_high_water_count, other.m_high_water_count);
 #if COSMOSIM_ENABLE_CUDA
     m_device_ptr = other.m_device_ptr;
     other.m_device_ptr = nullptr;
@@ -195,9 +207,11 @@ class DeviceBufferDouble {
     m_host_shadow = std::move(other.m_host_shadow);
 #endif
     other.m_count = 0;
+    other.m_high_water_count = 0;
   }
 
   std::size_t m_count = 0;
+  std::size_t m_high_water_count = 0;
 #if COSMOSIM_ENABLE_CUDA
   double* m_device_ptr = nullptr;
 #else

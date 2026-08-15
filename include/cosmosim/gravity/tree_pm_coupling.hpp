@@ -54,6 +54,10 @@ struct TreePmOptions {
   // response. The workflow owns these epochs; the coordinator owns only its
   // per-instance exchange sequence.
   DecompositionEpoch decomposition_epoch{};
+  // Authoritative compact top-domain geometry owned by src/parallel. Empty is
+  // an explicit lower-capability fallback to the derived local tree-root
+  // envelope used by older/reduced workflow paths.
+  std::span<const parallel::TopDomainLeaf> authoritative_domain_leaves;
   // Monotonic identity of the physical source snapshot represented by a PM
   // field. Reuse is legal only when this generation still matches. The
   // workflow owns this token; it must advance when source positions/masses or
@@ -74,6 +78,12 @@ struct TreePmDiagnostics {
   std::uint64_t remote_hierarchy_packet_count = 0;
   std::uint64_t communicating_peer_count = 0;
   std::uint64_t top_level_domain_leaf_count = 0;
+  std::uint64_t authoritative_domain_leaf_count = 0;
+  std::uint64_t domain_hierarchy_node_count = 0;
+  std::uint64_t domain_cache_hit_count = 0;
+  std::uint64_t domain_cache_miss_count = 0;
+  std::uint64_t graph_cache_hit_count = 0;
+  std::uint64_t graph_cache_miss_count = 0;
   std::uint64_t let_candidate_peer_count = 0;
   std::uint64_t let_exported_target_count = 0;
   std::uint64_t let_imported_target_count = 0;
@@ -212,6 +222,12 @@ class TreePmCoordinator {
     std::uint64_t remote_hierarchy_packets = 0;
     std::uint64_t communicating_peer_count = 0;
     std::uint64_t top_level_domain_leaf_count = 0;
+    std::uint64_t authoritative_domain_leaf_count = 0;
+    std::uint64_t domain_hierarchy_node_count = 0;
+    std::uint64_t domain_cache_hit_count = 0;
+    std::uint64_t domain_cache_miss_count = 0;
+    std::uint64_t graph_cache_hit_count = 0;
+    std::uint64_t graph_cache_miss_count = 0;
     std::uint64_t let_candidate_peer_count = 0;
     std::uint64_t let_exported_target_count = 0;
     std::uint64_t let_imported_target_count = 0;
@@ -290,10 +306,14 @@ class TreePmCoordinator {
   struct LetDomainCache {
     bool valid = false;
     DecompositionEpoch decomposition_epoch{};
+    int world_size = 1;
+    std::uint64_t local_geometry_fingerprint = 0U;
     std::uint64_t geometry_fingerprint = 0U;
     bool authoritative_geometry = false;
     std::vector<parallel::TreePseudoParticlePacket> top_level_domain_leaves;
   } m_let_domain_cache;
+  struct LetDomainHierarchyCacheOpaque;
+  std::unique_ptr<LetDomainHierarchyCacheOpaque> m_let_domain_hierarchy_cache;
   struct SparsePeerGraphCacheOpaque;
   std::unique_ptr<SparsePeerGraphCacheOpaque> m_sparse_peer_graph_cache;
   struct LongRangeFieldValidity {

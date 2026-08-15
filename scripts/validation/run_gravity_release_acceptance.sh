@@ -5,6 +5,7 @@ build_dir="${1:-build/cpu-only-debug}"
 poster_ranks="${COSMOSIM_POSTER_RANKS:-4}"
 manifest_out="${COSMOSIM_GRAVITY_ACCEPTANCE_MANIFEST:-gravity_acceptance_manifest.json}"
 evidence_dir="${COSMOSIM_GRAVITY_EVIDENCE_DIR:-gravity_acceptance_evidence}"
+require_complete="${COSMOSIM_GRAVITY_REQUIRE_COMPLETE_ACCEPTANCE:-false}"
 
 if [[ ! -d "$build_dir" ]]; then
   echo "gravity acceptance: build directory not found: $build_dir" >&2
@@ -25,6 +26,8 @@ run_ctest_regex() {
 
 evidence_args=()
 rank_args=(--rank-count "1")
+incomplete_reasons=()
+requirement_args=()
 
 echo "== serial gravity contract gates =="
 run_ctest_regex '^(unit_tree_gravity|unit_pm_solver|integration_tree_gravity_vs_direct|integration_tree_pm_coupling_periodic|integration_star_formation_source_runtime)$'
@@ -60,6 +63,7 @@ if $fftw_enabled && has_test validation_tree_pm_ewald_accuracy; then
   done
 else
   echo "Production FFTW Ewald lane unavailable in this build; no FFTW/Ewald certification is claimed."
+  incomplete_reasons+=("missing production FFTW Ewald softening-sweep evidence")
 fi
 
 mpi_version="unavailable"
@@ -103,14 +107,38 @@ if command -v mpiexec >/dev/null 2>&1 && grep -q '^COSMOSIM_ENABLE_MPI:BOOL=ON$'
   done
   if [[ "$poster_ranks" =~ ^[0-9]+$ && "$poster_ranks" -gt 1 && -z "${rank_seen[$poster_ranks]:-}" ]]; then
     echo "Poster rank count ${poster_ranks} was not covered by a discovered MPI CTest lane; production acceptance remains incomplete." >&2
+    incomplete_reasons+=("missing intended poster rank ${poster_ranks} MPI evidence")
   fi
+  for required_rank in 2 3 4; do
+    if [[ -z "${rank_seen[$required_rank]:-}" ]]; then
+      incomplete_reasons+=("missing required MPI np${required_rank} evidence")
+    fi
+  done
 else
   echo "MPI runtime/tests unavailable in this build; no MPI acceptance is claimed."
+  incomplete_reasons+=("missing MPI runtime evidence for np2/np3/np4 and intended poster rank")
 fi
 
 hdf5_version="unavailable"
 if grep -q '^COSMOSIM_ENABLE_HDF5:BOOL=ON$' "$build_dir/CMakeCache.txt" 2>/dev/null; then
   hdf5_version="enabled_version_not_extracted"
+  for hdf5_test in integration_restart_equivalence_treepm validation_dmo_zeldovich_workflow; do
+    if has_test "$hdf5_test"; then
+      evidence_file="$evidence_dir/${hdf5_test}.json"
+      python3 tools/gravity_ctest_evidence.py \
+        --build-dir "$build_dir" \
+        --test "$hdf5_test" \
+        --output "$evidence_file" \
+        --profile "${COSMOSIM_ACCEPTANCE_PROFILE_ID:-unknown_not_extracted}" \
+        --rank-count 1 \
+        --fft-backend "$pm_backend"
+      evidence_args+=(--evidence "$evidence_file")
+    else
+      incomplete_reasons+=("missing required HDF5 evidence lane ${hdf5_test}")
+    fi
+  done
+else
+  incomplete_reasons+=("missing HDF5 restart/Zeldovich evidence")
 fi
 cuda_version="unavailable"
 if grep -q '^COSMOSIM_ENABLE_CUDA:BOOL=ON$' "$build_dir/CMakeCache.txt" 2>/dev/null; then
@@ -120,6 +148,18 @@ source_revision="unavailable"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   source_revision="$(git rev-parse HEAD)"
 fi
+
+certification_status="evidence_only_not_self_certifying"
+if [[ "$require_complete" == "true" || "$require_complete" == "1" ]]; then
+  if [[ ${#incomplete_reasons[@]} -eq 0 ]]; then
+    certification_status="production_acceptance_passed"
+  else
+    certification_status="production_acceptance_incomplete"
+  fi
+fi
+for reason in "${incomplete_reasons[@]}"; do
+  requirement_args+=(--requirement "$reason")
+done
 
 python3 tools/gravity_acceptance_manifest.py create \
   --output "$manifest_out" \
@@ -140,8 +180,18 @@ python3 tools/gravity_acceptance_manifest.py create \
   --asmth-cells "${COSMOSIM_ACCEPTANCE_ASMTH_CELLS:-unknown_not_extracted}" \
   --rcut-cells "${COSMOSIM_ACCEPTANCE_RCUT_CELLS:-unknown_not_extracted}" \
   --softening-profile "${COSMOSIM_ACCEPTANCE_SOFTENING_PROFILE:-unknown_not_extracted}" \
+  --certification-status "$certification_status" \
+  "${requirement_args[@]}" \
   "${rank_args[@]}" \
   "${evidence_args[@]}" \
   --note "Only attached evidence is certified by this manifest; unavailable feature lanes remain unexecuted."
 python3 tools/gravity_acceptance_manifest.py verify "$manifest_out"
 echo "Acceptance manifest written to $manifest_out and bound to the current gravity-contract source fingerprint."
+if [[ "$require_complete" == "true" || "$require_complete" == "1" ]]; then
+  if [[ ${#incomplete_reasons[@]} -ne 0 ]]; then
+    echo "Production gravity acceptance is INCOMPLETE:" >&2
+    printf '  - %s\n' "${incomplete_reasons[@]}" >&2
+    exit 4
+  fi
+  echo "Production gravity acceptance passed all requested evidence requirements."
+fi

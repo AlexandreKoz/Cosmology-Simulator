@@ -10,6 +10,7 @@
 
 #include "cosmosim/gravity/gravity_memory.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
+#include "gravity/internal/tree_interaction_common.hpp"
 
 namespace {
 
@@ -571,14 +572,15 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
       .mpi_rank_count = 1U,
   });
   assert(estimate.known_peak_bytes > 0U);
+  assert(estimate.budget_required_bytes >= estimate.known_peak_bytes);
   bool budget_rejected = false;
   try {
-    cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.known_peak_bytes - 1U);
+    cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.budget_required_bytes - 1U);
   } catch (const std::runtime_error&) {
     budget_rejected = true;
   }
   assert(budget_rejected);
-  cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.known_peak_bytes);
+  cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.budget_required_bytes);
 }
 
 void testGasRefinementForceConvergesAtFixedMassAndCom() {
@@ -654,6 +656,57 @@ void testAuthoritativeGasGeometryMatchesDirectSoftenedReference() {
   assert(std::abs(az[0]) < 1.0e-14);
 }
 
+void testTreeAndTreePmCommonAcceptanceConformanceCorpus() {
+  using cosmosim::gravity::TreeGravityOptions;
+  using cosmosim::gravity::TreeOpeningCriterion;
+  using cosmosim::gravity::internal::TreeNodeAcceptanceInput;
+  using cosmosim::gravity::internal::acceptNodeByCommonTreePolicy;
+
+  TreeGravityOptions options;
+  options.gravitational_constant_code = 1.0;
+  options.opening_theta = 0.7;
+  options.relative_force_tolerance = 1.0e-3;
+  options.relative_force_acceleration_floor_code = 1.0e-12;
+
+  const std::array<TreeOpeningCriterion, 3> criteria{
+      TreeOpeningCriterion::kBarnesHutGeometric,
+      TreeOpeningCriterion::kBarnesHutComDistance,
+      TreeOpeningCriterion::kRelativeForceError,
+  };
+  for (const auto criterion : criteria) {
+    options.opening_criterion = criterion;
+    for (const bool inside : {false, true}) {
+      for (const bool previous_available : {false, true}) {
+        const TreeNodeAcceptanceInput input{
+            .is_leaf = false,
+            .target_inside_node = inside,
+            .half_size = 0.1,
+            .com_center_offset = 0.02,
+            .node_mass_code = 2.0,
+            .r2 = 4.0,
+            .previous_acceleration_available = previous_available,
+            .previous_acceleration_magnitude_code = 0.5,
+            .target_softening_comoving = 0.01,
+            .node_softening_min_comoving = 0.01,
+            .node_softening_max_comoving = 0.01,
+        };
+        const bool standalone_common = acceptNodeByCommonTreePolicy(input, options);
+        const bool treepm_common = acceptNodeByCommonTreePolicy(input, options);
+        assert(standalone_common == treepm_common);
+        if (inside) {
+          assert(!standalone_common);
+        }
+      }
+    }
+  }
+
+  assert(cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
+      0.1, -0.1, 0.0, 0.1));
+  assert(!cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
+      0.10001, 0.0, 0.0, 0.1));
+}
+
+
 }  // namespace
 
 int main() {
@@ -674,5 +727,6 @@ int main() {
   testAdaptiveNodeReserveAndMemoryEstimate();
   testAuthoritativeGasGeometryMatchesDirectSoftenedReference();
   testGasRefinementForceConvergesAtFixedMassAndCom();
+  testTreeAndTreePmCommonAcceptanceConformanceCorpus();
   return 0;
 }

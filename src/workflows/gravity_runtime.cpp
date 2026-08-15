@@ -514,6 +514,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     active("gravity_runtime.local_active_source_index", m_local_active_indices);
     active("gravity_runtime.local_active_particle_row", m_local_active_global_indices);
     active("gravity_runtime.force_refresh_particle_rows", m_force_refresh_particle_indices);
+    active("gravity_runtime.authoritative_top_domain_leaves", m_authoritative_top_domain_leaves);
     persistent("gravity_runtime.particle_force_cache_valid", m_particle_force_cache_valid);
     persistent("gravity_runtime.cell_force_cache_valid", m_cell_force_cache_valid);
 
@@ -529,6 +530,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       merged.notes.push_back(
           "gravity_pre_run_external_backend_unknown_bytes=" +
           std::to_string(m_last_pre_run_memory_estimate.external_backend_unknown_bytes));
+      merged.notes.push_back(
+          "gravity_pre_run_budget_required_bytes=" +
+          std::to_string(m_last_pre_run_memory_estimate.budget_required_bytes));
     }
     return merged;
   }
@@ -558,6 +562,25 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_source_generation = 0U;
     m_particle_force_cache_valid.clear();
     m_cell_force_cache_valid.clear();
+  }
+
+  void installAuthoritativeTopDomainLeaves(
+      std::span<const parallel::TopDomainLeaf> leaves) override {
+    for (const parallel::TopDomainLeaf& leaf : leaves) {
+      if (leaf.owner_rank != m_services.mpi_context.worldRank()) {
+        throw std::invalid_argument(
+            "gravity authoritative top-domain install received a leaf owned by another rank");
+      }
+      if (leaf.decomposition_epoch != m_decomposition_epoch.value) {
+        throw std::invalid_argument(
+            "gravity authoritative top-domain install received a stale decomposition epoch");
+      }
+    }
+    m_authoritative_top_domain_leaves.assign(leaves.begin(), leaves.end());
+    m_tree_pm_options.authoritative_domain_leaves =
+        std::span<const parallel::TopDomainLeaf>(
+            m_authoritative_top_domain_leaves.data(),
+            m_authoritative_top_domain_leaves.size());
   }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -887,6 +910,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         gravity::GravityMemoryEstimateInput{
             .local_source_count = static_cast<std::uint64_t>(conservative_local_source_count),
             .local_target_count = static_cast<std::uint64_t>(conservative_local_target_count),
+            .local_particle_count = static_cast<std::uint64_t>(particle_count),
+            .local_cell_count = static_cast<std::uint64_t>(cell_count),
             .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
             .multipole_order = m_tree_pm_options.tree_options.multipole_order,
             .pm_shape = m_pm_grid_shape,
@@ -900,6 +925,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .indexed_target_coordinates = true,
             .cuda_resident = m_runtime_topology.usesCuda(),
             .tree_exchange_batch_bytes = m_tree_pm_options.tree_exchange_batch_bytes,
+            .backend_unknown_reserve_bytes =
+                m_config.parallel.gravity_backend_unknown_reserve_bytes,
+            .safety_margin_fraction =
+                m_config.parallel.gravity_memory_safety_margin_fraction,
         });
     m_has_pre_run_memory_estimate = true;
     gravity::enforceGravityMemoryBudget(
@@ -1325,6 +1354,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"pm_decomposition_architecture", std::string(
                   gravity::pmDecompositionTopologyName(decomposition_descriptor.topology))},
               {"top_level_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.top_level_domain_leaf_count)},
+              {"authoritative_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.authoritative_domain_leaf_count)},
+              {"domain_hierarchy_node_count", std::to_string(m_last_tree_pm_diagnostics.domain_hierarchy_node_count)},
+              {"domain_cache_hits", std::to_string(m_last_tree_pm_diagnostics.domain_cache_hit_count)},
+              {"domain_cache_misses", std::to_string(m_last_tree_pm_diagnostics.domain_cache_miss_count)},
+              {"graph_cache_hits", std::to_string(m_last_tree_pm_diagnostics.graph_cache_hit_count)},
+              {"graph_cache_misses", std::to_string(m_last_tree_pm_diagnostics.graph_cache_miss_count)},
               {"let_candidate_peer_count", std::to_string(m_last_tree_pm_diagnostics.let_candidate_peer_count)},
               {"communicating_peer_count", std::to_string(m_last_tree_pm_diagnostics.communicating_peer_count)},
               {"let_exported_target_count", std::to_string(m_last_tree_pm_diagnostics.let_exported_target_count)},
@@ -1333,6 +1368,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"let_wire_bytes_received", std::to_string(m_last_tree_pm_diagnostics.let_wire_bytes_received)},
               {"let_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.let_high_water_bytes)},
               {"let_discovery_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_discovery_ms)},
+              {"let_graph_setup_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_graph_setup_ms)},
               {"let_communication_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_ms)},
               {"let_overlap_local_work_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_overlap_local_work_ms)},
               {"let_communication_wait_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_wait_ms)},
@@ -2066,6 +2102,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
   std::vector<std::uint32_t> m_force_refresh_particle_indices;
+  std::vector<parallel::TopDomainLeaf> m_authoritative_top_domain_leaves;
   std::size_t m_local_kick_particle_count = 0U;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
   parallel::DecompositionRuntimeMeasurements m_last_decomposition_measurements{};

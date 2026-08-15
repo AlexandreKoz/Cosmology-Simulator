@@ -1235,6 +1235,8 @@ struct ConfigKeySpec {
       {"parallel.isolated_pm_root_workspace_limit_bytes", "268435456"},
       {"parallel.zoom_high_res_allgather_limit_bytes", "268435456"},
       {"parallel.gravity_memory_budget_bytes", "0"},
+      {"parallel.gravity_backend_unknown_reserve_bytes", "0"},
+      {"parallel.gravity_memory_safety_margin_fraction", "0.0"},
       {"analysis.enable_diagnostics", "true"},
       {"analysis.enable_halo_workflow", "false"},
       {"analysis.halo_on_the_fly", "false"},
@@ -1471,6 +1473,12 @@ void validateConfig(const SimulationConfig& config) {
   if (config.parallel.isolated_pm_root_workspace_limit_bytes == 0U ||
       config.parallel.zoom_high_res_allgather_limit_bytes == 0U) {
     throw ConfigError("parallel PM gather guard byte limits must be > 0");
+  }
+  if (!std::isfinite(config.parallel.gravity_memory_safety_margin_fraction) ||
+      config.parallel.gravity_memory_safety_margin_fraction < 0.0 ||
+      config.parallel.gravity_memory_safety_margin_fraction > 1.0) {
+    throw ConfigError(
+        "parallel.gravity_memory_safety_margin_fraction must be finite and within [0,1]");
   }
   if (config.analysis.run_health_interval_steps <= 0 ||
       config.analysis.science_light_interval_steps <= 0 ||
@@ -2299,6 +2307,10 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.parallel.zoom_high_res_allgather_limit_bytes << '\n';
   stream << "gravity_memory_budget_bytes = "
          << frozen.config.parallel.gravity_memory_budget_bytes << '\n';
+  stream << "gravity_backend_unknown_reserve_bytes = "
+         << frozen.config.parallel.gravity_backend_unknown_reserve_bytes << '\n';
+  stream << "gravity_memory_safety_margin_fraction = "
+         << frozen.config.parallel.gravity_memory_safety_margin_fraction << '\n';
   stream << "\n[analysis]\n";
   stream << "enable_diagnostics = " << (frozen.config.analysis.enable_diagnostics ? "true" : "false")
          << '\n';
@@ -3159,6 +3171,14 @@ void validateConfig(const SimulationConfig& config) {
       requireString(entries, consumed, "parallel.gravity_memory_budget_bytes",
                     defaultFor("parallel.gravity_memory_budget_bytes")),
       "parallel.gravity_memory_budget_bytes");
+  frozen.config.parallel.gravity_backend_unknown_reserve_bytes = parseNumber<std::uint64_t>(
+      requireString(entries, consumed, "parallel.gravity_backend_unknown_reserve_bytes",
+                    defaultFor("parallel.gravity_backend_unknown_reserve_bytes")),
+      "parallel.gravity_backend_unknown_reserve_bytes");
+  frozen.config.parallel.gravity_memory_safety_margin_fraction = parseNumber<double>(
+      requireString(entries, consumed, "parallel.gravity_memory_safety_margin_fraction",
+                    defaultFor("parallel.gravity_memory_safety_margin_fraction")),
+      "parallel.gravity_memory_safety_margin_fraction");
 
   frozen.config.analysis.enable_diagnostics = parseBool(
       requireString(entries, consumed, "analysis.enable_diagnostics", "true"),

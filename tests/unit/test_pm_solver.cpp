@@ -726,17 +726,36 @@ void testPmBackendArchitectureAndTopologyContract() {
 
   const cosmosim::gravity::PmDecompositionView serial_view(
       shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
-  assert(serial_view.realOwnerRank(15U) == 0);
+  assert(serial_view.realOwnerRank({15U, 0U, 0U}) == 0);
   assert(serial_view.ownsRealCell(3U, 2U, 1U));
   assert(serial_view.globalToLocalRealIndex(3U, 2U, 1U) == (3U * shape.ny + 2U) * shape.nz + 1U);
 
   const cosmosim::gravity::PmDecompositionView distributed_view(
       shape, distributed_layout, cosmosim::core::PmDecompositionMode::kPencil);
-  assert(distributed_view.realOwnerRank(0U) == 0);
-  assert(distributed_view.realOwnerRank(5U) == 1);
-  assert(distributed_view.realOwnerRank(15U) == 3);
+  assert(distributed_view.realOwnerRank({0U, 2U, 1U}) == 0);
+  assert(distributed_view.realOwnerRank({5U, 2U, 1U}) == 1);
+  assert(distributed_view.realOwnerRank({15U, 2U, 1U}) == 3);
   assert(distributed_view.ownsRealCell(5U, 2U, 1U));
   assert(!distributed_view.ownsRealCell(2U, 2U, 1U));
+
+  // A true 2-D ownership query must be able to distinguish cells with the
+  // same global x but different y process-grid coordinates. This is a value-
+  // type contract only; no distributed FFT backend is implied by the test.
+  cosmosim::gravity::PmDecompositionDescriptor pencil_descriptor;
+  pencil_descriptor.topology = cosmosim::gravity::PmDecompositionTopology::kPencil2D;
+  pencil_descriptor.process_grid_x = 2U;
+  pencil_descriptor.process_grid_y = 2U;
+  const cosmosim::gravity::PmDecompositionView pencil_rank0(
+      shape, pencil_descriptor, 0, 4);
+  assert(pencil_rank0.realOwnerRank({1U, 1U, 0U}) == 0);
+  assert(pencil_rank0.realOwnerRank({1U, 6U, 0U}) == 2);
+  assert(pencil_rank0.realOwnerRank({10U, 1U, 0U}) == 1);
+  assert(pencil_rank0.realOwnerRank({10U, 6U, 0U}) == 3);
+  const auto pencil_rank3_extent = pencil_rank0.realExtentForRank(3);
+  assert(pencil_rank3_extent.x_begin == 8U);
+  assert(pencil_rank3_extent.x_count == 8U);
+  assert(pencil_rank3_extent.y_begin == 6U);
+  assert(pencil_rank3_extent.y_count == 6U);
 }
 
 void testPmRejectsInvalidEnumsNegativeMassAndOverflow() {

@@ -2,6 +2,7 @@
 #include <span>
 #include <vector>
 
+#include "cosmosim/core/device_buffer.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
@@ -70,6 +71,24 @@ void testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity() {
   assert(saw_hydro_gradient_scratch);
 }
 
+void testDeviceBufferPreservesHistoricalHighWaterAcrossShrink() {
+  cosmosim::core::DeviceBufferDouble buffer;
+  buffer.resize(64U);
+  assert(buffer.size() == 64U);
+  assert(buffer.highWaterSize() == 64U);
+  assert(buffer.highWaterBytes() == 64U * sizeof(double));
+
+  buffer.resize(8U);
+  assert(buffer.size() == 8U);
+  assert(buffer.sizeBytes() == 8U * sizeof(double));
+  assert(buffer.highWaterSize() == 64U);
+  assert(buffer.highWaterBytes() == 64U * sizeof(double));
+
+  cosmosim::core::DeviceBufferDouble moved(std::move(buffer));
+  assert(moved.size() == 8U);
+  assert(moved.highWaterSize() == 64U);
+}
+
 void testPreRunEstimateReportsRequiredSubsystemsAndUncertainty() {
   cosmosim::core::MemoryBudgetEstimateInput input;
   input.particle_capacity = 100;
@@ -107,6 +126,7 @@ int main() {
   testSpanViewReportsNoOwnedBytes();
   testAllCategoriesPresentEvenIfZero();
   testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity();
+  testDeviceBufferPreservesHistoricalHighWaterAcrossShrink();
   testPreRunEstimateReportsRequiredSubsystemsAndUncertainty();
   return 0;
 }

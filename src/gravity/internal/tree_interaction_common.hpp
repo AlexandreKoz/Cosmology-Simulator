@@ -8,6 +8,31 @@
 
 namespace cosmosim::gravity::internal {
 
+
+[[nodiscard]] inline bool targetInsideNodeAabbFromCenterDelta(
+    double delta_x,
+    double delta_y,
+    double delta_z,
+    double half_size) noexcept {
+  return std::abs(delta_x) <= half_size &&
+      std::abs(delta_y) <= half_size &&
+      std::abs(delta_z) <= half_size;
+}
+
+struct TreeNodeAcceptanceInput {
+  bool is_leaf = false;
+  bool target_inside_node = false;
+  double half_size = 0.0;
+  double com_center_offset = 0.0;
+  double node_mass_code = 0.0;
+  double r2 = 0.0;
+  bool previous_acceleration_available = false;
+  double previous_acceleration_magnitude_code = 0.0;
+  double target_softening_comoving = 0.0;
+  double node_softening_min_comoving = 0.0;
+  double node_softening_max_comoving = 0.0;
+};
+
 [[nodiscard]] inline bool acceptNodeByComDistanceMac(
     double theta,
     double half_size,
@@ -62,5 +87,30 @@ namespace cosmosim::gravity::internal {
       node_softening_max_comoving, target_softening_comoving);
   return r > (2.0 * half_size + 2.0 * pair_softening_max);
 }
+
+
+[[nodiscard]] inline bool acceptNodeByCommonTreePolicy(
+    const TreeNodeAcceptanceInput& input,
+    const TreeGravityOptions& options) noexcept {
+  const double r = std::sqrt(input.r2 + 1.0e-30);
+  return acceptNodeByMac(
+             input.is_leaf,
+             input.target_inside_node,
+             input.half_size,
+             input.com_center_offset,
+             input.node_mass_code,
+             input.r2,
+             input.previous_acceleration_available,
+             input.previous_acceleration_magnitude_code,
+             options) &&
+      passesSofteningEnvelopeGuard(
+          input.is_leaf,
+          input.half_size,
+          r,
+          input.target_softening_comoving,
+          input.node_softening_min_comoving,
+          input.node_softening_max_comoving);
+}
+
 
 }  // namespace cosmosim::gravity::internal

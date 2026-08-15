@@ -1166,6 +1166,94 @@ static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
   return packet;
 }
 
+[[nodiscard, maybe_unused]] std::vector<parallel::TreePseudoParticlePacket>
+makeAuthoritativeTopDomainPackets(
+    std::span<const parallel::TopDomainLeaf> leaves,
+    int world_rank,
+    std::uint64_t decomposition_epoch,
+    std::uint64_t force_epoch,
+    std::uint64_t exchange_sequence) {
+  std::vector<parallel::TreePseudoParticlePacket> packets;
+  packets.reserve(leaves.size());
+  for (const parallel::TopDomainLeaf& leaf : leaves) {
+    if (leaf.owner_rank != world_rank || leaf.decomposition_epoch != decomposition_epoch) {
+      throw std::invalid_argument(
+          "authoritative TreePM top-domain leaf owner/epoch does not match local force evaluation");
+    }
+    parallel::TreePseudoParticlePacket packet;
+    packet.descriptor = parallel::TreePseudoParticleDescriptor{
+        .pseudo_particle_id = leaf.domain_leaf_id,
+        .source_rank = world_rank,
+        .decomposition_epoch = decomposition_epoch,
+        .force_epoch = force_epoch,
+        .exchange_sequence = exchange_sequence,
+        .derived_not_authoritative = false,
+    };
+    // Routing-only authoritative leaves intentionally carry no multipole mass.
+    // The remote owner evaluates exported targets against its local tree.
+    packet.mass_code = 0.0;
+    packet.center_x_comoving = 0.5 * (leaf.min_x_comov + leaf.max_x_comov);
+    packet.center_y_comoving = 0.5 * (leaf.min_y_comov + leaf.max_y_comov);
+    packet.center_z_comoving = 0.5 * (leaf.min_z_comov + leaf.max_z_comov);
+    packet.min_x_comoving = leaf.min_x_comov;
+    packet.max_x_comoving = leaf.max_x_comov;
+    packet.min_y_comoving = leaf.min_y_comov;
+    packet.max_y_comoving = leaf.max_y_comov;
+    packet.min_z_comoving = leaf.min_z_comov;
+    packet.max_z_comoving = leaf.max_z_comov;
+    packet.source_count = leaf.entity_count;
+    packet.hierarchy_level = 0U;
+    packet.local_node_index = 0U;
+    packet.child_count = 0U;
+    packet.is_leaf = 1U;
+    packet.geometry_frame = leaf.periodic_geometry ? 0U : 0U;
+    parallel::validateTreePseudoParticlePacket(packet);
+    packets.push_back(packet);
+  }
+  return packets;
+}
+
+[[nodiscard, maybe_unused]] bool authoritativeDomainCoversLocalSources(
+    std::span<const parallel::TopDomainLeaf> leaves,
+    int world_rank,
+    std::uint64_t decomposition_epoch,
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving) {
+  if (pos_x_comoving.size() != pos_y_comoving.size() ||
+      pos_x_comoving.size() != pos_z_comoving.size()) {
+    return false;
+  }
+  if (pos_x_comoving.empty()) {
+    return true;
+  }
+  if (leaves.empty()) {
+    return false;
+  }
+  constexpr double k_geometry_tolerance = 1.0e-12;
+  for (std::size_t source_index = 0; source_index < pos_x_comoving.size(); ++source_index) {
+    bool covered = false;
+    for (const parallel::TopDomainLeaf& leaf : leaves) {
+      if (leaf.owner_rank != world_rank || leaf.decomposition_epoch != decomposition_epoch) {
+        return false;
+      }
+      if (pos_x_comoving[source_index] >= leaf.min_x_comov - k_geometry_tolerance &&
+          pos_x_comoving[source_index] <= leaf.max_x_comov + k_geometry_tolerance &&
+          pos_y_comoving[source_index] >= leaf.min_y_comov - k_geometry_tolerance &&
+          pos_y_comoving[source_index] <= leaf.max_y_comov + k_geometry_tolerance &&
+          pos_z_comoving[source_index] >= leaf.min_z_comov - k_geometry_tolerance &&
+          pos_z_comoving[source_index] <= leaf.max_z_comov + k_geometry_tolerance) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) {
+      return false;
+    }
+  }
+  return true;
+}
+
 [[nodiscard]] SourceDomainBoundsPacket boundsFromTreePseudoParticlePacket(
     const parallel::TreePseudoParticlePacket& packet) {
   parallel::validateTreePseudoParticlePacket(packet);
@@ -1188,7 +1276,7 @@ static_assert(std::is_trivially_copyable_v<SourceDomainBoundsPacket>);
     const PeriodicBoxLengths& box_lengths,
   double cutoff_radius_comoving) {
   for (const parallel::TreePseudoParticlePacket& packet : packets) {
-    if (packet.source_count == 0U || packet.mass_code == 0.0) {
+    if (packet.source_count == 0U) {
       continue;
     }
     if (minimumDistanceToPeriodicBounds(px, py, pz, boundsFromTreePseudoParticlePacket(packet), box_lengths) <=
@@ -1238,7 +1326,7 @@ class TopLevelDomainHierarchy {
              slot < node.leaf_begin + node.leaf_count; ++slot) {
           const auto& leaf = m_leaves[m_order[slot]];
           if (leaf.descriptor.source_rank == excluded_rank ||
-              leaf.source_count == 0U || leaf.mass_code == 0.0) {
+              leaf.source_count == 0U) {
             continue;
           }
           if (minimumDistanceToPeriodicBounds(
@@ -1316,7 +1404,7 @@ class TopLevelDomainHierarchy {
   std::vector<Node> m_nodes;
 };
 
-[[nodiscard]] std::uint64_t domainGeometryFingerprint(
+[[nodiscard, maybe_unused]] std::uint64_t domainGeometryFingerprint(
     std::span<const parallel::TreePseudoParticlePacket> leaves) {
   std::uint64_t hash = 1469598103934665603ULL;
   auto mix = [&](std::uint64_t value) {
@@ -1337,6 +1425,12 @@ class TopLevelDomainHierarchy {
 }
 
 }  // namespace
+
+struct TreePmCoordinator::LetDomainHierarchyCacheOpaque {
+  bool valid = false;
+  std::uint64_t geometry_fingerprint = 0U;
+  std::unique_ptr<TopLevelDomainHierarchy> hierarchy;
+};
 
 struct TreePmCoordinator::SparsePeerGraphCacheOpaque {
   bool valid = false;
@@ -1370,6 +1464,7 @@ TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape)
       m_grid(pm_shape),
       m_pm_solver(pm_shape),
       m_tree_solver(),
+      m_let_domain_hierarchy_cache(std::make_unique<LetDomainHierarchyCacheOpaque>()),
       m_sparse_peer_graph_cache(std::make_unique<SparsePeerGraphCacheOpaque>()) {}
 
 TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout)
@@ -1384,6 +1479,7 @@ TreePmCoordinator::TreePmCoordinator(
       m_grid(pm_shape, std::move(pm_layout)),
       m_pm_solver(pm_shape),
       m_tree_solver(),
+      m_let_domain_hierarchy_cache(std::make_unique<LetDomainHierarchyCacheOpaque>()),
       m_sparse_peer_graph_cache(std::make_unique<SparsePeerGraphCacheOpaque>()) {}
 
 TreePmCoordinator::~TreePmCoordinator() = default;
@@ -1403,6 +1499,7 @@ const parallel::PmSlabHaloExchangeResult& TreePmCoordinator::lastPmSlabHaloExcha
 core::MemoryReport TreePmCoordinator::memoryReport() const {
   core::MemoryReportBuilder builder;
   m_grid.appendMemoryReport(builder);
+  m_pm_solver.appendMemoryReport(builder);
   m_tree_solver.appendMemoryReport(builder);
   const auto add_active = [&builder](
                               std::string label,
@@ -2215,6 +2312,12 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->remote_hierarchy_packet_count = m_last_residual_stats.remote_hierarchy_packets;
     diagnostics->communicating_peer_count = m_last_residual_stats.communicating_peer_count;
     diagnostics->top_level_domain_leaf_count = m_last_residual_stats.top_level_domain_leaf_count;
+    diagnostics->authoritative_domain_leaf_count = m_last_residual_stats.authoritative_domain_leaf_count;
+    diagnostics->domain_hierarchy_node_count = m_last_residual_stats.domain_hierarchy_node_count;
+    diagnostics->domain_cache_hit_count = m_last_residual_stats.domain_cache_hit_count;
+    diagnostics->domain_cache_miss_count = m_last_residual_stats.domain_cache_miss_count;
+    diagnostics->graph_cache_hit_count = m_last_residual_stats.graph_cache_hit_count;
+    diagnostics->graph_cache_miss_count = m_last_residual_stats.graph_cache_miss_count;
     diagnostics->let_candidate_peer_count = m_last_residual_stats.let_candidate_peer_count;
     diagnostics->let_exported_target_count = m_last_residual_stats.let_exported_target_count;
     diagnostics->let_imported_target_count = m_last_residual_stats.let_imported_target_count;
@@ -2463,19 +2566,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double center_dz = nodes.center_z_comoving[node_index] - nodes.com_z_comoving[node_index];
       const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
       const bool target_inside_node = skip_self && !is_leaf &&
-          std::abs(minimumImageDelta(nodes.center_x_comoving[node_index] - px, box_lengths.lx)) <= half_size &&
-          std::abs(minimumImageDelta(nodes.center_y_comoving[node_index] - py, box_lengths.ly)) <= half_size &&
-          std::abs(minimumImageDelta(nodes.center_z_comoving[node_index] - pz, box_lengths.lz)) <= half_size;
-      const bool mac_accept = internal::acceptNodeByMac(
-          is_leaf,
-          target_inside_node,
-          half_size,
-          com_offset,
-          nodes.mass_code[node_index],
-          r2,
-          previous_acceleration_available,
-          previous_acceleration_magnitude_code,
-          options.tree_options);
+          internal::targetInsideNodeAabbFromCenterDelta(
+              minimumImageDelta(nodes.center_x_comoving[node_index] - px, box_lengths.lx),
+              minimumImageDelta(nodes.center_y_comoving[node_index] - py, box_lengths.ly),
+              minimumImageDelta(nodes.center_z_comoving[node_index] - pz, box_lengths.lz),
+              half_size);
       const bool node_within_cutoff = is_leaf || (maximumDistanceToNodeAabb(
           px,
           py,
@@ -2485,13 +2580,21 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_z_comoving[node_index],
           half_size,
           box_lengths) <= cutoff_radius_comoving);
-      const bool softening_accept = internal::passesSofteningEnvelopeGuard(
-          is_leaf,
-          half_size,
-          r,
-          target_softening_comoving,
-          nodes.softening_min_comoving[node_index],
-          nodes.softening_max_comoving[node_index]);
+      const bool common_tree_accept = internal::acceptNodeByCommonTreePolicy(
+          internal::TreeNodeAcceptanceInput{
+              .is_leaf = is_leaf,
+              .target_inside_node = target_inside_node,
+              .half_size = half_size,
+              .com_center_offset = com_offset,
+              .node_mass_code = nodes.mass_code[node_index],
+              .r2 = r2,
+              .previous_acceleration_available = previous_acceleration_available,
+              .previous_acceleration_magnitude_code = previous_acceleration_magnitude_code,
+              .target_softening_comoving = target_softening_comoving,
+              .node_softening_min_comoving = nodes.softening_min_comoving[node_index],
+              .node_softening_max_comoving = nodes.softening_max_comoving[node_index],
+          },
+          options.tree_options);
       // A rank-local forest does not have the same topology as the serial
       // tree.  Bound the residual multipole truncation independently of that
       // topology so changing rank ownership cannot amplify the configured
@@ -2503,7 +2606,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           (options.tree_options.multipole_order == TreeMultipoleOrder::kQuadrupole &&
            (2.0 * half_size / r) < k_screened_quadrupole_width_over_distance_limit);
       const bool accept =
-          mac_accept && node_within_cutoff && softening_accept && decomposition_stable_accept;
+          common_tree_accept && node_within_cutoff && decomposition_stable_accept;
 
       if (accept) {
         ++accepted_nodes;
@@ -2696,48 +2799,84 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& expected_response_count = m_tree_exchange_workspace.expected_response_count;
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
-    // Every rank holds only one compact top-level source-domain leaf per rank.
-    // Detailed remote tree nodes are no longer globally replicated. Traversal
-    // discovers target-export work against these ownership leaves, and the
-    // remote owner evaluates the request against its authoritative local tree.
+    // Prefer the authoritative decomposition-domain leaves installed by the
+    // workflow. Moving sources are checked against that geometry before use; if
+    // they have escaped the current decomposition footprint, fall back to the
+    // conservative gravity-tree root until the next ownership update. This is a
+    // correctness fallback, not an equivalent capability tier.
     std::vector<parallel::TreePseudoParticlePacket> local_top_level_domain;
+    bool local_authoritative_geometry = false;
     std::exception_ptr local_domain_failure;
     try {
-      local_top_level_domain.push_back(makeLocalTreePseudoParticlePacket(
+      local_authoritative_geometry = authoritativeDomainCoversLocalSources(
+          options.authoritative_domain_leaves,
           mpi_world_rank,
           options.decomposition_epoch.value,
-          options.force_epoch.sequence,
-          exchange_sequence,
-          m_tree_solver.nodes(),
-          pos_x_comoving.size()));
+          pos_x_comoving,
+          pos_y_comoving,
+          pos_z_comoving);
+      if (local_authoritative_geometry) {
+        local_top_level_domain = makeAuthoritativeTopDomainPackets(
+            options.authoritative_domain_leaves,
+            mpi_world_rank,
+            options.decomposition_epoch.value,
+            options.force_epoch.sequence,
+            exchange_sequence);
+      } else {
+        local_top_level_domain.push_back(makeLocalTreePseudoParticlePacket(
+            mpi_world_rank,
+            options.decomposition_epoch.value,
+            options.force_epoch.sequence,
+            exchange_sequence,
+            m_tree_solver.nodes(),
+            pos_x_comoving.size()));
+      }
     } catch (...) {
       local_domain_failure = std::current_exception();
     }
     coordinate_protocol_failure(local_domain_failure, "top-level domain preparation");
 
-    // The current parallel decomposition API exposes one compact gravity-derived
-    // source envelope per rank rather than authoritative spatial top leaves.
-    // These envelopes may change whenever source positions change, so do not key
-    // them to local tree-build generation or reuse them across force evaluations.
-    // Keeping topology validity separate from numerical tree validity avoids the
-    // former guaranteed cache invalidation on every rebuild and leaves a clean
-    // upgrade point for authoritative decomposition leaves later.
-    std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets =
-        parallel::executeBlockingTreePseudoParticleHierarchyExchange(
-            m_mpi_context, local_top_level_domain, exchange_sequence);
-    const std::uint64_t domain_geometry_fingerprint =
-        domainGeometryFingerprint(peer_pseudo_packets);
-    const bool authoritative_geometry = std::all_of(
-        peer_pseudo_packets.begin(),
-        peer_pseudo_packets.end(),
-        [](const parallel::TreePseudoParticlePacket& packet) {
-          return !packet.descriptor.derived_not_authoritative;
-        });
-    m_let_domain_cache.valid = true;
-    m_let_domain_cache.decomposition_epoch = options.decomposition_epoch;
-    m_let_domain_cache.geometry_fingerprint = domain_geometry_fingerprint;
-    m_let_domain_cache.authoritative_geometry = authoritative_geometry;
-    m_let_domain_cache.top_level_domain_leaves = peer_pseudo_packets;
+    const std::uint64_t local_domain_geometry_fingerprint =
+        domainGeometryFingerprint(local_top_level_domain);
+    const bool local_domain_cache_match =
+        local_authoritative_geometry &&
+        m_let_domain_cache.valid &&
+        m_let_domain_cache.authoritative_geometry &&
+        m_let_domain_cache.decomposition_epoch == options.decomposition_epoch &&
+        m_let_domain_cache.world_size == mpi_world_size &&
+        m_let_domain_cache.local_geometry_fingerprint == local_domain_geometry_fingerprint;
+    int local_domain_cache_match_int = local_domain_cache_match ? 1 : 0;
+    int all_domain_cache_match = 0;
+    MPI_Allreduce(
+        &local_domain_cache_match_int,
+        &all_domain_cache_match,
+        1,
+        MPI_INT,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+
+    std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets;
+    if (all_domain_cache_match != 0) {
+      peer_pseudo_packets = m_let_domain_cache.top_level_domain_leaves;
+      ++m_last_residual_stats.domain_cache_hit_count;
+    } else {
+      ++m_last_residual_stats.domain_cache_miss_count;
+      peer_pseudo_packets = parallel::executeBlockingTreePseudoParticleHierarchyExchange(
+          m_mpi_context, local_top_level_domain, exchange_sequence);
+      const bool authoritative_geometry = std::all_of(
+          peer_pseudo_packets.begin(),
+          peer_pseudo_packets.end(),
+          [](const parallel::TreePseudoParticlePacket& packet) {
+            return !packet.descriptor.derived_not_authoritative;
+          });
+      m_let_domain_cache.valid = authoritative_geometry;
+      m_let_domain_cache.decomposition_epoch = options.decomposition_epoch;
+      m_let_domain_cache.world_size = mpi_world_size;
+      m_let_domain_cache.local_geometry_fingerprint = local_domain_geometry_fingerprint;
+      m_let_domain_cache.geometry_fingerprint = domainGeometryFingerprint(peer_pseudo_packets);
+      m_let_domain_cache.authoritative_geometry = authoritative_geometry;
+      m_let_domain_cache.top_level_domain_leaves = peer_pseudo_packets;
+    }
 
     std::vector<std::vector<parallel::TreePseudoParticlePacket>> peer_hierarchy_by_rank;
     std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer;
@@ -2745,39 +2884,55 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     std::vector<std::vector<std::uint8_t>> response_seen_by_peer;
     std::vector<std::uint8_t> communicated_with_peer;
     std::vector<int> requested_outgoing_peers;
-    TopLevelDomainHierarchy top_level_domain_hierarchy(peer_pseudo_packets);
+
+    // The domain hierarchy is a decomposition object, not a tree-build object.
+    // Reuse the already-built BVH whenever the authoritative global domain
+    // geometry fingerprint is unchanged. Derived tree-root fallback geometry is
+    // intentionally rebuilt because it follows the current local tree.
+    const std::uint64_t peer_geometry_fingerprint = domainGeometryFingerprint(peer_pseudo_packets);
+    std::unique_ptr<TopLevelDomainHierarchy> transient_domain_hierarchy;
+    TopLevelDomainHierarchy* top_level_domain_hierarchy = nullptr;
+    if (m_let_domain_cache.valid && m_let_domain_cache.authoritative_geometry &&
+        m_let_domain_hierarchy_cache != nullptr &&
+        m_let_domain_hierarchy_cache->valid &&
+        m_let_domain_hierarchy_cache->geometry_fingerprint == peer_geometry_fingerprint &&
+        m_let_domain_hierarchy_cache->hierarchy != nullptr) {
+      top_level_domain_hierarchy = m_let_domain_hierarchy_cache->hierarchy.get();
+    } else if (m_let_domain_cache.valid && m_let_domain_cache.authoritative_geometry &&
+               m_let_domain_hierarchy_cache != nullptr) {
+      m_let_domain_hierarchy_cache->hierarchy =
+          std::make_unique<TopLevelDomainHierarchy>(peer_pseudo_packets);
+      m_let_domain_hierarchy_cache->geometry_fingerprint = peer_geometry_fingerprint;
+      m_let_domain_hierarchy_cache->valid = true;
+      top_level_domain_hierarchy = m_let_domain_hierarchy_cache->hierarchy.get();
+    } else {
+      if (m_let_domain_hierarchy_cache != nullptr) {
+        m_let_domain_hierarchy_cache->valid = false;
+        m_let_domain_hierarchy_cache->hierarchy.reset();
+      }
+      transient_domain_hierarchy = std::make_unique<TopLevelDomainHierarchy>(peer_pseudo_packets);
+      top_level_domain_hierarchy = transient_domain_hierarchy.get();
+    }
     SparsePeerGraph* sparse_peer_graph = nullptr;
     std::exception_ptr peer_domain_failure;
     const auto let_discovery_start = std::chrono::steady_clock::now();
     try {
-      if (peer_pseudo_packets.size() != static_cast<std::size_t>(mpi_world_size)) {
-        throw std::runtime_error("TreePM top-level domain exchange returned incomplete rank coverage");
-      }
       peer_hierarchy_by_rank.resize(static_cast<std::size_t>(mpi_world_size));
       for (const parallel::TreePseudoParticlePacket& packet : peer_pseudo_packets) {
         if (packet.descriptor.source_rank < 0 || packet.descriptor.source_rank >= mpi_world_size) {
           throw std::runtime_error("TreePM top-level domain packet has invalid source rank");
         }
         auto& rank_packets = peer_hierarchy_by_rank[static_cast<std::size_t>(packet.descriptor.source_rank)];
-        if (!rank_packets.empty()) {
-          throw std::runtime_error("TreePM top-level domain exchange produced duplicate owner leaves");
-        }
         rank_packets.push_back(packet);
       }
-      for (int peer = 0; peer < mpi_world_size; ++peer) {
-        if (peer_hierarchy_by_rank[static_cast<std::size_t>(peer)].size() != 1U) {
-          throw std::runtime_error("TreePM top-level domain exchange did not produce exactly one leaf per rank");
-        }
-      }
 
-      // Route target discovery through a compact top-domain BVH rather than
-      // scanning every remote rank envelope for every local target. The current
-      // leaves are still derived rank envelopes; when src/parallel exposes
-      // authoritative decomposition top leaves the same hierarchy can consume
-      // them without changing request transport.
+      // Route target discovery through a compact top-domain BVH. Authoritative
+      // decomposition geometry may expose several leaves for one owner; empty
+      // source ranks legitimately expose none. The fallback path contributes
+      // one derived tree-root leaf and is tracked as lower-capability geometry.
       std::vector<std::uint8_t> peer_needed(static_cast<std::size_t>(mpi_world_size), 0U);
       for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
-        const std::vector<int> owners = top_level_domain_hierarchy.ownersWithinCutoff(
+        const std::vector<int> owners = top_level_domain_hierarchy->ownersWithinCutoff(
             target_x(active_i),
             target_y(active_i),
             target_z(active_i),
@@ -2796,8 +2951,20 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
       m_last_residual_stats.top_level_domain_leaf_count =
           static_cast<std::uint64_t>(peer_pseudo_packets.size());
+      m_last_residual_stats.authoritative_domain_leaf_count =
+          static_cast<std::uint64_t>(std::count_if(
+              peer_pseudo_packets.begin(), peer_pseudo_packets.end(),
+              [](const parallel::TreePseudoParticlePacket& packet) {
+                return !packet.descriptor.derived_not_authoritative;
+              }));
+      m_last_residual_stats.domain_hierarchy_node_count =
+          static_cast<std::uint64_t>(top_level_domain_hierarchy->nodeCount());
       m_last_residual_stats.remote_hierarchy_packets =
-          mpi_world_size > 0 ? static_cast<std::uint64_t>(mpi_world_size - 1) : 0U;
+          static_cast<std::uint64_t>(std::count_if(
+              peer_pseudo_packets.begin(), peer_pseudo_packets.end(),
+              [mpi_world_rank](const parallel::TreePseudoParticlePacket& packet) {
+                return packet.descriptor.source_rank != mpi_world_rank;
+              }));
       requests_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
       response_expected_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
       response_seen_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
@@ -2830,6 +2997,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         MPI_MIN,
         MPI_COMM_WORLD);
     if (all_graph_cache_match == 0) {
+      ++m_last_residual_stats.graph_cache_miss_count;
       graph_cache.graph = makeSymmetricSparsePeerGraph(
           mpi_world_rank,
           std::span<const int>(requested_outgoing_peers.data(), requested_outgoing_peers.size()));
@@ -2837,6 +3005,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       graph_cache.decomposition_epoch = options.decomposition_epoch;
       graph_cache.world_size = mpi_world_size;
       graph_cache.requested_outgoing_peers = requested_outgoing_peers;
+    } else {
+      ++m_last_residual_stats.graph_cache_hit_count;
     }
     sparse_peer_graph = &graph_cache.graph;
     m_last_residual_stats.let_candidate_peer_count =

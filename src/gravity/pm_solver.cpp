@@ -1101,6 +1101,16 @@ class PmSolver::Impl {
     std::vector<int> recv_contrib_displs_bytes;
   };
 
+
+  struct IndexedTargetWorkspace {
+    std::vector<double> gathered_x;
+    std::vector<double> gathered_y;
+    std::vector<double> gathered_z;
+    std::vector<double> compact_ax;
+    std::vector<double> compact_ay;
+    std::vector<double> compact_az;
+  };
+
 #if COSMOSIM_ENABLE_CUDA
   // Persistent owner for the CUDA PM staging backend. The currently validated
   // path still performs FFT/Poisson/gradient on the host, but stream and device
@@ -1718,6 +1728,170 @@ class PmSolver::Impl {
     return m_potential_exchange.buffers;
   }
 
+  [[nodiscard]] IndexedTargetWorkspace& indexedTargetWorkspace() noexcept {
+    return m_indexed_target_workspace;
+  }
+#if COSMOSIM_ENABLE_CUDA
+  [[nodiscard]] CudaBackendWorkspace& cudaWorkspace() noexcept {
+    return m_cuda_workspace;
+  }
+#endif
+  void appendOwnedMemoryReport(core::MemoryReportBuilder& builder) const {
+    appendMemoryReport(builder);
+  }
+
+#if COSMOSIM_ENABLE_CUDA
+  // Current CUDA staging strategy. All transfer/deposit/host-field-solve/
+  // interpolation choreography lives behind Impl so a future resident strategy
+  // can replace these stages without changing solveForParticles().
+  void solveCudaStagingBackend(
+      PmSolver& solver,
+      PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      std::span<double> accel_x,
+      std::span<double> accel_y,
+      std::span<double> accel_z,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile) {
+    auto& cuda_workspace = m_cuda_workspace;
+    const core::CudaStreamView stream_view = cuda_workspace.prepare(
+        pos_x.size(), m_shape.cellCount());
+    const cudaStream_t stream = cuda_workspace.stream;
+    auto& pos_x_device = cuda_workspace.pos_x;
+    auto& pos_y_device = cuda_workspace.pos_y;
+    auto& pos_z_device = cuda_workspace.pos_z;
+    auto& mass_device = cuda_workspace.mass;
+    auto& density_device = cuda_workspace.density;
+    auto& force_x_device = cuda_workspace.force_x;
+    auto& force_y_device = cuda_workspace.force_y;
+    auto& force_z_device = cuda_workspace.force_z;
+    auto& accel_x_device = cuda_workspace.accel_x;
+    auto& accel_y_device = cuda_workspace.accel_y;
+    auto& accel_z_device = cuda_workspace.accel_z;
+
+    {
+      const auto copy_h2d_start = std::chrono::steady_clock::now();
+      pos_x_device.copyFromHostAsync(pos_x, stream_view);
+      pos_y_device.copyFromHostAsync(pos_y, stream_view);
+      pos_z_device.copyFromHostAsync(pos_z, stream_view);
+      mass_device.copyFromHostAsync(mass, stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing H2D particle copy");
+      }
+      const auto copy_h2d_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->transfer_h2d_ms += std::chrono::duration<double, std::milli>(copy_h2d_stop - copy_h2d_start).count();
+      }
+
+      const BoxLengths lengths = effectiveBoxLengths(options);
+
+      const auto kernel_assign_start = std::chrono::steady_clock::now();
+      pmCudaAssignDensityCic(
+          PmCudaAssignLaunch{
+              pos_x.size(),
+              m_shape.nx,
+              m_shape.ny,
+              m_shape.nz,
+              lengths.lx,
+              lengths.ly,
+              lengths.lz},
+          pos_x_device.data(),
+          pos_y_device.data(),
+          pos_z_device.data(),
+          mass_device.data(),
+          density_device.data(),
+          stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing PM assignment kernel");
+      }
+      const auto kernel_assign_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->device_kernel_ms +=
+            std::chrono::duration<double, std::milli>(kernel_assign_stop - kernel_assign_start).count();
+      }
+
+      const auto copy_density_start = std::chrono::steady_clock::now();
+      density_device.copyToHostAsync(grid.density(), stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing D2H density copy");
+      }
+      const auto copy_density_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_density_stop - copy_density_start).count();
+      }
+      const double cell_volume =
+          (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
+      for (double& density_cell : grid.density()) {
+        density_cell /= cell_volume;
+      }
+
+      solver.solvePoissonPeriodic(grid, options, profile);
+
+      const auto copy_forces_start = std::chrono::steady_clock::now();
+      force_x_device.copyFromHostAsync(grid.force_x(), stream_view);
+      force_y_device.copyFromHostAsync(grid.force_y(), stream_view);
+      force_z_device.copyFromHostAsync(grid.force_z(), stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing H2D force copy");
+      }
+      const auto copy_forces_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->transfer_h2d_ms += std::chrono::duration<double, std::milli>(copy_forces_stop - copy_forces_start).count();
+      }
+
+      const auto kernel_interp_start = std::chrono::steady_clock::now();
+      pmCudaInterpolateForcesCic(
+          PmCudaInterpLaunch{
+              pos_x.size(),
+              m_shape.nx,
+              m_shape.ny,
+              m_shape.nz,
+              lengths.lx,
+              lengths.ly,
+              lengths.lz},
+          pos_x_device.data(),
+          pos_y_device.data(),
+          pos_z_device.data(),
+          force_x_device.data(),
+          force_y_device.data(),
+          force_z_device.data(),
+          accel_x_device.data(),
+          accel_y_device.data(),
+          accel_z_device.data(),
+          stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing PM interpolation kernel");
+      }
+      const auto kernel_interp_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->device_kernel_ms +=
+            std::chrono::duration<double, std::milli>(kernel_interp_stop - kernel_interp_start).count();
+      }
+
+      const auto copy_accel_start = std::chrono::steady_clock::now();
+      accel_x_device.copyToHostAsync(accel_x, stream_view);
+      accel_y_device.copyToHostAsync(accel_y, stream_view);
+      accel_z_device.copyToHostAsync(accel_z, stream_view);
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error("Failed while synchronizing D2H acceleration copy");
+      }
+      const auto copy_accel_stop = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_accel_stop - copy_accel_start).count();
+      }
+    }
+
+    if (profile != nullptr) {
+      profile->bytes_moved += bytesForParticles(pos_x.size()) * 2U;
+      profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 4U;
+    }
+    return;
+  }
+#endif
+
  private:
   template <typename ContributionRecord>
   static void resetInterpolationExchangeForWorld(
@@ -1858,6 +2032,188 @@ class PmSolver::Impl {
   }
 #endif
 
+  void appendMemoryReport(core::MemoryReportBuilder& builder) const {
+    const auto checked_add = [](std::uint64_t lhs, std::uint64_t rhs) {
+      if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
+        throw std::overflow_error("PM memory report byte sum overflow");
+      }
+      return lhs + rhs;
+    };
+    const auto accumulate = [&checked_add](
+                                std::uint64_t& current,
+                                std::uint64_t& capacity,
+                                const auto& container) {
+      current = checked_add(current, core::currentSizeBytesForContainer(container));
+      capacity = checked_add(capacity, core::ownedCapacityBytesForContainer(container));
+    };
+    const auto accumulate_nested = [&accumulate](
+                                       std::uint64_t& current,
+                                       std::uint64_t& capacity,
+                                       const auto& outer) {
+      accumulate(current, capacity, outer);
+      for (const auto& inner : outer) {
+        accumulate(current, capacity, inner);
+      }
+    };
+    const auto emit = [&builder](
+                          core::MemorySubsystem subsystem,
+                          core::MemoryLifetime lifetime,
+                          std::string label,
+                          std::uint64_t current,
+                          std::uint64_t capacity,
+                          std::string note) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = subsystem,
+          .lifetime = lifetime,
+          .label = std::move(label),
+          .current_size_bytes = current,
+          .owned_capacity_bytes = capacity,
+          .high_water_bytes = capacity,
+          .estimated_next_step_bytes = 0U,
+          .uncertainty_note = std::move(note),
+      });
+    };
+
+    {
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      accumulate(current, capacity, m_indexed_target_workspace.gathered_x);
+      accumulate(current, capacity, m_indexed_target_workspace.gathered_y);
+      accumulate(current, capacity, m_indexed_target_workspace.gathered_z);
+      accumulate(current, capacity, m_indexed_target_workspace.compact_ax);
+      accumulate(current, capacity, m_indexed_target_workspace.compact_ay);
+      accumulate(current, capacity, m_indexed_target_workspace.compact_az);
+      emit(core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
+           "pm_solver.indexed_target_workspace", current, capacity,
+           "retained indexed-target coordinate/output scratch; capacity is its allocation high-water");
+    }
+
+    {
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      for (const auto& [_, resources] : m_plan_cache) {
+        accumulate(current, capacity, resources.real);
+        accumulate(current, capacity, resources.fourier);
+        accumulate(current, capacity, resources.potential_k);
+        accumulate(current, capacity, resources.working_k);
+        accumulate(current, capacity, resources.poisson_kernel);
+        accumulate(current, capacity, resources.grad_kx);
+        accumulate(current, capacity, resources.grad_ky);
+        accumulate(current, capacity, resources.grad_kz);
+      }
+      emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
+           "pm_solver.plan_cache_owned_arrays", current, capacity,
+           "owned FFT/Poisson arrays only; FFTW/cuFFT plan-internal allocations remain external/unknown");
+    }
+
+    {
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      accumulate(current, capacity, m_isolated_workspace.rho_k);
+      accumulate(current, capacity, m_isolated_workspace.kernel_k);
+      accumulate(current, capacity, m_isolated_workspace.scratch);
+      accumulate(current, capacity, m_isolated_workspace.potential_real);
+      emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
+           "pm_solver.isolated_open_workspace", current, capacity,
+           "retained owned arrays; distributed root/backend allocations are reported separately");
+    }
+
+    {
+      const auto& b = m_density_exchange.buffers;
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      accumulate_nested(current, capacity, b.send_records_by_rank);
+      accumulate(current, capacity, b.send_flat_records);
+      accumulate(current, capacity, b.recv_flat_records);
+      accumulate(current, capacity, b.send_wire);
+      accumulate(current, capacity, b.recv_wire);
+      accumulate(current, capacity, b.send_counts);
+      accumulate(current, capacity, b.send_displs);
+      accumulate(current, capacity, b.recv_counts);
+      accumulate(current, capacity, b.recv_displs);
+      accumulate(current, capacity, b.send_counts_bytes);
+      accumulate(current, capacity, b.send_displs_bytes);
+      accumulate(current, capacity, b.recv_counts_bytes);
+      accumulate(current, capacity, b.recv_displs_bytes);
+      emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
+           "pm_solver.density_exchange_workspace", current, capacity,
+           "retained sparse/routed PM density communication workspace");
+    }
+
+    const auto emit_interpolation_exchange = [&](std::string label, const auto& b) {
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      accumulate_nested(current, capacity, b.send_requests_by_rank);
+      accumulate(current, capacity, b.send_requests_flat);
+      accumulate(current, capacity, b.recv_requests_flat);
+      accumulate(current, capacity, b.send_request_wire);
+      accumulate(current, capacity, b.recv_request_wire);
+      accumulate_nested(current, capacity, b.send_contribs_by_rank);
+      accumulate(current, capacity, b.send_contribs_flat);
+      accumulate(current, capacity, b.recv_contribs_flat);
+      accumulate(current, capacity, b.send_contrib_wire);
+      accumulate(current, capacity, b.recv_contrib_wire);
+      accumulate(current, capacity, b.send_counts);
+      accumulate(current, capacity, b.send_displs);
+      accumulate(current, capacity, b.recv_counts);
+      accumulate(current, capacity, b.recv_displs);
+      accumulate(current, capacity, b.send_counts_bytes);
+      accumulate(current, capacity, b.send_displs_bytes);
+      accumulate(current, capacity, b.recv_counts_bytes);
+      accumulate(current, capacity, b.recv_displs_bytes);
+      accumulate(current, capacity, b.send_contrib_counts);
+      accumulate(current, capacity, b.send_contrib_displs);
+      accumulate(current, capacity, b.recv_contrib_counts);
+      accumulate(current, capacity, b.recv_contrib_displs);
+      accumulate(current, capacity, b.send_contrib_counts_bytes);
+      accumulate(current, capacity, b.send_contrib_displs_bytes);
+      accumulate(current, capacity, b.recv_contrib_counts_bytes);
+      accumulate(current, capacity, b.recv_contrib_displs_bytes);
+      emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
+           std::move(label), current, capacity,
+           "retained routed PM interpolation request/response workspace");
+    };
+    emit_interpolation_exchange(
+        "pm_solver.force_exchange_workspace", m_force_exchange.buffers);
+    emit_interpolation_exchange(
+        "pm_solver.potential_exchange_workspace", m_potential_exchange.buffers);
+
+#if COSMOSIM_ENABLE_CUDA
+    const auto emit_device = [&builder](std::string label, const core::DeviceBufferDouble& buffer) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kPmMesh,
+          .lifetime = core::MemoryLifetime::kPersistent,
+          .label = std::move(label),
+          .current_size_bytes = static_cast<std::uint64_t>(buffer.sizeBytes()),
+          .owned_capacity_bytes = static_cast<std::uint64_t>(buffer.sizeBytes()),
+          .high_water_bytes = static_cast<std::uint64_t>(buffer.highWaterBytes()),
+          .estimated_next_step_bytes = 0U,
+          .uncertainty_note = "persistent CUDA allocation owned by PmSolver; CUDA/cuFFT runtime internals excluded",
+      });
+    };
+    emit_device("pm_solver.cuda.pos_x", m_cuda_workspace.pos_x);
+    emit_device("pm_solver.cuda.pos_y", m_cuda_workspace.pos_y);
+    emit_device("pm_solver.cuda.pos_z", m_cuda_workspace.pos_z);
+    emit_device("pm_solver.cuda.mass", m_cuda_workspace.mass);
+    emit_device("pm_solver.cuda.density", m_cuda_workspace.density);
+    emit_device("pm_solver.cuda.force_x", m_cuda_workspace.force_x);
+    emit_device("pm_solver.cuda.force_y", m_cuda_workspace.force_y);
+    emit_device("pm_solver.cuda.force_z", m_cuda_workspace.force_z);
+    emit_device("pm_solver.cuda.accel_x", m_cuda_workspace.accel_x);
+    emit_device("pm_solver.cuda.accel_y", m_cuda_workspace.accel_y);
+    emit_device("pm_solver.cuda.accel_z", m_cuda_workspace.accel_z);
+    emit_device("pm_solver.cuda.fft_workspace", m_cuda_workspace.fft_workspace);
+    emit_device("pm_solver.cuda.green_filter_workspace", m_cuda_workspace.green_filter_workspace);
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kPmMesh,
+        .lifetime = core::MemoryLifetime::kUnknown,
+        .label = "pm_solver.cuda.plan_internal_workspace",
+        .estimate_only = true,
+        .uncertainty_note = "CUDA/cuFFT plan/runtime allocations are backend-owned and not measurable through the current API",
+    });
+#endif
+  }
+
   PmGridShape m_shape;
   std::unordered_map<PlanKey, PlanResources, PlanKeyHasher> m_plan_cache;
   std::optional<PlanKey> m_active_key;
@@ -1878,6 +2234,7 @@ class PmSolver::Impl {
     int world_rank = 0;
     InterpolationExchangeBuffers<PmPotentialContributionRecord> buffers;
   } m_potential_exchange{};
+  IndexedTargetWorkspace m_indexed_target_workspace{};
   IsolatedOpenWorkspace m_isolated_workspace{};
 #if COSMOSIM_ENABLE_CUDA
   CudaBackendWorkspace m_cuda_workspace{};
@@ -2128,8 +2485,8 @@ void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const
                                        .current_size_bytes = core::currentSizeBytesForContainer(container),
                                        .owned_capacity_bytes = bytes,
                                        .high_water_bytes = bytes,
-                                       .estimated_next_step_bytes = bytes,
-                                       .uncertainty_note = {}});
+                                       .estimated_next_step_bytes = 0U,
+                                       .uncertainty_note = "retained PM-grid capacity is an observed allocation high-water; next-step requirement is not predicted"});
   };
   add("pm_mesh.density", m_density);
   add("pm_mesh.potential", m_potential);
@@ -2156,6 +2513,10 @@ PmSolver& PmSolver::operator=(PmSolver&&) noexcept = default;
 
 const PmGridShape& PmSolver::shape() const {
   return m_shape;
+}
+
+void PmSolver::appendMemoryReport(core::MemoryReportBuilder& builder) const {
+  m_impl->appendOwnedMemoryReport(builder);
 }
 
 void PmSolver::assignDensity(
@@ -2418,8 +2779,6 @@ void PmSolver::assignDensity(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = decomposition_view.realOwnerRank(ix);
-        auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
             continue;
@@ -2434,6 +2793,9 @@ void PmSolver::assignDensity(
             const std::size_t iz = periodic
                 ? wrapIndex(sz.offsets[dz], m_shape.nz)
                 : static_cast<std::size_t>(sz.offsets[dz]);
+            const int destination_rank = decomposition_view.realOwnerRank(
+                PmGlobalCell{ix, iy, iz});
+            auto& batch = exchange.send_records_by_rank[static_cast<std::size_t>(destination_rank)];
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             if (next_record_sequence == std::numeric_limits<std::uint32_t>::max()) {
               throw std::invalid_argument("PmSolver::assignDensity record sequence exceeds routing token limit");
@@ -2585,7 +2947,7 @@ void PmSolver::assignDensity(
             throw std::invalid_argument("density contribution mesh index is out of range");
           }
           const int expected_owner =
-              decomposition_view.realOwnerRank(record.global_ix);
+              decomposition_view.realOwnerRank(PmGlobalCell{record.global_ix, record.global_iy, record.global_iz});
           if (expected_owner != grid.slabLayout().world_rank ||
               expected_owner != static_cast<int>(record.destination_rank)) {
             throw std::invalid_argument(
@@ -3268,16 +3630,14 @@ void PmSolver::interpolateForces(
         "PmSolver::interpolateForces target coordinate/index view extents must match");
   }
 
-  std::vector<double> gathered_x;
-  std::vector<double> gathered_y;
-  std::vector<double> gathered_z;
+  auto& indexed_workspace = m_impl->indexedTargetWorkspace();
   std::span<const double> target_x = target_view.pos_x_comoving;
   std::span<const double> target_y = target_view.pos_y_comoving;
   std::span<const double> target_z = target_view.pos_z_comoving;
   if (indexed_coordinates) {
-    gathered_x.resize(active_count);
-    gathered_y.resize(active_count);
-    gathered_z.resize(active_count);
+    indexed_workspace.gathered_x.resize(active_count);
+    indexed_workspace.gathered_y.resize(active_count);
+    indexed_workspace.gathered_z.resize(active_count);
     for (std::size_t active_i = 0; active_i < active_count; ++active_i) {
       const std::size_t source_i = static_cast<std::size_t>(
           target_view.coordinate_source_index[active_i]);
@@ -3285,13 +3645,13 @@ void PmSolver::interpolateForces(
         throw std::out_of_range(
             "PmSolver::interpolateForces coordinate source index out of range");
       }
-      gathered_x[active_i] = target_view.pos_x_comoving[source_i];
-      gathered_y[active_i] = target_view.pos_y_comoving[source_i];
-      gathered_z[active_i] = target_view.pos_z_comoving[source_i];
+      indexed_workspace.gathered_x[active_i] = target_view.pos_x_comoving[source_i];
+      indexed_workspace.gathered_y[active_i] = target_view.pos_y_comoving[source_i];
+      indexed_workspace.gathered_z[active_i] = target_view.pos_z_comoving[source_i];
     }
-    target_x = gathered_x;
-    target_y = gathered_y;
-    target_z = gathered_z;
+    target_x = indexed_workspace.gathered_x;
+    target_y = indexed_workspace.gathered_y;
+    target_z = indexed_workspace.gathered_z;
   }
 
   switch (target_view.output_layout) {
@@ -3321,24 +3681,24 @@ void PmSolver::interpolateForces(
           throw std::out_of_range("PmSolver::interpolateForces indexed active particle output index out of range");
         }
       }
-      std::vector<double> compact_ax(active_count, 0.0);
-      std::vector<double> compact_ay(active_count, 0.0);
-      std::vector<double> compact_az(active_count, 0.0);
+      indexed_workspace.compact_ax.assign(active_count, 0.0);
+      indexed_workspace.compact_ay.assign(active_count, 0.0);
+      indexed_workspace.compact_az.assign(active_count, 0.0);
       interpolateForces(
           grid,
           target_x,
           target_y,
           target_z,
-          compact_ax,
-          compact_ay,
-          compact_az,
+          indexed_workspace.compact_ax,
+          indexed_workspace.compact_ay,
+          indexed_workspace.compact_az,
           options,
           profile);
       for (std::size_t active_i = 0; active_i < active_count; ++active_i) {
         const std::uint32_t particle_index = target_view.active_particle_index[active_i];
-        target_view.accel_x_comoving[particle_index] = compact_ax[active_i];
-        target_view.accel_y_comoving[particle_index] = compact_ay[active_i];
-        target_view.accel_z_comoving[particle_index] = compact_az[active_i];
+        target_view.accel_x_comoving[particle_index] = indexed_workspace.compact_ax[active_i];
+        target_view.accel_y_comoving[particle_index] = indexed_workspace.compact_ay[active_i];
+        target_view.accel_z_comoving[particle_index] = indexed_workspace.compact_az[active_i];
       }
       return;
     }
@@ -3613,7 +3973,6 @@ void PmSolver::interpolateForces(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = decomposition_view.realOwnerRank(ix);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
             continue;
@@ -3628,9 +3987,12 @@ void PmSolver::interpolateForces(
             const std::size_t iz = periodic
                 ? wrapIndex(sz.offsets[dz], m_shape.nz)
                 : static_cast<std::size_t>(sz.offsets[dz]);
+            const int destination_rank = decomposition_view.realOwnerRank(
+                PmGlobalCell{ix, iy, iz});
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             if (destination_rank == grid.slabLayout().world_rank) {
-              const std::size_t local_index = grid.linearIndex(ix, iy, iz);
+              const std::size_t local_index =
+                  decomposition_view.globalToLocalRealIndex(ix, iy, iz);
               if (!std::isfinite(grid.force_x()[local_index]) || !std::isfinite(grid.force_y()[local_index]) ||
                   !std::isfinite(grid.force_z()[local_index])) {
                 throw std::invalid_argument(
@@ -3850,7 +4212,8 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request PM index out of range"));
         }
-        if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
+        if (!decomposition_view.ownsRealCell(
+                request.global_ix, request.global_iy, request.global_iz)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolateForces slab evaluation",
               grid.slabLayout().world_rank,
@@ -3858,9 +4221,9 @@ void PmSolver::interpolateForces(
               request.exchange_epoch,
               request.request_sequence,
               request.origin_particle_index,
-              "request x-index is not owned by receiving slab"));
+              "request PM cell is not owned by receiving decomposition view"));
         }
-        const int expected_owner = decomposition_view.realOwnerRank(request.global_ix);
+        const int expected_owner = decomposition_view.realOwnerRank(PmGlobalCell{request.global_ix, request.global_iy, request.global_iz});
         if (expected_owner != grid.slabLayout().world_rank ||
             expected_owner != static_cast<int>(request.destination_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -3872,7 +4235,8 @@ void PmSolver::interpolateForces(
               request.origin_particle_index,
               "request expected mesh owner does not match routed destination"));
         }
-        const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        const std::size_t index = decomposition_view.globalToLocalRealIndex(
+            request.global_ix, request.global_iy, request.global_iz);
         if (!std::isfinite(grid.force_x()[index]) || !std::isfinite(grid.force_y()[index]) ||
             !std::isfinite(grid.force_z()[index])) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -4440,7 +4804,6 @@ void PmSolver::interpolatePotential(
         const std::size_t ix = periodic
             ? wrapIndex(sx.offsets[dx], m_shape.nx)
             : static_cast<std::size_t>(sx.offsets[dx]);
-        const int destination_rank = decomposition_view.realOwnerRank(ix);
         for (std::size_t dy = 0; dy < sy.count; ++dy) {
           if (!periodic && (sy.offsets[dy] < 0 || sy.offsets[dy] >= static_cast<std::ptrdiff_t>(m_shape.ny))) {
             continue;
@@ -4455,6 +4818,8 @@ void PmSolver::interpolatePotential(
             const std::size_t iz = periodic
                 ? wrapIndex(sz.offsets[dz], m_shape.nz)
                 : static_cast<std::size_t>(sz.offsets[dz]);
+            const int destination_rank = decomposition_view.realOwnerRank(
+                PmGlobalCell{ix, iy, iz});
             const double weight = sx.weights[dx] * sy.weights[dy] * sz.weights[dz];
             if (next_request_sequence == std::numeric_limits<std::uint32_t>::max()) {
               throw std::invalid_argument("PmSolver::interpolatePotential request sequence exceeds routing token limit");
@@ -4649,7 +5014,8 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request PM index out of range"));
         }
-        if (!grid.slabLayout().ownsGlobalX(request.global_ix)) {
+        if (!decomposition_view.ownsRealCell(
+                request.global_ix, request.global_iy, request.global_iz)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolatePotential slab evaluation",
               grid.slabLayout().world_rank,
@@ -4657,9 +5023,9 @@ void PmSolver::interpolatePotential(
               request.exchange_epoch,
               request.request_sequence,
               request.origin_particle_index,
-              "request x-index is not owned by receiving slab"));
+              "request PM cell is not owned by receiving decomposition view"));
         }
-        const int expected_owner = decomposition_view.realOwnerRank(request.global_ix);
+        const int expected_owner = decomposition_view.realOwnerRank(PmGlobalCell{request.global_ix, request.global_iy, request.global_iz});
         if (expected_owner != grid.slabLayout().world_rank ||
             expected_owner != static_cast<int>(request.destination_rank)) {
           throw std::invalid_argument(pmRoutingDiagnostic(
@@ -4671,7 +5037,8 @@ void PmSolver::interpolatePotential(
               request.origin_particle_index,
               "request expected mesh owner does not match routed destination"));
         }
-        const std::size_t index = grid.linearIndex(request.global_ix, request.global_iy, request.global_iz);
+        const std::size_t index = decomposition_view.globalToLocalRealIndex(
+            request.global_ix, request.global_iy, request.global_iz);
         if (!std::isfinite(grid.potential()[index])) {
           throw std::invalid_argument(pmRoutingDiagnostic(
               "PmSolver::interpolatePotential slab evaluation",
@@ -5087,138 +5454,9 @@ void PmSolver::solveForParticles(
 
   if (options.execution_policy == core::ExecutionPolicy::kCuda) {
 #if COSMOSIM_ENABLE_CUDA
-    auto& cuda_workspace = m_impl->m_cuda_workspace;
-    const core::CudaStreamView stream_view = cuda_workspace.prepare(
-        pos_x.size(), m_shape.cellCount());
-    const cudaStream_t stream = cuda_workspace.stream;
-    auto& pos_x_device = cuda_workspace.pos_x;
-    auto& pos_y_device = cuda_workspace.pos_y;
-    auto& pos_z_device = cuda_workspace.pos_z;
-    auto& mass_device = cuda_workspace.mass;
-    auto& density_device = cuda_workspace.density;
-    auto& force_x_device = cuda_workspace.force_x;
-    auto& force_y_device = cuda_workspace.force_y;
-    auto& force_z_device = cuda_workspace.force_z;
-    auto& accel_x_device = cuda_workspace.accel_x;
-    auto& accel_y_device = cuda_workspace.accel_y;
-    auto& accel_z_device = cuda_workspace.accel_z;
-
-    {
-      const auto copy_h2d_start = std::chrono::steady_clock::now();
-      pos_x_device.copyFromHostAsync(pos_x, stream_view);
-      pos_y_device.copyFromHostAsync(pos_y, stream_view);
-      pos_z_device.copyFromHostAsync(pos_z, stream_view);
-      mass_device.copyFromHostAsync(mass, stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing H2D particle copy");
-      }
-      const auto copy_h2d_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->transfer_h2d_ms += std::chrono::duration<double, std::milli>(copy_h2d_stop - copy_h2d_start).count();
-      }
-
-      const BoxLengths lengths = effectiveBoxLengths(options);
-
-      const auto kernel_assign_start = std::chrono::steady_clock::now();
-      pmCudaAssignDensityCic(
-          PmCudaAssignLaunch{
-              pos_x.size(),
-              m_shape.nx,
-              m_shape.ny,
-              m_shape.nz,
-              lengths.lx,
-              lengths.ly,
-              lengths.lz},
-          pos_x_device.data(),
-          pos_y_device.data(),
-          pos_z_device.data(),
-          mass_device.data(),
-          density_device.data(),
-          stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing PM assignment kernel");
-      }
-      const auto kernel_assign_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->device_kernel_ms +=
-            std::chrono::duration<double, std::milli>(kernel_assign_stop - kernel_assign_start).count();
-      }
-
-      const auto copy_density_start = std::chrono::steady_clock::now();
-      density_device.copyToHostAsync(grid.density(), stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing D2H density copy");
-      }
-      const auto copy_density_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_density_stop - copy_density_start).count();
-      }
-      const double cell_volume =
-          (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
-      for (double& density_cell : grid.density()) {
-        density_cell /= cell_volume;
-      }
-
-      solvePoissonPeriodic(grid, options, profile);
-
-      const auto copy_forces_start = std::chrono::steady_clock::now();
-      force_x_device.copyFromHostAsync(grid.force_x(), stream_view);
-      force_y_device.copyFromHostAsync(grid.force_y(), stream_view);
-      force_z_device.copyFromHostAsync(grid.force_z(), stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing H2D force copy");
-      }
-      const auto copy_forces_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->transfer_h2d_ms += std::chrono::duration<double, std::milli>(copy_forces_stop - copy_forces_start).count();
-      }
-
-      const auto kernel_interp_start = std::chrono::steady_clock::now();
-      pmCudaInterpolateForcesCic(
-          PmCudaInterpLaunch{
-              pos_x.size(),
-              m_shape.nx,
-              m_shape.ny,
-              m_shape.nz,
-              lengths.lx,
-              lengths.ly,
-              lengths.lz},
-          pos_x_device.data(),
-          pos_y_device.data(),
-          pos_z_device.data(),
-          force_x_device.data(),
-          force_y_device.data(),
-          force_z_device.data(),
-          accel_x_device.data(),
-          accel_y_device.data(),
-          accel_z_device.data(),
-          stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing PM interpolation kernel");
-      }
-      const auto kernel_interp_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->device_kernel_ms +=
-            std::chrono::duration<double, std::milli>(kernel_interp_stop - kernel_interp_start).count();
-      }
-
-      const auto copy_accel_start = std::chrono::steady_clock::now();
-      accel_x_device.copyToHostAsync(accel_x, stream_view);
-      accel_y_device.copyToHostAsync(accel_y, stream_view);
-      accel_z_device.copyToHostAsync(accel_z, stream_view);
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        throw std::runtime_error("Failed while synchronizing D2H acceleration copy");
-      }
-      const auto copy_accel_stop = std::chrono::steady_clock::now();
-      if (profile != nullptr) {
-        profile->transfer_d2h_ms += std::chrono::duration<double, std::milli>(copy_accel_stop - copy_accel_start).count();
-      }
-    }
-
-    if (profile != nullptr) {
-      profile->bytes_moved += bytesForParticles(pos_x.size()) * 2U;
-      profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 4U;
-    }
+    m_impl->solveCudaStagingBackend(
+        *this, grid, pos_x, pos_y, pos_z, mass, accel_x, accel_y, accel_z,
+        options, profile);
     return;
 #else
     throw std::runtime_error("PM solve requested execution_policy=cuda, but this build has COSMOSIM_ENABLE_CUDA=OFF");
@@ -5341,15 +5579,64 @@ PmDecompositionView::PmDecompositionView(
     : m_shape(shape),
       m_layout(std::move(layout)),
       m_mode(mode),
-      m_descriptor(describePmDecomposition(m_shape, m_layout, m_mode)) {}
+      m_descriptor(describePmDecomposition(m_shape, m_layout, m_mode)),
+      m_world_rank(m_layout.world_rank),
+      m_world_size(m_layout.world_size) {}
+
+PmDecompositionView::PmDecompositionView(
+    PmGridShape shape,
+    PmDecompositionDescriptor descriptor,
+    int world_rank,
+    int world_size)
+    : m_shape(shape),
+      m_descriptor(std::move(descriptor)),
+      m_world_rank(world_rank),
+      m_world_size(world_size) {
+  if (!m_shape.isValid() || m_world_size <= 0 || m_world_rank < 0 ||
+      m_world_rank >= m_world_size) {
+    throw std::invalid_argument("PM decomposition view requires valid mesh/rank metadata");
+  }
+  if (m_descriptor.process_grid_x == 0U || m_descriptor.process_grid_y == 0U ||
+      m_descriptor.process_grid_x * m_descriptor.process_grid_y !=
+          static_cast<std::size_t>(m_world_size)) {
+    throw std::invalid_argument("PM decomposition process grid does not match world size");
+  }
+}
 
 const PmDecompositionDescriptor& PmDecompositionView::descriptor() const noexcept {
   return m_descriptor;
 }
 
 PmOwnershipExtent3D PmDecompositionView::realExtentForRank(int rank) const {
+  if (rank < 0 || rank >= m_world_size) {
+    throw std::out_of_range("PM real-space extent rank is outside decomposition world");
+  }
+  const auto block_range = [](std::size_t count, std::size_t parts, std::size_t coord) {
+    const std::size_t base = count / parts;
+    const std::size_t remainder = count % parts;
+    const std::size_t begin = coord * base + std::min(coord, remainder);
+    const std::size_t extent = base + (coord < remainder ? 1U : 0U);
+    return std::pair<std::size_t, std::size_t>{begin, extent};
+  };
+  if (m_descriptor.topology == PmDecompositionTopology::kPencil2D) {
+    const std::size_t rank_u = static_cast<std::size_t>(rank);
+    const std::size_t px = rank_u % m_descriptor.process_grid_x;
+    const std::size_t py = rank_u / m_descriptor.process_grid_x;
+    const auto [x_begin, x_count] = block_range(
+        m_shape.nx, m_descriptor.process_grid_x, px);
+    const auto [y_begin, y_count] = block_range(
+        m_shape.ny, m_descriptor.process_grid_y, py);
+    return PmOwnershipExtent3D{
+        .x_begin = x_begin,
+        .x_count = x_count,
+        .y_begin = y_begin,
+        .y_count = y_count,
+        .z_begin = 0U,
+        .z_count = m_shape.nz,
+    };
+  }
   const parallel::PmSlabRange owned =
-      parallel::pmOwnedXRangeForRank(m_shape.nx, m_layout.world_size, rank);
+      parallel::pmOwnedXRangeForRank(m_shape.nx, m_world_size, rank);
   return PmOwnershipExtent3D{
       .x_begin = owned.begin_x,
       .x_count = owned.extentX(),
@@ -5360,22 +5647,72 @@ PmOwnershipExtent3D PmDecompositionView::realExtentForRank(int rank) const {
   };
 }
 
-int PmDecompositionView::realOwnerRank(std::size_t global_x) const {
-  if (global_x >= m_shape.nx) {
-    throw std::out_of_range("PM real-space global x index is outside the mesh");
+int PmDecompositionView::realOwnerRank(PmGlobalCell global_cell) const {
+  if (global_cell.x >= m_shape.nx || global_cell.y >= m_shape.ny ||
+      global_cell.z >= m_shape.nz) {
+    throw std::out_of_range("PM real-space global cell is outside the mesh");
+  }
+  if (m_descriptor.topology == PmDecompositionTopology::kPencil2D) {
+    const auto owner_coord = [](std::size_t index, std::size_t count, std::size_t parts) {
+      const std::size_t base = count / parts;
+      const std::size_t remainder = count % parts;
+      const std::size_t wide = (base + 1U) * remainder;
+      if (index < wide) {
+        return index / (base + 1U);
+      }
+      return remainder + (index - wide) / std::max<std::size_t>(base, 1U);
+    };
+    const std::size_t px = owner_coord(
+        global_cell.x, m_shape.nx, m_descriptor.process_grid_x);
+    const std::size_t py = owner_coord(
+        global_cell.y, m_shape.ny, m_descriptor.process_grid_y);
+    return static_cast<int>(py * m_descriptor.process_grid_x + px);
   }
   return parallel::pmOwnerRankForGlobalX(
-      m_shape.nx, m_layout.world_size, global_x);
+      m_shape.nx, m_world_size, global_cell.x);
+}
+
+int PmDecompositionView::spectralOwnerRank(PmGlobalCell global_cell) const {
+  if (global_cell.x >= m_shape.nx || global_cell.y >= m_shape.ny ||
+      global_cell.z >= m_shape.nz) {
+    throw std::out_of_range("PM spectral global cell is outside the mesh");
+  }
+  if (m_descriptor.topology == PmDecompositionTopology::kXSlabTransposedSpectral) {
+    return parallel::pmOwnerRankForGlobalX(
+        m_shape.ny, m_world_size, global_cell.y);
+  }
+  return realOwnerRank(global_cell);
 }
 
 bool PmDecompositionView::ownsRealCell(
     std::size_t global_x, std::size_t global_y, std::size_t global_z) const noexcept {
-  return m_layout.ownsGlobalCell(global_x, global_y, global_z);
+  if (global_x >= m_shape.nx || global_y >= m_shape.ny || global_z >= m_shape.nz) {
+    return false;
+  }
+  try {
+    return realOwnerRank(PmGlobalCell{global_x, global_y, global_z}) == m_world_rank;
+  } catch (...) {
+    return false;
+  }
 }
 
 std::size_t PmDecompositionView::globalToLocalRealIndex(
     std::size_t global_x, std::size_t global_y, std::size_t global_z) const {
-  return m_layout.localLinearIndex(global_x, global_y, global_z);
+  if (!ownsRealCell(global_x, global_y, global_z)) {
+    throw std::out_of_range("PM real-space global index is not owned by this backend view");
+  }
+  const PmOwnershipExtent3D extent = realExtentForRank(m_world_rank);
+  return core::checkedSizeAdd(
+      core::checkedSizeProduct3(
+          global_x - extent.x_begin, extent.y_count, extent.z_count,
+          "PM real local index"),
+      core::checkedSizeAdd(
+          core::checkedSizeProduct3(
+              global_y - extent.y_begin, extent.z_count, 1U,
+              "PM real local index"),
+          global_z - extent.z_begin,
+          "PM real local index"),
+      "PM real local index");
 }
 
 bool PmDecompositionView::ownsSpectralCell(

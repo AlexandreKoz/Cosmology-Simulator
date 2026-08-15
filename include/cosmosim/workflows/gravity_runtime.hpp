@@ -78,6 +78,8 @@ class GravityRuntime : public GravityAccelerationProvider,
 
   virtual void restoreDecompositionEpoch(std::uint64_t decomposition_epoch) = 0;
   virtual void commitParticleDecompositionChange() = 0;
+  virtual void installAuthoritativeTopDomainLeaves(
+      std::span<const parallel::TopDomainLeaf> leaves) = 0;
   virtual void importRestartForceCache(
       const io::GravityForceCachePersistentState& cache,
       const core::SimulationState& state) = 0;

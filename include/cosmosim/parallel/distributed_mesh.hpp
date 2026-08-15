@@ -49,6 +49,10 @@ struct TreePseudoParticleDescriptor {
   std::uint64_t decomposition_epoch = 0;
   std::uint64_t force_epoch = 0;
   std::uint64_t exchange_sequence = 0;
+  // true: compatibility packet derived from a local gravity-tree node.
+  // false: routing-only authoritative top-domain leaf supplied by the
+  // decomposition layer. Both share the compact wire format because TreePM
+  // uses only owner/epoch/bounds for peer discovery.
   bool derived_not_authoritative = true;
 };
 

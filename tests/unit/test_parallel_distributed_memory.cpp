@@ -1250,6 +1250,60 @@ void testPmSlabHaloSerialDoesNotRequireMpiInitialization() {
   assert(exchange.received_bytes == 0U);
 }
 
+void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
+  std::vector<cosmosim::parallel::DecompositionItem> items;
+  for (std::uint64_t i = 0; i < 6U; ++i) {
+    cosmosim::parallel::DecompositionItem item;
+    item.entity_id = 100U + i;
+    item.current_owner_rank = 1;
+    item.x_comov = 0.10 + 0.10 * static_cast<double>(i);
+    item.y_comov = 0.20 + 0.02 * static_cast<double>(i);
+    item.z_comov = 0.30;
+    item.has_spatial_bounds = true;
+    item.min_x_comov = item.x_comov - 0.01;
+    item.max_x_comov = item.x_comov + 0.01;
+    item.min_y_comov = item.y_comov - 0.02;
+    item.max_y_comov = item.y_comov + 0.02;
+    item.min_z_comov = 0.25;
+    item.max_z_comov = 0.35;
+    item.work_units = 2.0 + static_cast<double>(i);
+    item.kind = i % 2U == 0U
+        ? cosmosim::parallel::DecompositionEntityKind::kParticle
+        : cosmosim::parallel::DecompositionEntityKind::kAmrPatch;
+    items.push_back(item);
+  }
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = 3;
+  config.work_weight = 1.0;
+  const auto leaves = cosmosim::parallel::buildAuthoritativeTopDomainLeaves(
+      items, config, /*owner_rank=*/1, /*decomposition_epoch=*/42U,
+      /*max_leaves_per_rank=*/3U);
+  assert(!leaves.empty());
+  assert(leaves.size() <= 3U);
+  std::uint64_t entity_count = 0U;
+  double total_work = 0.0;
+  for (const auto& leaf : leaves) {
+    assert(leaf.owner_rank == 1);
+    assert(leaf.decomposition_epoch == 42U);
+    assert(leaf.domain_leaf_id != 0U);
+    assert(leaf.min_x_comov <= leaf.max_x_comov);
+    assert(leaf.min_y_comov <= leaf.max_y_comov);
+    assert(leaf.min_z_comov <= leaf.max_z_comov);
+    assert(leaf.periodic_geometry);
+    entity_count += leaf.entity_count;
+    total_work += leaf.work_weight;
+  }
+  assert(entity_count == items.size());
+  assert(total_work > 0.0);
+  const auto fingerprint = cosmosim::parallel::topDomainGeometryFingerprint(leaves);
+  assert(fingerprint != 0U);
+
+  auto changed = leaves;
+  changed.front().max_x_comov += 0.05;
+  assert(cosmosim::parallel::topDomainGeometryFingerprint(changed) != fingerprint);
+}
+
+
 }  // namespace
 
 int main() {
@@ -1287,5 +1341,6 @@ int main() {
   testPmSlabUnevenPartitionOwnership();
   testPmSlabLayoutRoundTripAndCellOwnership();
   testPmSlabHaloSerialDoesNotRequireMpiInitialization();
+  testAuthoritativeTopDomainLeavesPreserveOwnedGeometry();
   return 0;
 }

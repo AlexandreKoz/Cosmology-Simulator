@@ -28,6 +28,9 @@ SOURCE_GLOBS = (
     "include/cosmosim/parallel/**/*",
     # Authoritative gravity source assembly and source-state mutation owners.
     "src/workflows/gravity_runtime.cpp",
+    "include/cosmosim/workflows/gravity_runtime.hpp",
+    "src/workflows/migration_balance_runtime.cpp",
+    "include/cosmosim/workflows/migration_balance_runtime.hpp",
     "src/workflows/hydro_amr_runtime.cpp",
     "src/workflows/source_runtime.cpp",
     "src/workflows/time_coordinator.cpp",
@@ -92,7 +95,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     fingerprint, source_files = source_fingerprint()
     return {
         "schema": "chui.gravity.acceptance.v1",
-        "status": "evidence_only_not_self_certifying",
+        "status": args.certification_status,
         "generated_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
         "source": {
             "gravity_contract_sha256": fingerprint,
@@ -133,6 +136,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "rank_counts_tested": args.rank_count,
         },
         "evidence": load_evidence(args.evidence),
+        "requirements": args.requirement,
         "notes": args.note,
     }
 
@@ -183,6 +187,15 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--asmth-cells", required=True)
     create.add_argument("--rcut-cells", required=True)
     create.add_argument("--softening-profile", required=True)
+    create.add_argument(
+        "--certification-status",
+        choices=(
+            "evidence_only_not_self_certifying",
+            "production_acceptance_passed",
+            "production_acceptance_incomplete",
+        ),
+        default="evidence_only_not_self_certifying")
+    create.add_argument("--requirement", action="append", default=[])
     create.add_argument("--rank-count", action="append", default=[])
     create.add_argument("--evidence", type=pathlib.Path, action="append", default=[])
     create.add_argument("--note", action="append", default=[])
