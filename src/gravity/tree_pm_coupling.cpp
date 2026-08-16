@@ -411,6 +411,7 @@ void validateTreePmPreflight(
   mix(static_cast<std::uint64_t>(effective_pm_options.boundary_condition));
   mix(static_cast<std::uint64_t>(effective_pm_options.execution_policy));
   mix(static_cast<std::uint64_t>(effective_pm_options.data_residency));
+  mix(effective_pm_options.routing_exchange_batch_bytes);
   mix(effective_pm_options.isolated_open_root_workspace_limit_bytes);
   mix(static_cast<std::uint64_t>(options.tree_options.opening_criterion));
   mix(static_cast<std::uint64_t>(options.tree_options.multipole_order));
@@ -535,18 +536,21 @@ struct GatheredParticleField {
     const TreeGravityOptions& options,
     double split_scale_comoving) {
   const double r2 = dx * dx + dy * dy + dz * dz;
-  const double r = std::sqrt(std::max(r2, 1.0e-30));
+  const double safe_r2 = std::max(r2, 1.0e-30);
+  const double r = std::sqrt(safe_r2);
   const double pair_epsilon =
       combineSofteningPairEpsilonUnchecked(nodes.softening_max_comoving[node_index], target_softening_comoving);
   const double eps2 = pair_epsilon * pair_epsilon;
   const double denom = std::max(r2 + eps2, 1.0e-30);
   const double softened_inv_r3 = 1.0 / (denom * std::sqrt(denom));
   const double split_factor = treePmGaussianShortRangeForceFactorUnchecked(r, split_scale_comoving);
+  const double newton_inv_r3 = 1.0 / (safe_r2 * r);
+  const double radial_kernel = softened_inv_r3 + (split_factor - 1.0) * newton_inv_r3;
   const double prefactor = options.gravitational_constant_code;
 
-  double ax = prefactor * nodes.mass_code[node_index] * split_factor * softened_inv_r3 * dx;
-  double ay = prefactor * nodes.mass_code[node_index] * split_factor * softened_inv_r3 * dy;
-  double az = prefactor * nodes.mass_code[node_index] * split_factor * softened_inv_r3 * dz;
+  double ax = prefactor * nodes.mass_code[node_index] * radial_kernel * dx;
+  double ay = prefactor * nodes.mass_code[node_index] * radial_kernel * dy;
+  double az = prefactor * nodes.mass_code[node_index] * radial_kernel * dz;
   if (options.multipole_order != TreeMultipoleOrder::kQuadrupole) {
     return {ax, ay, az};
   }
@@ -588,9 +592,12 @@ struct GatheredParticleField {
   const double softened_second =
       -3.0 / (denom * denom * std::sqrt(denom)) +
       15.0 * r2 / (denom * denom * denom * std::sqrt(denom));
-  const double radial_first = split_first * softened_inv_r3 + split_factor * softened_first;
-  const double radial_second = split_second * softened_inv_r3 +
-      2.0 * split_first * softened_first + split_factor * softened_second;
+  const double newton_first = -3.0 / (safe_r2 * safe_r2);
+  const double newton_second = 12.0 / (safe_r2 * safe_r2 * r);
+  const double radial_first = softened_first +
+      split_first * newton_inv_r3 + (split_factor - 1.0) * newton_first;
+  const double radial_second = softened_second + split_second * newton_inv_r3 +
+      2.0 * split_first * newton_first + (split_factor - 1.0) * newton_second;
   const double first_over_r = radial_first / r;
   const double contracted_radial = radial_second / r2 - radial_first / (r2 * r);
   ax += prefactor *
@@ -770,90 +777,149 @@ struct SparsePeerGraph {
   ~SparsePeerGraph() { releaseCommunicator(communicator); }
 };
 
+[[nodiscard]] std::string treePmMpiErrorText(int error_code) {
+  char message[MPI_MAX_ERROR_STRING]{};
+  int length = 0;
+  if (MPI_Error_string(error_code, message, &length) != MPI_SUCCESS || length <= 0) {
+    return "MPI error code " + std::to_string(error_code);
+  }
+  return std::string(message, static_cast<std::size_t>(length));
+}
+
+void requireTreePmMpiSuccess(int error_code, std::string_view context) {
+  if (error_code != MPI_SUCCESS) {
+    throw std::runtime_error(
+        std::string(context) + " failed: " + treePmMpiErrorText(error_code));
+  }
+}
+
 [[nodiscard]] SparsePeerGraph makeSymmetricSparsePeerGraph(
     int world_rank,
     std::span<const int> requested_outgoing_peers) {
-  MPI_Comm directed = MPI_COMM_NULL;
-  const int source = world_rank;
+  int world_size = 1;
+  requireTreePmMpiSuccess(
+      MPI_Comm_size(MPI_COMM_WORLD, &world_size),
+      "TreePM sparse graph MPI_Comm_size");
+  if (world_rank < 0 || world_rank >= world_size) {
+    throw std::invalid_argument("TreePM sparse graph world rank is out of range");
+  }
   if (requested_outgoing_peers.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error("TreePM sparse peer degree exceeds MPI int capacity");
   }
-  const int degree = static_cast<int>(requested_outgoing_peers.size());
-  const int* destinations = requested_outgoing_peers.empty()
-      ? nullptr
-      : requested_outgoing_peers.data();
-  MPI_Dist_graph_create(
-      MPI_COMM_WORLD,
-      1,
-      &source,
-      &degree,
-      destinations,
-      MPI_UNWEIGHTED,
-      MPI_INFO_NULL,
-      0,
-      &directed);
-  if (directed == MPI_COMM_NULL) {
-    throw std::runtime_error("TreePM failed to create directed sparse peer graph");
+
+  // Discover incoming peers using only O(world_size) integer topology metadata.
+  // This avoids MPI_Dist_graph_create's implementation-sensitive zero-degree
+  // source-array corner case while retaining a genuinely sparse neighborhood
+  // communicator for all subsequent payload exchange.
+  std::vector<int> outgoing_flags(static_cast<std::size_t>(world_size), 0);
+  bool local_topology_valid = true;
+  for (const int peer : requested_outgoing_peers) {
+    if (peer < 0 || peer >= world_size || peer == world_rank) {
+      local_topology_valid = false;
+      continue;
+    }
+    outgoing_flags[static_cast<std::size_t>(peer)] = 1;
+  }
+  const int local_valid = local_topology_valid ? 1 : 0;
+  int global_valid = 0;
+  requireTreePmMpiSuccess(
+      MPI_Allreduce(&local_valid, &global_valid, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD),
+      "TreePM sparse graph topology validation");
+  if (global_valid == 0) {
+    throw std::invalid_argument(
+        "TreePM sparse peer topology contains an out-of-range or self peer on at least one rank");
   }
 
-  int indegree = 0;
-  int outdegree = 0;
-  int weighted = 0;
-  MPI_Dist_graph_neighbors_count(directed, &indegree, &outdegree, &weighted);
-  std::vector<int> incoming(static_cast<std::size_t>(std::max(indegree, 0)));
-  std::vector<int> outgoing(static_cast<std::size_t>(std::max(outdegree, 0)));
-  MPI_Dist_graph_neighbors(
-      directed,
-      indegree,
-      incoming.empty() ? nullptr : incoming.data(),
-      MPI_UNWEIGHTED,
-      outdegree,
-      outgoing.empty() ? nullptr : outgoing.data(),
-      MPI_UNWEIGHTED);
-  MPI_Comm_free(&directed);
+  std::vector<int> incoming_flags(static_cast<std::size_t>(world_size), 0);
+  requireTreePmMpiSuccess(
+      MPI_Alltoall(
+          outgoing_flags.data(), 1, MPI_INT,
+          incoming_flags.data(), 1, MPI_INT,
+          MPI_COMM_WORLD),
+      "TreePM sparse graph incoming-peer discovery");
 
-  std::vector<int> symmetric_peers = incoming;
-  symmetric_peers.insert(symmetric_peers.end(), outgoing.begin(), outgoing.end());
-  std::sort(symmetric_peers.begin(), symmetric_peers.end());
-  symmetric_peers.erase(
-      std::unique(symmetric_peers.begin(), symmetric_peers.end()),
-      symmetric_peers.end());
-  symmetric_peers.erase(
-      std::remove(symmetric_peers.begin(), symmetric_peers.end(), world_rank),
-      symmetric_peers.end());
+  std::vector<int> symmetric_peers;
+  symmetric_peers.reserve(requested_outgoing_peers.size() + static_cast<std::size_t>(world_size));
+  for (int peer = 0; peer < world_size; ++peer) {
+    if (peer == world_rank) {
+      continue;
+    }
+    if (outgoing_flags[static_cast<std::size_t>(peer)] != 0 ||
+        incoming_flags[static_cast<std::size_t>(peer)] != 0) {
+      symmetric_peers.push_back(peer);
+    }
+  }
   if (symmetric_peers.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error("TreePM symmetric sparse peer degree exceeds MPI int capacity");
   }
 
   SparsePeerGraph graph;
-  const int symmetric_degree = static_cast<int>(symmetric_peers.size());
-  const int* symmetric_data = symmetric_peers.empty() ? nullptr : symmetric_peers.data();
-  MPI_Dist_graph_create_adjacent(
-      MPI_COMM_WORLD,
-      symmetric_degree,
-      symmetric_data,
-      MPI_UNWEIGHTED,
-      symmetric_degree,
-      symmetric_data,
-      MPI_UNWEIGHTED,
-      MPI_INFO_NULL,
-      0,
-      &graph.communicator);
+  MPI_Comm base = MPI_COMM_NULL;
+  requireTreePmMpiSuccess(
+      MPI_Comm_dup(MPI_COMM_WORLD, &base),
+      "TreePM sparse graph MPI_Comm_dup");
+  try {
+    requireTreePmMpiSuccess(
+        MPI_Comm_set_errhandler(base, MPI_ERRORS_RETURN),
+        "TreePM sparse graph error-handler setup");
+    const int symmetric_degree = static_cast<int>(symmetric_peers.size());
+    // Some MPI implementations are unnecessarily strict about nullptr even
+    // when degree==0. A non-null dummy address with count zero is standards-
+    // valid and does not create a fake neighbor.
+    const int dummy_peer = 0;
+    const int* symmetric_data = symmetric_peers.empty()
+        ? &dummy_peer
+        : symmetric_peers.data();
+    requireTreePmMpiSuccess(
+        MPI_Dist_graph_create_adjacent(
+            base,
+            symmetric_degree,
+            symmetric_data,
+            MPI_UNWEIGHTED,
+            symmetric_degree,
+            symmetric_data,
+            MPI_UNWEIGHTED,
+            MPI_INFO_NULL,
+            0,
+            &graph.communicator),
+        "TreePM symmetric MPI_Dist_graph_create_adjacent");
+  } catch (...) {
+    (void)MPI_Comm_free(&base);
+    throw;
+  }
+  requireTreePmMpiSuccess(
+      MPI_Comm_free(&base),
+      "TreePM sparse graph base communicator release");
   if (graph.communicator == MPI_COMM_NULL) {
     throw std::runtime_error("TreePM failed to create symmetric sparse peer graph");
   }
-  MPI_Dist_graph_neighbors_count(
-      graph.communicator, &indegree, &outdegree, &weighted);
-  graph.incoming_peers.resize(static_cast<std::size_t>(std::max(indegree, 0)));
-  graph.outgoing_peers.resize(static_cast<std::size_t>(std::max(outdegree, 0)));
-  MPI_Dist_graph_neighbors(
-      graph.communicator,
-      indegree,
-      graph.incoming_peers.empty() ? nullptr : graph.incoming_peers.data(),
-      MPI_UNWEIGHTED,
-      outdegree,
-      graph.outgoing_peers.empty() ? nullptr : graph.outgoing_peers.data(),
-      MPI_UNWEIGHTED);
+  requireTreePmMpiSuccess(
+      MPI_Comm_set_errhandler(graph.communicator, MPI_ERRORS_RETURN),
+      "TreePM sparse graph communicator error-handler setup");
+
+  int indegree = 0;
+  int outdegree = 0;
+  int weighted = 0;
+  requireTreePmMpiSuccess(
+      MPI_Dist_graph_neighbors_count(
+          graph.communicator, &indegree, &outdegree, &weighted),
+      "TreePM sparse graph neighbor count");
+  if (indegree < 0 || outdegree < 0) {
+    throw std::runtime_error("TreePM sparse graph returned a negative peer degree");
+  }
+  graph.incoming_peers.resize(static_cast<std::size_t>(indegree));
+  graph.outgoing_peers.resize(static_cast<std::size_t>(outdegree));
+  int dummy_neighbor = 0;
+  requireTreePmMpiSuccess(
+      MPI_Dist_graph_neighbors(
+          graph.communicator,
+          indegree,
+          graph.incoming_peers.empty() ? &dummy_neighbor : graph.incoming_peers.data(),
+          MPI_UNWEIGHTED,
+          outdegree,
+          graph.outgoing_peers.empty() ? &dummy_neighbor : graph.outgoing_peers.data(),
+          MPI_UNWEIGHTED),
+      "TreePM sparse graph neighbor query");
   return graph;
 }
 #endif
@@ -1987,6 +2053,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
           .accel_x_comoving = accumulator.accel_x_comoving,
           .accel_y_comoving = accumulator.accel_y_comoving,
           .accel_z_comoving = accumulator.accel_z_comoving,
+          .coordinate_layout = has_explicit_target_positions
+              ? PmSolver::PmForceCoordinateLayout::kCompactActive
+              : PmSolver::PmForceCoordinateLayout::kIndexedSource,
           .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
           .coordinate_source_index = has_explicit_target_positions
               ? std::span<const TreeLocalIndex>{}
@@ -2085,6 +2154,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
                 .accel_x_comoving = high_res_pm_coarse_ax,
                 .accel_y_comoving = high_res_pm_coarse_ay,
                 .accel_z_comoving = high_res_pm_coarse_az,
+                .coordinate_layout = has_explicit_target_positions
+                    ? PmSolver::PmForceCoordinateLayout::kCompactActive
+                    : PmSolver::PmForceCoordinateLayout::kIndexedSource,
                 .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
                 .coordinate_source_index = has_explicit_target_positions
                     ? std::span<const TreeLocalIndex>{}
@@ -2627,18 +2699,18 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               continue;
             }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
-            const double split_factor = treePmGaussianShortRangeForceFactorUnchecked(sr, options.split_policy.split_scale_comoving);
             const double source_softening =
                 resolveSourceSofteningEpsilon(source_index, options.tree_options.softening, softening_view);
             const double pair_epsilon = combineSofteningPairEpsilonUnchecked(source_softening, target_softening_comoving);
-            // Contract: short-range residual is the softened tree force multiplied by the
-            // Gaussian real-space residual factor so that tree+PM composes to the unsplit
-            // softened force before explicit r_cut truncation.
-            const double softened_factor =
-                softenedInvR3Unchecked(sr2, pair_epsilon) * split_factor * options.tree_options.gravitational_constant_code;
-            ax += softened_factor * mass_code[source_index] * sx;
-            ay += softened_factor * mass_code[source_index] * sy;
-            az += softened_factor * mass_code[source_index] * sz;
+            // PM carries the unsoftened Gaussian long-range field.  The tree therefore
+            // evaluates the exact residual needed to recover the requested softened
+            // force, rather than multiplying a softened force by the Newtonian split.
+            const double residual_factor = treePmSoftenedShortRangeInvR3Unchecked(
+                sr2, pair_epsilon, options.split_policy.split_scale_comoving) *
+                options.tree_options.gravitational_constant_code;
+            ax += residual_factor * mass_code[source_index] * sx;
+            ay += residual_factor * mass_code[source_index] * sy;
+            az += residual_factor * mass_code[source_index] * sz;
             ++pp_interactions;
           }
         } else {
@@ -2847,13 +2919,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         m_let_domain_cache.local_geometry_fingerprint == local_domain_geometry_fingerprint;
     int local_domain_cache_match_int = local_domain_cache_match ? 1 : 0;
     int all_domain_cache_match = 0;
-    MPI_Allreduce(
-        &local_domain_cache_match_int,
-        &all_domain_cache_match,
-        1,
-        MPI_INT,
-        MPI_MIN,
-        MPI_COMM_WORLD);
+    requireTreePmMpiSuccess(
+        MPI_Allreduce(
+            &local_domain_cache_match_int,
+            &all_domain_cache_match,
+            1,
+            MPI_INT,
+            MPI_MIN,
+            MPI_COMM_WORLD),
+        "TreePM LET domain-cache agreement MPI_Allreduce");
 
     std::vector<parallel::TreePseudoParticlePacket> peer_pseudo_packets;
     if (all_domain_cache_match != 0) {
@@ -2989,13 +3063,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         graph_cache.requested_outgoing_peers == requested_outgoing_peers;
     int local_graph_cache_match_int = local_graph_cache_match ? 1 : 0;
     int all_graph_cache_match = 0;
-    MPI_Allreduce(
-        &local_graph_cache_match_int,
-        &all_graph_cache_match,
-        1,
-        MPI_INT,
-        MPI_MIN,
-        MPI_COMM_WORLD);
+    requireTreePmMpiSuccess(
+        MPI_Allreduce(
+            &local_graph_cache_match_int,
+            &all_graph_cache_match,
+            1,
+            MPI_INT,
+            MPI_MIN,
+            MPI_COMM_WORLD),
+        "TreePM sparse graph-cache agreement MPI_Allreduce");
     if (all_graph_cache_match == 0) {
       ++m_last_residual_stats.graph_cache_miss_count;
       graph_cache.graph = makeSymmetricSparsePeerGraph(
@@ -3153,14 +3229,28 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             send_counts[static_cast<std::size_t>(sparse_peer_graph->outgoing_peers[i])];
       }
       const auto request_count_communication_start = std::chrono::steady_clock::now();
-      MPI_Neighbor_alltoall(
-          neighbor_request_send_counts.empty() ? nullptr : neighbor_request_send_counts.data(),
-          1,
-          MPI_INT,
-          neighbor_request_recv_counts.empty() ? nullptr : neighbor_request_recv_counts.data(),
-          1,
-          MPI_INT,
-          sparse_peer_graph->communicator);
+      std::exception_ptr request_count_communication_failure;
+      try {
+        int zero_count_lane = 0;
+        requireTreePmMpiSuccess(
+            MPI_Neighbor_alltoall(
+                neighbor_request_send_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_request_send_counts.data(),
+                1,
+                MPI_INT,
+                neighbor_request_recv_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_request_recv_counts.data(),
+                1,
+                MPI_INT,
+                sparse_peer_graph->communicator),
+            "TreePM sparse request-count MPI_Neighbor_alltoall");
+      } catch (...) {
+        request_count_communication_failure = std::current_exception();
+      }
+      coordinate_protocol_failure(
+          request_count_communication_failure, "sparse request-count exchange");
       m_last_residual_stats.let_communication_ms += std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - request_count_communication_start).count();
       for (std::size_t i = 0; i < sparse_peer_graph->incoming_peers.size(); ++i) {
@@ -3197,17 +3287,29 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             send_payload.empty() ? &empty_request_payload : send_payload.data();
         std::uint8_t* request_receive_buffer =
             recv_payload.empty() ? &empty_request_payload : recv_payload.data();
-        MPI_Ineighbor_alltoallv(
-            request_send_buffer,
-            neighbor_request_send_counts.empty() ? nullptr : neighbor_request_send_counts.data(),
-            neighbor_request_send_displs.empty() ? nullptr : neighbor_request_send_displs.data(),
-            MPI_BYTE,
-            request_receive_buffer,
-            neighbor_request_recv_counts.empty() ? nullptr : neighbor_request_recv_counts.data(),
-            neighbor_request_recv_displs.empty() ? nullptr : neighbor_request_recv_displs.data(),
-            MPI_BYTE,
-            sparse_peer_graph->communicator,
-            &request_payload_exchange);
+        int zero_count_lane = 0;
+        int zero_displacement_lane = 0;
+        requireTreePmMpiSuccess(
+            MPI_Ineighbor_alltoallv(
+                request_send_buffer,
+                neighbor_request_send_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_request_send_counts.data(),
+                neighbor_request_send_displs.empty()
+                    ? &zero_displacement_lane
+                    : neighbor_request_send_displs.data(),
+                MPI_BYTE,
+                request_receive_buffer,
+                neighbor_request_recv_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_request_recv_counts.data(),
+                neighbor_request_recv_displs.empty()
+                    ? &zero_displacement_lane
+                    : neighbor_request_recv_displs.data(),
+                MPI_BYTE,
+                sparse_peer_graph->communicator,
+                &request_payload_exchange),
+            "TreePM sparse request MPI_Ineighbor_alltoallv");
 
         // Useful local traversal overlaps the sparse remote request transfer.
         const auto overlap_local_work_start = std::chrono::steady_clock::now();
@@ -3239,7 +3341,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             std::chrono::steady_clock::now() - overlap_local_work_start).count();
         m_last_residual_stats.let_overlap_local_work_ms += overlap_local_work_ms;
         const auto request_wait_start = std::chrono::steady_clock::now();
-        MPI_Wait(&request_payload_exchange, MPI_STATUS_IGNORE);
+        requireTreePmMpiSuccess(
+            MPI_Wait(&request_payload_exchange, MPI_STATUS_IGNORE),
+            "TreePM sparse request MPI_Wait");
         const double request_wait_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - request_wait_start).count();
         m_last_residual_stats.let_communication_wait_ms += request_wait_ms;
@@ -3428,16 +3532,35 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       std::uint8_t* response_receive_buffer =
           response_recv_payload.empty() ? &empty_response_payload : response_recv_payload.data();
       const auto response_communication_start = std::chrono::steady_clock::now();
-      MPI_Neighbor_alltoallv(
-          response_send_buffer,
-          neighbor_response_send_counts.empty() ? nullptr : neighbor_response_send_counts.data(),
-          neighbor_response_send_displs.empty() ? nullptr : neighbor_response_send_displs.data(),
-          MPI_BYTE,
-          response_receive_buffer,
-          neighbor_response_recv_counts.empty() ? nullptr : neighbor_response_recv_counts.data(),
-          neighbor_response_recv_displs.empty() ? nullptr : neighbor_response_recv_displs.data(),
-          MPI_BYTE,
-          sparse_peer_graph->communicator);
+      std::exception_ptr response_communication_failure;
+      try {
+        int zero_count_lane = 0;
+        int zero_displacement_lane = 0;
+        requireTreePmMpiSuccess(
+            MPI_Neighbor_alltoallv(
+                response_send_buffer,
+                neighbor_response_send_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_response_send_counts.data(),
+                neighbor_response_send_displs.empty()
+                    ? &zero_displacement_lane
+                    : neighbor_response_send_displs.data(),
+                MPI_BYTE,
+                response_receive_buffer,
+                neighbor_response_recv_counts.empty()
+                    ? &zero_count_lane
+                    : neighbor_response_recv_counts.data(),
+                neighbor_response_recv_displs.empty()
+                    ? &zero_displacement_lane
+                    : neighbor_response_recv_displs.data(),
+                MPI_BYTE,
+                sparse_peer_graph->communicator),
+            "TreePM sparse response MPI_Neighbor_alltoallv");
+      } catch (...) {
+        response_communication_failure = std::current_exception();
+      }
+      coordinate_protocol_failure(
+          response_communication_failure, "sparse response exchange");
       m_last_residual_stats.let_communication_ms += std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - response_communication_start).count();
 

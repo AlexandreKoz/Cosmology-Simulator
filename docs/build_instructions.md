@@ -42,6 +42,8 @@ ctest --preset test-cpu-debug --output-on-failure
 
 ## HDF5 path
 
+The supported HDF5 source/API range is **1.10.x through 1.14.x**. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x.
+
 ```bash
 cmake --preset hdf5-debug
 cmake --build --preset build-hdf5-debug

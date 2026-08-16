@@ -215,7 +215,7 @@ payloads.
     `gravity_treepm_tree_opening_criterion`, `gravity_treepm_tree_opening_theta`,
     `gravity_treepm_tree_relative_force_tolerance`,
     `gravity_treepm_tree_relative_force_acceleration_floor`,
-    `gravity_treepm_pm_decomposition_mode`, `gravity_treepm_tree_exchange_batch_bytes`
+    `gravity_treepm_pm_decomposition_mode`, `gravity_treepm_tree_exchange_batch_bytes`, `gravity_treepm_pm_exchange_batch_bytes`
   - derived scales: `gravity_treepm_mesh_spacing_mpc_comoving` (`Δmesh`),
     `gravity_treepm_split_scale_mpc_comoving` (`r_s`),
     `gravity_treepm_cutoff_radius_mpc_comoving` (`r_cut`)

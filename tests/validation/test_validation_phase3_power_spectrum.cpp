@@ -96,9 +96,9 @@ int main() {
   const cosmosim::core::SimulationState state = makeDeterministicState();
 
   cosmosim::analysis::DiagnosticsEngine coarse_engine(makeConfig(8));
-  cosmosim::analysis::DiagnosticsEngine fine_engine(makeConfig(12));
+  cosmosim::analysis::DiagnosticsEngine fine_engine(makeConfig(16));
   const auto coarse = coarse_engine.computePowerSpectrum(state, 8, 4);
-  const auto fine = fine_engine.computePowerSpectrum(state, 12, 4);
+  const auto fine = fine_engine.computePowerSpectrum(state, 16, 4);
   requireOrThrow(!coarse.empty(), "coarse power spectrum must not be empty");
   requireOrThrow(!fine.empty(), "fine power spectrum must not be empty");
 

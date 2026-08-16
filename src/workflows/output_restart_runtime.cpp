@@ -274,6 +274,8 @@ namespace {
       pmDecompositionModeName(config.numerics.treepm_pm_decomposition_mode);
   record.gravity_treepm_tree_exchange_batch_bytes =
       config.numerics.treepm_tree_exchange_batch_bytes;
+  record.gravity_treepm_pm_exchange_batch_bytes =
+      config.numerics.treepm_pm_exchange_batch_bytes;
   record.gravity_softening_policy = describeSofteningPolicy(config);
   record.gravity_softening_kernel = "plummer";
   record.gravity_softening_epsilon_kpc_comoving = config.numerics.gravity_softening_kpc_comoving;

@@ -431,6 +431,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         ? config.mode.zoom_contamination_radius_mpc_comoving
         : config.mode.zoom_region_radius_mpc_comoving;
     m_tree_pm_options.tree_exchange_batch_bytes = config.numerics.treepm_tree_exchange_batch_bytes;
+    m_tree_pm_options.pm_options.routing_exchange_batch_bytes =
+        config.numerics.treepm_pm_exchange_batch_bytes;
     m_tree_pm_options.zoom_high_res_allgather_limit_bytes =
         config.parallel.zoom_high_res_allgather_limit_bytes;
     m_pm_assignment_scheme = treePmAssignmentSchemeName(config.numerics.treepm_assignment_scheme);
@@ -925,6 +927,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .indexed_target_coordinates = true,
             .cuda_resident = m_runtime_topology.usesCuda(),
             .tree_exchange_batch_bytes = m_tree_pm_options.tree_exchange_batch_bytes,
+            .pm_exchange_batch_bytes = m_tree_pm_options.pm_options.routing_exchange_batch_bytes,
             .backend_unknown_reserve_bytes =
                 m_config.parallel.gravity_backend_unknown_reserve_bytes,
             .safety_margin_fraction =
@@ -1378,6 +1381,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"remote_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.residual_pair_evaluations)},
               {"remote_request_packet_imbalance_ratio", formatRuntimeDouble(
                   m_last_tree_pm_diagnostics.residual_remote_request_packet_imbalance_ratio)},
+              {"pm_routed_density_records", std::to_string(tree_pm_profile.pm_profile.routed_density_records)},
+              {"pm_routed_force_requests", std::to_string(tree_pm_profile.pm_profile.routed_force_requests)},
+              {"pm_routed_density_peer_count", std::to_string(tree_pm_profile.pm_profile.routed_density_peer_count)},
+              {"pm_routed_force_peer_count", std::to_string(tree_pm_profile.pm_profile.routed_force_peer_count)},
+              {"pm_routed_mpi_bytes_sent", std::to_string(tree_pm_profile.pm_profile.routed_mpi_bytes_sent)},
+              {"pm_routed_mpi_bytes_received", std::to_string(tree_pm_profile.pm_profile.routed_mpi_bytes_received)},
+              {"pm_routed_send_buffer_high_water_bytes", std::to_string(
+                  tree_pm_profile.pm_profile.routed_send_buffer_high_water_bytes)},
+              {"pm_routed_receive_buffer_high_water_bytes", std::to_string(
+                  tree_pm_profile.pm_profile.routed_receive_buffer_high_water_bytes)},
+              {"pm_routed_mpi_wait_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.routed_mpi_wait_ms)},
           },
       });
       context.profiler_session->recordEvent(core::RuntimeEvent{

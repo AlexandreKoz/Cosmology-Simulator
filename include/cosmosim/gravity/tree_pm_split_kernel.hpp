@@ -3,6 +3,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "cosmosim/gravity/tree_softening.hpp"
+
 namespace cosmosim::gravity {
 
 // Explicitly documented TreePM Gaussian split metadata and utility API.
@@ -95,6 +97,44 @@ inline void validateTreePmSplitPolicy(const TreePmSplitPolicy& policy) {
     throw std::invalid_argument("TreePM split_scale_comoving must be finite and positive");
   }
   return treePmGaussianLongRangeForceFactorUnchecked(distance_comoving, split_scale_comoving);
+}
+
+// PM carries the unsoftened Gaussian long-range field.  Therefore a finite-
+// softening TreePM solve must use a real-space residual equal to
+//
+//   K_short = K_softened - K_long,newtonian
+//
+// rather than K_softened multiplied by the Newtonian short-range factor.
+// This definition composes Tree + PM to the requested Plummer-softened force
+// before the explicit short-range cutoff is applied.
+[[nodiscard]] inline double treePmSoftenedShortRangeInvR3Unchecked(
+    double squared_distance,
+    double epsilon_comoving,
+    double split_scale_comoving) noexcept {
+  if (squared_distance <= 0.0) {
+    return softenedInvR3Unchecked(squared_distance, epsilon_comoving);
+  }
+  const double distance = std::sqrt(squared_distance);
+  const double newton_inv_r3 = 1.0 / (squared_distance * distance);
+  const double long_range_factor =
+      treePmGaussianLongRangeForceFactorUnchecked(distance, split_scale_comoving);
+  return softenedInvR3Unchecked(squared_distance, epsilon_comoving) -
+      long_range_factor * newton_inv_r3;
+}
+
+[[nodiscard]] inline double treePmSoftenedShortRangeInvR3(
+    double squared_distance,
+    double epsilon_comoving,
+    double split_scale_comoving) {
+  if (!std::isfinite(squared_distance) || squared_distance < 0.0) {
+    throw std::invalid_argument("TreePM squared_distance must be finite and non-negative");
+  }
+  validatedSofteningEpsilon(epsilon_comoving, "TreePM pair softening");
+  if (!std::isfinite(split_scale_comoving) || split_scale_comoving <= 0.0) {
+    throw std::invalid_argument("TreePM split_scale_comoving must be finite and positive");
+  }
+  return treePmSoftenedShortRangeInvR3Unchecked(
+      squared_distance, epsilon_comoving, split_scale_comoving);
 }
 
 [[nodiscard]] inline double treePmGaussianFourierLongRangeFilterUnchecked(

@@ -462,6 +462,7 @@ std::string serializeProvenanceRecord(const ProvenanceRecord& record) {
   stream << "gravity_treepm_tree_relative_force_acceleration_floor=" << record.gravity_treepm_tree_relative_force_acceleration_floor << '\n';
   write_string("gravity_treepm_pm_decomposition_mode", record.gravity_treepm_pm_decomposition_mode);
   stream << "gravity_treepm_tree_exchange_batch_bytes=" << record.gravity_treepm_tree_exchange_batch_bytes << '\n';
+  stream << "gravity_treepm_pm_exchange_batch_bytes=" << record.gravity_treepm_pm_exchange_batch_bytes << '\n';
   write_string("gravity_softening_policy", record.gravity_softening_policy);
   write_string("gravity_softening_kernel", record.gravity_softening_kernel);
   stream << "gravity_softening_epsilon_kpc_comoving=" << record.gravity_softening_epsilon_kpc_comoving << '\n';
@@ -636,6 +637,8 @@ ProvenanceRecord deserializeProvenanceRecord(std::string_view text) {
       record.gravity_treepm_pm_decomposition_mode = string_value(raw, key);
     } else if (key == "gravity_treepm_tree_exchange_batch_bytes") {
       record.gravity_treepm_tree_exchange_batch_bytes = parseUint64Strict(value, key);
+    } else if (key == "gravity_treepm_pm_exchange_batch_bytes") {
+      record.gravity_treepm_pm_exchange_batch_bytes = parseUint64Strict(value, key);
     } else if (key == "gravity_softening_policy") {
       record.gravity_softening_policy = string_value(raw, key);
     } else if (key == "gravity_softening_kernel") {

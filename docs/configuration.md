@@ -239,6 +239,7 @@ Time/scale semantics (anti-ambiguity contract):
     available and this override is false)
   - `treepm_pm_decomposition_mode` (`slab` or `pencil`; default `slab`; `pencil` selects FFTW-MPI transposed spectral ownership while real-space particle deposition/interpolation retains x-slab ownership)
   - `treepm_tree_exchange_batch_bytes` (uint64 bytes, default `4194304`; cap for tree export/import payload chunking in distributed gravity paths)
+  - `treepm_pm_exchange_batch_bytes` (uint64 bytes, default `16777216`; per-peer wire-payload high-water for distributed PM density/force routing; the implementation communicates in globally coordinated bounded rounds and does not retain TSC cell records proportional to `27 * N_local`)
 
 TreePM split/cutoff semantics in this phase:
 
@@ -319,7 +320,7 @@ enabled by default for the certified periodic TSC profile. It is invalid with
 an isolated/open gravity boundary. There is no silent mode-dependent override:
 tracked isolated decks set the key to `false`, and user isolated decks must do
 the same.
-`treepm_pm_decomposition_mode` and `treepm_tree_exchange_batch_bytes` are live
+`treepm_pm_decomposition_mode`, `treepm_tree_exchange_batch_bytes`, and `treepm_pm_exchange_batch_bytes` are live
 distributed runtime controls, not ignored Phase 2 placeholders. Both slab and
 pencil FFTW-MPI paths are implemented; their current np1--np4 correctness
 evidence remains a small-cluster validation boundary, not a large-scale

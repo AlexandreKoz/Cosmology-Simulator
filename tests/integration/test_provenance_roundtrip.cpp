@@ -46,6 +46,7 @@ int main() {
   in.gravity_treepm_tree_relative_force_acceleration_floor = 1.0e-24;
   in.gravity_treepm_pm_decomposition_mode = "slab";
   in.gravity_treepm_tree_exchange_batch_bytes = 4194304ULL;
+  in.gravity_treepm_pm_exchange_batch_bytes = 16777216ULL;
   in.gravity_softening_policy = "comoving_fixed";
   in.gravity_softening_kernel = "plummer";
   in.gravity_softening_epsilon_kpc_comoving = 1.0;
@@ -97,6 +98,7 @@ int main() {
       in.gravity_treepm_tree_relative_force_acceleration_floor);
   assert(out.gravity_treepm_pm_decomposition_mode == in.gravity_treepm_pm_decomposition_mode);
   assert(out.gravity_treepm_tree_exchange_batch_bytes == in.gravity_treepm_tree_exchange_batch_bytes);
+  assert(out.gravity_treepm_pm_exchange_batch_bytes == in.gravity_treepm_pm_exchange_batch_bytes);
   assert(out.gravity_softening_policy == in.gravity_softening_policy);
   assert(out.gravity_softening_kernel == in.gravity_softening_kernel);
   assert(out.gravity_softening_epsilon_kpc_comoving == in.gravity_softening_epsilon_kpc_comoving);

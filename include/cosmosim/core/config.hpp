@@ -243,6 +243,7 @@ struct NumericsConfig {
   bool treepm_allow_diagnostic_naive_dft = false;
   PmDecompositionMode treepm_pm_decomposition_mode = PmDecompositionMode::kSlab;
   std::uint64_t treepm_tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+  std::uint64_t treepm_pm_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;
 };
 
 struct PhysicsConfig {

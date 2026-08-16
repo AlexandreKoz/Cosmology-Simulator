@@ -901,6 +901,13 @@ constexpr std::string_view k_physical_state_artifact_schema =
 #endif
 }
 
+[[nodiscard]] bool isSupportedDmoWorldSize(int world_size) noexcept {
+  return world_size == 1 || world_size == 2 || world_size == 3 ||
+      world_size == 4 || world_size == 8;
+}
+
+constexpr std::array<int, 4> k_distributed_dmo_acceptance_world_sizes{2, 3, 4, 8};
+
 struct PhysicalStateArtifact {
   std::string execution_backend;
   int world_size = 0;
@@ -916,7 +923,7 @@ struct PhysicalStateArtifact {
   requireOrThrow(
       execution_backend == "serial" || execution_backend == "mpi",
       "unsupported DMO execution-backend tag");
-  requireOrThrow(world_size >= 1 && world_size <= 4, "invalid DMO artifact world size");
+  requireOrThrow(isSupportedDmoWorldSize(world_size), "invalid DMO artifact world size");
   if (execution_backend == "serial") {
     requireOrThrow(world_size == 1, "serial DMO artifact must have world_size=1");
     return std::filesystem::temp_directory_path() /
@@ -939,7 +946,7 @@ void writePhysicalStateArtifact(
   requireOrThrow(
       artifact.execution_backend == "serial" || artifact.execution_backend == "mpi",
       "invalid DMO artifact execution backend");
-  requireOrThrow(artifact.world_size >= 1 && artifact.world_size <= 4, "invalid DMO artifact world size");
+  requireOrThrow(isSupportedDmoWorldSize(artifact.world_size), "invalid DMO artifact world size");
   requireOrThrow(
       artifact.execution_backend == "mpi" || artifact.world_size == 1,
       "serial DMO artifact must have world_size=1");
@@ -1050,7 +1057,7 @@ void writePhysicalStateArtifact(
   requireOrThrow(!(input >> trailing_token), "DMO physical-state artifact contains trailing data");
   requireOrThrow(
       (artifact.execution_backend == "serial" || artifact.execution_backend == "mpi") &&
-          artifact.world_size >= 1 && artifact.world_size <= 4 &&
+          isSupportedDmoWorldSize(artifact.world_size) &&
           (artifact.execution_backend == "mpi" || artifact.world_size == 1) &&
           std::isfinite(artifact.current_time_code) &&
           std::isfinite(artifact.current_scale_factor) &&
@@ -1167,7 +1174,7 @@ void compareRankCountPhysicalStateArtifacts() {
       reference.execution_backend == "mpi" && reference.world_size == 1,
       "DMO rank-count reference is not the MPI np1 artifact");
   PhysicalStateEquivalenceMetrics worst;
-  for (int world_size = 2; world_size <= 4; ++world_size) {
+  for (const int world_size : k_distributed_dmo_acceptance_world_sizes) {
     const PhysicalStateArtifact candidate =
         readPhysicalStateArtifact(physicalStateArtifactPath("mpi", world_size));
     requireOrThrow(
@@ -1187,7 +1194,7 @@ void compareRankCountPhysicalStateArtifacts() {
         std::max(worst.max_mass_relative_error, metrics.max_mass_relative_error);
   }
   std::cout << std::setprecision(17)
-            << "DMO_RANK_EQUIVALENCE_PASS compared=np1,np2,np3,np4"
+            << "DMO_RANK_EQUIVALENCE_PASS compared=np1,np2,np3,np4,np8"
             << " stable_id_particles=" << reference.state.particles.size()
             << " max_periodic_position_error_code=" << worst.max_periodic_position_error_code
             << " max_velocity_error_code=" << worst.max_velocity_error_code
@@ -1266,8 +1273,8 @@ void runEmptyRankSmoke(const ParallelRuntime& runtime, const std::filesystem::pa
   requireOrThrow(report.global_particle_partition_identity_match, "empty-rank DMO ownership identity failed");
   const std::uint64_t empty_rank_count = globalSum(
       report.local_particle_count == 0U ? std::uint64_t{1} : std::uint64_t{0});
-  if (runtime.world_size == 4) {
-    requireOrThrow(empty_rank_count >= 1U, "four-rank sparse DMO fixture did not exercise an empty rank");
+  if (runtime.world_size >= 4) {
+    requireOrThrow(empty_rank_count >= 1U, "multi-rank sparse DMO fixture did not exercise an empty rank");
   }
 }
 
@@ -1728,15 +1735,10 @@ int main(int argc, char** argv) {
       return 0;
     }
     requireOrThrow(argc == 1, "unsupported DMO validation command-line argument");
-    if (runtime.world_size < 1 || runtime.world_size > 4) {
-      if (runtime.world_rank == 0) {
-        std::cout << "DMO_ZELDOVICH_SKIP unsupported_world_size=" << runtime.world_size
-                  << " supported=1,2,3,4\n";
-      }
-#if COSMOSIM_ENABLE_MPI
-      MPI_Finalize();
-#endif
-      return 0;
+    if (!isSupportedDmoWorldSize(runtime.world_size)) {
+      throw std::runtime_error(
+          "DMO_ZELDOVICH_UNSUPPORTED requested world_size=" + std::to_string(runtime.world_size) +
+          "; acceptance topologies are 1,2,3,4,8 and unsupported requested ranks are failures, not skips");
     }
 
     const std::filesystem::path root =

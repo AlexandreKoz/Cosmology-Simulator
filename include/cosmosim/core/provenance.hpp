@@ -62,6 +62,7 @@ struct ProvenanceRecord {
   double gravity_treepm_tree_relative_force_acceleration_floor = 1.0e-30;
   std::string gravity_treepm_pm_decomposition_mode = "slab";
   std::uint64_t gravity_treepm_tree_exchange_batch_bytes = 0;
+  std::uint64_t gravity_treepm_pm_exchange_batch_bytes = 0;
   std::string gravity_softening_policy = "unspecified";
   std::string gravity_softening_kernel = "unknown";
   double gravity_softening_epsilon_kpc_comoving = 0.0;

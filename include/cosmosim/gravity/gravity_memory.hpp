@@ -27,6 +27,7 @@ struct GravityMemoryEstimateInput {
   bool indexed_target_coordinates = true;
   bool cuda_resident = false;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+  std::uint64_t pm_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;
   std::uint64_t backend_unknown_reserve_bytes = 0U;
   double safety_margin_fraction = 0.0;
 };

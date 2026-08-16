@@ -46,9 +46,9 @@ int main(int argc, char** argv) {
   int size = 1;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  if (size != 2 && size != 4) {
+  if (size != 2 && size != 3 && size != 4 && size != 8) {
     MPI_Finalize();
-    return 0;
+    return 1;
   }
 
   const std::filesystem::path directory =

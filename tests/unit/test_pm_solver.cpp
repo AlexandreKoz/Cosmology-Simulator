@@ -576,6 +576,90 @@ void testIndexedGlobalPmTargetViewWritesOnlyActiveRows() {
   assert(az[5] == -3.0);
 }
 
+void testExplicitPmCoordinateLayoutsAndEmptyTargets() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  std::fill(grid.force_x().begin(), grid.force_x().end(), 1.0);
+  std::fill(grid.force_y().begin(), grid.force_y().end(), 2.0);
+  std::fill(grid.force_z().begin(), grid.force_z().end(), 3.0);
+
+  // Indexed mode remains explicit even when a rank has source storage but no
+  // active targets. Container emptiness must not select the representation.
+  const std::vector<std::uint32_t> no_active;
+  const std::vector<double> source_x{0.1, 0.4, 0.8};
+  const std::vector<double> source_y{0.2, 0.5, 0.9};
+  const std::vector<double> source_z{0.3, 0.6, 0.7};
+  const std::vector<cosmosim::gravity::TreeLocalIndex> no_indices;
+  std::vector<double> empty_ax, empty_ay, empty_az;
+  solver.interpolateForces(
+      grid,
+      cosmosim::gravity::PmSolver::PmForceTargetView{
+          .active_particle_index = no_active,
+          .pos_x_comoving = source_x,
+          .pos_y_comoving = source_y,
+          .pos_z_comoving = source_z,
+          .accel_x_comoving = empty_ax,
+          .accel_y_comoving = empty_ay,
+          .accel_z_comoving = empty_az,
+          .coordinate_layout = cosmosim::gravity::PmSolver::PmForceCoordinateLayout::kIndexedSource,
+          .output_layout = cosmosim::gravity::PmSolver::PmForceOutputLayout::kCompactActive,
+          .coordinate_source_index = no_indices},
+      options,
+      nullptr);
+
+  const std::vector<std::uint32_t> active{0, 1};
+  const std::vector<cosmosim::gravity::TreeLocalIndex> source_indices{2, 0};
+  std::vector<double> ax(2, 0.0), ay(2, 0.0), az(2, 0.0);
+  solver.interpolateForces(
+      grid,
+      cosmosim::gravity::PmSolver::PmForceTargetView{
+          .active_particle_index = active,
+          .pos_x_comoving = source_x,
+          .pos_y_comoving = source_y,
+          .pos_z_comoving = source_z,
+          .accel_x_comoving = ax,
+          .accel_y_comoving = ay,
+          .accel_z_comoving = az,
+          .coordinate_layout = cosmosim::gravity::PmSolver::PmForceCoordinateLayout::kIndexedSource,
+          .output_layout = cosmosim::gravity::PmSolver::PmForceOutputLayout::kCompactActive,
+          .coordinate_source_index = source_indices},
+      options,
+      nullptr);
+  assert(std::abs(ax[0] - 1.0) < k_tolerance && std::abs(ax[1] - 1.0) < k_tolerance);
+  assert(std::abs(ay[0] - 2.0) < k_tolerance && std::abs(ay[1] - 2.0) < k_tolerance);
+  assert(std::abs(az[0] - 3.0) < k_tolerance && std::abs(az[1] - 3.0) < k_tolerance);
+
+  const std::vector<std::uint32_t> one_active{0};
+  const std::vector<cosmosim::gravity::TreeLocalIndex> invalid_index{3};
+  std::vector<double> one_ax(1), one_ay(1), one_az(1);
+  bool threw = false;
+  try {
+    solver.interpolateForces(
+        grid,
+        cosmosim::gravity::PmSolver::PmForceTargetView{
+            .active_particle_index = one_active,
+            .pos_x_comoving = source_x,
+            .pos_y_comoving = source_y,
+            .pos_z_comoving = source_z,
+            .accel_x_comoving = one_ax,
+            .accel_y_comoving = one_ay,
+            .accel_z_comoving = one_az,
+            .coordinate_layout = cosmosim::gravity::PmSolver::PmForceCoordinateLayout::kIndexedSource,
+            .output_layout = cosmosim::gravity::PmSolver::PmForceOutputLayout::kCompactActive,
+            .coordinate_source_index = invalid_index},
+        options,
+        nullptr);
+  } catch (const std::out_of_range&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testActivePmTargetViewExtentValidation() {
   const cosmosim::gravity::PmGridShape shape{8, 8, 8};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -822,6 +906,7 @@ int main() {
   testPartialSlabStorageRejectsSingleRankSolverPath();
   testPoissonPlanCachingForStableSlabLayout();
   testIndexedGlobalPmTargetViewWritesOnlyActiveRows();
+  testExplicitPmCoordinateLayoutsAndEmptyTargets();
   testActivePmTargetViewExtentValidation();
   testNonFiniteSolveOptionsRejected();
   testIsolatedOpenRectangularAssignmentAndInterpolationClipStencils();

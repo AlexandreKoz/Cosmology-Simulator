@@ -80,6 +80,9 @@ int main() {
   options.enable_window_deconvolution = true;
   options.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc;
 
+  {
+  // Keep every object that may own an MPI communicator or FFTW-MPI plan in a
+  // lexical scope that ends before MPI_Finalize().
   cosmosim::gravity::PmGridStorage grid(shape, layout);
   cosmosim::gravity::PmSolver solver(shape);
 
@@ -132,6 +135,7 @@ int main() {
     std::cout << "bench_pm_only_scaling_mpi artifact=" << out_path.string()
               << " max_rank_step_ms=" << max_rank_ms << '\n';
   }
+  }  // PM solver/grid destroyed before MPI finalization.
 
 #if COSMOSIM_ENABLE_MPI
   MPI_Finalize();

@@ -318,11 +318,11 @@ The current gravity acceptance bundle adds these deterministic gates:
 - `validation_phase2_mpi_gravity_{single,two,three,four}_rank`: identical
   physical fixtures across rank counts and the unchanged strict TreePM
   thresholds `relative_L2 <= 5e-6`, `max_relative <= 5e-5`.
-- `validation_dmo_zeldovich_workflow_single_rank` plus MPI np2/np3/np4 and
+- `validation_dmo_zeldovich_workflow_single_rank` plus MPI np2/np3/np4/np8 and
   `validation_dmo_zeldovich_workflow_rank_equivalence`: real config loader,
   production KDK/TreePM, HDF5 restart, stable ownership, periodic linear-mode
   amplitude/phase/coherence, mass/momentum/COM checks, direct-vs-resumed
-  equality, and stable-ID np1--np4 comparison. A manual cross-preset comparator
+  equality, and stable-ID np1/np2/np3/np4/np8 comparison. A manual cross-preset comparator
   separately checks a true non-MPI serial binary against MPI world size one.
 
 The DMO displacement-growth gate is increment-based. With

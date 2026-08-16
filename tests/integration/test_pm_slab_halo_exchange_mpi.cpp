@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
   int world_rank = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-  assert(world_size >= 2 && world_size <= 4);
+  assert(world_size >= 2 && world_size <= 8);
 
   // Every rank owns at least two planes. This exercises the ordinary periodic
   // ring, including the same-peer left/right topology at two ranks.

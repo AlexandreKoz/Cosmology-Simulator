@@ -1111,6 +1111,7 @@ struct ConfigKeySpec {
       {"numerics.treepm_allow_diagnostic_naive_dft", "false"},
       {"numerics.treepm_pm_decomposition_mode", "slab"},
       {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
+      {"numerics.treepm_pm_exchange_batch_bytes", "16777216"},
       {"physics.enable_cooling", "true"},
       {"physics.enable_star_formation", "true"},
       {"physics.enable_feedback", "true"},
@@ -1719,6 +1720,9 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
     throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
   }
+  if (config.numerics.treepm_pm_exchange_batch_bytes == 0) {
+    throw ConfigError("numerics.treepm_pm_exchange_batch_bytes must be > 0");
+  }
   if (config.mode.ic_chunk_particle_count == 0U) {
     throw ConfigError("mode.ic_chunk_particle_count must be > 0");
   }
@@ -2121,6 +2125,8 @@ void validateConfig(const SimulationConfig& config) {
          << pmDecompositionModeToString(frozen.config.numerics.treepm_pm_decomposition_mode) << '\n';
   stream << "treepm_tree_exchange_batch_bytes = "
          << frozen.config.numerics.treepm_tree_exchange_batch_bytes << '\n';
+  stream << "treepm_pm_exchange_batch_bytes = "
+         << frozen.config.numerics.treepm_pm_exchange_batch_bytes << '\n';
   stream << "\n[physics]\n";
   stream << "enable_cooling = " << (frozen.config.physics.enable_cooling ? "true" : "false") << '\n';
   stream << "enable_star_formation = "
@@ -2792,6 +2798,13 @@ void validateConfig(const SimulationConfig& config) {
           "numerics.treepm_tree_exchange_batch_bytes",
           defaultFor("numerics.treepm_tree_exchange_batch_bytes")),
       "numerics.treepm_tree_exchange_batch_bytes");
+  frozen.config.numerics.treepm_pm_exchange_batch_bytes = parseNumber<std::uint64_t>(
+      requireString(
+          entries,
+          consumed,
+          "numerics.treepm_pm_exchange_batch_bytes",
+          defaultFor("numerics.treepm_pm_exchange_batch_bytes")),
+      "numerics.treepm_pm_exchange_batch_bytes");
 
   frozen.config.physics.enable_cooling = parseBool(
       requireString(entries, consumed, "physics.enable_cooling", "true"), "physics.enable_cooling");

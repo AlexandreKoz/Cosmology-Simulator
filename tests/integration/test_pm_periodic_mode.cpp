@@ -622,6 +622,9 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
   options.scale_factor = 1.0;
   options.gravitational_constant_code = 1.0;
   options.assignment_scheme = scheme;
+  // Force multiple bounded communication rounds even for this tiny fixture.
+  // The production records are 96 bytes, so this admits two particles/peer/round.
+  options.routing_exchange_batch_bytes = 2ULL * 96ULL;
 
   const std::vector<double> all_x{0.499999, 0.500001, -0.0001, 1.0002, 0.125, 0.875, 0.24999, 0.75001};
   const std::vector<double> all_y{0.10, 0.20, 0.30, 0.40, 0.55, 0.65, 0.35, 0.85};
@@ -667,6 +670,20 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
       "Distributed PM solve did not report any global remote force route or halo-cache hit");
   requireOrThrow(profile.routed_mpi_bytes_sent > 0, "Distributed PM solve did not report sent wire bytes");
   requireOrThrow(profile.routed_mpi_bytes_received > 0, "Distributed PM solve did not report received wire bytes");
+  const std::uint64_t routing_buffer_bound = options.routing_exchange_batch_bytes *
+      static_cast<std::uint64_t>(world_size - 1);
+  requireOrThrow(
+      profile.routed_send_buffer_high_water_bytes <= routing_buffer_bound,
+      "Distributed PM send-buffer high-water exceeded the configured bounded-routing policy");
+  requireOrThrow(
+      profile.routed_receive_buffer_high_water_bytes <= routing_buffer_bound,
+      "Distributed PM receive-buffer high-water exceeded the configured bounded-routing policy");
+  requireOrThrow(
+      profile.routed_density_records <= 3ULL * static_cast<std::uint64_t>(local_x.size()),
+      "Distributed PM density routing regressed toward materialized xyz-stencil records");
+  requireOrThrow(
+      profile.routed_force_requests <= 3ULL * static_cast<std::uint64_t>(local_x.size()),
+      "Distributed PM force routing regressed toward materialized xyz-stencil requests");
   requireOrThrow(profile.routed_mpi_wait_ms >= 0.0, "Distributed PM solve reported invalid MPI wait time");
 
   std::vector<double> local_phi(local_x.size(), 0.0);

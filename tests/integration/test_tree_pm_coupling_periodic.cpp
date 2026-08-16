@@ -962,7 +962,7 @@ void testDivergentTreePmLayoutFailsCoordinately() {
   int world_rank = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-  if (world_size < 2 || world_size > 4) {
+  if (world_size < 2 || world_size > 8) {
     return;
   }
 
@@ -1318,7 +1318,7 @@ void testDistributedEmptyRanksIndependentTargetsAndMigration() {
   int world_rank = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-  if (world_size < 2 || world_size > 4) {
+  if (world_size < 2 || world_size > 8) {
     return;
   }
 

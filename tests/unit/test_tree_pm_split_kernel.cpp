@@ -23,6 +23,29 @@ void testSplitKernelComplementarity() {
   }
 }
 
+
+void testFiniteSofteningResidualComposesWithPmLongRange() {
+  constexpr double split_scale = 0.2;
+  const double radii[] = {0.02, 0.05, 0.1, 0.2, 0.5, 1.0};
+  const double epsilon_over_split[] = {0.0, 0.01664, 0.05, 0.10, 0.20};
+
+  for (const double epsilon_ratio : epsilon_over_split) {
+    const double epsilon = epsilon_ratio * split_scale;
+    for (const double radius : radii) {
+      const double r2 = radius * radius;
+      const double newton_inv_r3 = 1.0 / (r2 * radius);
+      const double pm_long =
+          cosmosim::gravity::treePmGaussianLongRangeForceFactor(radius, split_scale) *
+          newton_inv_r3;
+      const double tree_residual =
+          cosmosim::gravity::treePmSoftenedShortRangeInvR3(r2, epsilon, split_scale);
+      const double expected = cosmosim::gravity::softenedInvR3(r2, epsilon);
+      const double scale = std::max(std::abs(expected), 1.0e-30);
+      assert(std::abs((tree_residual + pm_long) - expected) / scale < 5.0e-13);
+    }
+  }
+}
+
 void testMeshCellDerivedSplitSemantics() {
   const double mesh_spacing = 0.025;
   const double asmth_cells = 1.25;
@@ -60,6 +83,7 @@ void testDiagnosticsContinuityAtSplitScale() {
 
 int main() {
   testSplitKernelComplementarity();
+  testFiniteSofteningResidualComposesWithPmLongRange();
   testMeshCellDerivedSplitSemantics();
   testDiagnosticsContinuityAtSplitScale();
   return 0;

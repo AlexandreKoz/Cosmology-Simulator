@@ -165,9 +165,24 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t zoom_bytes = checkedMul(
       zoom_local_cells, 5U * sizeof(double), "gravity zoom PM owned estimate overflow");
 
-  const std::uint64_t mpi_bytes = input.mpi_rank_count > 1U
-      ? checkedMul(input.tree_exchange_batch_bytes, 2U, "gravity exchange estimate overflow")
+  const std::uint64_t tree_mpi_bytes = input.mpi_rank_count > 1U
+      ? checkedMul(input.tree_exchange_batch_bytes, 2U, "gravity tree exchange estimate overflow")
       : 0U;
+  // PM density and force routing retain exactly two reusable wire buffers. The
+  // configured policy is a per-peer payload ceiling, so a rank can receive one
+  // bounded chunk from every remote peer in the same collective round. This is
+  // O(rank_count * batch_bytes), independent of local particle count and TSC's
+  // 27-cell stencil.
+  const std::uint64_t remote_rank_count = input.mpi_rank_count > 1U
+      ? static_cast<std::uint64_t>(input.mpi_rank_count - 1U)
+      : 0U;
+  const std::uint64_t pm_routing_bytes = remote_rank_count == 0U
+      ? 0U
+      : checkedMul(
+          checkedMul(input.pm_exchange_batch_bytes, remote_rank_count,
+                     "gravity PM routing estimate overflow"),
+          2U,
+          "gravity PM routing estimate overflow");
   const std::uint64_t cuda_owned_workspace = input.cuda_resident
       ? checkedAdd(
             checkedMul(input.local_source_count, 4U * sizeof(double),
@@ -230,10 +245,15 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
                 "gravity.estimate.zoom_pm_owned_fields", zoom_bytes,
                 "coarse/focused lifetimes are serialized; estimate reports the focused peak contribution");
   }
-  if (mpi_bytes > 0U) {
+  if (tree_mpi_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
-                "gravity.estimate.sparse_tree_exchange", mpi_bytes,
-                "request/response high-water bounded by configured exchange batch policy");
+                "gravity.estimate.sparse_tree_exchange", tree_mpi_bytes,
+                "request/response high-water bounded by configured tree exchange batch policy");
+  }
+  if (pm_routing_bytes > 0U) {
+    addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
+                "gravity.estimate.pm_routing_exchange", pm_routing_bytes,
+                "two reusable PM wire buffers; conservative all-remote-peer high-water from the configured per-peer batch policy, independent of particle count/stencil size");
   }
   if (cuda_owned_workspace > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
@@ -247,7 +267,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   GravityMemoryEstimate result;
   result.report = std::move(builder).finish();
   result.report.notes.push_back(
-      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, optional zoom lanes, persistent force cache, sparse exchange buffers, and known CUDA buffers; canonical SimulationState is reported separately.");
+      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, optional zoom lanes, persistent force cache, sparse tree exchange, bounded PM routing buffers, and known CUDA buffers; canonical SimulationState is reported separately.");
   result.report.notes.push_back(
       std::string("PM estimate profile assignment=") +
       (input.assignment_scheme == PmAssignmentScheme::kTsc ? "tsc" : "cic") +
@@ -266,6 +286,19 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
     }
   }
   result.known_peak_bytes = known_peak;
+  const std::uint64_t local_owned_estimate = checkedAdd(
+      checkedAdd(result.report.totals.persistent_total_bytes, result.report.totals.transient_total_bytes,
+                 "gravity distributed local memory summary overflow"),
+      result.report.totals.unknown_total_bytes,
+      "gravity distributed local memory summary overflow");
+  result.report.distributed.valid = true;
+  result.report.distributed.rank_count = static_cast<int>(input.mpi_rank_count);
+  result.report.distributed.local_owned_bytes = local_owned_estimate;
+  result.report.distributed.rank_max_owned_bytes = local_owned_estimate;
+  result.report.distributed.global_sum_owned_bytes = checkedMul(
+      local_owned_estimate, static_cast<std::uint64_t>(input.mpi_rank_count),
+      "gravity distributed aggregate memory summary overflow");
+  result.report.distributed.max_to_mean_imbalance_ratio = 1.0;
   const std::uint64_t base_budget_requirement = checkedAdd(
       known_peak, backend_unknown, "gravity budget requirement overflow");
   const long double scaled_requirement = static_cast<long double>(base_budget_requirement) *

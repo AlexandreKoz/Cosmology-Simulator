@@ -152,6 +152,10 @@ struct PmSolveOptions {
   PmBoundaryCondition boundary_condition = PmBoundaryCondition::kPeriodic;
   // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
   double tree_pm_split_scale_comoving = 0.0;
+  // Per-peer wire-payload high-water for distributed PM density assignment and
+  // force interpolation. The receive side is bounded by world_size times this
+  // value, independent of particle count.
+  std::uint64_t routing_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;
   // Root-owned transient workspace budget for the isolated/open gathered PM path.
   // The implementation is correct inside this envelope but is not a scalable
   // distributed isolated PM solver.
@@ -168,6 +172,8 @@ struct PmProfileEvent {
   std::uint64_t routed_potential_peer_count = 0;
   std::uint64_t routed_mpi_bytes_sent = 0;
   std::uint64_t routed_mpi_bytes_received = 0;
+  std::uint64_t routed_send_buffer_high_water_bytes = 0;
+  std::uint64_t routed_receive_buffer_high_water_bytes = 0;
   std::uint64_t force_halo_cache_hits = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
@@ -274,6 +280,15 @@ class PmSolver {
     std::span<const double> mass_code;
   };
 
+  enum class PmForceCoordinateLayout : std::uint8_t {
+    // Coordinate spans are compact and have exactly one row per active target.
+    kCompactActive = 0,
+    // Coordinate spans are source storage; coordinate_source_index explicitly
+    // maps each active target to its source row. This mode remains explicit
+    // even when the active set is empty.
+    kIndexedSource = 1,
+  };
+
   enum class PmForceOutputLayout : std::uint8_t {
     // Output spans are compact and have the same length/order as active_particle_index.
     kCompactActive = 0,
@@ -290,11 +305,12 @@ class PmSolver {
     std::span<double> accel_x_comoving;
     std::span<double> accel_y_comoving;
     std::span<double> accel_z_comoving;
+    PmForceCoordinateLayout coordinate_layout = PmForceCoordinateLayout::kCompactActive;
     PmForceOutputLayout output_layout = PmForceOutputLayout::kCompactActive;
-    // Empty means the coordinate spans are compact target coordinates. When
-    // populated, each active target resolves its coordinates by indexing the
-    // source coordinate spans. This keeps source-index targets compact across
-    // the workflow/coordinator boundary.
+    // Used only with kIndexedSource. Its extent equals the active-target count,
+    // while the coordinate spans retain the independent source-storage extent.
+    // An empty index span therefore unambiguously means zero active targets, not
+    // a change of coordinate representation.
     std::span<const TreeLocalIndex> coordinate_source_index;
   };
 

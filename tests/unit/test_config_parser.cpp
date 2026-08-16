@@ -712,6 +712,7 @@ treepm_enable_window_deconvolution = true
 treepm_update_cadence_steps = 1
 treepm_pm_decomposition_mode = slab
 treepm_tree_exchange_batch_bytes = 8388608
+treepm_pm_exchange_batch_bytes = 12582912
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "treepm_good");
   assert(frozen.config.numerics.treepm_pm_grid_nx == 32);
@@ -734,6 +735,7 @@ treepm_tree_exchange_batch_bytes = 8388608
       frozen.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kSlab);
   assert(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
+  assert(frozen.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
   assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_tree_opening_criterion = relative_force_error") !=
       std::string::npos);
@@ -751,6 +753,7 @@ treepm_tree_exchange_batch_bytes = 8388608
   assert(reparsed.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
   assert(reparsed.config.numerics.treepm_update_cadence_steps == 1);
   assert(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
+  assert(reparsed.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
 
   const auto parsed_geometric = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = geometric\n",
@@ -836,6 +839,16 @@ treepm_tree_exchange_batch_bytes = 8388608
   threw = false;
   try {
     (void)cosmosim::core::loadFrozenConfigFromString(bad_batch_bytes, "treepm_bad_batch");
+  } catch (const cosmosim::core::ConfigError&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::string bad_pm_batch_bytes =
+      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_exchange_batch_bytes = 0\n";
+  threw = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(bad_pm_batch_bytes, "treepm_bad_pm_batch");
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }

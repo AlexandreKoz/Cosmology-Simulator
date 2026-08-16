@@ -581,6 +581,32 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
   }
   assert(budget_rejected);
   cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.budget_required_bytes);
+
+  const auto distributed_estimate = cosmosim::gravity::estimateGravityMemory({
+      .local_source_count = n,
+      .local_target_count = n,
+      .tree_leaf_size = options.max_leaf_size,
+      .multipole_order = cosmosim::gravity::TreeMultipoleOrder::kMonopole,
+      .pm_shape = {32U, 32U, 32U},
+      .assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kTsc,
+      .decomposition_mode = cosmosim::core::PmDecompositionMode::kSlab,
+      .mpi_rank_count = 8U,
+      .tree_exchange_batch_bytes = 4096U,
+      .pm_exchange_batch_bytes = 1024U,
+  });
+  bool saw_pm_routing = false;
+  for (const auto& entry : distributed_estimate.report.entries) {
+    if (entry.label == "gravity.estimate.pm_routing_exchange") {
+      saw_pm_routing = true;
+      // Two reusable wire buffers, seven remote peers, 1024 bytes/peer.
+      assert(entry.estimated_next_step_bytes == 2U * 7U * 1024U);
+    }
+  }
+  assert(saw_pm_routing);
+  assert(distributed_estimate.report.distributed.valid);
+  assert(distributed_estimate.report.distributed.rank_count == 8);
+  assert(distributed_estimate.report.distributed.global_sum_owned_bytes ==
+      8U * distributed_estimate.report.distributed.local_owned_bytes);
 }
 
 void testGasRefinementForceConvergesAtFixedMassAndCom() {

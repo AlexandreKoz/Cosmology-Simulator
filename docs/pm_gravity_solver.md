@@ -96,37 +96,36 @@ Matched deposition + gather is a hard contract for both schemes in this stage.
 
 ## Distributed reverse-interpolation integrity contract
 
-For a slab-distributed periodic PM gather, particle rows remain authoritative
-only on the particle-owner/origin rank. A routed request carries four routing
-identity fields:
+For slab-distributed periodic PM force gather, particle rows remain authoritative
+only on the particle-owner/origin rank. The DMO force path routes compact
+**particle/x-plane group** requests rather than one retained record per mesh
+cell. Each request carries:
 
-- `origin_rank`, the rank allowed to mutate the particle result;
-- `origin_particle_index`, an opaque origin-local return token;
-- `request_sequence`, unique within the current origin exchange;
-- `exchange_epoch`, a checked 64-bit batch identity generated monotonically by
-  the solver for each distributed force or potential interpolation exchange.
+- `origin_rank` and `destination_rank`;
+- an opaque origin-local particle token;
+- a deterministic request sequence and monotonic 64-bit exchange epoch;
+- up to the three TSC x-plane indices/weights owned by the same destination;
+- the wrapped y/z mesh coordinates needed for the destination to expand the
+  y/z stencil locally.
 
-A slab owner uses those fields only to validate the MPI sender segment and the
-current epoch, then validates finite interpolation weight, mesh index bounds,
-slab ownership, and finite local mesh fields. It must not interpret
-`origin_particle_index` as a receiver-local particle-array index. Force and
-potential response records echo all four identity fields exactly.
+The slab owner validates sender/destination identity, epoch, sequence, x-plane
+ownership, bounds, and finite numerical fields before expanding the y/z stencil.
+It accumulates all mesh contributions represented by that request and returns
+one force response. The origin regenerates the deterministic expected request
+stream for response validation; it does not retain an O(N) request registry.
+Wrong sender/token, duplicate/out-of-order, stale, malformed, or non-finite
+responses fail closed before authoritative particle output is mutated.
 
-The origin keeps a registry keyed by `request_sequence`, recording the expected
-origin particle index, destination slab rank, and exchange epoch. Before adding
-a response, it checks origin rank, epoch, sequence range, expected sender,
-expected origin slot, owner-local slot bounds, and finite values. It rejects a
-duplicate response before accumulation and scans the registry after the reverse
-exchange to reject any missing response. Thus each emitted routed request
-produces one and only one validated contribution to an origin-owned particle
-result.
+Communication proceeds in coordinated rounds bounded by
+`treepm_pm_exchange_batch_bytes` **per peer**. Local x-plane work is consumed
+directly without entering MPI buffers. Send and receive wire buffers are reused
+between request and response phases, and the profiler records their actual
+high-water marks. Zero-work ranks still enter every collective round.
 
-Ordered blocking collectives continue to define normal delivery ordering, but
-the explicit epoch and sequence are the protocol boundary that detects stale,
-malformed, or cross-batch records. All PM `MPI_Alltoallv` record exchanges use
-checked conversion from record counts/displacements to `MPI_BYTE` arguments;
-negative values, mismatched layout spans, non-representable record sizes, and
-byte/cumulative displacement overflow are rejected before the collective.
+Potential interpolation retains the older per-cell request/response protocol
+for now; it is not used for the first-light DMO force update. Both protocols use
+checked byte-count/displacement conversion and coordinated preflight/failure
+agreement.
 
 ## Assignment/gather kernels (Phase 1)
 
@@ -226,95 +225,70 @@ communicator on every rank. In an MPI-enabled executable that has not called
 `MPI_Init`, or has already finalized, the library observes a serial world and
 does not call `MPI_Comm_size`/`MPI_Comm_rank`.
 
-### Distributed interpolation reverse-message contract
+### Distributed force-interpolation reverse-message contract
 
-Ownership and message flow for both force and potential gather:
+The production DMO force gather uses the bounded plane-group protocol:
 
-1. **Particle-owner rank** computes CIC/TSC stencil nodes in global periodic mesh coordinates.
-2. For each stencil node `(ix, iy, iz)`, particle owner routes a request to
+1. **Particle-owner rank** computes CIC/TSC x support and groups x planes by
    `pmOwnerRankForGlobalX(Nx, world_size, ix)`.
-3. Request payload fields are:
-   - `origin_rank` and `destination_rank`,
-   - `origin_particle_index` (an opaque owner-local return token),
-   - `request_sequence` and the monotonic 64-bit `exchange_epoch`,
-   - `global_ix/global_iy/global_iz`,
-   - `weight` (matched deposit/gather kernel weight).
-4. **Slab-owner rank** receives requests, validates that the x-index is locally owned and the
-   global indices are in range, and checks sender, destination, sequence,
-   exchange epoch, and finite numerical fields before computing:
-   - force gather: `weight * (ax, ay, az)` from owner-local PM force fields,
-   - potential gather: `weight * phi` from owner-local PM potential field.
-5. Slab owners echo the request identity and their `source_rank` in each response.
-6. The particle owner matches each response to its exchange-local request
-   registry and rejects a wrong sender/token, duplicate, missing, stale, or
-   non-finite response before accumulating into its output spans.
+2. Locally owned x-plane groups are accumulated directly from local PM fields.
+3. A remote group is encoded as one fixed-width force-plane request containing
+   the x indices/weights plus y/z mesh coordinates. The receiver expands y/z
+   weights locally, so TSC does not require 27 retained request records.
+4. **Slab-owner rank** validates the record, evaluates all represented local
+   stencil cells, and emits one accumulated force response for that request.
+5. The origin validates the response against the deterministic request stream
+   and accumulates it into the origin-owned target row.
 
-Ordering/determinism policy:
-
-- Request generation order is deterministic: particle index order, then stencil loop order
-  (`x`, `y`, `z`).
-- Every request sequence is accepted exactly once; the opaque
-  `origin_particle_index` is interpreted only by its origin rank.
-- No rank requires replicated full PM fields for interpolation in distributed mode.
+The same deterministic particle/group ordering is used in every round. The
+number of rounds is derived collectively from the maximum active/source count,
+so empty ranks remain legal participants without dummy particles.
 
 ### Distributed PM wire contract
 
-PM routing never transmits a native C++ structure. Version 1 is a fixed-width,
-little-endian wire format with an IEEE-754 binary64 requirement. Every record
-starts with the 12-byte header `(magic="PMW1", version=1, record_kind)`.
-The five record kinds and exact sizes are:
+PM routing never transmits native C++ object layouts. The version-1 wire format
+is fixed-width, little-endian, and requires IEEE-754 binary64. Every record
+starts with the 12-byte header `(magic="PMW1", version=1, record_kind)`. The
+first-light DMO routing adds compact plane-group kinds alongside the legacy
+per-cell kinds used by potential gather:
 
-- density contribution: 56 bytes;
-- force request: 56 bytes;
+- density plane-group request: 96 bytes;
+- force plane-group request: 96 bytes;
 - force response: 64 bytes;
+- legacy density contribution: 56 bytes;
+- legacy force request: 56 bytes;
 - potential request: 56 bytes;
 - potential response: 48 bytes.
 
-Density records carry origin/destination rank, per-origin record sequence,
-global cell indices, exchange epoch, a zero reserved lane, and weighted mass.
-Request and response identities are the fields described above; response
-floating-point lanes contain either three acceleration components or one
-potential contribution. Decoders require the exact record size, magic,
-version, kind, zero reserved lanes, and complete record alignment before any
-authoritative mesh or particle field is mutated.
+Decoders require exact size, magic, version, kind, reserved-lane validity,
+identity consistency, and complete record alignment before mutating mesh or
+particle fields.
 
 ### Distributed density assignment message contract
 
-Ownership and routing model:
+The density path uses the same x-plane grouping strategy:
 
-- **particle owner rank** computes assignment stencils in global mesh coordinates from
-  wrapped periodic particle positions.
-- **slab owner rank** is chosen by x-index ownership:
-  - `destination_rank = pmOwnerRankForGlobalX(Nx, world_size, global_ix)`.
-- Only slab owners accumulate to local PM density storage.
-- No remote direct writes are permitted.
+- particle owners compute wrapped CIC/TSC x support and group planes by slab
+  destination;
+- locally owned groups deposit directly into owner-local density storage;
+- one compact remote record carries up to three x planes plus y/z coordinates
+  and particle mass;
+- the destination expands y/z weights and deposits directly into its slab;
+- communication is split into deterministic coordinated rounds with at most
+  `treepm_pm_exchange_batch_bytes` of payload per destination peer in a round.
 
-Batching and ordering:
+For TSC this bounds retained routing state by the configured communication
+policy rather than by `27 * N_local`. The path does not simultaneously retain
+a nested C++ record population, a flattened C++ copy, a wire copy, and a
+decoded receive population. Two reusable physical wire buffers cover send and
+receive phases. Profile counters expose routed logical records, participating
+peers, wire bytes, measured MPI wait, and actual send/receive buffer high-water
+bytes.
 
-- Each owner rank batches records by destination rank.
-- In-batch order is deterministic append order from nested loops:
-  particle index order, then stencil axis loop order (`x`, `y`, `z`).
-- Batched wire records are exchanged via `MPI_Alltoallv` with `MPI_BYTE`.
-- PM solver-owned send/recv buffers are reused across solves for stable layout metadata.
-- The transport is sparse by stencil owner: only slabs touched by local particle
-  assignment/interpolation stencils receive records. The MPI implementation keeps
-  the collective all-to-all count/data fallback for completion ordering and
-  portability, but zero-count peers carry no payload.
-- Force interpolation can use the explicit slab-halo cache populated by TreePM
-  before falling back to routed request/response messages for non-neighbor
-  stencil cells.
-- Profile counters report routed density records, routed force/potential
-  requests, participating peers, force-halo cache hits, wire bytes sent and
-  received, and measured MPI wait time so scale tests can distinguish
-  neighbor/cache traffic from remote routed fallback.
-
-Receiver validation before accumulation:
-
-- Reject any received record with out-of-range global indices.
-- Reject any record whose `global_ix` is not owned by the receiving slab rank.
-- Reject wrong sender/origin/destination identity, non-monotonic per-sender
-  sequence, stale exchange epoch, or non-finite mass.
-- Accepted records are accumulated only into owner-local slab storage and then normalized by local cell volume.
+Receiver validation rejects out-of-range or non-owned x indices, wrong
+sender/origin/destination identity, stale epochs, invalid sequence, or non-finite
+coordinates/mass before accumulation. Accepted mass is accumulated only into
+owner-local slab storage and is normalized by local cell volume.
 
 The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
 
@@ -546,7 +520,7 @@ Conventions in this stage:
   points are clipped, not wrapped to the opposite face. Particles outside the
   open domain contribute/sample zero. Clipped weights are not renormalized into
   the domain, preserving the finite-domain convolution interpretation.
-- **Split consistency:** Tree short-range residual keeps the complementary Gaussian real-space factor `erfc(r/(2r_s))`, so long+short composes to Newtonian force before explicit cutoff.
+- **Split consistency:** PM supplies the unsoftened Gaussian long-range field. The tree evaluates the residual `F_softened,total - F_Newtonian,long`, so Tree+PM composes to the configured Plummer-softened total force. At zero softening this reduces exactly to the usual complementary Gaussian short-range factor before explicit cutoff.
 - **Self term policy:** kernel value at `r=0` is set to zero in the PM convolution.
 
 Current stage limitations and safety policy:

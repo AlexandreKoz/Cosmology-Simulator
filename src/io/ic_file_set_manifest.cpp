@@ -510,13 +510,29 @@ herr_t collectLinkName(
 }
 
 [[nodiscard]] H5O_type_t objectType(hid_t group, std::string_view name) {
-  H5O_info_t info{};
-  if (H5Oget_info_by_name(
-          group, std::string(name).c_str(), &info, H5O_INFO_BASIC, H5P_DEFAULT) < 0) {
-    throw std::runtime_error(
-        "failed to inspect HDF5 object " + std::string(name));
+  // H5Oget_info_by_name changed versioned signatures across supported HDF5
+  // releases (notably 1.10 versus 1.12/1.14). Opening the object and querying
+  // its identifier class is stable across that range and avoids scattering
+  // API-version branches throughout the IC manifest reader.
+  const std::string object_name(name);
+  const hid_t object = H5Oopen(group, object_name.c_str(), H5P_DEFAULT);
+  if (object < 0) {
+    throw std::runtime_error("failed to inspect HDF5 object " + object_name);
   }
-  return info.type;
+  const H5I_type_t identifier_type = H5Iget_type(object);
+  if (H5Oclose(object) < 0) {
+    throw std::runtime_error("failed to close inspected HDF5 object " + object_name);
+  }
+  switch (identifier_type) {
+    case H5I_GROUP:
+      return H5O_TYPE_GROUP;
+    case H5I_DATASET:
+      return H5O_TYPE_DATASET;
+    case H5I_DATATYPE:
+      return H5O_TYPE_NAMED_DATATYPE;
+    default:
+      return H5O_TYPE_UNKNOWN;
+  }
 }
 
 [[nodiscard]] std::string selectAlias(
