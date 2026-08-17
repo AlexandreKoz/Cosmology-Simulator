@@ -1640,7 +1640,10 @@ if(COSMOSIM_ENABLE_TESTS)
         test_integration_provenance_roundtrip)
 
 
-  if(COSMOSIM_ENABLE_HDF5)
+  # This smoke exercises the production TreePM runtime path.  Keep it out of
+  # HDF5-only builds, where the runtime correctly refuses to substitute the
+  # diagnostic naive-DFT backend for FFTW.
+  if(COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
     configure_file(
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_smoke.cmake.in"
       "${CMAKE_BINARY_DIR}/test_runtime_app_smoke.cmake"
@@ -1799,6 +1802,14 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(
       validation_tree_pm_ewald_accuracy
       PROPERTIES LABELS "validation;gravity;treepm;periodic;accuracy;production_fft")
+    add_test(
+      NAME validation_tree_pm_ewald_accuracy_first_light_softening
+      COMMAND test_validation_tree_pm_ewald_accuracy)
+    set_tests_properties(
+      validation_tree_pm_ewald_accuracy_first_light_softening
+      PROPERTIES
+        ENVIRONMENT "COSMOSIM_EWALD_SOFTENING_RATIO=0.016637952"
+        LABELS "validation;gravity;treepm;periodic;accuracy;production_fft;finite_softening;first_light")
   endif()
 
   add_executable(

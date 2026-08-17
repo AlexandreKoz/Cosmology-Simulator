@@ -132,6 +132,20 @@
       }
     },
     {
+      "name": "mpi-hdf5-fftw-release",
+      "inherits": [
+        "cpu-only-release"
+      ],
+      "displayName": "MPI + HDF5 + FFTW Release",
+      "description": "Production-like CPU feature combination for distributed DMO qualification.",
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_MPI": "ON",
+        "COSMOSIM_ENABLE_HDF5": "ON",
+        "COSMOSIM_ENABLE_FFTW": "ON",
+        "COSMOSIM_ENABLE_CUDA": "OFF"
+      }
+    },
+    {
       "name": "mpi-release",
       "inherits": [
         "cpu-only-release"
@@ -180,6 +194,10 @@
     {
       "name": "build-mpi-hdf5-fftw-debug",
       "configurePreset": "mpi-hdf5-fftw-debug"
+    },
+    {
+      "name": "build-mpi-hdf5-fftw-release",
+      "configurePreset": "mpi-hdf5-fftw-release"
     },
     {
       "name": "build-mpi-release",
@@ -233,6 +251,13 @@
     {
       "name": "test-mpi-hdf5-fftw-debug",
       "configurePreset": "mpi-hdf5-fftw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-mpi-hdf5-fftw-release",
+      "configurePreset": "mpi-hdf5-fftw-release",
       "output": {
         "outputOnFailure": true
       }

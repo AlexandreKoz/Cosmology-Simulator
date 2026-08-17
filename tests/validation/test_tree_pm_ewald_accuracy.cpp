@@ -462,6 +462,18 @@ void validateFixture(const ParticleFixture& fixture) {
   return fixtures;
 }
 
+[[nodiscard]] double representativeMeshSpacing(const ParticleFixture& fixture) {
+  const double spacing_x = fixture.box.length_x / static_cast<double>(fixture.pm_shape.nx);
+  const double spacing_y = fixture.box.length_y / static_cast<double>(fixture.pm_shape.ny);
+  const double spacing_z = fixture.box.length_z / static_cast<double>(fixture.pm_shape.nz);
+  return std::cbrt(spacing_x * spacing_y * spacing_z);
+}
+
+[[nodiscard]] double requestedSofteningEpsilon(const ParticleFixture& fixture) {
+  return softeningRatioFromEnvironment() *
+      k_asmth_cells * representativeMeshSpacing(fixture);
+}
+
 [[nodiscard]] cosmosim::gravity::TreePmOptions makeProductionOptions(
     const ParticleFixture& fixture,
     const SolverProfile& solver_profile) {
@@ -487,14 +499,10 @@ void validateFixture(const ParticleFixture& fixture) {
   options.tree_options.gravitational_constant_code = 1.0;
   options.tree_options.max_leaf_size = solver_profile.max_leaf_size;
 
-  const double spacing_x = fixture.box.length_x / static_cast<double>(fixture.pm_shape.nx);
-  const double spacing_y = fixture.box.length_y / static_cast<double>(fixture.pm_shape.ny);
-  const double spacing_z = fixture.box.length_z / static_cast<double>(fixture.pm_shape.nz);
-  const double representative_spacing = std::cbrt(spacing_x * spacing_y * spacing_z);
+  const double representative_spacing = representativeMeshSpacing(fixture);
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       k_asmth_cells, k_rcut_cells, representative_spacing);
-  options.tree_options.softening.epsilon_comoving =
-      softeningRatioFromEnvironment() * options.split_policy.split_scale_comoving;
+  options.tree_options.softening.epsilon_comoving = requestedSofteningEpsilon(fixture);
   return options;
 }
 
@@ -632,6 +640,8 @@ void validateFixture(const ParticleFixture& fixture) {
       .alpha_inverse_length = 2.5,
       .real_image_limits = {3, 3, 3},
       .reciprocal_mode_limits = {10, 10, 10},
+      .plummer_softening_epsilon = requestedSofteningEpsilon(fixture.sources),
+      .softening_correction_image_limits = {5, 5, 5},
   };
   const auto acceleration = cosmosim::test_support::periodicEwaldAccelerations(
       sources, targets, fixture.sources.box, options);
@@ -675,6 +685,8 @@ void validateFixture(const ParticleFixture& fixture) {
           mode_limit(fixture.box.length_y),
           mode_limit(fixture.box.length_z),
       },
+      .plummer_softening_epsilon = requestedSofteningEpsilon(fixture),
+      .softening_correction_image_limits = {5, 5, 5},
   };
   const auto acceleration = cosmosim::test_support::periodicEwaldAccelerationsAtSources(
       sources, fixture.box, options);

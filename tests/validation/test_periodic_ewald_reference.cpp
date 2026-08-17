@@ -146,6 +146,51 @@ void testIncreasingStrictnessConvergenceAndAlphaIndependence() {
       "converged Ewald force depends on splitting alpha; " + metrics);
 }
 
+void testPlummerSofteningCorrectionConvergence() {
+  const PeriodicEwaldBox box{.length_x = 1.0, .length_y = 1.3, .length_z = 1.7};
+  const std::vector<PeriodicEwaldSource> sources = convergenceFixture();
+
+  PeriodicEwaldOptions unsoftened = strictOptions();
+  const auto unsoftened_reference =
+      periodicEwaldAccelerationsAtSources(sources, box, unsoftened);
+  PeriodicEwaldOptions zero_softening = unsoftened;
+  zero_softening.plummer_softening_epsilon = 0.0;
+  zero_softening.softening_correction_image_limits = {0, 0, 0};
+  const auto zero_softening_reference =
+      periodicEwaldAccelerationsAtSources(sources, box, zero_softening);
+  requireOrThrow(
+      relativeL2(zero_softening_reference, unsoftened_reference) == 0.0,
+      "zero Plummer softening changed the unsoftened Ewald reference");
+
+  PeriodicEwaldOptions coarse = unsoftened;
+  coarse.plummer_softening_epsilon = 0.03;
+  coarse.softening_correction_image_limits = {1, 1, 1};
+  PeriodicEwaldOptions medium = coarse;
+  medium.softening_correction_image_limits = {3, 3, 3};
+  PeriodicEwaldOptions strict = coarse;
+  strict.softening_correction_image_limits = {5, 5, 5};
+  PeriodicEwaldOptions stricter = coarse;
+  stricter.softening_correction_image_limits = {7, 7, 7};
+
+  const auto coarse_acceleration = periodicEwaldAccelerationsAtSources(sources, box, coarse);
+  const auto medium_acceleration = periodicEwaldAccelerationsAtSources(sources, box, medium);
+  const auto strict_acceleration = periodicEwaldAccelerationsAtSources(sources, box, strict);
+  const auto stricter_acceleration = periodicEwaldAccelerationsAtSources(sources, box, stricter);
+  const double coarse_to_medium = relativeL2(coarse_acceleration, medium_acceleration);
+  const double medium_to_strict = relativeL2(medium_acceleration, strict_acceleration);
+  const double strict_to_stricter = relativeL2(strict_acceleration, stricter_acceleration);
+  std::cout << "periodic softened Ewald correction convergence: coarse_to_medium="
+            << std::setprecision(17) << coarse_to_medium
+            << ", medium_to_strict=" << medium_to_strict
+            << ", strict_to_stricter=" << strict_to_stricter << '\n';
+  requireOrThrow(
+      medium_to_strict < coarse_to_medium && strict_to_stricter < medium_to_strict,
+      "periodic Plummer correction did not converge monotonically with image extent");
+  requireOrThrow(
+      strict_to_stricter < 1.0e-5,
+      "periodic Plummer correction image extent is insufficient for the independent reference");
+}
+
 void testIntegerBoxTranslationInvariance() {
   const PeriodicEwaldBox box{.length_x = 1.0, .length_y = 1.3, .length_z = 1.7};
   const std::vector<PeriodicEwaldSource> sources = convergenceFixture();
@@ -324,6 +369,7 @@ void testInputValidationAndUnsoftenedEnvelope() {
 
 int main() {
   testIncreasingStrictnessConvergenceAndAlphaIndependence();
+  testPlummerSofteningCorrectionConvergence();
   testIntegerBoxTranslationInvariance();
   testZeroSelfForceAndSymmetricCancellation();
   testMassWeightedNetForceCancellation();

@@ -27,7 +27,7 @@ void testSplitKernelComplementarity() {
 void testFiniteSofteningResidualComposesWithPmLongRange() {
   constexpr double split_scale = 0.2;
   const double radii[] = {0.02, 0.05, 0.1, 0.2, 0.5, 1.0};
-  const double epsilon_over_split[] = {0.0, 0.01664, 0.05, 0.10, 0.20};
+  const double epsilon_over_split[] = {0.0, 0.008, 0.016637952, 0.025, 0.05, 0.10, 0.20};
 
   for (const double epsilon_ratio : epsilon_over_split) {
     const double epsilon = epsilon_ratio * split_scale;

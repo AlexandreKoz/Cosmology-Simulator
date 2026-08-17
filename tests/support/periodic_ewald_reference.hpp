@@ -47,9 +47,16 @@ struct PeriodicEwaldOptions {
   // Inclusive integer-mode ranges [-limit_i, +limit_i] on reciprocal
   // {x, y, z}. The (0, 0, 0) mode is always omitted.
   std::array<int, 3> reciprocal_mode_limits{4, 4, 4};
+
+  // Optional Plummer softening for the total periodic force.  The reference
+  // evaluates this independently as the unsoftened Ewald force plus the
+  // absolutely convergent real-space lattice correction
+  // F_Plummer - F_Newton.  Zero preserves the original Ewald reference.
+  double plummer_softening_epsilon = 0.0;
+  std::array<int, 3> softening_correction_image_limits{5, 5, 5};
 };
 
-// Test-only, unsoftened, double-precision periodic acceleration reference.
+// Test-only, double-precision periodic acceleration reference.
 // It does not call or share kernels with the production PM/TreePM solvers.
 //
 // With d_ij = x_j - x_i reduced to a minimum-image representative,

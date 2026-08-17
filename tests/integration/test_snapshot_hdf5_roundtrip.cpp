@@ -216,8 +216,11 @@ void testRoundtripMixedSpeciesSnapshot() {
   cosmosim::core::SimulationState state;
   fillMixedSpeciesState(state);
 
-  const std::filesystem::path snapshot_path =
-      std::filesystem::temp_directory_path() / "cosmosim_snapshot_roundtrip.hdf5";
+  const std::filesystem::path snapshot_directory =
+      std::filesystem::temp_directory_path() / "cosmosim_snapshot_roundtrip_set";
+  std::filesystem::remove_all(snapshot_directory);
+  std::filesystem::create_directories(snapshot_directory);
+  const std::filesystem::path snapshot_path = snapshot_directory / "snap_000.hdf5";
 
 #if COSMOSIM_ENABLE_HDF5
   cosmosim::io::SnapshotWritePayload payload;
@@ -254,7 +257,33 @@ void testRoundtripMixedSpeciesSnapshot() {
   policy.compression_level = 1;
   policy.chunk_particle_count = 2;
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
-  cosmosim::io::validateSnapshotSetHdf5(snapshot_path).requireValid();
+  const auto pending_single = cosmosim::io::inspectSnapshotSet(snapshot_path);
+  assert(!pending_single.complete);
+  assert(pending_single.num_files_per_snapshot == 1U);
+  assert(!pending_single.generation_id.empty());
+  const std::filesystem::path single_integrity_path =
+      std::filesystem::path(snapshot_path.string() + ".member.integrity");
+  assert(std::filesystem::is_regular_file(single_integrity_path));
+  std::filesystem::remove(single_integrity_path);
+  bool missing_integrity_rejected = false;
+  try {
+    cosmosim::io::writeSnapshotSetCompletionMarker(
+        snapshot_directory, pending_single.generation_id, 1U,
+        pending_single.global_part_count, false);
+  } catch (const std::runtime_error&) {
+    missing_integrity_rejected = true;
+  }
+  assert(missing_integrity_rejected);
+  cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
+  assert(std::filesystem::is_regular_file(single_integrity_path));
+  cosmosim::io::writeSnapshotSetCompletionMarker(
+      snapshot_directory, pending_single.generation_id, 1U,
+      pending_single.global_part_count, false);
+  const auto complete_single = cosmosim::io::inspectSnapshotSet(snapshot_directory);
+  assert(complete_single.complete);
+  assert(std::filesystem::is_regular_file(
+      snapshot_directory / (pending_single.generation_id + ".complete")));
+  cosmosim::io::validateSnapshotSetHdf5(snapshot_directory).requireValid();
 
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   assert(inspect_file >= 0);
@@ -491,7 +520,7 @@ void testRoundtripMixedSpeciesSnapshot() {
       legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
       1.0e-30);
 
-  std::filesystem::remove(snapshot_path);
+  std::filesystem::remove_all(snapshot_directory);
 #else
   bool threw = false;
   std::string error_message;

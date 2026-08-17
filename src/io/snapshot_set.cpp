@@ -957,7 +957,6 @@ void writeSnapshotMemberIntegritySidecar(
     const std::filesystem::path& member_path,
     const SnapshotSetMemberInfo& member,
     bool durable_publication) {
-  if (member.num_files_per_snapshot <= 1U) return;
   validateManifestAtom(member.generation_id, "generation id");
   if (member.member_index >= member.num_files_per_snapshot) {
     throw std::invalid_argument("snapshot member integrity sidecar received an invalid member index");
@@ -1053,10 +1052,10 @@ SnapshotSetInspection inspectSnapshotSet(
     }
   }
   const bool counts_match = summed == reference.global;
-  const bool chui_multifile =
-      reference.file_kind == sharedIoContractNames().science_snapshot_file_kind &&
-      reference.num_files > 1U;
-  const bool manifest_ok = !chui_multifile || completionManifestMatches(input_path, headers, options);
+  const bool chui_snapshot_set =
+      reference.file_kind == sharedIoContractNames().science_snapshot_file_kind;
+  const bool manifest_ok =
+      !chui_snapshot_set || completionManifestMatches(input_path, headers, options);
   result.complete = contiguous && counts_match && manifest_ok;
   return result;
 #endif

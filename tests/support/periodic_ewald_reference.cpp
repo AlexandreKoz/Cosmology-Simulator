@@ -158,12 +158,20 @@ void validateInputs(
   if (!std::isfinite(options.alpha_inverse_length) || options.alpha_inverse_length <= 0.0) {
     throw std::invalid_argument("periodic Ewald alpha must be finite and positive");
   }
+  if (!std::isfinite(options.plummer_softening_epsilon) ||
+      options.plummer_softening_epsilon < 0.0) {
+    throw std::invalid_argument(
+        "periodic Ewald Plummer softening must be finite and non-negative");
+  }
   const double alpha_squared = options.alpha_inverse_length * options.alpha_inverse_length;
   if (!std::isfinite(alpha_squared)) {
     throw std::invalid_argument("periodic Ewald alpha squared must be finite");
   }
   validateLimits(options.real_image_limits, "real_image_limits");
   validateLimits(options.reciprocal_mode_limits, "reciprocal_mode_limits");
+  validateLimits(
+      options.softening_correction_image_limits,
+      "softening_correction_image_limits");
 
   for (std::size_t source_index = 0; source_index < sources.size(); ++source_index) {
     requireFiniteVector(sources[source_index].position, "source", source_index);
@@ -290,6 +298,57 @@ std::vector<PeriodicEwaldVector3> periodicEwaldAccelerations(
                 factor * separation_x,
                 factor * separation_y,
                 factor * separation_z);
+          }
+        }
+      }
+
+      if (options.plummer_softening_epsilon > 0.0) {
+        const double epsilon2 =
+            options.plummer_softening_epsilon * options.plummer_softening_epsilon;
+        const std::int64_t correction_limit_x =
+            options.softening_correction_image_limits[0];
+        const std::int64_t correction_limit_y =
+            options.softening_correction_image_limits[1];
+        const std::int64_t correction_limit_z =
+            options.softening_correction_image_limits[2];
+        for (std::int64_t image_x = -correction_limit_x;
+             image_x <= correction_limit_x; ++image_x) {
+          for (std::int64_t image_y = -correction_limit_y;
+               image_y <= correction_limit_y; ++image_y) {
+            for (std::int64_t image_z = -correction_limit_z;
+                 image_z <= correction_limit_z; ++image_z) {
+              if (is_self_source && image_x == 0 && image_y == 0 && image_z == 0) {
+                continue;
+              }
+              const double separation_x =
+                  displacement.x + static_cast<double>(image_x) * box.length_x;
+              const double separation_y =
+                  displacement.y + static_cast<double>(image_y) * box.length_y;
+              const double separation_z =
+                  displacement.z + static_cast<double>(image_z) * box.length_z;
+              const double radius_squared = separation_x * separation_x +
+                  separation_y * separation_y + separation_z * separation_z;
+              if (radius_squared == 0.0) {
+                throw std::invalid_argument(
+                    "periodic softened Ewald correction encountered an exactly coincident distinct source-target pair");
+              }
+              if (!std::isfinite(radius_squared)) {
+                throw std::overflow_error(
+                    "periodic softened Ewald correction separation overflowed");
+              }
+              const double radius = std::sqrt(radius_squared);
+              const double newton_inv_r3 = 1.0 / (radius_squared * radius);
+              const double softened_radius_squared = radius_squared + epsilon2;
+              const double plummer_inv_r3 = 1.0 /
+                  (softened_radius_squared * std::sqrt(softened_radius_squared));
+              const double correction_factor =
+                  options.gravitational_constant * source.mass *
+                  (plummer_inv_r3 - newton_inv_r3);
+              acceleration.add(
+                  correction_factor * separation_x,
+                  correction_factor * separation_y,
+                  correction_factor * separation_z);
+            }
           }
         }
       }

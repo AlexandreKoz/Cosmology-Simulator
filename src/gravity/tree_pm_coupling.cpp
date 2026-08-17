@@ -3194,7 +3194,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const double previous_acceleration_magnitude_code = previous_acceleration_available
             ? accumulator.previous_acceleration_magnitude_code[batch_begin + batch_slot]
             : 0.0;
-        const std::vector<int> target_peers = top_level_domain_hierarchy.ownersWithinCutoff(
+        const std::vector<int> target_peers = top_level_domain_hierarchy->ownersWithinCutoff(
             px, py, pz, cutoff_radius_comoving, box_lengths, mpi_world_rank);
         if (sparse_peer_graph->outgoing_peers.size() > target_peers.size()) {
           m_last_residual_stats.remote_pairs_pruned_by_bounds +=

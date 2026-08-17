@@ -670,6 +670,13 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
   assert(profile.actual_node_count == solver.nodes().size());
   assert(profile.node_capacity_high_water >= profile.actual_node_count);
 
+  const std::uint64_t stable_node_capacity = profile.node_capacity_high_water;
+  for (int rebuild = 0; rebuild < 8; ++rebuild) {
+    solver.build(x, y, z, mass, options, &profile);
+    assert(profile.actual_node_count == solver.nodes().size());
+    assert(profile.node_capacity_high_water == stable_node_capacity);
+  }
+
   const auto estimate = cosmosim::gravity::estimateGravityMemory({
       .local_source_count = n,
       .local_target_count = n,

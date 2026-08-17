@@ -399,15 +399,16 @@ void TreeGravitySolver::build(
   const std::size_t structural_estimate = leaf_estimate > ((std::numeric_limits<std::size_t>::max() - 1U) / 2U)
       ? pos_x_comoving.size()
       : 1U + 2U * leaf_estimate;
-  std::size_t reserve_nodes = std::max<std::size_t>(1U, structural_estimate);
-  if (m_node_capacity_high_water > 0U) {
-    const std::size_t headroom = m_node_capacity_high_water / 8U + 8U;
-    const std::size_t prior_with_headroom = m_node_capacity_high_water >
-            std::numeric_limits<std::size_t>::max() - headroom
-        ? m_node_capacity_high_water
-        : m_node_capacity_high_water + headroom;
-    reserve_nodes = std::max(reserve_nodes, prior_with_headroom);
-  }
+  // `m_nodes.clear()` deliberately retains vector capacity between rebuilds.
+  // Re-reserving the previous *capacity plus headroom* on every build creates
+  // an artificial geometric ratchet even when the topology is unchanged
+  // (a two-particle tree could eventually exhaust memory after enough
+  // timesteps).  Reuse the observed retained capacity as-is; vector growth
+  // during an actually larger/adversarial build remains the correctness and
+  // headroom mechanism.
+  const std::size_t reserve_nodes = std::max(
+      std::max<std::size_t>(1U, structural_estimate),
+      m_node_capacity_high_water);
   m_nodes.reserve(reserve_nodes, options.multipole_order == TreeMultipoleOrder::kQuadrupole);
   const auto topology_start = std::chrono::steady_clock::now();
   const TreeLocalIndex root_index = buildNodeRecursive(

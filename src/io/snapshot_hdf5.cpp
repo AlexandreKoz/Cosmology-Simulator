@@ -27,6 +27,7 @@
 #include "io/internal/snapshot_set_internal.hpp"
 #include "io/internal/transactional_file.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "core/internal/sha256.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -1004,6 +1005,17 @@ void writeScienceSnapshotHdf5(
   if (member.member_index >= member.num_files_per_snapshot) {
     throw std::invalid_argument("snapshot writer: member index is outside snapshot set");
   }
+  if (member.generation_id.empty()) {
+    if (member.num_files_per_snapshot != 1U) {
+      throw std::invalid_argument(
+          "snapshot writer: multifile output requires one shared non-empty generation id");
+    }
+    std::string generation_material = output_path.filename().string();
+    generation_material += "\n" + payload.provenance.config_hash_hex;
+    generation_material += "\n" + std::to_string(state.metadata.scale_factor);
+    const std::string generation_hash = core::internal::sha256Hex(generation_material);
+    member.generation_id = "snapshot_" + generation_hash.substr(0U, 16U);
+  }
   const std::array<std::uint64_t, 6> global_count_by_type =
       member.has_global_part_count ? member.global_part_count : count_by_type;
   if (member.num_files_per_snapshot > 1U && !member.has_global_part_count) {
@@ -1614,10 +1626,8 @@ void writeScienceSnapshotHdf5(
   }
   }  // close all HDF5 identifiers before filesystem publication
   transaction.publish();
-  if (member.num_files_per_snapshot > 1U) {
-    internal::writeSnapshotMemberIntegritySidecar(
-        output_path, member, policy.durable_publication);
-  }
+  internal::writeSnapshotMemberIntegritySidecar(
+      output_path, member, policy.durable_publication);
 #endif
 }
 
