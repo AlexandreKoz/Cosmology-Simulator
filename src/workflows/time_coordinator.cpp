@@ -332,11 +332,11 @@ struct LocalGasCellCflMetadata {
         geometry.dz_stored * length_to_physical};
     physics::MetalDiffusionVelocityGradient velocity_gradient;
     bool gradient_valid = true;
-    for (int component = 0; component < 3; ++component) {
-      for (int axis = 0; axis < 3; ++axis) {
+    for (std::size_t component = 0; component < velocity_fields.size(); ++component) {
+      for (std::size_t axis = 0; axis < spacing_phys_code.size(); ++axis) {
         velocity_gradient.grad[component][axis] =
             internal::starFormationDerivativeAtCell(
-                velocity_fields[component], geometry, axis,
+                velocity_fields[component], geometry, static_cast<int>(axis),
                 spacing_phys_code[axis], cell_index);
         gradient_valid = gradient_valid &&
             std::isfinite(velocity_gradient.grad[component][axis]);
@@ -417,6 +417,7 @@ void updateAdaptiveTimeBinsFromView(
     core::HierarchicalTimeBinScheduler& scheduler,
     const core::IntegratorState& integrator_state,
     const core::SimulationConfig& config,
+    const physics::EffectiveMultiphaseEosTable* effective_eos_table,
     SchedulerElementFamily element_family,
     std::span<const std::uint32_t> requested_elements,
     bool update_all_elements) {
@@ -459,18 +460,13 @@ void updateAdaptiveTimeBinsFromView(
       config.units.mass_unit,
       config.units.velocity_unit);
   const double newton_g_code = newtonGCodeFromUnits(runtime_units);
-  std::optional<physics::EffectiveMultiphaseEosTable> effective_eos_table;
-  if (config.physics.enable_star_formation &&
-      config.physics.star_formation_model ==
-          core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
-    effective_eos_table.emplace(
-        physics::makeEffectiveMultiphaseEosConfig(config.physics),
-        runtime_units,
-        physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
-  }
   const double gravity_scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
   std::optional<double> cosmology_dt;
-  if (integrator_state.current_scale_factor > 0.0 && config.cosmology.hubble_param > 0.0) {
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  if (mode_policy.cosmological_comoving_frame &&
+      config.units.coordinate_frame == core::CoordinateFrame::kComoving &&
+      integrator_state.current_scale_factor > 0.0 &&
+      config.cosmology.hubble_param > 0.0) {
     core::CosmologyBackgroundConfig background_config;
     background_config.hubble_param = config.cosmology.hubble_param;
     background_config.omega_matter = config.cosmology.omega_matter;
@@ -499,12 +495,16 @@ void updateAdaptiveTimeBinsFromView(
     }
     if (config.physics.star_formation_model ==
         core::StarFormationModelKind::kLegacySchmidtThreshold) {
-      if (stored_density < config.physics.sf_density_threshold_code ||
+      const double scale_factor = std::max(integrator_state.current_scale_factor, 1.0e-12);
+      const double physical_density = config.units.coordinate_frame == core::CoordinateFrame::kComoving
+          ? stored_density / (scale_factor * scale_factor * scale_factor)
+          : stored_density;
+      if (physical_density < config.physics.sf_density_threshold_code ||
           temperature > config.physics.sf_temperature_threshold_k) {
         return std::nullopt;
       }
       const double t_ff_code = std::sqrt(3.0 * core::constants::k_pi /
-          (32.0 * newton_g_code * std::max(stored_density, 1.0e-30)));
+          (32.0 * newton_g_code * std::max(physical_density, 1.0e-30)));
       return std::max(
           1.0e-12,
           config.numerics.source_max_fractional_change * t_ff_code /
@@ -517,7 +517,7 @@ void updateAdaptiveTimeBinsFromView(
         : stored_density;
     if (config.physics.star_formation_model ==
         core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
-      if (!effective_eos_table.has_value()) return std::nullopt;
+      if (effective_eos_table == nullptr) return std::nullopt;
       const auto equilibrium = effective_eos_table->lookup(physical_density);
       if (!equilibrium.above_threshold || !equilibrium.valid ||
           equilibrium.entry.cold_mass_fraction <= 0.0) {
@@ -561,28 +561,47 @@ void updateAdaptiveTimeBinsFromView(
         config.physics.sf_epsilon_ff;
     return std::max(1.0e-12, dt_limit);
   };
+  const std::size_t bh_count = view.particles.black_hole_particle_index.size();
+  if (view.particles.black_hole_subgrid_mass_code.size() != bh_count ||
+      view.particles.black_hole_accretion_rate_code.size() != bh_count) {
+    throw std::invalid_argument("black-hole timestep criteria view has mismatched extents");
+  }
+  std::vector<std::size_t> bh_row_by_particle(
+      particle_count, std::numeric_limits<std::size_t>::max());
+  if (config.physics.enable_black_hole_agn) {
+    for (std::size_t bh_index = 0; bh_index < bh_count; ++bh_index) {
+      const std::uint32_t particle_index =
+          view.particles.black_hole_particle_index[bh_index];
+      if (particle_index >= particle_count) {
+        throw std::invalid_argument(
+            "black-hole sidecar references a particle row outside the particle extent");
+      }
+      if (bh_row_by_particle[particle_index] !=
+          std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(
+            "black-hole sidecar contains duplicate particle-row ownership");
+      }
+      bh_row_by_particle[particle_index] = bh_index;
+    }
+  }
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
     if (!config.physics.enable_black_hole_agn || particle_index >= view.particles.species_tag.size() ||
         view.particles.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
       return std::nullopt;
     }
-    const std::size_t bh_count = view.particles.black_hole_particle_index.size();
-    if (view.particles.black_hole_subgrid_mass_code.size() != bh_count ||
-        view.particles.black_hole_accretion_rate_code.size() != bh_count) {
-      throw std::invalid_argument("black-hole timestep criteria view has mismatched extents");
+    const std::size_t bh_index = bh_row_by_particle[particle_index];
+    if (bh_index == std::numeric_limits<std::size_t>::max()) {
+      return std::nullopt;
     }
-    for (std::size_t bh_index = 0; bh_index < bh_count; ++bh_index) {
-      if (view.particles.black_hole_particle_index[bh_index] != particle_index) {
-        continue;
-      }
-      const double mass = std::max(view.particles.black_hole_subgrid_mass_code[bh_index], 1.0e-30);
-      const double mdot = std::max(view.particles.black_hole_accretion_rate_code[bh_index], 0.0);
-      if (mdot <= 0.0) {
-        return std::nullopt;
-      }
-      return std::max(1.0e-12, config.numerics.source_max_fractional_change * mass / mdot);
+    const double mass = std::max(
+        view.particles.black_hole_subgrid_mass_code[bh_index], 1.0e-30);
+    const double mdot = std::max(
+        view.particles.black_hole_accretion_rate_code[bh_index], 0.0);
+    if (mdot <= 0.0) {
+      return std::nullopt;
     }
-    return std::nullopt;
+    return std::max(
+        1.0e-12, config.numerics.source_max_fractional_change * mass / mdot);
   };
   const std::size_t expected_element_count =
       element_family == SchedulerElementFamily::kParticles ? particle_count : cell_count;
@@ -622,6 +641,8 @@ void updateAdaptiveTimeBinsFromView(
               view.gas_cells.cell_width_z_code[cell_index]},
           .velocity_axis_code = {vx, vy, vz},
           .sound_speed_code = std::max(view.gas_cells.sound_speed_code[cell_index], 0.0),
+          .coordinate_frame = config.units.coordinate_frame,
+          .scale_factor = gravity_scale_factor,
       };
       const double cfl_dt =
           core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
@@ -707,6 +728,7 @@ void updateAdaptiveTimeBinFamilies(
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const core::IntegratorState& integrator_state,
     const core::SimulationConfig& config,
+    const physics::EffectiveMultiphaseEosTable* effective_eos_table,
     std::span<const double> particle_accel_x,
     std::span<const double> particle_accel_y,
     std::span<const double> particle_accel_z,
@@ -733,6 +755,7 @@ void updateAdaptiveTimeBinFamilies(
       particle_scheduler,
       integrator_state,
       config,
+      effective_eos_table,
       SchedulerElementFamily::kParticles,
       active_particle_indices,
       update_all_elements);
@@ -741,6 +764,7 @@ void updateAdaptiveTimeBinFamilies(
       gas_cell_scheduler,
       integrator_state,
       config,
+      effective_eos_table,
       SchedulerElementFamily::kGasCells,
       active_cell_indices,
       update_all_elements);
@@ -1211,12 +1235,24 @@ void TimeCoordinator::updateAdaptiveTimeBins(
     std::span<const std::uint32_t> active_particle_indices,
     std::span<const std::uint32_t> active_cell_indices,
     bool update_all_elements) {
+  if (config.physics.enable_star_formation &&
+      config.physics.star_formation_model ==
+          core::StarFormationModelKind::kEffectiveMultiphaseTngLike &&
+      m_effective_eos_table == nullptr) {
+    const core::UnitSystem runtime_units = core::makeUnitSystem(
+        config.units.length_unit, config.units.mass_unit, config.units.velocity_unit);
+    m_effective_eos_table = std::make_shared<physics::EffectiveMultiphaseEosTable>(
+        physics::makeEffectiveMultiphaseEosConfig(config.physics),
+        runtime_units,
+        physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
+  }
   updateAdaptiveTimeBinFamilies(
       state,
       particle_scheduler,
       gas_cell_scheduler,
       integrator_state,
       config,
+      m_effective_eos_table.get(),
       particle_accel_x,
       particle_accel_y,
       particle_accel_z,

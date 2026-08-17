@@ -1084,6 +1084,8 @@ struct ConfigKeySpec {
       {"numerics.cosmology_max_delta_ln_a", "1.0e-2"},
       {"numerics.cosmology_max_hubble_time_fraction", "1.0e-2"},
       {"numerics.source_max_fractional_change", "0.1"},
+      {"numerics.hydro_density_floor_code", "1.0e-10"},
+      {"numerics.hydro_pressure_floor_code", "1.0e-10"},
       {"numerics.max_global_steps", "1024"},
       {"numerics.hierarchical_max_rung", "0"},
       {"numerics.amr_max_level", "10"},
@@ -1187,6 +1189,7 @@ struct ConfigKeySpec {
       {"physics.metal_diffusion_coefficient_floor_code", "0.0"},
       {"physics.metal_diffusion_coefficient_ceiling_code", "1.0e30"},
       {"physics.enable_black_hole_agn", "false"},
+      {"physics.bh_enable_seeding", "false"},
       {"physics.bh_seed_halo_mass_threshold_code", "1.0e3"},
       {"physics.bh_seed_mass_code", "1.0"},
       {"physics.bh_seed_max_per_cell", "1"},
@@ -1322,6 +1325,8 @@ void validateConfig(const SimulationConfig& config) {
       {config.numerics.cosmology_max_delta_ln_a, "numerics.cosmology_max_delta_ln_a"},
       {config.numerics.cosmology_max_hubble_time_fraction, "numerics.cosmology_max_hubble_time_fraction"},
       {config.numerics.source_max_fractional_change, "numerics.source_max_fractional_change"},
+      {config.numerics.hydro_density_floor_code, "numerics.hydro_density_floor_code"},
+      {config.numerics.hydro_pressure_floor_code, "numerics.hydro_pressure_floor_code"},
       {config.numerics.gravity_softening_kpc_comoving, "numerics.gravity_softening"},
       {config.numerics.gravity_softening_gas_kpc_comoving, "numerics.gravity_softening_gas"},
       {config.numerics.gravity_softening_dark_matter_kpc_comoving, "numerics.gravity_softening_dark_matter"},
@@ -1422,6 +1427,10 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.source_max_fractional_change <= 0.0 ||
       config.numerics.source_max_fractional_change > 1.0) {
     throw ConfigError("numerics cosmology/source timestep limits must be positive; source_max_fractional_change must be <= 1");
+  }
+  if (config.numerics.hydro_density_floor_code < 0.0 ||
+      config.numerics.hydro_pressure_floor_code < 0.0) {
+    throw ConfigError("numerics hydro floors must be finite and non-negative code-unit values");
   }
   if (config.numerics.max_global_steps <= 0) {
     throw ConfigError("numerics.max_global_steps must be > 0");
@@ -1551,6 +1560,10 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.physics.enable_black_hole_agn && !config.physics.enable_feedback) {
     throw ConfigError("physics.enable_black_hole_agn requires physics.enable_feedback=true");
+  }
+  if (config.physics.bh_enable_seeding && !config.physics.enable_black_hole_agn) {
+    throw ConfigError(
+        "physics.bh_enable_seeding=true requires physics.enable_black_hole_agn=true");
   }
   if (config.physics.enable_cooling &&
       config.physics.cooling_model == CoolingModel::kPrimordialMetalLine &&
@@ -2094,6 +2107,8 @@ void validateConfig(const SimulationConfig& config) {
   stream << "cosmology_max_delta_ln_a = " << frozen.config.numerics.cosmology_max_delta_ln_a << '\n';
   stream << "cosmology_max_hubble_time_fraction = " << frozen.config.numerics.cosmology_max_hubble_time_fraction << '\n';
   stream << "source_max_fractional_change = " << frozen.config.numerics.source_max_fractional_change << '\n';
+  stream << "hydro_density_floor_code = " << frozen.config.numerics.hydro_density_floor_code << '\n';
+  stream << "hydro_pressure_floor_code = " << frozen.config.numerics.hydro_pressure_floor_code << '\n';
   stream << "max_global_steps = " << frozen.config.numerics.max_global_steps << '\n';
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
@@ -2247,6 +2262,7 @@ void validateConfig(const SimulationConfig& config) {
          << frozen.config.physics.metal_diffusion_coefficient_ceiling_code << '\n';
   stream << "enable_black_hole_agn = " << (frozen.config.physics.enable_black_hole_agn ? "true" : "false")
          << '\n';
+  stream << "bh_enable_seeding = " << (frozen.config.physics.bh_enable_seeding ? "true" : "false") << '\n';
   stream << "bh_seed_halo_mass_threshold_code = " << frozen.config.physics.bh_seed_halo_mass_threshold_code
          << '\n';
   stream << "bh_seed_mass_code = " << frozen.config.physics.bh_seed_mass_code << '\n';
@@ -2696,6 +2712,12 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.source_max_fractional_change = parseFloating(
       requireString(entries, consumed, "numerics.source_max_fractional_change", defaultFor("numerics.source_max_fractional_change")),
       "numerics.source_max_fractional_change");
+  frozen.config.numerics.hydro_density_floor_code = parseFloating(
+      requireString(entries, consumed, "numerics.hydro_density_floor_code", defaultFor("numerics.hydro_density_floor_code")),
+      "numerics.hydro_density_floor_code");
+  frozen.config.numerics.hydro_pressure_floor_code = parseFloating(
+      requireString(entries, consumed, "numerics.hydro_pressure_floor_code", defaultFor("numerics.hydro_pressure_floor_code")),
+      "numerics.hydro_pressure_floor_code");
   frozen.config.numerics.max_global_steps = parseNumber<int>(
       requireString(entries, consumed, "numerics.max_global_steps", "1024"),
       "numerics.max_global_steps");
@@ -3045,6 +3067,9 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.physics.enable_black_hole_agn = parseBool(
       requireString(entries, consumed, "physics.enable_black_hole_agn", "false"),
       "physics.enable_black_hole_agn");
+  frozen.config.physics.bh_enable_seeding = parseBool(
+      requireString(entries, consumed, "physics.bh_enable_seeding", "false"),
+      "physics.bh_enable_seeding");
   frozen.config.physics.bh_seed_halo_mass_threshold_code = parseFloating(
       requireString(entries, consumed, "physics.bh_seed_halo_mass_threshold_code", "1.0e3"),
       "physics.bh_seed_halo_mass_threshold_code");

@@ -245,9 +245,18 @@ struct HydroActiveSetView {
 
 struct HydroUpdateContext {
   double dt_code = 0.0;
+  // Explicit source/transport interval. The scalar scale_factor/hubble_rate
+  // are the evaluation epoch (normally the interval midpoint).
+  double time_begin_code = 0.0;
+  double time_end_code = 0.0;
+  double scale_factor_begin = 1.0;
   double scale_factor = 1.0;
+  double scale_factor_end = 1.0;
   // H(a) in inverse code time, owned by the cosmological timeline.
+  double hubble_rate_begin_code = 0.0;
   double hubble_rate_code = 0.0;
+  double hubble_rate_end_code = 0.0;
+  bool comoving_coordinates = false;
 };
 
 struct HydroThermodynamicClosureResult {
@@ -276,6 +285,9 @@ struct HydroSourceContext {
   std::span<const double> gravity_accel_x_peculiar;
   std::span<const double> gravity_accel_y_peculiar;
   std::span<const double> gravity_accel_z_peculiar;
+  // Physical mass density in g cm^-3 at the source-evaluation epoch.
+  // Cooling must not infer this quantity from a comoving code-density lane.
+  std::span<const double> mass_density_physical_cgs;
   std::span<const double> hydrogen_number_density_cgs;
   std::span<const double> metallicity_mass_fraction;
   std::span<const double> temperature_k;

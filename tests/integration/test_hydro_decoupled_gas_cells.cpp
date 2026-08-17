@@ -66,6 +66,15 @@ cosmosim::core::SimulationState makeDecoupledGasState() {
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 3;
   state.patches.owning_rank[0] = 0;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 3.0;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 3;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
 
   state.particle_sidecar.particle_id = {5001, 7001};
   state.particle_sidecar.species_tag = {

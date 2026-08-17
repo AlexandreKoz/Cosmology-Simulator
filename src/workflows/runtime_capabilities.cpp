@@ -178,6 +178,42 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
        .compiled = false, .dependency_available = false, .runtime_available = false,
        .active = false, .detail = "Distributed IC ingestion requires MPI and HDF5 in this build."},
 #endif
+      {.name = "production_hydro_cooling", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = config.physics.enable_cooling, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.physics.enable_cooling,
+       .implementation_maturity = RuntimeImplementationMaturity::kProductionScalable,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .scalability = RuntimeScalabilityClass::kLight,
+       .detail = "ReferenceWorkflow attaches the configured cooling/heating integrator to fixed-grid and production AMR hydro; physical density and hydrogen number density are derived explicitly from the stored density frame and unit system."},
+      {.name = "distributed_gas_cell_hydro_ghosting",
+#if COSMOSIM_ENABLE_MPI
+       .status = RuntimeCapabilityStatus::kProvisional,
+       .requested = config.parallel.mpi_ranks_expected > 1, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.parallel.mpi_ranks_expected > 1,
+       .implementation_maturity = RuntimeImplementationMaturity::kProductionScalable,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .scalability = RuntimeScalabilityClass::kModerate,
+       .detail = "Production distributed hydro uses the gas-cell protocol keyed by stable gas_cell_id, ownership/decomposition generation, and hydro synchronization epoch; the legacy fixed-Cartesian multi-rank fallback is rejected."},
+#else
+       .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.parallel.mpi_ranks_expected > 1, .compiled = false,
+       .dependency_available = false, .runtime_available = false, .active = false,
+       .detail = "Distributed gas-cell hydro ghosting requires an MPI-enabled build."},
+#endif
+      {.name = "black_hole_seeding_candidate_provider",
+       .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.physics.bh_enable_seeding, .compiled = false,
+       .dependency_available = false, .runtime_available = false, .active = false,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .detail = "ReferenceWorkflow has no authoritative halo/candidate provider for black-hole seeding and fails closed when bh_enable_seeding=true; pre-seeded black-hole accretion/feedback remains available independently."},
+      {.name = "distributed_metal_diffusion",
+       .status = RuntimeCapabilityStatus::kUnsupported,
+       .requested = config.physics.enable_metal_diffusion && config.parallel.mpi_ranks_expected > 1,
+       .compiled = false, .dependency_available = false, .runtime_available = false,
+       .active = false, .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .detail = "Local metal diffusion includes same-level and coarse/fine AMR interfaces, but multi-rank diffusion fails closed until directed remote-interface flux exchange and equal/opposite commit semantics are implemented."},
       {.name = "rank_remappable_restart", .status = RuntimeCapabilityStatus::kUnsupported,
        .requested = false, .compiled = false, .dependency_available = true,
        .runtime_available = false, .active = false,
@@ -277,6 +313,20 @@ void validateRequestedRuntimeCapabilities(
     throw std::invalid_argument(
         "runtime capability production_hierarchical_local_timestep is unsupported: " +
         report.require("production_hierarchical_local_timestep").detail);
+  }
+  if (config.physics.bh_enable_seeding &&
+      report.require("black_hole_seeding_candidate_provider").status !=
+          RuntimeCapabilityStatus::kSupported) {
+    throw std::invalid_argument(
+        "runtime capability black_hole_seeding_candidate_provider is unsupported: " +
+        report.require("black_hole_seeding_candidate_provider").detail);
+  }
+  if (config.physics.enable_metal_diffusion && config.parallel.mpi_ranks_expected > 1 &&
+      report.require("distributed_metal_diffusion").status !=
+          RuntimeCapabilityStatus::kSupported) {
+    throw std::invalid_argument(
+        "runtime capability distributed_metal_diffusion is unsupported: " +
+        report.require("distributed_metal_diffusion").detail);
   }
   if (config.numerics.gravity_solver == core::GravitySolver::kTreePm) {
     gravity::requireTreePmSupportOrThrow(

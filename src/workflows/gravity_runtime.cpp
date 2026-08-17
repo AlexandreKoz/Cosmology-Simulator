@@ -800,7 +800,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kParticleGravitySource, RuntimeResourceAccessMode::kRead},
-         {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kHydroConservedState, RuntimeResourceAccessMode::kReadWrite},
+         {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kSchedulerTruth, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kWrite},
@@ -820,6 +821,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_cell_force_cache_valid.size() != cell_count;
     const bool source_cache_generation_changed =
         m_force_cache_source_generation != context.state.gravitySourceGeneration();
+
     if (particle_cache_generation_changed) {
       // Dense-row identity is not a migration payload. A row is compatible only
       // after its authoritative source was refreshed in the current generation.
@@ -1691,6 +1693,44 @@ class GravityRuntimeImpl final : public GravityRuntime {
         hubble_drag_factor * state.particles.velocity_z_peculiar[particle_index] + kick_factor_code * accel_z_code;
   }
 
+  static void applyGasCellKdkKick(
+      core::SimulationState& state,
+      std::uint32_t cell_index,
+      double accel_x_code,
+      double accel_y_code,
+      double accel_z_code,
+      double kick_factor_code,
+      double hubble_drag_factor) {
+    if (cell_index >= state.gas_cells.size()) {
+      throw std::out_of_range("gas KDK kick cell index is outside GasCellSidecar");
+    }
+    if (!std::isfinite(hubble_drag_factor) || hubble_drag_factor <= 0.0) {
+      throw std::invalid_argument("gas KDK kick requires finite positive Hubble drag factor");
+    }
+    state.gas_cells.velocity_x_peculiar[cell_index] =
+        hubble_drag_factor * state.gas_cells.velocity_x_peculiar[cell_index] +
+        kick_factor_code * accel_x_code;
+    state.gas_cells.velocity_y_peculiar[cell_index] =
+        hubble_drag_factor * state.gas_cells.velocity_y_peculiar[cell_index] +
+        kick_factor_code * accel_y_code;
+    state.gas_cells.velocity_z_peculiar[cell_index] =
+        hubble_drag_factor * state.gas_cells.velocity_z_peculiar[cell_index] +
+        kick_factor_code * accel_z_code;
+
+    // For gamma=5/3, homogeneous adiabatic expansion gives
+    // specific internal energy u_int propto a^-2. The timeline drag factor is
+    // a_begin/a_end for this half-kick, so thermal state scales as drag^2.
+    // Density/mass are unchanged by a source kick; the finite-volume transport
+    // stage owns those conserved quantities.
+    constexpr double gamma_minus_one = 2.0 / 3.0;
+    const double thermal_drag =
+        std::pow(hubble_drag_factor, 3.0 * gamma_minus_one);
+    state.gas_cells.internal_energy_code[cell_index] *= thermal_drag;
+    state.gas_cells.pressure_code[cell_index] *= thermal_drag;
+    state.gas_cells.temperature_code[cell_index] *= thermal_drag;
+    state.gas_cells.sound_speed_code[cell_index] *= std::sqrt(thermal_drag);
+  }
+
   void applyActiveKickFromFreshForce(core::StepContext& context) {
     const double kick_factor = kickFactorForStage(context);
     const double hubble_drag = hubbleDragFactorForStage(context);
@@ -1712,6 +1752,30 @@ class GravityRuntimeImpl final : public GravityRuntime {
           m_active_accel_z[static_cast<std::size_t>(active_slot)],
           kick_factor,
           hubble_drag);
+    }
+    for (const std::uint32_t cell_index : context.active_set.cell_indices) {
+      if (cell_index >= m_active_slot_by_cell.size()) {
+        throw std::out_of_range("gas KDK fresh-force cell index is outside the active slot map");
+      }
+      const int active_slot = m_active_slot_by_cell[cell_index];
+      if (active_slot < 0) {
+        continue;
+      }
+      applyGasCellKdkKick(
+          context.state,
+          cell_index,
+          m_active_accel_x[static_cast<std::size_t>(active_slot)],
+          m_active_accel_y[static_cast<std::size_t>(active_slot)],
+          m_active_accel_z[static_cast<std::size_t>(active_slot)],
+          kick_factor,
+          hubble_drag);
+    }
+    if (context.stage == core::IntegrationStage::kGravityKickPost &&
+        !context.active_set.cell_indices.empty()) {
+      internal::synchronizeParentParticleCompatibilityMirrors(
+          context.state,
+          static_cast<std::uint32_t>(std::max(m_services.mpi_context.worldRank(), 0)),
+          "gravity post-kick gas compatibility mirror");
     }
   }
 
@@ -1760,6 +1824,47 @@ class GravityRuntimeImpl final : public GravityRuntime {
           m_particle_accel_z[particle_index],
           kick_factor,
           hubble_drag);
+    }
+    if (m_cell_accel_x.size() != context.state.cells.size() ||
+        m_cell_accel_y.size() != context.state.cells.size() ||
+        m_cell_accel_z.size() != context.state.cells.size() ||
+        m_cell_force_cache_valid.size() != context.state.cells.size()) {
+      throw std::runtime_error(
+          "gravity cached kick rejected an incomplete gas-cell acceleration cache");
+    }
+    const auto authoritative_rows = internal::selectAuthoritativeGravitySourceRows(
+        context.state,
+        local_rank,
+        static_cast<std::uint32_t>(std::max(m_services.mpi_context.worldSize(), 1)),
+        "gas KDK cached kick");
+    std::vector<std::uint8_t> is_owned_leaf(context.state.cells.size(), 0U);
+    for (const std::uint32_t cell_row : authoritative_rows.gas_cell_rows) {
+      is_owned_leaf[cell_row] = 1U;
+    }
+    for (const std::uint32_t cell_index : context.active_set.cell_indices) {
+      if (cell_index >= context.state.cells.size()) {
+        throw std::out_of_range("gas KDK cached-force cell index is outside CellSoa");
+      }
+      if (is_owned_leaf[cell_index] == 0U) {
+        continue;
+      }
+      if (m_cell_force_cache_valid[cell_index] == 0U) {
+        throw std::runtime_error(
+            "gas KDK cached kick rejected an invalid per-cell force row");
+      }
+      applyGasCellKdkKick(
+          context.state,
+          cell_index,
+          m_cell_accel_x[cell_index],
+          m_cell_accel_y[cell_index],
+          m_cell_accel_z[cell_index],
+          kick_factor,
+          hubble_drag);
+    }
+    if (context.stage == core::IntegrationStage::kGravityKickPost &&
+        !context.active_set.cell_indices.empty()) {
+      internal::synchronizeParentParticleCompatibilityMirrors(
+          context.state, local_rank, "gravity post-kick gas compatibility mirror");
     }
   }
 

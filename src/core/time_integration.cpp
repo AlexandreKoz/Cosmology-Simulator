@@ -2417,11 +2417,17 @@ double computeDirectionalCflTimeStep(const DirectionalCflTimeStepInput& input, d
   if (!std::isfinite(input.sound_speed_code)) {
     throw std::invalid_argument("sound_speed_code must be finite");
   }
+  if (!std::isfinite(input.scale_factor) || input.scale_factor <= 0.0) {
+    throw std::invalid_argument("directional CFL scale_factor must be finite and positive");
+  }
+  const double length_scale = input.coordinate_frame == CoordinateFrame::kComoving
+      ? input.scale_factor
+      : 1.0;
   const double sound_speed = std::max(input.sound_speed_code, 0.0);
   double dt = std::numeric_limits<double>::infinity();
   for (std::size_t axis = 0; axis < input.cell_width_axis_code.size(); ++axis) {
-    const double cell_width = input.cell_width_axis_code[axis];
-    if (cell_width <= 0.0 || !std::isfinite(cell_width)) {
+    const double cell_width_stored = input.cell_width_axis_code[axis];
+    if (cell_width_stored <= 0.0 || !std::isfinite(cell_width_stored)) {
       throw std::invalid_argument("cell_width_axis_code entries must be finite and positive");
     }
     if (!std::isfinite(input.velocity_axis_code[axis])) {
@@ -2429,7 +2435,8 @@ double computeDirectionalCflTimeStep(const DirectionalCflTimeStepInput& input, d
     }
     const double denom = std::abs(input.velocity_axis_code[axis]) + sound_speed;
     if (denom > 0.0) {
-      dt = std::min(dt, c_cfl * cell_width / denom);
+      const double crossing_length_code = length_scale * cell_width_stored;
+      dt = std::min(dt, c_cfl * crossing_length_code / denom);
     }
   }
   return dt;
@@ -2456,6 +2463,8 @@ HydroCflDiagnostics makeHydroCflDiagnostics(
   diagnostics.cell_width_axis_code = input.cell_width_axis_code;
   diagnostics.velocity_axis_code = input.velocity_axis_code;
   diagnostics.sound_speed_code = input.sound_speed_code;
+  diagnostics.coordinate_frame = input.coordinate_frame;
+  diagnostics.scale_factor = input.scale_factor;
   diagnostics.proposed_dt_time_code = computeDirectionalCflTimeStep(input, c_cfl);
   diagnostics.safety_factor = diagnostics.accepted_dt_time_code > 0.0
       ? diagnostics.proposed_dt_time_code / diagnostics.accepted_dt_time_code
@@ -2463,10 +2472,13 @@ HydroCflDiagnostics makeHydroCflDiagnostics(
 
   double limiting_dt = std::numeric_limits<double>::infinity();
   const double sound_speed = std::max(input.sound_speed_code, 0.0);
+  const double length_scale = input.coordinate_frame == CoordinateFrame::kComoving
+      ? input.scale_factor
+      : 1.0;
   for (std::size_t axis = 0; axis < input.cell_width_axis_code.size(); ++axis) {
     const double denom = std::abs(input.velocity_axis_code[axis]) + sound_speed;
     const double axis_dt = denom > 0.0
-        ? c_cfl * input.cell_width_axis_code[axis] / denom
+        ? c_cfl * length_scale * input.cell_width_axis_code[axis] / denom
         : std::numeric_limits<double>::infinity();
     if (axis_dt < limiting_dt) {
       limiting_dt = axis_dt;
@@ -2509,6 +2521,9 @@ void assertHydroCflStable(
       << diagnostics.velocity_axis_code[1] << ","
       << diagnostics.velocity_axis_code[2] << ")"
       << "; sound_speed=" << diagnostics.sound_speed_code
+      << "; coordinate_frame="
+      << (diagnostics.coordinate_frame == CoordinateFrame::kComoving ? "comoving" : "physical")
+      << "; scale_factor=" << diagnostics.scale_factor
       << "; cell_width=(" << diagnostics.cell_width_axis_code[0] << ","
       << diagnostics.cell_width_axis_code[1] << ","
       << diagnostics.cell_width_axis_code[2] << ")";

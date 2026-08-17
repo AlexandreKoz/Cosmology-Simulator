@@ -212,7 +212,8 @@ namespace {
         .resources = {read(RuntimeResourceKey::kParticlePosition),
                       readWrite(RuntimeResourceKey::kParticleVelocity),
                       read(RuntimeResourceKey::kParticleGravitySource),
-                      read(RuntimeResourceKey::kHydroConservedState),
+                      readWrite(RuntimeResourceKey::kHydroConservedState),
+                      readWrite(RuntimeResourceKey::kHydroPrimitiveState),
                       read(RuntimeResourceKey::kMigrationOwnership),
                       read(RuntimeResourceKey::kSchedulerTruth),
                       write(RuntimeResourceKey::kGravityAcceleration),
@@ -257,7 +258,7 @@ namespace {
       .module_id = "hydro_amr",
       .schema_version = 1,
       .construction_ordinal = 40,
-      .prerequisites = {"gravity"},
+      .prerequisites = {},
       .incompatibilities = {},
       .stage_tasks = {RuntimeTaskDeclaration{
           .task_id = "hydro_amr.update",
@@ -269,18 +270,13 @@ namespace {
                         readWrite(RuntimeResourceKey::kHydroPrimitiveState),
                         readWrite(RuntimeResourceKey::kAmrPatchState),
                         readWrite(RuntimeResourceKey::kEffectiveIsmThermodynamics),
-                        read(RuntimeResourceKey::kGravityAcceleration),
                         read(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
       }},
       .factory = [inputs, assembly](const RuntimeModuleFactoryContext&) {
-        if (!assembly->gravity) {
-          throw std::logic_error("hydro/AMR factory requires the gravity owner");
-        }
         assembly->hydro_amr = std::shared_ptr<HydroAmrRuntime>(makeHydroAmrRuntime(
             inputs.config,
             inputs.mode_policy,
-            *assembly->gravity,
             inputs.services));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = assembly->hydro_amr;
@@ -320,11 +316,11 @@ namespace {
                         readWrite(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
       }},
-      .factory = [&config = inputs.config, &units = inputs.units,
-                  world_rank = inputs.world_rank,
+      .factory = [&config = inputs.config, &mode_policy = inputs.mode_policy,
+                  &units = inputs.units, world_rank = inputs.world_rank,
                   &mpi_context = inputs.services.mpi_context](const RuntimeModuleFactoryContext&) {
         std::shared_ptr<SourceRuntime> owner(
-            makeSourceRuntime(config, units, world_rank, mpi_context));
+            makeSourceRuntime(config, mode_policy, units, world_rank, mpi_context));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{

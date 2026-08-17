@@ -257,11 +257,15 @@ constexpr double k_geometry_tol = 1.0e-10;
     double pressure_floor,
     double adiabatic_index) {
   const double rho = safeDensity(state, row, density_floor);
-  double pressure = state.gas_cells.pressure_code[row];
-  if (pressure <= pressure_floor) {
-    const double internal_energy = std::max(state.gas_cells.internal_energy_code[row], pressure_floor);
-    pressure = std::max((adiabatic_index - 1.0) * rho * internal_energy, pressure_floor);
-  }
+  const double internal_energy_floor = pressure_floor > 0.0
+      ? pressure_floor / ((adiabatic_index - 1.0) * std::max(rho, 1.0e-30))
+      : 0.0;
+  const double internal_energy = std::max(
+      state.gas_cells.internal_energy_code[row], internal_energy_floor);
+  const double pressure = std::max({
+      state.gas_cells.pressure_code[row],
+      (adiabatic_index - 1.0) * rho * internal_energy,
+      pressure_floor});
   return hydro::HydroPrimitiveState{
       .rho_comoving = rho,
       .vel_x_peculiar = state.gas_cells.velocity_x_peculiar[row],
@@ -1344,6 +1348,7 @@ namespace {
     std::vector<double> gravity_x(conserved_states[patch_index].size(), 0.0);
     std::vector<double> gravity_y(conserved_states[patch_index].size(), 0.0);
     std::vector<double> gravity_z(conserved_states[patch_index].size(), 0.0);
+    std::vector<double> mass_density_physical_cgs(conserved_states[patch_index].size(), 0.0);
     std::vector<double> hydrogen(conserved_states[patch_index].size(), 0.0);
     std::vector<double> metallicity(conserved_states[patch_index].size(), 0.0);
     std::vector<double> temperature(conserved_states[patch_index].size(), 0.0);
@@ -1357,6 +1362,10 @@ namespace {
       }
       if (row < global_source_context.gravity_accel_z_peculiar.size()) {
         gravity_z[local_cell] = global_source_context.gravity_accel_z_peculiar[row];
+      }
+      if (row < global_source_context.mass_density_physical_cgs.size()) {
+        mass_density_physical_cgs[local_cell] =
+            global_source_context.mass_density_physical_cgs[row];
       }
       if (row < global_source_context.hydrogen_number_density_cgs.size()) {
         hydrogen[local_cell] = global_source_context.hydrogen_number_density_cgs[row];
@@ -1373,6 +1382,7 @@ namespace {
         .gravity_accel_x_peculiar = gravity_x,
         .gravity_accel_y_peculiar = gravity_y,
         .gravity_accel_z_peculiar = gravity_z,
+        .mass_density_physical_cgs = mass_density_physical_cgs,
         .hydrogen_number_density_cgs = hydrogen,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
@@ -1606,6 +1616,51 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
     const double fine_start_code = coarse_start_code + static_cast<double>(substep) * fine_dt_code;
     hydro::HydroUpdateContext fine_update = coarse_update;
     fine_update.dt_code = fine_dt_code;
+    fine_update.time_begin_code = fine_start_code;
+    fine_update.time_end_code = fine_start_code + fine_dt_code;
+    const double fraction_begin = static_cast<double>(substep) /
+        static_cast<double>(options.refinement_ratio);
+    const double fraction_end = static_cast<double>(substep + 1U) /
+        static_cast<double>(options.refinement_ratio);
+    const double fraction_mid = 0.5 * (fraction_begin + fraction_end);
+    const auto interpolate = [](double begin, double end, double fraction) {
+      return begin + fraction * (end - begin);
+    };
+    fine_update.scale_factor_begin = interpolate(
+        coarse_update.scale_factor_begin, coarse_update.scale_factor_end, fraction_begin);
+    fine_update.scale_factor_end = interpolate(
+        coarse_update.scale_factor_begin, coarse_update.scale_factor_end, fraction_end);
+    fine_update.scale_factor = interpolate(
+        coarse_update.scale_factor_begin, coarse_update.scale_factor_end, fraction_mid);
+    fine_update.hubble_rate_begin_code = interpolate(
+        coarse_update.hubble_rate_begin_code, coarse_update.hubble_rate_end_code, fraction_begin);
+    fine_update.hubble_rate_end_code = interpolate(
+        coarse_update.hubble_rate_begin_code, coarse_update.hubble_rate_end_code, fraction_end);
+    fine_update.hubble_rate_code = interpolate(
+        coarse_update.hubble_rate_begin_code, coarse_update.hubble_rate_end_code, fraction_mid);
+
+    hydro::HydroSourceContext fine_source_context = global_source_context;
+    fine_source_context.update = fine_update;
+    fine_source_context.redshift = fine_update.scale_factor > 0.0
+        ? std::max(0.0, 1.0 / fine_update.scale_factor - 1.0)
+        : global_source_context.redshift;
+    std::vector<double> fine_mass_density_physical_cgs;
+    std::vector<double> fine_hydrogen_number_density_cgs;
+    if (fine_update.comoving_coordinates &&
+        coarse_update.scale_factor > 0.0 && fine_update.scale_factor > 0.0) {
+      const double density_rescale = std::pow(
+          coarse_update.scale_factor / fine_update.scale_factor, 3.0);
+      fine_mass_density_physical_cgs.assign(
+          global_source_context.mass_density_physical_cgs.begin(),
+          global_source_context.mass_density_physical_cgs.end());
+      fine_hydrogen_number_density_cgs.assign(
+          global_source_context.hydrogen_number_density_cgs.begin(),
+          global_source_context.hydrogen_number_density_cgs.end());
+      for (double& rho : fine_mass_density_physical_cgs) rho *= density_rescale;
+      for (double& n_h : fine_hydrogen_number_density_cgs) n_h *= density_rescale;
+      fine_source_context.mass_density_physical_cgs = fine_mass_density_physical_cgs;
+      fine_source_context.hydrogen_number_density_cgs = fine_hydrogen_number_density_cgs;
+    }
     ProductionAmrHydroOptions fine_options = options;
     fine_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
     fine_options.persist_incomplete_flux_registers = true;
@@ -1620,7 +1675,7 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
     fine_options.ghost_fill_time_code = fine_start_code;
     fine_options.enable_temporal_coarse_to_fine = true;
     const ProductionAmrHydroDiagnostics fine_diag = advanceProductionAmrHydro(
-        state, fine_rows, fine_update, global_source_context, solver, riemann_solver, source_terms, fine_options);
+        state, fine_rows, fine_update, fine_source_context, solver, riemann_solver, source_terms, fine_options);
     accumulateDiagnostics(diagnostics, fine_diag);
     diagnostics.substeps_by_level[static_cast<std::size_t>(max_level)] += 1U;
     diagnostics.subcycled_level_step_count += 1U;

@@ -51,19 +51,30 @@ constexpr std::uint32_t k_invalid_row = std::numeric_limits<std::uint32_t>::max(
     double value,
     std::string* diagnostic,
     const char* axis) {
+  if (coordinates.empty()) {
+    *diagnostic = std::string("empty ") + axis + " coordinate axis";
+    return std::nullopt;
+  }
+  const auto lower = std::lower_bound(coordinates.begin(), coordinates.end(), value);
+  const std::size_t lower_index = static_cast<std::size_t>(
+      std::distance(coordinates.begin(), lower));
   std::optional<std::size_t> match;
-  for (std::size_t index = 0; index < coordinates.size(); ++index) {
+  const std::size_t begin = lower_index > 0U ? lower_index - 1U : 0U;
+  const std::size_t end = std::min(coordinates.size(), lower_index + 2U);
+  for (std::size_t index = begin; index < end; ++index) {
     if (!nearlyEqual(coordinates[index], value)) {
       continue;
     }
     if (match.has_value()) {
-      *diagnostic = std::string("ambiguous ") + axis + " coordinate match while mapping a gas-cell center";
+      *diagnostic = std::string("ambiguous ") + axis +
+          " coordinate match while mapping a gas-cell center";
       return std::nullopt;
     }
     match = index;
   }
   if (!match.has_value()) {
-    *diagnostic = std::string("off-lattice ") + axis + " coordinate while mapping a gas-cell center";
+    *diagnostic = std::string("off-lattice ") + axis +
+        " coordinate while mapping a gas-cell center";
   }
   return match;
 }
@@ -97,17 +108,6 @@ constexpr std::uint32_t k_invalid_row = std::numeric_limits<std::uint32_t>::max(
     }
   }
   return expected;
-}
-
-[[nodiscard]] std::optional<std::size_t> patchIndexById(
-    const cosmosim::core::SimulationState& state,
-    std::uint64_t patch_id) {
-  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
-    if (state.patches.patch_id[patch_index] == patch_id) {
-      return patch_index;
-    }
-  }
-  return std::nullopt;
 }
 
 [[nodiscard]] bool hasExplicitPatchGeometry(
@@ -201,6 +201,11 @@ CartesianGasCellLayoutBuildResult buildCartesianGasCellRowLayout(
     result.diagnostic = "fixed Cartesian hydro layout requires at least one gas cell";
     return result;
   }
+  if (cell_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    result.diagnostic =
+        "fixed Cartesian hydro layout exceeds the uint32 dense-row contract";
+    return result;
+  }
   if (state.cells.center_x_comoving.size() != cell_count ||
       state.cells.center_y_comoving.size() != cell_count ||
       state.cells.center_z_comoving.size() != cell_count) {
@@ -284,6 +289,17 @@ CartesianGasCellLayoutBuildResult buildCartesianGasCellRowLayout(
   result.layout.spec = spec;
   result.layout.dense_row_by_geometry_row.assign(cell_count, k_invalid_row);
   result.layout.geometry_row_by_dense_row.assign(cell_count, k_invalid_row);
+  std::unordered_map<std::uint64_t, std::size_t> patch_index_by_id;
+  patch_index_by_id.reserve(state.patches.size());
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    const auto [it, inserted] = patch_index_by_id.emplace(
+        state.patches.patch_id[patch_index], patch_index);
+    if (!inserted) {
+      result.diagnostic = "PatchSoa contains duplicate stable patch IDs";
+      return result;
+    }
+    (void)it;
+  }
   for (std::uint32_t dense_row = 0; dense_row < cell_count; ++dense_row) {
     const auto* identity = state.gas_cell_identity.findByLocalRow(dense_row);
     if (identity == nullptr || identity->gas_cell_id == 0U) {
@@ -291,12 +307,12 @@ CartesianGasCellLayoutBuildResult buildCartesianGasCellRowLayout(
       return result;
     }
     if (state.patches.size() != 0U) {
-      const auto patch_index = patchIndexById(state, identity->owning_patch_id);
-      if (!patch_index.has_value()) {
+      const auto patch_it = patch_index_by_id.find(identity->owning_patch_id);
+      if (patch_it == patch_index_by_id.end()) {
         result.diagnostic = "gas-cell identity owns a patch absent from PatchSoa";
         return result;
       }
-      if (state.cells.patch_index[dense_row] != *patch_index) {
+      if (state.cells.patch_index[dense_row] != patch_it->second) {
         result.diagnostic = "gas-cell identity patch ownership disagrees with the dense cell patch-index mirror";
         return result;
       }

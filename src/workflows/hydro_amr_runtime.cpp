@@ -22,6 +22,7 @@
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/units.hpp"
+#include "cosmosim/physics/cooling_heating.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/hydro/hydro_boundary_conditions.hpp"
 #include "cosmosim/hydro/hydro_cartesian_patch.hpp"
@@ -42,8 +43,6 @@ namespace cosmosim::workflows {
 namespace {
 
 constexpr double k_gamma_adiabatic = 5.0 / 3.0;
-constexpr double k_pressure_floor = 1.0e-10;
-constexpr double k_density_floor = 1.0e-10;
 [[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -81,6 +80,13 @@ struct HydroRemoteGhostBoundaryReport {
   std::size_t stale_or_invalid_payloads = 0;
   std::uint64_t request_bytes = 0;
   std::uint64_t payload_bytes = 0;
+};
+
+struct HydroFloorApplicationDiagnostics {
+  std::uint64_t density_floor_cell_count = 0U;
+  std::uint64_t pressure_floor_cell_count = 0U;
+  double density_floor_correction_l1_code = 0.0;
+  double pressure_floor_correction_l1_code = 0.0;
 };
 
 struct HydroBoundaryCellAdvertisement {
@@ -314,21 +320,63 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   HydroAmrRuntimeImpl(
       const core::SimulationConfig& config,
       const core::ModePolicy& mode_policy,
-      const GravityAccelerationProvider& gravity_callback,
       const RuntimeServices& services)
       : m_config(config),
         m_mode_policy(mode_policy),
-        m_gravity_callback(gravity_callback),
         m_mpi_context(services.mpi_context),
+        m_units(core::makeUnitSystem(
+            config.units.length_unit, config.units.mass_unit, config.units.velocity_unit)),
         m_solver(k_gamma_adiabatic),
         m_reconstruction(hydro::HydroReconstructionPolicy{
             .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
             .dt_over_dx_code = 0.0,
-            .rho_floor = k_density_floor,
-            .pressure_floor = k_pressure_floor,
+            .rho_floor = m_config.numerics.hydro_density_floor_code,
+            .pressure_floor = m_config.numerics.hydro_pressure_floor_code,
             .enable_muscl_hancock_predictor = true,
             .adiabatic_index = k_gamma_adiabatic,
         }) {
+    if (m_config.physics.enable_cooling) {
+      constexpr double k_mean_molecular_weight_ionized = 0.59;
+      constexpr double k_proton_mass_kg = 1.67262192369e-27;
+      constexpr double k_boltzmann_j_per_k = 1.380649e-23;
+      const double velocity_sq_si =
+          m_units.velocity_si_per_code * m_units.velocity_si_per_code;
+      physics::CoolingModelConfig cooling_config{
+          .uv_background_model = m_config.physics.uv_background_model,
+          .self_shielding_model = m_config.physics.self_shielding_model,
+          .temperature_floor_k = m_config.physics.temperature_floor_k,
+          .primordial_helium_mass_fraction = 0.24,
+          .enable_metal_line_cooling =
+              m_config.physics.cooling_model == core::CoolingModel::kPrimordialMetalLine,
+          .max_fractional_energy_change_per_substep = 0.1,
+          .max_subcycles = 32,
+          .temperature_per_internal_energy_k =
+              (k_gamma_adiabatic - 1.0) * k_mean_molecular_weight_ionized *
+              k_proton_mass_kg / k_boltzmann_j_per_k * velocity_sq_si,
+      };
+      physics::CoolingRateProvider provider(cooling_config);
+      if (cooling_config.enable_metal_line_cooling) {
+        if (m_config.physics.metal_line_table_path.empty()) {
+          throw std::invalid_argument(
+              "metal-line cooling is enabled but physics.metal_line_table_path is empty");
+        }
+        provider.setMetalLineTable(physics::MetalLineCoolingTable::loadFromTextFile(
+            m_config.physics.metal_line_table_path));
+      }
+      const double temperature_energy_floor = std::max(
+          m_config.physics.temperature_floor_k /
+              cooling_config.temperature_per_internal_energy_k,
+          1.0e-30);
+      // Cooling rates are erg g^-1 s^-1 after division by physical CGS density.
+      // 1 erg/g = 1e-4 J/kg = 1e-4 m^2/s^2.
+      const double specific_energy_rate_cgs_to_code =
+          1.0e-4 * m_units.timeSiPerCode() / velocity_sq_si;
+      m_cooling_source = std::make_unique<physics::CoolingHeatingSource>(
+          std::move(provider),
+          physics::CoolingSourceIntegrator(
+              temperature_energy_floor, specific_energy_rate_cgs_to_code));
+    }
+
     if (m_config.physics.enable_star_formation &&
         m_config.physics.star_formation_model ==
             core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
@@ -380,7 +428,6 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
          {RuntimeResourceKey::kHydroPrimitiveState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kAmrPatchState, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kEffectiveIsmThermodynamics, RuntimeResourceAccessMode::kReadWrite},
-         {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kHydroUpdate) {
@@ -402,6 +449,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         !m_mpi_context.isEnabled() ||
         hydro_cell_rank_count == static_cast<std::uint64_t>(m_mpi_context.worldSize());
     m_last_hydro_profile = {};
+    m_last_floor_diagnostics = auditConfiguredHydroFloors(context.state);
 
     // Production AMR exchanges are collective.  Ranks with zero local cells
     // must still enter the control-plane and zero-record payload exchanges
@@ -416,6 +464,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       // any rank owns production gas. This covers gas mass/leaf-topology
       // mutations without an O(N) source fingerprint.
       context.state.bumpGravitySourceGeneration();
+      recordHydroFloorDiagnostics(context);
       return;
     }
     if (context.state.cells.size() == 0U) {
@@ -424,6 +473,17 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         context.state.bumpGravitySourceGeneration();
       }
       return;
+    }
+
+    // The legacy Cartesian fallback discovers cross-rank boundaries by globally
+    // replicating boundary advertisements.  That path is useful for small
+    // single-rank validation problems, but it is not a scalable production MPI
+    // contract and must not be selected silently.  Distributed production hydro
+    // is owned by the stable-gas-cell-ID AMR exchange above.
+    if (m_mpi_context.isEnabled() && m_mpi_context.worldSize() > 1) {
+      throw std::runtime_error(
+          "multi-rank fixed-Cartesian hydro is validation-only and is disabled in production; "
+          "provide complete production AMR hydro coverage so gas-cell-ID directed exchange is used");
     }
 
     context.state.requireGasCellIdentityMapCoversDenseRows("hydro callback");
@@ -438,24 +498,35 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 
     m_conserved.resize(m_geometry.totalCellStorageCount());
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const double rho = std::max(context.state.gas_cells.density_code[cell_index], k_density_floor);
-      double pressure = context.state.gas_cells.pressure_code[cell_index];
-      if (pressure <= 0.0) {
-        const double internal_energy = std::max(context.state.gas_cells.internal_energy_code[cell_index], k_pressure_floor);
-        pressure = std::max((k_gamma_adiabatic - 1.0) * rho * internal_energy, k_pressure_floor);
-      }
+      const double rho = std::max(
+          context.state.gas_cells.density_code[cell_index],
+          m_config.numerics.hydro_density_floor_code);
+      const double internal_energy_floor = m_config.numerics.hydro_pressure_floor_code > 0.0
+          ? m_config.numerics.hydro_pressure_floor_code /
+                ((k_gamma_adiabatic - 1.0) * std::max(rho, 1.0e-30))
+          : 0.0;
+      const double internal_energy = std::max(
+          context.state.gas_cells.internal_energy_code[cell_index],
+          internal_energy_floor);
+      const double pressure = std::max({
+          context.state.gas_cells.pressure_code[cell_index],
+          (k_gamma_adiabatic - 1.0) * rho * internal_energy,
+          m_config.numerics.hydro_pressure_floor_code});
+      const double sound_speed_squared_floor = m_config.numerics.hydro_pressure_floor_code > 0.0
+          ? k_gamma_adiabatic * m_config.numerics.hydro_pressure_floor_code /
+                std::max(rho, 1.0e-30)
+          : 0.0;
       const hydro::HydroPrimitiveState primitive{
           .rho_comoving = rho,
           .vel_x_peculiar = context.state.gas_cells.velocity_x_peculiar[cell_index],
           .vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[cell_index],
           .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[cell_index],
           .pressure_comoving = pressure,
-          .specific_internal_energy_code = std::max(
-              context.state.gas_cells.internal_energy_code[cell_index], k_pressure_floor),
+          .specific_internal_energy_code = internal_energy,
           .signal_speed_squared_code = std::max(
               context.state.gas_cells.sound_speed_code[cell_index] *
                   context.state.gas_cells.sound_speed_code[cell_index],
-              k_pressure_floor),
+              sound_speed_squared_floor),
           .uses_effective_ism = false,
           .metallicity_mass_fraction = std::clamp(
               context.state.gas_cells.metal_mass_code[cell_index] /
@@ -479,54 +550,65 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         context.state, m_conserved, m_geometry, m_geometry_row_by_dense_row, world_rank);
     const hydro::HydroActiveSetView active_view = buildActiveFaceView(context.active_set.cell_indices);
 
-    // Hydro runs after drift/force refresh while IntegratorState still carries
-    // the committed step-begin epoch. TimelineStep is authoritative for the
-    // step-end force/source epoch and for H in inverse code time.
+    // Hydro transport/source terms own the full accepted interval. Evaluate
+    // background terms at its midpoint; AMR fine substeps derive their own
+    // interval/evaluation epochs instead of inheriting the coarse end state.
     const double hydro_scale_factor = context.cosmology_background != nullptr
-        ? context.timeline_step.scale_factor_end
+        ? context.timeline_step.scale_factor_midpoint
         : context.integrator_state.current_scale_factor;
-    const double hubble_rate_code = context.cosmology_background != nullptr
-        ? context.timeline_step.hubble_end_code
+    const bool cosmological_comoving =
+        m_mode_policy.cosmological_comoving_frame &&
+        m_config.units.coordinate_frame == core::CoordinateFrame::kComoving;
+    const double hubble_rate_code = cosmological_comoving && context.cosmology_background != nullptr
+        ? context.cosmology_background->hubbleSi(hydro_scale_factor) *
+              context.timeline_step.time_si_per_code
         : 0.0;
 
     hydro::HydroUpdateContext update{
         .dt_code = context.integrator_state.dt_time_code,
+        .time_begin_code = context.timeline_step.time_begin_code,
+        .time_end_code = context.timeline_step.time_end_code,
+        .scale_factor_begin = context.timeline_step.scale_factor_begin,
         .scale_factor = std::max(1.0e-12, hydro_scale_factor),
+        .scale_factor_end = context.timeline_step.scale_factor_end,
+        .hubble_rate_begin_code = context.timeline_step.hubble_begin_code,
         .hubble_rate_code = hubble_rate_code,
+        .hubble_rate_end_code = context.timeline_step.hubble_end_code,
+        .comoving_coordinates =
+            m_config.units.coordinate_frame == core::CoordinateFrame::kComoving,
     };
 
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
     std::vector<double> temperature(context.state.cells.size(), 0.0);
+    std::vector<double> mass_density_physical_cgs(context.state.cells.size(), 0.0);
     std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    constexpr double k_hydrogen_mass_fraction = 0.76;
+    constexpr double k_proton_mass_g = 1.67262192369e-24;
+    const double density_frame_factor =
+        m_config.units.coordinate_frame == core::CoordinateFrame::kComoving
+            ? 1.0 / std::pow(update.scale_factor, 3.0)
+            : 1.0;
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const double gas_mass_code = context.state.cells.mass_code[cell_index];
       metallicity[cell_index] = gas_mass_code > 0.0
           ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
           : 0.0;
       temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
-    }
-    const auto& dense_accel_x = m_gravity_callback.cellAccelX();
-    const auto& dense_accel_y = m_gravity_callback.cellAccelY();
-    const auto& dense_accel_z = m_gravity_callback.cellAccelZ();
-    if (dense_accel_x.size() != context.state.cells.size() ||
-        dense_accel_y.size() != context.state.cells.size() ||
-        dense_accel_z.size() != context.state.cells.size()) {
-      throw std::runtime_error("hydro callback gravity-cell acceleration lanes do not cover dense gas-cell rows");
-    }
-    m_ordered_cell_accel_x.assign(context.state.cells.size(), 0.0);
-    m_ordered_cell_accel_y.assign(context.state.cells.size(), 0.0);
-    m_ordered_cell_accel_z.assign(context.state.cells.size(), 0.0);
-    for (std::size_t geometry_row = 0; geometry_row < m_dense_row_by_geometry_row.size(); ++geometry_row) {
-      const std::uint32_t dense_row = m_dense_row_by_geometry_row[geometry_row];
-      m_ordered_cell_accel_x[geometry_row] = dense_accel_x[dense_row];
-      m_ordered_cell_accel_y[geometry_row] = dense_accel_y[dense_row];
-      m_ordered_cell_accel_z[geometry_row] = dense_accel_z[dense_row];
+      const double rho_stored_code = std::max(
+          context.state.gas_cells.density_code[cell_index],
+          m_config.numerics.hydro_density_floor_code);
+      mass_density_physical_cgs[cell_index] =
+          m_units.densityCodeToCgs(rho_stored_code * density_frame_factor);
+      hydrogen_number_density[cell_index] =
+          k_hydrogen_mass_fraction * mass_density_physical_cgs[cell_index] /
+          k_proton_mass_g;
     }
     hydro::HydroSourceContext source_context{
         .update = update,
-        .gravity_accel_x_peculiar = m_ordered_cell_accel_x,
-        .gravity_accel_y_peculiar = m_ordered_cell_accel_y,
-        .gravity_accel_z_peculiar = m_ordered_cell_accel_z,
+        .gravity_accel_x_peculiar = {},
+        .gravity_accel_y_peculiar = {},
+        .gravity_accel_z_peculiar = {},
+        .mass_density_physical_cgs = mass_density_physical_cgs,
         .hydrogen_number_density_cgs = hydrogen_number_density,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
@@ -534,8 +616,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
 
-    hydro::ComovingGravityExpansionSource gravity_source;
-    std::vector<const hydro::HydroSourceTerm*> sources{&gravity_source};
+    // Gravity and homogeneous expansion are integrated by the gravity-owned
+    // KDK half-kicks around hydro/source evolution. Hydro owns transport plus
+    // local thermochemical source terms only, preventing double application.
+    std::vector<const hydro::HydroSourceTerm*> sources;
+    if (m_cooling_source != nullptr) {
+      sources.push_back(m_cooling_source.get());
+    }
     if (m_effective_ism_energy_source != nullptr) {
       m_effective_ism_energy_source->resetLedger();
       sources.push_back(m_effective_ism_energy_source.get());
@@ -705,9 +792,53 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         context.state, world_rank, "hydro callback parent compatibility mirror");
     persistEffectiveIsmDiagnostics(context.state);
     context.state.bumpGravitySourceGeneration();
+    recordHydroFloorDiagnostics(context);
   }
 
  private:
+  [[nodiscard]] HydroFloorApplicationDiagnostics auditConfiguredHydroFloors(
+      const core::SimulationState& state) const {
+    HydroFloorApplicationDiagnostics diagnostics;
+    for (std::size_t row = 0; row < state.gas_cells.size(); ++row) {
+      const double density = state.gas_cells.density_code[row];
+      const double pressure = state.gas_cells.pressure_code[row];
+      if (density < m_config.numerics.hydro_density_floor_code) {
+        ++diagnostics.density_floor_cell_count;
+        diagnostics.density_floor_correction_l1_code +=
+            m_config.numerics.hydro_density_floor_code - density;
+      }
+      if (pressure < m_config.numerics.hydro_pressure_floor_code) {
+        ++diagnostics.pressure_floor_cell_count;
+        diagnostics.pressure_floor_correction_l1_code +=
+            m_config.numerics.hydro_pressure_floor_code - pressure;
+      }
+    }
+    return diagnostics;
+  }
+
+  void recordHydroFloorDiagnostics(const core::StepContext& context) const {
+    if (context.profiler_session == nullptr) return;
+    context.profiler_session->recordEvent(core::RuntimeEvent{
+        .event_kind = "hydro.floor_policy",
+        .severity = (m_last_floor_diagnostics.density_floor_cell_count != 0U ||
+                     m_last_floor_diagnostics.pressure_floor_cell_count != 0U)
+            ? core::RuntimeEventSeverity::kWarning
+            : core::RuntimeEventSeverity::kInfo,
+        .subsystem = "hydro.floors",
+        .step_index = context.integrator_state.step_index,
+        .simulation_time_code = context.integrator_state.current_time_code,
+        .scale_factor = context.integrator_state.current_scale_factor,
+        .message = "configured hydro floor policy audit before the hydro update",
+        .payload = {
+            {"density_floor_code", std::to_string(m_config.numerics.hydro_density_floor_code)},
+            {"pressure_floor_code", std::to_string(m_config.numerics.hydro_pressure_floor_code)},
+            {"density_floor_cell_count", std::to_string(m_last_floor_diagnostics.density_floor_cell_count)},
+            {"pressure_floor_cell_count", std::to_string(m_last_floor_diagnostics.pressure_floor_cell_count)},
+            {"density_floor_correction_l1_code", std::to_string(m_last_floor_diagnostics.density_floor_correction_l1_code)},
+            {"pressure_floor_correction_l1_code", std::to_string(m_last_floor_diagnostics.pressure_floor_correction_l1_code)},
+        }});
+  }
+
   void persistEffectiveIsmDiagnostics(core::SimulationState& state) const {
     if (m_effective_ism_energy_source == nullptr || m_effective_ism_closure == nullptr) return;
     const physics::EffectiveIsmEnergyLedger latest = m_effective_ism_energy_source->ledger();
@@ -1138,44 +1269,77 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   }
 
   void runProductionAmrHydroPath(core::StepContext& context) {
-    // Hydro runs after drift/force refresh while IntegratorState still carries
-    // the committed step-begin epoch. TimelineStep is authoritative for the
-    // step-end force/source epoch and for H in inverse code time.
+    // Hydro transport/source terms own the full accepted interval. Evaluate
+    // background terms at its midpoint; AMR fine substeps derive their own
+    // interval/evaluation epochs instead of inheriting the coarse end state.
     const double hydro_scale_factor = context.cosmology_background != nullptr
-        ? context.timeline_step.scale_factor_end
+        ? context.timeline_step.scale_factor_midpoint
         : context.integrator_state.current_scale_factor;
-    const double hubble_rate_code = context.cosmology_background != nullptr
-        ? context.timeline_step.hubble_end_code
+    const bool cosmological_comoving =
+        m_mode_policy.cosmological_comoving_frame &&
+        m_config.units.coordinate_frame == core::CoordinateFrame::kComoving;
+    const double hubble_rate_code = cosmological_comoving && context.cosmology_background != nullptr
+        ? context.cosmology_background->hubbleSi(hydro_scale_factor) *
+              context.timeline_step.time_si_per_code
         : 0.0;
 
     const hydro::HydroUpdateContext update{
         .dt_code = context.integrator_state.dt_time_code,
+        .time_begin_code = context.timeline_step.time_begin_code,
+        .time_end_code = context.timeline_step.time_end_code,
+        .scale_factor_begin = context.timeline_step.scale_factor_begin,
         .scale_factor = std::max(1.0e-12, hydro_scale_factor),
+        .scale_factor_end = context.timeline_step.scale_factor_end,
+        .hubble_rate_begin_code = context.timeline_step.hubble_begin_code,
         .hubble_rate_code = hubble_rate_code,
+        .hubble_rate_end_code = context.timeline_step.hubble_end_code,
+        .comoving_coordinates =
+            m_config.units.coordinate_frame == core::CoordinateFrame::kComoving,
     };
     std::vector<double> metallicity(context.state.cells.size(), 0.0);
     std::vector<double> temperature(context.state.cells.size(), 0.0);
+    std::vector<double> mass_density_physical_cgs(context.state.cells.size(), 0.0);
     std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
+    constexpr double k_hydrogen_mass_fraction = 0.76;
+    constexpr double k_proton_mass_g = 1.67262192369e-24;
+    const double density_frame_factor =
+        m_config.units.coordinate_frame == core::CoordinateFrame::kComoving
+            ? 1.0 / std::pow(update.scale_factor, 3.0)
+            : 1.0;
     for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
       const double gas_mass_code = context.state.cells.mass_code[cell_index];
       metallicity[cell_index] = gas_mass_code > 0.0
           ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
           : 0.0;
       temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
+      const double rho_stored_code = std::max(
+          context.state.gas_cells.density_code[cell_index],
+          m_config.numerics.hydro_density_floor_code);
+      mass_density_physical_cgs[cell_index] =
+          m_units.densityCodeToCgs(rho_stored_code * density_frame_factor);
+      hydrogen_number_density[cell_index] =
+          k_hydrogen_mass_fraction * mass_density_physical_cgs[cell_index] /
+          k_proton_mass_g;
     }
     const hydro::HydroSourceContext source_context{
         .update = update,
-        .gravity_accel_x_peculiar = m_gravity_callback.cellAccelX(),
-        .gravity_accel_y_peculiar = m_gravity_callback.cellAccelY(),
-        .gravity_accel_z_peculiar = m_gravity_callback.cellAccelZ(),
+        .gravity_accel_x_peculiar = {},
+        .gravity_accel_y_peculiar = {},
+        .gravity_accel_z_peculiar = {},
+        .mass_density_physical_cgs = mass_density_physical_cgs,
         .hydrogen_number_density_cgs = hydrogen_number_density,
         .metallicity_mass_fraction = metallicity,
         .temperature_k = temperature,
         .thermodynamic_closure = m_effective_ism_closure.get(),
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
-    hydro::ComovingGravityExpansionSource gravity_source;
-    std::vector<const hydro::HydroSourceTerm*> sources{&gravity_source};
+    // Gravity and homogeneous expansion are integrated by the gravity-owned
+    // KDK half-kicks around hydro/source evolution. Hydro owns transport plus
+    // local thermochemical source terms only, preventing double application.
+    std::vector<const hydro::HydroSourceTerm*> sources;
+    if (m_cooling_source != nullptr) {
+      sources.push_back(m_cooling_source.get());
+    }
     if (m_effective_ism_energy_source != nullptr) {
       m_effective_ism_energy_source->resetLedger();
       sources.push_back(m_effective_ism_energy_source.get());
@@ -1183,8 +1347,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     const amr::ProductionAmrHydroOptions amr_options{
         .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
         .adiabatic_index = k_gamma_adiabatic,
-        .density_floor = k_density_floor,
-        .pressure_floor = k_pressure_floor,
+        .density_floor = m_config.numerics.hydro_density_floor_code,
+        .pressure_floor = m_config.numerics.hydro_pressure_floor_code,
         .state_time_code = context.integrator_state.current_time_code,
         .ghost_fill_time_code = context.integrator_state.current_time_code};
     amr::ProductionAmrHydroDiagnostics amr_diagnostics;
@@ -1417,18 +1581,35 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     if (m_effective_ism_closure != nullptr) {
       const double redshift = source_context.redshift;
       for (std::size_t row = 0; row < context.state.cells.size(); ++row) {
-        const double rho = std::max(context.state.gas_cells.density_code[row], k_density_floor);
+        const double rho = std::max(
+            context.state.gas_cells.density_code[row],
+            m_config.numerics.hydro_density_floor_code);
+        const double internal_energy_floor = m_config.numerics.hydro_pressure_floor_code > 0.0
+            ? m_config.numerics.hydro_pressure_floor_code /
+                  ((k_gamma_adiabatic - 1.0) * std::max(rho, 1.0e-30))
+            : 0.0;
+        const double internal_energy = std::max(
+            context.state.gas_cells.internal_energy_code[row],
+            internal_energy_floor);
+        const double pressure = std::max({
+            context.state.gas_cells.pressure_code[row],
+            (k_gamma_adiabatic - 1.0) * rho * internal_energy,
+            m_config.numerics.hydro_pressure_floor_code});
+        const double sound_speed_squared_floor = m_config.numerics.hydro_pressure_floor_code > 0.0
+            ? k_gamma_adiabatic * m_config.numerics.hydro_pressure_floor_code /
+                  std::max(rho, 1.0e-30)
+            : 0.0;
         hydro::HydroPrimitiveState primitive{
             .rho_comoving = rho,
             .vel_x_peculiar = context.state.gas_cells.velocity_x_peculiar[row],
             .vel_y_peculiar = context.state.gas_cells.velocity_y_peculiar[row],
             .vel_z_peculiar = context.state.gas_cells.velocity_z_peculiar[row],
-            .pressure_comoving = std::max(context.state.gas_cells.pressure_code[row], k_pressure_floor),
-            .specific_internal_energy_code = std::max(context.state.gas_cells.internal_energy_code[row], k_pressure_floor),
+            .pressure_comoving = pressure,
+            .specific_internal_energy_code = internal_energy,
             .signal_speed_squared_code = std::max(
                 context.state.gas_cells.sound_speed_code[row] *
                     context.state.gas_cells.sound_speed_code[row],
-                k_pressure_floor),
+                sound_speed_squared_floor),
             .uses_effective_ism = false,
             .metallicity_mass_fraction = context.state.cells.mass_code[row] > 0.0
                 ? std::clamp(context.state.gas_cells.metal_mass_code[row] /
@@ -1600,8 +1781,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .limiter = hydro::HydroSlopeLimiter::kMonotonizedCentral,
         .dt_over_dx_code = dt_time_code / dx,
         .dt_over_cell_width_code = {dt_time_code / dx, dt_time_code / dy, dt_time_code / dz},
-        .rho_floor = k_density_floor,
-        .pressure_floor = k_pressure_floor,
+        .rho_floor = m_config.numerics.hydro_density_floor_code,
+        .pressure_floor = m_config.numerics.hydro_pressure_floor_code,
         .enable_muscl_hancock_predictor = true,
         .adiabatic_index = k_gamma_adiabatic,
     });
@@ -1668,7 +1849,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   [[nodiscard]] core::HydroCflDiagnostics hydroCflDiagnosticsForCell(
       const core::SimulationState& state,
       std::uint32_t cell_index,
-      double accepted_dt_time_code) const {
+      double accepted_dt_time_code,
+      double cfl_scale_factor) const {
     const core::DirectionalCflTimeStepInput input{
         .cell_width_axis_code = {
             m_geometry.cell_width_x_comoving,
@@ -1679,6 +1861,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
             state.gas_cells.velocity_y_peculiar[cell_index],
             state.gas_cells.velocity_z_peculiar[cell_index]},
         .sound_speed_code = std::max(state.gas_cells.sound_speed_code[cell_index], 0.0),
+        .coordinate_frame = m_config.units.coordinate_frame,
+        .scale_factor = cfl_scale_factor,
     };
     const auto patch_identity = patchIdentityForCellRow(state, cell_index);
     return core::makeHydroCflDiagnostics(
@@ -1718,10 +1902,14 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       if (cell >= cell_count) {
         throw std::out_of_range("hydro CFL guard active cell index out of range");
       }
+      const double cfl_scale_factor = m_config.units.coordinate_frame == core::CoordinateFrame::kComoving
+          ? std::max(context.timeline_step.scale_factor_begin, 1.0e-12)
+          : 1.0;
       const core::HydroCflDiagnostics diagnostics = hydroCflDiagnosticsForCell(
           context.state,
           static_cast<std::uint32_t>(cell),
-          context.integrator_state.dt_time_code);
+          context.integrator_state.dt_time_code,
+          cfl_scale_factor);
       if (!have_worst || diagnostics.safety_factor < worst.safety_factor) {
         worst = diagnostics;
         have_worst = true;
@@ -1758,12 +1946,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
-  const GravityAccelerationProvider& m_gravity_callback;
   const parallel::MpiContext& m_mpi_context;
+  core::UnitSystem m_units;
   std::uint32_t m_current_world_rank = 0;
   hydro::HydroCoreSolver m_solver;
   hydro::MusclHancockReconstruction m_reconstruction;
   hydro::HllcRiemannSolver m_riemann_solver;
+  std::unique_ptr<physics::CoolingHeatingSource> m_cooling_source;
   std::unique_ptr<physics::EffectiveIsmThermodynamicClosure> m_effective_ism_closure;
   std::unique_ptr<physics::EffectiveIsmEnergyRelaxationSource> m_effective_ism_energy_source;
   hydro::HydroConservedStateSoa m_conserved;
@@ -1773,13 +1962,11 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   // Dense CellSoa row <-> physical Cartesian solver-row maps.
   std::vector<std::uint32_t> m_dense_row_by_geometry_row;
   std::vector<std::uint32_t> m_geometry_row_by_dense_row;
-  std::vector<double> m_ordered_cell_accel_x;
-  std::vector<double> m_ordered_cell_accel_y;
-  std::vector<double> m_ordered_cell_accel_z;
   hydro::HydroProfileEvent m_last_hydro_profile{};
   core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   internal::SolverGhostRefreshReport m_last_ghost_refresh{};
   HydroRemoteGhostBoundaryReport m_last_remote_ghost_boundary_report{};
+  HydroFloorApplicationDiagnostics m_last_floor_diagnostics{};
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::vector<std::size_t> m_active_cells;
   std::vector<std::size_t> m_active_faces;
@@ -1791,10 +1978,9 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(
     const core::SimulationConfig& config,
     const core::ModePolicy& mode_policy,
-    const GravityAccelerationProvider& gravity_acceleration,
     const RuntimeServices& services) {
   return std::make_unique<HydroAmrRuntimeImpl>(
-      config, mode_policy, gravity_acceleration, services);
+      config, mode_policy, services);
 }
 
 }  // namespace cosmosim::workflows

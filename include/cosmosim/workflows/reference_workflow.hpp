@@ -89,6 +89,8 @@ struct ReferenceWorkflowReport {
   // do not change snapshot/restart schemas or integration-state ownership.
   double final_time_code = 0.0;
   double final_scale_factor = 1.0;
+  // Rank-count and dense-row-order independent digest over authoritative
+  // physical entities keyed by stable particle/gas-cell identity.
   std::uint64_t final_state_digest = 0;
   std::uint64_t local_particle_count = 0;
   std::uint64_t global_particle_count = 0;

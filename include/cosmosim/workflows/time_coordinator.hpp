@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -17,6 +18,10 @@ struct UnitSystem;
 
 namespace cosmosim::io {
 struct RestartReadResult;
+}
+
+namespace cosmosim::physics {
+class EffectiveMultiphaseEosTable;
 }
 
 namespace cosmosim::workflows {
@@ -145,6 +150,9 @@ class TimeCoordinator {
   // Keeping this distinct from the ownership ledger prevents migrations from
   // being mistaken for particle creation.
   std::vector<std::uint64_t> m_newly_created_particle_ids;
+  // Immutable configuration-derived EOS table; build once per coordinator,
+  // not once per adaptive-bin refresh.
+  std::shared_ptr<const physics::EffectiveMultiphaseEosTable> m_effective_eos_table;
   core::StepOrchestrator m_lifecycle;
 };
 

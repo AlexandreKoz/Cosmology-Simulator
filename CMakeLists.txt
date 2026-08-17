@@ -394,6 +394,7 @@ add_library(cosmosim_workflows STATIC
   src/workflows/amr_migration_payload.cpp
   src/workflows/initial_condition_runtime.cpp
   src/workflows/internal/cartesian_gas_cell_layout.cpp
+  src/workflows/internal/metal_diffusion_topology.cpp
   src/workflows/internal/gas_cell_ownership.cpp
   src/workflows/migration_balance_runtime.cpp
   src/workflows/output_restart_runtime.cpp
@@ -818,6 +819,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_metal_diffusion tests/unit/test_metal_diffusion.cpp)
   target_link_libraries(test_unit_metal_diffusion PRIVATE cosmosim_all)
   add_test(NAME unit_metal_diffusion COMMAND test_unit_metal_diffusion)
+  add_executable(test_unit_workflow_metal_diffusion_topology
+    tests/unit/test_workflow_metal_diffusion_topology.cpp)
+  target_include_directories(test_unit_workflow_metal_diffusion_topology PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test_unit_workflow_metal_diffusion_topology PRIVATE cosmosim_all)
+  add_test(NAME unit_workflow_metal_diffusion_topology COMMAND test_unit_workflow_metal_diffusion_topology)
   add_executable(test_unit_stellar_feedback tests/unit/test_stellar_feedback.cpp)
   target_link_libraries(test_unit_stellar_feedback PRIVATE cosmosim_all)
   add_test(NAME unit_stellar_feedback COMMAND test_unit_stellar_feedback)

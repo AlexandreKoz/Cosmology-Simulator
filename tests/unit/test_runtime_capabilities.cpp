@@ -31,6 +31,13 @@ void testCapabilityTruth() {
          cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
   assert(report.require("production_hierarchical_local_timestep").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
+  assert(report.require("production_hydro_cooling").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
+  assert(report.require("production_hydro_cooling").active == config.physics.enable_cooling);
+  assert(report.require("black_hole_seeding_candidate_provider").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
+  assert(report.require("distributed_metal_diffusion").status ==
+         cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
   assert(report.require("distributed_ic_import").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kProvisional);
@@ -58,6 +65,32 @@ void testCapabilityTruth() {
   bool threw = false;
   try {
     cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  auto bh_seeding = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  bh_seeding.physics.enable_black_hole_agn = true;
+  bh_seeding.physics.bh_enable_seeding = true;
+  const auto bh_report = cosmosim::workflows::buildRuntimeCapabilityReport(bh_seeding);
+  threw = false;
+  try {
+    cosmosim::workflows::validateRequestedRuntimeCapabilities(bh_seeding, bh_report);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  auto distributed_diffusion = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  distributed_diffusion.physics.enable_metal_diffusion = true;
+  distributed_diffusion.parallel.mpi_ranks_expected = 2;
+  const auto diffusion_report =
+      cosmosim::workflows::buildRuntimeCapabilityReport(distributed_diffusion);
+  threw = false;
+  try {
+    cosmosim::workflows::validateRequestedRuntimeCapabilities(
+        distributed_diffusion, diffusion_report);
   } catch (const std::invalid_argument&) {
     threw = true;
   }

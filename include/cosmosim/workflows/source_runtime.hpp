@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
@@ -23,6 +24,7 @@ class SourceRuntime {
 
 [[nodiscard]] std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::SimulationConfig& config,
+    const core::ModePolicy& mode_policy,
     const core::UnitSystem& units,
     std::uint32_t world_rank,
     const parallel::MpiContext& mpi_context);

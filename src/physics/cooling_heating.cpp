@@ -208,16 +208,24 @@ std::optional<CoolingTableProvenance> CoolingRateProvider::metalLineTableProvena
   return m_metal_line_table->provenance();
 }
 
-CoolingSourceIntegrator::CoolingSourceIntegrator(double energy_floor_code)
-    : m_energy_floor_code(energy_floor_code) {
+CoolingSourceIntegrator::CoolingSourceIntegrator(
+    double energy_floor_code,
+    double specific_energy_rate_cgs_to_code)
+    : m_energy_floor_code(energy_floor_code),
+      m_specific_energy_rate_cgs_to_code(specific_energy_rate_cgs_to_code) {
   if (m_energy_floor_code <= 0.0) {
     throw std::invalid_argument("CoolingSourceIntegrator: energy_floor_code must be > 0");
+  }
+  if (!std::isfinite(m_specific_energy_rate_cgs_to_code) ||
+      m_specific_energy_rate_cgs_to_code <= 0.0) {
+    throw std::invalid_argument(
+        "CoolingSourceIntegrator: specific-energy rate conversion must be finite and > 0");
   }
 }
 
 CoolingIntegrationResult CoolingSourceIntegrator::integrateSpecificInternalEnergy(
     double specific_internal_energy_code,
-    double mass_density_comoving,
+    double mass_density_physical_cgs,
     double dt_code,
     const CoolingRateQuery& query,
     const CoolingRateProvider& rate_provider) const {
@@ -238,7 +246,9 @@ CoolingIntegrationResult CoolingSourceIntegrator::integrateSpecificInternalEnerg
 
     const CoolingRateResult rates = rate_provider.lookupRates(local_query);
     const double volumetric_net_rate = rates.heating_rate_erg_cm3_s - rates.cooling_rate_erg_cm3_s;
-    const double de_dt = volumetric_net_rate / std::max(mass_density_comoving, 1.0e-16);
+    const double de_dt =
+        volumetric_net_rate / std::max(mass_density_physical_cgs, 1.0e-40) *
+        m_specific_energy_rate_cgs_to_code;
 
     const double cooling_time = std::max(energy, m_energy_floor_code) / std::max(std::abs(de_dt), 1.0e-30);
     const double stable_dt = std::max(
@@ -258,8 +268,10 @@ CoolingIntegrationResult CoolingSourceIntegrator::integrateSpecificInternalEnerg
       energy * config.temperature_per_internal_energy_k,
       config.temperature_floor_k);
   const CoolingRateResult final_rates = rate_provider.lookupRates(final_query);
-  const double final_de_dt = (final_rates.heating_rate_erg_cm3_s - final_rates.cooling_rate_erg_cm3_s) /
-      std::max(mass_density_comoving, 1.0e-16);
+  const double final_de_dt =
+      (final_rates.heating_rate_erg_cm3_s - final_rates.cooling_rate_erg_cm3_s) /
+      std::max(mass_density_physical_cgs, 1.0e-40) *
+      m_specific_energy_rate_cgs_to_code;
   result.diagnostics.suggested_next_dt_code = config.max_fractional_energy_change_per_substep *
       std::max(energy, m_energy_floor_code) / std::max(std::abs(final_de_dt), 1.0e-30);
   result.specific_internal_energy_code = energy;
@@ -282,13 +294,20 @@ hydro::HydroConservedState CoolingHeatingSource::sourceForCell(
   const double internal_density = std::max(conserved.total_energy_density_comoving - kinetic_density, 0.0);
   const double specific_internal_energy = internal_density / std::max(conserved.mass_density_comoving, 1.0e-16);
 
-  const double hydrogen_density =
-      (cell_index < context.hydrogen_number_density_cgs.size()) ? context.hydrogen_number_density_cgs[cell_index]
-                                                                 : effectiveHydrogenNumberDensity(primitive.rho_comoving, 0.0);
+  if (cell_index >= context.hydrogen_number_density_cgs.size() ||
+      cell_index >= context.temperature_k.size()) {
+    throw std::runtime_error(
+        "CoolingHeatingSource requires explicit physical hydrogen density and temperature for every cooled cell");
+  }
+  const double hydrogen_density = context.hydrogen_number_density_cgs[cell_index];
+  const double temperature_k = context.temperature_k[cell_index];
+  if (!(hydrogen_density > 0.0) || !std::isfinite(hydrogen_density) ||
+      !(temperature_k > 0.0) || !std::isfinite(temperature_k)) {
+    throw std::runtime_error(
+        "CoolingHeatingSource requires finite positive physical hydrogen density and temperature");
+  }
   const double metallicity =
       (cell_index < context.metallicity_mass_fraction.size()) ? context.metallicity_mass_fraction[cell_index] : 0.0;
-  const double temperature_k =
-      (cell_index < context.temperature_k.size()) ? context.temperature_k[cell_index] : 1.0e4;
 
   const CoolingRateQuery query{
       .temperature_k = temperature_k,
@@ -296,9 +315,23 @@ hydro::HydroConservedState CoolingHeatingSource::sourceForCell(
       .metallicity_mass_fraction = metallicity,
       .redshift = context.redshift};
 
+  if (primitive.uses_effective_ism) {
+    // The effective multiphase closure owns its unresolved thermal equilibrium;
+    // applying the ordinary cooling source as well would double-count it.
+    return {};
+  }
+  const double physical_mass_density_cgs =
+      (cell_index < context.mass_density_physical_cgs.size())
+          ? context.mass_density_physical_cgs[cell_index]
+          : 0.0;
+  if (!(physical_mass_density_cgs > 0.0) || !std::isfinite(physical_mass_density_cgs)) {
+    throw std::runtime_error(
+        "CoolingHeatingSource requires finite positive physical CGS mass density");
+  }
+
   const CoolingIntegrationResult integrated = m_integrator.integrateSpecificInternalEnergy(
       specific_internal_energy,
-      conserved.mass_density_comoving,
+      physical_mass_density_cgs,
       context.update.dt_code,
       query,
       m_rate_provider);

@@ -20,12 +20,14 @@ int main() {
   cosmosim::physics::CoolingSourceIntegrator integrator(1.0e-8);
   cosmosim::physics::CoolingHeatingSource cooling_source(provider, integrator);
 
+  std::vector<double> rho_phys_cgs(1, 1.0);
   std::vector<double> nh(1, 5.0);
   std::vector<double> metal(1, 0.01);
   std::vector<double> temp(1, 1.0e6);
   cosmosim::hydro::HydroSourceContext source_context{};
   source_context.update.dt_code = 0.005;
   source_context.update.scale_factor = 1.0;
+  source_context.mass_density_physical_cgs = rho_phys_cgs;
   source_context.hydrogen_number_density_cgs = nh;
   source_context.metallicity_mass_fraction = metal;
   source_context.temperature_k = temp;

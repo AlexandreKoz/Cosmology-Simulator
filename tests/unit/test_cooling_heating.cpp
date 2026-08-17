@@ -62,12 +62,14 @@ void testCoolingHeatingSourceEnergySign() {
       .pressure_comoving = 0.1};
   const auto conserved = cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(primitive, 5.0 / 3.0);
 
+  const std::array<double, 1> rho_phys_cgs{1.0};
   const std::array<double, 1> n_h{5.0};
   const std::array<double, 1> z{0.0};
   const std::array<double, 1> temp{1.0e6};
   cosmosim::hydro::HydroSourceContext context{};
   context.update.dt_code = 0.01;
   context.update.scale_factor = 1.0;
+  context.mass_density_physical_cgs = rho_phys_cgs;
   context.hydrogen_number_density_cgs = n_h;
   context.metallicity_mass_fraction = z;
   context.temperature_k = temp;

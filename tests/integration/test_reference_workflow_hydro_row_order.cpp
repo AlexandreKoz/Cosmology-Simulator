@@ -48,6 +48,8 @@ int main() {
   fixture::assertEquivalentCfl(
       canonical_report.final_hydro_cfl_diagnostics,
       shuffled_report.final_hydro_cfl_diagnostics);
+  assert(canonical_report.final_state_digest != 0U);
+  assert(canonical_report.final_state_digest == shuffled_report.final_state_digest);
 
   const auto canonical_restart = cosmosim::io::readRestartCheckpointHdf5(canonical_report.restart_path);
   const auto shuffled_restart = cosmosim::io::readRestartCheckpointHdf5(shuffled_report.restart_path);

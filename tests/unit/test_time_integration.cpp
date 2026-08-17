@@ -661,6 +661,31 @@ void testTimeBinMappingAndCriteria() {
   };
   const double dt_directional = cosmosim::core::computeDirectionalCflTimeStep(directional_cfl, 0.4);
   assert(std::abs(dt_directional - (0.4 * 0.125 / 6.0)) < k_tolerance);
+
+  const auto comoving_cfl_at = [](double scale_factor) {
+    return cosmosim::core::computeDirectionalCflTimeStep(
+        cosmosim::core::DirectionalCflTimeStepInput{
+            .cell_width_axis_code = {0.5, 0.5, 0.5},
+            .velocity_axis_code = {1.0, 1.0, 1.0},
+            .sound_speed_code = 1.0,
+            .coordinate_frame = cosmosim::core::CoordinateFrame::kComoving,
+            .scale_factor = scale_factor},
+        0.4);
+  };
+  const double dt_comoving_a1 = comoving_cfl_at(1.0);
+  const double dt_comoving_a05 = comoving_cfl_at(0.5);
+  const double dt_comoving_a01 = comoving_cfl_at(0.1);
+  assert(std::abs(dt_comoving_a05 / dt_comoving_a1 - 0.5) < k_tolerance);
+  assert(std::abs(dt_comoving_a01 / dt_comoving_a1 - 0.1) < k_tolerance);
+  const double dt_physical_a01 = cosmosim::core::computeDirectionalCflTimeStep(
+      cosmosim::core::DirectionalCflTimeStepInput{
+          .cell_width_axis_code = {0.5, 0.5, 0.5},
+          .velocity_axis_code = {1.0, 1.0, 1.0},
+          .sound_speed_code = 1.0,
+          .coordinate_frame = cosmosim::core::CoordinateFrame::kPhysical,
+          .scale_factor = 0.1},
+      0.4);
+  assert(std::abs(dt_physical_a01 - dt_comoving_a1) < k_tolerance);
   const auto cfl_diagnostics = cosmosim::core::makeHydroCflDiagnostics(
       7,
       directional_cfl,

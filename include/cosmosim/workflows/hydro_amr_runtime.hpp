@@ -6,7 +6,7 @@
 
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
-#include "cosmosim/workflows/gravity_runtime.hpp"
+#include "cosmosim/workflows/runtime_resources.hpp"
 
 namespace cosmosim::workflows {
 
@@ -39,7 +39,6 @@ class HydroAmrRuntime {
 [[nodiscard]] std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(
     const core::SimulationConfig& config,
     const core::ModePolicy& mode_policy,
-    const GravityAccelerationProvider& gravity_acceleration,
     const RuntimeServices& services);
 
 }  // namespace cosmosim::workflows

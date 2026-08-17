@@ -1,6 +1,7 @@
 #include "cosmosim/workflows/source_runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include "cosmosim/physics/stellar_feedback.hpp"
 #include "cosmosim/physics/metal_diffusion.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
+#include "workflows/internal/metal_diffusion_topology.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/star_formation_geometry.hpp"
 
@@ -80,46 +82,116 @@ makeRuntimeEffectiveEosTable(
       physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
 }
 
-[[nodiscard]] std::vector<std::uint64_t> allGatherUint64(
+struct ShardedUint64Exchange {
+  std::vector<std::uint64_t> values;
+  std::vector<int> recv_counts;
+  std::vector<int> recv_displacements;
+};
+
+[[nodiscard]] ShardedUint64Exchange exchangeShardedUint64Records(
     const parallel::MpiContext& mpi_context,
-    std::span<const std::uint64_t> local_values) {
+    const std::vector<std::vector<std::uint64_t>>& values_by_rank,
+    std::size_t record_width) {
+  if (record_width == 0U) {
+    throw std::invalid_argument("sharded uint64 exchange requires nonzero record width");
+  }
+  const int world_size = mpi_context.worldSize();
+  if (world_size <= 0 || values_by_rank.size() != static_cast<std::size_t>(world_size)) {
+    throw std::invalid_argument("sharded uint64 exchange rank extent mismatch");
+  }
+  for (const auto& values : values_by_rank) {
+    if (values.size() % record_width != 0U) {
+      throw std::invalid_argument("sharded uint64 exchange received a partial record");
+    }
+  }
+
   if (!mpi_context.isEnabled()) {
-    return std::vector<std::uint64_t>(local_values.begin(), local_values.end());
+    return ShardedUint64Exchange{
+        .values = values_by_rank.front(),
+        .recv_counts = {static_cast<int>(values_by_rank.front().size())},
+        .recv_displacements = {0},
+    };
   }
 #if COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_values.size());
-  std::vector<std::uint64_t> counts(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count), 1, MPI_UINT64_T,
-      counts.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> displacements(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total = 0U;
+  std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> send_displacements(static_cast<std::size_t>(world_size), 0);
+  std::size_t total_send = 0U;
   for (int rank = 0; rank < world_size; ++rank) {
-    if (counts[static_cast<std::size_t>(rank)] >
-        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("particle-ID precommit count exceeds MPI int range");
+    const std::size_t count = values_by_rank[static_cast<std::size_t>(rank)].size();
+    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("sharded uint64 send count exceeds MPI int range");
     }
-    recv_counts[static_cast<std::size_t>(rank)] =
-        static_cast<int>(counts[static_cast<std::size_t>(rank)]);
+    send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
     if (rank > 0) {
-      displacements[static_cast<std::size_t>(rank)] =
-          displacements[static_cast<std::size_t>(rank - 1)] +
+      send_displacements[static_cast<std::size_t>(rank)] =
+          send_displacements[static_cast<std::size_t>(rank - 1)] +
+          send_counts[static_cast<std::size_t>(rank - 1)];
+    }
+    total_send += count;
+  }
+  if (total_send > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("sharded uint64 aggregate send count exceeds MPI int range");
+  }
+  std::vector<std::uint64_t> send_values;
+  send_values.reserve(total_send);
+  for (const auto& values : values_by_rank) {
+    send_values.insert(send_values.end(), values.begin(), values.end());
+  }
+
+  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
+  const int counts_status = MPI_Alltoall(
+      send_counts.data(), 1, MPI_INT,
+      recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  if (counts_status != MPI_SUCCESS) {
+    throw std::runtime_error("sharded uint64 MPI_Alltoall count exchange failed");
+  }
+  std::vector<int> recv_displacements(static_cast<std::size_t>(world_size), 0);
+  std::size_t total_recv = 0U;
+  for (int rank = 0; rank < world_size; ++rank) {
+    const int count = recv_counts[static_cast<std::size_t>(rank)];
+    if (count < 0 || static_cast<std::size_t>(count) % record_width != 0U) {
+      throw std::runtime_error("sharded uint64 receive count violates record framing");
+    }
+    if (rank > 0) {
+      recv_displacements[static_cast<std::size_t>(rank)] =
+          recv_displacements[static_cast<std::size_t>(rank - 1)] +
           recv_counts[static_cast<std::size_t>(rank - 1)];
     }
-    total += counts[static_cast<std::size_t>(rank)];
+    total_recv += static_cast<std::size_t>(count);
   }
-  std::vector<std::uint64_t> gathered(static_cast<std::size_t>(total), 0U);
-  MPI_Allgatherv(
-      const_cast<std::uint64_t*>(local_values.data()),
-      static_cast<int>(local_values.size()), MPI_UINT64_T,
-      gathered.data(), recv_counts.data(), displacements.data(),
-      MPI_UINT64_T, MPI_COMM_WORLD);
-  return gathered;
+  if (total_recv > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("sharded uint64 aggregate receive count exceeds MPI int range");
+  }
+  std::vector<std::uint64_t> recv_values(total_recv, 0U);
+  const int payload_status = MPI_Alltoallv(
+      send_values.data(), send_counts.data(), send_displacements.data(), MPI_UINT64_T,
+      recv_values.data(), recv_counts.data(), recv_displacements.data(), MPI_UINT64_T,
+      MPI_COMM_WORLD);
+  if (payload_status != MPI_SUCCESS) {
+    throw std::runtime_error("sharded uint64 MPI_Alltoallv payload exchange failed");
+  }
+  return ShardedUint64Exchange{
+      .values = std::move(recv_values),
+      .recv_counts = std::move(recv_counts),
+      .recv_displacements = std::move(recv_displacements),
+  };
 #else
-  throw std::runtime_error("distributed particle-ID precommit requires an MPI build");
+  throw std::runtime_error("distributed sharded particle-ID registry requires an MPI build");
 #endif
+}
+
+[[nodiscard]] std::size_t shardForUint64(std::uint64_t value, int world_size) {
+  if (world_size <= 0) {
+    throw std::invalid_argument("particle-ID sharding requires positive world size");
+  }
+  // Multiplicative mixing keeps sequential imported IDs from concentrating on
+  // a subset of shards while remaining deterministic for any rank count.
+  value ^= value >> 33U;
+  value *= 0xff51afd7ed558ccdULL;
+  value ^= value >> 33U;
+  value *= 0xc4ceb9fe1a85ec53ULL;
+  value ^= value >> 33U;
+  return static_cast<std::size_t>(value % static_cast<std::uint64_t>(world_size));
 }
 
 class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit {
@@ -131,56 +203,199 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
       const core::SimulationState& state,
       std::span<const std::uint64_t> birth_keys) override {
     if (!m_initialized) {
-      m_occupied = allGatherUint64(m_mpi_context, state.particle_sidecar.particle_id);
-      std::sort(m_occupied.begin(), m_occupied.end());
-      if ((!m_occupied.empty() && m_occupied.front() == 0U) ||
-          std::adjacent_find(m_occupied.begin(), m_occupied.end()) != m_occupied.end()) {
-        throw std::runtime_error(
-            "ParticleIdRegistry: zero or duplicate existing ID during distributed initialization");
-      }
-      m_initialized = true;
+      initializeOccupiedShard(state.particle_sidecar.particle_id);
     }
+    validateBirthKeysDistributed(birth_keys);
 
-    std::vector<std::uint64_t> global_birth_keys = allGatherUint64(m_mpi_context, birth_keys);
-    std::sort(global_birth_keys.begin(), global_birth_keys.end());
-    if ((!global_birth_keys.empty() && global_birth_keys.front() == 0U) ||
-        std::adjacent_find(global_birth_keys.begin(), global_birth_keys.end()) !=
-            global_birth_keys.end()) {
-      throw std::runtime_error(
-          "ParticleIdRegistry: duplicate immutable birth key across owner ranks before mutation");
-    }
-
-    const std::vector<std::uint64_t> global_ids =
-        physics::precommitStarParticleIdsExact(m_occupied, global_birth_keys);
-    const std::size_t occupied_before = m_occupied.size();
-    m_occupied.insert(m_occupied.end(), global_ids.begin(), global_ids.end());
-    std::inplace_merge(
-        m_occupied.begin(), m_occupied.begin() + static_cast<std::ptrdiff_t>(occupied_before),
-        m_occupied.end());
-    if (std::adjacent_find(m_occupied.begin(), m_occupied.end()) != m_occupied.end()) {
-      throw std::runtime_error(
-          "ParticleIdRegistry: exact distributed precommit produced a duplicate ID");
-    }
-
-    std::vector<std::uint64_t> local_ids;
-    local_ids.reserve(birth_keys.size());
+    struct LocalCandidate {
+      std::uint64_t particle_id = 0U;
+      std::uint64_t birth_key = 0U;
+      std::uint32_t collision_ordinal = 0U;
+      bool resolved = false;
+    };
+    std::vector<LocalCandidate> candidates;
+    candidates.reserve(birth_keys.size());
     for (const std::uint64_t birth_key : birth_keys) {
-      const auto it = std::lower_bound(
-          global_birth_keys.begin(), global_birth_keys.end(), birth_key);
-      if (it == global_birth_keys.end() || *it != birth_key) {
-        throw std::runtime_error(
-            "ParticleIdRegistry: local birth key missing from global precommit");
-      }
-      const std::size_t index = static_cast<std::size_t>(it - global_birth_keys.begin());
-      local_ids.push_back(global_ids[index]);
+      candidates.push_back(LocalCandidate{
+          .particle_id = physics::starFormationParticleIdFromBirthKey(birth_key, 0U),
+          .birth_key = birth_key,
+      });
     }
-    return local_ids;
+
+    std::unordered_set<std::uint64_t> batch_reserved_on_shard;
+    const int world_size = m_mpi_context.worldSize();
+    for (std::uint32_t pass = 0U; pass < 1024U; ++pass) {
+      std::vector<std::vector<std::uint64_t>> requests(
+          static_cast<std::size_t>(world_size));
+      for (std::size_t local_index = 0; local_index < candidates.size(); ++local_index) {
+        const LocalCandidate& candidate = candidates[local_index];
+        if (candidate.resolved) {
+          continue;
+        }
+        auto& target = requests[shardForUint64(candidate.particle_id, world_size)];
+        target.push_back(candidate.particle_id);
+        target.push_back(candidate.birth_key);
+        target.push_back(static_cast<std::uint64_t>(local_index));
+        target.push_back(static_cast<std::uint64_t>(candidate.collision_ordinal));
+      }
+      const ShardedUint64Exchange received =
+          exchangeShardedUint64Records(m_mpi_context, requests, 4U);
+
+      struct ReceivedCandidate {
+        std::uint64_t particle_id = 0U;
+        std::uint64_t birth_key = 0U;
+        std::uint64_t origin_index = 0U;
+        std::uint32_t ordinal = 0U;
+        int origin_rank = 0;
+      };
+      std::vector<ReceivedCandidate> shard_candidates;
+      shard_candidates.reserve(received.values.size() / 4U);
+      for (int origin_rank = 0; origin_rank < world_size; ++origin_rank) {
+        const int begin = received.recv_displacements[static_cast<std::size_t>(origin_rank)];
+        const int count = received.recv_counts[static_cast<std::size_t>(origin_rank)];
+        for (int offset = 0; offset < count; offset += 4) {
+          const std::size_t index = static_cast<std::size_t>(begin + offset);
+          const std::uint64_t ordinal64 = received.values[index + 3U];
+          if (ordinal64 > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("particle-ID collision ordinal wire value overflow");
+          }
+          shard_candidates.push_back(ReceivedCandidate{
+              .particle_id = received.values[index],
+              .birth_key = received.values[index + 1U],
+              .origin_index = received.values[index + 2U],
+              .ordinal = static_cast<std::uint32_t>(ordinal64),
+              .origin_rank = origin_rank,
+          });
+        }
+      }
+      std::sort(shard_candidates.begin(), shard_candidates.end(),
+                [](const ReceivedCandidate& lhs, const ReceivedCandidate& rhs) {
+                  if (lhs.particle_id != rhs.particle_id) return lhs.particle_id < rhs.particle_id;
+                  if (lhs.birth_key != rhs.birth_key) return lhs.birth_key < rhs.birth_key;
+                  if (lhs.origin_rank != rhs.origin_rank) return lhs.origin_rank < rhs.origin_rank;
+                  return lhs.origin_index < rhs.origin_index;
+                });
+
+      // decision record: local candidate index, 0=resolved, 1=rehash.
+      std::vector<std::vector<std::uint64_t>> decisions(
+          static_cast<std::size_t>(world_size));
+      std::size_t begin = 0U;
+      while (begin < shard_candidates.size()) {
+        std::size_t end_group = begin + 1U;
+        while (end_group < shard_candidates.size() &&
+               shard_candidates[end_group].particle_id ==
+                   shard_candidates[begin].particle_id) {
+          ++end_group;
+        }
+        const std::uint64_t particle_id = shard_candidates[begin].particle_id;
+        const bool collides_reserved = m_occupied_shard.contains(particle_id) ||
+            batch_reserved_on_shard.contains(particle_id);
+        const std::size_t first_rehash = collides_reserved ? begin : begin + 1U;
+        if (!collides_reserved) {
+          const ReceivedCandidate& winner = shard_candidates[begin];
+          auto& result = decisions[static_cast<std::size_t>(winner.origin_rank)];
+          result.push_back(winner.origin_index);
+          result.push_back(0U);
+          batch_reserved_on_shard.insert(particle_id);
+        }
+        for (std::size_t index = first_rehash; index < end_group; ++index) {
+          const ReceivedCandidate& collision = shard_candidates[index];
+          auto& result = decisions[static_cast<std::size_t>(collision.origin_rank)];
+          result.push_back(collision.origin_index);
+          result.push_back(1U);
+        }
+        begin = end_group;
+      }
+
+      const ShardedUint64Exchange returned =
+          exchangeShardedUint64Records(m_mpi_context, decisions, 2U);
+      for (std::size_t index = 0; index < returned.values.size(); index += 2U) {
+        const std::uint64_t local_index64 = returned.values[index];
+        const std::uint64_t action = returned.values[index + 1U];
+        if (local_index64 >= candidates.size() || action > 1U) {
+          throw std::runtime_error("particle-ID shard returned an invalid collision decision");
+        }
+        LocalCandidate& candidate = candidates[static_cast<std::size_t>(local_index64)];
+        if (action == 0U) {
+          candidate.resolved = true;
+          continue;
+        }
+        if (candidate.collision_ordinal == std::numeric_limits<std::uint32_t>::max()) {
+          throw std::runtime_error("ParticleIdRegistry: deterministic collision ordinal overflow");
+        }
+        ++candidate.collision_ordinal;
+        candidate.particle_id = physics::starFormationParticleIdFromBirthKey(
+            candidate.birth_key, candidate.collision_ordinal);
+      }
+
+      std::uint64_t local_unresolved = 0U;
+      for (const LocalCandidate& candidate : candidates) {
+        local_unresolved += candidate.resolved ? 0U : 1U;
+      }
+      if (m_mpi_context.allreduceSumUint64(local_unresolved) == 0U) {
+        m_occupied_shard.insert(
+            batch_reserved_on_shard.begin(), batch_reserved_on_shard.end());
+        std::vector<std::uint64_t> result;
+        result.reserve(candidates.size());
+        for (const LocalCandidate& candidate : candidates) {
+          result.push_back(candidate.particle_id);
+        }
+        return result;
+      }
+    }
+    throw std::runtime_error(
+        "ParticleIdRegistry: deterministic sharded collision resolution exhausted");
   }
 
  private:
+  void initializeOccupiedShard(std::span<const std::uint64_t> local_ids) {
+    const int world_size = m_mpi_context.worldSize();
+    std::vector<std::vector<std::uint64_t>> ids_by_rank(
+        static_cast<std::size_t>(world_size));
+    for (const std::uint64_t id : local_ids) {
+      ids_by_rank[shardForUint64(id, world_size)].push_back(id);
+    }
+    const ShardedUint64Exchange received =
+        exchangeShardedUint64Records(m_mpi_context, ids_by_rank, 1U);
+    std::vector<std::uint64_t> shard_ids = received.values;
+    std::sort(shard_ids.begin(), shard_ids.end());
+    const bool invalid_local =
+        (!shard_ids.empty() && shard_ids.front() == 0U) ||
+        std::adjacent_find(shard_ids.begin(), shard_ids.end()) != shard_ids.end();
+    if (m_mpi_context.allreduceSumUint64(invalid_local ? 1ULL : 0ULL) != 0U) {
+      throw std::runtime_error(
+          "ParticleIdRegistry: zero or duplicate existing ID during sharded initialization");
+    }
+    m_occupied_shard.insert(shard_ids.begin(), shard_ids.end());
+    m_initialized = true;
+  }
+
+  void validateBirthKeysDistributed(std::span<const std::uint64_t> birth_keys) const {
+    const int world_size = m_mpi_context.worldSize();
+    std::vector<std::vector<std::uint64_t>> keys_by_rank(
+        static_cast<std::size_t>(world_size));
+    for (const std::uint64_t key : birth_keys) {
+      keys_by_rank[shardForUint64(key, world_size)].push_back(key);
+    }
+    const ShardedUint64Exchange received =
+        exchangeShardedUint64Records(m_mpi_context, keys_by_rank, 1U);
+    std::vector<std::uint64_t> shard_keys = received.values;
+    std::sort(shard_keys.begin(), shard_keys.end());
+    const bool invalid_local =
+        (!shard_keys.empty() && shard_keys.front() == 0U) ||
+        std::adjacent_find(shard_keys.begin(), shard_keys.end()) != shard_keys.end();
+    if (m_mpi_context.allreduceSumUint64(invalid_local ? 1ULL : 0ULL) != 0U) {
+      throw std::runtime_error(
+          "ParticleIdRegistry: zero or duplicate immutable birth key across owner ranks");
+    }
+  }
+
   const parallel::MpiContext& m_mpi_context;
   bool m_initialized = false;
-  std::vector<std::uint64_t> m_occupied;
+  // Only IDs whose hash shard belongs to this rank are retained. Aggregate
+  // memory remains O(N), not O(N * ranks), while collision decisions stay
+  // deterministic because each candidate ID has one authoritative shard.
+  std::unordered_set<std::uint64_t> m_occupied_shard;
 };
 
 [[nodiscard]] physics::BlackHoleAgnConfig makeRuntimeBlackHoleAgnConfig(
@@ -206,6 +421,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
  public:
   SourceRuntimeImpl(
       const core::SimulationConfig& config,
+      const core::ModePolicy& mode_policy,
       const core::UnitSystem& units,
       std::uint32_t world_rank,
       const parallel::MpiContext& mpi_context)
@@ -222,9 +438,22 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_mpi_context(mpi_context),
         m_world_rank(world_rank),
         m_coordinate_frame(config.units.coordinate_frame),
+        m_hydro_boundary(mode_policy.hydro_boundary),
+        m_bh_enabled(config.physics.enable_black_hole_agn),
+        m_bh_seeding_requested(config.physics.bh_enable_seeding),
         m_is_cosmological(
             config.mode.mode == core::SimulationMode::kCosmoCube ||
             config.mode.mode == core::SimulationMode::kZoomIn) {
+    if (m_bh_seeding_requested) {
+      if (!m_bh_enabled) {
+        throw std::invalid_argument(
+            "physics.bh_enable_seeding=true requires physics.enable_black_hole_agn=true");
+      }
+      throw std::runtime_error(
+          "BH seeding requested, but ReferenceWorkflow has no authoritative halo/candidate provider; "
+          "disable bh_enable_seeding or supply a production candidate provider before claiming seeding support");
+    }
+
     const double hubble_si = config.cosmology.hubble_param *
         core::constants::k_hubble_100_km_s_mpc_si;
     const double hubble_code = hubble_si * units.timeSiPerCode();
@@ -325,14 +554,17 @@ class SourceRuntimeImpl final : public SourceRuntime {
     executeStellarEvolutionAndEnrichment(context);
     executeMetalDiffusion(context, source_evaluation_scale_factor);
 
-    const physics::BlackHoleAgnStepReport black_hole_report = m_black_hole.apply(
-        context.state,
-        m_seed_candidates,
-        context.integrator_state.dt_time_code,
-        source_evaluation_scale_factor,
-        m_coordinate_frame == core::CoordinateFrame::kComoving,
-        context.integrator_state.step_index,
-        &m_particle_id_registry);
+    physics::BlackHoleAgnStepReport black_hole_report{};
+    if (m_bh_enabled) {
+      black_hole_report = m_black_hole.apply(
+          context.state,
+          m_seed_candidates,
+          context.integrator_state.dt_time_code,
+          source_evaluation_scale_factor,
+          m_coordinate_frame == core::CoordinateFrame::kComoving,
+          context.integrator_state.step_index,
+          &m_particle_id_registry);
+    }
     if (black_hole_report.counters.gas_mass_removed_code > 0.0) {
       // Generic gas particles are compatibility mirrors only. Keep them coherent
       // for I/O/legacy consumers after the authoritative gas->BH transaction.
@@ -512,6 +744,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
     if (!m_metal_diffusion.config().enabled || context.state.cells.size() == 0U) {
       return;
     }
+    if (m_mpi_context.isEnabled() && m_mpi_context.worldSize() > 1) {
+      throw std::runtime_error(
+          "metal diffusion is not permitted on multiple MPI ranks until the directed gas-cell interface exchange "
+          "and equal-and-opposite remote flux commit are available; refusing a decomposition-dependent result");
+    }
     buildOwnedLeafCellMetadata(context);
     const double scale_factor = m_coordinate_frame == core::CoordinateFrame::kComoving
         ? source_evaluation_scale_factor
@@ -545,11 +782,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
             geometry.dx_stored * scale_factor,
             geometry.dy_stored * scale_factor,
             geometry.dz_stored * scale_factor};
-        for (int component = 0; component < 3; ++component) {
-          for (int axis = 0; axis < 3; ++axis) {
+        for (std::size_t component = 0; component < velocity_fields.size(); ++component) {
+          for (std::size_t axis = 0; axis < spacing.size(); ++axis) {
             cell.velocity_gradient.grad[component][axis] =
                 starFormationDerivativeAtCell(
-                    velocity_fields[component], geometry, axis,
+                    velocity_fields[component], geometry, static_cast<int>(axis),
                     spacing[axis], cell_index);
           }
         }
@@ -557,52 +794,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
       m_diffusion_cells[cell_index] = cell;
     }
 
-    m_diffusion_faces.clear();
-    for (std::uint32_t patch_index = 0;
-         patch_index < context.state.patches.size(); ++patch_index) {
-      if (context.state.patches.owning_rank[patch_index] != m_world_rank) {
-        continue;
-      }
-      const std::uint32_t first = context.state.patches.first_cell[patch_index];
-      const std::uint32_t nx = context.state.patches.cell_dim_x[patch_index];
-      const std::uint32_t ny = context.state.patches.cell_dim_y[patch_index];
-      const std::uint32_t nz = context.state.patches.cell_dim_z[patch_index];
-      if (nx == 0U || ny == 0U || nz == 0U) {
-        continue;
-      }
-      const double dx = context.state.patches.extent_x_comoving[patch_index] /
-          static_cast<double>(nx) * scale_factor;
-      const double dy = context.state.patches.extent_y_comoving[patch_index] /
-          static_cast<double>(ny) * scale_factor;
-      const double dz = context.state.patches.extent_z_comoving[patch_index] /
-          static_cast<double>(nz) * scale_factor;
-      const auto row = [first, nx, ny](std::uint32_t i, std::uint32_t j,
-                                      std::uint32_t k) {
-        return first + i + nx * (j + ny * k);
-      };
-      for (std::uint32_t k = 0; k < nz; ++k) {
-        for (std::uint32_t j = 0; j < ny; ++j) {
-          for (std::uint32_t i = 0; i < nx; ++i) {
-            const std::uint32_t left = row(i, j, k);
-            if (i + 1U < nx) {
-              m_diffusion_faces.push_back({
-                  .left_cell = left, .right_cell = row(i + 1U, j, k),
-                  .area_code = dy * dz, .center_distance_code = dx});
-            }
-            if (j + 1U < ny) {
-              m_diffusion_faces.push_back({
-                  .left_cell = left, .right_cell = row(i, j + 1U, k),
-                  .area_code = dx * dz, .center_distance_code = dy});
-            }
-            if (k + 1U < nz) {
-              m_diffusion_faces.push_back({
-                  .left_cell = left, .right_cell = row(i, j, k + 1U),
-                  .area_code = dx * dy, .center_distance_code = dz});
-            }
-          }
-        }
-      }
-    }
+    const internal::MetalDiffusionTopologyResult topology =
+        internal::buildMetalDiffusionTopology(
+            context.state,
+            m_owned_leaf_mask,
+            m_world_rank,
+            scale_factor,
+            m_hydro_boundary,
+            m_diffusion_cells);
+    m_diffusion_faces = topology.faces;
     if (m_diffusion_faces.empty()) {
       return;
     }
@@ -717,14 +917,14 @@ class SourceRuntimeImpl final : public SourceRuntime {
             state.gas_cells.velocity_z_peculiar};
         std::array<std::array<double, 3>, 3> gradient{};
         bool gradient_valid = true;
-        for (int component = 0; component < 3; ++component) {
+        for (std::size_t component = 0; component < velocity_fields.size(); ++component) {
           gradient[component][0] = starFormationDerivativeAtCell(
               velocity_fields[component], geometry, 0, dx_phys, cell_index);
           gradient[component][1] = starFormationDerivativeAtCell(
               velocity_fields[component], geometry, 1, dy_phys, cell_index);
           gradient[component][2] = starFormationDerivativeAtCell(
               velocity_fields[component], geometry, 2, dz_phys, cell_index);
-          for (int axis = 0; axis < 3; ++axis) {
+          for (std::size_t axis = 0; axis < gradient[component].size(); ++axis) {
             gradient_valid = gradient_valid && std::isfinite(gradient[component][axis]);
           }
         }
@@ -777,6 +977,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
   const parallel::MpiContext& m_mpi_context;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
+  core::BoundaryCondition m_hydro_boundary = core::BoundaryCondition::kOpen;
+  bool m_bh_enabled = false;
+  bool m_bh_seeding_requested = false;
   bool m_is_cosmological = false;
   double m_mean_baryon_density0_code = 0.0;
   std::vector<std::uint32_t> m_full_cell_indices;
@@ -797,10 +1000,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
 
 std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::SimulationConfig& config,
+    const core::ModePolicy& mode_policy,
     const core::UnitSystem& units,
     std::uint32_t world_rank,
     const parallel::MpiContext& mpi_context) {
-  return std::make_unique<SourceRuntimeImpl>(config, units, world_rank, mpi_context);
+  return std::make_unique<SourceRuntimeImpl>(
+      config, mode_policy, units, world_rank, mpi_context);
 }
 
 }  // namespace cosmosim::workflows

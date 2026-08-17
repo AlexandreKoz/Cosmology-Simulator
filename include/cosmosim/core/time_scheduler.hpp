@@ -89,11 +89,16 @@ struct CflTimeStepInput {
 };
 
 struct DirectionalCflTimeStepInput {
-  // Ordered x, y, z in code/comoving units. The stable CFL bound is the minimum
-  // directional crossing time, not the norm of the velocity vector.
+  // Ordered x, y, z stored-coordinate widths. velocity_axis_code and
+  // sound_speed_code are physical peculiar/signal speeds. For a comoving
+  // coordinate frame the crossing length is a * dx_comoving, so the CFL
+  // time scales linearly with scale_factor. Proper-coordinate runs use the
+  // stored width directly.
   std::array<double, 3> cell_width_axis_code{0.0, 0.0, 0.0};
   std::array<double, 3> velocity_axis_code{0.0, 0.0, 0.0};
   double sound_speed_code = 0.0;
+  CoordinateFrame coordinate_frame = CoordinateFrame::kPhysical;
+  double scale_factor = 1.0;
 };
 
 struct HydroCflDiagnostics {
@@ -111,6 +116,8 @@ struct HydroCflDiagnostics {
   std::array<double, 3> cell_width_axis_code{0.0, 0.0, 0.0};
   std::array<double, 3> velocity_axis_code{0.0, 0.0, 0.0};
   double sound_speed_code = 0.0;
+  CoordinateFrame coordinate_frame = CoordinateFrame::kPhysical;
+  double scale_factor = 1.0;
   std::uint8_t limiting_axis = 0;
 };
 

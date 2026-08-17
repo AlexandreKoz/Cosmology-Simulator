@@ -211,6 +211,8 @@ struct NumericsConfig {
   double cosmology_max_delta_ln_a = 1.0e-2;
   double cosmology_max_hubble_time_fraction = 1.0e-2;
   double source_max_fractional_change = 0.1;
+  double hydro_density_floor_code = 1.0e-10;
+  double hydro_pressure_floor_code = 1.0e-10;
   int max_global_steps = 1024;
   // Production ReferenceWorkflow is intentionally single-rung until each
   // particle/cell has an explicit last-kick epoch and per-bin KDK factors.
@@ -336,6 +338,9 @@ struct PhysicsConfig {
   double metal_diffusion_coefficient_ceiling_code = 1.0e30;
 
   bool enable_black_hole_agn = false;
+  // Seeding requires an authoritative halo/candidate provider. The reference
+  // workflow currently has none, so this is explicit and fail-closed.
+  bool bh_enable_seeding = false;
   double bh_seed_halo_mass_threshold_code = 1.0e3;
   double bh_seed_mass_code = 1.0;
   std::uint32_t bh_seed_max_per_cell = 1;

@@ -1,0 +1,181 @@
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <numeric>
+#include <vector>
+
+#include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/physics/metal_diffusion.hpp"
+#include "workflows/internal/metal_diffusion_topology.hpp"
+
+namespace {
+
+void setPatch(
+    cosmosim::core::SimulationState& state,
+    std::uint32_t patch,
+    std::uint32_t first,
+    std::uint32_t count,
+    std::uint32_t nx,
+    std::uint32_t ny,
+    std::uint32_t nz,
+    double ox,
+    double oy,
+    double oz,
+    double ex,
+    double ey,
+    double ez) {
+  state.patches.patch_id[patch] = 100U + patch;
+  state.patches.first_cell[patch] = first;
+  state.patches.cell_count[patch] = count;
+  state.patches.owning_rank[patch] = 0U;
+  state.patches.cell_dim_x[patch] = nx;
+  state.patches.cell_dim_y[patch] = ny;
+  state.patches.cell_dim_z[patch] = nz;
+  state.patches.origin_x_comoving[patch] = ox;
+  state.patches.origin_y_comoving[patch] = oy;
+  state.patches.origin_z_comoving[patch] = oz;
+  state.patches.extent_x_comoving[patch] = ex;
+  state.patches.extent_y_comoving[patch] = ey;
+  state.patches.extent_z_comoving[patch] = ez;
+}
+
+std::vector<cosmosim::physics::MetalDiffusionCell> makeDiffusionCells(
+    std::size_t count) {
+  std::vector<cosmosim::physics::MetalDiffusionCell> cells(count);
+  for (std::size_t row = 0; row < count; ++row) {
+    cells[row].gas_cell_id = 1000U + row;
+    cells[row].gas_mass_code = 1.0;
+    cells[row].metal_mass_code = row == 0U ? 0.5 : 0.0;
+    cells[row].density_code = 1.0;
+    cells[row].volume_code = 1.0;
+    cells[row].filter_length_code = 1.0;
+    cells[row].is_owned_leaf = true;
+  }
+  return cells;
+}
+
+void testSameLevelPatchBoundaryTransfersConservatively() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(2U);
+  state.resizePatches(2U);
+  setPatch(state, 0U, 0U, 1U, 1U, 1U, 1U, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  setPatch(state, 1U, 1U, 1U, 1U, 1U, 1U, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  state.cells.center_x_comoving[0] = 0.5;
+  state.cells.center_x_comoving[1] = 1.5;
+  state.cells.center_y_comoving[0] = state.cells.center_y_comoving[1] = 0.5;
+  state.cells.center_z_comoving[0] = state.cells.center_z_comoving[1] = 0.5;
+  state.gas_cells.velocity_x_peculiar[0] = 0.0;
+  state.gas_cells.velocity_x_peculiar[1] = 1.0;
+
+  std::vector<std::uint8_t> owned_leaf{1U, 1U};
+  auto cells = makeDiffusionCells(2U);
+  const auto topology = cosmosim::workflows::internal::buildMetalDiffusionTopology(
+      state,
+      owned_leaf,
+      0U,
+      1.0,
+      cosmosim::core::BoundaryCondition::kOpen,
+      cells);
+  assert(topology.interior_patch_face_count == 0U);
+  assert(topology.cross_patch_face_count == 1U);
+  assert(topology.periodic_wrap_face_count == 0U);
+  assert(topology.faces.size() == 1U);
+  assert(std::abs(topology.faces[0].area_code - 1.0) < 1.0e-14);
+  assert(std::abs(topology.faces[0].center_distance_code - 1.0) < 1.0e-14);
+
+  cosmosim::physics::MetalDiffusionConfig config;
+  config.enabled = true;
+  config.model = cosmosim::core::MetalDiffusionModel::kSmagorinsky;
+  config.smagorinsky_coefficient = 0.05;
+  config.parabolic_cfl = 0.4;
+  cosmosim::physics::MetalDiffusionModel model(config);
+  const double before = cells[0].metal_mass_code + cells[1].metal_mass_code;
+  const auto report = model.advance(cells, topology.faces, 1.0e-2);
+  assert(report.faces_evaluated > 0U);
+  assert(cells[0].metal_mass_code < 0.5);
+  assert(cells[1].metal_mass_code > 0.0);
+  assert(std::abs(cells[0].metal_mass_code + cells[1].metal_mass_code - before) < 1.0e-14);
+}
+
+void testCoarseFineOverlapSplitsFaceArea() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(5U);
+  state.resizePatches(2U);
+  setPatch(state, 0U, 0U, 1U, 1U, 1U, 1U, 0.0, 0.0, 0.0, 1.0, 2.0, 2.0);
+  state.patches.level[0] = 0U;
+  setPatch(state, 1U, 1U, 4U, 1U, 2U, 2U, 1.0, 0.0, 0.0, 1.0, 2.0, 2.0);
+  state.patches.level[1] = 1U;
+  state.cells.center_x_comoving[0] = 0.5;
+  state.cells.center_y_comoving[0] = 1.0;
+  state.cells.center_z_comoving[0] = 1.0;
+  std::uint32_t row = 1U;
+  for (std::uint32_t k = 0U; k < 2U; ++k) {
+    for (std::uint32_t j = 0U; j < 2U; ++j) {
+      state.cells.center_x_comoving[row] = 1.5;
+      state.cells.center_y_comoving[row] = 0.5 + static_cast<double>(j);
+      state.cells.center_z_comoving[row] = 0.5 + static_cast<double>(k);
+      ++row;
+    }
+  }
+  std::vector<std::uint8_t> owned_leaf(5U, 1U);
+  auto cells = makeDiffusionCells(5U);
+  const auto topology = cosmosim::workflows::internal::buildMetalDiffusionTopology(
+      state,
+      owned_leaf,
+      0U,
+      1.0,
+      cosmosim::core::BoundaryCondition::kOpen,
+      cells);
+  assert(topology.cross_patch_face_count == 4U);
+  double coarse_interface_area = 0.0;
+  std::uint64_t coarse_interface_faces = 0U;
+  for (const auto& face : topology.faces) {
+    if (face.left_cell == 0U || face.right_cell == 0U) {
+      coarse_interface_area += face.area_code;
+      ++coarse_interface_faces;
+    }
+  }
+  assert(coarse_interface_faces == 4U);
+  assert(std::abs(coarse_interface_area - 4.0) < 1.0e-14);
+}
+
+void testPeriodicWrapIsARealDiffusionInterface() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(2U);
+  state.resizePatches(1U);
+  setPatch(state, 0U, 0U, 2U, 2U, 1U, 1U, 0.0, 0.0, 0.0, 2.0, 1.0, 1.0);
+  state.cells.center_x_comoving[0] = 0.5;
+  state.cells.center_x_comoving[1] = 1.5;
+  state.cells.center_y_comoving[0] = state.cells.center_y_comoving[1] = 0.5;
+  state.cells.center_z_comoving[0] = state.cells.center_z_comoving[1] = 0.5;
+  state.gas_cells.velocity_x_peculiar[0] = -1.0;
+  state.gas_cells.velocity_x_peculiar[1] = 1.0;
+  std::vector<std::uint8_t> owned_leaf{1U, 1U};
+  auto cells = makeDiffusionCells(2U);
+  const auto topology = cosmosim::workflows::internal::buildMetalDiffusionTopology(
+      state,
+      owned_leaf,
+      0U,
+      1.0,
+      cosmosim::core::BoundaryCondition::kPeriodic,
+      cells);
+  assert(topology.interior_patch_face_count == 1U);
+  assert(topology.periodic_wrap_face_count == 1U);
+  assert(topology.faces.size() == 2U);
+  assert(std::count_if(
+             topology.faces.begin(), topology.faces.end(),
+             [](const auto& face) {
+               return face.boundary_kind ==
+                   cosmosim::physics::MetalDiffusionBoundaryKind::kPeriodic;
+             }) == 1);
+}
+
+}  // namespace
+
+int main() {
+  testSameLevelPatchBoundaryTransfersConservatively();
+  testCoarseFineOverlapSplitsFaceArea();
+  testPeriodicWrapIsARealDiffusionInterface();
+  return 0;
+}

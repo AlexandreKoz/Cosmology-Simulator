@@ -79,7 +79,8 @@ namespace {
         case Key::kParticlePosition: return Mode::kRead;
         case Key::kParticleVelocity: return Mode::kReadWrite;
         case Key::kParticleGravitySource: return Mode::kRead;
-        case Key::kHydroConservedState: return Mode::kRead;
+        case Key::kHydroConservedState: return Mode::kReadWrite;
+        case Key::kHydroPrimitiveState: return Mode::kReadWrite;
         case Key::kMigrationOwnership: return Mode::kRead;
         case Key::kSchedulerTruth: return Mode::kRead;
         case Key::kGravityAcceleration: return Mode::kWrite;

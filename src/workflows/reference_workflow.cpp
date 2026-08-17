@@ -1,5 +1,6 @@
 #include "cosmosim/workflows/reference_workflow.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
+#include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
 #include "cosmosim/workflows/runtime_capabilities.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
@@ -146,37 +147,94 @@ void fnv1aMix(std::uint64_t& hash, double value) { fnv1aMix(hash, &value, sizeof
 
 void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value, sizeof(value)); }
 
-[[nodiscard]] std::uint64_t computeStateDigest(const core::SimulationState& state, const core::IntegratorState& integrator_state) {
+[[nodiscard]] std::uint64_t entityStateHashParticle(
+    const core::SimulationState& state,
+    std::uint32_t particle_row) {
+  if (particle_row >= state.particles.size()) {
+    throw std::out_of_range("state digest particle row is outside ParticleSoa");
+  }
   std::uint64_t hash = 0;
-  fnv1aMix(hash, static_cast<std::uint64_t>(state.particles.size()));
-  fnv1aMix(hash, static_cast<std::uint64_t>(state.cells.size()));
-  for (const double value : state.particles.position_x_comoving) {
-    fnv1aMix(hash, value);
+  fnv1aMix(hash, static_cast<std::uint64_t>(0x7061727469636c65ULL));  // "particle" domain tag.
+  fnv1aMix(hash, state.particle_sidecar.particle_id[particle_row]);
+  fnv1aMix(hash, static_cast<std::uint64_t>(
+      state.particle_sidecar.species_tag[particle_row]));
+  fnv1aMix(hash, state.particles.position_x_comoving[particle_row]);
+  fnv1aMix(hash, state.particles.position_y_comoving[particle_row]);
+  fnv1aMix(hash, state.particles.position_z_comoving[particle_row]);
+  fnv1aMix(hash, state.particles.velocity_x_peculiar[particle_row]);
+  fnv1aMix(hash, state.particles.velocity_y_peculiar[particle_row]);
+  fnv1aMix(hash, state.particles.velocity_z_peculiar[particle_row]);
+  fnv1aMix(hash, state.particles.mass_code[particle_row]);
+  return hash;
+}
+
+[[nodiscard]] std::uint64_t entityStateHashGasCell(
+    const core::SimulationState& state,
+    std::uint32_t cell_row) {
+  if (cell_row >= state.cells.size() || cell_row >= state.gas_cells.size()) {
+    throw std::out_of_range("state digest gas-cell row is outside authoritative gas storage");
   }
-  for (const double value : state.particles.position_y_comoving) {
-    fnv1aMix(hash, value);
+  std::uint64_t hash = 0;
+  fnv1aMix(hash, static_cast<std::uint64_t>(0x6761735f63656c6cULL));  // "gas_cell" domain tag.
+  fnv1aMix(hash, state.gas_cells.gas_cell_id[cell_row]);
+  fnv1aMix(hash, state.cells.center_x_comoving[cell_row]);
+  fnv1aMix(hash, state.cells.center_y_comoving[cell_row]);
+  fnv1aMix(hash, state.cells.center_z_comoving[cell_row]);
+  fnv1aMix(hash, state.cells.mass_code[cell_row]);
+  fnv1aMix(hash, state.gas_cells.velocity_x_peculiar[cell_row]);
+  fnv1aMix(hash, state.gas_cells.velocity_y_peculiar[cell_row]);
+  fnv1aMix(hash, state.gas_cells.velocity_z_peculiar[cell_row]);
+  fnv1aMix(hash, state.gas_cells.density_code[cell_row]);
+  fnv1aMix(hash, state.gas_cells.pressure_code[cell_row]);
+  fnv1aMix(hash, state.gas_cells.internal_energy_code[cell_row]);
+  fnv1aMix(hash, state.gas_cells.metal_mass_code[cell_row]);
+  return hash;
+}
+
+[[nodiscard]] std::uint64_t computeStateDigest(
+    const core::SimulationState& state,
+    const core::IntegratorState& integrator_state,
+    const parallel::MpiContext& mpi_context) {
+  // Build an order- and decomposition-independent digest over authoritative
+  // physical entities.  Per-entity hashes are keyed by stable identity and
+  // combined commutatively; ghost copies, gas compatibility particles, and
+  // covered coarse gas cells are intentionally excluded.  This makes the
+  // report usable as a reproducibility artifact rather than a dense-row-local
+  // checksum while avoiding a global O(N) gather/sort.
+  const std::uint32_t local_rank = static_cast<std::uint32_t>(
+      std::max(mpi_context.worldRank(), 0));
+  const auto authoritative_rows = internal::selectAuthoritativeGravitySourceRows(
+      state,
+      local_rank,
+      static_cast<std::uint32_t>(std::max(mpi_context.worldSize(), 1)),
+      "reference workflow final-state digest");
+
+  std::uint64_t local_sum = 0U;
+  std::uint64_t local_xor = 0U;
+  for (const std::uint32_t particle_row : authoritative_rows.particle_rows) {
+    const std::uint64_t entity_hash = entityStateHashParticle(state, particle_row);
+    local_sum += entity_hash;
+    local_xor ^= entity_hash;
   }
-  for (const double value : state.particles.position_z_comoving) {
-    fnv1aMix(hash, value);
+  for (const std::uint32_t cell_row : authoritative_rows.gas_cell_rows) {
+    const std::uint64_t entity_hash = entityStateHashGasCell(state, cell_row);
+    local_sum += entity_hash;
+    local_xor ^= entity_hash;
   }
-  for (const double value : state.particles.velocity_x_peculiar) {
-    fnv1aMix(hash, value);
-  }
-  for (const double value : state.particles.velocity_y_peculiar) {
-    fnv1aMix(hash, value);
-  }
-  for (const double value : state.particles.velocity_z_peculiar) {
-    fnv1aMix(hash, value);
-  }
-  for (const double value : state.particles.mass_code) {
-    fnv1aMix(hash, value);
-  }
-  for (const double value : state.gas_cells.density_code) {
-    fnv1aMix(hash, value);
-  }
-  for (const double value : state.gas_cells.internal_energy_code) {
-    fnv1aMix(hash, value);
-  }
+
+  const std::uint64_t global_sum = mpi_context.allreduceSumUint64(local_sum);
+  const std::uint64_t global_xor = mpi_context.allreduceXorUint64(local_xor);
+  const std::uint64_t global_particle_count = mpi_context.allreduceSumUint64(
+      static_cast<std::uint64_t>(authoritative_rows.particle_rows.size()));
+  const std::uint64_t global_gas_cell_count = mpi_context.allreduceSumUint64(
+      static_cast<std::uint64_t>(authoritative_rows.gas_cell_rows.size()));
+
+  std::uint64_t hash = 0;
+  fnv1aMix(hash, static_cast<std::uint64_t>(0x676c6f62616c7631ULL));  // global digest schema v1.
+  fnv1aMix(hash, global_particle_count);
+  fnv1aMix(hash, global_gas_cell_count);
+  fnv1aMix(hash, global_sum);
+  fnv1aMix(hash, global_xor);
   fnv1aMix(hash, integrator_state.current_time_code);
   fnv1aMix(hash, integrator_state.current_scale_factor);
   fnv1aMix(hash, integrator_state.step_index);
@@ -624,7 +682,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         restoring_from_restart);
     traceRuntimePhase("time_coordinator_complete");
 
-    report.final_state_digest = computeStateDigest(state, integrator_state);
+    report.final_state_digest = computeStateDigest(state, integrator_state, mpi_context);
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());
     report.local_cell_count = static_cast<std::uint64_t>(state.cells.size());
     report.local_particle_id_sum = computeParticleIdSum(state);

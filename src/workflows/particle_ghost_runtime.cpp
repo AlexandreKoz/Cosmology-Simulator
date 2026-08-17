@@ -6,7 +6,6 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -48,7 +47,6 @@ namespace {
     const core::SimulationState& state,
     const parallel::GhostLayerEpoch& epoch) {
   parallel::GhostExchangeBufferSoA payload;
-  const std::size_t particle_count = state.particles.size();
   payload.epoch = epoch;
   payload.entity_id.assign(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
   payload.position_x_comoving.assign(state.particles.position_x_comoving.begin(), state.particles.position_x_comoving.end());
@@ -58,21 +56,11 @@ namespace {
   payload.velocity_x_code.assign(state.particles.velocity_x_peculiar.begin(), state.particles.velocity_x_peculiar.end());
   payload.velocity_y_code.assign(state.particles.velocity_y_peculiar.begin(), state.particles.velocity_y_peculiar.end());
   payload.velocity_z_code.assign(state.particles.velocity_z_peculiar.begin(), state.particles.velocity_z_peculiar.end());
-  payload.density_code.assign(particle_count, 0.0);
-  payload.pressure_code.assign(particle_count, 0.0);
-  payload.internal_energy_code.assign(particle_count, 0.0);
-
-  for (std::size_t cell_index = 0; cell_index < state.gas_cells.size(); ++cell_index) {
-    const std::uint64_t parent_id = state.gas_cells.parent_particle_id[cell_index];
-    const auto it = std::find(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end(), parent_id);
-    if (it == state.particle_sidecar.particle_id.end()) {
-      continue;
-    }
-    const auto particle_index = static_cast<std::size_t>(std::distance(state.particle_sidecar.particle_id.begin(), it));
-    payload.density_code[particle_index] = state.gas_cells.density_code[cell_index];
-    payload.pressure_code[particle_index] = state.gas_cells.pressure_code[cell_index];
-    payload.internal_energy_code[particle_index] = state.gas_cells.internal_energy_code[cell_index];
-  }
+  // Generic particle ghosts carry only particle/gravity state. Hydro state is
+  // authoritative on gas cells and is exchanged through the gas_cell_id keyed
+  // hydro ghost protocol in HydroAmrRuntime. Keeping these lanes empty is an
+  // intentional fail-closed contract: a parent particle is lineage metadata,
+  // not a unique hydro-state carrier.
   if (!payload.isConsistent() || !payload.hasGravityPayload()) {
     throw std::runtime_error("particle ghost payload construction produced inconsistent gravity lanes");
   }
@@ -84,17 +72,15 @@ void applyCommittedParticleGhostPayload(
     int world_rank,
     const std::vector<parallel::LocalGhostDescriptor>& descriptors,
     const parallel::GhostExchangeBufferSoA& payload) {
-  if (!payload.isConsistent() || !payload.hasGravityPayload() || !payload.hasHydroPayload()) {
-    throw std::invalid_argument("committed particle ghost payload must contain gravity and hydro lanes");
+  if (!payload.isConsistent() || !payload.hasGravityPayload()) {
+    throw std::invalid_argument("committed particle ghost payload must contain gravity lanes");
+  }
+  if (payload.hasHydroPayload()) {
+    throw std::invalid_argument(
+        "generic particle ghost payload must not contain hydro lanes; use gas_cell_id keyed hydro ghost exchange");
   }
   if (descriptors.size() != state.particles.size() || payload.size() < descriptors.size()) {
     throw std::invalid_argument("committed particle ghost payload shape does not match SimulationState particles");
-  }
-
-  std::unordered_map<std::uint64_t, std::size_t> particle_row_by_id;
-  particle_row_by_id.reserve(state.particles.size());
-  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    particle_row_by_id.emplace(state.particle_sidecar.particle_id[particle_index], particle_index);
   }
 
   for (std::size_t particle_index = 0; particle_index < descriptors.size(); ++particle_index) {
@@ -119,24 +105,7 @@ void applyCommittedParticleGhostPayload(
     state.particles.velocity_z_peculiar[particle_index] = payload.velocity_z_code[particle_index];
   }
 
-  for (std::size_t cell_index = 0; cell_index < state.gas_cells.size(); ++cell_index) {
-    const std::uint64_t parent_id = state.gas_cells.parent_particle_id[cell_index];
-    const auto particle_it = particle_row_by_id.find(parent_id);
-    if (particle_it == particle_row_by_id.end()) {
-      continue;
-    }
-    const std::size_t particle_index = particle_it->second;
-    if (descriptors[particle_index].residency != parallel::LocalIndexResidency::kGhost) {
-      continue;
-    }
-    state.cells.center_x_comoving[cell_index] = payload.position_x_comoving[particle_index];
-    state.cells.center_y_comoving[cell_index] = payload.position_y_comoving[particle_index];
-    state.cells.center_z_comoving[cell_index] = payload.position_z_comoving[particle_index];
-    state.cells.mass_code[cell_index] = payload.mass_code[particle_index];
-    state.gas_cells.density_code[cell_index] = payload.density_code[particle_index];
-    state.gas_cells.pressure_code[cell_index] = payload.pressure_code[particle_index];
-    state.gas_cells.internal_energy_code[cell_index] = payload.internal_energy_code[particle_index];
-  }
+
 }
 
 }  // namespace

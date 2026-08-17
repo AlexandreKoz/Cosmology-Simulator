@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -168,7 +169,8 @@ void materializeRootHydroPatchIfMissing(
 void finalizeStateMetadata(
     const core::FrozenConfig& frozen_config,
     core::SimulationState& state,
-    int world_rank) {
+    int world_rank,
+    bool restoring) {
   state.metadata.run_name = frozen_config.config.output.run_name;
   state.metadata.normalized_config_hash =
       frozen_config.provenance.config_hash;
@@ -176,9 +178,42 @@ void finalizeStateMetadata(
       frozen_config.provenance.config_hash_hex;
   state.metadata.snapshot_stem = frozen_config.config.output.output_stem;
   state.metadata.restart_stem = frozen_config.config.output.restart_stem;
-  state.metadata.scale_factor = state.metadata.scale_factor > 0.0
-      ? state.metadata.scale_factor
-      : std::max(1.0, frozen_config.config.numerics.t_code_begin);
+
+  const core::SimulationConfig& config = frozen_config.config;
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  if (restoring) {
+    if (!std::isfinite(state.metadata.scale_factor) ||
+        state.metadata.scale_factor <= 0.0) {
+      throw std::invalid_argument(
+          "restart state carries an invalid cosmological scale factor");
+    }
+  } else if (mode_policy.cosmological_comoving_frame) {
+    const double configured_a_begin = config.numerics.a_begin;
+    if (!std::isfinite(configured_a_begin) || configured_a_begin <= 0.0) {
+      throw std::invalid_argument(
+          "cosmological initial conditions require a finite positive numerics.a_begin");
+    }
+    if (config.mode.ic_convention == core::InitialConditionConvention::kGenerated) {
+      state.metadata.scale_factor = configured_a_begin;
+    } else {
+      if (!std::isfinite(state.metadata.scale_factor) ||
+          state.metadata.scale_factor <= 0.0) {
+        throw std::invalid_argument(
+            "cosmological external initial conditions require authoritative positive scale-factor metadata");
+      }
+      const double scale = std::max({1.0, std::abs(configured_a_begin),
+                                     std::abs(state.metadata.scale_factor)});
+      if (std::abs(state.metadata.scale_factor - configured_a_begin) >
+          1.0e-10 * scale) {
+        throw std::invalid_argument(
+            "cosmological IC scale factor disagrees with configured numerics.a_begin");
+      }
+    }
+  } else {
+    // Proper-coordinate/isolated runs are explicitly non-expanding.  Do not
+    // infer a dimensionless scale factor from simulation time.
+    state.metadata.scale_factor = 1.0;
+  }
   state.rebuildSpeciesIndex();
   materializeRootHydroPatchIfMissing(
       state, frozen_config.config, world_rank);
@@ -238,7 +273,8 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
   finalizeStateMetadata(
       m_frozen_config,
       ic_result.state,
-      m_services.mpi_context.worldRank());
+      m_services.mpi_context.worldRank(),
+      restoring);
   const io::IcImportCounters& counters = ic_result.report.counters;
   m_services.profiler.recordEvent(core::RuntimeEvent{
       .event_kind = "io.ic_ingestion.summary",

@@ -88,17 +88,20 @@ struct CoolingIntegrationResult {
 
 class CoolingSourceIntegrator {
  public:
-  explicit CoolingSourceIntegrator(double energy_floor_code);
+  explicit CoolingSourceIntegrator(
+      double energy_floor_code,
+      double specific_energy_rate_cgs_to_code = 1.0);
 
   [[nodiscard]] CoolingIntegrationResult integrateSpecificInternalEnergy(
       double specific_internal_energy_code,
-      double mass_density_comoving,
+      double mass_density_physical_cgs,
       double dt_code,
       const CoolingRateQuery& query,
       const CoolingRateProvider& rate_provider) const;
 
  private:
   double m_energy_floor_code = 0.0;
+  double m_specific_energy_rate_cgs_to_code = 1.0;
 };
 
 class CoolingHeatingSource final : public hydro::HydroSourceTerm {
