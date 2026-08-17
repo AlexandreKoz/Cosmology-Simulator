@@ -25,6 +25,7 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
+#include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/gravity/gravity_memory.hpp"
 #include "cosmosim/gravity/gravity_source_snapshot.hpp"
@@ -536,10 +537,30 @@ class GravityRuntimeImpl final : public GravityRuntime {
           "gravity_pre_run_budget_required_bytes=" +
           std::to_string(m_last_pre_run_memory_estimate.budget_required_bytes));
     }
+    if (m_has_process_memory_estimate) {
+      merged.notes.push_back(
+          "dmo_process_pre_run_known_owned_peak_bytes=" +
+          std::to_string(m_last_process_memory_estimate.known_owned_peak_bytes));
+      merged.notes.push_back(
+          "dmo_process_pre_run_external_unknown_reserve_bytes=" +
+          std::to_string(m_last_process_memory_estimate.external_unknown_reserve_bytes));
+      merged.notes.push_back(
+          "dmo_process_pre_run_safety_margin_bytes=" +
+          std::to_string(m_last_process_memory_estimate.safety_margin_bytes));
+      merged.notes.push_back(
+          "dmo_process_pre_run_budget_required_bytes=" +
+          std::to_string(m_last_process_memory_estimate.budget_required_bytes));
+      merged.notes.push_back(
+          "dmo_process_pre_run_aggregate_required_bytes=" +
+          std::to_string(m_last_process_memory_estimate.aggregate_required_bytes));
+    }
     return merged;
   }
   [[nodiscard]] const parallel::DecompositionRuntimeMeasurements& lastRuntimeDecompositionMeasurements() const noexcept {
     return m_last_decomposition_measurements;
+  }
+  void shutdownMpiResources() override {
+    m_tree_pm_coordinator.shutdownMpiResources();
   }
   [[nodiscard]] std::uint64_t decompositionEpoch() const noexcept { return m_decomposition_epoch.value; }
 
@@ -920,6 +941,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .assignment_scheme = m_tree_pm_options.pm_options.assignment_scheme,
             .decomposition_mode = m_tree_pm_options.pm_options.decomposition_mode,
             .mpi_rank_count = static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1)),
+            .mpi_world_rank = std::max(mpi_context.worldRank(), 0),
             .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
             .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
             .periodic_tree_coordinates =
@@ -937,6 +959,138 @@ class GravityRuntimeImpl final : public GravityRuntime {
     gravity::enforceGravityMemoryBudget(
         m_last_pre_run_memory_estimate,
         m_config.parallel.gravity_memory_budget_bytes);
+
+    if (m_config.parallel.process_memory_budget_bytes != 0U &&
+        context.particle_scheduler == nullptr) {
+      throw std::runtime_error(
+          "DMO process memory budget is enabled but the gravity stage has no authoritative particle scheduler for owned-memory preflight");
+    }
+    const std::uint64_t scheduler_owned_bytes = context.particle_scheduler != nullptr
+        ? context.particle_scheduler->ownedCapacityBytes()
+        : 0U;
+    const core::MemoryReport canonical_runtime_report =
+        core::collectSimulationMemoryReport(context.state, context.workspace);
+    m_last_process_memory_estimate = gravity::estimateDmoProcessMemory(
+        canonical_runtime_report,
+        m_last_pre_run_memory_estimate,
+        gravity::DmoProcessMemoryPolicy{
+            .mpi_rank_count = static_cast<std::uint32_t>(
+                std::max(m_runtime_topology.world_size, 1)),
+            .scheduler_owned_bytes = scheduler_owned_bytes,
+            .output_restart_overlap_bytes =
+                m_config.parallel.process_output_restart_overlap_bytes,
+            .mpi_external_reserve_bytes =
+                m_config.parallel.process_mpi_unknown_reserve_bytes,
+            .fftw_external_reserve_bytes =
+                m_config.parallel.process_fftw_unknown_reserve_bytes,
+            .hdf5_external_reserve_bytes =
+                m_config.parallel.process_hdf5_unknown_reserve_bytes,
+            .allocator_external_reserve_bytes =
+                m_config.parallel.process_allocator_unknown_reserve_bytes,
+            .safety_margin_fraction =
+                m_config.parallel.process_memory_safety_margin_fraction,
+        });
+
+    // Replace the estimate helper's equal-rank aggregate with the exact
+    // configured-topology reduction.  Particle decomposition can be uneven,
+    // so production diagnostics must report the sum/max of the rank-local
+    // preflights rather than local_required * world_size.  All ranks enter
+    // these reductions before any rank is allowed to reject its process
+    // budget, preventing a low-memory rank from throwing while peers continue
+    // into later collectives.
+    const std::uint64_t global_modeled_subtotal_bytes =
+        mpi_context.allreduceSumUint64(
+            m_last_process_memory_estimate.modeled_subtotal_bytes);
+    const std::uint64_t rank_max_modeled_subtotal_bytes =
+        mpi_context.allreduceMaxUint64(
+            m_last_process_memory_estimate.modeled_subtotal_bytes);
+    const std::uint64_t global_required_bytes =
+        mpi_context.allreduceSumUint64(
+            m_last_process_memory_estimate.budget_required_bytes);
+    const std::uint64_t rank_max_required_bytes =
+        mpi_context.allreduceMaxUint64(
+            m_last_process_memory_estimate.budget_required_bytes);
+
+    m_last_process_memory_estimate.aggregate_required_bytes =
+        global_required_bytes;
+    m_last_process_memory_estimate.report.notes.push_back(
+        "dmo_process_runtime_exact_aggregate_required_bytes=" +
+        std::to_string(global_required_bytes));
+    m_last_process_memory_estimate.report.notes.push_back(
+        "dmo_process_runtime_rank_max_required_bytes=" +
+        std::to_string(rank_max_required_bytes));
+    auto& distributed = m_last_process_memory_estimate.report.distributed;
+    distributed.valid = true;
+    distributed.rank_count = std::max(m_runtime_topology.world_size, 1);
+    distributed.local_owned_bytes =
+        m_last_process_memory_estimate.modeled_subtotal_bytes;
+    distributed.global_sum_owned_bytes = global_modeled_subtotal_bytes;
+    distributed.rank_max_owned_bytes = rank_max_modeled_subtotal_bytes;
+    if (global_modeled_subtotal_bytes != 0U) {
+      const long double mean_bytes =
+          static_cast<long double>(global_modeled_subtotal_bytes) /
+          static_cast<long double>(distributed.rank_count);
+      distributed.max_to_mean_imbalance_ratio = static_cast<double>(
+          static_cast<long double>(rank_max_modeled_subtotal_bytes) /
+          mean_bytes);
+    }
+    m_has_process_memory_estimate = true;
+
+    if (context.profiler_session != nullptr) {
+      context.profiler_session->recordEvent(core::RuntimeEvent{
+          .event_kind = "memory.dmo_process_preflight",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "core.memory",
+          .step_index = context.integrator_state.step_index,
+          .simulation_time_code = context.integrator_state.current_time_code,
+          .scale_factor = context.integrator_state.current_scale_factor,
+          .message = "authoritative DMO per-rank process memory preflight",
+          .payload = {
+              {"known_owned_peak_bytes",
+               std::to_string(m_last_process_memory_estimate.known_owned_peak_bytes)},
+              {"external_unknown_reserve_bytes",
+               std::to_string(m_last_process_memory_estimate.external_unknown_reserve_bytes)},
+              {"modeled_subtotal_bytes",
+               std::to_string(m_last_process_memory_estimate.modeled_subtotal_bytes)},
+              {"safety_margin_bytes",
+               std::to_string(m_last_process_memory_estimate.safety_margin_bytes)},
+              {"required_bytes",
+               std::to_string(m_last_process_memory_estimate.budget_required_bytes)},
+              {"configured_process_budget_bytes",
+               std::to_string(m_config.parallel.process_memory_budget_bytes)},
+              {"rank_max_required_bytes", std::to_string(rank_max_required_bytes)},
+              {"aggregate_required_bytes", std::to_string(global_required_bytes)},
+              {"rank_count", std::to_string(distributed.rank_count)},
+          },
+      });
+    }
+
+    const std::uint64_t process_budget_bytes =
+        m_config.parallel.process_memory_budget_bytes;
+    const bool local_process_budget_failure =
+        process_budget_bytes != 0U &&
+        m_last_process_memory_estimate.budget_required_bytes >
+            process_budget_bytes;
+    const std::uint64_t failed_process_budget_rank_count =
+        mpi_context.allreduceSumUint64(
+            local_process_budget_failure ? 1ULL : 0ULL);
+    if (failed_process_budget_rank_count != 0U) {
+      if (local_process_budget_failure) {
+        gravity::enforceDmoProcessMemoryBudget(
+            m_last_process_memory_estimate, process_budget_bytes);
+      }
+      throw std::runtime_error(
+          "DMO process memory preflight failed on " +
+          std::to_string(failed_process_budget_rank_count) +
+          " rank(s); local_required_bytes=" +
+          std::to_string(m_last_process_memory_estimate.budget_required_bytes) +
+          ", configured_process_budget_bytes=" +
+          std::to_string(process_budget_bytes) +
+          ", rank_max_required_bytes=" +
+          std::to_string(rank_max_required_bytes) +
+          ", aggregate_required_bytes=" +
+          std::to_string(global_required_bytes));
+    }
 
     rebuildOwnedParticleCompactView(
         context,
@@ -1273,6 +1427,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
         .pm_sync_surface = std::string(pmSyncSurfaceName(decision.sync_surface)),
+        .pm_refresh_reason = std::string(pmRefreshReasonName(context.pm_refresh_directive.reason)),
         .gravity_kick_opportunity = decision.gravity_kick_opportunity,
         .field_version = decision.field_version,
         .last_refresh_opportunity = decision.last_refresh_opportunity,
@@ -2134,6 +2289,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
   gravity::DecompositionEpoch m_decomposition_epoch{};
   gravity::GravityMemoryEstimate m_last_pre_run_memory_estimate{};
   bool m_has_pre_run_memory_estimate = false;
+  gravity::DmoProcessMemoryEstimate m_last_process_memory_estimate{};
+  bool m_has_process_memory_estimate = false;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;

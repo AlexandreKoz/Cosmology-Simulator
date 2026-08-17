@@ -115,14 +115,19 @@ int main() {
   assert(report.local_particle_ids_unique);
   assert(report.global_particle_partition_identity_match);
   assert(report.treepm_update_cadence_steps == 1);
-  assert(report.treepm_long_range_refresh_count == 3);
+  assert(report.treepm_long_range_refresh_count == 5);
   assert(report.treepm_long_range_reuse_count == 0);
-  assert(report.treepm_cadence_records.size() == 3U);
-  const std::vector<std::uint64_t> expected_field_versions{1ULL, 2ULL, 3ULL};
-  const std::vector<std::uint64_t> expected_field_built_steps{0ULL, 0ULL, 1ULL};
-  const std::vector<bool> expected_refresh_flags{true, true, true};
+  assert(report.treepm_cadence_records.size() == 5U);
+  const std::vector<std::uint64_t> expected_field_versions{1ULL, 2ULL, 3ULL, 4ULL, 5ULL};
+  const std::vector<std::uint64_t> expected_field_built_steps{0ULL, 0ULL, 0ULL, 1ULL, 1ULL};
+  const std::vector<bool> expected_refresh_flags{true, true, true, true, true};
   const std::vector<std::string> expected_stage_names{
-      "gravity_kick_pre", "force_refresh", "force_refresh"};
+      "gravity_kick_pre", "force_refresh", "gravity_kick_post",
+      "force_refresh", "gravity_kick_post"};
+  const std::vector<std::string> expected_refresh_reasons{
+      "initial_force_bootstrap", "scheduled_force_refresh_stage",
+      "source_mutation_force_refresh", "scheduled_force_refresh_stage",
+      "source_mutation_force_refresh"};
   for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
     const auto& record = report.treepm_cadence_records[i];
     assert(record.gravity_kick_opportunity == i + 1U);
@@ -130,6 +135,8 @@ int main() {
     assert(record.field_version == expected_field_versions[i]);
     assert(record.field_built_step_index == expected_field_built_steps[i]);
     assert(record.refreshed_long_range_field == expected_refresh_flags[i]);
+    assert(record.pm_refresh_reason == expected_refresh_reasons[i]);
+    assert(record.field_age_in_kick_opportunities == 0U);
     assert(record.active_particles_kicked + record.inactive_particles_skipped == report.local_particle_count);
   }
   assert(frozen.config.parallel.decomposition_runtime_rebalance_enabled);

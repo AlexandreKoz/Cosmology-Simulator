@@ -50,6 +50,16 @@ int main() {
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 2;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 2.0;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 2;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
+  state.patches.owning_rank[0] = 0;
 
   for (std::size_t i = 0; i < 2; ++i) {
     state.cells.center_x_comoving[i] = static_cast<double>(i);
@@ -66,6 +76,7 @@ int main() {
   }
 
   state.rebuildSpeciesIndex();
+  state.refreshGasCellIdentityFromParticleOrder();
   assert(state.validateOwnershipInvariants());
 
   const auto star_packet = state.packSpeciesTransferPacket(cosmosim::core::ParticleSpecies::kStar);

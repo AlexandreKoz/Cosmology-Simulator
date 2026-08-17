@@ -8,10 +8,12 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <numeric>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -1118,6 +1120,157 @@ void resizePmWireBufferBounded(
   return core::checkedSizeMultiply(a, b, context);
 }
 
+struct PmPlanLocalStorageLayout {
+  std::size_t logical_local_complex_cells = 0U;
+  std::size_t allocated_local_complex_cells = 0U;
+  std::size_t real_element_count = 0U;
+  std::size_t real_z_stride = 0U;
+  std::size_t transposed_local_ny = 0U;
+  std::size_t transposed_begin_y = 0U;
+  bool is_distributed = false;
+  bool spectral_transposed = false;
+  bool used_backend_allocation_query = false;
+};
+
+[[nodiscard]] PmPlanLocalStorageLayout determinePmPlanLocalStorageLayout(
+    PmGridShape shape,
+    const parallel::PmSlabLayout& layout,
+    core::PmDecompositionMode decomposition_mode,
+    bool require_active_distributed_backend) {
+  if (!shape.isValid()) {
+    throw std::invalid_argument("PM plan storage layout requires a valid grid shape");
+  }
+  if (!layout.isValid() ||
+      layout.global_nx != shape.nx ||
+      layout.global_ny != shape.ny ||
+      layout.global_nz != shape.nz) {
+    throw std::invalid_argument(
+        "PM plan storage layout requires a slab layout matching the PM grid shape");
+  }
+
+  PmPlanLocalStorageLayout storage;
+  const std::size_t nz_complex = shape.nz / 2U + 1U;
+  storage.logical_local_complex_cells = checkedProduct(
+      checkedProduct(layout.local_nx(), shape.ny, "PM plan local Fourier extent"),
+      nz_complex,
+      "PM plan local Fourier extent");
+  storage.allocated_local_complex_cells = storage.logical_local_complex_cells;
+  storage.real_z_stride = shape.nz;
+
+  if (layout.world_size <= 1) {
+    storage.real_element_count = checkedProduct(
+        checkedProduct(layout.local_nx(), shape.ny, "PM plan serial real extent"),
+        shape.nz,
+        "PM plan serial real extent");
+    return storage;
+  }
+
+  storage.is_distributed = true;
+  storage.real_z_stride = checkedProduct(2U, nz_complex, "PM plan distributed real stride");
+
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+  int mpi_world_size = 1;
+  int mpi_world_rank = 0;
+  if (queryActiveMpiWorld(mpi_world_size, mpi_world_rank)) {
+    if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
+      throw std::invalid_argument(
+          "PM slab layout world metadata must match active MPI_COMM_WORLD for distributed FFT storage");
+    }
+
+    fftw_mpi_init();
+    ptrdiff_t backend_local_nx = 0;
+    ptrdiff_t backend_begin_x = 0;
+    ptrdiff_t backend_local_ny = 0;
+    ptrdiff_t backend_begin_y = 0;
+    ptrdiff_t backend_alloc_local = 0;
+    if (decomposition_mode == core::PmDecompositionMode::kPencil) {
+      backend_alloc_local = fftw_mpi_local_size_3d_transposed(
+          static_cast<ptrdiff_t>(shape.nx),
+          static_cast<ptrdiff_t>(shape.ny),
+          static_cast<ptrdiff_t>(nz_complex),
+          MPI_COMM_WORLD,
+          &backend_local_nx,
+          &backend_begin_x,
+          &backend_local_ny,
+          &backend_begin_y);
+    } else {
+      backend_alloc_local = fftw_mpi_local_size_3d(
+          static_cast<ptrdiff_t>(shape.nx),
+          static_cast<ptrdiff_t>(shape.ny),
+          static_cast<ptrdiff_t>(nz_complex),
+          MPI_COMM_WORLD,
+          &backend_local_nx,
+          &backend_begin_x);
+    }
+    if (backend_alloc_local < 0) {
+      throw std::runtime_error(
+          "FFTW MPI reported a negative local allocation size for distributed PM storage");
+    }
+    const bool local_extent_mismatch =
+        backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx());
+    // FFTW leaves local_0_start unspecified for a zero-width input slab. The
+    // origin carries no ownership meaning in that legal case.
+    const bool nonempty_origin_mismatch =
+        backend_local_nx > 0 &&
+        backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x);
+    if (local_extent_mismatch || nonempty_origin_mismatch) {
+      std::ostringstream message;
+      message << "PM slab layout is incompatible with FFTW MPI ownership for this communicator: rank="
+              << layout.world_rank << ", configured=[" << layout.owned_x.begin_x << ','
+              << layout.owned_x.end_x << "), backend=[" << backend_begin_x << ','
+              << (backend_begin_x + backend_local_nx) << ')';
+      throw std::invalid_argument(message.str());
+    }
+
+    storage.allocated_local_complex_cells = std::max<std::size_t>(
+        1U, static_cast<std::size_t>(backend_alloc_local));
+    if (storage.allocated_local_complex_cells < storage.logical_local_complex_cells) {
+      throw std::runtime_error(
+          "FFTW MPI local allocation is smaller than CHUI's logical PM Fourier extent");
+    }
+    if (decomposition_mode == core::PmDecompositionMode::kPencil) {
+      if (backend_local_ny < 0 || backend_begin_y < 0) {
+        throw std::runtime_error(
+            "FFTW MPI reported negative transposed PM ownership metadata");
+      }
+      storage.spectral_transposed = true;
+      storage.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
+      storage.transposed_begin_y = static_cast<std::size_t>(backend_begin_y);
+    }
+    storage.used_backend_allocation_query = true;
+  }
+#endif
+
+  if (!storage.used_backend_allocation_query) {
+    if (require_active_distributed_backend) {
+      throw std::runtime_error(
+          "distributed PM plan storage requires an active FFTW-MPI session");
+    }
+    // Conservative backend-independent fallback for preflight/compile-only
+    // environments. A transposed FFT can require the larger of input x-slab
+    // or output y-slab spectral storage.
+    std::size_t conservative_complex = storage.logical_local_complex_cells;
+    if (decomposition_mode == core::PmDecompositionMode::kPencil) {
+      const parallel::PmSlabRange y_range = parallel::pmOwnedXRangeForRank(
+          shape.ny, layout.world_size, layout.world_rank);
+      const std::size_t transposed_complex = checkedProduct(
+          checkedProduct(shape.nx, y_range.extentX(),
+                         "PM plan transposed Fourier extent"),
+          nz_complex,
+          "PM plan transposed Fourier extent");
+      conservative_complex = std::max(conservative_complex, transposed_complex);
+    }
+    storage.allocated_local_complex_cells =
+        std::max<std::size_t>(1U, conservative_complex);
+  }
+
+  storage.real_element_count = checkedProduct(
+      2U,
+      storage.allocated_local_complex_cells,
+      "PM plan distributed padded real extent");
+  return storage;
+}
+
 [[nodiscard]] std::uint64_t checkedBytesForCount(
     std::size_t count,
     std::size_t element_size,
@@ -1478,24 +1631,84 @@ class PmSolver::Impl {
 
   explicit Impl(PmGridShape shape) : m_shape(shape) {}
 
-  ~Impl() {
+  void shutdownBackendResources() {
 #if COSMOSIM_ENABLE_FFTW
+#if COSMOSIM_ENABLE_MPI
+    bool has_distributed_plan = false;
+    for (const auto& [_, plan] : m_plan_cache) {
+      has_distributed_plan = has_distributed_plan ||
+          (plan.is_distributed &&
+           (plan.forward_plan != nullptr || plan.inverse_plan != nullptr));
+    }
+    if (has_distributed_plan) {
+      int world_size = 1;
+      int world_rank = 0;
+      if (!queryActiveMpiWorld(world_size, world_rank)) {
+        throw std::runtime_error(
+            "PM FFTW-MPI plan shutdown requires an active MPI session");
+      }
+    }
+#endif
     for (auto& [_, plan] : m_plan_cache) {
       if (plan.forward_plan != nullptr) {
         fftw_destroy_plan(plan.forward_plan);
+        plan.forward_plan = nullptr;
       }
       if (plan.inverse_plan != nullptr) {
         fftw_destroy_plan(plan.inverse_plan);
+        plan.inverse_plan = nullptr;
       }
     }
     if (m_isolated_workspace.forward_plan != nullptr) {
       fftw_destroy_plan(m_isolated_workspace.forward_plan);
+      m_isolated_workspace.forward_plan = nullptr;
     }
     if (m_isolated_workspace.inverse_plan != nullptr) {
       fftw_destroy_plan(m_isolated_workspace.inverse_plan);
+      m_isolated_workspace.inverse_plan = nullptr;
     }
 #endif
+    m_plan_cache.clear();
+    m_active_key.reset();
   }
+
+  void shutdownBackendResourcesNoexcept() noexcept {
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+    bool has_distributed_plan = false;
+    for (const auto& [_, plan] : m_plan_cache) {
+      has_distributed_plan = has_distributed_plan ||
+          (plan.is_distributed &&
+           (plan.forward_plan != nullptr || plan.inverse_plan != nullptr));
+    }
+    if (has_distributed_plan) {
+      int world_size = 1;
+      int world_rank = 0;
+      if (!queryActiveMpiWorld(world_size, world_rank)) {
+        std::fprintf(stderr,
+            "CHUI MPI LIFETIME ERROR: PM FFTW-MPI plans reached destructor outside an active MPI session; explicit backend shutdown ordering was violated\n");
+        // The process is already outside legal MPI teardown. Do not call FFTW
+        // destroy routines for MPI plans here; process teardown reclaims them.
+        for (auto& [_, plan] : m_plan_cache) {
+          if (plan.is_distributed) {
+            plan.forward_plan = nullptr;
+            plan.inverse_plan = nullptr;
+          }
+        }
+      }
+    }
+#endif
+    try {
+      shutdownBackendResources();
+    } catch (...) {
+      // Destructors must stay noexcept. Any late distributed plan was surfaced
+      // above; for other backend teardown failures process exit remains the
+      // final containment boundary.
+      m_plan_cache.clear();
+      m_active_key.reset();
+    }
+  }
+
+  ~Impl() { shutdownBackendResourcesNoexcept(); }
 
   struct IsolatedOpenWorkspace {
     std::size_t nx = 0;
@@ -1602,13 +1815,15 @@ class PmSolver::Impl {
     if (layout.world_size > 1) {
       const int local_cache_hit = it != m_plan_cache.end() ? 1 : 0;
       int global_cache_hit_count = 0;
-      MPI_Allreduce(
-          &local_cache_hit,
-          &global_cache_hit_count,
-          1,
-          MPI_INT,
-          MPI_SUM,
-          MPI_COMM_WORLD);
+      requirePmMpiSuccess(
+          MPI_Allreduce(
+              &local_cache_hit,
+              &global_cache_hit_count,
+              1,
+              MPI_INT,
+              MPI_SUM,
+              MPI_COMM_WORLD),
+          "PmSolver distributed FFT plan-cache agreement");
       if (global_cache_hit_count != 0 && global_cache_hit_count != layout.world_size) {
         throw std::runtime_error(
             "Distributed PM FFT plan cache state diverged across ranks; all ranks must build or reuse together");
@@ -1627,119 +1842,40 @@ class PmSolver::Impl {
     PlanResources plan{};
     plan.layout = layout;
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
-    plan.real_z_stride = m_shape.nz;
-    std::size_t expected_local_complex_size = 0U;
+    PmPlanLocalStorageLayout storage_layout;
 #if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
     double plan_mpi_wait_ms = 0.0;
     if (layout.world_size > 1) {
       runPmCoordinatedPhase(
-          "PmSolver distributed FFT logical-size preparation",
+          "PmSolver distributed FFT storage-layout preparation",
           layout.world_rank,
           layout.world_size,
           plan_mpi_wait_ms,
           [&]() {
-            expected_local_complex_size = checkedProduct(
-                checkedProduct(layout.local_nx(), m_shape.ny, "PM local Fourier extent"),
-                nz_complex,
-                "PM local Fourier extent");
+            storage_layout = determinePmPlanLocalStorageLayout(
+                m_shape, layout, decomposition_mode, true);
           });
     } else
 #endif
     {
-      expected_local_complex_size = checkedProduct(
-          checkedProduct(layout.local_nx(), m_shape.ny, "PM local Fourier extent"),
-          nz_complex,
-          "PM local Fourier extent");
+      storage_layout = determinePmPlanLocalStorageLayout(
+          m_shape, layout, decomposition_mode, false);
     }
-    [[maybe_unused]] std::size_t allocated_local_complex_size = expected_local_complex_size;
+    const std::size_t expected_local_complex_size =
+        storage_layout.logical_local_complex_cells;
+    const std::size_t allocated_local_complex_size =
+        storage_layout.allocated_local_complex_cells;
+    plan.real_z_stride = storage_layout.real_z_stride;
+
 
 #if COSMOSIM_ENABLE_FFTW
 #if COSMOSIM_ENABLE_MPI
     if (layout.world_size > 1) {
-      int mpi_world_size = 1;
-      int mpi_world_rank = 0;
-      queryActiveMpiWorld(mpi_world_size, mpi_world_rank);
-      runPmCoordinatedPhase(
-          "PmSolver distributed FFT plan metadata preflight",
-          mpi_world_rank,
-          mpi_world_size,
-          plan_mpi_wait_ms,
-          [&]() {
-            if (mpi_world_size != layout.world_size || mpi_world_rank != layout.world_rank) {
-              throw std::invalid_argument(
-                  "PM slab layout world metadata must match MPI_COMM_WORLD for distributed FFT path");
-            }
-          });
-      fftw_mpi_init();
-      ptrdiff_t backend_local_nx = 0;
-      ptrdiff_t backend_begin_x = 0;
-      ptrdiff_t backend_alloc_local = 0;
-      ptrdiff_t backend_local_ny = 0;
-      ptrdiff_t backend_begin_y = 0;
-      if (decomposition_mode == core::PmDecompositionMode::kPencil) {
-        backend_alloc_local = fftw_mpi_local_size_3d_transposed(
-            static_cast<ptrdiff_t>(m_shape.nx),
-            static_cast<ptrdiff_t>(m_shape.ny),
-            static_cast<ptrdiff_t>(nz_complex),
-            MPI_COMM_WORLD,
-            &backend_local_nx,
-            &backend_begin_x,
-            &backend_local_ny,
-            &backend_begin_y);
-      } else {
-        backend_alloc_local = fftw_mpi_local_size_3d(
-            static_cast<ptrdiff_t>(m_shape.nx),
-            static_cast<ptrdiff_t>(m_shape.ny),
-            static_cast<ptrdiff_t>(nz_complex),
-            MPI_COMM_WORLD,
-            &backend_local_nx,
-            &backend_begin_x);
-      }
-      runPmCoordinatedPhase(
-          "PmSolver distributed FFT backend/storage preparation",
-          mpi_world_rank,
-          mpi_world_size,
-          plan_mpi_wait_ms,
-          [&]() {
-      const bool local_extent_mismatch =
-          backend_local_nx != static_cast<ptrdiff_t>(layout.local_nx());
-      // FFTW leaves local_0_start unspecified for a zero-width input slab and
-      // commonly reports zero, whereas CHUI's canonical empty range is
-      // [global_nx, global_nx).  The origin has no ownership meaning when the
-      // extent is zero, so compare it only for non-empty slabs.
-      const bool nonempty_origin_mismatch =
-          backend_local_nx > 0 &&
-          backend_begin_x != static_cast<ptrdiff_t>(layout.owned_x.begin_x);
-      if (local_extent_mismatch || nonempty_origin_mismatch) {
-        std::ostringstream message;
-        message << "PM slab layout is incompatible with FFTW MPI ownership for this communicator: rank="
-                << layout.world_rank << ", configured=[" << layout.owned_x.begin_x << ',' << layout.owned_x.end_x
-                << "), backend=[" << backend_begin_x << ',' << (backend_begin_x + backend_local_nx) << ')';
-        throw std::invalid_argument(message.str());
-      }
-      if (backend_alloc_local < 0) {
-        throw std::runtime_error("FFTW MPI reported a negative local allocation size for distributed PM plan");
-      }
-      // FFTW permits a participating rank to own no real-space slab when
-      // world_size > nx and may then report alloc_local == 0.  Keep the
-      // authoritative logical extents at zero while providing non-null dummy
-      // storage to planners/backends that still require valid pointer values.
-      allocated_local_complex_size = std::max<std::size_t>(
-          1U,
-          static_cast<std::size_t>(backend_alloc_local));
-      plan.is_distributed = true;
-      plan.real_z_stride = 2U * nz_complex;
-      plan.real.assign(
-          checkedProduct(2U, allocated_local_complex_size, "FFTW MPI local real allocation"),
-          0.0);
-      if (decomposition_mode == core::PmDecompositionMode::kPencil) {
-        plan.spectral_transposed = true;
-        plan.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
-        plan.transposed_begin_y = static_cast<std::size_t>(backend_begin_y);
-      }
-      if (allocated_local_complex_size < expected_local_complex_size) {
-        throw std::runtime_error("FFTW MPI local allocation is smaller than the expected slab-local Fourier extent");
-      }
+      plan.is_distributed = storage_layout.is_distributed;
+      plan.spectral_transposed = storage_layout.spectral_transposed;
+      plan.transposed_local_ny = storage_layout.transposed_local_ny;
+      plan.transposed_begin_y = storage_layout.transposed_begin_y;
+      plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -1747,7 +1883,6 @@ class PmSolver::Impl {
       plan.grad_kx.assign(allocated_local_complex_size, 0.0);
       plan.grad_ky.assign(allocated_local_complex_size, 0.0);
       plan.grad_kz.assign(allocated_local_complex_size, 0.0);
-          });
     }
 #endif
 #if COSMOSIM_ENABLE_MPI
@@ -1785,13 +1920,8 @@ class PmSolver::Impl {
     } else
 #endif
     {
-      plan.real_z_stride = m_shape.nz;
-      plan.real.assign(
-          checkedProduct(
-              checkedProduct(layout.local_nx(), m_shape.ny, "PM local real extent"),
-              plan.real_z_stride,
-              "PM local real extent"),
-          0.0);
+      plan.real_z_stride = storage_layout.real_z_stride;
+      plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -1822,12 +1952,7 @@ class PmSolver::Impl {
       throw std::invalid_argument(
           "PM solver naive DFT fallback requires full-domain slab ownership; distributed PM requires COSMOSIM_ENABLE_FFTW=ON and COSMOSIM_ENABLE_MPI=ON");
     }
-    plan.real.assign(
-        checkedProduct(
-            checkedProduct(layout.local_nx(), m_shape.ny, "PM local real extent"),
-            plan.real_z_stride,
-            "PM local real extent"),
-        0.0);
+    plan.real.assign(storage_layout.real_element_count, 0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
@@ -2592,6 +2717,58 @@ bool PmGridShape::isValid() const {
   return nx > 0 && ny > 0 && nz > 0;
 }
 
+PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
+    PmGridShape shape,
+    const parallel::PmSlabLayout& layout,
+    core::PmDecompositionMode decomposition_mode) {
+  const PmPlanLocalStorageLayout storage_layout =
+      determinePmPlanLocalStorageLayout(
+          shape, layout, decomposition_mode, false);
+
+  const auto checked_bytes = [](std::size_t count, std::size_t element_bytes,
+                                std::string_view context) -> std::uint64_t {
+    const std::size_t bytes = checkedProduct(count, element_bytes, context);
+    return static_cast<std::uint64_t>(bytes);
+  };
+
+  PmPlanResourcesMemoryEstimate estimate;
+  estimate.logical_local_complex_cells = static_cast<std::uint64_t>(storage_layout.logical_local_complex_cells);
+  estimate.allocated_local_complex_cells = static_cast<std::uint64_t>(storage_layout.allocated_local_complex_cells);
+  estimate.used_backend_allocation_query = storage_layout.used_backend_allocation_query;
+
+  estimate.real_array_bytes = checked_bytes(
+      storage_layout.real_element_count,
+      sizeof(double),
+      "PM plan-memory real bytes");
+
+  estimate.complex_spectral_array_bytes = checked_bytes(
+      checkedProduct(3U, storage_layout.allocated_local_complex_cells,
+                     "PM plan-memory complex spectral arrays"),
+      sizeof(std::complex<double>),
+      "PM plan-memory complex spectral bytes");
+  estimate.scalar_spectral_array_bytes = checked_bytes(
+      checkedProduct(4U, storage_layout.allocated_local_complex_cells,
+                     "PM plan-memory scalar spectral arrays"),
+      sizeof(double),
+      "PM plan-memory scalar spectral bytes");
+  const auto checked_add_bytes = [](std::uint64_t lhs, std::uint64_t rhs,
+                                    std::string_view context) {
+    if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
+      throw std::overflow_error(std::string(context) + " overflow");
+    }
+    return lhs + rhs;
+  };
+  const std::uint64_t spectral_bytes = checked_add_bytes(
+      estimate.complex_spectral_array_bytes,
+      estimate.scalar_spectral_array_bytes,
+      "PM plan-memory spectral byte sum");
+  estimate.total_owned_bytes = checked_add_bytes(
+      estimate.real_array_bytes,
+      spectral_bytes,
+      "PM plan-memory total byte sum");
+  return estimate;
+}
+
 void PmProfiler::reset() {
   m_totals = {};
 }
@@ -2864,6 +3041,10 @@ const PmGridShape& PmSolver::shape() const {
 
 void PmSolver::appendMemoryReport(core::MemoryReportBuilder& builder) const {
   m_impl->appendOwnedMemoryReport(builder);
+}
+
+void PmSolver::shutdownBackendResources() {
+  m_impl->shutdownBackendResources();
 }
 
 void PmSolver::assignDensity(

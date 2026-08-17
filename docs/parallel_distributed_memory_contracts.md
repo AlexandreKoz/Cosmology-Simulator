@@ -209,6 +209,14 @@ restart state, and deterministic ordering are unchanged. The two-rank
 round trip, one-rank communicator metadata rejection, and post-gather mixed
 epoch rejection.
 
+MPI communicator lifetime follows the same explicit-ownership rule. Cached sparse graph
+communicators and cached FFTW-MPI PM plans are released through
+`TreePmCoordinator::shutdownMpiResources()` while the MPI session is active; the reference production
+workflow calls this on the normal-success path before returning control to its MPI-session owner.
+Exception unwinding destroys the runtime while that session is still active. Destructors keep noexcept
+emergency containment for process teardown, but an MPI-owned communicator or FFT plan reaching that
+path outside an active MPI session emits a lifetime error and is not treated as normal cleanup.
+
 The owning `TreePmCoordinator` applies the same rule before entering that
 protocol: periodic coordinate unwrapping and local tree construction are
 caught locally, failure-voted on the actual MPI world, and only then may ranks

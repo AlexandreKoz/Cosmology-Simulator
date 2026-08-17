@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -1529,6 +1530,52 @@ void HierarchicalTimeBinScheduler::endSubstep() {
 const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noexcept { return m_hot; }
 
 const TimeBinDiagnostics& HierarchicalTimeBinScheduler::diagnostics() const noexcept { return m_diagnostics; }
+
+std::uint64_t HierarchicalTimeBinScheduler::ownedCapacityBytes() const {
+  std::uint64_t total = 0U;
+  const auto add_bytes = [&total](std::uint64_t bytes, std::string_view label) {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - total) {
+      throw std::overflow_error(
+          "HierarchicalTimeBinScheduler memory accounting overflow at " +
+          std::string(label));
+    }
+    total += bytes;
+  };
+  const auto add_vector = [&add_bytes](const auto& values, std::string_view label) {
+    using Value = typename std::decay_t<decltype(values)>::value_type;
+    const std::uint64_t capacity = static_cast<std::uint64_t>(values.capacity());
+    constexpr std::uint64_t element_bytes = static_cast<std::uint64_t>(sizeof(Value));
+    if (capacity != 0U &&
+        element_bytes > std::numeric_limits<std::uint64_t>::max() / capacity) {
+      throw std::overflow_error(
+          "HierarchicalTimeBinScheduler vector memory accounting overflow at " +
+          std::string(label));
+    }
+    add_bytes(capacity * element_bytes, label);
+  };
+
+  add_vector(m_hot.bin_index, "hot.bin_index");
+  add_vector(m_hot.next_activation_tick, "hot.next_activation_tick");
+  add_vector(m_hot.active_flag, "hot.active_flag");
+  add_vector(m_hot.pending_bin_index, "hot.pending_bin_index");
+  add_vector(m_elements_by_bin, "elements_by_bin.outer");
+  for (const auto& bin : m_elements_by_bin) {
+    add_vector(bin, "elements_by_bin.inner");
+  }
+  add_vector(m_position_in_bin, "position_in_bin");
+  add_vector(m_active_elements, "active_elements");
+  add_vector(m_active_sort_scratch, "active_sort_scratch");
+  add_vector(m_diagnostics.occupancy_by_bin, "diagnostics.occupancy_by_bin");
+  add_vector(m_diagnostics.active_count_by_bin, "diagnostics.active_count_by_bin");
+  add_vector(m_candidate_bin_index, "candidate_bin_index");
+  add_vector(m_candidate_source, "candidate_source");
+  add_vector(m_candidate_label, "candidate_label.outer");
+  for (const std::string& label : m_candidate_label) {
+    add_bytes(static_cast<std::uint64_t>(label.capacity()) + 1U,
+              "candidate_label.payload");
+  }
+  return total;
+}
 
 TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() const {
   validateInternalState("HierarchicalTimeBinScheduler::exportPersistentState");

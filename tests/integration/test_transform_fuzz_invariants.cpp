@@ -421,7 +421,7 @@ SimulationState generateFuzzState(const std::uint32_t seed, const std::size_t pa
   state.black_holes.resize(black_hole_indices.size());
   for (std::size_t row = 0; row < black_hole_indices.size(); ++row) {
     state.black_holes.particle_index[row] = black_hole_indices[row];
-    state.black_holes.host_cell_index[row] = 0;
+    state.black_holes.host_cell_index[row] = cosmosim::core::kInvalidGasCellRow;
     state.black_holes.subgrid_mass_code[row] = 10.0 + static_cast<double>(row);
     state.black_holes.accretion_rate_code[row] = 0.01 * static_cast<double>(row + 1U);
     state.black_holes.feedback_energy_code[row] = 0.02 * static_cast<double>(row + 1U);
@@ -437,7 +437,7 @@ SimulationState generateFuzzState(const std::uint32_t seed, const std::size_t pa
     state.tracers.particle_index[row] = tracer_indices[row];
     state.tracers.parent_particle_id[row] = state.particle_sidecar.particle_id[(tracer_indices[row] + 1U) % particle_count];
     state.tracers.injection_step[row] = 1000U + row;
-    state.tracers.host_cell_index[row] = 0;
+    state.tracers.host_cell_index[row] = cosmosim::core::kInvalidGasCellRow;
     state.tracers.mass_fraction_of_host[row] = 0.01 * static_cast<double>(row + 1U);
     state.tracers.last_host_mass_code[row] = 1.5 + static_cast<double>(row);
     state.tracers.cumulative_exchanged_mass_code[row] = 0.2 * static_cast<double>(row + 1U);

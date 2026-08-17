@@ -396,11 +396,26 @@ mode = cosmo_cube
 decomposition_debug_exact_ownership_audit = true
 isolated_pm_root_workspace_limit_bytes = 1048576
 zoom_high_res_allgather_limit_bytes = 2097152
+process_memory_budget_bytes = 34359738368
+process_mpi_unknown_reserve_bytes = 10485760
+process_fftw_unknown_reserve_bytes = 20971520
+process_hdf5_unknown_reserve_bytes = 31457280
+process_allocator_unknown_reserve_bytes = 41943040
+process_output_restart_overlap_bytes = 52428800
+process_memory_safety_margin_fraction = 0.25
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "debug_exact_decomposition_audit");
   assert(frozen.config.parallel.decomposition_debug_exact_ownership_audit);
   assert(frozen.config.parallel.isolated_pm_root_workspace_limit_bytes == 1048576ULL);
   assert(frozen.config.parallel.zoom_high_res_allgather_limit_bytes == 2097152ULL);
+  assert(frozen.config.parallel.process_memory_budget_bytes == 34359738368ULL);
+  assert(frozen.config.parallel.process_mpi_unknown_reserve_bytes == 10485760ULL);
+  assert(frozen.config.parallel.process_fftw_unknown_reserve_bytes == 20971520ULL);
+  assert(frozen.config.parallel.process_hdf5_unknown_reserve_bytes == 31457280ULL);
+  assert(frozen.config.parallel.process_allocator_unknown_reserve_bytes == 41943040ULL);
+  assert(frozen.config.parallel.process_output_restart_overlap_bytes == 52428800ULL);
+  assert(std::abs(frozen.config.parallel.process_memory_safety_margin_fraction - 0.25) < 1.0e-15);
+  assert(frozen.normalized_text.find("process_memory_budget_bytes = 34359738368") != std::string::npos);
   assert(frozen.normalized_text.find("decomposition_debug_exact_ownership_audit = true") != std::string::npos);
 }
 

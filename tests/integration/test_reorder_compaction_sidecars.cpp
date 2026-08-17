@@ -205,7 +205,7 @@ void seedSyntheticState(SimulationState& state) {
 
   state.black_holes.resize(1);
   state.black_holes.particle_index[0] = 3;
-  state.black_holes.host_cell_index[0] = 42;
+  state.black_holes.host_cell_index[0] = cosmosim::core::kInvalidGasCellRow;
   state.black_holes.subgrid_mass_code[0] = 9.0;
   state.black_holes.accretion_rate_code[0] = 8.0;
   state.black_holes.feedback_energy_code[0] = 7.0;
@@ -219,7 +219,7 @@ void seedSyntheticState(SimulationState& state) {
   state.tracers.particle_index[0] = 4;
   state.tracers.parent_particle_id[0] = 702;
   state.tracers.injection_step[0] = 99;
-  state.tracers.host_cell_index[0] = 7;
+  state.tracers.host_cell_index[0] = cosmosim::core::kInvalidGasCellRow;
   state.tracers.mass_fraction_of_host[0] = 0.123;
   state.tracers.last_host_mass_code[0] = 11.0;
   state.tracers.cumulative_exchanged_mass_code[0] = 1.25;

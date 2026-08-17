@@ -69,10 +69,10 @@ void seedState(SimulationState& state) {
   state.star_particles.birth_mass_code[0] = 3.25;
   state.black_holes.resize(1);
   state.black_holes.particle_index[0] = 4;
-  state.black_holes.host_cell_index[0] = 17;
+  state.black_holes.host_cell_index[0] = cosmosim::core::kInvalidGasCellRow;
   state.tracers.resize(1);
   state.tracers.particle_index[0] = 5;
-  state.tracers.host_cell_index[0] = 9;
+  state.tracers.host_cell_index[0] = cosmosim::core::kInvalidGasCellRow;
 
   state.species.count_by_species = {1, 2, 1, 1, 1};
   state.rebuildSpeciesIndex();
@@ -156,7 +156,7 @@ void test_species_migration_sidecar_invariants() {
   outbound[0].species_tag = speciesTag(ParticleSpecies::kTracer);
   outbound[0].has_star_fields = false;
   outbound[0].has_tracer_fields = true;
-  outbound[0].tracer_fields.host_cell_index = 41;
+  outbound[0].tracer_fields.host_cell_index = cosmosim::core::kInvalidGasCellRow;
   outbound[0].tracer_fields.parent_particle_id = 990001;
   outbound[0].tracer_fields.mass_fraction_of_host = 0.125;
 
@@ -191,7 +191,7 @@ void test_species_migration_sidecar_invariants() {
   for (std::size_t row = 0; row < state.tracers.size(); ++row) {
     if (state.tracers.particle_index[row] == tracer_idx) {
       found_tracer_sidecar = true;
-      assert(state.tracers.host_cell_index[row] == 41);
+      assert(state.tracers.host_cell_index[row] == cosmosim::core::kInvalidGasCellRow);
       assert(state.tracers.parent_particle_id[row] == 990001);
     }
   }

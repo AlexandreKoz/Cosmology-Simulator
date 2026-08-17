@@ -201,12 +201,29 @@ int main() {
   assert(report.treepm_pm_grid_nz == 9);
   assert(report.treepm_pm_grid_shape == "9x9x9");
   assert(report.treepm_update_cadence_steps == 1);
-  assert(report.treepm_long_range_refresh_count == 3);
+  // Two KDK steps with gas intentionally mutate authoritative gravity sources in
+  // HydroUpdate after each scheduled post-drift PM refresh. The integrator must
+  // therefore repair the long-range field before each post-kick rather than reuse
+  // a stale source epoch. This is a physical validity contract, not a magic count.
+  assert(report.treepm_long_range_refresh_count == 5);
   assert(report.treepm_long_range_reuse_count == 0);
-  assert(report.treepm_cadence_records.size() == 3);
-  for (const auto& record : report.treepm_cadence_records) {
+  assert(report.treepm_cadence_records.size() == 5);
+  const std::array<std::string_view, 5> expected_refresh_reasons{
+      "initial_force_bootstrap",
+      "scheduled_force_refresh_stage",
+      "source_mutation_force_refresh",
+      "scheduled_force_refresh_stage",
+      "source_mutation_force_refresh"};
+  const std::array<std::string_view, 5> expected_refresh_stages{
+      "gravity_kick_pre", "force_refresh", "gravity_kick_post",
+      "force_refresh", "gravity_kick_post"};
+  for (std::size_t i = 0; i < report.treepm_cadence_records.size(); ++i) {
+    const auto& record = report.treepm_cadence_records[i];
     assert(record.refreshed_long_range_field);
     assert(record.field_built_step_index == record.step_index);
+    assert(record.field_age_in_kick_opportunities == 0);
+    assert(record.pm_refresh_reason == expected_refresh_reasons[i]);
+    assert(record.stage_name == expected_refresh_stages[i]);
   }
   assert(report.run_directory == expected_run_dir);
   assert(report.normalized_config_snapshot_written);
@@ -264,8 +281,29 @@ int main() {
   assert(tsc_report.completed_steps == 2);
   assert(tsc_report.treepm_pm_grid == 9);
   assert(tsc_report.treepm_pm_grid_shape == "9x9x9");
-  assert(tsc_report.treepm_long_range_refresh_count == 3);
+  assert(tsc_report.treepm_long_range_refresh_count == 5);
   assert(tsc_report.treepm_long_range_reuse_count == 0);
+
+  // The composed process-memory model is a real production gate, not a test-only
+  // utility. A deliberately impossible process budget must fail before gravity
+  // materializes its large staging/tree/PM workspaces.
+  {
+    std::string budget_config =
+        buildConfigText(1, "reference_integration_process_budget_reject", "cic");
+    budget_config += "\n[parallel]\nprocess_memory_budget_bytes = 1\n";
+    const auto budget_frozen = cosmosim::core::loadFrozenConfigFromString(
+        budget_config, "test_reference_workflow_process_memory_budget");
+    cosmosim::workflows::ReferenceWorkflowRunner budget_runner(budget_frozen);
+    bool rejected = false;
+    try {
+      (void)budget_runner.run(
+          output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+    } catch (const std::runtime_error& ex) {
+      rejected = std::string_view(ex.what()).find("DMO process memory preflight requires") !=
+          std::string_view::npos;
+    }
+    assert(rejected);
+  }
 
   std::string endpoint_config =
       buildConfigText(1, "reference_integration_endpoint_clip", "cic");

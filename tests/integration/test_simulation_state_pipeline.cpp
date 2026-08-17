@@ -51,6 +51,16 @@ int main() {
   state.patches.level[0] = 1;
   state.patches.first_cell[0] = 0;
   state.patches.cell_count[0] = 4;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 4.0;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 4;
+  state.patches.cell_dim_y[0] = 1;
+  state.patches.cell_dim_z[0] = 1;
+  state.patches.owning_rank[0] = 0;
 
   for (std::size_t i = 0; i < 4; ++i) {
     state.cells.center_x_comoving[i] = static_cast<double>(i) + 0.25;

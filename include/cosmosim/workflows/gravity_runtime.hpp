@@ -75,6 +75,7 @@ class GravityRuntime : public GravityAccelerationProvider,
   [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
   [[nodiscard]] virtual const parallel::DecompositionRuntimeMeasurements&
   lastRuntimeDecompositionMeasurements() const noexcept = 0;
+  virtual void shutdownMpiResources() = 0;
 
   virtual void restoreDecompositionEpoch(std::uint64_t decomposition_epoch) = 0;
   virtual void commitParticleDecompositionChange() = 0;

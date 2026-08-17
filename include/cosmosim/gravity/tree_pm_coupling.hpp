@@ -177,6 +177,10 @@ class TreePmCoordinator {
   [[nodiscard]] bool ownsFullPmDomain() const noexcept;
   [[nodiscard]] const parallel::PmSlabHaloExchangeResult& lastPmSlabHaloExchange() const noexcept;
   [[nodiscard]] core::MemoryReport memoryReport() const;
+  // Explicitly release cached MPI-owned communicators while the MPI session is active.
+  // Normal application/benchmark lifecycle must call this before MPI_Finalize; the
+  // destructor retains only a noexcept emergency fallback.
+  void shutdownMpiResources();
 
   void solveActiveSetWithPmCadence(
       std::span<const double> pos_x_comoving,

@@ -240,6 +240,7 @@ class HierarchicalTimeBinScheduler {
 
   [[nodiscard]] const TimeBinHotMetadata& hotMetadata() const noexcept;
   [[nodiscard]] const TimeBinDiagnostics& diagnostics() const noexcept;
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
 
   [[nodiscard]] TimeBinPersistentState exportPersistentState() const;
   void importPersistentState(const TimeBinPersistentState& persistent_state);

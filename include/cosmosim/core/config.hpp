@@ -434,6 +434,22 @@ struct ParallelConfig {
   // gravity estimate. Defaults preserve the historical budget behavior.
   std::uint64_t gravity_backend_unknown_reserve_bytes = 0U;
   double gravity_memory_safety_margin_fraction = 0.0;
+  // Authoritative per-rank total-process budget for production DMO preflight.
+  // Zero preserves historical parameter-file behavior and disables only this
+  // process-wide gate; the estimate/report is still produced. The legacy
+  // gravity_memory_budget_bytes remains a gravity-subsystem compatibility gate.
+  std::uint64_t process_memory_budget_bytes = 0U;
+  // Explicit reserves for library/runtime memory that CHUI does not own and
+  // cannot calculate exactly from container extents.
+  std::uint64_t process_mpi_unknown_reserve_bytes = 0U;
+  std::uint64_t process_fftw_unknown_reserve_bytes = 0U;
+  std::uint64_t process_hdf5_unknown_reserve_bytes = 0U;
+  std::uint64_t process_allocator_unknown_reserve_bytes = 0U;
+  // Owned output/restart staging that is permitted to overlap resident
+  // canonical/PM state. IC-import staging is deliberately excluded once the
+  // integrator owns the canonical state because those lifetimes do not overlap.
+  std::uint64_t process_output_restart_overlap_bytes = 0U;
+  double process_memory_safety_margin_fraction = 0.0;
 };
 
 struct UnitsConfig {

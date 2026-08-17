@@ -718,6 +718,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     });
     traceRuntimePhase("final_artifact_flush_begin");
     flushCommonArtifacts(m_frozen_config, profiler, report);
+    // Release cached graph communicators before the caller's MPI-session owner
+    // can finalize MPI. This is the normal lifecycle path; destructors retain
+    // only emergency containment for exception unwinding.
+    gravity_callback.shutdownMpiResources();
     traceRuntimePhase("run_complete");
     return report;
   } catch (const std::exception& ex) {

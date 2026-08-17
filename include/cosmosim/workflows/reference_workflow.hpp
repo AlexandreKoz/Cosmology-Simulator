@@ -64,6 +64,7 @@ struct ReferenceWorkflowReport {
     std::uint64_t step_index = 0;
     std::string stage_name;
     std::string pm_sync_surface;
+    std::string pm_refresh_reason;
     std::uint64_t gravity_kick_opportunity = 0;
     std::uint64_t field_version = 0;
     std::uint64_t last_refresh_opportunity = 0;

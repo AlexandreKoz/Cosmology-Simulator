@@ -86,6 +86,24 @@ struct PmGridShape {
   [[nodiscard]] bool isValid() const;
 };
 
+// Deterministic CHUI-owned storage required by one cached FFT/Poisson plan.
+// Backend-internal FFTW/cuFFT allocations are intentionally excluded and must
+// be carried as an explicit external reserve by the production memory policy.
+struct PmPlanResourcesMemoryEstimate {
+  std::uint64_t real_array_bytes = 0U;
+  std::uint64_t complex_spectral_array_bytes = 0U;
+  std::uint64_t scalar_spectral_array_bytes = 0U;
+  std::uint64_t total_owned_bytes = 0U;
+  std::uint64_t logical_local_complex_cells = 0U;
+  std::uint64_t allocated_local_complex_cells = 0U;
+  bool used_backend_allocation_query = false;
+};
+
+[[nodiscard]] PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
+    PmGridShape shape,
+    const parallel::PmSlabLayout& layout,
+    core::PmDecompositionMode decomposition_mode);
+
 struct PmGlobalCell {
   std::size_t x = 0;
   std::size_t y = 0;
@@ -323,6 +341,10 @@ class PmSolver {
 
   [[nodiscard]] const PmGridShape& shape() const;
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
+  // Destroy cached FFT/FFTW backend plans while the owning MPI session is
+  // guaranteed active. Idempotent; normal distributed runtime calls this
+  // before MPI_Finalize.
+  void shutdownBackendResources();
 
   void assignDensity(
       PmGridStorage& grid,

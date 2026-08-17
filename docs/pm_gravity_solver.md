@@ -299,6 +299,13 @@ This keeps the PM operator auditable while avoiding repeated per-solve heap allo
 
 Plan/scratch caches are keyed by slab layout ownership metadata (`world_size`, `world_rank`,
 `owned_x.begin`, `owned_x.end`) and are reused until layout/communicator metadata changes.
+
+`estimatePmPlanResourcesMemory(...)` uses the same PM shape/slab contract to preflight the
+solver-owned `real`, `fourier`, `potential_k`, `working_k`, `poisson_kernel`, and three gradient
+arrays. In an active FFTW-MPI session it uses `fftw_mpi_local_size_3d[_transposed]` so backend
+over-allocation is reflected before the vectors are created; compile-only/no-MPI environments use a
+conservative geometry fallback. These vectors are **known CHUI-owned memory**, not an FFTW
+"unknown" reserve. FFTW plan internals remain an explicit external-reserve category.
 Inverse normalization is applied exactly once per inverse field (`φ`, `a_x`, `a_y`, `a_z`).
 FFTW-MPI ranks with a legal zero-width slab retain a logical extent of zero but
 receive a one-element dummy allocation for backend pointer safety; they still

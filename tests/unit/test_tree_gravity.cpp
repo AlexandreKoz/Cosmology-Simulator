@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -10,6 +11,7 @@
 
 #include "cosmosim/gravity/gravity_memory.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
+#include "cosmosim/parallel/distributed_mesh.hpp"
 #include "gravity/internal/tree_interaction_common.hpp"
 
 namespace {
@@ -544,6 +546,113 @@ void testEveryMacOpensTargetContainingNode() {
 }
 
 
+void testPmPlanResourcesAndDmoProcessPreflight() {
+  using cosmosim::core::MemoryEntry;
+  using cosmosim::core::MemoryLifetime;
+  using cosmosim::core::MemoryReportBuilder;
+  using cosmosim::core::MemorySubsystem;
+
+  const cosmosim::gravity::PmGridShape shape{32U, 32U, 32U};
+  const auto serial_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 1, 0);
+  const auto serial_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
+      shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  constexpr std::uint64_t serial_real_cells = 32ULL * 32ULL * 32ULL;
+  constexpr std::uint64_t serial_complex_cells = 32ULL * 32ULL * 17ULL;
+  const std::uint64_t expected_serial =
+      serial_real_cells * sizeof(double) +
+      3ULL * serial_complex_cells * sizeof(std::complex<double>) +
+      4ULL * serial_complex_cells * sizeof(double);
+  assert(serial_plan.total_owned_bytes == expected_serial);
+  assert(serial_plan.logical_local_complex_cells == serial_complex_cells);
+
+  const auto rank3_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 8, 3);
+  const auto distributed_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
+      shape, rank3_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  constexpr std::uint64_t distributed_complex_cells = 4ULL * 32ULL * 17ULL;
+  const std::uint64_t expected_distributed =
+      2ULL * distributed_complex_cells * sizeof(double) +
+      3ULL * distributed_complex_cells * sizeof(std::complex<double>) +
+      4ULL * distributed_complex_cells * sizeof(double);
+  assert(distributed_plan.total_owned_bytes == expected_distributed);
+
+  // First-light target geometry: derive, do not hard-code, the known solver-owned
+  // PlanResources payload for one 64-plane slab of a 512^3 mesh.
+  const cosmosim::gravity::PmGridShape first_light_shape{512U, 512U, 512U};
+  const auto first_light_layout = cosmosim::parallel::makePmSlabLayout(
+      first_light_shape.nx, first_light_shape.ny, first_light_shape.nz, 8, 0);
+  const auto first_light_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
+      first_light_shape, first_light_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  const std::uint64_t first_light_complex =
+      64ULL * 512ULL * (512ULL / 2ULL + 1ULL);
+  const std::uint64_t first_light_expected =
+      2ULL * first_light_complex * sizeof(double) +
+      3ULL * first_light_complex * sizeof(std::complex<double>) +
+      4ULL * first_light_complex * sizeof(double);
+  assert(first_light_plan.total_owned_bytes == first_light_expected);
+  assert(first_light_plan.total_owned_bytes > 3ULL * 256ULL * 1024ULL * 1024ULL);
+
+  const auto gravity_estimate = cosmosim::gravity::estimateGravityMemory({
+      .local_source_count = 1024U,
+      .local_target_count = 1024U,
+      .local_particle_count = 1024U,
+      .tree_leaf_size = 16U,
+      .pm_shape = shape,
+      .decomposition_mode = cosmosim::core::PmDecompositionMode::kSlab,
+      .mpi_rank_count = 8U,
+      .mpi_world_rank = 3,
+      .backend_unknown_reserve_bytes = 4096U,
+  });
+  assert(gravity_estimate.pm_plan_owned_bytes == expected_distributed);
+
+  MemoryReportBuilder canonical_builder;
+  canonical_builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kParticles,
+      .lifetime = MemoryLifetime::kPersistent,
+      .label = "test.canonical_particles",
+      .owned_capacity_bytes = 1000U,
+      .high_water_bytes = 1000U,
+      .estimated_next_step_bytes = 1000U,
+  });
+  canonical_builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kScratch,
+      .lifetime = MemoryLifetime::kTransient,
+      .label = "test.canonical_scratch",
+      .owned_capacity_bytes = 2000U,
+      .high_water_bytes = 2000U,
+      .estimated_next_step_bytes = 2000U,
+  });
+  const auto canonical_report = std::move(canonical_builder).finish();
+  const auto process_estimate = cosmosim::gravity::estimateDmoProcessMemory(
+      canonical_report, gravity_estimate, cosmosim::gravity::DmoProcessMemoryPolicy{
+          .mpi_rank_count = 8U,
+          .scheduler_owned_bytes = 3000U,
+          .output_restart_overlap_bytes = 5000U,
+          .mpi_external_reserve_bytes = 7000U,
+          .fftw_external_reserve_bytes = 11000U,
+          .hdf5_external_reserve_bytes = 13000U,
+          .allocator_external_reserve_bytes = 17000U,
+          .safety_margin_fraction = 0.25,
+      });
+  assert(process_estimate.known_owned_peak_bytes ==
+      gravity_estimate.known_peak_bytes + 1000U + 2000U + 3000U + 5000U);
+  assert(process_estimate.external_unknown_reserve_bytes ==
+      gravity_estimate.external_backend_unknown_bytes + 7000U + 11000U + 13000U + 17000U);
+  assert(process_estimate.modeled_subtotal_bytes ==
+      process_estimate.known_owned_peak_bytes + process_estimate.external_unknown_reserve_bytes);
+  assert(process_estimate.budget_required_bytes >= process_estimate.modeled_subtotal_bytes);
+  assert(process_estimate.aggregate_required_bytes == 8U * process_estimate.budget_required_bytes);
+  bool rejected = false;
+  try {
+    cosmosim::gravity::enforceDmoProcessMemoryBudget(
+        process_estimate, process_estimate.budget_required_bytes - 1U);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+  cosmosim::gravity::enforceDmoProcessMemoryBudget(
+      process_estimate, process_estimate.budget_required_bytes);
+}
+
 void testAdaptiveNodeReserveAndMemoryEstimate() {
   constexpr std::size_t n = 1024;
   std::vector<double> x(n), y(n), z(n), mass(n, 1.0);
@@ -750,6 +859,7 @@ int main() {
   testSourceGenerationRejectsStaleTree();
   testLegacyFingerprintRejectsSameSizeMutation();
   testEveryMacOpensTargetContainingNode();
+  testPmPlanResourcesAndDmoProcessPreflight();
   testAdaptiveNodeReserveAndMemoryEstimate();
   testAuthoritativeGasGeometryMatchesDirectSoftenedReference();
   testGasRefinementForceConvergesAtFixedMassAndCom();

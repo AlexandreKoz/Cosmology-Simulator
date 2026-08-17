@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -733,29 +734,62 @@ void appendWireDouble(std::vector<std::uint8_t>& bytes, double value) {
   return total_bytes;
 }
 
+void requireTreePmMpiSuccess(int error_code, std::string_view context);
+
 struct SparsePeerGraph {
   MPI_Comm communicator = MPI_COMM_NULL;
   std::vector<int> incoming_peers;
   std::vector<int> outgoing_peers;
 
-  static void releaseCommunicator(MPI_Comm& communicator) noexcept {
+  void close() {
+    if (communicator == MPI_COMM_NULL) {
+      return;
+    }
+    int initialized = 0;
+    requireTreePmMpiSuccess(MPI_Initialized(&initialized),
+                            "TreePM sparse graph MPI_Initialized during shutdown");
+    if (initialized == 0) {
+      throw std::runtime_error(
+          "TreePM sparse graph shutdown reached an owned communicator before MPI initialization");
+    }
+    int finalized = 0;
+    requireTreePmMpiSuccess(MPI_Finalized(&finalized),
+                            "TreePM sparse graph MPI_Finalized during shutdown");
+    if (finalized != 0) {
+      throw std::runtime_error(
+          "TreePM sparse graph shutdown reached an owned communicator after MPI_Finalize");
+    }
+    requireTreePmMpiSuccess(MPI_Comm_free(&communicator),
+                            "TreePM sparse graph MPI_Comm_free");
+  }
+
+  static void releaseCommunicatorNoexcept(MPI_Comm& communicator) noexcept {
     if (communicator == MPI_COMM_NULL) {
       return;
     }
     int initialized = 0;
     int finalized = 0;
-    (void)MPI_Initialized(&initialized);
-    if (initialized != 0) {
-      (void)MPI_Finalized(&finalized);
-    }
-    if (initialized != 0 && finalized == 0) {
-      (void)MPI_Comm_free(&communicator);
-    } else {
-      // A cached communicator may outlive MPI finalization during process
-      // teardown. MPI objects cannot be freed after MPI_Finalize; dropping the
-      // handle here is the only legal teardown and process exit reclaims it.
+    const int initialized_rc = MPI_Initialized(&initialized);
+    const int finalized_rc = initialized_rc == MPI_SUCCESS && initialized != 0
+        ? MPI_Finalized(&finalized)
+        : MPI_SUCCESS;
+    if (initialized_rc == MPI_SUCCESS && finalized_rc == MPI_SUCCESS &&
+        initialized != 0 && finalized == 0) {
+      const int free_rc = MPI_Comm_free(&communicator);
+      if (free_rc == MPI_SUCCESS) {
+        return;
+      }
+      std::fprintf(stderr,
+          "CHUI MPI LIFETIME ERROR: TreePM sparse communicator destructor could not free communicator before MPI_Finalize (rc=%d)\n",
+          free_rc);
       communicator = MPI_COMM_NULL;
+      return;
     }
+    // Emergency containment only. Normal owners call close() explicitly while
+    // MPI is active. Make a late teardown visible rather than normalizing it.
+    std::fprintf(stderr,
+        "CHUI MPI LIFETIME ERROR: TreePM sparse communicator reached destructor outside an active MPI session; explicit shutdown ordering was violated\n");
+    communicator = MPI_COMM_NULL;
   }
 
   SparsePeerGraph() = default;
@@ -767,14 +801,14 @@ struct SparsePeerGraph {
         outgoing_peers(std::move(other.outgoing_peers)) {}
   SparsePeerGraph& operator=(SparsePeerGraph&& other) noexcept {
     if (this != &other) {
-      releaseCommunicator(communicator);
+      releaseCommunicatorNoexcept(communicator);
       communicator = std::exchange(other.communicator, MPI_COMM_NULL);
       incoming_peers = std::move(other.incoming_peers);
       outgoing_peers = std::move(other.outgoing_peers);
     }
     return *this;
   }
-  ~SparsePeerGraph() { releaseCommunicator(communicator); }
+  ~SparsePeerGraph() { releaseCommunicatorNoexcept(communicator); }
 };
 
 [[nodiscard]] std::string treePmMpiErrorText(int error_code) {
@@ -1549,6 +1583,20 @@ TreePmCoordinator::TreePmCoordinator(
       m_sparse_peer_graph_cache(std::make_unique<SparsePeerGraphCacheOpaque>()) {}
 
 TreePmCoordinator::~TreePmCoordinator() = default;
+
+void TreePmCoordinator::shutdownMpiResources() {
+  m_pm_solver.shutdownBackendResources();
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_sparse_peer_graph_cache &&
+      m_sparse_peer_graph_cache->graph.communicator != MPI_COMM_NULL) {
+    m_sparse_peer_graph_cache->graph.close();
+  }
+#endif
+  if (m_sparse_peer_graph_cache) {
+    m_sparse_peer_graph_cache->valid = false;
+    m_sparse_peer_graph_cache->requested_outgoing_peers.clear();
+  }
+}
 
 const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
   return m_grid.slabLayout();
