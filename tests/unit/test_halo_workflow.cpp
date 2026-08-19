@@ -6,6 +6,8 @@
 
 #include "cosmosim/analysis/halo_workflow.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 cosmosim::core::SimulationState makeTwoGroupState() {
@@ -117,8 +119,10 @@ void testPeriodicBoundaryGroupMatchesReference() {
 void testPersistedFinderIdentityMatchesCatalog() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "unit_halo_provenance";
-  config.output.output_directory =
-      std::filesystem::temp_directory_path() / "chui_halo_provenance_unit";
+  const auto workspace =
+      cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "chui_halo_provenance_unit");
+  config.output.output_directory = workspace.root();
   config.cosmology.box_size_mpc_comoving = 1.0;
 
   cosmosim::analysis::FofConfig fof;
@@ -151,7 +155,6 @@ void testPersistedFinderIdentityMatchesCatalog() {
          std::string::npos);
   assert(reference_json.find("\"halo_finder\": \"" + reference.halo_finder + "\"") !=
          std::string::npos);
-  std::filesystem::remove_all(output_directory);
 }
 
 }  // namespace

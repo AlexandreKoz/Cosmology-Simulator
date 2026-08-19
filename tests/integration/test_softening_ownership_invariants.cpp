@@ -14,6 +14,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/gravity/tree_softening.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
@@ -410,7 +411,7 @@ void test_softening_override_restart_roundtrip() {
   payload.distributed_gravity_state.pm_slab_end_x_by_rank = {4};
 
   const std::filesystem::path restart_path =
-      std::filesystem::temp_directory_path() / "cosmosim_softening_ownership_roundtrip.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_softening_ownership_roundtrip.hdf5");
 
   cosmosim::io::writeRestartCheckpointHdf5(restart_path, payload);
   const auto restored = cosmosim::io::readRestartCheckpointHdf5(restart_path);

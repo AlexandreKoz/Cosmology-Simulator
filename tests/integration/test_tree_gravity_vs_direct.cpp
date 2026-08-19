@@ -10,6 +10,8 @@
 
 #include "cosmosim/gravity/tree_gravity.hpp"
 
+#include "gravity_reference.hpp"
+
 namespace {
 
 void requireOrThrow(bool condition, const std::string& message) {
@@ -45,7 +47,7 @@ void directSumAcceleration(
       const double dz = pos_z[j] - tz;
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double factor = options.gravitational_constant_code * mass[j] *
-          cosmosim::gravity::softenedInvR3(r2, options.softening);
+          cosmosim::test_support::plummerInvR3Reference(r2, options.softening.epsilon_comoving);
       acc_x += factor * dx;
       acc_y += factor * dy;
       acc_z += factor * dz;
@@ -72,7 +74,7 @@ void directSumAccelerationWithSofteningView(
     const double tx = pos_x[target];
     const double ty = pos_y[target];
     const double tz = pos_z[target];
-    const double target_eps = cosmosim::gravity::resolveTargetSofteningEpsilon(i, target, options.softening, softening_view);
+    const double target_eps = cosmosim::test_support::targetSofteningReference(i, target, options.softening, softening_view);
     double acc_x = 0.0;
     double acc_y = 0.0;
     double acc_z = 0.0;
@@ -84,9 +86,9 @@ void directSumAccelerationWithSofteningView(
       const double dy = pos_y[j] - ty;
       const double dz = pos_z[j] - tz;
       const double r2 = dx * dx + dy * dy + dz * dz;
-      const double source_eps = cosmosim::gravity::resolveSourceSofteningEpsilon(j, options.softening, softening_view);
-      const double pair_eps = cosmosim::gravity::combineSofteningPairEpsilon(source_eps, target_eps);
-      const double factor = options.gravitational_constant_code * mass[j] * cosmosim::gravity::softenedInvR3(r2, pair_eps);
+      const double source_eps = cosmosim::test_support::sourceSofteningReference(j, options.softening, softening_view);
+      const double pair_eps = cosmosim::test_support::pairSofteningMaxReference(source_eps, target_eps);
+      const double factor = options.gravitational_constant_code * mass[j] * cosmosim::test_support::plummerInvR3Reference(r2, pair_eps);
       acc_x += factor * dx;
       acc_y += factor * dy;
       acc_z += factor * dz;

@@ -6,6 +6,7 @@
 
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
+#include "gravity_reference.hpp"
 #include "validation_tolerance.hpp"
 
 namespace {
@@ -40,7 +41,7 @@ void testTwoBodySymmetry(const cosmosim::validation::ValidationToleranceTable& t
   const double dx = pos_x[1] - pos_x[0];
   const double r2 = dx * dx;
   const double expected = options.gravitational_constant_code * mass[1] * dx *
-      cosmosim::gravity::softenedInvR3(r2, options.softening);
+      cosmosim::test_support::plummerInvR3Reference(r2, options.softening.epsilon_comoving);
 
   const double rel_err_0 = std::abs(ax[0] - expected) / std::max(std::abs(expected), 1.0e-12);
   const double rel_err_1 = std::abs(ax[1] + expected) / std::max(std::abs(expected), 1.0e-12);
@@ -74,7 +75,7 @@ void directSumAcceleration(
       const double dz = pos_z[j] - pos_z[i];
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double factor = options.gravitational_constant_code * mass[j] *
-          cosmosim::gravity::softenedInvR3(r2, options.softening);
+          cosmosim::test_support::plummerInvR3Reference(r2, options.softening.epsilon_comoving);
       acc_x += factor * dx;
       acc_y += factor * dy;
       acc_z += factor * dz;

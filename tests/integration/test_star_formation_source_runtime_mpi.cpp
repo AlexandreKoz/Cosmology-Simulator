@@ -16,6 +16,7 @@
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
+#include "../support/mpi_test_workspace.hpp"
 #endif
 
 namespace {
@@ -407,8 +408,9 @@ int main(int argc, char** argv) {
       configText(world_size, "star_formation_source_runtime_mpi_" + mode),
       "test_star_formation_source_runtime_mpi");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
-  const auto root = std::filesystem::temp_directory_path() /
-      ("cosmosim_star_formation_source_runtime_mpi_" + mode);
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_star_formation_source_runtime_mpi_" + mode);
+  const auto& root = workspace.root();
   const auto report = runner.run(
       root / ("rank_" + std::to_string(world_rank)),
       cosmosim::workflows::ReferenceWorkflowOptions{
@@ -439,6 +441,7 @@ int main(int argc, char** argv) {
             .max_steps_override = 1});
     assert(resumed.restart_roundtrip_ok);
   }
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
 #else
   (void)argc;

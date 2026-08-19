@@ -376,13 +376,23 @@ bool PatchSoa::isConsistent() const noexcept {
     return false;
   }
   for (std::size_t i = 0; i < expected; ++i) {
-    const bool has_geometry = extent_x_comoving[i] > 0.0 || extent_y_comoving[i] > 0.0 ||
-        extent_z_comoving[i] > 0.0 || cell_dim_x[i] != 0U || cell_dim_y[i] != 0U || cell_dim_z[i] != 0U;
+    const bool has_any_geometry_value = extent_x_comoving[i] != 0.0 ||
+        extent_y_comoving[i] != 0.0 || extent_z_comoving[i] != 0.0 ||
+        cell_dim_x[i] != 0U || cell_dim_y[i] != 0U || cell_dim_z[i] != 0U;
     if (cell_count[i] == 0U) {
       continue;
     }
-    if (!has_geometry) {
-      return false;
+    // A fully zero geometry tuple is the documented fixed-patch compatibility
+    // sentinel. It is structurally valid; workflow code must derive and verify
+    // the physical Cartesian layout from cell centers before using it. Partial
+    // or non-positive geometry, by contrast, is never a valid PatchSoa
+    // descriptor. Even the sentinel must carry finite origins.
+    if (!has_any_geometry_value) {
+      if (!std::isfinite(origin_x_comoving[i]) || !std::isfinite(origin_y_comoving[i]) ||
+          !std::isfinite(origin_z_comoving[i])) {
+        return false;
+      }
+      continue;
     }
     if (!(extent_x_comoving[i] > 0.0 && extent_y_comoving[i] > 0.0 && extent_z_comoving[i] > 0.0) ||
         cell_dim_x[i] == 0U || cell_dim_y[i] == 0U || cell_dim_z[i] == 0U) {

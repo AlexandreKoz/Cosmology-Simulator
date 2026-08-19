@@ -3,9 +3,10 @@
 #include <string>
 
 #include "cosmosim/core/provenance.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 int main() {
-  const auto run_directory = std::filesystem::temp_directory_path() / "cosmosim_provenance_roundtrip";
+  const auto run_directory = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_provenance_roundtrip");
   std::filesystem::remove_all(run_directory);
 
   cosmosim::core::ProvenanceRecord in;

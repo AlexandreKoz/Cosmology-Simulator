@@ -7,13 +7,12 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "reference_workflow_hydro_test_fixture.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 int main() {
 #if !COSMOSIM_ENABLE_HDF5
-  // HDF5 is required here solely to read final workflow state without adding a
-  // production-only state-export seam. The workflow target still compiles in
-  // CPU/no-HDF5 configurations; HDF5 acceptance is exercised in hdf5-debug.
-  return 0;
+  // CMake does not register or build this runtime-truth test without HDF5.
+  return 77;
 #else
   namespace fixture = cosmosim::test::workflow_hydro_fixture;
   constexpr std::array<std::uint32_t, fixture::k_cell_count> canonical{{0, 1, 2, 3, 4, 5, 6, 7}};
@@ -23,8 +22,9 @@ int main() {
   const auto shuffled_state = fixture::makeState(shuffled);
   const auto canonical_frozen = fixture::makeFrozenConfig("h1_workflow_row_order_canonical");
   const auto shuffled_frozen = fixture::makeFrozenConfig("h1_workflow_row_order_shuffled");
-  const std::filesystem::path output_root =
-      std::filesystem::temp_directory_path() / "cosmosim_h1_workflow_row_order";
+  auto workspace = cosmosim::test_support::TestTempWorkspace::createUniqueDirectory(
+      "reference_workflow_hydro_row_order");
+  const std::filesystem::path output_root = workspace.root();
 
   cosmosim::workflows::ReferenceWorkflowRunner canonical_runner(canonical_frozen);
   cosmosim::workflows::ReferenceWorkflowRunner shuffled_runner(shuffled_frozen);

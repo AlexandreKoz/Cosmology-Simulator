@@ -20,6 +20,8 @@
 #include "cosmosim/io/ic_reader.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
+#include "../support/mpi_test_workspace.hpp"
+
 namespace {
 
 constexpr double K_MPC_TO_SI = 3.0856775814913673e22;
@@ -762,9 +764,11 @@ int main(int argc, char** argv) {
       : makeBridgeConfig();
   const cosmosim::parallel::MpiContext mpi_context(
       true, world_size, world_rank);
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_distributed_ic_reader_" + mode);
 
   if (mode == "scaling") {
-    const auto scaling_root = std::filesystem::temp_directory_path();
+    const auto& scaling_root = workspace.root();
     const auto small = runScalingImport(
         scaling_root / "cosmosim_distributed_ic_scaling_small", 32U, config,
         mpi_context);
@@ -806,12 +810,12 @@ int main(int argc, char** argv) {
           large.state.particles.position_x_comoving.capacity() <
           large_global);
     }
+    MPI_Barrier(MPI_COMM_WORLD);
     MPI_Finalize();
     return 0;
   }
 
-  const auto base = std::filesystem::temp_directory_path() /
-      ("cosmosim_distributed_ic_acceptance_" + mode);
+  const auto base = workspace.root() / "acceptance";
   const auto first = std::filesystem::path(base.string() + ".0.hdf5");
   const auto second = std::filesystem::path(base.string() + ".1.hdf5");
   if (world_rank == 0) {

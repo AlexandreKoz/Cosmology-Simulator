@@ -8,6 +8,7 @@
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
 #include "cosmosim/workflows/runtime_module_registry.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 int main() {
   std::stringstream config_text;
@@ -74,7 +75,7 @@ int main() {
   };
 
   const std::filesystem::path output_root =
-      std::filesystem::temp_directory_path() / "cosmosim_runtime_descriptor_probe";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_runtime_descriptor_probe");
   const cosmosim::workflows::ReferenceWorkflowReport report =
       runner.run(output_root, options);
   assert(report.completed_steps == 1U);

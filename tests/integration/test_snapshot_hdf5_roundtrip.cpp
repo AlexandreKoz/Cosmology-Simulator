@@ -14,6 +14,7 @@
 #include "cosmosim/io/snapshot_hdf5.hpp"
 #include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -174,8 +175,7 @@ void testDecoupledGasIdentityRoundtrip() {
   state.rebuildSpeciesIndex();
 
   const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      "cosmosim_snapshot_decoupled_gas_identity.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_snapshot_decoupled_gas_identity.hdf5");
   cosmosim::io::SnapshotWritePayload payload;
   payload.state = &state;
   payload.config = &config;
@@ -217,7 +217,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   fillMixedSpeciesState(state);
 
   const std::filesystem::path snapshot_directory =
-      std::filesystem::temp_directory_path() / "cosmosim_snapshot_roundtrip_set";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_snapshot_roundtrip_set");
   std::filesystem::remove_all(snapshot_directory);
   std::filesystem::create_directories(snapshot_directory);
   const std::filesystem::path snapshot_path = snapshot_directory / "snap_000.hdf5";
@@ -553,7 +553,7 @@ void testMassTableFallbackSnapshotImport() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
 #if COSMOSIM_ENABLE_HDF5
   const std::filesystem::path snapshot_path =
-      std::filesystem::temp_directory_path() / "cosmosim_snapshot_mass_table_only.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_snapshot_mass_table_only.hdf5");
 
   hid_t file = H5Fcreate(snapshot_path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   assert(file >= 0);
@@ -657,7 +657,7 @@ void testPersistentIdAndMissingFieldContracts() {
   invalid_payload.normalized_config_text = "schema_version=1\n";
   invalid_payload.provenance = cosmosim::core::makeProvenanceRecord(
       "zero_id", "zero_id", 0, invalid_payload.normalized_config_text);
-  const auto zero_path = std::filesystem::temp_directory_path() / "cosmosim_zero_id_snapshot.hdf5";
+  const auto zero_path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_zero_id_snapshot.hdf5");
   bool zero_rejected = false;
   try {
     cosmosim::io::writeScienceSnapshotHdf5(zero_path, invalid_payload);
@@ -669,7 +669,7 @@ void testPersistentIdAndMissingFieldContracts() {
 
   cosmosim::core::SimulationState state;
   fillMixedSpeciesState(state);
-  const auto path = std::filesystem::temp_directory_path() / "cosmosim_missing_star_tracer_fields.hdf5";
+  const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_missing_star_tracer_fields.hdf5");
   cosmosim::io::SnapshotWritePayload payload;
   payload.state = &state;
   payload.config = &config;
@@ -716,7 +716,7 @@ void testSnapshotSetCompletionContract() {
 
   const std::array<std::uint64_t, 6> global_counts = {0U, 4U, 0U, 0U, 0U, 0U};
   const std::filesystem::path directory =
-      std::filesystem::temp_directory_path() / "cosmosim_snapshot_set_contract";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_snapshot_set_contract");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
 

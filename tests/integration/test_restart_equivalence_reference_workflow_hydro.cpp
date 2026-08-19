@@ -5,12 +5,12 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "reference_workflow_hydro_test_fixture.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 int main() {
 #if !COSMOSIM_ENABLE_HDF5
-  // Established guarded convention: this target remains CTest-registerable in
-  // CPU builds, but full workflow restart equivalence is executed only with HDF5.
-  return 0;
+  // CMake does not register or build this restart-equivalence runtime truth without HDF5.
+  return 77;
 #else
   namespace fixture = cosmosim::test::workflow_hydro_fixture;
   constexpr std::array<std::uint32_t, fixture::k_cell_count> canonical{{0, 1, 2, 3, 4, 5, 6, 7}};
@@ -18,8 +18,9 @@ int main() {
   const auto initial_state = fixture::makeState(canonical);
   const auto frozen = fixture::makeFrozenConfig("h1_reference_workflow_hydro_restart");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
-  const std::filesystem::path root =
-      std::filesystem::temp_directory_path() / "cosmosim_h1_reference_workflow_restart";
+  auto workspace = cosmosim::test_support::TestTempWorkspace::createUniqueDirectory(
+      "restart_equivalence_reference_workflow_hydro");
+  const std::filesystem::path root = workspace.root();
 
   const auto direct_report = runner.run(
       root / "direct",

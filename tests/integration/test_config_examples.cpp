@@ -7,6 +7,8 @@
 
 #include "cosmosim/core/config.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 void checkExample(const std::filesystem::path& path, cosmosim::core::SimulationMode expected_mode) {
@@ -24,8 +26,10 @@ void checkExample(const std::filesystem::path& path, cosmosim::core::SimulationM
   assert(frozen.normalized_text.find("treepm_pm_grid_nx = ") != std::string::npos);
   assert(frozen.normalized_text.find("treepm_pm_grid = ") == std::string::npos);
 
-  const std::filesystem::path run_dir = std::filesystem::temp_directory_path() / "cosmosim_config_test" /
-                                        frozen.config.output.run_name;
+  const auto workspace =
+      cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "cosmosim_config_test_" + frozen.config.output.run_name);
+  const std::filesystem::path run_dir = workspace.root();
   cosmosim::core::writeNormalizedConfigSnapshot(frozen, run_dir);
   assert(std::filesystem::exists(run_dir / "normalized_config.param.txt"));
 }

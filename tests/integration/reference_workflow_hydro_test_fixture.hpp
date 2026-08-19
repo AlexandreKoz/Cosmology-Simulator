@@ -47,7 +47,11 @@ constexpr std::size_t k_cell_count = k_nx * k_ny * k_nz;
   // Keep the low-cost CI mesh inside the periodic one-minimum-image cutoff.
   stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_assignment_scheme = cic\n";
-  stream << "treepm_update_cadence_steps = 1\n\n";
+  stream << "treepm_update_cadence_steps = 1\n";
+  // This is an 8-cell restart/row-order fixture, not a PM backend-acceptance test.
+  // Permit the explicit diagnostic DFT fallback when FFTW is not configured so
+  // the test exercises real workflow/restart behavior without claiming FFTW.
+  stream << "treepm_allow_diagnostic_naive_dft = true\n\n";
   stream << "[output]\n";
   stream << "run_name = " << run_name << '\n';
   stream << "output_directory = integration_outputs\n";
@@ -65,8 +69,8 @@ constexpr std::size_t k_cell_count = k_nx * k_ny * k_nz;
 }
 
 // new_dense_row -> physical Cartesian row. Patch geometry is deliberately left
-// legacy/unmaterialized: production fixed-patch workflow hydro must construct it
-// from the real centers, never from dense row order or cell_count factorization.
+// at the documented legacy fixed-patch sentinel: production workflow hydro must
+// prove strict Cartesian geometry from centers, never from dense row order.
 [[nodiscard]] inline core::SimulationState makeState(
     const std::array<std::uint32_t, k_cell_count>& dense_to_physical) {
   core::SimulationState state;
@@ -100,8 +104,7 @@ constexpr std::size_t k_cell_count = k_nx * k_ny * k_nz;
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] = static_cast<std::uint32_t>(k_cell_count);
   state.patches.owning_rank[0] = 0U;
-  // Zero dimensions/extents intentionally mark fixed-patch compatibility state.
-  // The H1 workflow must derive strict Cartesian geometry from centers.
+  // All geometry lanes remain zero: this is the legacy fixed-patch sentinel.
 
   std::vector<core::GasCellIdentityRecord> records;
   records.reserve(k_cell_count);

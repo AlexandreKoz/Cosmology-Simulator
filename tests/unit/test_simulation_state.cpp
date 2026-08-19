@@ -53,6 +53,29 @@ int main() {
               (2 * sizeof(std::uint64_t)),
       "HydroCellKernelView hot contract changed: unexpected extra field(s)");
 
+  {
+    // A fully zero geometry tuple is the documented legacy fixed-patch
+    // compatibility sentinel. Partial geometry must still be rejected.
+    cosmosim::core::PatchSoa patch_fixture;
+    patch_fixture.resize(1U);
+    patch_fixture.patch_id[0] = 9001U;
+    patch_fixture.cell_count[0] = 8U;
+    assert(patch_fixture.isConsistent());
+
+    patch_fixture.extent_x_comoving[0] = -1.0;
+    assert(!patch_fixture.isConsistent());
+
+    patch_fixture.extent_x_comoving[0] = 1.0;
+    assert(!patch_fixture.isConsistent());
+
+    patch_fixture.extent_y_comoving[0] = 1.0;
+    patch_fixture.extent_z_comoving[0] = 1.0;
+    patch_fixture.cell_dim_x[0] = 2U;
+    patch_fixture.cell_dim_y[0] = 2U;
+    patch_fixture.cell_dim_z[0] = 2U;
+    assert(patch_fixture.isConsistent());
+  }
+
   cosmosim::core::SimulationState state;
   state.resizeParticles(5);
   state.resizeCells(3);

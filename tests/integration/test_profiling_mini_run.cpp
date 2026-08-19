@@ -8,6 +8,7 @@
 
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
@@ -84,9 +85,9 @@ void testMiniRunProfileReportGeneration() {
   assert(profiler.counters().count("active_cells") == 2);
   assert(profiler.counters().count("stage.hydro_update.invocations") == 1);
 
-  const auto temp_dir = std::filesystem::temp_directory_path();
-  const auto json_path = temp_dir / "cosmosim_profile_integration.json";
-  const auto csv_path = temp_dir / "cosmosim_profile_integration.csv";
+  auto scratch = cosmosim::test_support::TestTempWorkspace::createUniqueDirectory("profiling_mini_run");
+  const auto json_path = scratch.path("profile.json");
+  const auto csv_path = scratch.path("profile.csv");
 
   cosmosim::core::writeProfilerReportJson(profiler, json_path);
   cosmosim::core::writeProfilerReportCsv(profiler, csv_path);

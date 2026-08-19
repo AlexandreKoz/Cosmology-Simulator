@@ -11,6 +11,8 @@
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
 
+#include "../support/mpi_test_workspace.hpp"
+
 namespace {
 
 cosmosim::core::SimulationState makeLocalState(int rank) {
@@ -51,13 +53,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const std::filesystem::path directory =
-      std::filesystem::temp_directory_path() /
-      ("cosmosim_snapshot_set_mpi_" + std::to_string(size));
-  if (rank == 0) {
-    std::filesystem::remove_all(directory);
-    std::filesystem::create_directories(directory);
-  }
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_snapshot_set_mpi_" + std::to_string(size));
+  const std::filesystem::path& directory = workspace.root();
   MPI_Barrier(MPI_COMM_WORLD);
 
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
@@ -121,7 +119,6 @@ int main(int argc, char** argv) {
   }
   MPI_Bcast(&root_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
   MPI_Barrier(MPI_COMM_WORLD);
-  if (rank == 0) std::filesystem::remove_all(directory);
   MPI_Finalize();
   return root_ok == 1 ? 0 : 1;
 }

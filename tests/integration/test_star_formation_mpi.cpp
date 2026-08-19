@@ -19,6 +19,8 @@
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/physics/star_formation.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
 #endif
@@ -375,9 +377,9 @@ void assertUniqueParticleIds(std::span<const BirthRecord> records) {
       });
 
   const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      ("cosmosim_star_formation_mpi_rank_" + std::to_string(world_rank) + ".hdf5");
-  std::filesystem::remove(path);
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalFile(
+          "cosmosim_star_formation_mpi_rank_" + std::to_string(world_rank),
+          ".hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(path, payload);
   cosmosim::io::RestartReadResult restored =
       cosmosim::io::readRestartCheckpointHdf5(path);

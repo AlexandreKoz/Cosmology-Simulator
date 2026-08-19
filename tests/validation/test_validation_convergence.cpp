@@ -7,11 +7,13 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
+#include "gravity_reference.hpp"
 #include "validation_tolerance.hpp"
 
 namespace {
@@ -66,7 +68,7 @@ void directSumAcceleration(
       const double dz = pos_z[j] - tz;
       const double r2 = dx * dx + dy * dy + dz * dz;
       const double factor = options.gravitational_constant_code * mass[j] *
-          cosmosim::gravity::softenedInvR3(r2, options.softening);
+          cosmosim::test_support::plummerInvR3Reference(r2, options.softening.epsilon_comoving);
       acc_x += factor * dx;
       acc_y += factor * dy;
       acc_z += factor * dz;
@@ -429,12 +431,11 @@ std::vector<HaloProfileRow> testStaticHaloRadialProfile(const cosmosim::validati
   return rows;
 }
 
-void writePhase3Artifacts(
+void writeValidationArtifacts(
     std::span<const TwoBodyEnergyDriftResult> drift_rows,
     std::span<const HaloProfileRow> halo_rows,
-    const cosmosim::validation::ValidationToleranceTable& tolerances) {
-  const std::filesystem::path root =
-      std::filesystem::path(COSMOSIM_SOURCE_DIR) / "validation" / "artifacts" / "research_grade" / "phase3";
+    const cosmosim::validation::ValidationToleranceTable& tolerances,
+    const std::filesystem::path& root) {
   const std::filesystem::path force_dir = root / "force_accuracy";
   const std::filesystem::path time_dir = root / "time_integration";
   std::filesystem::create_directories(force_dir);
@@ -474,7 +475,15 @@ void writePhase3Artifacts(
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  bool promote_research_evidence = false;
+  if (argc == 2 && std::string_view(argv[1]) == "--promote-research-evidence") {
+    promote_research_evidence = true;
+  } else if (argc != 1) {
+    throw std::invalid_argument(
+        "validation_convergence accepts only --promote-research-evidence");
+  }
+
   const auto tolerances = cosmosim::validation::ValidationToleranceTable::loadFromFile(
       std::string(COSMOSIM_SOURCE_DIR) + "/validation/reference/validation_tolerances_v1.txt");
 
@@ -482,6 +491,11 @@ int main() {
   testHydroResolutionConvergence(tolerances);
   const auto drift_rows = testTwoBodyOrbitEnergyDrift(tolerances);
   const auto halo_rows = testStaticHaloRadialProfile(tolerances);
-  writePhase3Artifacts(drift_rows, halo_rows, tolerances);
+
+  const std::filesystem::path artifact_root = promote_research_evidence
+      ? std::filesystem::path(COSMOSIM_SOURCE_DIR) / "validation" / "artifacts" /
+            "research_grade" / "phase3"
+      : std::filesystem::path(COSMOSIM_VALIDATION_OUTPUT_DIR) / "phase3";
+  writeValidationArtifacts(drift_rows, halo_rows, tolerances, artifact_root);
   return 0;
 }

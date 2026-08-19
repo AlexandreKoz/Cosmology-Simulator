@@ -102,21 +102,26 @@ void testPeriodicSinusoidalForceResponse() {
   const double force_cosine_similarity = corr_force / std::sqrt(std::max(norm_force_expected * norm_force_got, 1.0e-20));
   const double phi_cosine_similarity = corr_phi / std::sqrt(std::max(norm_phi_expected * norm_phi_got, 1.0e-20));
   const double force_consistency_rel = std::sqrt(consistency_rms / std::max(consistency_ref_rms, 1.0e-20));
-#if COSMOSIM_ENABLE_FFTW
-  const double min_cosine_similarity = 0.9;
-  const double max_consistency_rel = 0.08;
-#else
-  const double min_cosine_similarity = 0.05;
-  const double max_consistency_rel = 5.0;
-#endif
+  // A pure mesh eigenmode is analytic for both the direct-DFT fallback and
+  // FFTW backend.  Backend choice may change roundoff/performance, not sign or
+  // physical normalization.
+  constexpr double MIN_COSINE_SIMILARITY = 0.99;
+  constexpr double MAX_RELATIVE_AMPLITUDE_ERROR = 0.02;
+  constexpr double MAX_FORCE_FROM_POTENTIAL_REL_L2 = 0.02;
+  const double force_amplitude_ratio =
+      std::sqrt(norm_force_got / std::max(norm_force_expected, 1.0e-20));
+  const double potential_amplitude_ratio =
+      std::sqrt(norm_phi_got / std::max(norm_phi_expected, 1.0e-20));
 
   std::ostringstream diag;
   diag << "PM periodic sinusoidal response validation failed: backend='" << cosmosim::gravity::PmSolver::fftBackendName()
        << "', force_cosine_similarity=" << force_cosine_similarity
-       << " (required >= " << min_cosine_similarity << ")"
+       << " (required >= " << MIN_COSINE_SIMILARITY << ")"
        << ", potential_cosine_similarity=" << phi_cosine_similarity
        << ", force_from_potential_rel_l2=" << force_consistency_rel
-       << " (required <= " << max_consistency_rel << ")"
+       << " (required <= " << MAX_FORCE_FROM_POTENTIAL_REL_L2 << ")"
+       << ", force_amplitude_ratio=" << force_amplitude_ratio
+       << ", potential_amplitude_ratio=" << potential_amplitude_ratio
        << ", transverse_max=" << max_transverse
        << ", force_signal_norm=" << std::sqrt(norm_force_got)
        << ", potential_signal_norm=" << std::sqrt(norm_phi_got)
@@ -126,10 +131,16 @@ void testPeriodicSinusoidalForceResponse() {
   requireOrThrow(std::isfinite(force_consistency_rel), diag.str());
   requireOrThrow(norm_force_got > 0.0, diag.str());
   requireOrThrow(norm_phi_got > 0.0, diag.str());
-  requireOrThrow(std::abs(force_cosine_similarity) > min_cosine_similarity, diag.str());
-  requireOrThrow(std::abs(phi_cosine_similarity) > min_cosine_similarity, diag.str());
-  requireOrThrow(force_consistency_rel <= max_consistency_rel, diag.str());
-  requireOrThrow(max_transverse < 5.0e-2, diag.str());
+  requireOrThrow(force_cosine_similarity >= MIN_COSINE_SIMILARITY, diag.str());
+  requireOrThrow(phi_cosine_similarity >= MIN_COSINE_SIMILARITY, diag.str());
+  requireOrThrow(
+      std::abs(force_amplitude_ratio - 1.0) <= MAX_RELATIVE_AMPLITUDE_ERROR,
+      diag.str());
+  requireOrThrow(
+      std::abs(potential_amplitude_ratio - 1.0) <= MAX_RELATIVE_AMPLITUDE_ERROR,
+      diag.str());
+  requireOrThrow(force_consistency_rel <= MAX_FORCE_FROM_POTENTIAL_REL_L2, diag.str());
+  requireOrThrow(max_transverse < 1.0e-10, diag.str());
 
   requireOrThrow(profile.assign_ms >= 0.0, "PM profile.assign_ms must be non-negative");
   requireOrThrow(profile.fft_forward_ms >= 0.0, "PM profile.fft_forward_ms must be non-negative");

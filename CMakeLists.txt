@@ -127,11 +127,8 @@ function(cosmosim_apply_test_defaults)
       list(APPEND cosmosim_existing_labels python)
     endif()
 
-    if(cosmosim_test_name MATCHES "mpi")
-      list(APPEND cosmosim_existing_labels mpi)
-    endif()
-    if(cosmosim_test_name MATCHES "two_rank|three_rank|distributed")
-      list(APPEND cosmosim_existing_labels distributed)
+    if(COSMOSIM_ENABLE_MPI AND cosmosim_test_name MATCHES "two_rank|three_rank|four_rank|eight_rank|mpi_np[0-9]+")
+      list(APPEND cosmosim_existing_labels mpi distributed)
     endif()
     if(cosmosim_test_name MATCHES "runtime_app_smoke")
       list(APPEND cosmosim_existing_labels runtime smoke)
@@ -620,6 +617,7 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(
     integration_runtime_descriptor_probe workflow integration runtime_registry)
 
+  if(COSMOSIM_ENABLE_HDF5)
   add_executable(
     test_integration_reference_workflow_hydro_row_order
     tests/integration/test_reference_workflow_hydro_row_order.cpp)
@@ -641,11 +639,12 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(
     integration_restart_equivalence_reference_workflow_hydro
     restart scheduler hydro gas workflow equivalence integration)
-  add_executable(
-    test_integration_reference_workflow_distributed_treepm_mpi
-    tests/integration/test_reference_workflow_distributed_treepm_mpi.cpp)
-  target_link_libraries(test_integration_reference_workflow_distributed_treepm_mpi PRIVATE cosmosim_all)
+  endif()
   if(COSMOSIM_ENABLE_MPI)
+    add_executable(
+      test_integration_reference_workflow_distributed_treepm_mpi
+      tests/integration/test_reference_workflow_distributed_treepm_mpi.cpp)
+    target_link_libraries(test_integration_reference_workflow_distributed_treepm_mpi PRIVATE cosmosim_all)
     add_test(
       NAME integration_reference_workflow_distributed_treepm_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
@@ -667,11 +666,11 @@ if(COSMOSIM_ENABLE_TESTS)
       mpi distributed treepm hierarchy protocol guard integration)
   endif()
 
-  add_executable(
-    test_integration_reference_workflow_distributed_isolated_pm_mpi
-    tests/integration/test_reference_workflow_distributed_isolated_pm_mpi.cpp)
-  target_link_libraries(test_integration_reference_workflow_distributed_isolated_pm_mpi PRIVATE cosmosim_all)
   if(COSMOSIM_ENABLE_MPI)
+    add_executable(
+      test_integration_reference_workflow_distributed_isolated_pm_mpi
+      tests/integration/test_reference_workflow_distributed_isolated_pm_mpi.cpp)
+    target_link_libraries(test_integration_reference_workflow_distributed_isolated_pm_mpi PRIVATE cosmosim_all)
     add_test(
       NAME integration_reference_workflow_distributed_isolated_pm_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
@@ -681,11 +680,11 @@ if(COSMOSIM_ENABLE_TESTS)
       mpi distributed pm isolated_pm guard workflow integration)
   endif()
 
-  add_executable(
-    test_integration_reference_workflow_distributed_hydro_mpi
-    tests/integration/test_reference_workflow_distributed_hydro_mpi.cpp)
-  target_link_libraries(test_integration_reference_workflow_distributed_hydro_mpi PRIVATE cosmosim_all)
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(
+      test_integration_reference_workflow_distributed_hydro_mpi
+      tests/integration/test_reference_workflow_distributed_hydro_mpi.cpp)
+    target_link_libraries(test_integration_reference_workflow_distributed_hydro_mpi PRIVATE cosmosim_all)
     add_test(
       NAME integration_reference_workflow_distributed_hydro_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
@@ -860,12 +859,12 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(${star_formation_amr_test_name} PROPERTIES LABELS "integration;runtime_truth;star_formation;amr" RUN_SERIAL TRUE)
   endforeach()
 
-  add_executable(test_integration_star_formation_source_runtime_mpi tests/integration/test_star_formation_source_runtime_mpi.cpp)
-  target_link_libraries(test_integration_star_formation_source_runtime_mpi PRIVATE cosmosim_all)
-
-  add_executable(test_integration_star_formation_mpi tests/integration/test_star_formation_mpi.cpp)
-  target_link_libraries(test_integration_star_formation_mpi PRIVATE cosmosim_all)
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_star_formation_source_runtime_mpi tests/integration/test_star_formation_source_runtime_mpi.cpp)
+    target_link_libraries(test_integration_star_formation_source_runtime_mpi PRIVATE cosmosim_all)
+
+    add_executable(test_integration_star_formation_mpi tests/integration/test_star_formation_mpi.cpp)
+    target_link_libraries(test_integration_star_formation_mpi PRIVATE cosmosim_all)
     foreach(star_formation_mpi_mode IN ITEMS base repartition restart)
       if(star_formation_mpi_mode STREQUAL "base")
         set(star_formation_mpi_test_name integration_star_formation_mpi_two_rank)
@@ -1126,17 +1125,17 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_amr_hydro_shock_tube PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_hydro_shock_tube DEPENDS test_integration_amr_hydro_shock_tube)
   add_test(NAME integration_amr_hydro_shock_tube COMMAND test_integration_amr_hydro_shock_tube)
-  cosmosim_mark_runtime_truth_test(integration_amr_hydro_shock_tube amr hydro gas integration validation)
+  cosmosim_mark_runtime_truth_test(integration_amr_hydro_shock_tube amr hydro gas integration regression smoke)
   add_executable(test_integration_amr_hydro_sedov tests/integration/test_amr_hydro_sedov.cpp)
   target_link_libraries(test_integration_amr_hydro_sedov PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_hydro_sedov DEPENDS test_integration_amr_hydro_sedov)
   add_test(NAME integration_amr_hydro_sedov COMMAND test_integration_amr_hydro_sedov)
-  cosmosim_mark_runtime_truth_test(integration_amr_hydro_sedov amr hydro gas integration validation)
+  cosmosim_mark_runtime_truth_test(integration_amr_hydro_sedov amr hydro gas integration regression smoke)
   add_executable(test_integration_amr_synchronization_stress tests/integration/test_amr_synchronization_stress.cpp)
   target_link_libraries(test_integration_amr_synchronization_stress PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
   add_custom_target(integration_amr_synchronization_stress DEPENDS test_integration_amr_synchronization_stress)
   add_test(NAME integration_amr_synchronization_stress COMMAND test_integration_amr_synchronization_stress)
-  cosmosim_mark_runtime_truth_test(integration_amr_synchronization_stress amr hydro gas integration validation)
+  cosmosim_mark_runtime_truth_test(integration_amr_synchronization_stress amr hydro gas integration regression smoke)
 
   add_executable(test_integration_simulation_mode_toy_runs tests/integration/test_simulation_mode_toy_runs.cpp)
   target_link_libraries(test_integration_simulation_mode_toy_runs PRIVATE cosmosim_core)
@@ -1154,13 +1153,19 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_pm_periodic_mode_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
-    cosmosim_append_test_labels(integration_pm_periodic_mode_mpi_two_rank mpi distributed pm fftw)
+    cosmosim_append_test_labels(integration_pm_periodic_mode_mpi_two_rank mpi distributed pm)
+    if(COSMOSIM_ENABLE_FFTW)
+      cosmosim_append_test_labels(integration_pm_periodic_mode_mpi_two_rank fftw)
+    endif()
     set_tests_properties(integration_pm_periodic_mode_mpi_two_rank PROPERTIES PROCESSORS 2)
     add_test(
       NAME integration_pm_zero_width_slab_mpi_four_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_periodic_mode> ${MPIEXEC_POSTFLAGS})
-    cosmosim_append_test_labels(integration_pm_zero_width_slab_mpi_four_rank mpi distributed pm fftw)
+    cosmosim_append_test_labels(integration_pm_zero_width_slab_mpi_four_rank mpi distributed pm)
+    if(COSMOSIM_ENABLE_FFTW)
+      cosmosim_append_test_labels(integration_pm_zero_width_slab_mpi_four_rank fftw)
+    endif()
     set_tests_properties(integration_pm_zero_width_slab_mpi_four_rank PROPERTIES PROCESSORS 4)
   endif()
 
@@ -1459,7 +1464,16 @@ if(COSMOSIM_ENABLE_TESTS)
       integration_tree_pm_coupling_periodic_mpi_three_rank
       integration_tree_pm_coupling_periodic_mpi_four_rank
       integration_tree_pm_coupling_periodic_mpi_eight_rank
-      PROPERTIES LABELS "mpi;distributed;treepm;pm;fftw")
+      PROPERTIES LABELS "mpi;distributed;treepm;pm")
+    if(COSMOSIM_ENABLE_FFTW)
+      foreach(cosmosim_treepm_mpi_test IN ITEMS
+          integration_tree_pm_coupling_periodic_mpi_two_rank
+          integration_tree_pm_coupling_periodic_mpi_three_rank
+          integration_tree_pm_coupling_periodic_mpi_four_rank
+          integration_tree_pm_coupling_periodic_mpi_eight_rank)
+        cosmosim_append_test_labels(${cosmosim_treepm_mpi_test} fftw)
+      endforeach()
+    endif()
     set_tests_properties(integration_tree_pm_coupling_periodic_mpi_two_rank PROPERTIES PROCESSORS 2)
     set_tests_properties(integration_tree_pm_coupling_periodic_mpi_three_rank PROPERTIES PROCESSORS 3)
     set_tests_properties(integration_tree_pm_coupling_periodic_mpi_four_rank PROPERTIES PROCESSORS 4)
@@ -1471,15 +1485,18 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_ic_generated_pipeline PRIVATE cosmosim_all)
   add_test(NAME integration_ic_generated_pipeline COMMAND test_integration_ic_generated_pipeline)
 
+  if(COSMOSIM_ENABLE_HDF5)
   add_executable(test_integration_snapshot_hdf5_roundtrip tests/integration/test_snapshot_hdf5_roundtrip.cpp)
   target_link_libraries(test_integration_snapshot_hdf5_roundtrip PRIVATE cosmosim_all)
   add_test(NAME integration_snapshot_hdf5_roundtrip COMMAND test_integration_snapshot_hdf5_roundtrip)
   cosmosim_mark_runtime_truth_test(integration_snapshot_hdf5_roundtrip snapshot sidecar)
+  endif()
   add_executable(test_integration_tracer_advection tests/integration/test_tracer_advection.cpp)
   target_link_libraries(test_integration_tracer_advection PRIVATE cosmosim_all)
   add_test(NAME integration_tracer_advection COMMAND test_integration_tracer_advection)
 
 
+  if(COSMOSIM_ENABLE_HDF5)
   add_executable(test_integration_restart_checkpoint_roundtrip tests/integration/test_restart_checkpoint_roundtrip.cpp)
   target_link_libraries(test_integration_restart_checkpoint_roundtrip PRIVATE cosmosim_all)
   add_test(NAME integration_restart_checkpoint_roundtrip COMMAND test_integration_restart_checkpoint_roundtrip)
@@ -1521,8 +1538,10 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_flux_registers restart scheduler hydro gas amr equivalence integration pending_flux)
   cosmosim_mark_runtime_truth_test(integration_restart_equivalence_amr_temporal_ghosts restart scheduler hydro gas amr equivalence integration pending_flux temporal_ghost)
 
+  endif()
   add_executable(test_integration_tree_gravity_vs_direct tests/integration/test_tree_gravity_vs_direct.cpp)
   target_link_libraries(test_integration_tree_gravity_vs_direct PRIVATE cosmosim_gravity)
+  target_include_directories(test_integration_tree_gravity_vs_direct PRIVATE tests/support)
   add_test(NAME integration_tree_gravity_vs_direct COMMAND test_integration_tree_gravity_vs_direct)
   add_executable(test_integration_config_examples tests/integration/test_config_examples.cpp)
   target_link_libraries(test_integration_config_examples PRIVATE cosmosim_all)
@@ -1573,7 +1592,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_ic_decomposition_structure
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_ic_decomposition_structure.cmake")
   set_tests_properties(integration_ic_decomposition_structure
-    PROPERTIES LABELS "architecture;hdf5;ic;runtime_truth")
+    PROPERTIES LABELS "architecture;contract;ic")
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_decomposition_structure.cmake.in"
@@ -1581,8 +1600,9 @@ if(COSMOSIM_ENABLE_TESTS)
     @ONLY)
   add_test(NAME integration_runtime_decomposition_structure
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_decomposition_structure.cmake")
-  cosmosim_mark_runtime_truth_test(
-    integration_runtime_decomposition_structure architecture workflow runtime_registry)
+  set_tests_properties(
+    integration_runtime_decomposition_structure
+    PROPERTIES LABELS "architecture;contract;workflow;runtime_registry")
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_resource_capability_compile.cmake.in"
@@ -1590,8 +1610,9 @@ if(COSMOSIM_ENABLE_TESTS)
     @ONLY)
   add_test(NAME integration_runtime_resource_capability_compile
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_resource_capability_compile.cmake")
-  cosmosim_mark_runtime_truth_test(
-    integration_runtime_resource_capability_compile architecture workflow runtime_registry)
+  set_tests_properties(
+    integration_runtime_resource_capability_compile
+    PROPERTIES LABELS "architecture;contract;compile_only;workflow;runtime_registry")
 
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_release_readiness_artifacts.cmake.in"
@@ -1617,33 +1638,39 @@ if(COSMOSIM_ENABLE_TESTS)
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_truth_ctest_labels.cmake")
   cosmosim_mark_runtime_truth_test(integration_runtime_truth_ctest_labels ci labels)
 
-  add_custom_target(stage1_runtime_truth_targets
-      DEPENDS
-        test_unit_simulation_state
-        test_unit_gas_cell_identity_invariants
-        test_unit_hot_cold_sidecar_layout
-        test_integration_reorder_compaction_sidecars
-        test_integration_species_migration_invariants
-        test_integration_gas_cell_identity_migration
-        test_integration_transform_fuzz_invariants
-        test_integration_softening_ownership_invariants
-        test_integration_hierarchical_time_bins
-        test_integration_hierarchical_timestep_regression
-        test_integration_parallel_two_rank_restart
-        test_unit_snapshot_hdf5_schema
-        test_unit_restart_checkpoint_schema
-        test_integration_snapshot_hdf5_roundtrip
-        test_integration_restart_checkpoint_roundtrip
-        test_integration_restart_equivalence_harness
-        test_integration_restart_equivalence_dm_only
-        test_integration_restart_equivalence_treepm
-        test_integration_restart_equivalence_hydro_toy
-        test_integration_restart_equivalence_multirate_bins
-        test_integration_restart_equivalence_output_enabled
-        test_integration_restart_equivalence_stochastic_sources
-        test_integration_restart_equivalence_amr_hydro
-        test_integration_restart_equivalence_amr_flux_registers
-        test_integration_provenance_roundtrip)
+  set(cosmosim_stage1_runtime_truth_targets
+      test_unit_simulation_state
+      test_unit_gas_cell_identity_invariants
+      test_unit_hot_cold_sidecar_layout
+      test_integration_reorder_compaction_sidecars
+      test_integration_species_migration_invariants
+      test_integration_gas_cell_identity_migration
+      test_integration_transform_fuzz_invariants
+      test_integration_softening_ownership_invariants
+      test_integration_hierarchical_time_bins
+      test_integration_hierarchical_timestep_regression
+      test_integration_parallel_two_rank_restart
+      test_unit_snapshot_hdf5_schema
+      test_unit_restart_checkpoint_schema
+      test_integration_provenance_roundtrip)
+  if(COSMOSIM_ENABLE_HDF5)
+    list(APPEND cosmosim_stage1_runtime_truth_targets
+      test_integration_snapshot_hdf5_roundtrip
+      test_integration_restart_checkpoint_roundtrip
+      test_integration_restart_equivalence_harness
+      test_integration_restart_equivalence_dm_only
+      test_integration_restart_equivalence_treepm
+      test_integration_restart_equivalence_hydro_toy
+      test_integration_restart_equivalence_multirate_bins
+      test_integration_restart_equivalence_output_enabled
+      test_integration_restart_equivalence_stochastic_sources
+      test_integration_restart_equivalence_amr_hydro
+      test_integration_restart_equivalence_amr_flux_registers
+      test_integration_restart_equivalence_amr_temporal_ghosts
+      test_integration_reference_workflow_hydro_row_order
+      test_integration_restart_equivalence_reference_workflow_hydro)
+  endif()
+  add_custom_target(stage1_runtime_truth_targets DEPENDS ${cosmosim_stage1_runtime_truth_targets})
 
 
   # This smoke exercises the production TreePM runtime path.  Keep it out of
@@ -1673,7 +1700,7 @@ if(COSMOSIM_ENABLE_TESTS)
     tests/validation/test_validation_unit.cpp
     tests/validation/validation_tolerance.cpp)
   target_link_libraries(test_validation_unit PRIVATE cosmosim_all)
-  target_include_directories(test_validation_unit PRIVATE tests/validation)
+  target_include_directories(test_validation_unit PRIVATE tests/validation tests/support)
   target_compile_definitions(test_validation_unit PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME validation_unit COMMAND test_validation_unit)
   set_tests_properties(validation_unit PROPERTIES LABELS "validation;unit")
@@ -1683,7 +1710,7 @@ if(COSMOSIM_ENABLE_TESTS)
     tests/validation/test_validation_integration.cpp
     tests/validation/validation_tolerance.cpp)
   target_link_libraries(test_validation_integration PRIVATE cosmosim_all)
-  target_include_directories(test_validation_integration PRIVATE tests/validation)
+  target_include_directories(test_validation_integration PRIVATE tests/validation tests/support)
   target_compile_definitions(test_validation_integration PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME validation_integration COMMAND test_validation_integration)
   set_tests_properties(validation_integration PROPERTIES LABELS "validation;integration")
@@ -1693,10 +1720,19 @@ if(COSMOSIM_ENABLE_TESTS)
     tests/validation/test_validation_convergence.cpp
     tests/validation/validation_tolerance.cpp)
   target_link_libraries(test_validation_convergence PRIVATE cosmosim_all)
-  target_include_directories(test_validation_convergence PRIVATE tests/validation)
-  target_compile_definitions(test_validation_convergence PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  target_include_directories(test_validation_convergence PRIVATE tests/validation tests/support)
+  target_compile_definitions(
+    test_validation_convergence PRIVATE
+    COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    COSMOSIM_VALIDATION_OUTPUT_DIR="${CMAKE_BINARY_DIR}/validation_outputs")
   add_test(NAME validation_convergence COMMAND test_validation_convergence)
-  set_tests_properties(validation_convergence PROPERTIES LABELS "validation;convergence")
+  set_tests_properties(validation_convergence PROPERTIES LABELS "validation;numerical_convergence;regression")
+  add_custom_target(
+    generate_validation_research_evidence
+    COMMAND $<TARGET_FILE:test_validation_convergence> --promote-research-evidence
+    DEPENDS test_validation_convergence
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    COMMENT "Explicitly regenerate curated research-grade convergence evidence")
 
   add_executable(
     test_validation_hydro_classics
@@ -1707,20 +1743,26 @@ if(COSMOSIM_ENABLE_TESTS)
   set_tests_properties(validation_hydro_classics PROPERTIES LABELS "validation;integration;hydro")
 
   add_executable(
-    test_validation_amr_hydro_convergence
-    tests/validation/test_validation_amr_hydro_convergence.cpp)
-  target_link_libraries(test_validation_amr_hydro_convergence PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
-  target_include_directories(test_validation_amr_hydro_convergence PRIVATE tests/validation)
-  add_test(NAME validation_amr_hydro_convergence COMMAND test_validation_amr_hydro_convergence)
-  set_tests_properties(validation_amr_hydro_convergence PROPERTIES LABELS "validation;amr;hydro;contract")
+    test_unit_amr_hydro_validation_metric_contract
+    tests/unit/test_amr_hydro_validation_metric_contract.cpp)
+  target_link_libraries(test_unit_amr_hydro_validation_metric_contract PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_test(
+    NAME unit_amr_hydro_validation_metric_contract
+    COMMAND test_unit_amr_hydro_validation_metric_contract)
+  set_tests_properties(
+    unit_amr_hydro_validation_metric_contract
+    PROPERTIES LABELS "unit;contract;validation_metrics;amr;hydro")
 
   add_executable(
-    test_validation_amr_cross_code_contract
-    tests/validation/test_validation_amr_cross_code_contract.cpp)
-  target_link_libraries(test_validation_amr_cross_code_contract PRIVATE cosmosim_core)
-  target_include_directories(test_validation_amr_cross_code_contract PRIVATE tests/validation)
-  add_test(NAME validation_amr_cross_code_contract COMMAND test_validation_amr_cross_code_contract)
-  set_tests_properties(validation_amr_cross_code_contract PROPERTIES LABELS "validation;amr;cross_code;contract")
+    test_unit_amr_cross_code_metadata_contract
+    tests/unit/test_amr_cross_code_metadata_contract.cpp)
+  target_link_libraries(test_unit_amr_cross_code_metadata_contract PRIVATE cosmosim_core)
+  add_test(
+    NAME unit_amr_cross_code_metadata_contract
+    COMMAND test_unit_amr_cross_code_metadata_contract)
+  set_tests_properties(
+    unit_amr_cross_code_metadata_contract
+    PROPERTIES LABELS "unit;contract;validation_metadata;amr")
 
   add_executable(test_validation_star_formation_models tests/validation/test_validation_star_formation_models.cpp)
   target_link_libraries(test_validation_star_formation_models PRIVATE cosmosim_all)
@@ -1738,24 +1780,29 @@ if(COSMOSIM_ENABLE_TESTS)
   set_tests_properties(validation_regression PROPERTIES LABELS "validation;regression")
 
   add_executable(
-    test_validation_phase3_power_spectrum
-    tests/validation/test_validation_phase3_power_spectrum.cpp)
+    test_validation_power_spectrum_mesh_consistency
+    tests/validation/test_validation_power_spectrum_mesh_consistency.cpp
+    tests/validation/validation_tolerance.cpp)
   target_link_libraries(
-    test_validation_phase3_power_spectrum PRIVATE cosmosim_analysis cosmosim_core)
+    test_validation_power_spectrum_mesh_consistency PRIVATE cosmosim_analysis cosmosim_core)
+  target_include_directories(
+    test_validation_power_spectrum_mesh_consistency PRIVATE tests/validation)
   target_compile_definitions(
-    test_validation_phase3_power_spectrum
-    PRIVATE COSMOSIM_VALIDATION_OUTPUT_DIR="${CMAKE_BINARY_DIR}/validation_outputs/phase3_power_spectrum")
+    test_validation_power_spectrum_mesh_consistency
+    PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(
-    NAME validation_phase3_power_spectrum
-    COMMAND test_validation_phase3_power_spectrum)
+    NAME validation_power_spectrum_mesh_consistency
+    COMMAND test_validation_power_spectrum_mesh_consistency)
   set_tests_properties(
-    validation_phase3_power_spectrum
-    PROPERTIES LABELS "validation;analysis;power_spectrum;phase3")
+    validation_power_spectrum_mesh_consistency
+    PROPERTIES LABELS "validation;analysis;power_spectrum;regression;mesh_consistency")
 
   add_executable(test_validation_phase2_mpi_gravity tests/validation/test_validation_phase2_mpi_gravity.cpp)
   target_link_libraries(test_validation_phase2_mpi_gravity PRIVATE cosmosim_all)
   add_test(NAME validation_phase2_mpi_gravity_single_rank COMMAND test_validation_phase2_mpi_gravity)
-  set_tests_properties(validation_phase2_mpi_gravity_single_rank PROPERTIES LABELS "validation;gravity;mpi")
+  set_tests_properties(
+    validation_phase2_mpi_gravity_single_rank
+    PROPERTIES LABELS "validation;gravity;distributed_contract")
   if(COSMOSIM_ENABLE_MPI)
     add_test(
       NAME validation_phase2_mpi_gravity_two_rank
@@ -1822,6 +1869,9 @@ if(COSMOSIM_ENABLE_TESTS)
     test_validation_dmo_zeldovich_workflow
     tests/validation/test_dmo_zeldovich_workflow.cpp)
   target_link_libraries(test_validation_dmo_zeldovich_workflow PRIVATE cosmosim_all)
+  target_compile_definitions(
+    test_validation_dmo_zeldovich_workflow PRIVATE
+    COSMOSIM_DMO_ARTIFACT_ROOT="${CMAKE_BINARY_DIR}/validation_artifacts/dmo_zeldovich")
   add_test(
     NAME integration_dmo_empty_rank_smoke_single_rank
     COMMAND test_validation_dmo_zeldovich_workflow --empty-rank-smoke)

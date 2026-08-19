@@ -14,12 +14,18 @@
 #include "io/internal/ic_canonical_limits.hpp"
 #include "io/internal/ic_reader_session.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
 #endif
 
 namespace {
 
+[[nodiscard]] std::filesystem::path uniqueHdf5Path(std::string_view stem) {
+  return cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalFile(
+      stem, ".hdf5");
+}
 
 void testCanonicalSingleFileCountLimit() {
   std::array<std::uint64_t, 6> counts{};
@@ -477,15 +483,14 @@ std::filesystem::path writeMinimalIcFile(
     bool include_density,
     bool duplicate_ids = false,
     bool signed_arepo_counts = true) {
-  const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      (duplicate_ids
-           ? "cosmosim_ic_reader_duplicate_ids.hdf5"
-           : (include_density
-                  ? (signed_arepo_counts
-                         ? "cosmosim_ic_reader_gas_present_signed.hdf5"
-                         : "cosmosim_ic_reader_gas_present_unsigned.hdf5")
-                  : "cosmosim_ic_reader_gas_missing_density.hdf5"));
+  const std::filesystem::path path = uniqueHdf5Path(
+      duplicate_ids
+          ? "cosmosim_ic_reader_duplicate_ids"
+          : (include_density
+                 ? (signed_arepo_counts
+                        ? "cosmosim_ic_reader_gas_present_signed"
+                        : "cosmosim_ic_reader_gas_present_unsigned")
+                 : "cosmosim_ic_reader_gas_missing_density"));
   Hdf5Handle file(H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeRequiredHeaderWithTotals(
@@ -510,8 +515,7 @@ std::filesystem::path writeMinimalIcFile(
 
 
 std::filesystem::path writeDimensionalGasBlackHoleIcFile() {
-  const auto path = std::filesystem::temp_directory_path() /
-      "cosmosim_ic_dimensional_contract.hdf5";
+  const auto path = uniqueHdf5Path("cosmosim_ic_dimensional_contract");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(
@@ -563,10 +567,9 @@ void removeCanonicalBundle(const std::filesystem::path& canonical_path) {
 }
 
 std::filesystem::path writeCanonicalDmIcFile(bool valid_schema) {
-  const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      (valid_schema ? "cosmosim_ic_reader_canonical.hdf5"
-                    : "cosmosim_ic_reader_bad_canonical.hdf5");
+  const std::filesystem::path path = uniqueHdf5Path(
+      valid_schema ? "cosmosim_ic_reader_canonical"
+                   : "cosmosim_ic_reader_bad_canonical");
   removeCanonicalBundle(path);
   const std::string manifest_json =
       cosmosim::io::serializeIcManifestJson(makeValidManifest());
@@ -603,8 +606,7 @@ std::filesystem::path writeCanonicalDmIcFile(bool valid_schema) {
 
 std::filesystem::path writeMinimalBlackHoleIcFile() {
   const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      "cosmosim_ic_reader_black_hole.hdf5";
+      uniqueHdf5Path("cosmosim_ic_reader_black_hole");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(
@@ -623,8 +625,7 @@ std::filesystem::path writeMinimalBlackHoleIcFile() {
 
 std::filesystem::path writeMinimalFamily2IcFile() {
   const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      "cosmosim_ic_reader_family2.hdf5";
+      uniqueHdf5Path("cosmosim_ic_reader_family2");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(
@@ -642,8 +643,7 @@ std::filesystem::path writeMinimalFamily2IcFile() {
 
 std::filesystem::path writeMinimalStarIcFile() {
   const std::filesystem::path path =
-      std::filesystem::temp_directory_path() /
-      "cosmosim_ic_reader_star.hdf5";
+      uniqueHdf5Path("cosmosim_ic_reader_star");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(
@@ -668,9 +668,11 @@ std::vector<std::filesystem::path> writeMultifileDmSet(
     bool inconsistent_schema = false,
     bool omit_second_file = false) {
   std::vector<std::filesystem::path> paths;
+  const auto unique_stem =
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath(stem);
   for (std::uint32_t file_index = 0U; file_index < 2U; ++file_index) {
-    const auto path = std::filesystem::temp_directory_path() /
-        (stem + "." + std::to_string(file_index) + ".hdf5");
+    const auto path = std::filesystem::path(
+        unique_stem.string() + "." + std::to_string(file_index) + ".hdf5");
     paths.push_back(path);
     if (omit_second_file && file_index == 1U) {
       std::filesystem::remove(path);
@@ -1469,9 +1471,9 @@ void replaceDatasetWithFloatingIds(
 
 
 std::filesystem::path writeTracerPolicyIcFile(bool valid_parent) {
-  const auto path = std::filesystem::temp_directory_path() /
-      (valid_parent ? "cosmosim_ic_tracer_parent_valid.hdf5"
-                    : "cosmosim_ic_tracer_parent_invalid.hdf5");
+  const auto path = uniqueHdf5Path(
+      valid_parent ? "cosmosim_ic_tracer_parent_valid"
+                   : "cosmosim_ic_tracer_parent_invalid");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(H5Gcreate2(

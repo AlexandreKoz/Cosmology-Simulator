@@ -14,6 +14,7 @@
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
+#include "../support/mpi_test_workspace.hpp"
 #endif
 
 namespace {
@@ -150,8 +151,9 @@ int main() {
       "test_distributed_gas_cell_migration_mpi");
   const auto initial_state = makeState();
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
-  const std::filesystem::path root =
-      std::filesystem::temp_directory_path() / "cosmosim_distributed_gas_cell_migration_mpi";
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_distributed_gas_cell_migration_mpi");
+  const std::filesystem::path& root = workspace.root();
   const auto first_report = runner.run(
       root / ("rank_" + std::to_string(world_rank) + "_first"),
       cosmosim::workflows::ReferenceWorkflowOptions{
@@ -191,6 +193,7 @@ int main() {
   const double global_metal_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(local_metal_mass);
   const double expected_global_metal_mass = 0.02 * (0.1 + 0.12 + 0.09);
   assert(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12);
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
 #endif
   return 0;

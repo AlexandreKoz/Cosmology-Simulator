@@ -66,6 +66,8 @@ int main() {
   assert(hydro_compact.gas_cell_id[1] == 403);
   hydro_compact.cell_index[0] = 0;
   hydro_compact.cell_index[1] = 0;
+  hydro_compact.local_cell_row[0] = 0;
+  hydro_compact.local_cell_row[1] = 0;
   hydro_compact.density_code[0] = 88.0;
   hydro_compact.pressure_code[1] = 99.0;
   cosmosim::core::scatterHydroCellKernelView(hydro_compact, gas_state);

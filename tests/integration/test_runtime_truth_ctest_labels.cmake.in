@@ -46,19 +46,60 @@ require_registered_runtime_truth_test(integration_hierarchical_timestep_regressi
 require_registered_runtime_truth_test(integration_parallel_two_rank_restart runtime_truth p0 restart scheduler integration)
 require_registered_runtime_truth_test(unit_snapshot_hdf5_schema runtime_truth p0 snapshot unit)
 require_registered_runtime_truth_test(unit_restart_checkpoint_schema runtime_truth p0 restart provenance unit)
-require_registered_runtime_truth_test(integration_snapshot_hdf5_roundtrip runtime_truth p0 snapshot sidecar integration)
-require_registered_runtime_truth_test(integration_restart_checkpoint_roundtrip runtime_truth p0 restart provenance gas sidecar scheduler integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_harness runtime_truth p0 restart scheduler output stochastic equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_dm_only runtime_truth p0 restart scheduler equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_treepm runtime_truth p0 restart scheduler treepm pm equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_hydro_toy runtime_truth p0 restart scheduler hydro gas equivalence integration)
-require_registered_runtime_truth_test(integration_reference_workflow_hydro_row_order runtime_truth p0 restart scheduler hydro gas workflow geometry integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_reference_workflow_hydro runtime_truth p0 restart scheduler hydro gas workflow equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_multirate_bins runtime_truth p0 restart scheduler multirate equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_output_enabled runtime_truth p0 restart scheduler output equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_stochastic_sources runtime_truth p0 restart scheduler stochastic source_terms equivalence integration)
-require_registered_runtime_truth_test(integration_restart_equivalence_amr_hydro runtime_truth p0 restart scheduler hydro gas amr equivalence integration)
+if("@COSMOSIM_ENABLE_HDF5@" STREQUAL "ON")
+  require_registered_runtime_truth_test(integration_snapshot_hdf5_roundtrip runtime_truth p0 snapshot sidecar integration)
+  require_registered_runtime_truth_test(integration_restart_checkpoint_roundtrip runtime_truth p0 restart provenance gas sidecar scheduler integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_harness runtime_truth p0 restart scheduler output stochastic equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_dm_only runtime_truth p0 restart scheduler equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_treepm runtime_truth p0 restart scheduler treepm pm equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_hydro_toy runtime_truth p0 restart scheduler hydro gas equivalence integration)
+  require_registered_runtime_truth_test(integration_reference_workflow_hydro_row_order runtime_truth p0 restart scheduler hydro gas workflow geometry integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_reference_workflow_hydro runtime_truth p0 restart scheduler hydro gas workflow equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_multirate_bins runtime_truth p0 restart scheduler multirate equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_output_enabled runtime_truth p0 restart scheduler output equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_stochastic_sources runtime_truth p0 restart scheduler stochastic source_terms equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_amr_hydro runtime_truth p0 restart scheduler hydro gas amr equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_amr_flux_registers runtime_truth p0 restart scheduler hydro gas amr equivalence integration)
+  require_registered_runtime_truth_test(integration_restart_equivalence_amr_temporal_ghosts runtime_truth p0 restart scheduler hydro gas amr equivalence integration)
+else()
+  foreach(hdf5_runtime_truth_test IN ITEMS
+      integration_snapshot_hdf5_roundtrip
+      integration_restart_checkpoint_roundtrip
+      integration_restart_equivalence_harness
+      integration_restart_equivalence_dm_only
+      integration_restart_equivalence_treepm
+      integration_restart_equivalence_hydro_toy
+      integration_reference_workflow_hydro_row_order
+      integration_restart_equivalence_reference_workflow_hydro
+      integration_restart_equivalence_multirate_bins
+      integration_restart_equivalence_output_enabled
+      integration_restart_equivalence_stochastic_sources
+      integration_restart_equivalence_amr_hydro
+      integration_restart_equivalence_amr_flux_registers
+      integration_restart_equivalence_amr_temporal_ghosts)
+    require_test_absent_when_feature_disabled(${hdf5_runtime_truth_test} HDF5 FALSE)
+  endforeach()
+endif()
 require_registered_runtime_truth_test(integration_provenance_roundtrip runtime_truth p0 provenance integration)
+
+function(require_backend_label_absent_when_disabled backend_label feature_name feature_enabled)
+  if(NOT "${feature_enabled}" STREQUAL "ON")
+    string(REGEX MATCH
+      "LABELS \"([^\"]*;)?${backend_label}(;[^\"]*)?\""
+      backend_label_when_disabled
+      "${ctest_content}")
+    if(backend_label_when_disabled)
+      message(FATAL_ERROR
+        "CTest metadata claims the ${feature_name} backend while ${feature_name}=OFF: ${backend_label_when_disabled}")
+    endif()
+  endif()
+endfunction()
+
+require_backend_label_absent_when_disabled(fftw COSMOSIM_ENABLE_FFTW "@COSMOSIM_ENABLE_FFTW@")
+require_backend_label_absent_when_disabled(hdf5 COSMOSIM_ENABLE_HDF5 "@COSMOSIM_ENABLE_HDF5@")
+require_backend_label_absent_when_disabled(mpi COSMOSIM_ENABLE_MPI "@COSMOSIM_ENABLE_MPI@")
+require_backend_label_absent_when_disabled(cuda COSMOSIM_ENABLE_CUDA "@COSMOSIM_ENABLE_CUDA@")
+require_backend_label_absent_when_disabled(python COSMOSIM_ENABLE_PYTHON "@COSMOSIM_ENABLE_PYTHON@")
 
 require_test_absent_when_feature_disabled(integration_runtime_app_smoke HDF5 @COSMOSIM_ENABLE_HDF5@)
 require_test_absent_when_feature_disabled(integration_pm_cuda_smoke CUDA @COSMOSIM_ENABLE_CUDA@)

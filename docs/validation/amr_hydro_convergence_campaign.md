@@ -11,7 +11,7 @@ not presented as convergence evidence. The reproducible campaign interface is se
   `validation/input_decks/amr_sedov_temporal_subcycling_v1.json`;
 - campaign template: `validation/campaign/amr_hydro_convergence_campaign_v1.json`;
 - analysis tool: `tools/run_amr_hydro_validation.py`;
-- profile/metric contract tests: `validation_amr_hydro_convergence`.
+- profile/metric contract tests: `unit_amr_hydro_validation_metric_contract`.
 
 The campaign template intentionally contains unresolved output/reference paths. Replace them only with
 actual CHUÍ profile outputs and a provenance-tagged exact or vetted reference profile. Generated campaign

@@ -17,6 +17,8 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 cosmosim::core::HierarchicalTimeBinScheduler makeMigrationScheduler(
@@ -665,7 +667,8 @@ void verifyRestartRoundTripIfEnabled(SimulationState state, const TransformOracl
       ch = '_';
     }
   }
-  const auto path = std::filesystem::temp_directory_path() / ("cosmosim_transform_fuzz_" + path_token + ".hdf5");
+  const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalFile(
+      "cosmosim_transform_fuzz_" + path_token, ".hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(path, payload);
   const auto restored = cosmosim::io::readRestartCheckpointHdf5(path);
   verifyOracle(restored.state, oracle, context + "/restart");

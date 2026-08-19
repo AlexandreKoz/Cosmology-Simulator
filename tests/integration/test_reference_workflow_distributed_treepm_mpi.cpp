@@ -12,6 +12,7 @@
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
+#include "../support/mpi_test_workspace.hpp"
 #endif
 
 namespace {
@@ -308,8 +309,9 @@ int main() {
 
 #if COSMOSIM_ENABLE_HDF5
   {
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() / "cosmosim_treepm_mpi_restart_continuation";
+    auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+        "cosmosim_treepm_mpi_restart_continuation");
+    const std::filesystem::path& root = workspace.root();
     const std::string direct_config_text = buildConfigText(
         /*cadence_steps=*/1,
         world_size,
@@ -397,10 +399,6 @@ int main() {
     }
     assert(rank_count_resume_threw);
 
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (world_rank == 0) {
-      std::filesystem::remove_all(root);
-    }
     MPI_Barrier(MPI_COMM_WORLD);
   }
 #endif

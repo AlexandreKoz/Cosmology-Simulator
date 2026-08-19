@@ -18,6 +18,8 @@
 #include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 [[nodiscard]] std::string buildConfig(std::string_view run_name) {
@@ -581,9 +583,10 @@ struct AuthoritativeGravityNumericalResult {
 }  // namespace
 
 int main() {
-  const auto output_root = std::filesystem::temp_directory_path() /
-      "cosmosim_star_formation_source_runtime";
-  std::filesystem::remove_all(output_root);
+  const auto workspace =
+      cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "cosmosim_star_formation_source_runtime");
+  const auto& output_root = workspace.root();
 
   const auto converging_state = makeState(true);
   const auto expanding_state = makeState(false);
@@ -736,6 +739,5 @@ int main() {
   }
 #endif
 
-  std::filesystem::remove_all(output_root);
   return 0;
 }

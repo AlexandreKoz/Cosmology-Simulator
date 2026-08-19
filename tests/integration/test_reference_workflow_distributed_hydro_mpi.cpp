@@ -14,6 +14,8 @@
 #include <mpi.h>
 #endif
 
+#include "../support/mpi_test_workspace.hpp"
+
 namespace {
 
 std::string configText(int world_size, std::string_view run_name) {
@@ -152,8 +154,9 @@ int main() {
   }
 
   const cosmosim::core::SimulationState initial_state = makeRankState(world_rank);
-  const std::filesystem::path root =
-      std::filesystem::temp_directory_path() / "cosmosim_reference_workflow_distributed_hydro_mpi";
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_reference_workflow_distributed_hydro_mpi");
+  const std::filesystem::path& root = workspace.root();
 
   const auto direct_frozen = cosmosim::core::loadFrozenConfigFromString(
       configText(world_size, "distributed_hydro_mpi_direct"),
@@ -204,6 +207,7 @@ int main() {
   const double resumed_global_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(localMass(resumed_restart.state));
   assert(std::abs(resumed_global_mass - direct_global_mass) < 1.0e-10);
 
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
 #endif
   return 0;

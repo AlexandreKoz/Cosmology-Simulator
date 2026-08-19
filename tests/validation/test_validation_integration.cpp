@@ -12,6 +12,7 @@
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/physics/cooling_heating.hpp"
+#include "gravity_reference.hpp"
 #include "validation_tolerance.hpp"
 
 namespace {
@@ -60,7 +61,70 @@ void fillSodLikeInitialState(cosmosim::hydro::HydroConservedStateSoa& conserved,
   }
 }
 
+struct AnalyticModeMetrics {
+  double cosine_similarity = 0.0;
+  double relative_l2_error = 0.0;
+  double relative_amplitude_error = 0.0;
+};
+
+[[nodiscard]] AnalyticModeMetrics measureAnalyticMode(
+    std::span<const double> expected,
+    std::span<const double> candidate) {
+  requireOrThrow(expected.size() == candidate.size(), "analytic mode vectors must have equal sizes");
+  requireOrThrow(!expected.empty(), "analytic mode vectors must not be empty");
+
+  double dot = 0.0;
+  double expected_norm2 = 0.0;
+  double candidate_norm2 = 0.0;
+  double error_norm2 = 0.0;
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    requireOrThrow(
+        std::isfinite(expected[i]) && std::isfinite(candidate[i]),
+        "analytic mode comparison received a non-finite sample");
+    dot += expected[i] * candidate[i];
+    expected_norm2 += expected[i] * expected[i];
+    candidate_norm2 += candidate[i] * candidate[i];
+    const double error = candidate[i] - expected[i];
+    error_norm2 += error * error;
+  }
+  requireOrThrow(expected_norm2 > 0.0, "analytic mode reference must have non-zero norm");
+  requireOrThrow(candidate_norm2 > 0.0, "analytic mode candidate must have non-zero norm");
+
+  const double amplitude_ratio = dot / expected_norm2;
+  return AnalyticModeMetrics{
+      .cosine_similarity = dot / std::sqrt(expected_norm2 * candidate_norm2),
+      .relative_l2_error = std::sqrt(error_norm2 / expected_norm2),
+      .relative_amplitude_error = std::abs(amplitude_ratio - 1.0),
+  };
+}
+
+[[nodiscard]] bool analyticModeAccepted(
+    const AnalyticModeMetrics& metrics,
+    const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  return metrics.cosine_similarity >=
+             tolerances.require("gravity_pm_single_mode.min_cosine_similarity") &&
+      metrics.relative_l2_error <=
+             tolerances.require("gravity_pm_single_mode.max_relative_l2_error") &&
+      metrics.relative_amplitude_error <=
+             tolerances.require("gravity_pm_single_mode.max_relative_amplitude_error");
+}
+
+void requireAnalyticModeAccepted(
+    const AnalyticModeMetrics& metrics,
+    const cosmosim::validation::ValidationToleranceTable& tolerances,
+    const std::string& quantity) {
+  std::ostringstream message;
+  message << "gravity_pm_single_mode " << quantity
+          << " mismatch: cosine_similarity=" << metrics.cosine_similarity
+          << ", relative_l2_error=" << metrics.relative_l2_error
+          << ", relative_amplitude_error=" << metrics.relative_amplitude_error;
+  requireOrThrow(analyticModeAccepted(metrics, tolerances), message.str());
+}
+
 void testPmSingleMode(const cosmosim::validation::ValidationToleranceTable& tolerances) {
+  // This is a spectral Poisson truth test, not a mass-assignment smoke test.
+  // Populate one analytic density mode directly on the PM mesh so the reference
+  // amplitude/sign are unambiguous and independent of CIC/TSC interpolation.
   const cosmosim::gravity::PmGridShape shape{32, 8, 8};
   cosmosim::gravity::PmGridStorage grid(shape);
   cosmosim::gravity::PmSolver solver(shape);
@@ -70,57 +134,80 @@ void testPmSingleMode(const cosmosim::validation::ValidationToleranceTable& tole
   options.scale_factor = 1.0;
   options.gravitational_constant_code = 1.0;
 
-  const std::size_t particle_count = 32;
-  std::vector<double> pos_x(particle_count);
-  std::vector<double> pos_y(particle_count, 0.25);
-  std::vector<double> pos_z(particle_count, 0.75);
-  std::vector<double> mass(particle_count, 1.0);
-  for (std::size_t i = 0; i < particle_count; ++i) {
-    pos_x[i] = (static_cast<double>(i) + 0.5) / static_cast<double>(particle_count) * options.box_size_mpc_comoving;
-    mass[i] = 1.0 + 0.1 * std::sin(2.0 * k_pi * pos_x[i] / options.box_size_mpc_comoving);
-  }
-
-  std::vector<double> accel_x(particle_count, 0.0);
-  std::vector<double> accel_y(particle_count, 0.0);
-  std::vector<double> accel_z(particle_count, 0.0);
-  std::vector<double> phi(particle_count, 0.0);
-
-  solver.assignDensity(grid, pos_x, pos_y, pos_z, mass, options, nullptr);
-  solver.solvePoissonPeriodic(grid, options, nullptr);
-  solver.interpolateForces(grid, pos_x, pos_y, pos_z, accel_x, accel_y, accel_z, options, nullptr);
-  solver.interpolatePotential(grid, pos_x, pos_y, pos_z, phi, options, nullptr);
-
+  constexpr double DENSITY_MODE_AMPLITUDE = 0.1;
   const double kx = 2.0 * k_pi / options.box_size_mpc_comoving;
-  const double expected_amp = 4.0 * k_pi * options.gravitational_constant_code *
-      0.1 / kx;
-  const double expected_phi_amp = -4.0 * k_pi * options.gravitational_constant_code *
-      0.1 / (kx * kx);
+  const double expected_force_amplitude =
+      4.0 * k_pi * options.gravitational_constant_code * DENSITY_MODE_AMPLITUDE / kx;
+  const double expected_potential_amplitude =
+      -4.0 * k_pi * options.gravitational_constant_code * DENSITY_MODE_AMPLITUDE / (kx * kx);
 
-  double corr = 0.0;
-  double norm_expected = 0.0;
-  double norm_got = 0.0;
-  double corr_phi = 0.0;
-  double norm_phi_expected = 0.0;
-  double norm_phi_got = 0.0;
-  for (std::size_t i = 0; i < particle_count; ++i) {
-    const double expected = expected_amp * std::cos(kx * pos_x[i]);
-    const double expected_phi = expected_phi_amp * std::sin(kx * pos_x[i]);
-    corr += expected * accel_x[i];
-    norm_expected += expected * expected;
-    norm_got += accel_x[i] * accel_x[i];
-    corr_phi += expected_phi * phi[i];
-    norm_phi_expected += expected_phi * expected_phi;
-    norm_phi_got += phi[i] * phi[i];
+  std::vector<double> expected_force(shape.cellCount(), 0.0);
+  std::vector<double> expected_potential(shape.cellCount(), 0.0);
+  std::vector<double> phase_shifted_force(shape.cellCount(), 0.0);
+  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+    const double x_comoving =
+        (static_cast<double>(ix) + 0.5) / static_cast<double>(shape.nx) *
+        options.box_size_mpc_comoving;
+    const double density = DENSITY_MODE_AMPLITUDE * std::sin(kx * x_comoving);
+    const double analytic_force = expected_force_amplitude * std::cos(kx * x_comoving);
+    const double analytic_potential = expected_potential_amplitude * std::sin(kx * x_comoving);
+    const double phase_shifted = expected_force_amplitude *
+        std::cos(kx * x_comoving + 0.5 * k_pi);
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        const std::size_t index = grid.linearIndex(ix, iy, iz);
+        grid.density()[index] = density;
+        expected_force[index] = analytic_force;
+        expected_potential[index] = analytic_potential;
+        phase_shifted_force[index] = phase_shifted;
+      }
+    }
   }
 
-  const double cosine_similarity = corr / std::sqrt(std::max(norm_expected * norm_got, 1.0e-20));
-  const double cosine_similarity_phi = corr_phi / std::sqrt(std::max(norm_phi_expected * norm_phi_got, 1.0e-20));
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+
+  const AnalyticModeMetrics force_metrics = measureAnalyticMode(expected_force, grid.force_x());
+  const AnalyticModeMetrics potential_metrics =
+      measureAnalyticMode(expected_potential, grid.potential());
+  requireAnalyticModeAccepted(force_metrics, tolerances, "force");
+  requireAnalyticModeAccepted(potential_metrics, tolerances, "potential");
+
+  double max_transverse_acceleration = 0.0;
+  for (std::size_t index = 0; index < shape.cellCount(); ++index) {
+    max_transverse_acceleration = std::max(
+        max_transverse_acceleration,
+        std::max(std::abs(grid.force_y()[index]), std::abs(grid.force_z()[index])));
+  }
   requireOrThrow(
-      std::abs(cosine_similarity) >= tolerances.require("gravity_pm_single_mode.min_cosine_similarity"),
-      "gravity_pm_single_mode failed: cosine similarity below tolerance");
+      max_transverse_acceleration <= 1.0e-12,
+      "gravity_pm_single_mode produced transverse acceleration for a pure x mode");
+
+  // Negative controls prove the acceptance metric catches the historical failure
+  // classes rather than merely producing a green result for the production output.
+  std::vector<double> inverted_force = expected_force;
+  std::vector<double> inverted_potential = expected_potential;
+  std::vector<double> scaled_force = expected_force;
+  for (double& value : inverted_force) {
+    value = -value;
+  }
+  for (double& value : inverted_potential) {
+    value = -value;
+  }
+  for (double& value : scaled_force) {
+    value *= 1.5;
+  }
   requireOrThrow(
-      std::abs(cosine_similarity_phi) >= tolerances.require("gravity_pm_single_mode.min_cosine_similarity"),
-      "gravity_pm_single_mode failed: potential cosine similarity below tolerance");
+      !analyticModeAccepted(measureAnalyticMode(expected_force, inverted_force), tolerances),
+      "gravity_pm_single_mode negative control failed: inverted force was accepted");
+  requireOrThrow(
+      !analyticModeAccepted(measureAnalyticMode(expected_potential, inverted_potential), tolerances),
+      "gravity_pm_single_mode negative control failed: inverted potential was accepted");
+  requireOrThrow(
+      !analyticModeAccepted(measureAnalyticMode(expected_force, scaled_force), tolerances),
+      "gravity_pm_single_mode negative control failed: 50% amplitude error was accepted");
+  requireOrThrow(
+      !analyticModeAccepted(measureAnalyticMode(expected_force, phase_shifted_force), tolerances),
+      "gravity_pm_single_mode negative control failed: quarter-wave phase corruption was accepted");
 }
 
 void testPmUniformDensityCancellation(const cosmosim::validation::ValidationToleranceTable& tolerances) {
@@ -302,7 +389,7 @@ ForceField computeDirectShortRangeResidual(
       const double r = std::sqrt(std::max(r2, 1.0e-30));
       const double split_factor = cosmosim::gravity::treePmGaussianShortRangeForceFactor(
           r, options.split_policy.split_scale_comoving);
-      const double softened_factor = cosmosim::gravity::softenedInvR3(r2, options.tree_options.softening) *
+      const double softened_factor = cosmosim::test_support::plummerInvR3Reference(r2, options.tree_options.softening.epsilon_comoving) *
           split_factor * options.tree_options.gravitational_constant_code;
       field.ax[target] += softened_factor * mass[source] * dx;
       field.ay[target] += softened_factor * mass[source] * dy;

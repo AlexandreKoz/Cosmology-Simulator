@@ -4,6 +4,7 @@
 #include <string>
 
 #include "io/internal/transactional_file.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
@@ -16,7 +17,7 @@ std::string readText(const std::filesystem::path& path) {
 }  // namespace
 
 int main() {
-  const auto root = std::filesystem::temp_directory_path() / "cosmosim_transactional_file_test";
+  const auto root = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_transactional_file_test");
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
 

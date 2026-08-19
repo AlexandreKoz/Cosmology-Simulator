@@ -24,6 +24,7 @@
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -924,13 +925,12 @@ struct PhysicalStateArtifact {
       execution_backend == "serial" || execution_backend == "mpi",
       "unsupported DMO execution-backend tag");
   requireOrThrow(isSupportedDmoWorldSize(world_size), "invalid DMO artifact world size");
+  const std::filesystem::path artifact_root(COSMOSIM_DMO_ARTIFACT_ROOT);
   if (execution_backend == "serial") {
     requireOrThrow(world_size == 1, "serial DMO artifact must have world_size=1");
-    return std::filesystem::temp_directory_path() /
-        "cosmosim_dmo_zeldovich_workflow_serial";
+    return artifact_root / "serial";
   }
-  return std::filesystem::temp_directory_path() /
-      ("cosmosim_dmo_zeldovich_workflow_mpi_np" + std::to_string(world_size));
+  return artifact_root / ("mpi_np" + std::to_string(world_size));
 }
 
 [[nodiscard]] std::filesystem::path physicalStateArtifactPath(
@@ -1719,15 +1719,20 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--empty-rank-smoke") {
-      const std::filesystem::path smoke_root =
-          std::filesystem::temp_directory_path() /
-          ("cosmosim_dmo_empty_rank_smoke_" + std::string(currentExecutionBackend()) +
-           "_np" + std::to_string(runtime.world_size));
+      std::uint64_t shared_run_token = 0U;
       if (runtime.world_rank == 0) {
-        std::filesystem::remove_all(smoke_root);
+        shared_run_token = cosmosim::test_support::TestTempWorkspace::uniqueRunToken();
       }
+#if COSMOSIM_ENABLE_MPI
+      MPI_Bcast(&shared_run_token, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+#endif
+      auto smoke_workspace = cosmosim::test_support::TestTempWorkspace::createMpiShared(
+          "dmo_empty_rank_smoke_" + std::string(currentExecutionBackend()) +
+              "_np" + std::to_string(runtime.world_size),
+          shared_run_token,
+          runtime.world_rank == 0);
       barrier();
-      runEmptyRankSmoke(runtime, smoke_root);
+      runEmptyRankSmoke(runtime, smoke_workspace.root());
       barrier();
 #if COSMOSIM_ENABLE_MPI
       MPI_Finalize();

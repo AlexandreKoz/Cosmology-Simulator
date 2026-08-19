@@ -10,6 +10,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "restart_equivalence_harness.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace cosmosim::tests {
 
@@ -174,7 +175,8 @@ inline RestartEquivalenceScenario makeStage8Scenario(
 }
 
 inline std::filesystem::path stage8RestartPath(const std::string& stem) {
-  return std::filesystem::temp_directory_path() / ("cosmosim_" + stem + ".hdf5");
+  return test_support::TestTempWorkspace::uniqueProcessLocalPath(
+      "restart_equivalence_" + stem + ".hdf5");
 }
 
 }  // namespace cosmosim::tests

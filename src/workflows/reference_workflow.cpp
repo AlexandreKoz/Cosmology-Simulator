@@ -337,7 +337,14 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::run(
 ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const std::filesystem::path* output_root_override,
     const ReferenceWorkflowOptions& options) const {
-  const core::SimulationConfig& config = m_frozen_config.config;
+  // Runtime output-root overrides must cover diagnostics/analysis as well as
+  // snapshots and restarts. Preserve the frozen configuration for provenance,
+  // but pass a runtime copy with the effective root to output-producing modules.
+  core::SimulationConfig runtime_config = m_frozen_config.config;
+  if (output_root_override != nullptr && !output_root_override->empty()) {
+    runtime_config.output.output_directory = output_root_override->string();
+  }
+  const core::SimulationConfig& config = runtime_config;
   parallel::MpiContext mpi_context;
   mpi_context.validateExpectedWorldSizeOrThrow(config.parallel.mpi_ranks_expected);
 

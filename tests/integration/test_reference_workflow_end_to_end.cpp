@@ -14,6 +14,7 @@
 
 #include "cosmosim/cosmosim.hpp"
 #include "cosmosim/core/build_config.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 [[nodiscard]] std::string readFile(const std::filesystem::path& path) {
   std::ifstream in(path);
@@ -172,7 +173,7 @@ int main() {
 
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   const std::filesystem::path output_dir =
-      std::filesystem::temp_directory_path() / "cosmosim_reference_workflow_test";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_reference_workflow_test");
   const cosmosim::workflows::ReferenceWorkflowReport report =
       runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
 

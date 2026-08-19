@@ -14,8 +14,11 @@
 
 #include "cosmosim/cosmosim.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
+#include "../support/mpi_test_workspace.hpp"
 #endif
 
 namespace {
@@ -641,8 +644,14 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(stream.str(), "validation_phase2_mpi_gravity_restart");
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
 
-  const std::filesystem::path out_dir =
-      std::filesystem::temp_directory_path() / "cosmosim_validation_phase2_restart";
+#if COSMOSIM_ENABLE_MPI
+  auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
+      "cosmosim_validation_phase2_restart");
+#else
+  auto workspace = cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+      "cosmosim_validation_phase2_restart");
+#endif
+  const std::filesystem::path& out_dir = workspace.root();
   const auto report = runner.run(out_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = true});
   requireOrThrow(report.restart_roundtrip_executed, "restart roundtrip was not executed");
   requireOrThrow(report.restart_roundtrip_ok, "restart roundtrip failed verification");
@@ -657,12 +666,6 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
     requireOrThrow(report.restart_path.filename().string().find("_rank") != std::string::npos, "distributed restart filename must be rank-qualified");
   }
 
-#if COSMOSIM_ENABLE_MPI
-  MPI_Barrier(MPI_COMM_WORLD);
-#endif
-  if (world_rank == 0) {
-    std::filesystem::remove_all(out_dir);
-  }
 #if COSMOSIM_ENABLE_MPI
   MPI_Barrier(MPI_COMM_WORLD);
 #endif

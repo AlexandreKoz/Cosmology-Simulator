@@ -10,6 +10,7 @@
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
@@ -74,9 +75,9 @@ void testJsonAndCsvReportWriters() {
     session.addBytesMoved(1024);
   }
 
-  const auto temp_dir = std::filesystem::temp_directory_path();
-  const auto json_path = temp_dir / "cosmosim_profile_unit.json";
-  const auto csv_path = temp_dir / "cosmosim_profile_unit.csv";
+  auto scratch = cosmosim::test_support::TestTempWorkspace::createUniqueDirectory("profiling_unit_reports");
+  const auto json_path = scratch.path("profile.json");
+  const auto csv_path = scratch.path("profile.csv");
 
   cosmosim::core::writeProfilerReportJson(session, json_path);
   cosmosim::core::writeProfilerReportCsv(session, csv_path);
@@ -116,7 +117,7 @@ void testOperationalEventReportWriter() {
       .payload = {{"error", "disk full"}},
   });
 
-  const auto path = std::filesystem::temp_directory_path() / "cosmosim_operational_events_unit.json";
+  const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_operational_events_unit.json");
   cosmosim::core::writeOperationalReportJson(session, path, "unit_profiling", "cafef00d");
   assert(std::filesystem::exists(path));
 
@@ -141,7 +142,7 @@ void testOperationalReportIncludesMemoryAccounting() {
   report.notes.push_back("unknown external allocations are not fully tracked");
   session.setMemoryReport(std::move(report));
 
-  const auto path = std::filesystem::temp_directory_path() / "cosmosim_operational_events_memory_unit.json";
+  const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_operational_events_memory_unit.json");
   cosmosim::core::writeOperationalReportJson(session, path, "unit_memory", "beadfeed");
 
   std::ifstream in(path);
@@ -200,7 +201,7 @@ void testScopeMacroAndEscapedOperationalFields() {
       .message = "line1\nline2\r\tcontrol\x01",
       .payload = {{"zeta", "last"}, {"alpha", "first"}},
   });
-  const auto path = std::filesystem::temp_directory_path() / "cosmosim_profiler_escape_unit.json";
+  const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_profiler_escape_unit.json");
   cosmosim::core::writeOperationalReportJson(session, path, "escape_test", "hash");
   std::ifstream in(path);
   const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());

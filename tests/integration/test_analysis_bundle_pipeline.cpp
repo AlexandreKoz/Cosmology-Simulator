@@ -9,6 +9,8 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 class NoopCallback final : public cosmosim::core::IntegrationCallback {
@@ -39,7 +41,10 @@ class NoopCallback final : public cosmosim::core::IntegrationCallback {
 
 int main() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
-  config.output.output_directory = "test_outputs";
+  const auto temp_workspace =
+      cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "integration_analysis_bundle");
+  config.output.output_directory = temp_workspace.root().string();
   config.output.run_name = "integration_analysis";
   config.cosmology.box_size_mpc_comoving = 1.0;
   config.analysis.enable_diagnostics = true;
@@ -57,8 +62,6 @@ int main() {
 
   const std::filesystem::path output_root =
       std::filesystem::path(config.output.output_directory) / config.output.run_name;
-  std::filesystem::remove_all(output_root);
-
   cosmosim::core::SimulationState state;
   state.resizeParticles(8);
   state.resizeCells(8);
@@ -141,7 +144,9 @@ int main() {
         const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         if (body.find("\"diagnostics_execution_policy\": \"all_including_provisional\"") !=
                 std::string::npos &&
-            body.find("\"tier\": \"reference_science\"") != std::string::npos &&
+            body.find("\"tier\": \"provisional_science\"") != std::string::npos &&
+            body.find("\"implementation_maturity\": \"production_scalable\"") != std::string::npos &&
+            body.find("\"scientific_maturity\": \"provisional\"") != std::string::npos &&
             body.find("\"maturity\": \"provisional\"") != std::string::npos &&
             body.find("\"name\": \"power_spectrum\"") != std::string::npos &&
             body.find("\"name\": \"gravity_health_summary\"") != std::string::npos &&
@@ -161,6 +166,5 @@ int main() {
   assert(timing.light_calls >= 2);
   assert(timing.heavy_calls >= 1);
 
-  std::filesystem::remove_all(output_root);
   return 0;
 }

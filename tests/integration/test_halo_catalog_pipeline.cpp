@@ -6,6 +6,8 @@
 
 #include "cosmosim/analysis/halo_workflow.hpp"
 
+#include "../support/test_temp_workspace.hpp"
+
 namespace {
 
 cosmosim::core::SimulationState makePipelineState() {
@@ -34,7 +36,10 @@ cosmosim::core::SimulationState makePipelineState() {
 
 int main() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
-  config.output.output_directory = "test_outputs";
+  const auto workspace =
+      cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "integration_halo_catalog_pipeline");
+  config.output.output_directory = workspace.root().string();
   config.output.run_name = "integration_halo";
   config.analysis.enable_halo_workflow = true;
   config.analysis.halo_on_the_fly = false;
@@ -43,7 +48,6 @@ int main() {
   config.cosmology.box_size_mpc_comoving = 1.0;
 
   const auto output_root = std::filesystem::path(config.output.output_directory) / config.output.run_name;
-  std::filesystem::remove_all(output_root);
 
   cosmosim::analysis::HaloWorkflowPlanner planner(config);
   const auto report = planner.runSnapshotWorkflow(makePipelineState(), 11, 0.25, nullptr);
@@ -55,10 +59,8 @@ int main() {
   std::ifstream in(report.halo_catalog_path);
   std::string json_text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   in.close();
-  assert(json_text.find("cosmosim_halo_catalog_v1") != std::string::npos);
-  assert(json_text.find("\"schema_version\": 1") != std::string::npos);
+  assert(json_text.find("cosmosim_halo_catalog_v2") != std::string::npos);
+  assert(json_text.find("\"schema_version\": 2") != std::string::npos);
 
-  std::error_code cleanup_error;
-  std::filesystem::remove_all(output_root, cleanup_error);
   return 0;
 }

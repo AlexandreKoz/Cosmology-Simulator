@@ -14,6 +14,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/gravity/tree_softening.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -431,7 +432,7 @@ void testRestartRoundtrip() {
   });
 
   const std::filesystem::path checkpoint_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_roundtrip.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_roundtrip.hdf5");
 
   // Bare file names are supported. Invalid temp policy must fail before the
   // previous valid checkpoint is touched.
@@ -752,7 +753,7 @@ void testRestartRoundtrip() {
   assert(stale_writer_threw);
 
   const std::filesystem::path stale_mirror_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_stale_timebin_mirror.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_stale_timebin_mirror.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(stale_mirror_path, payload);
   hid_t stale_file = H5Fopen(stale_mirror_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(stale_file >= 0);
@@ -773,7 +774,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(stale_mirror_path);
 
   const std::filesystem::path invalid_scheduler_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_invalid_scheduler_active_flag.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_invalid_scheduler_active_flag.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(invalid_scheduler_path, payload);
   hid_t invalid_scheduler_file = H5Fopen(invalid_scheduler_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(invalid_scheduler_file >= 0);
@@ -798,7 +799,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(invalid_scheduler_path);
 
   const std::filesystem::path invalid_patch_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_invalid_hydro_patch_geometry.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_invalid_hydro_patch_geometry.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(invalid_patch_path, payload);
   hid_t invalid_patch_file = H5Fopen(invalid_patch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(invalid_patch_file >= 0);
@@ -825,7 +826,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(invalid_patch_path);
 
   const std::filesystem::path missing_parent_flag_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_gas_identity_has_parent.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_gas_identity_has_parent.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_parent_flag_path, payload);
   hid_t missing_parent_flag_file = H5Fopen(missing_parent_flag_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(missing_parent_flag_file >= 0);
@@ -842,7 +843,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(missing_parent_flag_path);
 
   const std::filesystem::path duplicate_gas_id_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_duplicate_gas_cell_id.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_duplicate_gas_cell_id.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(duplicate_gas_id_path, payload);
   hid_t duplicate_gas_id_file = H5Fopen(duplicate_gas_id_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(duplicate_gas_id_file >= 0);
@@ -887,7 +888,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(checkpoint_path);
 
   const std::filesystem::path schema_mismatch_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_schema_mismatch.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_schema_mismatch.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(schema_mismatch_path, payload);
   hid_t schema_file = H5Fopen(schema_mismatch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(schema_file >= 0);
@@ -908,7 +909,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(schema_mismatch_path);
 
   const std::filesystem::path missing_required_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_required.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_required.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_required_path, payload);
   hid_t missing_file = H5Fopen(missing_required_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(missing_file >= 0);
@@ -929,7 +930,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(missing_required_path);
 
   const std::filesystem::path missing_softening_mask_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_missing_softening_mask.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_softening_mask.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_softening_mask_path, payload);
   hid_t missing_softening_file = H5Fopen(missing_softening_mask_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   assert(missing_softening_file >= 0);
@@ -945,7 +946,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(missing_softening_mask_path);
 
   const std::filesystem::path legacy_softening_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_legacy_softening_compat.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_legacy_softening_compat.hdf5");
   cosmosim::core::SimulationState legacy_softening_state = state;
   legacy_softening_state.particle_sidecar.gravity_softening_comoving.clear();
   legacy_softening_state.particle_sidecar.has_gravity_softening_override.clear();
@@ -963,7 +964,7 @@ void testRestartRoundtrip() {
   std::filesystem::remove(legacy_softening_path);
 
   const std::filesystem::path finalize_failure_dir =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_finalize_failure_target";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_finalize_failure_target");
   std::filesystem::remove_all(finalize_failure_dir);
   std::filesystem::create_directories(finalize_failure_dir);
 
@@ -1023,7 +1024,7 @@ void testRestartAfterReorderAndMigration() {
   fillRestartPayload(reorder_payload, state, integrator_state, scheduler);
   const auto expected_density_by_id = gasDensityByParticleId(state);
   const std::filesystem::path reorder_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_after_reorder.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_after_reorder.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(reorder_path, reorder_payload);
   const auto reordered_restore = cosmosim::io::readRestartCheckpointHdf5(reorder_path);
   assertParticleTimeBinsMatchScheduler(reordered_restore.state, reordered_restore.scheduler_state);
@@ -1051,7 +1052,7 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::io::RestartWritePayload migration_payload;
   fillRestartPayload(migration_payload, state, integrator_state, scheduler);
   const std::filesystem::path migration_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_after_migration.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_after_migration.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(migration_path, migration_payload);
   const auto migration_restore = cosmosim::io::readRestartCheckpointHdf5(migration_path);
   assert(migration_restore.state.validateOwnershipInvariants());
@@ -1119,7 +1120,7 @@ void testParentlessGasCellRestartRoundtrip() {
   fillRestartPayload(payload, state, integrator_state, scheduler);
 
   const std::filesystem::path checkpoint_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_parentless_gas_cells.hdf5";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_parentless_gas_cells.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(checkpoint_path, payload);
   const auto restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
   assert(restored.state.validateOwnershipInvariants());

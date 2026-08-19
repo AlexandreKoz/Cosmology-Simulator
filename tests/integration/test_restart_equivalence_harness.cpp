@@ -8,6 +8,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "restart_equivalence_harness.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
@@ -109,15 +110,15 @@ void testRestartEquivalenceHarness() {
   scenario.initial_stochastic_state = makeStochasticState();
   scenario.total_steps = 10;
   scenario.restart_step = 4;
-  scenario.restart_path =
-      std::filesystem::temp_directory_path() / "cosmosim_restart_equivalence_harness.hdf5";
+  auto workspace = cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+      "restart_equivalence_harness");
+  scenario.restart_path = workspace.path("restart.hdf5");
 
   const cosmosim::tests::RestartEquivalenceResult result =
       cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
   assert(result.direct_integrator_state.step_index == 10);
   assert(result.restarted_integrator_state.step_index == 10);
   assert(result.direct_scheduler_state.current_tick == result.restarted_scheduler_state.current_tick);
-  std::filesystem::remove(std::filesystem::temp_directory_path() / "cosmosim_restart_equivalence_harness.hdf5");
 #endif
 }
 

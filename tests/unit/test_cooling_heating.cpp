@@ -5,12 +5,13 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/physics/cooling_heating.hpp"
+#include "../support/test_temp_workspace.hpp"
 
 namespace {
 
 void testMetalLineTableLookupInterpolation() {
   const std::filesystem::path table_path =
-      std::filesystem::temp_directory_path() / "cosmosim_test_metal_table.txt";
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_test_metal_table.txt");
   {
     std::ofstream out(table_path);
     out << "# log10T log10Lambda\n";
