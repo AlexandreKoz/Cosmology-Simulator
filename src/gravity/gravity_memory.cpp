@@ -368,13 +368,28 @@ DmoProcessMemoryEstimate estimateDmoProcessMemory(
   copyKnownEntries(builder, canonical_runtime_report);
   copyKnownEntries(builder, gravity_estimate.report);
 
-  if (policy.scheduler_owned_bytes > 0U) {
-    addEstimate(builder,
-                core::MemorySubsystem::kSidecars,
-                core::MemoryLifetime::kPersistent,
-                "dmo_process.scheduler_owned_state",
-                policy.scheduler_owned_bytes,
-                "retained hierarchical scheduler vector/string capacities owned by the active particle scheduler");
+  const std::uint64_t scheduler_high_water_bytes =
+      policy.scheduler_high_water_bytes != 0U
+      ? policy.scheduler_high_water_bytes
+      : policy.scheduler_owned_bytes;
+  if (policy.scheduler_current_size_bytes > policy.scheduler_owned_bytes ||
+      policy.scheduler_owned_bytes > scheduler_high_water_bytes) {
+    throw std::invalid_argument(
+        "DMO process scheduler memory accounting requires logical <= capacity <= high-water");
+  }
+  if (policy.scheduler_owned_bytes > 0U || scheduler_high_water_bytes > 0U) {
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kSidecars,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .label = "dmo_process.scheduler_owned_state",
+        .current_size_bytes = policy.scheduler_current_size_bytes,
+        .owned_capacity_bytes = policy.scheduler_owned_bytes,
+        .high_water_bytes = scheduler_high_water_bytes,
+        .estimated_next_step_bytes = policy.scheduler_owned_bytes,
+        .estimate_only = false,
+        .uncertainty_note =
+            "authoritative hierarchical scheduler logical bytes, retained vector capacity, and historical retained-capacity high-water",
+    });
   }
   if (policy.output_restart_overlap_bytes > 0U) {
     addEstimate(builder,

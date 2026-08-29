@@ -1292,6 +1292,7 @@ void HierarchicalTimeBinScheduler::reset(
   m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.occupancy_by_bin[clamped_bin] = element_count;
+  refreshOwnedCapacityHighWater();
 }
 
 void HierarchicalTimeBinScheduler::appendElements(
@@ -1330,6 +1331,7 @@ void HierarchicalTimeBinScheduler::appendElements(
     m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   }
   m_diagnostics.occupancy_by_bin[clamped_bin] += new_element_count;
+  refreshOwnedCapacityHighWater();
   validateInternalState("HierarchicalTimeBinScheduler::appendElements");
 }
 
@@ -1357,6 +1359,7 @@ void HierarchicalTimeBinScheduler::setElementBin(
   const std::uint64_t period_ticks = binPeriodTicks(clamped_bin);
   m_hot.next_activation_tick[element_index] =
       (current_tick % period_ticks == 0) ? current_tick : ((current_tick / period_ticks) * period_ticks + period_ticks);
+  refreshOwnedCapacityHighWater();
 }
 
 void HierarchicalTimeBinScheduler::submitCandidateTimeStep(
@@ -1387,8 +1390,9 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
     m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
   }
-  // Keep the label as a transient compatibility/diagnostic input. Production
-  // scheduler state stores only compact typed candidate provenance.
+  // The compatibility label is intentionally transient and is not retained or
+  // copied into scheduler state. Typed candidate provenance drives production
+  // arbitration and later human-readable diagnostics.
   (void)label;
   const std::uint8_t clamped = clampBin(target_bin);
   ++m_last_reconciliation.submitted_candidates;
@@ -1396,6 +1400,7 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
     m_candidate_bin_index[element_index] = clamped;
     m_candidate_source[element_index] = source;
   }
+  refreshOwnedCapacityHighWater();
 }
 
 TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTransitions() {
@@ -1474,6 +1479,7 @@ std::span<const std::uint32_t> HierarchicalTimeBinScheduler::beginSubstep() {
   validateInternalState("HierarchicalTimeBinScheduler::beginSubstep");
 #endif
   rebuildActiveSet();
+  refreshOwnedCapacityHighWater();
   m_substep_open = true;
 #ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::beginSubstep.active_set_created");
@@ -1517,6 +1523,7 @@ void HierarchicalTimeBinScheduler::endSubstep() {
   }
   ++m_current_tick;
   m_substep_open = false;
+  refreshOwnedCapacityHighWater();
 #ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::endSubstep.committed");
 #endif
@@ -1525,6 +1532,47 @@ void HierarchicalTimeBinScheduler::endSubstep() {
 const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noexcept { return m_hot; }
 
 const TimeBinDiagnostics& HierarchicalTimeBinScheduler::diagnostics() const noexcept { return m_diagnostics; }
+
+std::uint64_t HierarchicalTimeBinScheduler::logicalSizeBytes() const {
+  std::uint64_t total = 0U;
+  const auto add_bytes = [&total](std::uint64_t bytes, std::string_view label) {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - total) {
+      throw std::overflow_error(
+          "HierarchicalTimeBinScheduler logical memory accounting overflow at " +
+          std::string(label));
+    }
+    total += bytes;
+  };
+  const auto add_vector = [&add_bytes](const auto& values, std::string_view label) {
+    using Value = typename std::decay_t<decltype(values)>::value_type;
+    const std::uint64_t size = static_cast<std::uint64_t>(values.size());
+    constexpr std::uint64_t element_bytes = static_cast<std::uint64_t>(sizeof(Value));
+    if (size != 0U &&
+        element_bytes > std::numeric_limits<std::uint64_t>::max() / size) {
+      throw std::overflow_error(
+          "HierarchicalTimeBinScheduler vector logical memory accounting overflow at " +
+          std::string(label));
+    }
+    add_bytes(size * element_bytes, label);
+  };
+
+  add_vector(m_hot.bin_index, "hot.bin_index");
+  add_vector(m_hot.next_activation_tick, "hot.next_activation_tick");
+  add_vector(m_hot.active_flag, "hot.active_flag");
+  add_vector(m_hot.pending_bin_index, "hot.pending_bin_index");
+  add_vector(m_elements_by_bin, "elements_by_bin.outer");
+  for (const auto& bin : m_elements_by_bin) {
+    add_vector(bin, "elements_by_bin.inner");
+  }
+  add_vector(m_position_in_bin, "position_in_bin");
+  add_vector(m_active_elements, "active_elements");
+  add_vector(m_active_sort_scratch, "active_sort_scratch");
+  add_vector(m_diagnostics.occupancy_by_bin, "diagnostics.occupancy_by_bin");
+  add_vector(m_diagnostics.active_count_by_bin, "diagnostics.active_count_by_bin");
+  add_vector(m_candidate_bin_index, "candidate_bin_index");
+  add_vector(m_candidate_source, "candidate_source");
+  return total;
+}
 
 std::uint64_t HierarchicalTimeBinScheduler::ownedCapacityBytes() const {
   std::uint64_t total = 0U;
@@ -1565,6 +1613,15 @@ std::uint64_t HierarchicalTimeBinScheduler::ownedCapacityBytes() const {
   add_vector(m_candidate_bin_index, "candidate_bin_index");
   add_vector(m_candidate_source, "candidate_source");
   return total;
+}
+
+std::uint64_t HierarchicalTimeBinScheduler::ownedCapacityHighWaterBytes() const noexcept {
+  return m_owned_capacity_high_water_bytes;
+}
+
+void HierarchicalTimeBinScheduler::refreshOwnedCapacityHighWater() {
+  m_owned_capacity_high_water_bytes = std::max(
+      m_owned_capacity_high_water_bytes, ownedCapacityBytes());
 }
 
 TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() const {
@@ -1638,6 +1695,7 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
     m_diagnostics.occupancy_by_bin[bin] = checkedIntegralNarrow<std::uint32_t>(
         m_elements_by_bin[bin].size(), "scheduler bin occupancy");
   }
+  refreshOwnedCapacityHighWater();
   validateInternalState("HierarchicalTimeBinScheduler::importPersistentState");
 }
 

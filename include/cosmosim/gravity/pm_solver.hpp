@@ -160,6 +160,14 @@ enum class PmDataResidencyPolicy {
 // outside this contract.
 inline constexpr std::uint64_t k_pm_routing_workspace_target_bytes =
     128ULL * 1024ULL * 1024ULL;
+// Keep deterministic fixed slack below the acceptance ceiling so minor
+// rank-scale metadata growth cannot consume the final bytes of the contract.
+// All known CHUI-owned routing buffers/cursors are still accounted explicitly.
+inline constexpr std::uint64_t k_pm_routing_workspace_headroom_bytes =
+    64ULL * 1024ULL;
+inline constexpr std::uint64_t k_pm_routing_modeled_workspace_limit_bytes =
+    k_pm_routing_workspace_target_bytes - k_pm_routing_workspace_headroom_bytes;
+static_assert(k_pm_routing_workspace_headroom_bytes < k_pm_routing_workspace_target_bytes);
 
 struct PmRoutingCapacityModel {
   std::uint64_t configured_per_peer_max_bytes = 0U;

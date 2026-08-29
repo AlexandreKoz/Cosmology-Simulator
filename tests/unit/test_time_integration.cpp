@@ -1045,14 +1045,20 @@ void testSchedulerCandidateLabelsAreTransient() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
   scheduler.reset(element_count, 3, 0);
 
+  const std::uint64_t baseline_logical = scheduler.logicalSizeBytes();
   const std::uint64_t baseline_capacity = scheduler.ownedCapacityBytes();
+  const std::uint64_t baseline_high_water = scheduler.ownedCapacityHighWaterBytes();
+  assert(baseline_logical <= baseline_capacity);
+  assert(baseline_capacity <= baseline_high_water);
   const std::string long_label(1024U * 1024U, 'x');
   scheduler.submitCandidateBin(
       target_element,
       1,
       cosmosim::core::TimeStepCandidateSource::kHydroCfl,
       long_label);
+  assert(scheduler.logicalSizeBytes() == baseline_logical);
   assert(scheduler.ownedCapacityBytes() == baseline_capacity);
+  assert(scheduler.ownedCapacityHighWaterBytes() == baseline_high_water);
 
   // Arbitration remains source/bin driven: the stricter candidate wins and
   // the diagnostic label length has no scheduler-owned population-scale cost.
@@ -1068,7 +1074,9 @@ void testSchedulerCandidateLabelsAreTransient() {
   assert(reconciliation.dominant_limiting_source ==
          cosmosim::core::TimeStepCandidateSource::kGravityAcceleration);
   assert(scheduler.hotMetadata().pending_bin_index[target_element] == 0U);
+  assert(scheduler.logicalSizeBytes() == baseline_logical);
   assert(scheduler.ownedCapacityBytes() == baseline_capacity);
+  assert(scheduler.ownedCapacityHighWaterBytes() == baseline_high_water);
 }
 
 void testHighMachHydroCflCandidateLimitsBin() {

@@ -625,7 +625,9 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   const auto process_estimate = cosmosim::gravity::estimateDmoProcessMemory(
       canonical_report, gravity_estimate, cosmosim::gravity::DmoProcessMemoryPolicy{
           .mpi_rank_count = 8U,
+          .scheduler_current_size_bytes = 2500U,
           .scheduler_owned_bytes = 3000U,
+          .scheduler_high_water_bytes = 3500U,
           .output_restart_overlap_bytes = 5000U,
           .mpi_external_reserve_bytes = 7000U,
           .fftw_external_reserve_bytes = 11000U,
@@ -641,6 +643,18 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
       process_estimate.known_owned_peak_bytes + process_estimate.external_unknown_reserve_bytes);
   assert(process_estimate.budget_required_bytes >= process_estimate.modeled_subtotal_bytes);
   assert(process_estimate.aggregate_required_bytes == 8U * process_estimate.budget_required_bytes);
+  bool found_scheduler_memory = false;
+  for (const auto& entry : process_estimate.report.entries) {
+    if (entry.label != "dmo_process.scheduler_owned_state") {
+      continue;
+    }
+    found_scheduler_memory = true;
+    assert(entry.current_size_bytes == 2500U);
+    assert(entry.owned_capacity_bytes == 3000U);
+    assert(entry.high_water_bytes == 3500U);
+    assert(!entry.estimate_only);
+  }
+  assert(found_scheduler_memory);
   bool rejected = false;
   try {
     cosmosim::gravity::enforceDmoProcessMemoryBudget(

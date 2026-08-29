@@ -67,8 +67,15 @@ four distinct capacity high-waters: `pm_routed_send_buffer_high_water_bytes`,
 `pm_routed_combined_buffer_high_water_bytes`, and
 `pm_routed_workspace_high_water_bytes`. The combined value is the simultaneous
 capacity of the two reusable wire buffers; the workspace value additionally
-includes retained rank-scale routing count/displacement metadata. These are
-capacity/high-water metrics, not aliases for bytes communicated over the phase.
+includes retained rank-scale routing count/displacement metadata and the reused
+per-peer packing/response cursor. The capacity model intentionally leaves 64 KiB
+below the 128 MiB/rank M1A engineering ceiling. These are capacity/high-water
+metrics, not aliases for bytes communicated over the phase.
+
+The DMO process preflight also reports hierarchical scheduler memory as three
+separate values: logical live bytes, retained owned capacity, and historical
+retained-capacity high-water. Candidate labels remain transient compatibility
+inputs and do not contribute population-scale scheduler storage.
 
 ## Hydro runtime events
 

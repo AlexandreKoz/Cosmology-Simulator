@@ -967,8 +967,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::runtime_error(
           "DMO process memory budget is enabled but the gravity stage has no authoritative particle scheduler for owned-memory preflight");
     }
+    const std::uint64_t scheduler_current_size_bytes = context.particle_scheduler != nullptr
+        ? context.particle_scheduler->logicalSizeBytes()
+        : 0U;
     const std::uint64_t scheduler_owned_bytes = context.particle_scheduler != nullptr
         ? context.particle_scheduler->ownedCapacityBytes()
+        : 0U;
+    const std::uint64_t scheduler_high_water_bytes = context.particle_scheduler != nullptr
+        ? context.particle_scheduler->ownedCapacityHighWaterBytes()
         : 0U;
     const core::MemoryReport canonical_runtime_report =
         core::collectSimulationMemoryReport(context.state, context.workspace);
@@ -978,7 +984,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
         gravity::DmoProcessMemoryPolicy{
             .mpi_rank_count = static_cast<std::uint32_t>(
                 std::max(m_runtime_topology.world_size, 1)),
+            .scheduler_current_size_bytes = scheduler_current_size_bytes,
             .scheduler_owned_bytes = scheduler_owned_bytes,
+            .scheduler_high_water_bytes = scheduler_high_water_bytes,
             .output_restart_overlap_bytes =
                 m_config.parallel.process_output_restart_overlap_bytes,
             .mpi_external_reserve_bytes =

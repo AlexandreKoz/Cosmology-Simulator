@@ -848,24 +848,45 @@ void testPmRoutingCapacityModelM1A() {
   constexpr std::uint64_t mib = 1024ULL * 1024ULL;
   constexpr std::uint64_t configured_peer_max = 16ULL * mib;
   constexpr std::uint64_t density_rank_metadata_bytes =
-      8ULL * 8ULL * static_cast<std::uint64_t>(sizeof(int));
+      8ULL * 8ULL * static_cast<std::uint64_t>(sizeof(int)) +
+      8ULL * static_cast<std::uint64_t>(sizeof(std::size_t));
+  constexpr std::uint64_t interpolation_rank_metadata_bytes =
+      12ULL * 8ULL * static_cast<std::uint64_t>(sizeof(int)) +
+      8ULL * static_cast<std::uint64_t>(sizeof(std::size_t));
   constexpr std::size_t plane_record_bytes = 96U;
 
   const auto certified = cosmosim::gravity::modelPmRoutingCapacity(
       8,
       configured_peer_max,
-      cosmosim::gravity::k_pm_routing_workspace_target_bytes,
+      cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes,
       density_rank_metadata_bytes,
       plane_record_bytes);
   assert(certified.configured_per_peer_max_bytes == configured_peer_max);
-  assert(certified.effective_per_peer_payload_bytes == 9'586'944ULL);
+  assert(certified.effective_per_peer_payload_bytes == 9'582'240ULL);
   assert(certified.effective_per_peer_payload_bytes <= configured_peer_max);
   assert(certified.effective_per_peer_payload_bytes % plane_record_bytes == 0U);
-  assert(certified.max_send_payload_bytes == 67'108'608ULL);
-  assert(certified.max_receive_payload_bytes == 67'108'608ULL);
-  assert(certified.max_simultaneous_workspace_bytes == 134'217'472ULL);
+  assert(certified.max_send_payload_bytes == 67'075'680ULL);
+  assert(certified.max_receive_payload_bytes == 67'075'680ULL);
+  assert(certified.max_simultaneous_workspace_bytes == 134'151'680ULL);
   assert(certified.max_simultaneous_workspace_bytes <=
-         cosmosim::gravity::k_pm_routing_workspace_target_bytes);
+         cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes);
+  assert(cosmosim::gravity::k_pm_routing_workspace_target_bytes -
+             certified.max_simultaneous_workspace_bytes >=
+         cosmosim::gravity::k_pm_routing_workspace_headroom_bytes);
+
+  const auto interpolation = cosmosim::gravity::modelPmRoutingCapacity(
+      8,
+      configured_peer_max,
+      cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes,
+      interpolation_rank_metadata_bytes,
+      plane_record_bytes);
+  assert(interpolation.effective_per_peer_payload_bytes == 9'582'240ULL);
+  assert(interpolation.max_simultaneous_workspace_bytes == 134'151'808ULL);
+  assert(interpolation.max_simultaneous_workspace_bytes <=
+         cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes);
+  assert(cosmosim::gravity::k_pm_routing_workspace_target_bytes -
+             interpolation.max_simultaneous_workspace_bytes >=
+         cosmosim::gravity::k_pm_routing_workspace_headroom_bytes);
 
   const auto serial = cosmosim::gravity::modelPmRoutingCapacity(
       1, configured_peer_max, 128ULL * mib, 4096U, plane_record_bytes);

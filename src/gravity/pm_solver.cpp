@@ -1507,6 +1507,9 @@ class PmSolver::Impl {
     std::vector<int> send_displs_bytes;
     std::vector<int> recv_counts_bytes;
     std::vector<int> recv_displs_bytes;
+    // Reused for per-peer packing offsets so bounded rounds do not allocate
+    // O(world_size) scratch repeatedly. Capacity is part of the routing budget.
+    std::vector<std::size_t> cursor;
   };
 
   struct PlaneInterpolationExchangeBuffers {
@@ -1528,6 +1531,9 @@ class PmSolver::Impl {
     std::vector<int> send_response_displs_bytes;
     std::vector<int> recv_response_counts_bytes;
     std::vector<int> recv_response_displs_bytes;
+    // Shared by request packing and later response-stream validation; the two
+    // uses are phase-disjoint, so one retained rank-scale vector is sufficient.
+    std::vector<std::size_t> cursor;
   };
 
 
@@ -2103,6 +2109,7 @@ class PmSolver::Impl {
       m_density_exchange.buffers.send_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
       m_density_exchange.buffers.recv_counts_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
       m_density_exchange.buffers.recv_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
+      m_density_exchange.buffers.cursor.assign(static_cast<std::size_t>(layout.world_size), 0U);
     }
     return m_density_exchange.buffers;
   }
@@ -2126,6 +2133,7 @@ class PmSolver::Impl {
       b.send_response_displs_bytes.assign(ranks, 0);
       b.recv_response_counts_bytes.assign(ranks, 0);
       b.recv_response_displs_bytes.assign(ranks, 0);
+      b.cursor.assign(ranks, 0U);
     }
     return m_plane_interpolation_exchange.buffers;
   }
@@ -2502,6 +2510,7 @@ class PmSolver::Impl {
       accumulate(current, capacity, b.send_displs_bytes);
       accumulate(current, capacity, b.recv_counts_bytes);
       accumulate(current, capacity, b.recv_displs_bytes);
+      accumulate(current, capacity, b.cursor);
       emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
            "pm_solver.density_exchange_workspace", current, capacity, b.workspace_high_water_bytes,
            "bounded PM density communication workspace; logical bytes, retained capacity, and historical high-water are distinct");
@@ -2525,6 +2534,7 @@ class PmSolver::Impl {
       accumulate(current, capacity, b.send_response_displs_bytes);
       accumulate(current, capacity, b.recv_response_counts_bytes);
       accumulate(current, capacity, b.recv_response_displs_bytes);
+      accumulate(current, capacity, b.cursor);
       emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
            "pm_solver.plane_interpolation_exchange_workspace", current, capacity, b.workspace_high_water_bytes,
            "shared bounded plane-request PM force/potential workspace; no population-scale decoded copies");
@@ -3147,37 +3157,51 @@ void PmSolver::assignDensity(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::assignDensity");
     });
 
-    auto& exchange = m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+    Impl::DensityExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
-    const auto add_routing_metadata = [&](const auto& values) {
-      routing_metadata_capacity = checkedAddBytes(
-          routing_metadata_capacity,
-          core::ownedCapacityBytesForContainer(values),
-          "PM density routing metadata capacity");
-    };
-    add_routing_metadata(exchange.send_counts);
-    add_routing_metadata(exchange.send_displs);
-    add_routing_metadata(exchange.recv_counts);
-    add_routing_metadata(exchange.recv_displs);
-    add_routing_metadata(exchange.send_counts_bytes);
-    add_routing_metadata(exchange.send_displs_bytes);
-    add_routing_metadata(exchange.recv_counts_bytes);
-    add_routing_metadata(exchange.recv_displs_bytes);
-    const PmRoutingCapacityModel routing_capacity = modelPmRoutingCapacity(
+    PmRoutingCapacityModel routing_capacity{};
+    std::size_t routing_buffer_limit = 0U;
+    std::size_t particles_per_round = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity routing preflight",
+        world_rank,
         world_size,
-        options.routing_exchange_batch_bytes,
-        k_pm_routing_workspace_target_bytes,
-        routing_metadata_capacity,
-        k_pm_density_plane_wire_bytes);
-    if (routing_capacity.max_send_payload_bytes >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-      throw std::overflow_error("PM density routing buffer limit exceeds size_t capacity");
-    }
-    const std::size_t routing_buffer_limit =
-        static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
-    const std::size_t particles_per_round = pmRoutingParticlesPerRound(
-        routing_capacity.effective_per_peer_payload_bytes,
-        k_pm_density_plane_wire_bytes);
+        routed_mpi_wait_ms,
+        [&]() {
+          exchange_ptr = &m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+          auto& prepared_exchange = *exchange_ptr;
+          const auto add_routing_metadata = [&](const auto& values) {
+            routing_metadata_capacity = checkedAddBytes(
+                routing_metadata_capacity,
+                core::ownedCapacityBytesForContainer(values),
+                "PM density routing metadata capacity");
+          };
+          add_routing_metadata(prepared_exchange.send_counts);
+          add_routing_metadata(prepared_exchange.send_displs);
+          add_routing_metadata(prepared_exchange.recv_counts);
+          add_routing_metadata(prepared_exchange.recv_displs);
+          add_routing_metadata(prepared_exchange.send_counts_bytes);
+          add_routing_metadata(prepared_exchange.send_displs_bytes);
+          add_routing_metadata(prepared_exchange.recv_counts_bytes);
+          add_routing_metadata(prepared_exchange.recv_displs_bytes);
+          add_routing_metadata(prepared_exchange.cursor);
+          routing_capacity = modelPmRoutingCapacity(
+              world_size,
+              options.routing_exchange_batch_bytes,
+              k_pm_routing_modeled_workspace_limit_bytes,
+              routing_metadata_capacity,
+              k_pm_density_plane_wire_bytes);
+          if (routing_capacity.max_send_payload_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("PM density routing buffer limit exceeds size_t capacity");
+          }
+          routing_buffer_limit =
+              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          particles_per_round = pmRoutingParticlesPerRound(
+              routing_capacity.effective_per_peer_payload_bytes,
+              k_pm_density_plane_wire_bytes);
+        });
+    auto& exchange = *exchange_ptr;
     const std::uint64_t local_source_count = static_cast<std::uint64_t>(mass.size());
     std::uint64_t global_max_source_count = 0U;
     measurePmMpiWait(routed_mpi_wait_ms, [&]() {
@@ -3331,9 +3355,8 @@ void PmSolver::assignDensity(
                 routing_buffer_limit,
                 "PmSolver::assignDensity send buffer");
 
-            std::vector<std::size_t> write_cursor(static_cast<std::size_t>(world_size), 0U);
             for (int rank = 0; rank < world_size; ++rank) {
-              write_cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
+              exchange.cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
                   exchange.send_displs[static_cast<std::size_t>(rank)]);
             }
 
@@ -3374,7 +3397,7 @@ void PmSolver::assignDensity(
                 if (next_record_sequence == std::numeric_limits<std::uint32_t>::max()) {
                   throw std::overflow_error("PmSolver::assignDensity routing sequence exceeds uint32 capacity");
                 }
-                auto& cursor = write_cursor[static_cast<std::size_t>(group.destination_rank)];
+                auto& cursor = exchange.cursor[static_cast<std::size_t>(group.destination_rank)];
                 const std::size_t byte_offset = cursor * k_pm_density_plane_wire_bytes;
                 encodePmDensityPlaneRecord(
                     record,
@@ -4479,41 +4502,55 @@ void PmSolver::interpolateForces(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolateForces");
     });
 
-    auto& exchange = m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    Impl::PlaneInterpolationExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
-    const auto add_routing_metadata = [&](const auto& values) {
-      routing_metadata_capacity = checkedAddBytes(
-          routing_metadata_capacity,
-          core::ownedCapacityBytesForContainer(values),
-          "PM force routing metadata capacity");
-    };
-    add_routing_metadata(exchange.send_counts);
-    add_routing_metadata(exchange.send_displs);
-    add_routing_metadata(exchange.recv_counts);
-    add_routing_metadata(exchange.recv_displs);
-    add_routing_metadata(exchange.send_counts_bytes);
-    add_routing_metadata(exchange.send_displs_bytes);
-    add_routing_metadata(exchange.recv_counts_bytes);
-    add_routing_metadata(exchange.recv_displs_bytes);
-    add_routing_metadata(exchange.send_response_counts_bytes);
-    add_routing_metadata(exchange.send_response_displs_bytes);
-    add_routing_metadata(exchange.recv_response_counts_bytes);
-    add_routing_metadata(exchange.recv_response_displs_bytes);
-    const PmRoutingCapacityModel routing_capacity = modelPmRoutingCapacity(
+    PmRoutingCapacityModel routing_capacity{};
+    std::size_t routing_buffer_limit = 0U;
+    std::size_t particles_per_round = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces routing preflight",
+        world_rank,
         world_size,
-        options.routing_exchange_batch_bytes,
-        k_pm_routing_workspace_target_bytes,
-        routing_metadata_capacity,
-        k_pm_plane_interpolation_request_wire_bytes);
-    if (routing_capacity.max_send_payload_bytes >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-      throw std::overflow_error("PM force routing buffer limit exceeds size_t capacity");
-    }
-    const std::size_t routing_buffer_limit =
-        static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
-    const std::size_t particles_per_round = pmRoutingParticlesPerRound(
-        routing_capacity.effective_per_peer_payload_bytes,
-        k_pm_plane_interpolation_request_wire_bytes);
+        routed_mpi_wait_ms,
+        [&]() {
+          exchange_ptr = &m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+          auto& prepared_exchange = *exchange_ptr;
+          const auto add_routing_metadata = [&](const auto& values) {
+            routing_metadata_capacity = checkedAddBytes(
+                routing_metadata_capacity,
+                core::ownedCapacityBytesForContainer(values),
+                "PM force routing metadata capacity");
+          };
+          add_routing_metadata(prepared_exchange.send_counts);
+          add_routing_metadata(prepared_exchange.send_displs);
+          add_routing_metadata(prepared_exchange.recv_counts);
+          add_routing_metadata(prepared_exchange.recv_displs);
+          add_routing_metadata(prepared_exchange.send_counts_bytes);
+          add_routing_metadata(prepared_exchange.send_displs_bytes);
+          add_routing_metadata(prepared_exchange.recv_counts_bytes);
+          add_routing_metadata(prepared_exchange.recv_displs_bytes);
+          add_routing_metadata(prepared_exchange.send_response_counts_bytes);
+          add_routing_metadata(prepared_exchange.send_response_displs_bytes);
+          add_routing_metadata(prepared_exchange.recv_response_counts_bytes);
+          add_routing_metadata(prepared_exchange.recv_response_displs_bytes);
+          add_routing_metadata(prepared_exchange.cursor);
+          routing_capacity = modelPmRoutingCapacity(
+              world_size,
+              options.routing_exchange_batch_bytes,
+              k_pm_routing_modeled_workspace_limit_bytes,
+              routing_metadata_capacity,
+              k_pm_plane_interpolation_request_wire_bytes);
+          if (routing_capacity.max_send_payload_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("PM force routing buffer limit exceeds size_t capacity");
+          }
+          routing_buffer_limit =
+              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          particles_per_round = pmRoutingParticlesPerRound(
+              routing_capacity.effective_per_peer_payload_bytes,
+              k_pm_plane_interpolation_request_wire_bytes);
+        });
+    auto& exchange = *exchange_ptr;
     const std::uint64_t local_target_count = static_cast<std::uint64_t>(pos_x.size());
     std::uint64_t global_max_target_count = 0U;
     measurePmMpiWait(routed_mpi_wait_ms, [&]() {
@@ -4702,9 +4739,8 @@ void PmSolver::interpolateForces(
                 routing_buffer_limit,
                 "PmSolver::interpolateForces request send buffer");
 
-            std::vector<std::size_t> write_cursor(static_cast<std::size_t>(world_size), 0U);
             for (int rank = 0; rank < world_size; ++rank) {
-              write_cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
+              exchange.cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
                   exchange.send_displs[static_cast<std::size_t>(rank)]);
             }
 
@@ -4750,7 +4786,7 @@ void PmSolver::interpolateForces(
                   throw std::overflow_error(
                       "PmSolver::interpolateForces routing sequence exceeds uint32 capacity");
                 }
-                auto& cursor = write_cursor[static_cast<std::size_t>(group.destination_rank)];
+                auto& cursor = exchange.cursor[static_cast<std::size_t>(group.destination_rank)];
                 encodePmPlaneInterpolationRequest(
                     request,
                     PmWireRecordKind::kForcePlaneRequest,
@@ -4967,9 +5003,8 @@ void PmSolver::interpolateForces(
         // Re-generate the compact request stream instead of retaining an O(N)
         // request registry. This provides exact response identity validation with
         // only O(world_size) cursor state.
-        std::vector<std::size_t> response_cursor(static_cast<std::size_t>(world_size), 0U);
         for (int rank = 0; rank < world_size; ++rank) {
-          response_cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
+          exchange.cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
               exchange.send_displs[static_cast<std::size_t>(rank)]);
         }
         std::uint32_t expected_sequence = round_sequence_begin;
@@ -4990,7 +5025,7 @@ void PmSolver::interpolateForces(
             if (sender_rank == world_rank) {
               continue;
             }
-            auto& cursor = response_cursor[static_cast<std::size_t>(sender_rank)];
+            auto& cursor = exchange.cursor[static_cast<std::size_t>(sender_rank)];
             const std::size_t segment_end = static_cast<std::size_t>(
                 exchange.send_displs[static_cast<std::size_t>(sender_rank)] +
                 exchange.send_counts[static_cast<std::size_t>(sender_rank)]);
@@ -5026,7 +5061,7 @@ void PmSolver::interpolateForces(
           const std::size_t expected_end = static_cast<std::size_t>(
               exchange.send_displs[static_cast<std::size_t>(rank)] +
               exchange.send_counts[static_cast<std::size_t>(rank)]);
-          if (response_cursor[static_cast<std::size_t>(rank)] != expected_end) {
+          if (exchange.cursor[static_cast<std::size_t>(rank)] != expected_end) {
             throw std::invalid_argument("PM force response segment contains unconsumed records");
           }
         }
@@ -5290,41 +5325,55 @@ void PmSolver::interpolatePotential(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolatePotential");
     });
 
-    auto& exchange = m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+    Impl::PlaneInterpolationExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
-    const auto add_routing_metadata = [&](const auto& values) {
-      routing_metadata_capacity = checkedAddBytes(
-          routing_metadata_capacity,
-          core::ownedCapacityBytesForContainer(values),
-          "PM potential routing metadata capacity");
-    };
-    add_routing_metadata(exchange.send_counts);
-    add_routing_metadata(exchange.send_displs);
-    add_routing_metadata(exchange.recv_counts);
-    add_routing_metadata(exchange.recv_displs);
-    add_routing_metadata(exchange.send_counts_bytes);
-    add_routing_metadata(exchange.send_displs_bytes);
-    add_routing_metadata(exchange.recv_counts_bytes);
-    add_routing_metadata(exchange.recv_displs_bytes);
-    add_routing_metadata(exchange.send_response_counts_bytes);
-    add_routing_metadata(exchange.send_response_displs_bytes);
-    add_routing_metadata(exchange.recv_response_counts_bytes);
-    add_routing_metadata(exchange.recv_response_displs_bytes);
-    const PmRoutingCapacityModel routing_capacity = modelPmRoutingCapacity(
+    PmRoutingCapacityModel routing_capacity{};
+    std::size_t routing_buffer_limit = 0U;
+    std::size_t particles_per_round = 0U;
+    runPmCoordinatedPhase(
+        "PmSolver::interpolatePotential routing preflight",
+        world_rank,
         world_size,
-        options.routing_exchange_batch_bytes,
-        k_pm_routing_workspace_target_bytes,
-        routing_metadata_capacity,
-        k_pm_plane_interpolation_request_wire_bytes);
-    if (routing_capacity.max_send_payload_bytes >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-      throw std::overflow_error("PM potential routing buffer limit exceeds size_t capacity");
-    }
-    const std::size_t routing_buffer_limit =
-        static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
-    const std::size_t particles_per_round = pmRoutingParticlesPerRound(
-        routing_capacity.effective_per_peer_payload_bytes,
-        k_pm_plane_interpolation_request_wire_bytes);
+        routed_mpi_wait_ms,
+        [&]() {
+          exchange_ptr = &m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+          auto& prepared_exchange = *exchange_ptr;
+          const auto add_routing_metadata = [&](const auto& values) {
+            routing_metadata_capacity = checkedAddBytes(
+                routing_metadata_capacity,
+                core::ownedCapacityBytesForContainer(values),
+                "PM potential routing metadata capacity");
+          };
+          add_routing_metadata(prepared_exchange.send_counts);
+          add_routing_metadata(prepared_exchange.send_displs);
+          add_routing_metadata(prepared_exchange.recv_counts);
+          add_routing_metadata(prepared_exchange.recv_displs);
+          add_routing_metadata(prepared_exchange.send_counts_bytes);
+          add_routing_metadata(prepared_exchange.send_displs_bytes);
+          add_routing_metadata(prepared_exchange.recv_counts_bytes);
+          add_routing_metadata(prepared_exchange.recv_displs_bytes);
+          add_routing_metadata(prepared_exchange.send_response_counts_bytes);
+          add_routing_metadata(prepared_exchange.send_response_displs_bytes);
+          add_routing_metadata(prepared_exchange.recv_response_counts_bytes);
+          add_routing_metadata(prepared_exchange.recv_response_displs_bytes);
+          add_routing_metadata(prepared_exchange.cursor);
+          routing_capacity = modelPmRoutingCapacity(
+              world_size,
+              options.routing_exchange_batch_bytes,
+              k_pm_routing_modeled_workspace_limit_bytes,
+              routing_metadata_capacity,
+              k_pm_plane_interpolation_request_wire_bytes);
+          if (routing_capacity.max_send_payload_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("PM potential routing buffer limit exceeds size_t capacity");
+          }
+          routing_buffer_limit =
+              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          particles_per_round = pmRoutingParticlesPerRound(
+              routing_capacity.effective_per_peer_payload_bytes,
+              k_pm_plane_interpolation_request_wire_bytes);
+        });
+    auto& exchange = *exchange_ptr;
     const std::uint64_t local_target_count = static_cast<std::uint64_t>(pos_x.size());
     std::uint64_t global_max_target_count = 0U;
     measurePmMpiWait(routed_mpi_wait_ms, [&]() {
@@ -5505,9 +5554,8 @@ void PmSolver::interpolatePotential(
                 routing_buffer_limit,
                 "PmSolver::interpolatePotential request send buffer");
 
-            std::vector<std::size_t> write_cursor(static_cast<std::size_t>(world_size), 0U);
             for (int rank = 0; rank < world_size; ++rank) {
-              write_cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
+              exchange.cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
                   exchange.send_displs[static_cast<std::size_t>(rank)]);
             }
 
@@ -5551,7 +5599,7 @@ void PmSolver::interpolatePotential(
                   throw std::overflow_error(
                       "PmSolver::interpolatePotential routing sequence exceeds uint32 capacity");
                 }
-                auto& cursor = write_cursor[static_cast<std::size_t>(group.destination_rank)];
+                auto& cursor = exchange.cursor[static_cast<std::size_t>(group.destination_rank)];
                 encodePmPlaneInterpolationRequest(
                     request,
                     PmWireRecordKind::kPotentialPlaneRequest,
@@ -5768,9 +5816,8 @@ void PmSolver::interpolatePotential(
         // Re-generate the compact request stream instead of retaining an O(N)
         // request registry. This provides exact response identity validation with
         // only O(world_size) cursor state.
-        std::vector<std::size_t> response_cursor(static_cast<std::size_t>(world_size), 0U);
         for (int rank = 0; rank < world_size; ++rank) {
-          response_cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
+          exchange.cursor[static_cast<std::size_t>(rank)] = static_cast<std::size_t>(
               exchange.send_displs[static_cast<std::size_t>(rank)]);
         }
         std::uint32_t expected_sequence = round_sequence_begin;
@@ -5791,7 +5838,7 @@ void PmSolver::interpolatePotential(
             if (sender_rank == world_rank) {
               continue;
             }
-            auto& cursor = response_cursor[static_cast<std::size_t>(sender_rank)];
+            auto& cursor = exchange.cursor[static_cast<std::size_t>(sender_rank)];
             const std::size_t segment_end = static_cast<std::size_t>(
                 exchange.send_displs[static_cast<std::size_t>(sender_rank)] +
                 exchange.send_counts[static_cast<std::size_t>(sender_rank)]);
@@ -5823,7 +5870,7 @@ void PmSolver::interpolatePotential(
           const std::size_t expected_end = static_cast<std::size_t>(
               exchange.send_displs[static_cast<std::size_t>(rank)] +
               exchange.send_counts[static_cast<std::size_t>(rank)]);
-          if (response_cursor[static_cast<std::size_t>(rank)] != expected_end) {
+          if (exchange.cursor[static_cast<std::size_t>(rank)] != expected_end) {
             throw std::invalid_argument("PM potential response segment contains unconsumed records");
           }
         }

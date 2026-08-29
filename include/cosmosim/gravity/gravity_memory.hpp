@@ -44,7 +44,12 @@ struct GravityMemoryEstimate {
 
 struct DmoProcessMemoryPolicy {
   std::uint32_t mpi_rank_count = 1U;
+  // scheduler_owned_bytes remains the compatibility/budget field. The
+  // adjacent counters make live/capacity/high-water reporting truthful; a zero
+  // high-water falls back to scheduler_owned_bytes for older callers.
+  std::uint64_t scheduler_current_size_bytes = 0U;
   std::uint64_t scheduler_owned_bytes = 0U;
+  std::uint64_t scheduler_high_water_bytes = 0U;
   std::uint64_t output_restart_overlap_bytes = 0U;
   std::uint64_t mpi_external_reserve_bytes = 0U;
   std::uint64_t fftw_external_reserve_bytes = 0U;

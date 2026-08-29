@@ -247,7 +247,11 @@ class HierarchicalTimeBinScheduler {
 
   [[nodiscard]] const TimeBinHotMetadata& hotMetadata() const noexcept;
   [[nodiscard]] const TimeBinDiagnostics& diagnostics() const noexcept;
+  // Population-scale scheduler accounting distinguishes live logical elements,
+  // retained vector capacity, and the historical retained-capacity high-water.
+  [[nodiscard]] std::uint64_t logicalSizeBytes() const;
   [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
+  [[nodiscard]] std::uint64_t ownedCapacityHighWaterBytes() const noexcept;
 
   [[nodiscard]] TimeBinPersistentState exportPersistentState() const;
   void importPersistentState(const TimeBinPersistentState& persistent_state);
@@ -264,6 +268,7 @@ class HierarchicalTimeBinScheduler {
       std::uint32_t element_index,
       std::uint8_t target_bin,
       std::string_view source_label) const;
+  void refreshOwnedCapacityHighWater();
 
   std::uint64_t m_current_tick = 0;
   std::uint8_t m_max_bin = 0;
@@ -277,6 +282,7 @@ class HierarchicalTimeBinScheduler {
   std::vector<std::uint8_t> m_candidate_bin_index;
   std::vector<TimeStepCandidateSource> m_candidate_source;
   TimeStepReconciliationResult m_last_reconciliation;
+  std::uint64_t m_owned_capacity_high_water_bytes = 0U;
   bool m_substep_open = false;
 };
 

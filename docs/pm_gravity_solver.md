@@ -301,25 +301,41 @@ resident memory.
 
 `modelPmRoutingCapacity(...)` computes the record-aligned effective per-peer
 payload from `(world_size, configured_peer_max, aggregate_target,
-fixed_metadata, record_size)` before any wire allocation. It reserves capacity
-for simultaneous send and receive residency:
+fixed_metadata, record_size)` before any wire allocation. Runtime preflight is
+executed through the coordinated PM failure gate before the following MPI
+collective, so rank-local allocation/capacity failures cannot strand peers in a
+later collective.
 
-`M_workspace = M_fixed + 2 * (world_size - 1) * B_peer_effective <= 128 MiB`.
+The public engineering ceiling remains **128 MiB/rank**, but the solver keeps a
+fixed **64 KiB capacity headroom** below that ceiling:
 
-For the certified eight-rank topology, default 16 MiB configured peer maximum,
-96-byte plane records, and the density exchange's eight rank-count/displacement
-vectors (256 logical bytes at eight ranks), the deterministic model gives:
+`M_modeled_limit = 128 MiB - 64 KiB`.
 
-- effective peer payload: **9,586,944 bytes**;
-- maximum send payload capacity: **67,108,608 bytes**;
-- maximum receive payload capacity: **67,108,608 bytes**;
-- modeled simultaneous density-routing workspace: **134,217,472 bytes**
-  (**127.999756 MiB**), below the **128 MiB** target.
+All known CHUI-owned rank-scale routing state is included in `M_fixed`, including
+the retained per-peer packing/response cursor. The bounded model is therefore:
 
-Runtime policy uses the containers' actual retained capacities for fixed routing
-metadata, not their logical sizes, and derives the effective peer payload from
-that measured capacity. This proof is analytical capacity evidence, not a
-512^3 execution benchmark.
+`M_workspace = M_fixed + 2 * (world_size - 1) * B_peer_effective <= M_modeled_limit < 128 MiB`.
+
+For the certified eight-rank, 64-bit topology with the default 16 MiB configured
+peer maximum and 96-byte request/plane records:
+
+- density fixed metadata is **320 bytes** (eight count/displacement `int`
+  vectors plus one eight-entry `size_t` cursor);
+- interpolation fixed metadata is **448 bytes** (twelve count/displacement
+  `int` vectors plus the same eight-entry `size_t` cursor);
+- effective peer payload is **9,582,240 bytes**;
+- maximum send payload capacity is **67,075,680 bytes**;
+- maximum receive payload capacity is **67,075,680 bytes**;
+- modeled simultaneous density-routing workspace is **134,151,680 bytes**
+  (**127.937012 MiB**), leaving **66,048 bytes** below the 128 MiB ceiling;
+- modeled simultaneous force/potential routing workspace is **134,151,808
+  bytes** (**127.937134 MiB**), leaving **65,920 bytes** below the ceiling.
+
+The cursor storage is retained in the reusable exchange workspace rather than
+allocated once per routing round. Runtime accounting uses the containers'
+actual retained capacities for all fixed routing metadata and derives the
+effective peer payload from that measured capacity. This proof is analytical
+capacity evidence, not a 512^3 execution benchmark.
 
 Receiver validation rejects out-of-range or non-owned x indices, wrong
 sender/origin/destination identity, stale epochs, invalid sequence, or non-finite
