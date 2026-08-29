@@ -154,6 +154,33 @@ enum class PmDataResidencyPolicy {
   kPreferDevice,
 };
 
+// M1A structural routing ceiling for CHUI-owned PM communication workspace.
+// It bounds the two simultaneously retained wire buffers plus the solver-owned
+// fixed routing metadata. Persistent PM/FFT arrays and MPI/FFTW internals are
+// outside this contract.
+inline constexpr std::uint64_t k_pm_routing_workspace_target_bytes =
+    128ULL * 1024ULL * 1024ULL;
+
+struct PmRoutingCapacityModel {
+  std::uint64_t configured_per_peer_max_bytes = 0U;
+  std::uint64_t effective_per_peer_payload_bytes = 0U;
+  std::uint64_t max_send_payload_bytes = 0U;
+  std::uint64_t max_receive_payload_bytes = 0U;
+  std::uint64_t fixed_workspace_bytes = 0U;
+  std::uint64_t max_simultaneous_workspace_bytes = 0U;
+};
+
+// Deterministic capacity model used by density and reverse-interpolation
+// routing. The effective peer payload is record-aligned, never exceeds the
+// configured per-peer maximum, and is reduced when necessary so send+receive
+// payload plus fixed solver-owned routing metadata fits the aggregate limit.
+[[nodiscard]] PmRoutingCapacityModel modelPmRoutingCapacity(
+    int world_size,
+    std::uint64_t configured_per_peer_max_bytes,
+    std::uint64_t aggregate_workspace_limit_bytes,
+    std::uint64_t fixed_workspace_bytes,
+    std::size_t wire_record_bytes);
+
 struct PmSolveOptions {
   double box_size_x_mpc_comoving = 0.0;
   double box_size_y_mpc_comoving = 0.0;
@@ -170,9 +197,11 @@ struct PmSolveOptions {
   PmBoundaryCondition boundary_condition = PmBoundaryCondition::kPeriodic;
   // Optional TreePM long-range Gaussian split scale. <=0 disables filtering.
   double tree_pm_split_scale_comoving = 0.0;
-  // Per-peer wire-payload high-water for distributed PM density assignment and
-  // force interpolation. The receive side is bounded by world_size times this
-  // value, independent of particle count.
+  // Configured per-peer wire-payload maximum for distributed PM routing. The
+  // solver may derive a smaller effective per-peer value so simultaneous
+  // send+receive workspace remains inside k_pm_routing_workspace_target_bytes.
+  // The configured value therefore remains a compatibility-preserving upper
+  // bound, not a promise to allocate that much for every peer at once.
   std::uint64_t routing_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;
   // Root-owned transient workspace budget for the isolated/open gathered PM path.
   // The implementation is correct inside this envelope but is not a scalable
@@ -192,6 +221,8 @@ struct PmProfileEvent {
   std::uint64_t routed_mpi_bytes_received = 0;
   std::uint64_t routed_send_buffer_high_water_bytes = 0;
   std::uint64_t routed_receive_buffer_high_water_bytes = 0;
+  std::uint64_t routed_combined_buffer_high_water_bytes = 0;
+  std::uint64_t routed_workspace_high_water_bytes = 0;
   std::uint64_t force_halo_cache_hits = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;

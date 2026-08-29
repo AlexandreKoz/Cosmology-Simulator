@@ -276,7 +276,6 @@ class HierarchicalTimeBinScheduler {
   TimeBinDiagnostics m_diagnostics;
   std::vector<std::uint8_t> m_candidate_bin_index;
   std::vector<TimeStepCandidateSource> m_candidate_source;
-  std::vector<std::string> m_candidate_label;
   TimeStepReconciliationResult m_last_reconciliation;
   bool m_substep_open = false;
 };

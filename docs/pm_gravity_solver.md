@@ -116,16 +116,23 @@ stream for response validation; it does not retain an O(N) request registry.
 Wrong sender/token, duplicate/out-of-order, stale, malformed, or non-finite
 responses fail closed before authoritative particle output is mutated.
 
-Communication proceeds in coordinated rounds bounded by
-`treepm_pm_exchange_batch_bytes` **per peer**. Local x-plane work is consumed
-directly without entering MPI buffers. Send and receive wire buffers are reused
-between request and response phases, and the profiler records their actual
-high-water marks. Zero-work ranks still enter every collective round.
+Communication proceeds in coordinated rounds. `treepm_pm_exchange_batch_bytes`
+remains the configured **per-peer upper bound**, but M1A derives a smaller
+record-aligned effective peer payload whenever necessary so both physical wire
+buffers plus rank-scale routing metadata remain within the 128 MiB/rank PM
+routing-workspace target. Local x-plane work is consumed directly without
+entering MPI buffers. Send and receive wire buffers are reused between request
+and response phases, and the profiler records directional, combined-buffer, and
+full solver-owned routing-workspace high-water marks. Zero-work ranks still
+enter every collective round.
 
-Potential interpolation retains the older per-cell request/response protocol
-for now; it is not used for the first-light DMO force update. Both protocols use
-checked byte-count/displacement conversion and coordinated preflight/failure
-agreement.
+Potential interpolation now uses the same bounded plane-group request machinery.
+The slab owner expands y/z weights and returns one accumulated 48-byte scalar
+potential response per remote x-plane group. The origin regenerates the expected
+request stream for exact token/order validation, so neither force nor potential
+gather retains an O(N_local) request registry or a bucket -> flat -> wire ->
+decoded population chain. Both paths use checked byte-count/displacement
+conversion and coordinated preflight/failure agreement.
 
 ## Assignment/gather kernels (Phase 1)
 
@@ -227,16 +234,16 @@ does not call `MPI_Comm_size`/`MPI_Comm_rank`.
 
 ### Distributed force-interpolation reverse-message contract
 
-The production DMO force gather uses the bounded plane-group protocol:
+The production DMO force and potential gathers use the bounded plane-group protocol:
 
 1. **Particle-owner rank** computes CIC/TSC x support and groups x planes by
    `pmOwnerRankForGlobalX(Nx, world_size, ix)`.
 2. Locally owned x-plane groups are accumulated directly from local PM fields.
-3. A remote group is encoded as one fixed-width force-plane request containing
-   the x indices/weights plus y/z mesh coordinates. The receiver expands y/z
-   weights locally, so TSC does not require 27 retained request records.
+3. A remote group is encoded as one fixed-width plane request containing the x
+   indices/weights plus y/z mesh coordinates. The receiver expands y/z weights
+   locally, so TSC does not require 27 retained request records.
 4. **Slab-owner rank** validates the record, evaluates all represented local
-   stencil cells, and emits one accumulated force response for that request.
+   stencil cells, and emits one accumulated force or potential response.
 5. The origin validates the response against the deterministic request stream
    and accumulates it into the origin-owned target row.
 
@@ -249,16 +256,17 @@ so empty ranks remain legal participants without dummy particles.
 PM routing never transmits native C++ object layouts. The version-1 wire format
 is fixed-width, little-endian, and requires IEEE-754 binary64. Every record
 starts with the 12-byte header `(magic="PMW1", version=1, record_kind)`. The
-first-light DMO routing adds compact plane-group kinds alongside the legacy
-per-cell kinds used by potential gather:
+first-light DMO routing uses compact fixed-width plane-group kinds:
 
-- density plane-group request: 96 bytes;
+- density plane-group record: 96 bytes;
 - force plane-group request: 96 bytes;
+- potential plane-group request: 96 bytes;
 - force response: 64 bytes;
-- legacy density contribution: 56 bytes;
-- legacy force request: 56 bytes;
-- potential request: 56 bytes;
 - potential response: 48 bytes.
+
+A legacy 56-byte density-contribution codec remains internal, but the distributed
+density hot path does not materialize or exchange a population of those records.
+The former 56-byte per-cell force/potential request protocol is no longer used.
 
 Decoders require exact size, magic, version, kind, reserved-lane validity,
 identity consistency, and complete record alignment before mutating mesh or
@@ -274,16 +282,44 @@ The density path uses the same x-plane grouping strategy:
 - one compact remote record carries up to three x planes plus y/z coordinates
   and particle mass;
 - the destination expands y/z weights and deposits directly into its slab;
-- communication is split into deterministic coordinated rounds with at most
-  `treepm_pm_exchange_batch_bytes` of payload per destination peer in a round.
+- communication is split into deterministic coordinated rounds; the configured
+  `treepm_pm_exchange_batch_bytes` remains an upper bound per destination peer,
+  while the effective peer payload is reduced as needed to satisfy the aggregate
+  routing-workspace target.
 
-For TSC this bounds retained routing state by the configured communication
-policy rather than by `27 * N_local`. The path does not simultaneously retain
+For TSC this bounds retained routing state by the communication policy rather
+than by `27 * N_local`. The path does not simultaneously retain
 a nested C++ record population, a flattened C++ copy, a wire copy, and a
 decoded receive population. Two reusable physical wire buffers cover send and
 receive phases. Profile counters expose routed logical records, participating
-peers, wire bytes, measured MPI wait, and actual send/receive buffer high-water
-bytes.
+peers, total wire bytes, measured MPI wait, directional send/receive buffer
+high-water, combined-buffer high-water, and complete solver-owned
+routing-workspace high-water. Total traffic is therefore not conflated with peak
+resident memory.
+
+### M1A aggregate routing-cap proof
+
+`modelPmRoutingCapacity(...)` computes the record-aligned effective per-peer
+payload from `(world_size, configured_peer_max, aggregate_target,
+fixed_metadata, record_size)` before any wire allocation. It reserves capacity
+for simultaneous send and receive residency:
+
+`M_workspace = M_fixed + 2 * (world_size - 1) * B_peer_effective <= 128 MiB`.
+
+For the certified eight-rank topology, default 16 MiB configured peer maximum,
+96-byte plane records, and the density exchange's eight rank-count/displacement
+vectors (256 logical bytes at eight ranks), the deterministic model gives:
+
+- effective peer payload: **9,586,944 bytes**;
+- maximum send payload capacity: **67,108,608 bytes**;
+- maximum receive payload capacity: **67,108,608 bytes**;
+- modeled simultaneous density-routing workspace: **134,217,472 bytes**
+  (**127.999756 MiB**), below the **128 MiB** target.
+
+Runtime policy uses the containers' actual retained capacities for fixed routing
+metadata, not their logical sizes, and derives the effective peer payload from
+that measured capacity. This proof is analytical capacity evidence, not a
+512^3 execution benchmark.
 
 Receiver validation rejects out-of-range or non-owned x indices, wrong
 sender/origin/destination identity, stale epochs, invalid sequence, or non-finite

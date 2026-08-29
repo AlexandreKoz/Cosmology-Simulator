@@ -1540,14 +1540,20 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   m_last_tree_pm_diagnostics.residual_remote_request_packet_imbalance_ratio)},
               {"pm_routed_density_records", std::to_string(tree_pm_profile.pm_profile.routed_density_records)},
               {"pm_routed_force_requests", std::to_string(tree_pm_profile.pm_profile.routed_force_requests)},
+              {"pm_routed_potential_requests", std::to_string(tree_pm_profile.pm_profile.routed_potential_requests)},
               {"pm_routed_density_peer_count", std::to_string(tree_pm_profile.pm_profile.routed_density_peer_count)},
               {"pm_routed_force_peer_count", std::to_string(tree_pm_profile.pm_profile.routed_force_peer_count)},
+              {"pm_routed_potential_peer_count", std::to_string(tree_pm_profile.pm_profile.routed_potential_peer_count)},
               {"pm_routed_mpi_bytes_sent", std::to_string(tree_pm_profile.pm_profile.routed_mpi_bytes_sent)},
               {"pm_routed_mpi_bytes_received", std::to_string(tree_pm_profile.pm_profile.routed_mpi_bytes_received)},
               {"pm_routed_send_buffer_high_water_bytes", std::to_string(
                   tree_pm_profile.pm_profile.routed_send_buffer_high_water_bytes)},
               {"pm_routed_receive_buffer_high_water_bytes", std::to_string(
                   tree_pm_profile.pm_profile.routed_receive_buffer_high_water_bytes)},
+              {"pm_routed_combined_buffer_high_water_bytes", std::to_string(
+                  tree_pm_profile.pm_profile.routed_combined_buffer_high_water_bytes)},
+              {"pm_routed_workspace_high_water_bytes", std::to_string(
+                  tree_pm_profile.pm_profile.routed_workspace_high_water_bytes)},
               {"pm_routed_mpi_wait_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.routed_mpi_wait_ms)},
           },
       });

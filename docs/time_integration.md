@@ -130,7 +130,7 @@ for future multirate work, not an enabled production capability.
 ### Candidate criteria flow
 
 1. Physics modules compute local candidate timesteps through typed criteria hooks such as CFL, gravity acceleration, source-term, or user-clamp hooks.
-2. Candidates are submitted to the scheduler with an auditable `TimeStepCandidateSource` label.
+2. Candidates are submitted to the scheduler with an auditable `TimeStepCandidateSource`. Optional human-readable labels are transient `std::string_view` inputs used only at the diagnostic boundary; they are not retained per element. Production scheduler state stores compact typed provenance, so diagnostic label length cannot change population-scale retained capacity.
 3. `mapDtToTimeBin(...)` normalizes physical `dt` proposals into the integer power-of-two bin hierarchy using the configured `TimeStepLimits`.
 4. `reconcileCandidateTransitions()` conservatively keeps the finest submitted bin per element, validates synchronization legality, and records clipping/candidate counters.
 5. Pending transitions are committed only at scheduler-controlled substep boundaries; invalid destination synchronization fails fast rather than being silently clipped or delegated to mirrors.

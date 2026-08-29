@@ -1039,6 +1039,38 @@ void testHydroGravityCandidateReconciliation() {
   assert(hot.bin_index[2] == 3);
 }
 
+void testSchedulerCandidateLabelsAreTransient() {
+  constexpr std::uint32_t element_count = 100000U;
+  constexpr std::uint32_t target_element = 54321U;
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(3);
+  scheduler.reset(element_count, 3, 0);
+
+  const std::uint64_t baseline_capacity = scheduler.ownedCapacityBytes();
+  const std::string long_label(1024U * 1024U, 'x');
+  scheduler.submitCandidateBin(
+      target_element,
+      1,
+      cosmosim::core::TimeStepCandidateSource::kHydroCfl,
+      long_label);
+  assert(scheduler.ownedCapacityBytes() == baseline_capacity);
+
+  // Arbitration remains source/bin driven: the stricter candidate wins and
+  // the diagnostic label length has no scheduler-owned population-scale cost.
+  scheduler.submitCandidateBin(
+      target_element,
+      0,
+      cosmosim::core::TimeStepCandidateSource::kGravityAcceleration,
+      "shorter_gravity_candidate");
+  const auto reconciliation = scheduler.reconcileCandidateTransitions();
+  assert(reconciliation.submitted_candidates == 2U);
+  assert(reconciliation.elements_with_candidates == 1U);
+  assert(reconciliation.committed_transition_requests == 1U);
+  assert(reconciliation.dominant_limiting_source ==
+         cosmosim::core::TimeStepCandidateSource::kGravityAcceleration);
+  assert(scheduler.hotMetadata().pending_bin_index[target_element] == 0U);
+  assert(scheduler.ownedCapacityBytes() == baseline_capacity);
+}
+
 void testHighMachHydroCflCandidateLimitsBin() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(4);
   scheduler.reset(1, 4, 0);
@@ -1602,6 +1634,7 @@ int main() {
   testActiveSetAuthority();
   testActiveSetNoCompetingBuilders();
   testHydroGravityCandidateReconciliation();
+  testSchedulerCandidateLabelsAreTransient();
   testHighMachHydroCflCandidateLimitsBin();
   testOrchestratorRequiresSchedulerProvenanceWhenTickIsExpected();
   testOrchestratorRejectsSchedulerActiveSetWithoutTick();

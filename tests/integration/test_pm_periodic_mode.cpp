@@ -690,6 +690,14 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
       profile.routed_receive_buffer_high_water_bytes <= routing_buffer_bound,
       "Distributed PM receive-buffer high-water exceeded the configured bounded-routing policy");
   requireOrThrow(
+      profile.routed_combined_buffer_high_water_bytes <=
+          cosmosim::gravity::k_pm_routing_workspace_target_bytes,
+      "Distributed PM combined wire-buffer high-water exceeded the M1A aggregate target");
+  requireOrThrow(
+      profile.routed_workspace_high_water_bytes <=
+          cosmosim::gravity::k_pm_routing_workspace_target_bytes,
+      "Distributed PM routing workspace high-water exceeded the M1A aggregate target");
+  requireOrThrow(
       profile.routed_density_records <= 3ULL * static_cast<std::uint64_t>(local_x.size()),
       "Distributed PM density routing regressed toward materialized xyz-stencil records");
   requireOrThrow(
@@ -703,6 +711,13 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
     requireOrThrow(
         profile.routed_potential_requests > 0,
         "Distributed PM potential gather did not report routed requests");
+    requireOrThrow(
+        profile.routed_potential_requests <= 3ULL * static_cast<std::uint64_t>(local_x.size()),
+        "Distributed PM potential routing regressed toward materialized xyz-stencil requests");
+    requireOrThrow(
+        profile.routed_workspace_high_water_bytes <=
+            cosmosim::gravity::k_pm_routing_workspace_target_bytes,
+        "Distributed PM potential routing exceeded the M1A aggregate workspace target");
   }
 
   cosmosim::gravity::PmGridStorage reference_grid(shape);

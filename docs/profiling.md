@@ -57,6 +57,19 @@ Do not claim scientific correctness from benchmark throughput.
 - Preserve deterministic behavior when profiling is disabled.
 - Compare against prior baselines using the same preset and workload size.
 
+## PM routing runtime events
+
+The `gravity.treepm` runtime event keeps total communication traffic separate from
+resident routing memory. Its PM payload includes logical density/force/potential
+route counts and peer counts, total MPI bytes sent/received, MPI wait time, and
+four distinct capacity high-waters: `pm_routed_send_buffer_high_water_bytes`,
+`pm_routed_receive_buffer_high_water_bytes`,
+`pm_routed_combined_buffer_high_water_bytes`, and
+`pm_routed_workspace_high_water_bytes`. The combined value is the simultaneous
+capacity of the two reusable wire buffers; the workspace value additionally
+includes retained rank-scale routing count/displacement metadata. These are
+capacity/high-water metrics, not aliases for bytes communicated over the phase.
+
 ## Hydro runtime events
 
 The reference workflow emits `hydro.conservation` events from the Godunov hydro stage when a profiler session is

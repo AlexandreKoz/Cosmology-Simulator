@@ -1273,7 +1273,6 @@ void HierarchicalTimeBinScheduler::reset(
   m_hot.pending_bin_index.assign(element_count, k_unset_pending_bin);
   m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
   m_candidate_source.assign(element_count, TimeStepCandidateSource::kUserClamp);
-  m_candidate_label.assign(element_count, {});
   m_last_reconciliation = {};
   m_substep_open = false;
 
@@ -1317,7 +1316,6 @@ void HierarchicalTimeBinScheduler::appendElements(
   m_position_in_bin.resize(total_count, 0);
   m_candidate_bin_index.resize(total_count, k_unset_pending_bin);
   m_candidate_source.resize(total_count, TimeStepCandidateSource::kUserClamp);
-  m_candidate_label.resize(total_count);
 
   if (m_elements_by_bin.empty()) {
     m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
@@ -1388,16 +1386,15 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
     m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
-    m_candidate_label.assign(m_hot.size(), {});
   }
+  // Keep the label as a transient compatibility/diagnostic input. Production
+  // scheduler state stores only compact typed candidate provenance.
+  (void)label;
   const std::uint8_t clamped = clampBin(target_bin);
   ++m_last_reconciliation.submitted_candidates;
   if (m_candidate_bin_index[element_index] == k_unset_pending_bin || clamped < m_candidate_bin_index[element_index]) {
     m_candidate_bin_index[element_index] = clamped;
     m_candidate_source[element_index] = source;
-    m_candidate_label[element_index] = label.empty()
-        ? std::string(timeStepCandidateSourceName(source))
-        : std::string(label);
   }
 }
 
@@ -1405,7 +1402,6 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
     m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
-    m_candidate_label.assign(m_hot.size(), {});
   }
   TimeStepReconciliationResult result = m_last_reconciliation;
   for (std::uint32_t element = 0; element < m_candidate_bin_index.size(); ++element) {
@@ -1425,12 +1421,11 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
     validateTransitionRequest(
         element,
         candidate,
-        m_candidate_label[element].empty() ? "HierarchicalTimeBinScheduler::reconcileCandidateTransitions" : m_candidate_label[element]);
+        timeStepCandidateSourceName(m_candidate_source[element]));
     requestBinTransition(element, candidate);
     ++result.committed_transition_requests;
     m_candidate_bin_index[element] = k_unset_pending_bin;
     m_candidate_source[element] = TimeStepCandidateSource::kUserClamp;
-    m_candidate_label[element].clear();
   }
   m_last_reconciliation = {};
   return result;
@@ -1569,11 +1564,6 @@ std::uint64_t HierarchicalTimeBinScheduler::ownedCapacityBytes() const {
   add_vector(m_diagnostics.active_count_by_bin, "diagnostics.active_count_by_bin");
   add_vector(m_candidate_bin_index, "candidate_bin_index");
   add_vector(m_candidate_source, "candidate_source");
-  add_vector(m_candidate_label, "candidate_label.outer");
-  for (const std::string& label : m_candidate_label) {
-    add_bytes(static_cast<std::uint64_t>(label.capacity()) + 1U,
-              "candidate_label.payload");
-  }
   return total;
 }
 
@@ -1625,7 +1615,6 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   m_hot.pending_bin_index = persistent_state.pending_bin_index;
   m_candidate_bin_index.assign(m_hot.bin_index.size(), k_unset_pending_bin);
   m_candidate_source.assign(m_hot.bin_index.size(), TimeStepCandidateSource::kUserClamp);
-  m_candidate_label.assign(m_hot.bin_index.size(), {});
   m_last_reconciliation = {};
 
   m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});

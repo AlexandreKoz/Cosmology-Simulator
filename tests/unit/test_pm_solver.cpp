@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdint>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -842,6 +843,83 @@ void testPmBackendArchitectureAndTopologyContract() {
   assert(pencil_rank3_extent.y_count == 6U);
 }
 
+
+void testPmRoutingCapacityModelM1A() {
+  constexpr std::uint64_t mib = 1024ULL * 1024ULL;
+  constexpr std::uint64_t configured_peer_max = 16ULL * mib;
+  constexpr std::uint64_t density_rank_metadata_bytes =
+      8ULL * 8ULL * static_cast<std::uint64_t>(sizeof(int));
+  constexpr std::size_t plane_record_bytes = 96U;
+
+  const auto certified = cosmosim::gravity::modelPmRoutingCapacity(
+      8,
+      configured_peer_max,
+      cosmosim::gravity::k_pm_routing_workspace_target_bytes,
+      density_rank_metadata_bytes,
+      plane_record_bytes);
+  assert(certified.configured_per_peer_max_bytes == configured_peer_max);
+  assert(certified.effective_per_peer_payload_bytes == 9'586'944ULL);
+  assert(certified.effective_per_peer_payload_bytes <= configured_peer_max);
+  assert(certified.effective_per_peer_payload_bytes % plane_record_bytes == 0U);
+  assert(certified.max_send_payload_bytes == 67'108'608ULL);
+  assert(certified.max_receive_payload_bytes == 67'108'608ULL);
+  assert(certified.max_simultaneous_workspace_bytes == 134'217'472ULL);
+  assert(certified.max_simultaneous_workspace_bytes <=
+         cosmosim::gravity::k_pm_routing_workspace_target_bytes);
+
+  const auto serial = cosmosim::gravity::modelPmRoutingCapacity(
+      1, configured_peer_max, 128ULL * mib, 4096U, plane_record_bytes);
+  assert(serial.effective_per_peer_payload_bytes == 0U);
+  assert(serial.max_send_payload_bytes == 0U);
+  assert(serial.max_receive_payload_bytes == 0U);
+  assert(serial.max_simultaneous_workspace_bytes == 4096U);
+
+  const std::uint64_t small_peer_max = 4ULL * plane_record_bytes;
+  const auto configured_limited = cosmosim::gravity::modelPmRoutingCapacity(
+      8, small_peer_max, 128ULL * mib, 0U, plane_record_bytes);
+  assert(configured_limited.effective_per_peer_payload_bytes == small_peer_max);
+  assert(configured_limited.effective_per_peer_payload_bytes <= small_peer_max);
+
+  // N_local is deliberately absent from the capacity model. Even extreme
+  // legal rank/byte inputs remain bounded by the aggregate budget before any
+  // multiplication, which is the checked-arithmetic contract used by routing.
+  const auto extreme = cosmosim::gravity::modelPmRoutingCapacity(
+      std::numeric_limits<int>::max(),
+      std::numeric_limits<std::uint64_t>::max(),
+      std::numeric_limits<std::uint64_t>::max(),
+      0U,
+      1U);
+  assert(extreme.max_simultaneous_workspace_bytes <=
+         std::numeric_limits<std::uint64_t>::max());
+
+  bool threw = false;
+  try {
+    (void)cosmosim::gravity::modelPmRoutingCapacity(
+        0, configured_peer_max, 128ULL * mib, 0U, plane_record_bytes);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::gravity::modelPmRoutingCapacity(
+        8, configured_peer_max, 1024U, 2048U, plane_record_bytes);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try {
+    (void)cosmosim::gravity::modelPmRoutingCapacity(
+        8, plane_record_bytes - 1U, 128ULL * mib, 0U, plane_record_bytes);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testPmRejectsInvalidEnumsNegativeMassAndOverflow() {
   const cosmosim::gravity::PmGridShape shape{4, 4, 4};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -913,6 +991,7 @@ int main() {
   testTreePmBuildGate();
   testExecutionPolicyValidation();
   testDeviceCpuAgreementWhenCudaAvailable();
+  testPmRoutingCapacityModelM1A();
   testPmRejectsInvalidEnumsNegativeMassAndOverflow();
   testPmBackendArchitectureAndTopologyContract();
 
