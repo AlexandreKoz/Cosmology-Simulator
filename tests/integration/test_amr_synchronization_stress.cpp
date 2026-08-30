@@ -53,7 +53,12 @@ void testRefineDerefineSynchronizationStress() {
   ahv::requireOrThrow(diagnostics.advanced_patch_count == 2U, "sync stress: initial coarse patches were not advanced");
   ahv::requireFinitePositiveState(state, "sync stress before refine");
 
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, patches[0], 700, 40000);
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(
+      state,
+      patches[0],
+      700,
+      40000,
+      ahv::productionAmrHydroOptions());
   ahv::requireOrThrow(refine.refined_patch_count == 1U, "sync stress: refine did not run");
   ahv::requireOrThrow(refine.created_gas_cell_count == 32U, "sync stress: unexpected refined cell count");
   ahv::requireOrThrow(
@@ -68,7 +73,11 @@ void testRefineDerefineSynchronizationStress() {
   ahv::requireOrThrow(diagnostics.reflux.corrected_cells > 0U, "sync stress: reflux did not correct state");
   ahv::requireFinitePositiveState(state, "sync stress after refined evolution");
 
-  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, patches[0], 50000);
+  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(
+      state,
+      patches[0],
+      50000,
+      ahv::productionAmrHydroOptions());
   ahv::requireOrThrow(derefine.derefined_patch_count == 1U, "sync stress: derefine did not run");
   ahv::requireOrThrow(derefine.created_gas_cell_count == 4U, "sync stress: unexpected restricted parent cell count");
   ahv::requireOrThrow(derefine.retired_gas_cell_count == 32U, "sync stress: unexpected retired child count");

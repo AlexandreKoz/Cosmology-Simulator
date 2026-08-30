@@ -119,6 +119,33 @@ void testStandaloneCompatibilityRemainsUngoverned() {
   assert(value != nullptr);
 }
 
+void testPreparedGravityIndexLaneUsesGovernedScratch() {
+  MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 8192U});
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(8U);
+  cosmosim::core::TransientStepWorkspace workspace(&governor);
+
+  workspace.prepareGravityParticleIndexScratch(state.particles.size());
+  assert(!workspace.gravity_particle_index_scratch.empty());
+  assert(governor.snapshot().committed_bytes == workspace.scratch.capacityBytes());
+  assert(workspace.gravity_particle_index.empty());
+
+  auto view = cosmosim::core::buildGravityParticleKernelViewAllParticlesDirect(
+      state, workspace);
+  assert(view.particle_index.data() == workspace.gravity_particle_index_scratch.data());
+  assert(workspace.gravity_particle_index.empty());
+  for (std::size_t i = 0; i < view.particle_index.size(); ++i) {
+    assert(view.particle_index[i] == i);
+  }
+
+  const std::uint64_t committed_before_reset = governor.snapshot().committed_bytes;
+  workspace.clear();
+  assert(workspace.gravity_particle_index_scratch.empty());
+  assert(governor.snapshot().committed_bytes == committed_before_reset);
+  workspace.prepareGravityParticleIndexScratch(state.particles.size());
+  assert(governor.snapshot().committed_bytes == committed_before_reset);
+}
+
 }  // namespace
 
 int main() {
@@ -128,5 +155,6 @@ int main() {
   testBackingAllocationFailureReturnsPendingReservation();
   testAlignmentValidationDoesNotChangeGovernorState();
   testStandaloneCompatibilityRemainsUngoverned();
+  testPreparedGravityIndexLaneUsesGovernedScratch();
   return 0;
 }

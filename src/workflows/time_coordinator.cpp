@@ -1102,20 +1102,14 @@ void TimeCoordinator::runRungZeroSegment(
 
     const std::array runtime_reports{
         core::collectSimulationMemoryReport(state, &workspace),
+        core::collectSchedulerMemoryReport(
+            particle_scheduler, gas_cell_scheduler),
         m_gravity.memoryReport()};
     core::MemoryReport merged_runtime_memory_report =
         core::mergeMemoryReports(runtime_reports);
     if (m_services.memory_governor != nullptr) {
-      std::uint64_t governor_baseline_bytes =
+      const std::uint64_t governor_baseline_bytes =
           core::memoryReportBaselineOwnedBytes(merged_runtime_memory_report);
-      governor_baseline_bytes = core::checkedMemoryBytesAdd(
-          governor_baseline_bytes,
-          particle_scheduler.ownedCapacityBytes(),
-          "time coordinator particle scheduler memory baseline");
-      governor_baseline_bytes = core::checkedMemoryBytesAdd(
-          governor_baseline_bytes,
-          gas_cell_scheduler.ownedCapacityBytes(),
-          "time coordinator gas-cell scheduler memory baseline");
       m_services.memory_governor->setBaselineOwnedBytes(governor_baseline_bytes);
       core::attachMemoryGovernorSnapshot(
           merged_runtime_memory_report, *m_services.memory_governor);

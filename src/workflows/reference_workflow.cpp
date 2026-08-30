@@ -663,18 +663,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     {
       const std::array startup_reports{
           core::collectSimulationMemoryReport(state),
+          core::collectSchedulerMemoryReport(
+              time_state.particleScheduler(), time_state.gasCellScheduler()),
           gravity_callback.memoryReport()};
       core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
-      std::uint64_t governor_baseline_bytes =
+      const std::uint64_t governor_baseline_bytes =
           core::memoryReportBaselineOwnedBytes(merged_startup_memory_report);
-      governor_baseline_bytes = core::checkedMemoryBytesAdd(
-          governor_baseline_bytes,
-          time_state.particleScheduler().ownedCapacityBytes(),
-          "reference workflow particle scheduler memory baseline");
-      governor_baseline_bytes = core::checkedMemoryBytesAdd(
-          governor_baseline_bytes,
-          time_state.gasCellScheduler().ownedCapacityBytes(),
-          "reference workflow gas-cell scheduler memory baseline");
       memory_governor.setBaselineOwnedBytes(governor_baseline_bytes);
       core::attachMemoryGovernorSnapshot(
           merged_startup_memory_report, memory_governor);

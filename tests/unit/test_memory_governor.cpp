@@ -110,6 +110,29 @@ void testPressureBoundaries() {
   assert(governor.snapshot().headroom_bytes == 0U);
 }
 
+void testTinyFiniteBudgetPressureIsTotal() {
+  MemoryGovernor one_byte(MemoryGovernorPolicy{.hard_limit_bytes = 1U});
+  assert(one_byte.snapshot().pressure == MemoryPressure::kGreen);
+  one_byte.setBaselineOwnedBytes(1U);
+  assert(one_byte.snapshot().pressure == MemoryPressure::kRed);
+  one_byte.setBaselineOwnedBytes(2U);
+  assert(one_byte.snapshot().pressure == MemoryPressure::kTrip);
+
+  MemoryGovernor two_bytes(MemoryGovernorPolicy{.hard_limit_bytes = 2U});
+  assert(two_bytes.snapshot().pressure == MemoryPressure::kGreen);
+  two_bytes.setBaselineOwnedBytes(1U);
+  assert(two_bytes.snapshot().pressure == MemoryPressure::kAmber);
+  two_bytes.setBaselineOwnedBytes(2U);
+  assert(two_bytes.snapshot().pressure == MemoryPressure::kRed);
+
+  MemoryGovernor three_bytes(MemoryGovernorPolicy{.hard_limit_bytes = 3U});
+  assert(three_bytes.snapshot().pressure == MemoryPressure::kGreen);
+  three_bytes.setBaselineOwnedBytes(1U);
+  assert(three_bytes.snapshot().pressure == MemoryPressure::kAmber);
+  three_bytes.setBaselineOwnedBytes(2U);
+  assert(three_bytes.snapshot().pressure == MemoryPressure::kRed);
+}
+
 void testPendingDestructionAndCommitLifecycle() {
   MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 4096U});
   {
@@ -261,6 +284,7 @@ int main() {
   testAdmissionBoundariesAndZeroByteReservation();
   testSafetyMarginMatchesPreflightStyleAdmission();
   testPressureBoundaries();
+  testTinyFiniteBudgetPressureIsTotal();
   testPendingDestructionAndCommitLifecycle();
   testMoveConstructionMoveAssignmentAndDoubleCommit();
   testMultipleReservationsClassesAndReleaseOrder();

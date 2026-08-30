@@ -77,7 +77,19 @@ void TransientStepWorkspace::clear() {
   hydro_recon_gradient_y.clear();
   hydro_recon_gradient_z.clear();
 
+  gravity_particle_index_scratch = {};
   scratch.reset();
+}
+
+void TransientStepWorkspace::prepareGravityParticleIndexScratch(
+    std::size_t particle_count) {
+  if (particle_count == 0U) {
+    gravity_particle_index_scratch = {};
+    return;
+  }
+  auto* index_data = scratch.allocateArray<std::uint32_t>(particle_count);
+  gravity_particle_index_scratch =
+      std::span<std::uint32_t>(index_data, particle_count);
 }
 
 ParticleActiveView buildParticleActiveView(
@@ -264,12 +276,22 @@ GravityParticleKernelView buildGravityParticleKernelViewAllParticlesDirect(
       kMaxLocalParticleCount,
       "particle",
       "buildGravityParticleKernelViewAllParticlesDirect");
-  workspace.gravity_particle_index.resize(state.particles.size());
+  std::span<std::uint32_t> particle_index;
+  if (workspace.gravity_particle_index_scratch.size() >= state.particles.size()) {
+    particle_index = workspace.gravity_particle_index_scratch.first(
+        state.particles.size());
+  } else {
+    // Compatibility path for standalone/core callers and for a within-step
+    // population increase beyond the collectively admitted scratch extent.
+    // Production scratch growth itself is coordinated by GravityRuntime.
+    workspace.gravity_particle_index.resize(state.particles.size());
+    particle_index = workspace.gravity_particle_index;
+  }
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    workspace.gravity_particle_index[i] = checkedLocalParticleRow(i, "gravity all-particle view row");
+    particle_index[i] = checkedLocalParticleRow(i, "gravity all-particle view row");
   }
   return GravityParticleKernelView{
-      .particle_index = workspace.gravity_particle_index,
+      .particle_index = particle_index,
       .position_x_comoving = state.particles.position_x_comoving,
       .position_y_comoving = state.particles.position_y_comoving,
       .position_z_comoving = state.particles.position_z_comoving,

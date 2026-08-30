@@ -214,6 +214,15 @@ inline void requireFinitePositiveState(const core::SimulationState& state, const
   return rows;
 }
 
+[[nodiscard]] inline amr::ProductionAmrHydroOptions productionAmrHydroOptions(
+    hydro::HydroBoundaryKind boundary_kind = hydro::HydroBoundaryKind::kReflective) {
+  return amr::ProductionAmrHydroOptions{
+      .physical_boundary_kind = boundary_kind,
+      .adiabatic_index = k_gamma,
+      .density_floor = 1.0e-10,
+      .pressure_floor = 1.0e-10};
+}
+
 [[nodiscard]] inline amr::ProductionAmrHydroDiagnostics advanceProductionHydroSteps(
     core::SimulationState& state,
     std::size_t step_count,
@@ -222,11 +231,8 @@ inline void requireFinitePositiveState(const core::SimulationState& state, const
   hydro::HydroCoreSolver solver(k_gamma);
   hydro::HllcRiemannSolver riemann;
   amr::ProductionAmrHydroDiagnostics last;
-  const amr::ProductionAmrHydroOptions options{
-      .physical_boundary_kind = boundary_kind,
-      .adiabatic_index = k_gamma,
-      .density_floor = 1.0e-10,
-      .pressure_floor = 1.0e-10};
+  const amr::ProductionAmrHydroOptions options =
+      productionAmrHydroOptions(boundary_kind);
   requireOrThrow(
       amr::hasProductionAmrHydroCoverage(state),
       "AMR hydro validation helper: production AMR coverage missing");

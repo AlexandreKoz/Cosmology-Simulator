@@ -28,6 +28,27 @@ constexpr std::uint64_t k_basis_point_denominator = 10000U;
           k_basis_point_denominator;
 }
 
+[[nodiscard]] std::pair<std::uint64_t, std::uint64_t> pressureThresholds(
+    std::uint64_t hard_limit_bytes,
+    std::uint16_t amber_basis_points,
+    std::uint16_t red_basis_points) noexcept {
+  if (hard_limit_bytes <= 1U) {
+    return {1U, 1U};
+  }
+  if (hard_limit_bytes == 2U) {
+    return {1U, 2U};
+  }
+  const std::uint64_t amber_raw = scaledBasisPointThreshold(
+      hard_limit_bytes, amber_basis_points);
+  const std::uint64_t amber = std::clamp<std::uint64_t>(
+      amber_raw, 1U, hard_limit_bytes - 2U);
+  const std::uint64_t red_raw = scaledBasisPointThreshold(
+      hard_limit_bytes, red_basis_points);
+  const std::uint64_t red = std::clamp<std::uint64_t>(
+      red_raw, amber + 1U, hard_limit_bytes - 1U);
+  return {amber, red};
+}
+
 [[nodiscard]] std::string rejectionDiagnostic(
     MemoryClass memory_class,
     std::string_view owner,
@@ -431,10 +452,13 @@ MemoryPressure MemoryGovernor::pressureForAdjustedBytes(
   if (adjusted_bytes > m_policy.hard_limit_bytes) {
     return MemoryPressure::kTrip;
   }
-  const std::uint64_t amber = scaledBasisPointThreshold(
-      m_policy.hard_limit_bytes, m_policy.amber_basis_points);
-  const std::uint64_t red = scaledBasisPointThreshold(
-      m_policy.hard_limit_bytes, m_policy.red_basis_points);
+  if (adjusted_bytes == 0U) {
+    return MemoryPressure::kGreen;
+  }
+  const auto [amber, red] = pressureThresholds(
+      m_policy.hard_limit_bytes,
+      m_policy.amber_basis_points,
+      m_policy.red_basis_points);
   if (adjusted_bytes >= red) {
     return MemoryPressure::kRed;
   }

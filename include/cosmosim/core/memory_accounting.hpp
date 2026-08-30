@@ -17,6 +17,7 @@ namespace cosmosim::core {
 
 class SimulationState;
 struct TransientStepWorkspace;
+class HierarchicalTimeBinScheduler;
 
 enum class MemorySubsystem : std::uint8_t {
   kParticles = 0,
@@ -144,6 +145,12 @@ template <typename T>
 [[nodiscard]] MemoryReport collectSimulationMemoryReport(
     const SimulationState& state,
     const TransientStepWorkspace* workspace = nullptr);
+
+// Authoritative scheduler storage is process-persistent runtime truth and must
+// appear in the same ownership tree used to seed/reconcile MemoryGovernor.
+[[nodiscard]] MemoryReport collectSchedulerMemoryReport(
+    const HierarchicalTimeBinScheduler& particle_scheduler,
+    const HierarchicalTimeBinScheduler& gas_cell_scheduler);
 
 [[nodiscard]] MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports);
 

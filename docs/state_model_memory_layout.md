@@ -50,7 +50,10 @@ borrows the process `MemoryGovernor`: every newly allocated physical block is re
 allocation and its committed reservation is retained with that block. `reset()` clears logical use
 without releasing retained block capacity or the corresponding commitment. Current logical use,
 logical-use high-water, retained capacity, and retained-capacity high-water are therefore distinct
-quantities. Standalone/test construction without a governor remains supported. See
+quantities. The rung-zero production gravity path carves its all-particle `uint32` index lane from
+this arena after collective process-memory preflight; later direct gravity views reuse that governed
+storage rather than requiring an additional retained vector capacity. Standalone/test construction
+without a governor remains supported. See
 `docs/memory_governance.md` for reconciliation semantics.
 
 ## Active-set views

@@ -268,6 +268,12 @@ int main() {
   assert(profile_text.find("\"governor\"") != std::string::npos);
   assert(profile_text.find("\"hard_limit_bytes\": 1073741824") != std::string::npos);
   assert(profile_text.find("\"pressure\": \"green\"") != std::string::npos);
+  const std::size_t governor_begin = profile_text.find("\"governor\": {");
+  assert(governor_begin != std::string::npos);
+  const std::string governor_text = profile_text.substr(governor_begin, 768U);
+  assert(governor_text.find("\"committed_bytes\": 0") == std::string::npos);
+  assert(governor_text.find("\"peak_committed_bytes\": 0") == std::string::npos);
+  assert(governor_text.find("\"peak_reserved_bytes\": 0") == std::string::npos);
   assert(profile_text.find("\"workflow_workspace_reuses\": 2") != std::string::npos);
   assert(profile_text.find("\"scheduler_active_index_copy_bytes\": 0") !=
          std::string::npos);

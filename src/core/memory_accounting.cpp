@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_scheduler.hpp"
 
 namespace cosmosim::core {
 namespace {
@@ -437,6 +438,36 @@ MemoryReport collectSimulationMemoryReport(const SimulationState& state, const T
   report.notes.push_back("Owned bytes use container capacity*sizeof(T); spans/views are non-owning and report zero owned bytes.");
   report.notes.push_back("Persistent/transient classification follows restart ownership: scratch and active buffers are transient diagnostics, not restart truth.");
   report.notes.push_back("Unknown/estimate entries intentionally avoid claiming allocator, MPI, GPU, FFTW, or HDF5 internal precision.");
+  return report;
+}
+
+MemoryReport collectSchedulerMemoryReport(
+    const HierarchicalTimeBinScheduler& particle_scheduler,
+    const HierarchicalTimeBinScheduler& gas_cell_scheduler) {
+  MemoryReportBuilder builder;
+  const auto add_scheduler = [&builder](
+      std::string label,
+      const HierarchicalTimeBinScheduler& scheduler) {
+    builder.addEntry(MemoryEntry{
+        .subsystem = MemorySubsystem::kSidecars,
+        .lifetime = MemoryLifetime::kPersistent,
+        .memory_class = MemoryClass::kCanonicalPersistent,
+        .label = std::move(label),
+        .current_size_bytes = scheduler.logicalSizeBytes(),
+        .owned_capacity_bytes = scheduler.ownedCapacityBytes(),
+        .referenced_bytes = 0U,
+        .high_water_bytes = scheduler.ownedCapacityHighWaterBytes(),
+        .estimated_next_step_bytes = scheduler.ownedCapacityBytes(),
+        .estimate_only = false,
+        .governed_commitment = false,
+        .uncertainty_note =
+            "hierarchical scheduler logical bytes, retained capacity, and retained-capacity high-water"});
+  };
+  add_scheduler("scheduler.particle_owned_state", particle_scheduler);
+  add_scheduler("scheduler.gas_cell_owned_state", gas_cell_scheduler);
+  MemoryReport report = std::move(builder).finish();
+  report.notes.push_back(
+      "Scheduler retained capacities are explicit persistent ownership entries and participate directly in governor baseline reconciliation.");
   return report;
 }
 

@@ -2073,6 +2073,16 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
 - Governed real `MonotonicScratchAllocator` block growth reserve-before-allocate.
   Reservations remain committed across `reset()` because physical blocks remain
   resident, and are released with block destruction.
+- Closed the post-campaign production-use gap by admitting the rung-zero
+  all-particle gravity `uint32` index lane through governed scratch after the
+  existing collective DMO process preflight. `FailureCoordinator` now makes a
+  rank-local scratch admission/allocation failure collective-safe before later
+  TreePM communication.
+- Represented particle and gas-cell scheduler retained state as explicit
+  persistent `MemoryEntry` owners, so the governor baseline is fully derived
+  from the merged ownership report instead of manually adding scheduler bytes.
+- Made finite-budget pressure thresholds total for 1-3 byte diagnostic/test
+  ceilings while preserving the 85%/95% policy at realistic process budgets.
 - Added governor fields to the existing profiler memory-report JSON and human
   memory formatting. `RuntimeResourceLease` remains unchanged as the independent
   stage freshness/capability contract.
@@ -2080,5 +2090,9 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   workflow smoke cover finite-budget propagation, telemetry, lifecycle,
   exception/move semantics, concurrency, retained scratch reset/reuse, and the
   existing impossible-budget preflight rejection.
+- Repaired the two AMR hydro integration regressions without loosening
+  conservation tolerances: the fixtures evolve with `gamma=1.4`, and refine /
+  derefine now receive the same explicit `ProductionAmrHydroOptions` instead of
+  silently using the API default `gamma=5/3` during topology changes.
 - Broad PM/tree/FFT/migration/I/O/hydro/analysis reservation coverage and RSS/PSS
   reconciliation remain explicit M1C handoff items.

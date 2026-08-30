@@ -236,10 +236,15 @@ struct TransientStepWorkspace {
 
   // Monotonic scratch arena reused between steps via reset().
   MonotonicScratchAllocator scratch;
+  // Non-owning view carved from scratch after collective-safe production
+  // admission. The all-particle gravity hot view may use this lane instead of
+  // retaining a second population-scale std::vector capacity.
+  std::span<std::uint32_t> gravity_particle_index_scratch;
 
   explicit TransientStepWorkspace(MemoryGovernor* memory_governor = nullptr)
       : scratch(memory_governor) {}
 
+  void prepareGravityParticleIndexScratch(std::size_t particle_count);
   void clear();
 };
 

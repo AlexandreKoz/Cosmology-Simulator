@@ -50,7 +50,12 @@ void testAmrShockTubeRefinement() {
       });
   const auto before = ahv::totalState(state, cosmosim::amr::buildProductionAmrPatchDescriptors(state));
 
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, patches[0], 1000, 20000);
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(
+      state,
+      patches[0],
+      1000,
+      20000,
+      ahv::productionAmrHydroOptions());
   ahv::requireOrThrow(refine.refined_patch_count == 1U, "shock tube: discontinuity-adjacent patch was not refined");
   ahv::requireOrThrow(refine.created_gas_cell_count == 32U, "shock tube: unexpected child gas-cell count");
   ahv::requireFinitePositiveState(state, "shock tube after refine");

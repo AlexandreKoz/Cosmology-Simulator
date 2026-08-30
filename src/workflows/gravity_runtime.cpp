@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -1104,6 +1105,27 @@ class GravityRuntimeImpl final : public GravityRuntime {
           ", aggregate_required_bytes=" +
           std::to_string(global_required_bytes));
     }
+
+    // M1B production memory-governor closure: after every rank has completed
+    // the authoritative process-memory preflight, admit one real retained
+    // all-particle index lane through the governed monotonic scratch arena.
+    // Reservation/allocation failure is coordinated before any peer can enter
+    // the subsequent TreePM collectives.  The current pre-kick view may still
+    // reference the compatibility vector; drift/post-kick direct views reuse
+    // this admitted scratch lane during the same step.
+    std::exception_ptr scratch_admission_failure;
+    try {
+      if (context.workspace != nullptr &&
+          context.stage == core::IntegrationStage::kGravityKickPre &&
+          !context.active_set.hasParticleSubset(particle_count)) {
+        context.workspace->prepareGravityParticleIndexScratch(particle_count);
+      }
+    } catch (...) {
+      scratch_admission_failure = std::current_exception();
+    }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(
+        scratch_admission_failure,
+        "gravity all-particle scratch admission");
 
     rebuildOwnedParticleCompactView(
         context,

@@ -10,6 +10,7 @@
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_scheduler.hpp"
 
 namespace {
 
@@ -193,6 +194,34 @@ void testUnlimitedGovernorReporting() {
          std::numeric_limits<std::uint64_t>::max());
 }
 
+void testSchedulerOwnershipParticipatesInBaselineReport() {
+  cosmosim::core::HierarchicalTimeBinScheduler particle_scheduler(2U);
+  cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(2U);
+  particle_scheduler.reset(16U, 0U);
+  gas_scheduler.reset(7U, 0U);
+
+  const cosmosim::core::MemoryReport report =
+      cosmosim::core::collectSchedulerMemoryReport(
+          particle_scheduler, gas_scheduler);
+  bool saw_particle = false;
+  bool saw_gas = false;
+  for (const auto& entry : report.entries) {
+    if (entry.label == "scheduler.particle_owned_state") {
+      saw_particle = true;
+      assert(entry.owned_capacity_bytes == particle_scheduler.ownedCapacityBytes());
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kCanonicalPersistent);
+    }
+    if (entry.label == "scheduler.gas_cell_owned_state") {
+      saw_gas = true;
+      assert(entry.owned_capacity_bytes == gas_scheduler.ownedCapacityBytes());
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kCanonicalPersistent);
+    }
+  }
+  assert(saw_particle && saw_gas);
+  assert(cosmosim::core::memoryReportBaselineOwnedBytes(report) ==
+         particle_scheduler.ownedCapacityBytes() + gas_scheduler.ownedCapacityBytes());
+}
+
 }  // namespace
 
 int main() {
@@ -205,5 +234,6 @@ int main() {
   testMemorySubsystemAndClassCoexistAndSerialize();
   testGovernorReconciliationExcludesGovernedScratchCommitment();
   testUnlimitedGovernorReporting();
+  testSchedulerOwnershipParticipatesInBaselineReport();
   return 0;
 }
