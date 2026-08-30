@@ -29,6 +29,37 @@ namespace {
   return lhs * rhs;
 }
 
+[[nodiscard]] MemoryClass defaultClassFor(
+    MemorySubsystem subsystem,
+    MemoryLifetime lifetime) noexcept {
+  if (lifetime == MemoryLifetime::kUnknown) {
+    return MemoryClass::kExternalRuntime;
+  }
+  switch (subsystem) {
+    case MemorySubsystem::kParticles:
+    case MemorySubsystem::kGasHydro:
+    case MemorySubsystem::kSidecars:
+      return lifetime == MemoryLifetime::kPersistent
+          ? MemoryClass::kCanonicalPersistent
+          : MemoryClass::kPhaseResident;
+    case MemorySubsystem::kTree:
+    case MemorySubsystem::kPmMesh:
+      return lifetime == MemoryLifetime::kPersistent
+          ? MemoryClass::kPersistentCache
+          : MemoryClass::kPhaseResident;
+    case MemorySubsystem::kActiveSets:
+    case MemorySubsystem::kOutputBuffers:
+      return MemoryClass::kPhaseResident;
+    case MemorySubsystem::kMpiBuffers:
+      return MemoryClass::kCommunication;
+    case MemorySubsystem::kScratch:
+      return MemoryClass::kScratchArena;
+    case MemorySubsystem::kCount:
+      return MemoryClass::kExternalRuntime;
+  }
+  return MemoryClass::kExternalRuntime;
+}
+
 void addTotals(MemoryReport& report, const MemoryEntry& entry) {
   const std::size_t index = memorySubsystemIndex(entry.subsystem);
   if (index >= static_cast<std::size_t>(MemorySubsystem::kCount)) {
@@ -65,6 +96,7 @@ void addOwned(
   const std::uint64_t bytes = ownedCapacityBytesForContainer(container);
   builder.addEntry(MemoryEntry{.subsystem = subsystem,
                                .lifetime = lifetime,
+                               .memory_class = defaultClassFor(subsystem, lifetime),
                                .label = std::string(label),
                                .owned_capacity_bytes = bytes,
                                .referenced_bytes = 0,
@@ -82,6 +114,7 @@ void addEstimate(
     std::string_view note) {
   builder.addEntry(MemoryEntry{.subsystem = subsystem,
                                .lifetime = lifetime,
+                               .memory_class = defaultClassFor(subsystem, lifetime),
                                .label = std::string(label),
                                .owned_capacity_bytes = bytes,
                                .high_water_bytes = bytes,
@@ -270,12 +303,16 @@ void accountWorkspace(MemoryReportBuilder& builder, const TransientStepWorkspace
   addOwned(builder, MemorySubsystem::kScratch, MemoryLifetime::kTransient, "workspace.hydro_recon_gradient_z", workspace.hydro_recon_gradient_z);
   builder.addEntry(MemoryEntry{.subsystem = MemorySubsystem::kScratch,
                                .lifetime = MemoryLifetime::kTransient,
+                               .memory_class = MemoryClass::kScratchArena,
                                .label = "workspace.scratch_arena",
+                               .current_size_bytes = static_cast<std::uint64_t>(workspace.scratch.usedBytes()),
                                .owned_capacity_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityBytes()),
                                .referenced_bytes = 0,
-                               .high_water_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityBytes()),
+                               .high_water_bytes = static_cast<std::uint64_t>(workspace.scratch.capacityHighWaterBytes()),
                                .estimate_only = false,
-                               .uncertainty_note = {}});
+                               .governed_commitment = workspace.scratch.governed(),
+                               .uncertainty_note = "logical_high_water_bytes=" +
+                                   std::to_string(workspace.scratch.logicalHighWaterBytes())});
 }
 
 }  // namespace
@@ -290,6 +327,13 @@ void MemoryReportBuilder::addEntry(MemoryEntry entry) {
   if (entry.lifetime != MemoryLifetime::kPersistent && entry.lifetime != MemoryLifetime::kTransient &&
       entry.lifetime != MemoryLifetime::kUnknown) {
     throw std::invalid_argument("memory report entry has invalid lifetime");
+  }
+  if (!entry.memory_class.has_value()) {
+    entry.memory_class = defaultClassFor(entry.subsystem, entry.lifetime);
+  }
+  if (memoryClassIndex(*entry.memory_class) >=
+      static_cast<std::size_t>(MemoryClass::kCount)) {
+    throw std::invalid_argument("memory report entry has invalid memory class");
   }
   addTotals(m_report, entry);
   m_report.entries.push_back(std::move(entry));
@@ -420,6 +464,26 @@ MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports) {
   return merged;
 }
 
+std::uint64_t memoryReportBaselineOwnedBytes(const MemoryReport& report) {
+  std::uint64_t total = 0U;
+  for (const MemoryEntry& entry : report.entries) {
+    if (entry.estimate_only || entry.governed_commitment ||
+        entry.lifetime == MemoryLifetime::kUnknown) {
+      continue;
+    }
+    total = checkedU64Add(
+        total, entry.owned_capacity_bytes,
+        "memory report baseline owned byte reconciliation");
+  }
+  return total;
+}
+
+void attachMemoryGovernorSnapshot(
+    MemoryReport& report,
+    const MemoryGovernor& governor) {
+  report.governor_snapshot = governor.snapshot();
+}
+
 MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input) {
   MemoryReportBuilder builder;
   const auto bytes = [](std::uint64_t count, std::uint64_t elem_bytes) {
@@ -450,8 +514,22 @@ std::string formatMemoryReportHumanReadable(const MemoryReport& report) {
   out << "memory_report persistent_total_bytes=" << report.totals.persistent_total_bytes
       << " transient_total_bytes=" << report.totals.transient_total_bytes
       << " unknown_total_bytes=" << report.totals.unknown_total_bytes << "\n";
+  if (report.governor_snapshot.has_value()) {
+    const MemoryGovernorSnapshot& governor = *report.governor_snapshot;
+    out << " governor hard_limit_bytes=" << governor.hard_limit_bytes
+        << " baseline_owned_bytes=" << governor.baseline_owned_bytes
+        << " committed_bytes=" << governor.committed_bytes
+        << " reserved_bytes=" << governor.reserved_bytes
+        << " accounted_bytes=" << governor.accounted_bytes
+        << " headroom_bytes=" << governor.headroom_bytes
+        << " pressure=" << memoryPressureLabel(governor.pressure)
+        << " rejection_count=" << governor.rejection_count << "\n";
+  }
   for (const MemoryEntry& entry : report.entries) {
-    out << " - subsystem=" << memorySubsystemLabel(entry.subsystem) << " lifetime=" << memoryLifetimeLabel(entry.lifetime)
+    out << " - subsystem=" << memorySubsystemLabel(entry.subsystem)
+        << " lifetime=" << memoryLifetimeLabel(entry.lifetime)
+        << " class=" << (entry.memory_class.has_value()
+            ? memoryClassLabel(*entry.memory_class) : std::string_view("unclassified"))
         << " label=" << entry.label;
     if (entry.current_size_bytes > 0) {
       out << " current_size_bytes=" << entry.current_size_bytes;
@@ -468,6 +546,9 @@ std::string formatMemoryReportHumanReadable(const MemoryReport& report) {
     }
     if (entry.estimate_only) {
       out << " estimate_only=true";
+    }
+    if (entry.governed_commitment) {
+      out << " governed_commitment=true";
     }
     if (!entry.uncertainty_note.empty()) {
       out << " note=\"" << entry.uncertainty_note << "\"";

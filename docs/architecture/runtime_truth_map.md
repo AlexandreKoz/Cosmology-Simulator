@@ -618,3 +618,17 @@ All PM density/request/response and TreePM hierarchy/request/response payloads
 are explicit versioned little-endian wire records. Native C++ object layout is
 not wire truth. Decode validation and rank-coordinated failure voting happen
 before the next collective boundary; zero-record ranks still participate.
+
+## 2026-08-29 M1B memory-governor addendum
+
+| Runtime fact | Live authority | Transient view/mirror | Invalidation or rebuild rule |
+| --- | --- | --- | --- |
+| Process runtime memory admission | One `core::MemoryGovernor` owned by the reference-workflow composition root | Borrowed pointer in `RuntimeServices`; immutable `MemoryGovernorSnapshot` in the existing memory/profiler report | Construct once from `parallel.process_memory_budget_bytes` and existing process reserve/margin keys. Reconcile baseline owned capacity after authoritative memory reports change; never introduce subsystem-local governors. |
+| Governed retained scratch capacity | `MonotonicScratchAllocator::Block` backing storage plus its committed `MemoryReservation` | Logical scratch offsets/current-use counters | Reserve before block allocation, commit after allocation, retain reservation for the block lifetime. `reset()` changes logical use only and must not release physical commitment. |
+| Stage capability/freshness | Existing `RuntimeResourceLease` and runtime-resource epoch machinery | Task-scoped typed stage views | Unchanged by M1B. Memory reservations and stage-view leases are separate authorities and may coexist. |
+
+`MemoryReport` remains the ownership/capacity tree. `MemoryGovernor` is the
+admission authority. Governed entries are excluded from reconciled baseline
+owned bytes because their physical capacity is already represented by the
+governor committed counter; the two surfaces must not be summed as independent
+physical allocations. See `docs/memory_governance.md`.

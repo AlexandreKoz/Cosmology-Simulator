@@ -77,6 +77,23 @@ separate values: logical live bytes, retained owned capacity, and historical
 retained-capacity high-water. Candidate labels remain transient compatibility
 inputs and do not contribute population-scale scheduler storage.
 
+## M1B memory-governor telemetry
+
+The existing profiler `memory_report` JSON object may contain a `governor`
+object. It reports the authoritative process hard limit, reconciled baseline
+owned bytes, configured external/planned reserves, governed committed bytes,
+pending reserved bytes, raw and safety-adjusted accounted demand, raw headroom,
+pressure (`green`, `amber`, `red`, or `trip`), historical committed/reserved/
+accounted high-waters, and the reservation rejection count. This is an additive
+view in the existing profiler format, not a second profiling stream.
+
+Do not add `memory_report.totals` to governor `committed_bytes`: governed
+physical blocks remain visible as ordinary `MemoryEntry` capacity for ownership
+reporting, but are excluded from `baseline_owned_bytes` using the
+`governed_commitment` reconciliation marker. The governor snapshot is the policy
+view; the ordinary memory entries remain the ownership/capacity view. M1B does
+not claim RSS/PSS reconciliation.
+
 ## Hydro runtime events
 
 The reference workflow emits `hydro.conservation` events from the Godunov hydro stage when a profiler session is

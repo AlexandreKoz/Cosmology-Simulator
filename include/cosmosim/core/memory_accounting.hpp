@@ -4,11 +4,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "cosmosim/core/memory_governor.hpp"
 
 namespace cosmosim::core {
 
@@ -33,6 +36,9 @@ enum class MemoryLifetime : std::uint8_t { kPersistent = 0, kTransient = 1, kUnk
 struct MemoryEntry {
   MemorySubsystem subsystem = MemorySubsystem::kParticles;
   MemoryLifetime lifetime = MemoryLifetime::kUnknown;
+  // Orthogonal to subsystem ownership: subsystem answers who owns a range;
+  // memory_class answers what residency/lifetime purpose it serves.
+  std::optional<MemoryClass> memory_class;
   std::string label;
   // Bytes currently occupied by live elements. Capacity is reported
   // separately because reusable HPC workspaces intentionally retain storage
@@ -45,6 +51,10 @@ struct MemoryEntry {
   // that the owning component does not have a meaningful prediction yet.
   std::uint64_t estimated_next_step_bytes = 0;
   bool estimate_only = false;
+  // True only when owned_capacity_bytes describes a byte range already
+  // represented by MemoryGovernor.committed_bytes. Baseline reconciliation
+  // excludes these entries so governed physical memory is counted once.
+  bool governed_commitment = false;
   std::string uncertainty_note;
 };
 
@@ -71,6 +81,7 @@ struct MemoryReport {
   MemoryTotals totals;
   std::vector<std::string> notes;
   DistributedMemorySummary distributed{};
+  std::optional<MemoryGovernorSnapshot> governor_snapshot;
 };
 
 struct MemoryBudgetEstimateInput {
@@ -135,6 +146,14 @@ template <typename T>
     const TransientStepWorkspace* workspace = nullptr);
 
 [[nodiscard]] MemoryReport mergeMemoryReports(std::span<const MemoryReport> reports);
+
+// Sum actual CHUI-owned capacity that is not already represented by a
+// governor commitment. Estimate-only and unknown/external entries are excluded.
+[[nodiscard]] std::uint64_t memoryReportBaselineOwnedBytes(const MemoryReport& report);
+
+void attachMemoryGovernorSnapshot(
+    MemoryReport& report,
+    const MemoryGovernor& governor);
 
 [[nodiscard]] MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input);
 

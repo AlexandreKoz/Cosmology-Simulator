@@ -240,7 +240,13 @@ bool ParticleReorderMap::isConsistent(std::size_t particle_count) const {
   return true;
 }
 
-MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacity_bytes) {
+MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacity_bytes)
+    : MonotonicScratchAllocator(nullptr, initial_capacity_bytes) {}
+
+MonotonicScratchAllocator::MonotonicScratchAllocator(
+    MemoryGovernor* memory_governor,
+    std::size_t initial_capacity_bytes)
+    : m_memory_governor(memory_governor) {
   if (initial_capacity_bytes > 0U) {
     m_next_block_capacity_bytes = std::max<std::size_t>(1024U, initial_capacity_bytes);
     (void)appendBlock(initial_capacity_bytes);
@@ -250,13 +256,33 @@ MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacit
 MonotonicScratchAllocator::Block& MonotonicScratchAllocator::appendBlock(
     std::size_t minimum_capacity_bytes) {
   const std::size_t capacity = std::max(minimum_capacity_bytes, m_next_block_capacity_bytes);
+  const std::size_t new_total_capacity = checkedSizeAdd(
+      m_total_capacity_bytes, capacity, "MonotonicScratchAllocator.appendBlock total capacity");
+
+  MemoryReservation reservation;
+  if (m_memory_governor != nullptr) {
+    reservation = m_memory_governor->reserve(
+        MemoryClass::kScratchArena,
+        static_cast<std::uint64_t>(capacity),
+        "core.transient_step_scratch");
+  }
+
   Block block;
+  // Reserve-before-allocate: if the backing allocation throws, the pending
+  // reservation remains local and its destructor returns the reservation.
   block.storage = std::make_unique<std::byte[]>(capacity);
   block.capacity_bytes = capacity;
   block.offset_bytes = 0U;
+  if (reservation.valid()) {
+    reservation.commit();
+    block.reservation = std::move(reservation);
+  }
+  // If vector growth throws, destruction of the local block releases both the
+  // backing storage and its committed governor reservation.
   m_blocks.push_back(std::move(block));
-  m_total_capacity_bytes = checkedSizeAdd(
-      m_total_capacity_bytes, capacity, "MonotonicScratchAllocator.appendBlock total capacity");
+  m_total_capacity_bytes = new_total_capacity;
+  m_capacity_high_water_bytes = std::max(
+      m_capacity_high_water_bytes, m_total_capacity_bytes);
 
   if (capacity <= std::numeric_limits<std::size_t>::max() / 2U) {
     m_next_block_capacity_bytes = capacity * 2U;
@@ -282,6 +308,7 @@ std::byte* MonotonicScratchAllocator::allocateBytes(std::size_t bytes, std::size
     if (block.offset_bytes > block.capacity_bytes) {
       throw std::logic_error("MonotonicScratchAllocator block offset exceeds capacity");
     }
+    const std::size_t previous_offset = block.offset_bytes;
     void* candidate = block.storage.get() + block.offset_bytes;
     std::size_t available = block.capacity_bytes - block.offset_bytes;
     void* aligned = std::align(alignment, bytes, candidate, available);
@@ -292,6 +319,12 @@ std::byte* MonotonicScratchAllocator::allocateBytes(std::size_t bytes, std::size
     const auto aligned_offset = static_cast<std::size_t>(aligned_bytes - block.storage.get());
     block.offset_bytes = checkedSizeAdd(
         aligned_offset, bytes, "MonotonicScratchAllocator.allocateBytes");
+    const std::size_t consumed_bytes = block.offset_bytes - previous_offset;
+    m_current_used_bytes = checkedSizeAdd(
+        m_current_used_bytes, consumed_bytes,
+        "MonotonicScratchAllocator.allocateBytes current used");
+    m_logical_high_water_bytes = std::max(
+        m_logical_high_water_bytes, m_current_used_bytes);
     return aligned_bytes;
   };
 
@@ -316,10 +349,27 @@ void MonotonicScratchAllocator::reset() {
     block.offset_bytes = 0U;
   }
   m_current_block = 0U;
+  m_current_used_bytes = 0U;
+}
+
+std::size_t MonotonicScratchAllocator::usedBytes() const noexcept {
+  return m_current_used_bytes;
 }
 
 std::size_t MonotonicScratchAllocator::capacityBytes() const noexcept {
   return m_total_capacity_bytes;
+}
+
+std::size_t MonotonicScratchAllocator::logicalHighWaterBytes() const noexcept {
+  return m_logical_high_water_bytes;
+}
+
+std::size_t MonotonicScratchAllocator::capacityHighWaterBytes() const noexcept {
+  return m_capacity_high_water_bytes;
+}
+
+bool MonotonicScratchAllocator::governed() const noexcept {
+  return m_memory_governor != nullptr;
 }
 
 ParticleReorderMap buildParticleReorderMap(const SimulationState& state, ParticleReorderMode mode) {

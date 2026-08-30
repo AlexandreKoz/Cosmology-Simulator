@@ -195,7 +195,30 @@ void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int in
       << ", \"global_sum_owned_bytes\": " << report.distributed.global_sum_owned_bytes
       << ", \"rank_max_owned_bytes\": " << report.distributed.rank_max_owned_bytes
       << ", \"max_to_mean_imbalance_ratio\": "
-      << report.distributed.max_to_mean_imbalance_ratio << "}\n";
+      << report.distributed.max_to_mean_imbalance_ratio << "}";
+  if (report.governor_snapshot.has_value()) {
+    const MemoryGovernorSnapshot& governor = *report.governor_snapshot;
+    out << ",\n";
+    out << field_indent << "\"governor\": {"
+        << "\"hard_limit_bytes\": " << governor.hard_limit_bytes
+        << ", \"baseline_owned_bytes\": " << governor.baseline_owned_bytes
+        << ", \"external_runtime_reserve_bytes\": " << governor.external_runtime_reserve_bytes
+        << ", \"planned_overlap_reserve_bytes\": " << governor.planned_overlap_reserve_bytes
+        << ", \"committed_bytes\": " << governor.committed_bytes
+        << ", \"reserved_bytes\": " << governor.reserved_bytes
+        << ", \"accounted_bytes\": " << governor.accounted_bytes
+        << ", \"safety_adjusted_accounted_bytes\": "
+        << governor.safety_adjusted_accounted_bytes
+        << ", \"headroom_bytes\": " << governor.headroom_bytes
+        << ", \"pressure\": \"" << memoryPressureLabel(governor.pressure) << "\""
+        << ", \"peak_committed_bytes\": " << governor.peak_committed_bytes
+        << ", \"peak_reserved_bytes\": " << governor.peak_reserved_bytes
+        << ", \"peak_accounted_bytes\": " << governor.peak_accounted_bytes
+        << ", \"reservation_rejection_count\": " << governor.rejection_count
+        << "}\n";
+  } else {
+    out << "\n";
+  }
   out << indent << "}";
 }
 

@@ -8,6 +8,7 @@
 #include <system_error>
 
 #include "cosmosim/core/profiling.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
 #include "../support/test_temp_workspace.hpp"
@@ -140,6 +141,15 @@ void testOperationalReportIncludesMemoryAccounting() {
   report.totals.persistent_total_bytes = 1024;
   report.totals.transient_total_bytes = 256;
   report.notes.push_back("unknown external allocations are not fully tracked");
+  cosmosim::core::MemoryGovernor governor(cosmosim::core::MemoryGovernorPolicy{
+      .hard_limit_bytes = 4096U,
+      .external_runtime_reserve_bytes = 128U,
+  });
+  governor.setBaselineOwnedBytes(1024U);
+  auto reservation = governor.reserve(
+      cosmosim::core::MemoryClass::kScratchArena, 256U, "unit.profiler");
+  reservation.commit();
+  cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
   session.setMemoryReport(std::move(report));
 
   const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_operational_events_memory_unit.json");
@@ -151,6 +161,11 @@ void testOperationalReportIncludesMemoryAccounting() {
   assert(text.find("\"memory_report\"") != std::string::npos);
   assert(text.find("\"persistent_total_bytes\": 1024") != std::string::npos);
   assert(text.find("\"transient_total_bytes\": 256") != std::string::npos);
+  assert(text.find("\"governor\"") != std::string::npos);
+  assert(text.find("\"hard_limit_bytes\": 4096") != std::string::npos);
+  assert(text.find("\"committed_bytes\": 256") != std::string::npos);
+  assert(text.find("\"pressure\": \"green\"") != std::string::npos);
+  assert(text.find("\"reservation_rejection_count\": 0") != std::string::npos);
   std::error_code cleanup_error;
   std::filesystem::remove(path, cleanup_error);
 }

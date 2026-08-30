@@ -35,6 +35,7 @@
 #include "cosmosim/core/openmp_runtime.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/time_integration.hpp"
@@ -360,9 +361,39 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
   core::ProfilerSession profiler(true);
+  std::uint64_t external_runtime_reserve_bytes = 0U;
+  external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
+      external_runtime_reserve_bytes,
+      config.parallel.gravity_backend_unknown_reserve_bytes,
+      "reference workflow gravity backend reserve");
+  external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
+      external_runtime_reserve_bytes,
+      config.parallel.process_mpi_unknown_reserve_bytes,
+      "reference workflow MPI reserve");
+  external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
+      external_runtime_reserve_bytes,
+      config.parallel.process_fftw_unknown_reserve_bytes,
+      "reference workflow FFTW reserve");
+  external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
+      external_runtime_reserve_bytes,
+      config.parallel.process_hdf5_unknown_reserve_bytes,
+      "reference workflow HDF5 reserve");
+  external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
+      external_runtime_reserve_bytes,
+      config.parallel.process_allocator_unknown_reserve_bytes,
+      "reference workflow allocator reserve");
+  core::MemoryGovernor memory_governor(core::MemoryGovernorPolicy{
+      .hard_limit_bytes = config.parallel.process_memory_budget_bytes,
+      .external_runtime_reserve_bytes = external_runtime_reserve_bytes,
+      .planned_overlap_reserve_bytes =
+          config.parallel.process_output_restart_overlap_bytes,
+      .safety_margin_fraction =
+          config.parallel.process_memory_safety_margin_fraction,
+  });
   const RuntimeServices runtime_services{
       .mpi_context = mpi_context,
       .profiler = profiler,
+      .memory_governor = &memory_governor,
       .deterministic_execution = true};
   const FailureCoordinator failure_coordinator(runtime_services);
   const internal::MigrationBalanceRuntime migration_balance(
@@ -415,7 +446,13 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     traceRuntimePhase("initial_conditions_complete");
     report.ic_manifest_path = startup.manifest_path;
     core::SimulationState state = std::move(startup.state);
-    profiler.setMemoryReport(core::collectSimulationMemoryReport(state));
+    core::MemoryReport startup_memory_report_value =
+        core::collectSimulationMemoryReport(state);
+    memory_governor.setBaselineOwnedBytes(
+        core::memoryReportBaselineOwnedBytes(startup_memory_report_value));
+    core::attachMemoryGovernorSnapshot(
+        startup_memory_report_value, memory_governor);
+    profiler.setMemoryReport(std::move(startup_memory_report_value));
     const core::MemoryReport* startup_memory_report = profiler.memoryReport();
     if (startup_memory_report != nullptr) {
       profiler.recordEvent(core::RuntimeEvent{
@@ -628,6 +665,19 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           core::collectSimulationMemoryReport(state),
           gravity_callback.memoryReport()};
       core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
+      std::uint64_t governor_baseline_bytes =
+          core::memoryReportBaselineOwnedBytes(merged_startup_memory_report);
+      governor_baseline_bytes = core::checkedMemoryBytesAdd(
+          governor_baseline_bytes,
+          time_state.particleScheduler().ownedCapacityBytes(),
+          "reference workflow particle scheduler memory baseline");
+      governor_baseline_bytes = core::checkedMemoryBytesAdd(
+          governor_baseline_bytes,
+          time_state.gasCellScheduler().ownedCapacityBytes(),
+          "reference workflow gas-cell scheduler memory baseline");
+      memory_governor.setBaselineOwnedBytes(governor_baseline_bytes);
+      core::attachMemoryGovernorSnapshot(
+          merged_startup_memory_report, memory_governor);
       const std::uint64_t local_owned_memory =
           merged_startup_memory_report.totals.persistent_total_bytes +
           merged_startup_memory_report.totals.transient_total_bytes;
@@ -664,7 +714,17 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                         {"unknown_total_bytes", std::to_string(runtime_memory_report->totals.unknown_total_bytes)},
                         {"rank_max_owned_bytes", std::to_string(runtime_memory_report->distributed.rank_max_owned_bytes)},
                         {"global_sum_owned_bytes", std::to_string(runtime_memory_report->distributed.global_sum_owned_bytes)},
-                        {"memory_imbalance_ratio", formatRuntimeDouble(runtime_memory_report->distributed.max_to_mean_imbalance_ratio)}},
+                        {"memory_imbalance_ratio", formatRuntimeDouble(runtime_memory_report->distributed.max_to_mean_imbalance_ratio)},
+                        {"memory_governor_pressure",
+                         runtime_memory_report->governor_snapshot.has_value()
+                             ? std::string(core::memoryPressureLabel(
+                                   runtime_memory_report->governor_snapshot->pressure))
+                             : "unavailable"},
+                        {"memory_governor_headroom_bytes",
+                         runtime_memory_report->governor_snapshot.has_value()
+                             ? std::to_string(
+                                   runtime_memory_report->governor_snapshot->headroom_bytes)
+                             : "0"}},
       });
     }
   }

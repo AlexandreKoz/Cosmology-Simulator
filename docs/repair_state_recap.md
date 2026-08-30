@@ -2054,3 +2054,31 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
 - Removed accidental O(N^2) gas-cell migration validation by validating dense identity once at the operation boundary, and removed a redundant full migration-field staging copy. 50k-cell peak/steady RSS measurements are ~1.91x mostly-local, ~2.04x moderate, and ~2.31x heavy while retaining prepare/validate/commit.
 - Added process-memory calibration to memory-accounting benchmarks. On the recorded Linux 200k-particle/100k-cell case, known-owned capacity is within ~0.53% of the measured allocation-induced RSS delta; RSS remains explicitly diagnostic rather than treated as exact ownership truth.
 - MPI/CUDA runtime execution remains environment-blocked where the relevant tools/devices are absent; no runtime promotion is claimed from source evidence alone.
+
+## 2026-08-29 Campaign M1B memory-governor foundation
+
+- Added one process-level `core::MemoryGovernor` owned by the reference workflow
+  composition root and borrowed through `RuntimeServices`; no global memory
+  singleton or `core -> workflows` dependency was introduced.
+- Reused `parallel.process_memory_budget_bytes` plus the existing process
+  external-reserve, output-overlap, and safety-margin policy. Budget zero keeps
+  unlimited semantics while accounting and high-water telemetry remain active.
+- Added move-only RAII `MemoryReservation` with distinct pending/committed
+  accounting, checked 64-bit arithmetic, deterministic pressure/headroom,
+  rejection diagnostics, class attribution, and control-plane mutex safety.
+- Extended `MemoryEntry` with orthogonal `MemoryClass` plus a governed-commitment
+  reconciliation marker. `MemoryReport` remains the ownership tree; governed
+  capacity is excluded only from the governor baseline so the same physical byte
+  range is not counted twice in admission arithmetic.
+- Governed real `MonotonicScratchAllocator` block growth reserve-before-allocate.
+  Reservations remain committed across `reset()` because physical blocks remain
+  resident, and are released with block destruction.
+- Added governor fields to the existing profiler memory-report JSON and human
+  memory formatting. `RuntimeResourceLease` remains unchanged as the independent
+  stage freshness/capability contract.
+- Focused governor/scratch/accounting/profiler tests and the production reference
+  workflow smoke cover finite-budget propagation, telemetry, lifecycle,
+  exception/move semantics, concurrency, retained scratch reset/reuse, and the
+  existing impossible-budget preflight rejection.
+- Broad PM/tree/FFT/migration/I/O/hydro/analysis reservation coverage and RSS/PSS
+  reconciliation remain explicit M1C handoff items.

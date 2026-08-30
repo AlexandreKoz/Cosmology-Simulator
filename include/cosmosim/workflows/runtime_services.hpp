@@ -5,6 +5,7 @@
 #include <string_view>
 
 namespace cosmosim::core {
+class MemoryGovernor;
 class ProfilerSession;
 }
 
@@ -20,6 +21,9 @@ namespace cosmosim::workflows {
 struct RuntimeServices {
   const parallel::MpiContext& mpi_context;
   core::ProfilerSession& profiler;
+  // Optional only for standalone/unit composition. The production reference
+  // workflow always supplies the one process-level governor authority.
+  core::MemoryGovernor* memory_governor = nullptr;
   bool deterministic_execution = true;
 };
 

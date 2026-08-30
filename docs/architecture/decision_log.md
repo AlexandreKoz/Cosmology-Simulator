@@ -950,3 +950,52 @@ restart-schema, migration-schema, or timestep-criteria registration.
 ## 2026-08-02 — Authoritative `.param.txt` configuration format
 
 Accepted `docs/architecture/adr_param_txt_configuration_format.md`. Simulation inputs, examples, release profiles, normalized copies, and fixtures use lower-snake-case `.param.txt`. YAML/JSON input claims in older design or naming material are superseded; generated JSON metadata remains valid.
+
+## 2026-08-29 — ADR-RUNTIME-MEMORY-GOVERNOR-017: Establish one process memory-admission authority
+
+### Status
+Accepted for Campaign M1B foundation
+
+### Context
+Post-M1A PM/scheduler structure has bounded the dominant known memory pathologies,
+but pre-run estimation alone cannot prevent a later retained workspace from
+committing memory after headroom has changed. The repository already has
+`MemoryReport` ownership accounting and a separate `RuntimeResourceLease` for
+stage freshness; neither should be repurposed into runtime memory admission.
+
+### Decision
+- Own exactly one `core::MemoryGovernor` at the reference-workflow composition
+  root and borrow it through `RuntimeServices`; do not add a global singleton.
+- Use `parallel.process_memory_budget_bytes` and the existing process external
+  reserve/output-overlap/safety-margin policy as the only production budget
+  source.
+- Represent admitted demand with move-only RAII `MemoryReservation`, with
+  pending and committed bytes tracked separately.
+- Reconcile ordinary owned-capacity reporting as baseline memory while excluding
+  entries marked `governed_commitment`, because those bytes are already present
+  in the governor committed counter.
+- Govern `MonotonicScratchAllocator` block growth first. A block reservation is
+  committed only after backing allocation succeeds and remains committed across
+  scratch `reset()` until the block is destroyed.
+- Keep `RuntimeResourceLease` unchanged and independent.
+- Keep M1B pressure thresholds internal (85% Amber, 95% Red); broad adaptive
+  scheduling and broad allocation coverage are deferred to M1C/later work.
+
+### Consequences
+- Positive: large target-relevant allocations can now have deterministic
+  reserve-before-allocate admission without routing small/hot-loop allocation
+  traffic through a central lock.
+- Positive: retained physical capacity and logical scratch use no longer share
+  a false lifetime in governance accounting.
+- Positive: pre-run fit estimation and runtime admission share the same process
+  ceiling and reserve/margin semantics while serving different questions.
+- Required follow-up: M1C must extend governed reservation coverage, add
+  whole-process RSS/PSS reconciliation and distributed acceptance evidence, and
+  coordinate any new rank-dependent runtime rejection before later collectives.
+
+### Evidence references
+- `include/cosmosim/core/memory_governor.hpp`
+- `src/core/memory_governor.cpp`
+- `docs/memory_governance.md`
+- `docs/state_model_memory_layout.md`
+- `docs/profiling.md`

@@ -1,9 +1,14 @@
 #include <cassert>
+#include <cstdint>
+#include <limits>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "cosmosim/core/device_buffer.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
 namespace {
@@ -119,6 +124,75 @@ void testPreRunEstimateReportsRequiredSubsystemsAndUncertainty() {
   assert(saw_estimate_note);
 }
 
+void testMemorySubsystemAndClassCoexistAndSerialize() {
+  cosmosim::core::MemoryReportBuilder builder;
+  builder.addEntry(cosmosim::core::MemoryEntry{
+      .subsystem = cosmosim::core::MemorySubsystem::kMpiBuffers,
+      .lifetime = cosmosim::core::MemoryLifetime::kTransient,
+      .memory_class = cosmosim::core::MemoryClass::kCommunication,
+      .label = "unit.communication",
+      .current_size_bytes = 32U,
+      .owned_capacity_bytes = 64U,
+      .high_water_bytes = 64U,
+  });
+  cosmosim::core::MemoryReport report = std::move(builder).finish();
+  const auto& entry = report.entries.front();
+  assert(entry.subsystem == cosmosim::core::MemorySubsystem::kMpiBuffers);
+  assert(entry.memory_class.has_value());
+  assert(*entry.memory_class == cosmosim::core::MemoryClass::kCommunication);
+  const std::string formatted = cosmosim::core::formatMemoryReportHumanReadable(report);
+  assert(formatted.find("subsystem=mpi_buffers") != std::string::npos);
+  assert(formatted.find("class=communication") != std::string::npos);
+}
+
+void testGovernorReconciliationExcludesGovernedScratchCommitment() {
+  cosmosim::core::MemoryGovernor governor(
+      cosmosim::core::MemoryGovernorPolicy{.hard_limit_bytes = 1U << 20U});
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(2U);
+  cosmosim::core::TransientStepWorkspace workspace(&governor);
+  static_cast<void>(workspace.scratch.allocateBytes(128U, alignof(double)));
+
+  cosmosim::core::MemoryReport report =
+      cosmosim::core::collectSimulationMemoryReport(state, &workspace);
+  bool saw_governed_scratch = false;
+  for (const auto& entry : report.entries) {
+    if (entry.label == "workspace.scratch_arena") {
+      saw_governed_scratch = true;
+      assert(entry.governed_commitment);
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kScratchArena);
+      assert(entry.owned_capacity_bytes == workspace.scratch.capacityBytes());
+      assert(entry.current_size_bytes == workspace.scratch.usedBytes());
+    }
+  }
+  assert(saw_governed_scratch);
+
+  const std::uint64_t baseline =
+      cosmosim::core::memoryReportBaselineOwnedBytes(report);
+  governor.setBaselineOwnedBytes(baseline);
+  cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
+  assert(report.governor_snapshot.has_value());
+  const auto snapshot = *report.governor_snapshot;
+  assert(snapshot.baseline_owned_bytes == baseline);
+  assert(snapshot.committed_bytes == workspace.scratch.capacityBytes());
+  assert(snapshot.accounted_bytes ==
+         baseline + static_cast<std::uint64_t>(workspace.scratch.capacityBytes()));
+
+  const std::string formatted = cosmosim::core::formatMemoryReportHumanReadable(report);
+  assert(formatted.find("governor hard_limit_bytes=") != std::string::npos);
+  assert(formatted.find("governed_commitment=true") != std::string::npos);
+}
+
+void testUnlimitedGovernorReporting() {
+  cosmosim::core::MemoryGovernor governor;
+  cosmosim::core::MemoryReport report;
+  cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
+  assert(report.governor_snapshot->hard_limit_bytes == 0U);
+  assert(report.governor_snapshot->pressure == cosmosim::core::MemoryPressure::kGreen);
+  assert(report.governor_snapshot->headroom_bytes ==
+         std::numeric_limits<std::uint64_t>::max());
+}
+
 }  // namespace
 
 int main() {
@@ -128,5 +202,8 @@ int main() {
   testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity();
   testDeviceBufferPreservesHistoricalHighWaterAcrossShrink();
   testPreRunEstimateReportsRequiredSubsystemsAndUncertainty();
+  testMemorySubsystemAndClassCoexistAndSerialize();
+  testGovernorReconciliationExcludesGovernedScratchCommitment();
+  testUnlimitedGovernorReporting();
   return 0;
 }

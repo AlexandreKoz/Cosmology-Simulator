@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 #include <memory>
 
@@ -152,24 +153,41 @@ class MonotonicScratchAllocator final : public ScratchAllocator {
   // reset() begins the next scratch epoch or the arena is destroyed. reset()
   // reuses existing blocks instead of freeing them.
   explicit MonotonicScratchAllocator(std::size_t initial_capacity_bytes = 0);
+  MonotonicScratchAllocator(
+      MemoryGovernor* memory_governor,
+      std::size_t initial_capacity_bytes = 0);
+
+  MonotonicScratchAllocator(const MonotonicScratchAllocator&) = delete;
+  MonotonicScratchAllocator& operator=(const MonotonicScratchAllocator&) = delete;
+  MonotonicScratchAllocator(MonotonicScratchAllocator&&) noexcept = default;
+  MonotonicScratchAllocator& operator=(MonotonicScratchAllocator&&) noexcept = default;
 
   [[nodiscard]] std::byte* allocateBytes(std::size_t bytes, std::size_t alignment) override;
   void reset() override;
 
+  [[nodiscard]] std::size_t usedBytes() const noexcept;
   [[nodiscard]] std::size_t capacityBytes() const noexcept;
+  [[nodiscard]] std::size_t logicalHighWaterBytes() const noexcept;
+  [[nodiscard]] std::size_t capacityHighWaterBytes() const noexcept;
+  [[nodiscard]] bool governed() const noexcept;
 
  private:
   struct Block {
     std::unique_ptr<std::byte[]> storage;
     std::size_t capacity_bytes = 0;
     std::size_t offset_bytes = 0;
+    MemoryReservation reservation;
   };
 
   [[nodiscard]] Block& appendBlock(std::size_t minimum_capacity_bytes);
 
+  MemoryGovernor* m_memory_governor = nullptr;
   std::vector<Block> m_blocks;
   std::size_t m_current_block = 0;
   std::size_t m_total_capacity_bytes = 0;
+  std::size_t m_current_used_bytes = 0;
+  std::size_t m_logical_high_water_bytes = 0;
+  std::size_t m_capacity_high_water_bytes = 0;
   std::size_t m_next_block_capacity_bytes = 1024U;
 };
 
@@ -218,6 +236,9 @@ struct TransientStepWorkspace {
 
   // Monotonic scratch arena reused between steps via reset().
   MonotonicScratchAllocator scratch;
+
+  explicit TransientStepWorkspace(MemoryGovernor* memory_governor = nullptr)
+      : scratch(memory_governor) {}
 
   void clear();
 };

@@ -167,6 +167,8 @@ int main() {
 
   std::stringstream stream;
   stream << buildConfigText(1, "reference_integration_test", "cic");
+  // Exercise the production governor with a finite authoritative process ceiling.
+  stream << "\n[parallel]\nprocess_memory_budget_bytes = 1073741824\n";
 
   const cosmosim::core::FrozenConfig frozen =
       cosmosim::core::loadFrozenConfigFromString(stream.str(), "test_reference_workflow_end_to_end");
@@ -263,6 +265,9 @@ int main() {
   assert(op_text.find("\"event_kind\": \"gravity.health_summary\"") != std::string::npos);
   assert(op_text.find("\"heavy_reference_checks_opt_in\": \"false\"") != std::string::npos);
   const std::string profile_text = readFile(report.profiler_json_path);
+  assert(profile_text.find("\"governor\"") != std::string::npos);
+  assert(profile_text.find("\"hard_limit_bytes\": 1073741824") != std::string::npos);
+  assert(profile_text.find("\"pressure\": \"green\"") != std::string::npos);
   assert(profile_text.find("\"workflow_workspace_reuses\": 2") != std::string::npos);
   assert(profile_text.find("\"scheduler_active_index_copy_bytes\": 0") !=
          std::string::npos);

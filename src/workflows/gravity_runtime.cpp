@@ -466,6 +466,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       builder.addEntry(core::MemoryEntry{
           .subsystem = subsystem,
           .lifetime = lifetime,
+          .memory_class = lifetime == core::MemoryLifetime::kPersistent
+                              ? core::MemoryClass::kPersistentCache
+                              : core::MemoryClass::kPhaseResident,
           .label = std::move(label),
           .current_size_bytes = core::currentSizeBytesForContainer(container),
           .owned_capacity_bytes = capacity_bytes,

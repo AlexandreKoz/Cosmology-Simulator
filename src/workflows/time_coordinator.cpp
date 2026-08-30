@@ -976,7 +976,7 @@ void TimeCoordinator::runRungZeroSegment(
       ? options.max_steps_override
       : static_cast<std::uint64_t>(std::max(config.numerics.max_global_steps, 0));
   const std::uint64_t target_step_index = integrator_state.step_index + configured_segment_steps;
-  core::TransientStepWorkspace workspace;
+  core::TransientStepWorkspace workspace(m_services.memory_governor);
   while (integrator_state.step_index < target_step_index &&
          integrator_state.current_time_code < config.numerics.t_code_end) {
     const double remaining_time_code =
@@ -1103,7 +1103,24 @@ void TimeCoordinator::runRungZeroSegment(
     const std::array runtime_reports{
         core::collectSimulationMemoryReport(state, &workspace),
         m_gravity.memoryReport()};
-    profiler.setMemoryReport(core::mergeMemoryReports(runtime_reports));
+    core::MemoryReport merged_runtime_memory_report =
+        core::mergeMemoryReports(runtime_reports);
+    if (m_services.memory_governor != nullptr) {
+      std::uint64_t governor_baseline_bytes =
+          core::memoryReportBaselineOwnedBytes(merged_runtime_memory_report);
+      governor_baseline_bytes = core::checkedMemoryBytesAdd(
+          governor_baseline_bytes,
+          particle_scheduler.ownedCapacityBytes(),
+          "time coordinator particle scheduler memory baseline");
+      governor_baseline_bytes = core::checkedMemoryBytesAdd(
+          governor_baseline_bytes,
+          gas_cell_scheduler.ownedCapacityBytes(),
+          "time coordinator gas-cell scheduler memory baseline");
+      m_services.memory_governor->setBaselineOwnedBytes(governor_baseline_bytes);
+      core::attachMemoryGovernorSnapshot(
+          merged_runtime_memory_report, *m_services.memory_governor);
+    }
+    profiler.setMemoryReport(std::move(merged_runtime_memory_report));
     state.metadata.step_index = integrator_state.step_index;
     state.metadata.scale_factor = integrator_state.current_scale_factor;
     ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);

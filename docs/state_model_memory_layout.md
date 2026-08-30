@@ -45,7 +45,13 @@ For distributed ownership migration boundaries:
 
 `TransientStepWorkspace` owns temporary compact arrays for active solver subsets and a
 `MonotonicScratchAllocator` for scratch bytes. This workspace is explicitly resettable and does
-not retain persistent simulation data.
+not retain persistent simulation truth. In the production reference workflow the scratch allocator
+borrows the process `MemoryGovernor`: every newly allocated physical block is reserved before
+allocation and its committed reservation is retained with that block. `reset()` clears logical use
+without releasing retained block capacity or the corresponding commitment. Current logical use,
+logical-use high-water, retained capacity, and retained-capacity high-water are therefore distinct
+quantities. Standalone/test construction without a governor remains supported. See
+`docs/memory_governance.md` for reconciliation semantics.
 
 ## Active-set views
 
