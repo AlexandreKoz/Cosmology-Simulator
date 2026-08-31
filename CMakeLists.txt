@@ -1179,6 +1179,23 @@ if(COSMOSIM_ENABLE_TESTS)
   endif()
 
   if(COSMOSIM_ENABLE_MPI)
+    add_executable(test_integration_mpi_collective_safety
+      tests/integration/test_mpi_collective_safety.cpp)
+    target_link_libraries(test_integration_mpi_collective_safety PRIVATE cosmosim_parallel)
+    add_test(
+      NAME integration_mpi_collective_safety_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_mpi_collective_safety> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_mpi_collective_safety_three_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_mpi_collective_safety> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      integration_mpi_collective_safety_two_rank
+      integration_mpi_collective_safety_three_rank
+      PROPERTIES LABELS "mpi;distributed;correctness;collective_safety")
+    set_tests_properties(integration_mpi_collective_safety_three_rank PROPERTIES PROCESSORS 3)
+
     add_executable(test_integration_pm_slab_halo_exchange_mpi tests/integration/test_pm_slab_halo_exchange_mpi.cpp)
     target_link_libraries(test_integration_pm_slab_halo_exchange_mpi PRIVATE cosmosim_parallel)
     add_test(

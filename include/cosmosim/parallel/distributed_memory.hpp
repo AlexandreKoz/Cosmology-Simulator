@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <span>
@@ -265,6 +266,43 @@ struct RuntimeRebalancePlan {
 [[nodiscard]] std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
     const MpiContext& mpi_context,
     std::span<const DecompositionItem> local_items);
+
+// Classic MPI collectives expose signed-int counts/displacements. Logical
+// transfers are planned in size_t and split into bounded round-local layouts so
+// no individual MPI call depends on a population-scale aggregate fitting in
+// int. The public planner is intentionally small so overflow/boundary behavior
+// can be unit-tested without allocating large payloads.
+inline constexpr std::size_t k_default_mpi_transport_round_bytes =
+    16U * 1024U * 1024U;
+
+struct BoundedMpiRoundLayout {
+  std::vector<int> counts;
+  std::vector<int> displacements;
+  std::vector<std::size_t> logical_offsets;
+  std::size_t round_count = 0U;
+};
+
+struct BoundedMpiTransferPlan {
+  std::vector<std::size_t> logical_counts;
+  std::vector<std::size_t> logical_displacements;
+  std::vector<BoundedMpiRoundLayout> rounds;
+  std::size_t logical_total_count = 0U;
+  std::size_t per_peer_count_limit = 0U;
+};
+
+[[nodiscard]] BoundedMpiTransferPlan planBoundedMpiTransferRounds(
+    std::span<const std::size_t> logical_counts,
+    std::size_t mpi_count_limit = static_cast<std::size_t>(std::numeric_limits<int>::max()),
+    std::size_t round_count_limit = k_default_mpi_transport_round_bytes);
+
+// Production uses the conservative internal round bound above. Test-enabled
+// builds may override it through a test-only environment seam so MPI
+// integration tests can force multiple rounds using tiny payloads.
+[[nodiscard]] std::size_t mpiTransportRoundLimitBytes();
+
+[[nodiscard]] std::vector<std::vector<std::uint8_t>> exchangeBoundedAlltoallBytes(
+    const MpiContext& mpi_context,
+    const std::vector<std::vector<std::uint8_t>>& send_payloads);
 
 
 enum class LocalIndexResidency : std::uint8_t {
@@ -635,6 +673,15 @@ class MpiContext {
   [[nodiscard]] std::uint64_t allreduceMaxUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceXorUint64(std::uint64_t local_value) const;
 
+  // Collective preflight gate used after any rank-local preparation that can
+  // throw. All ranks must call this for the same phase. If any participant
+  // failed, every participant throws before entering the following payload
+  // communication; the first failing rank and its bounded diagnostic are
+  // propagated deterministically.
+  void rethrowCollectivePreparationFailure(
+      const std::exception_ptr& local_failure,
+      std::string_view phase_name) const;
+
   // Variable-size byte collectives used by correctness-first distributed
   // metadata/catalog assembly. Only the root receives gathered payload bytes;
   // broadcast returns the root payload on every rank.
@@ -642,6 +689,11 @@ class MpiContext {
       std::span<const std::uint8_t> local_bytes, int root_rank = 0) const;
   [[nodiscard]] std::vector<std::uint8_t> broadcastBytesFromRoot(
       std::span<const std::uint8_t> root_bytes, int root_rank = 0) const;
+
+  // Bounded byte all-gather used by distributed metadata paths. Rank order and
+  // byte order within each rank are preserved exactly.
+  [[nodiscard]] std::vector<std::uint8_t> allgatherBytesBounded(
+      std::span<const std::uint8_t> local_bytes) const;
 
  private:
   bool m_is_enabled = false;

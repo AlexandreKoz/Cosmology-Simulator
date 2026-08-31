@@ -395,3 +395,51 @@ not yet have executed multi-rank evidence for this contract in the current repai
 A distributed acceptance test must move a parentless cell and two shared-parent cells between
 ranks, compact/reorder dense rows, rebuild the local gas-cell scheduler by `gas_cell_id`, write
 and reload a restart, and compare the continuation by stable identity.
+
+---
+
+## MPI P1 bounded-count and participant-readiness contract (2026-08-30)
+
+Classic MPI `int` count/displacement ranges are transport limits, not logical-work
+limits. Distributed byte/record exchanges repaired by the MPI P1 campaign now
+plan logical counts and prefixes in checked `std::size_t` arithmetic and split
+payloads into bounded classic-MPI rounds. Every round has independently
+representable peer counts and displacements; the default internal transport
+round budget is 16 MiB and is not a user-facing scientific configuration
+surface.
+
+`parallel::planBoundedMpiTransferRounds(...)` is the shared planning seam.
+`MpiContext::allgatherBytesBounded(...)` and the bounded all-to-all byte helper
+use the plan to preserve source-rank and in-rank ordering while allowing the
+logical result to exceed one classic `MPI_*v` displacement domain. Migration,
+decomposition/debug ownership exchange, hydro advertisements/auxiliary record
+gathers, TreePM zoom field gathering, and sharded source-runtime exchange reuse
+this checked/bounded contract where applicable.
+
+Control metadata never authorizes a payload phase by itself. Any rank-local
+allocation, framing check, checked-size conversion, packing preparation, or
+other potentially throwing preparation that occurs after a control exchange is
+captured and followed by participant readiness agreement before payload
+communication. `MpiContext::rethrowCollectivePreparationFailure(...)` provides
+the lower-layer collective agreement without introducing a dependency on
+`workflows::FailureCoordinator`.
+
+Pairwise ghost refresh follows the corresponding peer contract:
+
+```text
+metadata Sendrecv
+  -> local preparation
+  -> readiness Sendrecv
+  -> payload Sendrecv only when both peers are ready
+  -> post-payload validation readiness
+```
+
+A failed peer interaction is remembered while the rank continues the
+deterministic metadata/readiness schedule for later peers, so a later peer is
+not stranded waiting for a rank that already abandoned the protocol.
+
+Test-only environment seams compiled under `COSMOSIM_ENABLE_TESTS` can force a
+small transport ceiling and deterministic preparation rejection. They do not
+change production configuration, restart state, scientific fields, ownership
+semantics, or numerical methods.
+

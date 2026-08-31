@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
 #include <mpi.h>
 #endif
@@ -470,59 +472,141 @@ struct GatheredParticleField {
 };
 
 [[nodiscard]] GatheredParticleField allGatherParticleField(
+    const parallel::MpiContext& mpi_context,
     std::span<const double> x,
     std::span<const double> y,
     std::span<const double> z,
     std::span<const double> m,
     std::uint64_t gather_limit_bytes,
     std::uint64_t* gathered_bytes = nullptr) {
-  if (x.size() != y.size() || x.size() != z.size() || x.size() != m.size()) {
-    throw std::invalid_argument("allGatherParticleField requires equal local span lengths");
-  }
-  int world_size = 1;
-  int world_rank = 0;
-  if (!queryActiveMpiWorld(world_size, world_rank)) {
-    throw std::runtime_error("TreePM zoom high-res all-gather requires an active MPI runtime");
-  }
-  if (x.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("TreePM zoom high-res all-gather local particle count exceeds MPI int limit");
-  }
-  const int local_count = static_cast<int>(x.size());
-  std::vector<int> counts(static_cast<std::size_t>(world_size), 0);
-  MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-  std::vector<int> displs(static_cast<std::size_t>(world_size), 0);
-  int total = 0;
-  for (int i = 0; i < world_size; ++i) {
-    if (counts[static_cast<std::size_t>(i)] < 0 ||
-        counts[static_cast<std::size_t>(i)] > std::numeric_limits<int>::max() - total) {
-      throw std::overflow_error("TreePM zoom high-res all-gather count/displacement exceeds MPI int limit");
+  std::exception_ptr local_failure;
+  try {
+    if (x.size() != y.size() || x.size() != z.size() || x.size() != m.size()) {
+      throw std::invalid_argument("allGatherParticleField requires equal local span lengths");
     }
-    displs[static_cast<std::size_t>(i)] = total;
-    total += counts[static_cast<std::size_t>(i)];
+    if (!mpi_context.isEnabled() || mpi_context.worldSize() <= 1) {
+      throw std::runtime_error("TreePM zoom high-res all-gather requires an active multi-rank MPI runtime");
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
   }
-  const std::uint64_t total_bytes =
-      checkedZoomGatherBytes(static_cast<std::size_t>(total), "TreePM zoom high-res all-gather");
-  if (gathered_bytes != nullptr) {
-    *gathered_bytes = total_bytes;
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "TreePM zoom high-res local gather validation");
+
+  std::uint64_t local_count64 = 0U;
+  std::vector<std::uint64_t> counts64;
+  local_failure = nullptr;
+  try {
+    local_count64 = core::checkedIntegralNarrow<std::uint64_t>(
+        x.size(), "TreePM zoom high-res local source count");
+    counts64.resize(static_cast<std::size_t>(mpi_context.worldSize()), 0U);
+  } catch (...) {
+    local_failure = std::current_exception();
   }
-  if (gather_limit_bytes == 0U || total_bytes > gather_limit_bytes) {
-    throw std::runtime_error(
-        "TreePM zoom high-res source all-gather guard exceeded on rank " + std::to_string(world_rank) +
-        ": gathered_high_res_sources=" + std::to_string(total) +
-        " ranks=" + std::to_string(world_size) +
-        " estimated_bytes=" + std::to_string(total_bytes) +
-        " configured_limit_bytes=" + std::to_string(gather_limit_bytes) +
-        " route=allgather policy=bounded_zoom_correction_only");
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "TreePM zoom high-res count-buffer preparation");
+
+  if (MPI_Allgather(
+          &local_count64, 1, MPI_UINT64_T,
+          counts64.data(), 1, MPI_UINT64_T,
+          MPI_COMM_WORLD) != MPI_SUCCESS) {
+    throw std::runtime_error("TreePM zoom high-res source-count Allgather failed");
   }
+
+  parallel::BoundedMpiTransferPlan plan;
   GatheredParticleField out;
-  out.x.resize(static_cast<std::size_t>(total));
-  out.y.resize(static_cast<std::size_t>(total));
-  out.z.resize(static_cast<std::size_t>(total));
-  out.m.resize(static_cast<std::size_t>(total));
-  MPI_Allgatherv(x.data(), local_count, MPI_DOUBLE, out.x.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-  MPI_Allgatherv(y.data(), local_count, MPI_DOUBLE, out.y.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-  MPI_Allgatherv(z.data(), local_count, MPI_DOUBLE, out.z.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-  MPI_Allgatherv(m.data(), local_count, MPI_DOUBLE, out.m.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+  std::vector<double> round_receive_buffer;
+  local_failure = nullptr;
+  try {
+    std::vector<std::size_t> logical_counts(counts64.size(), 0U);
+    for (std::size_t rank = 0; rank < counts64.size(); ++rank) {
+      logical_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+          counts64[rank], "TreePM zoom high-res received source count");
+    }
+    const std::size_t round_elements =
+        parallel::mpiTransportRoundLimitBytes() / sizeof(double);
+    if (round_elements == 0U) {
+      throw std::runtime_error("TreePM zoom high-res MPI round is smaller than one double");
+    }
+    plan = parallel::planBoundedMpiTransferRounds(
+        logical_counts,
+        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        round_elements);
+    const std::uint64_t total_bytes = checkedZoomGatherBytes(
+        plan.logical_total_count, "TreePM zoom high-res all-gather");
+    if (gathered_bytes != nullptr) {
+      *gathered_bytes = total_bytes;
+    }
+    if (gather_limit_bytes == 0U || total_bytes > gather_limit_bytes) {
+      throw std::runtime_error(
+          "TreePM zoom high-res source all-gather guard exceeded on rank " +
+          std::to_string(mpi_context.worldRank()) +
+          ": gathered_high_res_sources=" + std::to_string(plan.logical_total_count) +
+          " ranks=" + std::to_string(mpi_context.worldSize()) +
+          " estimated_bytes=" + std::to_string(total_bytes) +
+          " configured_limit_bytes=" + std::to_string(gather_limit_bytes) +
+          " route=allgather policy=bounded_zoom_correction_only");
+    }
+
+    // Treat every destination field plus round scratch as one distributed
+    // preparation transaction. No field payload collective is entered unless
+    // every rank has all four arrays ready.
+    out.x.resize(plan.logical_total_count);
+    out.y.resize(plan.logical_total_count);
+    out.z.resize(plan.logical_total_count);
+    out.m.resize(plan.logical_total_count);
+    std::size_t maximum_round_count = 0U;
+    for (const auto& round : plan.rounds) {
+      maximum_round_count = std::max(maximum_round_count, round.round_count);
+    }
+    round_receive_buffer.resize(maximum_round_count);
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "TreePM zoom high-res field-array preparation");
+
+  const auto gather_field = [&](std::span<const double> local_field,
+                                std::vector<double>& global_field,
+                                std::string_view field_name) {
+    for (const parallel::BoundedMpiRoundLayout& round : plan.rounds) {
+      const std::size_t local_rank = static_cast<std::size_t>(mpi_context.worldRank());
+      const int send_count = round.counts[local_rank];
+      const double* send_pointer = send_count == 0
+          ? nullptr
+          : local_field.data() + round.logical_offsets[local_rank];
+      if (MPI_Allgatherv(
+              const_cast<double*>(send_pointer), send_count, MPI_DOUBLE,
+              round_receive_buffer.empty() ? nullptr : round_receive_buffer.data(),
+              round.counts.data(), round.displacements.data(), MPI_DOUBLE,
+              MPI_COMM_WORLD) != MPI_SUCCESS) {
+        throw std::runtime_error(
+            "TreePM zoom high-res bounded Allgatherv failed for field " +
+            std::string(field_name));
+      }
+      for (std::size_t rank = 0; rank < round.counts.size(); ++rank) {
+        const std::size_t count = static_cast<std::size_t>(round.counts[rank]);
+        if (count == 0U) {
+          continue;
+        }
+        // The bounded plan proved the logical prefix, offset, and scratch
+        // extent before the first field payload collective.
+        const std::size_t destination =
+            plan.logical_displacements[rank] + round.logical_offsets[rank];
+        const std::size_t copy_bytes = count * sizeof(double);
+        std::memcpy(
+            global_field.data() + destination,
+            round_receive_buffer.data() +
+                static_cast<std::size_t>(round.displacements[rank]),
+            copy_bytes);
+      }
+    }
+  };
+
+  gather_field(x, out.x, "x");
+  gather_field(y, out.y, "y");
+  gather_field(z, out.z, "z");
+  gather_field(m, out.m, "m");
   return out;
 }
 #endif
@@ -2147,6 +2231,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
     if (m_grid.slabLayout().world_size > 1) {
       const auto gathered = allGatherParticleField(
+          m_mpi_context,
           high_res_source_x,
           high_res_source_y,
           high_res_source_z,

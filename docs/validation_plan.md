@@ -480,3 +480,27 @@ MPI+HDF5 build.
 `validation_star_formation_models` validates the deterministic EOS table, threshold continuity, monotonic pressure, positive closure signal speed, interpolation, adaptive resolution response, exact timestep subdivision, and stochastic ensemble expectation. Running the executable with an output directory generates machine-readable files under `validation/star_formation/`. Production-runtime integration covers explicit profile selection, authoritative hydro inputs, covered-coarse rejection, leaf-only spawning, dense-row/patch reorder invariance, conservative birth, restart, and HDF5 fields.
 
 The retained data are analytic and controlled-model validation. `validation_metadata.txt` explicitly records that no long-duration isolated-disk or observational calibration was performed. MPI acceptance requires the registered two-rank tests to execute in an MPI+HDF5 environment.
+
+## MPI P1 count/collective-safety regression gate (2026-08-30)
+
+The distributed-memory correctness floor now includes two complementary layers.
+
+The CPU unit test `test_unit_parallel_distributed_memory` exercises the bounded
+MPI round planner with synthetic limits rather than giant allocations. It
+covers zero/all-empty traffic, one participant, asymmetric peers, exact-limit
+and limit-plus-one cases, an aggregate that exceeds the simulated classic-MPI
+domain while individual peers fit, multi-round exact coverage, deterministic
+logical offsets, and checked multiplication/prefix overflow.
+
+When an MPI runtime is available, `test_integration_mpi_collective_safety` must
+run at two ranks and three ranks. The test forces tiny bounded rounds, injects a
+single-rank failure after collective control metadata, verifies coherent
+failure without entering an unmatched payload phase, and exercises a sequential
+ghost-peer schedule where a post-metadata rejection must not strand a later
+peer.
+
+These tests are specifically designed to prove protocol correctness without
+`INT_MAX`-sized buffers or deliberate OOM. Runtime MPI acceptance is evidence
+separate from source closure; an environment without `MPI_CXX` keeps this gate
+environment-blocked rather than converting the source repair into a different
+algorithm or weakening the tests.

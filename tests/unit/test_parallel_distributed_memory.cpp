@@ -1,12 +1,113 @@
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
 #include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace {
+
+void testBoundedMpiTransferPlannerSyntheticLimits() {
+  namespace parallel = cosmosim::parallel;
+
+  const auto empty = parallel::planBoundedMpiTransferRounds({}, 7U, 7U);
+  assert(empty.logical_total_count == 0U);
+  assert(empty.rounds.empty());
+
+  const std::vector<std::size_t> all_zero{0U, 0U, 0U};
+  const auto zero_plan = parallel::planBoundedMpiTransferRounds(all_zero, 7U, 6U);
+  assert(zero_plan.logical_total_count == 0U);
+  assert(zero_plan.rounds.empty());
+
+  const std::vector<std::size_t> exact_limit{7U};
+  const auto exact_plan = parallel::planBoundedMpiTransferRounds(exact_limit, 7U, 7U);
+  assert(exact_plan.rounds.size() == 1U);
+  assert(exact_plan.rounds.front().counts.front() == 7);
+  assert(exact_plan.rounds.front().displacements.front() == 0);
+  assert(exact_plan.rounds.front().logical_offsets.front() == 0U);
+
+  const std::vector<std::size_t> limit_plus_one{8U};
+  const auto split_plan = parallel::planBoundedMpiTransferRounds(limit_plus_one, 7U, 7U);
+  assert(split_plan.rounds.size() == 2U);
+  assert(split_plan.rounds[0].counts[0] == 7);
+  assert(split_plan.rounds[1].counts[0] == 1);
+  assert(split_plan.rounds[1].logical_offsets[0] == 7U);
+
+  // Each peer is individually representable under the synthetic MPI limit,
+  // while the aggregate is not. The planner must split the logical exchange
+  // without dropping or duplicating any logical element.
+  const std::vector<std::size_t> aggregate_over_limit{4U, 4U};
+  const auto aggregate_plan =
+      parallel::planBoundedMpiTransferRounds(aggregate_over_limit, 7U, 6U);
+  assert(aggregate_plan.logical_total_count == 8U);
+  assert(aggregate_plan.rounds.size() == 2U);
+  std::vector<std::vector<unsigned>> coverage(2);
+  for (std::size_t peer = 0; peer < coverage.size(); ++peer) {
+    coverage[peer].assign(aggregate_over_limit[peer], 0U);
+  }
+  for (const auto& round : aggregate_plan.rounds) {
+    assert(round.round_count <= 6U);
+    for (std::size_t peer = 0; peer < round.counts.size(); ++peer) {
+      assert(round.counts[peer] >= 0 && round.counts[peer] <= 7);
+      assert(round.displacements[peer] >= 0 && round.displacements[peer] <= 7);
+      const std::size_t count = static_cast<std::size_t>(round.counts[peer]);
+      const std::size_t begin = round.logical_offsets[peer];
+      for (std::size_t i = 0; i < count; ++i) {
+        assert(begin + i < coverage[peer].size());
+        ++coverage[peer][begin + i];
+      }
+    }
+  }
+  for (std::size_t peer = 0; peer < coverage.size(); ++peer) {
+    for (const unsigned visits : coverage[peer]) {
+      assert(visits == 1U);
+    }
+    const auto& last_round = aggregate_plan.rounds.back();
+    assert(last_round.logical_offsets[peer] +
+               static_cast<std::size_t>(last_round.counts[peer]) ==
+           aggregate_over_limit[peer]);
+  }
+
+  const std::vector<std::size_t> asymmetric{0U, 1U, 9U};
+  const auto asymmetric_plan =
+      parallel::planBoundedMpiTransferRounds(asymmetric, 7U, 6U);
+  assert(asymmetric_plan.logical_displacements ==
+         std::vector<std::size_t>({0U, 0U, 1U}));
+  assert(asymmetric_plan.logical_total_count == 10U);
+  assert(!asymmetric_plan.rounds.empty());
+  for (const auto& round : asymmetric_plan.rounds) {
+    assert(round.round_count <= 6U);
+    for (const int count : round.counts) {
+      assert(count >= 0 && count <= 7);
+    }
+    for (const int displacement : round.displacements) {
+      assert(displacement >= 0 && displacement <= 7);
+    }
+  }
+
+  bool prefix_overflow_threw = false;
+  try {
+    const std::vector<std::size_t> overflow_counts{
+        std::numeric_limits<std::size_t>::max(), 1U};
+    (void)parallel::planBoundedMpiTransferRounds(overflow_counts, 7U, 7U);
+  } catch (const std::overflow_error&) {
+    prefix_overflow_threw = true;
+  }
+  assert(prefix_overflow_threw);
+
+  bool multiplication_overflow_threw = false;
+  try {
+    (void)cosmosim::core::checkedSizeMultiply(
+        std::numeric_limits<std::size_t>::max(), 2U,
+        "bounded MPI planner test multiplication");
+  } catch (const std::overflow_error&) {
+    multiplication_overflow_threw = true;
+  }
+  assert(multiplication_overflow_threw);
+}
 
 void testGhostPackUnpackRoundTrip() {
   cosmosim::parallel::GhostExchangeBufferSoA source;
@@ -1307,6 +1408,7 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
 }  // namespace
 
 int main() {
+  testBoundedMpiTransferPlannerSyntheticLimits();
   testGhostPackUnpackRoundTrip();
   testMortonDecompositionInvariants();
   testMortonDecompositionKeepsOneItemPerRankWhenPossible();

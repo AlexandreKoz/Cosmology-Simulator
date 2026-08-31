@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <iomanip>
@@ -64,6 +65,34 @@ namespace {
   return local_rank;
 }
 #endif
+
+void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
+#if COSMOSIM_ENABLE_TESTS
+  const char* raw = std::getenv("COSMOSIM_MPI_TEST_FAULT");
+  if (raw == nullptr || *raw == '\0') {
+    return;
+  }
+  const std::string specification(raw);
+  const std::size_t separator = specification.rfind(':');
+  if (separator == std::string::npos) {
+    return;
+  }
+  int configured_rank = -1;
+  try {
+    configured_rank = std::stoi(specification.substr(separator + 1U));
+  } catch (...) {
+    return;
+  }
+  if (configured_rank == mpi_context.worldRank() &&
+      specification.substr(0U, separator) == phase) {
+    throw std::runtime_error(
+        "test-only injected MPI preparation failure at phase " + std::string(phase));
+  }
+#else
+  static_cast<void>(mpi_context);
+  static_cast<void>(phase);
+#endif
+}
 
 [[nodiscard]] double clampUnit(double value) {
   if (value <= 0.0) {
@@ -966,38 +995,41 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
 
   std::vector<CompactCutSample> global_samples;
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  if (local_samples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / sizeof(CompactCutSample))) {
-    throw std::overflow_error("distributed rebalance local cut sample byte count exceeds MPI int range");
+  std::size_t local_sample_bytes = 0U;
+  std::exception_ptr sample_preparation_failure;
+  try {
+    local_sample_bytes = core::checkedSizeMultiply(
+        local_samples.size(), sizeof(CompactCutSample),
+        "distributed rebalance local cut sample byte count");
+  } catch (...) {
+    sample_preparation_failure = std::current_exception();
   }
-  const int local_sample_bytes = static_cast<int>(local_samples.size() * sizeof(CompactCutSample));
-  std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
-  MPI_Allgather(&local_sample_bytes, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-  std::vector<int> displacements(recv_counts.size(), 0);
-  int total_sample_bytes = 0;
-  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
-    if (recv_counts[rank] < 0 || recv_counts[rank] % static_cast<int>(sizeof(CompactCutSample)) != 0) {
-      throw std::runtime_error("distributed rebalance received invalid cut sample byte count");
+  mpi_context.rethrowCollectivePreparationFailure(
+      sample_preparation_failure,
+      "distributed rebalance cut-sample local preparation");
+
+  const auto local_sample_wire = std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(local_samples.data()),
+      local_sample_bytes);
+  std::vector<std::uint8_t> recv_bytes =
+      mpi_context.allgatherBytesBounded(local_sample_wire);
+
+  std::exception_ptr sample_decode_failure;
+  try {
+    if (recv_bytes.size() % sizeof(CompactCutSample) != 0U) {
+      throw std::runtime_error(
+          "distributed rebalance cut sample exchange returned partial record bytes");
     }
-    displacements[rank] = total_sample_bytes;
-    if (recv_counts[rank] > std::numeric_limits<int>::max() - total_sample_bytes) {
-      throw std::overflow_error("distributed rebalance cut sample exchange exceeds MPI int range");
+    global_samples.resize(recv_bytes.size() / sizeof(CompactCutSample));
+    if (!recv_bytes.empty()) {
+      std::memcpy(global_samples.data(), recv_bytes.data(), recv_bytes.size());
     }
-    total_sample_bytes += recv_counts[rank];
+  } catch (...) {
+    sample_decode_failure = std::current_exception();
   }
-  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_sample_bytes));
-  MPI_Allgatherv(
-      local_samples.data(),
-      local_sample_bytes,
-      MPI_BYTE,
-      recv_bytes.data(),
-      recv_counts.data(),
-      displacements.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  global_samples.resize(static_cast<std::size_t>(total_sample_bytes) / sizeof(CompactCutSample));
-  if (!global_samples.empty()) {
-    std::memcpy(global_samples.data(), recv_bytes.data(), recv_bytes.size());
-  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      sample_decode_failure,
+      "distributed rebalance cut-sample reassembly");
 #else
   throw std::runtime_error("distributed runtime rebalance requires an MPI-enabled build");
 #endif
@@ -1127,15 +1159,22 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
   }
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  auto allreduce_double_vector = [](std::vector<double>& values) {
-    std::vector<double> reduced(values.size(), 0.0);
-    MPI_Allreduce(values.data(), reduced.data(), static_cast<int>(values.size()), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    values = std::move(reduced);
+  const int metric_rank_count = mpi_context.worldSize();
+  auto allreduce_double_vector = [&](std::vector<double>& values) {
+    if (MPI_Allreduce(
+            MPI_IN_PLACE, values.data(), metric_rank_count,
+            MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "distributed rebalance double metric Allreduce failed");
+    }
   };
-  auto allreduce_uint64_vector = [](std::vector<std::uint64_t>& values) {
-    std::vector<std::uint64_t> reduced(values.size(), 0ULL);
-    MPI_Allreduce(values.data(), reduced.data(), static_cast<int>(values.size()), MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
-    values = std::move(reduced);
+  auto allreduce_uint64_vector = [&](std::vector<std::uint64_t>& values) {
+    if (MPI_Allreduce(
+            MPI_IN_PLACE, values.data(), metric_rank_count,
+            MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "distributed rebalance uint64 metric Allreduce failed");
+    }
   };
   auto reduce_metrics = [&](LoadBalanceMetrics& metrics) {
     allreduce_double_vector(metrics.weighted_load_by_rank);
@@ -1204,6 +1243,246 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
   return rebalance;
 }
 
+BoundedMpiTransferPlan planBoundedMpiTransferRounds(
+    std::span<const std::size_t> logical_counts,
+    std::size_t mpi_count_limit,
+    std::size_t round_count_limit) {
+  if (mpi_count_limit == 0U ||
+      mpi_count_limit > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument(
+        "bounded MPI planner count limit must be within classic MPI int range");
+  }
+  if (round_count_limit == 0U || round_count_limit > mpi_count_limit) {
+    throw std::invalid_argument(
+        "bounded MPI planner round limit must be positive and no larger than the MPI count limit");
+  }
+
+  BoundedMpiTransferPlan plan;
+  plan.logical_counts.assign(logical_counts.begin(), logical_counts.end());
+  plan.logical_displacements.resize(logical_counts.size(), 0U);
+  if (logical_counts.empty()) {
+    return plan;
+  }
+  if (logical_counts.size() > round_count_limit) {
+    throw std::invalid_argument(
+        "bounded MPI planner round limit is too small to address every participant safely");
+  }
+
+  std::size_t logical_total = 0U;
+  for (std::size_t peer = 0; peer < logical_counts.size(); ++peer) {
+    plan.logical_displacements[peer] = logical_total;
+    logical_total = core::checkedSizeAdd(
+        logical_total, logical_counts[peer], "bounded MPI logical prefix");
+  }
+  plan.logical_total_count = logical_total;
+
+  const std::size_t fair_round_share = round_count_limit / logical_counts.size();
+  plan.per_peer_count_limit = std::min(mpi_count_limit, fair_round_share);
+  if (plan.per_peer_count_limit == 0U) {
+    throw std::invalid_argument("bounded MPI planner computed a zero per-peer round limit");
+  }
+
+  std::size_t round_count = 0U;
+  for (const std::size_t count : logical_counts) {
+    const std::size_t peer_rounds = count / plan.per_peer_count_limit +
+        (count % plan.per_peer_count_limit == 0U ? 0U : 1U);
+    round_count = std::max(round_count, peer_rounds);
+  }
+  plan.rounds.reserve(round_count);
+  std::vector<std::size_t> consumed(logical_counts.size(), 0U);
+  for (std::size_t round_index = 0; round_index < round_count; ++round_index) {
+    BoundedMpiRoundLayout round;
+    round.counts.resize(logical_counts.size(), 0);
+    round.displacements.resize(logical_counts.size(), 0);
+    round.logical_offsets = consumed;
+
+    std::size_t round_total = 0U;
+    for (std::size_t peer = 0; peer < logical_counts.size(); ++peer) {
+      const std::size_t remaining = logical_counts[peer] - consumed[peer];
+      const std::size_t count = std::min(plan.per_peer_count_limit, remaining);
+      round.displacements[peer] = core::checkedIntegralNarrow<int>(
+          round_total, "bounded MPI round displacement");
+      round.counts[peer] = core::checkedIntegralNarrow<int>(
+          count, "bounded MPI round count");
+      round_total = core::checkedSizeAdd(
+          round_total, count, "bounded MPI round aggregate");
+      if (round_total > round_count_limit || round_total > mpi_count_limit) {
+        throw std::overflow_error("bounded MPI round aggregate exceeds representability limit");
+      }
+      consumed[peer] = core::checkedSizeAdd(
+          consumed[peer], count, "bounded MPI logical coverage");
+    }
+    round.round_count = round_total;
+    plan.rounds.push_back(std::move(round));
+  }
+  if (consumed != plan.logical_counts) {
+    throw std::logic_error("bounded MPI planner did not cover the complete logical payload");
+  }
+  return plan;
+}
+
+std::size_t mpiTransportRoundLimitBytes() {
+#if COSMOSIM_ENABLE_TESTS
+  const char* raw = std::getenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES");
+  if (raw != nullptr && *raw != '\0') {
+    try {
+      const unsigned long long parsed = std::stoull(raw);
+      if (parsed > 0ULL && parsed <= static_cast<unsigned long long>(std::numeric_limits<int>::max())) {
+        return static_cast<std::size_t>(parsed);
+      }
+    } catch (...) {
+      // Invalid test-only overrides fall back to the production-safe default.
+    }
+  }
+#endif
+  return k_default_mpi_transport_round_bytes;
+}
+
+std::vector<std::vector<std::uint8_t>> exchangeBoundedAlltoallBytes(
+    const MpiContext& mpi_context,
+    const std::vector<std::vector<std::uint8_t>>& send_payloads) {
+  const int world_size = mpi_context.worldSize();
+  if (world_size <= 0) {
+    throw std::invalid_argument("bounded byte all-to-all requires positive world size");
+  }
+  if (!mpi_context.isEnabled()) {
+    if (world_size != 1 || send_payloads.size() != 1U) {
+      throw std::runtime_error(
+          "bounded byte all-to-all requires MPI when world size exceeds one");
+    }
+    return {send_payloads.front()};
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  std::vector<std::uint64_t> send_counts64;
+  std::vector<std::uint64_t> recv_counts64;
+  std::exception_ptr local_failure;
+  try {
+    if (send_payloads.size() != static_cast<std::size_t>(world_size)) {
+      throw std::invalid_argument(
+          "bounded byte all-to-all payload rank extent must match MPI world size");
+    }
+    send_counts64.resize(static_cast<std::size_t>(world_size), 0U);
+    recv_counts64.resize(static_cast<std::size_t>(world_size), 0U);
+    for (std::size_t rank = 0; rank < send_payloads.size(); ++rank) {
+      send_counts64[rank] = core::checkedIntegralNarrow<std::uint64_t>(
+          send_payloads[rank].size(), "bounded byte all-to-all send count");
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "bounded byte all-to-all pre-count preparation");
+
+  if (MPI_Alltoall(
+          send_counts64.data(), 1, MPI_UINT64_T,
+          recv_counts64.data(), 1, MPI_UINT64_T,
+          MPI_COMM_WORLD) != MPI_SUCCESS) {
+    throw std::runtime_error("bounded byte all-to-all count exchange failed");
+  }
+
+  BoundedMpiTransferPlan send_plan;
+  BoundedMpiTransferPlan recv_plan;
+  std::vector<std::vector<std::uint8_t>> recv_payloads;
+  std::vector<std::uint8_t> send_round_buffer;
+  std::vector<std::uint8_t> recv_round_buffer;
+  BoundedMpiRoundLayout zero_round;
+  local_failure = nullptr;
+  try {
+    std::vector<std::size_t> send_counts(send_counts64.size(), 0U);
+    std::vector<std::size_t> recv_counts(recv_counts64.size(), 0U);
+    for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
+      send_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+          send_counts64[rank], "bounded byte all-to-all logical send count");
+      recv_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+          recv_counts64[rank], "bounded byte all-to-all logical receive count");
+    }
+    const std::size_t round_limit = mpiTransportRoundLimitBytes();
+    send_plan = planBoundedMpiTransferRounds(
+        send_counts,
+        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        round_limit);
+    recv_plan = planBoundedMpiTransferRounds(
+        recv_counts,
+        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        round_limit);
+
+    recv_payloads.resize(static_cast<std::size_t>(world_size));
+    for (std::size_t rank = 0; rank < recv_payloads.size(); ++rank) {
+      recv_payloads[rank].resize(recv_counts[rank]);
+    }
+    std::size_t maximum_send_round = 0U;
+    for (const auto& round : send_plan.rounds) {
+      maximum_send_round = std::max(maximum_send_round, round.round_count);
+    }
+    std::size_t maximum_recv_round = 0U;
+    for (const auto& round : recv_plan.rounds) {
+      maximum_recv_round = std::max(maximum_recv_round, round.round_count);
+    }
+    send_round_buffer.resize(maximum_send_round);
+    recv_round_buffer.resize(maximum_recv_round);
+    zero_round.counts.resize(static_cast<std::size_t>(world_size), 0);
+    zero_round.displacements.resize(static_cast<std::size_t>(world_size), 0);
+    zero_round.logical_offsets.resize(static_cast<std::size_t>(world_size), 0U);
+    injectMpiTestFault(mpi_context, "alltoall_post_count");
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "bounded byte all-to-all payload preparation");
+
+  const std::uint64_t local_round_count = static_cast<std::uint64_t>(
+      std::max(send_plan.rounds.size(), recv_plan.rounds.size()));
+  const std::uint64_t global_round_count =
+      mpi_context.allreduceMaxUint64(local_round_count);
+  for (std::uint64_t round_index = 0U; round_index < global_round_count;
+       ++round_index) {
+    const BoundedMpiRoundLayout& send_round =
+        round_index < send_plan.rounds.size()
+            ? send_plan.rounds[static_cast<std::size_t>(round_index)]
+            : zero_round;
+    const BoundedMpiRoundLayout& recv_round =
+        round_index < recv_plan.rounds.size()
+            ? recv_plan.rounds[static_cast<std::size_t>(round_index)]
+            : zero_round;
+
+    for (std::size_t peer = 0; peer < send_round.counts.size(); ++peer) {
+      const std::size_t count = static_cast<std::size_t>(send_round.counts[peer]);
+      if (count == 0U) {
+        continue;
+      }
+      std::memcpy(
+          send_round_buffer.data() +
+              static_cast<std::size_t>(send_round.displacements[peer]),
+          send_payloads[peer].data() + send_round.logical_offsets[peer],
+          count);
+    }
+    if (MPI_Alltoallv(
+            send_round_buffer.empty() ? nullptr : send_round_buffer.data(),
+            send_round.counts.data(), send_round.displacements.data(), MPI_BYTE,
+            recv_round_buffer.empty() ? nullptr : recv_round_buffer.data(),
+            recv_round.counts.data(), recv_round.displacements.data(), MPI_BYTE,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("bounded byte all-to-all payload exchange failed");
+    }
+    for (std::size_t peer = 0; peer < recv_round.counts.size(); ++peer) {
+      const std::size_t count = static_cast<std::size_t>(recv_round.counts[peer]);
+      if (count == 0U) {
+        continue;
+      }
+      std::memcpy(
+          recv_payloads[peer].data() + recv_round.logical_offsets[peer],
+          recv_round_buffer.data() +
+              static_cast<std::size_t>(recv_round.displacements[peer]),
+          count);
+    }
+  }
+  return recv_payloads;
+#else
+  throw std::runtime_error(
+      "bounded byte all-to-all requires an MPI-enabled build");
+#endif
+}
+
 std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
     const MpiContext& mpi_context,
     std::span<const DecompositionItem> local_items) {
@@ -1215,30 +1494,42 @@ std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
     throw std::runtime_error("multi-rank decomposition item gather requires MPI to be enabled");
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  const int local_bytes = static_cast<int>(local_items.size_bytes());
-  std::vector<int> recv_counts(static_cast<std::size_t>(mpi_context.worldSize()), 0);
-  MPI_Allgather(&local_bytes, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-  std::vector<int> displacements(recv_counts.size(), 0);
-  int total_bytes = 0;
-  for (std::size_t i = 0; i < recv_counts.size(); ++i) {
-    if (recv_counts[i] % static_cast<int>(sizeof(DecompositionItem)) != 0) {
-      throw std::runtime_error("decomposition item gather received a non-record-aligned byte count");
-    }
-    displacements[i] = total_bytes;
-    total_bytes += recv_counts[i];
+  std::size_t local_byte_count = 0U;
+  std::exception_ptr local_preparation_failure;
+  try {
+    local_byte_count = core::checkedSizeMultiply(
+        local_items.size(), sizeof(DecompositionItem),
+        "decomposition item gather local byte count");
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
   }
-  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_bytes));
-  MPI_Allgatherv(
-      local_items.data(),
-      local_bytes,
-      MPI_BYTE,
-      recv_bytes.data(),
-      recv_counts.data(),
-      displacements.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  std::vector<DecompositionItem> gathered(static_cast<std::size_t>(total_bytes) / sizeof(DecompositionItem));
-  std::memcpy(gathered.data(), recv_bytes.data(), recv_bytes.size());
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure,
+      "decomposition item gather local byte framing");
+
+  const auto local_bytes = std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(local_items.data()),
+      local_byte_count);
+  const std::vector<std::uint8_t> recv_bytes =
+      mpi_context.allgatherBytesBounded(local_bytes);
+
+  std::vector<DecompositionItem> gathered;
+  std::exception_ptr local_reassembly_failure;
+  try {
+    if (recv_bytes.size() % sizeof(DecompositionItem) != 0U) {
+      throw std::runtime_error(
+          "decomposition item gather returned a non-record-aligned byte count");
+    }
+    gathered.resize(recv_bytes.size() / sizeof(DecompositionItem));
+    if (!recv_bytes.empty()) {
+      std::memcpy(gathered.data(), recv_bytes.data(), recv_bytes.size());
+    }
+  } catch (...) {
+    local_reassembly_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_reassembly_failure,
+      "decomposition item gather receive reassembly");
   return gathered;
 #else
   throw std::runtime_error("multi-rank decomposition item gather requires an MPI build");
@@ -1556,66 +1847,60 @@ ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   const int world_size = mpi_context.worldSize();
   const auto exchange_by_hash = [&](std::span<const std::uint64_t> ids) {
-    std::vector<std::vector<std::uint64_t>> buckets(
-        static_cast<std::size_t>(world_size));
-    for (const std::uint64_t id : ids) {
-      const std::uint64_t mixed = id ^ (id >> 33U) ^ (id << 11U);
-      const int owner = static_cast<int>(
-          mixed % static_cast<std::uint64_t>(world_size));
-      buckets[static_cast<std::size_t>(owner)].push_back(id);
-    }
-    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-    std::uint64_t send_total = 0U;
-    for (int rank = 0; rank < world_size; ++rank) {
-      const std::size_t count = buckets[static_cast<std::size_t>(rank)].size();
-      if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error(
-            "exact ownership hash bucket exceeds MPI int count limit");
+    std::vector<std::vector<std::uint8_t>> send_payloads;
+    std::exception_ptr local_preparation_failure;
+    try {
+      send_payloads.resize(static_cast<std::size_t>(world_size));
+      for (const std::uint64_t id : ids) {
+        const std::uint64_t mixed = id ^ (id >> 33U) ^ (id << 11U);
+        const std::size_t owner = static_cast<std::size_t>(
+            mixed % static_cast<std::uint64_t>(world_size));
+        auto& payload = send_payloads[owner];
+        const std::size_t old_size = payload.size();
+        const std::size_t new_size = core::checkedSizeAdd(
+            old_size, sizeof(id), "exact ownership hash bucket byte growth");
+        payload.resize(new_size);
+        std::memcpy(payload.data() + old_size, &id, sizeof(id));
       }
-      send_counts[static_cast<std::size_t>(rank)] =
-          static_cast<int>(count);
-      if (rank > 0) {
-        send_displs[static_cast<std::size_t>(rank)] =
-            send_displs[static_cast<std::size_t>(rank - 1)] +
-            send_counts[static_cast<std::size_t>(rank - 1)];
+    } catch (...) {
+      local_preparation_failure = std::current_exception();
+    }
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_preparation_failure,
+        "exact ownership hash local payload preparation");
+
+    std::vector<std::vector<std::uint8_t>> recv_payloads =
+        exchangeBoundedAlltoallBytes(mpi_context, send_payloads);
+
+    std::vector<std::uint64_t> recv;
+    std::exception_ptr local_decode_failure;
+    try {
+      std::size_t total_ids = 0U;
+      for (const auto& payload : recv_payloads) {
+        if (payload.size() % sizeof(std::uint64_t) != 0U) {
+          throw std::runtime_error(
+              "exact ownership hash exchange returned partial uint64 record bytes");
+        }
+        total_ids = core::checkedSizeAdd(
+            total_ids, payload.size() / sizeof(std::uint64_t),
+            "exact ownership hash receive record total");
       }
-      send_total += static_cast<std::uint64_t>(count);
-    }
-    MPI_Alltoall(
-        send_counts.data(), 1, MPI_INT,
-        recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-    std::uint64_t recv_total = 0U;
-    for (int rank = 0; rank < world_size; ++rank) {
-      if (rank > 0) {
-        recv_displs[static_cast<std::size_t>(rank)] =
-            recv_displs[static_cast<std::size_t>(rank - 1)] +
-            recv_counts[static_cast<std::size_t>(rank - 1)];
+      recv.resize(total_ids);
+      std::size_t destination = 0U;
+      for (const auto& payload : recv_payloads) {
+        const std::size_t count = payload.size() / sizeof(std::uint64_t);
+        if (!payload.empty()) {
+          std::memcpy(
+              recv.data() + destination, payload.data(), payload.size());
+        }
+        destination += count;
       }
-      recv_total += static_cast<std::uint64_t>(
-          recv_counts[static_cast<std::size_t>(rank)]);
+    } catch (...) {
+      local_decode_failure = std::current_exception();
     }
-    if (send_total > static_cast<std::uint64_t>(
-            std::numeric_limits<int>::max()) ||
-        recv_total > static_cast<std::uint64_t>(
-            std::numeric_limits<int>::max())) {
-      throw std::overflow_error(
-          "exact ownership hash exchange exceeds MPI int total limit");
-    }
-    std::vector<std::uint64_t> send(static_cast<std::size_t>(send_total));
-    for (int rank = 0; rank < world_size; ++rank) {
-      std::copy(
-          buckets[static_cast<std::size_t>(rank)].begin(),
-          buckets[static_cast<std::size_t>(rank)].end(),
-          send.begin() + send_displs[static_cast<std::size_t>(rank)]);
-    }
-    std::vector<std::uint64_t> recv(static_cast<std::size_t>(recv_total));
-    MPI_Alltoallv(
-        send.data(), send_counts.data(), send_displs.data(), MPI_UINT64_T,
-        recv.data(), recv_counts.data(), recv_displs.data(), MPI_UINT64_T,
-        MPI_COMM_WORLD);
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_decode_failure,
+        "exact ownership hash receive reassembly");
     return recv;
   };
 
@@ -2703,6 +2988,69 @@ std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
 }
 
 
+void MpiContext::rethrowCollectivePreparationFailure(
+    const std::exception_ptr& local_failure,
+    std::string_view phase_name) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    const int local_failed = local_failure != nullptr ? 1 : 0;
+    int failed_count = 0;
+    if (MPI_Allreduce(
+            &local_failed, &failed_count, 1, MPI_INT, MPI_SUM,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "MPI readiness Allreduce failed during collective preparation phase");
+    }
+    if (failed_count == 0) {
+      return;
+    }
+
+    const int local_candidate = local_failure != nullptr ? m_world_rank : m_world_size;
+    int failure_rank = m_world_size;
+    if (MPI_Allreduce(
+            &local_candidate, &failure_rank, 1, MPI_INT, MPI_MIN,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "MPI failure-rank Allreduce failed during collective preparation phase");
+    }
+
+    constexpr std::size_t k_maximum_message_bytes = 2047U;
+    std::array<char, k_maximum_message_bytes + 1U> message_buffer{};
+    std::uint32_t message_length = 0U;
+    if (m_world_rank == failure_rank) {
+      const char* message = "unknown non-standard exception";
+      try {
+        std::rethrow_exception(local_failure);
+      } catch (const std::exception& error) {
+        message = error.what();
+      } catch (...) {
+      }
+      const std::size_t raw_length = std::char_traits<char>::length(message);
+      message_length = static_cast<std::uint32_t>(
+          std::min(raw_length, k_maximum_message_bytes));
+      std::copy_n(message, message_length, message_buffer.data());
+    }
+    if (MPI_Bcast(
+            &message_length, 1, MPI_UINT32_T, failure_rank,
+            MPI_COMM_WORLD) != MPI_SUCCESS ||
+        MPI_Bcast(
+            message_buffer.data(), static_cast<int>(message_buffer.size()), MPI_CHAR,
+            failure_rank, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "MPI diagnostic broadcast failed during collective preparation phase");
+    }
+    throw std::runtime_error(
+        "collective preparation phase '" + std::string(phase_name) +
+        "' failed on rank " + std::to_string(failure_rank) + ": " +
+        std::string(message_buffer.data(),
+                    message_buffer.data() + message_length));
+  }
+#endif
+  if (local_failure != nullptr) {
+    std::rethrow_exception(local_failure);
+  }
+}
+
 std::vector<std::uint8_t> MpiContext::gatherBytesToRoot(
     std::span<const std::uint8_t> local_bytes,
     int root_rank) const {
@@ -2711,53 +3059,91 @@ std::vector<std::uint8_t> MpiContext::gatherBytesToRoot(
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {
-    const std::uint64_t local_count_overflow =
-        local_bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ? 1U : 0U;
-    std::uint64_t any_count_overflow = 0U;
-    MPI_Allreduce(
-        &local_count_overflow, &any_count_overflow, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
-    if (any_count_overflow != 0U) {
-      throw std::overflow_error(
-          "MpiContext::gatherBytesToRoot at least one local payload exceeds MPI count range");
+    std::uint64_t local_count64 = 0U;
+    std::vector<std::uint64_t> counts64;
+    std::exception_ptr local_failure;
+    try {
+      local_count64 = core::checkedIntegralNarrow<std::uint64_t>(
+          local_bytes.size(), "gatherBytesToRoot local byte count");
+      counts64.resize(static_cast<std::size_t>(m_world_size), 0U);
+    } catch (...) {
+      local_failure = std::current_exception();
     }
-    const int local_count = static_cast<int>(local_bytes.size());
-    std::vector<int> recv_counts(m_world_rank == root_rank ? static_cast<std::size_t>(m_world_size) : 0U);
-    MPI_Gather(&local_count, 1, MPI_INT,
-               recv_counts.empty() ? nullptr : recv_counts.data(), 1, MPI_INT,
-               root_rank, MPI_COMM_WORLD);
+    rethrowCollectivePreparationFailure(
+        local_failure, "gatherBytesToRoot count-buffer preparation");
 
-    std::vector<int> displacements;
+    if (MPI_Allgather(
+            &local_count64, 1, MPI_UINT64_T,
+            counts64.data(), 1, MPI_UINT64_T,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("gatherBytesToRoot count Allgather failed");
+    }
+
+    BoundedMpiTransferPlan plan;
     std::vector<std::uint8_t> gathered;
-    std::uint64_t total_bytes = 0U;
-    if (m_world_rank == root_rank) {
-      for (const int count : recv_counts) {
-        if (count < 0) {
-          total_bytes = static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U;
-          break;
+    std::vector<std::uint8_t> round_receive_buffer;
+    local_failure = nullptr;
+    try {
+      std::vector<std::size_t> logical_counts(counts64.size(), 0U);
+      for (std::size_t rank = 0; rank < counts64.size(); ++rank) {
+        logical_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+            counts64[rank], "gatherBytesToRoot received byte count");
+      }
+      plan = planBoundedMpiTransferRounds(
+          logical_counts,
+          static_cast<std::size_t>(std::numeric_limits<int>::max()),
+          mpiTransportRoundLimitBytes());
+      if (m_world_rank == root_rank) {
+        gathered.resize(plan.logical_total_count);
+        std::size_t maximum_round_count = 0U;
+        for (const auto& round : plan.rounds) {
+          maximum_round_count = std::max(maximum_round_count, round.round_count);
         }
-        total_bytes += static_cast<std::uint64_t>(count);
+        round_receive_buffer.resize(maximum_round_count);
+      }
+      injectMpiTestFault(*this, "gather_post_count");
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    rethrowCollectivePreparationFailure(
+        local_failure, "gatherBytesToRoot payload preparation");
+
+    for (const BoundedMpiRoundLayout& round : plan.rounds) {
+      const std::size_t local_rank = static_cast<std::size_t>(m_world_rank);
+      const int send_count = round.counts[local_rank];
+      const std::size_t local_offset = round.logical_offsets[local_rank];
+      const std::uint8_t* send_pointer = send_count == 0
+          ? nullptr
+          : local_bytes.data() + local_offset;
+      const int status = MPI_Gatherv(
+          const_cast<std::uint8_t*>(send_pointer), send_count, MPI_BYTE,
+          m_world_rank == root_rank && !round_receive_buffer.empty()
+              ? round_receive_buffer.data()
+              : nullptr,
+          m_world_rank == root_rank ? round.counts.data() : nullptr,
+          m_world_rank == root_rank ? round.displacements.data() : nullptr,
+          MPI_BYTE, root_rank, MPI_COMM_WORLD);
+      if (status != MPI_SUCCESS) {
+        throw std::runtime_error("gatherBytesToRoot bounded payload Gatherv failed");
+      }
+      if (m_world_rank == root_rank) {
+        for (std::size_t rank = 0; rank < round.counts.size(); ++rank) {
+          const std::size_t count = static_cast<std::size_t>(round.counts[rank]);
+          if (count == 0U) {
+            continue;
+          }
+          // The planner checked the logical prefix and every consumed peer offset
+          // before any payload round, so this addition cannot overflow here.
+          const std::size_t destination_offset =
+              plan.logical_displacements[rank] + round.logical_offsets[rank];
+          std::memcpy(
+              gathered.data() + destination_offset,
+              round_receive_buffer.data() +
+                  static_cast<std::size_t>(round.displacements[rank]),
+              count);
+        }
       }
     }
-    // All ranks learn whether the collective can be represented before any
-    // rank enters Gatherv, avoiding a root-only throw that would deadlock peers.
-    MPI_Bcast(&total_bytes, 1, MPI_UINT64_T, root_rank, MPI_COMM_WORLD);
-    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("MpiContext::gatherBytesToRoot payload exceeds MPI count range");
-    }
-    if (m_world_rank == root_rank) {
-      displacements.resize(recv_counts.size(), 0);
-      std::size_t total = 0;
-      for (std::size_t i = 0; i < recv_counts.size(); ++i) {
-        displacements[i] = static_cast<int>(total);
-        total += static_cast<std::size_t>(recv_counts[i]);
-      }
-      gathered.resize(total);
-    }
-    MPI_Gatherv(local_bytes.empty() ? nullptr : local_bytes.data(), local_count, MPI_BYTE,
-                gathered.empty() ? nullptr : gathered.data(),
-                recv_counts.empty() ? nullptr : recv_counts.data(),
-                displacements.empty() ? nullptr : displacements.data(), MPI_BYTE,
-                root_rank, MPI_COMM_WORLD);
     return gathered;
   }
 #endif
@@ -2775,18 +3161,55 @@ std::vector<std::uint8_t> MpiContext::broadcastBytesFromRoot(
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {
-    std::uint64_t byte_count = m_world_rank == root_rank
-        ? static_cast<std::uint64_t>(root_bytes.size()) : 0U;
-    MPI_Bcast(&byte_count, 1, MPI_UINT64_T, root_rank, MPI_COMM_WORLD);
-    if (byte_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("MpiContext::broadcastBytesFromRoot payload exceeds MPI count range");
+    std::uint64_t byte_count64 = 0U;
+    std::exception_ptr local_failure;
+    try {
+      if (m_world_rank == root_rank) {
+        byte_count64 = core::checkedIntegralNarrow<std::uint64_t>(
+            root_bytes.size(), "broadcastBytesFromRoot root byte count");
+      }
+    } catch (...) {
+      local_failure = std::current_exception();
     }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_count));
-    if (m_world_rank == root_rank && !root_bytes.empty()) {
-      std::copy(root_bytes.begin(), root_bytes.end(), bytes.begin());
+    rethrowCollectivePreparationFailure(
+        local_failure, "broadcastBytesFromRoot size preparation");
+    if (MPI_Bcast(
+            &byte_count64, 1, MPI_UINT64_T, root_rank,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("broadcastBytesFromRoot size Bcast failed");
     }
-    MPI_Bcast(bytes.empty() ? nullptr : bytes.data(), static_cast<int>(bytes.size()), MPI_BYTE,
-              root_rank, MPI_COMM_WORLD);
+
+    std::vector<std::uint8_t> bytes;
+    local_failure = nullptr;
+    try {
+      const std::size_t byte_count = core::checkedIntegralNarrow<std::size_t>(
+          byte_count64, "broadcastBytesFromRoot receive byte count");
+      bytes.resize(byte_count);
+      if (m_world_rank == root_rank && !root_bytes.empty()) {
+        std::copy(root_bytes.begin(), root_bytes.end(), bytes.begin());
+      }
+      injectMpiTestFault(*this, "broadcast_post_count");
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    rethrowCollectivePreparationFailure(
+        local_failure, "broadcastBytesFromRoot payload preparation");
+
+    const std::size_t round_limit = std::min(
+        mpiTransportRoundLimitBytes(),
+        static_cast<std::size_t>(std::numeric_limits<int>::max()));
+    for (std::size_t offset = 0U; offset < bytes.size();) {
+      const std::size_t chunk_size = std::min(round_limit, bytes.size() - offset);
+      const int chunk_count = core::checkedIntegralNarrow<int>(
+          chunk_size, "broadcastBytesFromRoot bounded chunk count");
+      if (MPI_Bcast(
+              bytes.data() + offset, chunk_count, MPI_BYTE,
+              root_rank, MPI_COMM_WORLD) != MPI_SUCCESS) {
+        throw std::runtime_error("broadcastBytesFromRoot bounded payload Bcast failed");
+      }
+      // chunk_size is bounded by bytes.size() - offset.
+      offset += chunk_size;
+    }
     return bytes;
   }
 #endif
@@ -2794,6 +3217,91 @@ std::vector<std::uint8_t> MpiContext::broadcastBytesFromRoot(
     throw std::invalid_argument("serial MpiContext only supports root rank 0");
   }
   return {root_bytes.begin(), root_bytes.end()};
+}
+
+std::vector<std::uint8_t> MpiContext::allgatherBytesBounded(
+    std::span<const std::uint8_t> local_bytes) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t local_count64 = 0U;
+    std::vector<std::uint64_t> counts64;
+    std::exception_ptr local_failure;
+    try {
+      local_count64 = core::checkedIntegralNarrow<std::uint64_t>(
+          local_bytes.size(), "allgatherBytesBounded local byte count");
+      counts64.resize(static_cast<std::size_t>(m_world_size), 0U);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    rethrowCollectivePreparationFailure(
+        local_failure, "allgatherBytesBounded count-buffer preparation");
+    if (MPI_Allgather(
+            &local_count64, 1, MPI_UINT64_T,
+            counts64.data(), 1, MPI_UINT64_T,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("allgatherBytesBounded count Allgather failed");
+    }
+
+    BoundedMpiTransferPlan plan;
+    std::vector<std::uint8_t> gathered;
+    std::vector<std::uint8_t> round_receive_buffer;
+    local_failure = nullptr;
+    try {
+      std::vector<std::size_t> logical_counts(counts64.size(), 0U);
+      for (std::size_t rank = 0; rank < counts64.size(); ++rank) {
+        logical_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+            counts64[rank], "allgatherBytesBounded received byte count");
+      }
+      plan = planBoundedMpiTransferRounds(
+          logical_counts,
+          static_cast<std::size_t>(std::numeric_limits<int>::max()),
+          mpiTransportRoundLimitBytes());
+      gathered.resize(plan.logical_total_count);
+      std::size_t maximum_round_count = 0U;
+      for (const auto& round : plan.rounds) {
+        maximum_round_count = std::max(maximum_round_count, round.round_count);
+      }
+      round_receive_buffer.resize(maximum_round_count);
+      injectMpiTestFault(*this, "allgather_post_count");
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    rethrowCollectivePreparationFailure(
+        local_failure, "allgatherBytesBounded payload preparation");
+
+    for (const BoundedMpiRoundLayout& round : plan.rounds) {
+      const std::size_t local_rank = static_cast<std::size_t>(m_world_rank);
+      const int send_count = round.counts[local_rank];
+      const std::uint8_t* send_pointer = send_count == 0
+          ? nullptr
+          : local_bytes.data() + round.logical_offsets[local_rank];
+      if (MPI_Allgatherv(
+              const_cast<std::uint8_t*>(send_pointer), send_count, MPI_BYTE,
+              round_receive_buffer.empty() ? nullptr : round_receive_buffer.data(),
+              round.counts.data(), round.displacements.data(), MPI_BYTE,
+              MPI_COMM_WORLD) != MPI_SUCCESS) {
+        throw std::runtime_error("allgatherBytesBounded bounded payload Allgatherv failed");
+      }
+      for (std::size_t rank = 0; rank < round.counts.size(); ++rank) {
+        const std::size_t count = static_cast<std::size_t>(round.counts[rank]);
+        if (count == 0U) {
+          continue;
+        }
+        // The planner checked the logical prefix and every consumed peer offset
+        // before any payload round, so this addition cannot overflow here.
+        const std::size_t destination_offset =
+            plan.logical_displacements[rank] + round.logical_offsets[rank];
+        std::memcpy(
+            gathered.data() + destination_offset,
+            round_receive_buffer.data() +
+                static_cast<std::size_t>(round.displacements[rank]),
+            count);
+      }
+    }
+    return gathered;
+  }
+#endif
+  return {local_bytes.begin(), local_bytes.end()};
 }
 
 namespace {
@@ -3086,91 +3594,27 @@ std::vector<TreePseudoParticlePacket> executeBlockingTreePseudoParticleHierarchy
       1,
       MPI_UINT64_T,
       MPI_COMM_WORLD);
-  std::vector<int> recv_counts;
-  std::vector<int> recv_displs;
-  std::uint64_t total_packets = 0;
-  std::uint64_t running_bytes = 0;
-  std::uint64_t total_bytes = 0U;
-  std::exception_ptr receive_layout_failure;
-  try {
-    recv_counts.assign(static_cast<std::size_t>(world_size), 0);
-    recv_displs.assign(static_cast<std::size_t>(world_size), 0);
-    for (int rank = 0; rank < world_size; ++rank) {
-      if (counts64[static_cast<std::size_t>(rank)] >
-          std::numeric_limits<std::uint64_t>::max() / k_tree_pseudo_wire_bytes) {
-        throw std::overflow_error("tree pseudo hierarchy exchange per-rank wire size overflows uint64_t");
-      }
-      const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * k_tree_pseudo_wire_bytes;
-      if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error("tree pseudo hierarchy exchange byte count exceeds MPI int limit");
-      }
-      recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
-      if (running_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error("tree pseudo hierarchy exchange displacement exceeds MPI int limit");
-      }
-      recv_displs[static_cast<std::size_t>(rank)] = static_cast<int>(running_bytes);
-      if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) - running_bytes) {
-        throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
-      }
-      running_bytes += bytes;
-      if (counts64[static_cast<std::size_t>(rank)] >
-          std::numeric_limits<std::uint64_t>::max() - total_packets) {
-        throw std::overflow_error("tree pseudo hierarchy exchange packet total overflows uint64_t");
-      }
-      total_packets += counts64[static_cast<std::size_t>(rank)];
-    }
-    if (total_packets > std::numeric_limits<std::uint64_t>::max() / k_tree_pseudo_wire_bytes) {
-      throw std::overflow_error("tree pseudo hierarchy exchange total wire size overflows uint64_t");
-    }
-    total_bytes = total_packets * k_tree_pseudo_wire_bytes;
-    if (total_bytes != running_bytes) {
-      throw std::logic_error("tree pseudo hierarchy exchange packet/byte totals disagree");
-    }
-    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("tree pseudo hierarchy exchange total byte count exceeds MPI int limit");
-    }
-    if (total_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-      throw std::overflow_error("tree pseudo hierarchy exchange receive allocation exceeds size_t");
-    }
-  } catch (...) {
-    receive_layout_failure = std::current_exception();
-  }
-  coordinate_failure(receive_layout_failure, "receive-layout preparation");
   std::vector<std::uint8_t> local_wire;
   std::exception_ptr local_encode_failure;
   try {
     local_wire = encodeTreePseudoPackets(local_packets);
-    const std::uint64_t expected_local_bytes =
-        counts64[static_cast<std::size_t>(communicator_world_rank)] * k_tree_pseudo_wire_bytes;
-    if (local_wire.size() != static_cast<std::size_t>(expected_local_bytes)) {
-      throw std::logic_error("tree pseudo hierarchy encoded byte count disagrees with gathered packet count");
-    }
-    if (local_wire.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("tree pseudo hierarchy local wire size exceeds MPI int limit");
+    const std::size_t expected_local_bytes = core::checkedSizeMultiply(
+        core::checkedIntegralNarrow<std::size_t>(
+            counts64[static_cast<std::size_t>(communicator_world_rank)],
+            "tree pseudo hierarchy local packet count"),
+        k_tree_pseudo_wire_bytes,
+        "tree pseudo hierarchy encoded byte count");
+    if (local_wire.size() != expected_local_bytes) {
+      throw std::logic_error(
+          "tree pseudo hierarchy encoded byte count disagrees with gathered packet count");
     }
   } catch (...) {
     local_encode_failure = std::current_exception();
   }
   coordinate_failure(local_encode_failure, "local wire encoding");
 
-  std::vector<std::uint8_t> result_wire;
-  std::exception_ptr receive_buffer_failure;
-  try {
-    result_wire.assign(static_cast<std::size_t>(total_bytes), 0U);
-  } catch (...) {
-    receive_buffer_failure = std::current_exception();
-  }
-  coordinate_failure(receive_buffer_failure, "receive-buffer allocation");
-  std::uint8_t empty_wire = 0U;
-  MPI_Allgatherv(
-      local_wire.empty() ? &empty_wire : const_cast<std::uint8_t*>(local_wire.data()),
-      static_cast<int>(local_wire.size()),
-      MPI_BYTE,
-      result_wire.empty() ? &empty_wire : result_wire.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
+  std::vector<std::uint8_t> result_wire =
+      mpi_context.allgatherBytesBounded(local_wire);
   std::vector<TreePseudoParticlePacket> result;
   std::exception_ptr received_wire_validation_failure;
   try {
@@ -3664,71 +4108,111 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
 #endif
 }
 
+namespace {
+
+template <typename Record>
+[[nodiscard]] std::vector<Record> allgatherTrivialRecordsBounded(
+    const MpiContext& mpi_context,
+    std::span<const Record> local_records,
+    std::string_view phase) {
+  static_assert(std::is_trivially_copyable_v<Record>);
+
+  std::size_t local_byte_count = 0U;
+  std::exception_ptr local_preparation_failure;
+  try {
+    local_byte_count = core::checkedSizeMultiply(
+        local_records.size(), sizeof(Record),
+        std::string(phase) + " local byte count");
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure,
+      std::string(phase) + " local wire preparation");
+
+  const auto local_wire = std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(local_records.data()),
+      local_byte_count);
+  std::vector<std::uint8_t> gathered_wire =
+      mpi_context.allgatherBytesBounded(local_wire);
+
+  std::vector<Record> result;
+  std::exception_ptr local_reassembly_failure;
+  try {
+    if (gathered_wire.size() % sizeof(Record) != 0U) {
+      throw std::runtime_error(
+          std::string(phase) + " returned partial record bytes");
+    }
+    result.resize(gathered_wire.size() / sizeof(Record));
+    if (!gathered_wire.empty()) {
+      std::memcpy(result.data(), gathered_wire.data(), gathered_wire.size());
+    }
+  } catch (...) {
+    local_reassembly_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_reassembly_failure,
+      std::string(phase) + " receive reassembly");
+  return result;
+}
+
+}  // namespace
+
 std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
     const MpiContext& mpi_context,
     std::span<const HydroConservativeFluxCorrectionRecord> local_records,
     std::uint64_t exchange_sequence) {
   (void)exchange_sequence;
-  for (const HydroConservativeFluxCorrectionRecord& record : local_records) {
-    validateHydroConservativeFluxCorrectionRecord(record);
-    if (record.source_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("hydro conservative flux correction source rank does not match MPI context");
+  std::exception_ptr local_validation_failure;
+  try {
+    for (const HydroConservativeFluxCorrectionRecord& record : local_records) {
+      validateHydroConservativeFluxCorrectionRecord(record);
+      if (record.source_rank != mpi_context.worldRank()) {
+        throw std::invalid_argument(
+            "hydro conservative flux correction source rank does not match MPI context");
+      }
     }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  if (mpi_context.isEnabled()) {
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_validation_failure,
+        "hydro conservative flux correction local validation");
+  } else if (local_validation_failure != nullptr) {
+    std::rethrow_exception(local_validation_failure);
   }
   if (!mpi_context.isEnabled()) {
-    return std::vector<HydroConservativeFluxCorrectionRecord>(local_records.begin(), local_records.end());
+    return std::vector<HydroConservativeFluxCorrectionRecord>(
+        local_records.begin(), local_records.end());
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroConservativeFluxCorrectionRecord);
-    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("hydro conservative flux correction exchange byte count exceeds MPI int limit");
+  std::vector<HydroConservativeFluxCorrectionRecord> result =
+      allgatherTrivialRecordsBounded(
+          mpi_context, local_records,
+          "hydro conservative flux correction exchange");
+
+  std::exception_ptr local_result_failure;
+  try {
+    for (const HydroConservativeFluxCorrectionRecord& record : result) {
+      validateHydroConservativeFluxCorrectionRecord(record);
+      if (record.source_rank < 0 || record.source_rank >= world_size ||
+          record.owner_rank < 0 || record.owner_rank >= world_size) {
+        throw std::runtime_error(
+            "hydro conservative flux correction exchange returned invalid rank metadata");
+      }
     }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  } catch (...) {
+    local_result_failure = std::current_exception();
   }
-  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroConservativeFluxCorrectionRecord);
-  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("hydro conservative flux correction exchange total byte count exceeds MPI int limit");
-  }
-  std::vector<HydroConservativeFluxCorrectionRecord> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<HydroConservativeFluxCorrectionRecord*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(HydroConservativeFluxCorrectionRecord)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const HydroConservativeFluxCorrectionRecord& record : result) {
-    validateHydroConservativeFluxCorrectionRecord(record);
-    if (record.source_rank < 0 || record.source_rank >= world_size ||
-        record.owner_rank < 0 || record.owner_rank >= world_size) {
-      throw std::runtime_error("hydro conservative flux correction exchange returned invalid rank metadata");
-    }
-  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_result_failure,
+      "hydro conservative flux correction receive validation");
   return result;
 #else
-  throw std::runtime_error("hydro conservative flux correction exchange requires MPI support when MPI context is enabled");
+  throw std::runtime_error(
+      "hydro conservative flux correction exchange requires MPI support when MPI context is enabled");
 #endif
 }
 
@@ -3737,66 +4221,58 @@ std::vector<HydroGhostCellRequest> executeBlockingHydroGhostCellRequestExchange(
     std::span<const HydroGhostCellRequest> local_requests,
     std::uint64_t exchange_sequence) {
   (void)exchange_sequence;
-  for (const HydroGhostCellRequest& request : local_requests) {
-    validateHydroGhostCellRequest(request);
-    if (request.descriptor.consumer_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("hydro ghost cell request consumer rank does not match MPI context");
+  std::exception_ptr local_validation_failure;
+  try {
+    for (const HydroGhostCellRequest& request : local_requests) {
+      validateHydroGhostCellRequest(request);
+      if (request.descriptor.consumer_rank != mpi_context.worldRank()) {
+        throw std::invalid_argument(
+            "hydro ghost cell request consumer rank does not match MPI context");
+      }
     }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  if (mpi_context.isEnabled()) {
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_validation_failure,
+        "hydro ghost cell request local validation");
+  } else if (local_validation_failure != nullptr) {
+    std::rethrow_exception(local_validation_failure);
   }
   if (!mpi_context.isEnabled()) {
-    return std::vector<HydroGhostCellRequest>(local_requests.begin(), local_requests.end());
+    return std::vector<HydroGhostCellRequest>(
+        local_requests.begin(), local_requests.end());
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_requests.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroGhostCellRequest);
-    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("hydro ghost cell request exchange byte count exceeds MPI int limit");
+  std::vector<HydroGhostCellRequest> result =
+      allgatherTrivialRecordsBounded(
+          mpi_context, local_requests,
+          "hydro ghost cell request exchange");
+
+  std::exception_ptr local_result_failure;
+  try {
+    for (const HydroGhostCellRequest& request : result) {
+      validateHydroGhostCellRequest(request);
+      if (request.descriptor.owner_rank < 0 ||
+          request.descriptor.owner_rank >= world_size ||
+          request.descriptor.consumer_rank < 0 ||
+          request.descriptor.consumer_rank >= world_size) {
+        throw std::runtime_error(
+            "hydro ghost cell request exchange returned invalid rank metadata");
+      }
     }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  } catch (...) {
+    local_result_failure = std::current_exception();
   }
-  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroGhostCellRequest);
-  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("hydro ghost cell request exchange total byte count exceeds MPI int limit");
-  }
-  std::vector<HydroGhostCellRequest> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<HydroGhostCellRequest*>(local_requests.data()),
-      static_cast<int>(local_requests.size() * sizeof(HydroGhostCellRequest)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const HydroGhostCellRequest& request : result) {
-    validateHydroGhostCellRequest(request);
-    if (request.descriptor.owner_rank < 0 || request.descriptor.owner_rank >= world_size ||
-        request.descriptor.consumer_rank < 0 || request.descriptor.consumer_rank >= world_size) {
-      throw std::runtime_error("hydro ghost cell request exchange returned invalid rank metadata");
-    }
-  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_result_failure,
+      "hydro ghost cell request receive validation");
   return result;
 #else
-  throw std::runtime_error("hydro ghost cell request exchange requires MPI support when MPI context is enabled");
+  throw std::runtime_error(
+      "hydro ghost cell request exchange requires MPI support when MPI context is enabled");
 #endif
 }
 
@@ -3805,66 +4281,58 @@ std::vector<HydroGhostCellPayloadRecord> executeBlockingHydroGhostCellPayloadExc
     std::span<const HydroGhostCellPayloadRecord> local_records,
     std::uint64_t exchange_sequence) {
   (void)exchange_sequence;
-  for (const HydroGhostCellPayloadRecord& record : local_records) {
-    validateHydroGhostCellPayloadRecord(record);
-    if (record.descriptor.owner_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("hydro ghost cell payload owner rank does not match MPI context");
+  std::exception_ptr local_validation_failure;
+  try {
+    for (const HydroGhostCellPayloadRecord& record : local_records) {
+      validateHydroGhostCellPayloadRecord(record);
+      if (record.descriptor.owner_rank != mpi_context.worldRank()) {
+        throw std::invalid_argument(
+            "hydro ghost cell payload owner rank does not match MPI context");
+      }
     }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  if (mpi_context.isEnabled()) {
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_validation_failure,
+        "hydro ghost cell payload local validation");
+  } else if (local_validation_failure != nullptr) {
+    std::rethrow_exception(local_validation_failure);
   }
   if (!mpi_context.isEnabled()) {
-    return std::vector<HydroGhostCellPayloadRecord>(local_records.begin(), local_records.end());
+    return std::vector<HydroGhostCellPayloadRecord>(
+        local_records.begin(), local_records.end());
   }
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records64 = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes64 = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroGhostCellPayloadRecord);
-    if (bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("hydro ghost cell payload exchange byte count exceeds MPI int limit");
+  std::vector<HydroGhostCellPayloadRecord> result =
+      allgatherTrivialRecordsBounded(
+          mpi_context, local_records,
+          "hydro ghost cell payload exchange");
+
+  std::exception_ptr local_result_failure;
+  try {
+    for (const HydroGhostCellPayloadRecord& record : result) {
+      validateHydroGhostCellPayloadRecord(record);
+      if (record.descriptor.owner_rank < 0 ||
+          record.descriptor.owner_rank >= world_size ||
+          record.descriptor.consumer_rank < 0 ||
+          record.descriptor.consumer_rank >= world_size) {
+        throw std::runtime_error(
+            "hydro ghost cell payload exchange returned invalid rank metadata");
+      }
     }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes64);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records64 += counts64[static_cast<std::size_t>(rank)];
+  } catch (...) {
+    local_result_failure = std::current_exception();
   }
-  const std::uint64_t total_bytes64 = total_records64 * sizeof(HydroGhostCellPayloadRecord);
-  if (total_bytes64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("hydro ghost cell payload exchange total byte count exceeds MPI int limit");
-  }
-  std::vector<HydroGhostCellPayloadRecord> result(static_cast<std::size_t>(total_records64));
-  MPI_Allgatherv(
-      const_cast<HydroGhostCellPayloadRecord*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(HydroGhostCellPayloadRecord)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const HydroGhostCellPayloadRecord& record : result) {
-    validateHydroGhostCellPayloadRecord(record);
-    if (record.descriptor.owner_rank < 0 || record.descriptor.owner_rank >= world_size ||
-        record.descriptor.consumer_rank < 0 || record.descriptor.consumer_rank >= world_size) {
-      throw std::runtime_error("hydro ghost cell payload exchange returned invalid rank metadata");
-    }
-  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_result_failure,
+      "hydro ghost cell payload receive validation");
   return result;
 #else
-  throw std::runtime_error("hydro ghost cell payload exchange requires MPI support when MPI context is enabled");
+  throw std::runtime_error(
+      "hydro ghost cell payload exchange requires MPI support when MPI context is enabled");
 #endif
 }
 
@@ -4255,64 +4723,73 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch) {
-  if (!authoritative_local_state.isConsistent()) {
-    throw std::invalid_argument(
-        "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload state is inconsistent");
-  }
-  if (!authoritative_local_state.epoch.matches(expected_epoch)) {
-    throw std::invalid_argument(
-        "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload epoch is stale");
-  }
-  if (authoritative_local_state.size() < local_ghost_descriptors.size()) {
-    throw std::invalid_argument(
-        "executeBlockingGhostRefreshExchangeFromDescriptors: payload state must expose one row per local descriptor");
-  }
-
   const int world_rank = mpi_context.worldRank();
   const int world_size = mpi_context.worldSize();
-  if (world_rank < 0 || world_size <= 0 || world_rank >= world_size) {
-    throw std::invalid_argument("executeBlockingGhostRefreshExchangeFromDescriptors: invalid MPI context");
-  }
-
   std::unordered_map<std::uint64_t, std::uint32_t> owned_index_by_particle_id;
-  owned_index_by_particle_id.reserve(local_ghost_descriptors.size());
-  std::vector<std::vector<std::uint64_t>> requested_particle_ids_by_rank(static_cast<std::size_t>(world_size));
-  std::vector<std::vector<std::uint32_t>> recv_indices_by_rank(static_cast<std::size_t>(world_size));
+  std::vector<std::vector<std::uint64_t>> requested_particle_ids_by_rank;
+  std::vector<std::vector<std::uint32_t>> recv_indices_by_rank;
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (!authoritative_local_state.isConsistent()) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload state is inconsistent");
+    }
+    if (!authoritative_local_state.epoch.matches(expected_epoch)) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload epoch is stale");
+    }
+    if (authoritative_local_state.size() < local_ghost_descriptors.size()) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: payload state must expose one row per local descriptor");
+    }
+    if (world_rank < 0 || world_size <= 0 || world_rank >= world_size) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: invalid MPI context");
+    }
 
-  for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
-    const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
-    if (!descriptor.epoch.matches(expected_epoch)) {
-      throw std::invalid_argument(
-          "executeBlockingGhostRefreshExchangeFromDescriptors: stale local ghost descriptor epoch");
-    }
-    if (descriptor.owning_rank < 0 || descriptor.owning_rank >= world_size) {
-      throw std::invalid_argument(
-          "executeBlockingGhostRefreshExchangeFromDescriptors: descriptor owning_rank outside MPI world");
-    }
-    if (authoritative_local_state.entity_id[local_index] != descriptor.particle_id) {
-      throw std::invalid_argument(
-          "executeBlockingGhostRefreshExchangeFromDescriptors: payload entity_id does not match descriptor particle_id");
-    }
-    if (descriptor.residency == LocalIndexResidency::kOwned) {
-      if (descriptor.owning_rank != world_rank) {
+    owned_index_by_particle_id.reserve(local_ghost_descriptors.size());
+    requested_particle_ids_by_rank.resize(static_cast<std::size_t>(world_size));
+    recv_indices_by_rank.resize(static_cast<std::size_t>(world_size));
+    for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
+      const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
+      if (!descriptor.epoch.matches(expected_epoch)) {
         throw std::invalid_argument(
-            "executeBlockingGhostRefreshExchangeFromDescriptors: owned descriptor has nonlocal owner");
+            "executeBlockingGhostRefreshExchangeFromDescriptors: stale local ghost descriptor epoch");
       }
-      auto [_, inserted] = owned_index_by_particle_id.emplace(descriptor.particle_id, local_index);
-      if (!inserted) {
+      if (descriptor.owning_rank < 0 || descriptor.owning_rank >= world_size) {
         throw std::invalid_argument(
-            "executeBlockingGhostRefreshExchangeFromDescriptors: duplicate owned particle_id in descriptor table");
+            "executeBlockingGhostRefreshExchangeFromDescriptors: descriptor owning_rank outside MPI world");
       }
-    } else {
-      if (descriptor.owning_rank == world_rank) {
+      if (authoritative_local_state.entity_id[local_index] != descriptor.particle_id) {
         throw std::invalid_argument(
-            "executeBlockingGhostRefreshExchangeFromDescriptors: ghost descriptor is owned by local rank");
+            "executeBlockingGhostRefreshExchangeFromDescriptors: payload entity_id does not match descriptor particle_id");
       }
-      requested_particle_ids_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(descriptor.particle_id);
-      recv_indices_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(local_index);
+      if (descriptor.residency == LocalIndexResidency::kOwned) {
+        if (descriptor.owning_rank != world_rank) {
+          throw std::invalid_argument(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: owned descriptor has nonlocal owner");
+        }
+        auto [_, inserted] = owned_index_by_particle_id.emplace(descriptor.particle_id, local_index);
+        if (!inserted) {
+          throw std::invalid_argument(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: duplicate owned particle_id in descriptor table");
+        }
+      } else {
+        if (descriptor.owning_rank == world_rank) {
+          throw std::invalid_argument(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: ghost descriptor is owned by local rank");
+        }
+        requested_particle_ids_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(
+            descriptor.particle_id);
+        recv_indices_by_rank[static_cast<std::size_t>(descriptor.owning_rank)].push_back(local_index);
+      }
     }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
   }
-
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure,
+      "ghost refresh descriptor/request preparation");
   const bool has_local_ghost_demands = std::any_of(
       recv_indices_by_rank.begin(), recv_indices_by_rank.end(), [](const auto& rows) { return !rows.empty(); });
   if (!mpi_context.isEnabled()) {
@@ -4347,88 +4824,197 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   constexpr int k_request_count_tag_base = 4810;
+  constexpr int k_request_ready_tag_base = 5310;
   constexpr int k_request_payload_tag_base = 5810;
-  std::vector<std::vector<std::uint32_t>> send_indices_by_rank(static_cast<std::size_t>(world_size));
+  constexpr int k_request_mapping_ready_tag_base = 6310;
+  std::vector<std::vector<std::uint32_t>> send_indices_by_rank;
+  local_preparation_failure = nullptr;
+  try {
+    send_indices_by_rank.resize(static_cast<std::size_t>(world_size));
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure,
+      "ghost refresh request exchange storage preparation");
+
+  std::exception_ptr first_protocol_failure;
+  const auto record_peer_failure = [&](int peer_rank, std::string_view phase) {
+    if (first_protocol_failure != nullptr) {
+      return;
+    }
+    try {
+      throw std::runtime_error(
+          "ghost refresh peer " + std::to_string(peer_rank) +
+          " rejected " + std::string(phase));
+    } catch (...) {
+      first_protocol_failure = std::current_exception();
+    }
+  };
+
   for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
     if (peer_rank == world_rank) {
       continue;
     }
-    const auto& request_ids = requested_particle_ids_by_rank[static_cast<std::size_t>(peer_rank)];
-    const std::uint64_t send_count = static_cast<std::uint64_t>(request_ids.size());
-    std::uint64_t recv_count = 0;
-    MPI_Sendrecv(
-        &send_count,
-        1,
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_request_count_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
-        &recv_count,
-        1,
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_request_count_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
-        MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-
-    if (send_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        recv_count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error(
-          "executeBlockingGhostRefreshExchangeFromDescriptors: ghost request count exceeds MPI int count limit");
+    const auto& request_ids =
+        requested_particle_ids_by_rank[static_cast<std::size_t>(peer_rank)];
+    const std::uint64_t send_count = core::checkedIntegralNarrow<std::uint64_t>(
+        request_ids.size(), "ghost refresh request send count");
+    std::uint64_t recv_count = 0U;
+    if (MPI_Sendrecv(
+            const_cast<std::uint64_t*>(&send_count), 1, MPI_UINT64_T,
+            peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_count_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            &recv_count, 1, MPI_UINT64_T,
+            peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_count_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: request-count Sendrecv failed");
     }
 
-    std::vector<std::uint64_t> received_request_ids(static_cast<std::size_t>(recv_count));
-    MPI_Sendrecv(
-        const_cast<std::uint64_t*>(request_ids.data()),
-        static_cast<int>(request_ids.size()),
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_request_payload_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
-        received_request_ids.data(),
-        static_cast<int>(received_request_ids.size()),
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_request_payload_tag_base, world_rank, peer_rank, expected_epoch.ghost_sync_epoch),
-        MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-
-    auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
-    send_rows.reserve(received_request_ids.size());
-    for (const std::uint64_t particle_id : received_request_ids) {
-      const auto it = owned_index_by_particle_id.find(particle_id);
-      if (it == owned_index_by_particle_id.end()) {
-        throw std::runtime_error(
-            "executeBlockingGhostRefreshExchangeFromDescriptors: peer requested a particle_id not owned by this rank");
+    std::vector<std::uint64_t> received_request_ids;
+    int request_send_count = 0;
+    int request_recv_count = 0;
+    std::exception_ptr peer_local_failure = first_protocol_failure;
+    if (peer_local_failure == nullptr) {
+      try {
+        request_send_count = core::checkedIntegralNarrow<int>(
+            send_count, "ghost refresh request send count");
+        const std::size_t checked_recv_count = core::checkedIntegralNarrow<std::size_t>(
+            recv_count, "ghost refresh request receive count");
+        request_recv_count = core::checkedIntegralNarrow<int>(
+            checked_recv_count, "ghost refresh request receive MPI count");
+        received_request_ids.resize(checked_recv_count);
+        injectMpiTestFault(mpi_context, "ghost_request_post_metadata");
+      } catch (...) {
+        peer_local_failure = std::current_exception();
+        if (first_protocol_failure == nullptr) {
+          first_protocol_failure = peer_local_failure;
+        }
       }
-      send_rows.push_back(it->second);
+    }
+
+    int local_ready = peer_local_failure == nullptr ? 1 : 0;
+    int peer_ready = 0;
+    if (MPI_Sendrecv(
+            &local_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_ready_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            &peer_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_ready_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: request-readiness Sendrecv failed");
+    }
+    if (local_ready == 0 || peer_ready == 0) {
+      if (peer_ready == 0) {
+        record_peer_failure(peer_rank, "request payload preparation");
+      }
+      continue;
+    }
+
+    if (MPI_Sendrecv(
+            request_ids.empty() ? nullptr : const_cast<std::uint64_t*>(request_ids.data()),
+            request_send_count,
+            MPI_UINT64_T, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_payload_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            received_request_ids.empty() ? nullptr : received_request_ids.data(),
+            request_recv_count,
+            MPI_UINT64_T, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_payload_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: request-payload Sendrecv failed");
+    }
+
+    peer_local_failure = nullptr;
+    try {
+      auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+      send_rows.reserve(received_request_ids.size());
+      for (const std::uint64_t particle_id : received_request_ids) {
+        const auto it = owned_index_by_particle_id.find(particle_id);
+        if (it == owned_index_by_particle_id.end()) {
+          throw std::runtime_error(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: peer requested a particle_id not owned by this rank");
+        }
+        send_rows.push_back(it->second);
+      }
+      injectMpiTestFault(mpi_context, "ghost_request_post_payload");
+    } catch (...) {
+      peer_local_failure = std::current_exception();
+      if (first_protocol_failure == nullptr) {
+        first_protocol_failure = peer_local_failure;
+      }
+    }
+
+    local_ready = peer_local_failure == nullptr ? 1 : 0;
+    peer_ready = 0;
+    if (MPI_Sendrecv(
+            &local_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_mapping_ready_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            &peer_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_request_mapping_ready_tag_base, world_rank, peer_rank,
+                expected_epoch.ghost_sync_epoch),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: request-mapping readiness Sendrecv failed");
+    }
+    if (peer_ready == 0) {
+      record_peer_failure(peer_rank, "request mapping validation");
     }
   }
 
+  mpi_context.rethrowCollectivePreparationFailure(
+      first_protocol_failure,
+      "ghost refresh request discovery");
   std::vector<int> neighbor_ranks;
   std::vector<std::vector<std::uint32_t>> send_indices_by_neighbor;
   std::vector<std::vector<std::uint32_t>> recv_indices_by_neighbor;
-  for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
-    if (peer_rank == world_rank) {
-      continue;
-    }
-    const auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
-    const auto& recv_rows = recv_indices_by_rank[static_cast<std::size_t>(peer_rank)];
-    if (send_rows.empty() && recv_rows.empty()) {
-      continue;
-    }
-    neighbor_ranks.push_back(peer_rank);
-    send_indices_by_neighbor.push_back(send_rows);
-    recv_indices_by_neighbor.push_back(recv_rows);
-  }
-
   BlockingGhostRefreshExchange exchange;
-  exchange.plan = buildExplicitGhostExchangePlan(
-      world_rank,
-      neighbor_ranks,
-      send_indices_by_neighbor,
-      recv_indices_by_neighbor,
-      ghostRefreshPayloadRecordBytes(),
-      expected_epoch);
-  exchange.plan.exchange_sequence = expected_epoch.ghost_sync_epoch;
+  local_preparation_failure = nullptr;
+  try {
+    for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
+      if (peer_rank == world_rank) {
+        continue;
+      }
+      const auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+      const auto& recv_rows = recv_indices_by_rank[static_cast<std::size_t>(peer_rank)];
+      if (send_rows.empty() && recv_rows.empty()) {
+        continue;
+      }
+      neighbor_ranks.push_back(peer_rank);
+      send_indices_by_neighbor.push_back(send_rows);
+      recv_indices_by_neighbor.push_back(recv_rows);
+    }
+    exchange.plan = buildExplicitGhostExchangePlan(
+        world_rank,
+        neighbor_ranks,
+        send_indices_by_neighbor,
+        recv_indices_by_neighbor,
+        ghostRefreshPayloadRecordBytes(),
+        expected_epoch);
+    exchange.plan.exchange_sequence = expected_epoch.ghost_sync_epoch;
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure,
+      "ghost refresh payload-plan preparation");
   exchange.result = executeBlockingGhostRefreshExchange(
       mpi_context,
       exchange.plan,
@@ -4448,105 +5034,253 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch) {
-  validateBlockingGhostExchangeContracts(
-      plan, local_ghost_descriptors, mpi_context.worldRank(), expected_epoch);
-  if (!authoritative_local_state.isConsistent()) {
-    throw std::invalid_argument("executeBlockingGhostRefreshExchange: authoritative local ghost payload state is inconsistent");
-  }
-  if (!authoritative_local_state.epoch.matches(expected_epoch)) {
-    throw std::invalid_argument("executeBlockingGhostRefreshExchange: authoritative local payload epoch is stale");
-  }
-
   BlockingGhostExchangeResult result;
   result.received_ghosts.epoch = expected_epoch;
+
+  std::vector<GhostExchangeBuffer> send_buffers;
+  std::exception_ptr local_preparation_failure;
+  try {
+    validateBlockingGhostExchangeContracts(
+        plan, local_ghost_descriptors, mpi_context.worldRank(), expected_epoch);
+    if (!authoritative_local_state.isConsistent()) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchange: authoritative local ghost payload state is inconsistent");
+    }
+    if (!authoritative_local_state.epoch.matches(expected_epoch)) {
+      throw std::invalid_argument(
+          "executeBlockingGhostRefreshExchange: authoritative local payload epoch is stale");
+    }
+    if (!plan.neighbor_ranks.empty() && !mpi_context.isEnabled()) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchange: non-empty ghost exchange requires MPI; serial path must have no neighbors");
+    }
+
+    send_buffers.resize(plan.neighbor_ranks.size());
+    std::size_t total_receive_records = 0U;
+    for (std::size_t slot = 0; slot < plan.neighbor_ranks.size(); ++slot) {
+      for (const std::uint32_t local_index : plan.send_local_indices_by_neighbor[slot]) {
+        if (local_index >= authoritative_local_state.size() ||
+            local_index >= local_ghost_descriptors.size()) {
+          throw std::out_of_range(
+              "executeBlockingGhostRefreshExchange: send descriptor index is outside local payload state");
+        }
+        if (authoritative_local_state.entity_id[local_index] !=
+            local_ghost_descriptors[local_index].particle_id) {
+          throw std::invalid_argument(
+              "executeBlockingGhostRefreshExchange: send payload entity_id does not match owned descriptor particle_id");
+        }
+      }
+      send_buffers[slot].packFrom(
+          plan.outbound_transfers[slot],
+          authoritative_local_state,
+          plan.send_local_indices_by_neighbor[slot]);
+      total_receive_records = core::checkedSizeAdd(
+          total_receive_records,
+          plan.recv_local_indices_by_neighbor[slot].size(),
+          "ghost refresh total receive record count");
+    }
+
+    // Reserve every destination lane before the first peer metadata exchange so
+    // successful payload decoding cannot allocate between sequential peers.
+    result.received_ghosts.entity_id.reserve(total_receive_records);
+    result.received_ghosts.position_x_comoving.reserve(total_receive_records);
+    result.received_ghosts.position_y_comoving.reserve(total_receive_records);
+    result.received_ghosts.position_z_comoving.reserve(total_receive_records);
+    result.received_ghosts.mass_code.reserve(total_receive_records);
+    result.received_ghosts.density_code.reserve(total_receive_records);
+    result.received_ghosts.velocity_x_code.reserve(total_receive_records);
+    result.received_ghosts.velocity_y_code.reserve(total_receive_records);
+    result.received_ghosts.velocity_z_code.reserve(total_receive_records);
+    result.received_ghosts.pressure_code.reserve(total_receive_records);
+    result.received_ghosts.internal_energy_code.reserve(total_receive_records);
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+
+  if (mpi_context.isEnabled()) {
+    mpi_context.rethrowCollectivePreparationFailure(
+        local_preparation_failure,
+        "ghost refresh payload pre-communication preparation");
+  } else if (local_preparation_failure != nullptr) {
+    std::rethrow_exception(local_preparation_failure);
+  }
   if (plan.neighbor_ranks.empty()) {
     return result;
-  }
-  if (!mpi_context.isEnabled()) {
-    throw std::runtime_error(
-        "executeBlockingGhostRefreshExchange: non-empty ghost exchange requires MPI; serial path must have no neighbors");
   }
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   constexpr int k_size_tag_base = 6810;
+  constexpr int k_ready_tag_base = 7310;
   constexpr int k_payload_tag_base = 7810;
+  constexpr int k_decode_ready_tag_base = 8310;
+  std::exception_ptr first_protocol_failure;
+  const auto record_peer_failure = [&](int peer_rank, std::string_view phase) {
+    if (first_protocol_failure != nullptr) {
+      return;
+    }
+    try {
+      throw std::runtime_error(
+          "ghost payload peer " + std::to_string(peer_rank) +
+          " rejected " + std::string(phase));
+    } catch (...) {
+      first_protocol_failure = std::current_exception();
+    }
+  };
+
   for (std::size_t slot = 0; slot < plan.neighbor_ranks.size(); ++slot) {
-    for (const std::uint32_t local_index : plan.send_local_indices_by_neighbor[slot]) {
-      if (local_index >= authoritative_local_state.size() || local_index >= local_ghost_descriptors.size()) {
-        throw std::out_of_range("executeBlockingGhostRefreshExchange: send descriptor index is outside local payload state");
-      }
-      if (authoritative_local_state.entity_id[local_index] != local_ghost_descriptors[local_index].particle_id) {
-        throw std::invalid_argument("executeBlockingGhostRefreshExchange: send payload entity_id does not match owned descriptor particle_id");
-      }
-    }
-
-    GhostExchangeBuffer send_buffer;
-    send_buffer.packFrom(
-        plan.outbound_transfers[slot],
-        authoritative_local_state,
-        plan.send_local_indices_by_neighbor[slot]);
-
-    const std::uint64_t send_size = static_cast<std::uint64_t>(send_buffer.byteSize());
-    std::uint64_t recv_size = 0;
+    const auto send_bytes = send_buffers[slot].encodedBytes();
+    const std::uint64_t send_size = core::checkedIntegralNarrow<std::uint64_t>(
+        send_bytes.size(), "ghost refresh payload send size");
+    std::uint64_t recv_size = 0U;
     const int peer_rank = plan.neighbor_ranks[slot];
-    MPI_Sendrecv(
-        &send_size,
-        1,
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_size_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
-        &recv_size,
-        1,
-        MPI_UINT64_T,
-        peer_rank,
-        ghostExchangeSequencedTag(k_size_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
-        MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-
-    if (send_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        recv_size > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("executeBlockingGhostRefreshExchange: ghost payload exceeds MPI int count limit");
+    if (MPI_Sendrecv(
+            const_cast<std::uint64_t*>(&send_size), 1, MPI_UINT64_T,
+            peer_rank,
+            ghostExchangeSequencedTag(
+                k_size_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            &recv_size, 1, MPI_UINT64_T,
+            peer_rank,
+            ghostExchangeSequencedTag(
+                k_size_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchange: payload-size Sendrecv failed");
     }
 
-    std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(recv_size));
-    const auto send_bytes = send_buffer.encodedBytes();
-    MPI_Sendrecv(
-        const_cast<std::uint8_t*>(send_bytes.data()),
-        static_cast<int>(send_bytes.size()),
-        MPI_BYTE,
-        peer_rank,
-        ghostExchangeSequencedTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
-        recv_bytes.data(),
-        static_cast<int>(recv_bytes.size()),
-        MPI_BYTE,
-        peer_rank,
-        ghostExchangeSequencedTag(k_payload_tag_base, mpi_context.worldRank(), peer_rank, plan.exchange_sequence),
-        MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-
-    GhostExchangeBuffer recv_buffer;
-    recv_buffer.replaceEncodedBytes(std::move(recv_bytes));
-    const std::size_t old_received_count = result.received_ghosts.size();
-    recv_buffer.unpackAppendTo(plan.inbound_transfers[slot], result.received_ghosts);
-    for (std::size_t i = 0; i < plan.recv_local_indices_by_neighbor[slot].size(); ++i) {
-      const std::uint32_t local_index = plan.recv_local_indices_by_neighbor[slot][i];
-      if (local_index >= local_ghost_descriptors.size()) {
-        throw std::out_of_range("executeBlockingGhostRefreshExchange: receive descriptor index is outside residency table");
-      }
-      if (result.received_ghosts.entity_id[old_received_count + i] !=
-          local_ghost_descriptors[local_index].particle_id) {
-        throw std::invalid_argument("executeBlockingGhostRefreshExchange: received ghost entity_id does not match receive descriptor particle_id");
+    std::vector<std::uint8_t> recv_bytes;
+    int payload_send_count = 0;
+    int payload_recv_count = 0;
+    std::exception_ptr peer_local_failure = first_protocol_failure;
+    if (peer_local_failure == nullptr) {
+      try {
+        payload_send_count = core::checkedIntegralNarrow<int>(
+            send_size, "ghost refresh payload send MPI count");
+        const std::size_t checked_recv_size = core::checkedIntegralNarrow<std::size_t>(
+            recv_size, "ghost refresh payload receive size");
+        payload_recv_count = core::checkedIntegralNarrow<int>(
+            checked_recv_size, "ghost refresh payload receive MPI count");
+        recv_bytes.resize(checked_recv_size);
+        injectMpiTestFault(mpi_context, "ghost_payload_post_metadata");
+      } catch (...) {
+        peer_local_failure = std::current_exception();
+        if (first_protocol_failure == nullptr) {
+          first_protocol_failure = peer_local_failure;
+        }
       }
     }
-    result.sent_bytes += send_size;
-    result.received_bytes += recv_size;
+
+    int local_ready = peer_local_failure == nullptr ? 1 : 0;
+    int peer_ready = 0;
+    if (MPI_Sendrecv(
+            &local_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_ready_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            &peer_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_ready_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchange: payload-readiness Sendrecv failed");
+    }
+    if (local_ready == 0 || peer_ready == 0) {
+      if (peer_ready == 0) {
+        record_peer_failure(peer_rank, "payload preparation");
+      }
+      continue;
+    }
+
+    if (MPI_Sendrecv(
+            send_bytes.empty() ? nullptr : const_cast<std::uint8_t*>(send_bytes.data()),
+            payload_send_count,
+            MPI_BYTE, peer_rank,
+            ghostExchangeSequencedTag(
+                k_payload_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            recv_bytes.empty() ? nullptr : recv_bytes.data(),
+            payload_recv_count,
+            MPI_BYTE, peer_rank,
+            ghostExchangeSequencedTag(
+                k_payload_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchange: ghost payload Sendrecv failed");
+    }
+
+    peer_local_failure = nullptr;
+    try {
+      GhostExchangeBuffer recv_buffer;
+      recv_buffer.replaceEncodedBytes(std::move(recv_bytes));
+      const std::size_t old_received_count = result.received_ghosts.size();
+      recv_buffer.unpackAppendTo(
+          plan.inbound_transfers[slot], result.received_ghosts);
+      for (std::size_t i = 0;
+           i < plan.recv_local_indices_by_neighbor[slot].size(); ++i) {
+        const std::uint32_t local_index =
+            plan.recv_local_indices_by_neighbor[slot][i];
+        if (local_index >= local_ghost_descriptors.size()) {
+          throw std::out_of_range(
+              "executeBlockingGhostRefreshExchange: receive descriptor index is outside residency table");
+        }
+        if (result.received_ghosts.entity_id[old_received_count + i] !=
+            local_ghost_descriptors[local_index].particle_id) {
+          throw std::invalid_argument(
+              "executeBlockingGhostRefreshExchange: received ghost entity_id does not match receive descriptor particle_id");
+        }
+      }
+      injectMpiTestFault(mpi_context, "ghost_payload_post_payload");
+      result.sent_bytes = core::checkedSizeAdd(
+          core::checkedIntegralNarrow<std::size_t>(
+              result.sent_bytes, "ghost refresh sent byte accumulator"),
+          core::checkedIntegralNarrow<std::size_t>(
+              send_size, "ghost refresh sent byte count"),
+          "ghost refresh sent byte aggregate");
+      result.received_bytes = core::checkedSizeAdd(
+          core::checkedIntegralNarrow<std::size_t>(
+              result.received_bytes, "ghost refresh received byte accumulator"),
+          core::checkedIntegralNarrow<std::size_t>(
+              recv_size, "ghost refresh received byte count"),
+          "ghost refresh received byte aggregate");
+    } catch (...) {
+      peer_local_failure = std::current_exception();
+      if (first_protocol_failure == nullptr) {
+        first_protocol_failure = peer_local_failure;
+      }
+    }
+
+    local_ready = peer_local_failure == nullptr ? 1 : 0;
+    peer_ready = 0;
+    if (MPI_Sendrecv(
+            &local_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_decode_ready_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            &peer_ready, 1, MPI_INT, peer_rank,
+            ghostExchangeSequencedTag(
+                k_decode_ready_tag_base, mpi_context.worldRank(), peer_rank,
+                plan.exchange_sequence),
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "executeBlockingGhostRefreshExchange: payload-decode readiness Sendrecv failed");
+    }
+    if (peer_ready == 0) {
+      record_peer_failure(peer_rank, "payload decode/validation");
+    }
   }
+
+  mpi_context.rethrowCollectivePreparationFailure(
+      first_protocol_failure,
+      "ghost refresh sequential peer payload exchange");
   return result;
 #else
-  throw std::runtime_error("executeBlockingGhostRefreshExchange: MPI support is not compiled in");
+  throw std::runtime_error(
+      "executeBlockingGhostRefreshExchange: MPI support is not compiled in");
 #endif
 }
-
 
 bool RankDeviceAssignment::isValid() const noexcept {
   if (requested_device_count < 0 || visible_device_count < 0 || active_device_count < 0) {

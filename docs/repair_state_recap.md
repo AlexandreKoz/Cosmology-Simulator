@@ -2096,3 +2096,33 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   silently using the API default `gamma=5/3` during topology changes.
 - Broad PM/tree/FFT/migration/I/O/hydro/analysis reservation coverage and RSS/PSS
   reconciliation remain explicit M1C handoff items.
+
+## 2026-08-30 MPI P1 count and collective-safety closure
+
+- Added one lower-layer checked bounded-round planner for classic MPI
+  counts/displacements. Logical totals/prefixes remain wide while every payload
+  round is representable; a conservative internal transport ceiling keeps
+  communication scratch bounded.
+- Repaired particle and AMR-patch migration, global decomposition gathering,
+  hydro boundary advertisement gathering, TreePM zoom field gathering, and the
+  sharded source-runtime exchange so logical traffic is not limited by one
+  `MPI_*v` `int` displacement domain.
+- Repaired `MpiContext::gatherBytesToRoot` and
+  `broadcastBytesFromRoot` so receive allocation/preparation is globally agreed
+  before payload communication.
+- Added lower-layer collective preparation coordination and pairwise ghost
+  readiness handshakes. Rank-local allocation/validation failure after metadata
+  now suppresses the matching payload phase coherently; sequential ghost
+  schedules continue servicing later peer handshakes before raising the
+  distributed failure.
+- The bounded adjacent review moved compact rebalance cut samples, exact
+  ownership hash redistribution, tree-pseudo wire gathering, hydro conservative
+  flux corrections, and hydro ghost request/payload gathers onto the same
+  bounded/coordination rules.
+- Added synthetic-limit planner tests and MPI integration regressions for
+  bounded rounds, one-rank post-control rejection, and later-peer liveness after
+  a pairwise preparation failure.
+- No physics, force law, hydro method, ownership authority, configuration
+  schema, HDF5 schema, or restart schema was changed by this repair. Real
+  multi-rank execution remains a separate validation requirement when an MPI
+  development/runtime environment is available.

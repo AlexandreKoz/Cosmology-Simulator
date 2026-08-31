@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/physics/cooling_heating.hpp"
@@ -110,59 +112,64 @@ struct HydroBoundaryCellAdvertisement {
 [[nodiscard]] std::vector<HydroBoundaryCellAdvertisement> exchangeHydroBoundaryAdvertisements(
     const parallel::MpiContext& mpi_context,
     std::span<const HydroBoundaryCellAdvertisement> local_records) {
-  for (const HydroBoundaryCellAdvertisement& record : local_records) {
-    if (!finiteBoundaryAdvertisement(record)) {
-      throw std::invalid_argument("hydro boundary advertisement is invalid");
+  std::exception_ptr local_failure;
+  try {
+    for (const HydroBoundaryCellAdvertisement& record : local_records) {
+      if (!finiteBoundaryAdvertisement(record)) {
+        throw std::invalid_argument("hydro boundary advertisement is invalid");
+      }
+      if (record.owner_rank != mpi_context.worldRank()) {
+        throw std::invalid_argument("hydro boundary advertisement owner rank does not match MPI context");
+      }
     }
-    if (record.owner_rank != mpi_context.worldRank()) {
-      throw std::invalid_argument("hydro boundary advertisement owner rank does not match MPI context");
-    }
+  } catch (...) {
+    local_failure = std::current_exception();
   }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "hydro boundary advertisement local validation");
   if (!mpi_context.isEnabled()) {
     return std::vector<HydroBoundaryCellAdvertisement>(local_records.begin(), local_records.end());
   }
 #if COSMOSIM_ENABLE_MPI
-  const int world_size = mpi_context.worldSize();
-  const std::uint64_t local_count = static_cast<std::uint64_t>(local_records.size());
-  std::vector<std::uint64_t> counts64(static_cast<std::size_t>(world_size), 0U);
-  MPI_Allgather(
-      const_cast<std::uint64_t*>(&local_count),
-      1,
-      MPI_UINT64_T,
-      counts64.data(),
-      1,
-      MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-  std::uint64_t total_records = 0;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::uint64_t bytes = counts64[static_cast<std::size_t>(rank)] * sizeof(HydroBoundaryCellAdvertisement);
-    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("hydro boundary advertisement exchange byte count exceeds MPI int limit");
-    }
-    recv_counts[static_cast<std::size_t>(rank)] = static_cast<int>(bytes);
-    if (rank > 0) {
-      recv_displs[static_cast<std::size_t>(rank)] =
-          recv_displs[static_cast<std::size_t>(rank - 1)] + recv_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_records += counts64[static_cast<std::size_t>(rank)];
+  std::span<const std::uint8_t> local_bytes;
+  local_failure = nullptr;
+  try {
+    const std::size_t byte_count = core::checkedSizeMultiply(
+        local_records.size(), sizeof(HydroBoundaryCellAdvertisement),
+        "hydro boundary advertisement local byte count");
+    local_bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(local_records.data()), byte_count);
+  } catch (...) {
+    local_failure = std::current_exception();
   }
-  std::vector<HydroBoundaryCellAdvertisement> result(static_cast<std::size_t>(total_records));
-  MPI_Allgatherv(
-      const_cast<HydroBoundaryCellAdvertisement*>(local_records.data()),
-      static_cast<int>(local_records.size() * sizeof(HydroBoundaryCellAdvertisement)),
-      MPI_BYTE,
-      result.data(),
-      recv_counts.data(),
-      recv_displs.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-  for (const HydroBoundaryCellAdvertisement& record : result) {
-    if (!finiteBoundaryAdvertisement(record) || record.owner_rank >= world_size) {
-      throw std::runtime_error("hydro boundary advertisement exchange returned invalid metadata");
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "hydro boundary advertisement byte framing");
+
+  const std::vector<std::uint8_t> recv_bytes =
+      mpi_context.allgatherBytesBounded(local_bytes);
+  std::vector<HydroBoundaryCellAdvertisement> result;
+  local_failure = nullptr;
+  try {
+    if (recv_bytes.size() % sizeof(HydroBoundaryCellAdvertisement) != 0U) {
+      throw std::runtime_error(
+          "hydro boundary advertisement exchange returned a partial record");
     }
+    result.resize(recv_bytes.size() / sizeof(HydroBoundaryCellAdvertisement));
+    if (!recv_bytes.empty()) {
+      std::memcpy(result.data(), recv_bytes.data(), recv_bytes.size());
+    }
+    for (const HydroBoundaryCellAdvertisement& record : result) {
+      if (!finiteBoundaryAdvertisement(record) ||
+          record.owner_rank >= mpi_context.worldSize()) {
+        throw std::runtime_error(
+            "hydro boundary advertisement exchange returned invalid metadata");
+      }
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
   }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "hydro boundary advertisement reassembly validation");
   return result;
 #else
   throw std::runtime_error("hydro boundary advertisement exchange requires MPI support when MPI context is enabled");

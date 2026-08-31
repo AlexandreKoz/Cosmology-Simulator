@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <numeric>
@@ -868,6 +869,47 @@ std::vector<core::AmrPatchMigrationRecord> deserializeAmrPatchMigrationRecords(
 
 }  // namespace migration_wire
 
+template <typename TRecord, typename TSerialize, typename TDeserialize>
+[[nodiscard]] std::vector<TRecord> exchangeRuntimeMigrationPayloads(
+    const parallel::MpiContext& mpi_context,
+    const std::vector<std::vector<TRecord>>& records_by_rank,
+    std::string_view phase_name,
+    TSerialize&& serialize,
+    TDeserialize&& deserialize) {
+  std::vector<std::vector<std::uint8_t>> send_payloads;
+  std::exception_ptr local_failure;
+  try {
+    send_payloads.resize(records_by_rank.size());
+    for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
+      send_payloads[rank] = serialize(records_by_rank[rank]);
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, phase_name);
+
+  const auto recv_payloads =
+      parallel::exchangeBoundedAlltoallBytes(mpi_context, send_payloads);
+
+  std::vector<TRecord> inbound;
+  local_failure = nullptr;
+  try {
+    for (const auto& payload : recv_payloads) {
+      auto decoded = deserialize(std::span<const std::uint8_t>(payload));
+      inbound.insert(
+          inbound.end(),
+          std::make_move_iterator(decoded.begin()),
+          std::make_move_iterator(decoded.end()));
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, phase_name);
+  return inbound;
+}
+
 std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
     const parallel::MpiContext& mpi_context,
     const std::vector<std::vector<core::ParticleMigrationRecord>>& records_by_rank) {
@@ -881,55 +923,16 @@ std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecor
     throw std::runtime_error("runtime particle migration execution requires MPI for world_size > 1");
   }
 #if COSMOSIM_ENABLE_MPI
-  std::vector<std::vector<std::uint8_t>> send_payloads(records_by_rank.size());
-  std::vector<int> send_counts(records_by_rank.size(), 0);
-  for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
-    send_payloads[rank] = migration_wire::serializeMigrationRecords(records_by_rank[rank]);
-    if (send_payloads[rank].size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("particle migration payload exceeds MPI int byte-count limit");
-    }
-    send_counts[rank] = static_cast<int>(send_payloads[rank].size());
-  }
-  std::vector<int> recv_counts(send_counts.size(), 0);
-  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-
-  std::vector<int> send_offsets(send_counts.size(), 0);
-  std::vector<int> recv_offsets(recv_counts.size(), 0);
-  int total_send = 0;
-  int total_recv = 0;
-  for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
-    send_offsets[rank] = total_send;
-    recv_offsets[rank] = total_recv;
-    total_send += send_counts[rank];
-    total_recv += recv_counts[rank];
-  }
-  std::vector<std::uint8_t> send_bytes(static_cast<std::size_t>(total_send));
-  for (std::size_t rank = 0; rank < send_payloads.size(); ++rank) {
-    if (!send_payloads[rank].empty()) {
-      std::memcpy(send_bytes.data() + send_offsets[rank], send_payloads[rank].data(), send_payloads[rank].size());
-    }
-  }
-  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_recv));
-  MPI_Alltoallv(
-      send_bytes.data(),
-      send_counts.data(),
-      send_offsets.data(),
-      MPI_BYTE,
-      recv_bytes.data(),
-      recv_counts.data(),
-      recv_offsets.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-
-  std::vector<core::ParticleMigrationRecord> inbound;
-  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
-    const auto offset = static_cast<std::size_t>(recv_offsets[rank]);
-    const auto count = static_cast<std::size_t>(recv_counts[rank]);
-    auto decoded = migration_wire::deserializeMigrationRecords(
-        std::span<const std::uint8_t>(recv_bytes.data() + offset, count));
-    inbound.insert(inbound.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
-  }
-  return inbound;
+  return exchangeRuntimeMigrationPayloads<core::ParticleMigrationRecord>(
+      mpi_context,
+      records_by_rank,
+      "particle migration exchange preparation/decode",
+      [](std::span<const core::ParticleMigrationRecord> records) {
+        return migration_wire::serializeMigrationRecords(records);
+      },
+      [](std::span<const std::uint8_t> bytes) {
+        return migration_wire::deserializeMigrationRecords(bytes);
+      });
 #else
   throw std::runtime_error("runtime particle migration execution requires an MPI-enabled build");
 #endif
@@ -948,55 +951,16 @@ std::vector<core::AmrPatchMigrationRecord> exchangeRuntimeAmrPatchMigrationRecor
     throw std::runtime_error("runtime AMR patch migration execution requires MPI for world_size > 1");
   }
 #if COSMOSIM_ENABLE_MPI
-  std::vector<std::vector<std::uint8_t>> send_payloads(records_by_rank.size());
-  std::vector<int> send_counts(records_by_rank.size(), 0);
-  for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
-    send_payloads[rank] = migration_wire::serializeAmrPatchMigrationRecords(records_by_rank[rank]);
-    if (send_payloads[rank].size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("AMR patch migration payload exceeds MPI int byte-count limit");
-    }
-    send_counts[rank] = static_cast<int>(send_payloads[rank].size());
-  }
-  std::vector<int> recv_counts(send_counts.size(), 0);
-  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-
-  std::vector<int> send_offsets(send_counts.size(), 0);
-  std::vector<int> recv_offsets(recv_counts.size(), 0);
-  int total_send = 0;
-  int total_recv = 0;
-  for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
-    send_offsets[rank] = total_send;
-    recv_offsets[rank] = total_recv;
-    total_send += send_counts[rank];
-    total_recv += recv_counts[rank];
-  }
-  std::vector<std::uint8_t> send_bytes(static_cast<std::size_t>(total_send));
-  for (std::size_t rank = 0; rank < send_payloads.size(); ++rank) {
-    if (!send_payloads[rank].empty()) {
-      std::memcpy(send_bytes.data() + send_offsets[rank], send_payloads[rank].data(), send_payloads[rank].size());
-    }
-  }
-  std::vector<std::uint8_t> recv_bytes(static_cast<std::size_t>(total_recv));
-  MPI_Alltoallv(
-      send_bytes.data(),
-      send_counts.data(),
-      send_offsets.data(),
-      MPI_BYTE,
-      recv_bytes.data(),
-      recv_counts.data(),
-      recv_offsets.data(),
-      MPI_BYTE,
-      MPI_COMM_WORLD);
-
-  std::vector<core::AmrPatchMigrationRecord> inbound;
-  for (std::size_t rank = 0; rank < recv_counts.size(); ++rank) {
-    const auto offset = static_cast<std::size_t>(recv_offsets[rank]);
-    const auto count = static_cast<std::size_t>(recv_counts[rank]);
-    auto decoded = migration_wire::deserializeAmrPatchMigrationRecords(
-        std::span<const std::uint8_t>(recv_bytes.data() + offset, count));
-    inbound.insert(inbound.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
-  }
-  return inbound;
+  return exchangeRuntimeMigrationPayloads<core::AmrPatchMigrationRecord>(
+      mpi_context,
+      records_by_rank,
+      "AMR patch migration exchange preparation/decode",
+      [](std::span<const core::AmrPatchMigrationRecord> records) {
+        return migration_wire::serializeAmrPatchMigrationRecords(records);
+      },
+      [](std::span<const std::uint8_t> bytes) {
+        return migration_wire::deserializeAmrPatchMigrationRecords(bytes);
+      });
 #else
   throw std::runtime_error("runtime AMR patch migration execution requires an MPI-enabled build");
 #endif

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -13,6 +15,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -84,96 +87,171 @@ makeRuntimeEffectiveEosTable(
 
 struct ShardedUint64Exchange {
   std::vector<std::uint64_t> values;
-  std::vector<int> recv_counts;
-  std::vector<int> recv_displacements;
+  std::vector<std::size_t> recv_counts;
+  std::vector<std::size_t> recv_displacements;
 };
 
 [[nodiscard]] ShardedUint64Exchange exchangeShardedUint64Records(
     const parallel::MpiContext& mpi_context,
     const std::vector<std::vector<std::uint64_t>>& values_by_rank,
     std::size_t record_width) {
-  if (record_width == 0U) {
-    throw std::invalid_argument("sharded uint64 exchange requires nonzero record width");
-  }
   const int world_size = mpi_context.worldSize();
-  if (world_size <= 0 || values_by_rank.size() != static_cast<std::size_t>(world_size)) {
-    throw std::invalid_argument("sharded uint64 exchange rank extent mismatch");
-  }
-  for (const auto& values : values_by_rank) {
-    if (values.size() % record_width != 0U) {
-      throw std::invalid_argument("sharded uint64 exchange received a partial record");
+  std::exception_ptr local_failure;
+  try {
+    if (record_width == 0U) {
+      throw std::invalid_argument("sharded uint64 exchange requires nonzero record width");
     }
+    if (world_size <= 0 || values_by_rank.size() != static_cast<std::size_t>(world_size)) {
+      throw std::invalid_argument("sharded uint64 exchange rank extent mismatch");
+    }
+    for (const auto& values : values_by_rank) {
+      if (values.size() % record_width != 0U) {
+        throw std::invalid_argument("sharded uint64 exchange received a partial record");
+      }
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
   }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "sharded uint64 local framing validation");
 
   if (!mpi_context.isEnabled()) {
     return ShardedUint64Exchange{
         .values = values_by_rank.front(),
-        .recv_counts = {static_cast<int>(values_by_rank.front().size())},
-        .recv_displacements = {0},
+        .recv_counts = {values_by_rank.front().size()},
+        .recv_displacements = {0U},
     };
   }
 #if COSMOSIM_ENABLE_MPI
-  std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> send_displacements(static_cast<std::size_t>(world_size), 0);
-  std::size_t total_send = 0U;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const std::size_t count = values_by_rank[static_cast<std::size_t>(rank)].size();
-    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::overflow_error("sharded uint64 send count exceeds MPI int range");
+  std::vector<std::uint64_t> send_counts64;
+  std::vector<std::uint64_t> recv_counts64;
+  local_failure = nullptr;
+  try {
+    send_counts64.resize(static_cast<std::size_t>(world_size), 0U);
+    recv_counts64.resize(static_cast<std::size_t>(world_size), 0U);
+    for (std::size_t rank = 0; rank < values_by_rank.size(); ++rank) {
+      send_counts64[rank] = core::checkedIntegralNarrow<std::uint64_t>(
+          values_by_rank[rank].size(), "sharded uint64 logical send count");
     }
-    send_counts[static_cast<std::size_t>(rank)] = static_cast<int>(count);
-    if (rank > 0) {
-      send_displacements[static_cast<std::size_t>(rank)] =
-          send_displacements[static_cast<std::size_t>(rank - 1)] +
-          send_counts[static_cast<std::size_t>(rank - 1)];
-    }
-    total_send += count;
+  } catch (...) {
+    local_failure = std::current_exception();
   }
-  if (total_send > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("sharded uint64 aggregate send count exceeds MPI int range");
-  }
-  std::vector<std::uint64_t> send_values;
-  send_values.reserve(total_send);
-  for (const auto& values : values_by_rank) {
-    send_values.insert(send_values.end(), values.begin(), values.end());
-  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "sharded uint64 count-buffer preparation");
 
-  std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-  const int counts_status = MPI_Alltoall(
-      send_counts.data(), 1, MPI_INT,
-      recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-  if (counts_status != MPI_SUCCESS) {
+  if (MPI_Alltoall(
+          send_counts64.data(), 1, MPI_UINT64_T,
+          recv_counts64.data(), 1, MPI_UINT64_T,
+          MPI_COMM_WORLD) != MPI_SUCCESS) {
     throw std::runtime_error("sharded uint64 MPI_Alltoall count exchange failed");
   }
-  std::vector<int> recv_displacements(static_cast<std::size_t>(world_size), 0);
-  std::size_t total_recv = 0U;
-  for (int rank = 0; rank < world_size; ++rank) {
-    const int count = recv_counts[static_cast<std::size_t>(rank)];
-    if (count < 0 || static_cast<std::size_t>(count) % record_width != 0U) {
-      throw std::runtime_error("sharded uint64 receive count violates record framing");
+
+  parallel::BoundedMpiTransferPlan send_plan;
+  parallel::BoundedMpiTransferPlan recv_plan;
+  std::vector<std::uint64_t> recv_values;
+  std::vector<std::uint64_t> send_round_buffer;
+  std::vector<std::uint64_t> recv_round_buffer;
+  parallel::BoundedMpiRoundLayout zero_round;
+  local_failure = nullptr;
+  try {
+    std::vector<std::size_t> send_counts(send_counts64.size(), 0U);
+    std::vector<std::size_t> recv_counts(recv_counts64.size(), 0U);
+    for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
+      send_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+          send_counts64[rank], "sharded uint64 send count");
+      recv_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
+          recv_counts64[rank], "sharded uint64 receive count");
+      if (recv_counts[rank] % record_width != 0U) {
+        throw std::runtime_error("sharded uint64 receive count violates record framing");
+      }
     }
-    if (rank > 0) {
-      recv_displacements[static_cast<std::size_t>(rank)] =
-          recv_displacements[static_cast<std::size_t>(rank - 1)] +
-          recv_counts[static_cast<std::size_t>(rank - 1)];
+    const std::size_t round_bytes = parallel::mpiTransportRoundLimitBytes();
+    const std::size_t round_elements = round_bytes / sizeof(std::uint64_t);
+    if (round_elements == 0U) {
+      throw std::runtime_error("sharded uint64 MPI transport round is smaller than one uint64 element");
     }
-    total_recv += static_cast<std::size_t>(count);
+    send_plan = parallel::planBoundedMpiTransferRounds(
+        send_counts,
+        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        round_elements);
+    recv_plan = parallel::planBoundedMpiTransferRounds(
+        recv_counts,
+        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        round_elements);
+    recv_values.resize(recv_plan.logical_total_count, 0U);
+
+    std::size_t maximum_send_round = 0U;
+    for (const auto& round : send_plan.rounds) {
+      maximum_send_round = std::max(maximum_send_round, round.round_count);
+    }
+    std::size_t maximum_recv_round = 0U;
+    for (const auto& round : recv_plan.rounds) {
+      maximum_recv_round = std::max(maximum_recv_round, round.round_count);
+    }
+    send_round_buffer.resize(maximum_send_round, 0U);
+    recv_round_buffer.resize(maximum_recv_round, 0U);
+    zero_round.counts.resize(static_cast<std::size_t>(world_size), 0);
+    zero_round.displacements.resize(static_cast<std::size_t>(world_size), 0);
+    zero_round.logical_offsets.resize(static_cast<std::size_t>(world_size), 0U);
+  } catch (...) {
+    local_failure = std::current_exception();
   }
-  if (total_recv > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error("sharded uint64 aggregate receive count exceeds MPI int range");
-  }
-  std::vector<std::uint64_t> recv_values(total_recv, 0U);
-  const int payload_status = MPI_Alltoallv(
-      send_values.data(), send_counts.data(), send_displacements.data(), MPI_UINT64_T,
-      recv_values.data(), recv_counts.data(), recv_displacements.data(), MPI_UINT64_T,
-      MPI_COMM_WORLD);
-  if (payload_status != MPI_SUCCESS) {
-    throw std::runtime_error("sharded uint64 MPI_Alltoallv payload exchange failed");
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_failure, "sharded uint64 post-count payload preparation");
+
+  const std::uint64_t local_round_count = static_cast<std::uint64_t>(
+      std::max(send_plan.rounds.size(), recv_plan.rounds.size()));
+  const std::uint64_t global_round_count =
+      mpi_context.allreduceMaxUint64(local_round_count);
+  for (std::uint64_t round_index = 0U; round_index < global_round_count;
+       ++round_index) {
+    const auto& send_round = round_index < send_plan.rounds.size()
+        ? send_plan.rounds[static_cast<std::size_t>(round_index)]
+        : zero_round;
+    const auto& recv_round = round_index < recv_plan.rounds.size()
+        ? recv_plan.rounds[static_cast<std::size_t>(round_index)]
+        : zero_round;
+    for (std::size_t peer = 0; peer < send_round.counts.size(); ++peer) {
+      const std::size_t count = static_cast<std::size_t>(send_round.counts[peer]);
+      if (count == 0U) {
+        continue;
+      }
+      const std::size_t copy_bytes = count * sizeof(std::uint64_t);
+      std::memcpy(
+          send_round_buffer.data() +
+              static_cast<std::size_t>(send_round.displacements[peer]),
+          values_by_rank[peer].data() + send_round.logical_offsets[peer],
+          copy_bytes);
+    }
+    if (MPI_Alltoallv(
+            send_round_buffer.empty() ? nullptr : send_round_buffer.data(),
+            send_round.counts.data(), send_round.displacements.data(), MPI_UINT64_T,
+            recv_round_buffer.empty() ? nullptr : recv_round_buffer.data(),
+            recv_round.counts.data(), recv_round.displacements.data(), MPI_UINT64_T,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("sharded uint64 bounded MPI_Alltoallv payload exchange failed");
+    }
+    for (std::size_t peer = 0; peer < recv_round.counts.size(); ++peer) {
+      const std::size_t count = static_cast<std::size_t>(recv_round.counts[peer]);
+      if (count == 0U) {
+        continue;
+      }
+      // The bounded plans already proved these prefixes and round extents.
+      const std::size_t destination =
+          recv_plan.logical_displacements[peer] +
+          recv_round.logical_offsets[peer];
+      const std::size_t copy_bytes = count * sizeof(std::uint64_t);
+      std::memcpy(
+          recv_values.data() + destination,
+          recv_round_buffer.data() +
+              static_cast<std::size_t>(recv_round.displacements[peer]),
+          copy_bytes);
+    }
   }
   return ShardedUint64Exchange{
       .values = std::move(recv_values),
-      .recv_counts = std::move(recv_counts),
-      .recv_displacements = std::move(recv_displacements),
+      .recv_counts = std::move(recv_plan.logical_counts),
+      .recv_displacements = std::move(recv_plan.logical_displacements),
   };
 #else
   throw std::runtime_error("distributed sharded particle-ID registry requires an MPI build");
@@ -251,10 +329,10 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
       std::vector<ReceivedCandidate> shard_candidates;
       shard_candidates.reserve(received.values.size() / 4U);
       for (int origin_rank = 0; origin_rank < world_size; ++origin_rank) {
-        const int begin = received.recv_displacements[static_cast<std::size_t>(origin_rank)];
-        const int count = received.recv_counts[static_cast<std::size_t>(origin_rank)];
-        for (int offset = 0; offset < count; offset += 4) {
-          const std::size_t index = static_cast<std::size_t>(begin + offset);
+        const std::size_t begin = received.recv_displacements[static_cast<std::size_t>(origin_rank)];
+        const std::size_t count = received.recv_counts[static_cast<std::size_t>(origin_rank)];
+        for (std::size_t offset = 0; offset < count; offset += 4U) {
+          const std::size_t index = begin + offset;
           const std::uint64_t ordinal64 = received.values[index + 3U];
           if (ordinal64 > std::numeric_limits<std::uint32_t>::max()) {
             throw std::runtime_error("particle-ID collision ordinal wire value overflow");
