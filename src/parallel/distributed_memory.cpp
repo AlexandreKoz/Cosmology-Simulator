@@ -5104,7 +5104,11 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
   } else if (local_preparation_failure != nullptr) {
     std::rethrow_exception(local_preparation_failure);
   }
-  if (plan.neighbor_ranks.empty()) {
+  // A rank with no local peer payload still remains a participant in the
+  // MPI-world protocol: MPI-enabled ranks must reach the final distributed
+  // failure agreement below even when this peer loop is empty. The serial
+  // no-neighbor path can return locally because it has no world collective.
+  if (!mpi_context.isEnabled() && plan.neighbor_ranks.empty()) {
     return result;
   }
 

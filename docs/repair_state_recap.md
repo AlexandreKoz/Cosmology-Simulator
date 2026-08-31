@@ -2126,3 +2126,24 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   schema, HDF5 schema, or restart schema was changed by this repair. Real
   multi-rank execution remains a separate validation requirement when an MPI
   development/runtime environment is available.
+
+## 2026-08-31 MPI P1 post-campaign sparse-participation closure
+
+- Closed the post-campaign sparse ghost-refresh divergence: an MPI-enabled rank
+  with zero payload neighbors no longer returns before the final world-wide
+  protocol failure agreement. Empty ranks perform no payload `Sendrecv`, but
+  remain MPI-world participants through protocol completion.
+- Added three-rank sparse-topology regressions with ranks 0/1 exchanging ghost
+  payloads and rank 2 carrying no payload neighbor. The suite covers both normal
+  completion and deterministic rank-0 post-metadata preparation rejection, with
+  all ranks observing coordinated failure and reaching a post-test barrier.
+- Extended the production distributed gas-cell migration integration test to
+  force an 8-byte test transport ceiling, ensuring the real bounded Alltoallv
+  path executes multiple rounds while existing restart, identity, count, and
+  metal-mass invariants remain unchanged.
+- Added the missing `PROCESSORS 2` CTest scheduling metadata for the two-rank
+  collective-safety regression.
+- Migration full-wire residency remains part of the existing M1C memory-governor
+  integration handoff; this closure does not claim packet-streaming migration.
+  The pre-existing sparse TreePM classic-count boundedness handoff is likewise
+  unchanged.

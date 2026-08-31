@@ -438,6 +438,14 @@ A failed peer interaction is remembered while the rank continues the
 deterministic metadata/readiness schedule for later peers, so a later peer is
 not stranded waiting for a rank that already abandoned the protocol.
 
+Sparse ownership does not remove a rank from MPI-world protocol completion.
+After the descriptor/request phase has established the payload plan, an
+MPI-enabled rank with zero local payload neighbors skips the peer payload loop
+but still enters the final world-wide failure agreement. A local empty plan is
+therefore not a legal reason to return between world-level preparation and
+completion collectives. The non-MPI empty-plan fast path remains local because
+no distributed protocol exists in that case.
+
 Test-only environment seams compiled under `COSMOSIM_ENABLE_TESTS` can force a
 small transport ceiling and deterministic preparation rejection. They do not
 change production configuration, restart state, scientific fields, ownership

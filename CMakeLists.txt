@@ -1194,6 +1194,7 @@ if(COSMOSIM_ENABLE_TESTS)
       integration_mpi_collective_safety_two_rank
       integration_mpi_collective_safety_three_rank
       PROPERTIES LABELS "mpi;distributed;correctness;collective_safety")
+    set_tests_properties(integration_mpi_collective_safety_two_rank PROPERTIES PROCESSORS 2)
     set_tests_properties(integration_mpi_collective_safety_three_rank PROPERTIES PROCESSORS 3)
 
     add_executable(test_integration_pm_slab_halo_exchange_mpi tests/integration/test_pm_slab_halo_exchange_mpi.cpp)

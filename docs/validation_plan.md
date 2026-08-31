@@ -497,7 +497,18 @@ run at two ranks and three ranks. The test forces tiny bounded rounds, injects a
 single-rank failure after collective control metadata, verifies coherent
 failure without entering an unmatched payload phase, and exercises a sequential
 ghost-peer schedule where a post-metadata rejection must not strand a later
-peer.
+peer. The three-rank case also uses a deliberately sparse payload topology in
+which ranks 0 and 1 exchange ghosts while rank 2 has no payload neighbor. Both
+normal success and an injected rank-0 payload-preparation failure must leave
+rank 2 participating in the final world agreement; a post-operation barrier is
+the liveness sentinel.
+
+`integration_distributed_gas_cell_migration_mpi_two_rank` sets the test-only
+`COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES` ceiling to 8 bytes. The serialized
+migration packets necessarily exceed that ceiling, forcing the real production
+bounded `MPI_Alltoallv` transport through multiple rounds while the existing
+restart, stable gas-cell identity, global cell-count, and metal-mass assertions
+verify that transport chunking does not alter authoritative state.
 
 These tests are specifically designed to prove protocol correctness without
 `INT_MAX`-sized buffers or deliberate OOM. Runtime MPI acceptance is evidence

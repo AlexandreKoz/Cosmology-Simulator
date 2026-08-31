@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <sstream>
@@ -146,6 +147,11 @@ int main() {
     return 0;
   }
 
+  // The serialized migration wire format is larger than this ceiling even for
+  // an empty peer packet, so production migration must execute more than one
+  // bounded Alltoallv payload round without changing ownership/identity truth.
+  assert(::setenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "8", 1) == 0);
+
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       configText(world_size),
       "test_distributed_gas_cell_migration_mpi");
@@ -193,6 +199,7 @@ int main() {
   const double global_metal_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(local_metal_mass);
   const double expected_global_metal_mass = 0.02 * (0.1 + 0.12 + 0.09);
   assert(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12);
+  assert(::unsetenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES") == 0);
   MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
 #endif
