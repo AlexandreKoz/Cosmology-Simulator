@@ -184,6 +184,19 @@ void MemoryReservation::commit() {
   m_state = State::kCommitted;
 }
 
+void MemoryReservation::reconcileBaselineOwnedAndRelease(
+    std::uint64_t baseline_owned_bytes) {
+  if (m_state != State::kCommitted || m_governor == nullptr) {
+    throw std::logic_error(
+        "MemoryReservation.reconcileBaselineOwnedAndRelease requires one live committed reservation");
+  }
+  m_governor->reconcileBaselineAndReleaseCommittedReservation(
+      m_memory_class, m_bytes, baseline_owned_bytes);
+  m_state = State::kReleased;
+  m_governor = nullptr;
+  m_bytes = 0U;
+}
+
 void MemoryReservation::release() noexcept {
   if (m_governor == nullptr || m_state == State::kInert || m_state == State::kReleased) {
     m_state = State::kReleased;
@@ -388,6 +401,38 @@ void MemoryGovernor::releaseCommittedReservation(
   }
   m_committed_bytes -= bytes;
   m_committed_by_class[class_index] -= bytes;
+}
+
+void MemoryGovernor::reconcileBaselineAndReleaseCommittedReservation(
+    MemoryClass memory_class,
+    std::uint64_t bytes,
+    std::uint64_t baseline_owned_bytes) {
+  std::lock_guard lock(m_mutex);
+  const std::size_t class_index = memoryClassIndex(memory_class);
+  if (m_committed_bytes < bytes || m_committed_by_class[class_index] < bytes) {
+    throw std::logic_error(
+        "MemoryGovernor committed accounting underflow during baseline reconciliation");
+  }
+
+  const std::uint64_t remaining_committed = m_committed_bytes - bytes;
+  std::uint64_t prospective = baseline_owned_bytes;
+  prospective = checkedMemoryBytesAdd(
+      prospective, m_policy.external_runtime_reserve_bytes,
+      "MemoryGovernor reconciled baseline external runtime reserve");
+  prospective = checkedMemoryBytesAdd(
+      prospective, m_policy.planned_overlap_reserve_bytes,
+      "MemoryGovernor reconciled baseline planned overlap reserve");
+  prospective = checkedMemoryBytesAdd(
+      prospective, remaining_committed,
+      "MemoryGovernor reconciled baseline remaining committed bytes");
+  prospective = checkedMemoryBytesAdd(
+      prospective, m_reserved_bytes,
+      "MemoryGovernor reconciled baseline reserved bytes");
+
+  m_committed_bytes = remaining_committed;
+  m_committed_by_class[class_index] -= bytes;
+  m_baseline_owned_bytes = baseline_owned_bytes;
+  m_peak_accounted_bytes = std::max(m_peak_accounted_bytes, prospective);
 }
 
 std::uint64_t MemoryGovernor::rawAccountedBytesLocked() const {

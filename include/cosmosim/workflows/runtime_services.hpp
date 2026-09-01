@@ -7,6 +7,7 @@
 namespace cosmosim::core {
 class MemoryGovernor;
 class ProfilerSession;
+struct MemoryReport;
 }
 
 namespace cosmosim::parallel {
@@ -30,6 +31,13 @@ struct RuntimeServices {
 // Collective-safe phase gate. Every rank must call the gate for a given phase;
 // no rank may enter the following collective phase after a peer reports a
 // local failure.
+// Reduce the current memory snapshot across ranks at an explicit workflow
+// boundary. Optional OS observations are reported only when every rank exposes
+// that metric; rank maximum remains the safety-relevant value.
+void attachDistributedMemoryTelemetry(
+    core::MemoryReport& report,
+    const RuntimeServices& services);
+
 class FailureCoordinator {
  public:
   explicit FailureCoordinator(const RuntimeServices& services) noexcept;

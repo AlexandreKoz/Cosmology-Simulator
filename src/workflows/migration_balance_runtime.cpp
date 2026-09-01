@@ -1,4 +1,7 @@
 #include "cosmosim/workflows/migration_balance_runtime.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "workflows/internal/amr_migration_payload.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 
@@ -1172,40 +1175,117 @@ void exchangeAndValidateAmrPatchPayloads(
     core::HierarchicalTimeBinScheduler& scheduler,
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const core::SimulationConfig& config,
-    const parallel::MpiContext& mpi_context,
+    const RuntimeServices& services,
     int world_rank,
     const parallel::DecompositionRuntimeMeasurements& measurements,
     std::span<const std::uint32_t> active_particle_indices,
     std::span<const std::uint64_t> expected_global_particle_ids,
     core::ProfilerSession* profiler,
     std::uint64_t step_index) {
+  const parallel::MpiContext& mpi_context = services.mpi_context;
   if (!config.parallel.decomposition_runtime_rebalance_enabled || mpi_context.worldSize() <= 1) {
     return false;
   }
   if (world_rank < 0 || world_rank >= mpi_context.worldSize()) {
     throw std::invalid_argument("runtime rebalance world_rank is outside MPI world");
   }
-  auto local_items = buildRuntimeDecompositionItems(state, config, world_rank, active_particle_indices);
-  parallel::applyRuntimeDecompositionFeedback(local_items, measurements, makeWorkflowFeedbackCoefficients(config));
-  parallel::RuntimeRebalanceConfig rebalance_config{
-      .world_size = mpi_context.worldSize(),
-      .imbalance_trigger_ratio = config.parallel.decomposition_rebalance_imbalance_trigger,
-      .memory_trigger_ratio = config.parallel.decomposition_rebalance_memory_trigger,
-      .max_migrated_load_fraction = config.parallel.decomposition_rebalance_max_migrated_load_fraction,
-      .allow_particle_migration = true,
-      .allow_amr_patch_reassignment = true,
-  };
-  auto rebalance = parallel::buildDistributedRuntimeRebalancePlan(
-      mpi_context,
-      local_items,
-      makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
-      rebalance_config);
+  parallel::RuntimeRebalancePlan rebalance;
+  {
+    // Decomposition planning is O(N_local) derived state. Keep it in a narrow
+    // physical lifetime and admit its explicit vector footprint before
+    // materialization so it cannot accidentally overlap the later migration
+    // transaction at full capacity.
+    core::MemoryReservation decomposition_reservation;
+    std::exception_ptr decomposition_admission_failure;
+    try {
+      if (services.memory_governor != nullptr) {
+        const std::size_t item_count = core::checkedSizeAdd(
+            state.particles.size(), state.patches.size(),
+            "runtime decomposition item count");
+        std::size_t planning_bytes = core::checkedSizeMultiply(
+            item_count, sizeof(parallel::DecompositionItem),
+            "runtime decomposition item bytes");
+        planning_bytes = core::checkedSizeAdd(
+            planning_bytes, state.particles.size(),
+            "runtime decomposition active-mask bytes");
+        planning_bytes = core::checkedSizeAdd(
+            planning_bytes,
+            core::checkedSizeMultiply(
+                state.patches.size(), sizeof(std::uint32_t) * 2U,
+                "runtime decomposition patch scratch bytes"),
+            "runtime decomposition planning bytes");
+        decomposition_reservation = services.memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            core::checkedIntegralNarrow<std::uint64_t>(
+                planning_bytes, "runtime decomposition planning byte width"),
+            "parallel.decomposition.plan");
+        decomposition_reservation.commit();
+      }
+    } catch (...) {
+      decomposition_admission_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        decomposition_admission_failure, "runtime decomposition memory admission");
+
+    auto local_items = buildRuntimeDecompositionItems(
+        state, config, world_rank, active_particle_indices);
+    parallel::applyRuntimeDecompositionFeedback(
+        local_items, measurements, makeWorkflowFeedbackCoefficients(config));
+    const parallel::RuntimeRebalanceConfig rebalance_config{
+        .world_size = mpi_context.worldSize(),
+        .imbalance_trigger_ratio = config.parallel.decomposition_rebalance_imbalance_trigger,
+        .memory_trigger_ratio = config.parallel.decomposition_rebalance_memory_trigger,
+        .max_migrated_load_fraction = config.parallel.decomposition_rebalance_max_migrated_load_fraction,
+        .allow_particle_migration = true,
+        .allow_amr_patch_reassignment = true,
+    };
+    rebalance = parallel::buildDistributedRuntimeRebalancePlan(
+        mpi_context,
+        local_items,
+        makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
+        rebalance_config);
+  }
   rebalance.exact_debug_audit_enabled = config.parallel.decomposition_debug_exact_ownership_audit;
   if (!rebalance.should_rebalance) {
     exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
     recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
     return false;
   }
+
+  const std::array transaction_reports{
+      core::collectSimulationMemoryReport(state),
+      core::collectSchedulerMemoryReport(scheduler, gas_cell_scheduler)};
+  const std::uint64_t transaction_baseline_before =
+      core::memoryReportBaselineOwnedBytes(
+          core::mergeMemoryReports(transaction_reports));
+  std::uint64_t process_baseline_before = 0U;
+  core::MemoryReservation migration_reservation;
+  std::exception_ptr migration_admission_failure;
+  try {
+    if (services.memory_governor != nullptr) {
+      process_baseline_before =
+          services.memory_governor->snapshot().baseline_owned_bytes;
+      if (transaction_baseline_before > process_baseline_before) {
+        throw std::logic_error(
+            "migration governor baseline is stale: state/scheduler capacity exceeds process baseline");
+      }
+      // Required commit can coexist with old state while bounded-round wire,
+      // decoded records, and scheduler remap are resident. Two additional
+      // state/scheduler footprints are a conservative admission ceiling for
+      // this M1 transaction without pretending traffic volume is live at once.
+      const std::uint64_t migration_peak_extra = core::checkedMemoryBytesAdd(
+          transaction_baseline_before, transaction_baseline_before,
+          "runtime migration transaction/staging peak");
+      migration_reservation = services.memory_governor->reserve(
+          core::MemoryClass::kCommunication, migration_peak_extra,
+          "parallel.migration.transaction");
+      migration_reservation.commit();
+    }
+  } catch (...) {
+    migration_admission_failure = std::current_exception();
+  }
+  FailureCoordinator(services).rethrowCollectiveFailure(
+      migration_admission_failure, "runtime migration memory admission");
 
   const std::uint64_t particle_index_generation_before = state.particleIndexGeneration();
 
@@ -1338,8 +1418,9 @@ void exchangeAndValidateAmrPatchPayloads(
       preserved_indices.push_back(particle_index);
     }
   }
-  std::vector<core::ParticleMigrationRecord> scheduler_records =
-      state.packParticleMigrationRecords(preserved_indices, scheduler);
+  std::vector<core::TimeBinSchedulerIdentityRecord> scheduler_records =
+      core::exportParticleSchedulerIdentityRecords(
+          scheduler, state, preserved_indices);
 
   std::vector<std::vector<core::ParticleMigrationRecord>> outbound_records_by_rank(
       static_cast<std::size_t>(mpi_context.worldSize()));
@@ -1425,7 +1506,19 @@ void exchangeAndValidateAmrPatchPayloads(
   }
 
   if (!outbound_local_indices.empty() || !inbound_records.empty()) {
-    scheduler_records.insert(scheduler_records.end(), inbound_records.begin(), inbound_records.end());
+    scheduler_records.reserve(scheduler_records.size() + inbound_records.size());
+    for (const core::ParticleMigrationRecord& record : inbound_records) {
+      if (!record.has_scheduler_fields) {
+        throw std::runtime_error(
+            "runtime particle migration payload is missing scheduler authority");
+      }
+      scheduler_records.push_back(core::TimeBinSchedulerIdentityRecord{
+          .element_id = record.particle_id,
+          .bin_index = record.scheduler_fields.bin_index,
+          .next_activation_tick = record.scheduler_fields.next_activation_tick,
+          .pending_bin_index = record.scheduler_fields.pending_bin_index,
+      });
+    }
     core::ParticleMigrationCommit commit;
     commit.world_rank = world_rank;
     commit.outbound_local_indices = outbound_local_indices;
@@ -1435,7 +1528,8 @@ void exchangeAndValidateAmrPatchPayloads(
 
     std::vector<std::uint64_t> destination_particle_ids(state.particle_sidecar.particle_id.begin(),
                                                         state.particle_sidecar.particle_id.end());
-    core::rebuildSchedulerFromParticleMigrationRecords(scheduler, scheduler_records, destination_particle_ids);
+    core::rebuildSchedulerFromParticleIdentityRecords(
+        scheduler, scheduler_records, destination_particle_ids);
     syncTimeBinsFromScheduler(scheduler, state);
     if (config.parallel.decomposition_debug_exact_ownership_audit) {
       requireGlobalOwnedParticlePartitionIdentity(
@@ -1462,6 +1556,23 @@ void exchangeAndValidateAmrPatchPayloads(
         },
     });
   }
+  if (migration_reservation.valid()) {
+    const std::array reconciled_transaction_reports{
+        core::collectSimulationMemoryReport(state),
+        core::collectSchedulerMemoryReport(scheduler, gas_cell_scheduler)};
+    const std::uint64_t transaction_baseline_after =
+        core::memoryReportBaselineOwnedBytes(
+            core::mergeMemoryReports(reconciled_transaction_reports));
+    const std::uint64_t non_transaction_baseline =
+        process_baseline_before - transaction_baseline_before;
+    const std::uint64_t reconciled_process_baseline =
+        core::checkedMemoryBytesAdd(
+            non_transaction_baseline, transaction_baseline_after,
+            "runtime migration retained-capacity baseline reconciliation");
+    migration_reservation.reconcileBaselineOwnedAndRelease(
+        reconciled_process_baseline);
+  }
+
   const bool local_particle_decomposition_changed =
       state.particleIndexGeneration() != particle_index_generation_before;
   const std::uint64_t changed_rank_count = mpi_context.allreduceSumUint64(
@@ -1791,7 +1902,7 @@ bool MigrationBalanceRuntime::rebalance(
       particle_scheduler,
       gas_cell_scheduler,
       m_config,
-      m_services.mpi_context,
+      m_services,
       m_services.mpi_context.worldRank(),
       measurements,
       active_particle_indices,

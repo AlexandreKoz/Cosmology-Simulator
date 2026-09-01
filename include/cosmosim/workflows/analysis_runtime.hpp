@@ -10,6 +10,8 @@
 
 namespace cosmosim::workflows {
 
+struct RuntimeServices;
+
 class AnalysisRuntime {
  public:
   virtual ~AnalysisRuntime() = default;
@@ -21,6 +23,7 @@ class AnalysisRuntime {
 
 [[nodiscard]] std::unique_ptr<AnalysisRuntime> makeAnalysisRuntime(
     const core::SimulationConfig& config,
-    std::vector<std::string>& stage_sequence);
+    std::vector<std::string>& stage_sequence,
+    const RuntimeServices& services);
 
 }  // namespace cosmosim::workflows

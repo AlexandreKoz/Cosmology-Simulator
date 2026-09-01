@@ -194,6 +194,49 @@ void testUnlimitedGovernorReporting() {
          std::numeric_limits<std::uint64_t>::max());
 }
 
+void testDeclaredVersusObservedReconciliationArithmetic() {
+  cosmosim::core::MemoryGovernor governor(cosmosim::core::MemoryGovernorPolicy{
+      .hard_limit_bytes = 8192U,
+      .external_runtime_reserve_bytes = 128U,
+      .planned_overlap_reserve_bytes = 64U,
+  });
+  governor.setBaselineOwnedBytes(1024U);
+  auto reservation = governor.reserve(
+      cosmosim::core::MemoryClass::kCommunication, 256U, "unit.reconcile");
+  reservation.commit();
+
+  cosmosim::core::MemoryReport report;
+  cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
+  const std::uint64_t known = governor.snapshot().accounted_bytes;
+  cosmosim::core::attachProcessMemoryObservation(
+      report,
+      cosmosim::core::ProcessMemoryObservation{
+          .current_rss_bytes = known + 512U,
+          .peak_rss_bytes = known + 1024U,
+          .pss_bytes = known + 128U,
+      });
+  assert(report.process_memory_reconciliation.has_value());
+  const auto& reconciliation = *report.process_memory_reconciliation;
+  assert(reconciliation.known_accounted_bytes == known);
+  assert(reconciliation.observed_rss_bytes == known + 512U);
+  assert(reconciliation.observed_peak_rss_bytes == known + 1024U);
+  assert(reconciliation.observed_pss_bytes == known + 128U);
+  assert(reconciliation.unexplained_resident_bytes == 512U);
+  assert(reconciliation.observed_to_known_ratio.has_value());
+  assert(*reconciliation.observed_to_known_ratio > 1.0);
+
+  cosmosim::core::attachProcessMemoryObservation(
+      report,
+      cosmosim::core::ProcessMemoryObservation{
+          .current_rss_bytes = known - 1U,
+          .peak_rss_bytes = std::nullopt,
+          .pss_bytes = std::nullopt,
+      });
+  assert(report.process_memory_reconciliation->unexplained_resident_bytes == 0U);
+  assert(!report.process_memory_reconciliation->observed_peak_rss_bytes.has_value());
+  assert(!report.process_memory_reconciliation->observed_pss_bytes.has_value());
+}
+
 void testSchedulerOwnershipParticipatesInBaselineReport() {
   cosmosim::core::HierarchicalTimeBinScheduler particle_scheduler(2U);
   cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(2U);
@@ -234,6 +277,7 @@ int main() {
   testMemorySubsystemAndClassCoexistAndSerialize();
   testGovernorReconciliationExcludesGovernedScratchCommitment();
   testUnlimitedGovernorReporting();
+  testDeclaredVersusObservedReconciliationArithmetic();
   testSchedulerOwnershipParticipatesInBaselineReport();
   return 0;
 }

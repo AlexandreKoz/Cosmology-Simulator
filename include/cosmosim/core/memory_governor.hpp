@@ -104,6 +104,11 @@ class MemoryReservation final {
   // Transitions a pending reservation into physical commitment. Calling this
   // more than once is a logic error.
   void commit();
+  // Atomically replaces the governor baseline with the caller-measured retained
+  // capacity and releases this committed reservation under the same governor
+  // lock. This transfers accounting authority without a transient double-count
+  // or unaccounted gap when phase allocations become retained cache/state.
+  void reconcileBaselineOwnedAndRelease(std::uint64_t baseline_owned_bytes);
   // Explicit release is idempotent. Destruction after release is harmless.
   void release() noexcept;
 
@@ -155,6 +160,10 @@ class MemoryGovernor final {
   void commitReservation(MemoryClass memory_class, std::uint64_t bytes);
   void releasePendingReservation(MemoryClass memory_class, std::uint64_t bytes) noexcept;
   void releaseCommittedReservation(MemoryClass memory_class, std::uint64_t bytes) noexcept;
+  void reconcileBaselineAndReleaseCommittedReservation(
+      MemoryClass memory_class,
+      std::uint64_t bytes,
+      std::uint64_t baseline_owned_bytes);
 
   [[nodiscard]] std::uint64_t rawAccountedBytesLocked() const;
   [[nodiscard]] std::uint64_t safetyAdjustedBytes(std::uint64_t raw_bytes) const;

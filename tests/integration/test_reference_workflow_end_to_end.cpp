@@ -268,6 +268,12 @@ int main() {
   assert(profile_text.find("\"governor\"") != std::string::npos);
   assert(profile_text.find("\"hard_limit_bytes\": 1073741824") != std::string::npos);
   assert(profile_text.find("\"pressure\": \"green\"") != std::string::npos);
+  assert(profile_text.find("\"process_memory\"") != std::string::npos);
+  assert(profile_text.find("\"known_accounted_bytes\"") != std::string::npos);
+  assert(profile_text.find("\"observed_rss_bytes\"") != std::string::npos);
+  assert(profile_text.find("\"unexplained_resident_bytes\"") != std::string::npos);
+  assert(profile_text.find("\"distributed_process_memory\"") != std::string::npos);
+  assert(profile_text.find("\"rank_count\": 1") != std::string::npos);
   const std::size_t governor_begin = profile_text.find("\"governor\": {");
   assert(governor_begin != std::string::npos);
   const std::string governor_text = profile_text.substr(governor_begin, 768U);
@@ -311,10 +317,46 @@ int main() {
       (void)budget_runner.run(
           output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
     } catch (const std::runtime_error& ex) {
-      rejected = std::string_view(ex.what()).find("DMO process memory preflight requires") !=
-          std::string_view::npos;
+      const std::string_view message(ex.what());
+      rejected =
+          message.find("DMO process memory preflight requires") != std::string_view::npos ||
+          (message.find("memory reservation rejected") != std::string_view::npos &&
+           message.find("gravity.treepm.phase_peak") != std::string_view::npos);
     }
     assert(rejected);
+  }
+
+  // Red pressure may postpone optional science diagnostics, but it must not
+  // alter the gravity/hydro step or suppress required run-health diagnostics.
+  {
+    std::string pressure_config =
+        buildConfigText(1, "reference_integration_red_pressure", "cic");
+    const std::string max_steps = "max_global_steps = 2";
+    const std::size_t max_steps_pos = pressure_config.find(max_steps);
+    assert(max_steps_pos != std::string::npos);
+    pressure_config.replace(
+        max_steps_pos, max_steps.size(), "max_global_steps = 1");
+    pressure_config +=
+        "\n[analysis]\n"
+        "enable_diagnostics = true\n"
+        "diagnostics_execution_policy = run_health_and_light_science\n"
+        "run_health_interval_steps = 1\n"
+        "science_light_interval_steps = 1\n"
+        "science_heavy_interval_steps = 8\n"
+        "\n[parallel]\n"
+        "process_memory_budget_bytes = 1073741824\n"
+        "process_output_restart_overlap_bytes = 1021000000\n"
+        "process_memory_safety_margin_fraction = 0.0\n";
+    const auto pressure_frozen = cosmosim::core::loadFrozenConfigFromString(
+        pressure_config, "test_reference_workflow_red_pressure");
+    cosmosim::workflows::ReferenceWorkflowRunner pressure_runner(pressure_frozen);
+    const auto pressure_report = pressure_runner.run(
+        output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+    assert(pressure_report.completed_steps == 1U);
+    const std::string pressure_events = readFile(pressure_report.operational_report_json_path);
+    assert(pressure_events.find("\"event_kind\": \"analysis.memory_pressure_deferral\"") !=
+           std::string::npos);
+    assert(pressure_events.find("\"pressure\": \"red\"") != std::string::npos);
   }
 
   std::string endpoint_config =

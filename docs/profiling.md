@@ -219,3 +219,17 @@ These hooks ensure core docs remain present and internally referenced as the cod
 ## Star-formation and effective-ISM benchmarks
 
 `bench_star_formation_spawn` reports no-birth, sparse-birth, and dense plan/append throughput plus total allocations, allocated bytes, and temporary-memory upper bounds. Exact ID precommit uses sorted contiguous batches, avoiding one heap node per birth. `bench_effective_multiphase_ism` separately reports table initialization, lookup, direct-equilibrium evaluation, and hydro-closure throughput. Table lookup reconstructs neither cooling tables nor EOS state and allocates nothing per cell.
+
+## M1C-1 process-memory reconciliation fields
+
+When the runtime memory report is attached, profiling now emits a
+`process_memory` object with `known_accounted_bytes`, optional current RSS,
+optional peak RSS, optional PSS, non-negative `unexplained_resident_bytes`, and
+an optional observed/known ratio. Unavailable OS measurements are JSON `null`,
+not zero.
+
+A `distributed_process_memory` object records rank count and per-metric local,
+global-sum, rank-max, rank-mean, and max/mean imbalance for governor-accounted
+demand, current RSS, peak RSS, and communication high-water. OS-derived metrics
+are valid only when all ranks provide a value. These fields are observational;
+the deterministic memory governor remains the allocation authority.

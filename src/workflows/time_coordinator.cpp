@@ -1114,6 +1114,10 @@ void TimeCoordinator::runRungZeroSegment(
       core::attachMemoryGovernorSnapshot(
           merged_runtime_memory_report, *m_services.memory_governor);
     }
+    core::attachProcessMemoryObservation(
+        merged_runtime_memory_report, core::observeProcessMemory());
+    attachDistributedMemoryTelemetry(
+        merged_runtime_memory_report, m_services);
     profiler.setMemoryReport(std::move(merged_runtime_memory_report));
     state.metadata.step_index = integrator_state.step_index;
     state.metadata.scale_factor = integrator_state.current_scale_factor;

@@ -249,6 +249,38 @@ void testCheckedArithmeticAndOversizedRequest() {
   assert(baseline_governor.snapshot().baseline_owned_bytes == 10U);
 }
 
+void testCommittedReservationTransfersIntoBaselineAtomically() {
+  MemoryGovernor governor(MemoryGovernorPolicy{
+      .hard_limit_bytes = 4096U,
+      .external_runtime_reserve_bytes = 128U,
+      .planned_overlap_reserve_bytes = 64U,
+  });
+  governor.setBaselineOwnedBytes(512U);
+  auto reservation = governor.reserve(
+      MemoryClass::kPhaseResident, 1024U, "unit.baseline_transfer");
+  reservation.commit();
+  const auto before = governor.snapshot();
+  assert(before.baseline_owned_bytes == 512U);
+  assert(before.committed_bytes == 1024U);
+
+  reservation.reconcileBaselineOwnedAndRelease(1400U);
+  const auto after = governor.snapshot();
+  assert(!reservation.valid());
+  assert(after.baseline_owned_bytes == 1400U);
+  assert(after.committed_bytes == 0U);
+  assert(after.reserved_bytes == 0U);
+  assert(after.accounted_bytes == 1592U);
+  assert(after.peak_accounted_bytes >= before.accounted_bytes);
+
+  bool second_transfer_rejected = false;
+  try {
+    reservation.reconcileBaselineOwnedAndRelease(1500U);
+  } catch (const std::logic_error&) {
+    second_transfer_rejected = true;
+  }
+  assert(second_transfer_rejected);
+}
+
 void testConcurrentControlPlaneReservations() {
   MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1U << 20U});
   constexpr int k_threads = 8;
@@ -289,6 +321,7 @@ int main() {
   testMoveConstructionMoveAssignmentAndDoubleCommit();
   testMultipleReservationsClassesAndReleaseOrder();
   testCheckedArithmeticAndOversizedRequest();
+  testCommittedReservationTransfersIntoBaselineAtomically();
   testConcurrentControlPlaneReservations();
   return 0;
 }

@@ -9,6 +9,9 @@
 #include <vector>
 
 #include "cosmosim/analysis/diagnostics.hpp"
+#include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/profiling.hpp"
+#include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 
 namespace cosmosim::workflows {
@@ -18,9 +21,11 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
  public:
   AnalysisRuntimeImpl(
       const core::SimulationConfig& config,
-      std::vector<std::string>& stage_sequence)
+      std::vector<std::string>& stage_sequence,
+      const RuntimeServices& services)
       : m_config(config),
         m_stage_sequence(&stage_sequence),
+        m_services(services),
         m_diagnostics(config) {}
 
   void audit(AnalysisStageView& view) override {
@@ -76,17 +81,46 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
                    m_config.analysis.run_health_interval_steps) == 0) {
       run(analysis::DiagnosticClass::kRunHealth);
     }
-    if (step % static_cast<std::uint64_t>(
+
+    const core::MemoryPressure memory_pressure =
+        m_services.memory_governor != nullptr
+        ? m_services.memory_governor->snapshot().pressure
+        : core::MemoryPressure::kGreen;
+    const bool defer_optional_analysis =
+        memory_pressure == core::MemoryPressure::kRed ||
+        memory_pressure == core::MemoryPressure::kTrip;
+    const bool science_light_due =
+        step % static_cast<std::uint64_t>(
                    m_config.analysis.science_light_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy !=
-            core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly) {
-      run(analysis::DiagnosticClass::kScienceLight);
-    }
-    if (step % static_cast<std::uint64_t>(
+            core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly;
+    const bool science_heavy_due =
+        step % static_cast<std::uint64_t>(
                    m_config.analysis.science_heavy_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy ==
-            core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional) {
-      run(analysis::DiagnosticClass::kScienceHeavy);
+            core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+    if (defer_optional_analysis && (science_light_due || science_heavy_due)) {
+      m_services.profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "analysis.memory_pressure_deferral",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "analysis.diagnostics",
+          .step_index = step,
+          .simulation_time_code = context.timeline_step.time_end_code,
+          .scale_factor = scale_factor,
+          .message = "optional science diagnostics deferred under process memory pressure",
+          .payload = {
+              {"pressure", std::string(core::memoryPressureLabel(memory_pressure))},
+              {"science_light_due", science_light_due ? "true" : "false"},
+              {"science_heavy_due", science_heavy_due ? "true" : "false"},
+          },
+      });
+    } else {
+      if (science_light_due) {
+        run(analysis::DiagnosticClass::kScienceLight);
+      }
+      if (science_heavy_due) {
+        run(analysis::DiagnosticClass::kScienceHeavy);
+      }
     }
     m_diagnostics.enforceRetentionPolicy();
   }
@@ -94,6 +128,7 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
  private:
   core::SimulationConfig m_config;
   std::vector<std::string>* m_stage_sequence = nullptr;
+  const RuntimeServices& m_services;
   analysis::DiagnosticsEngine m_diagnostics;
 };
 
@@ -101,8 +136,9 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
 
 std::unique_ptr<AnalysisRuntime> makeAnalysisRuntime(
     const core::SimulationConfig& config,
-    std::vector<std::string>& stage_sequence) {
-  return std::make_unique<AnalysisRuntimeImpl>(config, stage_sequence);
+    std::vector<std::string>& stage_sequence,
+    const RuntimeServices& services) {
+  return std::make_unique<AnalysisRuntimeImpl>(config, stage_sequence, services);
 }
 
 }  // namespace cosmosim::workflows

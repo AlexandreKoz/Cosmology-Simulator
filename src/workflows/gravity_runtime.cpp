@@ -26,6 +26,8 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/gravity/gravity_memory.hpp"
@@ -816,6 +818,70 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
     const std::size_t particle_count = context.state.particles.size();
     const std::size_t cell_count = context.state.cells.size();
+
+    // Admit the conservative gravity high-water before any O(N) cache/vector
+    // growth in this phase. The reservation covers the incremental TreePM
+    // owned/phase/communication footprint over the currently retained gravity
+    // baseline. Every rank coordinates admission before later solver
+    // collectives, so a low-headroom rank cannot strand peers in TreePM.
+    const std::uint64_t gravity_baseline_before =
+        core::memoryReportBaselineOwnedBytes(memoryReport());
+    std::uint64_t process_baseline_before = 0U;
+    core::MemoryReservation gravity_phase_reservation;
+    std::exception_ptr gravity_admission_failure;
+    try {
+      if (m_services.memory_governor != nullptr) {
+        process_baseline_before =
+            m_services.memory_governor->snapshot().baseline_owned_bytes;
+        if (gravity_baseline_before > process_baseline_before) {
+          throw std::logic_error(
+              "gravity governor baseline is stale: retained gravity capacity exceeds process baseline");
+        }
+        const std::size_t conservative_count = core::checkedSizeAdd(
+            particle_count, cell_count,
+            "gravity governed conservative source/target count");
+        const gravity::GravityMemoryEstimate governed_peak =
+            gravity::estimateGravityMemory(gravity::GravityMemoryEstimateInput{
+                .local_source_count = static_cast<std::uint64_t>(conservative_count),
+                .local_target_count = static_cast<std::uint64_t>(conservative_count),
+                .local_particle_count = static_cast<std::uint64_t>(particle_count),
+                .local_cell_count = static_cast<std::uint64_t>(cell_count),
+                .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
+                .multipole_order = m_tree_pm_options.tree_options.multipole_order,
+                .pm_shape = m_pm_grid_shape,
+                .assignment_scheme = m_tree_pm_options.pm_options.assignment_scheme,
+                .decomposition_mode = m_tree_pm_options.pm_options.decomposition_mode,
+                .mpi_rank_count = static_cast<std::uint32_t>(
+                    std::max(m_runtime_topology.world_size, 1)),
+                .mpi_world_rank = std::max(mpi_context.worldRank(), 0),
+                .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
+                .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
+                .periodic_tree_coordinates =
+                    m_tree_pm_options.pm_options.boundary_condition ==
+                    gravity::PmBoundaryCondition::kPeriodic,
+                .indexed_target_coordinates = true,
+                .cuda_resident = m_runtime_topology.usesCuda(),
+                .tree_exchange_batch_bytes =
+                    m_tree_pm_options.tree_exchange_batch_bytes,
+                .pm_exchange_batch_bytes =
+                    m_tree_pm_options.pm_options.routing_exchange_batch_bytes,
+                .backend_unknown_reserve_bytes = 0U,
+                .safety_margin_fraction = 0.0,
+            });
+        const std::uint64_t incremental_bytes =
+            governed_peak.known_peak_bytes > gravity_baseline_before
+            ? governed_peak.known_peak_bytes - gravity_baseline_before
+            : 0U;
+        gravity_phase_reservation = m_services.memory_governor->reserve(
+            core::MemoryClass::kPhaseResident, incremental_bytes,
+            "gravity.treepm.phase_peak");
+        gravity_phase_reservation.commit();
+      }
+    } catch (...) {
+      gravity_admission_failure = std::current_exception();
+    }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(
+        gravity_admission_failure, "gravity TreePM memory admission");
     const bool particle_cache_generation_changed =
         m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
         m_particle_force_cache_valid.size() != particle_count;
@@ -1693,6 +1759,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
       }
     }
 
+    if (gravity_phase_reservation.valid()) {
+      const std::uint64_t gravity_baseline_after =
+          core::memoryReportBaselineOwnedBytes(memoryReport());
+      const std::uint64_t non_gravity_baseline =
+          process_baseline_before - gravity_baseline_before;
+      const std::uint64_t reconciled_process_baseline =
+          core::checkedMemoryBytesAdd(
+              non_gravity_baseline, gravity_baseline_after,
+              "gravity retained-capacity baseline reconciliation");
+      gravity_phase_reservation.reconcileBaselineOwnedAndRelease(
+          reconciled_process_baseline);
+    }
+
   }
 
  private:
@@ -2129,6 +2208,23 @@ class GravityRuntimeImpl final : public GravityRuntime {
             world_rank,
             static_cast<std::uint32_t>(std::max(m_runtime_topology.world_size, 1)),
             "gravity authoritative source selection");
+    const std::size_t source_capacity = core::checkedSizeAdd(
+        authoritative_source_rows.particle_rows.size(),
+        authoritative_source_rows.gas_cell_rows.size(),
+        "gravity authoritative source capacity");
+    m_local_source_x.reserve(source_capacity);
+    m_local_source_y.reserve(source_capacity);
+    m_local_source_z.reserve(source_capacity);
+    m_local_source_mass.reserve(source_capacity);
+    m_local_source_species_tag.reserve(source_capacity);
+    m_local_source_particle_row.reserve(source_capacity);
+    m_local_source_cell_row.reserve(source_capacity);
+    if (has_softening_values) {
+      m_local_source_softening_comoving.reserve(source_capacity);
+    }
+    if (has_softening_masks) {
+      m_local_source_softening_override_mask.reserve(source_capacity);
+    }
     const double gas_softening_comoving = m_tree_pm_species_softening.enabled
         ? m_tree_pm_species_softening.epsilon_comoving_by_species[
               static_cast<std::size_t>(core::ParticleSpecies::kGas)]
@@ -2309,6 +2405,20 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_active_target_species_tag.clear();
     m_active_target_softening_comoving.clear();
     m_active_target_softening_override_mask.clear();
+    const std::size_t target_capacity = core::checkedSizeAdd(
+        active_particles.size(), authoritative_source_rows.gas_cell_rows.size(),
+        "gravity authoritative target capacity");
+    m_local_active_indices.reserve(target_capacity);
+    m_local_active_global_indices.reserve(active_particles.size());
+    m_active_target_particle_row.reserve(target_capacity);
+    m_active_target_cell_row.reserve(target_capacity);
+    m_active_target_species_tag.reserve(target_capacity);
+    if (has_softening_values) {
+      m_active_target_softening_comoving.reserve(target_capacity);
+    }
+    if (has_softening_masks) {
+      m_active_target_softening_override_mask.reserve(target_capacity);
+    }
 
     const auto appendTarget = [&](std::uint32_t source_index,
                                   std::uint32_t particle_row,

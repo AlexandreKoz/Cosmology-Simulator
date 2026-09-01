@@ -16,6 +16,8 @@
 #include <utility>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/provenance.hpp"
@@ -30,6 +32,62 @@
 
 namespace cosmosim::workflows::internal {
 namespace {
+
+[[nodiscard]] std::uint64_t checkedOutputBytesMul(
+    std::uint64_t lhs,
+    std::uint64_t rhs,
+    std::string_view context) {
+  if (lhs != 0U && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
+    throw std::overflow_error(std::string(context) + ": uint64 byte multiplication overflow");
+  }
+  return lhs * rhs;
+}
+
+[[nodiscard]] std::uint64_t simulationOwnedCapacityBytes(
+    const core::SimulationState& state) {
+  return core::memoryReportBaselineOwnedBytes(
+      core::collectSimulationMemoryReport(state));
+}
+
+[[nodiscard]] std::uint64_t restartForceCachePeakBytes(
+    const core::SimulationState& state) {
+  // One exported cache remains live while RestartReadResult materializes its
+  // independent cache, so budget both physical copies at readback peak.
+  const std::uint64_t particle_rows =
+      static_cast<std::uint64_t>(state.particles.size());
+  const std::uint64_t cell_rows =
+      static_cast<std::uint64_t>(state.cells.size());
+  const std::uint64_t particle_copy = checkedOutputBytesMul(
+      particle_rows,
+      sizeof(std::uint64_t) + 3U * sizeof(double),
+      "restart particle force-cache staging");
+  const std::uint64_t cell_copy = checkedOutputBytesMul(
+      cell_rows,
+      sizeof(std::uint64_t) + 3U * sizeof(double),
+      "restart gas-cell force-cache staging");
+  const std::uint64_t one_cache = core::checkedMemoryBytesAdd(
+      particle_copy, cell_copy, "restart force-cache staging total");
+  return checkedOutputBytesMul(
+      one_cache, 2U, "restart force-cache export/readback coexistence");
+}
+
+[[nodiscard]] core::MemoryReservation reserveOutputStaging(
+    const workflows::RuntimeServices& services,
+    std::uint64_t physical_staging_bytes,
+    std::string_view owner) {
+  if (services.memory_governor == nullptr) {
+    return {};
+  }
+  const std::uint64_t planned_overlap =
+      services.memory_governor->policy().planned_overlap_reserve_bytes;
+  const std::uint64_t incremental_bytes = physical_staging_bytes > planned_overlap
+      ? physical_staging_bytes - planned_overlap
+      : 0U;
+  core::MemoryReservation reservation = services.memory_governor->reserve(
+      core::MemoryClass::kDiagnostic, incremental_bytes, owner);
+  reservation.commit();
+  return reservation;
+}
 
 [[nodiscard]] std::string formatRuntimeDouble(double value) {
   std::ostringstream stream;
@@ -424,6 +482,13 @@ bool maybeWriteOutputs(
       io::writeScienceSnapshotHdf5(report.snapshot_path, snapshot_payload, snapshot_policy);
       report.snapshot_roundtrip_executed = true;
 
+      // The configured overlap allowance already occupies policy headroom.
+      // Commit only any physical readback bytes beyond that allowance, and
+      // keep the reservation alive until SnapshotReadResult is destroyed.
+      core::MemoryReservation snapshot_readback_reservation = reserveOutputStaging(
+          services,
+          simulationOwnedCapacityBytes(state),
+          "io.snapshot.readback");
       io::SnapshotReadOptions local_read_options;
       local_read_options.require_complete_chui_set = false;
       const io::SnapshotReadResult snapshot_read =
@@ -485,6 +550,32 @@ bool maybeWriteOutputs(
   }
 
   if (checkpoint_due) {
+    core::MemoryReservation restart_staging_reservation;
+    std::exception_ptr restart_staging_admission_failure;
+    try {
+      const std::uint64_t state_readback_bytes =
+          simulationOwnedCapacityBytes(state);
+      const std::uint64_t scheduler_bytes = core::checkedMemoryBytesAdd(
+          scheduler.ownedCapacityBytes(),
+          gas_cell_scheduler.ownedCapacityBytes(),
+          "restart scheduler readback staging");
+      std::uint64_t restart_staging_bytes = core::checkedMemoryBytesAdd(
+          state_readback_bytes,
+          scheduler_bytes,
+          "restart state/scheduler readback staging");
+      restart_staging_bytes = core::checkedMemoryBytesAdd(
+          restart_staging_bytes,
+          restartForceCachePeakBytes(state),
+          "restart readback plus force-cache staging");
+      restart_staging_reservation = reserveOutputStaging(
+          services, restart_staging_bytes, "io.restart.write_readback");
+    } catch (...) {
+      restart_staging_admission_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        restart_staging_admission_failure,
+        "restart output staging memory admission");
+
     core::IntegratorState restart_integrator_state = integrator_state;
     if (restart_resume_dt_time_code > 0.0) {
       // The completed step may have been shortened to land on an output

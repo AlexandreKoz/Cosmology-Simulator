@@ -292,6 +292,7 @@ add_library(cosmosim_core STATIC
   src/core/profiling.cpp
   src/core/memory_governor.cpp
   src/core/memory_accounting.cpp
+  src/core/process_memory.cpp
   src/core/openmp_runtime.cpp)
 
 target_include_directories(cosmosim_core
@@ -728,6 +729,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_memory_accounting tests/unit/test_memory_accounting.cpp)
   target_link_libraries(test_unit_memory_accounting PRIVATE cosmosim_core)
   add_test(NAME unit_memory_accounting COMMAND test_unit_memory_accounting)
+
+  add_executable(test_unit_process_memory tests/unit/test_process_memory.cpp)
+  target_link_libraries(test_unit_process_memory PRIVATE cosmosim_core)
+  add_test(NAME unit_process_memory COMMAND test_unit_process_memory)
 
   add_executable(test_unit_memory_governor tests/unit/test_memory_governor.cpp)
   target_link_libraries(test_unit_memory_governor PRIVATE cosmosim_core)

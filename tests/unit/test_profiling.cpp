@@ -150,6 +150,23 @@ void testOperationalReportIncludesMemoryAccounting() {
       cosmosim::core::MemoryClass::kScratchArena, 256U, "unit.profiler");
   reservation.commit();
   cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
+  cosmosim::core::attachProcessMemoryObservation(
+      report,
+      cosmosim::core::ProcessMemoryObservation{
+          .current_rss_bytes = 2048U,
+          .peak_rss_bytes = 3072U,
+          .pss_bytes = 1536U,
+      });
+  report.distributed_process_memory.rank_count = 2;
+  report.distributed_process_memory.current_rss =
+      cosmosim::core::DistributedMemoryMetricSummary{
+          .valid = true,
+          .local_bytes = 2048U,
+          .global_sum_bytes = 4608U,
+          .rank_max_bytes = 2560U,
+          .rank_mean_bytes = 2304.0,
+          .max_to_mean_imbalance_ratio = 2560.0 / 2304.0,
+      };
   session.setMemoryReport(std::move(report));
 
   const auto path = cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_operational_events_memory_unit.json");
@@ -166,6 +183,14 @@ void testOperationalReportIncludesMemoryAccounting() {
   assert(text.find("\"committed_bytes\": 256") != std::string::npos);
   assert(text.find("\"pressure\": \"green\"") != std::string::npos);
   assert(text.find("\"reservation_rejection_count\": 0") != std::string::npos);
+  assert(text.find("\"process_memory\"") != std::string::npos);
+  assert(text.find("\"known_accounted_bytes\": 1408") != std::string::npos);
+  assert(text.find("\"observed_rss_bytes\": 2048") != std::string::npos);
+  assert(text.find("\"observed_peak_rss_bytes\": 3072") != std::string::npos);
+  assert(text.find("\"observed_pss_bytes\": 1536") != std::string::npos);
+  assert(text.find("\"unexplained_resident_bytes\": 640") != std::string::npos);
+  assert(text.find("\"distributed_process_memory\"") != std::string::npos);
+  assert(text.find("\"rank_max_bytes\": 2560") != std::string::npos);
   std::error_code cleanup_error;
   std::filesystem::remove(path, cleanup_error);
 }

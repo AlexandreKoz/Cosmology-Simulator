@@ -452,6 +452,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         core::memoryReportBaselineOwnedBytes(startup_memory_report_value));
     core::attachMemoryGovernorSnapshot(
         startup_memory_report_value, memory_governor);
+    core::attachProcessMemoryObservation(
+        startup_memory_report_value, core::observeProcessMemory());
+    attachDistributedMemoryTelemetry(
+        startup_memory_report_value, runtime_services);
     profiler.setMemoryReport(std::move(startup_memory_report_value));
     const core::MemoryReport* startup_memory_report = profiler.memoryReport();
     if (startup_memory_report != nullptr) {
@@ -672,26 +676,10 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       memory_governor.setBaselineOwnedBytes(governor_baseline_bytes);
       core::attachMemoryGovernorSnapshot(
           merged_startup_memory_report, memory_governor);
-      const std::uint64_t local_owned_memory =
-          merged_startup_memory_report.totals.persistent_total_bytes +
-          merged_startup_memory_report.totals.transient_total_bytes;
-      const std::uint64_t global_owned_memory =
-          runtime_services.mpi_context.allreduceSumUint64(local_owned_memory);
-      const std::uint64_t rank_max_owned_memory =
-          runtime_services.mpi_context.allreduceMaxUint64(local_owned_memory);
-      const int memory_rank_count = std::max(runtime_services.mpi_context.worldSize(), 1);
-      const double mean_owned_memory =
-          static_cast<double>(global_owned_memory) / static_cast<double>(memory_rank_count);
-      merged_startup_memory_report.distributed = core::DistributedMemorySummary{
-          .valid = true,
-          .rank_count = memory_rank_count,
-          .local_owned_bytes = local_owned_memory,
-          .global_sum_owned_bytes = global_owned_memory,
-          .rank_max_owned_bytes = rank_max_owned_memory,
-          .max_to_mean_imbalance_ratio = mean_owned_memory > 0.0
-              ? static_cast<double>(rank_max_owned_memory) / mean_owned_memory
-              : 0.0,
-      };
+      core::attachProcessMemoryObservation(
+          merged_startup_memory_report, core::observeProcessMemory());
+      attachDistributedMemoryTelemetry(
+          merged_startup_memory_report, runtime_services);
       profiler.setMemoryReport(std::move(merged_startup_memory_report));
       const core::MemoryReport* runtime_memory_report = profiler.memoryReport();
       if (runtime_memory_report != nullptr) {

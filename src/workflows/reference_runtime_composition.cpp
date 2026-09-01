@@ -130,9 +130,9 @@ namespace {
       .incompatibilities = {},
       .stage_tasks = std::move(declarations),
       .factory = [&config = inputs.config, &report = inputs.report](
-                     const RuntimeModuleFactoryContext&) {
+                     const RuntimeModuleFactoryContext& context) {
         std::shared_ptr<AnalysisRuntime> owner(
-            makeAnalysisRuntime(config, report.stage_sequence));
+            makeAnalysisRuntime(config, report.stage_sequence, context.services));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         static constexpr std::array factory_stages{

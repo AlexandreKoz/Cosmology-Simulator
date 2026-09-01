@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/process_memory.hpp"
 
 namespace cosmosim::core {
 
@@ -77,12 +78,41 @@ struct DistributedMemorySummary {
   double max_to_mean_imbalance_ratio = 1.0;
 };
 
+struct ProcessMemoryReconciliation {
+  std::uint64_t known_accounted_bytes = 0U;
+  std::optional<std::uint64_t> observed_rss_bytes;
+  std::optional<std::uint64_t> observed_peak_rss_bytes;
+  std::optional<std::uint64_t> observed_pss_bytes;
+  std::optional<std::uint64_t> unexplained_resident_bytes;
+  std::optional<double> observed_to_known_ratio;
+};
+
+struct DistributedMemoryMetricSummary {
+  bool valid = false;
+  std::uint64_t local_bytes = 0U;
+  std::uint64_t global_sum_bytes = 0U;
+  std::uint64_t rank_max_bytes = 0U;
+  double rank_mean_bytes = 0.0;
+  double max_to_mean_imbalance_ratio = 0.0;
+};
+
+struct DistributedProcessMemorySummary {
+  int rank_count = 1;
+  DistributedMemoryMetricSummary known_accounted{};
+  DistributedMemoryMetricSummary current_rss{};
+  DistributedMemoryMetricSummary peak_rss{};
+  DistributedMemoryMetricSummary communication_high_water{};
+};
+
 struct MemoryReport {
   std::vector<MemoryEntry> entries;
   MemoryTotals totals;
   std::vector<std::string> notes;
   DistributedMemorySummary distributed{};
   std::optional<MemoryGovernorSnapshot> governor_snapshot;
+  std::optional<ProcessMemoryObservation> process_memory_observation;
+  std::optional<ProcessMemoryReconciliation> process_memory_reconciliation;
+  DistributedProcessMemorySummary distributed_process_memory{};
 };
 
 struct MemoryBudgetEstimateInput {
@@ -161,6 +191,17 @@ template <typename T>
 void attachMemoryGovernorSnapshot(
     MemoryReport& report,
     const MemoryGovernor& governor);
+
+// Attach a real process-residency sample and reconcile it against the explicit
+// CHUI accounting model. The governor snapshot, when present, is the preferred
+// known-demand authority because it already includes baseline ownership,
+// active reservations/commitments, and configured opaque-runtime reserves.
+void attachProcessMemoryObservation(
+    MemoryReport& report,
+    ProcessMemoryObservation observation);
+
+[[nodiscard]] std::uint64_t memoryReportCommunicationHighWaterBytes(
+    const MemoryReport& report);
 
 [[nodiscard]] MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input);
 

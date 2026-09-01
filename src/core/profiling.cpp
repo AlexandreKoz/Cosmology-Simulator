@@ -184,6 +184,23 @@ void writeEventJson(std::ostream& out, const RuntimeEvent& event, int indent_lev
 void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int indent_level) {
   const std::string indent(static_cast<std::size_t>(indent_level), ' ');
   const std::string field_indent(static_cast<std::size_t>(indent_level + 2), ' ');
+  const auto write_optional_u64 = [&out](const std::optional<std::uint64_t>& value) {
+    if (value.has_value()) {
+      out << *value;
+    } else {
+      out << "null";
+    }
+  };
+  const auto write_distributed_metric = [&out](
+      const DistributedMemoryMetricSummary& metric) {
+    out << "{\"valid\": " << (metric.valid ? "true" : "false")
+        << ", \"local_bytes\": " << metric.local_bytes
+        << ", \"global_sum_bytes\": " << metric.global_sum_bytes
+        << ", \"rank_max_bytes\": " << metric.rank_max_bytes
+        << ", \"rank_mean_bytes\": " << metric.rank_mean_bytes
+        << ", \"max_to_mean_imbalance_ratio\": "
+        << metric.max_to_mean_imbalance_ratio << "}";
+  };
   out << indent << "{\n";
   out << field_indent << "\"persistent_total_bytes\": " << report.totals.persistent_total_bytes << ",\n";
   out << field_indent << "\"transient_total_bytes\": " << report.totals.transient_total_bytes << ",\n";
@@ -215,10 +232,48 @@ void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int in
         << ", \"peak_reserved_bytes\": " << governor.peak_reserved_bytes
         << ", \"peak_accounted_bytes\": " << governor.peak_accounted_bytes
         << ", \"reservation_rejection_count\": " << governor.rejection_count
-        << "}\n";
-  } else {
-    out << "\n";
+        << "}";
   }
+  if (report.process_memory_reconciliation.has_value()) {
+    const ProcessMemoryReconciliation& process =
+        *report.process_memory_reconciliation;
+    out << ",\n" << field_indent << "\"process_memory\": {"
+        << "\"known_accounted_bytes\": " << process.known_accounted_bytes
+        << ", \"observed_rss_bytes\": ";
+    write_optional_u64(process.observed_rss_bytes);
+    out << ", \"observed_peak_rss_bytes\": ";
+    write_optional_u64(process.observed_peak_rss_bytes);
+    out << ", \"observed_pss_bytes\": ";
+    write_optional_u64(process.observed_pss_bytes);
+    out << ", \"unexplained_resident_bytes\": ";
+    write_optional_u64(process.unexplained_resident_bytes);
+    out << ", \"observed_to_known_ratio\": ";
+    if (process.observed_to_known_ratio.has_value()) {
+      out << *process.observed_to_known_ratio;
+    } else {
+      out << "null";
+    }
+    out << "}";
+  }
+  const DistributedProcessMemorySummary& distributed_process =
+      report.distributed_process_memory;
+  if (distributed_process.known_accounted.valid ||
+      distributed_process.current_rss.valid ||
+      distributed_process.peak_rss.valid ||
+      distributed_process.communication_high_water.valid) {
+    out << ",\n" << field_indent << "\"distributed_process_memory\": {"
+        << "\"rank_count\": " << distributed_process.rank_count
+        << ", \"known_accounted\": ";
+    write_distributed_metric(distributed_process.known_accounted);
+    out << ", \"current_rss\": ";
+    write_distributed_metric(distributed_process.current_rss);
+    out << ", \"peak_rss\": ";
+    write_distributed_metric(distributed_process.peak_rss);
+    out << ", \"communication_high_water\": ";
+    write_distributed_metric(distributed_process.communication_high_water);
+    out << "}";
+  }
+  out << "\n";
   out << indent << "}";
 }
 

@@ -515,6 +515,47 @@ void attachMemoryGovernorSnapshot(
   report.governor_snapshot = governor.snapshot();
 }
 
+void attachProcessMemoryObservation(
+    MemoryReport& report,
+    ProcessMemoryObservation observation) {
+  report.process_memory_observation = observation;
+  ProcessMemoryReconciliation reconciliation;
+  reconciliation.known_accounted_bytes = report.governor_snapshot.has_value()
+      ? report.governor_snapshot->accounted_bytes
+      : memoryReportBaselineOwnedBytes(report);
+  reconciliation.observed_rss_bytes = observation.current_rss_bytes;
+  reconciliation.observed_peak_rss_bytes = observation.peak_rss_bytes;
+  reconciliation.observed_pss_bytes = observation.pss_bytes;
+  if (observation.current_rss_bytes.has_value()) {
+    reconciliation.unexplained_resident_bytes =
+        *observation.current_rss_bytes > reconciliation.known_accounted_bytes
+        ? *observation.current_rss_bytes - reconciliation.known_accounted_bytes
+        : 0U;
+    if (reconciliation.known_accounted_bytes != 0U) {
+      reconciliation.observed_to_known_ratio =
+          static_cast<double>(*observation.current_rss_bytes) /
+          static_cast<double>(reconciliation.known_accounted_bytes);
+    }
+  }
+  report.process_memory_reconciliation = reconciliation;
+}
+
+std::uint64_t memoryReportCommunicationHighWaterBytes(
+    const MemoryReport& report) {
+  std::uint64_t total = 0U;
+  for (const MemoryEntry& entry : report.entries) {
+    if (entry.subsystem != MemorySubsystem::kMpiBuffers ||
+        entry.label == "category_present") {
+      continue;
+    }
+    total = checkedU64Add(
+        total,
+        entry.high_water_bytes,
+        "memory report communication high-water aggregation");
+  }
+  return total;
+}
+
 MemoryReport estimatePreRunMemoryBudget(const MemoryBudgetEstimateInput& input) {
   MemoryReportBuilder builder;
   const auto bytes = [](std::uint64_t count, std::uint64_t elem_bytes) {
@@ -555,6 +596,26 @@ std::string formatMemoryReportHumanReadable(const MemoryReport& report) {
         << " headroom_bytes=" << governor.headroom_bytes
         << " pressure=" << memoryPressureLabel(governor.pressure)
         << " rejection_count=" << governor.rejection_count << "\n";
+  }
+  if (report.process_memory_reconciliation.has_value()) {
+    const ProcessMemoryReconciliation& process = *report.process_memory_reconciliation;
+    out << " process_memory known_accounted_bytes=" << process.known_accounted_bytes;
+    if (process.observed_rss_bytes.has_value()) {
+      out << " observed_rss_bytes=" << *process.observed_rss_bytes;
+    }
+    if (process.observed_peak_rss_bytes.has_value()) {
+      out << " observed_peak_rss_bytes=" << *process.observed_peak_rss_bytes;
+    }
+    if (process.observed_pss_bytes.has_value()) {
+      out << " observed_pss_bytes=" << *process.observed_pss_bytes;
+    }
+    if (process.unexplained_resident_bytes.has_value()) {
+      out << " unexplained_resident_bytes=" << *process.unexplained_resident_bytes;
+    }
+    if (process.observed_to_known_ratio.has_value()) {
+      out << " observed_to_known_ratio=" << *process.observed_to_known_ratio;
+    }
+    out << "\n";
   }
   for (const MemoryEntry& entry : report.entries) {
     out << " - subsystem=" << memorySubsystemLabel(entry.subsystem)
