@@ -186,12 +186,10 @@ void SimulationState::bumpGravitySourceGeneration() noexcept {
 
 void SimulationState::bumpParticleIndexGeneration() noexcept {
   ++m_particle_index_generation;
-  bumpGravitySourceGeneration();
 }
 
 void SimulationState::bumpCellIndexGeneration() noexcept {
   ++m_cell_index_generation;
-  bumpGravitySourceGeneration();
 }
 
 }  // namespace cosmosim::core

@@ -2167,3 +2167,31 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
 - Focused CPU M1 acceptance tests pass. Dependency-enabled distributed runtime
   status is recorded in the M1C-2 acceptance document and must remain
   environment-blocked where MPI/FFTW development support is unavailable.
+
+## 2026-09-03 P0/P1 post-adversarial-audit runtime closure
+
+- Repaired the rank-local versus communicator-global TreePM/PM state boundary:
+  dense particle/cell index generations no longer advance global gravity-source
+  generation, while PM collective fingerprints retain global solve semantics
+  without incorrectly requiring rank-local target-layout enums to match.
+- Preserved optional-lane absence across generic ghost wire/unpack/commit so DMO
+  ghost state cannot silently acquire hydro lanes; hydro ghost truth remains on
+  the `gas_cell_id`-keyed path.
+- Enforced the gas optional-parent invariant at `GasCellIdentityMap`: absent
+  means no parent, present means a valid nonzero parent ID. HDF5/restart and
+  star-formation/AMR roundtrip coverage passes where executable.
+- Corrected the periodic TreePM integration contract to rely on the independent
+  periodic Ewald validation rather than an invalid minimum-image PM-only
+  monotonicity assertion; no force tolerance or certified split profile changed.
+- Closed narrow distributed-IC acceptance issues in collective telemetry,
+  malformed-manifest fixture setup, and single-rank `already_partitioned`
+  semantics without changing bounded routing/reconciliation/failure
+  coordination.
+- CPU and HDF5 executable matrices are green outside the long source-package
+  completeness test, and sanitizer coverage shows no production corruption;
+  the deliberate `SIZE_MAX` allocation test remains an ASan-runtime exception.
+- Full P0/P1 runtime closure remains environment-blocked because FFTW3 and MPI
+  C++ development support are unavailable. Do not promote distributed IC or
+  multi-rank TreePM/DMO acceptance until the registered np2/np3/np4/np8 matrix
+  passes on a dependency-complete system. Detailed evidence is in
+  `docs/repair/p0_p1_post_audit_runtime_closure_20260903.md`.

@@ -642,13 +642,16 @@ void validatePmCollectiveEntryConsensus(
     bool rank_local_serial_layout,
     const PmGridShape& shape,
     const PmSolveOptions& options,
-    double& accumulated_mpi_wait_ms,
-    int control_lane_0 = 0,
-    int control_lane_1 = 0) {
-  // Public PM entry is collective over MPI_COMM_WORLD. Bind every mesh and
-  // solver control that can select a different exchange, FFT plan, or kernel
-  // before any rank enters a layout-specific phase.
-  const std::array<std::uint64_t, 22> local_fingerprint{
+    double& accumulated_mpi_wait_ms) {
+  // Public PM entry is collective over MPI_COMM_WORLD. Bind every
+  // communicator-global mesh/solver control that can select a different
+  // exchange, FFT plan, or kernel before any rank enters a layout-specific
+  // phase. Rank-local target coordinate/output layouts are deliberately not
+  // fingerprinted: empty/uneven ranks may legitimately use indexed-source or
+  // compact-active target views while participating in the same PM protocol.
+  // Those representation contracts are validated in the coordinated local
+  // preflight below rather than promoted to false communicator invariants.
+  const std::array<std::uint64_t, 20> local_fingerprint{
       static_cast<std::uint64_t>(entry_kind),
       rank_local_serial_layout ? 1U : 0U,
       static_cast<std::uint64_t>(shape.nx),
@@ -669,11 +672,9 @@ void validatePmCollectiveEntryConsensus(
       std::bit_cast<std::uint64_t>(options.tree_pm_split_scale_comoving),
       options.routing_exchange_batch_bytes,
       options.isolated_open_root_workspace_limit_bytes,
-      static_cast<std::uint64_t>(control_lane_0),
-      static_cast<std::uint64_t>(control_lane_1),
   };
-  std::array<std::uint64_t, 22> minimum_fingerprint{};
-  std::array<std::uint64_t, 22> maximum_fingerprint{};
+  std::array<std::uint64_t, 20> minimum_fingerprint{};
+  std::array<std::uint64_t, 20> maximum_fingerprint{};
   measurePmMpiWait(accumulated_mpi_wait_ms, [&]() {
     requirePmMpiSuccess(
         MPI_Allreduce(
@@ -707,11 +708,7 @@ void validatePmCollectiveEntryConsensus(
         std::to_string(minimum_fingerprint[4]) + ") mesh_max=(" +
         std::to_string(maximum_fingerprint[2]) + "," +
         std::to_string(maximum_fingerprint[3]) + "," +
-        std::to_string(maximum_fingerprint[4]) + ") control_0_min=" +
-        std::to_string(minimum_fingerprint[20]) + " control_0_max=" +
-        std::to_string(maximum_fingerprint[20]) + " control_1_min=" +
-        std::to_string(minimum_fingerprint[21]) + " control_1_max=" +
-        std::to_string(maximum_fingerprint[21]));
+        std::to_string(maximum_fingerprint[4]) + ")");
   }
 }
 
@@ -4149,9 +4146,7 @@ void PmSolver::interpolateForces(
         rank_local_serial_layout,
         m_shape,
         options,
-        target_view_preflight_mpi_wait_ms,
-        static_cast<int>(target_view.output_layout),
-        static_cast<int>(target_view.coordinate_layout));
+        target_view_preflight_mpi_wait_ms);
     runPmCoordinatedPhase(
         "PmSolver::interpolateForces target-view API preflight",
         mpi_world_rank,
@@ -5996,9 +5991,7 @@ void PmSolver::solveForParticles(
         rank_local_serial_layout,
         m_shape,
         options,
-        solve_preflight_mpi_wait_ms,
-        static_cast<int>(options.execution_policy),
-        static_cast<int>(options.boundary_condition));
+        solve_preflight_mpi_wait_ms);
     runPmCoordinatedPhase(
         "PmSolver::solveForParticles API preflight",
         mpi_world_rank,

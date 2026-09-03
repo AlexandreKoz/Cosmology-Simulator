@@ -400,6 +400,10 @@ void applyManifestMissingFieldPolicies(
     text += "ic_bridge_velocity_scale_factor_exponent = " +
         std::to_string(arguments.velocity_a) + "\n";
   }
+  // The converter uses SimulationConfig only as the typed IC/unit-policy carrier.
+  // Pin an explicit physical box here so selecting a small target length unit
+  // cannot make unrelated TreePM defaults fail configuration validation.
+  text += "[cosmology]\nbox_size = 50 mpc\n";
   text += "[units]\nlength_unit = " + arguments.target_length_unit + "\n";
   text += "mass_unit = " + arguments.target_mass_unit + "\n";
   text += "velocity_unit = " + arguments.target_velocity_unit + "\n";

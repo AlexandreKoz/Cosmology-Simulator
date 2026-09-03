@@ -353,15 +353,14 @@ int main() {
     parentless_payload.distributed_gravity_state.owning_rank_by_item.clear();
     assert(cosmosim::io::restartPayloadIntegrityHash(parentless_payload) != 0);
 
-    parentless_state.gas_cell_identity.assign({
-        {.gas_cell_id = 7001, .parent_particle_id = 0, .owning_patch_id = 901, .local_cell_row = 0},
-    });
     bool zero_parent_with_has_parent_threw = false;
     try {
-      (void)cosmosim::io::restartPayloadIntegrityHash(parentless_payload);
+      parentless_state.gas_cell_identity.assign({
+          {.gas_cell_id = 7001, .parent_particle_id = 0, .owning_patch_id = 901, .local_cell_row = 0},
+      });
     } catch (const std::invalid_argument& ex) {
       zero_parent_with_has_parent_threw =
-          std::string(ex.what()).find("parent_particle_id must be nonzero") != std::string::npos;
+          std::string(ex.what()).find("present parent_particle_id must be nonzero") != std::string::npos;
     }
     assert(zero_parent_with_has_parent_threw);
   }

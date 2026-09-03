@@ -20,7 +20,7 @@ void GasCellIdentityMap::assign(std::vector<GasCellIdentityRecord> records) {
   candidate.m_records = std::move(records);
   if (!candidate.rebuildLookupTables()) {
     throw std::invalid_argument(
-        "GasCellIdentityMap.assign: gas_cell_id must be nonzero and gas_cell_id/local_cell_row must be unique");
+        "GasCellIdentityMap.assign: gas_cell_id must be nonzero, present parent_particle_id must be nonzero, and gas_cell_id/local_cell_row must be unique");
   }
 
   m_records = std::move(candidate.m_records);
@@ -36,7 +36,7 @@ void GasCellIdentityMap::assignWithGeneration(
   candidate.m_records = std::move(records);
   if (!candidate.rebuildLookupTables()) {
     throw std::invalid_argument(
-        "GasCellIdentityMap.assignWithGeneration: gas_cell_id must be nonzero and gas_cell_id/local_cell_row must be unique");
+        "GasCellIdentityMap.assignWithGeneration: gas_cell_id must be nonzero, present parent_particle_id must be nonzero, and gas_cell_id/local_cell_row must be unique");
   }
 
   m_records = std::move(candidate.m_records);
@@ -66,7 +66,8 @@ bool GasCellIdentityMap::rebuildLookupTables() {
 
   for (std::size_t index = 0; index < m_records.size(); ++index) {
     const auto& record = m_records[index];
-    if (record.gas_cell_id == 0U) {
+    if (record.gas_cell_id == 0U ||
+        (record.parent_particle_id.has_value() && *record.parent_particle_id == 0U)) {
       return false;
     }
     if (!index_by_gas_cell_id.emplace(record.gas_cell_id, index).second) {
@@ -88,7 +89,8 @@ bool GasCellIdentityMap::isConsistent() const noexcept {
   }
   for (std::size_t index = 0; index < m_records.size(); ++index) {
     const auto& record = m_records[index];
-    if (record.gas_cell_id == 0U) {
+    if (record.gas_cell_id == 0U ||
+        (record.parent_particle_id.has_value() && *record.parent_particle_id == 0U)) {
       return false;
     }
     const auto gas_it = m_index_by_gas_cell_id.find(record.gas_cell_id);

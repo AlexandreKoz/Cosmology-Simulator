@@ -600,6 +600,18 @@ void writePolicyMember(
   config.mode.ic_bridge_velocity_hubble_exponent = 0.0;
   config.mode.ic_bridge_velocity_scale_factor_exponent = 0.0;
   config.mode.ic_staging_particle_count = 21U;
+  // The fixture source header is itself valid and must agree with frozen
+  // runtime truth so malformed-manifest modes reach the corruption condition
+  // they are intended to exercise instead of failing setup cosmology first.
+  config.numerics.a_begin = 1.0;
+  config.numerics.z_begin = 0.0;
+  config.cosmology.omega_matter = 0.315;
+  config.cosmology.omega_lambda = 0.685;
+  config.cosmology.hubble_param = 0.674;
+  config.cosmology.box_size_x_mpc_comoving = K_BOX_SIZE;
+  config.cosmology.box_size_y_mpc_comoving = K_BOX_SIZE;
+  config.cosmology.box_size_z_mpc_comoving = K_BOX_SIZE;
+  config.cosmology.box_size_mpc_comoving = K_BOX_SIZE;
   return config;
 }
 

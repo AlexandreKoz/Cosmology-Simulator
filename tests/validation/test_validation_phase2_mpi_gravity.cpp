@@ -619,10 +619,17 @@ void testRestartRoundtripContinuationContract(int world_size, int world_rank) {
   stream << "time_end_code = 0.0103\n";
   stream << "max_global_steps = 3\n";
   stream << "hierarchical_max_rung = 0\n";
-  stream << "treepm_pm_grid = 16\n";
+  const bool fast_spectral_pm = hasFastSpectralPmBackend();
+  stream << "treepm_pm_grid = " << (fast_spectral_pm ? 16 : 4) << "\n";
   stream << "treepm_asmth_cells = 1.25\n";
-  stream << "treepm_rcut_cells = 6.25\n";
+  stream << "treepm_rcut_cells = " << (fast_spectral_pm ? 6.25 : 1.9) << "\n";
   stream << "treepm_update_cadence_steps = 1\n";
+  if (!fast_spectral_pm) {
+    // This HDF5 restart-contract fixture is not a production-backend
+    // acceptance test. Keep the fail-closed production default intact and
+    // use a tiny diagnostic DFT mesh only for deterministic restart checks.
+    stream << "treepm_allow_diagnostic_naive_dft = true\n";
+  }
   stream << "treepm_tree_exchange_batch_bytes = 256\n\n";
   stream << "[physics]\n";
   stream << "enable_cooling = false\n";

@@ -151,7 +151,7 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
        .status = RuntimeCapabilityStatus::kSupported, .requested = !config.mode.ic_file.empty(),
        .compiled = true, .dependency_available = true, .runtime_available = true,
        .active = !config.mode.ic_file.empty(),
-       .detail = "Typed HDF5 IC import/conversion with schema and provenance validation is compiled in."},
+       .detail = "Typed HDF5 IC import/conversion with strict audit manifest v4, source-chunk-to-canonical streaming, schema, and provenance validation is compiled in."},
 #else
        .status = RuntimeCapabilityStatus::kUnsupported, .requested = !config.mode.ic_file.empty(),
        .compiled = false, .dependency_available = false, .runtime_available = false,

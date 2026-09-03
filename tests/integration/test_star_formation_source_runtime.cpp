@@ -153,7 +153,7 @@ namespace {
   std::vector<cosmosim::core::GasCellIdentityRecord> identities(
       state.gas_cell_identity.records().begin(),
       state.gas_cell_identity.records().end());
-  identities[1].parent_particle_id = 0U;
+  identities[1].parent_particle_id.reset();
   state.replaceGasCellIdentityRecords(std::move(identities));
   assert(state.validateOwnershipInvariants());
   return state;

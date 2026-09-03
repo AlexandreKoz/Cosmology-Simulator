@@ -329,6 +329,38 @@ void appendRankConfigMismatch(
   return sizeof(std::uint64_t) + sizeof(double) * 10U;
 }
 
+constexpr std::uint16_t kGhostLanePositionX = 1U << 0U;
+constexpr std::uint16_t kGhostLanePositionY = 1U << 1U;
+constexpr std::uint16_t kGhostLanePositionZ = 1U << 2U;
+constexpr std::uint16_t kGhostLaneMass = 1U << 3U;
+constexpr std::uint16_t kGhostLaneDensity = 1U << 4U;
+constexpr std::uint16_t kGhostLaneVelocityX = 1U << 5U;
+constexpr std::uint16_t kGhostLaneVelocityY = 1U << 6U;
+constexpr std::uint16_t kGhostLaneVelocityZ = 1U << 7U;
+constexpr std::uint16_t kGhostLanePressure = 1U << 8U;
+constexpr std::uint16_t kGhostLaneInternalEnergy = 1U << 9U;
+constexpr std::uint16_t kGhostKnownLaneMask = (1U << 10U) - 1U;
+
+[[nodiscard]] std::uint16_t ghostOptionalLaneMask(const GhostExchangeBufferSoA& source) noexcept {
+  std::uint16_t mask = 0U;
+  const auto add_if_present = [&mask](const std::vector<double>& lane, std::uint16_t bit) {
+    if (!lane.empty()) {
+      mask = static_cast<std::uint16_t>(mask | bit);
+    }
+  };
+  add_if_present(source.position_x_comoving, kGhostLanePositionX);
+  add_if_present(source.position_y_comoving, kGhostLanePositionY);
+  add_if_present(source.position_z_comoving, kGhostLanePositionZ);
+  add_if_present(source.mass_code, kGhostLaneMass);
+  add_if_present(source.density_code, kGhostLaneDensity);
+  add_if_present(source.velocity_x_code, kGhostLaneVelocityX);
+  add_if_present(source.velocity_y_code, kGhostLaneVelocityY);
+  add_if_present(source.velocity_z_code, kGhostLaneVelocityZ);
+  add_if_present(source.pressure_code, kGhostLanePressure);
+  add_if_present(source.internal_energy_code, kGhostLaneInternalEnergy);
+  return mask;
+}
+
 [[nodiscard]] bool laneIsPresentOrEmpty(std::size_t size, std::size_t expected) noexcept {
   return size == 0 || size == expected;
 }
@@ -337,12 +369,24 @@ void appendRankConfigMismatch(
   return lane.empty() ? 0.0 : lane[index];
 }
 
-void resizeOptionalLaneForCommit(std::vector<double>* lane, std::size_t size) {
-  if (lane->empty()) {
-    lane->assign(size, 0.0);
-  } else if (lane->size() != size) {
+void commitOptionalGhostLane(
+    std::vector<double>* destination,
+    const std::vector<double>& source,
+    std::size_t destination_size,
+    std::size_t destination_index,
+    std::size_t source_index) {
+  if (source.empty()) {
+    return;
+  }
+  if (source_index >= source.size()) {
+    throw std::invalid_argument("ghost source optional lane does not cover committed row");
+  }
+  if (destination->empty()) {
+    destination->assign(destination_size, 0.0);
+  } else if (destination->size() != destination_size) {
     throw std::invalid_argument("ghost optional lane size does not match storage size");
   }
+  (*destination)[destination_index] = source[source_index];
 }
 
 void validateTransferDescriptor(
@@ -2141,7 +2185,7 @@ bool GhostExchangeBufferSoA::hasGravityPayload() const noexcept {
 
 bool GhostExchangeBufferSoA::hasHydroPayload() const noexcept {
   const std::size_t n = entity_id.size();
-  return density_code.size() == n && velocity_x_code.size() == n && velocity_y_code.size() == n &&
+  return n != 0U && density_code.size() == n && velocity_x_code.size() == n && velocity_y_code.size() == n &&
       velocity_z_code.size() == n && pressure_code.size() == n && internal_energy_code.size() == n;
 }
 
@@ -2213,6 +2257,7 @@ void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::sp
 
   m_bytes.clear();
   appendPod<std::uint64_t>(m_bytes, static_cast<std::uint64_t>(local_indices.size()));
+  appendPod<std::uint16_t>(m_bytes, ghostOptionalLaneMask(source));
 
   for (const std::uint32_t index : local_indices) {
     if (index >= source.size()) {
@@ -2249,43 +2294,85 @@ void GhostExchangeBuffer::unpackAppendTo(GhostExchangeBufferSoA& destination) co
   if (!destination.isConsistent()) {
     throw std::invalid_argument("ghost destination SoA fields must have matching sizes");
   }
-  if (m_bytes.size() < sizeof(std::uint64_t)) {
+  constexpr std::size_t header_bytes = sizeof(std::uint64_t) + sizeof(std::uint16_t);
+  if (m_bytes.size() < header_bytes) {
     throw std::runtime_error("ghost buffer is too small");
   }
 
   std::size_t offset = 0;
   const std::uint64_t count = readPod<std::uint64_t>(m_bytes, &offset);
+  const std::uint16_t lane_mask = readPod<std::uint16_t>(m_bytes, &offset);
+  if ((lane_mask & static_cast<std::uint16_t>(~kGhostKnownLaneMask)) != 0U) {
+    throw std::runtime_error("ghost buffer contains an unknown optional-lane presence bit");
+  }
   const std::uint64_t expected_payload_bytes =
-      static_cast<std::uint64_t>(sizeof(std::uint64_t)) + count * static_cast<std::uint64_t>(ghostExchangeRecordBytes());
+      static_cast<std::uint64_t>(header_bytes) + count * static_cast<std::uint64_t>(ghostExchangeRecordBytes());
   if (expected_payload_bytes != static_cast<std::uint64_t>(m_bytes.size())) {
     throw std::runtime_error("ghost buffer payload shape does not match encoded count");
   }
 
   const std::size_t append_count = static_cast<std::size_t>(count);
+  const std::size_t existing_count = destination.entity_id.size();
+  const auto require_lane_schema = [existing_count, lane_mask](
+                                       const std::vector<double>& lane,
+                                       std::uint16_t bit) {
+    if (existing_count == 0U) {
+      return;
+    }
+    const bool existing_present = lane.size() == existing_count;
+    const bool incoming_present = (lane_mask & bit) != 0U;
+    if (existing_present != incoming_present) {
+      throw std::runtime_error("ghost peer payloads disagree on optional-lane presence");
+    }
+  };
+  require_lane_schema(destination.position_x_comoving, kGhostLanePositionX);
+  require_lane_schema(destination.position_y_comoving, kGhostLanePositionY);
+  require_lane_schema(destination.position_z_comoving, kGhostLanePositionZ);
+  require_lane_schema(destination.mass_code, kGhostLaneMass);
+  require_lane_schema(destination.density_code, kGhostLaneDensity);
+  require_lane_schema(destination.velocity_x_code, kGhostLaneVelocityX);
+  require_lane_schema(destination.velocity_y_code, kGhostLaneVelocityY);
+  require_lane_schema(destination.velocity_z_code, kGhostLaneVelocityZ);
+  require_lane_schema(destination.pressure_code, kGhostLanePressure);
+  require_lane_schema(destination.internal_energy_code, kGhostLaneInternalEnergy);
+
   destination.entity_id.reserve(destination.entity_id.size() + append_count);
-  destination.position_x_comoving.reserve(destination.position_x_comoving.size() + append_count);
-  destination.position_y_comoving.reserve(destination.position_y_comoving.size() + append_count);
-  destination.position_z_comoving.reserve(destination.position_z_comoving.size() + append_count);
-  destination.mass_code.reserve(destination.mass_code.size() + append_count);
-  destination.density_code.reserve(destination.density_code.size() + append_count);
-  destination.velocity_x_code.reserve(destination.velocity_x_code.size() + append_count);
-  destination.velocity_y_code.reserve(destination.velocity_y_code.size() + append_count);
-  destination.velocity_z_code.reserve(destination.velocity_z_code.size() + append_count);
-  destination.pressure_code.reserve(destination.pressure_code.size() + append_count);
-  destination.internal_energy_code.reserve(destination.internal_energy_code.size() + append_count);
+  const auto reserve_if_present = [append_count, lane_mask](
+                                      std::vector<double>* lane,
+                                      std::uint16_t bit) {
+    if ((lane_mask & bit) != 0U) {
+      lane->reserve(lane->size() + append_count);
+    }
+  };
+  reserve_if_present(&destination.position_x_comoving, kGhostLanePositionX);
+  reserve_if_present(&destination.position_y_comoving, kGhostLanePositionY);
+  reserve_if_present(&destination.position_z_comoving, kGhostLanePositionZ);
+  reserve_if_present(&destination.mass_code, kGhostLaneMass);
+  reserve_if_present(&destination.density_code, kGhostLaneDensity);
+  reserve_if_present(&destination.velocity_x_code, kGhostLaneVelocityX);
+  reserve_if_present(&destination.velocity_y_code, kGhostLaneVelocityY);
+  reserve_if_present(&destination.velocity_z_code, kGhostLaneVelocityZ);
+  reserve_if_present(&destination.pressure_code, kGhostLanePressure);
+  reserve_if_present(&destination.internal_energy_code, kGhostLaneInternalEnergy);
 
   for (std::uint64_t i = 0; i < count; ++i) {
     destination.entity_id.push_back(readPod<std::uint64_t>(m_bytes, &offset));
-    destination.position_x_comoving.push_back(readPod<double>(m_bytes, &offset));
-    destination.position_y_comoving.push_back(readPod<double>(m_bytes, &offset));
-    destination.position_z_comoving.push_back(readPod<double>(m_bytes, &offset));
-    destination.mass_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.density_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.velocity_x_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.velocity_y_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.velocity_z_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.pressure_code.push_back(readPod<double>(m_bytes, &offset));
-    destination.internal_energy_code.push_back(readPod<double>(m_bytes, &offset));
+    const auto append_lane = [&](std::vector<double>* lane, std::uint16_t bit) {
+      const double value = readPod<double>(m_bytes, &offset);
+      if ((lane_mask & bit) != 0U) {
+        lane->push_back(value);
+      }
+    };
+    append_lane(&destination.position_x_comoving, kGhostLanePositionX);
+    append_lane(&destination.position_y_comoving, kGhostLanePositionY);
+    append_lane(&destination.position_z_comoving, kGhostLanePositionZ);
+    append_lane(&destination.mass_code, kGhostLaneMass);
+    append_lane(&destination.density_code, kGhostLaneDensity);
+    append_lane(&destination.velocity_x_code, kGhostLaneVelocityX);
+    append_lane(&destination.velocity_y_code, kGhostLaneVelocityY);
+    append_lane(&destination.velocity_z_code, kGhostLaneVelocityZ);
+    append_lane(&destination.pressure_code, kGhostLanePressure);
+    append_lane(&destination.internal_energy_code, kGhostLaneInternalEnergy);
   }
 
   if (offset != m_bytes.size()) {
@@ -4666,26 +4753,16 @@ GhostRefreshCommitReport commitBlockingGhostRefreshResult(
       }
       ghost_storage.entity_id[local_index] = result.received_ghosts.entity_id[result_row];
       const std::size_t storage_size = ghost_storage.size();
-      resizeOptionalLaneForCommit(&ghost_storage.position_x_comoving, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.position_y_comoving, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.position_z_comoving, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.mass_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.density_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.velocity_x_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.velocity_y_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.velocity_z_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.pressure_code, storage_size);
-      resizeOptionalLaneForCommit(&ghost_storage.internal_energy_code, storage_size);
-      ghost_storage.position_x_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_x_comoving, result_row);
-      ghost_storage.position_y_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_y_comoving, result_row);
-      ghost_storage.position_z_comoving[local_index] = optionalLaneValue(result.received_ghosts.position_z_comoving, result_row);
-      ghost_storage.mass_code[local_index] = optionalLaneValue(result.received_ghosts.mass_code, result_row);
-      ghost_storage.density_code[local_index] = optionalLaneValue(result.received_ghosts.density_code, result_row);
-      ghost_storage.velocity_x_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_x_code, result_row);
-      ghost_storage.velocity_y_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_y_code, result_row);
-      ghost_storage.velocity_z_code[local_index] = optionalLaneValue(result.received_ghosts.velocity_z_code, result_row);
-      ghost_storage.pressure_code[local_index] = optionalLaneValue(result.received_ghosts.pressure_code, result_row);
-      ghost_storage.internal_energy_code[local_index] = optionalLaneValue(result.received_ghosts.internal_energy_code, result_row);
+      commitOptionalGhostLane(&ghost_storage.position_x_comoving, result.received_ghosts.position_x_comoving, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.position_y_comoving, result.received_ghosts.position_y_comoving, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.position_z_comoving, result.received_ghosts.position_z_comoving, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.mass_code, result.received_ghosts.mass_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.density_code, result.received_ghosts.density_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.velocity_x_code, result.received_ghosts.velocity_x_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.velocity_y_code, result.received_ghosts.velocity_y_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.velocity_z_code, result.received_ghosts.velocity_z_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.pressure_code, result.received_ghosts.pressure_code, storage_size, local_index, result_row);
+      commitOptionalGhostLane(&ghost_storage.internal_energy_code, result.received_ghosts.internal_energy_code, storage_size, local_index, result_row);
       ++result_row;
       ++report.updated_ghost_slots;
     }
@@ -5080,19 +5157,28 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
           "ghost refresh total receive record count");
     }
 
-    // Reserve every destination lane before the first peer metadata exchange so
-    // successful payload decoding cannot allocate between sequential peers.
+    // Reserve only lanes that are semantically present in the authoritative
+    // payload. Optional-lane absence is part of the wire contract: in
+    // particular, generic DMO particle ghosts must not allocate or advertise
+    // gas/hydro lanes merely because an exchange occurs.
     result.received_ghosts.entity_id.reserve(total_receive_records);
-    result.received_ghosts.position_x_comoving.reserve(total_receive_records);
-    result.received_ghosts.position_y_comoving.reserve(total_receive_records);
-    result.received_ghosts.position_z_comoving.reserve(total_receive_records);
-    result.received_ghosts.mass_code.reserve(total_receive_records);
-    result.received_ghosts.density_code.reserve(total_receive_records);
-    result.received_ghosts.velocity_x_code.reserve(total_receive_records);
-    result.received_ghosts.velocity_y_code.reserve(total_receive_records);
-    result.received_ghosts.velocity_z_code.reserve(total_receive_records);
-    result.received_ghosts.pressure_code.reserve(total_receive_records);
-    result.received_ghosts.internal_energy_code.reserve(total_receive_records);
+    const auto reserve_if_source_present = [total_receive_records](
+                                                const std::vector<double>& source,
+                                                std::vector<double>* destination) {
+      if (!source.empty()) {
+        destination->reserve(total_receive_records);
+      }
+    };
+    reserve_if_source_present(authoritative_local_state.position_x_comoving, &result.received_ghosts.position_x_comoving);
+    reserve_if_source_present(authoritative_local_state.position_y_comoving, &result.received_ghosts.position_y_comoving);
+    reserve_if_source_present(authoritative_local_state.position_z_comoving, &result.received_ghosts.position_z_comoving);
+    reserve_if_source_present(authoritative_local_state.mass_code, &result.received_ghosts.mass_code);
+    reserve_if_source_present(authoritative_local_state.density_code, &result.received_ghosts.density_code);
+    reserve_if_source_present(authoritative_local_state.velocity_x_code, &result.received_ghosts.velocity_x_code);
+    reserve_if_source_present(authoritative_local_state.velocity_y_code, &result.received_ghosts.velocity_y_code);
+    reserve_if_source_present(authoritative_local_state.velocity_z_code, &result.received_ghosts.velocity_z_code);
+    reserve_if_source_present(authoritative_local_state.pressure_code, &result.received_ghosts.pressure_code);
+    reserve_if_source_present(authoritative_local_state.internal_energy_code, &result.received_ghosts.internal_energy_code);
   } catch (...) {
     local_preparation_failure = std::current_exception();
   }

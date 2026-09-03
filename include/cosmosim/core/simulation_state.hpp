@@ -896,9 +896,14 @@ class SimulationState {
   [[nodiscard]] std::uint64_t particleIndexGeneration() const noexcept;
   [[nodiscard]] std::uint64_t cellIndexGeneration() const noexcept;
   // Monotonic identity of authoritative gravity-relevant source state. This
-  // is owned by SimulationState, not synthesized from PM refresh sequencing.
+  // is owned by SimulationState, not synthesized from PM refresh sequencing
+  // or rank-local dense-row/index generations. Physical source mutations must
+  // bump this explicitly at a communicator-consistent workflow boundary.
   [[nodiscard]] std::uint64_t gravitySourceGeneration() const noexcept;
   void bumpGravitySourceGeneration() noexcept;
+  // Dense index generations are rank-local cache/view invalidation epochs.
+  // Reorder, migration, or empty-rank topology can advance them differently
+  // across ranks without changing the communicator-global gravity source epoch.
   void bumpParticleIndexGeneration() noexcept;
   void bumpCellIndexGeneration() noexcept;
 

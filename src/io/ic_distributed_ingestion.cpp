@@ -713,10 +713,17 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
     throw std::runtime_error(
         "distributed IC reader requires an MPI-enabled build for world_size > 1");
   }
-  return readGadgetArepoHdf5Ic(ic_path, config, options);
+  auto result = readGadgetArepoHdf5Ic(ic_path, config, options);
+  // The distributed entry point promises rank-local final state. With one
+  // rank, serial ingestion is the implementation detail and the result is
+  // trivially already partitioned onto that sole owner.
+  result.report.already_partitioned = true;
+  return result;
 #else
   if (!mpi_context.isEnabled() || mpi_context.worldSize() == 1) {
-    return readGadgetArepoHdf5Ic(ic_path, config, options);
+    auto result = readGadgetArepoHdf5Ic(ic_path, config, options);
+    result.report.already_partitioned = true;
+    return result;
   }
   // Standard MPI cannot guarantee communicator recovery after a collective
   // failure. Request return-status reporting so the I/O collective wrappers can
@@ -1057,16 +1064,17 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
             result.report.counters.peak_staging_bytes, routing_peak);
 
         const std::uint64_t batch_collective_end = collective_phase_count;
-        if (mpi_context.isRoot()) {
-          const std::uint64_t phase_delta =
-              batch_collective_end >= batch_collective_begin
-              ? batch_collective_end - batch_collective_begin
-              : 0U;
-          result.report.counters.routing_collective_phase_count =
-              saturatingAddBytes(
-                  result.report.counters.routing_collective_phase_count,
-                  phase_delta);
-        }
+        const std::uint64_t phase_delta =
+            batch_collective_end >= batch_collective_begin
+            ? batch_collective_end - batch_collective_begin
+            : 0U;
+        // Collective phases are communicator-global protocol truth, not
+        // root-local telemetry. Every rank executes this sequence and must
+        // report the same logical routing phase count.
+        result.report.counters.routing_collective_phase_count =
+            saturatingAddBytes(
+                result.report.counters.routing_collective_phase_count,
+                phase_delta);
       }
     }
     runCollectivePhaseVoid(

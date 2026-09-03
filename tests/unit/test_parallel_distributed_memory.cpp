@@ -131,6 +131,80 @@ void testGhostPackUnpackRoundTrip() {
   assert(std::abs(destination.density_code[0] - 2.0) < 1.0e-12);
   assert(std::abs(destination.velocity_x_code[1] - 40.0) < 1.0e-12);
   assert(std::abs(destination.pressure_code[1] - 400.0) < 1.0e-12);
+  assert(destination.position_x_comoving.empty());
+  assert(destination.mass_code.empty());
+  assert(destination.velocity_y_code.empty());
+  assert(destination.internal_energy_code.empty());
+}
+
+void testGhostOptionalLaneAbsenceSurvivesWireAndCommit() {
+  const cosmosim::parallel::GhostLayerEpoch epoch{
+      .decomposition_epoch = 4U,
+      .ghost_sync_epoch = 6U,
+      .particle_index_generation = 5U,
+  };
+  cosmosim::parallel::GhostExchangeBufferSoA source;
+  source.epoch = epoch;
+  source.entity_id = {42U};
+  source.position_x_comoving = {0.1};
+  source.position_y_comoving = {0.2};
+  source.position_z_comoving = {0.3};
+  source.mass_code = {2.5};
+  source.velocity_x_code = {1.0};
+  source.velocity_y_code = {2.0};
+  source.velocity_z_code = {3.0};
+  assert(source.hasGravityPayload());
+  assert(!source.hasHydroPayload());
+
+  cosmosim::parallel::GhostExchangeBuffer wire;
+  const std::vector<std::uint32_t> row{0U};
+  wire.packFrom(source, row);
+
+  cosmosim::parallel::BlockingGhostExchangeResult result;
+  result.received_ghosts.epoch = epoch;
+  wire.unpackAppendTo(result.received_ghosts);
+  assert(result.received_ghosts.hasGravityPayload());
+  assert(!result.received_ghosts.hasHydroPayload());
+  assert(result.received_ghosts.density_code.empty());
+  assert(result.received_ghosts.pressure_code.empty());
+  assert(result.received_ghosts.internal_energy_code.empty());
+
+  cosmosim::parallel::GhostExchangeBufferSoA storage;
+  storage.epoch = epoch;
+  storage.entity_id = {42U};
+  storage.position_x_comoving = {0.0};
+  storage.position_y_comoving = {0.0};
+  storage.position_z_comoving = {0.0};
+  storage.mass_code = {0.0};
+  storage.velocity_x_code = {0.0};
+  storage.velocity_y_code = {0.0};
+  storage.velocity_z_code = {0.0};
+  const std::vector<cosmosim::parallel::LocalGhostDescriptor> descriptors{
+      {.residency = cosmosim::parallel::LocalIndexResidency::kGhost,
+       .owning_rank = 1,
+       .particle_id = 42U,
+       .epoch = epoch},
+  };
+  const std::vector<int> neighbors{1};
+  const std::vector<std::vector<std::uint32_t>> sends{{}};
+  const std::vector<std::vector<std::uint32_t>> recvs{{0U}};
+  const auto plan = cosmosim::parallel::buildExplicitGhostExchangePlan(
+      0,
+      neighbors,
+      sends,
+      recvs,
+      cosmosim::parallel::ghostRefreshPayloadRecordBytes(),
+      epoch);
+  const auto report = cosmosim::parallel::commitBlockingGhostRefreshResult(
+      storage, descriptors, plan, result, epoch);
+  assert(report.updated_ghost_slots == 1U);
+  assert(storage.position_x_comoving[0] == 0.1);
+  assert(storage.mass_code[0] == 2.5);
+  assert(storage.velocity_z_code[0] == 3.0);
+  assert(storage.density_code.empty());
+  assert(storage.pressure_code.empty());
+  assert(storage.internal_energy_code.empty());
+  assert(!storage.hasHydroPayload());
 }
 
 void testMortonDecompositionInvariants() {
@@ -627,7 +701,7 @@ void testGhostExchangeBufferRejectsOwnershipMigrationIntent() {
 
   cosmosim::parallel::GhostExchangeBuffer buffer;
   buffer.packFrom(ghost_descriptor, source, ghost_descriptor.local_indices);
-  assert(buffer.byteSize() == sizeof(std::uint64_t) +
+  assert(buffer.byteSize() == sizeof(std::uint64_t) + sizeof(std::uint16_t) +
       2U * cosmosim::parallel::ghostRefreshPayloadRecordBytes());
 
   cosmosim::parallel::GhostExchangeBufferSoA destination;
@@ -1410,6 +1484,7 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
 int main() {
   testBoundedMpiTransferPlannerSyntheticLimits();
   testGhostPackUnpackRoundTrip();
+  testGhostOptionalLaneAbsenceSurvivesWireAndCommit();
   testMortonDecompositionInvariants();
   testMortonDecompositionKeepsOneItemPerRankWhenPossible();
   testRestartStateRoundTrip();
