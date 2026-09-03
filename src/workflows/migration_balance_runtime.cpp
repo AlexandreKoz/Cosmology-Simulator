@@ -4,6 +4,7 @@
 #include "cosmosim/core/memory_governor.hpp"
 #include "workflows/internal/amr_migration_payload.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
+#include "workflows/internal/migration_wire.hpp"
 
 #include <algorithm>
 #include <array>
@@ -603,370 +604,629 @@ void syncTimeBinsFromScheduler(
     const core::HierarchicalTimeBinScheduler& scheduler,
     core::SimulationState& state);
 
-namespace migration_wire {
 
-void appendBytes(std::vector<std::uint8_t>& out, const void* data, std::size_t bytes) {
-  const auto* first = static_cast<const std::uint8_t*>(data);
-  out.insert(out.end(), first, first + bytes);
-}
 
-template <typename T>
-void appendPod(std::vector<std::uint8_t>& out, const T& value) {
-  static_assert(std::is_trivially_copyable_v<T>);
-  appendBytes(out, &value, sizeof(T));
-}
 
-template <typename T>
-T readPod(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
-  static_assert(std::is_trivially_copyable_v<T>);
-  if (offset + sizeof(T) > bytes.size()) {
-    throw std::runtime_error("particle migration wire packet truncated while reading " + std::string(label));
-  }
-  T value{};
-  std::memcpy(&value, bytes.data() + offset, sizeof(T));
-  offset += sizeof(T);
-  return value;
-}
+struct MigrationExchangeStats {
+  std::uint64_t packet_send_capacity_bytes = 0U;
+  std::uint64_t packet_receive_capacity_bytes = 0U;
+  std::uint64_t record_assembly_capacity_bytes = 0U;
+  std::uint64_t communication_high_water_bytes = 0U;
+  std::uint64_t wire_bytes_sent = 0U;
+  std::uint64_t wire_bytes_received = 0U;
+  std::uint64_t physical_exchange_rounds = 0U;
+};
 
-void appendString(std::vector<std::uint8_t>& out, std::string_view value) {
-  const std::uint64_t size = static_cast<std::uint64_t>(value.size());
-  appendPod(out, size);
-  appendBytes(out, value.data(), value.size());
-}
+template <typename TRecord>
+struct MigrationExchangeResult {
+  std::vector<TRecord> records;
+  MigrationExchangeStats stats{};
+};
 
-std::string readString(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
-  const std::uint64_t size = readPod<std::uint64_t>(bytes, offset, label);
-  if (size > static_cast<std::uint64_t>(bytes.size() - offset)) {
-    throw std::runtime_error("particle migration wire packet truncated while reading string " + std::string(label));
-  }
-  std::string value(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(size));
-  offset += static_cast<std::size_t>(size);
-  return value;
-}
-
-void appendBytePayload(std::vector<std::uint8_t>& out, std::span<const std::byte> payload) {
-  const std::uint64_t size = static_cast<std::uint64_t>(payload.size());
-  appendPod(out, size);
-  if (!payload.empty()) {
-    appendBytes(out, payload.data(), payload.size());
-  }
-}
-
-std::vector<std::byte> readBytePayload(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string_view label) {
-  const std::uint64_t size = readPod<std::uint64_t>(bytes, offset, label);
-  if (size > static_cast<std::uint64_t>(bytes.size() - offset)) {
-    throw std::runtime_error("particle migration wire packet truncated while reading payload " + std::string(label));
-  }
-  std::vector<std::byte> payload(static_cast<std::size_t>(size));
-  if (!payload.empty()) {
-    std::memcpy(payload.data(), bytes.data() + offset, payload.size());
-  }
-  offset += static_cast<std::size_t>(size);
-  return payload;
-}
-
-void appendModulePayload(std::vector<std::uint8_t>& out, const core::ModuleParticleSidecarPayload& payload) {
-  appendString(out, payload.module_name);
-  appendPod(out, payload.schema_version);
-  appendPod(out, payload.row_stride_bytes);
-  appendPod(out, payload.required_species_mask);
-  appendPod(out, static_cast<std::uint32_t>(payload.requirement.kind));
-  appendPod(out, payload.requirement.species_mask);
-  appendPod(out, payload.requirement.particle_flags_mask);
-  appendPod(out, payload.requirement.threshold_code);
-  appendBytePayload(out, std::span<const std::byte>(payload.payload.data(), payload.payload.size()));
-}
-
-core::ModuleParticleSidecarPayload readModulePayload(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  core::ModuleParticleSidecarPayload payload;
-  payload.module_name = readString(bytes, offset, "module_name");
-  payload.schema_version = readPod<std::uint32_t>(bytes, offset, "module_schema_version");
-  payload.row_stride_bytes = readPod<std::uint32_t>(bytes, offset, "module_row_stride_bytes");
-  payload.required_species_mask = readPod<std::uint32_t>(bytes, offset, "module_required_species_mask");
-  payload.requirement.kind = static_cast<core::ModuleSidecarRequirementKind>(
-      readPod<std::uint32_t>(bytes, offset, "module_requirement_kind"));
-  payload.requirement.species_mask = readPod<std::uint32_t>(bytes, offset, "module_requirement_species_mask");
-  payload.requirement.particle_flags_mask = readPod<std::uint32_t>(bytes, offset, "module_requirement_particle_flags_mask");
-  payload.requirement.threshold_code = readPod<double>(bytes, offset, "module_requirement_threshold_code");
-  payload.payload = readBytePayload(bytes, offset, "module_payload");
-  return payload;
-}
-
-void appendMigrationRecord(std::vector<std::uint8_t>& out, const core::ParticleMigrationRecord& record) {
-  appendPod(out, record.particle_id);
-  appendPod(out, record.sfc_key);
-  appendPod(out, record.species_tag);
-  appendPod(out, record.particle_flags);
-  appendPod(out, record.owning_rank);
-  appendPod(out, record.position_x_comoving);
-  appendPod(out, record.position_y_comoving);
-  appendPod(out, record.position_z_comoving);
-  appendPod(out, record.velocity_x_peculiar);
-  appendPod(out, record.velocity_y_peculiar);
-  appendPod(out, record.velocity_z_peculiar);
-  appendPod(out, record.mass_code);
-  appendPod(out, record.time_bin);
-  appendPod(out, static_cast<std::uint8_t>(record.has_scheduler_fields ? 1U : 0U));
-  appendPod(out, record.scheduler_fields);
-  appendPod(out, record.last_drift_time_code);
-  appendPod(out, record.last_drift_scale_factor);
-  appendPod(out, static_cast<std::uint8_t>(record.has_gravity_softening_value ? 1U : 0U));
-  appendPod(out, static_cast<std::uint8_t>(record.has_gravity_softening_override ? 1U : 0U));
-  appendPod(out, record.gravity_softening_comoving);
-  appendPod(out, static_cast<std::uint8_t>(record.has_gas_cell_fields ? 1U : 0U));
-  appendPod(out, record.gas_cell_fields);
-  appendPod(out, static_cast<std::uint8_t>(record.has_star_fields ? 1U : 0U));
-  appendPod(out, record.star_fields);
-  appendPod(out, static_cast<std::uint8_t>(record.has_black_hole_fields ? 1U : 0U));
-  appendPod(out, record.black_hole_fields);
-  appendPod(out, static_cast<std::uint8_t>(record.has_tracer_fields ? 1U : 0U));
-  appendPod(out, record.tracer_fields);
-  const std::uint64_t module_count = static_cast<std::uint64_t>(record.module_sidecar_payloads.size());
-  appendPod(out, module_count);
-  for (const auto& payload : record.module_sidecar_payloads) {
-    appendModulePayload(out, payload);
-  }
-}
-
-core::ParticleMigrationRecord readMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  core::ParticleMigrationRecord record;
-  record.particle_id = readPod<std::uint64_t>(bytes, offset, "particle_id");
-  record.sfc_key = readPod<std::uint64_t>(bytes, offset, "sfc_key");
-  record.species_tag = readPod<std::uint32_t>(bytes, offset, "species_tag");
-  record.particle_flags = readPod<std::uint32_t>(bytes, offset, "particle_flags");
-  record.owning_rank = readPod<std::uint32_t>(bytes, offset, "owning_rank");
-  record.position_x_comoving = readPod<double>(bytes, offset, "position_x_comoving");
-  record.position_y_comoving = readPod<double>(bytes, offset, "position_y_comoving");
-  record.position_z_comoving = readPod<double>(bytes, offset, "position_z_comoving");
-  record.velocity_x_peculiar = readPod<double>(bytes, offset, "velocity_x_peculiar");
-  record.velocity_y_peculiar = readPod<double>(bytes, offset, "velocity_y_peculiar");
-  record.velocity_z_peculiar = readPod<double>(bytes, offset, "velocity_z_peculiar");
-  record.mass_code = readPod<double>(bytes, offset, "mass_code");
-  record.time_bin = readPod<std::uint8_t>(bytes, offset, "time_bin");
-  record.has_scheduler_fields = readPod<std::uint8_t>(bytes, offset, "has_scheduler_fields") != 0U;
-  record.scheduler_fields = readPod<core::SchedulerMigrationFields>(bytes, offset, "scheduler_fields");
-  record.last_drift_time_code = readPod<double>(bytes, offset, "last_drift_time_code");
-  record.last_drift_scale_factor = readPod<double>(bytes, offset, "last_drift_scale_factor");
-  record.has_gravity_softening_value = readPod<std::uint8_t>(bytes, offset, "has_gravity_softening_value") != 0U;
-  record.has_gravity_softening_override = readPod<std::uint8_t>(bytes, offset, "has_gravity_softening_override") != 0U;
-  record.gravity_softening_comoving = readPod<double>(bytes, offset, "gravity_softening_comoving");
-  record.has_gas_cell_fields = readPod<std::uint8_t>(bytes, offset, "has_gas_cell_fields") != 0U;
-  record.gas_cell_fields = readPod<core::GasCellMigrationFields>(bytes, offset, "gas_cell_fields");
-  record.has_star_fields = readPod<std::uint8_t>(bytes, offset, "has_star_fields") != 0U;
-  record.star_fields = readPod<core::StarParticleMigrationFields>(bytes, offset, "star_fields");
-  record.has_black_hole_fields = readPod<std::uint8_t>(bytes, offset, "has_black_hole_fields") != 0U;
-  record.black_hole_fields = readPod<core::BlackHoleParticleMigrationFields>(bytes, offset, "black_hole_fields");
-  record.has_tracer_fields = readPod<std::uint8_t>(bytes, offset, "has_tracer_fields") != 0U;
-  record.tracer_fields = readPod<core::TracerParticleMigrationFields>(bytes, offset, "tracer_fields");
-  const std::uint64_t module_count = readPod<std::uint64_t>(bytes, offset, "module_count");
-  if (module_count > 1'000'000ULL) {
-    throw std::runtime_error("particle migration wire packet has unreasonable module payload count");
-  }
-  record.module_sidecar_payloads.reserve(static_cast<std::size_t>(module_count));
-  for (std::uint64_t i = 0; i < module_count; ++i) {
-    record.module_sidecar_payloads.push_back(readModulePayload(bytes, offset));
-  }
-  return record;
-}
-
-std::vector<std::uint8_t> serializeMigrationRecords(std::span<const core::ParticleMigrationRecord> records) {
-  std::vector<std::uint8_t> bytes;
-  appendPod(bytes, static_cast<std::uint64_t>(records.size()));
-  for (const core::ParticleMigrationRecord& record : records) {
-    appendMigrationRecord(bytes, record);
-  }
-  return bytes;
-}
-
-std::vector<core::ParticleMigrationRecord> deserializeMigrationRecords(std::span<const std::uint8_t> bytes) {
-  std::size_t offset = 0;
-  const std::uint64_t count = readPod<std::uint64_t>(bytes, offset, "migration_record_count");
-  if (count > 100'000'000ULL) {
-    throw std::runtime_error("particle migration wire packet has unreasonable record count");
-  }
-  std::vector<core::ParticleMigrationRecord> records;
-  records.reserve(static_cast<std::size_t>(count));
-  for (std::uint64_t i = 0; i < count; ++i) {
-    records.push_back(readMigrationRecord(bytes, offset));
-  }
-  if (offset != bytes.size()) {
-    throw std::runtime_error("particle migration wire packet has trailing bytes");
-  }
-  return records;
-}
-
-void appendGasCellMigrationRecord(std::vector<std::uint8_t>& out, const core::GasCellMigrationRecord& record) {
-  appendPod(out, record.owning_rank);
-  appendPod(out, record.fields);
-}
-
-core::GasCellMigrationRecord readGasCellMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  core::GasCellMigrationRecord record;
-  record.owning_rank = readPod<std::uint32_t>(bytes, offset, "gas_cell_owning_rank");
-  record.fields = readPod<core::GasCellMigrationFields>(bytes, offset, "gas_cell_fields");
-  return record;
-}
-
-void appendAmrPatchMigrationRecord(std::vector<std::uint8_t>& out, const core::AmrPatchMigrationRecord& record) {
-  appendPod(out, record.patch);
-  appendPod(out, static_cast<std::uint64_t>(record.gas_cell_records.size()));
-  for (const core::GasCellMigrationRecord& gas_record : record.gas_cell_records) {
-    appendGasCellMigrationRecord(out, gas_record);
-  }
-  appendPod(out, static_cast<std::uint64_t>(record.gas_cell_scheduler_records.size()));
-  for (const core::GasCellSchedulerMigrationRecord& scheduler_record : record.gas_cell_scheduler_records) {
-    appendPod(out, scheduler_record);
-  }
-}
-
-core::AmrPatchMigrationRecord readAmrPatchMigrationRecord(std::span<const std::uint8_t> bytes, std::size_t& offset) {
-  core::AmrPatchMigrationRecord record;
-  record.patch = readPod<core::AmrPatchMigrationFields>(bytes, offset, "amr_patch_fields");
-  const std::uint64_t gas_count = readPod<std::uint64_t>(bytes, offset, "amr_patch_gas_cell_count");
-  if (gas_count > 100'000'000ULL) {
-    throw std::runtime_error("AMR patch migration wire packet has unreasonable gas-cell count");
-  }
-  record.gas_cell_records.reserve(static_cast<std::size_t>(gas_count));
-  for (std::uint64_t i = 0; i < gas_count; ++i) {
-    record.gas_cell_records.push_back(readGasCellMigrationRecord(bytes, offset));
-  }
-  const std::uint64_t scheduler_count = readPod<std::uint64_t>(bytes, offset, "amr_patch_scheduler_record_count");
-  if (scheduler_count != gas_count) {
-    throw std::runtime_error("AMR patch migration wire packet scheduler record count does not match gas-cell count");
-  }
-  record.gas_cell_scheduler_records.reserve(static_cast<std::size_t>(scheduler_count));
-  for (std::uint64_t i = 0; i < scheduler_count; ++i) {
-    record.gas_cell_scheduler_records.push_back(
-        readPod<core::GasCellSchedulerMigrationRecord>(bytes, offset, "gas_cell_scheduler_record"));
-  }
-  return record;
-}
-
-std::vector<std::uint8_t> serializeAmrPatchMigrationRecords(
-    std::span<const core::AmrPatchMigrationRecord> records) {
-  std::vector<std::uint8_t> bytes;
-  appendPod(bytes, static_cast<std::uint64_t>(records.size()));
-  for (const core::AmrPatchMigrationRecord& record : records) {
-    appendAmrPatchMigrationRecord(bytes, record);
-  }
-  return bytes;
-}
-
-std::vector<core::AmrPatchMigrationRecord> deserializeAmrPatchMigrationRecords(
-    std::span<const std::uint8_t> bytes) {
-  std::size_t offset = 0;
-  const std::uint64_t count = readPod<std::uint64_t>(bytes, offset, "amr_patch_migration_record_count");
-  if (count > 10'000'000ULL) {
-    throw std::runtime_error("AMR patch migration wire packet has unreasonable record count");
-  }
-  std::vector<core::AmrPatchMigrationRecord> records;
-  records.reserve(static_cast<std::size_t>(count));
-  for (std::uint64_t i = 0; i < count; ++i) {
-    records.push_back(readAmrPatchMigrationRecord(bytes, offset));
-  }
-  if (offset != bytes.size()) {
-    throw std::runtime_error("AMR patch migration wire packet has trailing bytes");
-  }
-  return records;
-}
-
-}  // namespace migration_wire
-
-template <typename TRecord, typename TSerialize, typename TDeserialize>
-[[nodiscard]] std::vector<TRecord> exchangeRuntimeMigrationPayloads(
+template <typename TRecord, typename TEncode, typename TDecode>
+[[nodiscard]] MigrationExchangeResult<TRecord> exchangeRuntimeMigrationPayloads(
     const parallel::MpiContext& mpi_context,
     const std::vector<std::vector<TRecord>>& records_by_rank,
     std::string_view phase_name,
-    TSerialize&& serialize,
-    TDeserialize&& deserialize) {
-  std::vector<std::vector<std::uint8_t>> send_payloads;
-  std::exception_ptr local_failure;
-  try {
-    send_payloads.resize(records_by_rank.size());
-    for (std::size_t rank = 0; rank < records_by_rank.size(); ++rank) {
-      send_payloads[rank] = serialize(records_by_rank[rank]);
-    }
-  } catch (...) {
-    local_failure = std::current_exception();
+    TEncode&& encode_record,
+    TDecode&& decode_record) {
+  const int world_size = mpi_context.worldSize();
+  if (world_size <= 0 || records_by_rank.size() != static_cast<std::size_t>(world_size)) {
+    throw std::invalid_argument("migration packet exchange rank extent must match positive MPI world size");
   }
-  mpi_context.rethrowCollectivePreparationFailure(
-      local_failure, phase_name);
-
-  const auto recv_payloads =
-      parallel::exchangeBoundedAlltoallBytes(mpi_context, send_payloads);
-
-  std::vector<TRecord> inbound;
-  local_failure = nullptr;
-  try {
-    for (const auto& payload : recv_payloads) {
-      auto decoded = deserialize(std::span<const std::uint8_t>(payload));
-      inbound.insert(
-          inbound.end(),
-          std::make_move_iterator(decoded.begin()),
-          std::make_move_iterator(decoded.end()));
-    }
-  } catch (...) {
-    local_failure = std::current_exception();
-  }
-  mpi_context.rethrowCollectivePreparationFailure(
-      local_failure, phase_name);
-  return inbound;
-}
-
-std::vector<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
-    const parallel::MpiContext& mpi_context,
-    const std::vector<std::vector<core::ParticleMigrationRecord>>& records_by_rank) {
-  if (records_by_rank.size() != static_cast<std::size_t>(mpi_context.worldSize())) {
-    throw std::invalid_argument("particle migration exchange records_by_rank size must match world size");
-  }
-  if (mpi_context.worldSize() == 1) {
-    return records_by_rank.empty() ? std::vector<core::ParticleMigrationRecord>{} : records_by_rank[0];
+  if (world_size == 1) {
+    return MigrationExchangeResult<TRecord>{
+        .records = records_by_rank.empty() ? std::vector<TRecord>{} : records_by_rank.front(),
+        .stats = {},
+    };
   }
   if (!mpi_context.isEnabled()) {
-    throw std::runtime_error("runtime particle migration execution requires MPI for world_size > 1");
+    throw std::runtime_error("runtime migration packet exchange requires MPI for world_size > 1");
   }
 #if COSMOSIM_ENABLE_MPI
+  struct OutboundCursor {
+    std::size_t record_index = 0U;
+    std::size_t fragment_offset = 0U;
+    std::vector<std::uint8_t> encoded_record;
+  };
+  struct InboundAssembly {
+    std::uint64_t record_sequence = 0U;
+    std::uint64_t total_bytes = 0U;
+    std::size_t received_bytes = 0U;
+    std::vector<std::uint8_t> encoded_record;
+    bool active = false;
+  };
+
+  const std::size_t round_limit = parallel::mpiTransportRoundLimitBytes();
+  const std::size_t rank_count = static_cast<std::size_t>(world_size);
+  const migration_wire::PacketCapacityPlan packet_plan =
+      migration_wire::planPacketCapacity(round_limit, rank_count);
+  const std::size_t fragment_payload_limit = packet_plan.fragment_payload_bytes;
+
+  std::vector<OutboundCursor> outbound(rank_count);
+  std::vector<InboundAssembly> inbound_assembly(rank_count);
+  MigrationExchangeResult<TRecord> result;
+  std::vector<std::vector<std::uint8_t>> send_payloads(rank_count);
+
+  const auto localHasPending = [&]() {
+    for (std::size_t peer = 0; peer < rank_count; ++peer) {
+      if (outbound[peer].record_index < records_by_rank[peer].size()) return true;
+    }
+    return false;
+  };
+  const auto assemblyCapacityBytes = [&]() {
+    std::uint64_t total = 0U;
+    for (const auto& assembly : inbound_assembly) {
+      total = core::checkedMemoryBytesAdd(
+          total,
+          core::checkedIntegralNarrow<std::uint64_t>(
+              assembly.encoded_record.capacity(), "migration record assembly capacity"),
+          "migration record assembly aggregate capacity");
+    }
+    return total;
+  };
+  const auto payloadCapacityBytes = [](const std::vector<std::vector<std::uint8_t>>& payloads) {
+    std::uint64_t total = 0U;
+    for (const auto& payload : payloads) {
+      total = core::checkedMemoryBytesAdd(
+          total,
+          core::checkedIntegralNarrow<std::uint64_t>(payload.capacity(), "migration packet capacity"),
+          "migration packet aggregate capacity");
+    }
+    return total;
+  };
+
+  while (mpi_context.allreduceMaxUint64(localHasPending() ? 1U : 0U) != 0U) {
+    std::exception_ptr local_failure;
+    try {
+      for (auto& payload : send_payloads) payload.clear();
+      for (std::size_t peer = 0; peer < rank_count; ++peer) {
+        auto& cursor = outbound[peer];
+        if (cursor.record_index >= records_by_rank[peer].size()) continue;
+        if (cursor.encoded_record.empty()) {
+          cursor.encoded_record = encode_record(records_by_rank[peer][cursor.record_index]);
+          cursor.fragment_offset = 0U;
+          if (cursor.encoded_record.empty()) {
+            throw std::runtime_error("migration record encoder returned an empty record");
+          }
+        }
+        const std::size_t remaining = cursor.encoded_record.size() - cursor.fragment_offset;
+        const std::size_t fragment_bytes = std::min(fragment_payload_limit, remaining);
+        send_payloads[peer] = migration_wire::encodeFragment(
+            static_cast<std::uint64_t>(cursor.record_index),
+            static_cast<std::uint64_t>(cursor.encoded_record.size()),
+            static_cast<std::uint64_t>(cursor.fragment_offset),
+            std::span<const std::uint8_t>(
+                cursor.encoded_record.data() + cursor.fragment_offset,
+                fragment_bytes));
+        result.stats.wire_bytes_sent = core::checkedMemoryBytesAdd(
+            result.stats.wire_bytes_sent,
+            core::checkedIntegralNarrow<std::uint64_t>(
+                send_payloads[peer].size(), "migration packet sent bytes"),
+            "migration cumulative wire bytes sent");
+        cursor.fragment_offset = core::checkedSizeAdd(
+            cursor.fragment_offset, fragment_bytes, "migration outbound fragment progress");
+        if (cursor.fragment_offset == cursor.encoded_record.size()) {
+          cursor.encoded_record.clear();
+          ++cursor.record_index;
+          cursor.fragment_offset = 0U;
+        }
+      }
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    mpi_context.rethrowCollectivePreparationFailure(local_failure, phase_name);
+
+    result.stats.packet_send_capacity_bytes = std::max(
+        result.stats.packet_send_capacity_bytes, payloadCapacityBytes(send_payloads));
+    const auto recv_payloads = parallel::exchangeBoundedAlltoallBytes(mpi_context, send_payloads);
+    result.stats.packet_receive_capacity_bytes = std::max(
+        result.stats.packet_receive_capacity_bytes, payloadCapacityBytes(recv_payloads));
+    ++result.stats.physical_exchange_rounds;
+
+    local_failure = nullptr;
+    try {
+      for (std::size_t peer = 0; peer < rank_count; ++peer) {
+        const auto& payload = recv_payloads[peer];
+        if (payload.empty()) continue;
+        result.stats.wire_bytes_received = core::checkedMemoryBytesAdd(
+            result.stats.wire_bytes_received,
+            core::checkedIntegralNarrow<std::uint64_t>(payload.size(), "migration packet received bytes"),
+            "migration cumulative wire bytes received");
+        const migration_wire::FragmentView fragment = migration_wire::decodeFragment(payload);
+        auto& assembly = inbound_assembly[peer];
+        if (!assembly.active) {
+          if (fragment.fragment_offset != 0U) {
+            throw std::runtime_error("migration record fragment stream did not begin at offset zero");
+          }
+          assembly.active = true;
+          assembly.record_sequence = fragment.record_sequence;
+          assembly.total_bytes = fragment.record_total_bytes;
+          assembly.received_bytes = 0U;
+          assembly.encoded_record.resize(core::checkedIntegralNarrow<std::size_t>(
+              fragment.record_total_bytes, "migration inbound record bytes"));
+        }
+        if (fragment.record_sequence != assembly.record_sequence ||
+            fragment.record_total_bytes != assembly.total_bytes ||
+            fragment.fragment_offset != assembly.received_bytes) {
+          throw std::runtime_error("migration fragment sequence/offset contract mismatch");
+        }
+        if (fragment.payload.size() > assembly.encoded_record.size() - assembly.received_bytes) {
+          throw std::runtime_error("migration fragment exceeds inbound record assembly capacity");
+        }
+        std::copy(
+            fragment.payload.begin(), fragment.payload.end(),
+            assembly.encoded_record.begin() + static_cast<std::ptrdiff_t>(assembly.received_bytes));
+        assembly.received_bytes = core::checkedSizeAdd(
+            assembly.received_bytes, fragment.payload.size(), "migration inbound fragment progress");
+        if (assembly.received_bytes == assembly.encoded_record.size()) {
+          result.records.push_back(decode_record(std::span<const std::uint8_t>(assembly.encoded_record)));
+          assembly.encoded_record.clear();
+          assembly.active = false;
+          ++assembly.record_sequence;
+          assembly.total_bytes = 0U;
+          assembly.received_bytes = 0U;
+        }
+      }
+      result.stats.record_assembly_capacity_bytes = std::max(
+          result.stats.record_assembly_capacity_bytes, assemblyCapacityBytes());
+      const std::uint64_t packet_capacity = core::checkedMemoryBytesAdd(
+          result.stats.packet_send_capacity_bytes,
+          result.stats.packet_receive_capacity_bytes,
+          "migration packet send/receive capacity");
+      result.stats.communication_high_water_bytes = std::max(
+          result.stats.communication_high_water_bytes,
+          core::checkedMemoryBytesAdd(
+              packet_capacity,
+              result.stats.record_assembly_capacity_bytes,
+              "migration packet/assembly high water"));
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    mpi_context.rethrowCollectivePreparationFailure(local_failure, phase_name);
+  }
+
+  std::exception_ptr completion_failure;
+  try {
+    for (const auto& assembly : inbound_assembly) {
+      if (assembly.active || !assembly.encoded_record.empty()) {
+        throw std::runtime_error("migration packet exchange ended with an incomplete record assembly");
+      }
+    }
+  } catch (...) {
+    completion_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(completion_failure, phase_name);
+  return result;
+#else
+  throw std::runtime_error("runtime migration packet exchange requires an MPI-enabled build");
+#endif
+}
+
+MigrationExchangeResult<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
+    const parallel::MpiContext& mpi_context,
+    const std::vector<std::vector<core::ParticleMigrationRecord>>& records_by_rank) {
   return exchangeRuntimeMigrationPayloads<core::ParticleMigrationRecord>(
       mpi_context,
       records_by_rank,
-      "particle migration exchange preparation/decode",
-      [](std::span<const core::ParticleMigrationRecord> records) {
-        return migration_wire::serializeMigrationRecords(records);
+      "particle migration bounded packet exchange",
+      [](const core::ParticleMigrationRecord& record) {
+        return migration_wire::encodeParticleMigrationRecord(record);
       },
       [](std::span<const std::uint8_t> bytes) {
-        return migration_wire::deserializeMigrationRecords(bytes);
+        return migration_wire::decodeParticleMigrationRecord(bytes);
       });
-#else
-  throw std::runtime_error("runtime particle migration execution requires an MPI-enabled build");
-#endif
 }
 
-std::vector<core::AmrPatchMigrationRecord> exchangeRuntimeAmrPatchMigrationRecords(
+MigrationExchangeResult<core::AmrPatchMigrationRecord> exchangeRuntimeAmrPatchMigrationRecords(
     const parallel::MpiContext& mpi_context,
     const std::vector<std::vector<core::AmrPatchMigrationRecord>>& records_by_rank) {
-  if (records_by_rank.size() != static_cast<std::size_t>(mpi_context.worldSize())) {
-    throw std::invalid_argument("AMR patch migration exchange records_by_rank size must match world size");
-  }
-  if (mpi_context.worldSize() == 1) {
-    return records_by_rank.empty() ? std::vector<core::AmrPatchMigrationRecord>{} : records_by_rank[0];
-  }
-  if (!mpi_context.isEnabled()) {
-    throw std::runtime_error("runtime AMR patch migration execution requires MPI for world_size > 1");
-  }
-#if COSMOSIM_ENABLE_MPI
   return exchangeRuntimeMigrationPayloads<core::AmrPatchMigrationRecord>(
       mpi_context,
       records_by_rank,
-      "AMR patch migration exchange preparation/decode",
-      [](std::span<const core::AmrPatchMigrationRecord> records) {
-        return migration_wire::serializeAmrPatchMigrationRecords(records);
+      "AMR patch migration bounded packet exchange",
+      [](const core::AmrPatchMigrationRecord& record) {
+        return migration_wire::encodeAmrPatchMigrationRecord(record);
       },
       [](std::span<const std::uint8_t> bytes) {
-        return migration_wire::deserializeAmrPatchMigrationRecords(bytes);
+        return migration_wire::decodeAmrPatchMigrationRecord(bytes);
       });
+}
+
+
+struct MigrationAdmissionPlan {
+  std::uint64_t outbound_particle_count = 0U;
+  std::uint64_t inbound_particle_count = 0U;
+  std::uint64_t outbound_particle_record_capacity_count = 0U;
+  std::uint64_t inbound_particle_record_capacity_count = 0U;
+  std::uint64_t outbound_patch_count = 0U;
+  std::uint64_t inbound_patch_count = 0U;
+  std::uint64_t outbound_wire_bytes = 0U;
+  std::uint64_t inbound_wire_bytes = 0U;
+  std::uint64_t outbound_dynamic_heap_bytes = 0U;
+  std::uint64_t inbound_dynamic_heap_bytes = 0U;
+  std::uint64_t packet_staging_bytes = 0U;
+  std::uint64_t record_capacity_bytes = 0U;
+  std::uint64_t scheduler_remap_bytes = 0U;
+  std::uint64_t index_map_bytes = 0U;
+  std::uint64_t commit_coexistence_bytes = 0U;
+  std::uint64_t requested_extra_bytes = 0U;
+  std::vector<std::uint64_t> outbound_particle_count_by_rank;
+  std::vector<std::uint64_t> outbound_particle_record_capacity_count_by_rank;
+  std::vector<std::uint64_t> outbound_patch_count_by_rank;
+};
+
+[[nodiscard]] std::vector<std::uint64_t> exchangeMigrationControlU64(
+    const parallel::MpiContext& mpi_context,
+    std::span<const std::uint64_t> send_values,
+    std::string_view phase_name) {
+  const int world_size = mpi_context.worldSize();
+  if (world_size <= 0 || send_values.size() != static_cast<std::size_t>(world_size)) {
+    throw std::invalid_argument("migration control exchange rank extent mismatch");
+  }
+  if (world_size == 1) return std::vector<std::uint64_t>(send_values.begin(), send_values.end());
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("migration control exchange requires MPI when world size exceeds one");
+  }
+#if COSMOSIM_ENABLE_MPI
+  std::vector<std::uint64_t> recv_values(static_cast<std::size_t>(world_size), 0U);
+  std::exception_ptr local_failure;
+  try {
+    if (MPI_Alltoall(
+            send_values.data(), 1, MPI_UINT64_T,
+            recv_values.data(), 1, MPI_UINT64_T,
+            MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error(std::string(phase_name) + " MPI_Alltoall failed");
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(local_failure, phase_name);
+  return recv_values;
 #else
-  throw std::runtime_error("runtime AMR patch migration execution requires an MPI-enabled build");
+  throw std::runtime_error("migration control exchange requires an MPI-enabled build");
 #endif
+}
+
+[[nodiscard]] std::uint64_t sumU64(
+    std::span<const std::uint64_t> values,
+    std::string_view context) {
+  std::uint64_t total = 0U;
+  for (const std::uint64_t value : values) {
+    total = core::checkedMemoryBytesAdd(total, value, context);
+  }
+  return total;
+}
+
+[[nodiscard]] std::uint32_t findLocalPatchIndexById(
+    const core::SimulationState& state,
+    std::uint64_t patch_id) {
+  const auto it = std::find(state.patches.patch_id.begin(), state.patches.patch_id.end(), patch_id);
+  if (it == state.patches.patch_id.end()) {
+    throw std::runtime_error("runtime rebalance references an AMR patch ID absent from local state");
+  }
+  return core::checkedIntegralNarrow<std::uint32_t>(
+      static_cast<std::size_t>(std::distance(state.patches.patch_id.begin(), it)),
+      "runtime AMR patch local index");
+}
+
+[[nodiscard]] MigrationAdmissionPlan buildMigrationAdmissionPlan(
+    const core::SimulationState& state,
+    const parallel::RuntimeRebalancePlan& rebalance,
+    const parallel::MpiContext& mpi_context,
+    int world_rank,
+    std::uint64_t transaction_baseline_before) {
+  const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
+  MigrationAdmissionPlan plan;
+  plan.outbound_particle_count_by_rank.assign(rank_count, 0U);
+  plan.outbound_particle_record_capacity_count_by_rank.assign(rank_count, 0U);
+  plan.outbound_patch_count_by_rank.assign(rank_count, 0U);
+  std::vector<std::uint64_t> send_wire(rank_count, 0U);
+  std::vector<std::uint64_t> send_dynamic_heap(rank_count, 0U);
+  std::vector<std::uint64_t> send_max_record_wire(rank_count, 0U);
+  std::vector<std::uint64_t> send_state_bytes(rank_count, 0U);
+  std::vector<std::uint64_t> send_patch_particle_upper_bound(rank_count, 0U);
+
+  std::exception_ptr local_sizing_failure;
+  try {
+    std::uint64_t max_particle_wire = 0U;
+    std::uint64_t max_particle_dynamic_heap = 0U;
+    std::uint64_t max_particle_state_bytes = 0U;
+    for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+    const auto local_index = core::checkedIntegralNarrow<std::uint32_t>(
+        particle_index, "migration admission particle scan index");
+    max_particle_wire = std::max(
+        max_particle_wire,
+        core::checkedIntegralNarrow<std::uint64_t>(
+            migration_wire::estimateParticleMigrationWireUpperBoundBytes(state, local_index),
+            "particle migration maximum wire upper bound"));
+    max_particle_dynamic_heap = std::max(
+        max_particle_dynamic_heap,
+        core::checkedIntegralNarrow<std::uint64_t>(
+            migration_wire::estimateParticleMigrationDynamicHeapUpperBoundBytes(state, local_index),
+            "particle migration maximum dynamic heap upper bound"));
+    max_particle_state_bytes = std::max(
+        max_particle_state_bytes,
+        estimateParticleMemoryBytesForDecomposition(
+            state, state.particle_sidecar.species_tag[particle_index]));
+    }
+
+    for (const parallel::ParticleMigrationIntent& intent : rebalance.particle_migrations) {
+    if (intent.old_owner_rank != world_rank) continue;
+    if (intent.new_owner_rank < 0 || intent.new_owner_rank >= mpi_context.worldSize()) {
+      throw std::invalid_argument("migration admission encountered out-of-range particle target rank");
+    }
+    if (intent.item_index >= state.particles.size()) {
+      throw std::runtime_error("migration admission particle item index is not a local particle row");
+    }
+    const std::size_t target = static_cast<std::size_t>(intent.new_owner_rank);
+    const auto local_index = core::checkedIntegralNarrow<std::uint32_t>(
+        intent.item_index, "migration admission particle local index");
+    const std::uint64_t wire = core::checkedIntegralNarrow<std::uint64_t>(
+        migration_wire::estimateParticleMigrationWireUpperBoundBytes(state, local_index),
+        "particle migration wire upper bound");
+    const std::uint64_t dynamic_heap = core::checkedIntegralNarrow<std::uint64_t>(
+        migration_wire::estimateParticleMigrationDynamicHeapUpperBoundBytes(state, local_index),
+        "particle migration dynamic heap upper bound");
+    const std::uint64_t state_bytes = estimateParticleMemoryBytesForDecomposition(
+        state, state.particle_sidecar.species_tag[local_index]);
+    plan.outbound_particle_count_by_rank[target] = core::checkedMemoryBytesAdd(
+        plan.outbound_particle_count_by_rank[target], 1U,
+        "particle migration outbound count");
+    send_wire[target] = core::checkedMemoryBytesAdd(
+        send_wire[target], wire, "particle migration outbound wire bytes");
+    send_dynamic_heap[target] = core::checkedMemoryBytesAdd(
+        send_dynamic_heap[target], dynamic_heap,
+        "particle migration outbound dynamic heap bytes");
+    send_max_record_wire[target] = std::max(send_max_record_wire[target], wire);
+    send_state_bytes[target] = core::checkedMemoryBytesAdd(
+        send_state_bytes[target], state_bytes,
+        "particle migration outbound state bytes");
+    }
+
+    for (const parallel::AmrPatchOwnershipUpdate& update : rebalance.amr_patch_ownership_updates) {
+    if (update.old_owner_rank != world_rank) continue;
+    if (update.new_owner_rank < 0 || update.new_owner_rank >= mpi_context.worldSize()) {
+      throw std::invalid_argument("migration admission encountered out-of-range AMR patch target rank");
+    }
+    const std::uint32_t patch_index = findLocalPatchIndexById(state, update.patch_id);
+    const std::size_t target = static_cast<std::size_t>(update.new_owner_rank);
+    const std::uint64_t patch_cell_count = core::checkedIntegralNarrow<std::uint64_t>(
+        state.patches.cell_count[patch_index], "AMR migration cell count");
+    const std::uint64_t wire = core::checkedIntegralNarrow<std::uint64_t>(
+        migration_wire::estimateAmrPatchMigrationWireUpperBoundBytes(state, patch_index),
+        "AMR migration wire upper bound");
+    const std::uint64_t dynamic_heap = core::checkedIntegralNarrow<std::uint64_t>(
+        migration_wire::estimateAmrPatchMigrationDynamicHeapUpperBoundBytes(state, patch_index),
+        "AMR migration dynamic heap upper bound");
+    const std::uint64_t state_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+        core::checkedSizeMultiply(
+            state.patches.cell_count[patch_index],
+            sizeof(double) * 8U + sizeof(std::uint32_t) * 2U,
+            "AMR migration state byte upper bound"),
+        "AMR migration state byte width");
+    plan.outbound_patch_count_by_rank[target] = core::checkedMemoryBytesAdd(
+        plan.outbound_patch_count_by_rank[target], 1U,
+        "AMR migration outbound patch count");
+    send_wire[target] = core::checkedMemoryBytesAdd(
+        send_wire[target], wire, "AMR migration outbound wire bytes");
+    send_dynamic_heap[target] = core::checkedMemoryBytesAdd(
+        send_dynamic_heap[target], dynamic_heap,
+        "AMR migration outbound dynamic heap bytes");
+    send_max_record_wire[target] = std::max(send_max_record_wire[target], wire);
+    send_state_bytes[target] = core::checkedMemoryBytesAdd(
+        send_state_bytes[target], state_bytes,
+        "AMR migration outbound state bytes");
+
+    // Patch reassignment can induce parent-gas-particle migration in addition
+    // to explicit particle intents.  Account for at most one particle per
+    // patch cell here without materializing the parent-index map before
+    // governor admission.  Double-counting an explicit overlapping particle
+    // intent is intentionally conservative; under-counting this path is not.
+    send_patch_particle_upper_bound[target] = core::checkedMemoryBytesAdd(
+        send_patch_particle_upper_bound[target], patch_cell_count,
+        "AMR-induced particle migration upper-bound count");
+    send_wire[target] = core::checkedMemoryBytesAdd(
+        send_wire[target],
+        core::checkedIntegralNarrow<std::uint64_t>(
+            core::checkedSizeMultiply(
+                core::checkedIntegralNarrow<std::size_t>(
+                    patch_cell_count, "AMR-induced particle count width"),
+                core::checkedIntegralNarrow<std::size_t>(
+                    max_particle_wire, "maximum particle wire width"),
+                "AMR-induced particle wire upper bound"),
+            "AMR-induced particle wire byte width"),
+        "AMR plus particle outbound wire bytes");
+    send_dynamic_heap[target] = core::checkedMemoryBytesAdd(
+        send_dynamic_heap[target],
+        core::checkedIntegralNarrow<std::uint64_t>(
+            core::checkedSizeMultiply(
+                core::checkedIntegralNarrow<std::size_t>(
+                    patch_cell_count, "AMR-induced dynamic particle count width"),
+                core::checkedIntegralNarrow<std::size_t>(
+                    max_particle_dynamic_heap, "maximum particle dynamic heap width"),
+                "AMR-induced particle dynamic heap upper bound"),
+            "AMR-induced particle dynamic heap byte width"),
+        "AMR plus particle outbound dynamic heap bytes");
+    send_state_bytes[target] = core::checkedMemoryBytesAdd(
+        send_state_bytes[target],
+        core::checkedIntegralNarrow<std::uint64_t>(
+            core::checkedSizeMultiply(
+                core::checkedIntegralNarrow<std::size_t>(
+                    patch_cell_count, "AMR-induced state particle count width"),
+                core::checkedIntegralNarrow<std::size_t>(
+                    max_particle_state_bytes, "maximum particle state byte width"),
+                "AMR-induced particle state upper bound"),
+            "AMR-induced particle state byte width"),
+        "AMR plus particle outbound state bytes");
+    send_max_record_wire[target] = std::max(send_max_record_wire[target], max_particle_wire);
+    }
+  } catch (...) {
+    local_sizing_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_sizing_failure, "migration admission local physical sizing");
+
+  const std::vector<std::uint64_t> recv_particle_counts = exchangeMigrationControlU64(
+      mpi_context, plan.outbound_particle_count_by_rank, "particle migration count admission exchange");
+  const std::vector<std::uint64_t> recv_patch_counts = exchangeMigrationControlU64(
+      mpi_context, plan.outbound_patch_count_by_rank, "AMR migration count admission exchange");
+  const std::vector<std::uint64_t> recv_wire = exchangeMigrationControlU64(
+      mpi_context, send_wire, "migration wire-byte admission exchange");
+  const std::vector<std::uint64_t> recv_dynamic_heap = exchangeMigrationControlU64(
+      mpi_context, send_dynamic_heap, "migration dynamic-heap admission exchange");
+  const std::vector<std::uint64_t> recv_max_record_wire = exchangeMigrationControlU64(
+      mpi_context, send_max_record_wire, "migration max-record admission exchange");
+  const std::vector<std::uint64_t> recv_state_bytes = exchangeMigrationControlU64(
+      mpi_context, send_state_bytes, "migration state-byte admission exchange");
+  const std::vector<std::uint64_t> recv_patch_particle_upper_bound = exchangeMigrationControlU64(
+      mpi_context, send_patch_particle_upper_bound,
+      "AMR-induced particle-count admission exchange");
+
+  plan.outbound_particle_count = sumU64(plan.outbound_particle_count_by_rank, "outbound particle migration count");
+  plan.inbound_particle_count = sumU64(recv_particle_counts, "inbound particle migration count");
+  plan.outbound_patch_count = sumU64(plan.outbound_patch_count_by_rank, "outbound AMR patch migration count");
+  plan.inbound_patch_count = sumU64(recv_patch_counts, "inbound AMR patch migration count");
+  plan.outbound_particle_record_capacity_count = core::checkedMemoryBytesAdd(
+      plan.outbound_particle_count,
+      sumU64(send_patch_particle_upper_bound, "outbound AMR-induced particle capacity count"),
+      "outbound particle record capacity count");
+  for (std::size_t rank = 0; rank < rank_count; ++rank) {
+    plan.outbound_particle_record_capacity_count_by_rank[rank] = core::checkedMemoryBytesAdd(
+        plan.outbound_particle_count_by_rank[rank],
+        send_patch_particle_upper_bound[rank],
+        "outbound per-rank particle record capacity count");
+  }
+  plan.inbound_particle_record_capacity_count = core::checkedMemoryBytesAdd(
+      plan.inbound_particle_count,
+      sumU64(recv_patch_particle_upper_bound, "inbound AMR-induced particle capacity count"),
+      "inbound particle record capacity count");
+  plan.outbound_wire_bytes = sumU64(send_wire, "outbound migration wire bytes");
+  plan.inbound_wire_bytes = sumU64(recv_wire, "inbound migration wire bytes");
+  plan.outbound_dynamic_heap_bytes = sumU64(send_dynamic_heap, "outbound migration dynamic heap bytes");
+  plan.inbound_dynamic_heap_bytes = sumU64(recv_dynamic_heap, "inbound migration dynamic heap bytes");
+
+  const std::uint64_t particle_records = core::checkedMemoryBytesAdd(
+      plan.outbound_particle_record_capacity_count,
+      plan.inbound_particle_record_capacity_count,
+      "migration particle record count");
+  const std::uint64_t patch_records = core::checkedMemoryBytesAdd(
+      plan.outbound_patch_count, plan.inbound_patch_count,
+      "migration patch record count");
+  plan.record_capacity_bytes = core::checkedMemoryBytesAdd(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(particle_records, "migration particle record count width"),
+          sizeof(core::ParticleMigrationRecord),
+          "migration particle record capacity"),
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(patch_records, "migration patch record count width"),
+          sizeof(core::AmrPatchMigrationRecord),
+          "migration patch record capacity"),
+      "migration native record capacities");
+  plan.record_capacity_bytes = core::checkedMemoryBytesAdd(
+      plan.record_capacity_bytes,
+      core::checkedMemoryBytesAdd(
+          plan.outbound_dynamic_heap_bytes,
+          plan.inbound_dynamic_heap_bytes,
+          "migration dynamic record heap total"),
+      "migration record plus dynamic capacity");
+
+  const std::uint64_t expected_particle_rows = core::checkedMemoryBytesAdd(
+      core::checkedIntegralNarrow<std::uint64_t>(state.particles.size(), "migration current particle rows"),
+      plan.inbound_particle_count,
+      "migration scheduler conservative destination rows");
+  plan.scheduler_remap_bytes = core::checkedMemoryBytesAdd(
+      core::checkedIntegralNarrow<std::uint64_t>(
+          core::checkedSizeMultiply(
+              state.particles.size(), sizeof(std::uint32_t),
+              "migration preserved-index capacity"),
+          "migration preserved-index bytes"),
+      core::checkedIntegralNarrow<std::uint64_t>(
+          core::checkedSizeMultiply(
+              core::checkedIntegralNarrow<std::size_t>(expected_particle_rows, "migration scheduler rows"),
+              sizeof(core::TimeBinSchedulerIdentityRecord),
+              "migration scheduler identity capacity"),
+          "migration scheduler identity bytes"),
+      "migration scheduler remap bytes");
+  plan.scheduler_remap_bytes = core::checkedMemoryBytesAdd(
+      plan.scheduler_remap_bytes,
+      core::checkedIntegralNarrow<std::uint64_t>(
+          core::checkedSizeMultiply(
+              core::checkedIntegralNarrow<std::size_t>(expected_particle_rows, "migration destination ID rows"),
+              sizeof(std::uint64_t),
+              "migration destination particle ID capacity"),
+          "migration destination particle ID bytes"),
+      "migration scheduler/destination remap bytes");
+
+  constexpr std::size_t k_unordered_node_overhead = sizeof(void*) * 3U;
+  const std::size_t local_index_node_bytes =
+      sizeof(std::pair<const std::uint64_t, std::uint32_t>) + k_unordered_node_overhead;
+  const std::size_t target_map_node_bytes =
+      sizeof(std::pair<const std::uint32_t, int>) + k_unordered_node_overhead;
+  plan.index_map_bytes = core::checkedMemoryBytesAdd(
+      core::checkedIntegralNarrow<std::uint64_t>(
+          core::checkedSizeMultiply(state.particles.size(), local_index_node_bytes,
+                                    "migration local identity map capacity"),
+          "migration local identity map bytes"),
+      core::checkedIntegralNarrow<std::uint64_t>(
+          core::checkedSizeMultiply(
+              core::checkedIntegralNarrow<std::size_t>(plan.outbound_particle_count, "migration outbound map rows"),
+              target_map_node_bytes,
+              "migration outbound target map capacity"),
+          "migration outbound target map bytes"),
+      "migration index-map bytes");
+
+  const std::uint64_t inbound_state_bytes = sumU64(recv_state_bytes, "migration inbound state bytes");
+  plan.commit_coexistence_bytes = core::checkedMemoryBytesAdd(
+      transaction_baseline_before,
+      inbound_state_bytes,
+      "migration old/new commit coexistence");
+
+  const std::uint64_t max_record_assembly = core::checkedMemoryBytesAdd(
+      sumU64(send_max_record_wire, "migration outbound max-record staging"),
+      sumU64(recv_max_record_wire, "migration inbound max-record staging"),
+      "migration record fragment assembly staging");
+  const std::uint64_t round_limit = core::checkedIntegralNarrow<std::uint64_t>(
+      parallel::mpiTransportRoundLimitBytes(), "migration MPI transport round limit");
+  plan.packet_staging_bytes = core::checkedMemoryBytesAdd(
+      core::checkedMemoryBytesAdd(round_limit, round_limit, "migration MPI internal round buffers"),
+      core::checkedMemoryBytesAdd(round_limit, round_limit, "migration packet send/receive vectors"),
+      "migration bounded packet staging");
+  plan.packet_staging_bytes = core::checkedMemoryBytesAdd(
+      plan.packet_staging_bytes, max_record_assembly,
+      "migration packet plus single-record assembly staging");
+
+  plan.requested_extra_bytes = plan.commit_coexistence_bytes;
+  for (const auto [bytes, label] : std::array{
+           std::pair{plan.record_capacity_bytes, std::string_view{"migration record capacities"}},
+           std::pair{plan.scheduler_remap_bytes, std::string_view{"migration scheduler remap"}},
+           std::pair{plan.index_map_bytes, std::string_view{"migration index maps"}},
+           std::pair{plan.packet_staging_bytes, std::string_view{"migration bounded packets"}},
+       }) {
+    plan.requested_extra_bytes = core::checkedMemoryBytesAdd(
+        plan.requested_extra_bytes, bytes, label);
+  }
+  return plan;
 }
 
 [[nodiscard]] parallel::LocalOwnershipIdentitySummary reduceLocalParticleIdentitySummary(
@@ -1259,9 +1519,12 @@ void exchangeAndValidateAmrPatchPayloads(
       core::memoryReportBaselineOwnedBytes(
           core::mergeMemoryReports(transaction_reports));
   std::uint64_t process_baseline_before = 0U;
+  MigrationAdmissionPlan migration_admission_plan;
   core::MemoryReservation migration_reservation;
   std::exception_ptr migration_admission_failure;
   try {
+    migration_admission_plan = buildMigrationAdmissionPlan(
+        state, rebalance, mpi_context, world_rank, transaction_baseline_before);
     if (services.memory_governor != nullptr) {
       process_baseline_before =
           services.memory_governor->snapshot().baseline_owned_bytes;
@@ -1269,15 +1532,9 @@ void exchangeAndValidateAmrPatchPayloads(
         throw std::logic_error(
             "migration governor baseline is stale: state/scheduler capacity exceeds process baseline");
       }
-      // Required commit can coexist with old state while bounded-round wire,
-      // decoded records, and scheduler remap are resident. Two additional
-      // state/scheduler footprints are a conservative admission ceiling for
-      // this M1 transaction without pretending traffic volume is live at once.
-      const std::uint64_t migration_peak_extra = core::checkedMemoryBytesAdd(
-          transaction_baseline_before, transaction_baseline_before,
-          "runtime migration transaction/staging peak");
       migration_reservation = services.memory_governor->reserve(
-          core::MemoryClass::kCommunication, migration_peak_extra,
+          core::MemoryClass::kCommunication,
+          migration_admission_plan.requested_extra_bytes,
           "parallel.migration.transaction");
       migration_reservation.commit();
     }
@@ -1424,6 +1681,12 @@ void exchangeAndValidateAmrPatchPayloads(
 
   std::vector<std::vector<core::ParticleMigrationRecord>> outbound_records_by_rank(
       static_cast<std::size_t>(mpi_context.worldSize()));
+  for (std::size_t rank = 0; rank < outbound_records_by_rank.size(); ++rank) {
+    outbound_records_by_rank[rank].reserve(
+        core::checkedIntegralNarrow<std::size_t>(
+            migration_admission_plan.outbound_particle_record_capacity_count_by_rank[rank],
+            "outbound particle migration record reserve"));
+  }
   for (const std::uint32_t local_index : outbound_local_indices) {
     const int target_rank = outbound_target_by_local_index.at(local_index);
     auto records = state.packParticleMigrationRecords(std::span<const std::uint32_t>(&local_index, 1), scheduler);
@@ -1436,6 +1699,12 @@ void exchangeAndValidateAmrPatchPayloads(
 
   std::vector<std::vector<core::AmrPatchMigrationRecord>> outbound_patch_records_by_rank(
       static_cast<std::size_t>(mpi_context.worldSize()));
+  for (std::size_t rank = 0; rank < outbound_patch_records_by_rank.size(); ++rank) {
+    outbound_patch_records_by_rank[rank].reserve(
+        core::checkedIntegralNarrow<std::size_t>(
+            migration_admission_plan.outbound_patch_count_by_rank[rank],
+            "outbound AMR migration record reserve"));
+  }
   for (const std::uint32_t patch_index : outbound_patch_indices) {
     const int target_rank = outbound_patch_target_by_local_index.at(patch_index);
     auto records = state.packAmrPatchMigrationRecords(std::span<const std::uint32_t>(&patch_index, 1));
@@ -1469,10 +1738,16 @@ void exchangeAndValidateAmrPatchPayloads(
     outbound_patch_records_by_rank[static_cast<std::size_t>(target_rank)].push_back(std::move(records[0]));
   }
 
-  std::vector<core::ParticleMigrationRecord> inbound_records =
+  auto particle_exchange =
       exchangeRuntimeParticleMigrationRecords(mpi_context, outbound_records_by_rank);
-  std::vector<core::AmrPatchMigrationRecord> inbound_patch_records =
+  auto patch_exchange =
       exchangeRuntimeAmrPatchMigrationRecords(mpi_context, outbound_patch_records_by_rank);
+  std::vector<core::ParticleMigrationRecord> inbound_records =
+      std::move(particle_exchange.records);
+  std::vector<core::AmrPatchMigrationRecord> inbound_patch_records =
+      std::move(patch_exchange.records);
+  const std::size_t inbound_particle_count = inbound_records.size();
+  const std::size_t inbound_patch_count = inbound_patch_records.size();
   for (const core::ParticleMigrationRecord& record : inbound_records) {
     if (record.owning_rank != static_cast<std::uint32_t>(world_rank)) {
       throw std::runtime_error("runtime particle migration exchange delivered a record to the wrong destination rank");
@@ -1499,7 +1774,7 @@ void exchangeAndValidateAmrPatchPayloads(
     core::AmrPatchMigrationCommit patch_commit;
     patch_commit.world_rank = world_rank;
     patch_commit.outbound_local_patch_indices = outbound_patch_indices;
-    patch_commit.inbound_records = inbound_patch_records;
+    patch_commit.inbound_records = std::move(inbound_patch_records);
     state.commitAmrPatchMigration(patch_commit);
     core::rebuildSchedulerFromGasCellIdentityRecords(gas_cell_scheduler, gas_scheduler_records, state);
     core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, state);
@@ -1522,7 +1797,7 @@ void exchangeAndValidateAmrPatchPayloads(
     core::ParticleMigrationCommit commit;
     commit.world_rank = world_rank;
     commit.outbound_local_indices = outbound_local_indices;
-    commit.inbound_records = inbound_records;
+    commit.inbound_records = std::move(inbound_records);
     commit.preserve_gas_cell_state = true;
     state.commitParticleMigration(commit);
 
@@ -1539,7 +1814,7 @@ void exchangeAndValidateAmrPatchPayloads(
   exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
 
   recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
-  if (profiler != nullptr && (!outbound_local_indices.empty() || !inbound_records.empty())) {
+  if (profiler != nullptr && (!outbound_local_indices.empty() || inbound_particle_count != 0U)) {
     profiler->recordEvent(core::RuntimeEvent{
         .event_kind = "parallel.decomposition.runtime_migration_commit",
         .severity = core::RuntimeEventSeverity::kWarning,
@@ -1548,7 +1823,32 @@ void exchangeAndValidateAmrPatchPayloads(
         .message = "runtime rebalance committed authoritative particle migration at a safe scheduler boundary",
         .payload = {
             {"outbound_particle_count", std::to_string(outbound_local_indices.size())},
-            {"inbound_particle_count", std::to_string(inbound_records.size())},
+            {"inbound_particle_count", std::to_string(inbound_particle_count)},
+            {"inbound_patch_count", std::to_string(inbound_patch_count)},
+            {"migration_transaction_reserved_bytes", std::to_string(migration_admission_plan.requested_extra_bytes)},
+            {"migration_record_capacity_bytes", std::to_string(migration_admission_plan.record_capacity_bytes)},
+            {"migration_packet_staging_bound_bytes", std::to_string(migration_admission_plan.packet_staging_bytes)},
+            {"migration_scheduler_remap_capacity_bytes", std::to_string(migration_admission_plan.scheduler_remap_bytes)},
+            {"migration_index_map_capacity_bytes", std::to_string(migration_admission_plan.index_map_bytes)},
+            {"migration_outbound_wire_traffic_upper_bound_bytes", std::to_string(migration_admission_plan.outbound_wire_bytes)},
+            {"migration_inbound_wire_traffic_upper_bound_bytes", std::to_string(migration_admission_plan.inbound_wire_bytes)},
+            {"migration_packet_send_capacity_bytes", std::to_string(std::max(
+                 particle_exchange.stats.packet_send_capacity_bytes,
+                 patch_exchange.stats.packet_send_capacity_bytes))},
+            {"migration_packet_receive_capacity_bytes", std::to_string(std::max(
+                 particle_exchange.stats.packet_receive_capacity_bytes,
+                 patch_exchange.stats.packet_receive_capacity_bytes))},
+            {"migration_communication_high_water_bytes", std::to_string(std::max(
+                 particle_exchange.stats.communication_high_water_bytes,
+                 patch_exchange.stats.communication_high_water_bytes))},
+            {"migration_wire_bytes_sent", std::to_string(core::checkedMemoryBytesAdd(
+                 particle_exchange.stats.wire_bytes_sent,
+                 patch_exchange.stats.wire_bytes_sent,
+                 "migration combined wire bytes sent"))},
+            {"migration_wire_bytes_received", std::to_string(core::checkedMemoryBytesAdd(
+                 particle_exchange.stats.wire_bytes_received,
+                 patch_exchange.stats.wire_bytes_received,
+                 "migration combined wire bytes received"))},
             {"current_weighted_imbalance_ratio", std::to_string(rebalance.current_metrics.weighted_imbalance_ratio)},
             {"target_weighted_imbalance_ratio", std::to_string(rebalance.target_decomposition.metrics.weighted_imbalance_ratio)},
             {"current_memory_imbalance_ratio", std::to_string(rebalance.current_metrics.memory_imbalance_ratio)},

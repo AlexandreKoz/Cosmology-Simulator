@@ -79,6 +79,13 @@ struct DistributedMemorySummary {
 };
 
 struct ProcessMemoryReconciliation {
+  // Estimated bytes that are currently resident by CHUI contract: retained
+  // baseline ownership, committed governed allocations, and the configured
+  // opaque external-runtime allowance.  Future policy headroom and merely
+  // reserved-but-uncommitted allocations are intentionally excluded.
+  std::uint64_t current_declared_residency_bytes = 0U;
+  // Backward-compatible report key.  This now aliases
+  // current_declared_residency_bytes rather than governor policy demand.
   std::uint64_t known_accounted_bytes = 0U;
   std::optional<std::uint64_t> observed_rss_bytes;
   std::optional<std::uint64_t> observed_peak_rss_bytes;

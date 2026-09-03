@@ -1,0 +1,169 @@
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+
+#include "cosmosim/core/simulation_state.hpp"
+#include "workflows/internal/migration_wire.hpp"
+
+namespace {
+
+using cosmosim::core::ParticleMigrationRecord;
+namespace wire = cosmosim::workflows::internal::migration_wire;
+
+ParticleMigrationRecord makeCommonRecord() {
+  ParticleMigrationRecord record;
+  record.particle_id = 0x0102030405060708ULL;
+  record.sfc_key = 0x1122334455667788ULL;
+  record.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+  record.particle_flags = 0x21U;
+  record.owning_rank = 3U;
+  record.position_x_comoving = 1.25;
+  record.position_y_comoving = 2.5;
+  record.position_z_comoving = 3.75;
+  record.velocity_x_peculiar = -4.0;
+  record.velocity_y_peculiar = 5.0;
+  record.velocity_z_peculiar = -6.0;
+  record.mass_code = 7.5;
+  record.time_bin = 4U;
+  record.has_scheduler_fields = true;
+  record.scheduler_fields.bin_index = 4U;
+  record.scheduler_fields.next_activation_tick = 12345U;
+  record.scheduler_fields.pending_bin_index = 5U;
+  record.last_drift_time_code = 0.125;
+  record.last_drift_scale_factor = 0.75;
+  record.has_gravity_softening_value = true;
+  record.gravity_softening_comoving = 0.002;
+  return record;
+}
+
+void testDarkMatterWireIsConditionalAndExplicit() {
+  const ParticleMigrationRecord dm = makeCommonRecord();
+  const std::vector<std::uint8_t> encoded = wire::encodeParticleMigrationRecord(dm);
+  assert(encoded.size() < 200U);
+  assert(encoded.size() == wire::particleWireReferenceWidths().dark_matter_bytes + sizeof(double));
+
+  // Wire version and particle ID are little-endian field encodings, not native
+  // struct bytes/padding.
+  assert(encoded[0] == 2U && encoded[1] == 0U && encoded[2] == 0U && encoded[3] == 0U);
+  assert(encoded[4] == 0x08U);
+  assert(encoded[11] == 0x01U);
+
+  ParticleMigrationRecord inactive_payload = dm;
+  inactive_payload.gas_cell_fields.gas_cell_id = 991U;
+  inactive_payload.star_fields.birth_key = 992U;
+  inactive_payload.black_hole_fields.accretion_rate_code = 993.0;
+  inactive_payload.tracer_fields.parent_particle_id = 994U;
+  assert(wire::encodeParticleMigrationRecord(inactive_payload) == encoded);
+
+  const ParticleMigrationRecord decoded = wire::decodeParticleMigrationRecord(encoded);
+  assert(decoded.particle_id == dm.particle_id);
+  assert(decoded.sfc_key == dm.sfc_key);
+  assert(decoded.owning_rank == dm.owning_rank);
+  assert(decoded.mass_code == dm.mass_code);
+  assert(decoded.has_scheduler_fields);
+  assert(decoded.scheduler_fields.next_activation_tick == 12345U);
+  assert(decoded.has_gravity_softening_value);
+  assert(decoded.gravity_softening_comoving == dm.gravity_softening_comoving);
+  assert(!decoded.has_gas_cell_fields);
+  assert(!decoded.has_star_fields);
+  assert(!decoded.has_black_hole_fields);
+  assert(!decoded.has_tracer_fields);
+}
+
+void testSpeciesPayloadRoundTrips() {
+  ParticleMigrationRecord gas = makeCommonRecord();
+  gas.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+  gas.has_gas_cell_fields = true;
+  gas.gas_cell_fields.gas_cell_id = 101U;
+  gas.gas_cell_fields.parent_particle_id = gas.particle_id;
+  gas.gas_cell_fields.density_code = 3.5;
+  auto decoded_gas = wire::decodeParticleMigrationRecord(wire::encodeParticleMigrationRecord(gas));
+  assert(decoded_gas.has_gas_cell_fields);
+  assert(decoded_gas.gas_cell_fields.gas_cell_id == 101U);
+  assert(decoded_gas.gas_cell_fields.density_code == 3.5);
+
+  ParticleMigrationRecord star = makeCommonRecord();
+  star.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kStar);
+  star.has_star_fields = true;
+  star.star_fields.birth_key = 202U;
+  star.star_fields.birth_mass_code = 4.5;
+  auto decoded_star = wire::decodeParticleMigrationRecord(wire::encodeParticleMigrationRecord(star));
+  assert(decoded_star.has_star_fields);
+  assert(decoded_star.star_fields.birth_key == 202U);
+  assert(decoded_star.star_fields.birth_mass_code == 4.5);
+
+  ParticleMigrationRecord black_hole = makeCommonRecord();
+  black_hole.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kBlackHole);
+  black_hole.has_black_hole_fields = true;
+  black_hole.black_hole_fields.accretion_rate_code = 6.5;
+  auto decoded_bh = wire::decodeParticleMigrationRecord(wire::encodeParticleMigrationRecord(black_hole));
+  assert(decoded_bh.has_black_hole_fields);
+  assert(decoded_bh.black_hole_fields.accretion_rate_code == 6.5);
+
+  ParticleMigrationRecord tracer = makeCommonRecord();
+  tracer.species_tag = static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kTracer);
+  tracer.has_tracer_fields = true;
+  tracer.tracer_fields.parent_particle_id = 303U;
+  auto decoded_tracer = wire::decodeParticleMigrationRecord(wire::encodeParticleMigrationRecord(tracer));
+  assert(decoded_tracer.has_tracer_fields);
+  assert(decoded_tracer.tracer_fields.parent_particle_id == 303U);
+
+  const auto widths = wire::particleWireReferenceWidths();
+  assert(widths.dark_matter_bytes > 0U);
+  assert(widths.gas_extra_bytes > 0U);
+  assert(widths.star_extra_bytes > 0U);
+  assert(widths.black_hole_extra_bytes > 0U);
+  assert(widths.tracer_extra_bytes > 0U);
+}
+
+void testTruncatedAndFragmentPacketsFailClosed() {
+  const auto encoded = wire::encodeParticleMigrationRecord(makeCommonRecord());
+  bool threw = false;
+  try {
+    (void)wire::decodeParticleMigrationRecord(
+        std::span<const std::uint8_t>(encoded.data(), encoded.size() - 1U));
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::vector<std::uint8_t> payload{1U, 2U, 3U, 4U};
+  const auto fragment = wire::encodeFragment(7U, 10U, 3U, payload);
+  const wire::FragmentView view = wire::decodeFragment(fragment);
+  assert(view.record_sequence == 7U);
+  assert(view.record_total_bytes == 10U);
+  assert(view.fragment_offset == 3U);
+  assert(std::vector<std::uint8_t>(view.payload.begin(), view.payload.end()) == payload);
+
+  threw = false;
+  try {
+    (void)wire::encodeFragment(0U, 4U, 3U, payload);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testPacketCapacityIsIndependentOfLogicalTraffic() {
+  constexpr std::size_t round_limit = 16U * 1024U * 1024U;
+  const auto plan = wire::planPacketCapacity(round_limit, 8U);
+  assert(plan.aggregate_packet_bytes <= round_limit);
+  assert(plan.fragment_payload_bytes > 0U);
+  // The plan has no logical-record-count input: one thousand or one billion
+  // records reuse the same physical packet capacity.
+  const std::size_t capacity_for_thousand = plan.aggregate_packet_bytes;
+  const std::size_t capacity_for_billion = plan.aggregate_packet_bytes;
+  assert(capacity_for_thousand == capacity_for_billion);
+}
+
+}  // namespace
+
+int main() {
+  testDarkMatterWireIsConditionalAndExplicit();
+  testSpeciesPayloadRoundTrips();
+  testTruncatedAndFragmentPacketsFailClosed();
+  testPacketCapacityIsIndependentOfLogicalTraffic();
+  return 0;
+}

@@ -520,9 +520,22 @@ void attachProcessMemoryObservation(
     ProcessMemoryObservation observation) {
   report.process_memory_observation = observation;
   ProcessMemoryReconciliation reconciliation;
-  reconciliation.known_accounted_bytes = report.governor_snapshot.has_value()
-      ? report.governor_snapshot->accounted_bytes
-      : memoryReportBaselineOwnedBytes(report);
+  if (report.governor_snapshot.has_value()) {
+    const MemoryGovernorSnapshot& governor = *report.governor_snapshot;
+    reconciliation.current_declared_residency_bytes = checkedMemoryBytesAdd(
+        governor.baseline_owned_bytes,
+        governor.external_runtime_reserve_bytes,
+        "process current declared baseline/external residency");
+    reconciliation.current_declared_residency_bytes = checkedMemoryBytesAdd(
+        reconciliation.current_declared_residency_bytes,
+        governor.committed_bytes,
+        "process current declared committed residency");
+  } else {
+    reconciliation.current_declared_residency_bytes =
+        memoryReportBaselineOwnedBytes(report);
+  }
+  reconciliation.known_accounted_bytes =
+      reconciliation.current_declared_residency_bytes;
   reconciliation.observed_rss_bytes = observation.current_rss_bytes;
   reconciliation.observed_peak_rss_bytes = observation.peak_rss_bytes;
   reconciliation.observed_pss_bytes = observation.pss_bytes;
@@ -599,7 +612,9 @@ std::string formatMemoryReportHumanReadable(const MemoryReport& report) {
   }
   if (report.process_memory_reconciliation.has_value()) {
     const ProcessMemoryReconciliation& process = *report.process_memory_reconciliation;
-    out << " process_memory known_accounted_bytes=" << process.known_accounted_bytes;
+    out << " process_memory current_declared_residency_bytes="
+        << process.current_declared_residency_bytes
+        << " known_accounted_bytes=" << process.known_accounted_bytes;
     if (process.observed_rss_bytes.has_value()) {
       out << " observed_rss_bytes=" << *process.observed_rss_bytes;
     }

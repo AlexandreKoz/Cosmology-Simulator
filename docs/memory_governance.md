@@ -185,14 +185,23 @@ avoiding either a double-account window or an unaccounted retained-capacity gap.
 
 Production process-memory observation now supplies optional Linux/WSL RSS,
 peak-RSS/HWM, and `smaps_rollup` PSS values at workflow reporting boundaries.
-The profiler reconciles those observations against governor-accounted demand and
-reports non-negative unexplained residency. RSS/PSS remain diagnostic evidence;
-they do not become scientific state or replace deterministic allocation
-admission.
+The profiler distinguishes conservative governor policy demand from current
+declared residency. RSS discrepancy uses baseline-owned retained capacity +
+currently committed governed capacity + the configured opaque external-runtime
+estimate; inactive future output/restart overlap and uncommitted reservations do
+not masquerade as current residency. RSS/PSS remain diagnostic evidence; they do
+not become scientific state or replace deterministic allocation admission.
 
 Distributed telemetry reports rank-local/sum/max/mean/imbalance for declared
 memory, RSS/peak RSS where all ranks expose it, and communication high-water.
 Rank maximum remains the safety quantity.
+
+Post-M1C-1 closure also replaces population-scaled migration wire
+materialization with an explicit conditional field codec and reusable fragmented
+packets bounded by `parallel::mpiTransportRoundLimitBytes()`. Migration governor
+admission is derived from the actual transaction coexistence, native record and
+dynamic sidecar capacities, scheduler/index staging, bounded packet buffers, and
+maximum single-record assembly requirements.
 
 The detailed coverage inventory and M1C-2 handoff are in
 `docs/repair/m1c1_runtime_memory_integration_20260831.md`.

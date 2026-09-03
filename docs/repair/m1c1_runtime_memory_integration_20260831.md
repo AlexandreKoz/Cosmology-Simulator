@@ -25,7 +25,7 @@ M1 acceptance declaration; M1C-2 owns final acceptance and scaling closure.
 | Runtime decomposition planning items | governed phase resident | Exact explicit vector footprint is admitted collectively and scoped so decomposition items are destroyed before migration staging begins. |
 | Migration transaction old/new coexistence | governed communication | A conservative transaction/staging reservation is admitted collectively before maps, migration records, wire payloads, decode, scheduler remap, and commit. Retained canonical/scheduler capacity is atomically transferred to baseline after commit. |
 | Migration preserved scheduler state | compact derived state | Preserved particles use `TimeBinSchedulerIdentityRecord`; the former full `ParticleMigrationRecord` reconstruction copy is removed. |
-| Migration wire transport | bounded-round + governed | Current authoritative checked bounded-round all-to-all implementation is preserved. Serialized payload residency for the selected migration set is inside the migration transaction admission; no older broad/unsafe collective path is reintroduced. |
+| Migration wire transport | bounded packet + governed | Post-campaign closure uses an explicit conditional field codec and reusable fragmented packets capped by the authoritative MPI transport-round budget. Total logical traffic may grow, but simultaneous application wire staging is bounded; see `docs/repair/m1c1_postcampaign_closure_20260902.md`. |
 | Snapshot scientific readback | governed diagnostic | Actual readback staging consumes the existing planned output/restart overlap allowance first; only bytes beyond the predeclared allowance become an additional commitment. Reservation outlives the readback object. |
 | Restart write/readback verification | governed diagnostic | State/scheduler/readback/force-cache coexistence is admitted collectively. Required restart verification is unchanged. The reservation lifetime covers the physical readback/export objects. |
 | Optional science diagnostics | pressure scheduled | Run-health diagnostics remain required. Science-light/heavy products are deferred under Red/Trip pressure and record `analysis.memory_pressure_deferral`; numerical solver semantics are unchanged. |
@@ -47,7 +47,8 @@ external-runtime reserves.
 The profiler reports:
 
 ```text
-process_memory.known_accounted_bytes
+process_memory.current_declared_residency_bytes
+process_memory.known_accounted_bytes  # compatibility alias
 process_memory.observed_rss_bytes
 process_memory.observed_peak_rss_bytes
 process_memory.observed_pss_bytes
@@ -58,12 +59,15 @@ process_memory.observed_to_known_ratio
 with
 
 ```text
-unexplained_resident_bytes = max(0, observed_rss_bytes - known_accounted_bytes)
+unexplained_resident_bytes = max(0, observed_rss_bytes - current_declared_residency_bytes)
 ```
 
-when RSS exists. `known_accounted_bytes` is the governor's accounted demand when
-a governor snapshot is attached, so opaque configured reserves are included in
-the declared comparison without pretending they are CHUI-owned arrays.
+when RSS exists. Post-campaign closure separates admission policy from current
+residency: `current_declared_residency_bytes` includes baseline-owned retained
+capacity, committed governed allocations, and the configured opaque external
+runtime estimate, while planned future output overlap and uncommitted
+reservations remain policy-only demand. `known_accounted_bytes` is retained as a
+compatibility alias for the corrected current-residency quantity.
 
 ## Distributed reconciliation
 

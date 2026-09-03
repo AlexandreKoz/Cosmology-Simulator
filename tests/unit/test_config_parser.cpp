@@ -931,6 +931,63 @@ treepm_rcut_cells = 5.5
   assert(axis_frozen.config.numerics.treepm_pm_grid_nx == 28);
   assert(axis_frozen.config.numerics.treepm_pm_grid_ny == 20);
   assert(axis_frozen.config.numerics.treepm_pm_grid_nz == 12);
+
+  bool anisotropic_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size_x = 80 mpc
+box_size_y = 20 mpc
+box_size_z = 20 mpc
+[numerics]
+treepm_pm_grid_nx = 20
+treepm_pm_grid_ny = 20
+treepm_pm_grid_nz = 20
+treepm_asmth_cells = 1.25
+)",
+        "axis_unsupported_anisotropy");
+  } catch (const cosmosim::core::ConfigError& error) {
+    anisotropic_rejected =
+        std::string(error.what()).find("coarsest PM cell spacing") != std::string::npos;
+  }
+  assert(anisotropic_rejected);
+
+  const auto certified_softening = cosmosim::core::loadFrozenConfigFromString(
+      R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 64 mpc
+[numerics]
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+gravity_softening = 400 kpc
+)",
+      "treepm_certified_softening_envelope");
+  assert(certified_softening.config.numerics.gravity_softening_kpc_comoving == 400.0);
+
+  bool excessive_softening_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        R"(
+[mode]
+mode = zoom_in
+[cosmology]
+box_size = 64 mpc
+[numerics]
+treepm_pm_grid = 32
+treepm_asmth_cells = 1.25
+gravity_softening = 600 kpc
+)",
+        "treepm_excessive_softening");
+  } catch (const cosmosim::core::ConfigError& error) {
+    excessive_softening_rejected =
+        std::string(error.what()).find("epsilon/r_s <= 0.20") != std::string::npos;
+  }
+  assert(excessive_softening_rejected);
 }
 
 void testBlackHoleAgnConfigKeysAndValidation() {

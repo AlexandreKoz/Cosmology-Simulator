@@ -207,28 +207,48 @@ void testDeclaredVersusObservedReconciliationArithmetic() {
 
   cosmosim::core::MemoryReport report;
   cosmosim::core::attachMemoryGovernorSnapshot(report, governor);
-  const std::uint64_t known = governor.snapshot().accounted_bytes;
+  const auto governor_snapshot = governor.snapshot();
+  const std::uint64_t current_declared = 1024U + 128U + 256U;
+  assert(governor_snapshot.accounted_bytes == current_declared + 64U);
   cosmosim::core::attachProcessMemoryObservation(
       report,
       cosmosim::core::ProcessMemoryObservation{
-          .current_rss_bytes = known + 512U,
-          .peak_rss_bytes = known + 1024U,
-          .pss_bytes = known + 128U,
+          .current_rss_bytes = current_declared + 512U,
+          .peak_rss_bytes = current_declared + 1024U,
+          .pss_bytes = current_declared + 128U,
       });
   assert(report.process_memory_reconciliation.has_value());
   const auto& reconciliation = *report.process_memory_reconciliation;
-  assert(reconciliation.known_accounted_bytes == known);
-  assert(reconciliation.observed_rss_bytes == known + 512U);
-  assert(reconciliation.observed_peak_rss_bytes == known + 1024U);
-  assert(reconciliation.observed_pss_bytes == known + 128U);
+  assert(reconciliation.current_declared_residency_bytes == current_declared);
+  assert(reconciliation.known_accounted_bytes == current_declared);
+  assert(reconciliation.observed_rss_bytes == current_declared + 512U);
+  assert(reconciliation.observed_peak_rss_bytes == current_declared + 1024U);
+  assert(reconciliation.observed_pss_bytes == current_declared + 128U);
   assert(reconciliation.unexplained_resident_bytes == 512U);
   assert(reconciliation.observed_to_known_ratio.has_value());
   assert(*reconciliation.observed_to_known_ratio > 1.0);
 
+  auto pending = governor.reserve(
+      cosmosim::core::MemoryClass::kDiagnostic, 96U, "unit.pending_not_resident");
+  cosmosim::core::MemoryReport pending_report;
+  cosmosim::core::attachMemoryGovernorSnapshot(pending_report, governor);
+  cosmosim::core::attachProcessMemoryObservation(
+      pending_report,
+      cosmosim::core::ProcessMemoryObservation{
+          .current_rss_bytes = current_declared + 64U,
+      });
+  assert(pending_report.governor_snapshot->accounted_bytes ==
+         current_declared + 64U + 96U);
+  assert(pending_report.process_memory_reconciliation->current_declared_residency_bytes ==
+         current_declared);
+  assert(pending_report.process_memory_reconciliation->known_accounted_bytes ==
+         current_declared);
+  assert(pending_report.process_memory_reconciliation->unexplained_resident_bytes == 64U);
+
   cosmosim::core::attachProcessMemoryObservation(
       report,
       cosmosim::core::ProcessMemoryObservation{
-          .current_rss_bytes = known - 1U,
+          .current_rss_bytes = current_declared - 1U,
           .peak_rss_bytes = std::nullopt,
           .pss_bytes = std::nullopt,
       });

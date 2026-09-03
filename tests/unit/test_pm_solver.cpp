@@ -159,6 +159,77 @@ void testPoissonAnalyticMode() {
 #endif
 }
 
+void testEvenGridNyquistFirstDerivativeContract() {
+  const cosmosim::gravity::PmGridShape shape{8, 8, 8};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  cosmosim::gravity::PmSolveOptions options;
+  options.box_size_mpc_comoving = 1.0;
+  options.scale_factor = 1.0;
+  options.gravitational_constant_code = 1.0;
+  options.enable_window_deconvolution = false;
+
+  // Pure x-Nyquist scalar mode.  The potential is non-zero, but an odd first
+  // derivative along x must use the zero-Nyquist convention for a real DFT.
+  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+    const double nyquist_x = (ix % 2U == 0U) ? 1.0 : -1.0;
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        grid.density()[grid.linearIndex(ix, iy, iz)] = nyquist_x;
+      }
+    }
+  }
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  double max_abs_potential = 0.0;
+  double max_abs_force_x = 0.0;
+  for (std::size_t i = 0; i < grid.potential().size(); ++i) {
+    max_abs_potential = std::max(max_abs_potential, std::abs(grid.potential()[i]));
+    max_abs_force_x = std::max(max_abs_force_x, std::abs(grid.force_x()[i]));
+  }
+  assert(max_abs_potential > 1.0e-8);
+  assert(max_abs_force_x < 1.0e-10);
+
+  // Mixed x-Nyquist / ordinary-y mode: only the x derivative is suppressed.
+  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+    const double nyquist_x = (ix % 2U == 0U) ? 1.0 : -1.0;
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      const double ordinary_y = std::sin(2.0 * k_pi * static_cast<double>(iy) /
+                                         static_cast<double>(shape.ny));
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        grid.density()[grid.linearIndex(ix, iy, iz)] = nyquist_x * ordinary_y;
+      }
+    }
+  }
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  max_abs_force_x = 0.0;
+  double max_abs_force_y = 0.0;
+  for (std::size_t i = 0; i < grid.force_x().size(); ++i) {
+    max_abs_force_x = std::max(max_abs_force_x, std::abs(grid.force_x()[i]));
+    max_abs_force_y = std::max(max_abs_force_y, std::abs(grid.force_y()[i]));
+  }
+  assert(max_abs_force_y > 1.0e-8);
+  assert(max_abs_force_x < 1.0e-10 * max_abs_force_y + 1.0e-10);
+
+  // The ordinary near-Nyquist mode must remain differentiated.
+  const std::size_t near_nyquist_mode = shape.nx / 2U - 1U;
+  for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+    const double mode = std::sin(
+        2.0 * k_pi * static_cast<double>(near_nyquist_mode * ix) /
+        static_cast<double>(shape.nx));
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      for (std::size_t iz = 0; iz < shape.nz; ++iz) {
+        grid.density()[grid.linearIndex(ix, iy, iz)] = mode;
+      }
+    }
+  }
+  solver.solvePoissonPeriodic(grid, options, nullptr);
+  max_abs_force_x = 0.0;
+  for (const double value : grid.force_x()) {
+    max_abs_force_x = std::max(max_abs_force_x, std::abs(value));
+  }
+  assert(max_abs_force_x > 1.0e-8);
+}
+
 void testUniformDensityZeroResponse() {
   const cosmosim::gravity::PmGridShape shape{8, 8, 8};
   cosmosim::gravity::PmGridStorage grid(shape);
@@ -990,6 +1061,7 @@ int main() {
   testCicMassConservation();
   testTscMassConservationAndPeriodicWrap();
   testPoissonAnalyticMode();
+  testEvenGridNyquistFirstDerivativeContract();
   testUniformDensityZeroResponse();
   testPotentialInterpolationCicConsistency();
   if (cosmosim::gravity::PmSolver::fftBackendAvailable()) {

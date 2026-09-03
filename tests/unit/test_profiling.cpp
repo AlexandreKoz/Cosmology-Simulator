@@ -184,6 +184,7 @@ void testOperationalReportIncludesMemoryAccounting() {
   assert(text.find("\"pressure\": \"green\"") != std::string::npos);
   assert(text.find("\"reservation_rejection_count\": 0") != std::string::npos);
   assert(text.find("\"process_memory\"") != std::string::npos);
+  assert(text.find("\"current_declared_residency_bytes\": 1408") != std::string::npos);
   assert(text.find("\"known_accounted_bytes\": 1408") != std::string::npos);
   assert(text.find("\"observed_rss_bytes\": 2048") != std::string::npos);
   assert(text.find("\"observed_peak_rss_bytes\": 3072") != std::string::npos);

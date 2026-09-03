@@ -1990,7 +1990,13 @@ class PmSolver::Impl {
     const double dky = 2.0 * k_pi / lengths.ly;
     const double dkz = 2.0 * k_pi / lengths.lz;
 
-    auto set_entry = [&](std::size_t index, double kx, double ky, double kz) {
+    auto set_entry = [&](std::size_t index,
+                         double kx,
+                         double ky,
+                         double kz,
+                         double grad_kx,
+                         double grad_ky,
+                         double grad_kz) {
       const double k2 = kx * kx + ky * ky + kz * kz;
       if (k2 == 0.0) {
         return;
@@ -2009,9 +2015,22 @@ class PmSolver::Impl {
         split_filter = treePmGaussianFourierLongRangeFilterUnchecked(std::sqrt(k2), options.tree_pm_split_scale_comoving);
       }
       plan.poisson_kernel[index] = prefactor * window_correction * split_filter / k2;
-      plan.grad_kx[index] = kx;
-      plan.grad_ky[index] = ky;
-      plan.grad_kz[index] = kz;
+      plan.grad_kx[index] = grad_kx;
+      plan.grad_ky[index] = grad_ky;
+      plan.grad_kz[index] = grad_kz;
+    };
+
+    const auto first_derivative_mode = [](std::size_t mode_index,
+                                          std::size_t mode_count,
+                                          double wave_number) {
+      // In an even-length real DFT the Nyquist coefficient is self-conjugate.
+      // A first derivative is odd, so assigning +/-i*k to that self-conjugate
+      // coefficient would violate the Hermitian contract required by c2r.
+      // The standard pseudospectral convention is therefore a zero Nyquist
+      // multiplier on the differentiated axis only.
+      return mode_count % 2U == 0U && mode_index == mode_count / 2U
+          ? 0.0
+          : wave_number;
     };
 
     if (plan.spectral_transposed) {
@@ -2027,7 +2046,11 @@ class PmSolver::Impl {
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
             const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
-            set_entry(index, kx, ky, kz);
+            set_entry(
+                index, kx, ky, kz,
+                first_derivative_mode(ix, shape.nx, kx),
+                first_derivative_mode(iy, shape.ny, ky),
+                first_derivative_mode(iz, shape.nz, kz));
           }
         }
       }
@@ -2045,7 +2068,11 @@ class PmSolver::Impl {
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
             const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
-            set_entry(index, kx, ky, kz);
+            set_entry(
+                index, kx, ky, kz,
+                first_derivative_mode(ix, shape.nx, kx),
+                first_derivative_mode(iy, shape.ny, ky),
+                first_derivative_mode(iz, shape.nz, kz));
           }
         }
       }

@@ -395,6 +395,7 @@ add_library(cosmosim_workflows STATIC
   src/workflows/internal/cartesian_gas_cell_layout.cpp
   src/workflows/internal/metal_diffusion_topology.cpp
   src/workflows/internal/gas_cell_ownership.cpp
+  src/workflows/internal/migration_wire.cpp
   src/workflows/migration_balance_runtime.cpp
   src/workflows/output_restart_runtime.cpp
   src/workflows/particle_ghost_runtime.cpp
@@ -985,6 +986,12 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME integration_species_migration_invariants COMMAND test_integration_species_migration_invariants)
   cosmosim_mark_runtime_truth_test(integration_species_migration_invariants migration sidecar)
 
+  add_executable(test_unit_migration_wire tests/unit/test_migration_wire.cpp)
+  target_include_directories(test_unit_migration_wire PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test_unit_migration_wire PRIVATE cosmosim_workflows)
+  add_test(NAME unit_migration_wire COMMAND test_unit_migration_wire)
+  cosmosim_mark_runtime_truth_test(unit_migration_wire migration memory)
+
   add_executable(test_integration_gas_cell_identity_migration tests/integration/test_gas_cell_identity_migration.cpp)
   target_link_libraries(test_integration_gas_cell_identity_migration PRIVATE cosmosim_core)
   add_test(NAME integration_gas_cell_identity_migration COMMAND test_integration_gas_cell_identity_migration)
@@ -1468,6 +1475,7 @@ if(COSMOSIM_ENABLE_TESTS)
   cosmosim_mark_runtime_truth_test(unit_restart_checkpoint_schema restart provenance)
 
   add_executable(test_unit_tree_pm_split_kernel tests/unit/test_tree_pm_split_kernel.cpp)
+  target_include_directories(test_unit_tree_pm_split_kernel PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(test_unit_tree_pm_split_kernel PRIVATE cosmosim_gravity)
   add_test(NAME unit_tree_pm_split_kernel COMMAND test_unit_tree_pm_split_kernel)
 

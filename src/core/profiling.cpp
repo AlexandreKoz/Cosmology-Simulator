@@ -238,7 +238,9 @@ void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int in
     const ProcessMemoryReconciliation& process =
         *report.process_memory_reconciliation;
     out << ",\n" << field_indent << "\"process_memory\": {"
-        << "\"known_accounted_bytes\": " << process.known_accounted_bytes
+        << "\"current_declared_residency_bytes\": "
+        << process.current_declared_residency_bytes
+        << ", \"known_accounted_bytes\": " << process.known_accounted_bytes
         << ", \"observed_rss_bytes\": ";
     write_optional_u64(process.observed_rss_bytes);
     out << ", \"observed_peak_rss_bytes\": ";

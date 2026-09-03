@@ -29,6 +29,7 @@
 
 // shared hot tree interaction invariants
 #include "internal/tree_interaction_common.hpp"
+#include "internal/tree_pm_transport_planner.hpp"
 
 namespace cosmosim::gravity {
 namespace {
@@ -3222,6 +3223,52 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         static_cast<std::uint64_t>(sparse_peer_graph->outgoing_peers.size());
     m_last_residual_stats.let_graph_setup_ms += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - graph_setup_start).count();
+
+    // The configured per-peer batch bound alone is insufficient for classic
+    // MPI collectives: counts may be individually representable while the
+    // aggregate displacement span across many sparse peers exceeds INT_MAX.
+    // Derive a topology-aware target count and agree on the global minimum so
+    // every rank executes the same number of physical exchange rounds.  The
+    // logical request stream may be arbitrarily larger than one MPI round.
+    const std::size_t local_peer_degree = std::max(
+        sparse_peer_graph->outgoing_peers.size(),
+        sparse_peer_graph->incoming_peers.size());
+    std::uint64_t local_mpi_safe_targets = 0U;
+    std::exception_ptr aggregate_round_failure;
+    try {
+      local_mpi_safe_targets = static_cast<std::uint64_t>(
+          internal::planSparseTreePmRound(
+              max_requests_per_peer,
+              local_peer_degree,
+              k_short_range_request_wire_bytes,
+              k_short_range_response_wire_bytes)
+              .targets_per_peer_per_round);
+    } catch (...) {
+      aggregate_round_failure = std::current_exception();
+    }
+    coordinate_protocol_failure(
+        aggregate_round_failure,
+        "sparse aggregate classic-MPI round planning");
+    std::uint64_t global_mpi_safe_targets = 0U;
+    requireTreePmMpiSuccess(
+        MPI_Allreduce(
+            &local_mpi_safe_targets,
+            &global_mpi_safe_targets,
+            1,
+            MPI_UINT64_T,
+            MPI_MIN,
+            MPI_COMM_WORLD),
+        "TreePM sparse aggregate-round target bound MPI_Allreduce");
+    if (global_mpi_safe_targets == 0U) {
+      throw std::overflow_error(
+          "TreePM sparse peer degree cannot fit one target request/response "
+          "round within classic MPI int displacement capacity");
+    }
+    max_requests_per_peer = std::min(
+        max_requests_per_peer,
+        core::checkedIntegralNarrow<std::size_t>(
+            global_mpi_safe_targets,
+            "TreePM sparse aggregate-round target count"));
 
     std::uint64_t local_active_count_u64 =
         static_cast<std::uint64_t>(accumulator.active_particle_index.size());

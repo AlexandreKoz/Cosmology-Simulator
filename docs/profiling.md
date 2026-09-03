@@ -222,11 +222,14 @@ These hooks ensure core docs remain present and internally referenced as the cod
 
 ## M1C-1 process-memory reconciliation fields
 
-When the runtime memory report is attached, profiling now emits a
-`process_memory` object with `known_accounted_bytes`, optional current RSS,
-optional peak RSS, optional PSS, non-negative `unexplained_resident_bytes`, and
-an optional observed/known ratio. Unavailable OS measurements are JSON `null`,
-not zero.
+When the runtime memory report is attached, profiling emits a `process_memory`
+object with `current_declared_residency_bytes`, the compatibility alias
+`known_accounted_bytes`, optional current RSS, optional peak RSS, optional PSS,
+non-negative `unexplained_resident_bytes`, and an optional observed/known ratio.
+Current declared residency excludes inactive future output/restart policy
+headroom and uncommitted reservations; governor `accounted_bytes` remains the
+separate conservative admission/policy quantity. Unavailable OS measurements
+are JSON `null`, not zero.
 
 A `distributed_process_memory` object records rank count and per-metric local,
 global-sum, rank-max, rank-mean, and max/mean imbalance for governor-accounted

@@ -453,14 +453,14 @@ bool maybeWriteOutputs(
     const std::string generation_id =
         snapshotGenerationId(frozen_config, integrator_state.step_index);
 
-    std::exception_ptr local_snapshot_failure;
-    std::string local_verification_detail;
+    core::ProvenanceRecord snapshot_provenance =
+        makeGravityAwareProvenanceRecord(frozen_config, config);
+    applyExecutionTopologyToProvenance(&snapshot_provenance, topology);
+    snapshot_provenance.gravity_treepm_decomposition_epoch =
+        gravity_state.decompositionEpoch();
+
+    std::exception_ptr local_snapshot_write_failure;
     try {
-      core::ProvenanceRecord snapshot_provenance =
-          makeGravityAwareProvenanceRecord(frozen_config, config);
-      applyExecutionTopologyToProvenance(&snapshot_provenance, topology);
-      snapshot_provenance.gravity_treepm_decomposition_epoch =
-          gravity_state.decompositionEpoch();
       io::SnapshotWritePayload snapshot_payload;
       snapshot_payload.state = &state;
       snapshot_payload.config = &config;
@@ -480,15 +480,32 @@ bool maybeWriteOutputs(
           : io::SnapshotDialect::kChuiNative;
       snapshot_policy.durable_publication = false;
       io::writeScienceSnapshotHdf5(report.snapshot_path, snapshot_payload, snapshot_policy);
-      report.snapshot_roundtrip_executed = true;
+    } catch (...) {
+      local_snapshot_write_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        local_snapshot_write_failure, "science snapshot member write");
 
-      // The configured overlap allowance already occupies policy headroom.
-      // Commit only any physical readback bytes beyond that allowance, and
-      // keep the reservation alive until SnapshotReadResult is destroyed.
-      core::MemoryReservation snapshot_readback_reservation = reserveOutputStaging(
+    // Admission for the rank-local readback is agreed collectively before any
+    // rank enters HDF5.  This keeps a rank-local memory rejection from letting
+    // peers begin a governed phase that the rejecting rank will never enter.
+    core::MemoryReservation snapshot_readback_reservation;
+    std::exception_ptr snapshot_readback_admission_failure;
+    try {
+      snapshot_readback_reservation = reserveOutputStaging(
           services,
           simulationOwnedCapacityBytes(state),
           "io.snapshot.readback");
+    } catch (...) {
+      snapshot_readback_admission_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        snapshot_readback_admission_failure, "science snapshot readback memory admission");
+
+    std::exception_ptr local_snapshot_readback_failure;
+    std::string local_verification_detail;
+    try {
+      report.snapshot_roundtrip_executed = true;
       io::SnapshotReadOptions local_read_options;
       local_read_options.require_complete_chui_set = false;
       const io::SnapshotReadResult snapshot_read =
@@ -505,10 +522,10 @@ bool maybeWriteOutputs(
             snapshot_verification.detail);
       }
     } catch (...) {
-      local_snapshot_failure = std::current_exception();
+      local_snapshot_readback_failure = std::current_exception();
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
-        local_snapshot_failure, "science snapshot member write/readback");
+        local_snapshot_readback_failure, "science snapshot member readback");
 
     std::exception_ptr completion_failure;
     if (services.mpi_context.isRoot()) {

@@ -1928,6 +1928,45 @@ void validateConfig(const SimulationConfig& config) {
         static_cast<double>(config.numerics.treepm_pm_grid_nz);
     const double representative_mesh_spacing =
         std::cbrt(mesh_spacing_x * mesh_spacing_y * mesh_spacing_z);
+    const double coarsest_mesh_spacing = std::max({
+        mesh_spacing_x, mesh_spacing_y, mesh_spacing_z});
+    const double split_scale =
+        config.numerics.treepm_asmth_cells * representative_mesh_spacing;
+    if (split_scale < coarsest_mesh_spacing) {
+      throw ConfigError(
+          "periodic TreePM rectangular-grid support requires the spherical split scale "
+          "treepm_asmth_cells*cbrt(dx*dy*dz) to be >= the coarsest PM cell spacing; "
+          "split_scale=" + std::to_string(split_scale) +
+          ", coarsest_spacing=" + std::to_string(coarsest_mesh_spacing) +
+          "; use a less anisotropic PM grid/box or increase treepm_asmth_cells");
+    }
+
+    // The current Plummer-softened short-range residual has been analytically
+    // composition-tested through epsilon/r_s=0.20.  Plummer softening has a
+    // non-compact tail, so silently accepting larger ratios under a fixed
+    // finite cutoff would make the omitted residual an uncontrolled model
+    // error.  Per-particle overrides are checked again at gravity-source
+    // materialization because they are not part of static configuration.
+    constexpr double k_max_certified_softening_to_split_ratio = 0.20;
+    const double max_configured_softening_kpc = std::max({
+        config.numerics.gravity_softening_kpc_comoving,
+        config.numerics.gravity_softening_gas_kpc_comoving,
+        config.numerics.gravity_softening_dark_matter_kpc_comoving,
+        config.numerics.gravity_softening_star_kpc_comoving,
+        config.numerics.gravity_softening_black_hole_kpc_comoving,
+        config.numerics.gravity_softening_tracer_kpc_comoving,
+    });
+    const double max_configured_softening_mpc =
+        max_configured_softening_kpc * 1.0e-3;
+    if (max_configured_softening_mpc >
+        k_max_certified_softening_to_split_ratio * split_scale) {
+      throw ConfigError(
+          "periodic TreePM Plummer softening exceeds the certified epsilon/r_s <= 0.20 "
+          "envelope; max_configured_softening_mpc=" +
+          std::to_string(max_configured_softening_mpc) +
+          ", split_scale_mpc=" + std::to_string(split_scale) +
+          "; reduce gravitational softening or increase treepm_asmth_cells/PM cell size");
+    }
     const double cutoff_radius =
         config.numerics.treepm_rcut_cells * representative_mesh_spacing;
     const double shortest_box_axis = std::min({

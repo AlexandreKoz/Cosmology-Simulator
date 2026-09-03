@@ -1,7 +1,11 @@
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
 
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
+#include "gravity/internal/tree_pm_transport_planner.hpp"
 
 namespace {
 
@@ -79,6 +83,38 @@ void testDiagnosticsContinuityAtSplitScale() {
   assert(diagnostics.max_relative_composition_error < 1.0e-12);
 }
 
+void testSparseTreePmAggregateRoundPlanner() {
+  using cosmosim::gravity::internal::planSparseTreePmRound;
+  using cosmosim::gravity::internal::sparseTreePmPhysicalRoundCount;
+
+  const auto zero_peer_plan = planSparseTreePmRound(4096U, 0U, 96U, 80U, 1024U);
+  assert(zero_peer_plan.targets_per_peer_per_round == 4096U);
+  assert(zero_peer_plan.aggregate_bytes_per_target == 0U);
+
+  const auto many_peer_plan = planSparseTreePmRound(4096U, 8U, 96U, 80U, 4096U);
+  assert(many_peer_plan.aggregate_bytes_per_target == 8U * 96U);
+  assert(many_peer_plan.targets_per_peer_per_round == 5U);
+  assert(many_peer_plan.targets_per_peer_per_round *
+             many_peer_plan.aggregate_bytes_per_target <= 4096U);
+
+  const std::uint64_t logical_targets =
+      static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1000000ULL;
+  const std::uint64_t physical_rounds = sparseTreePmPhysicalRoundCount(
+      logical_targets, many_peer_plan.targets_per_peer_per_round);
+  assert(physical_rounds > 1U);
+  assert(physical_rounds ==
+         1U + (logical_targets - 1U) /
+             static_cast<std::uint64_t>(many_peer_plan.targets_per_peer_per_round));
+
+  bool threw = false;
+  try {
+    (void)planSparseTreePmRound(1U, 64U, 96U, 80U, 4096U);
+  } catch (const std::overflow_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -86,5 +122,6 @@ int main() {
   testFiniteSofteningResidualComposesWithPmLongRange();
   testMeshCellDerivedSplitSemantics();
   testDiagnosticsContinuityAtSplitScale();
+  testSparseTreePmAggregateRoundPlanner();
   return 0;
 }
