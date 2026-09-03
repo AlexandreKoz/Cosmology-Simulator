@@ -925,6 +925,9 @@ void testPmRoutingCapacityModelM1A() {
       12ULL * 8ULL * static_cast<std::uint64_t>(sizeof(int)) +
       8ULL * static_cast<std::uint64_t>(sizeof(std::size_t));
   constexpr std::size_t plane_record_bytes = 96U;
+  constexpr std::uint64_t certified_global_particles = 512ULL * 512ULL * 512ULL;
+  constexpr std::uint64_t certified_local_particles = certified_global_particles / 8ULL;
+  static_assert(certified_local_particles == 16'777'216ULL);
 
   const auto certified = cosmosim::gravity::modelPmRoutingCapacity(
       8,
@@ -951,13 +954,32 @@ void testPmRoutingCapacityModelM1A() {
       cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes,
       interpolation_rank_metadata_bytes,
       plane_record_bytes);
+  assert(interpolation.fixed_workspace_bytes == interpolation_rank_metadata_bytes);
+  assert(interpolation.fixed_workspace_bytes == 448ULL);
   assert(interpolation.effective_per_peer_payload_bytes == 9'582'240ULL);
+  assert(interpolation.max_send_payload_bytes == 67'075'680ULL);
+  assert(interpolation.max_receive_payload_bytes == 67'075'680ULL);
+  assert(interpolation.max_simultaneous_workspace_bytes ==
+         interpolation.fixed_workspace_bytes +
+             interpolation.max_send_payload_bytes +
+             interpolation.max_receive_payload_bytes);
   assert(interpolation.max_simultaneous_workspace_bytes == 134'151'808ULL);
   assert(interpolation.max_simultaneous_workspace_bytes <=
          cosmosim::gravity::k_pm_routing_modeled_workspace_limit_bytes);
-  assert(cosmosim::gravity::k_pm_routing_workspace_target_bytes -
-             interpolation.max_simultaneous_workspace_bytes >=
+  const std::uint64_t certified_margin_bytes =
+      cosmosim::gravity::k_pm_routing_workspace_target_bytes -
+      interpolation.max_simultaneous_workspace_bytes;
+  assert(certified_margin_bytes == 65'920ULL);
+  assert(certified_margin_bytes >=
          cosmosim::gravity::k_pm_routing_workspace_headroom_bytes);
+
+  // The certified 512^3 / 8-rank TSC local population is deliberately not an
+  // input to the capacity model: bounded routing depends on peer count, wire
+  // width, rank metadata capacity, and policy bytes, not N_local. Keep the
+  // target count visible here so later refactors cannot accidentally turn the
+  // acceptance proof into a tiny-fixture-only statement.
+  assert(certified_local_particles >
+         interpolation.effective_per_peer_payload_bytes / plane_record_bytes);
 
   const auto serial = cosmosim::gravity::modelPmRoutingCapacity(
       1, configured_peer_max, 128ULL * mib, 4096U, plane_record_bytes);

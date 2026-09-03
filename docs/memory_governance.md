@@ -205,3 +205,25 @@ maximum single-record assembly requirements.
 
 The detailed coverage inventory and M1C-2 handoff are in
 `docs/repair/m1c1_runtime_memory_integration_20260831.md`.
+
+## M1C-2 acceptance closure addendum (2026-09-03)
+
+M1C-2 closes the M1 source/architecture acceptance matrix in
+`docs/repair/m1c2_m1_acceptance_closure_20260903.md`. The certified 8-rank PM
+routing model now has an explicit regression for the 512^3 target population and
+for the exact worst-case interpolation accounting expression:
+
+```text
+448 B rank metadata
++ 67,075,680 B retained send capacity
++ 67,075,680 B retained receive capacity
+= 134,151,808 B
+```
+
+This is 65,920 B below the 128 MiB contract. `N_local` is absent from the
+capacity model by design; source population changes round count/traffic, not the
+simultaneous routing workspace. Runtime still checks actual retained wire
+capacities plus rank metadata against the 128 MiB ceiling.
+
+M1C-2 does not promote unavailable MPI/FFTW execution into runtime evidence and
+does not redefine M2 hydro/AMR/full-physics memory scope.

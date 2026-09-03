@@ -2147,3 +2147,23 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   integration handoff; this closure does not claim packet-streaming migration.
   The pre-existing sparse TreePM classic-count boundedness handoff is likewise
   unchanged.
+
+## 2026-09-03 Campaign M1C-2 M1 acceptance closure
+
+- Reconstructed the M1A -> M1B -> M1C-1 architecture from current source after
+  all later authoritative MPI and M1C-1 post-campaign repairs.
+- Closed the 12-gate M1 source/architecture acceptance matrix in
+  `docs/repair/m1c2_m1_acceptance_closure_20260903.md` without changing the
+  accepted physics, numerical tolerances, restart schema, or configuration
+  authority.
+- Re-audited the PM 128 MiB gate using retained-capacity arithmetic rather than
+  logical payload. The conservative 8-rank force/potential interpolation model
+  is 134,151,808 B = 448 B rank metadata + two 67,075,680 B directional wire
+  capacities, leaving 65,920 B beneath 128 MiB. The model is independent of
+  `N_local`, and runtime checks actual retained wire capacities plus metadata.
+- Strengthened `unit_pm_solver` so the certified 512^3 / 8-rank local population
+  and exact 128 MiB expression are explicit regression evidence rather than an
+  undocumented arithmetic assumption.
+- Focused CPU M1 acceptance tests pass. Dependency-enabled distributed runtime
+  status is recorded in the M1C-2 acceptance document and must remain
+  environment-blocked where MPI/FFTW development support is unavailable.
