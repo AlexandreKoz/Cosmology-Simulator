@@ -202,6 +202,13 @@ ic_manifest_file = ../ics/cube.ic_manifest.json
     TreePM `|A|` or the peculiar-velocity response `|A|/a^2`; after step commit
     it evaluates `dt_grav=eta sqrt(a^3 epsilon_com/|A|)`.
 - `gravity_solver`, `hydro_solver`
+- `hydro_active_batch_max_cells` (uint64, default `0`)
+  - `0` selects the deterministic automatic ceiling (`16384` cells per active batch)
+    before runtime headroom is considered.
+  - a positive value caps the active hydro reconstruction/Riemann batch directly.
+  - the existing process `MemoryGovernor` may only reduce this cap from current
+    headroom; it does not create a second hydro memory authority or adaptive AIMD
+    controller. The selected batch is aligned to eight cells when headroom permits.
 
 Time/scale semantics (anti-ambiguity contract):
 

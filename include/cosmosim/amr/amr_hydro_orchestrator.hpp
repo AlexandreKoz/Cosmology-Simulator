@@ -38,6 +38,12 @@ struct ProductionAmrHydroOptions {
   double state_time_code = 0.0;
   double ghost_fill_time_code = 0.0;
   bool enable_temporal_coarse_to_fine = false;
+  hydro::HydroActiveBatchPolicy active_batch_policy{};
+  // Optional production conversion factor used to derive cooling/source
+  // inputs patch-locally from canonical SimulationState instead of retaining
+  // full-population thermodynamic helper vectors. A zero value preserves the
+  // legacy span-provided source-context path used by focused tests.
+  double physical_density_cgs_per_density_code = 0.0;
 };
 
 struct ProductionAmrHydroDiagnostics {
@@ -55,6 +61,11 @@ struct ProductionAmrHydroDiagnostics {
   std::size_t pending_register_applied_count = 0;
   std::size_t pending_register_rejected_count = 0;
   std::vector<std::uint32_t> substeps_by_level;
+  std::uint64_t scratch_high_water_bytes = 0;
+  std::uint64_t prepared_ghost_capacity_bytes = 0;
+  std::uint64_t max_patch_conserved_bytes = 0;
+  std::size_t active_batch_capacity_cells = 0;
+  std::size_t face_batch_capacity = 0;
   AmrHydroGhostFillDiagnostics ghost_fill;
   RefluxDiagnostics reflux;
 };

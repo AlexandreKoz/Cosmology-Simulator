@@ -8,6 +8,10 @@
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
 
+namespace cosmosim::core {
+struct MemoryReport;
+}  // namespace cosmosim::core
+
 namespace cosmosim::workflows {
 
 struct RuntimeServices;
@@ -33,7 +37,7 @@ class HydroAmrRuntime {
   remoteInterfaceFaceCount() const noexcept = 0;
   [[nodiscard]] virtual std::size_t
   remoteStaleInvalidPayloadCount() const noexcept = 0;
-
+  [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
 };
 
 [[nodiscard]] std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(

@@ -278,6 +278,120 @@ void testActiveSetFullCoverageMatchesFullAdvance() {
   }
 }
 
+void testTinyHydroBatchesMatchCachedFullFaceSweepAndStabilizeCapacity() {
+  constexpr double gamma = 1.4;
+  constexpr std::size_t cell_count = 24U;
+  cosmosim::hydro::HydroConservedStateSoa initial(cell_count);
+  for (std::size_t i = 0; i < cell_count; ++i) {
+    cosmosim::hydro::HydroPrimitiveState primitive;
+    primitive.rho_comoving = 0.8 + 0.03 * static_cast<double>(i);
+    primitive.vel_x_peculiar = 0.04 * std::sin(0.3 * static_cast<double>(i));
+    primitive.vel_y_peculiar = 0.02 * std::cos(0.2 * static_cast<double>(i));
+    primitive.pressure_comoving = 0.7 + 0.02 * static_cast<double>(i);
+    primitive.metallicity_mass_fraction = 0.01 * static_cast<double>(i % 7U);
+    initial.storeCell(
+        i, cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(primitive, gamma));
+  }
+
+  cosmosim::hydro::HydroPatchGeometry geometry;
+  geometry.cell_volume_comoving = 1.0;
+  for (std::size_t i = 0; i < cell_count; ++i) {
+    geometry.faces.push_back(cosmosim::hydro::HydroFace{
+        .owner_cell = i,
+        .neighbor_cell = (i + 1U) % cell_count,
+        .owner_minus_cell = (i + cell_count - 1U) % cell_count,
+        .neighbor_plus_cell = (i + 2U) % cell_count,
+        .area_comoving = 1.0,
+        .normal_x = 1.0});
+  }
+  std::vector<std::size_t> active_cells(cell_count);
+  std::vector<std::size_t> active_faces(geometry.faces.size());
+  for (std::size_t i = 0; i < active_cells.size(); ++i) active_cells[i] = i;
+  for (std::size_t i = 0; i < active_faces.size(); ++i) active_faces[i] = i;
+  const cosmosim::hydro::HydroActiveSetView active_set{
+      .active_cells = active_cells, .active_faces = active_faces};
+
+  const cosmosim::hydro::HydroUpdateContext update{
+      .dt_code = 2.5e-4, .scale_factor = 1.0, .hubble_rate_code = 0.0};
+  const cosmosim::hydro::HydroSourceContext source_context{.update = update};
+  cosmosim::hydro::HydroCoreSolver solver(gamma);
+  cosmosim::hydro::HllcRiemannSolver reference_riemann;
+  cosmosim::hydro::MusclHancockReconstruction reference_reconstruction(
+      cosmosim::hydro::HydroReconstructionPolicy{
+          .limiter = cosmosim::hydro::HydroSlopeLimiter::kMonotonizedCentral,
+          .dt_over_dx_code = update.dt_code,
+          .dt_over_cell_width_code = {update.dt_code, update.dt_code, update.dt_code},
+          .rho_floor = 1.0e-12,
+          .pressure_floor = 1.0e-12,
+          .enable_muscl_hancock_predictor = true,
+          .adiabatic_index = gamma});
+
+  cosmosim::hydro::HydroConservedStateSoa reference = initial;
+  cosmosim::hydro::HydroScratchBuffers reference_scratch;
+  cosmosim::hydro::HydroPrimitiveCacheSoa reference_cache(reference.size());
+  solver.advancePatchActiveSetBatchedWithScratch(
+      reference,
+      geometry,
+      active_set,
+      update,
+      reference_reconstruction,
+      reference_riemann,
+      {},
+      source_context,
+      reference_scratch,
+      &reference_cache,
+      cosmosim::hydro::HydroActiveBatchPolicy{.max_active_cells = cell_count});
+
+  for (const std::size_t tiny_batch : {1U, 2U, 3U, 4U}) {
+    cosmosim::hydro::HydroConservedStateSoa batched = initial;
+    cosmosim::hydro::HydroScratchBuffers scratch;
+    cosmosim::hydro::HllcRiemannSolver riemann;
+    cosmosim::hydro::MusclHancockReconstruction reconstruction(
+        reference_reconstruction.policy());
+    solver.advancePatchActiveSetBatchedWithScratch(
+        batched,
+        geometry,
+        active_set,
+        update,
+        reconstruction,
+        riemann,
+        {},
+        source_context,
+        scratch,
+        nullptr,
+        cosmosim::hydro::HydroActiveBatchPolicy{.max_active_cells = tiny_batch});
+
+    for (std::size_t i = 0; i < cell_count; ++i) {
+      const auto expected = reference.loadCell(i);
+      const auto actual = batched.loadCell(i);
+      assert(std::abs(expected.mass_density_comoving - actual.mass_density_comoving) < 1.0e-14);
+      assert(std::abs(expected.momentum_density_x_comoving - actual.momentum_density_x_comoving) < 1.0e-14);
+      assert(std::abs(expected.momentum_density_y_comoving - actual.momentum_density_y_comoving) < 1.0e-14);
+      assert(std::abs(expected.momentum_density_z_comoving - actual.momentum_density_z_comoving) < 1.0e-14);
+      assert(std::abs(expected.total_energy_density_comoving - actual.total_energy_density_comoving) < 1.0e-14);
+      assert(std::abs(expected.metal_mass_density_comoving - actual.metal_mass_density_comoving) < 1.0e-14);
+    }
+    assert(scratch.high_water.face_batch_capacity <= 6U * tiny_batch);
+    const std::uint64_t first_capacity = scratch.ownedCapacityBytes();
+
+    // Reusing the same workspace at the same shape must not ratchet capacity.
+    cosmosim::hydro::HydroConservedStateSoa repeated = initial;
+    solver.advancePatchActiveSetBatchedWithScratch(
+        repeated,
+        geometry,
+        active_set,
+        update,
+        reconstruction,
+        riemann,
+        {},
+        source_context,
+        scratch,
+        nullptr,
+        cosmosim::hydro::HydroActiveBatchPolicy{.max_active_cells = tiny_batch});
+    assert(scratch.ownedCapacityBytes() == first_capacity);
+  }
+}
+
 
 void testActivePeriodicGhostFluxUpdatesWrappedRealCell() {
   constexpr double gamma = 1.4;
@@ -512,6 +626,7 @@ int main() {
   testPassiveMetalFlux();
   testProfileFallbackCountersAreStepLocal();
   testActiveSetFullCoverageMatchesFullAdvance();
+  testTinyHydroBatchesMatchCachedFullFaceSweepAndStabilizeCapacity();
   testActivePeriodicGhostFluxUpdatesWrappedRealCell();
   testConservationReportSeparatesSourceTerms();
   testInternalEnergyFloorIsReported();

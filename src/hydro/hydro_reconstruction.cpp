@@ -155,6 +155,24 @@ bool HydroReconstruction::reconstructFaceFromCache(
   return false;
 }
 
+bool HydroReconstruction::reconstructFaceFromPrimitiveStates(
+    const HydroPrimitiveState& left_minus,
+    const HydroPrimitiveState& left_cell,
+    const HydroPrimitiveState& right_cell,
+    const HydroPrimitiveState& right_plus,
+    const HydroFace& face,
+    HydroPrimitiveState& left_state,
+    HydroPrimitiveState& right_state) const {
+  (void)left_minus;
+  (void)left_cell;
+  (void)right_cell;
+  (void)right_plus;
+  (void)face;
+  (void)left_state;
+  (void)right_state;
+  return false;
+}
+
 void PiecewiseConstantReconstruction::reconstructFace(
     const HydroConservedStateSoa& conserved,
     const HydroFace& face,
@@ -183,6 +201,22 @@ bool PiecewiseConstantReconstruction::reconstructFaceFromCache(
   return true;
 }
 
+bool PiecewiseConstantReconstruction::reconstructFaceFromPrimitiveStates(
+    const HydroPrimitiveState& left_minus,
+    const HydroPrimitiveState& left_cell,
+    const HydroPrimitiveState& right_cell,
+    const HydroPrimitiveState& right_plus,
+    const HydroFace& face,
+    HydroPrimitiveState& left_state,
+    HydroPrimitiveState& right_state) const {
+  (void)left_minus;
+  (void)right_plus;
+  (void)face;
+  left_state = left_cell;
+  right_state = right_cell;
+  return true;
+}
+
 MusclHancockReconstruction::MusclHancockReconstruction(HydroReconstructionPolicy policy) : m_policy(policy) {
   if (m_policy.rho_floor <= 0.0 || m_policy.pressure_floor <= 0.0) {
     throw std::invalid_argument("MUSCL-Hancock reconstruction requires positive floors");
@@ -200,19 +234,40 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
     const HydroFace& face,
     HydroPrimitiveState& left_state,
     HydroPrimitiveState& right_state) const {
-  left_state = primitive_cache.loadCell(face.owner_cell);
+  const HydroPrimitiveState left_cell = primitive_cache.loadCell(face.owner_cell);
   if (face.neighbor_cell == k_invalid_cell_index) {
-    right_state = left_state;
+    left_state = left_cell;
+    right_state = left_cell;
     return true;
   }
-  right_state = primitive_cache.loadCell(face.neighbor_cell);
-
+  const HydroPrimitiveState right_cell = primitive_cache.loadCell(face.neighbor_cell);
   const HydroPrimitiveState left_minus = face.owner_minus_cell == k_invalid_cell_index
-      ? left_state
+      ? left_cell
       : primitive_cache.loadCell(face.owner_minus_cell);
   const HydroPrimitiveState right_plus = face.neighbor_plus_cell == k_invalid_cell_index
-      ? right_state
+      ? right_cell
       : primitive_cache.loadCell(face.neighbor_plus_cell);
+
+  return reconstructFaceFromPrimitiveStates(
+      left_minus,
+      left_cell,
+      right_cell,
+      right_plus,
+      face,
+      left_state,
+      right_state);
+}
+
+bool MusclHancockReconstruction::reconstructFaceFromPrimitiveStates(
+    const HydroPrimitiveState& left_minus,
+    const HydroPrimitiveState& left_cell,
+    const HydroPrimitiveState& right_cell,
+    const HydroPrimitiveState& right_plus,
+    const HydroFace& face,
+    HydroPrimitiveState& left_state,
+    HydroPrimitiveState& right_state) const {
+  left_state = left_cell;
+  right_state = right_cell;
 
   auto limited = [&](double qm, double q, double qp) {
     const double dm = q - qm;
@@ -225,30 +280,30 @@ bool MusclHancockReconstruction::reconstructFaceFromCache(
   };
 
   const HydroPrimitiveState slope_left{
-      .rho_comoving = limited(left_minus.rho_comoving, left_state.rho_comoving, right_state.rho_comoving),
-      .vel_x_peculiar = limited(left_minus.vel_x_peculiar, left_state.vel_x_peculiar, right_state.vel_x_peculiar),
-      .vel_y_peculiar = limited(left_minus.vel_y_peculiar, left_state.vel_y_peculiar, right_state.vel_y_peculiar),
-      .vel_z_peculiar = limited(left_minus.vel_z_peculiar, left_state.vel_z_peculiar, right_state.vel_z_peculiar),
-      .pressure_comoving = limited(left_minus.pressure_comoving, left_state.pressure_comoving, right_state.pressure_comoving),
-      .specific_internal_energy_code = limited(left_minus.specific_internal_energy_code, left_state.specific_internal_energy_code, right_state.specific_internal_energy_code),
-      .signal_speed_squared_code = limited(left_minus.signal_speed_squared_code, left_state.signal_speed_squared_code, right_state.signal_speed_squared_code),
-      .uses_effective_ism = left_state.uses_effective_ism,
+      .rho_comoving = limited(left_minus.rho_comoving, left_cell.rho_comoving, right_cell.rho_comoving),
+      .vel_x_peculiar = limited(left_minus.vel_x_peculiar, left_cell.vel_x_peculiar, right_cell.vel_x_peculiar),
+      .vel_y_peculiar = limited(left_minus.vel_y_peculiar, left_cell.vel_y_peculiar, right_cell.vel_y_peculiar),
+      .vel_z_peculiar = limited(left_minus.vel_z_peculiar, left_cell.vel_z_peculiar, right_cell.vel_z_peculiar),
+      .pressure_comoving = limited(left_minus.pressure_comoving, left_cell.pressure_comoving, right_cell.pressure_comoving),
+      .specific_internal_energy_code = limited(left_minus.specific_internal_energy_code, left_cell.specific_internal_energy_code, right_cell.specific_internal_energy_code),
+      .signal_speed_squared_code = limited(left_minus.signal_speed_squared_code, left_cell.signal_speed_squared_code, right_cell.signal_speed_squared_code),
+      .uses_effective_ism = left_cell.uses_effective_ism,
       .metallicity_mass_fraction = limited(
           left_minus.metallicity_mass_fraction,
-          left_state.metallicity_mass_fraction,
-          right_state.metallicity_mass_fraction)};
+          left_cell.metallicity_mass_fraction,
+          right_cell.metallicity_mass_fraction)};
   const HydroPrimitiveState slope_right{
-      .rho_comoving = limited(left_state.rho_comoving, right_state.rho_comoving, right_plus.rho_comoving),
-      .vel_x_peculiar = limited(left_state.vel_x_peculiar, right_state.vel_x_peculiar, right_plus.vel_x_peculiar),
-      .vel_y_peculiar = limited(left_state.vel_y_peculiar, right_state.vel_y_peculiar, right_plus.vel_y_peculiar),
-      .vel_z_peculiar = limited(left_state.vel_z_peculiar, right_state.vel_z_peculiar, right_plus.vel_z_peculiar),
-      .pressure_comoving = limited(left_state.pressure_comoving, right_state.pressure_comoving, right_plus.pressure_comoving),
-      .specific_internal_energy_code = limited(left_state.specific_internal_energy_code, right_state.specific_internal_energy_code, right_plus.specific_internal_energy_code),
-      .signal_speed_squared_code = limited(left_state.signal_speed_squared_code, right_state.signal_speed_squared_code, right_plus.signal_speed_squared_code),
-      .uses_effective_ism = right_state.uses_effective_ism,
+      .rho_comoving = limited(left_cell.rho_comoving, right_cell.rho_comoving, right_plus.rho_comoving),
+      .vel_x_peculiar = limited(left_cell.vel_x_peculiar, right_cell.vel_x_peculiar, right_plus.vel_x_peculiar),
+      .vel_y_peculiar = limited(left_cell.vel_y_peculiar, right_cell.vel_y_peculiar, right_plus.vel_y_peculiar),
+      .vel_z_peculiar = limited(left_cell.vel_z_peculiar, right_cell.vel_z_peculiar, right_plus.vel_z_peculiar),
+      .pressure_comoving = limited(left_cell.pressure_comoving, right_cell.pressure_comoving, right_plus.pressure_comoving),
+      .specific_internal_energy_code = limited(left_cell.specific_internal_energy_code, right_cell.specific_internal_energy_code, right_plus.specific_internal_energy_code),
+      .signal_speed_squared_code = limited(left_cell.signal_speed_squared_code, right_cell.signal_speed_squared_code, right_plus.signal_speed_squared_code),
+      .uses_effective_ism = right_cell.uses_effective_ism,
       .metallicity_mass_fraction = limited(
-          left_state.metallicity_mass_fraction,
-          right_state.metallicity_mass_fraction,
+          left_cell.metallicity_mass_fraction,
+          right_cell.metallicity_mass_fraction,
           right_plus.metallicity_mass_fraction)};
 
   const double orientation = faceNormalSign(face);

@@ -13,6 +13,8 @@ namespace cosmosim::hydro {
 
 constexpr std::size_t k_invalid_cell_index = static_cast<std::size_t>(-1);
 constexpr std::size_t k_invalid_ghost_cell_slot = static_cast<std::size_t>(-1);
+constexpr std::size_t k_hydro_automatic_active_batch_max_cells = 16384U;
+constexpr std::size_t k_hydro_active_batch_alignment_cells = 8U;
 
 // Cell-centered primitive variables in comoving coordinates.
 // rho_comoving: comoving mass density.
@@ -63,6 +65,8 @@ class HydroConservedStateSoa {
 
   void resize(std::size_t cell_count);
   [[nodiscard]] std::size_t size() const;
+  [[nodiscard]] std::uint64_t currentSizeBytes() const;
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
 
   [[nodiscard]] HydroConservedState loadCell(std::size_t cell_index) const;
   void storeCell(std::size_t cell_index, const HydroConservedState& cell_state);
@@ -364,6 +368,23 @@ struct HydroProfileEvent {
   HydroConservationReport conservation;
 };
 
+struct HydroActiveBatchPolicy {
+  // Maximum number of active real cells represented by one reconstruction /
+  // Riemann workspace batch. Zero selects the deterministic repository
+  // automatic maximum. This controls transient derived state only; all face
+  // flux deltas are accumulated against the common step-start state before
+  // any authoritative cell is committed.
+  std::size_t max_active_cells = 0;
+};
+
+struct HydroScratchHighWater {
+  std::size_t active_cell_batch_capacity = 0;
+  std::size_t face_batch_capacity = 0;
+  std::size_t primitive_stencil_capacity = 0;
+  std::size_t touched_cell_capacity = 0;
+  std::uint64_t capacity_bytes = 0;
+};
+
 struct HydroScratchBuffers {
   // Transient per-step workspaces. None of these arrays are restart-authoritative.
   std::vector<HydroConservedState> cell_delta;
@@ -371,10 +392,15 @@ struct HydroScratchBuffers {
   std::vector<HydroPrimitiveState> right_states;
   std::vector<HydroConservedState> fluxes;
   std::vector<std::size_t> touched_cells;
+  std::vector<std::size_t> source_active_cells;
+  std::vector<std::size_t> primitive_stencil_cells;
+  std::vector<HydroPrimitiveState> primitive_stencil_states;
   std::vector<std::size_t> full_active_cells;
   std::vector<std::size_t> full_active_faces;
+  HydroScratchHighWater high_water{};
 
-  void resize(std::size_t cell_count, std::size_t active_face_count);
+  void resizeFaceBatch(std::size_t active_cell_batch_count, std::size_t active_face_batch_count);
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
 };
 
 class HydroCoreSolver {
@@ -443,6 +469,21 @@ class HydroCoreSolver {
       const HydroSourceContext& source_context,
       HydroScratchBuffers& scratch,
       HydroPrimitiveCacheSoa* primitive_cache,
+      HydroProfileEvent* profile = nullptr,
+      HydroFluxRegisterSink* flux_register_sink = nullptr) const;
+
+  void advancePatchActiveSetBatchedWithScratch(
+      HydroConservedStateSoa& conserved,
+      const HydroPatchGeometry& geometry,
+      const HydroActiveSetView& active_set,
+      const HydroUpdateContext& update,
+      const HydroReconstruction& reconstruction,
+      const HydroRiemannSolver& riemann_solver,
+      std::span<const HydroSourceTerm* const> source_terms,
+      const HydroSourceContext& source_context,
+      HydroScratchBuffers& scratch,
+      HydroPrimitiveCacheSoa* primitive_cache,
+      const HydroActiveBatchPolicy& batch_policy,
       HydroProfileEvent* profile = nullptr,
       HydroFluxRegisterSink* flux_register_sink = nullptr) const;
 

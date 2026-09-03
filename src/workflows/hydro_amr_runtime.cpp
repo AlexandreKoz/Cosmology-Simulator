@@ -22,6 +22,8 @@
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/physics/cooling_heating.hpp"
@@ -45,6 +47,7 @@ namespace cosmosim::workflows {
 namespace {
 
 constexpr double k_gamma_adiabatic = 5.0 / 3.0;
+constexpr std::uint64_t k_hydro_batch_scratch_bytes_per_cell = 4096ULL;
 [[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -331,6 +334,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       : m_config(config),
         m_mode_policy(mode_policy),
         m_mpi_context(services.mpi_context),
+        m_memory_governor(services.memory_governor),
         m_units(core::makeUnitSystem(
             config.units.length_unit, config.units.mass_unit, config.units.velocity_unit)),
         m_solver(k_gamma_adiabatic),
@@ -425,6 +429,83 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   [[nodiscard]] std::size_t remoteStaleInvalidPayloadCount() const noexcept override {
     return m_last_remote_ghost_boundary_report.stale_or_invalid_payloads;
   }
+  [[nodiscard]] core::MemoryReport memoryReport() const override {
+    core::MemoryReportBuilder builder;
+    const std::uint64_t conserved_capacity = m_conserved.ownedCapacityBytes();
+    if (conserved_capacity != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kGasHydro,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kPhaseResident,
+          .label = "hydro.runtime.fixed_patch_conserved_workspace",
+          .current_size_bytes = m_conserved.currentSizeBytes(),
+          .owned_capacity_bytes = conserved_capacity,
+          .high_water_bytes = conserved_capacity});
+    }
+    const std::uint64_t scratch_capacity = m_scratch.ownedCapacityBytes();
+    if (scratch_capacity != 0U || m_last_amr_hydro_diagnostics.scratch_high_water_bytes != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kScratch,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kScratchArena,
+          .label = "hydro.runtime.active_batch_scratch",
+          .current_size_bytes = scratch_capacity,
+          .owned_capacity_bytes = scratch_capacity,
+          .high_water_bytes = std::max(
+              m_scratch.high_water.capacity_bytes,
+              m_last_amr_hydro_diagnostics.scratch_high_water_bytes),
+          .governed_commitment = false,
+          .uncertainty_note = "AMR per-patch scratch is released after each patch; high-water retains the observed peak"});
+    }
+    if (m_last_amr_hydro_diagnostics.prepared_ghost_capacity_bytes != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kMpiBuffers,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kCommunication,
+          .label = "hydro.amr.step_start_ghost_snapshots",
+          .high_water_bytes = m_last_amr_hydro_diagnostics.prepared_ghost_capacity_bytes,
+          .estimate_only = true,
+          .uncertainty_note = "surface-scaled synchronization snapshot released at hydro-phase end"});
+    }
+    if (m_last_amr_hydro_diagnostics.max_patch_conserved_bytes != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kGasHydro,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kPhaseResident,
+          .label = "hydro.amr.max_patch_conserved_workspace",
+          .high_water_bytes = m_last_amr_hydro_diagnostics.max_patch_conserved_bytes,
+          .estimate_only = true,
+          .uncertainty_note = "one-patch-at-a-time conserved staging; released before the next phase"});
+    }
+    const std::uint64_t active_metadata_capacity = core::checkedMemoryBytesAdd(
+        core::ownedCapacityBytesForContainer(m_active_cells),
+        core::ownedCapacityBytesForContainer(m_active_faces),
+        "hydro active metadata capacity");
+    if (active_metadata_capacity != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kActiveSets,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kPhaseResident,
+          .label = "hydro.runtime.active_index_metadata",
+          .current_size_bytes = core::checkedMemoryBytesAdd(
+              core::currentSizeBytesForContainer(m_active_cells),
+              core::currentSizeBytesForContainer(m_active_faces),
+              "hydro active metadata logical bytes"),
+          .owned_capacity_bytes = active_metadata_capacity,
+          .high_water_bytes = active_metadata_capacity});
+    }
+    if (m_communication_high_water_bytes != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kMpiBuffers,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kCommunication,
+          .label = "hydro.runtime.communication_high_water",
+          .high_water_bytes = m_communication_high_water_bytes,
+          .estimate_only = true,
+          .uncertainty_note = "protocol byte high-water; temporary wire containers may be released between samples"});
+    }
+    return std::move(builder).finish();
+  }
 
   void execute(HydroAmrStageView& view) override {
     view.requireFresh();
@@ -447,6 +528,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
     m_last_ghost_refresh = internal::refreshParticleGhostsForSolver(
         context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
+    m_communication_high_water_bytes = std::max(
+        m_communication_high_water_bytes,
+        core::checkedMemoryBytesAdd(
+            m_last_ghost_refresh.sent_bytes,
+            m_last_ghost_refresh.received_bytes,
+            "hydro particle ghost communication bytes"));
     const std::uint64_t hydro_cell_rank_count = hydro_cell_rank_count_after_refresh();
     const std::uint64_t local_has_production_amr =
         amr::hasProductionAmrHydroCoverage(context.state) ? 1ULL : 0ULL;
@@ -456,6 +543,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         !m_mpi_context.isEnabled() ||
         hydro_cell_rank_count == static_cast<std::uint64_t>(m_mpi_context.worldSize());
     m_last_hydro_profile = {};
+    m_last_amr_hydro_diagnostics = {};
     m_last_floor_diagnostics = auditConfiguredHydroFloors(context.state);
 
     // Production AMR exchanges are collective.  Ranks with zero local cells
@@ -634,7 +722,9 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       m_effective_ism_energy_source->resetLedger();
       sources.push_back(m_effective_ism_energy_source.get());
     }
-    m_solver.advancePatchActiveSetWithScratch(
+    const hydro::HydroActiveBatchPolicy active_batch_policy = selectHydroActiveBatchPolicy();
+    auto active_batch_reservation = reserveHydroActiveBatch(active_batch_policy);
+    m_solver.advancePatchActiveSetBatchedWithScratch(
         m_conserved,
         m_geometry,
         active_view,
@@ -644,7 +734,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         sources,
         source_context,
         m_scratch,
-        &m_primitive_cache,
+        nullptr,
+        active_batch_policy,
         &m_last_hydro_profile);
     if (context.profiler_session != nullptr) {
       const hydro::HydroConservationReport& conservation = m_last_hydro_profile.conservation;
@@ -803,6 +894,45 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   }
 
  private:
+  [[nodiscard]] hydro::HydroActiveBatchPolicy selectHydroActiveBatchPolicy() const {
+    std::uint64_t requested = m_config.numerics.hydro_active_batch_max_cells == 0U
+        ? static_cast<std::uint64_t>(hydro::k_hydro_automatic_active_batch_max_cells)
+        : m_config.numerics.hydro_active_batch_max_cells;
+    if (m_memory_governor != nullptr) {
+      const core::MemoryGovernorSnapshot snapshot = m_memory_governor->snapshot();
+      if (snapshot.headroom_bytes != std::numeric_limits<std::uint64_t>::max()) {
+        std::uint64_t by_headroom = snapshot.headroom_bytes /
+            k_hydro_batch_scratch_bytes_per_cell;
+        if (by_headroom >= hydro::k_hydro_active_batch_alignment_cells) {
+          by_headroom -= by_headroom % hydro::k_hydro_active_batch_alignment_cells;
+        }
+        requested = std::min(requested, std::max<std::uint64_t>(1U, by_headroom));
+      }
+    }
+    requested = std::min<std::uint64_t>(
+        requested, static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()));
+    return hydro::HydroActiveBatchPolicy{
+        .max_active_cells = static_cast<std::size_t>(std::max<std::uint64_t>(1U, requested))};
+  }
+
+  [[nodiscard]] std::optional<core::MemoryReservation> reserveHydroActiveBatch(
+      const hydro::HydroActiveBatchPolicy& batch_policy) const {
+    if (m_memory_governor == nullptr) {
+      return std::nullopt;
+    }
+    const std::uint64_t cells = static_cast<std::uint64_t>(batch_policy.max_active_cells);
+    if (cells > std::numeric_limits<std::uint64_t>::max() /
+        k_hydro_batch_scratch_bytes_per_cell) {
+      throw std::overflow_error("hydro active-batch reservation byte count overflow");
+    }
+    auto reservation = m_memory_governor->reserve(
+        core::MemoryClass::kScratchArena,
+        cells * k_hydro_batch_scratch_bytes_per_cell,
+        "hydro.active_batch");
+    reservation.commit();
+    return std::optional<core::MemoryReservation>(std::move(reservation));
+  }
+
   [[nodiscard]] HydroFloorApplicationDiagnostics auditConfiguredHydroFloors(
       const core::SimulationState& state) const {
     HydroFloorApplicationDiagnostics diagnostics;
@@ -1303,43 +1433,25 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .comoving_coordinates =
             m_config.units.coordinate_frame == core::CoordinateFrame::kComoving,
     };
-    std::vector<double> metallicity(context.state.cells.size(), 0.0);
-    std::vector<double> temperature(context.state.cells.size(), 0.0);
-    std::vector<double> mass_density_physical_cgs(context.state.cells.size(), 0.0);
-    std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
-    constexpr double k_hydrogen_mass_fraction = 0.76;
-    constexpr double k_proton_mass_g = 1.67262192369e-24;
     const double density_frame_factor =
         m_config.units.coordinate_frame == core::CoordinateFrame::kComoving
             ? 1.0 / std::pow(update.scale_factor, 3.0)
             : 1.0;
-    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const double gas_mass_code = context.state.cells.mass_code[cell_index];
-      metallicity[cell_index] = gas_mass_code > 0.0
-          ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
-          : 0.0;
-      temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
-      const double rho_stored_code = std::max(
-          context.state.gas_cells.density_code[cell_index],
-          m_config.numerics.hydro_density_floor_code);
-      mass_density_physical_cgs[cell_index] =
-          m_units.densityCodeToCgs(rho_stored_code * density_frame_factor);
-      hydrogen_number_density[cell_index] =
-          k_hydrogen_mass_fraction * mass_density_physical_cgs[cell_index] /
-          k_proton_mass_g;
-    }
+    const double physical_density_cgs_per_density_code =
+        m_units.densityCodeToCgs(density_frame_factor);
     const hydro::HydroSourceContext source_context{
         .update = update,
         .gravity_accel_x_peculiar = {},
         .gravity_accel_y_peculiar = {},
         .gravity_accel_z_peculiar = {},
-        .mass_density_physical_cgs = mass_density_physical_cgs,
-        .hydrogen_number_density_cgs = hydrogen_number_density,
-        .metallicity_mass_fraction = metallicity,
-        .temperature_k = temperature,
+        .mass_density_physical_cgs = {},
+        .hydrogen_number_density_cgs = {},
+        .metallicity_mass_fraction = {},
+        .temperature_k = {},
         .thermodynamic_closure = m_effective_ism_closure.get(),
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
+
     // Gravity and homogeneous expansion are integrated by the gravity-owned
     // KDK half-kicks around hydro/source evolution. Hydro owns transport plus
     // local thermochemical source terms only, preventing double application.
@@ -1351,13 +1463,26 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       m_effective_ism_energy_source->resetLedger();
       sources.push_back(m_effective_ism_energy_source.get());
     }
+    const hydro::HydroActiveBatchPolicy active_batch_policy = selectHydroActiveBatchPolicy();
+    std::optional<core::MemoryReservation> active_batch_reservation;
+    std::exception_ptr batch_admission_failure;
+    try {
+      active_batch_reservation = reserveHydroActiveBatch(active_batch_policy);
+    } catch (...) {
+      batch_admission_failure = std::current_exception();
+    }
+    m_mpi_context.rethrowCollectivePreparationFailure(
+        batch_admission_failure, "hydro active-batch memory admission");
+
     const amr::ProductionAmrHydroOptions amr_options{
         .physical_boundary_kind = hydroBoundaryKindFromModePolicy(m_mode_policy.hydro_boundary),
         .adiabatic_index = k_gamma_adiabatic,
         .density_floor = m_config.numerics.hydro_density_floor_code,
         .pressure_floor = m_config.numerics.hydro_pressure_floor_code,
         .state_time_code = context.integrator_state.current_time_code,
-        .ghost_fill_time_code = context.integrator_state.current_time_code};
+        .ghost_fill_time_code = context.integrator_state.current_time_code,
+        .active_batch_policy = active_batch_policy,
+        .physical_density_cgs_per_density_code = physical_density_cgs_per_density_code};
     amr::ProductionAmrHydroDiagnostics amr_diagnostics;
     std::size_t remote_patch_count = 0;
     std::size_t remote_flux_register_count = 0;
@@ -1585,6 +1710,22 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           sources,
           amr_options);
     }
+    m_last_amr_hydro_diagnostics = amr_diagnostics;
+    std::uint64_t directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
+        directed_amr_diagnostics.control_plane_bytes,
+        directed_amr_diagnostics.patch_descriptor_bytes,
+        "hydro directed AMR control and descriptor bytes");
+    directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
+        directed_amr_communication_bytes,
+        directed_amr_diagnostics.patch_cell_payload_bytes,
+        "hydro directed AMR patch payload bytes");
+    directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
+        directed_amr_communication_bytes,
+        directed_amr_diagnostics.flux_payload_bytes,
+        "hydro directed AMR flux payload bytes");
+    m_communication_high_water_bytes = std::max(
+        m_communication_high_water_bytes, directed_amr_communication_bytes);
+
     if (m_effective_ism_closure != nullptr) {
       const double redshift = source_context.redshift;
       for (std::size_t row = 0; row < context.state.cells.size(); ++row) {
@@ -1668,6 +1809,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                       {"distributed_remote_patch_count", std::to_string(remote_patch_count)},
                       {"distributed_remote_flux_register_count", std::to_string(remote_flux_register_count)},
                       {"distributed_inbound_flux_register_count", std::to_string(inbound_flux_register_count)},
+                      {"hydro_active_batch_capacity_cells", std::to_string(amr_diagnostics.active_batch_capacity_cells)},
+                      {"hydro_face_batch_capacity", std::to_string(amr_diagnostics.face_batch_capacity)},
+                      {"hydro_scratch_high_water_bytes", std::to_string(amr_diagnostics.scratch_high_water_bytes)},
+                      {"hydro_prepared_ghost_capacity_bytes", std::to_string(amr_diagnostics.prepared_ghost_capacity_bytes)},
+                      {"hydro_max_patch_conserved_bytes", std::to_string(amr_diagnostics.max_patch_conserved_bytes)},
+                      {"hydro_batch_scratch_bytes_per_cell", std::to_string(k_hydro_batch_scratch_bytes_per_cell)},
                       {"directed_amr_candidate_peer_count", std::to_string(directed_amr_diagnostics.candidate_peer_count)},
                       {"directed_amr_neighbor_peer_count", std::to_string(directed_amr_diagnostics.neighbor_peer_count)},
                       {"directed_amr_patch_descriptor_records_sent", std::to_string(directed_amr_diagnostics.directed_patch_descriptor_records_sent)},
@@ -1954,6 +2101,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   const core::SimulationConfig& m_config;
   const core::ModePolicy& m_mode_policy;
   const parallel::MpiContext& m_mpi_context;
+  core::MemoryGovernor* m_memory_governor = nullptr;
   core::UnitSystem m_units;
   std::uint32_t m_current_world_rank = 0;
   hydro::HydroCoreSolver m_solver;
@@ -1964,7 +2112,6 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   std::unique_ptr<physics::EffectiveIsmEnergyRelaxationSource> m_effective_ism_energy_source;
   hydro::HydroConservedStateSoa m_conserved;
   hydro::HydroScratchBuffers m_scratch;
-  hydro::HydroPrimitiveCacheSoa m_primitive_cache;
   hydro::HydroPatchGeometry m_geometry;
   // Dense CellSoa row <-> physical Cartesian solver-row maps.
   std::vector<std::uint32_t> m_dense_row_by_geometry_row;
@@ -1973,6 +2120,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   internal::SolverGhostRefreshReport m_last_ghost_refresh{};
   HydroRemoteGhostBoundaryReport m_last_remote_ghost_boundary_report{};
+  amr::ProductionAmrHydroDiagnostics m_last_amr_hydro_diagnostics{};
+  std::uint64_t m_communication_high_water_bytes = 0U;
   HydroFloorApplicationDiagnostics m_last_floor_diagnostics{};
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::vector<std::size_t> m_active_cells;

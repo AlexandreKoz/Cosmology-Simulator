@@ -669,7 +669,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           core::collectSimulationMemoryReport(state),
           core::collectSchedulerMemoryReport(
               time_state.particleScheduler(), time_state.gasCellScheduler()),
-          gravity_callback.memoryReport()};
+          gravity_callback.memoryReport(),
+          runtime_composition.hydro_amr->memoryReport()};
       core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
       const std::uint64_t governor_baseline_bytes =
           core::memoryReportBaselineOwnedBytes(merged_startup_memory_report);

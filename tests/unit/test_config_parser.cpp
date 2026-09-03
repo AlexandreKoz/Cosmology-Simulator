@@ -708,6 +708,22 @@ gravity_softening_tracer = 1.5 kpc
   assert(std::abs(reparsed.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
 }
 
+void testHydroActiveBatchConfigurationRoundtrip() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\nhydro_active_batch_max_cells = 37\n",
+      "hydro_active_batch_roundtrip");
+  assert(frozen.config.numerics.hydro_active_batch_max_cells == 37ULL);
+  assert(frozen.normalized_text.find("hydro_active_batch_max_cells = 37") !=
+         std::string::npos);
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "hydro_active_batch_roundtrip_reparse");
+  assert(reparsed.config.numerics.hydro_active_batch_max_cells == 37ULL);
+
+  const auto automatic = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n", "hydro_active_batch_auto");
+  assert(automatic.config.numerics.hydro_active_batch_max_cells == 0ULL);
+}
+
 void testTreePmNumericsRoundtripAndValidation() {
   const std::string good_text = R"(
 [mode]
@@ -1386,6 +1402,7 @@ int main() {
   testDiagnosticsExecutionPolicyValidation();
   testEnumSerializationIsFailFastWithoutUnknownFallback();
   testSpeciesSofteningOverridesRoundtrip();
+  testHydroActiveBatchConfigurationRoundtrip();
   testTreePmNumericsRoundtripAndValidation();
   testAxisAwareBoxAndPmGridCanonicalizationCompatibility();
   testBlackHoleAgnConfigKeysAndValidation();

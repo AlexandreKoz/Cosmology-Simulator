@@ -1086,6 +1086,7 @@ struct ConfigKeySpec {
       {"numerics.source_max_fractional_change", "0.1"},
       {"numerics.hydro_density_floor_code", "1.0e-10"},
       {"numerics.hydro_pressure_floor_code", "1.0e-10"},
+      {"numerics.hydro_active_batch_max_cells", "0"},
       {"numerics.max_global_steps", "1024"},
       {"numerics.hierarchical_max_rung", "0"},
       {"numerics.amr_max_level", "10"},
@@ -2148,6 +2149,7 @@ void validateConfig(const SimulationConfig& config) {
   stream << "source_max_fractional_change = " << frozen.config.numerics.source_max_fractional_change << '\n';
   stream << "hydro_density_floor_code = " << frozen.config.numerics.hydro_density_floor_code << '\n';
   stream << "hydro_pressure_floor_code = " << frozen.config.numerics.hydro_pressure_floor_code << '\n';
+  stream << "hydro_active_batch_max_cells = " << frozen.config.numerics.hydro_active_batch_max_cells << '\n';
   stream << "max_global_steps = " << frozen.config.numerics.max_global_steps << '\n';
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
@@ -2757,6 +2759,13 @@ void validateConfig(const SimulationConfig& config) {
   frozen.config.numerics.hydro_pressure_floor_code = parseFloating(
       requireString(entries, consumed, "numerics.hydro_pressure_floor_code", defaultFor("numerics.hydro_pressure_floor_code")),
       "numerics.hydro_pressure_floor_code");
+  frozen.config.numerics.hydro_active_batch_max_cells = parseNumber<std::uint64_t>(
+      requireString(
+          entries,
+          consumed,
+          "numerics.hydro_active_batch_max_cells",
+          defaultFor("numerics.hydro_active_batch_max_cells")),
+      "numerics.hydro_active_batch_max_cells");
   frozen.config.numerics.max_global_steps = parseNumber<int>(
       requireString(entries, consumed, "numerics.max_global_steps", "1024"),
       "numerics.max_global_steps");

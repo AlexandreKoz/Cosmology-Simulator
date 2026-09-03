@@ -213,6 +213,10 @@ struct NumericsConfig {
   double source_max_fractional_change = 0.1;
   double hydro_density_floor_code = 1.0e-10;
   double hydro_pressure_floor_code = 1.0e-10;
+  // Maximum real-cell count represented by one hydro reconstruction/Riemann
+  // scratch batch. 0 selects the deterministic runtime automatic maximum,
+  // further bounded by current MemoryGovernor headroom.
+  std::uint64_t hydro_active_batch_max_cells = 0;
   int max_global_steps = 1024;
   // Production ReferenceWorkflow is intentionally single-rung until each
   // particle/cell has an explicit last-kick epoch and per-bin KDK factors.

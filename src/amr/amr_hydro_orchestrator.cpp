@@ -1203,11 +1203,9 @@ namespace {
   const bool all_cells_active = active_cell_rows.empty();
 
   std::vector<AmrHydroPatchGeometry> geometries;
-  std::vector<hydro::HydroConservedStateSoa> conserved_states;
   std::vector<AmrHydroPatchGeometry> remote_geometries;
   std::vector<hydro::HydroConservedStateSoa> remote_conserved_states;
   geometries.reserve(descriptors.size());
-  conserved_states.reserve(descriptors.size());
   for (const PatchDescriptor& patch : descriptors) {
     AmrHydroGeometryOptions geometry_options;
     geometry_options.physical_boundary_kind = options.physical_boundary_kind;
@@ -1221,7 +1219,6 @@ namespace {
     };
     geometries.push_back(buildAmrHydroPatchGeometry(state, patch, geometry_options));
     populateAmrHydroFluxRegisterFaces(geometries.back(), all_descriptors);
-    conserved_states.push_back(loadAmrHydroConservedState(state, geometries.back(), options.adiabatic_index));
   }
   if (distributed_exchange != nullptr) {
     remote_geometries.reserve(distributed_exchange->remote_patches.size());
@@ -1280,17 +1277,93 @@ namespace {
     }
   }
 
-  std::vector<AmrHydroGhostFillPatch> ghost_views;
-  ghost_views.reserve(geometries.size() + remote_geometries.size());
-  for (std::size_t i = 0; i < geometries.size(); ++i) {
-    const bool patch_requires_ghost_fill = all_cells_active || std::any_of(
-        geometries[i].real_cells.begin(), geometries[i].real_cells.end(),
+  const auto patchRequiresGhostFill = [&](std::size_t patch_index) {
+    return all_cells_active || std::any_of(
+        geometries[patch_index].real_cells.begin(),
+        geometries[patch_index].real_cells.end(),
         [&active_lookup](const AmrHydroCellDescriptor& cell) {
           return active_lookup.contains(cell.local_cell_row);
         });
+  };
+  const auto addGhostDiagnostics = [](AmrHydroGhostFillDiagnostics& target,
+                                      const AmrHydroGhostFillDiagnostics& source) {
+    target.physical_ghosts_filled += source.physical_ghosts_filled;
+    target.same_level_ghosts_filled += source.same_level_ghosts_filled;
+    target.coarse_to_fine_ghosts_filled += source.coarse_to_fine_ghosts_filled;
+    target.fine_to_coarse_ghosts_filled += source.fine_to_coarse_ghosts_filled;
+    target.temporal_coarse_to_fine_ghosts_filled += source.temporal_coarse_to_fine_ghosts_filled;
+    target.temporal_endpoint_ghosts_filled += source.temporal_endpoint_ghosts_filled;
+    target.skipped_remote_ghosts += source.skipped_remote_ghosts;
+    target.stale_epoch_rejections += source.stale_epoch_rejections;
+    target.temporal_same_level_mismatch_rejections += source.temporal_same_level_mismatch_rejections;
+    target.temporal_history_missing_rejections += source.temporal_history_missing_rejections;
+    target.temporal_history_invalid_rejections += source.temporal_history_invalid_rejections;
+    target.temporal_time_out_of_range_rejections += source.temporal_time_out_of_range_rejections;
+    target.temporal_fine_to_coarse_misalignment_rejections += source.temporal_fine_to_coarse_misalignment_rejections;
+    target.temporal_geometry_mismatch_rejections += source.temporal_geometry_mismatch_rejections;
+    target.temporal_identity_mismatch_rejections += source.temporal_identity_mismatch_rejections;
+    target.missing_source_records += source.missing_source_records;
+    target.unresolved_ghosts += source.unresolved_ghosts;
+  };
+
+  // Snapshot only the ghost shell needed by each active local patch while the
+  // entire canonical SimulationState is still at the common step-start epoch.
+  // This preserves the old synchronized-sweep semantics without retaining a
+  // full conserved SoA for every local patch simultaneously.
+  std::vector<std::vector<hydro::HydroConservedState>> prepared_ghost_states(geometries.size());
+  for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
+    if (!patchRequiresGhostFill(patch_index)) {
+      continue;
+    }
+    hydro::HydroConservedStateSoa target_state = loadAmrHydroConservedState(
+        state, geometries[patch_index], options.adiabatic_index);
+    const std::uint64_t target_bytes = static_cast<std::uint64_t>(target_state.size()) *
+        static_cast<std::uint64_t>(6U * sizeof(double));
+    diagnostics.max_patch_conserved_bytes = std::max(
+        diagnostics.max_patch_conserved_bytes, target_bytes);
+
+    std::vector<std::size_t> local_source_indices;
+    for (std::size_t source_index = 0; source_index < geometries.size(); ++source_index) {
+      if (source_index == patch_index) {
+        continue;
+      }
+      bool touches = false;
+      for (const hydro::HydroFaceAxis axis : {
+               hydro::HydroFaceAxis::kX,
+               hydro::HydroFaceAxis::kY,
+               hydro::HydroFaceAxis::kZ}) {
+        touches = touches || touchesOnSide(
+            geometries[patch_index].patch,
+            geometries[source_index].patch,
+            axis,
+            hydro::HydroFaceSide::kLower);
+        touches = touches || touchesOnSide(
+            geometries[patch_index].patch,
+            geometries[source_index].patch,
+            axis,
+            hydro::HydroFaceSide::kUpper);
+      }
+      if (touches) {
+        local_source_indices.push_back(source_index);
+      }
+    }
+
+    std::vector<hydro::HydroConservedStateSoa> local_source_states;
+    local_source_states.reserve(local_source_indices.size());
+    for (const std::size_t source_index : local_source_indices) {
+      local_source_states.push_back(loadAmrHydroConservedState(
+          state, geometries[source_index], options.adiabatic_index));
+      const std::uint64_t source_bytes = static_cast<std::uint64_t>(
+          local_source_states.back().size()) * static_cast<std::uint64_t>(6U * sizeof(double));
+      diagnostics.max_patch_conserved_bytes = std::max(
+          diagnostics.max_patch_conserved_bytes, source_bytes);
+    }
+
+    std::vector<AmrHydroGhostFillPatch> ghost_views;
+    ghost_views.reserve(1U + local_source_indices.size() + remote_geometries.size());
     ghost_views.push_back(AmrHydroGhostFillPatch{
-        .geometry = &geometries[i],
-        .conserved = &conserved_states[i],
+        .geometry = &geometries[patch_index],
+        .conserved = &target_state,
         .residency = AmrGhostSourceResidency::kLocal,
         .ghost_hydro_epoch = state.gasCellIdentityGeneration(),
         .expected_ghost_hydro_epoch = state.gasCellIdentityGeneration(),
@@ -1301,26 +1374,57 @@ namespace {
             ? &state.amr_temporal_boundary_history
             : nullptr,
         .enable_temporal_coarse_to_fine = options.enable_temporal_coarse_to_fine,
-        .requires_ghost_fill = patch_requires_ghost_fill});
-  }
-  if (distributed_exchange != nullptr) {
-    for (std::size_t i = 0; i < remote_geometries.size(); ++i) {
-      const DistributedAmrRemotePatch& remote = distributed_exchange->remote_patches[i];
+        .requires_ghost_fill = true});
+    for (std::size_t slot = 0; slot < local_source_indices.size(); ++slot) {
       ghost_views.push_back(AmrHydroGhostFillPatch{
-          .geometry = &remote_geometries[i],
-          .conserved = &remote_conserved_states[i],
-          .residency = AmrGhostSourceResidency::kRemoteReadOnly,
-          .ghost_hydro_epoch = remote.ghost_hydro_epoch,
-          .expected_ghost_hydro_epoch = remote.expected_ghost_hydro_epoch,
+          .geometry = &geometries[local_source_indices[slot]],
+          .conserved = &local_source_states[slot],
+          .residency = AmrGhostSourceResidency::kLocal,
+          .ghost_hydro_epoch = state.gasCellIdentityGeneration(),
+          .expected_ghost_hydro_epoch = state.gasCellIdentityGeneration(),
           .target_state_time_code = options.state_time_code,
           .ghost_fill_time_code = options.ghost_fill_time_code,
           .source_current_state_time_code = options.state_time_code,
-          .temporal_boundary_history = nullptr,
-          .enable_temporal_coarse_to_fine = false,
+          .temporal_boundary_history = options.enable_temporal_coarse_to_fine
+              ? &state.amr_temporal_boundary_history
+              : nullptr,
+          .enable_temporal_coarse_to_fine = options.enable_temporal_coarse_to_fine,
           .requires_ghost_fill = false});
     }
+    if (distributed_exchange != nullptr) {
+      for (std::size_t remote_index = 0; remote_index < remote_geometries.size(); ++remote_index) {
+        const DistributedAmrRemotePatch& remote = distributed_exchange->remote_patches[remote_index];
+        ghost_views.push_back(AmrHydroGhostFillPatch{
+            .geometry = &remote_geometries[remote_index],
+            .conserved = &remote_conserved_states[remote_index],
+            .residency = AmrGhostSourceResidency::kRemoteReadOnly,
+            .ghost_hydro_epoch = remote.ghost_hydro_epoch,
+            .expected_ghost_hydro_epoch = remote.expected_ghost_hydro_epoch,
+            .target_state_time_code = options.state_time_code,
+            .ghost_fill_time_code = options.ghost_fill_time_code,
+            .source_current_state_time_code = options.state_time_code,
+            .temporal_boundary_history = nullptr,
+            .enable_temporal_coarse_to_fine = false,
+            .requires_ghost_fill = false});
+      }
+    }
+    addGhostDiagnostics(
+        diagnostics.ghost_fill,
+        fillAmrHydroGhostCells(ghost_views, options.adiabatic_index));
+
+    auto& prepared = prepared_ghost_states[patch_index];
+    prepared.reserve(geometries[patch_index].geometry.ghost_cells.size());
+    for (const hydro::HydroGhostCell& ghost : geometries[patch_index].geometry.ghost_cells) {
+      prepared.push_back(target_state.loadCell(ghost.ghost_cell));
+    }
+    const std::uint64_t prepared_bytes = static_cast<std::uint64_t>(prepared.capacity()) *
+        static_cast<std::uint64_t>(sizeof(hydro::HydroConservedState));
+    if (diagnostics.prepared_ghost_capacity_bytes >
+        std::numeric_limits<std::uint64_t>::max() - prepared_bytes) {
+      throw std::overflow_error("AMR prepared ghost capacity byte count overflow");
+    }
+    diagnostics.prepared_ghost_capacity_bytes += prepared_bytes;
   }
-  diagnostics.ghost_fill = fillAmrHydroGhostCells(ghost_views, options.adiabatic_index);
 
   FluxRegisterAccumulator flux_registers;
   for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
@@ -1335,6 +1439,16 @@ namespace {
     if (active_patch_cells.empty()) {
       continue;
     }
+    hydro::HydroConservedStateSoa conserved_state = loadAmrHydroConservedState(
+        state, patch_geometry, options.adiabatic_index);
+    if (prepared_ghost_states[patch_index].size() != patch_geometry.geometry.ghost_cells.size()) {
+      throw std::logic_error("AMR hydro active patch is missing its step-start ghost snapshot");
+    }
+    for (std::size_t ghost_slot = 0; ghost_slot < patch_geometry.geometry.ghost_cells.size(); ++ghost_slot) {
+      conserved_state.storeCell(
+          patch_geometry.geometry.ghost_cells[ghost_slot].ghost_cell,
+          prepared_ghost_states[patch_index][ghost_slot]);
+    }
     std::unordered_set<std::size_t> patch_active_lookup(active_patch_cells.begin(), active_patch_cells.end());
     std::vector<std::size_t> active_faces;
     for (std::size_t face_index = 0; face_index < patch_geometry.geometry.faces.size(); ++face_index) {
@@ -1345,13 +1459,15 @@ namespace {
       }
     }
 
-    std::vector<double> gravity_x(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> gravity_y(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> gravity_z(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> mass_density_physical_cgs(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> hydrogen(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> metallicity(conserved_states[patch_index].size(), 0.0);
-    std::vector<double> temperature(conserved_states[patch_index].size(), 0.0);
+    std::vector<double> gravity_x(conserved_state.size(), 0.0);
+    std::vector<double> gravity_y(conserved_state.size(), 0.0);
+    std::vector<double> gravity_z(conserved_state.size(), 0.0);
+    std::vector<double> mass_density_physical_cgs(conserved_state.size(), 0.0);
+    std::vector<double> hydrogen(conserved_state.size(), 0.0);
+    std::vector<double> metallicity(conserved_state.size(), 0.0);
+    std::vector<double> temperature(conserved_state.size(), 0.0);
+    constexpr double k_hydrogen_mass_fraction = 0.76;
+    constexpr double k_proton_mass_g = 1.67262192369e-24;
     for (std::size_t local_cell = 0; local_cell < patch_geometry.real_cells.size(); ++local_cell) {
       const std::uint32_t row = patch_geometry.real_cells[local_cell].local_cell_row;
       if (row < global_source_context.gravity_accel_x_peculiar.size()) {
@@ -1366,15 +1482,29 @@ namespace {
       if (row < global_source_context.mass_density_physical_cgs.size()) {
         mass_density_physical_cgs[local_cell] =
             global_source_context.mass_density_physical_cgs[row];
+      } else if (options.physical_density_cgs_per_density_code > 0.0) {
+        mass_density_physical_cgs[local_cell] =
+            std::max(state.gas_cells.density_code[row], options.density_floor) *
+            options.physical_density_cgs_per_density_code;
       }
       if (row < global_source_context.hydrogen_number_density_cgs.size()) {
         hydrogen[local_cell] = global_source_context.hydrogen_number_density_cgs[row];
+      } else if (mass_density_physical_cgs[local_cell] > 0.0) {
+        hydrogen[local_cell] = k_hydrogen_mass_fraction *
+            mass_density_physical_cgs[local_cell] / k_proton_mass_g;
       }
       if (row < global_source_context.metallicity_mass_fraction.size()) {
         metallicity[local_cell] = global_source_context.metallicity_mass_fraction[row];
+      } else {
+        const double gas_mass_code = state.cells.mass_code[row];
+        metallicity[local_cell] = gas_mass_code > 0.0
+            ? std::clamp(state.gas_cells.metal_mass_code[row] / gas_mass_code, 0.0, 1.0)
+            : 0.0;
       }
       if (row < global_source_context.temperature_k.size()) {
         temperature[local_cell] = global_source_context.temperature_k[row];
+      } else {
+        temperature[local_cell] = state.gas_cells.temperature_code[row];
       }
     }
     const hydro::HydroSourceContext patch_source_context{
@@ -1402,10 +1532,9 @@ namespace {
         .enable_muscl_hancock_predictor = true,
         .adiabatic_index = options.adiabatic_index});
     hydro::HydroScratchBuffers scratch;
-    hydro::HydroPrimitiveCacheSoa cache(conserved_states[patch_index].size());
     hydro::HydroProfileEvent profile;
-    solver.advancePatchActiveSetWithScratch(
-        conserved_states[patch_index],
+    solver.advancePatchActiveSetBatchedWithScratch(
+        conserved_state,
         patch_geometry.geometry,
         hydro::HydroActiveSetView{.active_cells = active_patch_cells, .active_faces = active_faces},
         update,
@@ -1414,16 +1543,21 @@ namespace {
         source_terms,
         patch_source_context,
         scratch,
-        &cache,
+        nullptr,
+        options.active_batch_policy,
         &profile,
         &flux_registers);
+    scatterAmrHydroConservedState(
+        state, patch_geometry, conserved_state, options.adiabatic_index);
     diagnostics.advanced_patch_count += 1U;
     diagnostics.active_cell_count += active_patch_cells.size();
     diagnostics.active_face_count += active_faces.size();
-  }
-
-  for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
-    scatterAmrHydroConservedState(state, geometries[patch_index], conserved_states[patch_index], options.adiabatic_index);
+    diagnostics.scratch_high_water_bytes = std::max(
+        diagnostics.scratch_high_water_bytes, scratch.high_water.capacity_bytes);
+    diagnostics.active_batch_capacity_cells = std::max(
+        diagnostics.active_batch_capacity_cells, scratch.high_water.active_cell_batch_capacity);
+    diagnostics.face_batch_capacity = std::max(
+        diagnostics.face_batch_capacity, scratch.high_water.face_batch_capacity);
   }
   const std::vector<FluxRegisterEntry> entries = flux_registers.entries();
   diagnostics.flux_register_entry_count = entries.size();

@@ -1104,7 +1104,8 @@ void TimeCoordinator::runRungZeroSegment(
         core::collectSimulationMemoryReport(state, &workspace),
         core::collectSchedulerMemoryReport(
             particle_scheduler, gas_cell_scheduler),
-        m_gravity.memoryReport()};
+        m_gravity.memoryReport(),
+        m_hydro_amr.memoryReport()};
     core::MemoryReport merged_runtime_memory_report =
         core::mergeMemoryReports(runtime_reports);
     if (m_services.memory_governor != nullptr) {

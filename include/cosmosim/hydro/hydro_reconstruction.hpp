@@ -37,6 +37,19 @@ class HydroReconstruction {
  public:
   virtual ~HydroReconstruction() = default;
 
+  // Batch-local primitive reconstruction entry point. The caller owns the
+  // four primitive stencil states, so reconstruction never requires a
+  // population-sized primitive cache merely to preserve MUSCL-Hancock
+  // semantics.
+  [[nodiscard]] virtual bool reconstructFaceFromPrimitiveStates(
+      const HydroPrimitiveState& left_minus,
+      const HydroPrimitiveState& left_cell,
+      const HydroPrimitiveState& right_cell,
+      const HydroPrimitiveState& right_plus,
+      const HydroFace& face,
+      HydroPrimitiveState& left_state,
+      HydroPrimitiveState& right_state) const;
+
   [[nodiscard]] virtual bool reconstructFaceFromCache(
       const HydroPrimitiveCacheSoa& primitive_cache,
       const HydroFace& face,
@@ -56,6 +69,15 @@ class HydroReconstruction {
 
 class PiecewiseConstantReconstruction final : public HydroReconstruction {
  public:
+  [[nodiscard]] bool reconstructFaceFromPrimitiveStates(
+      const HydroPrimitiveState& left_minus,
+      const HydroPrimitiveState& left_cell,
+      const HydroPrimitiveState& right_cell,
+      const HydroPrimitiveState& right_plus,
+      const HydroFace& face,
+      HydroPrimitiveState& left_state,
+      HydroPrimitiveState& right_state) const override;
+
   [[nodiscard]] bool reconstructFaceFromCache(
       const HydroPrimitiveCacheSoa& primitive_cache,
       const HydroFace& face,
@@ -75,6 +97,15 @@ class PiecewiseConstantReconstruction final : public HydroReconstruction {
 class MusclHancockReconstruction final : public HydroReconstruction {
  public:
   explicit MusclHancockReconstruction(HydroReconstructionPolicy policy = {});
+
+  [[nodiscard]] bool reconstructFaceFromPrimitiveStates(
+      const HydroPrimitiveState& left_minus,
+      const HydroPrimitiveState& left_cell,
+      const HydroPrimitiveState& right_cell,
+      const HydroPrimitiveState& right_plus,
+      const HydroFace& face,
+      HydroPrimitiveState& left_state,
+      HydroPrimitiveState& right_state) const override;
 
   [[nodiscard]] bool reconstructFaceFromCache(
       const HydroPrimitiveCacheSoa& primitive_cache,
