@@ -680,11 +680,12 @@ void writeStringArray(
 
 void validateIcManifest(const IcManifest& manifest) {
 
-  if (manifest.schema_name != "chui_ic_audit_manifest" ||
-      manifest.schema_version != 4U) {
+  if (manifest.schema_name != kIcAuditManifestSchemaName ||
+      manifest.schema_version != kIcAuditManifestSchemaVersion) {
     throw std::invalid_argument(
-        "IcManifest requires schema chui_ic_audit_manifest version 4; "
-        "earlier versions apply ambiguous field-coupled conversion/default "
+        "IcManifest requires schema " + std::string(kIcAuditManifestSchemaName) +
+        " version " + std::to_string(kIcAuditManifestSchemaVersion) +
+        "; earlier versions apply ambiguous field-coupled conversion/default "
         "semantics and are intentionally not reinterpreted");
   }
 

@@ -1,5 +1,6 @@
 #include "cosmosim/workflows/runtime_capabilities.hpp"
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/io/ic_reader.hpp"
 
 #include <cassert>
 #include <filesystem>
@@ -55,7 +56,9 @@ void testCapabilityTruth() {
 #if COSMOSIM_ENABLE_HDF5
   const auto& canonical_detail =
       report.require("canonical_external_ic_import").detail;
-  assert(canonical_detail.find("manifest v4") != std::string::npos);
+  const std::string manifest_version_contract =
+      "manifest v" + std::to_string(cosmosim::io::kIcAuditManifestSchemaVersion);
+  assert(canonical_detail.find(manifest_version_contract) != std::string::npos);
   assert(canonical_detail.find("source-chunk-to-canonical") !=
          std::string::npos);
 #endif

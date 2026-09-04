@@ -181,7 +181,7 @@ Use one of these config-driven paths for honest runtime smoke checks:
 
 Or run the built-in integration smoke gate:
 
-- `integration_runtime_app_smoke` (HDF5-enabled builds)
+- `integration_runtime_app_smoke` (HDF5+FFTW-enabled builds; the production TreePM runtime fails closed when only the diagnostic naive-DFT backend is available)
 - `integration_runtime_app_mpi_treepm_smoke_two_rank` (MPI+HDF5+FFTW-enabled builds; launches the real `cosmosim_harness` through `mpiexec` with `parallel.mpi_ranks_expected = 2`)
 
 
@@ -199,11 +199,13 @@ Or run the built-in integration smoke gate:
 The Phase 2 gate is now a dedicated MPI validation suite:
 
 - Executable: `test_validation_phase2_mpi_gravity`
+- Registration requirement: `COSMOSIM_ENABLE_FFTW=ON`. The diagnostic naive-DFT backend is not production-gravity acceptance evidence.
 - CTest entries:
   - `validation_phase2_mpi_gravity_single_rank`
   - `validation_phase2_mpi_gravity_two_rank`
   - `validation_phase2_mpi_gravity_three_rank`
   - `validation_phase2_mpi_gravity_four_rank`
+  - `validation_phase2_mpi_gravity_eight_rank`
 
 ### Numerical contracts enforced
 
@@ -315,7 +317,7 @@ The current gravity acceptance bundle adds these deterministic gates:
   slabs, and nonblocking halo completion.
 - the periodic PM `Nx=2,np4` case: zero-width high ranks enter the complete
   FFTW-MPI plan/transform/collective solve with backend-safe dummy allocation.
-- `validation_phase2_mpi_gravity_{single,two,three,four}_rank`: identical
+- `validation_phase2_mpi_gravity_{single,two,three,four,eight}_rank`: identical
   physical fixtures across rank counts and the unchanged strict TreePM
   thresholds `relative_L2 <= 5e-6`, `max_relative <= 5e-5`.
 - `validation_dmo_zeldovich_workflow_single_rank` plus MPI np2/np3/np4/np8 and

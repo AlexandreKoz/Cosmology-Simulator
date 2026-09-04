@@ -1837,41 +1837,46 @@ if(COSMOSIM_ENABLE_TESTS)
     validation_power_spectrum_mesh_consistency
     PROPERTIES LABELS "validation;analysis;power_spectrum;regression;mesh_consistency")
 
-  add_executable(test_validation_phase2_mpi_gravity tests/validation/test_validation_phase2_mpi_gravity.cpp)
-  target_link_libraries(test_validation_phase2_mpi_gravity PRIVATE cosmosim_all)
-  add_test(NAME validation_phase2_mpi_gravity_single_rank COMMAND test_validation_phase2_mpi_gravity)
-  set_tests_properties(
-    validation_phase2_mpi_gravity_single_rank
-    PROPERTIES LABELS "validation;gravity;distributed_contract")
-  if(COSMOSIM_ENABLE_MPI)
-    add_test(
-      NAME validation_phase2_mpi_gravity_two_rank
-      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
-    add_test(
-      NAME validation_phase2_mpi_gravity_three_rank
-      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
-              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+  # Phase-2 production TreePM validation is an FFT-backed acceptance gate.
+  # Diagnostic naive DFT remains available to focused solver/unit fixtures, but
+  # must not be registered as successful production-gravity validation.
+  if(COSMOSIM_ENABLE_FFTW)
+    add_executable(test_validation_phase2_mpi_gravity tests/validation/test_validation_phase2_mpi_gravity.cpp)
+    target_link_libraries(test_validation_phase2_mpi_gravity PRIVATE cosmosim_all)
+    add_test(NAME validation_phase2_mpi_gravity_single_rank COMMAND test_validation_phase2_mpi_gravity)
     set_tests_properties(
-      validation_phase2_mpi_gravity_two_rank
-      validation_phase2_mpi_gravity_three_rank
-      PROPERTIES LABELS "validation;gravity;mpi;distributed")
-    set_tests_properties(validation_phase2_mpi_gravity_two_rank PROPERTIES PROCESSORS 2)
-    set_tests_properties(validation_phase2_mpi_gravity_three_rank PROPERTIES PROCESSORS 3)
-    add_test(
-      NAME validation_phase2_mpi_gravity_four_rank
-      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
-              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
-    set_tests_properties(
-      validation_phase2_mpi_gravity_four_rank
-      PROPERTIES LABELS "validation;gravity;mpi;distributed" PROCESSORS 4)
-    add_test(
-      NAME validation_phase2_mpi_gravity_eight_rank
-      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 8 ${MPIEXEC_PREFLAGS}
-              $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
-    set_tests_properties(
-      validation_phase2_mpi_gravity_eight_rank
-      PROPERTIES LABELS "validation;gravity;mpi;distributed" PROCESSORS 8)
+      validation_phase2_mpi_gravity_single_rank
+      PROPERTIES LABELS "validation;gravity;fftw;distributed_contract")
+    if(COSMOSIM_ENABLE_MPI)
+      add_test(
+        NAME validation_phase2_mpi_gravity_two_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+      add_test(
+        NAME validation_phase2_mpi_gravity_three_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        validation_phase2_mpi_gravity_two_rank
+        validation_phase2_mpi_gravity_three_rank
+        PROPERTIES LABELS "validation;gravity;fftw;mpi;distributed")
+      set_tests_properties(validation_phase2_mpi_gravity_two_rank PROPERTIES PROCESSORS 2)
+      set_tests_properties(validation_phase2_mpi_gravity_three_rank PROPERTIES PROCESSORS 3)
+      add_test(
+        NAME validation_phase2_mpi_gravity_four_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        validation_phase2_mpi_gravity_four_rank
+        PROPERTIES LABELS "validation;gravity;fftw;mpi;distributed" PROCESSORS 4)
+      add_test(
+        NAME validation_phase2_mpi_gravity_eight_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 8 ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_phase2_mpi_gravity> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        validation_phase2_mpi_gravity_eight_rank
+        PROPERTIES LABELS "validation;gravity;fftw;mpi;distributed" PROCESSORS 8)
+    endif()
   endif()
 
   add_executable(

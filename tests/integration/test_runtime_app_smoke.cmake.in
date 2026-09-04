@@ -4,6 +4,8 @@ set(runtime_smoke_config "${runtime_smoke_root}/runtime_smoke.param.txt")
 set(runtime_smoke_stdout "${runtime_smoke_root}/runtime_stdout.txt")
 set(runtime_smoke_stderr "${runtime_smoke_root}/runtime_stderr.txt")
 set(runtime_smoke_run_dir "${runtime_smoke_run_root}/runtime_app_smoke")
+set(runtime_smoke_snapshot_dir "${runtime_smoke_run_dir}/snapdir_001")
+set(runtime_smoke_snapshot_member "${runtime_smoke_snapshot_dir}/snap_001.hdf5")
 
 file(REMOVE_RECURSE "${runtime_smoke_root}")
 file(MAKE_DIRECTORY "${runtime_smoke_root}")
@@ -34,10 +36,35 @@ foreach(required_path IN ITEMS
     "${runtime_smoke_run_dir}/operational_events.json"
     "${runtime_smoke_run_dir}/profile.json"
     "${runtime_smoke_run_dir}/profile.csv"
-    "${runtime_smoke_run_dir}/snap_001.hdf5"
+    "${runtime_smoke_snapshot_dir}"
+    "${runtime_smoke_snapshot_member}"
     "${runtime_smoke_run_dir}/restart_001.hdf5")
   if(NOT EXISTS "${required_path}")
     message(FATAL_ERROR "runtime smoke missing expected artifact: ${required_path}")
+  endif()
+endforeach()
+
+file(GLOB runtime_smoke_completion_markers
+     "${runtime_smoke_snapshot_dir}/snap_001_*.complete")
+list(LENGTH runtime_smoke_completion_markers runtime_smoke_completion_marker_count)
+if(NOT runtime_smoke_completion_marker_count EQUAL 1)
+  message(FATAL_ERROR
+    "runtime smoke expected exactly one snapshot-set completion manifest in "
+    "${runtime_smoke_snapshot_dir}, found ${runtime_smoke_completion_marker_count}")
+endif()
+list(GET runtime_smoke_completion_markers 0 runtime_smoke_completion_marker)
+file(READ "${runtime_smoke_completion_marker}" runtime_smoke_completion_text)
+foreach(required_manifest_contract IN ITEMS
+    "schema=chui_snapshot_set_v2"
+    "schema_name=chui_science_snapshot_v6"
+    "file_kind=chui_science_snapshot"
+    "num_files_per_snapshot=1"
+    "member_count=1"
+    "member.0.filename=snap_001.hdf5")
+  if(NOT runtime_smoke_completion_text MATCHES "${required_manifest_contract}")
+    message(FATAL_ERROR
+      "runtime smoke snapshot-set completion manifest is missing contract: "
+      "${required_manifest_contract}")
   endif()
 endforeach()
 
@@ -55,6 +82,12 @@ if(NOT runtime_ops MATCHES "run.complete")
 endif()
 if(NOT runtime_ops MATCHES "config.freeze")
   message(FATAL_ERROR "runtime smoke operational report must record config.freeze")
+endif()
+if(NOT runtime_ops MATCHES "snapshot.write.complete")
+  message(FATAL_ERROR "runtime smoke operational report must record snapshot.write.complete")
+endif()
+if(NOT runtime_ops MATCHES "scientifically read back, and independently validated as one logical set")
+  message(FATAL_ERROR "runtime smoke must record successful scientific snapshot-set validation")
 endif()
 
 file(READ "${runtime_smoke_run_dir}/normalized_config.param.txt" runtime_normalized)

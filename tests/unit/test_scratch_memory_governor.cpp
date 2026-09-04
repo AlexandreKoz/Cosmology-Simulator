@@ -1,12 +1,35 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <cstdlib>
 #include <new>
 #include <stdexcept>
 
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+
+namespace {
+bool g_fail_next_array_allocation = false;
+}
+
+void* operator new[](std::size_t size) {
+  if (g_fail_next_array_allocation) {
+    g_fail_next_array_allocation = false;
+    throw std::bad_alloc();
+  }
+  if (void* storage = std::malloc(size); storage != nullptr) {
+    return storage;
+  }
+  throw std::bad_alloc();
+}
+
+void operator delete[](void* storage) noexcept {
+  std::free(storage);
+}
+
+void operator delete[](void* storage, std::size_t) noexcept {
+  std::free(storage);
+}
 
 namespace {
 
@@ -79,19 +102,14 @@ void testBackingAllocationFailureReturnsPendingReservation() {
   MemoryGovernor governor;
   MonotonicScratchAllocator scratch(&governor);
   bool allocation_failed = false;
+  g_fail_next_array_allocation = true;
   try {
-    (void)scratch.allocateBytes(
-        std::numeric_limits<std::size_t>::max(), 1U);
-  } catch (const std::bad_array_new_length&) {
-    allocation_failed = true;
+    (void)scratch.allocateBytes(2048U, alignof(std::max_align_t));
   } catch (const std::bad_alloc&) {
-    allocation_failed = true;
-  } catch (const std::length_error&) {
-    // Some standard libraries reject impossible array extents before operator
-    // new. This is still an allocation-path failure after reservation.
     allocation_failed = true;
   }
   assert(allocation_failed);
+  assert(!g_fail_next_array_allocation);
   const auto snapshot = governor.snapshot();
   assert(snapshot.reserved_bytes == 0U);
   assert(snapshot.committed_bytes == 0U);

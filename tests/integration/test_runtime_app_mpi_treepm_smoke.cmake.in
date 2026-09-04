@@ -3,8 +3,10 @@ set(runtime_mpi_run_root "${runtime_mpi_root}/outputs")
 set(runtime_mpi_config "${runtime_mpi_root}/runtime_mpi_treepm.param.txt")
 set(runtime_mpi_stdout "${runtime_mpi_root}/runtime_stdout.txt")
 set(runtime_mpi_stderr "${runtime_mpi_root}/runtime_stderr.txt")
+set(runtime_mpi_shared_run_dir "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke")
 set(runtime_mpi_run_dir_rank0 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank000")
 set(runtime_mpi_run_dir_rank1 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank001")
+set(runtime_mpi_snapshot_dir "${runtime_mpi_shared_run_dir}/snapdir_001")
 
 file(REMOVE_RECURSE "${runtime_mpi_root}")
 file(MAKE_DIRECTORY "${runtime_mpi_root}")
@@ -36,12 +38,37 @@ foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_
 endforeach()
 
 foreach(required_path IN ITEMS
-    "${runtime_mpi_run_dir_rank0}/snap_001_rank000.hdf5"
-    "${runtime_mpi_run_dir_rank1}/snap_001_rank001.hdf5"
+    "${runtime_mpi_snapshot_dir}/snap_001.0.hdf5"
+    "${runtime_mpi_snapshot_dir}/snap_001.1.hdf5"
     "${runtime_mpi_run_dir_rank0}/restart_001_rank000.hdf5"
     "${runtime_mpi_run_dir_rank1}/restart_001_rank001.hdf5")
   if(NOT EXISTS "${required_path}")
     message(FATAL_ERROR "MPI runtime smoke missing expected rank-qualified HDF5 artifact: ${required_path}")
+  endif()
+endforeach()
+
+file(GLOB runtime_mpi_completion_markers
+     "${runtime_mpi_snapshot_dir}/snap_001_*.complete")
+list(LENGTH runtime_mpi_completion_markers runtime_mpi_completion_marker_count)
+if(NOT runtime_mpi_completion_marker_count EQUAL 1)
+  message(FATAL_ERROR
+    "MPI runtime smoke expected exactly one shared snapshot-set completion manifest in "
+    "${runtime_mpi_snapshot_dir}, found ${runtime_mpi_completion_marker_count}")
+endif()
+list(GET runtime_mpi_completion_markers 0 runtime_mpi_completion_marker)
+file(READ "${runtime_mpi_completion_marker}" runtime_mpi_completion_text)
+foreach(required_manifest_contract IN ITEMS
+    "schema=chui_snapshot_set_v2"
+    "schema_name=chui_science_snapshot_v6"
+    "file_kind=chui_science_snapshot"
+    "num_files_per_snapshot=2"
+    "member_count=2"
+    "member.0.filename=snap_001.0.hdf5"
+    "member.1.filename=snap_001.1.hdf5")
+  if(NOT runtime_mpi_completion_text MATCHES "${required_manifest_contract}")
+    message(FATAL_ERROR
+      "MPI runtime smoke snapshot-set completion manifest is missing contract: "
+      "${required_manifest_contract}")
   endif()
 endforeach()
 
@@ -63,6 +90,12 @@ foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_
   endif()
   if(NOT runtime_ops MATCHES "config.freeze")
     message(FATAL_ERROR "MPI runtime smoke operational report must record config.freeze in ${rank_dir}")
+  endif()
+  if(NOT runtime_ops MATCHES "snapshot.write.complete")
+    message(FATAL_ERROR "MPI runtime smoke operational report must record snapshot.write.complete in ${rank_dir}")
+  endif()
+  if(NOT runtime_ops MATCHES "scientifically read back, and independently validated as one logical set")
+    message(FATAL_ERROR "MPI runtime smoke must record successful scientific snapshot-set validation in ${rank_dir}")
   endif()
 
   file(READ "${rank_dir}/normalized_config.param.txt" runtime_normalized)

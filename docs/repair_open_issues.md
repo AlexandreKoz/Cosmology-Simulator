@@ -383,11 +383,14 @@ matrix passes. Any failure must be repaired in code or protocol; do not promote
 capability by changing the status test, disabling a fault scenario, or increasing
 its timeout.
 
-A separate repository-wide HDF5 `integration_runtime_app_smoke` process did not
-return within repeated bounded command windows in the repair environment. It
-uses generated ICs and is not part of the external Campaign B ingestion path,
-but it prevents reporting the entire HDF5 preset as 133/133 green until its
-pre-existing harness behavior is diagnosed on the normal validation system.
+Supersession note (2026-09-04): the repository-wide runtime smoke issue is now
+diagnosed. Production output writes a logical snapshot set under
+`snapdir_###`, while the old smoke asserted an obsolete flat snapshot path.
+The P2/P3 post-audit closure aligns both serial and MPI smoke checks with the
+snapshot-set completion-manifest contract and keeps the production smoke gated
+on FFTW. Runtime re-execution of that gate still requires a dependency-complete
+FFTW environment; the historical Campaign B ingestion result is otherwise
+unchanged.
 
 ## Campaign B completion follow-ups (2026-07-25)
 

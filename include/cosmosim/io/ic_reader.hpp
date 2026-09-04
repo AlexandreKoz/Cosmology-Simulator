@@ -19,6 +19,11 @@ class MpiContext;
 
 namespace cosmosim::io {
 
+inline constexpr std::string_view kIcAuditManifestSchemaName =
+    "chui_ic_audit_manifest";
+inline constexpr std::uint32_t kIcAuditManifestSchemaVersion = 4U;
+inline constexpr std::string_view kIcConverterVersion = "chui_ic_converter_v4";
+
 enum class IcParticleKind : std::uint8_t {
   kGas = 0,
   kDarkMatter = 1,
@@ -139,9 +144,9 @@ struct IcMissingFieldContract {
 };
 
 struct IcManifest {
-  std::string schema_name = "chui_ic_audit_manifest";
-  std::uint32_t schema_version = 4;
-  std::string converter_version = "chui_ic_converter_v4";
+  std::string schema_name{kIcAuditManifestSchemaName};
+  std::uint32_t schema_version = kIcAuditManifestSchemaVersion;
+  std::string converter_version{kIcConverterVersion};
   IcDialect dialect = IcDialect::kGadgetArepoBridgeV1;
   std::string dialect_version = "1";
   std::vector<std::filesystem::path> source_files;
