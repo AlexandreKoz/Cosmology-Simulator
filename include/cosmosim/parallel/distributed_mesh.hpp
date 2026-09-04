@@ -239,6 +239,15 @@ struct DirectedAmrPatchPayloadExchange {
   DirectedAmrExchangeDiagnostics diagnostics{};
 };
 
+// Constant-space description of the bounded patch-cell stream. Production
+// transport must not materialize one metadata entry per round because memory
+// pressure can legitimately reduce the round window to only a few records.
+struct DirectedAmrPatchCellTransferPlan {
+  std::uint64_t logical_record_count = 0U;
+  std::size_t records_per_round = 0U;
+  std::uint64_t round_count = 0U;
+};
+
 struct AmrFluxRegisterPayloadRecord {
   std::uint64_t register_key = 0;
   std::uint64_t coarse_patch_id = 0;
@@ -316,6 +325,13 @@ planDirectedAmrPatchBoundaryCellRequests(
     std::size_t transport_round_limit_bytes = 0U,
     std::uint64_t exchange_sequence = 0);
 
+[[nodiscard]] DirectedAmrPatchCellTransferPlan planDirectedAmrPatchCellTransfer(
+    std::uint64_t logical_record_count,
+    std::size_t transport_round_limit_bytes = 0U);
+
+// Compatibility/diagnostic helper that materializes individual round sizes.
+// Production streaming uses planDirectedAmrPatchCellTransfer() so transport
+// planning remains O(1) in the logical interface population.
 [[nodiscard]] std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
     std::uint64_t logical_record_count,
     std::size_t transport_round_limit_bytes = 0U);

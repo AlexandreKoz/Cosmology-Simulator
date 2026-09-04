@@ -406,6 +406,133 @@ void testSparseFineToCoarseMatchesDenseReferenceAndRequiresCompleteStencil() {
   assert(threw);
 }
 
+void testFineToCoarseStencilSpansMultipleFinePatches() {
+  cosmosim::amr::PatchDescriptor coarse;
+  coarse.patch_id = 51U;
+  coarse.level = 0U;
+  coarse.origin_comov = {0.0, 0.0, 0.0};
+  coarse.extent_comov = {1.0, 1.0, 1.0};
+  coarse.cell_dims = {2U, 1U, 1U};
+
+  std::vector<cosmosim::amr::PatchDescriptor> fine_patches;
+  fine_patches.reserve(4U);
+  for (std::size_t z_half = 0U; z_half < 2U; ++z_half) {
+    for (std::size_t y_half = 0U; y_half < 2U; ++y_half) {
+      cosmosim::amr::PatchDescriptor fine;
+      fine.patch_id = 52U + fine_patches.size();
+      fine.parent_patch_id = coarse.patch_id;
+      fine.level = 1U;
+      fine.origin_comov = {
+          1.0,
+          0.5 * static_cast<double>(y_half),
+          0.5 * static_cast<double>(z_half)};
+      fine.extent_comov = {0.5, 0.5, 0.5};
+      fine.cell_dims = {2U, 1U, 1U};
+      fine_patches.push_back(fine);
+    }
+  }
+
+  std::vector<cosmosim::amr::PatchDescriptor> all_patches{coarse};
+  all_patches.insert(all_patches.end(), fine_patches.begin(), fine_patches.end());
+  const auto dense_state = makeState(all_patches);
+  auto dense_coarse_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      dense_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto dense_coarse = cosmosim::amr::loadAmrHydroConservedState(
+      dense_state, dense_coarse_geometry, k_gamma);
+
+  std::vector<cosmosim::amr::AmrHydroPatchGeometry> fine_geometries;
+  std::vector<cosmosim::hydro::HydroConservedStateSoa> fine_conserved;
+  fine_geometries.reserve(fine_patches.size());
+  fine_conserved.reserve(fine_patches.size());
+  for (const auto& fine : fine_patches) {
+    fine_geometries.push_back(cosmosim::amr::buildAmrHydroPatchGeometry(
+        dense_state, fine));
+    fine_conserved.push_back(cosmosim::amr::loadAmrHydroConservedState(
+        dense_state, fine_geometries.back(), k_gamma));
+  }
+
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> dense_views;
+  dense_views.reserve(1U + fine_patches.size());
+  dense_views.push_back({.geometry = &dense_coarse_geometry, .conserved = &dense_coarse});
+  for (std::size_t i = 0U; i < fine_patches.size(); ++i) {
+    dense_views.push_back({
+        .geometry = &fine_geometries[i],
+        .conserved = &fine_conserved[i],
+        .requires_ghost_fill = false});
+  }
+  const auto dense_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      dense_views, k_gamma);
+  assert(dense_diagnostics.fine_to_coarse_ghosts_filled == 1U);
+
+  const auto& dense_ghost = findGhost(
+      dense_coarse_geometry,
+      cosmosim::hydro::HydroFaceAxis::kX,
+      cosmosim::hydro::HydroFaceSide::kUpper,
+      1U);
+  cosmosim::hydro::HydroConservedState expected;
+  for (const auto& source : fine_conserved) {
+    expected += source.loadCell(0U);
+    expected += source.loadCell(1U);
+  }
+  expected = (1.0 / 8.0) * expected;
+  assertStateNear(dense_coarse.loadCell(dense_ghost.ghost_cell), expected);
+
+  const auto local_state = makeState({coarse});
+  auto sparse_coarse_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      local_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto sparse_coarse = cosmosim::amr::loadAmrHydroConservedState(
+      local_state, sparse_coarse_geometry, k_gamma);
+
+  std::vector<std::vector<cosmosim::amr::AmrHydroSparseRemoteCell>> sparse_cells(
+      fine_patches.size());
+  std::vector<cosmosim::amr::AmrHydroSparseGhostSource> remote_sources;
+  remote_sources.reserve(fine_patches.size());
+  for (std::size_t i = 0U; i < fine_patches.size(); ++i) {
+    sparse_cells[i].reserve(2U);
+    for (std::uint32_t offset = 0U; offset < 2U; ++offset) {
+      sparse_cells[i].push_back(cosmosim::amr::AmrHydroSparseRemoteCell{
+          .patch_local_cell = offset,
+          .gas_cell_id = 13000U + static_cast<std::uint64_t>(10U * i + offset),
+          .conserved = fine_conserved[i].loadCell(offset)});
+    }
+    remote_sources.push_back(cosmosim::amr::AmrHydroSparseGhostSource{
+        .patch = &fine_patches[i],
+        .owner_rank = 1,
+        .ghost_hydro_epoch = 11U,
+        .expected_ghost_hydro_epoch = 11U,
+        .source_current_state_time_code = 0.0,
+        .cells = sparse_cells[i]});
+  }
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> sparse_views{
+      {.geometry = &sparse_coarse_geometry, .conserved = &sparse_coarse}};
+  const auto sparse_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      sparse_views, remote_sources, k_gamma);
+  assert(sparse_diagnostics.fine_to_coarse_ghosts_filled == 1U);
+  const auto& sparse_ghost = findGhost(
+      sparse_coarse_geometry,
+      cosmosim::hydro::HydroFaceAxis::kX,
+      cosmosim::hydro::HydroFaceSide::kUpper,
+      1U);
+  assertStateNear(sparse_coarse.loadCell(sparse_ghost.ghost_cell), expected);
+
+  sparse_cells.back().pop_back();
+  remote_sources.back().cells = sparse_cells.back();
+  auto rejected_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      local_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto rejected_conserved = cosmosim::amr::loadAmrHydroConservedState(
+      local_state, rejected_geometry, k_gamma);
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> rejected_views{
+      {.geometry = &rejected_geometry, .conserved = &rejected_conserved}};
+  bool threw = false;
+  try {
+    (void)cosmosim::amr::fillAmrHydroGhostCells(
+        rejected_views, remote_sources, k_gamma);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testRejectsStaleRemoteGhostEpoch() {
   cosmosim::amr::PatchDescriptor patch;
   patch.patch_id = 21;
@@ -435,6 +562,7 @@ int main() {
   testSameLevelGhostFillInXyz();
   testSparseSameLevelRemoteGhostMatchesDenseReference();
   testSparseFineToCoarseMatchesDenseReferenceAndRequiresCompleteStencil();
+  testFineToCoarseStencilSpansMultipleFinePatches();
   testRejectsStaleRemoteGhostEpoch();
   return 0;
 }

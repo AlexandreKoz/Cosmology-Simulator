@@ -1382,7 +1382,7 @@ std::size_t mpiTransportRoundLimitBytes() {
   return k_default_mpi_transport_round_bytes;
 }
 
-std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
+DirectedAmrPatchCellTransferPlan planDirectedAmrPatchCellTransfer(
     std::uint64_t logical_record_count,
     std::size_t transport_round_limit_bytes) {
   const std::size_t requested_limit = transport_round_limit_bytes == 0U
@@ -1398,14 +1398,32 @@ std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
   }
   const std::uint64_t round_count_u64 = logical_record_count / records_per_round +
       (logical_record_count % records_per_round == 0U ? 0U : 1U);
+  return DirectedAmrPatchCellTransferPlan{
+      .logical_record_count = logical_record_count,
+      .records_per_round = records_per_round,
+      .round_count = round_count_u64,
+  };
+}
+
+std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
+    std::uint64_t logical_record_count,
+    std::size_t transport_round_limit_bytes) {
+  constexpr std::uint64_t k_max_materialized_round_count = 65'536U;
+  const DirectedAmrPatchCellTransferPlan plan = planDirectedAmrPatchCellTransfer(
+      logical_record_count, transport_round_limit_bytes);
+  if (plan.round_count > k_max_materialized_round_count) {
+    throw std::length_error(
+        "directed AMR diagnostic round materialization exceeds bounded metadata cap; "
+        "use the constant-space transfer plan");
+  }
   const std::size_t round_count = core::checkedIntegralNarrow<std::size_t>(
-      round_count_u64, "directed AMR patch-cell transport round count");
+      plan.round_count, "directed AMR patch-cell materialized round count");
   std::vector<std::size_t> rounds;
   rounds.reserve(round_count);
-  std::uint64_t remaining = logical_record_count;
+  std::uint64_t remaining = plan.logical_record_count;
   while (remaining != 0U) {
     const std::size_t records = static_cast<std::size_t>(std::min<std::uint64_t>(
-        remaining, static_cast<std::uint64_t>(records_per_round)));
+        remaining, static_cast<std::uint64_t>(plan.records_per_round)));
     rounds.push_back(records);
     remaining -= records;
   }
@@ -4151,13 +4169,13 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
       core::checkedIntegralNarrow<std::size_t>(
           peer_limit_u64, "directed AMR peer transport limit"));
 
-  std::vector<std::size_t> send_rounds;
-  std::vector<std::size_t> receive_rounds;
+  DirectedAmrPatchCellTransferPlan send_plan;
+  DirectedAmrPatchCellTransferPlan receive_plan;
   std::exception_ptr local_admission_failure;
   try {
-    send_rounds = planDirectedAmrPatchCellTransferRounds(
+    send_plan = planDirectedAmrPatchCellTransfer(
         logical_send_count, agreed_limit);
-    receive_rounds = planDirectedAmrPatchCellTransferRounds(
+    receive_plan = planDirectedAmrPatchCellTransfer(
         logical_receive_count, agreed_limit);
     if (admission) {
       admission(peer_rank, remote_patches, remote_requests, logical_receive_count);
@@ -4189,10 +4207,10 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
     throw std::runtime_error("directed AMR peer rejected patch-cell memory admission");
   }
 
-  const std::size_t round_count = std::max(send_rounds.size(), receive_rounds.size());
+  const std::uint64_t round_count = std::max(send_plan.round_count, receive_plan.round_count);
   std::vector<AmrPatchCellPayloadRecord> send_chunk;
   std::vector<AmrPatchCellPayloadRecord> receive_chunk;
-  const std::size_t max_records = agreed_limit / sizeof(AmrPatchCellPayloadRecord);
+  const std::size_t max_records = send_plan.records_per_round;
   send_chunk.reserve(max_records);
   receive_chunk.reserve(max_records);
   diagnostics.patch_cell_send_capacity_high_water_bytes = std::max(
@@ -4213,9 +4231,18 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
           "directed AMR streamed simultaneous transport capacity"));
 
   std::uint64_t send_offset = 0U;
-  for (std::size_t round = 0; round < round_count; ++round) {
-    const std::size_t send_records = round < send_rounds.size() ? send_rounds[round] : 0U;
-    const std::size_t receive_records = round < receive_rounds.size() ? receive_rounds[round] : 0U;
+  std::uint64_t receive_offset = 0U;
+  for (std::uint64_t round = 0U; round < round_count; ++round) {
+    const std::size_t send_records = round < send_plan.round_count
+        ? static_cast<std::size_t>(std::min<std::uint64_t>(
+              send_plan.logical_record_count - send_offset,
+              static_cast<std::uint64_t>(send_plan.records_per_round)))
+        : 0U;
+    const std::size_t receive_records = round < receive_plan.round_count
+        ? static_cast<std::size_t>(std::min<std::uint64_t>(
+              receive_plan.logical_record_count - receive_offset,
+              static_cast<std::uint64_t>(receive_plan.records_per_round)))
+        : 0U;
 
     std::exception_ptr local_producer_failure;
     try {
@@ -4314,10 +4341,14 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
     }
 
     send_offset += static_cast<std::uint64_t>(send_records);
+    receive_offset += static_cast<std::uint64_t>(receive_records);
     ++diagnostics.patch_cell_transport_round_count;
   }
   if (send_offset != logical_send_count) {
     throw std::logic_error("directed AMR streamed patch-cell sender did not cover logical payload");
+  }
+  if (receive_offset != logical_receive_count) {
+    throw std::logic_error("directed AMR streamed patch-cell receiver did not cover logical payload");
   }
 #else
   (void)peer_rank;

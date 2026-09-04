@@ -98,6 +98,25 @@ void testBoundedMpiTransferPlannerSyntheticLimits() {
     assert(records <= max_records_per_round);
   }
 
+  // M2A.4 regression: memory pressure may reduce the transport window to one
+  // record. Production planning must remain constant-space even when the
+  // logical interface contains tens of millions of records rather than
+  // materializing one size_t per round.
+  constexpr std::uint64_t huge_logical_record_count = 100'000'000U;
+  const auto constant_space_plan = parallel::planDirectedAmrPatchCellTransfer(
+      huge_logical_record_count, record_bytes);
+  assert(constant_space_plan.logical_record_count == huge_logical_record_count);
+  assert(constant_space_plan.records_per_round == 1U);
+  assert(constant_space_plan.round_count == huge_logical_record_count);
+
+  bool rejected_unbounded_metadata = false;
+  try {
+    (void)parallel::planDirectedAmrPatchCellTransferRounds(65'537U, record_bytes);
+  } catch (const std::length_error&) {
+    rejected_unbounded_metadata = true;
+  }
+  assert(rejected_unbounded_metadata);
+
   // Each peer is individually representable under the synthetic MPI limit,
   // while the aggregate is not. The planner must split the logical exchange
   // without dropping or duplicating any logical element.

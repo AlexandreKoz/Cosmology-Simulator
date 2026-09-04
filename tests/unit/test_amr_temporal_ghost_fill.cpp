@@ -215,7 +215,11 @@ void testRejectsOutOfRangeAndStaleHistory() {
 
   Fixture geometry_fixture;
   geometry_fixture.captureInterval();
-  geometry_fixture.coarse.patch.extent_comov[0] = 0.9;
+  auto* stale_geometry_record =
+      geometry_fixture.state.amr_temporal_boundary_history.findByPatchId(
+          geometry_fixture.coarse.patch.patch_id);
+  assert(stale_geometry_record != nullptr);
+  ++stale_geometry_record->patch_geometry_fingerprint;
   views = geometry_fixture.views(0.5);
   threw = false;
   try {

@@ -239,3 +239,89 @@ Live multi-rank certification still requires the repository's authoritative MPI
 preset on a host with MPI C++ development support. The source contract and
 serial dense-vs-sparse regressions are intended to fail closed until that
 external runtime evidence is available.
+
+## M2A.4 constant-space directed-AMR transport planning addendum — 2026-09-04
+
+Post-M2A.3 adversarial review found one remaining memory-scaling violation in
+its otherwise bounded patch-cell stream. The production peer exchange called
+`planDirectedAmrPatchCellTransferRounds()` for both directions and retained one
+`std::size_t` entry per physical transport round. Under normal 16 MiB rounds
+that metadata is small, but memory-governor pressure is explicitly allowed to
+shrink the negotiated window. At a one-record window, planner residency grew
+linearly with the complete logical interface population even though the actual
+send/receive chunks were bounded.
+
+M2A.4 removes that hidden scaling term without changing AMR geometry, ghost
+selection, reconstruction, Riemann fluxes, reflux, passive-metal transport,
+MPI wire records, restart schema, or numerical tolerances:
+
+- production directed-AMR patch-cell streaming now uses the constant-space
+  `DirectedAmrPatchCellTransferPlan`, containing only the logical record count,
+  records per round, and arithmetic round count for each direction;
+- per-round send and receive record counts are derived from logical offsets as
+  the stream advances, so planner residency is O(1) with respect to interface
+  population and transport-round count;
+- the legacy/materialized round-size helper is retained for focused diagnostics
+  and compatibility tests, but refuses to allocate more than 65,536 round
+  entries and directs large callers to the constant-space planner;
+- sender and receiver logical offsets are both checked at stream completion so
+  the arithmetic plan remains fail-closed against dropped/overrun coverage.
+
+### M2A.4 scaling evidence
+
+On a 64-bit platform, the removed production metadata had the asymptotic form
+
+```
+2 * N_rounds * sizeof(std::size_t)
+```
+
+for simultaneous send/receive round vectors, before allocator over-capacity.
+Thus a one-record window would require about 160 MB of planner entries at
+10 million logical records and about 1.6 GB at 100 million records. The new
+production plan keeps two fixed-size descriptors regardless of logical record
+count. `unit_parallel_distributed_memory` includes a synthetic
+100,000,000-record / one-record-per-round plan and completes without
+materializing those 100 million entries; it also verifies that the diagnostic
+materializer fails closed above its metadata cap.
+
+The physical communication high-water remains the M2A.2/M2A.3 contract:
+bounded reusable send/receive chunks plus sparse interface source state and
+O(remote-interface) metadata. M2A.4 specifically removes planner metadata from
+being another population-scaled live object under the smallest transport
+windows.
+
+### M2A.4 post-artifact scientific closure
+
+The first broader CPU-debug inventory after the artifact-first checkpoint
+exposed a pre-existing M2A.3 regression in the same acceptance boundary.
+M2A.3 correctly required a complete fine-to-coarse restriction stencil, but
+its selector assumed the entire coarse ghost volume was covered by one fine
+source patch. Production octree refinement normally partitions that volume
+across several child patches; for a 2:1 Cartesian refinement a coarse ghost may
+require eight fine cells distributed across four tangential child patches.
+The overly narrow source assumption therefore rejected valid shock-tube and
+refine/derefine synchronization runs.
+
+The closure now:
+
+- intersects the coarse ghost volume with every finer local and sparse-remote
+  candidate patch rather than requiring one patch to contain the whole volume;
+- verifies that all contributors use one fine AMR level and consistent cell
+  widths, maps every selected cell onto the expected refinement lattice, and
+  rejects overlaps, gaps, off-lattice cells, or incomplete sparse payloads;
+- orders contributors by geometric stencil ordinal before arithmetic averaging,
+  so patch-vector/rank discovery order does not silently change the
+  fine-to-coarse accumulation order;
+- preserves the existing synchronization-time requirement for fine-to-coarse
+  reads and does not change reflux, reconstruction, or Riemann semantics;
+- updates the temporal-history negative fixture to stale the saved history
+  fingerprint directly instead of corrupting live patch geometry, which would
+  now (correctly) fail the stricter fine-to-coarse geometry gate first.
+
+Focused regression coverage includes a coarse ghost tiled by four fine child
+patches (eight fine source cells), both dense-local and sparse-remote source
+forms, plus a missing-cell rejection. The previously red AMR temporal-history,
+shock-tube, and synchronization-stress tests pass with the corrected selector.
+The temporary coverage map is only one coarse-ghost restriction stencil in
+size (`O(product(refinement_ratio_axis))`), not patch- or population-scale
+persistent state.

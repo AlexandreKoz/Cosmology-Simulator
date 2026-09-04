@@ -20,20 +20,32 @@ namespace {
 constexpr double k_geometry_tol = 1.0e-10;
 constexpr double k_time_tol = 1.0e-12;
 
-struct CellSelection {
+struct SelectedSourceCell {
   const AmrHydroGhostFillPatch* patch = nullptr;
   const AmrHydroSparseGhostSource* sparse_remote = nullptr;
-  std::vector<std::size_t> cells;
+  std::size_t cell = 0U;
+  std::size_t fine_stencil_ordinal = 0U;
 };
 
+struct CellSelection {
+  std::vector<SelectedSourceCell> cells;
+};
+
+[[nodiscard]] const PatchDescriptor& sourcePatch(const SelectedSourceCell& source) {
+  if (source.patch != nullptr) {
+    return source.patch->geometry->patch;
+  }
+  if (source.sparse_remote != nullptr && source.sparse_remote->patch != nullptr) {
+    return *source.sparse_remote->patch;
+  }
+  throw std::logic_error("fillAmrHydroGhostCells: empty selected source cell");
+}
+
 [[nodiscard]] const PatchDescriptor& selectionPatch(const CellSelection& selection) {
-  if (selection.patch != nullptr) {
-    return selection.patch->geometry->patch;
+  if (selection.cells.empty()) {
+    throw std::logic_error("fillAmrHydroGhostCells: empty source selection");
   }
-  if (selection.sparse_remote != nullptr && selection.sparse_remote->patch != nullptr) {
-    return *selection.sparse_remote->patch;
-  }
-  throw std::logic_error("fillAmrHydroGhostCells: empty source selection");
+  return sourcePatch(selection.cells.front());
 }
 
 [[nodiscard]] const AmrHydroSparseRemoteCell* findSparseRemoteCell(
@@ -177,52 +189,56 @@ struct CellSelection {
   return index;
 }
 
-[[nodiscard]] std::vector<std::size_t> requiredFineSourceCellsForGhost(
+[[nodiscard]] std::array<std::array<double, 3>, 2> ghostCellBounds(
+    const PatchDescriptor& target_patch,
+    const hydro::HydroGhostCell& ghost) {
+  auto center = cellCenter(target_patch, ghost.owner_real_cell);
+  const auto target_widths = patchCellWidths(target_patch);
+  center[axisIndex(ghost.axis)] +=
+      sideSign(ghost.side) * target_widths[axisIndex(ghost.axis)];
+  std::array<std::array<double, 3>, 2> bounds{};
+  for (std::size_t axis = 0; axis < 3U; ++axis) {
+    bounds[0][axis] = center[axis] - 0.5 * target_widths[axis];
+    bounds[1][axis] = center[axis] + 0.5 * target_widths[axis];
+  }
+  return bounds;
+}
+
+[[nodiscard]] std::vector<std::size_t> fineSourceCellsIntersectingGhost(
     const PatchDescriptor& target_patch,
     const hydro::HydroGhostCell& ghost,
     const PatchDescriptor& source_patch) {
   if (source_patch.level <= target_patch.level) {
-    throw std::logic_error(
-        "fillAmrHydroGhostCells: complete fine-source stencil requested from a non-fine patch");
+    return {};
   }
-  const auto owner_center = cellCenter(target_patch, ghost.owner_real_cell);
-  const auto target_widths = patchCellWidths(target_patch);
+  const auto bounds = ghostCellBounds(target_patch, ghost);
   const auto source_widths = patchCellWidths(source_patch);
-  const int normal_axis = axisIndex(ghost.axis);
-
   std::array<std::size_t, 3> begin{};
   std::array<std::size_t, 3> end{};
-  for (int axis = 0; axis < 3; ++axis) {
-    double ghost_center = owner_center[axis];
-    if (axis == normal_axis) {
-      ghost_center += sideSign(ghost.side) * target_widths[axis];
+  for (std::size_t axis = 0; axis < 3U; ++axis) {
+    const double source_lower = source_patch.origin_comov[axis];
+    const double source_upper = source_lower + source_patch.extent_comov[axis];
+    const double lower = std::max(bounds[0][axis], source_lower);
+    const double upper = std::min(bounds[1][axis], source_upper);
+    const double scale = std::max({1.0, std::abs(lower), std::abs(upper)});
+    if (upper - lower <= k_geometry_tol * scale) {
+      return {};
     }
-    const double lower = ghost_center - 0.5 * target_widths[axis];
-    const double upper = ghost_center + 0.5 * target_widths[axis];
     const std::size_t dim = source_patch.cell_dims[axis];
     begin[axis] = alignedGhostBoundaryIndex(
-        lower, source_patch.origin_comov[axis], source_widths[axis], dim, false);
+        lower, source_lower, source_widths[axis], dim, false);
     end[axis] = alignedGhostBoundaryIndex(
-        upper, source_patch.origin_comov[axis], source_widths[axis], dim, true);
+        upper, source_lower, source_widths[axis], dim, true);
     if (end[axis] <= begin[axis]) {
-      throw std::runtime_error(
-          "fillAmrHydroGhostCells: fine-to-coarse source stencil has an empty aligned axis");
+      return {};
     }
   }
 
   const std::size_t nx = source_patch.cell_dims[0];
   const std::size_t ny = source_patch.cell_dims[1];
-  const std::size_t count_x = end[0] - begin[0];
-  const std::size_t count_y = end[1] - begin[1];
-  const std::size_t count_z = end[2] - begin[2];
   const std::size_t expected_count = core::checkedSizeProduct3(
-      count_x, count_y, count_z,
-      "fillAmrHydroGhostCells fine-to-coarse required source count");
-  if (expected_count == 0U) {
-    throw std::runtime_error(
-        "fillAmrHydroGhostCells: fine-to-coarse source stencil contains no cells");
-  }
-
+      end[0] - begin[0], end[1] - begin[1], end[2] - begin[2],
+      "fillAmrHydroGhostCells fine-source patch intersection count");
   std::vector<std::size_t> cells;
   cells.reserve(expected_count);
   for (std::size_t k = begin[2]; k < end[2]; ++k) {
@@ -232,11 +248,95 @@ struct CellSelection {
       }
     }
   }
-  if (cells.size() != expected_count) {
-    throw std::logic_error(
-        "fillAmrHydroGhostCells: complete fine-source stencil enumeration mismatch");
-  }
   return cells;
+}
+
+void validateAndOrderFineSourceCoverage(
+    const PatchDescriptor& target_patch,
+    const hydro::HydroGhostCell& ghost,
+    CellSelection& selection) {
+  if (selection.cells.empty()) {
+    return;
+  }
+  const PatchDescriptor& first_source = sourcePatch(selection.cells.front());
+  if (first_source.level <= target_patch.level) {
+    throw std::logic_error(
+        "fillAmrHydroGhostCells: fine-source coverage contains a non-fine patch");
+  }
+  const auto target_widths = patchCellWidths(target_patch);
+  const auto source_widths = patchCellWidths(first_source);
+  std::array<std::size_t, 3> refinement_ratio{};
+  for (std::size_t axis = 0; axis < 3U; ++axis) {
+    if (!(target_widths[axis] > 0.0) || !(source_widths[axis] > 0.0)) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: fine-to-coarse cell width is non-positive");
+    }
+    const double ratio = target_widths[axis] / source_widths[axis];
+    const double rounded = std::round(ratio);
+    const double tolerance = 1.0e-9 * std::max(1.0, std::abs(ratio));
+    if (rounded < 1.0 || std::abs(ratio - rounded) > tolerance) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: coarse ghost width is not an integer fine-cell multiple");
+    }
+    refinement_ratio[axis] = core::checkedIntegralNarrow<std::size_t>(
+        static_cast<std::uint64_t>(rounded),
+        "fillAmrHydroGhostCells fine-to-coarse refinement ratio");
+  }
+  const std::size_t expected_count = core::checkedSizeProduct3(
+      refinement_ratio[0], refinement_ratio[1], refinement_ratio[2],
+      "fillAmrHydroGhostCells complete fine-source stencil size");
+  std::vector<std::uint8_t> coverage(expected_count, 0U);
+  const auto bounds = ghostCellBounds(target_patch, ghost);
+
+  for (SelectedSourceCell& selected : selection.cells) {
+    const PatchDescriptor& source = sourcePatch(selected);
+    if (source.level != first_source.level) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: coarse ghost is covered by mixed fine AMR levels");
+    }
+    const auto widths = patchCellWidths(source);
+    for (std::size_t axis = 0; axis < 3U; ++axis) {
+      const double width_scale = std::max({1.0, std::abs(widths[axis]), std::abs(source_widths[axis])});
+      if (std::abs(widths[axis] - source_widths[axis]) > k_geometry_tol * width_scale) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: coarse ghost is covered by inconsistent fine-cell widths");
+      }
+    }
+
+    const auto center = cellCenter(source, selected.cell);
+    std::array<std::size_t, 3> ordinal{};
+    for (std::size_t axis = 0; axis < 3U; ++axis) {
+      const double first_center = bounds[0][axis] + 0.5 * source_widths[axis];
+      const double scaled = (center[axis] - first_center) / source_widths[axis];
+      const double rounded = std::round(scaled);
+      const double tolerance = 1.0e-9 * std::max(1.0, std::abs(scaled));
+      if (std::abs(scaled - rounded) > tolerance || rounded < 0.0 ||
+          rounded >= static_cast<double>(refinement_ratio[axis])) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: fine source cell is outside the aligned coarse ghost stencil");
+      }
+      ordinal[axis] = static_cast<std::size_t>(rounded);
+    }
+    const std::size_t linear = ordinal[0] + refinement_ratio[0] *
+        (ordinal[1] + refinement_ratio[1] * ordinal[2]);
+    if (linear >= coverage.size() || coverage[linear] != 0U) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: fine source patches overlap within a coarse ghost stencil");
+    }
+    coverage[linear] = 1U;
+    selected.fine_stencil_ordinal = linear;
+  }
+
+  if (selection.cells.size() != expected_count ||
+      std::find(coverage.begin(), coverage.end(), 0U) != coverage.end()) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine source patches do not cover the complete coarse ghost volume");
+  }
+  std::sort(
+      selection.cells.begin(), selection.cells.end(),
+      [](const SelectedSourceCell& lhs, const SelectedSourceCell& rhs) {
+        return lhs.fine_stencil_ordinal < rhs.fine_stencil_ordinal;
+      });
 }
 
 void validatePatchView(const AmrHydroGhostFillPatch& patch) {
@@ -289,56 +389,17 @@ void requireSourceCellAvailable(
     std::span<AmrHydroGhostFillPatch> patches,
     std::span<const AmrHydroSparseGhostSource> remote_sources) {
   const auto probe = ghostProbePoint(*target.geometry, ghost);
+  const PatchDescriptor& target_patch = target.geometry->patch;
   CellSelection selection;
 
+  // Same-level and coarse-to-fine ghost fills resolve one source cell by the
+  // ghost probe point. Fine-to-coarse is handled separately below because one
+  // coarse ghost volume may span several fine child patches.
   for (const AmrHydroGhostFillPatch& candidate : patches) {
     if (candidate.geometry == nullptr || candidate.conserved == nullptr) {
       continue;
     }
     const PatchDescriptor& source_patch = candidate.geometry->patch;
-    const PatchDescriptor& target_patch = target.geometry->patch;
-    if (source_patch.patch_id == target_patch.patch_id) {
-      continue;
-    }
-    if (!containsPoint(source_patch, probe)) {
-      continue;
-    }
-
-    const bool same_level =
-        source_patch.level == target_patch.level &&
-        boundary_class == AmrHydroBoundaryClass::kSameLevel;
-    const bool coarse_to_fine =
-        source_patch.level < target_patch.level &&
-        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
-    const bool fine_to_coarse =
-        source_patch.level > target_patch.level &&
-        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
-    if (!same_level && !coarse_to_fine && !fine_to_coarse) {
-      continue;
-    }
-
-    selection.patch = &candidate;
-    if (same_level || coarse_to_fine) {
-      const std::size_t source_cell = cellContainingPoint(source_patch, probe);
-      requireSourceCellAvailable(candidate, source_cell);
-      selection.cells.push_back(source_cell);
-      return selection;
-    }
-
-    selection.cells = requiredFineSourceCellsForGhost(
-        target_patch, ghost, source_patch);
-    for (const std::size_t cell : selection.cells) {
-      requireSourceCellAvailable(candidate, cell);
-    }
-    return selection;
-  }
-
-  for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
-    if (candidate.patch == nullptr) {
-      continue;
-    }
-    const PatchDescriptor& source_patch = *candidate.patch;
-    const PatchDescriptor& target_patch = target.geometry->patch;
     if (source_patch.patch_id == target_patch.patch_id ||
         !containsPoint(source_patch, probe)) {
       continue;
@@ -349,44 +410,103 @@ void requireSourceCellAvailable(
     const bool coarse_to_fine =
         source_patch.level < target_patch.level &&
         boundary_class == AmrHydroBoundaryClass::kCoarseFine;
-    const bool fine_to_coarse =
-        source_patch.level > target_patch.level &&
-        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
-    if (!same_level && !coarse_to_fine && !fine_to_coarse) {
+    if (!same_level && !coarse_to_fine) {
       continue;
     }
-    selection.sparse_remote = &candidate;
-    if (same_level || coarse_to_fine) {
-      const std::size_t source_cell = cellContainingPoint(source_patch, probe);
-      if (findSparseRemoteCell(candidate, source_cell) == nullptr) {
-        throw std::runtime_error(
-            "fillAmrHydroGhostCells: sparse remote interface payload is missing a required source cell");
-      }
-      selection.cells.push_back(source_cell);
-      return selection;
-    }
-    selection.cells = requiredFineSourceCellsForGhost(
-        target_patch, ghost, source_patch);
-    for (const std::size_t required_cell : selection.cells) {
-      if (findSparseRemoteCell(candidate, required_cell) == nullptr) {
-        throw std::runtime_error(
-            "fillAmrHydroGhostCells: sparse remote fine-to-coarse payload is missing a required source cell");
-      }
-    }
+    const std::size_t source_cell = cellContainingPoint(source_patch, probe);
+    requireSourceCellAvailable(candidate, source_cell);
+    selection.cells.push_back(SelectedSourceCell{
+        .patch = &candidate,
+        .cell = source_cell});
     return selection;
   }
 
+  for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
+    if (candidate.patch == nullptr) {
+      continue;
+    }
+    const PatchDescriptor& source_patch = *candidate.patch;
+    if (source_patch.patch_id == target_patch.patch_id ||
+        !containsPoint(source_patch, probe)) {
+      continue;
+    }
+    const bool same_level =
+        source_patch.level == target_patch.level &&
+        boundary_class == AmrHydroBoundaryClass::kSameLevel;
+    const bool coarse_to_fine =
+        source_patch.level < target_patch.level &&
+        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
+    if (!same_level && !coarse_to_fine) {
+      continue;
+    }
+    const std::size_t source_cell = cellContainingPoint(source_patch, probe);
+    if (findSparseRemoteCell(candidate, source_cell) == nullptr) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: sparse remote interface payload is missing a required source cell");
+    }
+    selection.cells.push_back(SelectedSourceCell{
+        .sparse_remote = &candidate,
+        .cell = source_cell});
+    return selection;
+  }
+
+  if (boundary_class != AmrHydroBoundaryClass::kCoarseFine) {
+    return selection;
+  }
+
+  for (const AmrHydroGhostFillPatch& candidate : patches) {
+    if (candidate.geometry == nullptr || candidate.conserved == nullptr) {
+      continue;
+    }
+    const PatchDescriptor& source_patch = candidate.geometry->patch;
+    if (source_patch.patch_id == target_patch.patch_id ||
+        source_patch.level <= target_patch.level) {
+      continue;
+    }
+    const std::vector<std::size_t> cells = fineSourceCellsIntersectingGhost(
+        target_patch, ghost, source_patch);
+    for (const std::size_t cell : cells) {
+      requireSourceCellAvailable(candidate, cell);
+      selection.cells.push_back(SelectedSourceCell{
+          .patch = &candidate,
+          .cell = cell});
+    }
+  }
+
+  for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
+    if (candidate.patch == nullptr) {
+      continue;
+    }
+    const PatchDescriptor& source_patch = *candidate.patch;
+    if (source_patch.patch_id == target_patch.patch_id ||
+        source_patch.level <= target_patch.level) {
+      continue;
+    }
+    const std::vector<std::size_t> cells = fineSourceCellsIntersectingGhost(
+        target_patch, ghost, source_patch);
+    for (const std::size_t cell : cells) {
+      if (findSparseRemoteCell(candidate, cell) == nullptr) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: sparse remote fine-to-coarse payload is missing a required source cell");
+      }
+      selection.cells.push_back(SelectedSourceCell{
+          .sparse_remote = &candidate,
+          .cell = cell});
+    }
+  }
+
+  validateAndOrderFineSourceCoverage(target_patch, ghost, selection);
   return selection;
 }
 
 [[nodiscard]] hydro::HydroConservedState averageSourceState(const CellSelection& selection) {
   hydro::HydroConservedState state;
-  for (const std::size_t cell : selection.cells) {
-    if (selection.patch != nullptr) {
-      state += selection.patch->conserved->loadCell(cell);
+  for (const SelectedSourceCell& source : selection.cells) {
+    if (source.patch != nullptr) {
+      state += source.patch->conserved->loadCell(source.cell);
     } else {
       const AmrHydroSparseRemoteCell* remote_cell =
-          findSparseRemoteCell(*selection.sparse_remote, cell);
+          findSparseRemoteCell(*source.sparse_remote, source.cell);
       if (remote_cell == nullptr) {
         throw std::runtime_error(
             "fillAmrHydroGhostCells: sparse remote source disappeared during ghost averaging");
@@ -399,22 +519,45 @@ void requireSourceCellAvailable(
 }
 
 [[nodiscard]] bool selectionIsStale(const CellSelection& selection) {
-  if (selection.patch != nullptr) {
-    return staleRemotePatch(*selection.patch);
-  }
-  return selection.sparse_remote != nullptr &&
-      selection.sparse_remote->ghost_hydro_epoch !=
-          selection.sparse_remote->expected_ghost_hydro_epoch;
+  return std::any_of(
+      selection.cells.begin(), selection.cells.end(),
+      [](const SelectedSourceCell& source) {
+        if (source.patch != nullptr) {
+          return staleRemotePatch(*source.patch);
+        }
+        return source.sparse_remote != nullptr &&
+            source.sparse_remote->ghost_hydro_epoch !=
+                source.sparse_remote->expected_ghost_hydro_epoch;
+      });
 }
 
-[[nodiscard]] double selectionSourceTime(const CellSelection& selection) {
-  return selection.patch != nullptr
-      ? selection.patch->source_current_state_time_code
-      : selection.sparse_remote->source_current_state_time_code;
+[[nodiscard]] double sourceTime(const SelectedSourceCell& source) {
+  if (source.patch != nullptr) {
+    return source.patch->source_current_state_time_code;
+  }
+  if (source.sparse_remote != nullptr) {
+    return source.sparse_remote->source_current_state_time_code;
+  }
+  throw std::logic_error("fillAmrHydroGhostCells: selected source cell has no owner");
+}
+
+[[nodiscard]] bool selectionTimesMatch(
+    const CellSelection& selection,
+    double target_time_code) {
+  return std::all_of(
+      selection.cells.begin(), selection.cells.end(),
+      [target_time_code](const SelectedSourceCell& source) {
+        return timesMatch(sourceTime(source), target_time_code);
+      });
 }
 
 [[nodiscard]] bool selectionIsSparseRemote(const CellSelection& selection) noexcept {
-  return selection.sparse_remote != nullptr;
+  return !selection.cells.empty() && selection.cells.front().sparse_remote != nullptr;
+}
+
+[[nodiscard]] const AmrHydroGhostFillPatch* selectionLocalPatch(
+    const CellSelection& selection) noexcept {
+  return selection.cells.empty() ? nullptr : selection.cells.front().patch;
 }
 
 [[nodiscard]] bool finiteConserved(const hydro::HydroConservedState& state) {
@@ -540,8 +683,7 @@ void fillAmrGhost(
       target.geometry->geometry.ghost_cells.at(descriptor.ghost_slot);
   const CellSelection selection =
       selectSourceCells(target, ghost, descriptor.boundary_class, patches, remote_sources);
-  if ((selection.patch == nullptr && selection.sparse_remote == nullptr) ||
-      selection.cells.empty()) {
+  if (selection.cells.empty()) {
     descriptor.fill_status = AmrHydroGhostFillStatus::kMissingSource;
     ++diagnostics.missing_source_records;
     ++diagnostics.unresolved_ghosts;
@@ -561,7 +703,7 @@ void fillAmrGhost(
   const bool coarse_to_fine = source_patch.level < target.geometry->patch.level;
   const bool fine_to_coarse = source_patch.level > target.geometry->patch.level;
   if (same_level) {
-    if (!timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
+    if (!selectionTimesMatch(selection, target.ghost_fill_time_code)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalSameLevelMismatch,
@@ -575,7 +717,7 @@ void fillAmrGhost(
     return;
   }
   if (fine_to_coarse) {
-    if (!timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
+    if (!selectionTimesMatch(selection, target.ghost_fill_time_code)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalFineToCoarseMismatch,
@@ -590,9 +732,10 @@ void fillAmrGhost(
   }
 
   if (coarse_to_fine && target.enable_temporal_coarse_to_fine) {
-    if (selectionIsSparseRemote(selection) ||
-        (selection.patch->residency == AmrGhostSourceResidency::kRemoteReadOnly &&
-         selection.patch->temporal_boundary_history == nullptr)) {
+    const AmrHydroGhostFillPatch* temporal_source = selectionLocalPatch(selection);
+    if (selectionIsSparseRemote(selection) || temporal_source == nullptr ||
+        (temporal_source->residency == AmrGhostSourceResidency::kRemoteReadOnly &&
+         temporal_source->temporal_boundary_history == nullptr)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalHistoryMissing,
@@ -608,11 +751,15 @@ void fillAmrGhost(
     const std::size_t geometry_before = diagnostics.temporal_geometry_mismatch_rejections;
     const std::size_t identity_before = diagnostics.temporal_identity_mismatch_rejections;
     try {
-      for (const std::size_t cell : selection.cells) {
+      for (const SelectedSourceCell& source : selection.cells) {
+        if (source.patch == nullptr) {
+          throw std::logic_error(
+              "fillAmrHydroGhostCells: temporal coarse source unexpectedly uses sparse remote state");
+        }
         bool cell_endpoint = false;
         accumulated += temporalStateForCell(
-            *selection.patch,
-            cell,
+            *source.patch,
+            source.cell,
             target.ghost_fill_time_code,
             adiabatic_index,
             cell_endpoint,
@@ -646,7 +793,7 @@ void fillAmrGhost(
     return;
   }
 
-  if (coarse_to_fine && !timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
+  if (coarse_to_fine && !selectionTimesMatch(selection, target.ghost_fill_time_code)) {
     rejectTemporal(
         descriptor,
         AmrHydroGhostFillStatus::kRejectedTemporalHistoryMissing,

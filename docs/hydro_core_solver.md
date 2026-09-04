@@ -112,8 +112,10 @@ state has been loaded from `SimulationState`. Physical AMR boundaries delegate t
 (`periodic`, `open`, and `reflective`). Same-level AMR ghosts are copied from the geometrically adjacent source patch
 cell at the same refinement level. Fine-side coarse-fine ghosts use piecewise-constant coarse-to-fine injection from
 the adjacent coarse cell. Coarse-side coarse-fine ghosts use a monotone arithmetic average of the adjacent fine boundary
-cells that cover the coarse ghost volume; this makes the fine boundary state available for reconstruction/restriction
-tests without replacing flux registers or refluxing. AMR ghost writes are scratch-only writes into the patch-local
+cells that tile the complete coarse ghost volume, including the normal case where that stencil spans multiple fine child
+patches. Contributors are validated as one aligned, non-overlapping, gap-free refinement stencil and accumulated in
+geometric stencil order; this makes the fine boundary state available for reconstruction/restriction tests without
+replacing flux registers or refluxing. AMR ghost writes are scratch-only writes into the patch-local
 `HydroConservedStateSoa` ghost rows. Same-level, coarse-fine, and remote imported ghost sources are read-only; stale
 remote ghost epochs are rejected before fill.
 
