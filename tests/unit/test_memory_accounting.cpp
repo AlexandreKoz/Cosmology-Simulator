@@ -65,14 +65,29 @@ void testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity() {
   assert(report.totals.transient_by_subsystem[cosmosim::core::memorySubsystemIndex(cosmosim::core::MemorySubsystem::kScratch)] >= 128);
 
   bool saw_velocity_z = false;
+  bool saw_pressure_cache = false;
+  bool saw_temperature_cache = false;
   bool saw_sound_speed = false;
   bool saw_hydro_gradient_scratch = false;
   for (const auto& entry : report.entries) {
     if (entry.label == "particles.velocity_z_peculiar") { saw_velocity_z = true; }
-    if (entry.label == "gas_cells.sound_speed_code") { saw_sound_speed = true; }
+    if (entry.label == "gas_cells.pressure_code") {
+      saw_pressure_cache = true;
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kPersistentCache);
+    }
+    if (entry.label == "gas_cells.temperature_code") {
+      saw_temperature_cache = true;
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kPersistentCache);
+    }
+    if (entry.label == "gas_cells.sound_speed_code") {
+      saw_sound_speed = true;
+      assert(entry.memory_class == cosmosim::core::MemoryClass::kPersistentCache);
+    }
     if (entry.label == "workspace.hydro_recon_gradient_x") { saw_hydro_gradient_scratch = true; }
   }
   assert(saw_velocity_z);
+  assert(saw_pressure_cache);
+  assert(saw_temperature_cache);
   assert(saw_sound_speed);
   assert(saw_hydro_gradient_scratch);
 }

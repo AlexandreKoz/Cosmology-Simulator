@@ -118,14 +118,26 @@ int main() {
   const int peer_rank = 1 - world_rank;
   const cosmosim::parallel::MpiContext mpi_context;
   const std::vector<cosmosim::parallel::AmrPatchPayloadRecord> local_patches{makePatch(world_rank)};
-  const std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> local_cells = makeCells(world_rank);
   const auto exchange = cosmosim::parallel::executeBlockingDirectedAmrPatchPayloadExchange(
       mpi_context,
       local_patches,
-      local_cells,
+      [world_rank](std::span<const cosmosim::parallel::AmrPatchBoundaryCellRequest> requests) {
+        const auto all_cells = makeCells(world_rank);
+        std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> result;
+        for (const auto& request : requests) {
+          assert(request.patch_id == (world_rank == 0 ? 9001U : 9002U));
+          const std::uint8_t expected_face = static_cast<std::uint8_t>(
+              world_rank == 0
+                  ? cosmosim::parallel::AmrPatchBoundaryFace::kXUpper
+                  : cosmosim::parallel::AmrPatchBoundaryFace::kXLower);
+          assert((request.boundary_face_mask & expected_face) != 0U);
+          result.push_back(all_cells[world_rank == 0 ? 1U : 0U]);
+        }
+        return result;
+      },
       123U);
 
-  if (exchange.patch_payloads_received.size() != 1U || exchange.patch_cell_payloads_received.size() != 2U) {
+  if (exchange.patch_payloads_received.size() != 1U || exchange.patch_cell_payloads_received.size() != 1U) {
     std::cerr << "rank=" << world_rank
               << " remote_patches=" << exchange.patch_payloads_received.size()
               << " remote_cells=" << exchange.patch_cell_payloads_received.size()
@@ -136,11 +148,20 @@ int main() {
   assert(exchange.diagnostics.neighbor_peer_count == 1U);
   assert(exchange.diagnostics.directed_patch_descriptor_records_sent == 1U);
   assert(exchange.diagnostics.directed_patch_descriptor_records_received == 1U);
-  assert(exchange.diagnostics.directed_patch_cell_records_sent == 2U);
-  assert(exchange.diagnostics.directed_patch_cell_records_received == 2U);
+  assert(exchange.diagnostics.directed_patch_cell_records_sent == 1U);
+  assert(exchange.diagnostics.directed_patch_cell_records_received == 1U);
   assert(exchange.diagnostics.control_plane_bytes > 0U);
   assert(exchange.diagnostics.patch_descriptor_bytes > 0U);
   assert(exchange.diagnostics.patch_cell_payload_bytes > 0U);
+  assert(exchange.diagnostics.patch_cell_send_capacity_high_water_bytes >=
+         sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
+  assert(exchange.diagnostics.patch_cell_receive_capacity_high_water_bytes >=
+         sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
+  assert(exchange.diagnostics.patch_cell_retained_capacity_high_water_bytes >=
+         sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
+  assert(exchange.diagnostics.communication_workspace_high_water_bytes >=
+         sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
+  assert(exchange.diagnostics.patch_cell_transport_round_count >= 1U);
   assert(exchange.diagnostics.remote_patch_ghost_count == 1U);
   assert(exchange.diagnostics.remote_interface_count == 1U);
   assert(exchange.patch_payloads_received.front().owner_rank == peer_rank);

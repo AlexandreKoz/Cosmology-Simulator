@@ -282,6 +282,20 @@ class HydroThermodynamicClosure {
       double redshift) const = 0;
 };
 
+struct HydroCellSourceProperties {
+  double mass_density_physical_cgs = 0.0;
+  double hydrogen_number_density_cgs = 0.0;
+  double metallicity_mass_fraction = 0.0;
+  double temperature_k = 0.0;
+};
+
+class HydroCellSourcePropertyProvider {
+ public:
+  virtual ~HydroCellSourcePropertyProvider() = default;
+  [[nodiscard]] virtual HydroCellSourceProperties sourcePropertiesForCell(
+      std::size_t cell_index) const = 0;
+};
+
 struct HydroSourceContext {
   HydroUpdateContext update;
   // Scale-free comoving gravitational kernel A from TreePM. The comoving
@@ -295,6 +309,10 @@ struct HydroSourceContext {
   std::span<const double> hydrogen_number_density_cgs;
   std::span<const double> metallicity_mass_fraction;
   std::span<const double> temperature_k;
+  // Optional on-demand provider. When present, source terms prefer it over the
+  // legacy dense property spans so fixed-grid production hydro does not need
+  // population-scale derived staging arrays.
+  const HydroCellSourcePropertyProvider* source_property_provider = nullptr;
   const HydroThermodynamicClosure* thermodynamic_closure = nullptr;
   double redshift = 0.0;
 };

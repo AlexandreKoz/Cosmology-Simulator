@@ -27,6 +27,11 @@ struct AmrHydroGhostFillPatch {
   double ghost_fill_time_code = 0.0;
   double source_current_state_time_code = 0.0;
   const core::AmrTemporalBoundaryHistoryStore* temporal_boundary_history = nullptr;
+  // Optional sparse-remote coverage mask over real patch cells. Local sources
+  // leave this empty. Remote interface exchange sets one byte per geometric
+  // real cell so ghost fill fails deterministically if it ever requests a
+  // cell that was not advertised for the cross-rank interface.
+  std::span<const std::uint8_t> available_real_cells;
   bool enable_temporal_coarse_to_fine = false;
   bool requires_ghost_fill = true;
 };

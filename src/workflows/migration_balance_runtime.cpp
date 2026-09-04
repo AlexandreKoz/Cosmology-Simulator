@@ -18,6 +18,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1328,13 +1329,8 @@ void exchangeAndValidateAmrPatchPayloads(
     core::ProfilerSession* profiler) {
   const std::vector<parallel::AmrPatchPayloadRecord> local_records =
       buildMigrationAmrPatchPayloadRecords(state, world_rank);
-  const std::vector<parallel::AmrPatchCellPayloadRecord> local_cell_records =
-      buildMigrationAmrPatchCellPayloadRecords(state, world_rank);
-
   std::unordered_map<std::uint64_t, std::uint32_t> expected_cell_count_by_patch_id;
-  std::unordered_map<std::uint64_t, std::uint32_t> observed_cell_count_by_patch_id;
   expected_cell_count_by_patch_id.reserve(local_records.size());
-  observed_cell_count_by_patch_id.reserve(local_records.size());
   for (const parallel::AmrPatchPayloadRecord& record : local_records) {
     const auto [it, inserted] = expected_cell_count_by_patch_id.emplace(record.patch_id, record.cell_count);
     if (!inserted) {
@@ -1344,23 +1340,18 @@ void exchangeAndValidateAmrPatchPayloads(
       throw std::runtime_error("AMR owner-local validation found stale patch owner metadata");
     }
   }
-  for (const parallel::AmrPatchCellPayloadRecord& record : local_cell_records) {
-    const auto owner_it = expected_cell_count_by_patch_id.find(record.patch_id);
-    if (owner_it == expected_cell_count_by_patch_id.end()) {
-      throw std::runtime_error("AMR owner-local validation found a cell for an unknown local patch");
+  for (const parallel::AmrPatchPayloadRecord& record : local_records) {
+    if (static_cast<std::uint64_t>(record.first_cell) + record.cell_count > state.cells.size()) {
+      throw std::runtime_error(
+          "AMR owner-local validation patch range exceeds authoritative cell storage for patch_id=" +
+          std::to_string(record.patch_id));
     }
-    if (record.owner_rank != world_rank) {
-      throw std::runtime_error("AMR owner-local validation found stale cell owner metadata");
-    }
-    if (record.local_cell_offset >= owner_it->second) {
-      throw std::runtime_error("AMR owner-local validation found a cell offset beyond patch bounds");
-    }
-    ++observed_cell_count_by_patch_id[record.patch_id];
-  }
-  for (const auto& [patch_id, expected_count] : expected_cell_count_by_patch_id) {
-    if (observed_cell_count_by_patch_id[patch_id] != expected_count) {
-      throw std::runtime_error("AMR owner-local validation patch cell coverage mismatch for patch_id=" +
-                               std::to_string(patch_id));
+    const std::uint64_t geometry_count = static_cast<std::uint64_t>(record.cell_dim_x) *
+        record.cell_dim_y * record.cell_dim_z;
+    if (geometry_count != record.cell_count) {
+      throw std::runtime_error(
+          "AMR owner-local validation patch geometry/cell-count mismatch for patch_id=" +
+          std::to_string(record.patch_id));
     }
   }
 
@@ -1369,7 +1360,10 @@ void exchangeAndValidateAmrPatchPayloads(
     const parallel::DirectedAmrPatchPayloadExchange directed = parallel::executeBlockingDirectedAmrPatchPayloadExchange(
         mpi_context,
         local_records,
-        local_cell_records,
+        [&state, world_rank](std::span<const parallel::AmrPatchBoundaryCellRequest> requests) {
+          return buildMigrationAmrPatchBoundaryCellPayloadRecords(
+              state, world_rank, requests);
+        },
         step_index);
     diagnostics = directed.diagnostics;
 
@@ -1384,8 +1378,7 @@ void exchangeAndValidateAmrPatchPayloads(
         throw std::runtime_error("directed AMR validation received duplicate remote patch metadata");
       }
     }
-    std::unordered_map<std::uint64_t, std::uint32_t> remote_cell_count_by_patch_id;
-    remote_cell_count_by_patch_id.reserve(remote_patch_by_id.size());
+    std::set<std::pair<std::uint64_t, std::uint32_t>> remote_cell_keys;
     for (const parallel::AmrPatchCellPayloadRecord& record : directed.patch_cell_payloads_received) {
       const auto patch_it = remote_patch_by_id.find(record.patch_id);
       if (patch_it == remote_patch_by_id.end()) {
@@ -1397,12 +1390,8 @@ void exchangeAndValidateAmrPatchPayloads(
       if (record.local_cell_offset >= patch_it->second.cell_count) {
         throw std::runtime_error("directed AMR validation remote cell offset exceeds patch extent");
       }
-      ++remote_cell_count_by_patch_id[record.patch_id];
-    }
-    for (const auto& [patch_id, record] : remote_patch_by_id) {
-      if (remote_cell_count_by_patch_id[patch_id] != record.cell_count) {
-        throw std::runtime_error("directed AMR validation remote patch cell coverage mismatch for patch_id=" +
-                                 std::to_string(patch_id));
+      if (!remote_cell_keys.emplace(record.patch_id, record.local_cell_offset).second) {
+        throw std::runtime_error("directed AMR validation received duplicate remote boundary-cell payload");
       }
     }
   }
@@ -1415,7 +1404,7 @@ void exchangeAndValidateAmrPatchPayloads(
         .step_index = step_index,
         .message = "validated owner-local AMR state and interface-scoped directed AMR payload coverage",
         .payload = {{"local_patch_payloads", std::to_string(local_records.size())},
-                    {"local_patch_cell_payloads", std::to_string(local_cell_records.size())},
+                    {"local_patch_cell_payloads", "lazy_interface_only"},
                     {"candidate_peer_count", std::to_string(diagnostics.candidate_peer_count)},
                     {"neighbor_peer_count", std::to_string(diagnostics.neighbor_peer_count)},
                     {"directed_patch_descriptor_records_sent", std::to_string(diagnostics.directed_patch_descriptor_records_sent)},
@@ -1425,6 +1414,11 @@ void exchangeAndValidateAmrPatchPayloads(
                     {"control_plane_bytes", std::to_string(diagnostics.control_plane_bytes)},
                     {"patch_descriptor_bytes", std::to_string(diagnostics.patch_descriptor_bytes)},
                     {"patch_cell_payload_bytes", std::to_string(diagnostics.patch_cell_payload_bytes)},
+                    {"patch_cell_send_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_send_capacity_high_water_bytes)},
+                    {"patch_cell_receive_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_receive_capacity_high_water_bytes)},
+                    {"patch_cell_retained_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_retained_capacity_high_water_bytes)},
+                    {"communication_workspace_high_water_bytes", std::to_string(diagnostics.communication_workspace_high_water_bytes)},
+                    {"patch_cell_transport_round_count", std::to_string(diagnostics.patch_cell_transport_round_count)},
                     {"remote_patch_ghost_count", std::to_string(diagnostics.remote_patch_ghost_count)},
                     {"remote_interface_count", std::to_string(diagnostics.remote_interface_count)}}});
   }

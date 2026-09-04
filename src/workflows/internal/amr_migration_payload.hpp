@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
@@ -12,8 +13,9 @@ buildMigrationAmrPatchPayloadRecords(
     const core::SimulationState& state,
     int world_rank);
 [[nodiscard]] std::vector<parallel::AmrPatchCellPayloadRecord>
-buildMigrationAmrPatchCellPayloadRecords(
+buildMigrationAmrPatchBoundaryCellPayloadRecords(
     const core::SimulationState& state,
-    int world_rank);
+    int world_rank,
+    std::span<const parallel::AmrPatchBoundaryCellRequest> requests);
 
 }  // namespace cosmosim::workflows::internal

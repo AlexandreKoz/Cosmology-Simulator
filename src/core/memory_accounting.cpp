@@ -88,6 +88,27 @@ void addTotals(MemoryReport& report, const MemoryEntry& entry) {
 }
 
 template <typename T>
+void addOwnedWithClass(
+    MemoryReportBuilder& builder,
+    MemorySubsystem subsystem,
+    MemoryLifetime lifetime,
+    MemoryClass memory_class,
+    std::string_view label,
+    const T& container,
+    std::string_view note = {}) {
+  const std::uint64_t bytes = ownedCapacityBytesForContainer(container);
+  builder.addEntry(MemoryEntry{.subsystem = subsystem,
+                               .lifetime = lifetime,
+                               .memory_class = memory_class,
+                               .label = std::string(label),
+                               .owned_capacity_bytes = bytes,
+                               .referenced_bytes = 0,
+                               .high_water_bytes = bytes,
+                               .estimate_only = false,
+                               .uncertainty_note = std::string(note)});
+}
+
+template <typename T>
 void addOwned(
     MemoryReportBuilder& builder,
     MemorySubsystem subsystem,
@@ -150,10 +171,19 @@ void accountGasSidecar(MemoryReportBuilder& builder, const GasCellSidecar& gas) 
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.velocity_y_peculiar", gas.velocity_y_peculiar);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.velocity_z_peculiar", gas.velocity_z_peculiar);
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.density_code", gas.density_code);
-  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.pressure_code", gas.pressure_code);
+  addOwnedWithClass(
+      builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent,
+      MemoryClass::kPersistentCache, "gas_cells.pressure_code", gas.pressure_code,
+      "restart/schema compatibility mirror; hydro conserved updates refresh it");
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.internal_energy_code", gas.internal_energy_code);
-  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.temperature_code", gas.temperature_code);
-  addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.sound_speed_code", gas.sound_speed_code);
+  addOwnedWithClass(
+      builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent,
+      MemoryClass::kPersistentCache, "gas_cells.temperature_code", gas.temperature_code,
+      "restart/source compatibility cache derived from thermodynamic state");
+  addOwnedWithClass(
+      builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent,
+      MemoryClass::kPersistentCache, "gas_cells.sound_speed_code", gas.sound_speed_code,
+      "restart/scheduler compatibility cache derived from thermodynamic closure");
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "gas_cells.metal_mass_code", gas.metal_mass_code);
 }
 

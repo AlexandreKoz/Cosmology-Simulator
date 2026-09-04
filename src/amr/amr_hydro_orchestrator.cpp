@@ -1227,8 +1227,10 @@ namespace {
       if (remote.owner_rank == distributed_exchange->local_rank) {
         throw std::runtime_error("distributed AMR remote patch source cannot be owned by the local rank");
       }
-      if (remote.conserved_cells.size() != remote.gas_cell_ids.size()) {
-        throw std::runtime_error("distributed AMR remote patch conserved payload does not match gas-cell identity payload");
+      if (remote.conserved_cells.size() != remote.gas_cell_ids.size() ||
+          (!remote.available_cells.empty() &&
+           remote.available_cells.size() != remote.gas_cell_ids.size())) {
+        throw std::runtime_error("distributed AMR remote patch sparse payload arrays do not match patch storage");
       }
       AmrHydroGeometryOptions geometry_options;
       geometry_options.physical_boundary_kind = options.physical_boundary_kind;
@@ -1244,7 +1246,8 @@ namespace {
           remote.patch,
           remote.gas_cell_ids,
           remote.expected_ghost_hydro_epoch,
-          geometry_options));
+          geometry_options,
+          remote.available_cells));
       populateAmrHydroFluxRegisterFaces(remote_geometries.back(), all_descriptors);
       hydro::HydroConservedStateSoa remote_soa(remote_geometries.back().geometry.totalCellStorageCount());
       for (std::size_t cell = 0; cell < remote.conserved_cells.size(); ++cell) {
@@ -1404,6 +1407,7 @@ namespace {
             .ghost_fill_time_code = options.ghost_fill_time_code,
             .source_current_state_time_code = options.state_time_code,
             .temporal_boundary_history = nullptr,
+            .available_real_cells = remote.available_cells,
             .enable_temporal_coarse_to_fine = false,
             .requires_ghost_fill = false});
       }

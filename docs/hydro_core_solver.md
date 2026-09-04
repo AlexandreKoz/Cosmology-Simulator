@@ -235,6 +235,8 @@ convention.
 
 This is intentionally conservative and modular; additional baryonic sources should be implemented through extra `HydroSourceTerm` instances.
 
+M2A.1 also permits `HydroSourceContext` to provide thermodynamic/cooling inputs through a read-only `HydroCellSourcePropertyProvider`. The fixed-grid runtime uses this seam to derive physical density, hydrogen number density, metallicity, and temperature for the cell currently being cooled rather than allocating four full-grid derived vectors. The legacy span fields remain a compatibility API, and the cooling source gives the provider precedence when one is supplied. The provider changes data lifetime only; it does not change the cooling-rate model or source integration.
+
 ## Assumptions
 
 - Face normals are unit vectors.

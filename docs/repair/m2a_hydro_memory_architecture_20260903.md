@@ -110,3 +110,29 @@ restart-schema campaign may investigate removal/rematerialization of persistent
 `pressure_code`, `temperature_code`, and `sound_speed_code` only with explicit
 restart compatibility, source/closure derivation, performance measurements, and
 scientific equivalence evidence. M2A does not claim that schema compaction.
+
+## M2A.1 acceptance-closure addendum — 2026-09-04
+
+The post-M2A adversarial audit found that the local hydro batching architecture was sound but the directed distributed-AMR hydro handoff still materialized one `AmrPatchCellPayloadRecord` for every local cell, sent that full population-scale vector to each candidate peer, used a one-shot classic-MPI byte-count contract, and reported transferred bytes as communication memory high-water. It also found four full-grid derived source-property vectors on the supported single-rank fixed-grid hydro path.
+
+M2A.1 closes those defects without changing hydro equations, reconstruction, Riemann semantics, CFL/floor policy, AMR reflux ordering, or restart schema:
+
+- Directed AMR exchange now sends compact patch descriptors first, derives actual face-sharing remote interfaces, and asks a lazy provider to materialize only requested boundary-face cells. Edge/corner-only patch contacts do not request hydro cells.
+- The old full-owned-cell directed-hydro payload builder is removed. Ownership migration remains a distinct commit protocol and is not replaced by sparse ghost state.
+- Directed peer record transport uses deterministic bounded `MPI_Sendrecv` rounds. The default round ceiling is 16 MiB and every individual classic-MPI byte count is checked before narrowing to `int`. Logical payloads may therefore exceed `INT_MAX` without requiring a single illegal MPI count.
+- Receive allocation and lazy payload preparation have pairwise readiness handshakes before payload traffic so a local preparation failure does not leave the peer waiting in the payload exchange.
+- Remote AMR patch storage carries an availability mask. Unadvertised interior cells are not treated as valid hydro state; ghost fill throws if geometry selection ever requests a cell omitted by the sparse interface protocol.
+- Communication telemetry separates traffic (`patch_*_payload_bytes`) from resident capacity high-water (`patch_cell_*_capacity_high_water_bytes` and `communication_workspace_high_water_bytes`).
+- The fixed-grid cooling path no longer builds four `N_gas` derived vectors. Cooling can obtain per-cell density, hydrogen density, metallicity, and temperature through a read-only property provider derived on demand from authoritative state. The dense-span API remains as a compatibility surface and is regression-tested for numerical equivalence.
+- `pressure_code`, `temperature_code`, and `sound_speed_code` remain in the restart-compatible schema for this campaign, but memory accounting now classifies them explicitly as `PersistentCache` rather than independent canonical conserved truth. Their eventual removal requires a versioned schema/performance campaign.
+
+### Scaling consequence
+
+For a rectangular patch with dimensions `nx × ny × nz`, a single face request now materializes `ny*nz`, `nx*nz`, or `nx*ny` cell records rather than `nx*ny*nz`. Multiple requested faces are unioned without duplicate edge/corner records. Thus the directed hydro-cell wire representation scales with advertised interface surface for ordinary patch adjacency, not the entire local gas population. Patch descriptors remain patch-scale control metadata; broader AMR-topology compaction remains M2B scope.
+
+### New acceptance regressions
+
+- `unit_parallel_distributed_memory` checks face-only interface planning and plans a logical AMR cell payload larger than `INT_MAX` into bounded 16 MiB rounds without allocating the multi-GiB payload.
+- `integration_amr_distributed_remote_patch_boundary` runs with an unavailable remote interior cell and only the advertised boundary cell resident, proving the ghost/reflux path consumes sparse remote state.
+- `unit_cooling_heating` checks on-demand source-property provider results against the dense compatibility path.
+- `unit_memory_accounting` asserts the three derivable restart-compatible thermodynamic lanes report as `PersistentCache`.

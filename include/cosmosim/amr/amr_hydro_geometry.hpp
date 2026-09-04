@@ -108,7 +108,8 @@ struct AmrHydroPatchGeometry {
     const PatchDescriptor& patch,
     std::span<const std::uint64_t> gas_cell_ids,
     std::uint64_t source_gas_cell_identity_generation,
-    const AmrHydroGeometryOptions& options = {});
+    const AmrHydroGeometryOptions& options = {},
+    std::span<const std::uint8_t> available_real_cells = {});
 
 [[nodiscard]] hydro::HydroConservedStateSoa loadAmrHydroConservedState(
     const core::SimulationState& state,

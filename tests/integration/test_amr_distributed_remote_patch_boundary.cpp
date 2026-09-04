@@ -97,11 +97,13 @@ void setCell(
   remote.owner_rank = 0;
   remote.ghost_hydro_epoch = 7;
   remote.expected_ghost_hydro_epoch = 7;
-  remote.gas_cell_ids = {9001, 9002};
-  remote.conserved_cells.push_back(cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
-      {.rho_comoving = 1.0, .vel_x_peculiar = 0.20, .pressure_comoving = 1.0}, k_gamma));
-  remote.conserved_cells.push_back(cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
-      {.rho_comoving = 0.9, .vel_x_peculiar = 0.35, .pressure_comoving = 0.9}, k_gamma));
+  // M2A.1 sparse remote contract: only the coarse patch face touching the
+  // local fine patch is resident. Offset 0 is deliberately unavailable.
+  remote.gas_cell_ids = {0U, 9002U};
+  remote.available_cells = {0U, 1U};
+  remote.conserved_cells.resize(2U);
+  remote.conserved_cells[1] = cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
+      {.rho_comoving = 0.9, .vel_x_peculiar = 0.35, .pressure_comoving = 0.9}, k_gamma);
   return remote;
 }
 

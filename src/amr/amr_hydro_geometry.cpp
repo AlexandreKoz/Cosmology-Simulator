@@ -414,10 +414,14 @@ AmrHydroPatchGeometry buildRemoteAmrHydroPatchGeometry(
     const PatchDescriptor& patch,
     std::span<const std::uint64_t> gas_cell_ids,
     std::uint64_t source_gas_cell_identity_generation,
-    const AmrHydroGeometryOptions& options) {
+    const AmrHydroGeometryOptions& options,
+    std::span<const std::uint8_t> available_real_cells) {
   const std::size_t expected_cells = checkedPatchCellCount(patch, "buildRemoteAmrHydroPatchGeometry");
   if (gas_cell_ids.size() != expected_cells) {
     throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: remote gas-cell coverage does not match patch geometry");
+  }
+  if (!available_real_cells.empty() && available_real_cells.size() != expected_cells) {
+    throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: sparse remote availability mask does not match patch geometry");
   }
   AmrHydroPatchGeometry result;
   result.patch = patch;
@@ -439,8 +443,12 @@ AmrHydroPatchGeometry buildRemoteAmrHydroPatchGeometry(
   result.gas_cell_ids.assign(gas_cell_ids.begin(), gas_cell_ids.end());
   result.local_cell_rows.assign(expected_cells, core::kInvalidGasCellRow);
   for (std::size_t patch_cell = 0; patch_cell < expected_cells; ++patch_cell) {
-    if (result.gas_cell_ids[patch_cell] == 0U) {
-      throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: remote gas-cell IDs must be non-zero");
+    const bool available = available_real_cells.empty() || available_real_cells[patch_cell] != 0U;
+    if (available && result.gas_cell_ids[patch_cell] == 0U) {
+      throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: available remote gas-cell IDs must be non-zero");
+    }
+    if (!available && result.gas_cell_ids[patch_cell] != 0U) {
+      throw std::runtime_error("buildRemoteAmrHydroPatchGeometry: unavailable sparse remote cell unexpectedly carries an ID");
     }
     result.real_cells.push_back(AmrHydroCellDescriptor{
         .patch_id = patch.patch_id,

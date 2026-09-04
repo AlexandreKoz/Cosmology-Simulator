@@ -36,6 +36,34 @@ void testBoundedMpiTransferPlannerSyntheticLimits() {
   assert(split_plan.rounds[1].counts[0] == 1);
   assert(split_plan.rounds[1].logical_offsets[0] == 7U);
 
+  // The M2A.1 AMR cell protocol uses classic MPI byte counts internally but
+  // plans bounded rounds. Exercise a logical transfer that is larger than
+  // INT_MAX without allocating the corresponding multi-GiB payload.
+  const std::size_t record_bytes = sizeof(parallel::AmrPatchCellPayloadRecord);
+  const std::size_t records_over_classic_mpi_limit =
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) / record_bytes + 1U;
+  const std::size_t logical_bytes_over_classic_mpi_limit =
+      cosmosim::core::checkedSizeMultiply(
+          records_over_classic_mpi_limit, record_bytes,
+          "directed AMR logical payload beyond classic MPI count");
+  const std::size_t transport_round_bytes = 16U * 1024U * 1024U;
+  const auto large_amr_plan = parallel::planBoundedMpiTransferRounds(
+      std::vector<std::size_t>{logical_bytes_over_classic_mpi_limit},
+      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      transport_round_bytes);
+  assert(large_amr_plan.rounds.size() > 1U);
+  std::size_t planned_bytes = 0U;
+  for (const auto& round : large_amr_plan.rounds) {
+    assert(round.round_count <= transport_round_bytes);
+    assert(round.counts.size() == 1U);
+    assert(round.counts[0] >= 0);
+    assert(static_cast<std::size_t>(round.counts[0]) <= transport_round_bytes);
+    planned_bytes = cosmosim::core::checkedSizeAdd(
+        planned_bytes, static_cast<std::size_t>(round.counts[0]),
+        "directed AMR planned byte coverage");
+  }
+  assert(planned_bytes == logical_bytes_over_classic_mpi_limit);
+
   // Each peer is individually representable under the synthetic MPI limit,
   // while the aggregate is not. The planner must split the logical exchange
   // without dropping or duplicating any logical element.
@@ -107,6 +135,63 @@ void testBoundedMpiTransferPlannerSyntheticLimits() {
     multiplication_overflow_threw = true;
   }
   assert(multiplication_overflow_threw);
+}
+
+void testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces() {
+  namespace parallel = cosmosim::parallel;
+  const parallel::AmrPatchPayloadRecord local{
+      .patch_id = 101U,
+      .owner_rank = 0,
+      .cell_count = 64U,
+      .origin_x_comoving = 0.0,
+      .origin_y_comoving = 0.0,
+      .origin_z_comoving = 0.0,
+      .extent_x_comoving = 1.0,
+      .extent_y_comoving = 1.0,
+      .extent_z_comoving = 1.0,
+      .cell_dim_x = 4U,
+      .cell_dim_y = 4U,
+      .cell_dim_z = 4U};
+  const parallel::AmrPatchPayloadRecord x_neighbor{
+      .patch_id = 202U,
+      .owner_rank = 1,
+      .cell_count = 64U,
+      .origin_x_comoving = 1.0,
+      .origin_y_comoving = 0.0,
+      .origin_z_comoving = 0.0,
+      .extent_x_comoving = 1.0,
+      .extent_y_comoving = 1.0,
+      .extent_z_comoving = 1.0,
+      .cell_dim_x = 4U,
+      .cell_dim_y = 4U,
+      .cell_dim_z = 4U};
+  const auto local_requests =
+      parallel::planDirectedAmrPatchBoundaryCellRequests(
+          std::span<const parallel::AmrPatchPayloadRecord>(&local, 1U),
+          std::span<const parallel::AmrPatchPayloadRecord>(&x_neighbor, 1U));
+  assert(local_requests.size() == 1U);
+  assert(local_requests[0].patch_id == local.patch_id);
+  assert((local_requests[0].boundary_face_mask &
+          static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U);
+  assert((local_requests[0].boundary_face_mask &
+          static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) == 0U);
+
+  const auto reverse_requests =
+      parallel::planDirectedAmrPatchBoundaryCellRequests(
+          std::span<const parallel::AmrPatchPayloadRecord>(&x_neighbor, 1U),
+          std::span<const parallel::AmrPatchPayloadRecord>(&local, 1U));
+  assert(reverse_requests.size() == 1U);
+  assert((reverse_requests[0].boundary_face_mask &
+          static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) != 0U);
+
+  auto edge_only = x_neighbor;
+  edge_only.patch_id = 303U;
+  edge_only.origin_y_comoving = 1.0;
+  const auto edge_requests =
+      parallel::planDirectedAmrPatchBoundaryCellRequests(
+          std::span<const parallel::AmrPatchPayloadRecord>(&local, 1U),
+          std::span<const parallel::AmrPatchPayloadRecord>(&edge_only, 1U));
+  assert(edge_requests.empty());
 }
 
 void testGhostPackUnpackRoundTrip() {
@@ -1483,6 +1568,7 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
 
 int main() {
   testBoundedMpiTransferPlannerSyntheticLimits();
+  testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces();
   testGhostPackUnpackRoundTrip();
   testGhostOptionalLaneAbsenceSurvivesWireAndCommit();
   testMortonDecompositionInvariants();

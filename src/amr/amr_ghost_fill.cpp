@@ -146,6 +146,10 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
   if (patch.conserved->size() < patch.geometry->geometry.totalCellStorageCount()) {
     throw std::invalid_argument("fillAmrHydroGhostCells: conserved storage is missing AMR ghost rows");
   }
+  if (!patch.available_real_cells.empty() &&
+      patch.available_real_cells.size() != patch.geometry->geometry.cellCount()) {
+    throw std::invalid_argument("fillAmrHydroGhostCells: sparse source availability does not match real-cell count");
+  }
   if (!std::isfinite(patch.target_state_time_code) || !std::isfinite(patch.ghost_fill_time_code) ||
       !std::isfinite(patch.source_current_state_time_code)) {
     throw std::invalid_argument("fillAmrHydroGhostCells: ghost-fill times must be finite");
@@ -160,6 +164,22 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
 [[nodiscard]] bool timesMatch(double lhs, double rhs) {
   const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
   return std::abs(lhs - rhs) <= k_time_tol * scale;
+}
+
+[[nodiscard]] bool sourceCellAvailable(
+    const AmrHydroGhostFillPatch& patch,
+    std::size_t cell) {
+  return patch.available_real_cells.empty() ||
+      (cell < patch.available_real_cells.size() && patch.available_real_cells[cell] != 0U);
+}
+
+void requireSourceCellAvailable(
+    const AmrHydroGhostFillPatch& patch,
+    std::size_t cell) {
+  if (!sourceCellAvailable(patch, cell)) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: sparse remote interface payload is missing a required source cell");
+  }
 }
 
 [[nodiscard]] CellSelection selectSourceCells(
@@ -198,12 +218,15 @@ void validatePatchView(const AmrHydroGhostFillPatch& patch) {
 
     selection.patch = &candidate;
     if (same_level || coarse_to_fine) {
-      selection.cells.push_back(cellContainingPoint(source_patch, probe));
+      const std::size_t source_cell = cellContainingPoint(source_patch, probe);
+      requireSourceCellAvailable(candidate, source_cell);
+      selection.cells.push_back(source_cell);
       return selection;
     }
 
     for (std::size_t cell = 0; cell < candidate.geometry->geometry.cellCount(); ++cell) {
       if (centerInsideGhostVolume(target_patch, ghost, cellCenter(source_patch, cell))) {
+        requireSourceCellAvailable(candidate, cell);
         selection.cells.push_back(cell);
       }
     }

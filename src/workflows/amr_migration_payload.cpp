@@ -4,12 +4,99 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace cosmosim::workflows::internal {
+namespace {
+
+[[nodiscard]] parallel::AmrPatchCellPayloadRecord makePatchCellPayloadRecord(
+    const core::SimulationState& state,
+    std::size_t patch_index,
+    std::uint32_t offset,
+    int world_rank) {
+  const std::uint32_t first_cell = state.patches.first_cell[patch_index];
+  const std::uint32_t cell_index = first_cell + offset;
+  parallel::AmrPatchCellPayloadRecord record;
+  record.patch_id = state.patches.patch_id[patch_index];
+  record.owner_rank = world_rank;
+  record.local_cell_offset = offset;
+  record.patch_index = static_cast<std::uint32_t>(patch_index);
+  record.center_x_comoving = state.cells.center_x_comoving[cell_index];
+  record.center_y_comoving = state.cells.center_y_comoving[cell_index];
+  record.center_z_comoving = state.cells.center_z_comoving[cell_index];
+  record.mass_code = state.cells.mass_code[cell_index];
+  record.time_bin = state.cells.time_bin[cell_index];
+  const core::GasCellIdentityRecord& identity = gasCellIdentityRecordForLocalRow(
+      state, cell_index, "makePatchCellPayloadRecord");
+  record.gas_cell_id = identity.gas_cell_id;
+  record.parent_particle_id = identity.parent_particle_id.value_or(0U);
+  record.velocity_x_peculiar =
+      cell_index < state.gas_cells.velocity_x_peculiar.size()
+          ? state.gas_cells.velocity_x_peculiar[cell_index]
+          : 0.0;
+  record.velocity_y_peculiar =
+      cell_index < state.gas_cells.velocity_y_peculiar.size()
+          ? state.gas_cells.velocity_y_peculiar[cell_index]
+          : 0.0;
+  record.velocity_z_peculiar =
+      cell_index < state.gas_cells.velocity_z_peculiar.size()
+          ? state.gas_cells.velocity_z_peculiar[cell_index]
+          : 0.0;
+  record.density_code = cell_index < state.gas_cells.density_code.size()
+      ? state.gas_cells.density_code[cell_index]
+      : 0.0;
+  record.pressure_code = cell_index < state.gas_cells.pressure_code.size()
+      ? state.gas_cells.pressure_code[cell_index]
+      : 0.0;
+  record.internal_energy_code =
+      cell_index < state.gas_cells.internal_energy_code.size()
+          ? state.gas_cells.internal_energy_code[cell_index]
+          : 0.0;
+  record.temperature_code = cell_index < state.gas_cells.temperature_code.size()
+      ? state.gas_cells.temperature_code[cell_index]
+      : 0.0;
+  record.sound_speed_code = cell_index < state.gas_cells.sound_speed_code.size()
+      ? state.gas_cells.sound_speed_code[cell_index]
+      : 0.0;
+  parallel::validateAmrPatchCellPayloadRecord(record);
+  return record;
+}
+
+[[nodiscard]] std::uint8_t faceBit(parallel::AmrPatchBoundaryFace face) noexcept {
+  return static_cast<std::uint8_t>(face);
+}
+
+[[nodiscard]] bool offsetMatchesBoundaryMask(
+    std::uint32_t offset,
+    std::uint16_t nx,
+    std::uint16_t ny,
+    std::uint16_t nz,
+    std::uint8_t mask) {
+  if (nx == 0U || ny == 0U || nz == 0U) {
+    throw std::invalid_argument("AMR boundary payload requires positive patch cell dimensions");
+  }
+  const std::uint64_t plane = static_cast<std::uint64_t>(nx) * static_cast<std::uint64_t>(ny);
+  const std::uint64_t cell_count = plane * static_cast<std::uint64_t>(nz);
+  if (offset >= cell_count) {
+    throw std::out_of_range("AMR boundary payload cell offset exceeds patch dimensions");
+  }
+  const std::uint32_t i = offset % nx;
+  const std::uint32_t j = (offset / nx) % ny;
+  const std::uint32_t k = static_cast<std::uint32_t>(offset / plane);
+  return ((mask & faceBit(parallel::AmrPatchBoundaryFace::kXLower)) != 0U && i == 0U) ||
+      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U && i + 1U == nx) ||
+      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kYLower)) != 0U && j == 0U) ||
+      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kYUpper)) != 0U && j + 1U == ny) ||
+      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kZLower)) != 0U && k == 0U) ||
+      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kZUpper)) != 0U && k + 1U == nz);
+}
+
+}  // namespace
 
 std::vector<parallel::AmrPatchPayloadRecord>
 buildMigrationAmrPatchPayloadRecords(
@@ -20,10 +107,8 @@ buildMigrationAmrPatchPayloadRecords(
     return records;
   }
   records.reserve(state.patches.size());
-  for (std::size_t patch_index = 0; patch_index < state.patches.size();
-       ++patch_index) {
-    if (state.patches.owning_rank[patch_index] !=
-        static_cast<std::uint32_t>(world_rank)) {
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
       continue;
     }
     const std::uint32_t first_cell = state.patches.first_cell[patch_index];
@@ -31,11 +116,9 @@ buildMigrationAmrPatchPayloadRecords(
     if (cell_count == 0U) {
       continue;
     }
-    if (static_cast<std::uint64_t>(first_cell) +
-            static_cast<std::uint64_t>(cell_count) >
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) >
         state.cells.size()) {
-      throw std::runtime_error(
-          "AMR patch payload build found a patch range outside CellSoa");
+      throw std::runtime_error("AMR patch payload build found a patch range outside CellSoa");
     }
     parallel::AmrPatchPayloadRecord record;
     record.patch_id = state.patches.patch_id[patch_index];
@@ -60,8 +143,7 @@ buildMigrationAmrPatchPayloadRecords(
       const std::uint32_t cell_index = first_cell + offset;
       record.cell_mass_sum_code += state.cells.mass_code[cell_index];
       if (cell_index < state.gas_cells.internal_energy_code.size()) {
-        record.gas_internal_energy_sum_code +=
-            state.gas_cells.internal_energy_code[cell_index];
+        record.gas_internal_energy_sum_code += state.gas_cells.internal_energy_code[cell_index];
       }
     }
     parallel::validateAmrPatchPayloadRecord(record);
@@ -71,86 +153,55 @@ buildMigrationAmrPatchPayloadRecords(
 }
 
 std::vector<parallel::AmrPatchCellPayloadRecord>
-buildMigrationAmrPatchCellPayloadRecords(
+buildMigrationAmrPatchBoundaryCellPayloadRecords(
     const core::SimulationState& state,
-    int world_rank) {
+    int world_rank,
+    std::span<const parallel::AmrPatchBoundaryCellRequest> requests) {
   std::vector<parallel::AmrPatchCellPayloadRecord> records;
-  if (world_rank < 0 || state.patches.size() == 0) {
+  if (world_rank < 0 || requests.empty()) {
     return records;
   }
-  std::size_t total_owned_cells = 0;
-  for (std::size_t patch_index = 0; patch_index < state.patches.size();
-       ++patch_index) {
-    if (state.patches.owning_rank[patch_index] ==
-        static_cast<std::uint32_t>(world_rank)) {
-      total_owned_cells += state.patches.cell_count[patch_index];
+
+  std::unordered_map<std::uint64_t, std::uint8_t> mask_by_patch_id;
+  mask_by_patch_id.reserve(requests.size());
+  for (const parallel::AmrPatchBoundaryCellRequest& request : requests) {
+    if (request.patch_id == 0U || request.boundary_face_mask == 0U) {
+      throw std::invalid_argument("AMR boundary-cell request must name a patch and at least one face");
     }
+    mask_by_patch_id[request.patch_id] |= request.boundary_face_mask;
   }
-  records.reserve(total_owned_cells);
-  for (std::size_t patch_index = 0; patch_index < state.patches.size();
-       ++patch_index) {
-    if (state.patches.owning_rank[patch_index] !=
-        static_cast<std::uint32_t>(world_rank)) {
+
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    const std::uint64_t patch_id = state.patches.patch_id[patch_index];
+    const auto request_it = mask_by_patch_id.find(patch_id);
+    if (request_it == mask_by_patch_id.end()) {
       continue;
+    }
+    if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
+      throw std::invalid_argument("AMR boundary-cell request selected a patch not owned by the local rank");
     }
     const std::uint32_t first_cell = state.patches.first_cell[patch_index];
     const std::uint32_t cell_count = state.patches.cell_count[patch_index];
-    if (static_cast<std::uint64_t>(first_cell) +
-            static_cast<std::uint64_t>(cell_count) >
+    if (static_cast<std::uint64_t>(first_cell) + static_cast<std::uint64_t>(cell_count) >
         state.cells.size()) {
-      throw std::runtime_error(
-          "AMR patch cell payload build found a patch range outside CellSoa");
+      throw std::runtime_error("AMR boundary-cell payload build found a patch range outside CellSoa");
+    }
+    const std::uint16_t nx = state.patches.cell_dim_x[patch_index];
+    const std::uint16_t ny = state.patches.cell_dim_y[patch_index];
+    const std::uint16_t nz = state.patches.cell_dim_z[patch_index];
+    const std::uint64_t geometry_cell_count = static_cast<std::uint64_t>(nx) * ny * nz;
+    if (geometry_cell_count != cell_count) {
+      throw std::runtime_error("AMR boundary-cell payload build found cell_dims/cell_count mismatch");
     }
     for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
-      const std::uint32_t cell_index = first_cell + offset;
-      parallel::AmrPatchCellPayloadRecord record;
-      record.patch_id = state.patches.patch_id[patch_index];
-      record.owner_rank = world_rank;
-      record.local_cell_offset = offset;
-      record.patch_index = static_cast<std::uint32_t>(patch_index);
-      record.center_x_comoving = state.cells.center_x_comoving[cell_index];
-      record.center_y_comoving = state.cells.center_y_comoving[cell_index];
-      record.center_z_comoving = state.cells.center_z_comoving[cell_index];
-      record.mass_code = state.cells.mass_code[cell_index];
-      record.time_bin = state.cells.time_bin[cell_index];
-      const core::GasCellIdentityRecord& identity =
-          gasCellIdentityRecordForLocalRow(
-              state, cell_index, "buildMigrationAmrPatchCellPayloadRecords");
-      record.gas_cell_id = identity.gas_cell_id;
-      record.parent_particle_id = identity.parent_particle_id.value_or(0U);
-      record.velocity_x_peculiar =
-          cell_index < state.gas_cells.velocity_x_peculiar.size()
-              ? state.gas_cells.velocity_x_peculiar[cell_index]
-              : 0.0;
-      record.velocity_y_peculiar =
-          cell_index < state.gas_cells.velocity_y_peculiar.size()
-              ? state.gas_cells.velocity_y_peculiar[cell_index]
-              : 0.0;
-      record.velocity_z_peculiar =
-          cell_index < state.gas_cells.velocity_z_peculiar.size()
-              ? state.gas_cells.velocity_z_peculiar[cell_index]
-              : 0.0;
-      record.density_code = cell_index < state.gas_cells.density_code.size()
-          ? state.gas_cells.density_code[cell_index]
-          : 0.0;
-      record.pressure_code = cell_index < state.gas_cells.pressure_code.size()
-          ? state.gas_cells.pressure_code[cell_index]
-          : 0.0;
-      record.internal_energy_code =
-          cell_index < state.gas_cells.internal_energy_code.size()
-              ? state.gas_cells.internal_energy_code[cell_index]
-              : 0.0;
-      record.temperature_code =
-          cell_index < state.gas_cells.temperature_code.size()
-              ? state.gas_cells.temperature_code[cell_index]
-              : 0.0;
-      record.sound_speed_code =
-          cell_index < state.gas_cells.sound_speed_code.size()
-              ? state.gas_cells.sound_speed_code[cell_index]
-              : 0.0;
-      parallel::validateAmrPatchCellPayloadRecord(record);
-      records.push_back(record);
+      if (offsetMatchesBoundaryMask(offset, nx, ny, nz, request_it->second)) {
+        records.push_back(makePatchCellPayloadRecord(state, patch_index, offset, world_rank));
+      }
     }
+    mask_by_patch_id.erase(request_it);
+  }
+  if (!mask_by_patch_id.empty()) {
+    throw std::invalid_argument("AMR boundary-cell request referenced an unknown local patch_id");
   }
   return records;
 }

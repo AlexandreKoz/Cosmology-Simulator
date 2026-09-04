@@ -48,6 +48,53 @@ namespace {
 
 constexpr double k_gamma_adiabatic = 5.0 / 3.0;
 constexpr std::uint64_t k_hydro_batch_scratch_bytes_per_cell = 4096ULL;
+
+class SimulationStateHydroSourcePropertyProvider final
+    : public hydro::HydroCellSourcePropertyProvider {
+ public:
+  SimulationStateHydroSourcePropertyProvider(
+      const core::SimulationState& state,
+      const core::UnitSystem& units,
+      double density_floor_code,
+      double density_frame_factor)
+      : m_state(state),
+        m_units(units),
+        m_density_floor_code(density_floor_code),
+        m_density_frame_factor(density_frame_factor) {}
+
+  [[nodiscard]] hydro::HydroCellSourceProperties sourcePropertiesForCell(
+      std::size_t cell_index) const override {
+    if (cell_index >= m_state.cells.size() || cell_index >= m_state.gas_cells.size()) {
+      throw std::out_of_range(
+          "SimulationStateHydroSourcePropertyProvider cell index is outside gas state");
+    }
+    constexpr double k_hydrogen_mass_fraction = 0.76;
+    constexpr double k_proton_mass_g = 1.67262192369e-24;
+    const double gas_mass_code = m_state.cells.mass_code[cell_index];
+    const double metallicity = gas_mass_code > 0.0
+        ? std::clamp(
+              m_state.gas_cells.metal_mass_code[cell_index] / gas_mass_code,
+              0.0,
+              1.0)
+        : 0.0;
+    const double rho_stored_code = std::max(
+        m_state.gas_cells.density_code[cell_index], m_density_floor_code);
+    const double mass_density_physical_cgs =
+        m_units.densityCodeToCgs(rho_stored_code * m_density_frame_factor);
+    return hydro::HydroCellSourceProperties{
+        .mass_density_physical_cgs = mass_density_physical_cgs,
+        .hydrogen_number_density_cgs =
+            k_hydrogen_mass_fraction * mass_density_physical_cgs / k_proton_mass_g,
+        .metallicity_mass_fraction = metallicity,
+        .temperature_k = m_state.gas_cells.temperature_code[cell_index]};
+  }
+
+ private:
+  const core::SimulationState& m_state;
+  const core::UnitSystem& m_units;
+  double m_density_floor_code = 0.0;
+  double m_density_frame_factor = 1.0;
+};
 [[nodiscard]] internal::CartesianGasCellRowLayout requireCartesianGasCellRowLayout(
     const core::SimulationState& state,
     const core::SimulationConfig& config,
@@ -501,8 +548,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .memory_class = core::MemoryClass::kCommunication,
           .label = "hydro.runtime.communication_high_water",
           .high_water_bytes = m_communication_high_water_bytes,
-          .estimate_only = true,
-          .uncertainty_note = "protocol byte high-water; temporary wire containers may be released between samples"});
+          .estimate_only = false,
+          .uncertainty_note = "capacity-based simultaneous directed-AMR send/receive/retained payload high-water; traffic volume is reported separately"});
     }
     return std::move(builder).finish();
   }
@@ -528,12 +575,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     m_current_world_rank = static_cast<std::uint32_t>(std::max(m_mpi_context.worldRank(), 0));
     m_last_ghost_refresh = internal::refreshParticleGhostsForSolver(
         context, m_mpi_context, "hydro.godunov", &m_ghost_cache_lifecycle);
-    m_communication_high_water_bytes = std::max(
-        m_communication_high_water_bytes,
-        core::checkedMemoryBytesAdd(
-            m_last_ghost_refresh.sent_bytes,
-            m_last_ghost_refresh.received_bytes,
-            "hydro particle ghost communication bytes"));
+    // sent_bytes/received_bytes are traffic counters, not resident-memory
+    // capacity. Do not fold them into the memory high-water metric.
     const std::uint64_t hydro_cell_rank_count = hydro_cell_rank_count_after_refresh();
     const std::uint64_t local_has_production_amr =
         amr::hasProductionAmrHydroCoverage(context.state) ? 1ULL : 0ULL;
@@ -673,40 +716,25 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
             m_config.units.coordinate_frame == core::CoordinateFrame::kComoving,
     };
 
-    std::vector<double> metallicity(context.state.cells.size(), 0.0);
-    std::vector<double> temperature(context.state.cells.size(), 0.0);
-    std::vector<double> mass_density_physical_cgs(context.state.cells.size(), 0.0);
-    std::vector<double> hydrogen_number_density(context.state.cells.size(), 0.0);
-    constexpr double k_hydrogen_mass_fraction = 0.76;
-    constexpr double k_proton_mass_g = 1.67262192369e-24;
     const double density_frame_factor =
         m_config.units.coordinate_frame == core::CoordinateFrame::kComoving
             ? 1.0 / std::pow(update.scale_factor, 3.0)
             : 1.0;
-    for (std::size_t cell_index = 0; cell_index < context.state.cells.size(); ++cell_index) {
-      const double gas_mass_code = context.state.cells.mass_code[cell_index];
-      metallicity[cell_index] = gas_mass_code > 0.0
-          ? std::clamp(context.state.gas_cells.metal_mass_code[cell_index] / gas_mass_code, 0.0, 1.0)
-          : 0.0;
-      temperature[cell_index] = context.state.gas_cells.temperature_code[cell_index];
-      const double rho_stored_code = std::max(
-          context.state.gas_cells.density_code[cell_index],
-          m_config.numerics.hydro_density_floor_code);
-      mass_density_physical_cgs[cell_index] =
-          m_units.densityCodeToCgs(rho_stored_code * density_frame_factor);
-      hydrogen_number_density[cell_index] =
-          k_hydrogen_mass_fraction * mass_density_physical_cgs[cell_index] /
-          k_proton_mass_g;
-    }
+    const SimulationStateHydroSourcePropertyProvider source_property_provider(
+        context.state,
+        m_units,
+        m_config.numerics.hydro_density_floor_code,
+        density_frame_factor);
     hydro::HydroSourceContext source_context{
         .update = update,
         .gravity_accel_x_peculiar = {},
         .gravity_accel_y_peculiar = {},
         .gravity_accel_z_peculiar = {},
-        .mass_density_physical_cgs = mass_density_physical_cgs,
-        .hydrogen_number_density_cgs = hydrogen_number_density,
-        .metallicity_mass_fraction = metallicity,
-        .temperature_k = temperature,
+        .mass_density_physical_cgs = {},
+        .hydrogen_number_density_cgs = {},
+        .metallicity_mass_fraction = {},
+        .temperature_k = {},
+        .source_property_provider = &source_property_provider,
         .thermodynamic_closure = m_effective_ism_closure.get(),
         .redshift = std::max(0.0, (update.scale_factor > 0.0 ? (1.0 / update.scale_factor - 1.0) : 0.0)),
     };
@@ -1492,13 +1520,13 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       const auto local_patch_records =
           internal::buildMigrationAmrPatchPayloadRecords(
               context.state, m_mpi_context.worldRank());
-      const auto local_cell_records =
-          internal::buildMigrationAmrPatchCellPayloadRecords(
-              context.state, m_mpi_context.worldRank());
       const auto directed_amr_exchange = parallel::executeBlockingDirectedAmrPatchPayloadExchange(
           m_mpi_context,
           local_patch_records,
-          local_cell_records,
+          [&context, this](std::span<const parallel::AmrPatchBoundaryCellRequest> requests) {
+            return internal::buildMigrationAmrPatchBoundaryCellPayloadRecords(
+                context.state, m_mpi_context.worldRank(), requests);
+          },
           context.integrator_state.step_index);
       directed_amr_diagnostics = directed_amr_exchange.diagnostics;
 
@@ -1531,9 +1559,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       remote_patches.reserve(directed_amr_exchange.patch_payloads_received.size());
       for (const auto& patch_record : directed_amr_exchange.patch_payloads_received) {
         auto cells_it = cells_by_patch_id.find(patch_record.patch_id);
-        if (cells_it == cells_by_patch_id.end() ||
-            cells_it->second.size() != patch_record.cell_count) {
-          throw std::runtime_error("directed AMR hydro remote patch cell payload coverage mismatch");
+        if (cells_it == cells_by_patch_id.end() || cells_it->second.empty()) {
+          throw std::runtime_error("directed AMR hydro remote interface patch has no boundary-cell payload");
         }
         std::sort(
             cells_it->second.begin(),
@@ -1551,15 +1578,18 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         remote.owner_rank = patch_record.owner_rank;
         remote.ghost_hydro_epoch = patch_record.decomposition_epoch;
         remote.expected_ghost_hydro_epoch = patch_record.decomposition_epoch;
-        remote.gas_cell_ids.resize(patch_record.cell_count);
+        remote.gas_cell_ids.assign(patch_record.cell_count, 0U);
         remote.conserved_cells.resize(patch_record.cell_count);
-        for (std::size_t i = 0; i < cells_it->second.size(); ++i) {
-          const auto& cell_record = cells_it->second[i];
-          if (cell_record.local_cell_offset != i || cell_record.owner_rank != patch_record.owner_rank) {
-            throw std::runtime_error("directed AMR hydro remote patch cell payload has stale offset or owner metadata");
+        remote.available_cells.assign(patch_record.cell_count, 0U);
+        for (const auto& cell_record : cells_it->second) {
+          if (cell_record.owner_rank != patch_record.owner_rank ||
+              cell_record.local_cell_offset >= patch_record.cell_count ||
+              remote.available_cells[cell_record.local_cell_offset] != 0U) {
+            throw std::runtime_error("directed AMR hydro remote boundary payload has stale, duplicate, or out-of-range metadata");
           }
-          remote.gas_cell_ids[i] = cell_record.gas_cell_id;
-          remote.conserved_cells[i] = hydro::HydroCoreSolver::conservedFromPrimitive(
+          const std::size_t offset = cell_record.local_cell_offset;
+          remote.gas_cell_ids[offset] = cell_record.gas_cell_id;
+          remote.conserved_cells[offset] = hydro::HydroCoreSolver::conservedFromPrimitive(
               hydro::HydroPrimitiveState{
                   .rho_comoving = cell_record.density_code,
                   .vel_x_peculiar = cell_record.velocity_x_peculiar,
@@ -1567,6 +1597,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                   .vel_z_peculiar = cell_record.velocity_z_peculiar,
                   .pressure_comoving = cell_record.pressure_code},
               k_gamma_adiabatic);
+          remote.available_cells[offset] = 1U;
         }
         remote_patches.push_back(std::move(remote));
       }
@@ -1711,20 +1742,9 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           amr_options);
     }
     m_last_amr_hydro_diagnostics = amr_diagnostics;
-    std::uint64_t directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
-        directed_amr_diagnostics.control_plane_bytes,
-        directed_amr_diagnostics.patch_descriptor_bytes,
-        "hydro directed AMR control and descriptor bytes");
-    directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
-        directed_amr_communication_bytes,
-        directed_amr_diagnostics.patch_cell_payload_bytes,
-        "hydro directed AMR patch payload bytes");
-    directed_amr_communication_bytes = core::checkedMemoryBytesAdd(
-        directed_amr_communication_bytes,
-        directed_amr_diagnostics.flux_payload_bytes,
-        "hydro directed AMR flux payload bytes");
     m_communication_high_water_bytes = std::max(
-        m_communication_high_water_bytes, directed_amr_communication_bytes);
+        m_communication_high_water_bytes,
+        directed_amr_diagnostics.communication_workspace_high_water_bytes);
 
     if (m_effective_ism_closure != nullptr) {
       const double redshift = source_context.redshift;
@@ -1826,6 +1846,11 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                       {"directed_amr_control_plane_bytes", std::to_string(directed_amr_diagnostics.control_plane_bytes)},
                       {"directed_amr_patch_descriptor_bytes", std::to_string(directed_amr_diagnostics.patch_descriptor_bytes)},
                       {"directed_amr_patch_cell_payload_bytes", std::to_string(directed_amr_diagnostics.patch_cell_payload_bytes)},
+                      {"directed_amr_patch_cell_send_capacity_high_water_bytes", std::to_string(directed_amr_diagnostics.patch_cell_send_capacity_high_water_bytes)},
+                      {"directed_amr_patch_cell_receive_capacity_high_water_bytes", std::to_string(directed_amr_diagnostics.patch_cell_receive_capacity_high_water_bytes)},
+                      {"directed_amr_patch_cell_retained_capacity_high_water_bytes", std::to_string(directed_amr_diagnostics.patch_cell_retained_capacity_high_water_bytes)},
+                      {"directed_amr_communication_workspace_high_water_bytes", std::to_string(directed_amr_diagnostics.communication_workspace_high_water_bytes)},
+                      {"directed_amr_patch_cell_transport_round_count", std::to_string(directed_amr_diagnostics.patch_cell_transport_round_count)},
                       {"directed_amr_flux_payload_bytes", std::to_string(directed_amr_diagnostics.flux_payload_bytes)},
                       {"directed_amr_remote_interface_count", std::to_string(directed_amr_diagnostics.remote_interface_count)},
                       {"directed_amr_inbound_reflux_count", std::to_string(directed_amr_diagnostics.inbound_reflux_count)},

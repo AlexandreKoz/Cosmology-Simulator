@@ -105,6 +105,10 @@ struct GasCellSidecar {
   AlignedVector<double> velocity_y_peculiar;
   AlignedVector<double> velocity_z_peculiar;
   AlignedVector<double> density_code;
+  // Persistent compatibility/restart caches. Pressure, temperature, and sound
+  // speed are not independent conserved authority; hydro/source/scheduler
+  // synchronization refreshes them from the accepted thermodynamic state.
+  // Removing these lanes requires an explicit restart/schema migration.
   AlignedVector<double> pressure_code;
   AlignedVector<double> internal_energy_code;
   // Conserved gas metal mass. Metallicity is derived as metal_mass_code / cell mass.

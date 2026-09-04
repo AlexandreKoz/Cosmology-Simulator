@@ -294,20 +294,34 @@ hydro::HydroConservedState CoolingHeatingSource::sourceForCell(
   const double internal_density = std::max(conserved.total_energy_density_comoving - kinetic_density, 0.0);
   const double specific_internal_energy = internal_density / std::max(conserved.mass_density_comoving, 1.0e-16);
 
-  if (cell_index >= context.hydrogen_number_density_cgs.size() ||
-      cell_index >= context.temperature_k.size()) {
-    throw std::runtime_error(
-        "CoolingHeatingSource requires explicit physical hydrogen density and temperature for every cooled cell");
+  hydro::HydroCellSourceProperties properties;
+  if (context.source_property_provider != nullptr) {
+    properties = context.source_property_provider->sourcePropertiesForCell(cell_index);
+  } else {
+    if (cell_index >= context.hydrogen_number_density_cgs.size() ||
+        cell_index >= context.temperature_k.size()) {
+      throw std::runtime_error(
+          "CoolingHeatingSource requires explicit physical hydrogen density and temperature for every cooled cell");
+    }
+    properties.hydrogen_number_density_cgs = context.hydrogen_number_density_cgs[cell_index];
+    properties.temperature_k = context.temperature_k[cell_index];
+    properties.metallicity_mass_fraction =
+        (cell_index < context.metallicity_mass_fraction.size())
+            ? context.metallicity_mass_fraction[cell_index]
+            : 0.0;
+    properties.mass_density_physical_cgs =
+        (cell_index < context.mass_density_physical_cgs.size())
+            ? context.mass_density_physical_cgs[cell_index]
+            : 0.0;
   }
-  const double hydrogen_density = context.hydrogen_number_density_cgs[cell_index];
-  const double temperature_k = context.temperature_k[cell_index];
+  const double hydrogen_density = properties.hydrogen_number_density_cgs;
+  const double temperature_k = properties.temperature_k;
   if (!(hydrogen_density > 0.0) || !std::isfinite(hydrogen_density) ||
       !(temperature_k > 0.0) || !std::isfinite(temperature_k)) {
     throw std::runtime_error(
         "CoolingHeatingSource requires finite positive physical hydrogen density and temperature");
   }
-  const double metallicity =
-      (cell_index < context.metallicity_mass_fraction.size()) ? context.metallicity_mass_fraction[cell_index] : 0.0;
+  const double metallicity = properties.metallicity_mass_fraction;
 
   const CoolingRateQuery query{
       .temperature_k = temperature_k,
@@ -320,10 +334,7 @@ hydro::HydroConservedState CoolingHeatingSource::sourceForCell(
     // applying the ordinary cooling source as well would double-count it.
     return {};
   }
-  const double physical_mass_density_cgs =
-      (cell_index < context.mass_density_physical_cgs.size())
-          ? context.mass_density_physical_cgs[cell_index]
-          : 0.0;
+  const double physical_mass_density_cgs = properties.mass_density_physical_cgs;
   if (!(physical_mass_density_cgs > 0.0) || !std::isfinite(physical_mass_density_cgs)) {
     throw std::runtime_error(
         "CoolingHeatingSource requires finite positive physical CGS mass density");
