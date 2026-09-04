@@ -1608,7 +1608,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                     "directed AMR sparse admission patch owner does not match peer rank");
               }
               const std::size_t expected = parallel::directedAmrPatchBoundaryCellCount(
-                  *patch_record, request.boundary_face_mask);
+                  *patch_record, request);
               expected_total = core::checkedMemoryBytesAdd(
                   expected_total,
                   static_cast<std::uint64_t>(expected),
@@ -1704,6 +1704,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                 throw std::runtime_error(
                     "directed AMR sparse consumer exceeded its governor-admitted boundary capacity");
               }
+              const double metallicity_mass_fraction = cell_record.mass_code > 0.0
+                  ? std::clamp(
+                        cell_record.metal_mass_code / cell_record.mass_code,
+                        0.0,
+                        1.0)
+                  : 0.0;
               remote.boundary_cells.push_back(amr::AmrHydroSparseRemoteCell{
                   .patch_local_cell = cell_record.local_cell_offset,
                   .gas_cell_id = cell_record.gas_cell_id,
@@ -1713,7 +1719,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                           .vel_x_peculiar = cell_record.velocity_x_peculiar,
                           .vel_y_peculiar = cell_record.velocity_y_peculiar,
                           .vel_z_peculiar = cell_record.velocity_z_peculiar,
-                          .pressure_comoving = cell_record.pressure_code},
+                          .pressure_comoving = cell_record.pressure_code,
+                          .metallicity_mass_fraction = metallicity_mass_fraction},
                       k_gamma_adiabatic)});
             }
           };

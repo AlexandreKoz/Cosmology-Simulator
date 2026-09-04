@@ -2866,11 +2866,15 @@ void validateAmrPatchCellPayloadRecord(const AmrPatchCellPayloadRecord& record) 
       !std::isfinite(record.velocity_z_peculiar) || !std::isfinite(record.density_code) ||
       !std::isfinite(record.pressure_code) ||
       !std::isfinite(record.internal_energy_code) || !std::isfinite(record.temperature_code) ||
-      !std::isfinite(record.sound_speed_code)) {
+      !std::isfinite(record.sound_speed_code) || !std::isfinite(record.metal_mass_code)) {
     throw std::invalid_argument("AMR patch cell payload contains non-finite state");
   }
   if (record.density_code <= 0.0 || record.pressure_code <= 0.0) {
     throw std::invalid_argument("AMR patch cell payload requires positive thermodynamic state");
+  }
+  if (record.metal_mass_code < 0.0 ||
+      record.metal_mass_code > record.mass_code + 1.0e-12 * std::max(1.0, std::abs(record.mass_code))) {
+    throw std::invalid_argument("AMR patch cell payload metal mass must lie within the gas-cell mass");
   }
 }
 
@@ -4399,17 +4403,161 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
   return mask;
 }
 
+[[nodiscard]] std::size_t amrBoundaryFaceIndex(AmrPatchBoundaryFace face) noexcept {
+  switch (face) {
+    case AmrPatchBoundaryFace::kXLower: return 0U;
+    case AmrPatchBoundaryFace::kXUpper: return 1U;
+    case AmrPatchBoundaryFace::kYLower: return 2U;
+    case AmrPatchBoundaryFace::kYUpper: return 3U;
+    case AmrPatchBoundaryFace::kZLower: return 4U;
+    case AmrPatchBoundaryFace::kZUpper: return 5U;
+  }
+  return 0U;
+}
+
+[[nodiscard]] std::size_t amrBoundaryFaceAxis(AmrPatchBoundaryFace face) noexcept {
+  switch (face) {
+    case AmrPatchBoundaryFace::kXLower:
+    case AmrPatchBoundaryFace::kXUpper:
+      return 0U;
+    case AmrPatchBoundaryFace::kYLower:
+    case AmrPatchBoundaryFace::kYUpper:
+      return 1U;
+    case AmrPatchBoundaryFace::kZLower:
+    case AmrPatchBoundaryFace::kZUpper:
+      return 2U;
+  }
+  return 0U;
+}
+
+[[nodiscard]] std::uint16_t amrPatchDimension(
+    const AmrPatchPayloadRecord& patch,
+    std::size_t axis) {
+  switch (axis) {
+    case 0U: return patch.cell_dim_x;
+    case 1U: return patch.cell_dim_y;
+    case 2U: return patch.cell_dim_z;
+    default: throw std::out_of_range("directed AMR boundary axis out of range");
+  }
+}
+
+[[nodiscard]] double amrPatchExtent(
+    const AmrPatchPayloadRecord& patch,
+    std::size_t axis) {
+  switch (axis) {
+    case 0U: return patch.extent_x_comoving;
+    case 1U: return patch.extent_y_comoving;
+    case 2U: return patch.extent_z_comoving;
+    default: throw std::out_of_range("directed AMR boundary axis out of range");
+  }
+}
+
+[[nodiscard]] std::uint16_t requiredSourceBoundaryDepth(
+    const AmrPatchPayloadRecord& source,
+    const AmrPatchPayloadRecord& target,
+    std::size_t axis) {
+  const std::uint16_t source_dim = amrPatchDimension(source, axis);
+  const std::uint16_t target_dim = amrPatchDimension(target, axis);
+  if (source_dim == 0U || target_dim == 0U) {
+    throw std::invalid_argument("directed AMR boundary depth requires positive patch dimensions");
+  }
+  const double source_width = amrPatchExtent(source, axis) / static_cast<double>(source_dim);
+  const double target_width = amrPatchExtent(target, axis) / static_cast<double>(target_dim);
+  if (!(source_width > 0.0) || !(target_width > 0.0) ||
+      !std::isfinite(source_width) || !std::isfinite(target_width)) {
+    throw std::invalid_argument("directed AMR boundary depth requires finite positive cell widths");
+  }
+
+  const double ratio = target_width / source_width;
+  const double ratio_tolerance = 1.0e-10 * std::max(1.0, std::abs(ratio));
+  if (ratio <= 1.0 + ratio_tolerance) {
+    return 1U;
+  }
+  const double rounded = std::round(ratio);
+  if (std::abs(ratio - rounded) > ratio_tolerance || rounded < 1.0 ||
+      rounded > static_cast<double>(std::numeric_limits<std::uint16_t>::max())) {
+    throw std::runtime_error(
+        "directed AMR fine-to-coarse boundary depth is not an aligned integer cell-width ratio");
+  }
+  const auto depth = static_cast<std::uint16_t>(rounded);
+  if (depth > source_dim) {
+    throw std::runtime_error(
+        "directed AMR fine-to-coarse boundary depth exceeds source patch dimension");
+  }
+  return depth;
+}
+
+[[nodiscard]] AmrPatchBoundaryCellRequest amrPatchBoundaryRequestForPeer(
+    const AmrPatchPayloadRecord& source,
+    const AmrPatchPayloadRecord& target) {
+  AmrPatchBoundaryCellRequest request;
+  request.patch_id = source.patch_id;
+  request.boundary_face_mask = amrPatchBoundaryMaskForPeer(source, target);
+  constexpr std::array<AmrPatchBoundaryFace, 6> k_faces{
+      AmrPatchBoundaryFace::kXLower,
+      AmrPatchBoundaryFace::kXUpper,
+      AmrPatchBoundaryFace::kYLower,
+      AmrPatchBoundaryFace::kYUpper,
+      AmrPatchBoundaryFace::kZLower,
+      AmrPatchBoundaryFace::kZUpper};
+  for (const AmrPatchBoundaryFace face : k_faces) {
+    if ((request.boundary_face_mask & amrBoundaryFaceBit(face)) == 0U) {
+      continue;
+    }
+    request.boundary_face_depths[amrBoundaryFaceIndex(face)] =
+        requiredSourceBoundaryDepth(source, target, amrBoundaryFaceAxis(face));
+  }
+  return request;
+}
+
+void mergeBoundaryRequest(
+    AmrPatchBoundaryCellRequest& destination,
+    const AmrPatchBoundaryCellRequest& source) {
+  if (destination.patch_id == 0U) {
+    destination.patch_id = source.patch_id;
+  }
+  if (destination.patch_id != source.patch_id) {
+    throw std::invalid_argument("cannot merge directed AMR boundary requests for different patches");
+  }
+  destination.boundary_face_mask |= source.boundary_face_mask;
+  for (std::size_t face = 0; face < destination.boundary_face_depths.size(); ++face) {
+    destination.boundary_face_depths[face] = std::max(
+        destination.boundary_face_depths[face], source.boundary_face_depths[face]);
+  }
+}
+
+[[nodiscard]] std::uint16_t requestFaceDepth(
+    const AmrPatchBoundaryCellRequest& request,
+    AmrPatchBoundaryFace face) {
+  const bool selected = (request.boundary_face_mask & amrBoundaryFaceBit(face)) != 0U;
+  const std::uint16_t depth = request.boundary_face_depths[amrBoundaryFaceIndex(face)];
+  if (selected && depth == 0U) {
+    throw std::invalid_argument("directed AMR selected boundary face has zero source depth");
+  }
+  if (!selected && depth != 0U) {
+    throw std::invalid_argument("directed AMR unselected boundary face has non-zero source depth");
+  }
+  return selected ? depth : 0U;
+}
+
 [[nodiscard]] std::size_t requestedBoundaryCellCount(
     const AmrPatchPayloadRecord& patch,
-    std::uint8_t mask) {
-  const auto selected_positions = [mask](
+    const AmrPatchBoundaryCellRequest& request) {
+  if (request.patch_id != patch.patch_id || request.boundary_face_mask == 0U) {
+    throw std::invalid_argument("directed AMR boundary count request does not match patch metadata");
+  }
+  const auto selected_positions = [&request](
       std::uint16_t dim,
       AmrPatchBoundaryFace lower,
       AmrPatchBoundaryFace upper) -> std::size_t {
-    const std::size_t selected =
-        (((mask & amrBoundaryFaceBit(lower)) != 0U) ? 1U : 0U) +
-        (((mask & amrBoundaryFaceBit(upper)) != 0U) ? 1U : 0U);
-    return std::min<std::size_t>(dim, selected);
+    const std::size_t lower_depth = requestFaceDepth(request, lower);
+    const std::size_t upper_depth = requestFaceDepth(request, upper);
+    if (lower_depth > dim || upper_depth > dim) {
+      throw std::invalid_argument("directed AMR boundary depth exceeds patch dimension");
+    }
+    return std::min<std::size_t>(
+        dim, core::checkedSizeAdd(lower_depth, upper_depth,
+                                  "directed AMR selected boundary depth"));
   };
   const std::size_t nx = patch.cell_dim_x;
   const std::size_t ny = patch.cell_dim_y;
@@ -4427,26 +4575,58 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
   return total - unselected;
 }
 
-[[nodiscard]] bool patchCellOffsetMatchesBoundaryMask(
+[[nodiscard]] AmrPatchBoundaryCellRequest oneLayerBoundaryRequest(
+    const AmrPatchPayloadRecord& patch,
+    std::uint8_t mask) {
+  AmrPatchBoundaryCellRequest request;
+  request.patch_id = patch.patch_id;
+  request.boundary_face_mask = mask;
+  constexpr std::array<AmrPatchBoundaryFace, 6> k_faces{
+      AmrPatchBoundaryFace::kXLower,
+      AmrPatchBoundaryFace::kXUpper,
+      AmrPatchBoundaryFace::kYLower,
+      AmrPatchBoundaryFace::kYUpper,
+      AmrPatchBoundaryFace::kZLower,
+      AmrPatchBoundaryFace::kZUpper};
+  for (const AmrPatchBoundaryFace face : k_faces) {
+    if ((mask & amrBoundaryFaceBit(face)) != 0U) {
+      request.boundary_face_depths[amrBoundaryFaceIndex(face)] = 1U;
+    }
+  }
+  return request;
+}
+
+[[nodiscard]] bool patchCellOffsetMatchesBoundaryRequest(
     const AmrPatchPayloadRecord& patch,
     std::uint32_t offset,
-    std::uint8_t mask) {
-  if (patch.cell_dim_x == 0U || patch.cell_dim_y == 0U || patch.cell_dim_z == 0U ||
-      offset >= patch.cell_count) {
+    const AmrPatchBoundaryCellRequest& request) {
+  if (request.patch_id != patch.patch_id || patch.cell_dim_x == 0U ||
+      patch.cell_dim_y == 0U || patch.cell_dim_z == 0U || offset >= patch.cell_count) {
     return false;
   }
-  const std::uint32_t nx = patch.cell_dim_x;
-  const std::uint32_t ny = patch.cell_dim_y;
-  const std::uint64_t plane = static_cast<std::uint64_t>(nx) * ny;
-  const std::uint32_t i = offset % nx;
-  const std::uint32_t j = (offset / nx) % ny;
-  const std::uint32_t k = static_cast<std::uint32_t>(offset / plane);
-  return ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kXLower)) != 0U && i == 0U) ||
-      ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kXUpper)) != 0U && i + 1U == nx) ||
-      ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kYLower)) != 0U && j == 0U) ||
-      ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kYUpper)) != 0U && j + 1U == ny) ||
-      ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kZLower)) != 0U && k == 0U) ||
-      ((mask & amrBoundaryFaceBit(AmrPatchBoundaryFace::kZUpper)) != 0U && k + 1U == patch.cell_dim_z);
+  const std::size_t nx = patch.cell_dim_x;
+  const std::size_t ny = patch.cell_dim_y;
+  const std::size_t nz = patch.cell_dim_z;
+  const std::size_t plane = core::checkedSizeMultiply(nx, ny, "directed AMR patch plane");
+  const std::size_t i = offset % nx;
+  const std::size_t j = (offset / nx) % ny;
+  const std::size_t k = offset / plane;
+  const std::size_t x_lower = requestFaceDepth(request, AmrPatchBoundaryFace::kXLower);
+  const std::size_t x_upper = requestFaceDepth(request, AmrPatchBoundaryFace::kXUpper);
+  const std::size_t y_lower = requestFaceDepth(request, AmrPatchBoundaryFace::kYLower);
+  const std::size_t y_upper = requestFaceDepth(request, AmrPatchBoundaryFace::kYUpper);
+  const std::size_t z_lower = requestFaceDepth(request, AmrPatchBoundaryFace::kZLower);
+  const std::size_t z_upper = requestFaceDepth(request, AmrPatchBoundaryFace::kZUpper);
+  if (x_lower > nx || x_upper > nx || y_lower > ny || y_upper > ny ||
+      z_lower > nz || z_upper > nz) {
+    throw std::invalid_argument("directed AMR boundary depth exceeds patch dimension");
+  }
+  return (x_lower != 0U && i < x_lower) ||
+      (x_upper != 0U && i >= nx - x_upper) ||
+      (y_lower != 0U && j < y_lower) ||
+      (y_upper != 0U && j >= ny - y_upper) ||
+      (z_lower != 0U && k < z_lower) ||
+      (z_upper != 0U && k >= nz - z_upper);
 }
 
 [[nodiscard]] std::uint64_t checkedU64AddLocal(
@@ -4472,15 +4652,18 @@ void exchangeAmrPatchCellRecordStreamWithPeer(
       bytes, std::string(context) + " uint64 byte count");
 }
 
-[[nodiscard]] std::unordered_map<std::uint64_t, std::uint8_t> requestMaskByPatchId(
-    std::span<const AmrPatchBoundaryCellRequest> requests) {
-  std::unordered_map<std::uint64_t, std::uint8_t> result;
+[[nodiscard]] std::unordered_map<std::uint64_t, AmrPatchBoundaryCellRequest>
+requestByPatchId(std::span<const AmrPatchBoundaryCellRequest> requests) {
+  std::unordered_map<std::uint64_t, AmrPatchBoundaryCellRequest> result;
   result.reserve(requests.size());
   for (const AmrPatchBoundaryCellRequest& request : requests) {
     if (request.patch_id == 0U || request.boundary_face_mask == 0U) {
       throw std::invalid_argument("directed AMR boundary request is empty or malformed");
     }
-    result[request.patch_id] |= request.boundary_face_mask;
+    auto [it, inserted] = result.emplace(request.patch_id, request);
+    if (!inserted) {
+      mergeBoundaryRequest(it->second, request);
+    }
   }
   return result;
 }
@@ -4494,18 +4677,31 @@ std::vector<AmrPatchBoundaryCellRequest> planDirectedAmrPatchBoundaryCellRequest
   requests.reserve(local_patch_records.size());
   for (const AmrPatchPayloadRecord& local_record : local_patch_records) {
     validateAmrPatchPayloadRecord(local_record);
-    std::uint8_t mask = 0U;
+    AmrPatchBoundaryCellRequest combined;
+    combined.patch_id = local_record.patch_id;
     for (const AmrPatchPayloadRecord& remote_record : remote_patch_records) {
       validateAmrPatchPayloadRecord(remote_record);
-      mask |= amrPatchBoundaryMaskForPeer(local_record, remote_record);
+      const AmrPatchBoundaryCellRequest one =
+          amrPatchBoundaryRequestForPeer(local_record, remote_record);
+      if (one.boundary_face_mask != 0U) {
+        mergeBoundaryRequest(combined, one);
+      }
     }
-    if (mask != 0U) {
-      requests.push_back(AmrPatchBoundaryCellRequest{
-          .patch_id = local_record.patch_id,
-          .boundary_face_mask = mask});
+    if (combined.boundary_face_mask != 0U) {
+      requests.push_back(combined);
     }
   }
   return requests;
+}
+
+std::size_t directedAmrPatchBoundaryCellCount(
+    const AmrPatchPayloadRecord& patch,
+    const AmrPatchBoundaryCellRequest& request) {
+  validateAmrPatchPayloadRecord(patch);
+  if (request.boundary_face_mask == 0U) {
+    return 0U;
+  }
+  return requestedBoundaryCellCount(patch, request);
 }
 
 std::size_t directedAmrPatchBoundaryCellCount(
@@ -4515,7 +4711,8 @@ std::size_t directedAmrPatchBoundaryCellCount(
   if (boundary_face_mask == 0U) {
     return 0U;
   }
-  return requestedBoundaryCellCount(patch, boundary_face_mask);
+  return requestedBoundaryCellCount(
+      patch, oneLayerBoundaryRequest(patch, boundary_face_mask));
 }
 
 DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
@@ -4594,8 +4791,8 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
     }
     ++result.diagnostics.neighbor_peer_count;
 
-    const auto local_request_masks = requestMaskByPatchId(local_requests);
-    const auto remote_request_masks = requestMaskByPatchId(remote_requests);
+    const auto local_request_by_id = requestByPatchId(local_requests);
+    const auto remote_request_by_id = requestByPatchId(remote_requests);
     std::uint64_t peer_interface_count = 0U;
     for (const AmrPatchPayloadRecord& local_record : local_patch_records) {
       for (const AmrPatchPayloadRecord& remote_record : remote_patches) {
@@ -4611,7 +4808,7 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
         "directed AMR accumulated remote interface count");
 
     for (const AmrPatchPayloadRecord& remote_patch : remote_patches) {
-      if (remote_request_masks.contains(remote_patch.patch_id)) {
+      if (remote_request_by_id.contains(remote_patch.patch_id)) {
         result.patch_payloads_received.push_back(remote_patch);
       }
     }
@@ -4622,7 +4819,7 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
       logical_send_count = checkedU64AddLocal(
           logical_send_count,
           static_cast<std::uint64_t>(requestedBoundaryCellCount(
-              patch, request.boundary_face_mask)),
+              patch, request)),
           "directed AMR logical send boundary-cell count");
     }
 
@@ -4649,10 +4846,10 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
                   "directed AMR boundary payload producer returned a non-local cell");
             }
             const auto patch_it = local_patch_by_id.find(record.patch_id);
-            const auto mask_it = local_request_masks.find(record.patch_id);
-            if (patch_it == local_patch_by_id.end() || mask_it == local_request_masks.end() ||
-                !patchCellOffsetMatchesBoundaryMask(
-                    patch_it->second, record.local_cell_offset, mask_it->second)) {
+            const auto request_it = local_request_by_id.find(record.patch_id);
+            if (patch_it == local_patch_by_id.end() || request_it == local_request_by_id.end() ||
+                !patchCellOffsetMatchesBoundaryRequest(
+                    patch_it->second, record.local_cell_offset, request_it->second)) {
               throw std::invalid_argument(
                   "directed AMR boundary payload producer returned a non-interface cell");
             }
@@ -4671,10 +4868,10 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
                   "directed AMR patch-cell stream received payload from a rank that is not the owner");
             }
             const auto patch_it = remote_patch_by_id.find(record.patch_id);
-            const auto mask_it = remote_request_masks.find(record.patch_id);
-            if (patch_it == remote_patch_by_id.end() || mask_it == remote_request_masks.end() ||
-                !patchCellOffsetMatchesBoundaryMask(
-                    patch_it->second, record.local_cell_offset, mask_it->second)) {
+            const auto request_it = remote_request_by_id.find(record.patch_id);
+            if (patch_it == remote_patch_by_id.end() || request_it == remote_request_by_id.end() ||
+                !patchCellOffsetMatchesBoundaryRequest(
+                    patch_it->second, record.local_cell_offset, request_it->second)) {
               throw std::runtime_error(
                   "directed AMR patch-cell stream received a non-interface cell payload");
             }
@@ -4702,7 +4899,7 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
     for (const AmrPatchBoundaryCellRequest& request : local_requests) {
       const AmrPatchPayloadRecord& patch = local_patch_by_id.at(request.patch_id);
       if (observed_local_count[request.patch_id] !=
-          requestedBoundaryCellCount(patch, request.boundary_face_mask)) {
+          requestedBoundaryCellCount(patch, request)) {
         throw std::runtime_error(
             "directed AMR streamed producer did not cover requested local boundary cells");
       }
@@ -4711,7 +4908,7 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
     for (const AmrPatchBoundaryCellRequest& request : remote_requests) {
       const AmrPatchPayloadRecord& patch = remote_patch_by_id.at(request.patch_id);
       const std::size_t expected = requestedBoundaryCellCount(
-          patch, request.boundary_face_mask);
+          patch, request);
       if (observed_remote_count[request.patch_id] != expected) {
         throw std::runtime_error(
             "directed AMR streamed remote boundary coverage mismatch");

@@ -28,6 +28,7 @@ void assertStateNear(
   assert(std::abs(actual.momentum_density_y_comoving - expected.momentum_density_y_comoving) < k_tol);
   assert(std::abs(actual.momentum_density_z_comoving - expected.momentum_density_z_comoving) < k_tol);
   assert(std::abs(actual.total_energy_density_comoving - expected.total_energy_density_comoving) < k_tol);
+  assert(std::abs(actual.metal_mass_density_comoving - expected.metal_mass_density_comoving) < k_tol);
 }
 
 cosmosim::core::SimulationState makeState(
@@ -84,6 +85,10 @@ cosmosim::core::SimulationState makeState(
       state.gas_cells.velocity_x_peculiar[row] = 0.0;
       state.gas_cells.velocity_y_peculiar[row] = 0.0;
       state.gas_cells.velocity_z_peculiar[row] = 0.0;
+      // Deliberately non-zero/non-uniform passive metal state so local/sparse
+      // equivalence also covers distributed hydro metal transport semantics.
+      state.gas_cells.metal_mass_code[row] =
+          value * (0.01 + 0.001 * static_cast<double>((patch_cell % 7U) + 1U));
       records.push_back(cosmosim::core::GasCellIdentityRecord{
           .gas_cell_id = gas_cell_id,
           .parent_particle_id = std::nullopt,
@@ -109,6 +114,16 @@ cosmosim::amr::AmrHydroGeometryOptions sameLevelOptions(
               ? (side == cosmosim::hydro::HydroFaceSide::kLower ? 2U : 3U)
               : (side == cosmosim::hydro::HydroFaceSide::kLower ? 4U : 5U);
   options.boundary_classes[slot] = cosmosim::amr::AmrHydroBoundaryClass::kSameLevel;
+  return options;
+}
+
+cosmosim::amr::AmrHydroGeometryOptions coarseFineOptions(
+    cosmosim::hydro::HydroFaceSide side) {
+  cosmosim::amr::AmrHydroGeometryOptions options;
+  options.physical_boundary_kind = cosmosim::hydro::HydroBoundaryKind::kOpen;
+  options.boundary_classes[
+      side == cosmosim::hydro::HydroFaceSide::kLower ? 0U : 1U] =
+      cosmosim::amr::AmrHydroBoundaryClass::kCoarseFine;
   return options;
 }
 
@@ -278,6 +293,119 @@ void testSparseSameLevelRemoteGhostMatchesDenseReference() {
   }
 }
 
+void testSparseFineToCoarseMatchesDenseReferenceAndRequiresCompleteStencil() {
+  cosmosim::amr::PatchDescriptor coarse;
+  coarse.patch_id = 41U;
+  coarse.level = 0U;
+  coarse.origin_comov = {0.0, 0.0, 0.0};
+  coarse.extent_comov = {1.0, 1.0, 1.0};
+  coarse.cell_dims = {2U, 2U, 2U};
+
+  cosmosim::amr::PatchDescriptor fine;
+  fine.patch_id = 42U;
+  fine.parent_patch_id = coarse.patch_id;
+  fine.level = 1U;
+  fine.origin_comov = {1.0, 0.0, 0.0};
+  fine.extent_comov = {0.5, 1.0, 1.0};
+  fine.cell_dims = {2U, 4U, 4U};
+
+  // Dense accepted reference. Both fine X layers deliberately carry distinct
+  // values through makeState(), so averaging only the first layer cannot pass.
+  const auto dense_state = makeState({coarse, fine});
+  auto dense_coarse_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      dense_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto dense_fine_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      dense_state, fine, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kLower));
+  auto dense_coarse = cosmosim::amr::loadAmrHydroConservedState(
+      dense_state, dense_coarse_geometry, k_gamma);
+  auto dense_fine = cosmosim::amr::loadAmrHydroConservedState(
+      dense_state, dense_fine_geometry, k_gamma);
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> dense_patches{
+      {.geometry = &dense_coarse_geometry, .conserved = &dense_coarse},
+      {.geometry = &dense_fine_geometry, .conserved = &dense_fine}};
+  const auto dense_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      dense_patches, k_gamma);
+  assert(dense_diagnostics.fine_to_coarse_ghosts_filled == 4U);
+
+  const auto local_state = makeState({coarse});
+  auto sparse_coarse_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      local_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto sparse_coarse = cosmosim::amr::loadAmrHydroConservedState(
+      local_state, sparse_coarse_geometry, k_gamma);
+
+  std::vector<cosmosim::amr::AmrHydroSparseRemoteCell> complete_cells;
+  complete_cells.reserve(32U);
+  for (std::uint32_t offset = 0U; offset < 32U; ++offset) {
+    complete_cells.push_back(cosmosim::amr::AmrHydroSparseRemoteCell{
+        .patch_local_cell = offset,
+        .gas_cell_id = 12000U + offset,
+        .conserved = dense_fine.loadCell(offset)});
+  }
+  const cosmosim::amr::AmrHydroSparseGhostSource complete_remote{
+      .patch = &fine,
+      .owner_rank = 1,
+      .ghost_hydro_epoch = 9U,
+      .expected_ghost_hydro_epoch = 9U,
+      .source_current_state_time_code = 0.0,
+      .cells = complete_cells};
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> sparse_patches{
+      {.geometry = &sparse_coarse_geometry, .conserved = &sparse_coarse}};
+  const auto sparse_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      sparse_patches,
+      std::span<const cosmosim::amr::AmrHydroSparseGhostSource>(&complete_remote, 1U),
+      k_gamma);
+  assert(sparse_diagnostics.fine_to_coarse_ghosts_filled == 4U);
+
+  for (std::size_t owner = 0; owner < 8U; ++owner) {
+    if ((owner % 2U) != 1U) {
+      continue;
+    }
+    const auto& dense_ghost = findGhost(
+        dense_coarse_geometry,
+        cosmosim::hydro::HydroFaceAxis::kX,
+        cosmosim::hydro::HydroFaceSide::kUpper,
+        owner);
+    const auto& sparse_ghost = findGhost(
+        sparse_coarse_geometry,
+        cosmosim::hydro::HydroFaceAxis::kX,
+        cosmosim::hydro::HydroFaceSide::kUpper,
+        owner);
+    assertStateNear(
+        sparse_coarse.loadCell(sparse_ghost.ghost_cell),
+        dense_coarse.loadCell(dense_ghost.ghost_cell));
+  }
+
+  // Remove one cell from the second normal source layer. The sparse path must
+  // reject incomplete restriction rather than averaging a partial stencil.
+  std::vector<cosmosim::amr::AmrHydroSparseRemoteCell> incomplete_cells = complete_cells;
+  const std::size_t missing_offset = linearCellIndex(fine, 1U, 0U, 0U);
+  incomplete_cells.erase(
+      incomplete_cells.begin() + static_cast<std::ptrdiff_t>(missing_offset));
+  const cosmosim::amr::AmrHydroSparseGhostSource incomplete_remote{
+      .patch = &fine,
+      .owner_rank = 1,
+      .ghost_hydro_epoch = 9U,
+      .expected_ghost_hydro_epoch = 9U,
+      .source_current_state_time_code = 0.0,
+      .cells = incomplete_cells};
+  auto rejected_coarse_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      local_state, coarse, coarseFineOptions(cosmosim::hydro::HydroFaceSide::kUpper));
+  auto rejected_coarse = cosmosim::amr::loadAmrHydroConservedState(
+      local_state, rejected_coarse_geometry, k_gamma);
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> rejected_patches{
+      {.geometry = &rejected_coarse_geometry, .conserved = &rejected_coarse}};
+  bool threw = false;
+  try {
+    (void)cosmosim::amr::fillAmrHydroGhostCells(
+        rejected_patches,
+        std::span<const cosmosim::amr::AmrHydroSparseGhostSource>(&incomplete_remote, 1U),
+        k_gamma);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void testRejectsStaleRemoteGhostEpoch() {
   cosmosim::amr::PatchDescriptor patch;
   patch.patch_id = 21;
@@ -306,6 +434,7 @@ void testRejectsStaleRemoteGhostEpoch() {
 int main() {
   testSameLevelGhostFillInXyz();
   testSparseSameLevelRemoteGhostMatchesDenseReference();
+  testSparseFineToCoarseMatchesDenseReferenceAndRequiresCompleteStencil();
   testRejectsStaleRemoteGhostEpoch();
   return 0;
 }

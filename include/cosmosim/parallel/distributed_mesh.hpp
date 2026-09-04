@@ -169,6 +169,10 @@ struct AmrPatchCellPayloadRecord {
   double internal_energy_code = 0.0;
   double temperature_code = 0.0;
   double sound_speed_code = 0.0;
+  // Canonical gas metal mass carried by the transient distributed-hydro wire
+  // record. The receiver derives rho*Z using the same mass/density contract as
+  // the local AMR hydro path; this is not a restart-schema field.
+  double metal_mass_code = 0.0;
 };
 
 enum class AmrPatchBoundaryFace : std::uint8_t {
@@ -183,6 +187,10 @@ enum class AmrPatchBoundaryFace : std::uint8_t {
 struct AmrPatchBoundaryCellRequest {
   std::uint64_t patch_id = 0;
   std::uint8_t boundary_face_mask = 0U;
+  // Required source-cell depth for X-/X+/Y-/Y+/Z-/Z+ respectively. A set
+  // face bit must have a positive depth. Fine->coarse restriction may require
+  // more than one source layer; same-level and coarse->fine normally use one.
+  std::array<std::uint16_t, 6> boundary_face_depths{};
 };
 
 using DirectedAmrPatchCellPayloadProvider = std::function<void(
@@ -312,6 +320,12 @@ planDirectedAmrPatchBoundaryCellRequests(
     std::uint64_t logical_record_count,
     std::size_t transport_round_limit_bytes = 0U);
 
+[[nodiscard]] std::size_t directedAmrPatchBoundaryCellCount(
+    const AmrPatchPayloadRecord& patch,
+    const AmrPatchBoundaryCellRequest& request);
+
+// Compatibility helper for one-layer callers/tests. Production directed hydro
+// uses the depth-aware request overload above.
 [[nodiscard]] std::size_t directedAmrPatchBoundaryCellCount(
     const AmrPatchPayloadRecord& patch,
     std::uint8_t boundary_face_mask);

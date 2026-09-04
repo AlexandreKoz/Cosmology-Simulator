@@ -63,6 +63,9 @@ namespace {
   record.sound_speed_code = cell_index < state.gas_cells.sound_speed_code.size()
       ? state.gas_cells.sound_speed_code[cell_index]
       : 0.0;
+  record.metal_mass_code = cell_index < state.gas_cells.metal_mass_code.size()
+      ? state.gas_cells.metal_mass_code[cell_index]
+      : 0.0;
   parallel::validateAmrPatchCellPayloadRecord(record);
   return record;
 }
@@ -71,29 +74,46 @@ namespace {
   return static_cast<std::uint8_t>(face);
 }
 
-[[nodiscard]] bool offsetMatchesBoundaryMask(
-    std::uint32_t offset,
-    std::uint16_t nx,
-    std::uint16_t ny,
-    std::uint16_t nz,
-    std::uint8_t mask) {
-  if (nx == 0U || ny == 0U || nz == 0U) {
-    throw std::invalid_argument("AMR boundary payload requires positive patch cell dimensions");
+[[nodiscard]] std::size_t faceIndex(parallel::AmrPatchBoundaryFace face) noexcept {
+  switch (face) {
+    case parallel::AmrPatchBoundaryFace::kXLower: return 0U;
+    case parallel::AmrPatchBoundaryFace::kXUpper: return 1U;
+    case parallel::AmrPatchBoundaryFace::kYLower: return 2U;
+    case parallel::AmrPatchBoundaryFace::kYUpper: return 3U;
+    case parallel::AmrPatchBoundaryFace::kZLower: return 4U;
+    case parallel::AmrPatchBoundaryFace::kZUpper: return 5U;
   }
-  const std::uint64_t plane = static_cast<std::uint64_t>(nx) * static_cast<std::uint64_t>(ny);
-  const std::uint64_t cell_count = plane * static_cast<std::uint64_t>(nz);
-  if (offset >= cell_count) {
-    throw std::out_of_range("AMR boundary payload cell offset exceeds patch dimensions");
+  return 0U;
+}
+
+[[nodiscard]] std::uint16_t faceDepth(
+    const parallel::AmrPatchBoundaryCellRequest& request,
+    parallel::AmrPatchBoundaryFace face) {
+  const bool selected = (request.boundary_face_mask & faceBit(face)) != 0U;
+  const std::uint16_t depth = request.boundary_face_depths[faceIndex(face)];
+  if (selected && depth == 0U) {
+    throw std::invalid_argument("AMR boundary-cell request selected a face with zero depth");
   }
-  const std::uint32_t i = offset % nx;
-  const std::uint32_t j = (offset / nx) % ny;
-  const std::uint32_t k = static_cast<std::uint32_t>(offset / plane);
-  return ((mask & faceBit(parallel::AmrPatchBoundaryFace::kXLower)) != 0U && i == 0U) ||
-      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U && i + 1U == nx) ||
-      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kYLower)) != 0U && j == 0U) ||
-      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kYUpper)) != 0U && j + 1U == ny) ||
-      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kZLower)) != 0U && k == 0U) ||
-      ((mask & faceBit(parallel::AmrPatchBoundaryFace::kZUpper)) != 0U && k + 1U == nz);
+  if (!selected && depth != 0U) {
+    throw std::invalid_argument("AMR boundary-cell request carries depth for an unselected face");
+  }
+  return selected ? depth : 0U;
+}
+
+void mergeRequest(
+    parallel::AmrPatchBoundaryCellRequest& destination,
+    const parallel::AmrPatchBoundaryCellRequest& source) {
+  if (destination.patch_id == 0U) {
+    destination.patch_id = source.patch_id;
+  }
+  if (destination.patch_id != source.patch_id) {
+    throw std::invalid_argument("AMR boundary-cell request merge crossed patch identities");
+  }
+  destination.boundary_face_mask |= source.boundary_face_mask;
+  for (std::size_t face = 0; face < destination.boundary_face_depths.size(); ++face) {
+    destination.boundary_face_depths[face] = std::max(
+        destination.boundary_face_depths[face], source.boundary_face_depths[face]);
+  }
 }
 
 }  // namespace
@@ -165,22 +185,35 @@ void fillMigrationAmrPatchBoundaryCellPayloadChunk(
   }
   output.reserve(max_records);
 
-  std::unordered_map<std::uint64_t, std::uint8_t> mask_by_patch_id;
-  mask_by_patch_id.reserve(requests.size());
+  std::unordered_map<std::uint64_t, parallel::AmrPatchBoundaryCellRequest> request_by_patch_id;
+  request_by_patch_id.reserve(requests.size());
   for (const parallel::AmrPatchBoundaryCellRequest& request : requests) {
     if (request.patch_id == 0U || request.boundary_face_mask == 0U) {
       throw std::invalid_argument("AMR boundary-cell request must name a patch and at least one face");
     }
-    mask_by_patch_id[request.patch_id] |= request.boundary_face_mask;
+    auto [it, inserted] = request_by_patch_id.emplace(request.patch_id, request);
+    if (!inserted) {
+      mergeRequest(it->second, request);
+    }
   }
 
   std::uint64_t logical_index = 0U;
+  const auto emit = [&](std::size_t patch_index, std::uint32_t offset) -> bool {
+    if (logical_index++ < first_record) {
+      return false;
+    }
+    output.push_back(makePatchCellPayloadRecord(
+        state, patch_index, offset, world_rank));
+    return output.size() == max_records;
+  };
+
   for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
     const std::uint64_t patch_id = state.patches.patch_id[patch_index];
-    const auto request_it = mask_by_patch_id.find(patch_id);
-    if (request_it == mask_by_patch_id.end()) {
+    const auto request_it = request_by_patch_id.find(patch_id);
+    if (request_it == request_by_patch_id.end()) {
       continue;
     }
+    const auto& request = request_it->second;
     if (state.patches.owning_rank[patch_index] != static_cast<std::uint32_t>(world_rank)) {
       throw std::invalid_argument("AMR boundary-cell request selected a patch not owned by the local rank");
     }
@@ -197,53 +230,54 @@ void fillMigrationAmrPatchBoundaryCellPayloadChunk(
     if (geometry_cell_count != cell_count) {
       throw std::runtime_error("AMR boundary-cell payload build found cell_dims/cell_count mismatch");
     }
+
+    const std::size_t x_lower = faceDepth(request, parallel::AmrPatchBoundaryFace::kXLower);
+    const std::size_t x_upper = faceDepth(request, parallel::AmrPatchBoundaryFace::kXUpper);
+    const std::size_t y_lower = faceDepth(request, parallel::AmrPatchBoundaryFace::kYLower);
+    const std::size_t y_upper = faceDepth(request, parallel::AmrPatchBoundaryFace::kYUpper);
+    const std::size_t z_lower = faceDepth(request, parallel::AmrPatchBoundaryFace::kZLower);
+    const std::size_t z_upper = faceDepth(request, parallel::AmrPatchBoundaryFace::kZUpper);
+    if (x_lower > nx || x_upper > nx || y_lower > ny || y_upper > ny ||
+        z_lower > nz || z_upper > nz) {
+      throw std::invalid_argument("AMR boundary-cell request depth exceeds patch dimension");
+    }
+
     for (std::uint32_t k = 0; k < nz; ++k) {
+      const bool selected_z =
+          (z_lower != 0U && k < z_lower) ||
+          (z_upper != 0U && static_cast<std::size_t>(k) >= static_cast<std::size_t>(nz) - z_upper);
       for (std::uint32_t j = 0; j < ny; ++j) {
-        const bool whole_row =
-            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kYLower)) != 0U && j == 0U) ||
-            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kYUpper)) != 0U && j + 1U == ny) ||
-            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kZLower)) != 0U && k == 0U) ||
-            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kZUpper)) != 0U && k + 1U == nz);
+        const bool selected_y =
+            (y_lower != 0U && j < y_lower) ||
+            (y_upper != 0U && static_cast<std::size_t>(j) >= static_cast<std::size_t>(ny) - y_upper);
         const std::uint32_t row_base = nx * (j + static_cast<std::uint32_t>(ny) * k);
-        if (whole_row) {
+        if (selected_z || selected_y) {
           for (std::uint32_t i = 0; i < nx; ++i) {
-            if (logical_index++ < first_record) {
-              continue;
-            }
-            output.push_back(makePatchCellPayloadRecord(
-                state, patch_index, row_base + i, world_rank));
-            if (output.size() == max_records) {
+            if (emit(patch_index, row_base + i)) {
               return;
             }
           }
           continue;
         }
-        const bool lower_x =
-            (request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) != 0U;
-        const bool upper_x =
-            (request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U;
-        if (lower_x) {
-          if (logical_index++ >= first_record) {
-            output.push_back(makePatchCellPayloadRecord(state, patch_index, row_base, world_rank));
-            if (output.size() == max_records) {
-              return;
-            }
+
+        const std::size_t lower_count = std::min<std::size_t>(x_lower, nx);
+        for (std::size_t i = 0; i < lower_count; ++i) {
+          if (emit(patch_index, row_base + static_cast<std::uint32_t>(i))) {
+            return;
           }
         }
-        if (upper_x && (nx > 1U || !lower_x)) {
-          if (logical_index++ >= first_record) {
-            output.push_back(makePatchCellPayloadRecord(
-                state, patch_index, row_base + static_cast<std::uint32_t>(nx - 1U), world_rank));
-            if (output.size() == max_records) {
-              return;
-            }
+        const std::size_t upper_begin = std::max<std::size_t>(
+            lower_count, static_cast<std::size_t>(nx) - std::min<std::size_t>(x_upper, nx));
+        for (std::size_t i = upper_begin; i < nx; ++i) {
+          if (emit(patch_index, row_base + static_cast<std::uint32_t>(i))) {
+            return;
           }
         }
       }
     }
-    mask_by_patch_id.erase(request_it);
+    request_by_patch_id.erase(request_it);
   }
-  if (!mask_by_patch_id.empty()) {
+  if (!request_by_patch_id.empty()) {
     throw std::invalid_argument("AMR boundary-cell request referenced an unknown local patch_id");
   }
 }

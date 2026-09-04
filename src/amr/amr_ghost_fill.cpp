@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/hydro/hydro_boundary_conditions.hpp"
 
 namespace cosmosim::amr {
@@ -137,32 +138,105 @@ struct CellSelection {
                       (ijk[1] + static_cast<std::size_t>(patch.cell_dims[1]) * ijk[2]);
 }
 
-[[nodiscard]] bool centerInsideGhostVolume(
-    const PatchDescriptor& target_patch,
-    const hydro::HydroGhostCell& ghost,
-    const std::array<double, 3>& center) {
-  const auto owner_center = cellCenter(target_patch, ghost.owner_real_cell);
-  const auto target_widths = patchCellWidths(target_patch);
-  const int normal_axis = axisIndex(ghost.axis);
-  for (int axis = 0; axis < 3; ++axis) {
-    double mid = owner_center[axis];
-    if (axis == normal_axis) {
-      mid += sideSign(ghost.side) * target_widths[axis];
-    }
-    const double half_width = 0.5 * target_widths[axis] + k_geometry_tol;
-    if (center[axis] < mid - half_width || center[axis] >= mid + half_width) {
-      return false;
-    }
-  }
-  return true;
-}
-
 [[nodiscard]] std::array<double, 3> ghostProbePoint(
     const AmrHydroPatchGeometry& patch_geometry,
     const hydro::HydroGhostCell& ghost) {
   std::array<double, 3> point = cellCenter(patch_geometry.patch, ghost.owner_real_cell);
   point[axisIndex(ghost.axis)] += sideSign(ghost.side) * cellWidth(patch_geometry.geometry, ghost.axis);
   return point;
+}
+
+
+[[nodiscard]] std::size_t alignedGhostBoundaryIndex(
+    double coordinate,
+    double source_origin,
+    double source_width,
+    std::size_t source_dim,
+    bool upper_boundary) {
+  if (!(source_width > 0.0) || !std::isfinite(coordinate) ||
+      !std::isfinite(source_origin) || !std::isfinite(source_width)) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine-to-coarse source geometry is non-finite or degenerate");
+  }
+  const double scaled = (coordinate - source_origin) / source_width;
+  const double rounded = std::round(scaled);
+  const double tolerance = 1.0e-9 * std::max(1.0, std::abs(scaled));
+  if (std::abs(scaled - rounded) > tolerance) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine-to-coarse ghost volume is not aligned to source-cell boundaries");
+  }
+  if (rounded < 0.0 || rounded > static_cast<double>(source_dim)) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine source patch does not cover the complete coarse ghost volume");
+  }
+  const std::size_t index = static_cast<std::size_t>(rounded);
+  if ((!upper_boundary && index >= source_dim) || (upper_boundary && index == 0U)) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine source range for coarse ghost is empty");
+  }
+  return index;
+}
+
+[[nodiscard]] std::vector<std::size_t> requiredFineSourceCellsForGhost(
+    const PatchDescriptor& target_patch,
+    const hydro::HydroGhostCell& ghost,
+    const PatchDescriptor& source_patch) {
+  if (source_patch.level <= target_patch.level) {
+    throw std::logic_error(
+        "fillAmrHydroGhostCells: complete fine-source stencil requested from a non-fine patch");
+  }
+  const auto owner_center = cellCenter(target_patch, ghost.owner_real_cell);
+  const auto target_widths = patchCellWidths(target_patch);
+  const auto source_widths = patchCellWidths(source_patch);
+  const int normal_axis = axisIndex(ghost.axis);
+
+  std::array<std::size_t, 3> begin{};
+  std::array<std::size_t, 3> end{};
+  for (int axis = 0; axis < 3; ++axis) {
+    double ghost_center = owner_center[axis];
+    if (axis == normal_axis) {
+      ghost_center += sideSign(ghost.side) * target_widths[axis];
+    }
+    const double lower = ghost_center - 0.5 * target_widths[axis];
+    const double upper = ghost_center + 0.5 * target_widths[axis];
+    const std::size_t dim = source_patch.cell_dims[axis];
+    begin[axis] = alignedGhostBoundaryIndex(
+        lower, source_patch.origin_comov[axis], source_widths[axis], dim, false);
+    end[axis] = alignedGhostBoundaryIndex(
+        upper, source_patch.origin_comov[axis], source_widths[axis], dim, true);
+    if (end[axis] <= begin[axis]) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: fine-to-coarse source stencil has an empty aligned axis");
+    }
+  }
+
+  const std::size_t nx = source_patch.cell_dims[0];
+  const std::size_t ny = source_patch.cell_dims[1];
+  const std::size_t count_x = end[0] - begin[0];
+  const std::size_t count_y = end[1] - begin[1];
+  const std::size_t count_z = end[2] - begin[2];
+  const std::size_t expected_count = core::checkedSizeProduct3(
+      count_x, count_y, count_z,
+      "fillAmrHydroGhostCells fine-to-coarse required source count");
+  if (expected_count == 0U) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine-to-coarse source stencil contains no cells");
+  }
+
+  std::vector<std::size_t> cells;
+  cells.reserve(expected_count);
+  for (std::size_t k = begin[2]; k < end[2]; ++k) {
+    for (std::size_t j = begin[1]; j < end[1]; ++j) {
+      for (std::size_t i = begin[0]; i < end[0]; ++i) {
+        cells.push_back(i + nx * (j + ny * k));
+      }
+    }
+  }
+  if (cells.size() != expected_count) {
+    throw std::logic_error(
+        "fillAmrHydroGhostCells: complete fine-source stencil enumeration mismatch");
+  }
+  return cells;
 }
 
 void validatePatchView(const AmrHydroGhostFillPatch& patch) {
@@ -251,15 +325,12 @@ void requireSourceCellAvailable(
       return selection;
     }
 
-    for (std::size_t cell = 0; cell < candidate.geometry->geometry.cellCount(); ++cell) {
-      if (centerInsideGhostVolume(target_patch, ghost, cellCenter(source_patch, cell))) {
-        requireSourceCellAvailable(candidate, cell);
-        selection.cells.push_back(cell);
-      }
+    selection.cells = requiredFineSourceCellsForGhost(
+        target_patch, ghost, source_patch);
+    for (const std::size_t cell : selection.cells) {
+      requireSourceCellAvailable(candidate, cell);
     }
-    if (!selection.cells.empty()) {
-      return selection;
-    }
+    return selection;
   }
 
   for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
@@ -294,18 +365,15 @@ void requireSourceCellAvailable(
       selection.cells.push_back(source_cell);
       return selection;
     }
-    for (const AmrHydroSparseRemoteCell& cell : candidate.cells) {
-      if (centerInsideGhostVolume(
-              target_patch,
-              ghost,
-              cellCenter(source_patch, cell.patch_local_cell))) {
-        selection.cells.push_back(cell.patch_local_cell);
+    selection.cells = requiredFineSourceCellsForGhost(
+        target_patch, ghost, source_patch);
+    for (const std::size_t required_cell : selection.cells) {
+      if (findSparseRemoteCell(candidate, required_cell) == nullptr) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: sparse remote fine-to-coarse payload is missing a required source cell");
       }
     }
-    if (!selection.cells.empty()) {
-      return selection;
-    }
-    selection.sparse_remote = nullptr;
+    return selection;
   }
 
   return selection;

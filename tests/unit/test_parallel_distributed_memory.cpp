@@ -209,6 +209,7 @@ void testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces() {
           static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U);
   assert((local_requests[0].boundary_face_mask &
           static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) == 0U);
+  assert(local_requests[0].boundary_face_depths[1] == 1U);
 
   const auto reverse_requests =
       parallel::planDirectedAmrPatchBoundaryCellRequests(
@@ -217,6 +218,7 @@ void testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces() {
   assert(reverse_requests.size() == 1U);
   assert((reverse_requests[0].boundary_face_mask &
           static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) != 0U);
+  assert(reverse_requests[0].boundary_face_depths[0] == 1U);
 
   auto edge_only = x_neighbor;
   edge_only.patch_id = 303U;
@@ -226,6 +228,63 @@ void testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces() {
           std::span<const parallel::AmrPatchPayloadRecord>(&local, 1U),
           std::span<const parallel::AmrPatchPayloadRecord>(&edge_only, 1U));
   assert(edge_requests.empty());
+
+  // Fine source -> coarse target needs enough source layers to cover one
+  // coarse ghost-cell width. Keep the face area fixed while changing the
+  // source-patch depth to prove the request remains surface/depth scaled.
+  parallel::AmrPatchPayloadRecord coarse = local;
+  coarse.patch_id = 404U;
+  coarse.owner_rank = 1;
+  coarse.cell_count = 8U;
+  coarse.cell_dim_x = 2U;
+  coarse.cell_dim_y = 2U;
+  coarse.cell_dim_z = 2U;
+  coarse.level = 0U;
+
+  parallel::AmrPatchPayloadRecord fine_shallow{
+      .patch_id = 505U,
+      .owner_rank = 0,
+      .level = 1U,
+      .cell_count = 4U * 64U * 64U,
+      .origin_x_comoving = 1.0,
+      .origin_y_comoving = 0.0,
+      .origin_z_comoving = 0.0,
+      .extent_x_comoving = 1.0,
+      .extent_y_comoving = 1.0,
+      .extent_z_comoving = 1.0,
+      .cell_dim_x = 4U,
+      .cell_dim_y = 64U,
+      .cell_dim_z = 64U};
+  const auto fine_requests = parallel::planDirectedAmrPatchBoundaryCellRequests(
+      std::span<const parallel::AmrPatchPayloadRecord>(&fine_shallow, 1U),
+      std::span<const parallel::AmrPatchPayloadRecord>(&coarse, 1U));
+  assert(fine_requests.size() == 1U);
+  assert((fine_requests[0].boundary_face_mask &
+          static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) != 0U);
+  assert(fine_requests[0].boundary_face_depths[0] == 2U);
+  const std::size_t shallow_count = parallel::directedAmrPatchBoundaryCellCount(
+      fine_shallow, fine_requests[0]);
+  assert(shallow_count == 2U * 64U * 64U);
+
+  parallel::AmrPatchPayloadRecord fine_deep = fine_shallow;
+  fine_deep.patch_id = 506U;
+  fine_deep.cell_dim_x = 128U;
+  fine_deep.cell_count = 128U * 64U * 64U;
+  fine_deep.extent_x_comoving = 32.0;  // preserves the 0.25 source-cell width
+  const auto deep_requests = parallel::planDirectedAmrPatchBoundaryCellRequests(
+      std::span<const parallel::AmrPatchPayloadRecord>(&fine_deep, 1U),
+      std::span<const parallel::AmrPatchPayloadRecord>(&coarse, 1U));
+  assert(deep_requests.size() == 1U);
+  assert(deep_requests[0].boundary_face_depths[0] == 2U);
+  const std::size_t deep_count = parallel::directedAmrPatchBoundaryCellCount(
+      fine_deep, deep_requests[0]);
+  assert(deep_count == shallow_count);
+
+  const auto coarse_requests = parallel::planDirectedAmrPatchBoundaryCellRequests(
+      std::span<const parallel::AmrPatchPayloadRecord>(&coarse, 1U),
+      std::span<const parallel::AmrPatchPayloadRecord>(&fine_shallow, 1U));
+  assert(coarse_requests.size() == 1U);
+  assert(coarse_requests[0].boundary_face_depths[1] == 1U);
 }
 
 void testGhostPackUnpackRoundTrip() {

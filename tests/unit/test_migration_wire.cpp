@@ -1,10 +1,12 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "workflows/internal/amr_migration_payload.hpp"
 #include "workflows/internal/migration_wire.hpp"
 
 namespace {
@@ -158,6 +160,64 @@ void testPacketCapacityIsIndependentOfLogicalTraffic() {
   assert(capacity_for_thousand == capacity_for_billion);
 }
 
+void testAmrBoundaryPayloadCarriesDepthAndCanonicalMetalMass() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(2U);
+  state.resizePatches(1U);
+  state.patches.patch_id[0] = 77U;
+  state.patches.level[0] = 1;
+  state.patches.morton_key[0] = 77U;
+  state.patches.origin_x_comoving[0] = 1.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] = 0.5;
+  state.patches.extent_y_comoving[0] = 1.0;
+  state.patches.extent_z_comoving[0] = 1.0;
+  state.patches.cell_dim_x[0] = 2U;
+  state.patches.cell_dim_y[0] = 1U;
+  state.patches.cell_dim_z[0] = 1U;
+  state.patches.first_cell[0] = 0U;
+  state.patches.cell_count[0] = 2U;
+  state.patches.owning_rank[0] = 0U;
+
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities;
+  for (std::uint32_t row = 0U; row < 2U; ++row) {
+    state.cells.patch_index[row] = 0U;
+    state.cells.center_x_comoving[row] = 1.125 + 0.25 * static_cast<double>(row);
+    state.cells.center_y_comoving[row] = 0.5;
+    state.cells.center_z_comoving[row] = 0.5;
+    state.cells.mass_code[row] = 2.0 + static_cast<double>(row);
+    state.gas_cells.gas_cell_id[row] = 8001U + row;
+    state.gas_cells.density_code[row] = 8.0 + static_cast<double>(row);
+    state.gas_cells.pressure_code[row] = 3.0;
+    state.gas_cells.internal_energy_code[row] = 1.0;
+    state.gas_cells.temperature_code[row] = 2.0;
+    state.gas_cells.sound_speed_code[row] = 1.0;
+    state.gas_cells.metal_mass_code[row] = 0.2 + 0.1 * static_cast<double>(row);
+    identities.push_back(cosmosim::core::GasCellIdentityRecord{
+        .gas_cell_id = 8001U + row,
+        .parent_particle_id = std::nullopt,
+        .owning_patch_id = 77U,
+        .local_cell_row = row});
+  }
+  state.gas_cell_identity.assign(std::move(identities));
+
+  cosmosim::parallel::AmrPatchBoundaryCellRequest request;
+  request.patch_id = 77U;
+  request.boundary_face_mask = static_cast<std::uint8_t>(
+      cosmosim::parallel::AmrPatchBoundaryFace::kXLower);
+  request.boundary_face_depths[0] = 2U;
+  std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> payload;
+  cosmosim::workflows::internal::fillMigrationAmrPatchBoundaryCellPayloadChunk(
+      state, 0, std::span<const cosmosim::parallel::AmrPatchBoundaryCellRequest>(&request, 1U),
+      0U, 8U, payload);
+  assert(payload.size() == 2U);
+  assert(payload[0].local_cell_offset == 0U);
+  assert(payload[1].local_cell_offset == 1U);
+  assert(payload[0].metal_mass_code == state.gas_cells.metal_mass_code[0]);
+  assert(payload[1].metal_mass_code == state.gas_cells.metal_mass_code[1]);
+}
+
 }  // namespace
 
 int main() {
@@ -165,5 +225,6 @@ int main() {
   testSpeciesPayloadRoundTrips();
   testTruncatedAndFragmentPacketsFailClosed();
   testPacketCapacityIsIndependentOfLogicalTraffic();
+  testAmrBoundaryPayloadCarriesDepthAndCanonicalMetalMass();
   return 0;
 }

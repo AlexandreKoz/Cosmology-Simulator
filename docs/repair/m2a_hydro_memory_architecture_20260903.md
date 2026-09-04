@@ -199,3 +199,43 @@ The restart-compatible `pressure_code`, `temperature_code`, and
 `sound_speed_code` lanes remain `PersistentCache` in M2A.2. Their 24 B/gas-cell
 persistent cost and any future rematerialization/schema migration remain a
 separate performance/restart campaign and are not silently changed here.
+
+## M2A.3 final distributed-hydro correctness addendum — 2026-09-04
+
+Post-M2A.2 adversarial review found that the sparse remote boundary protocol
+requested exactly one source layer per face. That is sufficient for same-level
+and the current coarse-to-fine interpolation path, but it is insufficient when
+a fine remote source supplies a coarse local ghost: one coarse ghost-cell width
+covers multiple fine layers. The sparse selector also accepted whichever fine
+records happened to be present, allowing an incomplete restriction stencil to
+produce a plausible but incorrect average.
+
+M2A.3 closes that correctness gap while preserving the M2A.2 bounded-memory
+contract:
+
+- `AmrPatchBoundaryCellRequest` now carries a compact per-face source depth.
+  The planner derives the depth from the actual target/source cell-width ratio;
+  a normal 2:1 fine-to-coarse interface requests two fine source layers, while
+  same-level and coarse-to-fine requests remain one layer.
+- Boundary payload counting, streamed production, and receive validation honor
+  the per-face depth and union overlapping face slabs without constructing a
+  full remote patch representation.
+- Fine-to-coarse ghost selection independently derives the complete aligned
+  source-cell index range for the target coarse ghost and requires every sparse
+  offset before averaging. Missing second-layer state now fails deterministically
+  instead of performing partial restriction.
+- The transient distributed-hydro cell record now carries canonical
+  `metal_mass_code`. The sparse receiver reconstructs the passive conserved
+  metal lane using the same `metal_mass_code / mass_code` mass-fraction contract
+  as local AMR hydro. This changes only the MPI transient wire record; HDF5
+  snapshot/restart schema is unchanged.
+
+The resulting residency law remains bounded communication workspace plus
+`O(interface_area * required_normal_source_depth)` sparse source state and
+`O(remote interfaces)` metadata. M2A.3 does not reintroduce dense remote patch
+hydro state, remote solver topology, or full logical receive buffers.
+
+Live multi-rank certification still requires the repository's authoritative MPI
+preset on a host with MPI C++ development support. The source contract and
+serial dense-vs-sparse regressions are intended to fail closed until that
+external runtime evidence is available.
