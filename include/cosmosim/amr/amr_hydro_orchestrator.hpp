@@ -75,9 +75,7 @@ struct DistributedAmrRemotePatch {
   int owner_rank = 0;
   std::uint64_t ghost_hydro_epoch = 0;
   std::uint64_t expected_ghost_hydro_epoch = 0;
-  std::vector<std::uint64_t> gas_cell_ids;
-  std::vector<hydro::HydroConservedState> conserved_cells;
-  std::vector<std::uint8_t> available_cells;
+  std::vector<AmrHydroSparseRemoteCell> boundary_cells;
 };
 
 struct DistributedAmrHydroExchange {

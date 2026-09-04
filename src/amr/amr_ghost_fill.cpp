@@ -21,8 +21,34 @@ constexpr double k_time_tol = 1.0e-12;
 
 struct CellSelection {
   const AmrHydroGhostFillPatch* patch = nullptr;
+  const AmrHydroSparseGhostSource* sparse_remote = nullptr;
   std::vector<std::size_t> cells;
 };
+
+[[nodiscard]] const PatchDescriptor& selectionPatch(const CellSelection& selection) {
+  if (selection.patch != nullptr) {
+    return selection.patch->geometry->patch;
+  }
+  if (selection.sparse_remote != nullptr && selection.sparse_remote->patch != nullptr) {
+    return *selection.sparse_remote->patch;
+  }
+  throw std::logic_error("fillAmrHydroGhostCells: empty source selection");
+}
+
+[[nodiscard]] const AmrHydroSparseRemoteCell* findSparseRemoteCell(
+    const AmrHydroSparseGhostSource& source,
+    std::size_t patch_local_cell) {
+  const auto it = std::lower_bound(
+      source.cells.begin(), source.cells.end(), patch_local_cell,
+      [](const AmrHydroSparseRemoteCell& cell, std::size_t offset) {
+        return static_cast<std::size_t>(cell.patch_local_cell) < offset;
+      });
+  if (it == source.cells.end() ||
+      static_cast<std::size_t>(it->patch_local_cell) != patch_local_cell) {
+    return nullptr;
+  }
+  return &*it;
+}
 
 [[nodiscard]] double cellWidth(
     const hydro::HydroPatchGeometry& geometry,
@@ -186,7 +212,8 @@ void requireSourceCellAvailable(
     const AmrHydroGhostFillPatch& target,
     const hydro::HydroGhostCell& ghost,
     AmrHydroBoundaryClass boundary_class,
-    std::span<AmrHydroGhostFillPatch> patches) {
+    std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources) {
   const auto probe = ghostProbePoint(*target.geometry, ghost);
   CellSelection selection;
 
@@ -235,16 +262,91 @@ void requireSourceCellAvailable(
     }
   }
 
+  for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
+    if (candidate.patch == nullptr) {
+      continue;
+    }
+    const PatchDescriptor& source_patch = *candidate.patch;
+    const PatchDescriptor& target_patch = target.geometry->patch;
+    if (source_patch.patch_id == target_patch.patch_id ||
+        !containsPoint(source_patch, probe)) {
+      continue;
+    }
+    const bool same_level =
+        source_patch.level == target_patch.level &&
+        boundary_class == AmrHydroBoundaryClass::kSameLevel;
+    const bool coarse_to_fine =
+        source_patch.level < target_patch.level &&
+        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
+    const bool fine_to_coarse =
+        source_patch.level > target_patch.level &&
+        boundary_class == AmrHydroBoundaryClass::kCoarseFine;
+    if (!same_level && !coarse_to_fine && !fine_to_coarse) {
+      continue;
+    }
+    selection.sparse_remote = &candidate;
+    if (same_level || coarse_to_fine) {
+      const std::size_t source_cell = cellContainingPoint(source_patch, probe);
+      if (findSparseRemoteCell(candidate, source_cell) == nullptr) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: sparse remote interface payload is missing a required source cell");
+      }
+      selection.cells.push_back(source_cell);
+      return selection;
+    }
+    for (const AmrHydroSparseRemoteCell& cell : candidate.cells) {
+      if (centerInsideGhostVolume(
+              target_patch,
+              ghost,
+              cellCenter(source_patch, cell.patch_local_cell))) {
+        selection.cells.push_back(cell.patch_local_cell);
+      }
+    }
+    if (!selection.cells.empty()) {
+      return selection;
+    }
+    selection.sparse_remote = nullptr;
+  }
+
   return selection;
 }
 
 [[nodiscard]] hydro::HydroConservedState averageSourceState(const CellSelection& selection) {
   hydro::HydroConservedState state;
   for (const std::size_t cell : selection.cells) {
-    state += selection.patch->conserved->loadCell(cell);
+    if (selection.patch != nullptr) {
+      state += selection.patch->conserved->loadCell(cell);
+    } else {
+      const AmrHydroSparseRemoteCell* remote_cell =
+          findSparseRemoteCell(*selection.sparse_remote, cell);
+      if (remote_cell == nullptr) {
+        throw std::runtime_error(
+            "fillAmrHydroGhostCells: sparse remote source disappeared during ghost averaging");
+      }
+      state += remote_cell->conserved;
+    }
   }
   const double inv_count = 1.0 / static_cast<double>(selection.cells.size());
   return inv_count * state;
+}
+
+[[nodiscard]] bool selectionIsStale(const CellSelection& selection) {
+  if (selection.patch != nullptr) {
+    return staleRemotePatch(*selection.patch);
+  }
+  return selection.sparse_remote != nullptr &&
+      selection.sparse_remote->ghost_hydro_epoch !=
+          selection.sparse_remote->expected_ghost_hydro_epoch;
+}
+
+[[nodiscard]] double selectionSourceTime(const CellSelection& selection) {
+  return selection.patch != nullptr
+      ? selection.patch->source_current_state_time_code
+      : selection.sparse_remote->source_current_state_time_code;
+}
+
+[[nodiscard]] bool selectionIsSparseRemote(const CellSelection& selection) noexcept {
+  return selection.sparse_remote != nullptr;
 }
 
 [[nodiscard]] bool finiteConserved(const hydro::HydroConservedState& state) {
@@ -363,13 +465,15 @@ void fillAmrGhost(
     AmrHydroGhostFillPatch& target,
     AmrHydroGhostDescriptor& descriptor,
     std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
     double adiabatic_index,
     AmrHydroGhostFillDiagnostics& diagnostics) {
   const hydro::HydroGhostCell& ghost =
       target.geometry->geometry.ghost_cells.at(descriptor.ghost_slot);
   const CellSelection selection =
-      selectSourceCells(target, ghost, descriptor.boundary_class, patches);
-  if (selection.patch == nullptr || selection.cells.empty()) {
+      selectSourceCells(target, ghost, descriptor.boundary_class, patches, remote_sources);
+  if ((selection.patch == nullptr && selection.sparse_remote == nullptr) ||
+      selection.cells.empty()) {
     descriptor.fill_status = AmrHydroGhostFillStatus::kMissingSource;
     ++diagnostics.missing_source_records;
     ++diagnostics.unresolved_ghosts;
@@ -377,18 +481,19 @@ void fillAmrGhost(
         "fillAmrHydroGhostCells: unresolved AMR hydro ghost for patch " +
         std::to_string(target.geometry->patch.patch_id));
   }
-  if (staleRemotePatch(*selection.patch)) {
+  if (selectionIsStale(selection)) {
     descriptor.fill_status = AmrHydroGhostFillStatus::kRejectedStaleRemote;
     ++diagnostics.stale_epoch_rejections;
     ++diagnostics.unresolved_ghosts;
     throw std::runtime_error("fillAmrHydroGhostCells: stale source AMR hydro ghost epoch");
   }
 
-  const bool same_level = selection.patch->geometry->patch.level == target.geometry->patch.level;
-  const bool coarse_to_fine = selection.patch->geometry->patch.level < target.geometry->patch.level;
-  const bool fine_to_coarse = selection.patch->geometry->patch.level > target.geometry->patch.level;
+  const PatchDescriptor& source_patch = selectionPatch(selection);
+  const bool same_level = source_patch.level == target.geometry->patch.level;
+  const bool coarse_to_fine = source_patch.level < target.geometry->patch.level;
+  const bool fine_to_coarse = source_patch.level > target.geometry->patch.level;
   if (same_level) {
-    if (!timesMatch(selection.patch->source_current_state_time_code, target.ghost_fill_time_code)) {
+    if (!timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalSameLevelMismatch,
@@ -402,7 +507,7 @@ void fillAmrGhost(
     return;
   }
   if (fine_to_coarse) {
-    if (!timesMatch(selection.patch->source_current_state_time_code, target.ghost_fill_time_code)) {
+    if (!timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalFineToCoarseMismatch,
@@ -417,8 +522,9 @@ void fillAmrGhost(
   }
 
   if (coarse_to_fine && target.enable_temporal_coarse_to_fine) {
-    if (selection.patch->residency == AmrGhostSourceResidency::kRemoteReadOnly &&
-        selection.patch->temporal_boundary_history == nullptr) {
+    if (selectionIsSparseRemote(selection) ||
+        (selection.patch->residency == AmrGhostSourceResidency::kRemoteReadOnly &&
+         selection.patch->temporal_boundary_history == nullptr)) {
       rejectTemporal(
           descriptor,
           AmrHydroGhostFillStatus::kRejectedTemporalHistoryMissing,
@@ -472,7 +578,7 @@ void fillAmrGhost(
     return;
   }
 
-  if (coarse_to_fine && !timesMatch(selection.patch->source_current_state_time_code, target.ghost_fill_time_code)) {
+  if (coarse_to_fine && !timesMatch(selectionSourceTime(selection), target.ghost_fill_time_code)) {
     rejectTemporal(
         descriptor,
         AmrHydroGhostFillStatus::kRejectedTemporalHistoryMissing,
@@ -648,10 +754,40 @@ void retireAmrTemporalBoundaryHistory(core::SimulationState& state) {
 
 AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
     std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
     double adiabatic_index) {
   AmrHydroGhostFillDiagnostics diagnostics;
   for (const AmrHydroGhostFillPatch& patch : patches) {
     validatePatchView(patch);
+  }
+  for (const AmrHydroSparseGhostSource& source : remote_sources) {
+    if (source.patch == nullptr) {
+      throw std::invalid_argument(
+          "fillAmrHydroGhostCells: sparse remote source is missing its patch descriptor");
+    }
+    if (!std::isfinite(source.source_current_state_time_code)) {
+      throw std::invalid_argument(
+          "fillAmrHydroGhostCells: sparse remote source time must be finite");
+    }
+    const std::size_t patch_cell_count =
+        static_cast<std::size_t>(source.patch->cell_dims[0]) *
+        static_cast<std::size_t>(source.patch->cell_dims[1]) *
+        static_cast<std::size_t>(source.patch->cell_dims[2]);
+    std::size_t previous_offset = 0U;
+    bool have_previous = false;
+    for (const AmrHydroSparseRemoteCell& cell : source.cells) {
+      const std::size_t offset = cell.patch_local_cell;
+      if (offset >= patch_cell_count || cell.gas_cell_id == 0U) {
+        throw std::invalid_argument(
+            "fillAmrHydroGhostCells: sparse remote cell is outside its patch or has zero identity");
+      }
+      if (have_previous && offset <= previous_offset) {
+        throw std::invalid_argument(
+            "fillAmrHydroGhostCells: sparse remote cells must be strictly sorted by patch-local offset");
+      }
+      previous_offset = offset;
+      have_previous = true;
+    }
   }
 
   for (AmrHydroGhostFillPatch& patch : patches) {
@@ -669,10 +805,17 @@ AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
         ++diagnostics.physical_ghosts_filled;
         continue;
       }
-      fillAmrGhost(patch, ghost, patches, adiabatic_index, diagnostics);
+      fillAmrGhost(
+          patch, ghost, patches, remote_sources, adiabatic_index, diagnostics);
     }
   }
   return diagnostics;
+}
+
+AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
+    std::span<AmrHydroGhostFillPatch> patches,
+    double adiabatic_index) {
+  return fillAmrHydroGhostCells(patches, {}, adiabatic_index);
 }
 
 }  // namespace cosmosim::amr

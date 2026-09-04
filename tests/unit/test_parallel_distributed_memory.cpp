@@ -64,6 +64,40 @@ void testBoundedMpiTransferPlannerSyntheticLimits() {
   }
   assert(planned_bytes == logical_bytes_over_classic_mpi_limit);
 
+  // Exercise the exact production planner used by the streamed directed-AMR
+  // patch-cell transport, not merely the generic byte planner. The logical
+  // payload exceeds classic MPI_INT bytes, but every physical record round
+  // must remain bounded by the configured transport window.
+  const auto production_amr_rounds =
+      parallel::planDirectedAmrPatchCellTransferRounds(
+          static_cast<std::uint64_t>(records_over_classic_mpi_limit),
+          transport_round_bytes);
+  assert(production_amr_rounds.size() > 1U);
+  std::uint64_t planned_records = 0U;
+  const std::size_t max_records_per_round = transport_round_bytes / record_bytes;
+  for (const std::size_t records : production_amr_rounds) {
+    assert(records > 0U);
+    assert(records <= max_records_per_round);
+    const std::size_t bytes = cosmosim::core::checkedSizeMultiply(
+        records, record_bytes, "production directed AMR round bytes");
+    assert(bytes <= transport_round_bytes);
+    assert(bytes <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
+    planned_records += static_cast<std::uint64_t>(records);
+  }
+  assert(planned_records == records_over_classic_mpi_limit);
+
+  // A much larger logical transfer still uses the same physical per-round
+  // ceiling. This is the non-MPI regression for logical-size/physical-workspace
+  // separation; the MPI integration test exercises the actual Sendrecv path.
+  const std::uint64_t much_larger_logical_records =
+      static_cast<std::uint64_t>(max_records_per_round) * 17U + 3U;
+  const auto bounded_rounds = parallel::planDirectedAmrPatchCellTransferRounds(
+      much_larger_logical_records, transport_round_bytes);
+  assert(bounded_rounds.size() == 18U);
+  for (const std::size_t records : bounded_rounds) {
+    assert(records <= max_records_per_round);
+  }
+
   // Each peer is individually representable under the synthetic MPI limit,
   // while the aggregate is not. The planner must split the logical exchange
   // without dropping or duplicating any logical element.

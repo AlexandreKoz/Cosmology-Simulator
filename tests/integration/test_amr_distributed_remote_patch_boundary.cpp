@@ -97,13 +97,13 @@ void setCell(
   remote.owner_rank = 0;
   remote.ghost_hydro_epoch = 7;
   remote.expected_ghost_hydro_epoch = 7;
-  // M2A.1 sparse remote contract: only the coarse patch face touching the
-  // local fine patch is resident. Offset 0 is deliberately unavailable.
-  remote.gas_cell_ids = {0U, 9002U};
-  remote.available_cells = {0U, 1U};
-  remote.conserved_cells.resize(2U);
-  remote.conserved_cells[1] = cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
-      {.rho_comoving = 0.9, .vel_x_peculiar = 0.35, .pressure_comoving = 0.9}, k_gamma);
+  // M2A.2 sparse remote contract: only the coarse patch face touching the
+  // local fine patch exists in memory. Offset 0 has no placeholder state.
+  remote.boundary_cells.push_back(cosmosim::amr::AmrHydroSparseRemoteCell{
+      .patch_local_cell = 1U,
+      .gas_cell_id = 9002U,
+      .conserved = cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
+          {.rho_comoving = 0.9, .vel_x_peculiar = 0.35, .pressure_comoving = 0.9}, k_gamma)});
   return remote;
 }
 
@@ -151,6 +151,120 @@ void testRemoteCoarseGhostProducesRemoteRefluxRegister() {
   assert(saw_remote_coarse_target);
 }
 
+void testSparseRemoteResidencyTracksInterfaceAreaNotPatchVolume() {
+  constexpr std::size_t face_cells = 64U * 64U;
+  auto make_sparse_patch = [](std::uint64_t patch_id, std::uint16_t depth) {
+    cosmosim::amr::DistributedAmrRemotePatch remote;
+    remote.patch = cosmosim::amr::PatchDescriptor{
+        .patch_id = patch_id,
+        .level = 0,
+        .morton_key = patch_id,
+        .origin_comov = {0.0, 0.0, 0.0},
+        .extent_comov = {1.0, 1.0, 1.0},
+        .cell_dims = {depth, 64U, 64U}};
+    remote.owner_rank = 0;
+    remote.boundary_cells.reserve(face_cells);
+    for (std::uint32_t k = 0; k < 64U; ++k) {
+      for (std::uint32_t j = 0; j < 64U; ++j) {
+        const std::uint32_t offset =
+            static_cast<std::uint32_t>(depth - 1U) +
+            static_cast<std::uint32_t>(depth) * (j + 64U * k);
+        remote.boundary_cells.push_back(cosmosim::amr::AmrHydroSparseRemoteCell{
+            .patch_local_cell = offset,
+            .gas_cell_id = 100000U + static_cast<std::uint64_t>(j + 64U * k),
+            .conserved = cosmosim::hydro::HydroCoreSolver::conservedFromPrimitive(
+                {.rho_comoving = 1.0, .vel_x_peculiar = 0.0, .pressure_comoving = 1.0},
+                k_gamma)});
+      }
+    }
+    return remote;
+  };
+
+  auto shallow = make_sparse_patch(301U, 4U);
+  auto deep = make_sparse_patch(302U, 128U);
+  assert(shallow.boundary_cells.size() == face_cells);
+  assert(deep.boundary_cells.size() == face_cells);
+  assert(shallow.boundary_cells.capacity() == deep.boundary_cells.capacity());
+  const std::size_t shallow_bytes = shallow.boundary_cells.capacity() *
+      sizeof(cosmosim::amr::AmrHydroSparseRemoteCell);
+  const std::size_t deep_bytes = deep.boundary_cells.capacity() *
+      sizeof(cosmosim::amr::AmrHydroSparseRemoteCell);
+  assert(shallow_bytes == deep_bytes);
+  assert(static_cast<std::uint64_t>(shallow.patch.cell_dims[0]) * 64U * 64U !=
+         static_cast<std::uint64_t>(deep.patch.cell_dims[0]) * 64U * 64U);
+}
+
+void testMissingSparseRemoteCellFailsDeterministically() {
+  cosmosim::core::SimulationState state = makeFineRankState();
+  cosmosim::amr::DistributedAmrRemotePatch remote = makeRemoteCoarsePatch();
+  remote.boundary_cells.clear();
+  std::vector<cosmosim::amr::FluxRegisterEntry> outbound;
+  cosmosim::hydro::HydroCoreSolver solver(k_gamma);
+  cosmosim::hydro::HlleRiemannSolver riemann;
+  const cosmosim::hydro::HydroUpdateContext update{.dt_code = 1.0e-5, .scale_factor = 1.0};
+  bool threw = false;
+  try {
+    (void)cosmosim::amr::advanceDistributedProductionAmrHydro(
+        state,
+        std::vector<std::uint32_t>{0U, 1U},
+        update,
+        {.update = update},
+        solver,
+        riemann,
+        {},
+        cosmosim::amr::ProductionAmrHydroOptions{
+            .physical_boundary_kind = cosmosim::hydro::HydroBoundaryKind::kOpen,
+            .adiabatic_index = k_gamma,
+            .density_floor = 1.0e-12,
+            .pressure_floor = 1.0e-12,
+            .state_time_code = 0.0,
+            .ghost_fill_time_code = 0.0},
+        cosmosim::amr::DistributedAmrHydroExchange{
+            .local_rank = 1,
+            .ghost_hydro_epoch = 7,
+            .expected_ghost_hydro_epoch = 7,
+            .remote_patches = std::span<const cosmosim::amr::DistributedAmrRemotePatch>(&remote, 1),
+            .outbound_remote_flux_registers = &outbound});
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void testSparseRemoteCapacityStableAcrossRepeatedHydroSteps() {
+  cosmosim::amr::DistributedAmrRemotePatch remote = makeRemoteCoarsePatch();
+  const std::size_t capacity_before = remote.boundary_cells.capacity();
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    cosmosim::core::SimulationState state = makeFineRankState();
+    std::vector<cosmosim::amr::FluxRegisterEntry> outbound;
+    cosmosim::hydro::HydroCoreSolver solver(k_gamma);
+    cosmosim::hydro::HlleRiemannSolver riemann;
+    const cosmosim::hydro::HydroUpdateContext update{.dt_code = 1.0e-5, .scale_factor = 1.0};
+    (void)cosmosim::amr::advanceDistributedProductionAmrHydro(
+        state,
+        std::vector<std::uint32_t>{0U, 1U},
+        update,
+        {.update = update},
+        solver,
+        riemann,
+        {},
+        cosmosim::amr::ProductionAmrHydroOptions{
+            .physical_boundary_kind = cosmosim::hydro::HydroBoundaryKind::kOpen,
+            .adiabatic_index = k_gamma,
+            .density_floor = 1.0e-12,
+            .pressure_floor = 1.0e-12,
+            .state_time_code = 0.0,
+            .ghost_fill_time_code = 0.0},
+        cosmosim::amr::DistributedAmrHydroExchange{
+            .local_rank = 1,
+            .ghost_hydro_epoch = 7,
+            .expected_ghost_hydro_epoch = 7,
+            .remote_patches = std::span<const cosmosim::amr::DistributedAmrRemotePatch>(&remote, 1),
+            .outbound_remote_flux_registers = &outbound});
+    assert(remote.boundary_cells.capacity() == capacity_before);
+  }
+}
+
 void testDistributedSubcyclingIsGated() {
   cosmosim::core::SimulationState state = makeFineRankState();
   const cosmosim::amr::DistributedAmrRemotePatch remote = makeRemoteCoarsePatch();
@@ -185,6 +299,9 @@ void testDistributedSubcyclingIsGated() {
 
 int main() {
   testRemoteCoarseGhostProducesRemoteRefluxRegister();
+  testSparseRemoteResidencyTracksInterfaceAreaNotPatchVolume();
+  testMissingSparseRemoteCellFailsDeterministically();
+  testSparseRemoteCapacityStableAcrossRepeatedHydroSteps();
   testDistributedSubcyclingIsGated();
   return 0;
 }

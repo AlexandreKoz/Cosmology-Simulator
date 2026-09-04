@@ -27,13 +27,27 @@ struct AmrHydroGhostFillPatch {
   double ghost_fill_time_code = 0.0;
   double source_current_state_time_code = 0.0;
   const core::AmrTemporalBoundaryHistoryStore* temporal_boundary_history = nullptr;
-  // Optional sparse-remote coverage mask over real patch cells. Local sources
-  // leave this empty. Remote interface exchange sets one byte per geometric
-  // real cell so ghost fill fails deterministically if it ever requests a
-  // cell that was not advertised for the cross-rank interface.
+  // Legacy dense-remote coverage mask retained only for compatibility with
+  // validation callers that still provide a fully materialized remote patch.
+  // Production distributed hydro uses AmrHydroSparseGhostSource instead.
   std::span<const std::uint8_t> available_real_cells;
   bool enable_temporal_coarse_to_fine = false;
   bool requires_ghost_fill = true;
+};
+
+struct AmrHydroSparseRemoteCell {
+  std::uint32_t patch_local_cell = 0U;
+  std::uint64_t gas_cell_id = 0U;
+  hydro::HydroConservedState conserved{};
+};
+
+struct AmrHydroSparseGhostSource {
+  const PatchDescriptor* patch = nullptr;
+  int owner_rank = 0;
+  std::uint64_t ghost_hydro_epoch = 0U;
+  std::uint64_t expected_ghost_hydro_epoch = 0U;
+  double source_current_state_time_code = 0.0;
+  std::span<const AmrHydroSparseRemoteCell> cells;
 };
 
 struct AmrHydroGhostFillDiagnostics {
@@ -76,6 +90,11 @@ void retireAmrTemporalBoundaryHistory(core::SimulationState& state);
 
 [[nodiscard]] AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
     std::span<AmrHydroGhostFillPatch> patches,
+    double adiabatic_index);
+
+[[nodiscard]] AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
+    std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
     double adiabatic_index);
 
 }  // namespace cosmosim::amr

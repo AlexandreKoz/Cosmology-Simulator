@@ -1382,6 +1382,36 @@ std::size_t mpiTransportRoundLimitBytes() {
   return k_default_mpi_transport_round_bytes;
 }
 
+std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
+    std::uint64_t logical_record_count,
+    std::size_t transport_round_limit_bytes) {
+  const std::size_t requested_limit = transport_round_limit_bytes == 0U
+      ? mpiTransportRoundLimitBytes()
+      : transport_round_limit_bytes;
+  const std::size_t bounded_limit = std::min(
+      requested_limit,
+      static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  const std::size_t records_per_round = bounded_limit / sizeof(AmrPatchCellPayloadRecord);
+  if (records_per_round == 0U) {
+    throw std::invalid_argument(
+        "directed AMR patch-cell transport round cannot hold one complete record");
+  }
+  const std::uint64_t round_count_u64 = logical_record_count / records_per_round +
+      (logical_record_count % records_per_round == 0U ? 0U : 1U);
+  const std::size_t round_count = core::checkedIntegralNarrow<std::size_t>(
+      round_count_u64, "directed AMR patch-cell transport round count");
+  std::vector<std::size_t> rounds;
+  rounds.reserve(round_count);
+  std::uint64_t remaining = logical_record_count;
+  while (remaining != 0U) {
+    const std::size_t records = static_cast<std::size_t>(std::min<std::uint64_t>(
+        remaining, static_cast<std::uint64_t>(records_per_round)));
+    rounds.push_back(records);
+    remaining -= records;
+  }
+  return rounds;
+}
+
 std::vector<std::vector<std::uint8_t>> exchangeBoundedAlltoallBytes(
     const MpiContext& mpi_context,
     const std::vector<std::vector<std::uint8_t>>& send_payloads) {
@@ -4046,6 +4076,263 @@ template <typename T>
 #endif
 }
 
+void exchangeAmrPatchCellRecordStreamWithPeer(
+    const MpiContext& mpi_context,
+    int peer_rank,
+    std::uint64_t logical_send_count,
+    std::span<const AmrPatchBoundaryCellRequest> local_requests,
+    std::span<const AmrPatchPayloadRecord> remote_patches,
+    std::span<const AmrPatchBoundaryCellRequest> remote_requests,
+    const DirectedAmrPatchCellPayloadProvider& provider,
+    const DirectedAmrPatchCellPayloadConsumer& consumer,
+    const DirectedAmrPatchCellAdmission& admission,
+    int count_tag_base,
+    int payload_tag_base,
+    std::uint64_t exchange_sequence,
+    std::size_t local_transport_round_limit_bytes,
+    DirectedAmrExchangeDiagnostics& diagnostics) {
+  if (!provider || !consumer) {
+    throw std::invalid_argument(
+        "directed AMR patch-cell streaming requires both producer and consumer callbacks");
+  }
+  if (!mpi_context.isEnabled()) {
+    if (logical_send_count != 0U) {
+      throw std::runtime_error(
+          "directed AMR patch-cell streaming requires MPI for non-empty payloads");
+    }
+    return;
+  }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  std::uint64_t logical_receive_count = 0U;
+  if (MPI_Sendrecv(
+          &logical_send_count,
+          1,
+          MPI_UINT64_T,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          &logical_receive_count,
+          1,
+          MPI_UINT64_T,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          MPI_COMM_WORLD,
+          MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    throw std::runtime_error("directed AMR patch-cell record-count Sendrecv failed");
+  }
+
+  const std::size_t local_limit = std::min(
+      local_transport_round_limit_bytes == 0U
+          ? mpiTransportRoundLimitBytes()
+          : local_transport_round_limit_bytes,
+      static_cast<std::size_t>(std::numeric_limits<int>::max()));
+  std::uint64_t local_limit_u64 = static_cast<std::uint64_t>(local_limit);
+  std::uint64_t peer_limit_u64 = 0U;
+  if (MPI_Sendrecv(
+          &local_limit_u64,
+          1,
+          MPI_UINT64_T,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base + 1, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          &peer_limit_u64,
+          1,
+          MPI_UINT64_T,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base + 1, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          MPI_COMM_WORLD,
+          MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    throw std::runtime_error("directed AMR patch-cell transport-limit Sendrecv failed");
+  }
+  const std::size_t agreed_limit = std::min(
+      local_limit,
+      core::checkedIntegralNarrow<std::size_t>(
+          peer_limit_u64, "directed AMR peer transport limit"));
+
+  std::vector<std::size_t> send_rounds;
+  std::vector<std::size_t> receive_rounds;
+  std::exception_ptr local_admission_failure;
+  try {
+    send_rounds = planDirectedAmrPatchCellTransferRounds(
+        logical_send_count, agreed_limit);
+    receive_rounds = planDirectedAmrPatchCellTransferRounds(
+        logical_receive_count, agreed_limit);
+    if (admission) {
+      admission(peer_rank, remote_patches, remote_requests, logical_receive_count);
+    }
+  } catch (...) {
+    local_admission_failure = std::current_exception();
+  }
+  int local_admitted = local_admission_failure == nullptr ? 1 : 0;
+  int peer_admitted = 0;
+  if (MPI_Sendrecv(
+          &local_admitted,
+          1,
+          MPI_INT,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base + 2, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          &peer_admitted,
+          1,
+          MPI_INT,
+          peer_rank,
+          ghostExchangeSequencedTag(count_tag_base + 2, mpi_context.worldRank(), peer_rank, exchange_sequence),
+          MPI_COMM_WORLD,
+          MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    throw std::runtime_error("directed AMR patch-cell admission-readiness Sendrecv failed");
+  }
+  if (local_admitted == 0) {
+    std::rethrow_exception(local_admission_failure);
+  }
+  if (peer_admitted == 0) {
+    throw std::runtime_error("directed AMR peer rejected patch-cell memory admission");
+  }
+
+  const std::size_t round_count = std::max(send_rounds.size(), receive_rounds.size());
+  std::vector<AmrPatchCellPayloadRecord> send_chunk;
+  std::vector<AmrPatchCellPayloadRecord> receive_chunk;
+  const std::size_t max_records = agreed_limit / sizeof(AmrPatchCellPayloadRecord);
+  send_chunk.reserve(max_records);
+  receive_chunk.reserve(max_records);
+  diagnostics.patch_cell_send_capacity_high_water_bytes = std::max(
+      diagnostics.patch_cell_send_capacity_high_water_bytes,
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          send_chunk.capacity(), sizeof(AmrPatchCellPayloadRecord),
+          "directed AMR streamed send capacity")));
+  diagnostics.patch_cell_receive_capacity_high_water_bytes = std::max(
+      diagnostics.patch_cell_receive_capacity_high_water_bytes,
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          receive_chunk.capacity(), sizeof(AmrPatchCellPayloadRecord),
+          "directed AMR streamed receive capacity")));
+  diagnostics.communication_workspace_high_water_bytes = std::max(
+      diagnostics.communication_workspace_high_water_bytes,
+      core::checkedMemoryBytesAdd(
+          diagnostics.patch_cell_send_capacity_high_water_bytes,
+          diagnostics.patch_cell_receive_capacity_high_water_bytes,
+          "directed AMR streamed simultaneous transport capacity"));
+
+  std::uint64_t send_offset = 0U;
+  for (std::size_t round = 0; round < round_count; ++round) {
+    const std::size_t send_records = round < send_rounds.size() ? send_rounds[round] : 0U;
+    const std::size_t receive_records = round < receive_rounds.size() ? receive_rounds[round] : 0U;
+
+    std::exception_ptr local_producer_failure;
+    try {
+      send_chunk.clear();
+      if (send_records != 0U) {
+        provider(local_requests, send_offset, send_records, send_chunk);
+      }
+      if (send_chunk.size() != send_records) {
+        throw std::runtime_error(
+            "directed AMR patch-cell producer did not provide the requested streamed record count");
+      }
+    } catch (...) {
+      local_producer_failure = std::current_exception();
+    }
+    int local_ready = local_producer_failure == nullptr ? 1 : 0;
+    int peer_ready = 0;
+    if (MPI_Sendrecv(
+            &local_ready,
+            1,
+            MPI_INT,
+            peer_rank,
+            ghostExchangeSequencedTag(count_tag_base + 3, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            &peer_ready,
+            1,
+            MPI_INT,
+            peer_rank,
+            ghostExchangeSequencedTag(count_tag_base + 3, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            MPI_COMM_WORLD,
+            MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error("directed AMR patch-cell producer-readiness Sendrecv failed");
+    }
+    if (local_ready == 0) {
+      std::rethrow_exception(local_producer_failure);
+    }
+    if (peer_ready == 0) {
+      throw std::runtime_error("directed AMR peer rejected patch-cell producer preparation");
+    }
+
+    receive_chunk.resize(receive_records);
+    const std::size_t send_bytes = core::checkedSizeMultiply(
+        send_records, sizeof(AmrPatchCellPayloadRecord),
+        "directed AMR streamed send bytes");
+    const std::size_t receive_bytes = core::checkedSizeMultiply(
+        receive_records, sizeof(AmrPatchCellPayloadRecord),
+        "directed AMR streamed receive bytes");
+    const int send_count_bytes = core::checkedIntegralNarrow<int>(
+        send_bytes, "directed AMR streamed send count");
+    const int receive_count_bytes = core::checkedIntegralNarrow<int>(
+        receive_bytes, "directed AMR streamed receive count");
+    if (MPI_Sendrecv(
+            send_records == 0U ? nullptr : send_chunk.data(),
+            send_count_bytes,
+            MPI_BYTE,
+            peer_rank,
+            ghostExchangeSequencedTag(payload_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            receive_records == 0U ? nullptr : receive_chunk.data(),
+            receive_count_bytes,
+            MPI_BYTE,
+            peer_rank,
+            ghostExchangeSequencedTag(payload_tag_base, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            MPI_COMM_WORLD,
+            MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error("directed AMR bounded streamed patch-cell Sendrecv failed");
+    }
+
+    std::exception_ptr local_consumer_failure;
+    try {
+      if (!receive_chunk.empty()) {
+        consumer(peer_rank, receive_chunk);
+      }
+    } catch (...) {
+      local_consumer_failure = std::current_exception();
+    }
+    int local_consumed = local_consumer_failure == nullptr ? 1 : 0;
+    int peer_consumed = 0;
+    if (MPI_Sendrecv(
+            &local_consumed,
+            1,
+            MPI_INT,
+            peer_rank,
+            ghostExchangeSequencedTag(count_tag_base + 4, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            &peer_consumed,
+            1,
+            MPI_INT,
+            peer_rank,
+            ghostExchangeSequencedTag(count_tag_base + 4, mpi_context.worldRank(), peer_rank, exchange_sequence),
+            MPI_COMM_WORLD,
+            MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      throw std::runtime_error("directed AMR patch-cell consumer-readiness Sendrecv failed");
+    }
+    if (local_consumed == 0) {
+      std::rethrow_exception(local_consumer_failure);
+    }
+    if (peer_consumed == 0) {
+      throw std::runtime_error("directed AMR peer rejected streamed patch-cell consumption");
+    }
+
+    send_offset += static_cast<std::uint64_t>(send_records);
+    ++diagnostics.patch_cell_transport_round_count;
+  }
+  if (send_offset != logical_send_count) {
+    throw std::logic_error("directed AMR streamed patch-cell sender did not cover logical payload");
+  }
+#else
+  (void)peer_rank;
+  (void)logical_send_count;
+  (void)local_requests;
+  (void)remote_patches;
+  (void)remote_requests;
+  (void)provider;
+  (void)consumer;
+  (void)admission;
+  (void)count_tag_base;
+  (void)payload_tag_base;
+  (void)exchange_sequence;
+  (void)local_transport_round_limit_bytes;
+  (void)diagnostics;
+  throw std::runtime_error("directed AMR patch-cell streaming requires MPI support");
+#endif
+}
+
 [[nodiscard]] std::uint8_t amrBoundaryFaceBit(AmrPatchBoundaryFace face) noexcept {
   return static_cast<std::uint8_t>(face);
 }
@@ -4221,10 +4508,23 @@ std::vector<AmrPatchBoundaryCellRequest> planDirectedAmrPatchBoundaryCellRequest
   return requests;
 }
 
+std::size_t directedAmrPatchBoundaryCellCount(
+    const AmrPatchPayloadRecord& patch,
+    std::uint8_t boundary_face_mask) {
+  validateAmrPatchPayloadRecord(patch);
+  if (boundary_face_mask == 0U) {
+    return 0U;
+  }
+  return requestedBoundaryCellCount(patch, boundary_face_mask);
+}
+
 DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrPatchPayloadRecord> local_patch_records,
     const DirectedAmrPatchCellPayloadProvider& cell_payload_provider,
+    const DirectedAmrPatchCellPayloadConsumer& cell_payload_consumer,
+    const DirectedAmrPatchCellAdmission& cell_payload_admission,
+    std::size_t transport_round_limit_bytes,
     std::uint64_t exchange_sequence) {
 #if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
   (void)exchange_sequence;
@@ -4242,8 +4542,9 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
       throw std::invalid_argument("directed AMR patch exchange found duplicate local patch metadata");
     }
   }
-  if (!cell_payload_provider && !local_patch_records.empty()) {
-    throw std::invalid_argument("directed AMR patch exchange requires a boundary-cell payload provider");
+  if ((!cell_payload_provider || !cell_payload_consumer) && !local_patch_records.empty()) {
+    throw std::invalid_argument(
+        "directed AMR patch exchange requires boundary-cell producer and consumer callbacks");
   }
 
   DirectedAmrPatchPayloadExchange result;
@@ -4254,7 +4555,6 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   constexpr int k_patch_count_tag_base = 8910;
   constexpr int k_patch_payload_tag_base = 9910;
-  constexpr int k_cell_provider_ready_tag_base = 10710;
   constexpr int k_cell_count_tag_base = 10910;
   constexpr int k_cell_payload_tag_base = 11910;
   const std::vector<int> candidate_peers = discoverCandidateAmrPeers(
@@ -4316,143 +4616,138 @@ DirectedAmrPatchPayloadExchange executeBlockingDirectedAmrPatchPayloadExchange(
       }
     }
 
-    std::vector<AmrPatchCellPayloadRecord> local_cells;
-    std::exception_ptr local_payload_preparation_failure;
-    try {
-      local_cells = cell_payload_provider(local_requests);
-      std::unordered_map<std::uint64_t, std::size_t> observed_local_count;
-      observed_local_count.reserve(local_requests.size());
-      for (const AmrPatchCellPayloadRecord& record : local_cells) {
-        validateAmrPatchCellPayloadRecord(record);
-        if (record.owner_rank != world_rank) {
-          throw std::invalid_argument("directed AMR boundary payload provider returned a non-local cell");
-        }
-        const auto patch_it = local_patch_by_id.find(record.patch_id);
-        const auto mask_it = local_request_masks.find(record.patch_id);
-        if (patch_it == local_patch_by_id.end() || mask_it == local_request_masks.end() ||
-            !patchCellOffsetMatchesBoundaryMask(
-                patch_it->second, record.local_cell_offset, mask_it->second)) {
-          throw std::invalid_argument("directed AMR boundary payload provider returned a non-interface cell");
-        }
-        ++observed_local_count[record.patch_id];
-      }
-      for (const AmrPatchBoundaryCellRequest& request : local_requests) {
-        const AmrPatchPayloadRecord& patch = local_patch_by_id.at(request.patch_id);
-        if (observed_local_count[request.patch_id] !=
-            requestedBoundaryCellCount(patch, request.boundary_face_mask)) {
-          throw std::invalid_argument(
-              "directed AMR boundary payload provider did not cover the requested patch faces");
-        }
-      }
-    } catch (...) {
-      local_payload_preparation_failure = std::current_exception();
+    std::uint64_t logical_send_count = 0U;
+    for (const AmrPatchBoundaryCellRequest& request : local_requests) {
+      const AmrPatchPayloadRecord& patch = local_patch_by_id.at(request.patch_id);
+      logical_send_count = checkedU64AddLocal(
+          logical_send_count,
+          static_cast<std::uint64_t>(requestedBoundaryCellCount(
+              patch, request.boundary_face_mask)),
+          "directed AMR logical send boundary-cell count");
     }
-
-    int local_payload_ready = local_payload_preparation_failure == nullptr ? 1 : 0;
-    int peer_payload_ready = 0;
-    if (MPI_Sendrecv(
-            &local_payload_ready,
-            1,
-            MPI_INT,
-            peer_rank,
-            ghostExchangeSequencedTag(
-                k_cell_provider_ready_tag_base, world_rank, peer_rank, exchange_sequence),
-            &peer_payload_ready,
-            1,
-            MPI_INT,
-            peer_rank,
-            ghostExchangeSequencedTag(
-                k_cell_provider_ready_tag_base, world_rank, peer_rank, exchange_sequence),
-            MPI_COMM_WORLD,
-            MPI_STATUS_IGNORE) != MPI_SUCCESS) {
-      throw std::runtime_error(
-          "executeBlockingDirectedAmrPatchPayloadExchange: boundary-payload readiness Sendrecv failed");
-    }
-    if (local_payload_ready == 0) {
-      std::rethrow_exception(local_payload_preparation_failure);
-    }
-    if (peer_payload_ready == 0) {
-      throw std::runtime_error(
-          "executeBlockingDirectedAmrPatchPayloadExchange: peer rejected boundary-payload preparation");
-    }
-
-    const std::uint64_t send_capacity_bytes = static_cast<std::uint64_t>(
-        core::checkedSizeMultiply(
-            local_cells.capacity(), sizeof(AmrPatchCellPayloadRecord),
-            "directed AMR send capacity bytes"));
-    result.diagnostics.patch_cell_send_capacity_high_water_bytes = std::max(
-        result.diagnostics.patch_cell_send_capacity_high_water_bytes, send_capacity_bytes);
-
-    std::vector<AmrPatchCellPayloadRecord> remote_cells = exchangePodRecordsWithPeer(
-        mpi_context,
-        peer_rank,
-        local_cells,
-        k_cell_count_tag_base,
-        k_cell_payload_tag_base,
-        exchange_sequence,
-        "executeBlockingDirectedAmrPatchPayloadExchange/cell",
-        &result.diagnostics.patch_cell_transport_round_count);
 
     std::unordered_map<std::uint64_t, AmrPatchPayloadRecord> remote_patch_by_id;
     remote_patch_by_id.reserve(remote_patches.size());
     for (const AmrPatchPayloadRecord& patch : remote_patches) {
       remote_patch_by_id.emplace(patch.patch_id, patch);
     }
+    std::unordered_map<std::uint64_t, std::size_t> observed_local_count;
+    observed_local_count.reserve(local_requests.size());
     std::unordered_map<std::uint64_t, std::size_t> observed_remote_count;
     observed_remote_count.reserve(remote_requests.size());
-    for (const AmrPatchCellPayloadRecord& record : remote_cells) {
-      validateAmrPatchCellPayloadRecord(record);
-      if (record.owner_rank != peer_rank) {
-        throw std::runtime_error("directed AMR patch-cell exchange received payload from a rank that is not the owner");
+
+    const DirectedAmrPatchCellPayloadProvider validated_provider =
+        [&](std::span<const AmrPatchBoundaryCellRequest> requests,
+            std::uint64_t first_record,
+            std::size_t max_records,
+            std::vector<AmrPatchCellPayloadRecord>& output) {
+          cell_payload_provider(requests, first_record, max_records, output);
+          for (const AmrPatchCellPayloadRecord& record : output) {
+            validateAmrPatchCellPayloadRecord(record);
+            if (record.owner_rank != world_rank) {
+              throw std::invalid_argument(
+                  "directed AMR boundary payload producer returned a non-local cell");
+            }
+            const auto patch_it = local_patch_by_id.find(record.patch_id);
+            const auto mask_it = local_request_masks.find(record.patch_id);
+            if (patch_it == local_patch_by_id.end() || mask_it == local_request_masks.end() ||
+                !patchCellOffsetMatchesBoundaryMask(
+                    patch_it->second, record.local_cell_offset, mask_it->second)) {
+              throw std::invalid_argument(
+                  "directed AMR boundary payload producer returned a non-interface cell");
+            }
+            ++observed_local_count[record.patch_id];
+          }
+        };
+    const DirectedAmrPatchCellPayloadConsumer validated_consumer =
+        [&](int source_rank, std::span<const AmrPatchCellPayloadRecord> records) {
+          if (source_rank != peer_rank) {
+            throw std::runtime_error("directed AMR patch-cell consumer received wrong peer rank");
+          }
+          for (const AmrPatchCellPayloadRecord& record : records) {
+            validateAmrPatchCellPayloadRecord(record);
+            if (record.owner_rank != peer_rank) {
+              throw std::runtime_error(
+                  "directed AMR patch-cell stream received payload from a rank that is not the owner");
+            }
+            const auto patch_it = remote_patch_by_id.find(record.patch_id);
+            const auto mask_it = remote_request_masks.find(record.patch_id);
+            if (patch_it == remote_patch_by_id.end() || mask_it == remote_request_masks.end() ||
+                !patchCellOffsetMatchesBoundaryMask(
+                    patch_it->second, record.local_cell_offset, mask_it->second)) {
+              throw std::runtime_error(
+                  "directed AMR patch-cell stream received a non-interface cell payload");
+            }
+            ++observed_remote_count[record.patch_id];
+          }
+          cell_payload_consumer(source_rank, records);
+        };
+
+    exchangeAmrPatchCellRecordStreamWithPeer(
+        mpi_context,
+        peer_rank,
+        logical_send_count,
+        local_requests,
+        remote_patches,
+        remote_requests,
+        validated_provider,
+        validated_consumer,
+        cell_payload_admission,
+        k_cell_count_tag_base,
+        k_cell_payload_tag_base,
+        exchange_sequence,
+        transport_round_limit_bytes,
+        result.diagnostics);
+
+    for (const AmrPatchBoundaryCellRequest& request : local_requests) {
+      const AmrPatchPayloadRecord& patch = local_patch_by_id.at(request.patch_id);
+      if (observed_local_count[request.patch_id] !=
+          requestedBoundaryCellCount(patch, request.boundary_face_mask)) {
+        throw std::runtime_error(
+            "directed AMR streamed producer did not cover requested local boundary cells");
       }
-      const auto patch_it = remote_patch_by_id.find(record.patch_id);
-      const auto mask_it = remote_request_masks.find(record.patch_id);
-      if (patch_it == remote_patch_by_id.end() || mask_it == remote_request_masks.end() ||
-          !patchCellOffsetMatchesBoundaryMask(patch_it->second, record.local_cell_offset, mask_it->second)) {
-        throw std::runtime_error("directed AMR patch-cell exchange received a non-interface cell payload");
-      }
-      ++observed_remote_count[record.patch_id];
     }
+    std::uint64_t logical_receive_count = 0U;
     for (const AmrPatchBoundaryCellRequest& request : remote_requests) {
       const AmrPatchPayloadRecord& patch = remote_patch_by_id.at(request.patch_id);
-      if (observed_remote_count[request.patch_id] != requestedBoundaryCellCount(patch, request.boundary_face_mask)) {
-        throw std::runtime_error("directed AMR patch-cell exchange remote boundary coverage mismatch");
+      const std::size_t expected = requestedBoundaryCellCount(
+          patch, request.boundary_face_mask);
+      if (observed_remote_count[request.patch_id] != expected) {
+        throw std::runtime_error(
+            "directed AMR streamed remote boundary coverage mismatch");
       }
+      logical_receive_count = checkedU64AddLocal(
+          logical_receive_count,
+          static_cast<std::uint64_t>(expected),
+          "directed AMR logical receive boundary-cell count");
     }
-
-    const std::uint64_t receive_capacity_bytes = static_cast<std::uint64_t>(
-        core::checkedSizeMultiply(
-            remote_cells.capacity(), sizeof(AmrPatchCellPayloadRecord),
-            "directed AMR receive capacity bytes"));
-    result.diagnostics.patch_cell_receive_capacity_high_water_bytes = std::max(
-        result.diagnostics.patch_cell_receive_capacity_high_water_bytes, receive_capacity_bytes);
-    result.diagnostics.directed_patch_cell_records_sent +=
-        static_cast<std::uint64_t>(local_cells.size());
-    result.diagnostics.directed_patch_cell_records_received +=
-        static_cast<std::uint64_t>(remote_cells.size());
+    result.diagnostics.directed_patch_cell_records_sent = checkedU64AddLocal(
+        result.diagnostics.directed_patch_cell_records_sent,
+        logical_send_count,
+        "directed AMR accumulated sent boundary-cell records");
+    result.diagnostics.directed_patch_cell_records_received = checkedU64AddLocal(
+        result.diagnostics.directed_patch_cell_records_received,
+        logical_receive_count,
+        "directed AMR accumulated received boundary-cell records");
+    const std::uint64_t traffic_records = checkedU64AddLocal(
+        logical_send_count,
+        logical_receive_count,
+        "directed AMR streamed traffic record count");
+    const std::uint64_t traffic_bytes = core::checkedMemoryBytesAdd(
+        0U,
+        core::checkedIntegralNarrow<std::uint64_t>(
+            core::checkedSizeMultiply(
+                core::checkedIntegralNarrow<std::size_t>(
+                    traffic_records,
+                    "directed AMR streamed traffic records size_t"),
+                sizeof(AmrPatchCellPayloadRecord),
+                "directed AMR streamed traffic bytes"),
+            "directed AMR streamed traffic bytes uint64"),
+        "directed AMR streamed traffic byte accounting");
     result.diagnostics.patch_cell_payload_bytes = checkedU64AddLocal(
         result.diagnostics.patch_cell_payload_bytes,
-        checkedRecordTrafficBytes(
-            local_cells.size(), remote_cells.size(), sizeof(AmrPatchCellPayloadRecord),
-            "directed AMR patch-cell traffic"),
-        "directed AMR accumulated patch-cell traffic");
-
-    result.patch_cell_payloads_received.insert(
-        result.patch_cell_payloads_received.end(), remote_cells.begin(), remote_cells.end());
-    const std::uint64_t retained_capacity_bytes = static_cast<std::uint64_t>(
-        core::checkedSizeMultiply(
-            result.patch_cell_payloads_received.capacity(), sizeof(AmrPatchCellPayloadRecord),
-            "directed AMR retained receive capacity bytes"));
-    result.diagnostics.patch_cell_retained_capacity_high_water_bytes = std::max(
-        result.diagnostics.patch_cell_retained_capacity_high_water_bytes, retained_capacity_bytes);
-    const std::uint64_t simultaneous_bytes = checkedU64AddLocal(
-        checkedU64AddLocal(
-            send_capacity_bytes, receive_capacity_bytes,
-            "directed AMR simultaneous send/receive capacity"),
-        retained_capacity_bytes,
-        "directed AMR simultaneous communication capacity");
-    result.diagnostics.communication_workspace_high_water_bytes = std::max(
-        result.diagnostics.communication_workspace_high_water_bytes, simultaneous_bytes);
+        traffic_bytes,
+        "directed AMR accumulated streamed patch-cell traffic");
   }
   result.diagnostics.remote_patch_ghost_count =
       static_cast<std::uint64_t>(result.patch_payloads_received.size());

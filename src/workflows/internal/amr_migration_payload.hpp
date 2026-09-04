@@ -12,10 +12,12 @@ namespace cosmosim::workflows::internal {
 buildMigrationAmrPatchPayloadRecords(
     const core::SimulationState& state,
     int world_rank);
-[[nodiscard]] std::vector<parallel::AmrPatchCellPayloadRecord>
-buildMigrationAmrPatchBoundaryCellPayloadRecords(
+void fillMigrationAmrPatchBoundaryCellPayloadChunk(
     const core::SimulationState& state,
     int world_rank,
-    std::span<const parallel::AmrPatchBoundaryCellRequest> requests);
+    std::span<const parallel::AmrPatchBoundaryCellRequest> requests,
+    std::uint64_t first_record,
+    std::size_t max_records,
+    std::vector<parallel::AmrPatchCellPayloadRecord>& output);
 
 }  // namespace cosmosim::workflows::internal

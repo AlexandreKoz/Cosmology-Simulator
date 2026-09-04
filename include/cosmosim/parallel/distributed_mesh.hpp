@@ -185,9 +185,21 @@ struct AmrPatchBoundaryCellRequest {
   std::uint8_t boundary_face_mask = 0U;
 };
 
-using DirectedAmrPatchCellPayloadProvider = std::function<
-    std::vector<AmrPatchCellPayloadRecord>(
-        std::span<const AmrPatchBoundaryCellRequest>)>;
+using DirectedAmrPatchCellPayloadProvider = std::function<void(
+    std::span<const AmrPatchBoundaryCellRequest>,
+    std::uint64_t,
+    std::size_t,
+    std::vector<AmrPatchCellPayloadRecord>&)>;
+
+using DirectedAmrPatchCellPayloadConsumer = std::function<void(
+    int,
+    std::span<const AmrPatchCellPayloadRecord>)>;
+
+using DirectedAmrPatchCellAdmission = std::function<void(
+    int,
+    std::span<const AmrPatchPayloadRecord>,
+    std::span<const AmrPatchBoundaryCellRequest>,
+    std::uint64_t)>;
 
 struct DirectedAmrExchangeDiagnostics {
   std::uint64_t candidate_peer_count = 0;
@@ -206,7 +218,6 @@ struct DirectedAmrExchangeDiagnostics {
   // Resident communication ownership/capacity truth for the directed AMR cell path.
   std::uint64_t patch_cell_send_capacity_high_water_bytes = 0;
   std::uint64_t patch_cell_receive_capacity_high_water_bytes = 0;
-  std::uint64_t patch_cell_retained_capacity_high_water_bytes = 0;
   std::uint64_t communication_workspace_high_water_bytes = 0;
   std::uint64_t patch_cell_transport_round_count = 0;
   std::uint64_t remote_patch_ghost_count = 0;
@@ -217,7 +228,6 @@ struct DirectedAmrExchangeDiagnostics {
 
 struct DirectedAmrPatchPayloadExchange {
   std::vector<AmrPatchPayloadRecord> patch_payloads_received;
-  std::vector<AmrPatchCellPayloadRecord> patch_cell_payloads_received;
   DirectedAmrExchangeDiagnostics diagnostics{};
 };
 
@@ -293,7 +303,18 @@ planDirectedAmrPatchBoundaryCellRequests(
     const MpiContext& mpi_context,
     std::span<const AmrPatchPayloadRecord> local_patch_records,
     const DirectedAmrPatchCellPayloadProvider& cell_payload_provider,
+    const DirectedAmrPatchCellPayloadConsumer& cell_payload_consumer,
+    const DirectedAmrPatchCellAdmission& cell_payload_admission = {},
+    std::size_t transport_round_limit_bytes = 0U,
     std::uint64_t exchange_sequence = 0);
+
+[[nodiscard]] std::vector<std::size_t> planDirectedAmrPatchCellTransferRounds(
+    std::uint64_t logical_record_count,
+    std::size_t transport_round_limit_bytes = 0U);
+
+[[nodiscard]] std::size_t directedAmrPatchBoundaryCellCount(
+    const AmrPatchPayloadRecord& patch,
+    std::uint8_t boundary_face_mask);
 
 [[nodiscard]] std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
     const MpiContext& mpi_context,

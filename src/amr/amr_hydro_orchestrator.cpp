@@ -335,6 +335,67 @@ void refreshTraceableGhostSourceIds(std::vector<AmrHydroPatchGeometry>& geometri
   }
 }
 
+[[nodiscard]] const AmrHydroSparseRemoteCell* findRemoteBoundaryCell(
+    const DistributedAmrRemotePatch& remote,
+    std::size_t patch_local_cell) {
+  const auto it = std::lower_bound(
+      remote.boundary_cells.begin(),
+      remote.boundary_cells.end(),
+      patch_local_cell,
+      [](const AmrHydroSparseRemoteCell& cell, std::size_t offset) {
+        return static_cast<std::size_t>(cell.patch_local_cell) < offset;
+      });
+  if (it == remote.boundary_cells.end() ||
+      static_cast<std::size_t>(it->patch_local_cell) != patch_local_cell) {
+    return nullptr;
+  }
+  return &*it;
+}
+
+void refreshRemoteTraceableGhostSourceIds(
+    std::vector<AmrHydroPatchGeometry>& geometries,
+    std::span<const DistributedAmrRemotePatch> remote_patches) {
+  std::unordered_map<std::uint64_t, const DistributedAmrRemotePatch*> remote_by_id;
+  remote_by_id.reserve(remote_patches.size());
+  for (const DistributedAmrRemotePatch& remote : remote_patches) {
+    remote_by_id.emplace(remote.patch.patch_id, &remote);
+  }
+  for (AmrHydroPatchGeometry& target : geometries) {
+    for (AmrHydroGhostDescriptor& ghost_descriptor : target.ghosts) {
+      const auto remote_it = remote_by_id.find(ghost_descriptor.source_patch_id);
+      if (remote_it == remote_by_id.end()) {
+        continue;
+      }
+      const DistributedAmrRemotePatch& remote = *remote_it->second;
+      const hydro::HydroGhostCell& ghost =
+          target.geometry.ghost_cells.at(ghost_descriptor.ghost_slot);
+      const std::array<double, 3> probe = ghostProbePoint(target, ghost);
+      if (!containsPoint(remote.patch, probe)) {
+        continue;
+      }
+      const std::size_t source_cell = cellContainingPoint(remote.patch, probe);
+      const AmrHydroSparseRemoteCell* remote_cell =
+          findRemoteBoundaryCell(remote, source_cell);
+      if (remote_cell == nullptr) {
+        continue;
+      }
+      ghost_descriptor.source_gas_cell_id = remote_cell->gas_cell_id;
+      for (std::size_t face_index = 0;
+           face_index < target.geometry.faces.size(); ++face_index) {
+        const hydro::HydroFace& face = target.geometry.faces[face_index];
+        if (face.ghost_cell_slot == ghost_descriptor.ghost_slot &&
+            face_index < target.geometry.flux_register_faces.size() &&
+            target.geometry.flux_register_faces[face_index].role ==
+                hydro::HydroFluxRegisterFaceRole::kFine &&
+            target.geometry.flux_register_faces[face_index].coarse_gas_cell_id == 0U) {
+          target.geometry.flux_register_faces[face_index].coarse_gas_cell_id =
+              remote_cell->gas_cell_id;
+        }
+      }
+    }
+  }
+}
+
 void writeVolumeIntegratedToRow(
     core::SimulationState& state,
     std::uint32_t row,
@@ -1203,8 +1264,6 @@ namespace {
   const bool all_cells_active = active_cell_rows.empty();
 
   std::vector<AmrHydroPatchGeometry> geometries;
-  std::vector<AmrHydroPatchGeometry> remote_geometries;
-  std::vector<hydro::HydroConservedStateSoa> remote_conserved_states;
   geometries.reserve(descriptors.size());
   for (const PatchDescriptor& patch : descriptors) {
     AmrHydroGeometryOptions geometry_options;
@@ -1220,64 +1279,42 @@ namespace {
     geometries.push_back(buildAmrHydroPatchGeometry(state, patch, geometry_options));
     populateAmrHydroFluxRegisterFaces(geometries.back(), all_descriptors);
   }
+
+  std::vector<AmrHydroSparseGhostSource> remote_sources;
   if (distributed_exchange != nullptr) {
-    remote_geometries.reserve(distributed_exchange->remote_patches.size());
-    remote_conserved_states.reserve(distributed_exchange->remote_patches.size());
+    remote_sources.reserve(distributed_exchange->remote_patches.size());
     for (const DistributedAmrRemotePatch& remote : distributed_exchange->remote_patches) {
       if (remote.owner_rank == distributed_exchange->local_rank) {
         throw std::runtime_error("distributed AMR remote patch source cannot be owned by the local rank");
       }
-      if (remote.conserved_cells.size() != remote.gas_cell_ids.size() ||
-          (!remote.available_cells.empty() &&
-           remote.available_cells.size() != remote.gas_cell_ids.size())) {
-        throw std::runtime_error("distributed AMR remote patch sparse payload arrays do not match patch storage");
+      std::size_t previous_offset = 0U;
+      bool have_previous = false;
+      const std::size_t patch_cell_count =
+          static_cast<std::size_t>(remote.patch.cell_dims[0]) *
+          static_cast<std::size_t>(remote.patch.cell_dims[1]) *
+          static_cast<std::size_t>(remote.patch.cell_dims[2]);
+      for (const AmrHydroSparseRemoteCell& cell : remote.boundary_cells) {
+        if (cell.patch_local_cell >= patch_cell_count || cell.gas_cell_id == 0U ||
+            (have_previous && cell.patch_local_cell <= previous_offset)) {
+          throw std::runtime_error(
+              "distributed AMR sparse remote boundary cells are unsorted, duplicated, or out of range");
+        }
+        previous_offset = cell.patch_local_cell;
+        have_previous = true;
       }
-      AmrHydroGeometryOptions geometry_options;
-      geometry_options.physical_boundary_kind = options.physical_boundary_kind;
-      geometry_options.boundary_classes = {
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kLower),
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kX, hydro::HydroFaceSide::kUpper),
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kLower),
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kY, hydro::HydroFaceSide::kUpper),
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kLower),
-          boundaryClassForSide(remote.patch, all_descriptors, hydro::HydroFaceAxis::kZ, hydro::HydroFaceSide::kUpper),
-      };
-      remote_geometries.push_back(buildRemoteAmrHydroPatchGeometry(
-          remote.patch,
-          remote.gas_cell_ids,
-          remote.expected_ghost_hydro_epoch,
-          geometry_options,
-          remote.available_cells));
-      populateAmrHydroFluxRegisterFaces(remote_geometries.back(), all_descriptors);
-      hydro::HydroConservedStateSoa remote_soa(remote_geometries.back().geometry.totalCellStorageCount());
-      for (std::size_t cell = 0; cell < remote.conserved_cells.size(); ++cell) {
-        remote_soa.storeCell(cell, remote.conserved_cells[cell]);
-      }
-      remote_conserved_states.push_back(std::move(remote_soa));
+      remote_sources.push_back(AmrHydroSparseGhostSource{
+          .patch = &remote.patch,
+          .owner_rank = remote.owner_rank,
+          .ghost_hydro_epoch = remote.ghost_hydro_epoch,
+          .expected_ghost_hydro_epoch = remote.expected_ghost_hydro_epoch,
+          .source_current_state_time_code = options.state_time_code,
+          .cells = remote.boundary_cells});
     }
   }
 
   refreshTraceableGhostSourceIds(geometries);
-  refreshTraceableGhostSourceIds(remote_geometries);
-  std::vector<AmrHydroPatchGeometry> trace_geometries;
-  if (!remote_geometries.empty()) {
-    trace_geometries.reserve(geometries.size() + remote_geometries.size());
-    for (const auto& geometry : geometries) {
-      trace_geometries.push_back(geometry);
-    }
-    for (const auto& geometry : remote_geometries) {
-      trace_geometries.push_back(geometry);
-    }
-    refreshTraceableGhostSourceIds(trace_geometries);
-    for (std::size_t i = 0; i < geometries.size(); ++i) {
-      geometries[i].ghosts = trace_geometries[i].ghosts;
-      geometries[i].geometry.flux_register_faces = trace_geometries[i].geometry.flux_register_faces;
-    }
-    for (std::size_t i = 0; i < remote_geometries.size(); ++i) {
-      remote_geometries[i].ghosts = trace_geometries[geometries.size() + i].ghosts;
-      remote_geometries[i].geometry.flux_register_faces =
-          trace_geometries[geometries.size() + i].geometry.flux_register_faces;
-    }
+  if (distributed_exchange != nullptr) {
+    refreshRemoteTraceableGhostSourceIds(geometries, distributed_exchange->remote_patches);
   }
 
   const auto patchRequiresGhostFill = [&](std::size_t patch_index) {
@@ -1363,7 +1400,7 @@ namespace {
     }
 
     std::vector<AmrHydroGhostFillPatch> ghost_views;
-    ghost_views.reserve(1U + local_source_indices.size() + remote_geometries.size());
+    ghost_views.reserve(1U + local_source_indices.size());
     ghost_views.push_back(AmrHydroGhostFillPatch{
         .geometry = &geometries[patch_index],
         .conserved = &target_state,
@@ -1394,27 +1431,9 @@ namespace {
           .enable_temporal_coarse_to_fine = options.enable_temporal_coarse_to_fine,
           .requires_ghost_fill = false});
     }
-    if (distributed_exchange != nullptr) {
-      for (std::size_t remote_index = 0; remote_index < remote_geometries.size(); ++remote_index) {
-        const DistributedAmrRemotePatch& remote = distributed_exchange->remote_patches[remote_index];
-        ghost_views.push_back(AmrHydroGhostFillPatch{
-            .geometry = &remote_geometries[remote_index],
-            .conserved = &remote_conserved_states[remote_index],
-            .residency = AmrGhostSourceResidency::kRemoteReadOnly,
-            .ghost_hydro_epoch = remote.ghost_hydro_epoch,
-            .expected_ghost_hydro_epoch = remote.expected_ghost_hydro_epoch,
-            .target_state_time_code = options.state_time_code,
-            .ghost_fill_time_code = options.ghost_fill_time_code,
-            .source_current_state_time_code = options.state_time_code,
-            .temporal_boundary_history = nullptr,
-            .available_real_cells = remote.available_cells,
-            .enable_temporal_coarse_to_fine = false,
-            .requires_ghost_fill = false});
-      }
-    }
     addGhostDiagnostics(
         diagnostics.ghost_fill,
-        fillAmrHydroGhostCells(ghost_views, options.adiabatic_index));
+        fillAmrHydroGhostCells(ghost_views, remote_sources, options.adiabatic_index));
 
     auto& prepared = prepared_ghost_states[patch_index];
     prepared.reserve(geometries[patch_index].geometry.ghost_cells.size());

@@ -136,3 +136,66 @@ For a rectangular patch with dimensions `nx × ny × nz`, a single face request 
 - `integration_amr_distributed_remote_patch_boundary` runs with an unavailable remote interior cell and only the advertised boundary cell resident, proving the ghost/reflux path consumes sparse remote state.
 - `unit_cooling_heating` checks on-demand source-property provider results against the dense compatibility path.
 - `unit_memory_accounting` asserts the three derivable restart-compatible thermodynamic lanes report as `PersistentCache`.
+
+## M2A.2 bounded remote hydro ghost acceptance closure — 2026-09-04
+
+The post-M2A.1 adversarial audit found that M2A.1 had made the directed AMR
+*wire* representation interface-scaled and classic-MPI-count safe, but had not
+yet made the complete resident live set sparse. The receiver still allocated a
+full logical receive vector, retained all-peer wire records, expanded sparse
+boundary state into full remote patch-volume arrays and a full remote hydro
+geometry/SoA, and deep-copied geometry to form a combined tracing collection.
+Those ownership/lifetime defects could restore O(remote patch volume) memory
+even though the transmitted records were only O(interface area).
+
+M2A.2 changes the contract from merely bounded MPI calls to bounded physical
+residency:
+
+- directed AMR patch-cell transport streams record-aligned chunks through a
+  producer/consumer interface; the complete logical receive payload is never
+  allocated as one vector;
+- the sender and receiver reuse bounded chunk buffers whose simultaneous
+  capacity is limited by the negotiated transport window and admitted through
+  the existing `MemoryGovernor`;
+- received wire records are consumed directly into compact
+  `AmrHydroSparseRemoteCell` stores keyed by patch-local cell offset, with no
+  all-peer owning wire-record aggregate;
+- sparse remote ghost state contains only advertised boundary cells. Missing
+  remote interiors have no placeholder `gas_cell_id`, conserved-state, or
+  availability lanes;
+- ghost selection computes remote patch-local offsets from the immutable patch
+  descriptor and reads the compact sparse store directly. Same-level,
+  coarse-to-fine, and fine-to-coarse source selection do not construct remote
+  solver geometry, remote internal faces, or a full remote
+  `HydroConservedStateSoa`;
+- the local AMR solver continues to build full geometry only for locally owned
+  patches that it actually advances. The previous combined `trace_geometries`
+  owning-copy stage is removed from distributed ghost-source use;
+- sparse-store growth is admitted through `MemoryGovernor` as communication
+  memory for the lifetime of the distributed hydro ghost phase. Transport
+  workspace and sparse ghost residency therefore participate in the same
+  process ceiling as hydro active-batch work;
+- diagnostics keep traffic volume separate from resident capacity and report
+  bounded transport workspace plus sparse ghost cell/metadata high-waters.
+
+### M2A.2 scaling contract
+
+For a remote patch with volume `nx*ny*nz` and advertised interface cell count
+`N_interface`, production ghost-source residency is now approximately:
+
+```
+2 * bounded_transport_chunk
++ N_interface * sizeof(AmrHydroSparseRemoteCell)
++ O(remote_patch_count) descriptors/reservations
+```
+
+It no longer allocates `O(nx*ny*nz)` remote conserved state or remote solver
+geometry solely to fill local ghosts. A regression compares patches with the
+same 64x64 advertised face but depths 4 and 128 and requires identical sparse
+cell-store capacity. Missing advertised source cells fail deterministically
+rather than becoming default/zero state.
+
+The restart-compatible `pressure_code`, `temperature_code`, and
+`sound_speed_code` lanes remain `PersistentCache` in M2A.2. Their 24 B/gas-cell
+persistent cost and any future rematerialization/schema migration remain a
+separate performance/restart campaign and are not silently changed here.

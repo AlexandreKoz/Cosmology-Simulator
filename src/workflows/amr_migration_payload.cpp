@@ -152,15 +152,18 @@ buildMigrationAmrPatchPayloadRecords(
   return records;
 }
 
-std::vector<parallel::AmrPatchCellPayloadRecord>
-buildMigrationAmrPatchBoundaryCellPayloadRecords(
+void fillMigrationAmrPatchBoundaryCellPayloadChunk(
     const core::SimulationState& state,
     int world_rank,
-    std::span<const parallel::AmrPatchBoundaryCellRequest> requests) {
-  std::vector<parallel::AmrPatchCellPayloadRecord> records;
-  if (world_rank < 0 || requests.empty()) {
-    return records;
+    std::span<const parallel::AmrPatchBoundaryCellRequest> requests,
+    std::uint64_t first_record,
+    std::size_t max_records,
+    std::vector<parallel::AmrPatchCellPayloadRecord>& output) {
+  output.clear();
+  if (world_rank < 0 || requests.empty() || max_records == 0U) {
+    return;
   }
+  output.reserve(max_records);
 
   std::unordered_map<std::uint64_t, std::uint8_t> mask_by_patch_id;
   mask_by_patch_id.reserve(requests.size());
@@ -171,6 +174,7 @@ buildMigrationAmrPatchBoundaryCellPayloadRecords(
     mask_by_patch_id[request.patch_id] |= request.boundary_face_mask;
   }
 
+  std::uint64_t logical_index = 0U;
   for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
     const std::uint64_t patch_id = state.patches.patch_id[patch_index];
     const auto request_it = mask_by_patch_id.find(patch_id);
@@ -193,9 +197,48 @@ buildMigrationAmrPatchBoundaryCellPayloadRecords(
     if (geometry_cell_count != cell_count) {
       throw std::runtime_error("AMR boundary-cell payload build found cell_dims/cell_count mismatch");
     }
-    for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
-      if (offsetMatchesBoundaryMask(offset, nx, ny, nz, request_it->second)) {
-        records.push_back(makePatchCellPayloadRecord(state, patch_index, offset, world_rank));
+    for (std::uint32_t k = 0; k < nz; ++k) {
+      for (std::uint32_t j = 0; j < ny; ++j) {
+        const bool whole_row =
+            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kYLower)) != 0U && j == 0U) ||
+            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kYUpper)) != 0U && j + 1U == ny) ||
+            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kZLower)) != 0U && k == 0U) ||
+            ((request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kZUpper)) != 0U && k + 1U == nz);
+        const std::uint32_t row_base = nx * (j + static_cast<std::uint32_t>(ny) * k);
+        if (whole_row) {
+          for (std::uint32_t i = 0; i < nx; ++i) {
+            if (logical_index++ < first_record) {
+              continue;
+            }
+            output.push_back(makePatchCellPayloadRecord(
+                state, patch_index, row_base + i, world_rank));
+            if (output.size() == max_records) {
+              return;
+            }
+          }
+          continue;
+        }
+        const bool lower_x =
+            (request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXLower)) != 0U;
+        const bool upper_x =
+            (request_it->second & static_cast<std::uint8_t>(parallel::AmrPatchBoundaryFace::kXUpper)) != 0U;
+        if (lower_x) {
+          if (logical_index++ >= first_record) {
+            output.push_back(makePatchCellPayloadRecord(state, patch_index, row_base, world_rank));
+            if (output.size() == max_records) {
+              return;
+            }
+          }
+        }
+        if (upper_x && (nx > 1U || !lower_x)) {
+          if (logical_index++ >= first_record) {
+            output.push_back(makePatchCellPayloadRecord(
+                state, patch_index, row_base + static_cast<std::uint32_t>(nx - 1U), world_rank));
+            if (output.size() == max_records) {
+              return;
+            }
+          }
+        }
       }
     }
     mask_by_patch_id.erase(request_it);
@@ -203,7 +246,6 @@ buildMigrationAmrPatchBoundaryCellPayloadRecords(
   if (!mask_by_patch_id.empty()) {
     throw std::invalid_argument("AMR boundary-cell request referenced an unknown local patch_id");
   }
-  return records;
 }
 
 }  // namespace cosmosim::workflows::internal

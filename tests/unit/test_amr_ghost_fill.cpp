@@ -187,6 +187,97 @@ void testSameLevelGhostFillInXyz() {
   testSameLevelGhostFillForAxis(cosmosim::hydro::HydroFaceAxis::kZ);
 }
 
+void testSparseSameLevelRemoteGhostMatchesDenseReference() {
+  cosmosim::amr::PatchDescriptor left;
+  left.patch_id = 31;
+  left.level = 0;
+  left.cell_dims = {2, 2, 2};
+  left.extent_comov = {1.0, 1.0, 1.0};
+  cosmosim::amr::PatchDescriptor right = left;
+  right.patch_id = 32;
+  right.origin_comov[0] = 1.0;
+
+  // Dense two-patch reference using the established local/local path.
+  const auto dense_state = makeState({left, right});
+  auto dense_left_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      dense_state, left, sameLevelOptions(
+          cosmosim::hydro::HydroFaceAxis::kX,
+          cosmosim::hydro::HydroFaceSide::kUpper));
+  auto dense_right_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      dense_state, right, sameLevelOptions(
+          cosmosim::hydro::HydroFaceAxis::kX,
+          cosmosim::hydro::HydroFaceSide::kLower));
+  auto dense_left = cosmosim::amr::loadAmrHydroConservedState(
+      dense_state, dense_left_geometry, k_gamma);
+  auto dense_right = cosmosim::amr::loadAmrHydroConservedState(
+      dense_state, dense_right_geometry, k_gamma);
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> dense_patches{
+      {.geometry = &dense_left_geometry, .conserved = &dense_left},
+      {.geometry = &dense_right_geometry, .conserved = &dense_right}};
+  const auto dense_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      dense_patches, k_gamma);
+  assert(dense_diagnostics.same_level_ghosts_filled == 8U);
+
+  // Sparse remote source contains only the X-lower boundary plane of the
+  // right patch. No remote interior placeholders or remote solver geometry
+  // exist in this path.
+  const auto local_state = makeState({left});
+  auto sparse_left_geometry = cosmosim::amr::buildAmrHydroPatchGeometry(
+      local_state, left, sameLevelOptions(
+          cosmosim::hydro::HydroFaceAxis::kX,
+          cosmosim::hydro::HydroFaceSide::kUpper));
+  auto sparse_left = cosmosim::amr::loadAmrHydroConservedState(
+      local_state, sparse_left_geometry, k_gamma);
+  std::vector<cosmosim::amr::AmrHydroSparseRemoteCell> sparse_cells;
+  sparse_cells.reserve(4U);
+  for (std::uint32_t k = 0; k < 2U; ++k) {
+    for (std::uint32_t j = 0; j < 2U; ++j) {
+      const std::uint32_t offset = static_cast<std::uint32_t>(
+          linearCellIndex(right, 0U, j, k));
+      sparse_cells.push_back(cosmosim::amr::AmrHydroSparseRemoteCell{
+          .patch_local_cell = offset,
+          .gas_cell_id = 9000U + offset,
+          .conserved = dense_right.loadCell(offset)});
+    }
+  }
+  const std::size_t sparse_capacity = sparse_cells.capacity();
+  const cosmosim::amr::AmrHydroSparseGhostSource remote{
+      .patch = &right,
+      .owner_rank = 1,
+      .ghost_hydro_epoch = 3U,
+      .expected_ghost_hydro_epoch = 3U,
+      .source_current_state_time_code = 0.0,
+      .cells = sparse_cells};
+  std::vector<cosmosim::amr::AmrHydroGhostFillPatch> sparse_patches{
+      {.geometry = &sparse_left_geometry, .conserved = &sparse_left}};
+  const auto sparse_diagnostics = cosmosim::amr::fillAmrHydroGhostCells(
+      sparse_patches,
+      std::span<const cosmosim::amr::AmrHydroSparseGhostSource>(&remote, 1U),
+      k_gamma);
+  assert(sparse_diagnostics.same_level_ghosts_filled == 4U);
+  assert(sparse_cells.capacity() == sparse_capacity);
+
+  for (std::size_t owner = 0; owner < 8U; ++owner) {
+    const std::size_t i = owner % 2U;
+    if (i != 1U) {
+      continue;
+    }
+    const auto& dense_ghost = findGhost(
+        dense_left_geometry,
+        cosmosim::hydro::HydroFaceAxis::kX,
+        cosmosim::hydro::HydroFaceSide::kUpper,
+        owner);
+    const auto& sparse_ghost = findGhost(
+        sparse_left_geometry,
+        cosmosim::hydro::HydroFaceAxis::kX,
+        cosmosim::hydro::HydroFaceSide::kUpper,
+        owner);
+    assertStateNear(
+        sparse_left.loadCell(sparse_ghost.ghost_cell),
+        dense_left.loadCell(dense_ghost.ghost_cell));
+  }
+}
+
 void testRejectsStaleRemoteGhostEpoch() {
   cosmosim::amr::PatchDescriptor patch;
   patch.patch_id = 21;
@@ -214,6 +305,7 @@ void testRejectsStaleRemoteGhostEpoch() {
 
 int main() {
   testSameLevelGhostFillInXyz();
+  testSparseSameLevelRemoteGhostMatchesDenseReference();
   testRejectsStaleRemoteGhostEpoch();
   return 0;
 }

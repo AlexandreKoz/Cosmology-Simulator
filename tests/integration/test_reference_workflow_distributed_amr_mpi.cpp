@@ -118,12 +118,17 @@ int main() {
   const int peer_rank = 1 - world_rank;
   const cosmosim::parallel::MpiContext mpi_context;
   const std::vector<cosmosim::parallel::AmrPatchPayloadRecord> local_patches{makePatch(world_rank)};
+  std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> received_cells;
   const auto exchange = cosmosim::parallel::executeBlockingDirectedAmrPatchPayloadExchange(
       mpi_context,
       local_patches,
-      [world_rank](std::span<const cosmosim::parallel::AmrPatchBoundaryCellRequest> requests) {
+      [world_rank](
+          std::span<const cosmosim::parallel::AmrPatchBoundaryCellRequest> requests,
+          std::uint64_t first_record,
+          std::size_t max_records,
+          std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord>& output) {
         const auto all_cells = makeCells(world_rank);
-        std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> result;
+        std::vector<cosmosim::parallel::AmrPatchCellPayloadRecord> logical;
         for (const auto& request : requests) {
           assert(request.patch_id == (world_rank == 0 ? 9001U : 9002U));
           const std::uint8_t expected_face = static_cast<std::uint8_t>(
@@ -131,16 +136,28 @@ int main() {
                   ? cosmosim::parallel::AmrPatchBoundaryFace::kXUpper
                   : cosmosim::parallel::AmrPatchBoundaryFace::kXLower);
           assert((request.boundary_face_mask & expected_face) != 0U);
-          result.push_back(all_cells[world_rank == 0 ? 1U : 0U]);
+          logical.push_back(all_cells[world_rank == 0 ? 1U : 0U]);
         }
-        return result;
+        output.clear();
+        const std::size_t begin = static_cast<std::size_t>(first_record);
+        const std::size_t end = std::min(logical.size(), begin + max_records);
+        if (begin < logical.size()) {
+          output.insert(output.end(), logical.begin() + begin, logical.begin() + end);
+        }
       },
+      [&received_cells](
+          int,
+          std::span<const cosmosim::parallel::AmrPatchCellPayloadRecord> chunk) {
+        received_cells.insert(received_cells.end(), chunk.begin(), chunk.end());
+      },
+      {},
+      sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord),
       123U);
 
-  if (exchange.patch_payloads_received.size() != 1U || exchange.patch_cell_payloads_received.size() != 1U) {
+  if (exchange.patch_payloads_received.size() != 1U || received_cells.size() != 1U) {
     std::cerr << "rank=" << world_rank
               << " remote_patches=" << exchange.patch_payloads_received.size()
-              << " remote_cells=" << exchange.patch_cell_payloads_received.size()
+              << " remote_cells=" << received_cells.size()
               << " candidates=" << exchange.diagnostics.candidate_peer_count
               << " neighbors=" << exchange.diagnostics.neighbor_peer_count << '\n';
   }
@@ -157,15 +174,13 @@ int main() {
          sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
   assert(exchange.diagnostics.patch_cell_receive_capacity_high_water_bytes >=
          sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
-  assert(exchange.diagnostics.patch_cell_retained_capacity_high_water_bytes >=
-         sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
   assert(exchange.diagnostics.communication_workspace_high_water_bytes >=
          sizeof(cosmosim::parallel::AmrPatchCellPayloadRecord));
   assert(exchange.diagnostics.patch_cell_transport_round_count >= 1U);
   assert(exchange.diagnostics.remote_patch_ghost_count == 1U);
   assert(exchange.diagnostics.remote_interface_count == 1U);
   assert(exchange.patch_payloads_received.front().owner_rank == peer_rank);
-  for (const auto& cell : exchange.patch_cell_payloads_received) {
+  for (const auto& cell : received_cells) {
     assert(cell.owner_rank == peer_rank);
     assert(cell.gas_cell_id != 0U);
   }

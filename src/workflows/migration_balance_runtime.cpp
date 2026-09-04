@@ -1357,13 +1357,30 @@ void exchangeAndValidateAmrPatchPayloads(
 
   parallel::DirectedAmrExchangeDiagnostics diagnostics;
   if (mpi_context.isEnabled() && mpi_context.worldSize() > 1) {
+    std::set<std::pair<std::uint64_t, std::uint32_t>> remote_cell_keys;
     const parallel::DirectedAmrPatchPayloadExchange directed = parallel::executeBlockingDirectedAmrPatchPayloadExchange(
         mpi_context,
         local_records,
-        [&state, world_rank](std::span<const parallel::AmrPatchBoundaryCellRequest> requests) {
-          return buildMigrationAmrPatchBoundaryCellPayloadRecords(
-              state, world_rank, requests);
+        [&state, world_rank](
+            std::span<const parallel::AmrPatchBoundaryCellRequest> requests,
+            std::uint64_t first_record,
+            std::size_t max_records,
+            std::vector<parallel::AmrPatchCellPayloadRecord>& output) {
+          fillMigrationAmrPatchBoundaryCellPayloadChunk(
+              state, world_rank, requests, first_record, max_records, output);
         },
+        [&remote_cell_keys](
+            int,
+            std::span<const parallel::AmrPatchCellPayloadRecord> records) {
+          for (const auto& record : records) {
+            if (!remote_cell_keys.emplace(record.patch_id, record.local_cell_offset).second) {
+              throw std::runtime_error(
+                  "directed AMR validation received duplicate remote boundary-cell payload");
+            }
+          }
+        },
+        {},
+        0U,
         step_index);
     diagnostics = directed.diagnostics;
 
@@ -1376,22 +1393,6 @@ void exchangeAndValidateAmrPatchPayloads(
       const auto [it, inserted] = remote_patch_by_id.emplace(record.patch_id, record);
       if (!inserted) {
         throw std::runtime_error("directed AMR validation received duplicate remote patch metadata");
-      }
-    }
-    std::set<std::pair<std::uint64_t, std::uint32_t>> remote_cell_keys;
-    for (const parallel::AmrPatchCellPayloadRecord& record : directed.patch_cell_payloads_received) {
-      const auto patch_it = remote_patch_by_id.find(record.patch_id);
-      if (patch_it == remote_patch_by_id.end()) {
-        throw std::runtime_error("directed AMR validation received remote cell payload without patch metadata");
-      }
-      if (record.owner_rank != patch_it->second.owner_rank) {
-        throw std::runtime_error("directed AMR validation remote cell owner does not match patch owner");
-      }
-      if (record.local_cell_offset >= patch_it->second.cell_count) {
-        throw std::runtime_error("directed AMR validation remote cell offset exceeds patch extent");
-      }
-      if (!remote_cell_keys.emplace(record.patch_id, record.local_cell_offset).second) {
-        throw std::runtime_error("directed AMR validation received duplicate remote boundary-cell payload");
       }
     }
   }
@@ -1416,7 +1417,6 @@ void exchangeAndValidateAmrPatchPayloads(
                     {"patch_cell_payload_bytes", std::to_string(diagnostics.patch_cell_payload_bytes)},
                     {"patch_cell_send_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_send_capacity_high_water_bytes)},
                     {"patch_cell_receive_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_receive_capacity_high_water_bytes)},
-                    {"patch_cell_retained_capacity_high_water_bytes", std::to_string(diagnostics.patch_cell_retained_capacity_high_water_bytes)},
                     {"communication_workspace_high_water_bytes", std::to_string(diagnostics.communication_workspace_high_water_bytes)},
                     {"patch_cell_transport_round_count", std::to_string(diagnostics.patch_cell_transport_round_count)},
                     {"remote_patch_ghost_count", std::to_string(diagnostics.remote_patch_ghost_count)},
