@@ -92,6 +92,9 @@ class AmrPatch {
   [[nodiscard]] std::span<const std::uint64_t> gasCellIdView() const;
 
   [[nodiscard]] ConservedState totalConserved() const;
+  // Capacity truth for the patch-owned physical state lanes only. This excludes
+  // allocator bookkeeping and hierarchy/index container overhead.
+  [[nodiscard]] std::size_t ownedStorageCapacityBytes() const;
   [[nodiscard]] bool isLeaf() const;
   void setLeaf(bool is_leaf);
 
@@ -117,6 +120,8 @@ class PatchHierarchy {
 
   [[nodiscard]] std::size_t levelCount() const;
   [[nodiscard]] std::size_t patchCount() const;
+  [[nodiscard]] std::size_t allocatedCellCount() const;
+  [[nodiscard]] std::size_t patchStorageCapacityBytes() const;
   [[nodiscard]] std::span<const std::uint64_t> retiredGasCellIds() const;
 
  private:
@@ -126,7 +131,7 @@ class PatchHierarchy {
   std::uint64_t m_next_gas_cell_id = 1;
   std::vector<std::uint64_t> m_retired_gas_cell_ids;
 
-  void assignStableGasCellIds(AmrPatch& patch);
+  static void assignStableGasCellIds(AmrPatch& patch, std::uint64_t& next_gas_cell_id);
   void rebuildPatchIndex();
 };
 

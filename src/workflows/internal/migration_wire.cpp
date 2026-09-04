@@ -403,6 +403,164 @@ core::GasCellSchedulerMigrationRecord readGasSchedulerRecord(WireReader& in) {
   };
 }
 
+
+void appendPendingFluxRegisterRecord(
+    WireWriter& out,
+    const core::PendingFluxRegisterRecord& record) {
+  out.u64(record.register_key);
+  out.u64(record.coarse_patch_id);
+  out.u64(record.coarse_gas_cell_id);
+  out.u64(core::checkedIntegralNarrow<std::uint64_t>(
+      record.coarse_cell_index, "pending_flux_coarse_cell_index"));
+  out.u8(record.level);
+  out.u8(record.axis);
+  out.u8(record.orientation);
+  out.f64(record.expected_area_comov);
+  out.f64(record.coarse_area_accumulated_comov);
+  out.f64(record.fine_area_accumulated_comov);
+  out.f64(record.interval_start_code);
+  out.f64(record.interval_end_code);
+  out.f64(record.coarse_dt_code);
+  out.u32(record.expected_fine_substeps);
+  out.u32(record.completed_fine_substeps);
+  out.u64(record.fine_substep_coverage_mask);
+  out.u32(record.coarse_face_count);
+  out.u32(record.fine_face_count);
+  out.u64(record.gas_cell_identity_generation);
+  out.u64(record.patch_geometry_generation);
+  out.f64(record.coarse_mass_flux_integral_code);
+  out.f64(record.coarse_momentum_x_flux_integral_code);
+  out.f64(record.coarse_momentum_y_flux_integral_code);
+  out.f64(record.coarse_momentum_z_flux_integral_code);
+  out.f64(record.coarse_total_energy_flux_integral_code);
+  out.f64(record.coarse_metal_mass_flux_integral_code);
+  out.f64(record.fine_mass_flux_integral_code);
+  out.f64(record.fine_momentum_x_flux_integral_code);
+  out.f64(record.fine_momentum_y_flux_integral_code);
+  out.f64(record.fine_momentum_z_flux_integral_code);
+  out.f64(record.fine_total_energy_flux_integral_code);
+  out.f64(record.fine_metal_mass_flux_integral_code);
+}
+
+core::PendingFluxRegisterRecord readPendingFluxRegisterRecord(WireReader& in) {
+  core::PendingFluxRegisterRecord record;
+  record.register_key = in.u64("pending_flux_register_key");
+  record.coarse_patch_id = in.u64("pending_flux_coarse_patch_id");
+  record.coarse_gas_cell_id = in.u64("pending_flux_coarse_gas_cell_id");
+  record.coarse_cell_index = core::checkedIntegralNarrow<std::size_t>(
+      in.u64("pending_flux_coarse_cell_index"), "pending_flux_coarse_cell_index");
+  record.level = in.u8("pending_flux_level");
+  record.axis = in.u8("pending_flux_axis");
+  record.orientation = in.u8("pending_flux_orientation");
+  record.expected_area_comov = in.f64("pending_flux_expected_area");
+  record.coarse_area_accumulated_comov = in.f64("pending_flux_coarse_area");
+  record.fine_area_accumulated_comov = in.f64("pending_flux_fine_area");
+  record.interval_start_code = in.f64("pending_flux_interval_start");
+  record.interval_end_code = in.f64("pending_flux_interval_end");
+  record.coarse_dt_code = in.f64("pending_flux_coarse_dt");
+  record.expected_fine_substeps = in.u32("pending_flux_expected_fine_substeps");
+  record.completed_fine_substeps = in.u32("pending_flux_completed_fine_substeps");
+  record.fine_substep_coverage_mask = in.u64("pending_flux_coverage_mask");
+  record.coarse_face_count = in.u32("pending_flux_coarse_face_count");
+  record.fine_face_count = in.u32("pending_flux_fine_face_count");
+  record.gas_cell_identity_generation = in.u64("pending_flux_identity_generation");
+  record.patch_geometry_generation = in.u64("pending_flux_geometry_generation");
+  record.coarse_mass_flux_integral_code = in.f64("pending_flux_coarse_mass");
+  record.coarse_momentum_x_flux_integral_code = in.f64("pending_flux_coarse_momentum_x");
+  record.coarse_momentum_y_flux_integral_code = in.f64("pending_flux_coarse_momentum_y");
+  record.coarse_momentum_z_flux_integral_code = in.f64("pending_flux_coarse_momentum_z");
+  record.coarse_total_energy_flux_integral_code = in.f64("pending_flux_coarse_energy");
+  record.coarse_metal_mass_flux_integral_code = in.f64("pending_flux_coarse_metal");
+  record.fine_mass_flux_integral_code = in.f64("pending_flux_fine_mass");
+  record.fine_momentum_x_flux_integral_code = in.f64("pending_flux_fine_momentum_x");
+  record.fine_momentum_y_flux_integral_code = in.f64("pending_flux_fine_momentum_y");
+  record.fine_momentum_z_flux_integral_code = in.f64("pending_flux_fine_momentum_z");
+  record.fine_total_energy_flux_integral_code = in.f64("pending_flux_fine_energy");
+  record.fine_metal_mass_flux_integral_code = in.f64("pending_flux_fine_metal");
+  return record;
+}
+
+void appendTemporalHistoryCell(
+    WireWriter& out,
+    const core::AmrTemporalBoundaryHistoryCellRecord& cell) {
+  out.u64(cell.gas_cell_id);
+  out.u64(core::checkedIntegralNarrow<std::uint64_t>(
+      cell.patch_local_cell, "temporal_history_patch_local_cell"));
+  out.f64(cell.start_mass_density_comoving);
+  out.f64(cell.start_momentum_density_x_comoving);
+  out.f64(cell.start_momentum_density_y_comoving);
+  out.f64(cell.start_momentum_density_z_comoving);
+  out.f64(cell.start_total_energy_density_comoving);
+  out.f64(cell.start_metal_mass_density_comoving);
+  out.f64(cell.end_mass_density_comoving);
+  out.f64(cell.end_momentum_density_x_comoving);
+  out.f64(cell.end_momentum_density_y_comoving);
+  out.f64(cell.end_momentum_density_z_comoving);
+  out.f64(cell.end_total_energy_density_comoving);
+  out.f64(cell.end_metal_mass_density_comoving);
+}
+
+core::AmrTemporalBoundaryHistoryCellRecord readTemporalHistoryCell(WireReader& in) {
+  core::AmrTemporalBoundaryHistoryCellRecord cell;
+  cell.gas_cell_id = in.u64("temporal_history_gas_cell_id");
+  cell.patch_local_cell = core::checkedIntegralNarrow<std::size_t>(
+      in.u64("temporal_history_patch_local_cell"), "temporal_history_patch_local_cell");
+  cell.start_mass_density_comoving = in.f64("temporal_history_start_mass");
+  cell.start_momentum_density_x_comoving = in.f64("temporal_history_start_momentum_x");
+  cell.start_momentum_density_y_comoving = in.f64("temporal_history_start_momentum_y");
+  cell.start_momentum_density_z_comoving = in.f64("temporal_history_start_momentum_z");
+  cell.start_total_energy_density_comoving = in.f64("temporal_history_start_energy");
+  cell.start_metal_mass_density_comoving = in.f64("temporal_history_start_metal");
+  cell.end_mass_density_comoving = in.f64("temporal_history_end_mass");
+  cell.end_momentum_density_x_comoving = in.f64("temporal_history_end_momentum_x");
+  cell.end_momentum_density_y_comoving = in.f64("temporal_history_end_momentum_y");
+  cell.end_momentum_density_z_comoving = in.f64("temporal_history_end_momentum_z");
+  cell.end_total_energy_density_comoving = in.f64("temporal_history_end_energy");
+  cell.end_metal_mass_density_comoving = in.f64("temporal_history_end_metal");
+  return cell;
+}
+
+void appendTemporalHistoryRecord(
+    WireWriter& out,
+    const core::AmrTemporalBoundaryHistoryRecord& record) {
+  out.u64(record.patch_id);
+  out.u8(record.patch_level);
+  out.u64(record.patch_geometry_fingerprint);
+  out.u64(record.gas_cell_identity_generation);
+  out.f64(record.interval_start_code);
+  out.f64(record.interval_end_code);
+  out.u8(record.end_state_valid ? 1U : 0U);
+  out.u64(static_cast<std::uint64_t>(record.cells.size()));
+  for (const auto& cell : record.cells) {
+    appendTemporalHistoryCell(out, cell);
+  }
+}
+
+core::AmrTemporalBoundaryHistoryRecord readTemporalHistoryRecord(WireReader& in) {
+  core::AmrTemporalBoundaryHistoryRecord record;
+  record.patch_id = in.u64("temporal_history_patch_id");
+  record.patch_level = in.u8("temporal_history_patch_level");
+  record.patch_geometry_fingerprint = in.u64("temporal_history_geometry_fingerprint");
+  record.gas_cell_identity_generation = in.u64("temporal_history_identity_generation");
+  record.interval_start_code = in.f64("temporal_history_interval_start");
+  record.interval_end_code = in.f64("temporal_history_interval_end");
+  const std::uint8_t end_state_valid = in.u8("temporal_history_end_state_valid");
+  if (end_state_valid > 1U) {
+    throw std::runtime_error("AMR temporal history wire boolean is not canonical");
+  }
+  record.end_state_valid = end_state_valid != 0U;
+  const std::uint64_t cell_count = in.u64("temporal_history_cell_count");
+  if (cell_count > 100'000'000ULL) {
+    throw std::runtime_error("AMR temporal history wire has unreasonable cell count");
+  }
+  record.cells.reserve(core::checkedIntegralNarrow<std::size_t>(
+      cell_count, "temporal_history_cell_count"));
+  for (std::uint64_t i = 0U; i < cell_count; ++i) {
+    record.cells.push_back(readTemporalHistoryCell(in));
+  }
+  return record;
+}
+
 [[nodiscard]] std::size_t moduleWireUpperBound(const core::ModuleSidecarBlock& block) {
   constexpr std::size_t k_requirement_bytes = sizeof(std::uint32_t) * 3U + sizeof(double);
   const std::size_t metadata = core::checkedSizeAdd(
@@ -555,6 +713,14 @@ std::vector<std::uint8_t> encodeAmrPatchMigrationRecord(
   for (const auto& scheduler_record : record.gas_cell_scheduler_records) {
     appendGasSchedulerRecord(out, scheduler_record);
   }
+  out.u64(static_cast<std::uint64_t>(record.pending_flux_register_records.size()));
+  for (const auto& pending : record.pending_flux_register_records) {
+    appendPendingFluxRegisterRecord(out, pending);
+  }
+  out.u64(static_cast<std::uint64_t>(record.temporal_boundary_history_records.size()));
+  for (const auto& history : record.temporal_boundary_history_records) {
+    appendTemporalHistoryRecord(out, history);
+  }
   return std::move(out).take();
 }
 
@@ -582,6 +748,24 @@ core::AmrPatchMigrationRecord decodeAmrPatchMigrationRecord(
   record.gas_cell_scheduler_records.reserve(core::checkedIntegralNarrow<std::size_t>(scheduler_count, "amr_patch_scheduler_record_count"));
   for (std::uint64_t i = 0U; i < scheduler_count; ++i) {
     record.gas_cell_scheduler_records.push_back(readGasSchedulerRecord(in));
+  }
+  const std::uint64_t pending_count = in.u64("amr_patch_pending_flux_count");
+  if (pending_count > 100'000'000ULL) {
+    throw std::runtime_error("AMR patch migration wire has unreasonable pending flux-register count");
+  }
+  record.pending_flux_register_records.reserve(core::checkedIntegralNarrow<std::size_t>(
+      pending_count, "amr_patch_pending_flux_count"));
+  for (std::uint64_t i = 0U; i < pending_count; ++i) {
+    record.pending_flux_register_records.push_back(readPendingFluxRegisterRecord(in));
+  }
+  const std::uint64_t history_count = in.u64("amr_patch_temporal_history_count");
+  if (history_count > 1'000'000ULL) {
+    throw std::runtime_error("AMR patch migration wire has unreasonable temporal-history count");
+  }
+  record.temporal_boundary_history_records.reserve(core::checkedIntegralNarrow<std::size_t>(
+      history_count, "amr_patch_temporal_history_count"));
+  for (std::uint64_t i = 0U; i < history_count; ++i) {
+    record.temporal_boundary_history_records.push_back(readTemporalHistoryRecord(in));
   }
   if (!in.atEnd()) throw std::runtime_error("AMR patch migration wire record has trailing bytes");
   return record;
@@ -659,7 +843,32 @@ std::size_t estimateAmrPatchMigrationWireUpperBoundBytes(
   core::AmrPatchMigrationRecord representative;
   representative.gas_cell_records.resize(state.patches.cell_count[local_patch_index]);
   representative.gas_cell_scheduler_records.resize(state.patches.cell_count[local_patch_index]);
-  return encodeAmrPatchMigrationRecord(representative).size();
+  std::size_t bytes = encodeAmrPatchMigrationRecord(representative).size();
+  const std::uint64_t patch_id = state.patches.patch_id[local_patch_index];
+  constexpr std::size_t k_pending_flux_wire_bytes = 219U;
+  constexpr std::size_t k_temporal_history_fixed_wire_bytes = 50U;
+  constexpr std::size_t k_temporal_history_cell_wire_bytes = 112U;
+  for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+    if (pending.coarse_patch_id == patch_id) {
+      bytes = core::checkedSizeAdd(
+          bytes, k_pending_flux_wire_bytes,
+          "AMR migration pending flux-register wire upper bound");
+    }
+  }
+  for (const core::AmrTemporalBoundaryHistoryRecord& history :
+       state.amr_temporal_boundary_history.records()) {
+    if (history.patch_id != patch_id) continue;
+    const std::size_t cell_bytes = core::checkedSizeMultiply(
+        history.cells.size(), k_temporal_history_cell_wire_bytes,
+        "AMR migration temporal-history cell wire upper bound");
+    bytes = core::checkedSizeAdd(
+        bytes,
+        core::checkedSizeAdd(
+            k_temporal_history_fixed_wire_bytes, cell_bytes,
+            "AMR migration temporal-history wire upper bound"),
+        "AMR migration wire upper bound");
+  }
+  return bytes;
 }
 
 
@@ -697,7 +906,7 @@ std::size_t estimateAmrPatchMigrationDynamicHeapUpperBoundBytes(
     throw std::out_of_range("AMR migration heap estimate patch index out of range");
   }
   const std::size_t cell_count = state.patches.cell_count[local_patch_index];
-  return core::checkedSizeAdd(
+  std::size_t bytes = core::checkedSizeAdd(
       core::checkedSizeMultiply(
           cell_count, sizeof(core::GasCellMigrationRecord),
           "AMR migration gas-cell vector bytes"),
@@ -705,6 +914,28 @@ std::size_t estimateAmrPatchMigrationDynamicHeapUpperBoundBytes(
           cell_count, sizeof(core::GasCellSchedulerMigrationRecord),
           "AMR migration scheduler vector bytes"),
       "AMR migration dynamic heap bytes");
+  const std::uint64_t patch_id = state.patches.patch_id[local_patch_index];
+  for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+    if (pending.coarse_patch_id == patch_id) {
+      bytes = core::checkedSizeAdd(
+          bytes, sizeof(core::PendingFluxRegisterRecord),
+          "AMR migration pending flux-register vector bytes");
+    }
+  }
+  for (const core::AmrTemporalBoundaryHistoryRecord& history :
+       state.amr_temporal_boundary_history.records()) {
+    if (history.patch_id != patch_id) continue;
+    bytes = core::checkedSizeAdd(
+        bytes, sizeof(core::AmrTemporalBoundaryHistoryRecord),
+        "AMR migration temporal-history record bytes");
+    bytes = core::checkedSizeAdd(
+        bytes,
+        core::checkedSizeMultiply(
+            history.cells.size(), sizeof(core::AmrTemporalBoundaryHistoryCellRecord),
+            "AMR migration temporal-history cell vector bytes"),
+        "AMR migration temporal-history dynamic heap bytes");
+  }
+  return bytes;
 }
 
 ParticleWireReferenceWidths particleWireReferenceWidths() {

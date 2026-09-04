@@ -218,6 +218,83 @@ void testAmrBoundaryPayloadCarriesDepthAndCanonicalMetalMass() {
   assert(payload[1].metal_mass_code == state.gas_cells.metal_mass_code[1]);
 }
 
+void testAmrMigrationWireCarriesPendingSynchronizationState() {
+  cosmosim::core::AmrPatchMigrationRecord record;
+  record.patch.patch_id = 501U;
+  record.patch.parent_patch_id = 50U;
+  record.patch.morton_key = 0xABU;
+  record.patch.level = 2;
+  record.patch.owning_rank = 3U;
+  record.patch.cell_count = 1U;
+  record.patch.extent_x_comoving = 1.0;
+  record.patch.extent_y_comoving = 1.0;
+  record.patch.extent_z_comoving = 1.0;
+  record.patch.cell_dim_x = 1U;
+  record.patch.cell_dim_y = 1U;
+  record.patch.cell_dim_z = 1U;
+  cosmosim::core::GasCellMigrationRecord gas;
+  gas.owning_rank = 3U;
+  gas.fields.gas_cell_id = 9001U;
+  gas.fields.owning_patch_id = 501U;
+  gas.fields.temperature_code = 42.0;
+  record.gas_cell_records.push_back(gas);
+  cosmosim::core::GasCellSchedulerMigrationRecord scheduler;
+  scheduler.gas_cell_id = 9001U;
+  scheduler.bin_index = 2U;
+  scheduler.next_activation_tick = 64U;
+  scheduler.pending_bin_index = 0xFFU;
+  record.gas_cell_scheduler_records.push_back(scheduler);
+
+  cosmosim::core::PendingFluxRegisterRecord pending;
+  pending.register_key = 7001U;
+  pending.coarse_patch_id = 501U;
+  pending.coarse_gas_cell_id = 9001U;
+  pending.coarse_cell_index = 17U;
+  pending.level = 2U;
+  pending.expected_area_comov = 0.25;
+  pending.expected_fine_substeps = 2U;
+  pending.completed_fine_substeps = 1U;
+  pending.fine_substep_coverage_mask = 1U;
+  pending.coarse_face_count = 1U;
+  pending.fine_face_count = 4U;
+  pending.gas_cell_identity_generation = 9U;
+  pending.patch_geometry_generation = 11U;
+  pending.coarse_total_energy_flux_integral_code = 3.5;
+  pending.fine_total_energy_flux_integral_code = 4.5;
+  record.pending_flux_register_records.push_back(pending);
+
+  cosmosim::core::AmrTemporalBoundaryHistoryRecord history;
+  history.patch_id = 501U;
+  history.patch_level = 2U;
+  history.patch_geometry_fingerprint = 0x1234U;
+  history.gas_cell_identity_generation = 9U;
+  history.interval_start_code = 0.5;
+  history.interval_end_code = 0.75;
+  history.end_state_valid = true;
+  cosmosim::core::AmrTemporalBoundaryHistoryCellRecord history_cell;
+  history_cell.gas_cell_id = 9001U;
+  history_cell.patch_local_cell = 0U;
+  history_cell.start_mass_density_comoving = 2.0;
+  history_cell.end_mass_density_comoving = 2.5;
+  history.cells.push_back(history_cell);
+  record.temporal_boundary_history_records.push_back(history);
+
+  const auto encoded = wire::encodeAmrPatchMigrationRecord(record);
+  const auto decoded = wire::decodeAmrPatchMigrationRecord(encoded);
+  assert(decoded.patch.patch_id == 501U);
+  assert(decoded.gas_cell_records.size() == 1U);
+  assert(decoded.pending_flux_register_records.size() == 1U);
+  assert(decoded.pending_flux_register_records[0].register_key == 7001U);
+  assert(decoded.pending_flux_register_records[0].coarse_gas_cell_id == 9001U);
+  assert(decoded.pending_flux_register_records[0].fine_total_energy_flux_integral_code == 4.5);
+  assert(decoded.temporal_boundary_history_records.size() == 1U);
+  assert(decoded.temporal_boundary_history_records[0].patch_geometry_fingerprint == 0x1234U);
+  assert(decoded.temporal_boundary_history_records[0].end_state_valid);
+  assert(decoded.temporal_boundary_history_records[0].cells.size() == 1U);
+  assert(decoded.temporal_boundary_history_records[0].cells[0].gas_cell_id == 9001U);
+  assert(decoded.temporal_boundary_history_records[0].cells[0].end_mass_density_comoving == 2.5);
+}
+
 }  // namespace
 
 int main() {
@@ -226,5 +303,6 @@ int main() {
   testTruncatedAndFragmentPacketsFailClosed();
   testPacketCapacityIsIndependentOfLogicalTraffic();
   testAmrBoundaryPayloadCarriesDepthAndCanonicalMetalMass();
+  testAmrMigrationWireCarriesPendingSynchronizationState();
   return 0;
 }

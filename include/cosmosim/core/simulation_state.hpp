@@ -697,12 +697,16 @@ struct GasCellSchedulerMigrationRecord {
 };
 
 struct AmrPatchMigrationRecord {
-  // Atomic patch ownership payload. Patch descriptors and every authoritative
-  // gas-cell row in the patch migrate together, keyed by stable patch_id and
-  // gas_cell_id rather than by old local rows.
+  // Atomic patch ownership payload. Patch descriptors, every authoritative
+  // gas-cell row, scheduler identity, and AMR synchronization state owned by
+  // the patch migrate together. Pending reflux records are keyed by the
+  // coarse patch/gas-cell identity; temporal histories are keyed by patch_id.
+  // Dense-row indices/generations are remapped on destination commit.
   AmrPatchMigrationFields patch{};
   std::vector<GasCellMigrationRecord> gas_cell_records;
   std::vector<GasCellSchedulerMigrationRecord> gas_cell_scheduler_records;
+  std::vector<PendingFluxRegisterRecord> pending_flux_register_records;
+  std::vector<AmrTemporalBoundaryHistoryRecord> temporal_boundary_history_records;
 };
 
 struct AmrPatchMigrationCommit {

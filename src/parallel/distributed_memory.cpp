@@ -5037,17 +5037,82 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   constexpr int k_flux_count_tag_base = 12910;
   constexpr int k_flux_payload_tag_base = 13910;
-  std::vector<AmrFluxRegisterPayloadRecord> inbound_records;
-  for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
-    if (peer_rank == world_rank) {
-      continue;
+  std::vector<std::uint64_t> send_record_counts;
+  std::vector<std::uint64_t> recv_record_counts;
+  std::exception_ptr local_preparation_failure;
+  try {
+    send_record_counts.resize(static_cast<std::size_t>(world_size), 0U);
+    recv_record_counts.resize(static_cast<std::size_t>(world_size), 0U);
+    for (const AmrFluxRegisterPayloadRecord& record : local_records) {
+      if (record.owner_rank == world_rank) {
+        continue;
+      }
+      auto& count = send_record_counts[static_cast<std::size_t>(record.owner_rank)];
+      if (count == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("AMR flux-register owner-target count overflows uint64_t");
+      }
+      ++count;
     }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure, "AMR flux-register owner-target count preparation");
+
+  if (MPI_Alltoall(
+          send_record_counts.data(), 1, MPI_UINT64_T,
+          recv_record_counts.data(), 1, MPI_UINT64_T,
+          MPI_COMM_WORLD) != MPI_SUCCESS) {
+    throw std::runtime_error("AMR flux-register owner-target count exchange failed");
+  }
+
+  std::vector<int> active_peers;
+  std::size_t total_inbound_records = 0U;
+  local_preparation_failure = nullptr;
+  try {
+    active_peers.reserve(static_cast<std::size_t>(world_size));
+    for (int peer_rank = 0; peer_rank < world_size; ++peer_rank) {
+      if (peer_rank == world_rank) {
+        continue;
+      }
+      const std::size_t peer = static_cast<std::size_t>(peer_rank);
+      if (send_record_counts[peer] != 0U || recv_record_counts[peer] != 0U) {
+        active_peers.push_back(peer_rank);
+      }
+      total_inbound_records = core::checkedSizeAdd(
+          total_inbound_records,
+          core::checkedIntegralNarrow<std::size_t>(
+              recv_record_counts[peer], "AMR flux-register inbound owner count"),
+          "AMR flux-register inbound record count");
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure, "AMR flux-register active-peer preparation");
+
+  std::vector<AmrFluxRegisterPayloadRecord> inbound_records;
+  inbound_records.reserve(core::checkedSizeAdd(
+      total_inbound_records,
+      static_cast<std::size_t>(std::count_if(
+          local_records.begin(), local_records.end(),
+          [world_rank](const AmrFluxRegisterPayloadRecord& record) {
+            return record.owner_rank == world_rank;
+          })),
+      "AMR flux-register inbound reserve"));
+  for (const int peer_rank : active_peers) {
+    const std::size_t peer = static_cast<std::size_t>(peer_rank);
+    const std::size_t peer_send_count = core::checkedIntegralNarrow<std::size_t>(
+        send_record_counts[peer], "AMR flux-register peer send count");
     std::vector<AmrFluxRegisterPayloadRecord> outbound_to_peer;
-    outbound_to_peer.reserve(local_records.size());
+    outbound_to_peer.reserve(peer_send_count);
     for (const AmrFluxRegisterPayloadRecord& record : local_records) {
       if (record.owner_rank == peer_rank) {
         outbound_to_peer.push_back(record);
       }
+    }
+    if (outbound_to_peer.size() != peer_send_count) {
+      throw std::runtime_error("AMR flux-register owner-target payload count changed after count exchange");
     }
     std::vector<AmrFluxRegisterPayloadRecord> received_from_peer = exchangePodRecordsWithPeer(
         mpi_context,
@@ -5057,6 +5122,11 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
         k_flux_payload_tag_base,
         exchange_sequence,
         "executeBlockingAmrFluxRegisterPayloadExchange");
+    const std::size_t peer_recv_count = core::checkedIntegralNarrow<std::size_t>(
+        recv_record_counts[peer], "AMR flux-register peer receive count");
+    if (received_from_peer.size() != peer_recv_count) {
+      throw std::runtime_error("AMR flux-register owner-target receive count changed after count exchange");
+    }
     for (const AmrFluxRegisterPayloadRecord& record : received_from_peer) {
       validateAmrFluxRegisterPayloadRecord(record);
       if (record.owner_rank != world_rank || record.source_rank != peer_rank) {

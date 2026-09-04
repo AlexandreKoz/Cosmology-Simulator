@@ -86,6 +86,47 @@ void seedPatchState(SimulationState& state) {
     state.gas_cells.sound_speed_code[row] = 500.0 + static_cast<double>(row);
   }
   state.refreshGasCellIdentityMapFromSidecarLanes();
+
+  cosmosim::core::PendingFluxRegisterRecord pending;
+  pending.register_key = 0xA501U;
+  pending.coarse_patch_id = 101U;
+  pending.coarse_gas_cell_id = 7001U;
+  pending.coarse_cell_index = 0U;
+  pending.level = 1U;
+  pending.axis = 0U;
+  pending.orientation = 1U;
+  pending.expected_area_comov = 0.5;
+  pending.interval_start_code = 1.0;
+  pending.interval_end_code = 1.25;
+  pending.coarse_dt_code = 0.25;
+  pending.expected_fine_substeps = 2U;
+  pending.completed_fine_substeps = 1U;
+  pending.fine_substep_coverage_mask = 1U;
+  pending.coarse_face_count = 1U;
+  pending.fine_face_count = 1U;
+  pending.gas_cell_identity_generation = state.gasCellIdentityGeneration();
+  pending.patch_geometry_generation = state.cellIndexGeneration();
+  pending.coarse_mass_flux_integral_code = 0.125;
+  pending.fine_mass_flux_integral_code = 0.25;
+  state.pending_flux_registers.assign({pending});
+
+  cosmosim::core::AmrTemporalBoundaryHistoryRecord history;
+  history.patch_id = 101U;
+  history.patch_level = 1U;
+  history.patch_geometry_fingerprint = 0xCAFEU;
+  history.gas_cell_identity_generation = state.gasCellIdentityGeneration();
+  history.interval_start_code = 1.0;
+  history.interval_end_code = 1.25;
+  history.end_state_valid = true;
+  for (std::size_t offset = 0; offset < 2U; ++offset) {
+    cosmosim::core::AmrTemporalBoundaryHistoryCellRecord cell;
+    cell.gas_cell_id = gas_ids[offset];
+    cell.patch_local_cell = offset;
+    cell.start_mass_density_comoving = 10.0 + static_cast<double>(offset);
+    cell.end_mass_density_comoving = 11.0 + static_cast<double>(offset);
+    history.cells.push_back(cell);
+  }
+  state.amr_temporal_boundary_history.assign({history});
 }
 
 std::uint32_t rowForGasCell(const SimulationState& state, std::uint64_t gas_cell_id) {
@@ -121,6 +162,10 @@ void test_patch_payload_carries_descriptor_and_gas_sidecars_atomically() {
   assert(records[0].gas_cell_records[1].fields.gas_cell_id == 7002);
   assert(records[0].gas_cell_records[1].fields.has_parent_particle == 0);
   assert(records[0].gas_cell_records[1].fields.ghost_hydro_epoch == 42);
+  assert(records[0].pending_flux_register_records.size() == 1U);
+  assert(records[0].pending_flux_register_records[0].register_key == 0xA501U);
+  assert(records[0].temporal_boundary_history_records.size() == 1U);
+  assert(records[0].temporal_boundary_history_records[0].cells.size() == 2U);
 
   AmrPatchMigrationCommit commit;
   commit.world_rank = 0;
@@ -154,6 +199,21 @@ void test_patch_payload_carries_descriptor_and_gas_sidecars_atomically() {
   assert(state.owningPatchIdForGasCellId(7001).value() == 101);
   assert(state.gas_cells.density_code[parented_row] == 100.0);
   assert(state.gas_cells.internal_energy_code[parentless_row] == 301.0);
+  assert(state.pending_flux_registers.size() == 1U);
+  const auto& migrated_pending = state.pending_flux_registers.records().front();
+  assert(migrated_pending.register_key == 0xA501U);
+  assert(migrated_pending.coarse_patch_id == 101U);
+  assert(migrated_pending.coarse_gas_cell_id == 7001U);
+  assert(migrated_pending.coarse_cell_index == parented_row);
+  assert(migrated_pending.gas_cell_identity_generation == state.gasCellIdentityGeneration());
+  assert(migrated_pending.patch_geometry_generation == state.cellIndexGeneration());
+  assert(state.amr_temporal_boundary_history.size() == 1U);
+  const auto& migrated_history = state.amr_temporal_boundary_history.records().front();
+  assert(migrated_history.patch_id == 101U);
+  assert(migrated_history.gas_cell_identity_generation == state.gasCellIdentityGeneration());
+  assert(migrated_history.cells.size() == 2U);
+  assert(migrated_history.cells[0].gas_cell_id == 7001U);
+  assert(migrated_history.cells[1].gas_cell_id == 7002U);
   assert(state.validateOwnershipInvariants());
   assert(cosmosim::amr::hasProductionAmrHydroCoverage(state));
 }

@@ -10,7 +10,7 @@
 namespace cosmosim::workflows::internal::migration_wire {
 
 inline constexpr std::uint32_t k_particle_record_wire_version = 2U;
-inline constexpr std::uint32_t k_amr_patch_record_wire_version = 2U;
+inline constexpr std::uint32_t k_amr_patch_record_wire_version = 3U;
 inline constexpr std::uint32_t k_fragment_wire_version = 1U;
 inline constexpr std::size_t k_fragment_header_bytes =
     sizeof(std::uint32_t) + sizeof(std::uint64_t) * 3U + sizeof(std::uint32_t);

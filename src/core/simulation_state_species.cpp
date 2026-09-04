@@ -1420,6 +1420,17 @@ std::vector<AmrPatchMigrationRecord> SimulationState::packAmrPatchMigrationRecor
     if (record.gas_cell_records.size() != record.patch.cell_count) {
       throw std::runtime_error("packAmrPatchMigrationRecords: patch payload did not cover every gas-cell row");
     }
+    for (const PendingFluxRegisterRecord& pending : pending_flux_registers.records()) {
+      if (pending.coarse_patch_id == record.patch.patch_id) {
+        record.pending_flux_register_records.push_back(pending);
+      }
+    }
+    for (const AmrTemporalBoundaryHistoryRecord& history :
+         amr_temporal_boundary_history.records()) {
+      if (history.patch_id == record.patch.patch_id) {
+        record.temporal_boundary_history_records.push_back(history);
+      }
+    }
     records.push_back(std::move(record));
   }
   return records;
@@ -1500,6 +1511,7 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
       throw std::invalid_argument("commitAmrPatchMigration: kept patches contain duplicate patch_id");
     }
   }
+  const std::unordered_set<std::uint64_t> kept_original_patch_ids = final_patch_ids;
   for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
     requireValidAmrPatchMigrationFields(inbound.patch, "commitAmrPatchMigration");
     if (inbound.patch.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
@@ -1507,6 +1519,48 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
     }
     if (inbound.gas_cell_records.size() != inbound.patch.cell_count) {
       throw std::invalid_argument("commitAmrPatchMigration: inbound patch gas-cell payload count mismatch");
+    }
+    std::unordered_set<std::uint64_t> inbound_gas_cell_ids;
+    inbound_gas_cell_ids.reserve(inbound.gas_cell_records.size());
+    for (const GasCellMigrationRecord& gas_record : inbound.gas_cell_records) {
+      if (!inbound_gas_cell_ids.insert(gas_record.fields.gas_cell_id).second) {
+        throw std::invalid_argument("commitAmrPatchMigration: inbound patch contains duplicate gas_cell_id");
+      }
+    }
+    std::unordered_set<std::uint64_t> inbound_flux_keys;
+    inbound_flux_keys.reserve(inbound.pending_flux_register_records.size());
+    for (const PendingFluxRegisterRecord& pending : inbound.pending_flux_register_records) {
+      if (pending.register_key == 0U || pending.coarse_patch_id != inbound.patch.patch_id ||
+          !inbound_gas_cell_ids.contains(pending.coarse_gas_cell_id)) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: inbound pending flux register does not belong to the migrated patch");
+      }
+      if (!inbound_flux_keys.insert(pending.register_key).second) {
+        throw std::invalid_argument("commitAmrPatchMigration: inbound patch contains duplicate flux-register key");
+      }
+    }
+    if (inbound.temporal_boundary_history_records.size() > 1U) {
+      throw std::invalid_argument(
+          "commitAmrPatchMigration: inbound patch contains multiple temporal-boundary histories");
+    }
+    for (const AmrTemporalBoundaryHistoryRecord& history : inbound.temporal_boundary_history_records) {
+      if (history.patch_id != inbound.patch.patch_id || history.cells.size() != inbound.patch.cell_count) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: inbound temporal-boundary history does not cover the migrated patch");
+      }
+      std::vector<std::uint8_t> seen_local_cell(history.cells.size(), 0U);
+      for (const AmrTemporalBoundaryHistoryCellRecord& history_cell : history.cells) {
+        if (history_cell.patch_local_cell >= inbound.patch.cell_count ||
+            !inbound_gas_cell_ids.contains(history_cell.gas_cell_id)) {
+          throw std::invalid_argument(
+              "commitAmrPatchMigration: inbound temporal-boundary history references a foreign gas cell");
+        }
+        if (seen_local_cell[history_cell.patch_local_cell] != 0U) {
+          throw std::invalid_argument(
+              "commitAmrPatchMigration: inbound temporal-boundary history duplicates a patch-local cell");
+        }
+        seen_local_cell[history_cell.patch_local_cell] = 1U;
+      }
     }
     if (!final_patch_ids.insert(inbound.patch.patch_id).second) {
       throw std::invalid_argument("commitAmrPatchMigration: inbound patch_id duplicates local patch state");
@@ -1646,6 +1700,130 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
   GasCellIdentityMap rebuilt_identity;
   rebuilt_identity.assignWithGeneration(
       std::move(rebuilt_identity_records), gas_cell_identity.generation() + 1U);
+  if (cellIndexGeneration() == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("commitAmrPatchMigration: cell-index generation overflow");
+  }
+  const std::uint64_t rebuilt_cell_index_generation = cellIndexGeneration() + 1U;
+
+  std::vector<PendingFluxRegisterRecord> rebuilt_pending_flux_records;
+  std::size_t incoming_pending_count = 0U;
+  std::size_t incoming_history_count = 0U;
+  for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
+    incoming_pending_count = checkedSizeAdd(
+        incoming_pending_count,
+        inbound.pending_flux_register_records.size(),
+        "commitAmrPatchMigration pending flux count");
+    incoming_history_count = checkedSizeAdd(
+        incoming_history_count,
+        inbound.temporal_boundary_history_records.size(),
+        "commitAmrPatchMigration temporal history count");
+  }
+  rebuilt_pending_flux_records.reserve(checkedSizeAdd(
+      pending_flux_registers.size(), incoming_pending_count,
+      "commitAmrPatchMigration pending flux reserve"));
+  std::unordered_set<std::uint64_t> final_flux_keys;
+  final_flux_keys.reserve(checkedSizeAdd(
+      pending_flux_registers.size(), incoming_pending_count,
+      "commitAmrPatchMigration flux-key reserve"));
+  for (const PendingFluxRegisterRecord& pending : pending_flux_registers.records()) {
+    if (!kept_original_patch_ids.contains(pending.coarse_patch_id)) {
+      continue;
+    }
+    if (!final_flux_keys.insert(pending.register_key).second) {
+      throw std::invalid_argument("commitAmrPatchMigration: kept pending flux registers contain duplicate key");
+    }
+    rebuilt_pending_flux_records.push_back(pending);
+  }
+  for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
+    for (const PendingFluxRegisterRecord& pending : inbound.pending_flux_register_records) {
+      if (!final_flux_keys.insert(pending.register_key).second) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: inbound pending flux-register key duplicates destination state");
+      }
+      rebuilt_pending_flux_records.push_back(pending);
+    }
+  }
+
+  std::vector<AmrTemporalBoundaryHistoryRecord> rebuilt_temporal_history_records;
+  rebuilt_temporal_history_records.reserve(checkedSizeAdd(
+      amr_temporal_boundary_history.size(), incoming_history_count,
+      "commitAmrPatchMigration temporal history reserve"));
+  std::unordered_set<std::uint64_t> final_history_patch_ids;
+  final_history_patch_ids.reserve(checkedSizeAdd(
+      amr_temporal_boundary_history.size(), incoming_history_count,
+      "commitAmrPatchMigration temporal history key reserve"));
+  for (const AmrTemporalBoundaryHistoryRecord& history : amr_temporal_boundary_history.records()) {
+    if (!kept_original_patch_ids.contains(history.patch_id)) {
+      continue;
+    }
+    if (!final_history_patch_ids.insert(history.patch_id).second) {
+      throw std::invalid_argument("commitAmrPatchMigration: kept temporal histories contain duplicate patch_id");
+    }
+    rebuilt_temporal_history_records.push_back(history);
+  }
+  for (const AmrPatchMigrationRecord& inbound : commit.inbound_records) {
+    for (const AmrTemporalBoundaryHistoryRecord& history : inbound.temporal_boundary_history_records) {
+      if (!final_history_patch_ids.insert(history.patch_id).second) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: inbound temporal history duplicates destination patch state");
+      }
+      rebuilt_temporal_history_records.push_back(history);
+    }
+  }
+
+  std::unordered_map<std::uint64_t, std::uint32_t> final_patch_row_by_id;
+  final_patch_row_by_id.reserve(rebuilt_patches.size());
+  for (std::uint32_t patch_row = 0; patch_row < rebuilt_patches.size(); ++patch_row) {
+    final_patch_row_by_id.emplace(rebuilt_patches.patch_id[patch_row], patch_row);
+  }
+  for (PendingFluxRegisterRecord& pending : rebuilt_pending_flux_records) {
+    const auto patch_it = final_patch_row_by_id.find(pending.coarse_patch_id);
+    const auto gas_it = new_row_by_gas_cell_id.find(pending.coarse_gas_cell_id);
+    if (patch_it == final_patch_row_by_id.end() || gas_it == new_row_by_gas_cell_id.end()) {
+      throw std::invalid_argument(
+          "commitAmrPatchMigration: pending flux register lost its stable patch/gas target");
+    }
+    const std::uint32_t gas_row = gas_it->second;
+    if (rebuilt_cells.patch_index[gas_row] != patch_it->second) {
+      throw std::invalid_argument(
+          "commitAmrPatchMigration: pending flux register gas target belongs to a different patch");
+    }
+    pending.coarse_cell_index = gas_row;
+    pending.gas_cell_identity_generation = rebuilt_identity.generation();
+    pending.patch_geometry_generation = rebuilt_cell_index_generation;
+  }
+  for (AmrTemporalBoundaryHistoryRecord& history : rebuilt_temporal_history_records) {
+    const auto patch_it = final_patch_row_by_id.find(history.patch_id);
+    if (patch_it == final_patch_row_by_id.end()) {
+      throw std::invalid_argument("commitAmrPatchMigration: temporal history lost its patch target");
+    }
+    const std::uint32_t patch_row = patch_it->second;
+    if (history.cells.size() != rebuilt_patches.cell_count[patch_row]) {
+      throw std::invalid_argument(
+          "commitAmrPatchMigration: temporal history no longer covers its patch after migration");
+    }
+    history.gas_cell_identity_generation = rebuilt_identity.generation();
+    for (const AmrTemporalBoundaryHistoryCellRecord& history_cell : history.cells) {
+      if (history_cell.patch_local_cell >= rebuilt_patches.cell_count[patch_row]) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: temporal history patch-local cell is out of range after migration");
+      }
+      const std::uint32_t expected_row = rebuilt_patches.first_cell[patch_row] +
+          checkedIntegralNarrow<std::uint32_t>(
+              history_cell.patch_local_cell,
+              "commitAmrPatchMigration temporal history local-cell row");
+      if (expected_row >= rebuilt_gas_cells.size() ||
+          rebuilt_gas_cells.gas_cell_id[expected_row] != history_cell.gas_cell_id) {
+        throw std::invalid_argument(
+            "commitAmrPatchMigration: temporal history gas-cell identity changed during migration");
+      }
+    }
+  }
+
+  PendingFluxRegisterStore rebuilt_pending_flux_store;
+  rebuilt_pending_flux_store.assign(std::move(rebuilt_pending_flux_records));
+  AmrTemporalBoundaryHistoryStore rebuilt_temporal_history_store;
+  rebuilt_temporal_history_store.assign(std::move(rebuilt_temporal_history_records));
 
   patches = std::move(rebuilt_patches);
   cells = std::move(rebuilt_cells);
@@ -1653,6 +1831,8 @@ void SimulationState::commitAmrPatchMigration(const AmrPatchMigrationCommit& com
   black_holes.host_cell_index = std::move(rebuilt_black_hole_hosts);
   tracers.host_cell_index = std::move(rebuilt_tracer_hosts);
   gas_cell_identity = std::move(rebuilt_identity);
+  pending_flux_registers = std::move(rebuilt_pending_flux_store);
+  amr_temporal_boundary_history = std::move(rebuilt_temporal_history_store);
   bumpCellIndexGeneration();
 }
 

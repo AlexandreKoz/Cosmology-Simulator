@@ -288,6 +288,55 @@ void testRefluxCorrection() {
                   std::abs((0.50 - 0.25) * area * dt_code / coarse_volume)) < k_tolerance);
 }
 
+void testRepeatedRefineDerefineReleasesSparseLevelStorage() {
+  cosmosim::amr::PatchHierarchy hierarchy;
+  cosmosim::amr::PatchDescriptor root;
+  root.cell_dims = {2, 2, 2};
+  const std::uint64_t root_id = hierarchy.createRootPatch(root);
+  const std::size_t root_cells = hierarchy.allocatedCellCount();
+  const std::size_t root_capacity_bytes = hierarchy.patchStorageCapacityBytes();
+  assert(root_cells == 8U);
+  assert(root_capacity_bytes > 0U);
+
+  for (int cycle = 0; cycle < 12; ++cycle) {
+    const auto child_ids = hierarchy.refinePatch(root_id);
+    assert(child_ids.size() == 8U);
+    assert(hierarchy.levelCount() == 2U);
+    assert(hierarchy.patchCount() == 9U);
+    assert(hierarchy.allocatedCellCount() == 72U);
+    assert(hierarchy.patchStorageCapacityBytes() >= 9U * root_capacity_bytes);
+
+    assert(hierarchy.derefinePatch(root_id));
+    assert(hierarchy.levelCount() == 1U);
+    assert(hierarchy.patchCount() == 1U);
+    assert(hierarchy.allocatedCellCount() == root_cells);
+    assert(hierarchy.patchStorageCapacityBytes() == root_capacity_bytes);
+  }
+}
+
+void testOddPatchDimensionsRoundTripConservatively() {
+  cosmosim::amr::PatchHierarchy hierarchy;
+  cosmosim::amr::PatchDescriptor root;
+  root.cell_dims = {3, 2, 2};
+  const std::uint64_t root_id = hierarchy.createRootPatch(root);
+  auto* root_patch = hierarchy.findPatch(root_id);
+  assert(root_patch != nullptr);
+  for (std::size_t row = 0U; row < root_patch->cellCount(); ++row) {
+    auto& cell = root_patch->conservedView()[row];
+    const double value = static_cast<double>(row + 1U);
+    cell.mass_code = value;
+    cell.momentum_x_code = 0.25 * value;
+    cell.total_energy_code = 2.0 * value;
+    root_patch->metricsView()[row].particle_count = static_cast<std::uint32_t>(row + 3U);
+  }
+  const auto total_before = root_patch->totalConserved();
+  [[maybe_unused]] const auto children = hierarchy.refinePatch(root_id);
+  assert(hierarchy.derefinePatch(root_id));
+  root_patch = hierarchy.findPatch(root_id);
+  assert(root_patch != nullptr);
+  assertConservedClose(root_patch->totalConserved(), total_before);
+}
+
 }  // namespace
 
 int main() {
@@ -296,5 +345,7 @@ int main() {
   testRefinePatchInitializesChildrenConservatively();
   testDerefineRestrictsModifiedChildrenAndArchivesIds();
   testRefluxCorrection();
+  testRepeatedRefineDerefineReleasesSparseLevelStorage();
+  testOddPatchDimensionsRoundTripConservatively();
   return 0;
 }

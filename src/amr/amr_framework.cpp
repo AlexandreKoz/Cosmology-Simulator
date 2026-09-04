@@ -1,5 +1,7 @@
 #include "cosmosim/amr/amr_framework.hpp"
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -282,12 +284,20 @@ RefinementDecision RefinementEvaluator::evaluateCell(
 }
 
 AmrPatch::AmrPatch(PatchDescriptor descriptor)
-    : m_descriptor(std::move(descriptor)),
-      m_conserved(static_cast<std::size_t>(m_descriptor.cell_dims[0]) *
-                  static_cast<std::size_t>(m_descriptor.cell_dims[1]) *
-                  static_cast<std::size_t>(m_descriptor.cell_dims[2])),
-      m_metrics(m_conserved.size()),
-      m_gas_cell_ids(m_conserved.size()) {}
+    : m_descriptor(std::move(descriptor)) {
+  if (m_descriptor.cell_dims[0] == 0U || m_descriptor.cell_dims[1] == 0U ||
+      m_descriptor.cell_dims[2] == 0U) {
+    throw std::invalid_argument("AMR patch cell dimensions must be nonzero");
+  }
+  const std::size_t cell_count = core::checkedSizeProduct3(
+      static_cast<std::size_t>(m_descriptor.cell_dims[0]),
+      static_cast<std::size_t>(m_descriptor.cell_dims[1]),
+      static_cast<std::size_t>(m_descriptor.cell_dims[2]),
+      "AMR patch cell count");
+  m_conserved.resize(cell_count);
+  m_metrics.resize(cell_count);
+  m_gas_cell_ids.resize(cell_count);
+}
 
 const PatchDescriptor& AmrPatch::descriptor() const {
   return m_descriptor;
@@ -338,6 +348,21 @@ ConservedState AmrPatch::totalConserved() const {
   return total;
 }
 
+std::size_t AmrPatch::ownedStorageCapacityBytes() const {
+  std::size_t bytes = core::checkedSizeMultiply(
+      m_conserved.capacity(), sizeof(ConservedState), "AMR conserved-state capacity bytes");
+  bytes = core::checkedSizeAdd(
+      bytes,
+      core::checkedSizeMultiply(m_metrics.capacity(), sizeof(CellMetrics), "AMR cell-metrics capacity bytes"),
+      "AMR patch storage capacity bytes");
+  bytes = core::checkedSizeAdd(
+      bytes,
+      core::checkedSizeMultiply(
+          m_gas_cell_ids.capacity(), sizeof(std::uint64_t), "AMR gas-cell-id capacity bytes"),
+      "AMR patch storage capacity bytes");
+  return bytes;
+}
+
 bool AmrPatch::isLeaf() const {
   return m_is_leaf;
 }
@@ -350,21 +375,35 @@ std::uint64_t PatchHierarchy::createRootPatch(const PatchDescriptor& root) {
   if (!m_levels.empty()) {
     throw std::runtime_error("PatchHierarchy already initialized with a root patch.");
   }
+  if (m_next_patch_id == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("AMR patch id space exhausted");
+  }
 
   PatchDescriptor root_copy = root;
-  root_copy.patch_id = m_next_patch_id++;
+  root_copy.patch_id = m_next_patch_id;
   root_copy.parent_patch_id = 0;
   root_copy.level = 0;
+  AmrPatch prepared_root(root_copy);
+  std::uint64_t candidate_next_gas_cell_id = m_next_gas_cell_id;
+  assignStableGasCellIds(prepared_root, candidate_next_gas_cell_id);
 
-  m_levels.emplace_back();
-  m_levels[0].emplace_back(root_copy);
-  assignStableGasCellIds(m_levels[0].back());
-  rebuildPatchIndex();
+  std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> candidate_index;
+  candidate_index.reserve(1U);
+  candidate_index.emplace(root_copy.patch_id, std::pair<std::size_t, std::size_t>{0U, 0U});
+  std::vector<AmrPatch> root_level;
+  root_level.reserve(1U);
+  root_level.emplace_back(std::move(prepared_root));
+  m_levels.reserve(1U);
+
+  m_levels.emplace_back(std::move(root_level));
+  m_patch_index.swap(candidate_index);
+  m_next_patch_id = root_copy.patch_id + 1U;
+  m_next_gas_cell_id = candidate_next_gas_cell_id;
   return root_copy.patch_id;
 }
 
 std::array<std::uint64_t, 8> PatchHierarchy::refinePatch(std::uint64_t patch_id) {
-  AmrPatch* parent_patch = findPatch(patch_id);
+  const AmrPatch* parent_patch = findPatch(patch_id);
   if (parent_patch == nullptr) {
     throw std::runtime_error("Cannot refine missing patch id.");
   }
@@ -372,23 +411,15 @@ std::array<std::uint64_t, 8> PatchHierarchy::refinePatch(std::uint64_t patch_id)
     throw std::runtime_error("Cannot refine non-leaf patch id.");
   }
 
-  const PatchDescriptor& parent = parent_patch->descriptor();
-  const PatchDescriptor parent_descriptor = parent;
-  const std::vector<ConservedState> parent_conserved(
-      parent_patch->conservedView().begin(),
-      parent_patch->conservedView().end());
-  const std::vector<CellMetrics> parent_metrics(
-      parent_patch->metricsView().begin(),
-      parent_patch->metricsView().end());
-  std::vector<std::vector<ConservedState>> parent_prolongated;
-  parent_prolongated.reserve(parent_conserved.size());
-  for (const auto& parent_cell : parent_conserved) {
-    parent_prolongated.push_back(ConservativeTransfer::prolongateFromCoarse(parent_cell, 8));
+  const PatchDescriptor parent_descriptor = parent_patch->descriptor();
+  const std::span<const ConservedState> parent_conserved = parent_patch->conservedView();
+  const std::span<const CellMetrics> parent_metrics = parent_patch->metricsView();
+  const std::size_t child_level = static_cast<std::size_t>(parent_descriptor.level) + 1U;
+  if (child_level > static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max())) {
+    throw std::overflow_error("AMR refinement level exceeds uint8_t range");
   }
-
-  const std::size_t child_level = static_cast<std::size_t>(parent.level) + 1;
-  if (child_level >= m_levels.size()) {
-    m_levels.resize(child_level + 1);
+  if (m_next_patch_id > std::numeric_limits<std::uint64_t>::max() - 8U) {
+    throw std::overflow_error("AMR patch id space cannot allocate a child octet");
   }
 
   const std::array<double, 3> child_extent = {
@@ -398,22 +429,25 @@ std::array<std::uint64_t, 8> PatchHierarchy::refinePatch(std::uint64_t patch_id)
   };
 
   std::array<std::uint64_t, 8> child_ids{};
+  std::vector<AmrPatch> prepared_children;
+  prepared_children.reserve(8U);
+  std::uint64_t candidate_next_patch_id = m_next_patch_id;
+  std::uint64_t candidate_next_gas_cell_id = m_next_gas_cell_id;
   for (std::uint8_t octant = 0; octant < 8; ++octant) {
     PatchDescriptor child;
-    child.patch_id = m_next_patch_id++;
+    child.patch_id = candidate_next_patch_id++;
     child.parent_patch_id = parent_descriptor.patch_id;
     child.level = static_cast<std::uint8_t>(child_level);
     child.morton_key = (parent_descriptor.morton_key << 3U) | octant;
     child.cell_dims = parent_descriptor.cell_dims;
     child.extent_comov = child_extent;
-
     child.origin_comov = parent_descriptor.origin_comov;
     child.origin_comov[0] += ((octant & 1U) != 0U) ? child_extent[0] : 0.0;
     child.origin_comov[1] += ((octant & 2U) != 0U) ? child_extent[1] : 0.0;
     child.origin_comov[2] += ((octant & 4U) != 0U) ? child_extent[2] : 0.0;
 
     AmrPatch child_patch(child);
-    assignStableGasCellIds(child_patch);
+    assignStableGasCellIds(child_patch, candidate_next_gas_cell_id);
     auto child_conserved = child_patch.conservedView();
     auto child_metrics = child_patch.metricsView();
     for (std::uint16_t z = 0; z < child.cell_dims[2]; ++z) {
@@ -425,7 +459,6 @@ std::array<std::uint64_t, 8> PatchHierarchy::refinePatch(std::uint64_t patch_id)
               static_cast<std::uint16_t>(y + (((octant & 2U) != 0U) ? child.cell_dims[1] : 0U));
           const std::uint16_t fine_z =
               static_cast<std::uint16_t>(z + (((octant & 4U) != 0U) ? child.cell_dims[2] : 0U));
-
           const std::uint16_t parent_x = static_cast<std::uint16_t>(fine_x / 2U);
           const std::uint16_t parent_y = static_cast<std::uint16_t>(fine_y / 2U);
           const std::uint16_t parent_z = static_cast<std::uint16_t>(fine_z / 2U);
@@ -435,18 +468,73 @@ std::array<std::uint64_t, 8> PatchHierarchy::refinePatch(std::uint64_t patch_id)
           const std::uint8_t fine_ordinal =
               static_cast<std::uint8_t>((fine_x & 1U) | ((fine_y & 1U) << 1U) | ((fine_z & 1U) << 2U));
 
-          child_conserved[child_index] = parent_prolongated[parent_index][fine_ordinal];
+          child_conserved[child_index] = parent_conserved[parent_index];
+          child_conserved[child_index] *= 0.125;
           child_metrics[child_index] = prolongatedChildMetrics(parent_metrics[parent_index], fine_ordinal);
         }
       }
     }
-
-    m_levels[child_level].emplace_back(std::move(child_patch));
     child_ids[octant] = child.patch_id;
+    prepared_children.emplace_back(std::move(child_patch));
   }
 
-  parent_patch->setLeaf(false);
-  rebuildPatchIndex();
+  // Pre-allocate all hierarchy/index growth before changing leaf authority.
+  m_levels.reserve(core::checkedSizeAdd(child_level, 1U, "AMR hierarchy level reserve"));
+  if (child_level < m_levels.size()) {
+    m_levels[child_level].reserve(core::checkedSizeAdd(
+        m_levels[child_level].size(), prepared_children.size(), "AMR child-level patch reserve"));
+  }
+
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> child_level_order;
+  const std::size_t existing_child_level_size = child_level < m_levels.size() ? m_levels[child_level].size() : 0U;
+  child_level_order.reserve(core::checkedSizeAdd(
+      existing_child_level_size, prepared_children.size(), "AMR child-level order reserve"));
+  if (child_level < m_levels.size()) {
+    for (const AmrPatch& patch : m_levels[child_level]) {
+      child_level_order.emplace_back(patch.descriptor().morton_key, patch.descriptor().patch_id);
+    }
+  }
+  for (const AmrPatch& patch : prepared_children) {
+    child_level_order.emplace_back(patch.descriptor().morton_key, patch.descriptor().patch_id);
+  }
+  std::sort(child_level_order.begin(), child_level_order.end());
+
+  std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> candidate_index;
+  candidate_index.reserve(core::checkedSizeAdd(patchCount(), prepared_children.size(), "AMR patch-index reserve"));
+  for (std::size_t level = 0; level < m_levels.size(); ++level) {
+    if (level == child_level) {
+      continue;
+    }
+    for (std::size_t offset = 0; offset < m_levels[level].size(); ++offset) {
+      candidate_index.emplace(m_levels[level][offset].descriptor().patch_id, std::pair{level, offset});
+    }
+  }
+  for (std::size_t offset = 0; offset < child_level_order.size(); ++offset) {
+    candidate_index.emplace(child_level_order[offset].second, std::pair{child_level, offset});
+  }
+
+  if (child_level == m_levels.size()) {
+    std::sort(prepared_children.begin(), prepared_children.end(), [](const AmrPatch& lhs, const AmrPatch& rhs) {
+      return lhs.descriptor().morton_key < rhs.descriptor().morton_key;
+    });
+    m_levels.emplace_back(std::move(prepared_children));
+  } else {
+    auto& target_level = m_levels[child_level];
+    for (AmrPatch& child : prepared_children) {
+      target_level.emplace_back(std::move(child));
+    }
+    std::sort(target_level.begin(), target_level.end(), [](const AmrPatch& lhs, const AmrPatch& rhs) {
+      return lhs.descriptor().morton_key < rhs.descriptor().morton_key;
+    });
+  }
+  m_patch_index.swap(candidate_index);
+  AmrPatch* committed_parent = findPatch(patch_id);
+  if (committed_parent == nullptr) {
+    throw std::logic_error("AMR refinement lost parent patch during transaction commit");
+  }
+  committed_parent->setLeaf(false);
+  m_next_patch_id = candidate_next_patch_id;
+  m_next_gas_cell_id = candidate_next_gas_cell_id;
   return child_ids;
 }
 
@@ -455,103 +543,110 @@ bool PatchHierarchy::derefinePatch(std::uint64_t parent_patch_id) {
   if (parent_patch == nullptr) {
     return false;
   }
-
   const PatchDescriptor parent_descriptor = parent_patch->descriptor();
-  const std::uint8_t child_level = parent_patch->descriptor().level + 1;
-  if (static_cast<std::size_t>(child_level) >= m_levels.size()) {
+  const std::size_t child_level = static_cast<std::size_t>(parent_descriptor.level) + 1U;
+  if (child_level >= m_levels.size()) {
     return false;
   }
 
   auto& level_patches = m_levels[child_level];
-  std::vector<const AmrPatch*> child_patches;
-  child_patches.reserve(8);
-  for (const auto& patch : level_patches) {
-    if (patch.descriptor().parent_patch_id == parent_patch_id) {
-      child_patches.push_back(&patch);
+  std::array<const AmrPatch*, 8> child_by_octant{};
+  std::size_t child_count = 0U;
+  for (const AmrPatch& patch : level_patches) {
+    if (patch.descriptor().parent_patch_id != parent_patch_id) {
+      continue;
     }
+    if (patch.descriptor().cell_dims != parent_descriptor.cell_dims) {
+      throw std::runtime_error("Cannot conservatively derefine child patches with mismatched cell dimensions.");
+    }
+    const std::uint8_t octant = static_cast<std::uint8_t>(patch.descriptor().morton_key & 7U);
+    if (child_by_octant[octant] != nullptr) {
+      throw std::runtime_error("Cannot conservatively derefine duplicate child octant.");
+    }
+    child_by_octant[octant] = &patch;
+    ++child_count;
   }
-  if (child_patches.empty()) {
+  if (child_count == 0U) {
     return false;
   }
-  if (child_patches.size() != 8) {
+  if (child_count != 8U) {
     throw std::runtime_error("Cannot conservatively derefine an incomplete octet of child patches.");
   }
 
-  std::vector<std::vector<ConservedState>> fine_conserved_by_parent(parent_patch->cellCount());
-  std::vector<std::vector<CellMetrics>> fine_metrics_by_parent(parent_patch->cellCount());
-  for (auto& fine_cells : fine_conserved_by_parent) {
-    fine_cells.reserve(8);
-  }
-  for (auto& fine_metrics : fine_metrics_by_parent) {
-    fine_metrics.reserve(8);
-  }
-
-  for (const auto* child_patch : child_patches) {
-    const PatchDescriptor& child = child_patch->descriptor();
-    if (child.cell_dims != parent_descriptor.cell_dims) {
-      throw std::runtime_error("Cannot conservatively derefine child patches with mismatched cell dimensions.");
-    }
-
-    const std::uint8_t octant = static_cast<std::uint8_t>(child.morton_key & 7U);
-    const auto child_conserved = child_patch->conservedView();
-    const auto child_metrics = child_patch->metricsView();
-    const auto child_gas_cell_ids = child_patch->gasCellIdView();
-    for (std::uint16_t z = 0; z < child.cell_dims[2]; ++z) {
-      for (std::uint16_t y = 0; y < child.cell_dims[1]; ++y) {
-        for (std::uint16_t x = 0; x < child.cell_dims[0]; ++x) {
-          const std::uint16_t fine_x =
-              static_cast<std::uint16_t>(x + (((octant & 1U) != 0U) ? child.cell_dims[0] : 0U));
-          const std::uint16_t fine_y =
-              static_cast<std::uint16_t>(y + (((octant & 2U) != 0U) ? child.cell_dims[1] : 0U));
-          const std::uint16_t fine_z =
-              static_cast<std::uint16_t>(z + (((octant & 4U) != 0U) ? child.cell_dims[2] : 0U));
-
-          const std::uint16_t parent_x = static_cast<std::uint16_t>(fine_x / 2U);
-          const std::uint16_t parent_y = static_cast<std::uint16_t>(fine_y / 2U);
-          const std::uint16_t parent_z = static_cast<std::uint16_t>(fine_z / 2U);
-          const std::size_t parent_index =
-              cellIndex(parent_descriptor.cell_dims, parent_x, parent_y, parent_z);
-          const std::size_t child_index = cellIndex(child.cell_dims, x, y, z);
-
-          fine_conserved_by_parent[parent_index].push_back(child_conserved[child_index]);
-          fine_metrics_by_parent[parent_index].push_back(child_metrics[child_index]);
-          m_retired_gas_cell_ids.push_back(child_gas_cell_ids[child_index]);
+  const std::size_t parent_cell_count = parent_patch->cellCount();
+  std::vector<ConservedState> prepared_parent_conserved(parent_cell_count);
+  std::vector<CellMetrics> prepared_parent_metrics(parent_cell_count);
+  std::vector<std::uint64_t> prepared_retired_ids;
+  prepared_retired_ids.reserve(core::checkedSizeMultiply(
+      parent_cell_count, 8U, "AMR derefine retired gas-cell reserve"));
+  const auto dims = parent_descriptor.cell_dims;
+  const double parent_cell_volume_comov = parent_patch->cellVolumeComov();
+  for (std::uint16_t parent_z = 0; parent_z < dims[2]; ++parent_z) {
+    for (std::uint16_t parent_y = 0; parent_y < dims[1]; ++parent_y) {
+      for (std::uint16_t parent_x = 0; parent_x < dims[0]; ++parent_x) {
+        const std::size_t parent_index = cellIndex(dims, parent_x, parent_y, parent_z);
+        std::array<ConservedState, 8> fine_conserved{};
+        std::array<CellMetrics, 8> fine_metrics{};
+        for (std::uint8_t fine_ordinal = 0; fine_ordinal < 8U; ++fine_ordinal) {
+          const std::uint16_t fine_x_global = static_cast<std::uint16_t>(2U * parent_x + (fine_ordinal & 1U));
+          const std::uint16_t fine_y_global = static_cast<std::uint16_t>(2U * parent_y + ((fine_ordinal >> 1U) & 1U));
+          const std::uint16_t fine_z_global = static_cast<std::uint16_t>(2U * parent_z + ((fine_ordinal >> 2U) & 1U));
+          const std::uint8_t octant = static_cast<std::uint8_t>(
+              (fine_x_global >= dims[0] ? 1U : 0U) |
+              (fine_y_global >= dims[1] ? 2U : 0U) |
+              (fine_z_global >= dims[2] ? 4U : 0U));
+          const AmrPatch* child_patch = child_by_octant[octant];
+          if (child_patch == nullptr) {
+            throw std::runtime_error("Cannot conservatively derefine: child octant coverage is incomplete.");
+          }
+          const std::uint16_t child_x = static_cast<std::uint16_t>(fine_x_global - ((octant & 1U) != 0U ? dims[0] : 0U));
+          const std::uint16_t child_y = static_cast<std::uint16_t>(fine_y_global - ((octant & 2U) != 0U ? dims[1] : 0U));
+          const std::uint16_t child_z = static_cast<std::uint16_t>(fine_z_global - ((octant & 4U) != 0U ? dims[2] : 0U));
+          const std::size_t child_index = cellIndex(dims, child_x, child_y, child_z);
+          fine_conserved[fine_ordinal] = child_patch->conservedView()[child_index];
+          fine_metrics[fine_ordinal] = child_patch->metricsView()[child_index];
+          prepared_retired_ids.push_back(child_patch->gasCellIdView()[child_index]);
         }
+        prepared_parent_conserved[parent_index] = ConservativeTransfer::restrictToCoarse(fine_conserved);
+        prepared_parent_metrics[parent_index] = restrictedParentMetrics(
+            fine_metrics, prepared_parent_conserved[parent_index], parent_cell_volume_comov);
       }
+    }
+  }
+
+  m_retired_gas_cell_ids.reserve(core::checkedSizeAdd(
+      m_retired_gas_cell_ids.size(), prepared_retired_ids.size(), "AMR retired-id archive reserve"));
+  std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> candidate_index;
+  candidate_index.reserve(patchCount() - child_count);
+  for (std::size_t level = 0; level < m_levels.size(); ++level) {
+    std::size_t final_offset = 0U;
+    for (const AmrPatch& patch : m_levels[level]) {
+      if (level == child_level && patch.descriptor().parent_patch_id == parent_patch_id) {
+        continue;
+      }
+      candidate_index.emplace(patch.descriptor().patch_id, std::pair{level, final_offset++});
     }
   }
 
   auto parent_conserved = parent_patch->conservedView();
   auto parent_metrics = parent_patch->metricsView();
-  for (std::size_t parent_index = 0; parent_index < parent_conserved.size(); ++parent_index) {
-    if (fine_conserved_by_parent[parent_index].size() != 8) {
-      throw std::runtime_error("Cannot conservatively derefine: fine child coverage is incomplete.");
-    }
-
-    parent_conserved[parent_index] =
-        ConservativeTransfer::restrictToCoarse(fine_conserved_by_parent[parent_index]);
-    parent_metrics[parent_index] = restrictedParentMetrics(
-        fine_metrics_by_parent[parent_index],
-        parent_conserved[parent_index],
-        parent_patch->cellVolumeComov());
-  }
-
-  const auto old_size = level_patches.size();
+  std::copy(prepared_parent_conserved.begin(), prepared_parent_conserved.end(), parent_conserved.begin());
+  std::copy(prepared_parent_metrics.begin(), prepared_parent_metrics.end(), parent_metrics.begin());
+  m_retired_gas_cell_ids.insert(
+      m_retired_gas_cell_ids.end(), prepared_retired_ids.begin(), prepared_retired_ids.end());
   level_patches.erase(
       std::remove_if(
-          level_patches.begin(),
-          level_patches.end(),
+          level_patches.begin(), level_patches.end(),
           [parent_patch_id](const AmrPatch& patch) {
             return patch.descriptor().parent_patch_id == parent_patch_id;
           }),
       level_patches.end());
-
-  const bool removed_children = level_patches.size() != old_size;
-  if (removed_children) {
-    parent_patch->setLeaf(true);
-    rebuildPatchIndex();
+  parent_patch->setLeaf(true);
+  m_patch_index.swap(candidate_index);
+  while (m_levels.size() > 1U && m_levels.back().empty()) {
+    m_levels.pop_back();
   }
-  return removed_children;
+  return true;
 }
 
 AmrPatch* PatchHierarchy::findPatch(std::uint64_t patch_id) {
@@ -559,7 +654,6 @@ AmrPatch* PatchHierarchy::findPatch(std::uint64_t patch_id) {
   if (it == m_patch_index.end()) {
     return nullptr;
   }
-
   const auto [level_index, offset] = it->second;
   return &m_levels[level_index][offset];
 }
@@ -569,7 +663,6 @@ const AmrPatch* PatchHierarchy::findPatch(std::uint64_t patch_id) const {
   if (it == m_patch_index.end()) {
     return nullptr;
   }
-
   const auto [level_index, offset] = it->second;
   return &m_levels[level_index][offset];
 }
@@ -593,20 +686,43 @@ std::size_t PatchHierarchy::levelCount() const {
 }
 
 std::size_t PatchHierarchy::patchCount() const {
-  std::size_t count = 0;
+  std::size_t count = 0U;
   for (const auto& level : m_levels) {
-    count += level.size();
+    count = core::checkedSizeAdd(count, level.size(), "AMR hierarchy patch count");
   }
   return count;
+}
+
+std::size_t PatchHierarchy::allocatedCellCount() const {
+  std::size_t count = 0U;
+  for (const auto& level : m_levels) {
+    for (const AmrPatch& patch : level) {
+      count = core::checkedSizeAdd(count, patch.cellCount(), "AMR hierarchy allocated cell count");
+    }
+  }
+  return count;
+}
+
+std::size_t PatchHierarchy::patchStorageCapacityBytes() const {
+  std::size_t bytes = 0U;
+  for (const auto& level : m_levels) {
+    for (const AmrPatch& patch : level) {
+      bytes = core::checkedSizeAdd(bytes, patch.ownedStorageCapacityBytes(), "AMR patch storage capacity total");
+    }
+  }
+  return bytes;
 }
 
 std::span<const std::uint64_t> PatchHierarchy::retiredGasCellIds() const {
   return std::span<const std::uint64_t>(m_retired_gas_cell_ids.data(), m_retired_gas_cell_ids.size());
 }
 
-void PatchHierarchy::assignStableGasCellIds(AmrPatch& patch) {
+void PatchHierarchy::assignStableGasCellIds(AmrPatch& patch, std::uint64_t& next_gas_cell_id) {
   for (auto& gas_cell_id : patch.gasCellIdView()) {
-    gas_cell_id = m_next_gas_cell_id++;
+    if (next_gas_cell_id == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("AMR gas-cell id space exhausted");
+    }
+    gas_cell_id = next_gas_cell_id++;
   }
 }
 
