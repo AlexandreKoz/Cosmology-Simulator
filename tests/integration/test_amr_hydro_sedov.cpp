@@ -58,7 +58,9 @@ void testAmrSedovRefinement() {
             .pressure_comoving = 1.0e-3};
       });
 
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 30000);
+  cosmosim::core::MemoryGovernor regrid_governor;
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(
+      state, parent, 400, 30000, ahv::productionAmrRegridOptions(state, regrid_governor));
   ahv::requireOrThrow(refine.refined_patch_count == 1U, "Sedov: parent patch was not refined");
   ahv::requireOrThrow(refine.created_gas_cell_count == 64U, "Sedov: unexpected refined cell count");
   ahv::requireFinitePositiveState(state, "Sedov after refine");

@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
 
@@ -13,6 +15,16 @@ namespace {
 
 constexpr double k_gamma = 1.4;
 constexpr double k_tol = 1.0e-9;
+
+[[nodiscard]] cosmosim::amr::ProductionAmrHydroOptions regridOptions(
+    const cosmosim::core::SimulationState& state,
+    cosmosim::core::MemoryGovernor& governor) {
+  governor.setBaselineOwnedBytes(cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(state)));
+  cosmosim::amr::ProductionAmrHydroOptions options;
+  options.regrid_memory_governor = &governor;
+  return options;
+}
 
 struct Totals {
   double mass = 0.0;
@@ -298,10 +310,11 @@ void testPatchLocalMappingSurvivesRowReorder() {
 
 void testProductionRegridRejectsIdCollisions() {
   cosmosim::core::SimulationState state = makeRefineState();
+  cosmosim::core::MemoryGovernor regrid_governor;
   const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
   bool patch_collision = false;
   try {
-    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 301, 20000);
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 301, 20000, regridOptions(state, regrid_governor));
   } catch (const std::invalid_argument&) {
     patch_collision = true;
   }
@@ -309,7 +322,7 @@ void testProductionRegridRejectsIdCollisions() {
 
   bool gas_collision = false;
   try {
-    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 9201);
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 9201, regridOptions(state, regrid_governor));
   } catch (const std::invalid_argument&) {
     gas_collision = true;
   }
@@ -318,10 +331,11 @@ void testProductionRegridRejectsIdCollisions() {
 
 void testProductionRefineUsesPatchLocalGeometryAfterRowReorder() {
   cosmosim::core::SimulationState state = makeRefineState();
+  cosmosim::core::MemoryGovernor regrid_governor;
   swapGasRows(state, 0, 7);
   const double patch_cell_zero_density = state.gas_cells.density_code[7];
   const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000);
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000, regridOptions(state, regrid_governor));
   assert(refine.refined_patch_count == 1U);
   assertClose(refine.conserved_mass_before, refine.conserved_mass_after);
   assertClose(refine.conserved_momentum_x_before, refine.conserved_momentum_x_after);
@@ -345,8 +359,9 @@ void testProductionRefineUsesPatchLocalGeometryAfterRowReorder() {
 
 void testProductionDerefineUsesPatchLocalGeometryAfterChildRowReorder() {
   cosmosim::core::SimulationState state = makeRefineState();
+  cosmosim::core::MemoryGovernor regrid_governor;
   const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000);
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000, regridOptions(state, regrid_governor));
   assert(refine.refined_patch_count == 1U);
 
   for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
@@ -357,7 +372,7 @@ void testProductionDerefineUsesPatchLocalGeometryAfterChildRowReorder() {
     }
   }
 
-  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, parent, 30000);
+  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, parent, 30000, regridOptions(state, regrid_governor));
   assert(derefine.derefined_patch_count == 1U);
   assertClose(derefine.conserved_mass_before, derefine.conserved_mass_after);
   assertClose(derefine.conserved_momentum_x_before, derefine.conserved_momentum_x_after);
@@ -387,8 +402,9 @@ void testPartialActiveSetSkipsIncompleteReflux() {
 
 void testProductionRefineAndDerefineConserveSimulationState() {
   cosmosim::core::SimulationState state = makeRefineState();
+  cosmosim::core::MemoryGovernor regrid_governor;
   const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
-  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000);
+  const auto refine = cosmosim::amr::refineProductionPatchInSimulationState(state, parent, 400, 20000, regridOptions(state, regrid_governor));
   assert(refine.refined_patch_count == 1U);
   assert(refine.created_gas_cell_count == 64U);
   assert(refine.retired_gas_cell_count == 8U);
@@ -402,7 +418,7 @@ void testProductionRefineAndDerefineConserveSimulationState() {
   assertClose(refine.conserved_momentum_z_before, refine.conserved_momentum_z_after);
   assertClose(refine.conserved_total_energy_before, refine.conserved_total_energy_after);
 
-  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, parent, 30000);
+  const auto derefine = cosmosim::amr::derefineProductionPatchInSimulationState(state, parent, 30000, regridOptions(state, regrid_governor));
   assert(derefine.derefined_patch_count == 1U);
   assert(derefine.created_gas_cell_count == 8U);
   assert(derefine.retired_gas_cell_count == 64U);
@@ -417,6 +433,112 @@ void testProductionRefineAndDerefineConserveSimulationState() {
   assertClose(derefine.conserved_total_energy_before, derefine.conserved_total_energy_after);
 }
 
+void testProductionRegridGovernorRejectionIsAtomic() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  const auto cells_before = state.cells.mass_code;
+  const auto gas_ids_before = state.gas_cells.gas_cell_id;
+  const auto patch_ids_before = state.patches.patch_id;
+  const auto identity_generation_before = state.gasCellIdentityGeneration();
+  const std::uint64_t baseline = cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(state));
+  cosmosim::core::MemoryGovernor governor(
+      cosmosim::core::MemoryGovernorPolicy{.hard_limit_bytes = baseline + 1U});
+  governor.setBaselineOwnedBytes(baseline);
+  cosmosim::amr::ProductionAmrHydroOptions options;
+  options.regrid_memory_governor = &governor;
+  bool rejected = false;
+  try {
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(
+        state, parent, 400, 20000, options);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(state.cells.mass_code == cells_before);
+  assert(state.gas_cells.gas_cell_id == gas_ids_before);
+  assert(state.patches.patch_id == patch_ids_before);
+  assert(state.gasCellIdentityGeneration() == identity_generation_before);
+  assert(state.gasCellIdentityMapMatchesSidecarLanes());
+  assert(governor.snapshot().rejection_count == 1U);
+
+  // Repeat the same atomic-rejection contract for derefinement after a
+  // successful governed refine has constructed the exact child octet.
+  cosmosim::core::MemoryGovernor refine_governor;
+  (void)cosmosim::amr::refineProductionPatchInSimulationState(
+      state, parent, 400, 20000, regridOptions(state, refine_governor));
+  const auto derefine_cells_before = state.cells.mass_code;
+  const auto derefine_gas_ids_before = state.gas_cells.gas_cell_id;
+  const auto derefine_patch_ids_before = state.patches.patch_id;
+  const auto derefine_identity_generation_before = state.gasCellIdentityGeneration();
+  const std::uint64_t derefine_baseline = cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(state));
+  cosmosim::core::MemoryGovernor derefine_governor(
+      cosmosim::core::MemoryGovernorPolicy{.hard_limit_bytes = derefine_baseline + 1U});
+  derefine_governor.setBaselineOwnedBytes(derefine_baseline);
+  cosmosim::amr::ProductionAmrHydroOptions derefine_options;
+  derefine_options.regrid_memory_governor = &derefine_governor;
+  rejected = false;
+  try {
+    (void)cosmosim::amr::derefineProductionPatchInSimulationState(
+        state, parent, 30000, derefine_options);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(state.cells.mass_code == derefine_cells_before);
+  assert(state.gas_cells.gas_cell_id == derefine_gas_ids_before);
+  assert(state.patches.patch_id == derefine_patch_ids_before);
+  assert(state.gasCellIdentityGeneration() == derefine_identity_generation_before);
+  assert(derefine_governor.snapshot().rejection_count == 1U);
+}
+
+void testProductionRegridRejectsPendingRefluxBeforeMutation() {
+  cosmosim::core::SimulationState state = makeRefineState();
+  const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+  const auto patch_ids_before = state.patches.patch_id;
+  const auto gas_ids_before = state.gas_cells.gas_cell_id;
+  cosmosim::core::PendingFluxRegisterRecord pending;
+  pending.register_key = 77U;
+  pending.coarse_patch_id = parent.patch_id;
+  pending.coarse_gas_cell_id = state.gas_cells.gas_cell_id.front();
+  state.pending_flux_registers.upsertByRegisterKey(pending);
+  bool rejected = false;
+  try {
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(
+        state, parent, 400, 20000);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(state.pending_flux_registers.size() == 1U);
+  assert(state.patches.patch_id == patch_ids_before);
+  assert(state.gas_cells.gas_cell_id == gas_ids_before);
+}
+
+void testProductionRegridReservationDoesNotScaleWithUnrelatedParticles() {
+  auto run = [](std::size_t particle_count) {
+    cosmosim::core::SimulationState state = makeRefineState();
+    state.resizeParticles(particle_count);
+    for (std::size_t i = 0; i < particle_count; ++i) {
+      state.particle_sidecar.particle_id[i] = 1000000U + i;
+      state.particle_sidecar.species_tag[i] =
+          static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+    }
+    state.rebuildSpeciesIndex();
+    const auto parent = cosmosim::amr::buildProductionAmrPatchDescriptors(state).front();
+    cosmosim::core::MemoryGovernor governor;
+    const auto options = regridOptions(state, governor);
+    (void)cosmosim::amr::refineProductionPatchInSimulationState(
+        state, parent, 400, 20000, options);
+    return governor.snapshot().peak_reserved_bytes;
+  };
+  const std::uint64_t without_particles = run(0U);
+  const std::uint64_t with_particles = run(4096U);
+  assert(without_particles > 0U);
+  assert(with_particles == without_particles);
+}
+
 }  // namespace
 
 int main() {
@@ -427,5 +549,8 @@ int main() {
   testProductionDerefineUsesPatchLocalGeometryAfterChildRowReorder();
   testPartialActiveSetSkipsIncompleteReflux();
   testProductionRefineAndDerefineConserveSimulationState();
+  testProductionRegridGovernorRejectionIsAtomic();
+  testProductionRegridRejectsPendingRefluxBeforeMutation();
+  testProductionRegridReservationDoesNotScaleWithUnrelatedParticles();
   return 0;
 }

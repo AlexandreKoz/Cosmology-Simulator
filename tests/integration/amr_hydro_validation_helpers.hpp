@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
 
 namespace cosmosim::tests::amr_hydro_validation {
@@ -221,6 +222,17 @@ inline void requireFinitePositiveState(const core::SimulationState& state, const
       .adiabatic_index = k_gamma,
       .density_floor = 1.0e-10,
       .pressure_floor = 1.0e-10};
+}
+
+[[nodiscard]] inline amr::ProductionAmrHydroOptions productionAmrRegridOptions(
+    const core::SimulationState& state,
+    core::MemoryGovernor& governor,
+    hydro::HydroBoundaryKind boundary_kind = hydro::HydroBoundaryKind::kReflective) {
+  governor.setBaselineOwnedBytes(
+      core::memoryReportBaselineOwnedBytes(core::collectSimulationMemoryReport(state)));
+  amr::ProductionAmrHydroOptions options = productionAmrHydroOptions(boundary_kind);
+  options.regrid_memory_governor = &governor;
+  return options;
 }
 
 [[nodiscard]] inline amr::ProductionAmrHydroDiagnostics advanceProductionHydroSteps(

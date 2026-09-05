@@ -227,3 +227,27 @@ capacities plus rank metadata against the 128 MiB ceiling.
 
 M1C-2 does not promote unavailable MPI/FFTW execution into runtime evidence and
 does not redefine M2 hydro/AMR/full-physics memory scope.
+
+## M2B-1 production AMR regrid transaction addendum (2026-09-05)
+
+Production `SimulationState` refinement and derefinement are explicit governed
+transactions. `ProductionAmrHydroOptions::regrid_memory_governor` must point to
+the process `MemoryGovernor`; regrid fails closed when that authority is absent.
+Before allocating candidate AMR authority or transaction scratch, the regrid
+path computes a checked upper bound and reserves it as phase-resident memory.
+Only AMR-owned cell, gas-sidecar, patch, and gas-identity state are staged;
+unrelated particle/species/module populations are not copied. A reservation or
+preparation failure leaves live AMR authority unchanged.
+
+Canonical memory reporting now includes allocated capacity for the gas-cell
+stable-identity records and lookup tables, pending flux-register records, and
+AMR temporal-boundary histories including nested cell records. These entries
+therefore participate in `memoryReportBaselineOwnedBytes()` and the existing
+governor baseline reconciliation instead of remaining hidden heap state.
+
+Regrid is permitted only at a synchronization-safe point. Active temporal
+boundary history or any unresolved pending flux register causes deterministic
+pre-mutation rejection. The pending-register representation does not encode all
+fine-contributor topology identities, so this campaign deliberately uses the
+strong global-drain contract rather than attempting an unsafe intersection-local
+remap.

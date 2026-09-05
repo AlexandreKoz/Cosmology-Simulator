@@ -1,6 +1,7 @@
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 
 #include "cosmosim/amr/amr_patch_indexing.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -21,8 +23,11 @@ namespace {
 constexpr double k_geometry_tol = 1.0e-10;
 
 [[nodiscard]] std::size_t product(std::array<std::uint16_t, 3> dims) {
-  return static_cast<std::size_t>(dims[0]) * static_cast<std::size_t>(dims[1]) *
-      static_cast<std::size_t>(dims[2]);
+  return core::checkedSizeProduct3(
+      static_cast<std::size_t>(dims[0]),
+      static_cast<std::size_t>(dims[1]),
+      static_cast<std::size_t>(dims[2]),
+      "AMR patch cell-count product");
 }
 
 [[nodiscard]] std::size_t linearIndex(
@@ -30,7 +35,14 @@ constexpr double k_geometry_tol = 1.0e-10;
     std::size_t i,
     std::size_t j,
     std::size_t k) {
-  return i + static_cast<std::size_t>(dims[0]) * (j + static_cast<std::size_t>(dims[1]) * k);
+  const std::size_t yz = core::checkedSizeAdd(
+      j,
+      core::checkedSizeMultiply(static_cast<std::size_t>(dims[1]), k, "AMR linear index yz"),
+      "AMR linear index yz sum");
+  return core::checkedSizeAdd(
+      i,
+      core::checkedSizeMultiply(static_cast<std::size_t>(dims[0]), yz, "AMR linear index x"),
+      "AMR linear index total");
 }
 
 [[nodiscard]] std::vector<double> sortedUnique(std::vector<double> values) {
@@ -469,14 +481,17 @@ void copyCellRow(core::SimulationState& state, std::uint32_t dst, const core::Si
   state.gas_cells.density_code[dst] = old.gas_cells.density_code[src];
   state.gas_cells.pressure_code[dst] = old.gas_cells.pressure_code[src];
   state.gas_cells.internal_energy_code[dst] = old.gas_cells.internal_energy_code[src];
+  state.gas_cells.metal_mass_code[dst] = old.gas_cells.metal_mass_code[src];
   state.gas_cells.temperature_code[dst] = old.gas_cells.temperature_code[src];
   state.gas_cells.sound_speed_code[dst] = old.gas_cells.sound_speed_code[src];
 }
 
-void rebuildIdentityFromSidecars(core::SimulationState& state) {
+void rebuildIdentityFromSidecars(
+    core::SimulationState& state,
+    std::uint64_t identity_generation) {
   std::vector<core::GasCellIdentityRecord> records;
   records.reserve(state.cells.size());
-  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+  for (std::size_t row = 0; row < state.cells.size(); ++row) {
     if (state.gas_cells.gas_cell_id[row] == 0U) {
       throw std::runtime_error("production AMR hydro generated a zero gas_cell_id");
     }
@@ -489,9 +504,10 @@ void rebuildIdentityFromSidecars(core::SimulationState& state) {
         .gas_cell_id = state.gas_cells.gas_cell_id[row],
         .parent_particle_id = parent_id == 0U ? std::optional<std::uint64_t>{} : std::optional<std::uint64_t>{parent_id},
         .owning_patch_id = state.patches.patch_id[patch_index],
-        .local_cell_row = row});
+        .local_cell_row = core::checkedIntegralNarrow<std::uint32_t>(
+            row, "production AMR identity local row")});
   }
-  state.replaceGasCellIdentityRecords(std::move(records));
+  state.restoreGasCellIdentityRecords(std::move(records), identity_generation);
 }
 
 [[nodiscard]] bool idRangeOverflows(std::uint64_t first, std::size_t count) {
@@ -545,6 +561,9 @@ void validateGasCellIdRangeAvailable(
 [[nodiscard]] std::uint64_t nextFreePatchId(const core::SimulationState& state, std::size_t count) {
   std::uint64_t candidate = 1U;
   for (const std::uint64_t patch_id : state.patches.patch_id) {
+    if (patch_id == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("production AMR next patch-id seed overflows uint64");
+    }
     candidate = std::max(candidate, patch_id + 1U);
   }
   validatePatchIdRangeAvailable(state, candidate, count);
@@ -554,6 +573,9 @@ void validateGasCellIdRangeAvailable(
 [[nodiscard]] std::uint64_t nextFreeGasCellId(const core::SimulationState& state, std::size_t count) {
   std::uint64_t candidate = 1U;
   for (const std::uint64_t gas_cell_id : state.gas_cells.gas_cell_id) {
+    if (gas_cell_id == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("production AMR next gas-cell-id seed overflows uint64");
+    }
     candidate = std::max(candidate, gas_cell_id + 1U);
   }
   validateGasCellIdRangeAvailable(state, candidate, count);
@@ -563,12 +585,147 @@ void validateGasCellIdRangeAvailable(
 [[nodiscard]] std::optional<std::uint32_t> patchIndexById(
     const core::SimulationState& state,
     std::uint64_t patch_id) {
-  for (std::uint32_t index = 0; index < state.patches.size(); ++index) {
+  for (std::size_t index = 0; index < state.patches.size(); ++index) {
     if (state.patches.patch_id[index] == patch_id) {
-      return index;
+      return core::checkedIntegralNarrow<std::uint32_t>(
+          index, "production AMR patch index");
     }
   }
   return std::nullopt;
+}
+
+void requireProductionRegridSynchronizationQuiescent(
+    const core::SimulationState& state,
+    std::string_view operation) {
+  if (!state.amr_temporal_boundary_history.empty()) {
+    throw std::runtime_error(
+        std::string(operation) +
+        " is prohibited while restart-resumable temporal boundary history is active");
+  }
+  // PendingFluxRegisterRecord identifies the coarse target but does not carry
+  // every fine-patch contributor identity. Therefore intersection-local
+  // invalidation cannot be proven for an arbitrary regrid. Fail closed until
+  // all pending reflux authority has drained.
+  if (!state.pending_flux_registers.empty()) {
+    throw std::runtime_error(
+        std::string(operation) +
+        " is prohibited while pending AMR flux-register synchronization is active");
+  }
+}
+
+[[nodiscard]] std::uint64_t nextIdentityGeneration(
+    const core::SimulationState& state) {
+  const std::uint64_t generation = state.gasCellIdentityGeneration();
+  if (generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("production AMR gas-cell identity generation overflows uint64");
+  }
+  return generation + 1U;
+}
+
+[[nodiscard]] std::uint64_t productionAmrCandidateReservationBytes(
+    std::size_t cell_count,
+    std::size_t patch_count,
+    std::size_t extra_scratch_bytes) {
+  constexpr std::size_t k_cell_soa_bytes_per_cell =
+      4U * sizeof(double) + sizeof(std::uint8_t) + sizeof(std::uint32_t);
+  constexpr std::size_t k_gas_sidecar_bytes_per_cell =
+      2U * sizeof(std::uint64_t) + 9U * sizeof(double);
+  constexpr std::size_t k_patch_soa_bytes_per_patch =
+      3U * sizeof(std::uint64_t) + sizeof(std::int32_t) +
+      3U * sizeof(std::uint32_t) + 6U * sizeof(double) +
+      3U * sizeof(std::uint16_t);
+  using GasIdLookupValue = std::pair<const std::uint64_t, std::size_t>;
+  using LocalRowLookupValue = std::pair<const std::uint32_t, std::size_t>;
+  // GasCellIdentityMap::assign builds two unordered maps. Reserve a
+  // conservative per-record allowance for both map values, node links and
+  // bucket pointers so the governor sees the hidden lookup allocation too.
+  constexpr std::size_t k_identity_lookup_bytes_per_cell =
+      sizeof(GasIdLookupValue) + sizeof(LocalRowLookupValue) +
+      8U * sizeof(void*);
+  const std::size_t per_cell = core::checkedSizeAdd(
+      core::checkedSizeAdd(
+          k_cell_soa_bytes_per_cell, k_gas_sidecar_bytes_per_cell,
+          "production AMR candidate per-cell state bytes"),
+      core::checkedSizeAdd(
+          sizeof(core::GasCellIdentityRecord), k_identity_lookup_bytes_per_cell,
+          "production AMR candidate identity bytes"),
+      "production AMR candidate per-cell total bytes");
+  std::size_t bytes = core::checkedSizeMultiply(
+      cell_count, per_cell, "production AMR candidate cell bytes");
+  bytes = core::checkedSizeAdd(
+      bytes,
+      core::checkedSizeMultiply(
+          patch_count, k_patch_soa_bytes_per_patch,
+          "production AMR candidate patch bytes"),
+      "production AMR candidate state bytes");
+  bytes = core::checkedSizeAdd(
+      bytes, extra_scratch_bytes, "production AMR candidate transaction bytes");
+  return core::checkedIntegralNarrow<std::uint64_t>(
+      bytes, "production AMR candidate reservation width");
+}
+
+struct ProductionAmrRegridAdmission {
+  core::MemoryReservation reservation;
+  std::uint64_t process_baseline_before = 0U;
+  std::uint64_t state_baseline_before = 0U;
+};
+
+[[nodiscard]] ProductionAmrRegridAdmission admitProductionAmrRegrid(
+    const core::SimulationState& state,
+    const ProductionAmrHydroOptions& options,
+    std::uint64_t requested_bytes,
+    std::string_view owner) {
+  if (options.regrid_memory_governor == nullptr) {
+    throw std::logic_error(
+        "production AMR regrid requires the process MemoryGovernor in ProductionAmrHydroOptions");
+  }
+  core::MemoryGovernor& governor = *options.regrid_memory_governor;
+  const std::uint64_t state_baseline = core::memoryReportBaselineOwnedBytes(
+      core::collectSimulationMemoryReport(state));
+  const core::MemoryGovernorSnapshot snapshot = governor.snapshot();
+  if (snapshot.baseline_owned_bytes < state_baseline) {
+    throw std::logic_error(
+        "production AMR regrid governor baseline is stale: SimulationState owned capacity exceeds process baseline");
+  }
+  return ProductionAmrRegridAdmission{
+      .reservation = governor.reserve(core::MemoryClass::kPhaseResident, requested_bytes, owner),
+      .process_baseline_before = snapshot.baseline_owned_bytes,
+      .state_baseline_before = state_baseline};
+}
+
+void commitProductionAmrCandidate(
+    core::SimulationState& state,
+    core::SimulationState&& candidate,
+    ProductionAmrRegridAdmission& admission) {
+  static_assert(std::is_nothrow_move_assignable_v<core::CellSoa>);
+  static_assert(std::is_nothrow_move_assignable_v<core::GasCellSidecar>);
+  static_assert(std::is_nothrow_move_assignable_v<core::PatchSoa>);
+  static_assert(std::is_nothrow_move_assignable_v<core::GasCellIdentityMap>);
+
+  admission.reservation.commit();
+  state.cells = std::move(candidate.cells);
+  state.gas_cells = std::move(candidate.gas_cells);
+  state.patches = std::move(candidate.patches);
+  state.gas_cell_identity = std::move(candidate.gas_cell_identity);
+  state.bumpCellIndexGeneration();
+
+  const std::uint64_t state_baseline_after = core::memoryReportBaselineOwnedBytes(
+      core::collectSimulationMemoryReport(state));
+  std::uint64_t process_baseline_after = admission.process_baseline_before;
+  if (state_baseline_after >= admission.state_baseline_before) {
+    process_baseline_after = core::checkedMemoryBytesAdd(
+        process_baseline_after,
+        state_baseline_after - admission.state_baseline_before,
+        "production AMR regrid retained baseline growth");
+  } else {
+    const std::uint64_t released = admission.state_baseline_before - state_baseline_after;
+    if (released > process_baseline_after) {
+      throw std::logic_error(
+          "production AMR regrid retained baseline release exceeds process baseline");
+    }
+    process_baseline_after -= released;
+  }
+  admission.reservation.reconcileBaselineOwnedAndRelease(process_baseline_after);
 }
 
 }  // namespace
@@ -1877,10 +2034,7 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
     std::uint64_t first_child_patch_id,
     std::uint64_t first_child_gas_cell_id,
     const ProductionAmrHydroOptions& options) {
-  if (!state.amr_temporal_boundary_history.empty()) {
-    throw std::runtime_error(
-        "production AMR refine is prohibited while a restart-resumable temporal boundary history is active");
-  }
+  requireProductionRegridSynchronizationQuiescent(state, "production AMR refine");
   if (first_child_patch_id == 0U || first_child_gas_cell_id == 0U) {
     throw std::invalid_argument("production AMR refine requires nonzero child patch and gas-cell ID seeds");
   }
@@ -1891,42 +2045,75 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
   if (!parent_patch_index.has_value()) {
     throw std::runtime_error("production AMR refine target patch is absent from SimulationState");
   }
-  const std::vector<std::uint32_t> parent_rows = patchLocalRowsForPatch(state, parent_patch, "production AMR refine");
-  if (parent_rows.size() != product(parent_patch.cell_dims)) {
+  if (parent_patch.level == std::numeric_limits<std::uint8_t>::max()) {
+    throw std::overflow_error("production AMR refine child level overflows uint8");
+  }
+  if (parent_patch.morton_key >
+      (std::numeric_limits<std::uint64_t>::max() - 8U) / 8U) {
+    throw std::overflow_error("production AMR refine child Morton key overflows uint64");
+  }
+
+  const std::size_t parent_cell_count = product(parent_patch.cell_dims);
+  if (parent_cell_count == 0U || state.cells.size() < parent_cell_count || state.patches.size() == 0U) {
+    throw std::runtime_error("production AMR refine has invalid parent-cell/patch population");
+  }
+  const std::size_t child_cell_count = core::checkedSizeMultiply(
+      parent_cell_count, 8U, "production AMR refine child cell count");
+  const std::size_t new_cell_count = core::checkedSizeAdd(
+      state.cells.size() - parent_cell_count, child_cell_count,
+      "production AMR refine new cell count");
+  const std::size_t new_patch_count = core::checkedSizeAdd(
+      state.patches.size() - 1U, 8U, "production AMR refine new patch count");
+  const std::size_t scratch_bytes = core::checkedSizeMultiply(
+      child_cell_count, sizeof(std::uint32_t),
+      "production AMR refine diagnostic row scratch bytes");
+  ProductionAmrRegridAdmission admission = admitProductionAmrRegrid(
+      state, options,
+      productionAmrCandidateReservationBytes(new_cell_count, new_patch_count, scratch_bytes),
+      "amr.production_refine.transaction");
+
+  const std::vector<std::uint32_t> parent_rows =
+      patchLocalRowsForPatch(state, parent_patch, "production AMR refine");
+  if (parent_rows.size() != parent_cell_count) {
     throw std::runtime_error("production AMR refine parent row coverage does not match descriptor");
   }
   validatePatchIdRangeAvailable(state, first_child_patch_id, 8U);
-  validateGasCellIdRangeAvailable(state, first_child_gas_cell_id, parent_rows.size() * 8U);
-  const double parent_volume = parent_patch.extent_comov[0] * parent_patch.extent_comov[1] * parent_patch.extent_comov[2] /
-      static_cast<double>(product(parent_patch.cell_dims));
+  validateGasCellIdRangeAvailable(state, first_child_gas_cell_id, child_cell_count);
+  const double parent_volume =
+      parent_patch.extent_comov[0] * parent_patch.extent_comov[1] *
+      parent_patch.extent_comov[2] / static_cast<double>(parent_cell_count);
   const auto before = totalsForRows(state, parent_rows, parent_volume, options);
+  const std::uint64_t identity_generation = nextIdentityGeneration(state);
 
-  const core::SimulationState old = state;
+  core::SimulationState candidate;
+  candidate.resizeCells(new_cell_count);
+  candidate.resizePatches(new_patch_count);
   const std::array<double, 3> child_extent = {
       parent_patch.extent_comov[0] * 0.5,
       parent_patch.extent_comov[1] * 0.5,
       parent_patch.extent_comov[2] * 0.5};
   const double child_volume = parent_volume / 8.0;
-  const std::size_t new_cell_count = old.cells.size() - parent_rows.size() + parent_rows.size() * 8U;
-  const std::size_t new_patch_count = old.patches.size() - 1U + 8U;
-  state.resizeCells(new_cell_count);
-  state.resizePatches(new_patch_count);
 
-  std::uint32_t write_row = 0;
-  std::uint32_t write_patch = 0;
+  std::size_t write_row = 0U;
+  std::size_t write_patch = 0U;
   std::vector<std::uint32_t> new_child_rows;
-  new_child_rows.reserve(parent_rows.size() * 8U);
-  for (std::size_t old_patch_index = 0; old_patch_index < old.patches.size(); ++old_patch_index) {
-    if (old.patches.patch_id[old_patch_index] != parent_patch.patch_id) {
-      const std::uint32_t first = old.patches.first_cell[old_patch_index];
-      const std::uint32_t count = old.patches.cell_count[old_patch_index];
-      writePatchDescriptorToStateRow(state, write_patch, patchDescriptorFromStateRow(old, old_patch_index));
-      state.patches.first_cell[write_patch] = write_row;
-      state.patches.cell_count[write_patch] = count;
-      state.patches.owning_rank[write_patch] = old.patches.owning_rank[old_patch_index];
+  new_child_rows.reserve(child_cell_count);
+  std::uint64_t next_child_gas_cell_id = first_child_gas_cell_id;
+  for (std::size_t old_patch_index = 0; old_patch_index < state.patches.size(); ++old_patch_index) {
+    if (state.patches.patch_id[old_patch_index] != parent_patch.patch_id) {
+      const std::uint32_t first = state.patches.first_cell[old_patch_index];
+      const std::uint32_t count = state.patches.cell_count[old_patch_index];
+      writePatchDescriptorToStateRow(candidate, write_patch, patchDescriptorFromStateRow(state, old_patch_index));
+      candidate.patches.first_cell[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+          write_row, "production AMR refine kept patch first row");
+      candidate.patches.cell_count[write_patch] = count;
+      candidate.patches.owning_rank[write_patch] = state.patches.owning_rank[old_patch_index];
       for (std::uint32_t offset = 0; offset < count; ++offset) {
-        copyCellRow(state, write_row, old, first + offset);
-        state.cells.patch_index[write_row] = write_patch;
+        const std::uint32_t dst = core::checkedIntegralNarrow<std::uint32_t>(
+            write_row, "production AMR refine kept cell destination row");
+        copyCellRow(candidate, dst, state, first + offset);
+        candidate.cells.patch_index[dst] = core::checkedIntegralNarrow<std::uint32_t>(
+            write_patch, "production AMR refine kept cell patch index");
         ++write_row;
       }
       ++write_patch;
@@ -1943,37 +2130,50 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
           child_extent[1] / static_cast<double>(parent_patch.cell_dims[1]),
           child_extent[2] / static_cast<double>(parent_patch.cell_dims[2])};
       PatchDescriptor child_patch = parent_patch;
-      child_patch.patch_id = first_child_patch_id + octant;
+      child_patch.patch_id = first_child_patch_id + static_cast<std::uint64_t>(octant);
       child_patch.parent_patch_id = parent_patch.patch_id;
-      child_patch.level = parent_patch.level + 1U;
-      child_patch.morton_key = parent_patch.morton_key * 8U + static_cast<std::uint64_t>(octant) + 1U;
+      child_patch.level = static_cast<std::uint8_t>(parent_patch.level + 1U);
+      child_patch.morton_key = parent_patch.morton_key * 8U +
+          static_cast<std::uint64_t>(octant) + 1U;
       child_patch.origin_comov = child_origin;
       child_patch.extent_comov = child_extent;
-      writePatchDescriptorToStateRow(state, write_patch, child_patch);
-      state.patches.first_cell[write_patch] = write_row;
-      state.patches.cell_count[write_patch] = static_cast<std::uint32_t>(parent_rows.size());
-      state.patches.owning_rank[write_patch] = old.patches.owning_rank[old_patch_index];
-      for (std::size_t child_cell = 0; child_cell < parent_rows.size(); ++child_cell) {
+      writePatchDescriptorToStateRow(candidate, write_patch, child_patch);
+      candidate.patches.first_cell[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+          write_row, "production AMR refine child patch first row");
+      candidate.patches.cell_count[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+          parent_cell_count, "production AMR refine child patch cell count");
+      candidate.patches.owning_rank[write_patch] = state.patches.owning_rank[*parent_patch_index];
+      for (std::size_t child_cell = 0; child_cell < parent_cell_count; ++child_cell) {
         const std::size_t i = child_cell % parent_patch.cell_dims[0];
-        const std::size_t j = (child_cell / parent_patch.cell_dims[0]) % parent_patch.cell_dims[1];
-        const std::size_t k = child_cell / (static_cast<std::size_t>(parent_patch.cell_dims[0]) * parent_patch.cell_dims[1]);
+        const std::size_t j =
+            (child_cell / parent_patch.cell_dims[0]) % parent_patch.cell_dims[1];
+        const std::size_t xy = core::checkedSizeMultiply(
+            static_cast<std::size_t>(parent_patch.cell_dims[0]),
+            static_cast<std::size_t>(parent_patch.cell_dims[1]),
+            "production AMR refine parent xy cell count");
+        const std::size_t k = child_cell / xy;
         const std::array<double, 3> center = {
             child_origin[0] + (static_cast<double>(i) + 0.5) * child_widths[0],
             child_origin[1] + (static_cast<double>(j) + 0.5) * child_widths[1],
             child_origin[2] + (static_cast<double>(k) + 0.5) * child_widths[2]};
         const std::size_t parent_cell = cellContainingPoint(parent_patch, center);
         const std::uint32_t parent_row = parent_rows[parent_cell];
-        const ConservedState parent_conserved = volumeIntegratedForRow(old, parent_row, parent_volume, options);
+        const ConservedState parent_conserved =
+            volumeIntegratedForRow(state, parent_row, parent_volume, options);
         const ConservedState child_conserved = parent_conserved * (1.0 / 8.0);
-        state.cells.center_x_comoving[write_row] = center[0];
-        state.cells.center_y_comoving[write_row] = center[1];
-        state.cells.center_z_comoving[write_row] = center[2];
-        state.cells.time_bin[write_row] = old.cells.time_bin[parent_row];
-        state.cells.patch_index[write_row] = write_patch;
-        state.gas_cells.gas_cell_id[write_row] = first_child_gas_cell_id++;
-        state.gas_cells.parent_particle_id[write_row] = old.gas_cells.parent_particle_id[parent_row];
-        writeVolumeIntegratedToRow(state, write_row, child_conserved, child_volume, options);
-        new_child_rows.push_back(write_row);
+        const std::uint32_t dst = core::checkedIntegralNarrow<std::uint32_t>(
+            write_row, "production AMR refine child destination row");
+        candidate.cells.center_x_comoving[dst] = center[0];
+        candidate.cells.center_y_comoving[dst] = center[1];
+        candidate.cells.center_z_comoving[dst] = center[2];
+        candidate.cells.time_bin[dst] = state.cells.time_bin[parent_row];
+        candidate.cells.patch_index[dst] = core::checkedIntegralNarrow<std::uint32_t>(
+            write_patch, "production AMR refine child patch index");
+        candidate.gas_cells.gas_cell_id[dst] = next_child_gas_cell_id++;
+        candidate.gas_cells.parent_particle_id[dst] =
+            state.gas_cells.parent_particle_id[parent_row];
+        writeVolumeIntegratedToRow(candidate, dst, child_conserved, child_volume, options);
+        new_child_rows.push_back(dst);
         ++write_row;
       }
       ++write_patch;
@@ -1982,10 +2182,14 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
   if (write_row != new_cell_count || write_patch != new_patch_count) {
     throw std::runtime_error("production AMR refine internal row accounting failed");
   }
-  rebuildIdentityFromSidecars(state);
-  state.bumpCellIndexGeneration();
-  const auto after = totalsForRows(state, new_child_rows, child_volume, options);
-  return ProductionAmrRegridDiagnostics{
+  rebuildIdentityFromSidecars(candidate, identity_generation);
+  if (!hasProductionAmrHydroCoverage(candidate) ||
+      !candidate.gas_cell_identity.coversDenseLocalRows(candidate.cells.size()) ||
+      !candidate.gasCellIdentityMapMatchesSidecarLanes()) {
+    throw std::runtime_error("production AMR refine candidate failed authority validation");
+  }
+  const auto after = totalsForRows(candidate, new_child_rows, child_volume, options);
+  const ProductionAmrRegridDiagnostics diagnostics{
       .refined_patch_count = 1,
       .created_gas_cell_count = new_child_rows.size(),
       .retired_gas_cell_count = parent_rows.size(),
@@ -1999,6 +2203,8 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
       .conserved_momentum_z_after = after[3],
       .conserved_total_energy_before = before[4],
       .conserved_total_energy_after = after[4]};
+  commitProductionAmrCandidate(state, std::move(candidate), admission);
+  return diagnostics;
 }
 
 ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
@@ -2015,27 +2221,60 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
     const PatchDescriptor& parent_patch,
     std::uint64_t replacement_gas_cell_id,
     const ProductionAmrHydroOptions& options) {
-  if (!state.amr_temporal_boundary_history.empty()) {
-    throw std::runtime_error(
-        "production AMR derefine is prohibited while a restart-resumable temporal boundary history is active");
-  }
+  requireProductionRegridSynchronizationQuiescent(state, "production AMR derefine");
   if (replacement_gas_cell_id == 0U) {
     throw std::invalid_argument("production AMR derefine requires a nonzero replacement gas_cell_id seed");
   }
   if (!hasProductionAmrHydroCoverage(state)) {
     throw std::runtime_error("production AMR derefine requires complete SimulationState patch coverage");
   }
-  const std::vector<PatchDescriptor> descriptors = buildProductionAmrPatchDescriptors(state);
+  if (parent_patch.level == std::numeric_limits<std::uint8_t>::max()) {
+    throw std::overflow_error("production AMR derefine child-level query overflows uint8");
+  }
+  const std::size_t parent_cell_count = product(parent_patch.cell_dims);
+  const std::size_t child_cell_count = core::checkedSizeMultiply(
+      parent_cell_count, 8U, "production AMR derefine child cell count");
+  if (state.cells.size() < child_cell_count || state.patches.size() < 8U) {
+    throw std::runtime_error("production AMR derefine state is too small for an exact child octet");
+  }
+  const std::size_t kept_cell_count = core::checkedSizeAdd(
+      state.cells.size() - child_cell_count, parent_cell_count,
+      "production AMR derefine kept cell count");
+  const std::size_t kept_patch_count = core::checkedSizeAdd(
+      state.patches.size() - 8U, 1U,
+      "production AMR derefine kept patch count");
+  std::size_t scratch_bytes = core::checkedSizeMultiply(
+      parent_cell_count,
+      sizeof(ConservedState) + sizeof(std::uint64_t) + sizeof(std::uint8_t),
+      "production AMR derefine restriction scratch bytes");
+  scratch_bytes = core::checkedSizeAdd(
+      scratch_bytes,
+      core::checkedSizeMultiply(
+          child_cell_count, sizeof(std::uint32_t),
+          "production AMR derefine child-row scratch bytes"),
+      "production AMR derefine scratch bytes");
+  ProductionAmrRegridAdmission admission = admitProductionAmrRegrid(
+      state, options,
+      productionAmrCandidateReservationBytes(kept_cell_count, kept_patch_count, scratch_bytes),
+      "amr.production_derefine.transaction");
+
   std::vector<PatchDescriptor> children;
-  for (const PatchDescriptor& patch : descriptors) {
-    const bool parent_link_ok = patch.parent_patch_id == parent_patch.patch_id || patch.parent_patch_id == 0U;
-    const bool same_parent_extent = parent_link_ok && patch.level == parent_patch.level + 1U &&
+  children.reserve(8U);
+  for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    const PatchDescriptor patch = patchDescriptorFromStateRow(state, patch_index);
+    const bool parent_link_ok =
+        patch.parent_patch_id == parent_patch.patch_id || patch.parent_patch_id == 0U;
+    const bool same_parent_extent =
+        parent_link_ok && patch.level == static_cast<std::uint8_t>(parent_patch.level + 1U) &&
         patch.origin_comov[0] >= parent_patch.origin_comov[0] - k_geometry_tol &&
         patch.origin_comov[1] >= parent_patch.origin_comov[1] - k_geometry_tol &&
         patch.origin_comov[2] >= parent_patch.origin_comov[2] - k_geometry_tol &&
-        patch.origin_comov[0] + patch.extent_comov[0] <= parent_patch.origin_comov[0] + parent_patch.extent_comov[0] + k_geometry_tol &&
-        patch.origin_comov[1] + patch.extent_comov[1] <= parent_patch.origin_comov[1] + parent_patch.extent_comov[1] + k_geometry_tol &&
-        patch.origin_comov[2] + patch.extent_comov[2] <= parent_patch.origin_comov[2] + parent_patch.extent_comov[2] + k_geometry_tol;
+        patch.origin_comov[0] + patch.extent_comov[0] <=
+            parent_patch.origin_comov[0] + parent_patch.extent_comov[0] + k_geometry_tol &&
+        patch.origin_comov[1] + patch.extent_comov[1] <=
+            parent_patch.origin_comov[1] + parent_patch.extent_comov[1] + k_geometry_tol &&
+        patch.origin_comov[2] + patch.extent_comov[2] <=
+            parent_patch.origin_comov[2] + parent_patch.extent_comov[2] + k_geometry_tol;
     if (same_parent_extent) {
       children.push_back(patch);
     }
@@ -2046,14 +2285,19 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
       parent_patch.extent_comov[2] * 0.5};
   std::array<bool, 8> octant_seen{};
   for (const PatchDescriptor& child : children) {
-    if (child.level != parent_patch.level + 1U || child.cell_dims != parent_patch.cell_dims) {
-      throw std::runtime_error("production AMR derefine child level/cell dimensions do not match exact octant contract");
+    if (child.level != static_cast<std::uint8_t>(parent_patch.level + 1U) ||
+        child.cell_dims != parent_patch.cell_dims) {
+      throw std::runtime_error(
+          "production AMR derefine child level/cell dimensions do not match exact octant contract");
     }
     std::uint8_t octant = 0U;
     for (std::size_t axis = 0; axis < 3; ++axis) {
-      const double scale = std::max({1.0, std::abs(child.extent_comov[axis]), std::abs(expected_child_extent[axis])});
-      if (std::abs(child.extent_comov[axis] - expected_child_extent[axis]) > k_geometry_tol * scale) {
-        throw std::runtime_error("production AMR derefine child extent does not match exact octant contract");
+      const double scale = std::max(
+          {1.0, std::abs(child.extent_comov[axis]), std::abs(expected_child_extent[axis])});
+      if (std::abs(child.extent_comov[axis] - expected_child_extent[axis]) >
+          k_geometry_tol * scale) {
+        throw std::runtime_error(
+            "production AMR derefine child extent does not match exact octant contract");
       }
       const double lower = parent_patch.origin_comov[axis];
       const double upper = parent_patch.origin_comov[axis] + expected_child_extent[axis];
@@ -2067,7 +2311,8 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
         octant |= static_cast<std::uint8_t>(1U << axis);
         continue;
       }
-      throw std::runtime_error("production AMR derefine child origin does not match an exact parent octant");
+      throw std::runtime_error(
+          "production AMR derefine child origin does not match an exact parent octant");
     }
     if (octant_seen[octant]) {
       throw std::runtime_error("production AMR derefine detected duplicate child octant");
@@ -2076,79 +2321,102 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
   }
   if (children.size() != 8U ||
       !std::all_of(octant_seen.begin(), octant_seen.end(), [](bool seen) { return seen; })) {
-    throw std::runtime_error("production AMR derefine requires exactly eight child patches covering the parent descriptor");
+    throw std::runtime_error(
+        "production AMR derefine requires exactly eight child patches covering the parent descriptor");
   }
-  const double child_volume = children.front().extent_comov[0] * children.front().extent_comov[1] * children.front().extent_comov[2] /
+
+  const double child_volume =
+      children.front().extent_comov[0] * children.front().extent_comov[1] *
+      children.front().extent_comov[2] /
       static_cast<double>(product(children.front().cell_dims));
   std::vector<std::uint32_t> child_rows;
+  child_rows.reserve(child_cell_count);
   for (const PatchDescriptor& child : children) {
-    const std::vector<std::uint32_t> rows = patchLocalRowsForPatch(state, child, "production AMR derefine child coverage");
+    const std::vector<std::uint32_t> rows =
+        patchLocalRowsForPatch(state, child, "production AMR derefine child coverage");
     child_rows.insert(child_rows.end(), rows.begin(), rows.end());
+  }
+  if (child_rows.size() != child_cell_count) {
+    throw std::runtime_error("production AMR derefine child row coverage does not match exact octet");
   }
   const auto before = totalsForRows(state, child_rows, child_volume, options);
   validatePatchIdRangeAvailable(state, parent_patch.patch_id, 1U);
-  validateGasCellIdRangeAvailable(state, replacement_gas_cell_id, product(parent_patch.cell_dims));
+  validateGasCellIdRangeAvailable(state, replacement_gas_cell_id, parent_cell_count);
 
-  const core::SimulationState old = state;
-  const std::size_t parent_cell_count = product(parent_patch.cell_dims);
-  const double parent_volume = parent_patch.extent_comov[0] * parent_patch.extent_comov[1] * parent_patch.extent_comov[2] /
-      static_cast<double>(parent_cell_count);
+  const double parent_volume =
+      parent_patch.extent_comov[0] * parent_patch.extent_comov[1] *
+      parent_patch.extent_comov[2] / static_cast<double>(parent_cell_count);
   std::vector<ConservedState> restricted(parent_cell_count);
-  std::vector<std::uint64_t> restricted_parent_particle_id(parent_cell_count, std::numeric_limits<std::uint64_t>::max());
-  std::vector<std::uint8_t> restricted_time_bin(parent_cell_count, std::numeric_limits<std::uint8_t>::max());
+  std::vector<std::uint64_t> restricted_parent_particle_id(
+      parent_cell_count, std::numeric_limits<std::uint64_t>::max());
+  std::vector<std::uint8_t> restricted_time_bin(
+      parent_cell_count, std::numeric_limits<std::uint8_t>::max());
   for (const PatchDescriptor& child : children) {
-    const std::vector<std::uint32_t> rows = patchLocalRowsForPatch(old, child, "production AMR derefine child restriction");
+    const std::vector<std::uint32_t> rows =
+        patchLocalRowsForPatch(state, child, "production AMR derefine child restriction");
     for (std::size_t child_cell = 0; child_cell < rows.size(); ++child_cell) {
       const std::array<double, 3> center = cellCenter(child, child_cell);
       const std::size_t parent_cell = cellContainingPoint(parent_patch, center);
       const std::uint32_t child_row = rows[child_cell];
-      restricted[parent_cell] += volumeIntegratedForRow(old, child_row, child_volume, options);
-      const std::uint64_t child_parent = old.gas_cells.parent_particle_id[child_row];
+      restricted[parent_cell] +=
+          volumeIntegratedForRow(state, child_row, child_volume, options);
+      const std::uint64_t child_parent = state.gas_cells.parent_particle_id[child_row];
       std::uint64_t& parent_slot = restricted_parent_particle_id[parent_cell];
       if (parent_slot == std::numeric_limits<std::uint64_t>::max()) {
         parent_slot = child_parent;
       } else if (parent_slot != child_parent) {
         parent_slot = 0U;
       }
-      restricted_time_bin[parent_cell] = std::min(restricted_time_bin[parent_cell], old.cells.time_bin[child_row]);
+      restricted_time_bin[parent_cell] =
+          std::min(restricted_time_bin[parent_cell], state.cells.time_bin[child_row]);
     }
   }
 
   std::unordered_set<std::uint64_t> child_patch_ids;
+  child_patch_ids.reserve(8U);
   for (const PatchDescriptor& child : children) {
     child_patch_ids.insert(child.patch_id);
   }
-  const std::size_t kept_patch_count = old.patches.size() - child_patch_ids.size() + 1U;
-  const std::size_t kept_cell_count = old.cells.size() - child_rows.size() + parent_cell_count;
-  state.resizeCells(kept_cell_count);
-  state.resizePatches(kept_patch_count);
-  std::uint32_t write_row = 0;
-  std::uint32_t write_patch = 0;
+  const std::uint64_t identity_generation = nextIdentityGeneration(state);
+  core::SimulationState candidate;
+  candidate.resizeCells(kept_cell_count);
+  candidate.resizePatches(kept_patch_count);
+  std::size_t write_row = 0U;
+  std::size_t write_patch = 0U;
   std::vector<std::uint32_t> parent_rows;
   parent_rows.reserve(parent_cell_count);
   bool inserted_parent = false;
-  for (std::size_t old_patch_index = 0; old_patch_index < old.patches.size(); ++old_patch_index) {
-    const std::uint64_t old_patch_id = old.patches.patch_id[old_patch_index];
+  std::uint64_t next_parent_gas_cell_id = replacement_gas_cell_id;
+  for (std::size_t old_patch_index = 0; old_patch_index < state.patches.size(); ++old_patch_index) {
+    const std::uint64_t old_patch_id = state.patches.patch_id[old_patch_index];
     if (child_patch_ids.contains(old_patch_id)) {
       if (!inserted_parent) {
-        writePatchDescriptorToStateRow(state, write_patch, parent_patch);
-        state.patches.first_cell[write_patch] = write_row;
-        state.patches.cell_count[write_patch] = static_cast<std::uint32_t>(parent_cell_count);
-        state.patches.owning_rank[write_patch] = old.patches.owning_rank[old_patch_index];
+        writePatchDescriptorToStateRow(candidate, write_patch, parent_patch);
+        candidate.patches.first_cell[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+            write_row, "production AMR derefine parent first row");
+        candidate.patches.cell_count[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+            parent_cell_count, "production AMR derefine parent cell count");
+        candidate.patches.owning_rank[write_patch] = state.patches.owning_rank[old_patch_index];
         for (std::size_t cell = 0; cell < parent_cell_count; ++cell) {
+          const std::uint32_t dst = core::checkedIntegralNarrow<std::uint32_t>(
+              write_row, "production AMR derefine parent destination row");
           const std::array<double, 3> center = cellCenter(parent_patch, cell);
-          state.cells.center_x_comoving[write_row] = center[0];
-          state.cells.center_y_comoving[write_row] = center[1];
-          state.cells.center_z_comoving[write_row] = center[2];
-          state.cells.time_bin[write_row] = restricted_time_bin[cell] == std::numeric_limits<std::uint8_t>::max()
+          candidate.cells.center_x_comoving[dst] = center[0];
+          candidate.cells.center_y_comoving[dst] = center[1];
+          candidate.cells.center_z_comoving[dst] = center[2];
+          candidate.cells.time_bin[dst] =
+              restricted_time_bin[cell] == std::numeric_limits<std::uint8_t>::max()
               ? 0U
               : restricted_time_bin[cell];
-          state.cells.patch_index[write_row] = write_patch;
-          state.gas_cells.gas_cell_id[write_row] = replacement_gas_cell_id++;
-          state.gas_cells.parent_particle_id[write_row] =
-              restricted_parent_particle_id[cell] == std::numeric_limits<std::uint64_t>::max() ? 0U : restricted_parent_particle_id[cell];
-          writeVolumeIntegratedToRow(state, write_row, restricted[cell], parent_volume, options);
-          parent_rows.push_back(write_row);
+          candidate.cells.patch_index[dst] = core::checkedIntegralNarrow<std::uint32_t>(
+              write_patch, "production AMR derefine parent patch index");
+          candidate.gas_cells.gas_cell_id[dst] = next_parent_gas_cell_id++;
+          candidate.gas_cells.parent_particle_id[dst] =
+              restricted_parent_particle_id[cell] == std::numeric_limits<std::uint64_t>::max()
+              ? 0U
+              : restricted_parent_particle_id[cell];
+          writeVolumeIntegratedToRow(candidate, dst, restricted[cell], parent_volume, options);
+          parent_rows.push_back(dst);
           ++write_row;
         }
         ++write_patch;
@@ -2156,15 +2424,19 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
       }
       continue;
     }
-    const std::uint32_t first = old.patches.first_cell[old_patch_index];
-    const std::uint32_t count = old.patches.cell_count[old_patch_index];
-    writePatchDescriptorToStateRow(state, write_patch, patchDescriptorFromStateRow(old, old_patch_index));
-    state.patches.first_cell[write_patch] = write_row;
-    state.patches.cell_count[write_patch] = count;
-    state.patches.owning_rank[write_patch] = old.patches.owning_rank[old_patch_index];
+    const std::uint32_t first = state.patches.first_cell[old_patch_index];
+    const std::uint32_t count = state.patches.cell_count[old_patch_index];
+    writePatchDescriptorToStateRow(candidate, write_patch, patchDescriptorFromStateRow(state, old_patch_index));
+    candidate.patches.first_cell[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(
+        write_row, "production AMR derefine kept patch first row");
+    candidate.patches.cell_count[write_patch] = count;
+    candidate.patches.owning_rank[write_patch] = state.patches.owning_rank[old_patch_index];
     for (std::uint32_t offset = 0; offset < count; ++offset) {
-      copyCellRow(state, write_row, old, first + offset);
-      state.cells.patch_index[write_row] = write_patch;
+      const std::uint32_t dst = core::checkedIntegralNarrow<std::uint32_t>(
+          write_row, "production AMR derefine kept cell destination row");
+      copyCellRow(candidate, dst, state, first + offset);
+      candidate.cells.patch_index[dst] = core::checkedIntegralNarrow<std::uint32_t>(
+          write_patch, "production AMR derefine kept cell patch index");
       ++write_row;
     }
     ++write_patch;
@@ -2172,10 +2444,14 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
   if (!inserted_parent || write_row != kept_cell_count || write_patch != kept_patch_count) {
     throw std::runtime_error("production AMR derefine internal row accounting failed");
   }
-  rebuildIdentityFromSidecars(state);
-  state.bumpCellIndexGeneration();
-  const auto after = totalsForRows(state, parent_rows, parent_volume, options);
-  return ProductionAmrRegridDiagnostics{
+  rebuildIdentityFromSidecars(candidate, identity_generation);
+  if (!hasProductionAmrHydroCoverage(candidate) ||
+      !candidate.gas_cell_identity.coversDenseLocalRows(candidate.cells.size()) ||
+      !candidate.gasCellIdentityMapMatchesSidecarLanes()) {
+    throw std::runtime_error("production AMR derefine candidate failed authority validation");
+  }
+  const auto after = totalsForRows(candidate, parent_rows, parent_volume, options);
+  const ProductionAmrRegridDiagnostics diagnostics{
       .derefined_patch_count = 1,
       .created_gas_cell_count = parent_rows.size(),
       .retired_gas_cell_count = child_rows.size(),
@@ -2189,6 +2465,8 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
       .conserved_momentum_z_after = after[3],
       .conserved_total_energy_before = before[4],
       .conserved_total_energy_after = after[4]};
+  commitProductionAmrCandidate(state, std::move(candidate), admission);
+  return diagnostics;
 }
 
 ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(

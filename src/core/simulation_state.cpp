@@ -58,6 +58,46 @@ bool GasCellIdentityMap::empty() const noexcept { return m_records.empty(); }
 
 std::uint64_t GasCellIdentityMap::generation() const noexcept { return m_generation; }
 
+std::uint64_t GasCellIdentityMap::recordsCurrentSizeBytes() const {
+  return checkedIntegralNarrow<std::uint64_t>(
+      checkedSizeMultiply(
+          m_records.size(), sizeof(GasCellIdentityRecord),
+          "GasCellIdentityMap record current bytes"),
+      "GasCellIdentityMap record current byte width");
+}
+
+std::uint64_t GasCellIdentityMap::recordsOwnedCapacityBytes() const {
+  return checkedIntegralNarrow<std::uint64_t>(
+      checkedSizeMultiply(
+          m_records.capacity(), sizeof(GasCellIdentityRecord),
+          "GasCellIdentityMap record capacity bytes"),
+      "GasCellIdentityMap record capacity byte width");
+}
+
+std::uint64_t GasCellIdentityMap::lookupOwnedBytesConservative() const {
+  const auto map_bytes = [](const auto& map, std::string_view context) {
+    using Map = std::remove_cvref_t<decltype(map)>;
+    // libstdc++/libc++ do not expose node allocation size. Account the bucket
+    // array exactly by bucket_count and conservatively model every live node
+    // as value_type plus two links. This is deliberately an upper-oriented
+    // baseline model; allocator bookkeeping remains inside the process safety
+    // margin and RSS/PSS reconciliation.
+    const std::size_t bucket_bytes = checkedSizeMultiply(
+        map.bucket_count(), sizeof(void*), context);
+    const std::size_t node_bytes_each = checkedSizeAdd(
+        sizeof(typename Map::value_type), 2U * sizeof(void*), context);
+    const std::size_t node_bytes = checkedSizeMultiply(map.size(), node_bytes_each, context);
+    return checkedSizeAdd(bucket_bytes, node_bytes, context);
+  };
+  const std::size_t gas_lookup = map_bytes(
+      m_index_by_gas_cell_id, "GasCellIdentityMap gas-id lookup bytes");
+  const std::size_t row_lookup = map_bytes(
+      m_index_by_local_row, "GasCellIdentityMap row lookup bytes");
+  return checkedIntegralNarrow<std::uint64_t>(
+      checkedSizeAdd(gas_lookup, row_lookup, "GasCellIdentityMap lookup total bytes"),
+      "GasCellIdentityMap lookup total byte width");
+}
+
 bool GasCellIdentityMap::rebuildLookupTables() {
   std::unordered_map<std::uint64_t, std::size_t> index_by_gas_cell_id;
   std::unordered_map<std::uint32_t, std::size_t> index_by_local_row;
@@ -240,6 +280,54 @@ bool ParticleReorderMap::isConsistent(std::size_t particle_count) const {
     }
   }
   return true;
+}
+
+std::uint64_t PendingFluxRegisterStore::currentSizeBytes() const {
+  return checkedIntegralNarrow<std::uint64_t>(
+      checkedSizeMultiply(
+          m_records.size(), sizeof(PendingFluxRegisterRecord),
+          "PendingFluxRegisterStore current bytes"),
+      "PendingFluxRegisterStore current byte width");
+}
+
+std::uint64_t PendingFluxRegisterStore::ownedCapacityBytes() const {
+  return checkedIntegralNarrow<std::uint64_t>(
+      checkedSizeMultiply(
+          m_records.capacity(), sizeof(PendingFluxRegisterRecord),
+          "PendingFluxRegisterStore capacity bytes"),
+      "PendingFluxRegisterStore capacity byte width");
+}
+
+std::uint64_t AmrTemporalBoundaryHistoryStore::currentSizeBytes() const {
+  std::size_t bytes = checkedSizeMultiply(
+      m_records.size(), sizeof(AmrTemporalBoundaryHistoryRecord),
+      "AmrTemporalBoundaryHistoryStore outer current bytes");
+  for (const AmrTemporalBoundaryHistoryRecord& record : m_records) {
+    bytes = checkedSizeAdd(
+        bytes,
+        checkedSizeMultiply(
+            record.cells.size(), sizeof(AmrTemporalBoundaryHistoryCellRecord),
+            "AmrTemporalBoundaryHistoryStore nested current bytes"),
+        "AmrTemporalBoundaryHistoryStore current total bytes");
+  }
+  return checkedIntegralNarrow<std::uint64_t>(
+      bytes, "AmrTemporalBoundaryHistoryStore current byte width");
+}
+
+std::uint64_t AmrTemporalBoundaryHistoryStore::ownedCapacityBytes() const {
+  std::size_t bytes = checkedSizeMultiply(
+      m_records.capacity(), sizeof(AmrTemporalBoundaryHistoryRecord),
+      "AmrTemporalBoundaryHistoryStore outer capacity bytes");
+  for (const AmrTemporalBoundaryHistoryRecord& record : m_records) {
+    bytes = checkedSizeAdd(
+        bytes,
+        checkedSizeMultiply(
+            record.cells.capacity(), sizeof(AmrTemporalBoundaryHistoryCellRecord),
+            "AmrTemporalBoundaryHistoryStore nested capacity bytes"),
+        "AmrTemporalBoundaryHistoryStore capacity total bytes");
+  }
+  return checkedIntegralNarrow<std::uint64_t>(
+      bytes, "AmrTemporalBoundaryHistoryStore capacity byte width");
 }
 
 MonotonicScratchAllocator::MonotonicScratchAllocator(std::size_t initial_capacity_bytes)

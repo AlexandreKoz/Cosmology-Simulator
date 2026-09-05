@@ -284,6 +284,55 @@ void accountPatchSoa(MemoryReportBuilder& builder, const PatchSoa& patches) {
   addOwned(builder, MemorySubsystem::kGasHydro, MemoryLifetime::kPersistent, "patches.owning_rank", patches.owning_rank);
 }
 
+void accountAmrIdentityAndSynchronization(
+    MemoryReportBuilder& builder,
+    const SimulationState& state) {
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kGasHydro,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kCanonicalPersistent,
+      .label = "gas_cell_identity.records",
+      .current_size_bytes = state.gas_cell_identity.recordsCurrentSizeBytes(),
+      .owned_capacity_bytes = state.gas_cell_identity.recordsOwnedCapacityBytes(),
+      .high_water_bytes = state.gas_cell_identity.recordsOwnedCapacityBytes(),
+      .estimate_only = false,
+      .uncertainty_note = {}});
+  const std::uint64_t lookup_bytes =
+      state.gas_cell_identity.lookupOwnedBytesConservative();
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kSidecars,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kPersistentCache,
+      .label = "gas_cell_identity.lookup_tables",
+      .current_size_bytes = lookup_bytes,
+      .owned_capacity_bytes = lookup_bytes,
+      .high_water_bytes = lookup_bytes,
+      .estimate_only = false,
+      .uncertainty_note =
+          "Conservative unordered-map bucket/node ownership model; allocator bookkeeping is covered by process safety margin/RSS reconciliation."});
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kGasHydro,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kCanonicalPersistent,
+      .label = "amr.pending_flux_registers",
+      .current_size_bytes = state.pending_flux_registers.currentSizeBytes(),
+      .owned_capacity_bytes = state.pending_flux_registers.ownedCapacityBytes(),
+      .high_water_bytes = state.pending_flux_registers.ownedCapacityBytes(),
+      .estimate_only = false,
+      .uncertainty_note = {}});
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kGasHydro,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kCanonicalPersistent,
+      .label = "amr.temporal_boundary_history",
+      .current_size_bytes = state.amr_temporal_boundary_history.currentSizeBytes(),
+      .owned_capacity_bytes = state.amr_temporal_boundary_history.ownedCapacityBytes(),
+      .high_water_bytes = state.amr_temporal_boundary_history.ownedCapacityBytes(),
+      .estimate_only = false,
+      .uncertainty_note =
+          "Includes outer record capacity and nested per-patch temporal-cell vector capacity."});
+}
+
 void accountModulePayloads(MemoryReportBuilder& builder, const ModuleSidecarRegistry& registry) {
   for (const ModuleSidecarBlock* block : registry.blocksSortedByName()) {
     if (block == nullptr) {
@@ -437,6 +486,7 @@ MemoryReport collectSimulationMemoryReport(const SimulationState& state, const T
   accountBlackHoleSidecar(builder, state.black_holes);
   accountTracerSidecar(builder, state.tracers);
   accountPatchSoa(builder, state.patches);
+  accountAmrIdentityAndSynchronization(builder, state);
   accountModulePayloads(builder, state.sidecars);
 
   builder.addEntry(MemoryEntry{.subsystem = MemorySubsystem::kTree,

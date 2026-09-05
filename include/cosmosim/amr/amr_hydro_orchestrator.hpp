@@ -8,6 +8,7 @@
 #include "cosmosim/amr/amr_framework.hpp"
 #include "cosmosim/amr/amr_ghost_fill.hpp"
 #include "cosmosim/amr/amr_hydro_geometry.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
@@ -44,6 +45,10 @@ struct ProductionAmrHydroOptions {
   // full-population thermodynamic helper vectors. A zero value preserves the
   // legacy span-provided source-context path used by focused tests.
   double physical_density_cgs_per_density_code = 0.0;
+  // Production regrid is an explicit memory transaction. Regrid entry points
+  // fail closed when this authority is absent; ordinary hydro stepping does
+  // not require it. Runtime composition must pass the process MemoryGovernor.
+  core::MemoryGovernor* regrid_memory_governor = nullptr;
 };
 
 struct ProductionAmrHydroDiagnostics {

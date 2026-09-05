@@ -302,6 +302,77 @@ void testSchedulerOwnershipParticipatesInBaselineReport() {
 
 }  // namespace
 
+
+void testAmrSynchronizationAndIdentityMemoryParticipateInBaseline() {
+  cosmosim::core::SimulationState state;
+  state.resizeCells(8U);
+  state.resizePatches(1U);
+  state.patches.patch_id[0] = 301U;
+  state.patches.first_cell[0] = 0U;
+  state.patches.cell_count[0] = 8U;
+  state.patches.owning_rank[0] = 0U;
+  std::vector<cosmosim::core::GasCellIdentityRecord> identities;
+  identities.reserve(8U);
+  for (std::uint32_t row = 0; row < 8U; ++row) {
+    state.cells.patch_index[row] = 0U;
+    state.gas_cells.gas_cell_id[row] = 9000U + row;
+    identities.push_back(cosmosim::core::GasCellIdentityRecord{
+        .gas_cell_id = 9000U + row,
+        .owning_patch_id = 301U,
+        .local_cell_row = row});
+  }
+  state.replaceGasCellIdentityRecords(std::move(identities));
+  const auto before = cosmosim::core::collectSimulationMemoryReport(state);
+  const std::uint64_t baseline_before =
+      cosmosim::core::memoryReportBaselineOwnedBytes(before);
+
+  for (std::uint64_t i = 0; i < 1000U; ++i) {
+    cosmosim::core::PendingFluxRegisterRecord record;
+    record.register_key = i + 1U;
+    record.coarse_patch_id = 301U;
+    record.coarse_gas_cell_id = 9000U;
+    state.pending_flux_registers.upsertByRegisterKey(record);
+  }
+  std::vector<cosmosim::core::AmrTemporalBoundaryHistoryRecord> histories;
+  histories.reserve(100U);
+  for (std::uint64_t i = 0; i < 100U; ++i) {
+    cosmosim::core::AmrTemporalBoundaryHistoryRecord history;
+    history.patch_id = 10000U + i;
+    history.cells.resize(8U);
+    histories.push_back(std::move(history));
+  }
+  state.amr_temporal_boundary_history.assign(std::move(histories));
+
+  const auto after = cosmosim::core::collectSimulationMemoryReport(state);
+  const std::uint64_t baseline_after =
+      cosmosim::core::memoryReportBaselineOwnedBytes(after);
+  assert(baseline_after > baseline_before);
+  bool saw_identity_records = false;
+  bool saw_identity_lookup = false;
+  bool saw_pending = false;
+  bool saw_temporal = false;
+  for (const auto& entry : after.entries) {
+    if (entry.label == "gas_cell_identity.records") {
+      saw_identity_records = true;
+      assert(entry.owned_capacity_bytes >= 8U * sizeof(cosmosim::core::GasCellIdentityRecord));
+    } else if (entry.label == "gas_cell_identity.lookup_tables") {
+      saw_identity_lookup = true;
+      assert(entry.owned_capacity_bytes > 0U);
+      assert(!entry.estimate_only);
+    } else if (entry.label == "amr.pending_flux_registers") {
+      saw_pending = true;
+      assert(entry.owned_capacity_bytes >=
+             1000U * sizeof(cosmosim::core::PendingFluxRegisterRecord));
+    } else if (entry.label == "amr.temporal_boundary_history") {
+      saw_temporal = true;
+      assert(entry.owned_capacity_bytes >=
+             100U * sizeof(cosmosim::core::AmrTemporalBoundaryHistoryRecord) +
+             800U * sizeof(cosmosim::core::AmrTemporalBoundaryHistoryCellRecord));
+    }
+  }
+  assert(saw_identity_records && saw_identity_lookup && saw_pending && saw_temporal);
+}
+
 int main() {
   testCapacityBasedAccountingUsesCapacityNotSize();
   testSpanViewReportsNoOwnedBytes();
@@ -314,5 +385,6 @@ int main() {
   testUnlimitedGovernorReporting();
   testDeclaredVersusObservedReconciliationArithmetic();
   testSchedulerOwnershipParticipatesInBaselineReport();
+  testAmrSynchronizationAndIdentityMemoryParticipateInBaseline();
   return 0;
 }

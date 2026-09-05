@@ -295,6 +295,13 @@ class GasCellIdentityMap {
   [[nodiscard]] std::optional<std::uint64_t> owningPatchIdForGasCellId(std::uint64_t gas_cell_id) const noexcept;
   [[nodiscard]] std::vector<std::uint32_t> rowsForParentParticleId(std::uint64_t parent_particle_id) const;
   [[nodiscard]] std::vector<std::uint32_t> rowsForPatch(std::uint64_t owning_patch_id) const;
+  // Exact owned bytes for the canonical record vector plus a conservative
+  // bucket/node model for the two derived unordered lookup tables. The latter
+  // is intentionally conservative so MemoryGovernor baseline reconciliation
+  // does not omit identity-index residency hidden behind std::unordered_map.
+  [[nodiscard]] std::uint64_t recordsCurrentSizeBytes() const;
+  [[nodiscard]] std::uint64_t recordsOwnedCapacityBytes() const;
+  [[nodiscard]] std::uint64_t lookupOwnedBytesConservative() const;
 
  private:
   bool rebuildLookupTables();
@@ -543,6 +550,8 @@ class AmrTemporalBoundaryHistoryStore {
  public:
   [[nodiscard]] bool empty() const noexcept { return m_records.empty(); }
   [[nodiscard]] std::size_t size() const noexcept { return m_records.size(); }
+  [[nodiscard]] std::uint64_t currentSizeBytes() const;
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
   [[nodiscard]] std::span<const AmrTemporalBoundaryHistoryRecord> records() const noexcept { return m_records; }
   [[nodiscard]] std::span<AmrTemporalBoundaryHistoryRecord> mutableRecords() noexcept { return m_records; }
   void clear() noexcept { m_records.clear(); }
@@ -580,6 +589,8 @@ class PendingFluxRegisterStore {
  public:
   [[nodiscard]] bool empty() const noexcept { return m_records.empty(); }
   [[nodiscard]] std::size_t size() const noexcept { return m_records.size(); }
+  [[nodiscard]] std::uint64_t currentSizeBytes() const;
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
   [[nodiscard]] std::span<const PendingFluxRegisterRecord> records() const noexcept { return m_records; }
   [[nodiscard]] std::span<PendingFluxRegisterRecord> mutableRecords() noexcept { return m_records; }
   void clear() noexcept { m_records.clear(); }

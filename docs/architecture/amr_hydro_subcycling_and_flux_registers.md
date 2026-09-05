@@ -81,7 +81,9 @@ silently clamped or copied from the coarse end state.
 
 The history records stable gas-cell IDs and patch-local cell indices, plus a patch geometry fingerprint and
 identity generation. Dense-row order is never a temporal-history key. Refinement and derefinement are
-prohibited while an active history exists. This is a safe local lifecycle policy, not a migration/remap
+prohibited while an active history exists. M2B-1 additionally requires all pending flux registers to be
+drained before production regrid, because the current pending record does not encode every fine-contributor
+topology identity needed to prove an intersection-local regrid safe. This is a safe local lifecycle policy, not a migration/remap
 implementation.
 
 HDF5 restart schema v19 retains these records under:
@@ -117,3 +119,26 @@ components. They are routed to the authoritative owner rank and applied at most
 once per stable register key/epoch contract. Consumer-side remote patches remain
 read-only; distributed AMR subcycling and remote temporal interpolation remain
 unsupported until implemented with a separate validation contract.
+
+## M2B-1 production regrid authority boundary (2026-09-05)
+
+The production `core::SimulationState` regrid path no longer creates a full
+`SimulationState` snapshot. It prepares an AMR-only candidate containing cell
+state, gas sidecars, patch state, and stable gas-cell identity, under one
+process-governor reservation computed before candidate allocation. Successful
+validation commits those AMR authorities together; failed admission or
+preparation leaves the live state unchanged. The scientific prolongation,
+restriction, EOS, and reflux formulae are unchanged.
+
+Restart-authoritative AMR synchronization containers and gas identity are now
+part of the canonical memory report by allocated capacity. Production regrid
+requires pending reflux and temporal history to be quiescent before topology
+identity retirement.
+
+The prior CTest label `integration_star_formation_amr_migration_mpi_two_rank`
+was removed because its executable did not perform AMR migration. The genuine
+directed two-rank AMR boundary/reflux test remains the current distributed AMR
+runtime test. A true two-rank patch-migration test carrying pending reflux and
+temporal history through destination commit and restart remains an explicit
+MPI-capable follow-up validation item; no test name claims that coverage until
+it exists.
