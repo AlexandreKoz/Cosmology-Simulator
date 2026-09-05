@@ -712,13 +712,15 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
   }
     HydroAmrRuntime& hydro_callback = *runtime_composition.hydro_amr;
+    auto effective_eos_table = runtime_composition.effective_eos_table;
     TimeCoordinator time_coordinator(
         runtime_services,
         time_state,
         gravity_callback,
         hydro_callback,
         std::move(runtime_composition.execution_plan),
-        migration_balance);
+        migration_balance,
+        std::move(effective_eos_table));
     traceRuntimePhase("time_coordinator_begin");
     time_coordinator.runRungZeroSegment(
         config,

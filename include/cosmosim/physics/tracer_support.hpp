@@ -74,7 +74,6 @@ class TracerCallback final : public cosmosim::core::IntegrationCallback {
  private:
   TracerModel m_model;
   TracerUpdateCounters m_last_counters;
-  std::vector<std::uint32_t> m_all_cells_cache;
 };
 
 }  // namespace cosmosim::physics

@@ -72,12 +72,18 @@ TracerUpdateCounters TracerModel::updateMassFromHostCellsView(TracerHostMassView
     return counters;
   }
 
-  std::vector<std::uint8_t> active_cell_mask;
+  std::vector<std::uint32_t> active_cells_sorted;
   if (!view.active_cell_indices.empty()) {
-    active_cell_mask.assign(view.host_mass_code.size(), 0U);
+    active_cells_sorted.assign(
+        view.active_cell_indices.begin(), view.active_cell_indices.end());
+    std::sort(active_cells_sorted.begin(), active_cells_sorted.end());
+    active_cells_sorted.erase(
+        std::unique(active_cells_sorted.begin(), active_cells_sorted.end()),
+        active_cells_sorted.end());
     for (const std::uint32_t cell_index : view.active_cell_indices) {
-      if (cell_index < active_cell_mask.size()) {
-        active_cell_mask[cell_index] = 1U;
+      if (cell_index >= view.host_mass_code.size()) {
+        throw std::out_of_range(
+            "TracerModel.updateMassFromHostCellsView: active cell index out of range");
       }
     }
   }
@@ -90,7 +96,9 @@ TracerUpdateCounters TracerModel::updateMassFromHostCellsView(TracerHostMassView
       ++counters.skipped_invalid_host;
       continue;
     }
-    if (!active_cell_mask.empty() && active_cell_mask[host_cell_index] == 0U) {
+    if (!active_cells_sorted.empty() &&
+        !std::binary_search(
+            active_cells_sorted.begin(), active_cells_sorted.end(), host_cell_index)) {
       ++counters.skipped_inactive_host;
       continue;
     }
@@ -192,11 +200,9 @@ void TracerCallback::onStage(cosmosim::core::StepContext& context) {
     return;
   }
 
-  m_all_cells_cache.resize(context.state.cells.size());
-  for (std::size_t i = 0; i < m_all_cells_cache.size(); ++i) {
-    m_all_cells_cache[i] = static_cast<std::uint32_t>(i);
-  }
-  m_last_counters = m_model.updateMassFromHostCells(context.state, m_all_cells_cache);
+  // Empty active-cell span is the explicit all-cells contract. Do not retain a
+  // second uint32 lane over the full gas population merely to spell 0..N-1.
+  m_last_counters = m_model.updateMassFromHostCells(context.state, {});
 #endif
 }
 

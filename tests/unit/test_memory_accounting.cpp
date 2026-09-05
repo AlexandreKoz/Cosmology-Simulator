@@ -41,6 +41,35 @@ void testAllCategoriesPresentEvenIfZero() {
   }
 }
 
+void testDisabledSpeciesSidecarsOwnNoColdState() {
+  cosmosim::core::SimulationState dmo_state;
+  dmo_state.resizeParticles(4096U);
+  const auto dmo_report = cosmosim::core::collectSimulationMemoryReport(dmo_state, nullptr);
+  for (const auto& entry : dmo_report.entries) {
+    const bool optional_species_lane =
+        entry.label.rfind("gas_cells.", 0U) == 0U ||
+        entry.label.rfind("star_particles.", 0U) == 0U ||
+        entry.label.rfind("black_holes.", 0U) == 0U ||
+        entry.label.rfind("tracers.", 0U) == 0U;
+    if (optional_species_lane) {
+      assert(entry.owned_capacity_bytes == 0U);
+    }
+  }
+
+  cosmosim::core::SimulationState gas_state;
+  gas_state.resizeCells(2048U);
+  const auto gas_report = cosmosim::core::collectSimulationMemoryReport(gas_state, nullptr);
+  for (const auto& entry : gas_report.entries) {
+    const bool non_gas_optional_lane =
+        entry.label.rfind("star_particles.", 0U) == 0U ||
+        entry.label.rfind("black_holes.", 0U) == 0U ||
+        entry.label.rfind("tracers.", 0U) == 0U;
+    if (non_gas_optional_lane) {
+      assert(entry.owned_capacity_bytes == 0U);
+    }
+  }
+}
+
 
 void testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity() {
   cosmosim::core::SimulationState state;
@@ -377,6 +406,7 @@ int main() {
   testCapacityBasedAccountingUsesCapacityNotSize();
   testSpanViewReportsNoOwnedBytes();
   testAllCategoriesPresentEvenIfZero();
+  testDisabledSpeciesSidecarsOwnNoColdState();
   testRuntimeAccountingCoversAllPersistentLanesAndWorkspaceCapacity();
   testDeviceBufferPreservesHistoricalHighWaterAcrossShrink();
   testPreRunEstimateReportsRequiredSubsystemsAndUncertainty();

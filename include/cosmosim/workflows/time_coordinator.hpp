@@ -86,7 +86,8 @@ class TimeCoordinator {
       GravityRuntime& gravity,
       HydroAmrRuntime& hydro_amr,
       RuntimeExecutionPlan execution_plan,
-      const internal::MigrationBalanceRuntime& migration_balance) noexcept;
+      const internal::MigrationBalanceRuntime& migration_balance,
+      std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table = nullptr) noexcept;
 
   // Execute one bounded rung-zero segment. This owns active-set formation,
   // ordered endpoint/output clipping, adaptive-bin refresh, rebalance, and

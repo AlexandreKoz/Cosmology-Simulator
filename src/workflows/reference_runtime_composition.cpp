@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/workflows/analysis_runtime.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
@@ -21,6 +22,7 @@ namespace cosmosim::workflows::internal {
 struct CompositionAssembly {
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
+  std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table;
 };
 
 class DriftRuntime final {
@@ -277,7 +279,8 @@ namespace {
         assembly->hydro_amr = std::shared_ptr<HydroAmrRuntime>(makeHydroAmrRuntime(
             inputs.config,
             inputs.mode_policy,
-            inputs.services));
+            inputs.services,
+            assembly->effective_eos_table));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = assembly->hydro_amr;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
@@ -292,7 +295,8 @@ namespace {
 }
 
 [[nodiscard]] RuntimeModuleDescriptor makeSourceDescriptor(
-    const ReferenceRuntimeCompositionInputs& inputs) {
+    const ReferenceRuntimeCompositionInputs& inputs,
+    std::shared_ptr<CompositionAssembly> assembly) {
   return RuntimeModuleDescriptor{
       .module_id = "sources",
       .schema_version = 1,
@@ -318,9 +322,18 @@ namespace {
       }},
       .factory = [&config = inputs.config, &mode_policy = inputs.mode_policy,
                   &units = inputs.units, world_rank = inputs.world_rank,
-                  &mpi_context = inputs.services.mpi_context](const RuntimeModuleFactoryContext&) {
+                  &mpi_context = inputs.services.mpi_context,
+                  &services = inputs.services,
+                  assembly](const RuntimeModuleFactoryContext&) {
         std::shared_ptr<SourceRuntime> owner(
-            makeSourceRuntime(config, mode_policy, units, world_rank, mpi_context));
+            makeSourceRuntime(
+                config,
+                mode_policy,
+                units,
+                world_rank,
+                mpi_context,
+                assembly->effective_eos_table,
+                &services));
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
@@ -391,12 +404,21 @@ namespace {
 ReferenceRuntimeComposition buildReferenceRuntimeComposition(
     ReferenceRuntimeCompositionInputs inputs) {
   auto assembly = std::make_shared<CompositionAssembly>();
+  if (inputs.config.physics.enable_star_formation &&
+      inputs.config.physics.star_formation_model ==
+          core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
+    assembly->effective_eos_table =
+        std::make_shared<const physics::EffectiveMultiphaseEosTable>(
+            physics::makeEffectiveMultiphaseEosConfig(inputs.config.physics),
+            inputs.units,
+            physics::makeEffectiveIsmReferenceCoolingProvider(inputs.config.physics));
+  }
   RuntimeModuleRegistry registry;
   registry.registerModule(makeAnalysisDescriptor(inputs));
   registry.registerModule(makeDriftDescriptor());
   registry.registerModule(makeGravityDescriptor(inputs, assembly));
   registry.registerModule(makeHydroAmrDescriptor(inputs, assembly));
-  registry.registerModule(makeSourceDescriptor(inputs));
+  registry.registerModule(makeSourceDescriptor(inputs, assembly));
   registry.registerModule(makeOutputRestartDescriptor(inputs, assembly));
   if (inputs.options.register_runtime_modules) {
     inputs.options.register_runtime_modules(registry);
@@ -409,6 +431,7 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
   return ReferenceRuntimeComposition{
       .gravity = std::move(assembly->gravity),
       .hydro_amr = std::move(assembly->hydro_amr),
+      .effective_eos_table = std::move(assembly->effective_eos_table),
       .execution_plan = std::move(execution_plan),
   };
 }

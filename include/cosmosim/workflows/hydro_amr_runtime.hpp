@@ -12,6 +12,10 @@ namespace cosmosim::core {
 struct MemoryReport;
 }  // namespace cosmosim::core
 
+namespace cosmosim::physics {
+class EffectiveMultiphaseEosTable;
+}  // namespace cosmosim::physics
+
 namespace cosmosim::workflows {
 
 struct RuntimeServices;
@@ -43,6 +47,7 @@ class HydroAmrRuntime {
 [[nodiscard]] std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(
     const core::SimulationConfig& config,
     const core::ModePolicy& mode_policy,
-    const RuntimeServices& services);
+    const RuntimeServices& services,
+    std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table = nullptr);
 
 }  // namespace cosmosim::workflows

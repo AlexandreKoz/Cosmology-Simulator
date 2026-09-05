@@ -2195,3 +2195,24 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   multi-rank TreePM/DMO acceptance until the registered np2/np3/np4/np8 matrix
   passes on a dependency-complete system. Detailed evidence is in
   `docs/repair/p0_p1_post_audit_runtime_closure_20260903.md`.
+
+## 2026-09-05 Campaign M2C full-physics sidecar/event-memory closure
+
+- Preserved the existing species-local gas/star/BH/tracer sidecar authority and
+  added acceptance coverage proving disabled species retain zero cold-sidecar
+  capacity in DMO/gas-only states.
+- Removed the 48 B/star duplicate stellar-feedback carry mirror; persistent
+  unresolved budget remains solely in restart/migration-authoritative star
+  sidecar lanes.
+- Replaced 24 B/star source-step feedback delta staging with bounded 4096-event
+  batches and replaced per-event O(N_gas) distance materialization with an exact
+  nearest-k lookup over a 4 B/owned-leaf x-sorted spatial index.
+- Removed feedback-only full gas volume/ownership staging in favor of on-demand
+  AMR volume derivation and removed tracer all-cell retained index/mask scaling.
+- Reference hydro, sources, and adaptive timestep logic now share one immutable
+  effective-multiphase EOS table rather than constructing three copies.
+- Existing typed cooling/metal configuration remains the scientific fidelity
+  authority. `core_elements` still fails closed until its full abundance,
+  transport, cooling, restart, and MPI contract exists.
+- Detailed source/validation evidence is recorded in
+  `docs/repair/m2c_full_physics_sidecars_20260905.md`.

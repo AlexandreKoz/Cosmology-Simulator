@@ -45,20 +45,149 @@ struct WeightedCellDistance {
   return static_cast<double>(splitmix64(mixed)) * k_u01_norm;
 }
 
-[[nodiscard]] double persistentOrCompatibilityCarry(
-    double persistent, double compatibility) noexcept {
-  return std::abs(persistent) > 0.0 ? persistent : compatibility;
+[[nodiscard]] bool deterministicDistanceOrder(
+    const WeightedCellDistance& lhs,
+    const WeightedCellDistance& rhs) noexcept {
+  if (lhs.distance2 != rhs.distance2) {
+    return lhs.distance2 < rhs.distance2;
+  }
+  if (lhs.gas_cell_id != rhs.gas_cell_id) {
+    return lhs.gas_cell_id < rhs.gas_cell_id;
+  }
+  return lhs.cell_index < rhs.cell_index;
+}
+
+void insertBoundedNearest(
+    std::vector<WeightedCellDistance>& nearest,
+    WeightedCellDistance candidate,
+    std::size_t keep_count) {
+  if (keep_count == 0U) {
+    return;
+  }
+  const auto position = std::lower_bound(
+      nearest.begin(), nearest.end(), candidate, deterministicDistanceOrder);
+  if (nearest.size() < keep_count) {
+    nearest.insert(position, std::move(candidate));
+    return;
+  }
+  if (position == nearest.end()) {
+    return;
+  }
+  nearest.insert(position, std::move(candidate));
+  nearest.pop_back();
 }
 
 }  // namespace
 
-void StellarFeedbackModuleState::ensureStarCapacity(std::size_t star_count) {
-  last_returned_mass_cumulative_code.resize(star_count, 0.0);
-  carry_mass_code.resize(star_count, 0.0);
-  carry_metals_code.resize(star_count, 0.0);
-  carry_thermal_energy_erg.resize(star_count, 0.0);
-  carry_kinetic_energy_erg.resize(star_count, 0.0);
-  carry_momentum_code.resize(star_count, 0.0);
+void StellarFeedbackSpatialIndex::rebuild(
+    const StellarFeedbackGeometryView& geometry_view) {
+  const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
+  if (geometry_view.cell_center_y_comoving.size() != cell_count ||
+      geometry_view.cell_center_z_comoving.size() != cell_count) {
+    throw std::invalid_argument(
+        "stellar-feedback spatial index received inconsistent geometry");
+  }
+  if (!geometry_view.gas_cell_id.empty() &&
+      geometry_view.gas_cell_id.size() != cell_count) {
+    throw std::invalid_argument(
+        "stellar-feedback spatial index gas-cell IDs do not cover geometry");
+  }
+  if (!geometry_view.is_owned_leaf.empty() &&
+      geometry_view.is_owned_leaf.size() != cell_count) {
+    throw std::invalid_argument(
+        "stellar-feedback spatial index ownership mask does not cover geometry");
+  }
+
+  std::vector<std::uint32_t> candidates;
+  const std::size_t candidate_count = geometry_view.candidate_cell_indices.empty()
+      ? cell_count
+      : geometry_view.candidate_cell_indices.size();
+  candidates.reserve(candidate_count);
+  const auto append = [&](std::uint32_t cell_index) {
+    if (cell_index >= cell_count ||
+        (!geometry_view.is_owned_leaf.empty() &&
+         geometry_view.is_owned_leaf[cell_index] == 0U)) {
+      return;
+    }
+    const double x = geometry_view.cell_center_x_comoving[cell_index];
+    const double y = geometry_view.cell_center_y_comoving[cell_index];
+    const double z = geometry_view.cell_center_z_comoving[cell_index];
+    if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+      candidates.push_back(cell_index);
+    }
+  };
+  if (geometry_view.candidate_cell_indices.empty()) {
+    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+      append(cell_index);
+    }
+  } else {
+    for (const std::uint32_t cell_index : geometry_view.candidate_cell_indices) {
+      append(cell_index);
+    }
+  }
+
+  rebuildFromCellIndices(geometry_view, std::move(candidates));
+}
+
+void StellarFeedbackSpatialIndex::rebuildFromCellIndices(
+    const StellarFeedbackGeometryView& geometry_view,
+    std::vector<std::uint32_t> cell_indices) {
+  const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
+  if (geometry_view.cell_center_y_comoving.size() != cell_count ||
+      geometry_view.cell_center_z_comoving.size() != cell_count ||
+      (!geometry_view.gas_cell_id.empty() &&
+       geometry_view.gas_cell_id.size() != cell_count)) {
+    throw std::invalid_argument(
+        "stellar-feedback spatial index received inconsistent geometry");
+  }
+  for (const std::uint32_t cell_index : cell_indices) {
+    if (cell_index >= cell_count) {
+      throw std::invalid_argument(
+          "stellar-feedback spatial index candidate row is out of range");
+    }
+  }
+  m_sorted_cell_indices = std::move(cell_indices);
+
+  std::sort(
+      m_sorted_cell_indices.begin(), m_sorted_cell_indices.end(),
+      [&](std::uint32_t lhs, std::uint32_t rhs) {
+        const double lhs_x = geometry_view.cell_center_x_comoving[lhs];
+        const double rhs_x = geometry_view.cell_center_x_comoving[rhs];
+        if (lhs_x != rhs_x) {
+          return lhs_x < rhs_x;
+        }
+        const std::uint64_t lhs_id = geometry_view.gas_cell_id.empty()
+            ? static_cast<std::uint64_t>(lhs) + 1U
+            : geometry_view.gas_cell_id[lhs];
+        const std::uint64_t rhs_id = geometry_view.gas_cell_id.empty()
+            ? static_cast<std::uint64_t>(rhs) + 1U
+            : geometry_view.gas_cell_id[rhs];
+        return lhs_id != rhs_id ? lhs_id < rhs_id : lhs < rhs;
+      });
+  m_high_water_bytes = std::max(m_high_water_bytes, ownedCapacityBytes());
+}
+
+void StellarFeedbackSpatialIndex::clear() noexcept {
+  m_sorted_cell_indices.clear();
+}
+
+std::span<const std::uint32_t>
+StellarFeedbackSpatialIndex::sortedCellIndices() const noexcept {
+  return m_sorted_cell_indices;
+}
+
+std::uint64_t StellarFeedbackSpatialIndex::ownedCapacityBytes() const noexcept {
+  return static_cast<std::uint64_t>(m_sorted_cell_indices.capacity()) *
+      static_cast<std::uint64_t>(sizeof(std::uint32_t));
+}
+
+std::uint64_t StellarFeedbackSpatialIndex::highWaterBytes() const noexcept {
+  return m_high_water_bytes;
+}
+
+void StellarFeedbackModuleState::ensureStarCapacity(std::size_t) noexcept {
+  // Intentionally no-op. StarParticleSidecar is the single persistent carry
+  // authority; M2C forbids a duplicate O(N_star) runtime mirror.
 }
 
 StellarFeedbackModel::StellarFeedbackModel(StellarFeedbackConfig config)
@@ -161,10 +290,12 @@ std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
   const double px = geometry_view.particle_position_x_comoving[particle_index];
   const double py = geometry_view.particle_position_y_comoving[particle_index];
   const double pz = geometry_view.particle_position_z_comoving[particle_index];
-  std::vector<WeightedCellDistance> distances;
   const std::size_t candidate_count = geometry_view.candidate_cell_indices.empty()
       ? cell_count : geometry_view.candidate_cell_indices.size();
-  distances.reserve(candidate_count);
+  const std::size_t keep_count =
+      std::min<std::size_t>(m_config.neighbor_count, candidate_count);
+  std::vector<WeightedCellDistance> distances;
+  distances.reserve(keep_count);
 
   const auto append_candidate = [&](std::uint32_t cell_index) {
     if (cell_index >= cell_count ||
@@ -179,7 +310,7 @@ std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
     if (!std::isfinite(d2)) {
       return;
     }
-    distances.push_back(WeightedCellDistance{
+    insertBoundedNearest(distances, WeightedCellDistance{
         .cell_index = cell_index,
         .gas_cell_id = geometry_view.gas_cell_id.empty()
             ? static_cast<std::uint64_t>(cell_index) + 1U
@@ -188,7 +319,7 @@ std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
         .dx = dx,
         .dy = dy,
         .dz = dz,
-    });
+    }, keep_count);
   };
   if (geometry_view.candidate_cell_indices.empty()) {
     for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
@@ -200,45 +331,137 @@ std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
     }
   }
 
-  const std::size_t keep_count =
-      std::min<std::size_t>(m_config.neighbor_count, distances.size());
-  if (keep_count == 0U) {
+  if (distances.empty()) {
     return {};
   }
-  const auto deterministic_order = [](const WeightedCellDistance& lhs,
-                                      const WeightedCellDistance& rhs) {
-    if (lhs.distance2 != rhs.distance2) {
-      return lhs.distance2 < rhs.distance2;
-    }
-    if (lhs.gas_cell_id != rhs.gas_cell_id) {
-      return lhs.gas_cell_id < rhs.gas_cell_id;
-    }
-    return lhs.cell_index < rhs.cell_index;
-  };
-  std::partial_sort(
-      distances.begin(), distances.begin() + static_cast<std::ptrdiff_t>(keep_count),
-      distances.end(), deterministic_order);
 
   double weight_sum = 0.0;
-  for (std::size_t i = 0; i < keep_count; ++i) {
+  for (const WeightedCellDistance& distance : distances) {
     weight_sum += 1.0 /
-        std::sqrt(std::max(distances[i].distance2, k_distance_floor));
+        std::sqrt(std::max(distance.distance2, k_distance_floor));
   }
   if (!(weight_sum > 0.0) || !std::isfinite(weight_sum)) {
     return {};
   }
 
   std::vector<StellarFeedbackTarget> targets;
-  targets.reserve(keep_count);
-  for (std::size_t i = 0; i < keep_count; ++i) {
+  targets.reserve(distances.size());
+  for (const WeightedCellDistance& distance : distances) {
     const double inv_r = 1.0 /
-        std::sqrt(std::max(distances[i].distance2, k_distance_floor));
+        std::sqrt(std::max(distance.distance2, k_distance_floor));
     targets.push_back(StellarFeedbackTarget{
-        .cell_index = distances[i].cell_index,
+        .cell_index = distance.cell_index,
         .weight = inv_r / weight_sum,
-        .radial_dx_comoving = distances[i].dx,
-        .radial_dy_comoving = distances[i].dy,
-        .radial_dz_comoving = distances[i].dz,
+        .radial_dx_comoving = distance.dx,
+        .radial_dy_comoving = distance.dy,
+        .radial_dz_comoving = distance.dz,
+    });
+  }
+  return targets;
+}
+
+std::vector<StellarFeedbackTarget> StellarFeedbackModel::selectTargets(
+    const StellarFeedbackGeometryView& geometry_view,
+    const StellarFeedbackSpatialIndex& spatial_index,
+    std::uint32_t particle_index) const {
+  const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
+  if (particle_index >= geometry_view.particle_position_x_comoving.size() ||
+      geometry_view.particle_position_y_comoving.size() <= particle_index ||
+      geometry_view.particle_position_z_comoving.size() <= particle_index ||
+      geometry_view.cell_center_y_comoving.size() != cell_count ||
+      geometry_view.cell_center_z_comoving.size() != cell_count ||
+      spatial_index.sortedCellIndices().empty()) {
+    return {};
+  }
+  const double px = geometry_view.particle_position_x_comoving[particle_index];
+  const double py = geometry_view.particle_position_y_comoving[particle_index];
+  const double pz = geometry_view.particle_position_z_comoving[particle_index];
+  const auto sorted = spatial_index.sortedCellIndices();
+  const auto right_begin = std::lower_bound(
+      sorted.begin(), sorted.end(), px,
+      [&](std::uint32_t cell_index, double x) {
+        return geometry_view.cell_center_x_comoving[cell_index] < x;
+      });
+  std::size_t right = static_cast<std::size_t>(right_begin - sorted.begin());
+  std::size_t left = right;
+  const std::size_t keep_count =
+      std::min<std::size_t>(m_config.neighbor_count, sorted.size());
+  std::vector<WeightedCellDistance> nearest;
+  nearest.reserve(keep_count);
+
+  const auto x_distance2 = [&](std::uint32_t cell_index) {
+    const double dx = geometry_view.cell_center_x_comoving[cell_index] - px;
+    return dx * dx;
+  };
+  const auto evaluate = [&](std::uint32_t cell_index) {
+    if (cell_index >= cell_count) {
+      throw std::runtime_error("stellar-feedback spatial index contains an invalid cell row");
+    }
+    const double dx = geometry_view.cell_center_x_comoving[cell_index] - px;
+    const double dy = geometry_view.cell_center_y_comoving[cell_index] - py;
+    const double dz = geometry_view.cell_center_z_comoving[cell_index] - pz;
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    if (!std::isfinite(d2)) {
+      return;
+    }
+    insertBoundedNearest(nearest, WeightedCellDistance{
+        .cell_index = cell_index,
+        .gas_cell_id = geometry_view.gas_cell_id.empty()
+            ? static_cast<std::uint64_t>(cell_index) + 1U
+            : geometry_view.gas_cell_id[cell_index],
+        .distance2 = d2,
+        .dx = dx,
+        .dy = dy,
+        .dz = dz,
+    }, keep_count);
+  };
+
+  while (left > 0U || right < sorted.size()) {
+    const double left_dx2 = left > 0U
+        ? x_distance2(sorted[left - 1U])
+        : std::numeric_limits<double>::infinity();
+    const double right_dx2 = right < sorted.size()
+        ? x_distance2(sorted[right])
+        : std::numeric_limits<double>::infinity();
+    if (nearest.size() == keep_count) {
+      const double worst_distance2 = nearest.back().distance2;
+      if (left_dx2 > worst_distance2 && right_dx2 > worst_distance2) {
+        break;
+      }
+    }
+    if (left_dx2 <= right_dx2 && left > 0U) {
+      --left;
+      evaluate(sorted[left]);
+    } else if (right < sorted.size()) {
+      evaluate(sorted[right]);
+      ++right;
+    } else {
+      break;
+    }
+  }
+
+  if (nearest.empty()) {
+    return {};
+  }
+  double weight_sum = 0.0;
+  for (const WeightedCellDistance& distance : nearest) {
+    weight_sum += 1.0 /
+        std::sqrt(std::max(distance.distance2, k_distance_floor));
+  }
+  if (!(weight_sum > 0.0) || !std::isfinite(weight_sum)) {
+    return {};
+  }
+  std::vector<StellarFeedbackTarget> targets;
+  targets.reserve(nearest.size());
+  for (const WeightedCellDistance& distance : nearest) {
+    const double inv_r = 1.0 /
+        std::sqrt(std::max(distance.distance2, k_distance_floor));
+    targets.push_back(StellarFeedbackTarget{
+        .cell_index = distance.cell_index,
+        .weight = inv_r / weight_sum,
+        .radial_dx_comoving = distance.dx,
+        .radial_dy_comoving = distance.dy,
+        .radial_dz_comoving = distance.dz,
     });
   }
   return targets;
@@ -269,6 +492,51 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     std::span<const double> returned_metals_delta_code,
     double dt_code,
     std::span<const double> feedback_energy_delta_erg) const {
+  std::vector<StellarFeedbackEvent> events;
+  events.reserve(active_star_indices.size());
+  for (const std::uint32_t star_index : active_star_indices) {
+    const double returned_mass = star_index < returned_mass_delta_code.size()
+        ? returned_mass_delta_code[star_index]
+        : 0.0;
+    const double returned_metals = star_index < returned_metals_delta_code.size()
+        ? returned_metals_delta_code[star_index]
+        : 0.0;
+    double energy = 0.0;
+    if (star_index < feedback_energy_delta_erg.size()) {
+      energy = feedback_energy_delta_erg[star_index];
+    } else if (star_index < state.star_particles.size()) {
+      const double source_mass = m_config.use_returned_mass_budget
+          ? returned_mass
+          : std::max(
+                state.star_particles.birth_mass_code[star_index] * dt_code,
+                0.0);
+      energy = std::max(source_mass, 0.0) * m_config.sn_energy_erg_per_mass_code;
+    }
+    events.push_back(StellarFeedbackEvent{
+        .star_index = star_index,
+        .returned_mass_code = returned_mass,
+        .returned_metals_code = returned_metals,
+        .feedback_energy_erg = energy,
+    });
+  }
+  return applyEventsWithViews(
+      state,
+      module_state,
+      geometry_view,
+      nullptr,
+      deposition_view,
+      events,
+      dt_code);
+}
+
+StellarFeedbackStepReport StellarFeedbackModel::applyEventsWithViews(
+    core::SimulationState& state,
+    StellarFeedbackModuleState& module_state,
+    const StellarFeedbackGeometryView& geometry_view,
+    const StellarFeedbackSpatialIndex* spatial_index,
+    StellarFeedbackDepositionView deposition_view,
+    std::span<const StellarFeedbackEvent> events,
+    double dt_code) const {
   StellarFeedbackStepReport report;
   const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
   if (geometry_view.cell_center_y_comoving.size() != cell_count ||
@@ -296,7 +564,8 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
   module_state.ensureStarCapacity(state.star_particles.size());
   const std::uint64_t step_seed = state.metadata.step_index;
 
-  for (const std::uint32_t star_index : active_star_indices) {
+  for (const StellarFeedbackEvent& event : events) {
+    const std::uint32_t star_index = event.star_index;
     ++report.counters.scanned_stars;
     if (star_index >= state.star_particles.size()) {
       continue;
@@ -307,16 +576,12 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
       continue;
     }
 
-    const double returned_mass = star_index < returned_mass_delta_code.size()
-        ? returned_mass_delta_code[star_index] : 0.0;
-    const double returned_metals = star_index < returned_metals_delta_code.size()
-        ? returned_metals_delta_code[star_index] : 0.0;
+    const double returned_mass = event.returned_mass_code;
+    const double returned_metals = event.returned_metals_code;
     const double source_mass = m_config.use_returned_mass_budget
         ? returned_mass
         : std::max(state.star_particles.birth_mass_code[star_index] * dt_code, 0.0);
-    const double energy = star_index < feedback_energy_delta_erg.size()
-        ? feedback_energy_delta_erg[star_index]
-        : std::max(source_mass, 0.0) * m_config.sn_energy_erg_per_mass_code;
+    const double energy = event.feedback_energy_erg;
 
     StellarFeedbackStarReport star_report;
     star_report.star_index = star_index;
@@ -324,19 +589,14 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     star_report.budget = computeBudgetFromEnergy(
         source_mass, returned_mass, returned_metals, energy);
 
-    const double carry_mass = persistentOrCompatibilityCarry(
-        state.star_particles.enrichment_carry_mass_code[star_index],
-        module_state.carry_mass_code[star_index]);
-    const double carry_metals = persistentOrCompatibilityCarry(
-        state.star_particles.enrichment_carry_metals_code[star_index],
-        module_state.carry_metals_code[star_index]);
-    const double carry_energy = persistentOrCompatibilityCarry(
-        state.star_particles.enrichment_carry_feedback_energy_erg[star_index],
-        module_state.carry_thermal_energy_erg[star_index] +
-            module_state.carry_kinetic_energy_erg[star_index]);
-    const double carry_momentum = persistentOrCompatibilityCarry(
-        state.star_particles.enrichment_carry_momentum_code[star_index],
-        module_state.carry_momentum_code[star_index]);
+    const double carry_mass =
+        state.star_particles.enrichment_carry_mass_code[star_index];
+    const double carry_metals =
+        state.star_particles.enrichment_carry_metals_code[star_index];
+    const double carry_energy =
+        state.star_particles.enrichment_carry_feedback_energy_erg[star_index];
+    const double carry_momentum =
+        state.star_particles.enrichment_carry_momentum_code[star_index];
 
     star_report.budget.returned_mass_code += carry_mass;
     star_report.budget.returned_metals_code += carry_metals;
@@ -359,11 +619,6 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     state.star_particles.enrichment_carry_metals_code[star_index] = 0.0;
     state.star_particles.enrichment_carry_feedback_energy_erg[star_index] = 0.0;
     state.star_particles.enrichment_carry_momentum_code[star_index] = 0.0;
-    module_state.carry_mass_code[star_index] = 0.0;
-    module_state.carry_metals_code[star_index] = 0.0;
-    module_state.carry_thermal_energy_erg[star_index] = 0.0;
-    module_state.carry_kinetic_energy_erg[star_index] = 0.0;
-    module_state.carry_momentum_code[star_index] = 0.0;
 
     if (star_report.budget.returned_mass_code <= k_mass_floor &&
         star_report.budget.thermal_energy_erg <= k_energy_floor &&
@@ -375,8 +630,9 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     star_report.stochastic_event_fired =
         m_config.variant != StellarFeedbackVariant::kStochastic ||
         stochasticEventFires(star_index, step_seed);
-    std::vector<StellarFeedbackTarget> targets =
-        selectTargets(geometry_view, particle_index);
+    std::vector<StellarFeedbackTarget> targets = spatial_index != nullptr
+        ? selectTargets(geometry_view, *spatial_index, particle_index)
+        : selectTargets(geometry_view, particle_index);
     star_report.target_count = targets.size();
     report.counters.target_cells_visited += targets.size();
 
@@ -412,9 +668,14 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
         const double old_mass = deposition_view.cell_mass_code[cell_index];
         const double old_density = deposition_view.gas_density_code[cell_index];
         const double old_u = deposition_view.gas_internal_energy_code[cell_index];
-        double volume = deposition_view.cell_volume_code.empty()
-            ? (old_density > 0.0 ? old_mass / old_density : 0.0)
-            : deposition_view.cell_volume_code[cell_index];
+        double volume = 0.0;
+        if (!deposition_view.cell_volume_code.empty()) {
+          volume = deposition_view.cell_volume_code[cell_index];
+        } else if (deposition_view.cell_volume_provider != nullptr) {
+          volume = deposition_view.cell_volume_provider->cellVolumeCode(cell_index);
+        } else {
+          volume = old_density > 0.0 ? old_mass / old_density : 0.0;
+        }
         if (!(volume > 0.0) || !std::isfinite(volume) || !(old_mass >= 0.0) ||
             !std::isfinite(old_u)) {
           throw std::runtime_error(
@@ -474,17 +735,6 @@ StellarFeedbackStepReport StellarFeedbackModel::applyWithViews(
     state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[star_index] +=
         star_report.deposited_thermal_energy_erg +
         star_report.deposited_kinetic_energy_erg;
-
-    module_state.carry_mass_code[star_index] =
-        star_report.unresolved_mass_code;
-    module_state.carry_metals_code[star_index] =
-        star_report.unresolved_metals_code;
-    module_state.carry_thermal_energy_erg[star_index] =
-        star_report.unresolved_thermal_energy_erg;
-    module_state.carry_kinetic_energy_erg[star_index] =
-        star_report.unresolved_kinetic_energy_erg;
-    module_state.carry_momentum_code[star_index] =
-        star_report.unresolved_momentum_code;
 
     ++report.counters.feedback_stars;
     report.counters.source_mass_code += star_report.budget.source_mass_code;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/units.hpp"
@@ -138,6 +139,14 @@ void testHydroClosureAndEnergyLedger() {
   assert(nearlyEqual(hot_result.pressure_comoving, hot.pressure_comoving));
 }
 
+void testClosureSharesReadOnlyTable() {
+  auto table = std::make_shared<const cosmosim::physics::EffectiveMultiphaseEosTable>(
+      makeTable());
+  cosmosim::physics::EffectiveIsmThermodynamicClosure closure(table);
+  assert(&closure.table() == table.get());
+  assert(closure.table().tableHash() == table->tableHash());
+}
+
 }  // namespace
 
 int main() {
@@ -145,5 +154,6 @@ int main() {
   testTableDeterminismMonotonicityAndDerivative();
   testQeosLimitsAndThresholdContinuity();
   testHydroClosureAndEnergyLedger();
+  testClosureSharesReadOnlyTable();
   return 0;
 }

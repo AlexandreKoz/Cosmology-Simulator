@@ -377,7 +377,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   HydroAmrRuntimeImpl(
       const core::SimulationConfig& config,
       const core::ModePolicy& mode_policy,
-      const RuntimeServices& services)
+      const RuntimeServices& services,
+      std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table)
       : m_config(config),
         m_mode_policy(mode_policy),
         m_mpi_context(services.mpi_context),
@@ -438,16 +439,20 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     if (m_config.physics.enable_star_formation &&
         m_config.physics.star_formation_model ==
             core::StarFormationModelKind::kEffectiveMultiphaseTngLike) {
-      core::UnitSystem units = core::makeUnitSystem(
-          m_config.units.length_unit,
-          m_config.units.mass_unit,
-          m_config.units.velocity_unit);
-      physics::EffectiveMultiphaseEosTable table(
-          physics::makeEffectiveMultiphaseEosConfig(m_config.physics),
-          std::move(units),
-          physics::makeEffectiveIsmReferenceCoolingProvider(m_config.physics));
+      if (effective_eos_table == nullptr) {
+        core::UnitSystem units = core::makeUnitSystem(
+            m_config.units.length_unit,
+            m_config.units.mass_unit,
+            m_config.units.velocity_unit);
+        effective_eos_table =
+            std::make_shared<const physics::EffectiveMultiphaseEosTable>(
+                physics::makeEffectiveMultiphaseEosConfig(m_config.physics),
+                std::move(units),
+                physics::makeEffectiveIsmReferenceCoolingProvider(m_config.physics));
+      }
       m_effective_ism_closure =
-          std::make_unique<physics::EffectiveIsmThermodynamicClosure>(std::move(table));
+          std::make_unique<physics::EffectiveIsmThermodynamicClosure>(
+              std::move(effective_eos_table));
       m_effective_ism_energy_source =
           std::make_unique<physics::EffectiveIsmEnergyRelaxationSource>(*m_effective_ism_closure);
     }
@@ -2378,9 +2383,10 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
 std::unique_ptr<HydroAmrRuntime> makeHydroAmrRuntime(
     const core::SimulationConfig& config,
     const core::ModePolicy& mode_policy,
-    const RuntimeServices& services) {
+    const RuntimeServices& services,
+    std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table) {
   return std::make_unique<HydroAmrRuntimeImpl>(
-      config, mode_policy, services);
+      config, mode_policy, services, std::move(effective_eos_table));
 }
 
 }  // namespace cosmosim::workflows

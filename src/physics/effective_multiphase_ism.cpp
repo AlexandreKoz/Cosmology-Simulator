@@ -288,7 +288,15 @@ std::string EffectiveMultiphaseEosTable::coolingReferenceDescription() const {
 
 EffectiveIsmThermodynamicClosure::EffectiveIsmThermodynamicClosure(
     EffectiveMultiphaseEosTable table)
-    : m_table(std::move(table)) {}
+    : m_table(std::make_shared<const EffectiveMultiphaseEosTable>(std::move(table))) {}
+
+EffectiveIsmThermodynamicClosure::EffectiveIsmThermodynamicClosure(
+    std::shared_ptr<const EffectiveMultiphaseEosTable> table)
+    : m_table(std::move(table)) {
+  if (m_table == nullptr) {
+    throw std::invalid_argument("effective ISM thermodynamic closure requires an EOS table");
+  }
+}
 
 hydro::HydroThermodynamicClosureResult EffectiveIsmThermodynamicClosure::evaluate(
     std::size_t cell_index,
@@ -307,18 +315,18 @@ hydro::HydroThermodynamicClosureResult EffectiveIsmThermodynamicClosure::evaluat
   };
   const double a = std::max(scale_factor, 1.0e-12);
   const double density_phys_code = conserved.mass_density_comoving / (a * a * a);
-  const EffectiveMultiphaseEosLookup equilibrium = m_table.lookup(density_phys_code);
+  const EffectiveMultiphaseEosLookup equilibrium = m_table->lookup(density_phys_code);
   if (!equilibrium.above_threshold || !equilibrium.valid) {
     return result;
   }
   result.target_specific_internal_energy_code = equilibrium.entry.specific_internal_energy_eff_code;
   const bool hot_above_eos = ideal_primitive.specific_internal_energy_code >
       equilibrium.entry.specific_internal_energy_eff_code *
-          (1.0 + m_table.config().hot_excess_tolerance);
+          (1.0 + m_table->config().hot_excess_tolerance);
   if (hot_above_eos) {
     return result;
   }
-  result.pressure_comoving = (m_table.config().adiabatic_index - 1.0) *
+  result.pressure_comoving = (m_table->config().adiabatic_index - 1.0) *
       conserved.mass_density_comoving * equilibrium.entry.specific_internal_energy_eff_code;
   result.signal_speed_squared_code = equilibrium.entry.signal_speed_squared_code;
   result.uses_effective_ism = true;
@@ -328,7 +336,7 @@ hydro::HydroThermodynamicClosureResult EffectiveIsmThermodynamicClosure::evaluat
 }
 
 const EffectiveMultiphaseEosTable& EffectiveIsmThermodynamicClosure::table() const noexcept {
-  return m_table;
+  return *m_table;
 }
 
 EffectiveIsmEnergyRelaxationSource::EffectiveIsmEnergyRelaxationSource(

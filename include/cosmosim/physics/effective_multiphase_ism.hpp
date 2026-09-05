@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -100,6 +101,8 @@ class EffectiveMultiphaseEosTable {
 class EffectiveIsmThermodynamicClosure final : public hydro::HydroThermodynamicClosure {
  public:
   explicit EffectiveIsmThermodynamicClosure(EffectiveMultiphaseEosTable table);
+  explicit EffectiveIsmThermodynamicClosure(
+      std::shared_ptr<const EffectiveMultiphaseEosTable> table);
 
   [[nodiscard]] hydro::HydroThermodynamicClosureResult evaluate(
       std::size_t cell_index,
@@ -111,7 +114,7 @@ class EffectiveIsmThermodynamicClosure final : public hydro::HydroThermodynamicC
   [[nodiscard]] const EffectiveMultiphaseEosTable& table() const noexcept;
 
  private:
-  EffectiveMultiphaseEosTable m_table;
+  std::shared_ptr<const EffectiveMultiphaseEosTable> m_table;
 };
 
 struct EffectiveIsmEnergyLedger {

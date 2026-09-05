@@ -429,3 +429,13 @@ unchanged.
 | MEMORY-M1-SOURCE-ACCEPTANCE-20260903 | Closed | M1 memory architecture | All 12 mandatory M1 source/architecture gates are closed in `docs/repair/m1c2_m1_acceptance_closure_20260903.md`; the 512^3/8-rank PM routing expression is explicitly regression-tested. |
 | MEMORY-M1-DISTRIBUTED-RUNTIME-20260903 | Environment-blocked | M1 distributed runtime validation | Multi-rank PM/TreePM/rank-imbalance/restart equivalence must be reported only from an MPI+FFTW-capable environment. Missing dependencies are an environment blocker, not permission to weaken source gates. |
 | MEMORY-M2-FULL-PHYSICS-20260903 | Open for M2 | Hydro/AMR/subgrid/device memory architecture | Hydro active batching, sparse AMR/regrid coexistence, chemistry fidelity tiers, species-specific subgrid sidecars, large analysis products, and device budgets remain the explicit next campaign. |
+
+## 2026-09-05 M2C full-physics memory handoff
+
+| ID | Status | Area | Closure / remaining boundary |
+| --- | --- | --- | --- |
+| MEMORY-M2C-SPECIES-SIDECARS-20260905 | Closed for released species | Full-physics persistent state | Gas/star/BH/tracer state remains species-local; DMO/gas-only zero-cold-sidecar allocation is regression-tested. Dust is not implemented and allocates nothing. |
+| MEMORY-M2C-FEEDBACK-EVENTS-20260905 | Closed | Stellar feedback memory | Duplicate star carry mirrors and full-star delta staging are removed; feedback uses capped event batches, exact indexed nearest-k target selection, on-demand AMR cell volume, and O(k) per-event target scratch. |
+| MEMORY-M2C-MICROPHYSICS-TABLES-20260905 | Closed for effective ISM table | Shared microphysics | Reference hydro/source/timestep consumers share one immutable EOS table. Preserve shared/read-only ownership for future tables unless measured thread-local replication is justified. |
+| MEMORY-M2C-CHEMISTRY-TIERS-20260905 | Released scalar tier closed; higher tier fail-closed | Chemistry/enrichment fidelity | `primordial`/`primordial_metal_line` cooling and `metal_species_mode=total_only` remain explicit typed choices. `core_elements` remains rejected until the complete element-sidecar/yield/cooling/AMR/MPI/restart contract exists. |
+| MEMORY-M3-GLOBAL-SCHEDULING-20260905 | Open for next campaign | Whole-runtime resource scheduling | Global task-DAG/phase overlap policy, analysis co-scheduling/streaming, and device-residency budgets remain out of M2C scope. |

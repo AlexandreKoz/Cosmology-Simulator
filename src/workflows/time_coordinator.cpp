@@ -917,13 +917,15 @@ TimeCoordinator::TimeCoordinator(
     GravityRuntime& gravity,
     HydroAmrRuntime& hydro_amr,
     RuntimeExecutionPlan execution_plan,
-    const internal::MigrationBalanceRuntime& migration_balance) noexcept
+    const internal::MigrationBalanceRuntime& migration_balance,
+    std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table) noexcept
     : m_services(services),
       m_time_state(time_state),
       m_gravity(gravity),
       m_hydro_amr(hydro_amr),
       m_execution_plan(std::move(execution_plan)),
-      m_migration_balance(migration_balance) {}
+      m_migration_balance(migration_balance),
+      m_effective_eos_table(std::move(effective_eos_table)) {}
 
 void TimeCoordinator::runRungZeroSegment(
     const core::SimulationConfig& config,

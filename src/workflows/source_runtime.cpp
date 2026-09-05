@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -23,6 +24,7 @@
 #include "cosmosim/physics/stellar_evolution.hpp"
 #include "cosmosim/physics/stellar_feedback.hpp"
 #include "cosmosim/physics/metal_diffusion.hpp"
+#include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/metal_diffusion_topology.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
@@ -495,6 +497,29 @@ using internal::starFormationDerivativeAtCell;
 using internal::starFormationPatchCellGeometry;
 using internal::starFormationPatchIsLeaf;
 
+class FeedbackCellVolumeProvider final
+    : public physics::StellarFeedbackCellVolumeProvider {
+ public:
+  explicit FeedbackCellVolumeProvider(const core::SimulationState& state)
+      : m_state(state) {}
+
+  [[nodiscard]] double cellVolumeCode(std::uint32_t cell_index) const override {
+    if (cell_index >= m_state.cells.size() || cell_index >= m_state.gas_cells.size()) {
+      return 0.0;
+    }
+    const PatchCellGeometry geometry =
+        starFormationPatchCellGeometry(m_state, cell_index);
+    if (geometry.valid) {
+      return geometry.dx_stored * geometry.dy_stored * geometry.dz_stored;
+    }
+    const double density = m_state.gas_cells.density_code[cell_index];
+    return density > 0.0 ? m_state.cells.mass_code[cell_index] / density : 0.0;
+  }
+
+ private:
+  const core::SimulationState& m_state;
+};
+
 class SourceRuntimeImpl final : public SourceRuntime {
  public:
   SourceRuntimeImpl(
@@ -502,9 +527,14 @@ class SourceRuntimeImpl final : public SourceRuntime {
       const core::ModePolicy& mode_policy,
       const core::UnitSystem& units,
       std::uint32_t world_rank,
-      const parallel::MpiContext& mpi_context)
+      const parallel::MpiContext& mpi_context,
+      std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table,
+      const RuntimeServices* runtime_services)
       : m_units(units),
-        m_effective_eos_table(makeRuntimeEffectiveEosTable(config, units)),
+        m_effective_eos_table(
+            effective_eos_table != nullptr
+                ? std::move(effective_eos_table)
+                : makeRuntimeEffectiveEosTable(config, units)),
         m_star_formation(makeRuntimeStarFormationConfig(config, units), m_effective_eos_table),
         m_stellar_evolution(
             physics::makeStellarEvolutionConfig(config.physics),
@@ -514,6 +544,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_black_hole(makeRuntimeBlackHoleAgnConfig(config.physics, units)),
         m_particle_id_registry(mpi_context),
         m_mpi_context(mpi_context),
+        m_runtime_services(runtime_services),
+        m_memory_governor(
+            runtime_services != nullptr ? runtime_services->memory_governor : nullptr),
         m_world_rank(world_rank),
         m_coordinate_frame(config.units.coordinate_frame),
         m_hydro_boundary(mode_policy.hydro_boundary),
@@ -681,8 +714,6 @@ class SourceRuntimeImpl final : public SourceRuntime {
     const std::size_t cell_count = state.cells.size();
     m_cell_volume_code.assign(cell_count, 0.0);
     m_owned_leaf_mask.assign(cell_count, 0U);
-    m_feedback_candidate_cells.clear();
-    m_feedback_candidate_cells.reserve(cell_count);
     std::unordered_set<std::uint64_t> patch_ids_with_children;
     patch_ids_with_children.reserve(state.patches.size());
     for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
@@ -706,9 +737,6 @@ class SourceRuntimeImpl final : public SourceRuntime {
       }
       m_cell_volume_code[cell_index] = volume;
       m_owned_leaf_mask[cell_index] = owned_leaf ? 1U : 0U;
-      if (owned_leaf) {
-        m_feedback_candidate_cells.push_back(cell_index);
-      }
     }
   }
 
@@ -751,32 +779,99 @@ class SourceRuntimeImpl final : public SourceRuntime {
   }
 
   void executeStellarEvolutionAndEnrichment(core::StepContext& context) {
-    if (!m_stellar_evolution.config().enabled ||
-        context.state.star_particles.size() == 0U) {
+    if (!m_stellar_evolution.config().enabled) {
       return;
     }
-    buildActiveStarRows(context);
-    if (m_active_star_indices.empty()) {
+    const bool all_stars_active =
+        !context.active_set.particles_are_subset ||
+        context.active_set.particle_indices.empty();
+    if (all_stars_active) {
+      m_active_star_indices.clear();
+    } else {
+      buildActiveStarRows(context);
+    }
+    const std::size_t active_star_count = all_stars_active
+        ? context.state.star_particles.size()
+        : m_active_star_indices.size();
+    constexpr std::size_t k_feedback_event_batch_max = 4096U;
+    const std::size_t required_event_capacity = std::min<std::size_t>(
+        active_star_count, k_feedback_event_batch_max);
+    const std::size_t feedback_index_bytes_size = active_star_count == 0U
+        ? 0U
+        : core::checkedSizeMultiply(
+              context.state.cells.size(),
+              sizeof(std::uint32_t),
+              "stellar-feedback spatial-index staging");
+    const std::size_t event_bytes_size =
+        required_event_capacity > m_feedback_events.capacity()
+        ? core::checkedSizeMultiply(
+              required_event_capacity,
+              sizeof(physics::StellarFeedbackEvent),
+              "stellar-feedback event batch")
+        : 0U;
+    core::MemoryReservation feedback_index_rebuild_reservation;
+    core::MemoryReservation replacement_event_reservation;
+    std::exception_ptr reservation_failure;
+    try {
+      if (m_memory_governor != nullptr && feedback_index_bytes_size != 0U) {
+        feedback_index_rebuild_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            static_cast<std::uint64_t>(feedback_index_bytes_size),
+            "sources.stellar_feedback.spatial_index_rebuild");
+      }
+      if (m_memory_governor != nullptr && event_bytes_size != 0U) {
+        replacement_event_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            static_cast<std::uint64_t>(event_bytes_size),
+            "sources.stellar_feedback.event_batch");
+      }
+    } catch (...) {
+      reservation_failure = std::current_exception();
+    }
+    if (m_runtime_services != nullptr) {
+      FailureCoordinator(*m_runtime_services).rethrowCollectiveFailure(
+          reservation_failure,
+          "stellar-feedback memory preflight");
+    } else if (reservation_failure != nullptr) {
+      std::rethrow_exception(reservation_failure);
+    }
+    if (active_star_count == 0U) {
       return;
     }
-    buildOwnedLeafCellMetadata(context);
+    if (feedback_index_rebuild_reservation.pending()) {
+      feedback_index_rebuild_reservation.commit();
+    }
+    if (replacement_event_reservation.pending()) {
+      replacement_event_reservation.commit();
+    }
     const double elapsed_years = elapsedStellarEvolutionYears(context);
-    const physics::StellarEvolutionStepReport evolution_report =
-        m_stellar_evolution.evaluateElapsedYears(
-            context.state, m_active_star_indices, elapsed_years);
 
-    const std::size_t star_count = context.state.star_particles.size();
-    m_returned_mass_delta_code.assign(star_count, 0.0);
-    m_returned_metals_delta_code.assign(star_count, 0.0);
-    m_feedback_energy_delta_erg.assign(star_count, 0.0);
-    for (const physics::StellarEvolutionStarBudget& budget :
-         evolution_report.budgets) {
-      m_returned_mass_delta_code[budget.star_index] =
-          budget.interval.returned_mass_code;
-      m_returned_metals_delta_code[budget.star_index] =
-          budget.interval.returned_metals_code;
-      m_feedback_energy_delta_erg[budget.star_index] =
-          budget.interval.feedback_energy_erg;
+    std::unordered_set<std::uint64_t> patch_ids_with_children;
+    patch_ids_with_children.reserve(context.state.patches.size());
+    for (std::size_t patch_index = 0;
+         patch_index < context.state.patches.size(); ++patch_index) {
+      const std::uint64_t parent_id =
+          context.state.patches.parent_patch_id[patch_index];
+      if (parent_id != 0U) {
+        patch_ids_with_children.insert(parent_id);
+      }
+    }
+    std::vector<std::uint32_t> owned_leaf_cells;
+    owned_leaf_cells.reserve(context.state.cells.size());
+    for (std::uint32_t cell_index = 0;
+         cell_index < context.state.cells.size(); ++cell_index) {
+      const PatchCellGeometry geometry =
+          starFormationPatchCellGeometry(context.state, cell_index);
+      bool owned_leaf = true;
+      if (geometry.valid) {
+        owned_leaf =
+            context.state.patches.owning_rank[geometry.patch_index] == m_world_rank &&
+            starFormationPatchIsLeaf(
+                context.state, geometry.patch_index, patch_ids_with_children);
+      }
+      if (owned_leaf) {
+        owned_leaf_cells.push_back(cell_index);
+      }
     }
 
     const physics::StellarFeedbackGeometryView geometry_view{
@@ -790,27 +885,81 @@ class SourceRuntimeImpl final : public SourceRuntime {
         .cell_center_y_comoving = context.state.cells.center_y_comoving,
         .cell_center_z_comoving = context.state.cells.center_z_comoving,
         .gas_cell_id = context.state.gas_cells.gas_cell_id,
-        .is_owned_leaf = m_owned_leaf_mask,
-        .candidate_cell_indices = m_feedback_candidate_cells,
     };
+    m_feedback_spatial_index.rebuildFromCellIndices(
+        geometry_view, std::move(owned_leaf_cells));
+    if (m_memory_governor != nullptr) {
+      // The moved candidate allocation has become the retained index and the
+      // old index buffer has been released by vector move-assignment. Transfer
+      // the committed rebuild reservation only after that ownership change.
+      m_feedback_index_reservation.release();
+      m_feedback_index_reservation = std::move(feedback_index_rebuild_reservation);
+    }
+    FeedbackCellVolumeProvider volume_provider(context.state);
     physics::StellarFeedbackDepositionView deposition_view{
         .cell_mass_code = context.state.cells.mass_code,
         .gas_density_code = context.state.gas_cells.density_code,
         .gas_internal_energy_code =
             context.state.gas_cells.internal_energy_code,
         .gas_metal_mass_code = context.state.gas_cells.metal_mass_code,
-        .cell_volume_code = m_cell_volume_code,
+        .cell_volume_provider = &volume_provider,
     };
-    (void)m_stellar_feedback.applyWithViews(
-        context.state, m_stellar_feedback_state, geometry_view,
-        deposition_view, m_active_star_indices, m_returned_mass_delta_code,
-        m_returned_metals_delta_code, context.integrator_state.dt_time_code,
-        m_feedback_energy_delta_erg);
+    m_feedback_events.clear();
+    if (required_event_capacity > m_feedback_events.capacity()) {
+      m_feedback_events.reserve(required_event_capacity);
+      if (m_memory_governor != nullptr) {
+        m_feedback_event_reservation.release();
+        m_feedback_event_reservation = std::move(replacement_event_reservation);
+      }
+    }
+    m_contiguous_star_batch.reserve(required_event_capacity);
+    for (std::size_t batch_begin = 0U;
+         batch_begin < active_star_count;
+         batch_begin += k_feedback_event_batch_max) {
+      const std::size_t batch_size = std::min<std::size_t>(
+          k_feedback_event_batch_max, active_star_count - batch_begin);
+      std::span<const std::uint32_t> star_batch;
+      if (all_stars_active) {
+        m_contiguous_star_batch.resize(batch_size);
+        for (std::size_t i = 0U; i < batch_size; ++i) {
+          m_contiguous_star_batch[i] = core::checkedIntegralNarrow<std::uint32_t>(
+              batch_begin + i,
+              "stellar-feedback contiguous active star row");
+        }
+        star_batch = m_contiguous_star_batch;
+      } else {
+        star_batch = std::span<const std::uint32_t>(m_active_star_indices)
+            .subspan(batch_begin, batch_size);
+      }
+      const physics::StellarEvolutionStepReport evolution_report =
+          m_stellar_evolution.evaluateElapsedYears(
+              context.state, star_batch, elapsed_years);
+      m_feedback_events.clear();
+      for (const physics::StellarEvolutionStarBudget& budget :
+           evolution_report.budgets) {
+        m_feedback_events.push_back(physics::StellarFeedbackEvent{
+            .star_index = budget.star_index,
+            .returned_mass_code = budget.interval.returned_mass_code,
+            .returned_metals_code = budget.interval.returned_metals_code,
+            .feedback_energy_erg = budget.interval.feedback_energy_erg,
+        });
+      }
+      if (!m_feedback_events.empty()) {
+        (void)m_stellar_feedback.applyEventsWithViews(
+            context.state,
+            m_stellar_feedback_state,
+            geometry_view,
+            &m_feedback_spatial_index,
+            deposition_view,
+            m_feedback_events,
+            context.integrator_state.dt_time_code);
+      }
 
-    // The returned budget is now either deposited or durably attached to its
-    // source star. Only after that transaction succeeds may stellar mass and
-    // cumulative SSP bookkeeping advance.
-    m_stellar_evolution.commitBudgets(context.state, evolution_report);
+      // Each bounded event batch is deposited or durably carried before its
+      // matching stellar-evolution ledger advances. No processed event history
+      // survives beyond this batch.
+      m_stellar_evolution.commitBudgets(context.state, evolution_report);
+    }
     internal::synchronizeParentParticleCompatibilityMirrors(
         context.state, m_world_rank,
         "SourceRuntime stellar-evolution enrichment batch");
@@ -1053,6 +1202,10 @@ class SourceRuntimeImpl final : public SourceRuntime {
   physics::BlackHoleAgnModel m_black_hole;
   DistributedParticleIdRegistry m_particle_id_registry;
   const parallel::MpiContext& m_mpi_context;
+  const RuntimeServices* m_runtime_services = nullptr;
+  core::MemoryGovernor* m_memory_governor = nullptr;
+  core::MemoryReservation m_feedback_index_reservation;
+  core::MemoryReservation m_feedback_event_reservation;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
   core::BoundaryCondition m_hydro_boundary = core::BoundaryCondition::kOpen;
@@ -1063,12 +1216,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
   std::vector<std::uint32_t> m_full_cell_indices;
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
   std::vector<std::uint32_t> m_active_star_indices;
-  std::vector<double> m_returned_mass_delta_code;
-  std::vector<double> m_returned_metals_delta_code;
-  std::vector<double> m_feedback_energy_delta_erg;
+  std::vector<std::uint32_t> m_contiguous_star_batch;
+  std::vector<physics::StellarFeedbackEvent> m_feedback_events;
+  physics::StellarFeedbackSpatialIndex m_feedback_spatial_index;
   std::vector<double> m_cell_volume_code;
   std::vector<std::uint8_t> m_owned_leaf_mask;
-  std::vector<std::uint32_t> m_feedback_candidate_cells;
   std::vector<physics::MetalDiffusionCell> m_diffusion_cells;
   std::vector<physics::MetalDiffusionFace> m_diffusion_faces;
   std::vector<physics::BlackHoleSeedCandidate> m_seed_candidates;
@@ -1081,9 +1233,17 @@ std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::ModePolicy& mode_policy,
     const core::UnitSystem& units,
     std::uint32_t world_rank,
-    const parallel::MpiContext& mpi_context) {
+    const parallel::MpiContext& mpi_context,
+    std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table,
+    const RuntimeServices* runtime_services) {
   return std::make_unique<SourceRuntimeImpl>(
-      config, mode_policy, units, world_rank, mpi_context);
+      config,
+      mode_policy,
+      units,
+      world_rank,
+      mpi_context,
+      std::move(effective_eos_table),
+      runtime_services);
 }
 
 }  // namespace cosmosim::workflows

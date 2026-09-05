@@ -56,6 +56,33 @@ struct StellarFeedbackGeometryView {
   std::span<const std::uint32_t> candidate_cell_indices;
 };
 
+// Phase-resident, locality-preserving index for exact nearest-cell feedback
+// queries.  The index stores only cell rows sorted by x coordinate; per-event
+// target scratch remains O(neighbor_count), not O(N_gas).  It is rebuilt from
+// current geometry and never becomes restart authority.
+class StellarFeedbackSpatialIndex {
+ public:
+  void rebuild(const StellarFeedbackGeometryView& geometry_view);
+  void rebuildFromCellIndices(
+      const StellarFeedbackGeometryView& geometry_view,
+      std::vector<std::uint32_t> cell_indices);
+  void clear() noexcept;
+
+  [[nodiscard]] std::span<const std::uint32_t> sortedCellIndices() const noexcept;
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const noexcept;
+  [[nodiscard]] std::uint64_t highWaterBytes() const noexcept;
+
+ private:
+  std::vector<std::uint32_t> m_sorted_cell_indices;
+  std::uint64_t m_high_water_bytes = 0U;
+};
+
+class StellarFeedbackCellVolumeProvider {
+ public:
+  virtual ~StellarFeedbackCellVolumeProvider() = default;
+  [[nodiscard]] virtual double cellVolumeCode(std::uint32_t cell_index) const = 0;
+};
+
 struct StellarFeedbackDepositionView {
   std::span<double> cell_mass_code;
   std::span<double> gas_density_code;
@@ -63,6 +90,16 @@ struct StellarFeedbackDepositionView {
   std::span<double> gas_metal_mass_code;
   // Optional. If absent, volume is derived once from old mass/old density.
   std::span<const double> cell_volume_code;
+  // Optional phase-local provider used by AMR workflows to derive exact cell
+  // geometry without retaining a full-population volume vector.
+  const StellarFeedbackCellVolumeProvider* cell_volume_provider = nullptr;
+};
+
+struct StellarFeedbackEvent {
+  std::uint32_t star_index = 0;
+  double returned_mass_code = 0.0;
+  double returned_metals_code = 0.0;
+  double feedback_energy_erg = 0.0;
 };
 
 struct StellarFeedbackBudget {
@@ -124,17 +161,15 @@ struct StellarFeedbackStepReport {
   std::vector<StellarFeedbackStarReport> star_reports;
 };
 
-// Compatibility mirror. Persistent carry authority lives in StarParticleSidecar
-// so restart and migration cannot lose unresolved budgets.
+// Compatibility/runtime token only. Persistent carry authority lives in
+// StarParticleSidecar. M2C intentionally keeps no population-scale duplicate
+// carry vectors here: unresolved budgets must survive restart/migration in one
+// authority, not in a second runtime mirror.
 struct StellarFeedbackModuleState {
-  std::vector<double> last_returned_mass_cumulative_code;
-  std::vector<double> carry_mass_code;
-  std::vector<double> carry_metals_code;
-  std::vector<double> carry_thermal_energy_erg;
-  std::vector<double> carry_kinetic_energy_erg;
-  std::vector<double> carry_momentum_code;
-
-  void ensureStarCapacity(std::size_t star_count);
+  void ensureStarCapacity(std::size_t star_count) noexcept;
+  [[nodiscard]] constexpr std::uint64_t ownedCapacityBytes() const noexcept {
+    return 0U;
+  }
 };
 
 class StellarFeedbackModel {
@@ -156,6 +191,10 @@ class StellarFeedbackModel {
       const StellarFeedbackGeometryView& geometry_view,
       std::uint32_t particle_index) const;
   [[nodiscard]] std::vector<StellarFeedbackTarget> selectTargets(
+      const StellarFeedbackGeometryView& geometry_view,
+      const StellarFeedbackSpatialIndex& spatial_index,
+      std::uint32_t particle_index) const;
+  [[nodiscard]] std::vector<StellarFeedbackTarget> selectTargets(
       const core::SimulationState& state,
       std::uint32_t particle_index) const;
 
@@ -169,6 +208,15 @@ class StellarFeedbackModel {
       std::span<const double> returned_metals_delta_code,
       double dt_code,
       std::span<const double> feedback_energy_delta_erg = {}) const;
+
+  [[nodiscard]] StellarFeedbackStepReport applyEventsWithViews(
+      core::SimulationState& state,
+      StellarFeedbackModuleState& module_state,
+      const StellarFeedbackGeometryView& geometry_view,
+      const StellarFeedbackSpatialIndex* spatial_index,
+      StellarFeedbackDepositionView deposition_view,
+      std::span<const StellarFeedbackEvent> events,
+      double dt_code) const;
 
   [[nodiscard]] StellarFeedbackStepReport apply(
       core::SimulationState& state,
