@@ -74,5 +74,19 @@ Focused HDF5 acceptance additionally covers IC metallicity, snapshot/restart
 round trips, authoritative gas-cell row ordering, hydro restart equivalence,
 the bounded runtime application smoke, and phase-3 power-spectrum validation.
 
+
+### 2026-09-05 M2B sparse-AMR acceptance cleanup
+Production AMR regrid remains governor-admitted, synchronization-safe, and
+capacity-accounted as established by M2B/M2B-1. The remaining scaffold
+`PatchHierarchy` retired-gas identity archive is now bounded to the most recent
+derefinement transaction instead of growing across repeated refine/derefine
+cycles. The MPI+HDF5 validation inventory now contains a genuine two-rank AMR
+patch migration test that transfers patch/gas state together with pending reflux
+and temporal-boundary history through the production bounded byte transport,
+commits on the destination by stable identity, checkpoints/reloads the migrated
+state, and verifies that the migration contract can continue after restart.
+This source snapshot does not promote the MPI result unless that registered test
+is actually executed on a dependency-complete host.
+
 ### 2026-08-09 core audit-lineage closure
 The residual `src/core` integrity campaign closes the metadata/provenance escape gaps, introduces backward-compatible `provenance_v7` SHA-256 integrity, completes checked local-index narrowing, removes comparison sorting from active-set ordering via deterministic radix staging, and establishes measured scheduler/migration/memory-accounting envelopes. Previously closed P0 allocator/ownership/KDK/migration/timestep/profiler repairs remain regression constraints. MPI/CUDA runtime evidence is still environment-dependent and is not promoted without execution.

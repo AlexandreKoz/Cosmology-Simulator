@@ -409,12 +409,20 @@ must not count the serial `integration_amr_distributed_remote_patch_boundary`
 fixture as MPI coverage. The serial test remains useful as an AMR data-structure
 and orchestrator guard only.
 
-The current two-rank AMR MPI test exercises the new directed patch/cell payload
-exchange and owner-routed flux-register exchange with asymmetric ranks and
-nonzero mass/momentum/energy payload fields. It is not yet full AMR workflow
-acceptance: a later validation pass still needs to prove production
-`ReferenceWorkflowRunner` AMR restart continuation, named migration/regrid across
-ranks, and all five conserved totals through direct and restart-resumed paths.
+The directed-exchange test exercises patch/cell payload exchange and owner-routed
+flux-register exchange with asymmetric ranks and nonzero mass/momentum/energy
+payload fields. The MPI+HDF5 lane also registers
+`integration_distributed_amr_patch_migration_mpi_two_rank`, which performs a
+genuine cross-rank AMR patch migration using the production bounded byte
+transport and migration wire. The migrated payload includes pending reflux and
+temporal-boundary history; the destination commit remaps them by stable gas/patch
+identity, then the test checkpoints/reloads the migrated state and performs a
+post-restart migration-commit continuation check.
+
+These are CI-scale ownership/restart contracts, not a publication-grade AMR
+scaling or convergence result. Full `ReferenceWorkflowRunner` direct-vs-resumed
+comparison of all five conserved totals across a runtime-triggered AMR regrid is
+still a stronger future validation target.
 
 ## Campaign B IC-ingestion acceptance repair gate (2026-07-24)
 

@@ -614,8 +614,6 @@ bool PatchHierarchy::derefinePatch(std::uint64_t parent_patch_id) {
     }
   }
 
-  m_retired_gas_cell_ids.reserve(core::checkedSizeAdd(
-      m_retired_gas_cell_ids.size(), prepared_retired_ids.size(), "AMR retired-id archive reserve"));
   std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> candidate_index;
   candidate_index.reserve(patchCount() - child_count);
   for (std::size_t level = 0; level < m_levels.size(); ++level) {
@@ -632,8 +630,12 @@ bool PatchHierarchy::derefinePatch(std::uint64_t parent_patch_id) {
   auto parent_metrics = parent_patch->metricsView();
   std::copy(prepared_parent_conserved.begin(), prepared_parent_conserved.end(), parent_conserved.begin());
   std::copy(prepared_parent_metrics.begin(), prepared_parent_metrics.end(), parent_metrics.begin());
-  m_retired_gas_cell_ids.insert(
-      m_retired_gas_cell_ids.end(), prepared_retired_ids.begin(), prepared_retired_ids.end());
+  // Retired gas-cell identities are transaction-local invalidation evidence, not
+  // an append-only history. Keeping every prior derefinement would make this
+  // scaffold hierarchy grow monotonically across otherwise capacity-stable
+  // regrid cycles. Swap in only the identities retired by this commit; the
+  // previous transaction's storage is released when prepared_retired_ids dies.
+  m_retired_gas_cell_ids.swap(prepared_retired_ids);
   level_patches.erase(
       std::remove_if(
           level_patches.begin(), level_patches.end(),

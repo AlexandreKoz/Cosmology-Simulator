@@ -298,6 +298,7 @@ void testRepeatedRefineDerefineReleasesSparseLevelStorage() {
   assert(root_cells == 8U);
   assert(root_capacity_bytes > 0U);
 
+  std::vector<std::uint64_t> previous_retired_ids;
   for (int cycle = 0; cycle < 12; ++cycle) {
     const auto child_ids = hierarchy.refinePatch(root_id);
     assert(child_ids.size() == 8U);
@@ -311,6 +312,16 @@ void testRepeatedRefineDerefineReleasesSparseLevelStorage() {
     assert(hierarchy.patchCount() == 1U);
     assert(hierarchy.allocatedCellCount() == root_cells);
     assert(hierarchy.patchStorageCapacityBytes() == root_capacity_bytes);
+
+    const auto retired_ids = hierarchy.retiredGasCellIds();
+    assert(retired_ids.size() == 64U);
+    if (!previous_retired_ids.empty()) {
+      for (const std::uint64_t retired_id : retired_ids) {
+        assert(std::find(previous_retired_ids.begin(), previous_retired_ids.end(), retired_id) ==
+               previous_retired_ids.end());
+      }
+    }
+    previous_retired_ids.assign(retired_ids.begin(), retired_ids.end());
   }
 }
 

@@ -1404,6 +1404,24 @@ if(COSMOSIM_ENABLE_TESTS)
     cosmosim_mark_runtime_truth_test(integration_distributed_gas_cell_migration_mpi_two_rank mpi hdf5 gas migration restart integration)
   endif()
 
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
+    add_executable(test_integration_distributed_amr_patch_migration_mpi
+      tests/integration/test_distributed_amr_patch_migration_mpi.cpp)
+    target_include_directories(
+      test_integration_distributed_amr_patch_migration_mpi PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(test_integration_distributed_amr_patch_migration_mpi PRIVATE cosmosim_all)
+    add_test(
+      NAME integration_distributed_amr_patch_migration_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_amr_patch_migration_mpi> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(
+      integration_distributed_amr_patch_migration_mpi_two_rank
+      PROPERTIES PROCESSORS 2 TIMEOUT 90)
+    cosmosim_mark_runtime_truth_test(
+      integration_distributed_amr_patch_migration_mpi_two_rank
+      mpi hdf5 distributed amr hydro gas migration restart reflux temporal_history integration)
+  endif()
+
   if(COSMOSIM_ENABLE_CUDA)
     add_executable(test_integration_pm_cuda_smoke tests/integration/test_pm_cuda_smoke.cpp)
     target_link_libraries(test_integration_pm_cuda_smoke PRIVATE cosmosim_gravity)
