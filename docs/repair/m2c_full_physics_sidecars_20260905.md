@@ -269,3 +269,99 @@ environment-blocked and is not claimed.
 - Global task-DAG/resource co-scheduling, memory-aware overlap of independent
   physics/analysis phases, GPU/device physics residency, and broad analysis
   streaming are out of M2C scope and belong to the next memory campaign.
+
+## Post-merge adversarial audit closure — transient source memory
+
+A post-merge M2C audit found that the original closeout correctly removed
+persistent species pollution and stellar-feedback population staging, but did
+not fully close transient source-memory scaling. In particular, production
+star formation still materialized all-active gas-cell indices and one
+`StarFormationCellInput` per active gas cell before source evaluation, while
+metal diffusion mirrored every gas cell into a 128-byte `MetalDiffusionCell`
+phase representation and retained additional full-cell geometry arrays. The
+central profiler also omitted `SourceRuntime` owner-level capacity entries.
+Those findings supersede the earlier statement that all M2C transient
+microphysics scratch was acceptance-closed.
+
+The closure repair preserves the same source equations and changes only
+representation, lifetime, and batching:
+
+- production star formation uses at most 4096 active gas rows per batch; the
+  all-active case is represented without a full `0..N_cell-1` index vector;
+  `StarFormationCellInput` capacity is governor-admitted before growth;
+- all MPI ranks execute the same number of star-formation batch rounds using a
+  rank-max batch count, including empty local rounds, so distributed particle-ID
+  precommit remains collective-safe when local active counts differ;
+- `StarBirthPlan` no longer reserves one record for every scanned input before
+  eligibility is known; because input itself is bounded, eligible birth-plan
+  staging is also bounded by the same source batch;
+- black-hole accretion uses an empty active-index span to mean all local BH rows,
+  eliminating the former 4 B/BH all-active index vector; production BH seeding
+  remains deliberately fail-closed until an authoritative candidate provider
+  exists, so no unbounded production seed-candidate staging is introduced;
+- production metal diffusion operates directly on canonical gas mass/metal-mass
+  spans plus an explicit compact phase view. Its retained per-cell phase state
+  is one ownership byte, one `rho*kappa` double, and five reusable scalar
+  workspace doubles (49 B/cell total), rather than the former 128 B/cell
+  `MetalDiffusionCell` mirror plus full cell-volume and ownership arrays;
+- diffusion face records carry the axis needed by the compact operator, and
+  topology construction reduces velocity-gradient neighbor accumulators
+  cell-by-cell instead of retaining six `NeighborAccumulator` objects per gas
+  cell. The production face graph remains explicit O(N_face) topology state;
+  duplicate face copying is removed;
+- the compact Euler/RKL diffusion path keeps an immutable per-stage metal-mass
+  snapshot while applying limited transfers, preserving the legacy
+  equal-and-opposite conservative operator ordering without O(N_face) transfer
+  records;
+- `SourceRuntime::memoryReport()` now exposes star-formation input/index batches,
+  stellar evolution/feedback batches, the feedback spatial index, diffusion
+  mask/rho-kappa/face/workspace capacities, and released topology-construction
+  scratch high-water. These owner entries are merged into startup/per-step
+  runtime memory truth and serialized into profiler JSON.
+
+### Quantitative closure
+
+At the current ABI, the audited star-formation convenience representation could
+reach 308 B per simultaneously active gas cell (4 B full-cell index + 168 B
+input + 136 B pre-reserved plan), or 38.5 GiB over a hypothetical 512^3 active
+gas population. Production input residency is now capped at
+`4096 * sizeof(StarFormationCellInput)` = 688,128 B (672 KiB), plus at most
+16 KiB for the contiguous-row batch. Birth plans are created only for eligible
+rows and cannot exceed one bounded input batch.
+
+The audited diffusion cell/volume/mask residency was at least 137 B/cell before
+faces (17.125 GiB over 512^3 gas cells), with an additional hidden six-neighbor
+accumulator topology representation. Production compact cell-phase residency is
+49 B/cell (6.125 GiB over 512^3 cells) plus the scientifically required face
+graph; the 128 B/cell mirror, separate volume lane, and population-scale
+neighbor-accumulator graph are absent. This uniform 512^3 figure is a scaling
+comparison, not a claim that such a full-physics uniform run fits the 48 GiB
+workstation target.
+
+### Closure regressions
+
+Focused CPU validation after this repair passes the following 14-test matrix:
+`unit_memory_accounting`, `unit_star_formation`,
+`unit_effective_multiphase_ism`, `unit_black_hole_agn`,
+`unit_metal_diffusion`, `unit_workflow_metal_diffusion_topology`,
+`unit_stellar_feedback`, `unit_tracer_support`,
+`integration_star_formation_box`, `integration_star_formation_source_runtime`,
+`integration_black_hole_agn_toy`, `integration_stellar_feedback_box`,
+`integration_tracer_advection`, and `validation_star_formation_models`.
+
+New regressions additionally prove that:
+
+- a 4097-cell all-active reference source run crosses the production batch
+  boundary while the persisted `sources.star_formation.input_batch` owned
+  capacity remains no larger than one 4096-cell batch;
+- compact diffusion matches the legacy operator/conservation result for the
+  same fixture and its workspace capacity/high-water plateaus across repeated
+  same-size steps;
+- empty-span all-active BH accretion is equivalent to explicitly listing every
+  BH row;
+- owner-level source-memory entries are present in persisted profiler JSON.
+
+MPI/FFTW-enabled distributed validation remains dependent on an environment
+with usable MPI C++ and FFTW development libraries. The source batching is
+collective-safe by construction, but no multi-rank runtime result is claimed by
+this closure document unless such a test is actually executed.

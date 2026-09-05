@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <string>
+#include <span>
 
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
@@ -171,6 +172,81 @@ void testCosmologicalDensityConversionAndGasLimitedAccretion() {
   assert(counters.gas_mass_removed_code == counters.integrated_accreted_mass_code);
 }
 
+void testEmptyActiveSpanMatchesExplicitAllBlackHoles() {
+  cosmosim::core::SimulationState base;
+  base.resizeParticles(2);
+  base.resizeCells(2);
+  base.black_holes.resize(2);
+  for (std::uint32_t i = 0U; i < 2U; ++i) {
+    base.particles.mass_code[i] = 2.0 + i;
+    base.particles.velocity_x_peculiar[i] = 0.5 * i;
+    base.cells.mass_code[i] = 10.0 + i;
+    base.gas_cells.density_code[i] = 3.0 + i;
+    base.gas_cells.sound_speed_code[i] = 1.0;
+    base.gas_cells.velocity_x_peculiar[i] = 0.25 * i;
+    base.gas_cells.metal_mass_code[i] = 0.1;
+    base.gas_cells.internal_energy_code[i] = 1.0;
+    base.black_holes.particle_index[i] = i;
+    base.black_holes.host_cell_index[i] = i;
+    base.black_holes.subgrid_mass_code[i] = 2.0 + i;
+  }
+  auto explicit_state = base;
+  auto implicit_state = base;
+
+  cosmosim::physics::BlackHoleAgnConfig config;
+  config.enabled = true;
+  config.alpha_bondi = 0.01;
+  config.use_eddington_cap = false;
+  config.newton_g_code = 1.0;
+  config.speed_of_light_code = 1.0;
+  config.epsilon_r = 0.1;
+  config.epsilon_f = 0.0;
+  cosmosim::physics::BlackHoleAgnModel model(config);
+  const std::array<std::uint32_t, 2> explicit_rows{0U, 1U};
+  const auto make_view = [](cosmosim::core::SimulationState& state,
+                            std::span<const std::uint32_t> active) {
+    return cosmosim::physics::BlackHoleAgnAccretionView{
+        .active_black_hole_indices = active,
+        .particle_index = state.black_holes.particle_index,
+        .host_cell_index = state.black_holes.host_cell_index,
+        .subgrid_mass_code = state.black_holes.subgrid_mass_code,
+        .accretion_rate_code = state.black_holes.accretion_rate_code,
+        .feedback_energy_code = state.black_holes.feedback_energy_code,
+        .eddington_ratio = state.black_holes.eddington_ratio,
+        .cumulative_accreted_mass_code = state.black_holes.cumulative_accreted_mass_code,
+        .cumulative_feedback_energy_code = state.black_holes.cumulative_feedback_energy_code,
+        .duty_cycle_active_time_code = state.black_holes.duty_cycle_active_time_code,
+        .duty_cycle_total_time_code = state.black_holes.duty_cycle_total_time_code,
+        .gas_mass_code = state.cells.mass_code,
+        .gas_density_code = state.gas_cells.density_code,
+        .gas_metal_mass_code = state.gas_cells.metal_mass_code,
+        .gas_sound_speed_code = state.gas_cells.sound_speed_code,
+        .gas_velocity_x_peculiar = state.gas_cells.velocity_x_peculiar,
+        .gas_velocity_y_peculiar = state.gas_cells.velocity_y_peculiar,
+        .gas_velocity_z_peculiar = state.gas_cells.velocity_z_peculiar,
+        .gas_internal_energy_code = state.gas_cells.internal_energy_code,
+        .particle_mass_code = state.particles.mass_code,
+        .particle_velocity_x_peculiar = state.particles.velocity_x_peculiar,
+        .particle_velocity_y_peculiar = state.particles.velocity_y_peculiar,
+        .particle_velocity_z_peculiar = state.particles.velocity_z_peculiar,
+    };
+  };
+  const auto explicit_counters = model.applyAccretionFromView(
+      make_view(explicit_state, explicit_rows), 1.0e-4, 1.0, false);
+  const auto implicit_counters = model.applyAccretionFromView(
+      make_view(implicit_state, {}), 1.0e-4, 1.0, false);
+  assert(explicit_counters.scanned_bh == implicit_counters.scanned_bh);
+  assert(explicit_counters.scanned_bh == 2U);
+  for (std::size_t i = 0U; i < 2U; ++i) {
+    assert(explicit_state.cells.mass_code[i] == implicit_state.cells.mass_code[i]);
+    assert(explicit_state.particles.mass_code[i] == implicit_state.particles.mass_code[i]);
+    assert(explicit_state.black_holes.subgrid_mass_code[i] ==
+           implicit_state.black_holes.subgrid_mass_code[i]);
+    assert(explicit_state.black_holes.accretion_rate_code[i] ==
+           implicit_state.black_holes.accretion_rate_code[i]);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -178,5 +254,6 @@ int main() {
   testSeedEligibilityRespectsThresholdAndMultiplicity();
   testApplyMassGrowthFeedbackAndMetadata();
   testCosmologicalDensityConversionAndGasLimitedAccretion();
+  testEmptyActiveSpanMatchesExplicitAllBlackHoles();
   return 0;
 }

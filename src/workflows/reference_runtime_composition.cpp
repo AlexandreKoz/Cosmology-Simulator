@@ -22,6 +22,7 @@ namespace cosmosim::workflows::internal {
 struct CompositionAssembly {
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
+  std::shared_ptr<SourceRuntime> source;
   std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table;
 };
 
@@ -334,6 +335,7 @@ namespace {
                 mpi_context,
                 assembly->effective_eos_table,
                 &services));
+        assembly->source = owner;
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
@@ -425,12 +427,13 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
   }
   RuntimeExecutionPlan execution_plan = registry.freezeAndInstantiate(
       RuntimeModuleFactoryContext{inputs.services});
-  if (!assembly->gravity || !assembly->hydro_amr) {
+  if (!assembly->gravity || !assembly->hydro_amr || !assembly->source) {
     throw std::logic_error("reference runtime composition omitted a required owner");
   }
   return ReferenceRuntimeComposition{
       .gravity = std::move(assembly->gravity),
       .hydro_amr = std::move(assembly->hydro_amr),
+      .source = std::move(assembly->source),
       .effective_eos_table = std::move(assembly->effective_eos_table),
       .execution_plan = std::move(execution_plan),
   };

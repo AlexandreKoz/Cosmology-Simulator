@@ -28,6 +28,7 @@ namespace cosmosim::workflows {
 
 class GravityRuntime;
 class HydroAmrRuntime;
+class SourceRuntime;
 struct RuntimeServices;
 namespace internal {
 class MigrationBalanceRuntime;
@@ -85,6 +86,7 @@ class TimeCoordinator {
       RungZeroTimeState& time_state,
       GravityRuntime& gravity,
       HydroAmrRuntime& hydro_amr,
+      SourceRuntime& source,
       RuntimeExecutionPlan execution_plan,
       const internal::MigrationBalanceRuntime& migration_balance,
       std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table = nullptr) noexcept;
@@ -145,6 +147,7 @@ class TimeCoordinator {
   RungZeroTimeState& m_time_state;
   GravityRuntime& m_gravity;
   HydroAmrRuntime& m_hydro_amr;
+  SourceRuntime& m_source;
   RuntimeExecutionPlan m_execution_plan;
   const internal::MigrationBalanceRuntime& m_migration_balance;
   // Cleared for each KDK step and populated only by legal source-stage births.

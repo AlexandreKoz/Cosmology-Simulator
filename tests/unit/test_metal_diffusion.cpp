@@ -181,6 +181,63 @@ void testStepProfileRemainsBounded() {
   }
 }
 
+void testCompactViewMatchesLegacyAndWorkspacePlateaus() {
+  auto legacy_line = makePeriodicLine(64, 0.02);
+  auto compact_line = legacy_line;
+  const auto config = makeConfig(
+      cosmosim::core::MetalDiffusionTimeIntegrator::kExplicitSubcycling);
+  const MetalDiffusionModel model(config);
+  const double stable = model.stableExplicitTimestepCode(
+      legacy_line.cells, legacy_line.faces);
+  const double dt = 3.0 * stable;
+  const auto legacy_report = model.advance(
+      legacy_line.cells, legacy_line.faces, dt);
+
+  std::vector<double> gas_mass(compact_line.cells.size());
+  std::vector<double> metal_mass(compact_line.cells.size());
+  std::vector<double> rho_kappa(compact_line.cells.size());
+  for (std::size_t i = 0U; i < compact_line.cells.size(); ++i) {
+    gas_mass[i] = compact_line.cells[i].gas_mass_code;
+    metal_mass[i] = compact_line.cells[i].metal_mass_code;
+    rho_kappa[i] = compact_line.cells[i].density_code *
+        cosmosim::physics::smagorinskyMetalDiffusivityCode(
+            config, compact_line.cells[i]);
+  }
+  cosmosim::physics::MetalDiffusionWorkspace workspace;
+  const auto compact_report = model.advanceFromView(
+      cosmosim::physics::MetalDiffusionFieldView{
+          .gas_mass_code = gas_mass,
+          .metal_mass_code = metal_mass,
+          .rho_kappa_code = rho_kappa,
+      },
+      compact_line.faces,
+      dt,
+      workspace);
+  assert(std::abs(
+      compact_report.conservation_residual_code -
+      legacy_report.conservation_residual_code) < 1.0e-14);
+  for (std::size_t i = 0U; i < metal_mass.size(); ++i) {
+    assert(std::abs(
+        metal_mass[i] - legacy_line.cells[i].metal_mass_code) < 1.0e-14);
+  }
+  const std::uint64_t required = model.requiredWorkspaceBytes(metal_mass.size());
+  assert(required == 5U * metal_mass.size() * sizeof(double));
+  assert(workspace.ownedCapacityBytes() >= required);
+  const std::uint64_t retained_before = workspace.ownedCapacityBytes();
+  const std::uint64_t high_water_before = workspace.highWaterBytes();
+  (void)model.advanceFromView(
+      cosmosim::physics::MetalDiffusionFieldView{
+          .gas_mass_code = gas_mass,
+          .metal_mass_code = metal_mass,
+          .rho_kappa_code = rho_kappa,
+      },
+      compact_line.faces,
+      dt,
+      workspace);
+  assert(workspace.ownedCapacityBytes() == retained_before);
+  assert(workspace.highWaterBytes() == high_water_before);
+}
+
 }  // namespace
 
 int main() {
@@ -189,5 +246,6 @@ int main() {
   testExplicitAndRkl2Agreement();
   testSolidBodyRotationHasNoSmagorinskyDiffusion();
   testStepProfileRemainsBounded();
+  testCompactViewMatchesLegacyAndWorkspacePlateaus();
   return 0;
 }

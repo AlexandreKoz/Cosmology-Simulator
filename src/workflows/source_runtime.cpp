@@ -17,6 +17,7 @@
 
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -573,6 +574,112 @@ class SourceRuntimeImpl final : public SourceRuntime {
         (8.0 * core::constants::k_pi * g_code) * config.cosmology.omega_baryon;
   }
 
+  [[nodiscard]] core::MemoryReport memoryReport() const override {
+    core::MemoryReportBuilder builder;
+    const auto add_container = [&builder](
+        core::MemorySubsystem subsystem,
+        core::MemoryClass memory_class,
+        std::string_view label,
+        const auto& container,
+        bool governed) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = subsystem,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = memory_class,
+          .label = std::string(label),
+          .current_size_bytes = core::currentSizeBytesForContainer(container),
+          .owned_capacity_bytes = core::ownedCapacityBytesForContainer(container),
+          .high_water_bytes = core::ownedCapacityBytesForContainer(container),
+          .estimate_only = false,
+          .governed_commitment = governed,
+      });
+    };
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.star_formation.contiguous_cell_batch",
+        m_contiguous_cell_batch,
+        false);
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.star_formation.input_batch",
+        m_star_formation_inputs,
+        m_star_formation_input_reservation.committed());
+    add_container(
+        core::MemorySubsystem::kActiveSets,
+        core::MemoryClass::kPhaseResident,
+        "sources.stellar_evolution.active_star_rows",
+        m_active_star_indices,
+        false);
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.stellar_evolution.contiguous_star_batch",
+        m_contiguous_star_batch,
+        false);
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.stellar_feedback.event_batch",
+        m_feedback_events,
+        m_feedback_event_reservation.committed());
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kScratch,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kPhaseResident,
+        .label = "sources.stellar_feedback.spatial_index",
+        .current_size_bytes = m_feedback_spatial_index.ownedCapacityBytes(),
+        .owned_capacity_bytes = m_feedback_spatial_index.ownedCapacityBytes(),
+        .high_water_bytes = m_feedback_spatial_index.highWaterBytes(),
+        .estimate_only = false,
+        .governed_commitment = m_feedback_index_reservation.committed(),
+    });
+    const bool diffusion_governed = m_diffusion_phase_reservation.committed();
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.metal_diffusion.owned_leaf_mask",
+        m_owned_leaf_mask,
+        diffusion_governed);
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.metal_diffusion.rho_kappa",
+        m_diffusion_rho_kappa_code,
+        diffusion_governed);
+    add_container(
+        core::MemorySubsystem::kScratch,
+        core::MemoryClass::kPhaseResident,
+        "sources.metal_diffusion.faces",
+        m_diffusion_faces,
+        false);
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kScratch,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kPhaseResident,
+        .label = "sources.metal_diffusion.workspace",
+        .current_size_bytes = m_diffusion_workspace.ownedCapacityBytes(),
+        .owned_capacity_bytes = m_diffusion_workspace.ownedCapacityBytes(),
+        .high_water_bytes = m_diffusion_workspace.highWaterBytes(),
+        .estimate_only = false,
+        .governed_commitment = diffusion_governed,
+    });
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kScratch,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kScratchArena,
+        .label = "sources.metal_diffusion.topology_construction_scratch",
+        .owned_capacity_bytes = 0U,
+        .high_water_bytes = m_diffusion_topology_scratch_high_water_bytes,
+        .estimate_only = true,
+        .governed_commitment = false,
+        .uncertainty_note =
+            "measured container-capacity high-water for released topology construction scratch",
+    });
+    return std::move(builder).finish();
+  }
+
   void execute(SourceMutationStageView& view) override {
     view.requireFresh();
     core::StepContext& context = internal::RuntimeStageAccess::sourceContext(
@@ -611,33 +718,136 @@ class SourceRuntimeImpl final : public SourceRuntime {
         context.state.black_holes.size() > 0U;
     const std::uint64_t gravity_source_mutation_rank_count =
         m_mpi_context.allreduceSumUint64(local_has_mutable_gravity_sources ? 1ULL : 0ULL);
-    if (cell_count > 0U && m_star_formation.config().enabled) {
-      std::span<const std::uint32_t> active_cells = context.active_set.cell_indices;
-      if (!context.active_set.cells_are_subset && active_cells.empty()) {
-        m_full_cell_indices.resize(cell_count);
-        std::iota(m_full_cell_indices.begin(), m_full_cell_indices.end(), 0U);
-        active_cells = m_full_cell_indices;
+    if (m_star_formation.config().enabled) {
+      constexpr std::size_t k_star_formation_cell_batch_max = 4096U;
+      const bool all_cells_active =
+          !context.active_set.cells_are_subset &&
+          context.active_set.cell_indices.empty();
+      const std::span<const std::uint32_t> active_cells =
+          context.active_set.cell_indices;
+      const std::size_t local_active_count = all_cells_active
+          ? cell_count : active_cells.size();
+      const std::uint64_t local_batch_count = local_active_count == 0U
+          ? 0U
+          : 1U + static_cast<std::uint64_t>(
+              (local_active_count - 1U) / k_star_formation_cell_batch_max);
+      const std::uint64_t global_batch_count =
+          m_mpi_context.allreduceMaxUint64(local_batch_count);
+      const std::size_t required_input_capacity = std::min<std::size_t>(
+          local_active_count, k_star_formation_cell_batch_max);
+
+      core::MemoryReservation replacement_input_reservation;
+      std::exception_ptr reservation_failure;
+      try {
+        if (m_memory_governor != nullptr &&
+            required_input_capacity > m_star_formation_inputs.capacity()) {
+          const std::size_t input_bytes = core::checkedSizeMultiply(
+              required_input_capacity,
+              sizeof(physics::StarFormationCellInput),
+              "star-formation bounded input batch");
+          replacement_input_reservation = m_memory_governor->reserve(
+              core::MemoryClass::kPhaseResident,
+              static_cast<std::uint64_t>(input_bytes),
+              "sources.star_formation.input_batch");
+        }
+      } catch (...) {
+        reservation_failure = std::current_exception();
       }
-      buildStarFormationInputs(context, active_cells, source_evaluation_scale_factor);
-      const std::size_t particle_count_before_birth = context.state.particles.size();
-      const physics::StarFormationStepReport report = m_star_formation.applyFromInputs(
-          context.state,
-          m_star_formation_inputs,
-          context.integrator_state.dt_time_code,
-          source_evaluation_scale_factor,
-          context.integrator_state.step_index,
-          &m_particle_id_registry);
-      if (report.counters.spawned_particles > 0U) {
-        const std::size_t particle_count_after_birth = context.state.particles.size();
+      if (m_runtime_services != nullptr) {
+        FailureCoordinator(*m_runtime_services).rethrowCollectiveFailure(
+            reservation_failure,
+            "star-formation memory preflight");
+      } else if (reservation_failure != nullptr) {
+        std::rethrow_exception(reservation_failure);
+      }
+      if (replacement_input_reservation.pending()) {
+        replacement_input_reservation.commit();
+      }
+      if (required_input_capacity > m_star_formation_inputs.capacity()) {
+        m_star_formation_inputs.reserve(required_input_capacity);
+        if (m_memory_governor != nullptr) {
+          m_star_formation_input_reservation.release();
+          m_star_formation_input_reservation =
+              std::move(replacement_input_reservation);
+        }
+      }
+      m_contiguous_cell_batch.reserve(required_input_capacity);
+
+      std::unordered_set<std::uint64_t> patch_ids_with_children;
+      patch_ids_with_children.reserve(context.state.patches.size());
+      for (std::size_t patch_index = 0U;
+           patch_index < context.state.patches.size(); ++patch_index) {
+        const std::uint64_t parent_id =
+            context.state.patches.parent_patch_id[patch_index];
+        if (parent_id != 0U) {
+          patch_ids_with_children.insert(parent_id);
+        }
+      }
+
+      const std::size_t particle_count_before_birth =
+          context.state.particles.size();
+      std::uint64_t local_spawned_particles = 0U;
+      for (std::uint64_t batch_round = 0U;
+           batch_round < global_batch_count; ++batch_round) {
+        const std::size_t batch_begin = batch_round < local_batch_count
+            ? core::checkedSizeMultiply(
+                core::checkedIntegralNarrow<std::size_t>(
+                    batch_round,
+                    "star-formation batch round"),
+                k_star_formation_cell_batch_max,
+                "star-formation batch begin")
+            : local_active_count;
+        const std::size_t batch_size = batch_begin < local_active_count
+            ? std::min<std::size_t>(
+                k_star_formation_cell_batch_max,
+                local_active_count - batch_begin)
+            : 0U;
+        std::span<const std::uint32_t> cell_batch;
+        if (batch_size == 0U) {
+          m_contiguous_cell_batch.clear();
+          cell_batch = {};
+        } else if (all_cells_active) {
+          m_contiguous_cell_batch.resize(batch_size);
+          for (std::size_t i = 0U; i < batch_size; ++i) {
+            m_contiguous_cell_batch[i] =
+                core::checkedIntegralNarrow<std::uint32_t>(
+                    batch_begin + i,
+                    "star-formation contiguous active gas row");
+          }
+          cell_batch = m_contiguous_cell_batch;
+        } else {
+          cell_batch = active_cells.subspan(batch_begin, batch_size);
+        }
+        buildStarFormationInputs(
+            context,
+            cell_batch,
+            source_evaluation_scale_factor,
+            patch_ids_with_children);
+        const physics::StarFormationStepReport batch_report =
+            m_star_formation.applyFromInputs(
+                context.state,
+                m_star_formation_inputs,
+                context.integrator_state.dt_time_code,
+                source_evaluation_scale_factor,
+                context.integrator_state.step_index,
+                &m_particle_id_registry);
+        if (batch_report.counters.spawned_particles >
+            std::numeric_limits<std::uint64_t>::max() - local_spawned_particles) {
+          throw std::overflow_error(
+              "source runtime star-formation batch spawn count overflows uint64");
+        }
+        local_spawned_particles += batch_report.counters.spawned_particles;
+      }
+
+      if (local_spawned_particles > 0U) {
+        const std::size_t particle_count_after_birth =
+            context.state.particles.size();
         if (particle_count_after_birth < particle_count_before_birth ||
             particle_count_after_birth - particle_count_before_birth !=
-                static_cast<std::size_t>(report.counters.spawned_particles)) {
+                static_cast<std::size_t>(local_spawned_particles)) {
           throw std::runtime_error(
               "source runtime star-formation report disagrees with appended particle rows");
         }
-        // Gas cells are the hydro and gas-gravity mass authority; generic gas
-        // particles are compatibility mirrors only. Refresh legacy mirrors once
-        // after the batch so I/O/adapter consumers observe the post-birth mass.
         internal::synchronizeParentParticleCompatibilityMirrors(
             context.state, m_world_rank, "SourceRuntime star-formation batch");
         if (context.newly_created_particle_ids != nullptr) {
@@ -648,15 +858,18 @@ class SourceRuntimeImpl final : public SourceRuntime {
               context.state.particle_sidecar.particle_id.end());
         }
       }
-      if (report.counters.spawned_particles > 0U && context.particle_scheduler != nullptr) {
-        const std::uint64_t current_tick = context.particle_scheduler->currentTick();
+      if (local_spawned_particles > 0U &&
+          context.particle_scheduler != nullptr) {
+        const std::uint64_t current_tick =
+            context.particle_scheduler->currentTick();
         if (current_tick == std::numeric_limits<std::uint64_t>::max()) {
-          throw std::overflow_error("source runtime newborn activation tick overflows uint64");
+          throw std::overflow_error(
+              "source runtime newborn activation tick overflows uint64");
         }
-        // Newborn stars have no retroactive kick. They join bin zero at the next
-        // legal scheduler tick and become visible to the next force boundary.
         context.particle_scheduler->appendElements(
-            static_cast<std::uint32_t>(report.counters.spawned_particles),
+            core::checkedIntegralNarrow<std::uint32_t>(
+                local_spawned_particles,
+                "source runtime newborn scheduler append count"),
             0U,
             current_tick + 1U);
       }
@@ -669,7 +882,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
     if (m_bh_enabled) {
       black_hole_report = m_black_hole.apply(
           context.state,
-          m_seed_candidates,
+          {},
           context.integrator_state.dt_time_code,
           source_evaluation_scale_factor,
           m_coordinate_frame == core::CoordinateFrame::kComoving,
@@ -712,30 +925,23 @@ class SourceRuntimeImpl final : public SourceRuntime {
   void buildOwnedLeafCellMetadata(const core::StepContext& context) {
     const core::SimulationState& state = context.state;
     const std::size_t cell_count = state.cells.size();
-    m_cell_volume_code.assign(cell_count, 0.0);
     m_owned_leaf_mask.assign(cell_count, 0U);
     std::unordered_set<std::uint64_t> patch_ids_with_children;
     patch_ids_with_children.reserve(state.patches.size());
-    for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
+    for (std::size_t patch_index = 0U; patch_index < state.patches.size(); ++patch_index) {
       const std::uint64_t parent_id = state.patches.parent_patch_id[patch_index];
       if (parent_id != 0U) {
         patch_ids_with_children.insert(parent_id);
       }
     }
-    for (std::uint32_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+    for (std::uint32_t cell_index = 0U; cell_index < cell_count; ++cell_index) {
       const PatchCellGeometry geometry = starFormationPatchCellGeometry(state, cell_index);
       bool owned_leaf = true;
-      double volume = state.gas_cells.density_code[cell_index] > 0.0
-          ? state.cells.mass_code[cell_index] /
-                state.gas_cells.density_code[cell_index]
-          : 0.0;
       if (geometry.valid) {
-        volume = geometry.dx_stored * geometry.dy_stored * geometry.dz_stored;
         owned_leaf = state.patches.owning_rank[geometry.patch_index] == m_world_rank &&
             starFormationPatchIsLeaf(
                 state, geometry.patch_index, patch_ids_with_children);
       }
-      m_cell_volume_code[cell_index] = volume;
       m_owned_leaf_mask[cell_index] = owned_leaf ? 1U : 0U;
     }
   }
@@ -976,73 +1182,123 @@ class SourceRuntimeImpl final : public SourceRuntime {
           "metal diffusion is not permitted on multiple MPI ranks until the directed gas-cell interface exchange "
           "and equal-and-opposite remote flux commit are available; refusing a decomposition-dependent result");
     }
+
+    const std::size_t cell_count = context.state.cells.size();
+    const std::uint64_t workspace_bytes =
+        m_metal_diffusion.requiredWorkspaceBytes(cell_count);
+    const std::size_t mask_bytes = core::checkedSizeMultiply(
+        cell_count, sizeof(std::uint8_t), "metal-diffusion owned-leaf mask");
+    const std::size_t rho_kappa_bytes = core::checkedSizeMultiply(
+        cell_count, sizeof(double), "metal-diffusion rho-kappa field");
+    std::uint64_t phase_bytes = core::checkedMemoryBytesAdd(
+        workspace_bytes,
+        static_cast<std::uint64_t>(mask_bytes),
+        "metal-diffusion phase workspace plus ownership mask");
+    phase_bytes = core::checkedMemoryBytesAdd(
+        phase_bytes,
+        static_cast<std::uint64_t>(rho_kappa_bytes),
+        "metal-diffusion phase plus rho-kappa field");
+
+    core::MemoryReservation replacement_phase_reservation;
+    std::exception_ptr reservation_failure;
+    try {
+      if (m_memory_governor != nullptr &&
+          (m_owned_leaf_mask.capacity() < cell_count ||
+           m_diffusion_rho_kappa_code.capacity() < cell_count ||
+           m_diffusion_workspace.ownedCapacityBytes() < workspace_bytes)) {
+        replacement_phase_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            phase_bytes,
+            "sources.metal_diffusion.cell_phase");
+      }
+    } catch (...) {
+      reservation_failure = std::current_exception();
+    }
+    if (m_runtime_services != nullptr) {
+      FailureCoordinator(*m_runtime_services).rethrowCollectiveFailure(
+          reservation_failure,
+          "metal-diffusion memory preflight");
+    } else if (reservation_failure != nullptr) {
+      std::rethrow_exception(reservation_failure);
+    }
+    if (replacement_phase_reservation.pending()) {
+      replacement_phase_reservation.commit();
+    }
+
     buildOwnedLeafCellMetadata(context);
     const double scale_factor = m_coordinate_frame == core::CoordinateFrame::kComoving
         ? source_evaluation_scale_factor
         : 1.0;
-    m_diffusion_cells.clear();
-    m_diffusion_cells.resize(context.state.cells.size());
-    for (std::uint32_t cell_index = 0;
-         cell_index < context.state.cells.size(); ++cell_index) {
-      const PatchCellGeometry geometry =
-          starFormationPatchCellGeometry(context.state, cell_index);
-      const double volume_stored = m_cell_volume_code[cell_index];
-      const double volume_phys = volume_stored * scale_factor * scale_factor *
-          scale_factor;
-      physics::MetalDiffusionCell cell;
-      cell.gas_cell_id = context.state.gas_cells.gas_cell_id[cell_index];
-      cell.gas_mass_code = context.state.cells.mass_code[cell_index];
-      cell.metal_mass_code =
-          context.state.gas_cells.metal_mass_code[cell_index];
-      cell.volume_code = volume_phys;
-      cell.density_code = volume_phys > 0.0
-          ? cell.gas_mass_code / volume_phys : 0.0;
-      cell.filter_length_code = volume_phys > 0.0
-          ? std::cbrt(volume_phys) : 0.0;
-      cell.is_owned_leaf = m_owned_leaf_mask[cell_index] != 0U;
-      if (geometry.valid && cell.is_owned_leaf) {
-        const std::array<std::span<const double>, 3> velocity_fields{
-            context.state.gas_cells.velocity_x_peculiar,
-            context.state.gas_cells.velocity_y_peculiar,
-            context.state.gas_cells.velocity_z_peculiar};
-        const std::array<double, 3> spacing{
-            geometry.dx_stored * scale_factor,
-            geometry.dy_stored * scale_factor,
-            geometry.dz_stored * scale_factor};
-        for (std::size_t component = 0; component < velocity_fields.size(); ++component) {
-          for (std::size_t axis = 0; axis < spacing.size(); ++axis) {
-            cell.velocity_gradient.grad[component][axis] =
-                starFormationDerivativeAtCell(
-                    velocity_fields[component], geometry, static_cast<int>(axis),
-                    spacing[axis], cell_index);
-          }
-        }
-      }
-      m_diffusion_cells[cell_index] = cell;
-    }
-
-    const internal::MetalDiffusionTopologyResult topology =
+    internal::MetalDiffusionTopologyResult topology =
         internal::buildMetalDiffusionTopology(
             context.state,
             m_owned_leaf_mask,
             m_world_rank,
             scale_factor,
-            m_hydro_boundary,
-            m_diffusion_cells);
-    m_diffusion_faces = topology.faces;
+            m_hydro_boundary);
+    m_diffusion_topology_scratch_high_water_bytes = std::max(
+        m_diffusion_topology_scratch_high_water_bytes,
+        topology.construction_scratch_high_water_bytes);
+    m_diffusion_faces = std::move(topology.faces);
+    m_diffusion_rho_kappa_code = std::move(topology.strain_magnitude_code);
+    if (m_diffusion_rho_kappa_code.size() != cell_count) {
+      throw std::runtime_error(
+          "metal diffusion topology returned the wrong strain-field extent");
+    }
+
+    for (std::uint32_t cell_index = 0U; cell_index < cell_count; ++cell_index) {
+      if (m_owned_leaf_mask[cell_index] == 0U) {
+        m_diffusion_rho_kappa_code[cell_index] = 0.0;
+        continue;
+      }
+      const PatchCellGeometry geometry =
+          starFormationPatchCellGeometry(context.state, cell_index);
+      double volume_stored = context.state.gas_cells.density_code[cell_index] > 0.0
+          ? context.state.cells.mass_code[cell_index] /
+                context.state.gas_cells.density_code[cell_index]
+          : 0.0;
+      if (geometry.valid) {
+        volume_stored = geometry.dx_stored * geometry.dy_stored *
+            geometry.dz_stored;
+      }
+      const double volume_phys = volume_stored * scale_factor * scale_factor *
+          scale_factor;
+      const double gas_mass = context.state.cells.mass_code[cell_index];
+      const double density = volume_phys > 0.0 ? gas_mass / volume_phys : 0.0;
+      const double filter_length = volume_phys > 0.0
+          ? std::cbrt(volume_phys) : 0.0;
+      m_diffusion_rho_kappa_code[cell_index] =
+          physics::smagorinskyRhoKappaCode(
+              m_metal_diffusion.config(),
+              density,
+              filter_length,
+              m_diffusion_rho_kappa_code[cell_index]);
+    }
+
     if (m_diffusion_faces.empty()) {
+      if (m_memory_governor != nullptr &&
+          replacement_phase_reservation.committed()) {
+        m_diffusion_phase_reservation.release();
+        m_diffusion_phase_reservation = std::move(replacement_phase_reservation);
+      }
       return;
     }
-    const physics::MetalDiffusionStepReport report = m_metal_diffusion.advance(
-        m_diffusion_cells, m_diffusion_faces,
-        context.integrator_state.dt_time_code);
-    for (std::uint32_t cell_index = 0;
-         cell_index < context.state.cells.size(); ++cell_index) {
-      if (m_diffusion_cells[cell_index].is_owned_leaf) {
-        context.state.gas_cells.metal_mass_code[cell_index] =
-            m_diffusion_cells[cell_index].metal_mass_code;
-      }
+    const physics::MetalDiffusionStepReport report =
+        m_metal_diffusion.advanceFromView(
+            physics::MetalDiffusionFieldView{
+                .gas_mass_code = context.state.cells.mass_code,
+                .metal_mass_code = context.state.gas_cells.metal_mass_code,
+                .rho_kappa_code = m_diffusion_rho_kappa_code,
+            },
+            m_diffusion_faces,
+            context.integrator_state.dt_time_code,
+            m_diffusion_workspace);
+    if (m_memory_governor != nullptr &&
+        replacement_phase_reservation.committed()) {
+      m_diffusion_phase_reservation.release();
+      m_diffusion_phase_reservation = std::move(replacement_phase_reservation);
     }
+
     std::ostringstream metadata;
     metadata << "module=metal_diffusion\n";
     metadata << "model=" << core::metalDiffusionModelToString(
@@ -1060,7 +1316,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
     sidecar.module_name = "metal_diffusion";
     sidecar.schema_version = 1U;
     sidecar.payload.resize(text.size());
-    for (std::size_t i = 0; i < text.size(); ++i) {
+    for (std::size_t i = 0U; i < text.size(); ++i) {
       sidecar.payload[i] = static_cast<std::byte>(text[i]);
     }
     context.state.sidecars.upsert(std::move(sidecar));
@@ -1069,19 +1325,10 @@ class SourceRuntimeImpl final : public SourceRuntime {
   void buildStarFormationInputs(
       const core::StepContext& context,
       std::span<const std::uint32_t> active_cells,
-      double source_evaluation_scale_factor) {
+      double source_evaluation_scale_factor,
+      const std::unordered_set<std::uint64_t>& patch_ids_with_children) {
     const core::SimulationState& state = context.state;
     m_star_formation_inputs.clear();
-    m_star_formation_inputs.reserve(active_cells.size());
-
-    std::unordered_set<std::uint64_t> patch_ids_with_children;
-    patch_ids_with_children.reserve(state.patches.size());
-    for (std::size_t patch_index = 0; patch_index < state.patches.size(); ++patch_index) {
-      const std::uint64_t parent_id = state.patches.parent_patch_id[patch_index];
-      if (parent_id != 0U) {
-        patch_ids_with_children.insert(parent_id);
-      }
-    }
 
     const double scale_factor = source_evaluation_scale_factor;
     const double length_to_physical =
@@ -1206,6 +1453,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
   core::MemoryGovernor* m_memory_governor = nullptr;
   core::MemoryReservation m_feedback_index_reservation;
   core::MemoryReservation m_feedback_event_reservation;
+  core::MemoryReservation m_star_formation_input_reservation;
+  core::MemoryReservation m_diffusion_phase_reservation;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
   core::BoundaryCondition m_hydro_boundary = core::BoundaryCondition::kOpen;
@@ -1213,17 +1462,17 @@ class SourceRuntimeImpl final : public SourceRuntime {
   bool m_bh_seeding_requested = false;
   bool m_is_cosmological = false;
   double m_mean_baryon_density0_code = 0.0;
-  std::vector<std::uint32_t> m_full_cell_indices;
+  std::vector<std::uint32_t> m_contiguous_cell_batch;
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
   std::vector<std::uint32_t> m_active_star_indices;
   std::vector<std::uint32_t> m_contiguous_star_batch;
   std::vector<physics::StellarFeedbackEvent> m_feedback_events;
   physics::StellarFeedbackSpatialIndex m_feedback_spatial_index;
-  std::vector<double> m_cell_volume_code;
   std::vector<std::uint8_t> m_owned_leaf_mask;
-  std::vector<physics::MetalDiffusionCell> m_diffusion_cells;
+  std::vector<double> m_diffusion_rho_kappa_code;
   std::vector<physics::MetalDiffusionFace> m_diffusion_faces;
-  std::vector<physics::BlackHoleSeedCandidate> m_seed_candidates;
+  physics::MetalDiffusionWorkspace m_diffusion_workspace;
+  std::uint64_t m_diffusion_topology_scratch_high_water_bytes = 0U;
 };
 
 }  // namespace

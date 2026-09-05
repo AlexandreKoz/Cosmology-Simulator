@@ -27,6 +27,79 @@ constexpr double k_small = 1.0e-30;
   return 2.0 * left * right / (left + right);
 }
 
+
+[[nodiscard]] double faceConductanceFromRhoKappa(
+    std::span<const double> rho_kappa_code,
+    const MetalDiffusionFace& face) noexcept {
+  if (face.boundary_kind == MetalDiffusionBoundaryKind::kReflective ||
+      face.boundary_kind == MetalDiffusionBoundaryKind::kOpen ||
+      face.left_cell >= rho_kappa_code.size() ||
+      face.right_cell >= rho_kappa_code.size() ||
+      !(face.area_code > 0.0) || !(face.center_distance_code > 0.0)) {
+    return 0.0;
+  }
+  const double rho_kappa_face = harmonicMean(
+      rho_kappa_code[face.left_cell], rho_kappa_code[face.right_cell]);
+  return rho_kappa_face * face.area_code / face.center_distance_code;
+}
+
+void validateCompactInputs(
+    const MetalDiffusionConfig& config,
+    MetalDiffusionFieldView view,
+    std::span<const MetalDiffusionFace> faces,
+    double dt_code) {
+  if (!(dt_code >= 0.0) || !std::isfinite(dt_code)) {
+    throw std::invalid_argument(
+        "MetalDiffusionModel: dt_code must be finite and nonnegative");
+  }
+  if (view.gas_mass_code.size() != view.metal_mass_code.size() ||
+      view.rho_kappa_code.size() != view.gas_mass_code.size()) {
+    throw std::invalid_argument(
+        "MetalDiffusionModel: compact field extents disagree");
+  }
+  for (std::size_t i = 0U; i < view.gas_mass_code.size(); ++i) {
+    if (!finiteNonnegative(view.gas_mass_code[i]) ||
+        !finiteNonnegative(view.metal_mass_code[i]) ||
+        !finiteNonnegative(view.rho_kappa_code[i])) {
+      throw std::invalid_argument(
+          "MetalDiffusionModel: compact field contains invalid state");
+    }
+    const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+        std::max(1.0, view.gas_mass_code[i]);
+    if (view.metal_mass_code[i] > view.gas_mass_code[i] + tolerance) {
+      throw std::invalid_argument(
+          "MetalDiffusionModel: metal mass exceeds gas mass");
+    }
+  }
+  for (const auto& face : faces) {
+    if (face.left_cell >= view.gas_mass_code.size() ||
+        face.right_cell >= view.gas_mass_code.size() ||
+        !finiteNonnegative(face.area_code) ||
+        !finiteNonnegative(face.center_distance_code)) {
+      throw std::invalid_argument(
+          "MetalDiffusionModel: invalid compact face geometry or index");
+    }
+  }
+  if (config.enabled && config.model == core::MetalDiffusionModel::kNone) {
+    throw std::invalid_argument(
+        "MetalDiffusionModel: enabled diffusion requires a model");
+  }
+}
+
+[[nodiscard]] std::uint64_t checkedWorkspaceBytes(
+    std::size_t count, std::size_t buffer_count) {
+  if (count != 0U && sizeof(double) >
+      std::numeric_limits<std::uint64_t>::max() / count) {
+    throw std::overflow_error("MetalDiffusionModel workspace byte count overflow");
+  }
+  const std::uint64_t one = static_cast<std::uint64_t>(count) * sizeof(double);
+  if (buffer_count != 0U && one >
+      std::numeric_limits<std::uint64_t>::max() / buffer_count) {
+    throw std::overflow_error("MetalDiffusionModel workspace byte count overflow");
+  }
+  return one * static_cast<std::uint64_t>(buffer_count);
+}
+
 [[nodiscard]] double faceConductance(
     const MetalDiffusionConfig& config,
     std::span<const MetalDiffusionCell> cells,
@@ -135,6 +208,42 @@ double smagorinskyMetalDiffusivityCode(
       cell.filter_length_code * cell.filter_length_code * strain;
   return std::clamp(
       raw, config.diffusivity_floor_code, config.diffusivity_ceiling_code);
+}
+
+
+double smagorinskyRhoKappaCode(
+    const MetalDiffusionConfig& config,
+    double density_code,
+    double filter_length_code,
+    double trace_free_strain_magnitude_code) noexcept {
+  if (!config.enabled || config.model != core::MetalDiffusionModel::kSmagorinsky ||
+      !(density_code > 0.0) || !(filter_length_code > 0.0) ||
+      !std::isfinite(trace_free_strain_magnitude_code)) {
+    return 0.0;
+  }
+  const double raw = config.smagorinsky_coefficient *
+      filter_length_code * filter_length_code *
+      trace_free_strain_magnitude_code;
+  const double kappa = std::clamp(
+      raw, config.diffusivity_floor_code, config.diffusivity_ceiling_code);
+  return density_code * kappa;
+}
+
+std::uint64_t MetalDiffusionWorkspace::ownedCapacityBytes() const noexcept {
+  std::uint64_t total = 0U;
+  for (const auto& buffer : m_buffers) {
+    const std::uint64_t bytes =
+        static_cast<std::uint64_t>(buffer.capacity()) * sizeof(double);
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - total) {
+      return std::numeric_limits<std::uint64_t>::max();
+    }
+    total += bytes;
+  }
+  return total;
+}
+
+std::uint64_t MetalDiffusionWorkspace::highWaterBytes() const noexcept {
+  return m_high_water_bytes;
 }
 
 MetalDiffusionModel::MetalDiffusionModel(MetalDiffusionConfig config)
@@ -346,6 +455,252 @@ void MetalDiffusionModel::rkl2(
     yjm1.swap(yj);
   }
   std::copy(yjm1.begin(), yjm1.end(), metal_mass_code.begin());
+}
+
+
+std::uint64_t MetalDiffusionModel::requiredWorkspaceBytes(
+    std::size_t cell_count) const {
+  // Five scalar lanes are sufficient for both integrators. Explicit SSPRK2
+  // uses the fifth lane as an immutable face-transfer source snapshot so the
+  // two-pass limiter is algebraically identical to the legacy transfer list.
+  return checkedWorkspaceBytes(cell_count, 5U);
+}
+
+MetalDiffusionStepReport MetalDiffusionModel::advanceFromView(
+    MetalDiffusionFieldView view,
+    std::span<const MetalDiffusionFace> faces,
+    double dt_code,
+    MetalDiffusionWorkspace& workspace) const {
+  validateCompactInputs(m_config, view, faces, dt_code);
+  MetalDiffusionStepReport report;
+  const std::size_t count = view.gas_mass_code.size();
+  const std::size_t required_buffer_count = 5U;
+  for (std::size_t i = 0U; i < required_buffer_count; ++i) {
+    workspace.m_buffers[i].resize(count);
+  }
+  workspace.m_high_water_bytes = std::max(
+      workspace.m_high_water_bytes, workspace.ownedCapacityBytes());
+
+  auto& working = workspace.m_buffers[0];
+  std::copy(view.metal_mass_code.begin(), view.metal_mass_code.end(), working.begin());
+  report.metal_mass_before_code = totalMetalMass(working);
+
+  auto& scratch_a = workspace.m_buffers[2];
+  std::fill(scratch_a.begin(), scratch_a.end(), 0.0);
+  for (const auto& face : faces) {
+    const double conductance = faceConductanceFromRhoKappa(view.rho_kappa_code, face);
+    if (!(conductance > 0.0)) {
+      continue;
+    }
+    scratch_a[face.left_cell] += conductance;
+    scratch_a[face.right_cell] += conductance;
+  }
+  report.stable_dt_code = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0U; i < count; ++i) {
+    if (scratch_a[i] > 0.0 && view.gas_mass_code[i] > 0.0) {
+      report.stable_dt_code = std::min(
+          report.stable_dt_code,
+          m_config.parabolic_cfl * view.gas_mass_code[i] / scratch_a[i]);
+    }
+  }
+
+  const auto limitedEuler = [&](std::span<double> metal_mass, double dt) {
+    auto& outgoing = workspace.m_buffers[2];
+    auto& incoming = workspace.m_buffers[3];
+    auto& transfer_source = workspace.m_buffers[4];
+    std::copy(metal_mass.begin(), metal_mass.end(), transfer_source.begin());
+    std::fill(outgoing.begin(), outgoing.end(), 0.0);
+    std::fill(incoming.begin(), incoming.end(), 0.0);
+    for (const auto& face : faces) {
+      const double conductance = faceConductanceFromRhoKappa(
+          view.rho_kappa_code, face);
+      if (!(conductance > 0.0)) {
+        continue;
+      }
+      const std::uint32_t left = face.left_cell;
+      const std::uint32_t right = face.right_cell;
+      const double z_left = view.gas_mass_code[left] > 0.0
+          ? transfer_source[left] / view.gas_mass_code[left] : 0.0;
+      const double z_right = view.gas_mass_code[right] > 0.0
+          ? transfer_source[right] / view.gas_mass_code[right] : 0.0;
+      const double signed_amount = dt * conductance * (z_left - z_right);
+      if (signed_amount > 0.0) {
+        outgoing[left] += signed_amount;
+        incoming[right] += signed_amount;
+        ++report.faces_evaluated;
+      } else if (signed_amount < 0.0) {
+        outgoing[right] -= signed_amount;
+        incoming[left] -= signed_amount;
+        ++report.faces_evaluated;
+      }
+    }
+    for (std::size_t i = 0U; i < count; ++i) {
+      const double donor_scale =
+          outgoing[i] > metal_mass[i] && outgoing[i] > 0.0
+          ? metal_mass[i] / outgoing[i] : 1.0;
+      const double capacity = std::max(0.0, view.gas_mass_code[i] - metal_mass[i]);
+      const double receiver_scale =
+          incoming[i] > capacity && incoming[i] > 0.0
+          ? capacity / incoming[i] : 1.0;
+      outgoing[i] = donor_scale;
+      incoming[i] = receiver_scale;
+    }
+    for (const auto& face : faces) {
+      const double conductance = faceConductanceFromRhoKappa(
+          view.rho_kappa_code, face);
+      if (!(conductance > 0.0)) {
+        continue;
+      }
+      const std::uint32_t left = face.left_cell;
+      const std::uint32_t right = face.right_cell;
+      const double z_left = view.gas_mass_code[left] > 0.0
+          ? transfer_source[left] / view.gas_mass_code[left] : 0.0;
+      const double z_right = view.gas_mass_code[right] > 0.0
+          ? transfer_source[right] / view.gas_mass_code[right] : 0.0;
+      const double signed_amount = dt * conductance * (z_left - z_right);
+      if (signed_amount == 0.0) {
+        continue;
+      }
+      const std::uint32_t donor = signed_amount > 0.0 ? left : right;
+      const std::uint32_t receiver = signed_amount > 0.0 ? right : left;
+      const double requested = std::abs(signed_amount);
+      const double scale = std::min(outgoing[donor], incoming[receiver]);
+      if (scale < 1.0) {
+        ++report.limited_faces;
+      }
+      const double amount = requested * scale;
+      metal_mass[donor] -= amount;
+      metal_mass[receiver] += amount;
+    }
+  };
+
+  const auto derivativeInto = [&](std::span<const double> metal_mass,
+                                  std::span<double> derivative) {
+    std::fill(derivative.begin(), derivative.end(), 0.0);
+    for (const auto& face : faces) {
+      const double conductance = faceConductanceFromRhoKappa(
+          view.rho_kappa_code, face);
+      if (!(conductance > 0.0)) {
+        continue;
+      }
+      const std::uint32_t left = face.left_cell;
+      const std::uint32_t right = face.right_cell;
+      const double z_left = view.gas_mass_code[left] > 0.0
+          ? metal_mass[left] / view.gas_mass_code[left] : 0.0;
+      const double z_right = view.gas_mass_code[right] > 0.0
+          ? metal_mass[right] / view.gas_mass_code[right] : 0.0;
+      const double rate = conductance * (z_left - z_right);
+      derivative[left] -= rate;
+      derivative[right] += rate;
+      ++report.faces_evaluated;
+    }
+  };
+
+  if (!m_config.enabled || dt_code == 0.0 ||
+      !std::isfinite(report.stable_dt_code)) {
+    report.metal_mass_after_code = report.metal_mass_before_code;
+  } else if (m_config.time_integrator ==
+             core::MetalDiffusionTimeIntegrator::kExplicitSubcycling) {
+    const double ratio = dt_code / report.stable_dt_code;
+    const std::uint32_t subcycles = std::max(
+        1U, static_cast<std::uint32_t>(std::ceil(std::max(1.0, ratio))));
+    if (subcycles > m_config.max_subcycles) {
+      throw std::runtime_error(
+          "MetalDiffusionModel: explicit subcycling exceeds configured maximum");
+    }
+    report.subcycles = subcycles;
+    const double sub_dt = dt_code / static_cast<double>(subcycles);
+    auto& initial = workspace.m_buffers[1];
+    for (std::uint32_t subcycle = 0U; subcycle < subcycles; ++subcycle) {
+      std::copy(working.begin(), working.end(), initial.begin());
+      limitedEuler(working, sub_dt);
+      limitedEuler(working, sub_dt);
+      for (std::size_t i = 0U; i < count; ++i) {
+        working[i] = 0.5 * initial[i] + 0.5 * working[i];
+      }
+    }
+  } else {
+    const std::uint32_t stages = rklStageCount(
+        dt_code, report.stable_dt_code, m_config.max_rkl_stages);
+    const double capacity = report.stable_dt_code *
+        (static_cast<double>(stages) * stages + stages - 2.0) / 4.0;
+    if (capacity + 64.0 * std::numeric_limits<double>::epsilon() * dt_code <
+        dt_code) {
+      throw std::runtime_error("MetalDiffusionModel: RKL2 stage limit is insufficient");
+    }
+    report.rkl_stages = stages;
+    if (stages <= 1U) {
+      auto& derivative = workspace.m_buffers[4];
+      derivativeInto(working, derivative);
+      for (std::size_t i = 0U; i < count; ++i) {
+        working[i] += dt_code * derivative[i];
+      }
+    } else {
+      auto& f0 = workspace.m_buffers[1];
+      auto& yjm2 = workspace.m_buffers[2];
+      auto& yjm1 = workspace.m_buffers[3];
+      auto& derivative = workspace.m_buffers[4];
+      derivativeInto(working, f0);
+      std::copy(working.begin(), working.end(), yjm2.begin());
+      constexpr double b1 = 1.0 / 3.0;
+      const double sd = static_cast<double>(stages);
+      const double w1 = 4.0 / (sd * sd + sd - 2.0);
+      for (std::size_t i = 0U; i < count; ++i) {
+        yjm1[i] = working[i] + b1 * w1 * dt_code * f0[i];
+      }
+      const auto b = [](std::uint32_t j) {
+        if (j <= 1U) {
+          return 1.0 / 3.0;
+        }
+        const double jd = static_cast<double>(j);
+        return (jd * jd + jd - 2.0) / (2.0 * jd * (jd + 1.0));
+      };
+      const auto a = [&b](std::uint32_t j) { return 1.0 - b(j); };
+      for (std::uint32_t j = 2U; j <= stages; ++j) {
+        const double jd = static_cast<double>(j);
+        const double mu = ((2.0 * jd - 1.0) / jd) * b(j) / b(j - 1U);
+        const double nu = -((jd - 1.0) / jd) * b(j) / b(j - 2U);
+        const double mu_tilde = mu * w1;
+        const double gamma_tilde = -a(j - 1U) * mu_tilde;
+        derivativeInto(yjm1, derivative);
+        for (std::size_t i = 0U; i < count; ++i) {
+          yjm2[i] = mu * yjm1[i] + nu * yjm2[i] +
+              (1.0 - mu - nu) * working[i] +
+              mu_tilde * dt_code * derivative[i] +
+              gamma_tilde * dt_code * f0[i];
+        }
+        yjm2.swap(yjm1);
+      }
+      std::copy(yjm1.begin(), yjm1.end(), working.begin());
+    }
+    for (std::size_t i = 0U; i < count; ++i) {
+      const double tolerance = 256.0 * std::numeric_limits<double>::epsilon() *
+          std::max(1.0, view.gas_mass_code[i]);
+      if (working[i] < -tolerance ||
+          working[i] > view.gas_mass_code[i] + tolerance) {
+        throw std::runtime_error(
+            "MetalDiffusionModel: RKL2 produced an unbounded state; use explicit_subcycling");
+      }
+      working[i] = std::clamp(working[i], 0.0, view.gas_mass_code[i]);
+    }
+  }
+
+  report.metal_mass_after_code = totalMetalMass(working);
+  report.conservation_residual_code = report.metal_mass_after_code -
+      report.metal_mass_before_code + report.open_boundary_loss_code;
+  report.minimum_metallicity = std::numeric_limits<double>::infinity();
+  report.maximum_metallicity = 0.0;
+  for (std::size_t i = 0U; i < count; ++i) {
+    const double metallicity = view.gas_mass_code[i] > 0.0
+        ? working[i] / view.gas_mass_code[i] : 0.0;
+    report.minimum_metallicity = std::min(report.minimum_metallicity, metallicity);
+    report.maximum_metallicity = std::max(report.maximum_metallicity, metallicity);
+  }
+  if (count == 0U) {
+    report.minimum_metallicity = 0.0;
+  }
+  std::copy(working.begin(), working.end(), view.metal_mass_code.begin());
+  return report;
 }
 
 MetalDiffusionStepReport MetalDiffusionModel::advance(

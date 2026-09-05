@@ -160,7 +160,14 @@ BlackHoleAgnCounters BlackHoleAgnModel::applyAccretionFromView(
       ? 1.0 / (scale_factor * scale_factor * scale_factor)
       : 1.0;
 
-  for (const std::uint32_t bh_local_index : view.active_black_hole_indices) {
+  const bool all_black_holes_active = view.active_black_hole_indices.empty();
+  const std::size_t active_count = all_black_holes_active
+      ? bh_count
+      : view.active_black_hole_indices.size();
+  for (std::size_t active_slot = 0; active_slot < active_count; ++active_slot) {
+    const std::uint32_t bh_local_index = all_black_holes_active
+        ? static_cast<std::uint32_t>(active_slot)
+        : view.active_black_hole_indices[active_slot];
     ++counters.scanned_bh;
     if (bh_local_index >= bh_count) {
       throw std::out_of_range("BlackHoleAgnModel: active BH index is out of range");
@@ -275,15 +282,11 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
     return report;
   }
 
-  std::vector<std::uint32_t> active_black_hole_indices(state.black_holes.size());
-  for (std::size_t i = 0; i < active_black_hole_indices.size(); ++i) {
-    if (i > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-      throw std::overflow_error("BlackHoleAgnModel: local BH count exceeds uint32 index capacity");
-    }
-    active_black_hole_indices[i] = static_cast<std::uint32_t>(i);
+  if (state.black_holes.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error("BlackHoleAgnModel: local BH count exceeds uint32 index capacity");
   }
   BlackHoleAgnAccretionView accretion_view{
-      .active_black_hole_indices = active_black_hole_indices,
+      .active_black_hole_indices = {},
       .particle_index = state.black_holes.particle_index,
       .host_cell_index = state.black_holes.host_cell_index,
       .subgrid_mass_code = state.black_holes.subgrid_mass_code,

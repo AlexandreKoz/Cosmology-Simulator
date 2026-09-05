@@ -16,9 +16,9 @@
 namespace cosmosim::workflows::internal {
 namespace {
 
-struct TopologyFace {
-  physics::MetalDiffusionFace face;
-  std::uint8_t axis = 0U;
+struct DirectedFaceRef {
+  std::uint32_t cell = 0U;
+  std::uint32_t face_index = 0U;
 };
 
 struct PatchBoundaryFace {
@@ -68,20 +68,18 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
     std::span<const std::uint8_t> owned_leaf_mask,
     std::uint32_t world_rank,
     double scale_factor,
-    core::BoundaryCondition hydro_boundary,
-    std::span<physics::MetalDiffusionCell> diffusion_cells) {
+    core::BoundaryCondition hydro_boundary) {
   if (!std::isfinite(scale_factor) || !(scale_factor > 0.0)) {
     throw std::invalid_argument(
         "metal diffusion topology requires finite positive scale factor");
   }
-  if (owned_leaf_mask.size() != state.cells.size() ||
-      diffusion_cells.size() != state.cells.size()) {
+  if (owned_leaf_mask.size() != state.cells.size()) {
     throw std::invalid_argument(
         "metal diffusion topology cell/mask extent mismatch");
   }
 
   MetalDiffusionTopologyResult result;
-  std::vector<TopologyFace> topology_faces;
+  result.strain_magnitude_code.assign(state.cells.size(), 0.0);
   std::vector<PatchBoundaryFace> patch_boundary_faces;
   double topology_scale = 1.0;
   std::array<double, 3> domain_min{
@@ -178,9 +176,9 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
           .right_cell = right,
           .area_code = area,
           .center_distance_code = distance,
-          .boundary_kind = kind};
+          .boundary_kind = kind,
+          .axis = axis};
       result.faces.push_back(face);
-      topology_faces.push_back(TopologyFace{.face = face, .axis = axis});
     };
     const auto addBoundaryFace = [&](std::uint32_t cell,
                                      std::uint8_t axis,
@@ -305,9 +303,9 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
         .area_code = overlap_u * overlap_v,
         .center_distance_code = 0.5 *
             (upper.normal_width + lower.normal_width),
-        .boundary_kind = kind};
+        .boundary_kind = kind,
+        .axis = upper.axis};
     result.faces.push_back(face);
-    topology_faces.push_back(TopologyFace{.face = face, .axis = upper.axis});
     ++counter;
   };
 
@@ -361,24 +359,90 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
     }
   }
 
-  std::vector<std::array<std::array<NeighborAccumulator, 2>, 3>>
-      neighbor_accumulators(state.cells.size());
+  // Build a compact directed face-reference list instead of retaining six
+  // NeighborAccumulator objects (~240 B) per gas cell. The refs are sorted by
+  // cell and face index so each cell reconstructs the exact same face-order
+  // weighted derivative with one stack-local accumulator.
+  if (result.faces.size() > static_cast<std::size_t>(
+          std::numeric_limits<std::uint32_t>::max())) {
+    throw std::overflow_error(
+        "metal diffusion topology face count exceeds uint32 reference capacity");
+  }
+  std::vector<DirectedFaceRef> directed_face_refs;
+  if (result.faces.size() >
+      std::numeric_limits<std::size_t>::max() / 2U) {
+    throw std::overflow_error(
+        "metal diffusion topology directed reference count overflow");
+  }
+  directed_face_refs.reserve(result.faces.size() * 2U);
+  for (std::size_t face_index = 0U; face_index < result.faces.size(); ++face_index) {
+    const auto face_row = static_cast<std::uint32_t>(face_index);
+    const physics::MetalDiffusionFace& face = result.faces[face_index];
+    directed_face_refs.push_back(DirectedFaceRef{.cell = face.left_cell,
+                                                 .face_index = face_row});
+    directed_face_refs.push_back(DirectedFaceRef{.cell = face.right_cell,
+                                                 .face_index = face_row});
+  }
+  std::sort(
+      directed_face_refs.begin(), directed_face_refs.end(),
+      [](const DirectedFaceRef& lhs, const DirectedFaceRef& rhs) {
+        if (lhs.cell != rhs.cell) {
+          return lhs.cell < rhs.cell;
+        }
+        return lhs.face_index < rhs.face_index;
+      });
+
+  const auto checkedCapacityBytes = [](std::size_t capacity, std::size_t width) {
+    if (capacity != 0U &&
+        width > std::numeric_limits<std::uint64_t>::max() / capacity) {
+      throw std::overflow_error(
+          "metal diffusion topology scratch byte count overflow");
+    }
+    return static_cast<std::uint64_t>(capacity) *
+        static_cast<std::uint64_t>(width);
+  };
+  const std::uint64_t patch_boundary_scratch_bytes = checkedCapacityBytes(
+      patch_boundary_faces.capacity(), sizeof(PatchBoundaryFace));
+  const std::uint64_t directed_face_ref_scratch_bytes = checkedCapacityBytes(
+      directed_face_refs.capacity(), sizeof(DirectedFaceRef));
+  if (directed_face_ref_scratch_bytes >
+      std::numeric_limits<std::uint64_t>::max() - patch_boundary_scratch_bytes) {
+    throw std::overflow_error(
+        "metal diffusion topology aggregate scratch byte count overflow");
+  }
+  result.construction_scratch_high_water_bytes =
+      patch_boundary_scratch_bytes + directed_face_ref_scratch_bytes;
+
   const std::array<std::span<const double>, 3> velocity_fields{
       state.gas_cells.velocity_x_peculiar,
       state.gas_cells.velocity_y_peculiar,
       state.gas_cells.velocity_z_peculiar};
-  for (const TopologyFace& topology_face : topology_faces) {
-    const physics::MetalDiffusionFace& face = topology_face.face;
-    const std::uint8_t axis = topology_face.axis;
-    for (std::uint8_t side = 0U; side < 2U; ++side) {
-      const std::uint32_t cell =
-          side == 0U ? face.left_cell : face.right_cell;
-      const std::uint32_t neighbor =
-          side == 0U ? face.right_cell : face.left_cell;
-      const std::size_t direction = side == 0U ? 1U : 0U;
-      NeighborAccumulator& accumulator =
-          neighbor_accumulators[cell][axis][direction];
-      for (std::size_t component = 0; component < 3U; ++component) {
+  std::size_t ref_begin = 0U;
+  while (ref_begin < directed_face_refs.size()) {
+    const std::uint32_t cell_index = directed_face_refs[ref_begin].cell;
+    std::size_t ref_end = ref_begin + 1U;
+    while (ref_end < directed_face_refs.size() &&
+           directed_face_refs[ref_end].cell == cell_index) {
+      ++ref_end;
+    }
+    if (cell_index >= owned_leaf_mask.size() ||
+        owned_leaf_mask[cell_index] == 0U) {
+      ref_begin = ref_end;
+      continue;
+    }
+
+    std::array<std::array<NeighborAccumulator, 2>, 3> accumulators{};
+    for (std::size_t ref_index = ref_begin; ref_index < ref_end; ++ref_index) {
+      const physics::MetalDiffusionFace& face =
+          result.faces[directed_face_refs[ref_index].face_index];
+      if (face.axis >= 3U) {
+        throw std::runtime_error("metal diffusion topology face has invalid axis");
+      }
+      const bool is_left = cell_index == face.left_cell;
+      const std::uint32_t neighbor = is_left ? face.right_cell : face.left_cell;
+      const std::size_t direction = is_left ? 1U : 0U;
+      NeighborAccumulator& accumulator = accumulators[face.axis][direction];
+      for (std::size_t component = 0U; component < 3U; ++component) {
         accumulator.velocity_area_sum[component] +=
             face.area_code * velocity_fields[component][neighbor];
       }
@@ -386,19 +450,12 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
           face.area_code * face.center_distance_code;
       accumulator.area_sum += face.area_code;
     }
-  }
 
-  for (std::uint32_t cell_index = 0;
-       cell_index < state.cells.size(); ++cell_index) {
-    if (owned_leaf_mask[cell_index] == 0U) {
-      continue;
-    }
-    for (std::size_t axis = 0; axis < 3U; ++axis) {
-      const NeighborAccumulator& lower =
-          neighbor_accumulators[cell_index][axis][0];
-      const NeighborAccumulator& upper =
-          neighbor_accumulators[cell_index][axis][1];
-      for (std::size_t component = 0; component < 3U; ++component) {
+    physics::MetalDiffusionVelocityGradient gradient{};
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+      const NeighborAccumulator& lower = accumulators[axis][0];
+      const NeighborAccumulator& upper = accumulators[axis][1];
+      for (std::size_t component = 0U; component < 3U; ++component) {
         const double self_velocity = velocity_fields[component][cell_index];
         double derivative = 0.0;
         if (lower.area_sum > 0.0 && upper.area_sum > 0.0) {
@@ -416,19 +473,19 @@ MetalDiffusionTopologyResult buildMetalDiffusionTopology(
           derivative =
               (upper.velocity_area_sum[component] / upper.area_sum -
                self_velocity) /
-              std::max(
-                  upper.distance_area_sum / upper.area_sum, 1.0e-30);
+              std::max(upper.distance_area_sum / upper.area_sum, 1.0e-30);
         } else if (lower.area_sum > 0.0) {
           derivative =
               (self_velocity -
                lower.velocity_area_sum[component] / lower.area_sum) /
-              std::max(
-                  lower.distance_area_sum / lower.area_sum, 1.0e-30);
+              std::max(lower.distance_area_sum / lower.area_sum, 1.0e-30);
         }
-        diffusion_cells[cell_index].velocity_gradient.grad[component][axis] =
-            derivative;
+        gradient.grad[component][axis] = derivative;
       }
     }
+    result.strain_magnitude_code[cell_index] =
+        physics::traceFreeStrainMagnitude(gradient);
+    ref_begin = ref_end;
   }
 
   return result;

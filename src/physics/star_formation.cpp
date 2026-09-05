@@ -914,8 +914,9 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   }
 
   const std::uint64_t identity_generation_before = state.gasCellIdentityGeneration();
+  // Birth plans are event-local. Do not reserve one 136-byte record for every
+  // scanned gas cell before eligibility is known.
   std::vector<StarBirthPlan> plans;
-  plans.reserve(cell_inputs.size());
 
   for (const StarFormationCellInput& cell : cell_inputs) {
     ++report.counters.scanned_cells;
@@ -1016,14 +1017,6 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
     plans.push_back(plan);
   }
 
-  if (plans.empty()) {
-    StarFormationCounters cumulative = cumulativeCountersFromState(state);
-    accumulateStarFormationCounters(cumulative, report.counters);
-    state.sidecars.upsert(buildMetadataSidecar(
-        report.counters, state.metadata.normalized_config_hash_hex, &cumulative));
-    return report;
-  }
-
   std::sort(plans.begin(), plans.end(), [](const StarBirthPlan& lhs, const StarBirthPlan& rhs) {
     if (lhs.gas_cell_id != rhs.gas_cell_id) {
       return lhs.gas_cell_id < rhs.gas_cell_id;
@@ -1067,6 +1060,16 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   const std::vector<std::uint64_t> new_particle_ids = registry.precommit(state, new_birth_keys);
   if (new_particle_ids.size() != new_birth_keys.size()) {
     throw std::runtime_error("StarFormationModel: particle-ID precommit returned the wrong batch size");
+  }
+
+  // Distributed precommit is collective. Empty-birth ranks must reach it for
+  // every globally ordered source batch before returning.
+  if (plans.empty()) {
+    StarFormationCounters cumulative = cumulativeCountersFromState(state);
+    accumulateStarFormationCounters(cumulative, report.counters);
+    state.sidecars.upsert(buildMetadataSidecar(
+        report.counters, state.metadata.normalized_config_hash_hex, &cumulative));
+    return report;
   }
 
   const std::size_t old_particle_count = state.particles.size();

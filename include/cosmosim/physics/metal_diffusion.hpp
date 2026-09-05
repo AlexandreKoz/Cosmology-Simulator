@@ -56,6 +56,26 @@ struct MetalDiffusionFace {
   double area_code = 0.0;
   double center_distance_code = 0.0;
   MetalDiffusionBoundaryKind boundary_kind = MetalDiffusionBoundaryKind::kInternal;
+  std::uint8_t axis = 0U;
+};
+
+// Compact production operator view. Canonical gas/metal masses stay in the
+// SimulationState SoA; the phase only materializes rho*kappa and the face graph.
+struct MetalDiffusionFieldView {
+  std::span<const double> gas_mass_code;
+  std::span<double> metal_mass_code;
+  std::span<const double> rho_kappa_code;
+};
+
+class MetalDiffusionWorkspace {
+ public:
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const noexcept;
+  [[nodiscard]] std::uint64_t highWaterBytes() const noexcept;
+
+ private:
+  friend class MetalDiffusionModel;
+  std::array<std::vector<double>, 5> m_buffers;
+  std::uint64_t m_high_water_bytes = 0U;
 };
 
 struct MetalDiffusionStepReport {
@@ -79,6 +99,12 @@ struct MetalDiffusionStepReport {
     const MetalDiffusionConfig& config,
     const MetalDiffusionCell& cell) noexcept;
 
+[[nodiscard]] double smagorinskyRhoKappaCode(
+    const MetalDiffusionConfig& config,
+    double density_code,
+    double filter_length_code,
+    double trace_free_strain_magnitude_code) noexcept;
+
 class MetalDiffusionModel {
  public:
   explicit MetalDiffusionModel(MetalDiffusionConfig config);
@@ -88,6 +114,14 @@ class MetalDiffusionModel {
   [[nodiscard]] double stableExplicitTimestepCode(
       std::span<const MetalDiffusionCell> cells,
       std::span<const MetalDiffusionFace> faces) const;
+
+  [[nodiscard]] std::uint64_t requiredWorkspaceBytes(std::size_t cell_count) const;
+
+  [[nodiscard]] MetalDiffusionStepReport advanceFromView(
+      MetalDiffusionFieldView view,
+      std::span<const MetalDiffusionFace> faces,
+      double dt_code,
+      MetalDiffusionWorkspace& workspace) const;
 
   // Mutates only MetalDiffusionCell::metal_mass_code. Pairwise face updates are
   // equal and opposite. A symmetric donor/receiver limiter enforces

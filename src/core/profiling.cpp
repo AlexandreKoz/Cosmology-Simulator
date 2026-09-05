@@ -275,6 +275,39 @@ void writeMemoryReportJson(std::ostream& out, const MemoryReport& report, int in
     write_distributed_metric(distributed_process.communication_high_water);
     out << "}";
   }
+  out << ",\n" << field_indent << "\"entries\": [";
+  if (!report.entries.empty()) {
+    out << "\n";
+    for (std::size_t i = 0U; i < report.entries.size(); ++i) {
+      const MemoryEntry& entry = report.entries[i];
+      out << field_indent << "  {"
+          << "\"label\": \"" << escapeJson(entry.label) << "\""
+          << ", \"subsystem\": \""
+          << memorySubsystemLabel(entry.subsystem) << "\""
+          << ", \"lifetime\": \""
+          << memoryLifetimeLabel(entry.lifetime) << "\""
+          << ", \"memory_class\": ";
+      if (entry.memory_class.has_value()) {
+        out << "\"" << memoryClassLabel(*entry.memory_class) << "\"";
+      } else {
+        out << "null";
+      }
+      out << ", \"current_size_bytes\": " << entry.current_size_bytes
+          << ", \"owned_capacity_bytes\": " << entry.owned_capacity_bytes
+          << ", \"high_water_bytes\": " << entry.high_water_bytes
+          << ", \"estimate_only\": "
+          << (entry.estimate_only ? "true" : "false")
+          << ", \"governed_commitment\": "
+          << (entry.governed_commitment ? "true" : "false")
+          << "}";
+      if (i + 1U < report.entries.size()) {
+        out << ",";
+      }
+      out << "\n";
+    }
+    out << field_indent;
+  }
+  out << "]";
   out << "\n";
   out << indent << "}";
 }

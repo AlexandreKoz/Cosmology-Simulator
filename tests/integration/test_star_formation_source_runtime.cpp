@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <numeric>
 #include <sstream>
@@ -15,6 +18,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
+#include "cosmosim/physics/star_formation.hpp"
 #include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
 
@@ -146,6 +150,117 @@ namespace {
   state.rebuildSpeciesIndex();
   state.replaceGasCellIdentityRecords(std::move(identity_records));
   return state;
+}
+
+[[nodiscard]] cosmosim::core::SimulationState makeBatchScalingState(
+    std::size_t cell_count) {
+  assert(cell_count > 0U);
+  assert(cell_count <= std::numeric_limits<std::uint32_t>::max());
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(cell_count);
+  state.resizeCells(cell_count);
+  state.resizePatches(1U);
+
+  constexpr double k_cell_width = 0.001;
+  state.patches.patch_id[0] = 7901U;
+  state.patches.level[0] = 0U;
+  state.patches.first_cell[0] = 0U;
+  state.patches.cell_count[0] =
+      static_cast<std::uint32_t>(cell_count);
+  state.patches.owning_rank[0] = 0U;
+  state.patches.origin_x_comoving[0] = 0.0;
+  state.patches.origin_y_comoving[0] = 0.0;
+  state.patches.origin_z_comoving[0] = 0.0;
+  state.patches.extent_x_comoving[0] =
+      k_cell_width * static_cast<double>(cell_count);
+  state.patches.extent_y_comoving[0] = k_cell_width;
+  state.patches.extent_z_comoving[0] = k_cell_width;
+  state.patches.cell_dim_x[0] =
+      static_cast<std::uint32_t>(cell_count);
+  state.patches.cell_dim_y[0] = 1U;
+  state.patches.cell_dim_z[0] = 1U;
+
+  std::vector<cosmosim::core::GasCellIdentityRecord> identity_records;
+  identity_records.reserve(cell_count);
+  for (std::size_t row = 0U; row < cell_count; ++row) {
+    const std::uint64_t particle_id = 900000U + row;
+    const std::uint64_t gas_cell_id = 1900000U + row;
+    const double x = (static_cast<double>(row) + 0.5) * k_cell_width;
+    state.particles.position_x_comoving[row] = x;
+    state.particles.position_y_comoving[row] = 0.5 * k_cell_width;
+    state.particles.position_z_comoving[row] = 0.5 * k_cell_width;
+    state.particles.mass_code[row] = 1.0e6;
+    state.particle_sidecar.particle_id[row] = particle_id;
+    state.particle_sidecar.sfc_key[row] = particle_id;
+    state.particle_sidecar.species_tag[row] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas);
+    state.particle_sidecar.owning_rank[row] = 0U;
+
+    state.cells.center_x_comoving[row] = x;
+    state.cells.center_y_comoving[row] = 0.5 * k_cell_width;
+    state.cells.center_z_comoving[row] = 0.5 * k_cell_width;
+    state.cells.mass_code[row] = 1.0e6;
+    state.cells.patch_index[row] = 0U;
+    state.cells.time_bin[row] = 0U;
+    state.gas_cells.gas_cell_id[row] = gas_cell_id;
+    state.gas_cells.parent_particle_id[row] = particle_id;
+    state.gas_cells.density_code[row] = 1.0e15;
+    state.gas_cells.pressure_code[row] = 1.0e3;
+    state.gas_cells.internal_energy_code[row] = 1.0e-3;
+    state.gas_cells.temperature_code[row] = 100.0;
+    state.gas_cells.sound_speed_code[row] = 1.0e-3;
+    // Zero velocity gives zero divergence, so this fixture exercises the
+    // all-active scan/batching path without producing a large star population.
+    state.gas_cells.velocity_x_peculiar[row] = 0.0;
+    state.gas_cells.velocity_y_peculiar[row] = 0.0;
+    state.gas_cells.velocity_z_peculiar[row] = 0.0;
+    state.gas_cells.metal_mass_code[row] = 2.0e4;
+    identity_records.push_back({
+        .gas_cell_id = gas_cell_id,
+        .parent_particle_id = particle_id,
+        .owning_patch_id = 7901U,
+        .local_cell_row = static_cast<std::uint32_t>(row),
+    });
+  }
+  state.species.count_by_species.fill(0U);
+  state.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kGas)] =
+      static_cast<std::uint64_t>(cell_count);
+  state.rebuildSpeciesIndex();
+  state.replaceGasCellIdentityRecords(std::move(identity_records));
+  assert(state.validateOwnershipInvariants());
+  return state;
+}
+
+[[nodiscard]] std::string readTextFile(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  assert(input.good());
+  return std::string(
+      (std::istreambuf_iterator<char>(input)),
+      std::istreambuf_iterator<char>());
+}
+
+[[nodiscard]] std::uint64_t memoryEntryOwnedCapacity(
+    std::string_view profiler_json,
+    std::string_view label) {
+  const std::string label_token = "\"label\": \"" + std::string(label) + "\"";
+  const std::size_t label_pos = profiler_json.find(label_token);
+  assert(label_pos != std::string_view::npos);
+  constexpr std::string_view k_capacity_key = "\"owned_capacity_bytes\":";
+  const std::size_t capacity_key_pos = profiler_json.find(k_capacity_key, label_pos);
+  assert(capacity_key_pos != std::string_view::npos);
+  std::size_t value_begin = capacity_key_pos + k_capacity_key.size();
+  while (value_begin < profiler_json.size() && profiler_json[value_begin] == ' ') {
+    ++value_begin;
+  }
+  std::size_t value_end = value_begin;
+  while (value_end < profiler_json.size() &&
+         profiler_json[value_end] >= '0' && profiler_json[value_end] <= '9') {
+    ++value_end;
+  }
+  assert(value_end > value_begin);
+  return static_cast<std::uint64_t>(std::stoull(
+      std::string(profiler_json.substr(value_begin, value_end - value_begin))));
 }
 
 [[nodiscard]] cosmosim::core::SimulationState makeParentlessGasState() {
@@ -671,6 +786,11 @@ int main() {
   const auto level1_report = runEffectiveHierarchyCase(
       output_root, "sf_runtime_effective_level1",
       makeSingleLevelEffectiveState(1U, 0.0005, 9602U));
+  constexpr std::size_t k_star_formation_batch_acceptance_cells = 4097U;
+  const auto batch_scaling_report = runCase(
+      output_root,
+      "sf_runtime_batch_scaling",
+      makeBatchScalingState(k_star_formation_batch_acceptance_cells));
 
   assert(converging_report.completed_steps == 1);
   assert(expanding_report.completed_steps == 1);
@@ -681,6 +801,7 @@ int main() {
   assert(reordered_hierarchy_report.completed_steps == 1);
   assert(level0_report.completed_steps == 1);
   assert(level1_report.completed_steps == 1);
+  assert(batch_scaling_report.completed_steps == 1);
   assert(converging_report.local_particle_count > 3);
   assert(expanding_report.local_particle_count == 3);
   assert(effective_report.local_particle_count > 3);
@@ -695,6 +816,36 @@ int main() {
   // The production integration order keeps hydro/AMR synchronization ahead of
   // the source stage, so covered coarse and fine representations are not both used.
   assert(stagePrecedes(hierarchy_report, "hydro_update", "source_terms"));
+
+
+  // M2C source-phase ownership must be visible in the same persisted memory
+  // report used by the governor/provenance path, even when optional modules are
+  // disabled and therefore own zero capacity.
+  {
+    const std::string profiler_json = readTextFile(converging_report.profiler_json_path);
+    assert(profiler_json.find("sources.star_formation.input_batch") !=
+           std::string::npos);
+    assert(profiler_json.find("sources.stellar_feedback.event_batch") !=
+           std::string::npos);
+    assert(profiler_json.find("sources.metal_diffusion.workspace") !=
+           std::string::npos);
+  }
+
+  // Cross the 4096-cell production batch boundary and assert that retained
+  // star-formation input capacity plateaus at one bounded batch rather than
+  // scaling with the all-active gas population.
+  {
+    const std::string profiler_json =
+        readTextFile(batch_scaling_report.profiler_json_path);
+    const std::uint64_t input_capacity_bytes = memoryEntryOwnedCapacity(
+        profiler_json, "sources.star_formation.input_batch");
+    const std::uint64_t maximum_batch_bytes =
+        4096ULL * sizeof(cosmosim::physics::StarFormationCellInput);
+    assert(input_capacity_bytes <= maximum_batch_bytes);
+    assert(input_capacity_bytes <
+           static_cast<std::uint64_t>(k_star_formation_batch_acceptance_cells) *
+               sizeof(cosmosim::physics::StarFormationCellInput));
+  }
 
 #if COSMOSIM_ENABLE_HDF5
   assert(converging_report.restart_roundtrip_ok);

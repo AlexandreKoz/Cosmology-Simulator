@@ -52,6 +52,8 @@ struct BlackHoleRates {
 
 
 struct BlackHoleAgnAccretionView {
+  // Empty means every local BH row is active. This avoids materializing a
+  // 0..N_BH-1 index vector for the common all-active source step.
   std::span<const std::uint32_t> active_black_hole_indices;
   std::span<const std::uint32_t> particle_index;
   std::span<const std::uint32_t> host_cell_index;

@@ -14,6 +14,10 @@ namespace cosmosim::physics {
 class EffectiveMultiphaseEosTable;
 }  // namespace cosmosim::physics
 
+namespace cosmosim::core {
+struct MemoryReport;
+}
+
 namespace cosmosim::workflows {
 
 struct RuntimeServices;
@@ -25,6 +29,7 @@ class SourceRuntime {
   virtual ~SourceRuntime() = default;
 
   virtual void execute(SourceMutationStageView& view) = 0;
+  [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
 
 };
 

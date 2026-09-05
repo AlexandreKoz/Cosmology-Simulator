@@ -2,6 +2,7 @@
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/gravity_source_ownership.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
+#include "cosmosim/workflows/source_runtime.hpp"
 #include "cosmosim/workflows/runtime_capabilities.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "cosmosim/workflows/time_coordinator.hpp"
@@ -670,7 +671,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           core::collectSchedulerMemoryReport(
               time_state.particleScheduler(), time_state.gasCellScheduler()),
           gravity_callback.memoryReport(),
-          runtime_composition.hydro_amr->memoryReport()};
+          runtime_composition.hydro_amr->memoryReport(),
+          runtime_composition.source->memoryReport()};
       core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
       const std::uint64_t governor_baseline_bytes =
           core::memoryReportBaselineOwnedBytes(merged_startup_memory_report);
@@ -718,6 +720,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         time_state,
         gravity_callback,
         hydro_callback,
+        *runtime_composition.source,
         std::move(runtime_composition.execution_plan),
         migration_balance,
         std::move(effective_eos_table));

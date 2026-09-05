@@ -75,8 +75,7 @@ void testSameLevelPatchBoundaryTransfersConservatively() {
       owned_leaf,
       0U,
       1.0,
-      cosmosim::core::BoundaryCondition::kOpen,
-      cells);
+      cosmosim::core::BoundaryCondition::kOpen);
   assert(topology.interior_patch_face_count == 0U);
   assert(topology.cross_patch_face_count == 1U);
   assert(topology.periodic_wrap_face_count == 0U);
@@ -90,12 +89,26 @@ void testSameLevelPatchBoundaryTransfersConservatively() {
   config.smagorinsky_coefficient = 0.05;
   config.parabolic_cfl = 0.4;
   cosmosim::physics::MetalDiffusionModel model(config);
-  const double before = cells[0].metal_mass_code + cells[1].metal_mass_code;
-  const auto report = model.advance(cells, topology.faces, 1.0e-2);
+  std::vector<double> gas_mass{1.0, 1.0};
+  std::vector<double> metal_mass{0.5, 0.0};
+  std::vector<double> rho_kappa(2U, 0.0);
+  for (std::size_t i = 0U; i < rho_kappa.size(); ++i) {
+    rho_kappa[i] = cosmosim::physics::smagorinskyRhoKappaCode(
+        config, 1.0, 1.0, topology.strain_magnitude_code[i]);
+  }
+  cosmosim::physics::MetalDiffusionWorkspace workspace;
+  const double before = metal_mass[0] + metal_mass[1];
+  const auto report = model.advanceFromView(
+      cosmosim::physics::MetalDiffusionFieldView{
+          .gas_mass_code = gas_mass,
+          .metal_mass_code = metal_mass,
+          .rho_kappa_code = rho_kappa,
+      },
+      topology.faces, 1.0e-2, workspace);
   assert(report.faces_evaluated > 0U);
-  assert(cells[0].metal_mass_code < 0.5);
-  assert(cells[1].metal_mass_code > 0.0);
-  assert(std::abs(cells[0].metal_mass_code + cells[1].metal_mass_code - before) < 1.0e-14);
+  assert(metal_mass[0] < 0.5);
+  assert(metal_mass[1] > 0.0);
+  assert(std::abs(metal_mass[0] + metal_mass[1] - before) < 1.0e-14);
 }
 
 void testCoarseFineOverlapSplitsFaceArea() {
@@ -125,8 +138,7 @@ void testCoarseFineOverlapSplitsFaceArea() {
       owned_leaf,
       0U,
       1.0,
-      cosmosim::core::BoundaryCondition::kOpen,
-      cells);
+      cosmosim::core::BoundaryCondition::kOpen);
   assert(topology.cross_patch_face_count == 4U);
   double coarse_interface_area = 0.0;
   std::uint64_t coarse_interface_faces = 0U;
@@ -158,8 +170,7 @@ void testPeriodicWrapIsARealDiffusionInterface() {
       owned_leaf,
       0U,
       1.0,
-      cosmosim::core::BoundaryCondition::kPeriodic,
-      cells);
+      cosmosim::core::BoundaryCondition::kPeriodic);
   assert(topology.interior_patch_face_count == 1U);
   assert(topology.periodic_wrap_face_count == 1U);
   assert(topology.faces.size() == 2U);

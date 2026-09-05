@@ -27,6 +27,7 @@
 #include "cosmosim/physics/metal_diffusion.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/hydro_amr_runtime.hpp"
+#include "cosmosim/workflows/source_runtime.hpp"
 #include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
@@ -916,6 +917,7 @@ TimeCoordinator::TimeCoordinator(
     RungZeroTimeState& time_state,
     GravityRuntime& gravity,
     HydroAmrRuntime& hydro_amr,
+    SourceRuntime& source,
     RuntimeExecutionPlan execution_plan,
     const internal::MigrationBalanceRuntime& migration_balance,
     std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table) noexcept
@@ -923,6 +925,7 @@ TimeCoordinator::TimeCoordinator(
       m_time_state(time_state),
       m_gravity(gravity),
       m_hydro_amr(hydro_amr),
+      m_source(source),
       m_execution_plan(std::move(execution_plan)),
       m_migration_balance(migration_balance),
       m_effective_eos_table(std::move(effective_eos_table)) {}
@@ -1107,7 +1110,8 @@ void TimeCoordinator::runRungZeroSegment(
         core::collectSchedulerMemoryReport(
             particle_scheduler, gas_cell_scheduler),
         m_gravity.memoryReport(),
-        m_hydro_amr.memoryReport()};
+        m_hydro_amr.memoryReport(),
+        m_source.memoryReport()};
     core::MemoryReport merged_runtime_memory_report =
         core::mergeMemoryReports(runtime_reports);
     if (m_services.memory_governor != nullptr) {

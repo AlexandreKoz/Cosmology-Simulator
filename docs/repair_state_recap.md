@@ -2216,3 +2216,25 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   transport, cooling, restart, and MPI contract exists.
 - Detailed source/validation evidence is recorded in
   `docs/repair/m2c_full_physics_sidecars_20260905.md`.
+
+## 2026-09-05 M2C post-merge transient-memory closure
+
+- Closed the post-merge audit finding that star formation could retain/materialize
+  population-scale all-active indices and `StarFormationCellInput` rows. The
+  reference `SourceRuntime` now scans in globally coordinated <=4096-cell
+  batches and governor-admits input-capacity growth.
+- Removed pre-eligibility `StarBirthPlan` population reservation while preserving
+  birth-key, RNG, conservation, and particle-ID precommit semantics; empty local
+  MPI batch rounds still participate in collective ID preparation.
+- Replaced the production 128 B/gas-cell metal-diffusion mirror plus full-cell
+  volume staging with canonical spans, 49 B/cell compact phase state, reusable
+  five-scalar workspace, and cell-local topology-gradient reduction. Conservative
+  equal-and-opposite flux ordering is regression-tested against the legacy
+  operator.
+- Removed the O(N_BH) all-active accretion index vector; empty active-index span
+  denotes all local BH rows. Production seeding remains fail-closed without an
+  authoritative seed-candidate provider.
+- `SourceRuntime` capacities/high-waters are now part of central runtime memory
+  truth and persisted profiler JSON. A 4097-cell regression proves SF input
+  residency plateaus at one 4096-cell batch; compact diffusion repeated-step
+  capacity also plateaus.

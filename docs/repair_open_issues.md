@@ -439,3 +439,12 @@ unchanged.
 | MEMORY-M2C-MICROPHYSICS-TABLES-20260905 | Closed for effective ISM table | Shared microphysics | Reference hydro/source/timestep consumers share one immutable EOS table. Preserve shared/read-only ownership for future tables unless measured thread-local replication is justified. |
 | MEMORY-M2C-CHEMISTRY-TIERS-20260905 | Released scalar tier closed; higher tier fail-closed | Chemistry/enrichment fidelity | `primordial`/`primordial_metal_line` cooling and `metal_species_mode=total_only` remain explicit typed choices. `core_elements` remains rejected until the complete element-sidecar/yield/cooling/AMR/MPI/restart contract exists. |
 | MEMORY-M3-GLOBAL-SCHEDULING-20260905 | Open for next campaign | Whole-runtime resource scheduling | Global task-DAG/phase overlap policy, analysis co-scheduling/streaming, and device-residency budgets remain out of M2C scope. |
+
+## 2026-09-05 M2C post-merge transient-memory closure
+
+| ID | Status | Area | Closure / remaining boundary |
+| --- | --- | --- | --- |
+| MEMORY-M2C-SF-TRANSIENT-BATCHING-20260905 | Closed | Star-formation source memory | Removed all-active full-cell index materialization and population-scale input staging from production `SourceRuntime`; input work is <=4096 cells per globally coordinated batch and capacity growth is governor-admitted. |
+| MEMORY-M2C-DIFFUSION-TRANSIENT-20260905 | Closed for single-rank released diffusion | Metal/enrichment source memory | Production diffusion now uses canonical gas spans plus 49 B/cell compact phase state and reusable five-scalar workspace; the 128 B/cell mirror, separate full-cell volume lane, duplicate face copy, and population-scale neighbor-accumulator graph are removed. Distributed conservative diffusion remains intentionally fail-closed until its remote flux contract exists. |
+| MEMORY-M2C-SOURCE-ACCOUNTING-20260905 | Closed | Runtime memory truth | `SourceRuntime` owner capacities/high-waters are merged into startup/per-step `MemoryReport` and persisted profiler JSON, including SF/feedback/diffusion source scratch. |
+| MEMORY-M2C-BH-ACTIVE-STAGING-20260905 | Closed for production accretion | BH/AGN event memory | Empty active-index span denotes all local BH rows, eliminating the O(N_BH) all-active index vector. Production seeding remains fail-closed without an authoritative candidate provider rather than allocating speculative population staging. |
