@@ -47,7 +47,6 @@ namespace cosmosim::workflows {
 namespace {
 
 constexpr double k_gamma_adiabatic = 5.0 / 3.0;
-constexpr std::uint64_t k_hydro_batch_scratch_bytes_per_cell = 4096ULL;
 
 class SimulationStateHydroSourcePropertyProvider final
     : public hydro::HydroCellSourcePropertyProvider {
@@ -952,15 +951,22 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         ? static_cast<std::uint64_t>(hydro::k_hydro_automatic_active_batch_max_cells)
         : m_config.numerics.hydro_active_batch_max_cells;
     if (m_memory_governor != nullptr) {
-      const core::MemoryGovernorSnapshot snapshot = m_memory_governor->snapshot();
-      if (snapshot.headroom_bytes != std::numeric_limits<std::uint64_t>::max()) {
-        std::uint64_t by_headroom = snapshot.headroom_bytes /
-            k_hydro_batch_scratch_bytes_per_cell;
-        if (by_headroom >= hydro::k_hydro_active_batch_alignment_cells) {
-          by_headroom -= by_headroom % hydro::k_hydro_active_batch_alignment_cells;
-        }
-        requested = std::min(requested, std::max<std::uint64_t>(1U, by_headroom));
+      const core::DeterministicBatchSizingResult sizing =
+          core::selectDeterministicBatchSize(
+              m_memory_governor->snapshot(),
+              core::DeterministicBatchSizingPolicy{
+                  .requested_max_items = requested,
+                  .bytes_per_item = hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell,
+                  .fixed_reserve_bytes = 0U,
+                  .minimum_items = 1U,
+                  .alignment_items = hydro::k_hydro_active_batch_alignment_cells,
+                  .headroom_use_basis_points = 10000U,
+              });
+      if (sizing.selected_items == 0U) {
+        throw std::runtime_error(
+            "hydro active-batch headroom cannot admit one active cell");
       }
+      requested = sizing.selected_items;
     }
     requested = std::min<std::uint64_t>(
         requested, static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()));
@@ -975,12 +981,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     }
     const std::uint64_t cells = static_cast<std::uint64_t>(batch_policy.max_active_cells);
     if (cells > std::numeric_limits<std::uint64_t>::max() /
-        k_hydro_batch_scratch_bytes_per_cell) {
+        hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell) {
       throw std::overflow_error("hydro active-batch reservation byte count overflow");
     }
     auto reservation = m_memory_governor->reserve(
         core::MemoryClass::kScratchArena,
-        cells * k_hydro_batch_scratch_bytes_per_cell,
+        cells * hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell,
         "hydro.active_batch");
     reservation.commit();
     return std::optional<core::MemoryReservation>(std::move(reservation));
@@ -1551,25 +1557,32 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
       std::exception_ptr transport_admission_failure;
       try {
         if (m_memory_governor != nullptr) {
-          const core::MemoryGovernorSnapshot snapshot = m_memory_governor->snapshot();
-          if (snapshot.headroom_bytes != std::numeric_limits<std::uint64_t>::max()) {
-            const std::uint64_t half_headroom = snapshot.headroom_bytes / 2U;
-            transport_round_limit_bytes = std::min(
-                transport_round_limit_bytes,
-                core::checkedIntegralNarrow<std::size_t>(
-                    half_headroom,
-                    "hydro remote ghost transport half-headroom"));
-          }
-          transport_round_limit_bytes -= transport_round_limit_bytes % wire_record_bytes;
-          if (transport_round_limit_bytes < wire_record_bytes) {
+          const std::uint64_t simultaneous_record_bytes =
+              core::checkedMemoryBytesAdd(
+                  static_cast<std::uint64_t>(wire_record_bytes),
+                  static_cast<std::uint64_t>(wire_record_bytes),
+                  "hydro remote ghost simultaneous wire-record bytes");
+          const std::uint64_t requested_records = static_cast<std::uint64_t>(
+              transport_round_limit_bytes / wire_record_bytes);
+          const core::DeterministicBatchSizingResult sizing =
+              core::selectDeterministicBatchSize(
+                  m_memory_governor->snapshot(),
+                  core::DeterministicBatchSizingPolicy{
+                      .requested_max_items = std::max<std::uint64_t>(requested_records, 1U),
+                      .bytes_per_item = simultaneous_record_bytes,
+                      .fixed_reserve_bytes = 0U,
+                      .minimum_items = 1U,
+                      .alignment_items = 1U,
+                      .headroom_use_basis_points = 10000U,
+                  });
+          if (sizing.selected_items == 0U) {
             throw std::runtime_error(
                 "hydro remote ghost transport cannot admit one send/receive wire record per rank");
           }
-          const std::uint64_t transport_reservation_bytes =
-              core::checkedMemoryBytesAdd(
-                  static_cast<std::uint64_t>(transport_round_limit_bytes),
-                  static_cast<std::uint64_t>(transport_round_limit_bytes),
-                  "hydro remote ghost simultaneous send/receive transport reservation");
+          transport_round_limit_bytes = core::checkedIntegralNarrow<std::size_t>(
+              sizing.selected_items * static_cast<std::uint64_t>(wire_record_bytes),
+              "hydro remote ghost selected transport round bytes");
+          const std::uint64_t transport_reservation_bytes = sizing.selected_bytes;
           transport_reservation = m_memory_governor->reserve(
               core::MemoryClass::kCommunication,
               transport_reservation_bytes,
@@ -2050,7 +2063,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                       {"hydro_scratch_high_water_bytes", std::to_string(amr_diagnostics.scratch_high_water_bytes)},
                       {"hydro_prepared_ghost_capacity_bytes", std::to_string(amr_diagnostics.prepared_ghost_capacity_bytes)},
                       {"hydro_max_patch_conserved_bytes", std::to_string(amr_diagnostics.max_patch_conserved_bytes)},
-                      {"hydro_batch_scratch_bytes_per_cell", std::to_string(k_hydro_batch_scratch_bytes_per_cell)},
+                      {"hydro_batch_scratch_bytes_per_cell", std::to_string(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell)},
                       {"directed_amr_candidate_peer_count", std::to_string(directed_amr_diagnostics.candidate_peer_count)},
                       {"directed_amr_neighbor_peer_count", std::to_string(directed_amr_diagnostics.neighbor_peer_count)},
                       {"directed_amr_patch_descriptor_records_sent", std::to_string(directed_amr_diagnostics.directed_patch_descriptor_records_sent)},

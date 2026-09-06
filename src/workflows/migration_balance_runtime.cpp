@@ -2,6 +2,9 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/hydro/hydro_core_solver.hpp"
+#include "cosmosim/physics/stellar_evolution.hpp"
+#include "cosmosim/physics/stellar_feedback.hpp"
 #include "workflows/internal/amr_migration_payload.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/migration_wire.hpp"
@@ -426,6 +429,62 @@ void compactStateToCurrentOwner(
   return decomposition_config;
 }
 
+[[nodiscard]] std::uint64_t declaredMajorTaskTransientReserveBytes(
+    const core::SimulationConfig& config) {
+  const std::uint64_t hydro_cells = config.numerics.hydro_active_batch_max_cells == 0U
+      ? static_cast<std::uint64_t>(hydro::k_hydro_automatic_active_batch_max_cells)
+      : config.numerics.hydro_active_batch_max_cells;
+  const std::size_t hydro_bytes = core::checkedSizeMultiply(
+      core::checkedIntegralNarrow<std::size_t>(hydro_cells, "hydro batch cell count"),
+      core::checkedIntegralNarrow<std::size_t>(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell,
+                                               "hydro batch scratch bytes per cell"),
+      "hydro major-task transient reserve");
+  const std::size_t communication_bytes = core::checkedSizeMultiply(
+      parallel::mpiTransportRoundLimitBytes(), 2U,
+      "bidirectional communication major-task transient reserve");
+  constexpr std::size_t k_feedback_batch_max = 4096U;
+  const std::size_t feedback_bytes = core::checkedSizeMultiply(
+      k_feedback_batch_max,
+      sizeof(physics::StellarEvolutionStarBudget) + sizeof(physics::StellarFeedbackEvent) + sizeof(std::uint32_t),
+      "feedback major-task transient reserve");
+  return core::checkedIntegralNarrow<std::uint64_t>(
+      std::max({hydro_bytes, communication_bytes, feedback_bytes}),
+      "major-task transient reserve byte width");
+}
+
+void applyMemoryAwareDecompositionEnvelope(
+    parallel::DecompositionConfig& decomposition_config,
+    std::span<const parallel::DecompositionItem> local_items,
+    const core::SimulationConfig& config,
+    const RuntimeServices& services) {
+  if (services.memory_governor == nullptr) {
+    return;
+  }
+  const core::MemoryGovernorSnapshot snapshot = services.memory_governor->snapshot();
+  if (snapshot.hard_limit_bytes == 0U) {
+    return;
+  }
+  std::uint64_t local_persistent_bytes = 0U;
+  for (const parallel::DecompositionItem& item : local_items) {
+    if (item.memory_bytes > std::numeric_limits<std::uint64_t>::max() - local_persistent_bytes) {
+      throw std::overflow_error("decomposition persistent-memory estimate overflows uint64");
+    }
+    local_persistent_bytes += item.memory_bytes;
+  }
+  if (snapshot.headroom_bytes > std::numeric_limits<std::uint64_t>::max() - local_persistent_bytes) {
+    throw std::overflow_error("decomposition headroom plus persistent estimate overflows uint64");
+  }
+  const std::uint64_t local_ceiling = local_persistent_bytes + snapshot.headroom_bytes;
+  const std::uint64_t global_ceiling = services.mpi_context.allreduceMinUint64(local_ceiling);
+  const std::uint64_t transient_reserve = declaredMajorTaskTransientReserveBytes(config);
+  if (global_ceiling <= transient_reserve) {
+    throw std::runtime_error(
+        "memory-aware decomposition has no rank-local headroom for the declared major-task transient reserve");
+  }
+  decomposition_config.max_rank_memory_bytes = global_ceiling;
+  decomposition_config.rank_transient_reserve_bytes = transient_reserve;
+}
+
 [[nodiscard]] parallel::DecompositionFeedbackCoefficients makeWorkflowFeedbackCoefficients(
     const core::SimulationConfig& config) {
   return parallel::DecompositionFeedbackCoefficients{
@@ -541,6 +600,15 @@ void compactStateToCurrentOwner(
         .amr_patch_cost = amr_patch_cost,
         .active_fraction_cost = static_cast<double>(item.active_target_count_recent),
         .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .transient_memory_cost = (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) &&
+                                  item.active_target_count_recent != 0U)
+            ? static_cast<double>(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell)
+            : 0.0,
+        .source_event_cost = (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kStar) ||
+                              species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole))
+            ? 1.0
+            : 0.0,
+        .communication_cost = static_cast<double>(item.remote_tree_interactions_recent) + 1.0,
         .gpu_occupancy_cost = 0.0,
         .generic_work_cost = 1.0,
         .has_explicit_components = true,
@@ -591,6 +659,12 @@ void compactStateToCurrentOwner(
         .amr_patch_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
             (1.0 + static_cast<double>(std::max<std::int32_t>(state.patches.level[patch_index], 0))),
         .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .transient_memory_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
+            static_cast<double>(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell),
+        .communication_cost = 2.0 * (
+            static_cast<double>(state.patches.cell_dim_x[patch_index]) * state.patches.cell_dim_y[patch_index] +
+            static_cast<double>(state.patches.cell_dim_x[patch_index]) * state.patches.cell_dim_z[patch_index] +
+            static_cast<double>(state.patches.cell_dim_y[patch_index]) * state.patches.cell_dim_z[patch_index]),
         .generic_work_cost = static_cast<double>(state.patches.cell_count[patch_index]),
         .has_explicit_components = true,
     };
@@ -1493,10 +1567,21 @@ void exchangeAndValidateAmrPatchPayloads(
         .allow_particle_migration = true,
         .allow_amr_patch_reassignment = true,
     };
+    parallel::DecompositionConfig decomposition_config =
+        makeWorkflowDecompositionConfig(config, mpi_context.worldSize());
+    std::exception_ptr decomposition_envelope_failure;
+    try {
+      applyMemoryAwareDecompositionEnvelope(
+          decomposition_config, local_items, config, services);
+    } catch (...) {
+      decomposition_envelope_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        decomposition_envelope_failure, "runtime decomposition memory envelope");
     rebalance = parallel::buildDistributedRuntimeRebalancePlan(
         mpi_context,
         local_items,
-        makeWorkflowDecompositionConfig(config, mpi_context.worldSize()),
+        decomposition_config,
         rebalance_config);
   }
   rebalance.exact_debug_audit_enabled = config.parallel.decomposition_debug_exact_ownership_audit;
@@ -2024,6 +2109,16 @@ void applyInitialGravityAwareDecomposition(
         .amr_patch_cost = amr_patch_cost,
         .active_fraction_cost = static_cast<double>(local_active),
         .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .transient_memory_cost = (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas))
+            ? static_cast<double>(local_active) *
+                  static_cast<double>(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell)
+            : 0.0,
+        .source_event_cost = (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kStar) ||
+                              species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole))
+            ? 1.0
+            : 0.0,
+        .communication_cost = static_cast<double>(item.remote_tree_interactions_recent) +
+            static_cast<double>(pm_load),
         .gpu_occupancy_cost = 0.0,
         .generic_work_cost = 1.0 + std::sqrt(local_density_d),
         .has_explicit_components = true,
@@ -2056,6 +2151,12 @@ void applyInitialGravityAwareDecomposition(
         .amr_patch_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
             (1.0 + static_cast<double>(std::max(state.patches.level[patch_index], 0))),
         .memory_pressure_cost = static_cast<double>(patch_item.memory_bytes),
+        .transient_memory_cost = static_cast<double>(state.patches.cell_count[patch_index]) *
+            static_cast<double>(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell),
+        .communication_cost = 2.0 * (
+            static_cast<double>(state.patches.cell_dim_x[patch_index]) * state.patches.cell_dim_y[patch_index] +
+            static_cast<double>(state.patches.cell_dim_x[patch_index]) * state.patches.cell_dim_z[patch_index] +
+            static_cast<double>(state.patches.cell_dim_y[patch_index]) * state.patches.cell_dim_z[patch_index]),
         .generic_work_cost = static_cast<double>(state.patches.cell_count[patch_index]),
         .has_explicit_components = true,
     };

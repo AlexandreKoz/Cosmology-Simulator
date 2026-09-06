@@ -236,3 +236,20 @@ global-sum, rank-max, rank-mean, and max/mean imbalance for governor-accounted
 demand, current RSS, peak RSS, and communication high-water. OS-derived metrics
 are valid only when all ranks provide a value. These fields are observational;
 the deterministic memory governor remains the allocation authority.
+
+## M2D runtime topology telemetry
+
+The reference workflow emits a `runtime.topology` profiler event containing MPI
+world size/rank, MPI node-local size/rank where available, OpenMP compile
+status, requested thread count, and configured thread count. These fields are
+intended for rank/thread topology comparisons and memory/work imbalance
+interpretation. They are diagnostic evidence only and do not alter numerical
+configuration or restart state.
+
+Optional science-diagnostic pressure handling emits
+`analysis.memory_pressure_deferral` with current pressure plus light/heavy due
+and pending state. When a previously deferred diagnostic later executes on a
+non-Red analysis hook outside its original cadence, the profiler emits
+`analysis.memory_pressure_catchup` with light/heavy catch-up flags. These events
+make bounded deferral and starvation recovery auditable without promoting the
+pending bits into restart or scientific state.

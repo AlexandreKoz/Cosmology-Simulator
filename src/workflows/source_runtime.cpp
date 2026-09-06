@@ -38,6 +38,12 @@
 namespace cosmosim::workflows {
 namespace {
 
+constexpr std::size_t k_feedback_event_batch_max = 4096U;
+constexpr std::uint64_t k_feedback_batch_bytes_per_star =
+    static_cast<std::uint64_t>(sizeof(physics::StellarEvolutionStarBudget)) +
+    static_cast<std::uint64_t>(sizeof(physics::StellarFeedbackEvent)) +
+    static_cast<std::uint64_t>(sizeof(std::uint32_t));
+
 [[nodiscard]] double newtonGCodeFromUnits(const core::UnitSystem& units) {
   return core::newtonGravitationalConstantCode(units);
 }
@@ -617,7 +623,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
         core::MemoryClass::kPhaseResident,
         "sources.stellar_evolution.contiguous_star_batch",
         m_contiguous_star_batch,
-        false);
+        m_contiguous_star_batch_reservation.committed());
     add_container(
         core::MemorySubsystem::kScratch,
         core::MemoryClass::kPhaseResident,
@@ -1018,15 +1024,34 @@ class SourceRuntimeImpl final : public SourceRuntime {
     const std::size_t active_star_count = all_stars_active
         ? context.state.star_particles.size()
         : m_active_star_indices.size();
-    constexpr std::size_t k_feedback_event_batch_max = 4096U;
-    const std::size_t required_event_capacity = std::min<std::size_t>(
-        active_star_count, k_feedback_event_batch_max);
     const std::size_t feedback_index_bytes_size = active_star_count == 0U
         ? 0U
         : core::checkedSizeMultiply(
               context.state.cells.size(),
               sizeof(std::uint32_t),
               "stellar-feedback spatial-index staging");
+    std::size_t feedback_batch_max = std::min<std::size_t>(
+        active_star_count, k_feedback_event_batch_max);
+    if (m_memory_governor != nullptr && feedback_batch_max != 0U) {
+      const core::DeterministicBatchSizingResult sizing =
+          core::selectDeterministicBatchSize(
+              m_memory_governor->snapshot(),
+              core::DeterministicBatchSizingPolicy{
+                  .requested_max_items = static_cast<std::uint64_t>(feedback_batch_max),
+                  .bytes_per_item = k_feedback_batch_bytes_per_star,
+                  .fixed_reserve_bytes = static_cast<std::uint64_t>(feedback_index_bytes_size),
+                  .minimum_items = 1U,
+                  .alignment_items = 1U,
+                  .headroom_use_basis_points = 10000U,
+              });
+      if (sizing.selected_items == 0U) {
+        throw std::runtime_error(
+            "stellar-feedback headroom cannot admit one evolution/event item after spatial-index staging");
+      }
+      feedback_batch_max = core::checkedIntegralNarrow<std::size_t>(
+          sizing.selected_items, "stellar-feedback selected batch size");
+    }
+    const std::size_t required_event_capacity = feedback_batch_max;
     const std::size_t event_bytes_size =
         required_event_capacity > m_feedback_events.capacity()
         ? core::checkedSizeMultiply(
@@ -1034,8 +1059,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
               sizeof(physics::StellarFeedbackEvent),
               "stellar-feedback event batch")
         : 0U;
+    const std::size_t contiguous_star_bytes_size =
+        required_event_capacity > m_contiguous_star_batch.capacity()
+        ? core::checkedSizeMultiply(
+              required_event_capacity, sizeof(std::uint32_t),
+              "stellar-feedback contiguous star batch")
+        : 0U;
     core::MemoryReservation feedback_index_rebuild_reservation;
     core::MemoryReservation replacement_event_reservation;
+    core::MemoryReservation replacement_contiguous_star_reservation;
     std::exception_ptr reservation_failure;
     try {
       if (m_memory_governor != nullptr && feedback_index_bytes_size != 0U) {
@@ -1049,6 +1081,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
             core::MemoryClass::kPhaseResident,
             static_cast<std::uint64_t>(event_bytes_size),
             "sources.stellar_feedback.event_batch");
+      }
+      if (m_memory_governor != nullptr && contiguous_star_bytes_size != 0U) {
+        replacement_contiguous_star_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            static_cast<std::uint64_t>(contiguous_star_bytes_size),
+            "sources.stellar_feedback.contiguous_star_batch");
       }
     } catch (...) {
       reservation_failure = std::current_exception();
@@ -1068,6 +1106,9 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
     if (replacement_event_reservation.pending()) {
       replacement_event_reservation.commit();
+    }
+    if (replacement_contiguous_star_reservation.pending()) {
+      replacement_contiguous_star_reservation.commit();
     }
     const double elapsed_years = elapsedStellarEvolutionYears(context);
 
@@ -1137,12 +1178,19 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_feedback_event_reservation = std::move(replacement_event_reservation);
       }
     }
-    m_contiguous_star_batch.reserve(required_event_capacity);
+    if (required_event_capacity > m_contiguous_star_batch.capacity()) {
+      m_contiguous_star_batch.reserve(required_event_capacity);
+      if (m_memory_governor != nullptr) {
+        m_contiguous_star_batch_reservation.release();
+        m_contiguous_star_batch_reservation =
+            std::move(replacement_contiguous_star_reservation);
+      }
+    }
     for (std::size_t batch_begin = 0U;
          batch_begin < active_star_count;
-         batch_begin += k_feedback_event_batch_max) {
+         batch_begin += feedback_batch_max) {
       const std::size_t batch_size = std::min<std::size_t>(
-          k_feedback_event_batch_max, active_star_count - batch_begin);
+          feedback_batch_max, active_star_count - batch_begin);
       std::span<const std::uint32_t> star_batch;
       if (all_stars_active) {
         m_contiguous_star_batch.resize(batch_size);
@@ -1155,6 +1203,16 @@ class SourceRuntimeImpl final : public SourceRuntime {
       } else {
         star_batch = std::span<const std::uint32_t>(m_active_star_indices)
             .subspan(batch_begin, batch_size);
+      }
+      core::MemoryReservation evolution_batch_reservation;
+      if (m_memory_governor != nullptr) {
+        evolution_batch_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            static_cast<std::uint64_t>(core::checkedSizeMultiply(
+                batch_size, sizeof(physics::StellarEvolutionStarBudget),
+                "stellar-evolution bounded report batch")),
+            "sources.stellar_evolution.report_batch");
+        evolution_batch_reservation.commit();
       }
       const physics::StellarEvolutionStepReport evolution_report =
           m_stellar_evolution.evaluateElapsedYears(
@@ -1522,6 +1580,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
   core::MemoryGovernor* m_memory_governor = nullptr;
   core::MemoryReservation m_feedback_index_reservation;
   core::MemoryReservation m_feedback_event_reservation;
+  core::MemoryReservation m_contiguous_star_batch_reservation;
   core::MemoryReservation m_star_formation_input_reservation;
   core::MemoryReservation m_diffusion_phase_reservation;
   core::MemoryReservation m_diffusion_faces_reservation;

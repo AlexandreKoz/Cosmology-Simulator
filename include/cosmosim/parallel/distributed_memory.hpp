@@ -32,6 +32,9 @@ struct DecompositionWorkComponents {
   double amr_patch_cost = 0.0;
   double active_fraction_cost = 0.0;
   double memory_pressure_cost = 0.0;
+  double transient_memory_cost = 0.0;
+  double source_event_cost = 0.0;
+  double communication_cost = 0.0;
   double gpu_occupancy_cost = 0.0;
   double generic_work_cost = 0.0;
   bool has_explicit_components = false;
@@ -90,6 +93,10 @@ struct DecompositionConfig {
   double work_weight = 0.0;
   double memory_weight = 0.0;
   DecompositionWeightCoefficients component_weights{};
+  // Hard rank-local envelope for decomposition-owned persistent state plus the
+  // declared transient reserve. Zero disables this guard for compatibility.
+  std::uint64_t max_rank_memory_bytes = 0;
+  std::uint64_t rank_transient_reserve_bytes = 0;
   bool prefer_component_work_model = true;
 };
 
@@ -111,6 +118,9 @@ struct LoadBalanceMetrics {
   std::vector<double> amr_patch_cost_by_rank;
   std::vector<double> active_fraction_cost_by_rank;
   std::vector<double> memory_pressure_cost_by_rank;
+  std::vector<double> transient_memory_cost_by_rank;
+  std::vector<double> source_event_cost_by_rank;
+  std::vector<double> communication_cost_by_rank;
   std::vector<double> gpu_occupancy_cost_by_rank;
   std::vector<double> generic_work_cost_by_rank;
   double mean_weighted_load = 0.0;
@@ -119,6 +129,9 @@ struct LoadBalanceMetrics {
   std::uint64_t total_memory_bytes = 0;
   std::uint64_t max_memory_bytes = 0;
   double memory_imbalance_ratio = 0.0;
+  std::vector<std::uint64_t> peak_memory_bytes_by_rank;
+  std::uint64_t max_peak_memory_bytes = 0;
+  double peak_memory_imbalance_ratio = 0.0;
 };
 
 struct DecompositionPlan {
@@ -666,11 +679,13 @@ class MpiContext {
   [[nodiscard]] int worldSize() const noexcept;
   [[nodiscard]] int worldRank() const noexcept;
   [[nodiscard]] int localRank() const noexcept;
+  [[nodiscard]] int localSize() const noexcept;
   void validateExpectedWorldSizeOrThrow(int expected_world_size) const;
 
   [[nodiscard]] double allreduceSumDouble(double local_value) const;
   [[nodiscard]] std::uint64_t allreduceSumUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceMaxUint64(std::uint64_t local_value) const;
+  [[nodiscard]] std::uint64_t allreduceMinUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceXorUint64(std::uint64_t local_value) const;
 
   // Collective preflight gate used after any rank-local preparation that can
@@ -700,6 +715,7 @@ class MpiContext {
   int m_world_size = 1;
   int m_world_rank = 0;
   int m_local_rank = 0;
+  int m_local_size = 1;
 };
 
 struct BlockingGhostExchangeResult {

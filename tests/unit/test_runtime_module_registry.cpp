@@ -77,6 +77,57 @@ void expectInvalid(auto&& callback) {
   assert(threw);
 }
 
+
+void testTaskDependenciesAndConcurrencyGuards(
+    const cosmosim::workflows::RuntimeModuleFactoryContext& context,
+    std::vector<std::string>* trace) {
+  using namespace cosmosim::workflows;
+
+  RuntimeModuleRegistry dependency_registry;
+  auto producer = makeAnalysisModule("producer", 0, 10, {}, trace);
+  auto consumer = makeAnalysisModule("consumer", 1, 20, {}, trace);
+  consumer.stage_tasks.front().dependencies = {"producer::producer.analysis"};
+  dependency_registry.registerModule(std::move(producer));
+  dependency_registry.registerModule(std::move(consumer));
+  auto dependency_plan = dependency_registry.freezeAndInstantiate(context);
+  assert(dependency_plan.taskCount() == 2U);
+
+  RuntimeModuleRegistry invalid_order_registry;
+  auto early = makeAnalysisModule("early", 0, 10, {}, trace);
+  auto late = makeAnalysisModule("late_dependency", 1, 20, {}, trace);
+  early.stage_tasks.front().dependencies = {"late_dependency::late_dependency.analysis"};
+  invalid_order_registry.registerModule(std::move(early));
+  invalid_order_registry.registerModule(std::move(late));
+  expectInvalid([&]() { (void)invalid_order_registry.freezeAndInstantiate(context); });
+
+  RuntimeTaskDeclaration bandwidth_a;
+  bandwidth_a.task_id = "bandwidth_a";
+  bandwidth_a.resources = {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead}};
+  bandwidth_a.scheduling.estimated_peak_bytes = 256U;
+  bandwidth_a.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kHigh;
+
+  RuntimeTaskDeclaration bandwidth_b;
+  bandwidth_b.task_id = "bandwidth_b";
+  bandwidth_b.resources = {{RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead}};
+  bandwidth_b.scheduling.estimated_peak_bytes = 256U;
+  bandwidth_b.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kHigh;
+
+  cosmosim::core::MemoryGovernorSnapshot roomy;
+  roomy.headroom_bytes = 1024U;
+  assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+
+  bandwidth_a.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kModerate;
+  bandwidth_b.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kModerate;
+  assert(runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+
+  cosmosim::core::MemoryGovernorSnapshot tight = roomy;
+  tight.headroom_bytes = 400U;
+  assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, tight));
+
+  bandwidth_b.resources = {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kWrite}};
+  assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+}
+
 }  // namespace
 
 int main() {
@@ -90,6 +141,7 @@ int main() {
   cosmosim::workflows::RuntimeModuleFactoryContext context{services};
 
   std::vector<std::string> trace;
+  testTaskDependenciesAndConcurrencyGuards(context, &trace);
   cosmosim::workflows::RuntimeModuleRegistry registry;
   registry.registerModule(makeAnalysisModule("base", 20, 20, {}, &trace));
   // The prerequisite fixes construction order while task ordinals independently

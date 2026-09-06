@@ -89,17 +89,24 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
     const bool defer_optional_analysis =
         memory_pressure == core::MemoryPressure::kRed ||
         memory_pressure == core::MemoryPressure::kTrip;
-    const bool science_light_due =
+    const bool science_light_due_now =
         step % static_cast<std::uint64_t>(
                    m_config.analysis.science_light_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy !=
             core::AnalysisConfig::DiagnosticsExecutionPolicy::kRunHealthOnly;
-    const bool science_heavy_due =
+    const bool science_heavy_due_now =
         step % static_cast<std::uint64_t>(
                    m_config.analysis.science_heavy_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy ==
             core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
-    if (defer_optional_analysis && (science_light_due || science_heavy_due)) {
+    const bool science_light_requested =
+        science_light_due_now || m_science_light_deferred;
+    const bool science_heavy_requested =
+        science_heavy_due_now || m_science_heavy_deferred;
+    if (defer_optional_analysis &&
+        (science_light_requested || science_heavy_requested)) {
+      m_science_light_deferred = science_light_requested;
+      m_science_heavy_deferred = science_heavy_requested;
       m_services.profiler.recordEvent(core::RuntimeEvent{
           .event_kind = "analysis.memory_pressure_deferral",
           .severity = core::RuntimeEventSeverity::kInfo,
@@ -110,16 +117,39 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
           .message = "optional science diagnostics deferred under process memory pressure",
           .payload = {
               {"pressure", std::string(core::memoryPressureLabel(memory_pressure))},
-              {"science_light_due", science_light_due ? "true" : "false"},
-              {"science_heavy_due", science_heavy_due ? "true" : "false"},
+              {"science_light_due", science_light_due_now ? "true" : "false"},
+              {"science_heavy_due", science_heavy_due_now ? "true" : "false"},
+              {"science_light_pending", m_science_light_deferred ? "true" : "false"},
+              {"science_heavy_pending", m_science_heavy_deferred ? "true" : "false"},
           },
       });
     } else {
-      if (science_light_due) {
+      const bool science_light_catchup =
+          m_science_light_deferred && !science_light_due_now;
+      const bool science_heavy_catchup =
+          m_science_heavy_deferred && !science_heavy_due_now;
+      if (science_light_requested) {
         run(analysis::DiagnosticClass::kScienceLight);
+        m_science_light_deferred = false;
       }
-      if (science_heavy_due) {
+      if (science_heavy_requested) {
         run(analysis::DiagnosticClass::kScienceHeavy);
+        m_science_heavy_deferred = false;
+      }
+      if (science_light_catchup || science_heavy_catchup) {
+        m_services.profiler.recordEvent(core::RuntimeEvent{
+            .event_kind = "analysis.memory_pressure_catchup",
+            .severity = core::RuntimeEventSeverity::kInfo,
+            .subsystem = "analysis.diagnostics",
+            .step_index = step,
+            .simulation_time_code = context.timeline_step.time_end_code,
+            .scale_factor = scale_factor,
+            .message = "deferred optional science diagnostics completed after pressure eased",
+            .payload = {
+                {"science_light_catchup", science_light_catchup ? "true" : "false"},
+                {"science_heavy_catchup", science_heavy_catchup ? "true" : "false"},
+            },
+        });
       }
     }
     m_diagnostics.enforceRetentionPolicy();
@@ -130,6 +160,8 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
   std::vector<std::string>* m_stage_sequence = nullptr;
   const RuntimeServices& m_services;
   analysis::DiagnosticsEngine m_diagnostics;
+  bool m_science_light_deferred = false;
+  bool m_science_heavy_deferred = false;
 };
 
 }  // namespace

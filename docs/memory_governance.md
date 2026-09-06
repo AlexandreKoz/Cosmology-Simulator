@@ -251,3 +251,44 @@ pre-mutation rejection. The pending-register representation does not encode all
 fine-contributor topology identities, so this campaign deliberately uses the
 strong global-drain contract rather than attempting an unsafe intersection-local
 remap.
+
+## M2D memory-aware runtime scheduling addendum (2026-09-06)
+
+M2D extends the existing process governor from allocation admission into
+explicit deterministic high-water scheduling without creating a second memory
+authority. The governor now supplies checked headroom-derived batch sizing used
+by hydro, bounded remote-gas communication, and stellar evolution/feedback.
+Each selection is deterministic for a given snapshot and policy; unlimited
+budget preserves the configured/requested maximum.
+
+The frozen `RuntimeModuleRegistry` now also records major-task dependency,
+release-boundary, optionality, declared peak, and coarse compute/DRAM/MPI
+pressure metadata. The accepted serial stage dispatcher remains the numerical
+execution authority. A conservative overlap predicate rejects resource-write
+conflicts, simultaneous high pressure in the same limiting resource class, and
+known memory peaks that exceed current governor headroom. This establishes a
+safe concurrency contract without silently changing scientific order.
+
+SFC decomposition now accepts a hard per-rank peak-memory envelope in addition
+to its soft memory-pressure cost. The envelope is derived collectively from the
+most constrained process-governor headroom and includes a conservative
+major-task transient reserve. Memory-unsafe candidate partitions are rejected
+before migration, and a current hard violation forces rebalance independently
+of ordinary soft load thresholds. Rank maximum is therefore a safety constraint,
+not an average optimization target.
+
+`MpiContext` records node-local MPI size/rank and the workflow publishes
+rank/thread topology in `runtime.topology`. M2D does not introduce MPI shared
+windows or a new node-memory authority; any future cross-rank shared resource
+must demonstrate measurable bytes/runtime payoff plus NUMA and lifetime safety.
+
+Optional science diagnostics remain subordinate to the hard memory ceiling, but
+a transient Red/Trip episode no longer drops a due diagnostic permanently. The
+analysis runtime retains only two owner-local pending bits (light/heavy science)
+and retries them on the first later AnalysisHooks stage whose governor pressure
+is below Red. A failed/unsafe pressure state still defers rather than forcing the
+work through the ceiling; successful catch-up clears the pending bit. This
+pending state is runtime scheduling metadata, not scientific/restart authority.
+
+Detailed implementation and validation evidence is in
+`docs/repair/m2d_memory_aware_runtime_20260906.md`.

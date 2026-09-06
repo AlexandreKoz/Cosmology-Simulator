@@ -632,3 +632,20 @@ admission authority. Governed entries are excluded from reconciled baseline
 owned bytes because their physical capacity is already represented by the
 governor committed counter; the two surfaces must not be summed as independent
 physical allocations. See `docs/memory_governance.md`.
+
+## 2026-09-06 M2D runtime scheduling authority addendum
+
+| Runtime fact | Live authority | Transient policy/view | Invalidation or release rule |
+| --- | --- | --- | --- |
+| Process byte admission and deterministic batch headroom | One composition-root `core::MemoryGovernor` | `MemoryGovernorSnapshot` plus `DeterministicBatchSizingPolicy/Result` | Re-evaluate from a fresh snapshot at each task/batch decision; a sizing result never owns bytes and does not replace the required reservation for actual residency. |
+| Major production task order and dependency graph | Frozen `workflows::RuntimeExecutionPlan` from `RuntimeModuleRegistry` | `RuntimeTaskSchedulingProfile`, dependency keys, and `runtimeTasksMayOverlap()` | Registry freeze validates dependencies against the already-authoritative order. The current dispatcher remains serial; scheduling metadata is not restart/scientific state. |
+| Per-rank decomposition safety | Existing Morton/SFC decomposition and its `DecompositionConfig` | Hard `max_rank_memory_bytes`, transient reserve, expanded work-component telemetry | Recompute from current ownership and fresh process-governor headroom before rebalance. Any memory-unsafe target is rejected before migration; rank maximum, not mean, is the safety quantity. |
+| Node/rank/thread topology evidence | `parallel::MpiContext` plus OpenMP runtime configuration | `runtime.topology` profiler event | Rebuilt at process/runtime initialization. It is diagnostic/tuning evidence, not a second scheduling or memory authority. |
+| Deferred optional science diagnostics | `AnalysisRuntime` owner lifetime | Two pending booleans for light/heavy science plus deferral/catch-up profiler events | Set only when a due/pending optional diagnostic is blocked by Red/Trip pressure; cleared only after successful execution at a later non-Red analysis hook. Not serialized and never allowed to override the hard memory ceiling. |
+
+The M2D task graph does not supersede `RungZeroTimeState` scheduler authority or
+change accepted kick/drift/hydro/source ordering. It describes resource lifetime
+and overlap legality around the existing scientific schedule. The decomposition
+hard cap likewise constrains ownership placement; it does not become a second
+whole-process memory ledger and must not be summed independently with governor
+baseline/commitment accounting.

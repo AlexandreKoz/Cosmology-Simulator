@@ -49,20 +49,21 @@ namespace {
   return true;
 }
 
-[[nodiscard]] int queryNodeLocalRank(int fallback_world_rank) {
+void queryNodeLocalTopology(int fallback_world_rank, int& local_rank, int& local_size) {
   MPI_Comm local_comm = MPI_COMM_NULL;
   const int split_result = MPI_Comm_split_type(
       MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &local_comm);
   if (split_result != MPI_SUCCESS || local_comm == MPI_COMM_NULL) {
-    throw std::runtime_error("MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) failed while determining node-local rank");
+    throw std::runtime_error("MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) failed while determining node-local topology");
   }
-  int local_rank = fallback_world_rank;
+  local_rank = fallback_world_rank;
+  local_size = 1;
   const int rank_result = MPI_Comm_rank(local_comm, &local_rank);
+  const int size_result = MPI_Comm_size(local_comm, &local_size);
   const int free_result = MPI_Comm_free(&local_comm);
-  if (rank_result != MPI_SUCCESS || free_result != MPI_SUCCESS) {
+  if (rank_result != MPI_SUCCESS || size_result != MPI_SUCCESS || free_result != MPI_SUCCESS) {
     throw std::runtime_error("MPI node-local communicator query failed");
   }
-  return local_rank;
 }
 #endif
 
@@ -102,6 +103,16 @@ void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
     return std::nextafter(1.0, 0.0);
   }
   return value;
+}
+
+[[nodiscard]] std::uint64_t checkedUint64Add(
+    std::uint64_t lhs,
+    std::uint64_t rhs,
+    std::string_view context) {
+  if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
+    throw std::overflow_error(std::string(context) + ": uint64 addition overflows");
+  }
+  return lhs + rhs;
 }
 
 [[nodiscard]] std::uint32_t quantize10bit(double coordinate, double min_coord, double max_coord) {
@@ -145,6 +156,9 @@ void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
     components.amr_patch_cost = std::max(0.0, components.amr_patch_cost);
     components.active_fraction_cost = std::max(0.0, components.active_fraction_cost);
     components.memory_pressure_cost = std::max(0.0, components.memory_pressure_cost);
+    components.transient_memory_cost = std::max(0.0, components.transient_memory_cost);
+    components.source_event_cost = std::max(0.0, components.source_event_cost);
+    components.communication_cost = std::max(0.0, components.communication_cost);
     components.gpu_occupancy_cost = std::max(0.0, components.gpu_occupancy_cost);
     components.generic_work_cost = std::max(0.0, components.generic_work_cost);
     return components;
@@ -158,6 +172,9 @@ void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
   components.tree_interaction_cost = static_cast<double>(item.remote_tree_interactions_recent);
   components.active_fraction_cost = static_cast<double>(item.active_target_count_recent);
   components.memory_pressure_cost = static_cast<double>(item.memory_bytes);
+  components.transient_memory_cost = 0.0;
+  components.source_event_cost = 0.0;
+  components.communication_cost = static_cast<double>(item.remote_tree_interactions_recent);
   components.generic_work_cost = std::max(0.0, item.work_units);
   return components;
 }
@@ -171,9 +188,9 @@ void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
       weights.pm_mesh * components.pm_mesh_cost +
       weights.amr_patch * components.amr_patch_cost +
       weights.active_fraction * components.active_fraction_cost +
-      weights.memory_pressure * components.memory_pressure_cost +
+      weights.memory_pressure * (components.memory_pressure_cost + components.transient_memory_cost) +
       weights.gpu_occupancy * components.gpu_occupancy_cost +
-      weights.generic_work * components.generic_work_cost;
+      weights.generic_work * (components.generic_work_cost + components.source_event_cost + components.communication_cost);
 }
 
 [[nodiscard]] double legacyWeightedLoad(const DecompositionItem& item, const DecompositionConfig& config) {
@@ -254,6 +271,9 @@ void addWorkComponentsToMetrics(
   metrics.amr_patch_cost_by_rank[rank] += sign * components.amr_patch_cost;
   metrics.active_fraction_cost_by_rank[rank] += sign * components.active_fraction_cost;
   metrics.memory_pressure_cost_by_rank[rank] += sign * components.memory_pressure_cost;
+  metrics.transient_memory_cost_by_rank[rank] += sign * components.transient_memory_cost;
+  metrics.source_event_cost_by_rank[rank] += sign * components.source_event_cost;
+  metrics.communication_cost_by_rank[rank] += sign * components.communication_cost;
   metrics.gpu_occupancy_cost_by_rank[rank] += sign * components.gpu_occupancy_cost;
   metrics.generic_work_cost_by_rank[rank] += sign * components.generic_work_cost;
 }
@@ -440,7 +460,8 @@ bool GhostLayerEpoch::matches(const GhostLayerEpoch& expected) const noexcept {
 
 double DecompositionWorkComponents::rawTotal() const noexcept {
   return particle_count_cost + gas_cell_cost + tree_interaction_cost + pm_mesh_cost + amr_patch_cost +
-      active_fraction_cost + memory_pressure_cost + gpu_occupancy_cost + generic_work_cost;
+      active_fraction_cost + memory_pressure_cost + transient_memory_cost + source_event_cost +
+      communication_cost + gpu_occupancy_cost + generic_work_cost;
 }
 
 void validateOwnershipDescriptor(const OwnershipDescriptor& descriptor) {
@@ -521,6 +542,7 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.ranges_by_rank.assign(static_cast<std::size_t>(config.world_size), RankRange{});
   plan.metrics.weighted_load_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.memory_bytes_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
+  plan.metrics.peak_memory_bytes_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
   plan.metrics.owned_particles_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
   plan.metrics.active_targets_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
   plan.metrics.remote_tree_interactions_by_rank.assign(static_cast<std::size_t>(config.world_size), 0ULL);
@@ -531,6 +553,9 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
   plan.metrics.amr_patch_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.active_fraction_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.memory_pressure_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.transient_memory_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.source_event_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
+  plan.metrics.communication_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.gpu_occupancy_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
   plan.metrics.generic_work_cost_by_rank.assign(static_cast<std::size_t>(config.world_size), 0.0);
 
@@ -550,8 +575,42 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
     std::size_t current_rank = 0;
     std::size_t rank_begin = 0;
     double cumulative_load = 0.0;
+    std::uint64_t current_rank_memory_bytes = 0;
+    const bool enforce_rank_memory_limit = config.max_rank_memory_bytes != 0U;
+    if (enforce_rank_memory_limit && config.rank_transient_reserve_bytes >= config.max_rank_memory_bytes) {
+      throw std::invalid_argument(
+          "decomposition transient reserve must be smaller than the hard rank memory ceiling");
+    }
+    const std::uint64_t persistent_rank_limit = enforce_rank_memory_limit
+        ? config.max_rank_memory_bytes - config.rank_transient_reserve_bytes
+        : std::numeric_limits<std::uint64_t>::max();
 
     for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
+      const std::size_t original_index = keyed[sorted_pos].index;
+      const std::uint64_t item_memory_bytes = items[original_index].memory_bytes;
+      if (enforce_rank_memory_limit && item_memory_bytes > persistent_rank_limit) {
+        throw std::runtime_error(
+            "SFC decomposition cannot satisfy hard rank memory ceiling: one decomposition item exceeds the persistent allowance");
+      }
+
+      const bool rank_has_items = sorted_pos > rank_begin;
+      const bool would_exceed_memory = enforce_rank_memory_limit && rank_has_items &&
+          item_memory_bytes > persistent_rank_limit - current_rank_memory_bytes;
+      if (would_exceed_memory) {
+        if (current_rank + 1U >= active_rank_count) {
+          throw std::runtime_error(
+              "SFC decomposition cannot satisfy hard rank memory ceiling with the available ranks");
+        }
+        plan.ranges_by_rank[current_rank] = RankRange{
+            .begin_sorted = rank_begin,
+            .end_sorted = sorted_pos};
+        ++current_rank;
+        rank_begin = sorted_pos;
+        current_rank_memory_bytes = 0U;
+      }
+
+      current_rank_memory_bytes = checkedUint64Add(
+          current_rank_memory_bytes, item_memory_bytes, "SFC rank persistent memory accumulation");
       cumulative_load += keyed[sorted_pos].weighted_load;
       if (current_rank + 1 >= active_rank_count) {
         continue;
@@ -576,6 +635,7 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
           .end_sorted = sorted_pos + 1U};
       ++current_rank;
       rank_begin = sorted_pos + 1U;
+      current_rank_memory_bytes = 0U;
     }
 
     plan.ranges_by_rank[current_rank] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};
@@ -620,6 +680,29 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
                                  : (static_cast<double>(plan.metrics.total_memory_bytes) /
                                     static_cast<double>(plan.metrics.memory_bytes_by_rank.size()));
   plan.metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? (static_cast<double>(plan.metrics.max_memory_bytes) / mean_memory) : 0.0;
+  std::uint64_t total_peak_memory = 0U;
+  for (std::size_t rank = 0; rank < plan.metrics.memory_bytes_by_rank.size(); ++rank) {
+    const bool rank_has_work = plan.ranges_by_rank[rank].begin_sorted != plan.ranges_by_rank[rank].end_sorted;
+    plan.metrics.peak_memory_bytes_by_rank[rank] = rank_has_work
+        ? checkedUint64Add(plan.metrics.memory_bytes_by_rank[rank], config.rank_transient_reserve_bytes,
+                           "SFC rank peak memory metric")
+        : 0U;
+    total_peak_memory = checkedUint64Add(total_peak_memory, plan.metrics.peak_memory_bytes_by_rank[rank],
+                                         "SFC total peak memory metric");
+  }
+  const auto max_peak_it = std::max_element(
+      plan.metrics.peak_memory_bytes_by_rank.begin(), plan.metrics.peak_memory_bytes_by_rank.end());
+  plan.metrics.max_peak_memory_bytes =
+      (max_peak_it == plan.metrics.peak_memory_bytes_by_rank.end()) ? 0U : *max_peak_it;
+  const double mean_peak_memory = plan.metrics.peak_memory_bytes_by_rank.empty()
+      ? 0.0
+      : static_cast<double>(total_peak_memory) / static_cast<double>(plan.metrics.peak_memory_bytes_by_rank.size());
+  plan.metrics.peak_memory_imbalance_ratio = mean_peak_memory > 0.0
+      ? static_cast<double>(plan.metrics.max_peak_memory_bytes) / mean_peak_memory
+      : 0.0;
+  if (config.max_rank_memory_bytes != 0U && plan.metrics.max_peak_memory_bytes > config.max_rank_memory_bytes) {
+    throw std::logic_error("SFC decomposition produced a rank above its hard memory ceiling");
+  }
 
   return plan;
 }
@@ -839,6 +922,7 @@ LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
   const std::size_t rank_count = static_cast<std::size_t>(config.world_size);
   metrics.weighted_load_by_rank.assign(rank_count, 0.0);
   metrics.memory_bytes_by_rank.assign(rank_count, 0ULL);
+  metrics.peak_memory_bytes_by_rank.assign(rank_count, 0ULL);
   metrics.owned_particles_by_rank.assign(rank_count, 0ULL);
   metrics.active_targets_by_rank.assign(rank_count, 0ULL);
   metrics.remote_tree_interactions_by_rank.assign(rank_count, 0ULL);
@@ -849,6 +933,9 @@ LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
   metrics.amr_patch_cost_by_rank.assign(rank_count, 0.0);
   metrics.active_fraction_cost_by_rank.assign(rank_count, 0.0);
   metrics.memory_pressure_cost_by_rank.assign(rank_count, 0.0);
+  metrics.transient_memory_cost_by_rank.assign(rank_count, 0.0);
+  metrics.source_event_cost_by_rank.assign(rank_count, 0.0);
+  metrics.communication_cost_by_rank.assign(rank_count, 0.0);
   metrics.gpu_occupancy_cost_by_rank.assign(rank_count, 0.0);
   metrics.generic_work_cost_by_rank.assign(rank_count, 0.0);
 
@@ -884,6 +971,25 @@ LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
       : (static_cast<double>(metrics.total_memory_bytes) / static_cast<double>(metrics.memory_bytes_by_rank.size()));
   metrics.memory_imbalance_ratio =
       (mean_memory > 0.0) ? (static_cast<double>(metrics.max_memory_bytes) / mean_memory) : 0.0;
+  std::uint64_t total_peak_memory = 0U;
+  for (std::size_t rank = 0; rank < rank_count; ++rank) {
+    const bool rank_has_work = metrics.weighted_load_by_rank[rank] > 0.0 || metrics.memory_bytes_by_rank[rank] != 0U;
+    metrics.peak_memory_bytes_by_rank[rank] = rank_has_work
+        ? checkedUint64Add(metrics.memory_bytes_by_rank[rank], config.rank_transient_reserve_bytes,
+                           "current ownership rank peak memory")
+        : 0U;
+    total_peak_memory = checkedUint64Add(total_peak_memory, metrics.peak_memory_bytes_by_rank[rank],
+                                         "current ownership total peak memory");
+  }
+  const auto max_peak_it = std::max_element(metrics.peak_memory_bytes_by_rank.begin(), metrics.peak_memory_bytes_by_rank.end());
+  metrics.max_peak_memory_bytes =
+      (max_peak_it == metrics.peak_memory_bytes_by_rank.end()) ? 0U : *max_peak_it;
+  const double mean_peak_memory = rank_count == 0U
+      ? 0.0
+      : static_cast<double>(total_peak_memory) / static_cast<double>(rank_count);
+  metrics.peak_memory_imbalance_ratio = mean_peak_memory > 0.0
+      ? static_cast<double>(metrics.max_peak_memory_bytes) / mean_peak_memory
+      : 0.0;
   return metrics;
 }
 
@@ -913,7 +1019,9 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
       rebalance_config.imbalance_trigger_ratio;
   const bool memory_imbalanced = rebalance.current_metrics.memory_imbalance_ratio >=
       rebalance_config.memory_trigger_ratio;
-  if (!load_imbalanced && !memory_imbalanced) {
+  const bool hard_memory_violated = decomposition_config.max_rank_memory_bytes != 0U &&
+      rebalance.current_metrics.max_peak_memory_bytes > decomposition_config.max_rank_memory_bytes;
+  if (!load_imbalanced && !memory_imbalanced && !hard_memory_violated) {
     rebalance.reason = "below_rebalance_threshold";
     return rebalance;
   }
@@ -932,7 +1040,7 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
     }
     const double item_load = weightedLoad(items[item_index], decomposition_config);
     if (items[item_index].kind == DecompositionEntityKind::kParticle && rebalance_config.allow_particle_migration) {
-      if (max_migrated_load > 0.0 && rebalance.migrated_load + item_load > max_migrated_load &&
+      if (!hard_memory_violated && max_migrated_load > 0.0 && rebalance.migrated_load + item_load > max_migrated_load &&
           !rebalance.particle_migrations.empty()) {
         continue;
       }
@@ -957,8 +1065,9 @@ RuntimeRebalancePlan buildRuntimeRebalancePlan(
 
   rebalance.should_rebalance = !rebalance.particle_migrations.empty() || !rebalance.amr_patch_ownership_updates.empty();
   rebalance.migrated_load_fraction = (total_load > 0.0) ? (rebalance.migrated_load / total_load) : 0.0;
-  rebalance.reason = load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
-      (load_imbalanced ? "load_imbalance" : "memory_imbalance");
+  rebalance.reason = hard_memory_violated ? "rank_memory_limit" :
+      (load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
+       (load_imbalanced ? "load_imbalance" : "memory_imbalance"));
   return rebalance;
 }
 
@@ -1125,6 +1234,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
     metrics.weighted_load_by_rank.assign(rank_count, 0.0);
     metrics.memory_bytes_by_rank.assign(rank_count, 0ULL);
+    metrics.peak_memory_bytes_by_rank.assign(rank_count, 0ULL);
     metrics.owned_particles_by_rank.assign(rank_count, 0ULL);
     metrics.active_targets_by_rank.assign(rank_count, 0ULL);
     metrics.remote_tree_interactions_by_rank.assign(rank_count, 0ULL);
@@ -1135,6 +1245,9 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     metrics.amr_patch_cost_by_rank.assign(rank_count, 0.0);
     metrics.active_fraction_cost_by_rank.assign(rank_count, 0.0);
     metrics.memory_pressure_cost_by_rank.assign(rank_count, 0.0);
+    metrics.transient_memory_cost_by_rank.assign(rank_count, 0.0);
+    metrics.source_event_cost_by_rank.assign(rank_count, 0.0);
+    metrics.communication_cost_by_rank.assign(rank_count, 0.0);
     metrics.gpu_occupancy_cost_by_rank.assign(rank_count, 0.0);
     metrics.generic_work_cost_by_rank.assign(rank_count, 0.0);
     return metrics;
@@ -1149,7 +1262,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     metrics.remote_tree_interactions_by_rank[rank] += item.remote_tree_interactions_recent;
     addWorkComponentsToMetrics(metrics, rank, effectiveWorkComponents(item), 1.0);
   };
-  [[maybe_unused]] auto finalize_metrics = [](LoadBalanceMetrics& metrics) {
+  [[maybe_unused]] auto finalize_metrics = [&](LoadBalanceMetrics& metrics) {
     const auto max_load_it = std::max_element(metrics.weighted_load_by_rank.begin(), metrics.weighted_load_by_rank.end());
     metrics.max_weighted_load = (max_load_it == metrics.weighted_load_by_rank.end()) ? 0.0 : *max_load_it;
     metrics.mean_weighted_load = metrics.weighted_load_by_rank.empty()
@@ -1165,6 +1278,25 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
         ? 0.0
         : static_cast<double>(metrics.total_memory_bytes) / static_cast<double>(metrics.memory_bytes_by_rank.size());
     metrics.memory_imbalance_ratio = (mean_memory > 0.0) ? static_cast<double>(metrics.max_memory_bytes) / mean_memory : 0.0;
+    std::uint64_t total_peak_memory = 0U;
+    for (std::size_t rank = 0; rank < metrics.memory_bytes_by_rank.size(); ++rank) {
+      const bool rank_has_work = metrics.weighted_load_by_rank[rank] > 0.0 || metrics.memory_bytes_by_rank[rank] != 0U;
+      metrics.peak_memory_bytes_by_rank[rank] = rank_has_work
+          ? checkedUint64Add(metrics.memory_bytes_by_rank[rank], decomposition_config.rank_transient_reserve_bytes,
+                             "distributed decomposition rank peak memory")
+          : 0U;
+      total_peak_memory = checkedUint64Add(total_peak_memory, metrics.peak_memory_bytes_by_rank[rank],
+                                           "distributed decomposition total peak memory");
+    }
+    const auto max_peak_it = std::max_element(metrics.peak_memory_bytes_by_rank.begin(), metrics.peak_memory_bytes_by_rank.end());
+    metrics.max_peak_memory_bytes =
+        (max_peak_it == metrics.peak_memory_bytes_by_rank.end()) ? 0U : *max_peak_it;
+    const double mean_peak_memory = metrics.peak_memory_bytes_by_rank.empty()
+        ? 0.0
+        : static_cast<double>(total_peak_memory) / static_cast<double>(metrics.peak_memory_bytes_by_rank.size());
+    metrics.peak_memory_imbalance_ratio = mean_peak_memory > 0.0
+        ? static_cast<double>(metrics.max_peak_memory_bytes) / mean_peak_memory
+        : 0.0;
   };
 
   LoadBalanceMetrics local_current = zero_metrics();
@@ -1233,6 +1365,9 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     allreduce_double_vector(metrics.amr_patch_cost_by_rank);
     allreduce_double_vector(metrics.active_fraction_cost_by_rank);
     allreduce_double_vector(metrics.memory_pressure_cost_by_rank);
+    allreduce_double_vector(metrics.transient_memory_cost_by_rank);
+    allreduce_double_vector(metrics.source_event_cost_by_rank);
+    allreduce_double_vector(metrics.communication_cost_by_rank);
     allreduce_double_vector(metrics.gpu_occupancy_cost_by_rank);
     allreduce_double_vector(metrics.generic_work_cost_by_rank);
     finalize_metrics(metrics);
@@ -1261,6 +1396,17 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
       rebalance.current_metrics.weighted_imbalance_ratio >= rebalance_config.imbalance_trigger_ratio;
   const bool memory_imbalanced =
       rebalance.current_metrics.memory_imbalance_ratio >= rebalance_config.memory_trigger_ratio;
+  const bool hard_memory_violated = decomposition_config.max_rank_memory_bytes != 0U &&
+      rebalance.current_metrics.max_peak_memory_bytes > decomposition_config.max_rank_memory_bytes;
+  const bool target_memory_safe = decomposition_config.max_rank_memory_bytes == 0U ||
+      rebalance.target_decomposition.metrics.max_peak_memory_bytes <= decomposition_config.max_rank_memory_bytes;
+  if (!target_memory_safe) {
+    rebalance.particle_migrations.clear();
+    rebalance.amr_patch_ownership_updates.clear();
+    rebalance.should_rebalance = false;
+    rebalance.reason = "target_rank_memory_limit_exceeded";
+    return rebalance;
+  }
   const bool local_has_actionable_migration =
       !rebalance.particle_migrations.empty() ||
       !rebalance.amr_patch_ownership_updates.empty();
@@ -1272,14 +1418,15 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
       mpi_context.allreduceSumUint64(local_has_actionable_migration ? 1ULL : 0ULL);
   if (global_entity_count == 0U) {
     rebalance.reason = "empty_decomposition";
-  } else if (!load_imbalanced && !memory_imbalanced) {
+  } else if (!load_imbalanced && !memory_imbalanced && !hard_memory_violated) {
     rebalance.reason = "below_rebalance_threshold";
   } else if (rebalance.migrated_load_fraction > rebalance_config.max_migrated_load_fraction &&
              rebalance_config.max_migrated_load_fraction < 1.0) {
     rebalance.reason = "migration_fraction_limited";
   } else {
-    rebalance.reason = load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
-        (load_imbalanced ? "load_imbalance" : "memory_imbalance");
+    rebalance.reason = hard_memory_violated ? "rank_memory_limit" :
+        (load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
+         (load_imbalanced ? "load_imbalance" : "memory_imbalance"));
     rebalance.should_rebalance =
         rebalance.global_entities_moved > 0U &&
         actionable_migration_rank_count > 0U;
@@ -2982,6 +3129,9 @@ void recordDistributedProfiling(
   record_component_total("parallel.weight_component_amr_patch", metrics.amr_patch_cost_by_rank);
   record_component_total("parallel.weight_component_active_fraction", metrics.active_fraction_cost_by_rank);
   record_component_total("parallel.weight_component_memory_pressure", metrics.memory_pressure_cost_by_rank);
+  record_component_total("parallel.weight_component_transient_memory", metrics.transient_memory_cost_by_rank);
+  record_component_total("parallel.weight_component_source_event", metrics.source_event_cost_by_rank);
+  record_component_total("parallel.weight_component_communication", metrics.communication_cost_by_rank);
   record_component_total("parallel.weight_component_gpu_occupancy", metrics.gpu_occupancy_cost_by_rank);
 
   if (!metrics.weighted_load_by_rank.empty()) {
@@ -2996,7 +3146,7 @@ void recordDistributedProfiling(
       std::string_view name;
       const std::vector<double>* values;
     };
-    const std::array<ComponentView, 9> components{{
+    const std::array<ComponentView, 12> components{{
         {"particle_count", &metrics.particle_count_cost_by_rank},
         {"gas_cell", &metrics.gas_cell_cost_by_rank},
         {"tree_interaction", &metrics.tree_interaction_cost_by_rank},
@@ -3004,6 +3154,9 @@ void recordDistributedProfiling(
         {"amr_patch", &metrics.amr_patch_cost_by_rank},
         {"active_fraction", &metrics.active_fraction_cost_by_rank},
         {"memory_pressure", &metrics.memory_pressure_cost_by_rank},
+        {"transient_memory", &metrics.transient_memory_cost_by_rank},
+        {"source_event", &metrics.source_event_cost_by_rank},
+        {"communication", &metrics.communication_cost_by_rank},
         {"gpu_occupancy", &metrics.gpu_occupancy_cost_by_rank},
         {"generic_work", &metrics.generic_work_cost_by_rank},
     }};
@@ -3047,12 +3200,15 @@ void recordDistributedProfiling(
 MpiContext::MpiContext() {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   m_is_enabled = queryActiveMpiWorld(m_world_size, m_world_rank);
-  m_local_rank = m_is_enabled ? queryNodeLocalRank(m_world_rank) : 0;
+  if (m_is_enabled) {
+    queryNodeLocalTopology(m_world_rank, m_local_rank, m_local_size);
+  }
 #endif
 }
 
 MpiContext::MpiContext(bool is_enabled, int world_size, int world_rank)
-    : m_is_enabled(is_enabled), m_world_size(world_size), m_world_rank(world_rank), m_local_rank(world_rank) {
+    : m_is_enabled(is_enabled), m_world_size(world_size), m_world_rank(world_rank), m_local_rank(world_rank),
+      m_local_size(is_enabled ? world_size : 1) {
   if (world_size <= 0) {
     throw std::invalid_argument("MpiContext world_size must be positive");
   }
@@ -3070,6 +3226,8 @@ int MpiContext::worldSize() const noexcept { return m_world_size; }
 int MpiContext::worldRank() const noexcept { return m_world_rank; }
 
 int MpiContext::localRank() const noexcept { return m_local_rank; }
+
+int MpiContext::localSize() const noexcept { return m_local_size; }
 
 void MpiContext::validateExpectedWorldSizeOrThrow(int expected_world_size) const {
   if (expected_world_size <= 0) {
@@ -3109,6 +3267,17 @@ std::uint64_t MpiContext::allreduceMaxUint64(std::uint64_t local_value) const {
   if (m_is_enabled) {
     std::uint64_t global = 0;
     MPI_Allreduce(&local_value, &global, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+    return global;
+  }
+#endif
+  return local_value;
+}
+
+std::uint64_t MpiContext::allreduceMinUint64(std::uint64_t local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t global = 0;
+    MPI_Allreduce(&local_value, &global, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
     return global;
   }
 #endif

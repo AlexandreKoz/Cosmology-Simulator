@@ -399,6 +399,23 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
   const FailureCoordinator failure_coordinator(runtime_services);
   const internal::MigrationBalanceRuntime migration_balance(
       config, runtime_services);
+  const core::OpenMpRuntimeInfo omp_runtime = core::openMpRuntimeInfo();
+  profiler.recordEvent(core::RuntimeEvent{
+      .event_kind = "runtime.topology",
+      .severity = core::RuntimeEventSeverity::kInfo,
+      .subsystem = "parallel.runtime",
+      .step_index = options.step_index,
+      .simulation_time_code = config.numerics.t_code_begin,
+      .scale_factor = 1.0,
+      .message = "MPI/OpenMP execution topology selected",
+      .payload = {{"world_size", std::to_string(mpi_context.worldSize())},
+                  {"world_rank", std::to_string(mpi_context.worldRank())},
+                  {"node_local_size", std::to_string(mpi_context.localSize())},
+                  {"node_local_rank", std::to_string(mpi_context.localRank())},
+                  {"openmp_compiled", omp_runtime.compiled ? "true" : "false"},
+                  {"openmp_requested_threads", std::to_string(omp_runtime.requested_threads)},
+                  {"openmp_configured_threads", std::to_string(omp_runtime.configured_threads)}},
+  });
   profiler.recordEvent(core::RuntimeEvent{
       .event_kind = "config.freeze",
       .severity = core::RuntimeEventSeverity::kInfo,

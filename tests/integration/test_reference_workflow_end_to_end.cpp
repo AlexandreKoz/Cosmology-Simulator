@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -11,6 +12,8 @@
 #include <unordered_map>
 
 #include "cosmosim/io/restart_checkpoint.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
+#include "cosmosim/workflows/runtime_services.hpp"
 
 #include "cosmosim/cosmosim.hpp"
 #include "cosmosim/core/build_config.hpp"
@@ -357,6 +360,149 @@ int main() {
     assert(pressure_events.find("\"event_kind\": \"analysis.memory_pressure_deferral\"") !=
            std::string::npos);
     assert(pressure_events.find("\"pressure\": \"red\"") != std::string::npos);
+  }
+
+  // A transient red-pressure episode must not permanently starve a due
+  // optional science diagnostic. The test starts at step 3 so light-science
+  // cadence 4 is due at completed step 4, forces red pressure only for that
+  // analysis stage, restores the production baseline before OutputCheck, and
+  // verifies catch-up on completed step 5 even though cadence 4 is no longer
+  // due. Safety still wins: the catch-up occurs only after pressure is eased.
+  {
+    std::string catchup_config =
+        buildConfigText(1, "reference_integration_analysis_catchup", "cic");
+    const std::string catchup_time_end = "time_end_code = 0.0102";
+    const std::size_t catchup_time_end_pos = catchup_config.find(catchup_time_end);
+    assert(catchup_time_end_pos != std::string::npos);
+    catchup_config.replace(
+        catchup_time_end_pos, catchup_time_end.size(), "time_end_code = 0.0108");
+    const std::string catchup_max_steps = "max_global_steps = 2";
+    const std::size_t catchup_max_steps_pos = catchup_config.find(catchup_max_steps);
+    assert(catchup_max_steps_pos != std::string::npos);
+    catchup_config.replace(
+        catchup_max_steps_pos, catchup_max_steps.size(), "max_global_steps = 8");
+    catchup_config +=
+        "\n[analysis]\n"
+        "enable_diagnostics = true\n"
+        "diagnostics_execution_policy = run_health_and_light_science\n"
+        "run_health_interval_steps = 1\n"
+        "science_light_interval_steps = 4\n"
+        "science_heavy_interval_steps = 8\n"
+        "\n[parallel]\n"
+        "process_memory_budget_bytes = 1073741824\n"
+        "process_memory_safety_margin_fraction = 0.0\n";
+    const auto catchup_frozen = cosmosim::core::loadFrozenConfigFromString(
+        catchup_config, "test_reference_workflow_analysis_catchup");
+    cosmosim::workflows::ReferenceWorkflowRunner catchup_runner(catchup_frozen);
+
+    struct PressureToggleState {
+      cosmosim::core::MemoryGovernor* governor = nullptr;
+      std::uint64_t production_baseline_bytes = 0U;
+      std::uint64_t analysis_invocations = 0U;
+      bool baseline_restored = false;
+    };
+    auto pressure_toggle = std::make_shared<PressureToggleState>();
+
+    cosmosim::workflows::ReferenceWorkflowOptions catchup_options;
+    catchup_options.step_index = 3U;
+    catchup_options.max_steps_override = 8U;
+    catchup_options.write_outputs = false;
+    catchup_options.register_runtime_modules =
+        [pressure_toggle](cosmosim::workflows::RuntimeModuleRegistry& registry) {
+          using namespace cosmosim::workflows;
+          registry.registerModule(RuntimeModuleDescriptor{
+              .module_id = "test_analysis_pressure_toggle",
+              .schema_version = 1,
+              .construction_ordinal = 1000,
+              .prerequisites = {"analysis"},
+              .incompatibilities = {},
+              .stage_tasks = {
+                  RuntimeTaskDeclaration{
+                      .task_id = "force_transient_red_pressure",
+                      .stage = cosmosim::core::IntegrationStage::kAnalysisHooks,
+                      .ordinal = 50,
+                      .view_kind = RuntimeStageViewKind::kAnalysis,
+                      .resources = {RuntimeResourceAccess{
+                          .resource = RuntimeResourceKey::kDiagnostics,
+                          .mode = RuntimeResourceAccessMode::kWrite,
+                      }},
+                      .dependencies = {"gravity::gravity.gravity_kick_post"},
+                  },
+                  RuntimeTaskDeclaration{
+                      .task_id = "restore_memory_baseline",
+                      .stage = cosmosim::core::IntegrationStage::kOutputCheck,
+                      .ordinal = -50,
+                      .view_kind = RuntimeStageViewKind::kOutputRestart,
+                      .resources = {RuntimeResourceAccess{
+                          .resource = RuntimeResourceKey::kOutputRestartState,
+                          .mode = RuntimeResourceAccessMode::kReadWrite,
+                      }},
+                      .dependencies = {"analysis::analysis.diagnostics"},
+                  },
+              },
+              .factory = [pressure_toggle](const RuntimeModuleFactoryContext& context) {
+                assert(context.services.memory_governor != nullptr);
+                pressure_toggle->governor = context.services.memory_governor;
+                RuntimeModuleInstance instance;
+                instance.owner_lifetime = pressure_toggle;
+                instance.stage_tasks.push_back(RuntimeStageTaskContribution{
+                    .task_id = "force_transient_red_pressure",
+                    .task = AnalysisStageTask(
+                        [pressure_toggle](AnalysisStageView& view) {
+                          view.requireFresh();
+                          ++pressure_toggle->analysis_invocations;
+                          if (pressure_toggle->analysis_invocations != 1U) {
+                            return;
+                          }
+                          const auto snapshot = pressure_toggle->governor->snapshot();
+                          assert(snapshot.hard_limit_bytes != 0U);
+                          pressure_toggle->production_baseline_bytes =
+                              snapshot.baseline_owned_bytes;
+                          assert(snapshot.accounted_bytes >= snapshot.baseline_owned_bytes);
+                          const std::uint64_t non_baseline_bytes =
+                              snapshot.accounted_bytes - snapshot.baseline_owned_bytes;
+                          const std::uint64_t red_target_bytes =
+                              snapshot.hard_limit_bytes * 96U / 100U;
+                          assert(red_target_bytes > non_baseline_bytes);
+                          pressure_toggle->governor->setBaselineOwnedBytes(
+                              red_target_bytes - non_baseline_bytes);
+                          assert(pressure_toggle->governor->snapshot().pressure ==
+                                 cosmosim::core::MemoryPressure::kRed);
+                        }),
+                });
+                instance.stage_tasks.push_back(RuntimeStageTaskContribution{
+                    .task_id = "restore_memory_baseline",
+                    .task = OutputRestartStageTask(
+                        [pressure_toggle](OutputRestartStageView& view) {
+                          view.requireFresh();
+                          if (pressure_toggle->analysis_invocations == 1U &&
+                              !pressure_toggle->baseline_restored) {
+                            pressure_toggle->governor->setBaselineOwnedBytes(
+                                pressure_toggle->production_baseline_bytes);
+                            pressure_toggle->baseline_restored = true;
+                            const auto restored = pressure_toggle->governor->snapshot();
+                            assert(restored.pressure != cosmosim::core::MemoryPressure::kRed);
+                            assert(restored.pressure != cosmosim::core::MemoryPressure::kTrip);
+                          }
+                        }),
+                });
+                return instance;
+              },
+          });
+        };
+
+    const auto catchup_report = catchup_runner.run(output_dir, catchup_options);
+    assert(catchup_report.completed_steps == 8U);
+    assert(pressure_toggle->analysis_invocations == 8U);
+    assert(pressure_toggle->baseline_restored);
+    const std::string catchup_events =
+        readFile(catchup_report.operational_report_json_path);
+    assert(catchup_events.find("\"event_kind\": \"analysis.memory_pressure_deferral\"") !=
+           std::string::npos);
+    assert(catchup_events.find("\"event_kind\": \"analysis.memory_pressure_catchup\"") !=
+           std::string::npos);
+    assert(catchup_events.find("\"science_light_catchup\": \"true\"") !=
+           std::string::npos);
   }
 
   std::string endpoint_config =

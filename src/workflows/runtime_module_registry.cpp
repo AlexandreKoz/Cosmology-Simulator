@@ -1,6 +1,7 @@
 #include "cosmosim/workflows/runtime_module_registry.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -158,6 +159,26 @@ namespace {
       RuntimeResourceAccess{requested.resource, *allowed_mode}, requested);
 }
 
+[[nodiscard]] bool accessModesConflict(
+    RuntimeResourceAccessMode lhs,
+    RuntimeResourceAccessMode rhs) noexcept {
+  return lhs != RuntimeResourceAccessMode::kRead || rhs != RuntimeResourceAccessMode::kRead;
+}
+
+[[nodiscard]] bool hasResourceConflict(
+    const RuntimeTaskDeclaration& lhs,
+    const RuntimeTaskDeclaration& rhs) noexcept {
+  for (const RuntimeResourceAccess lhs_access : lhs.resources) {
+    for (const RuntimeResourceAccess rhs_access : rhs.resources) {
+      if (lhs_access.resource == rhs_access.resource &&
+          accessModesConflict(lhs_access.mode, rhs_access.mode)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
   if (descriptor.module_id.empty()) {
     throw std::invalid_argument("runtime module descriptor has an empty module_id");
@@ -181,6 +202,18 @@ void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
       throw std::invalid_argument(
           "runtime task '" + task.task_id +
           "' declares a view that cannot execute its stage");
+    }
+    if (task.scheduling.estimated_peak_bytes != 0U &&
+        task.scheduling.memory_class == core::MemoryClass::kExternalRuntime) {
+      throw std::invalid_argument(
+          "runtime task '" + task.task_id +
+          "' cannot reserve opaque external-runtime memory as a task peak");
+    }
+    for (const std::string& dependency : task.dependencies) {
+      if (dependency.empty()) {
+        throw std::invalid_argument(
+            "runtime task '" + task.task_id + "' declares an empty dependency");
+      }
     }
     if (task.resources.empty()) {
       throw std::invalid_argument(
@@ -367,6 +400,37 @@ std::string_view runtimeResourceKeyName(RuntimeResourceKey resource) noexcept {
   return "unknown";
 }
 
+bool runtimeTasksMayOverlap(
+    const RuntimeTaskDeclaration& lhs,
+    const RuntimeTaskDeclaration& rhs,
+    const core::MemoryGovernorSnapshot& memory_snapshot) noexcept {
+  if (hasResourceConflict(lhs, rhs)) {
+    return false;
+  }
+  const auto high = RuntimeTaskPressureClass::kHigh;
+  if ((lhs.scheduling.memory_bandwidth_pressure == high &&
+       rhs.scheduling.memory_bandwidth_pressure == high) ||
+      (lhs.scheduling.communication_pressure == high &&
+       rhs.scheduling.communication_pressure == high) ||
+      (lhs.scheduling.compute_pressure == high &&
+       rhs.scheduling.compute_pressure == high)) {
+    return false;
+  }
+  const std::uint64_t lhs_peak = lhs.scheduling.estimated_peak_bytes;
+  const std::uint64_t rhs_peak = rhs.scheduling.estimated_peak_bytes;
+  if (lhs_peak != 0U && rhs_peak != 0U) {
+    if (rhs_peak > std::numeric_limits<std::uint64_t>::max() - lhs_peak) {
+      return false;
+    }
+    const std::uint64_t simultaneous_peak = lhs_peak + rhs_peak;
+    if (memory_snapshot.headroom_bytes != std::numeric_limits<std::uint64_t>::max() &&
+        simultaneous_peak > memory_snapshot.headroom_bytes) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::size_t RuntimeExecutionPlan::moduleCount() const noexcept {
   return m_module_instances.size();
 }
@@ -516,6 +580,33 @@ RuntimeExecutionPlan RuntimeModuleRegistry::freezeAndInstantiate(
                    rhs.module_id,
                    rhs.declaration.task_id};
       });
+
+  std::unordered_map<std::string, std::size_t> task_position_by_key;
+  task_position_by_key.reserve(plan.m_tasks.size());
+  for (std::size_t index = 0; index < plan.m_tasks.size(); ++index) {
+    const std::string key = plan.m_tasks[index].module_id + "::" +
+        plan.m_tasks[index].declaration.task_id;
+    if (!task_position_by_key.emplace(key, index).second) {
+      throw std::invalid_argument("duplicate fully-qualified runtime task key '" + key + "'");
+    }
+  }
+  for (std::size_t index = 0; index < plan.m_tasks.size(); ++index) {
+    const RuntimeExecutionPlan::PlannedTask& task = plan.m_tasks[index];
+    for (const std::string& dependency : task.declaration.dependencies) {
+      const auto dependency_it = task_position_by_key.find(dependency);
+      if (dependency_it == task_position_by_key.end()) {
+        throw std::invalid_argument(
+            "runtime task '" + task.module_id + "::" + task.declaration.task_id +
+            "' requires missing task dependency '" + dependency + "'");
+      }
+      if (dependency_it->second >= index) {
+        throw std::invalid_argument(
+            "runtime task dependency graph contradicts deterministic stage/ordinal order: '" +
+            dependency + "' must precede '" + task.module_id + "::" +
+            task.declaration.task_id + "'");
+      }
+    }
+  }
   return plan;
 }
 

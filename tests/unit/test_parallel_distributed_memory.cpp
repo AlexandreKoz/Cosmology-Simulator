@@ -1622,6 +1622,85 @@ void testPmSlabHaloSerialDoesNotRequireMpiInitialization() {
   assert(exchange.received_bytes == 0U);
 }
 
+
+void testHardRankMemoryConstraintAndExpandedCostModel() {
+  using namespace cosmosim::parallel;
+  std::vector<DecompositionItem> items;
+  for (std::uint64_t i = 0U; i < 4U; ++i) {
+    DecompositionItem item;
+    item.entity_id = 1000U + i;
+    item.kind = DecompositionEntityKind::kParticle;
+    item.current_owner_rank = 0;
+    item.x_comov = 0.1 + 0.2 * static_cast<double>(i);
+    item.y_comov = 0.5;
+    item.z_comov = 0.5;
+    item.memory_bytes = 60U;
+    item.work_components = DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .memory_pressure_cost = 60.0,
+        .transient_memory_cost = 12.0,
+        .source_event_cost = (i % 2U == 0U) ? 1.0 : 0.0,
+        .communication_cost = 3.0 + static_cast<double>(i),
+        .generic_work_cost = 1.0,
+        .has_explicit_components = true,
+    };
+    items.push_back(item);
+  }
+
+  DecompositionConfig config;
+  config.world_size = 2;
+  config.max_rank_memory_bytes = 140U;
+  config.rank_transient_reserve_bytes = 20U;
+  config.component_weights.memory_pressure = 1.0 / 1024.0;
+  const DecompositionPlan plan = buildMortonSfcDecomposition(items, config);
+  assert(plan.metrics.max_memory_bytes == 120U);
+  assert(plan.metrics.max_peak_memory_bytes == 140U);
+  assert(plan.metrics.peak_memory_bytes_by_rank.size() == 2U);
+  for (const std::uint64_t peak : plan.metrics.peak_memory_bytes_by_rank) {
+    assert(peak <= config.max_rank_memory_bytes);
+  }
+  double source_events = 0.0;
+  double communication = 0.0;
+  double transient = 0.0;
+  for (std::size_t rank = 0; rank < 2U; ++rank) {
+    source_events += plan.metrics.source_event_cost_by_rank[rank];
+    communication += plan.metrics.communication_cost_by_rank[rank];
+    transient += plan.metrics.transient_memory_cost_by_rank[rank];
+  }
+  assert(source_events == 2.0);
+  assert(communication == 18.0);
+  assert(transient == 48.0);
+
+  RuntimeRebalanceConfig rebalance_config;
+  rebalance_config.world_size = 2;
+  rebalance_config.imbalance_trigger_ratio = 10.0;
+  rebalance_config.memory_trigger_ratio = 10.0;
+  rebalance_config.max_migrated_load_fraction = 0.01;
+  const RuntimeRebalancePlan rebalance = buildRuntimeRebalancePlan(
+      items, config, rebalance_config);
+  assert(rebalance.current_metrics.max_peak_memory_bytes == 260U);
+  assert(rebalance.should_rebalance);
+  assert(rebalance.reason == "rank_memory_limit");
+  assert(rebalance.target_decomposition.metrics.max_peak_memory_bytes <= 140U);
+
+  std::vector<DecompositionItem> impossible = items;
+  impossible.resize(3U);
+  for (DecompositionItem& item : impossible) {
+    item.memory_bytes = 80U;
+    item.work_components.memory_pressure_cost = 80.0;
+  }
+  DecompositionConfig impossible_config = config;
+  impossible_config.max_rank_memory_bytes = 120U;
+  impossible_config.rank_transient_reserve_bytes = 20U;
+  bool rejected = false;
+  try {
+    (void)buildMortonSfcDecomposition(impossible, impossible_config);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
 void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
   std::vector<cosmosim::parallel::DecompositionItem> items;
   for (std::uint64_t i = 0; i < 6U; ++i) {
@@ -1716,6 +1795,7 @@ int main() {
   testPmSlabUnevenPartitionOwnership();
   testPmSlabLayoutRoundTripAndCellOwnership();
   testPmSlabHaloSerialDoesNotRequireMpiInitialization();
+  testHardRankMemoryConstraintAndExpandedCostModel();
   testAuthoritativeTopDomainLeavesPreserveOwnedGeometry();
   return 0;
 }

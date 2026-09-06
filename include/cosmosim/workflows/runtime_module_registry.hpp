@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
 
@@ -26,12 +27,35 @@ enum class RuntimeStageViewKind : std::uint8_t {
   kOutputRestart,
 };
 
+enum class RuntimeTaskPressureClass : std::uint8_t {
+  kLow = 0,
+  kModerate = 1,
+  kHigh = 2,
+};
+
+enum class RuntimeTaskLifetimeBoundary : std::uint8_t {
+  kTaskEnd = 0,
+  kStageEnd = 1,
+};
+
+struct RuntimeTaskSchedulingProfile {
+  std::uint64_t estimated_peak_bytes = 0U;
+  core::MemoryClass memory_class = core::MemoryClass::kPhaseResident;
+  RuntimeTaskLifetimeBoundary lifetime_boundary = RuntimeTaskLifetimeBoundary::kTaskEnd;
+  RuntimeTaskPressureClass compute_pressure = RuntimeTaskPressureClass::kLow;
+  RuntimeTaskPressureClass memory_bandwidth_pressure = RuntimeTaskPressureClass::kLow;
+  RuntimeTaskPressureClass communication_pressure = RuntimeTaskPressureClass::kLow;
+  bool optional = false;
+};
+
 struct RuntimeTaskDeclaration {
   std::string task_id;
   core::IntegrationStage stage = core::IntegrationStage::kGravityKickPre;
   std::int32_t ordinal = 0;
   RuntimeStageViewKind view_kind = RuntimeStageViewKind::kGravity;
   std::vector<RuntimeResourceAccess> resources;
+  std::vector<std::string> dependencies;
+  RuntimeTaskSchedulingProfile scheduling{};
 };
 
 using DriftStageTask = std::function<void(DriftParticleStageView&)>;
@@ -137,5 +161,9 @@ class RuntimeModuleRegistry {
     const RuntimeStageTaskFunction& task) noexcept;
 [[nodiscard]] std::string_view runtimeResourceKeyName(
     RuntimeResourceKey resource) noexcept;
+[[nodiscard]] bool runtimeTasksMayOverlap(
+    const RuntimeTaskDeclaration& lhs,
+    const RuntimeTaskDeclaration& rhs,
+    const core::MemoryGovernorSnapshot& memory_snapshot) noexcept;
 
 }  // namespace cosmosim::workflows

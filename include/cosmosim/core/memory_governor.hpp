@@ -56,6 +56,27 @@ struct MemoryGovernorPolicy {
   std::uint16_t red_basis_points = 9500U;
 };
 
+struct DeterministicBatchSizingPolicy {
+  std::uint64_t requested_max_items = 1U;
+  std::uint64_t bytes_per_item = 1U;
+  // Bytes that must coexist with the selected batch (for example a spatial
+  // index rebuild or the opposite-direction communication buffer).
+  std::uint64_t fixed_reserve_bytes = 0U;
+  std::uint64_t minimum_items = 1U;
+  std::uint64_t alignment_items = 1U;
+  // Fraction of currently reported headroom this kernel may consume. 10000
+  // means all available headroom; communication paths commonly use 5000 so
+  // send and receive sides can coexist deterministically.
+  std::uint16_t headroom_use_basis_points = 10000U;
+};
+
+struct DeterministicBatchSizingResult {
+  std::uint64_t selected_items = 0U;
+  std::uint64_t selected_bytes = 0U;
+  std::uint64_t usable_headroom_bytes = 0U;
+  bool constrained_by_headroom = false;
+};
+
 struct MemoryGovernorSnapshot {
   std::uint64_t hard_limit_bytes = 0U;
   std::uint64_t baseline_owned_bytes = 0U;
@@ -81,6 +102,10 @@ struct MemoryGovernorSnapshot {
   std::array<std::uint64_t, static_cast<std::size_t>(MemoryClass::kCount)>
       reserved_by_class{};
 };
+
+[[nodiscard]] DeterministicBatchSizingResult selectDeterministicBatchSize(
+    const MemoryGovernorSnapshot& snapshot,
+    const DeterministicBatchSizingPolicy& policy);
 
 class MemoryGovernor;
 

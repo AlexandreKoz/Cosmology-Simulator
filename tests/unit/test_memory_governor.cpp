@@ -281,6 +281,53 @@ void testCommittedReservationTransfersIntoBaselineAtomically() {
   assert(second_transfer_rejected);
 }
 
+
+void testDeterministicHeadroomAwareBatchSizing() {
+  MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1000U});
+  governor.setBaselineOwnedBytes(400U);
+  const auto constrained = cosmosim::core::selectDeterministicBatchSize(
+      governor.snapshot(),
+      cosmosim::core::DeterministicBatchSizingPolicy{
+          .requested_max_items = 100U,
+          .bytes_per_item = 10U,
+          .fixed_reserve_bytes = 100U,
+          .minimum_items = 1U,
+          .alignment_items = 8U,
+          .headroom_use_basis_points = 5000U,
+      });
+  assert(constrained.usable_headroom_bytes == 250U);
+  assert(constrained.selected_items == 24U);
+  assert(constrained.selected_bytes == 240U);
+  assert(constrained.constrained_by_headroom);
+
+  MemoryGovernor unlimited;
+  const auto unconstrained = cosmosim::core::selectDeterministicBatchSize(
+      unlimited.snapshot(),
+      cosmosim::core::DeterministicBatchSizingPolicy{
+          .requested_max_items = 33U,
+          .bytes_per_item = 64U,
+          .minimum_items = 1U,
+          .alignment_items = 8U,
+      });
+  assert(unconstrained.selected_items == 33U);
+  assert(unconstrained.selected_bytes == 33U * 64U);
+  assert(!unconstrained.constrained_by_headroom);
+
+  MemoryGovernor starved(MemoryGovernorPolicy{.hard_limit_bytes = 128U});
+  starved.setBaselineOwnedBytes(120U);
+  const auto no_batch = cosmosim::core::selectDeterministicBatchSize(
+      starved.snapshot(),
+      cosmosim::core::DeterministicBatchSizingPolicy{
+          .requested_max_items = 16U,
+          .bytes_per_item = 16U,
+          .minimum_items = 1U,
+          .alignment_items = 1U,
+      });
+  assert(no_batch.selected_items == 0U);
+  assert(no_batch.selected_bytes == 0U);
+  assert(no_batch.constrained_by_headroom);
+}
+
 void testConcurrentControlPlaneReservations() {
   MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1U << 20U});
   constexpr int k_threads = 8;
@@ -322,6 +369,7 @@ int main() {
   testMultipleReservationsClassesAndReleaseOrder();
   testCheckedArithmeticAndOversizedRequest();
   testCommittedReservationTransfersIntoBaselineAtomically();
+  testDeterministicHeadroomAwareBatchSizing();
   testConcurrentControlPlaneReservations();
   return 0;
 }

@@ -1,12 +1,14 @@
 #include "workflows/internal/reference_runtime_composition.hpp"
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/workflows/analysis_runtime.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
@@ -87,6 +89,36 @@ namespace {
   return {.resource = resource, .mode = RuntimeResourceAccessMode::kReadWrite};
 }
 
+[[nodiscard]] RuntimeTaskSchedulingProfile schedulingProfile(
+    std::uint64_t estimated_peak_bytes,
+    RuntimeTaskPressureClass compute_pressure,
+    RuntimeTaskPressureClass memory_bandwidth_pressure,
+    RuntimeTaskPressureClass communication_pressure,
+    bool optional = false,
+    core::MemoryClass memory_class = core::MemoryClass::kPhaseResident,
+    RuntimeTaskLifetimeBoundary lifetime_boundary = RuntimeTaskLifetimeBoundary::kTaskEnd) {
+  return RuntimeTaskSchedulingProfile{
+      .estimated_peak_bytes = estimated_peak_bytes,
+      .memory_class = memory_class,
+      .lifetime_boundary = lifetime_boundary,
+      .compute_pressure = compute_pressure,
+      .memory_bandwidth_pressure = memory_bandwidth_pressure,
+      .communication_pressure = communication_pressure,
+      .optional = optional,
+  };
+}
+
+[[nodiscard]] std::uint64_t declaredHydroTaskPeakBytes(const core::SimulationConfig& config) {
+  const std::uint64_t cells = config.numerics.hydro_active_batch_max_cells == 0U
+      ? static_cast<std::uint64_t>(hydro::k_hydro_automatic_active_batch_max_cells)
+      : config.numerics.hydro_active_batch_max_cells;
+  if (cells > std::numeric_limits<std::uint64_t>::max() /
+                  hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell) {
+    throw std::overflow_error("declared hydro task peak overflows uint64");
+  }
+  return cells * hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell;
+}
+
 [[nodiscard]] RuntimeModuleDescriptor makeAnalysisDescriptor(
     const ReferenceRuntimeCompositionInputs& inputs) {
   static constexpr std::array stages{
@@ -108,6 +140,9 @@ namespace {
         .ordinal = -100,
         .view_kind = RuntimeStageViewKind::kStageAudit,
         .resources = {write(RuntimeResourceKey::kDiagnostics)},
+        .scheduling = schedulingProfile(
+            0U, RuntimeTaskPressureClass::kLow, RuntimeTaskPressureClass::kLow,
+            RuntimeTaskPressureClass::kLow),
     });
   }
   declarations.push_back(RuntimeTaskDeclaration{
@@ -123,6 +158,10 @@ namespace {
                     read(RuntimeResourceKey::kMigrationOwnership),
                     read(RuntimeResourceKey::kIntegratorTruth),
                     write(RuntimeResourceKey::kDiagnostics)},
+      .dependencies = {"gravity::gravity.gravity_kick_post"},
+      .scheduling = schedulingProfile(
+          0U, RuntimeTaskPressureClass::kModerate, RuntimeTaskPressureClass::kHigh,
+          RuntimeTaskPressureClass::kLow, true, core::MemoryClass::kDiagnostic),
   });
 
   return RuntimeModuleDescriptor{
@@ -183,6 +222,10 @@ namespace {
           .resources = {readWrite(RuntimeResourceKey::kParticlePosition),
                         read(RuntimeResourceKey::kParticleVelocity),
                         read(RuntimeResourceKey::kMigrationOwnership)},
+          .dependencies = {"gravity::gravity.gravity_kick_pre"},
+          .scheduling = schedulingProfile(
+              0U, RuntimeTaskPressureClass::kModerate, RuntimeTaskPressureClass::kHigh,
+              RuntimeTaskPressureClass::kLow),
       }},
       .factory = [](const RuntimeModuleFactoryContext& context) {
         auto owner = std::make_shared<DriftRuntime>(context.services);
@@ -221,6 +264,14 @@ namespace {
                       read(RuntimeResourceKey::kSchedulerTruth),
                       write(RuntimeResourceKey::kGravityAcceleration),
                       readWrite(RuntimeResourceKey::kIntegratorTruth)},
+        .dependencies = stage == core::IntegrationStage::kForceRefresh
+            ? std::vector<std::string>{"drift::time.drift_particles"}
+            : (stage == core::IntegrationStage::kGravityKickPost
+                   ? std::vector<std::string>{"sources::sources.update"}
+                   : std::vector<std::string>{}),
+        .scheduling = schedulingProfile(
+            0U, RuntimeTaskPressureClass::kHigh, RuntimeTaskPressureClass::kHigh,
+            RuntimeTaskPressureClass::kHigh),
     });
   }
   return RuntimeModuleDescriptor{
@@ -275,6 +326,11 @@ namespace {
                         readWrite(RuntimeResourceKey::kEffectiveIsmThermodynamics),
                         read(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
+          .dependencies = {"gravity::gravity.force_refresh"},
+          .scheduling = schedulingProfile(
+              declaredHydroTaskPeakBytes(inputs.config), RuntimeTaskPressureClass::kHigh,
+              RuntimeTaskPressureClass::kHigh, RuntimeTaskPressureClass::kHigh, false,
+              core::MemoryClass::kScratchArena),
       }},
       .factory = [inputs, assembly](const RuntimeModuleFactoryContext&) {
         assembly->hydro_amr = std::shared_ptr<HydroAmrRuntime>(makeHydroAmrRuntime(
@@ -320,6 +376,10 @@ namespace {
                         read(RuntimeResourceKey::kEffectiveIsmThermodynamics),
                         readWrite(RuntimeResourceKey::kMigrationOwnership),
                         read(RuntimeResourceKey::kIntegratorTruth)},
+          .dependencies = {"hydro_amr::hydro_amr.update"},
+          .scheduling = schedulingProfile(
+              0U, RuntimeTaskPressureClass::kHigh, RuntimeTaskPressureClass::kHigh,
+              RuntimeTaskPressureClass::kModerate),
       }},
       .factory = [&config = inputs.config, &mode_policy = inputs.mode_policy,
                   &units = inputs.units, world_rank = inputs.world_rank,
@@ -372,6 +432,10 @@ namespace {
                         read(RuntimeResourceKey::kIntegratorTruth),
                         readWrite(RuntimeResourceKey::kOutputRestartState),
                         write(RuntimeResourceKey::kDiagnostics)},
+          .dependencies = {"analysis::analysis.diagnostics"},
+          .scheduling = schedulingProfile(
+              0U, RuntimeTaskPressureClass::kLow, RuntimeTaskPressureClass::kHigh,
+              RuntimeTaskPressureClass::kHigh),
       }},
       .factory = [inputs, assembly](const RuntimeModuleFactoryContext&) {
         if (!assembly->gravity) {

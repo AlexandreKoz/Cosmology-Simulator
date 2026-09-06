@@ -2257,3 +2257,37 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
 - Reproducibility/science impact: no source equations, diffusion operator,
   star-formation/feedback model, precision, HDF5 schema version, dataset names,
   normalized config, or restart payload changed.
+
+## 2026-09-06 Campaign M2D memory-aware runtime scheduling
+
+- Extended the existing process `MemoryGovernor` with checked deterministic
+  headroom-aware batch sizing; hydro, remote hydro communication, and
+  stellar-evolution/feedback paths now derive bounded residency from the same
+  authority instead of using independent fixed-memory assumptions.
+- Added major-task dependency, declared-peak/lifetime, optionality, and coarse
+  compute/DRAM/MPI pressure metadata to the existing `RuntimeModuleRegistry`.
+  The reference serial stage order is unchanged; the conservative overlap
+  predicate establishes legality for future concurrency without changing the
+  numerical schedule.
+- Expanded SFC load metrics with transient-memory, source-event, and
+  communication costs while preserving the existing geometry and weight
+  authority. A hard per-rank peak-memory envelope now cuts/rejects partitions
+  independently of the soft memory weight, and target candidates that exceed
+  the cap are vetoed before migration.
+- A current hard rank-memory violation forces rebalance despite non-triggering
+  soft thresholds or migration throttling. The workflow derives one
+  collective-safe cap from the minimum process-governor headroom and reserves a
+  conservative maximum major-task transient allowance.
+- MPI topology truth now includes node-local size as well as rank; workflow
+  profiling records world/node rank topology and OpenMP thread configuration.
+  No cross-rank shared-memory rewrite or new memory authority was introduced.
+- Optional light/heavy science diagnostics now retain bounded pending state when
+  Red/Trip pressure defers a due cadence and catch up at the first later
+  non-Red analysis hook. An 8-step tiny workflow regression forces a step-4
+  deferral and proves step-5 catch-up without bypassing the hard ceiling.
+- Final available-environment validation is green for all 136 CPU tests other
+  than the separately long-running source-package-completeness regression,
+  which exceeded the external command window and produced no failure. The
+  HDF5 configuration detects HDF5 1.14.5 and the focused M2D/reference-workflow
+  set passes 4/4. MPI C++ and FFTW development dependencies remain unavailable.
+  Detailed evidence is in `docs/repair/m2d_memory_aware_runtime_20260906.md`.

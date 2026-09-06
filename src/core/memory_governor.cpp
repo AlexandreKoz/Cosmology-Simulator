@@ -75,6 +75,67 @@ constexpr std::uint64_t k_basis_point_denominator = 10000U;
 
 }  // namespace
 
+
+DeterministicBatchSizingResult selectDeterministicBatchSize(
+    const MemoryGovernorSnapshot& snapshot,
+    const DeterministicBatchSizingPolicy& policy) {
+  if (policy.requested_max_items == 0U || policy.bytes_per_item == 0U ||
+      policy.minimum_items == 0U || policy.alignment_items == 0U ||
+      policy.headroom_use_basis_points == 0U ||
+      policy.headroom_use_basis_points > k_basis_point_denominator) {
+    throw std::invalid_argument("deterministic batch sizing policy is invalid");
+  }
+  if (policy.minimum_items > policy.requested_max_items) {
+    throw std::invalid_argument(
+        "deterministic batch minimum_items exceeds requested_max_items");
+  }
+
+  DeterministicBatchSizingResult result;
+  result.selected_items = policy.requested_max_items;
+  if (snapshot.headroom_bytes == std::numeric_limits<std::uint64_t>::max()) {
+    result.usable_headroom_bytes = snapshot.headroom_bytes;
+  }
+
+  if (snapshot.headroom_bytes == std::numeric_limits<std::uint64_t>::max()) {
+    if (policy.requested_max_items >
+        std::numeric_limits<std::uint64_t>::max() / policy.bytes_per_item) {
+      throw std::overflow_error("deterministic batch selected byte count overflow");
+    }
+    result.selected_bytes = policy.requested_max_items * policy.bytes_per_item;
+    return result;
+  }
+
+  const std::uint64_t after_fixed =
+      snapshot.headroom_bytes > policy.fixed_reserve_bytes
+          ? snapshot.headroom_bytes - policy.fixed_reserve_bytes
+          : 0U;
+  const std::uint64_t whole = after_fixed / k_basis_point_denominator;
+  const std::uint64_t remainder = after_fixed % k_basis_point_denominator;
+  result.usable_headroom_bytes =
+      whole * static_cast<std::uint64_t>(policy.headroom_use_basis_points) +
+      (remainder * static_cast<std::uint64_t>(policy.headroom_use_basis_points)) /
+          k_basis_point_denominator;
+
+  std::uint64_t by_headroom = result.usable_headroom_bytes / policy.bytes_per_item;
+  if (by_headroom >= policy.alignment_items) {
+    by_headroom -= by_headroom % policy.alignment_items;
+  }
+  if (by_headroom < policy.minimum_items) {
+    result.selected_items = 0U;
+    result.selected_bytes = 0U;
+    result.constrained_by_headroom = true;
+    return result;
+  }
+  result.selected_items = std::min(policy.requested_max_items, by_headroom);
+  if (result.selected_items >
+      std::numeric_limits<std::uint64_t>::max() / policy.bytes_per_item) {
+    throw std::overflow_error("deterministic batch selected byte count overflow");
+  }
+  result.selected_bytes = result.selected_items * policy.bytes_per_item;
+  result.constrained_by_headroom = result.selected_items < policy.requested_max_items;
+  return result;
+}
+
 std::size_t memoryClassIndex(MemoryClass memory_class) noexcept {
   return static_cast<std::size_t>(memory_class);
 }

@@ -15,6 +15,7 @@ constexpr std::size_t k_invalid_cell_index = static_cast<std::size_t>(-1);
 constexpr std::size_t k_invalid_ghost_cell_slot = static_cast<std::size_t>(-1);
 constexpr std::size_t k_hydro_automatic_active_batch_max_cells = 16384U;
 constexpr std::size_t k_hydro_active_batch_alignment_cells = 8U;
+constexpr std::uint64_t k_hydro_runtime_batch_scratch_budget_bytes_per_cell = 4096ULL;
 
 // Cell-centered primitive variables in comoving coordinates.
 // rho_comoving: comoving mass density.
