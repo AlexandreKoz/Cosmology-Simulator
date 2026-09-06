@@ -642,18 +642,37 @@ class SourceRuntimeImpl final : public SourceRuntime {
         "sources.metal_diffusion.owned_leaf_mask",
         m_owned_leaf_mask,
         diffusion_governed);
-    add_container(
-        core::MemorySubsystem::kScratch,
-        core::MemoryClass::kPhaseResident,
-        "sources.metal_diffusion.rho_kappa",
-        m_diffusion_rho_kappa_code,
-        diffusion_governed);
-    add_container(
-        core::MemorySubsystem::kScratch,
-        core::MemoryClass::kPhaseResident,
-        "sources.metal_diffusion.faces",
-        m_diffusion_faces,
-        false);
+    // These two containers are move-replaced by each topology rebuild. Report
+    // historical retained-capacity high-water explicitly rather than letting a
+    // smaller later topology erase the evidence of a larger residency peak.
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kScratch,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kPhaseResident,
+        .label = "sources.metal_diffusion.rho_kappa",
+        .current_size_bytes = core::currentSizeBytesForContainer(
+            m_diffusion_rho_kappa_code),
+        .owned_capacity_bytes = core::ownedCapacityBytesForContainer(
+            m_diffusion_rho_kappa_code),
+        .high_water_bytes = std::max(
+            m_diffusion_rho_kappa_high_water_bytes,
+            core::ownedCapacityBytesForContainer(m_diffusion_rho_kappa_code)),
+        .estimate_only = false,
+        .governed_commitment = diffusion_governed,
+    });
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kScratch,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kPhaseResident,
+        .label = "sources.metal_diffusion.faces",
+        .current_size_bytes = core::currentSizeBytesForContainer(m_diffusion_faces),
+        .owned_capacity_bytes = core::ownedCapacityBytesForContainer(m_diffusion_faces),
+        .high_water_bytes = std::max(
+            m_diffusion_faces_high_water_bytes,
+            core::ownedCapacityBytesForContainer(m_diffusion_faces)),
+        .estimate_only = false,
+        .governed_commitment = m_diffusion_faces_reservation.committed(),
+    });
     builder.addEntry(core::MemoryEntry{
         .subsystem = core::MemorySubsystem::kScratch,
         .lifetime = core::MemoryLifetime::kTransient,
@@ -1239,8 +1258,58 @@ class SourceRuntimeImpl final : public SourceRuntime {
     m_diffusion_topology_scratch_high_water_bytes = std::max(
         m_diffusion_topology_scratch_high_water_bytes,
         topology.construction_scratch_high_water_bytes);
+
+    const std::uint64_t current_faces_capacity =
+        core::ownedCapacityBytesForContainer(m_diffusion_faces);
+    const std::uint64_t replacement_faces_capacity =
+        core::ownedCapacityBytesForContainer(topology.faces);
+    const std::uint64_t current_rho_kappa_capacity =
+        core::ownedCapacityBytesForContainer(m_diffusion_rho_kappa_code);
+    const std::uint64_t replacement_rho_kappa_capacity =
+        core::ownedCapacityBytesForContainer(topology.strain_magnitude_code);
+    m_diffusion_faces_high_water_bytes = std::max(
+        m_diffusion_faces_high_water_bytes,
+        std::max(current_faces_capacity, replacement_faces_capacity));
+    m_diffusion_rho_kappa_high_water_bytes = std::max(
+        m_diffusion_rho_kappa_high_water_bytes,
+        std::max(current_rho_kappa_capacity, replacement_rho_kappa_capacity));
+
+    // The retained diffusion face graph is scientifically meaningful O(Nface)
+    // phase topology, but it still consumes real process memory. Admit the new
+    // retained allocation before replacing the previous graph so the governor
+    // accounts for old/new coexistence during the handoff. Construction-local
+    // scratch remains separately visible through the measured scratch high-water.
+    core::MemoryReservation replacement_faces_reservation;
+    std::exception_ptr faces_reservation_failure;
+    try {
+      if (m_memory_governor != nullptr && replacement_faces_capacity != 0U) {
+        replacement_faces_reservation = m_memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            replacement_faces_capacity,
+            "sources.metal_diffusion.faces");
+      }
+    } catch (...) {
+      faces_reservation_failure = std::current_exception();
+    }
+    if (m_runtime_services != nullptr) {
+      FailureCoordinator(*m_runtime_services).rethrowCollectiveFailure(
+          faces_reservation_failure,
+          "metal-diffusion topology residency preflight");
+    } else if (faces_reservation_failure != nullptr) {
+      std::rethrow_exception(faces_reservation_failure);
+    }
+    if (replacement_faces_reservation.pending()) {
+      replacement_faces_reservation.commit();
+    }
+
     m_diffusion_faces = std::move(topology.faces);
     m_diffusion_rho_kappa_code = std::move(topology.strain_magnitude_code);
+    if (m_memory_governor != nullptr) {
+      m_diffusion_faces_reservation.release();
+      if (replacement_faces_reservation.committed()) {
+        m_diffusion_faces_reservation = std::move(replacement_faces_reservation);
+      }
+    }
     if (m_diffusion_rho_kappa_code.size() != cell_count) {
       throw std::runtime_error(
           "metal diffusion topology returned the wrong strain-field extent");
@@ -1455,6 +1524,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
   core::MemoryReservation m_feedback_event_reservation;
   core::MemoryReservation m_star_formation_input_reservation;
   core::MemoryReservation m_diffusion_phase_reservation;
+  core::MemoryReservation m_diffusion_faces_reservation;
   std::uint32_t m_world_rank = 0;
   core::CoordinateFrame m_coordinate_frame = core::CoordinateFrame::kComoving;
   core::BoundaryCondition m_hydro_boundary = core::BoundaryCondition::kOpen;
@@ -1472,6 +1542,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
   std::vector<double> m_diffusion_rho_kappa_code;
   std::vector<physics::MetalDiffusionFace> m_diffusion_faces;
   physics::MetalDiffusionWorkspace m_diffusion_workspace;
+  std::uint64_t m_diffusion_rho_kappa_high_water_bytes = 0U;
+  std::uint64_t m_diffusion_faces_high_water_bytes = 0U;
   std::uint64_t m_diffusion_topology_scratch_high_water_bytes = 0U;
 };
 

@@ -205,6 +205,97 @@ void testDecoupledGasIdentityRoundtrip() {
 #endif
 }
 
+void testChuiNativeCoordinateBoundsUseCodeLengthUnits() {
+#if COSMOSIM_ENABLE_HDF5
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.units.length_unit = "kpc";
+  config.units.mass_unit = "msun";
+  config.units.velocity_unit = "km_s";
+  config.units.coordinate_frame = cosmosim::core::CoordinateFrame::kPhysical;
+  config.cosmology.box_size_x_mpc_comoving = 0.05;
+  config.cosmology.box_size_y_mpc_comoving = 0.05;
+  config.cosmology.box_size_z_mpc_comoving = 0.05;
+  config.cosmology.box_size_mpc_comoving = 0.05;
+  config.output.run_name = "snapshot_chui_native_bounds_units";
+
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1U);
+  state.particles.position_x_comoving[0] = 4.0965;  // kpc: >0.05 numerically, <50 kpc physically.
+  state.particles.position_y_comoving[0] = 0.5;
+  state.particles.position_z_comoving[0] = 0.5;
+  state.particles.mass_code[0] = 1.0;
+  state.particle_sidecar.particle_id[0] = 42001U;
+  state.particle_sidecar.species_tag[0] =
+      static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+  state.particle_sidecar.owning_rank[0] = 0U;
+  state.species.count_by_species.fill(0U);
+  state.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 1U;
+  state.rebuildSpeciesIndex();
+  state.metadata.scale_factor = 1.0;
+
+  cosmosim::io::SnapshotWritePayload payload;
+  payload.state = &state;
+  payload.config = &config;
+  payload.normalized_config_text = "schema_version = 1\n";
+  payload.provenance = cosmosim::core::makeProvenanceRecord(
+      "bounds_units", "bounds_units", 0, payload.normalized_config_text);
+  payload.set_member.member_index = 0U;
+  payload.set_member.num_files_per_snapshot = 1U;
+  payload.set_member.global_part_count = {0U, 1U, 0U, 0U, 0U, 0U};
+  payload.set_member.has_global_part_count = true;
+  cosmosim::io::SnapshotIoPolicy policy;
+  policy.dialect = cosmosim::io::SnapshotDialect::kChuiNative;
+
+  const auto write_set = [&](const std::filesystem::path& directory,
+                             std::string_view generation_id) {
+    std::filesystem::create_directories(directory);
+    payload.set_member.generation_id = std::string(generation_id);
+    cosmosim::io::writeScienceSnapshotHdf5(
+        directory / "snap_000.0.hdf5", payload, policy);
+    cosmosim::io::writeSnapshotSetCompletionMarker(
+        directory, generation_id, 1U, payload.set_member.global_part_count, false);
+  };
+
+  const std::filesystem::path valid_directory =
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath(
+          "cosmosim_snapshot_chui_native_bounds_units");
+  write_set(valid_directory, "bounds_units_valid");
+  cosmosim::io::validateSnapshotSetHdf5(valid_directory).requireValid();
+  const auto roundtrip = cosmosim::io::readCosmoSimScienceSnapshotHdf5(
+      valid_directory, config);
+  assert(roundtrip.report.header_box_size_x == 0.05);
+  assert(std::abs(roundtrip.state.particles.position_x_comoving[0] - 4.0965) <
+         1.0e-12);
+
+  // Bounds enforcement remains active after the unit fix: 50.1 kpc exceeds
+  // the declared 0.05 Mpc (50 kpc) box and must be rejected.
+  state.particles.position_x_comoving[0] = 50.1;
+  const std::filesystem::path invalid_directory =
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath(
+          "cosmosim_snapshot_chui_native_bounds_units_invalid");
+  write_set(invalid_directory, "bounds_units_invalid");
+  bool validator_rejected = false;
+  try {
+    cosmosim::io::validateSnapshotSetHdf5(invalid_directory).requireValid();
+  } catch (const std::runtime_error&) {
+    validator_rejected = true;
+  }
+  assert(validator_rejected);
+
+  bool reader_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::readCosmoSimScienceSnapshotHdf5(
+        invalid_directory, config));
+  } catch (const std::runtime_error&) {
+    reader_rejected = true;
+  }
+  assert(reader_rejected);
+  std::filesystem::remove_all(valid_directory);
+  std::filesystem::remove_all(invalid_directory);
+#endif
+}
+
 void testRoundtripMixedSpeciesSnapshot() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   config.output.run_name = "snapshot_roundtrip";
@@ -844,6 +935,7 @@ void testSnapshotSetCompletionContract() {
 
 int main() {
   testDecoupledGasIdentityRoundtrip();
+  testChuiNativeCoordinateBoundsUseCodeLengthUnits();
   testRoundtripMixedSpeciesSnapshot();
   testMassTableFallbackSnapshotImport();
   testPersistentIdAndMissingFieldContracts();

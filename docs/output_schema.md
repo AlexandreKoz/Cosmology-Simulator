@@ -106,6 +106,11 @@ Storage reports inspect actual HDF5 creation properties rather than fabricating
 compression/chunk values. A direct HDF5 validator independently checks set/header identity,
 required dataset type/shape/counts, finite values, positive masses, box bounds where defined,
 and global nonzero/unique particle IDs without reconstructing the normal `SimulationState`.
+`CHUIBoxSize{X,Y,Z}_MpcComoving` and `SnapshotIoReport::header_box_size_*` remain expressed in
+comoving Mpc. CHUI-native `Coordinates` are stored/decoded in the configured code-length unit,
+so both direct validation and readback convert the Mpc box metadata into the corresponding
+stored/code coordinate unit before enforcing bounds. This is a unit-consistency repair only;
+no HDF5 attribute names, schema versions, or coordinate-storage conventions changed.
 
 See `docs/snapshot_hdf5_io.md` for the detailed contract.
 

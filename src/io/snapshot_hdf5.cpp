@@ -1743,6 +1743,17 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     readOptionalHeaderDouble(header_group.get(), "CosmoSimBoxSizeY", conversion.boxSizeStoredToMpc(scalar_box_size_stored), result.report.header_box_size_y);
     readOptionalHeaderDouble(header_group.get(), "CosmoSimBoxSizeZ", conversion.boxSizeStoredToMpc(scalar_box_size_stored), result.report.header_box_size_z);
   }
+  // SnapshotReadReport preserves the public/header contract in comoving Mpc,
+  // while decoded CHUI-native positions are expressed in the configured code
+  // length unit. Bounds validation must therefore compare like units. Routing
+  // the Mpc header values through the dialect-aware box conversion gives the
+  // corresponding code-space box lengths without changing report/schema units.
+  const double header_box_size_x_code = conversion.positionFromStored(
+      conversion.boxSizeMpcToStored(result.report.header_box_size_x));
+  const double header_box_size_y_code = conversion.positionFromStored(
+      conversion.boxSizeMpcToStored(result.report.header_box_size_y));
+  const double header_box_size_z_code = conversion.positionFromStored(
+      conversion.boxSizeMpcToStored(result.report.header_box_size_z));
 
   std::array<std::uint64_t, 6> header_counts{};
   std::array<double, 6> header_mass_table{};
@@ -2254,14 +2265,14 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       }
       if (chui_authored) {
         const double tolerance = 1.0e-10 * std::max(
-            {1.0, result.report.header_box_size_x,
-             result.report.header_box_size_y, result.report.header_box_size_z});
+            {1.0, header_box_size_x_code,
+             header_box_size_y_code, header_box_size_z_code});
         if (position_x < -tolerance ||
-            position_x > result.report.header_box_size_x + tolerance ||
+            position_x > header_box_size_x_code + tolerance ||
             position_y < -tolerance ||
-            position_y > result.report.header_box_size_y + tolerance ||
+            position_y > header_box_size_y_code + tolerance ||
             position_z < -tolerance ||
-            position_z > result.report.header_box_size_z + tolerance) {
+            position_z > header_box_size_z_code + tolerance) {
           throw std::runtime_error(
               "snapshot reader: CHUI-authored coordinate lies outside declared box bounds");
         }

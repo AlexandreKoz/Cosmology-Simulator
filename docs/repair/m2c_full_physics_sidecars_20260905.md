@@ -365,3 +365,34 @@ MPI/FFTW-enabled distributed validation remains dependent on an environment
 with usable MPI C++ and FFTW development libraries. The source batching is
 collective-safe by construction, but no multi-rank runtime result is claimed by
 this closure document unless such a test is actually executed.
+
+## Final acceptance closure — HDF5 bounds units and diffusion-memory hardening (2026-09-06)
+
+The final post-patch audit found no remaining M2C architectural blocker, but it
+exposed one unrelated HDF5 unit mismatch and two memory-observability hardening
+items. This closure repairs all three without changing the snapshot schema or
+scientific source operators.
+
+- CHUI-native snapshot readback and direct HDF5 validation now compare
+  coordinates and box bounds in one consistent unit system. Public/report
+  `CHUIBoxSize{X,Y,Z}_MpcComoving` values remain Mpc; bounds are converted to
+  code/stored coordinate units before comparison.
+- The retained metal-diffusion face graph now has its own governor reservation.
+  Replacement admission occurs before the old retained graph is released, so
+  old/new topology coexistence is visible to the process memory authority.
+- Move-replaced diffusion `rho*kappa` and face containers retain explicit
+  historical capacity high-water values; a smaller later topology can no longer
+  erase evidence of a larger retained-memory peak.
+- The source-runtime regression now executes a diffusion-enabled production
+  case and verifies that the face graph is reported as governor-committed and
+  that reported high-water is never below retained capacity.
+- The HDF5 snapshot regression explicitly covers a kpc code-unit / Mpc metadata
+  mismatch case: 4.0965 kpc is accepted inside a 0.05 Mpc box, while 50.1 kpc
+  is rejected.
+
+No HDF5 dataset/attribute names, schema versions, star-formation model,
+feedback coupling, metal-diffusion coefficient/integrator, chemistry fidelity,
+or numerical tolerances changed. With the focused HDF5 acceptance tests green,
+M2C is acceptance-closed for the exercised single-rank/HDF5 environment. MPI
+and FFTW runtime evidence remains dependent on those development libraries being
+available.

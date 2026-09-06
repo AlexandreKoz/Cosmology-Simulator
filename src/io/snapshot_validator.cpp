@@ -15,6 +15,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/units.hpp"
 #include "internal/snapshot_field_contract.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
@@ -303,6 +304,41 @@ void validateMember(
   const auto mass_table = readMassTable(header.get());
   const bool chui_native = inspection.dialect == SnapshotDialect::kChuiNative ||
                            inspection.schema_name.rfind("chui_science_snapshot_", 0U) == 0U;
+
+  std::optional<std::array<double, 3>> chui_coordinate_bounds_stored;
+  if (chui_native) {
+    if (!inspection.unit_length.empty()) {
+      const core::UnitSystem code_units = core::makeUnitSystem(
+          inspection.unit_length, "msun", "km_s");
+      const core::UnitSystem mpc_units = core::makeUnitSystem(
+          "mpc", "msun", "km_s");
+      const double mpc_to_code =
+          mpc_units.length_si_per_code / code_units.length_si_per_code;
+      double storage_scale = 1.0;
+      if (inspection.dialect == SnapshotDialect::kArepoFormat3 ||
+          inspection.dialect == SnapshotDialect::kGadget4Hdf5) {
+        storage_scale = inspection.hubble_param;
+      }
+      chui_coordinate_bounds_stored = std::array<double, 3>{
+          inspection.box_size_x * mpc_to_code * storage_scale,
+          inspection.box_size_y * mpc_to_code * storage_scale,
+          inspection.box_size_z * mpc_to_code * storage_scale};
+    } else {
+      // Compatibility fallback for historical CHUI files that predate explicit
+      // unit metadata. Their canonical BoxSize is already expressed in stored
+      // coordinate units, albeit without axis-specific geometry.
+      H5Handle box_attr(H5Aopen(header.get(), "BoxSize", H5P_DEFAULT));
+      double scalar_box_stored = 0.0;
+      if (!box_attr.valid() ||
+          H5Aread(box_attr.get(), H5T_NATIVE_DOUBLE, &scalar_box_stored) < 0 ||
+          !(scalar_box_stored > 0.0) || !std::isfinite(scalar_box_stored)) {
+        throw std::runtime_error(
+            "snapshot validator: CHUI coordinate bounds require unit metadata or a valid stored BoxSize");
+      }
+      chui_coordinate_bounds_stored = std::array<double, 3>{
+          scalar_box_stored, scalar_box_stored, scalar_box_stored};
+    }
+  }
   for (std::size_t type_index = 0; type_index < local_counts.size(); ++type_index) {
     const std::uint64_t rows = local_counts[type_index];
     if (rows == 0U) continue;
@@ -313,20 +349,9 @@ void validateMember(
     }
     static_cast<void>(requireDataset(
         group.get(), "Coordinates", rows, H5T_FLOAT, chui_native ? 8U : 0U, 3U, options.budget, report));
-    std::optional<std::array<double, 3>> coordinate_bounds;
-    if (chui_native) {
-      double storage_scale = 1.0;
-      if (inspection.dialect == SnapshotDialect::kArepoFormat3 ||
-          inspection.dialect == SnapshotDialect::kGadget4Hdf5) {
-        storage_scale = inspection.hubble_param;
-      }
-      coordinate_bounds = std::array<double, 3>{
-          inspection.box_size_x * storage_scale,
-          inspection.box_size_y * storage_scale,
-          inspection.box_size_z * storage_scale};
-    }
     streamFiniteDoubleDataset(
-        group.get(), "Coordinates", rows, 3U, false, false, coordinate_bounds);
+        group.get(), "Coordinates", rows, 3U, false, false,
+        chui_coordinate_bounds_stored);
     if (options.require_velocities || chui_native) {
       static_cast<void>(requireDataset(
           group.get(), "Velocities", rows, H5T_FLOAT, chui_native ? 8U : 0U, 3U, options.budget, report));

@@ -2238,3 +2238,22 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   truth and persisted profiler JSON. A 4097-cell regression proves SF input
   residency plateaus at one 4096-cell batch; compact diffusion repeated-step
   capacity also plateaus.
+
+## 2026-09-06 M2C final acceptance closure
+
+- Repaired the CHUI-native HDF5 bounds check so Mpc-valued
+  `CHUIBoxSize{X,Y,Z}_MpcComoving` metadata is converted to the configured
+  code/stored coordinate unit before validating decoded/stored coordinates.
+  Snapshot schema names and report units remain unchanged.
+- Added a dedicated governor reservation for retained metal-diffusion face
+  topology. Replacement admission accounts for old/new graph coexistence before
+  releasing the prior retained reservation.
+- Added historical retained-capacity high-water tracking for move-replaced
+  diffusion `rho*kappa` and face containers; smaller later topologies cannot
+  erase prior peak evidence.
+- Added focused regressions for kpc-vs-Mpc snapshot bounds, continued invalid
+  out-of-box rejection, governed diffusion face residency, and high-water >=
+  current retained capacity.
+- Reproducibility/science impact: no source equations, diffusion operator,
+  star-formation/feedback model, precision, HDF5 schema version, dataset names,
+  normalized config, or restart payload changed.

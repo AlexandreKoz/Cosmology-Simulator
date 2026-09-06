@@ -489,6 +489,12 @@ MPI+HDF5 build.
 
 `validation_star_formation_models` validates the deterministic EOS table, threshold continuity, monotonic pressure, positive closure signal speed, interpolation, adaptive resolution response, exact timestep subdivision, and stochastic ensemble expectation. Running the executable with an output directory generates machine-readable files under `validation/star_formation/`. Production-runtime integration covers explicit profile selection, authoritative hydro inputs, covered-coarse rejection, leaf-only spawning, dense-row/patch reorder invariance, conservative birth, restart, and HDF5 fields.
 
+The HDF5 snapshot acceptance path also includes a CHUI-native unit-consistency regression with
+`length_unit = kpc` and a 0.05 Mpc box. A valid 4.0965 kpc coordinate must pass even though its
+raw numeric value exceeds `0.05`, while a 50.1 kpc coordinate must still fail the same 50 kpc
+box bound. This protects both the direct HDF5 validator and normal snapshot readback from
+mixing Mpc-valued CHUI box metadata with code-unit coordinates.
+
 The retained data are analytic and controlled-model validation. `validation_metadata.txt` explicitly records that no long-duration isolated-disk or observational calibration was performed. MPI acceptance requires the registered two-rank tests to execute in an MPI+HDF5 environment.
 
 ## MPI P1 count/collective-safety regression gate (2026-08-30)

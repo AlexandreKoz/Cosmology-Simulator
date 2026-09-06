@@ -263,6 +263,45 @@ namespace {
       std::string(profiler_json.substr(value_begin, value_end - value_begin))));
 }
 
+[[nodiscard]] std::uint64_t memoryEntryHighWater(
+    std::string_view profiler_json,
+    std::string_view label) {
+  const std::string label_token = "\"label\": \"" + std::string(label) + "\"";
+  const std::size_t label_pos = profiler_json.find(label_token);
+  assert(label_pos != std::string_view::npos);
+  constexpr std::string_view k_high_water_key = "\"high_water_bytes\":";
+  const std::size_t key_pos = profiler_json.find(k_high_water_key, label_pos);
+  assert(key_pos != std::string_view::npos);
+  std::size_t value_begin = key_pos + k_high_water_key.size();
+  while (value_begin < profiler_json.size() && profiler_json[value_begin] == ' ') {
+    ++value_begin;
+  }
+  std::size_t value_end = value_begin;
+  while (value_end < profiler_json.size() &&
+         profiler_json[value_end] >= '0' && profiler_json[value_end] <= '9') {
+    ++value_end;
+  }
+  assert(value_end > value_begin);
+  return static_cast<std::uint64_t>(std::stoull(
+      std::string(profiler_json.substr(value_begin, value_end - value_begin))));
+}
+
+[[nodiscard]] bool memoryEntryGoverned(
+    std::string_view profiler_json,
+    std::string_view label) {
+  const std::string label_token = "\"label\": \"" + std::string(label) + "\"";
+  const std::size_t label_pos = profiler_json.find(label_token);
+  assert(label_pos != std::string_view::npos);
+  constexpr std::string_view k_governed_key = "\"governed_commitment\":";
+  const std::size_t key_pos = profiler_json.find(k_governed_key, label_pos);
+  assert(key_pos != std::string_view::npos);
+  std::size_t value_begin = key_pos + k_governed_key.size();
+  while (value_begin < profiler_json.size() && profiler_json[value_begin] == ' ') {
+    ++value_begin;
+  }
+  return profiler_json.substr(value_begin, 4U) == "true";
+}
+
 [[nodiscard]] cosmosim::core::SimulationState makeParentlessGasState() {
   auto state = makeState(true);
   std::vector<cosmosim::core::GasCellIdentityRecord> identities(
@@ -695,6 +734,40 @@ struct AuthoritativeGravityNumericalResult {
       });
 }
 
+[[nodiscard]] cosmosim::workflows::ReferenceWorkflowReport runDiffusionMemoryCase(
+    const std::filesystem::path& output_root,
+    std::string_view run_name,
+    const cosmosim::core::SimulationState& state) {
+  std::string config_text = buildConfig(run_name);
+  const std::string sf_enabled = "enable_star_formation = true";
+  const std::size_t sf_pos = config_text.find(sf_enabled);
+  assert(sf_pos != std::string::npos);
+  config_text.replace(sf_pos, sf_enabled.size(), R"(enable_star_formation = false
+enable_feedback = false
+metal_species_mode = total_only
+enable_metal_diffusion = true
+metal_diffusion_model = smagorinsky
+metal_diffusion_time_integrator = explicit_subcycling
+metal_diffusion_coefficient = 0.05
+metal_diffusion_cfl = 0.35
+metal_diffusion_max_subcycles = 64
+metal_diffusion_max_rkl_stages = 48
+metal_diffusion_coefficient_floor_code = 0.0
+metal_diffusion_coefficient_ceiling_code = 100.0)"
+  );
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      config_text, "test_star_formation_source_runtime_diffusion_memory");
+  cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+  return runner.run(
+      output_root,
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .dt_time_code = 1.0e-9,
+          .write_outputs = false,
+          .initial_state_override = &state,
+          .max_steps_override = 1,
+      });
+}
+
 }  // namespace
 
 int main() {
@@ -791,6 +864,10 @@ int main() {
       output_root,
       "sf_runtime_batch_scaling",
       makeBatchScalingState(k_star_formation_batch_acceptance_cells));
+  const auto diffusion_memory_report = runDiffusionMemoryCase(
+      output_root,
+      "source_runtime_diffusion_memory",
+      converging_state);
 
   assert(converging_report.completed_steps == 1);
   assert(expanding_report.completed_steps == 1);
@@ -802,6 +879,7 @@ int main() {
   assert(level0_report.completed_steps == 1);
   assert(level1_report.completed_steps == 1);
   assert(batch_scaling_report.completed_steps == 1);
+  assert(diffusion_memory_report.completed_steps == 1);
   assert(converging_report.local_particle_count > 3);
   assert(expanding_report.local_particle_count == 3);
   assert(effective_report.local_particle_count > 3);
@@ -845,6 +923,27 @@ int main() {
     assert(input_capacity_bytes <
            static_cast<std::uint64_t>(k_star_formation_batch_acceptance_cells) *
                sizeof(cosmosim::physics::StarFormationCellInput));
+  }
+
+  // The scientifically required diffusion face graph is retained phase
+  // topology, but its physical capacity must still be governor-admitted and
+  // historical high-water must never under-report current retained capacity.
+  {
+    const std::string profiler_json =
+        readTextFile(diffusion_memory_report.profiler_json_path);
+    const std::uint64_t faces_capacity = memoryEntryOwnedCapacity(
+        profiler_json, "sources.metal_diffusion.faces");
+    const std::uint64_t faces_high_water = memoryEntryHighWater(
+        profiler_json, "sources.metal_diffusion.faces");
+    assert(faces_capacity > 0U);
+    assert(faces_high_water >= faces_capacity);
+    assert(memoryEntryGoverned(
+        profiler_json, "sources.metal_diffusion.faces"));
+    const std::uint64_t rho_capacity = memoryEntryOwnedCapacity(
+        profiler_json, "sources.metal_diffusion.rho_kappa");
+    const std::uint64_t rho_high_water = memoryEntryHighWater(
+        profiler_json, "sources.metal_diffusion.rho_kappa");
+    assert(rho_high_water >= rho_capacity);
   }
 
 #if COSMOSIM_ENABLE_HDF5

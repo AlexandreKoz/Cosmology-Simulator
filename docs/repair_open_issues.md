@@ -448,3 +448,11 @@ unchanged.
 | MEMORY-M2C-DIFFUSION-TRANSIENT-20260905 | Closed for single-rank released diffusion | Metal/enrichment source memory | Production diffusion now uses canonical gas spans plus 49 B/cell compact phase state and reusable five-scalar workspace; the 128 B/cell mirror, separate full-cell volume lane, duplicate face copy, and population-scale neighbor-accumulator graph are removed. Distributed conservative diffusion remains intentionally fail-closed until its remote flux contract exists. |
 | MEMORY-M2C-SOURCE-ACCOUNTING-20260905 | Closed | Runtime memory truth | `SourceRuntime` owner capacities/high-waters are merged into startup/per-step `MemoryReport` and persisted profiler JSON, including SF/feedback/diffusion source scratch. |
 | MEMORY-M2C-BH-ACTIVE-STAGING-20260905 | Closed for production accretion | BH/AGN event memory | Empty active-index span denotes all local BH rows, eliminating the O(N_BH) all-active index vector. Production seeding remains fail-closed without an authoritative candidate provider rather than allocating speculative population staging. |
+
+## 2026-09-06 M2C final acceptance closure
+
+| ID | Status | Area | Current blocker / ambiguity | Required follow-up |
+| --- | --- | --- | --- | --- |
+| IO-M2C-CHUI-BOX-UNITS-20260906 | Closed | Snapshot HDF5 validation/readback | CHUI Mpc-valued axis box metadata was compared directly against CHUI-native code-unit coordinates. | Reader and validator now convert box bounds into the matching code/stored unit; regression covers valid 4.0965 kpc and invalid 50.1 kpc coordinates in a 0.05 Mpc box. |
+| MEMORY-M2C-DIFFUSION-FACE-GOVERNOR-20260906 | Closed | Metal-diffusion topology memory | The retained O(N_face) diffusion graph was reported but not governor-admitted during replacement. | Face capacity now has a dedicated phase-resident reservation; old/new coexistence is accounted during handoff. |
+| MEMORY-M2C-DIFFUSION-HIGH-WATER-20260906 | Closed | SourceRuntime memory truth | Move-replaced diffusion containers could report only current capacity after a later smaller topology. | Explicit historical high-water is retained for `rho*kappa` and face capacities and surfaced in the existing `MemoryReport`. |
