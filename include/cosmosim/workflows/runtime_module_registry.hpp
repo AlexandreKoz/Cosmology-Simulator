@@ -38,8 +38,20 @@ enum class RuntimeTaskLifetimeBoundary : std::uint8_t {
   kStageEnd = 1,
 };
 
+// Owner-managed tasks retain their existing phase/transaction reservations.
+// Dispatcher-owned tasks are charged once by the execution plan. Neither mode
+// grants permission to overlap tasks with unknown or incomplete peak models.
+enum class RuntimeTaskMemoryOwnership : std::uint8_t {
+  kOwnerManaged = 0,
+  kDispatcherOwned = 1,
+};
+
 struct RuntimeTaskSchedulingProfile {
   std::uint64_t estimated_peak_bytes = 0U;
+  // Zero is not an implicit proof of zero allocation. A complete incremental
+  // peak model must opt in before this declaration can authorize overlap.
+  bool peak_is_known = false;
+  RuntimeTaskMemoryOwnership memory_ownership = RuntimeTaskMemoryOwnership::kOwnerManaged;
   core::MemoryClass memory_class = core::MemoryClass::kPhaseResident;
   RuntimeTaskLifetimeBoundary lifetime_boundary = RuntimeTaskLifetimeBoundary::kTaskEnd;
   RuntimeTaskPressureClass compute_pressure = RuntimeTaskPressureClass::kLow;
@@ -80,6 +92,9 @@ using RuntimeStageTaskFunction = std::variant<
 
 struct RuntimeStageTaskContribution {
   std::string task_id;
+  // Optional bounded, state-dependent incremental peak. Evaluated once at
+  // the task boundary; owner-managed tasks retain their existing reservations.
+  std::function<std::uint64_t()> estimate_incremental_bytes;
   RuntimeStageTaskFunction task;
 };
 
@@ -116,6 +131,7 @@ class RuntimeExecutionPlan {
     std::string module_id;
     RuntimeTaskDeclaration declaration;
     RuntimeStageTaskFunction task;
+    std::function<std::uint64_t()> estimate_incremental_bytes;
   };
 
   RuntimeExecutionPlan() = default;
@@ -139,6 +155,7 @@ class RuntimeExecutionPlan {
  private:
   friend class RuntimeModuleRegistry;
 
+  const RuntimeServices* m_services = nullptr;
   std::vector<std::string> m_ordered_module_ids;
   std::vector<RuntimeModuleInstance> m_module_instances;
   std::vector<PlannedTask> m_tasks;

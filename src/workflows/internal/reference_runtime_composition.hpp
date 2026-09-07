@@ -20,6 +20,7 @@ class EffectiveMultiphaseEosTable;
 }
 
 namespace cosmosim::workflows {
+class AnalysisRuntime;
 class GravityRuntime;
 class HydroAmrRuntime;
 class SourceRuntime;
@@ -50,6 +51,7 @@ struct ReferenceRuntimeCompositionInputs {
 // gravity/hydro handles are narrow lifecycle/diagnostic surfaces needed by the
 // time coordinator outside stage execution.
 struct ReferenceRuntimeComposition {
+  std::shared_ptr<AnalysisRuntime> analysis;
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
   std::shared_ptr<SourceRuntime> source;

@@ -22,6 +22,7 @@
 namespace cosmosim::workflows::internal {
 
 struct CompositionAssembly {
+  std::shared_ptr<AnalysisRuntime> analysis;
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
   std::shared_ptr<SourceRuntime> source;
@@ -99,6 +100,7 @@ namespace {
     RuntimeTaskLifetimeBoundary lifetime_boundary = RuntimeTaskLifetimeBoundary::kTaskEnd) {
   return RuntimeTaskSchedulingProfile{
       .estimated_peak_bytes = estimated_peak_bytes,
+      .peak_is_known = estimated_peak_bytes != 0U,
       .memory_class = memory_class,
       .lifetime_boundary = lifetime_boundary,
       .compute_pressure = compute_pressure,
@@ -120,7 +122,8 @@ namespace {
 }
 
 [[nodiscard]] RuntimeModuleDescriptor makeAnalysisDescriptor(
-    const ReferenceRuntimeCompositionInputs& inputs) {
+    const ReferenceRuntimeCompositionInputs& inputs,
+    std::shared_ptr<CompositionAssembly> assembly) {
   static constexpr std::array stages{
       core::IntegrationStage::kGravityKickPre,
       core::IntegrationStage::kDrift,
@@ -140,9 +143,13 @@ namespace {
         .ordinal = -100,
         .view_kind = RuntimeStageViewKind::kStageAudit,
         .resources = {write(RuntimeResourceKey::kDiagnostics)},
-        .scheduling = schedulingProfile(
-            0U, RuntimeTaskPressureClass::kLow, RuntimeTaskPressureClass::kLow,
-            RuntimeTaskPressureClass::kLow),
+        .scheduling = [] {
+          auto profile = schedulingProfile(
+              0U, RuntimeTaskPressureClass::kLow, RuntimeTaskPressureClass::kLow,
+              RuntimeTaskPressureClass::kLow);
+          profile.peak_is_known = true;
+          return profile;
+        }(),
     });
   }
   declarations.push_back(RuntimeTaskDeclaration{
@@ -171,10 +178,11 @@ namespace {
       .prerequisites = {},
       .incompatibilities = {},
       .stage_tasks = std::move(declarations),
-      .factory = [&config = inputs.config, &report = inputs.report](
+      .factory = [&config = inputs.config, &report = inputs.report, assembly](
                      const RuntimeModuleFactoryContext& context) {
         std::shared_ptr<AnalysisRuntime> owner(
             makeAnalysisRuntime(config, report.stage_sequence, context.services));
+        assembly->analysis = owner;
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         static constexpr std::array factory_stages{
@@ -447,6 +455,7 @@ namespace {
             inputs.particle_scheduler,
             inputs.gas_cell_scheduler,
             *assembly->gravity,
+            *assembly->analysis,
             inputs.services,
             inputs.report,
             inputs.profiler,
@@ -480,7 +489,7 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
             physics::makeEffectiveIsmReferenceCoolingProvider(inputs.config.physics));
   }
   RuntimeModuleRegistry registry;
-  registry.registerModule(makeAnalysisDescriptor(inputs));
+  registry.registerModule(makeAnalysisDescriptor(inputs, assembly));
   registry.registerModule(makeDriftDescriptor());
   registry.registerModule(makeGravityDescriptor(inputs, assembly));
   registry.registerModule(makeHydroAmrDescriptor(inputs, assembly));
@@ -495,6 +504,7 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
     throw std::logic_error("reference runtime composition omitted a required owner");
   }
   return ReferenceRuntimeComposition{
+      .analysis = std::move(assembly->analysis),
       .gravity = std::move(assembly->gravity),
       .hydro_amr = std::move(assembly->hydro_amr),
       .source = std::move(assembly->source),

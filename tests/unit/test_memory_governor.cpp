@@ -1,4 +1,5 @@
 #include <atomic>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -328,6 +329,77 @@ void testDeterministicHeadroomAwareBatchSizing() {
   assert(no_batch.constrained_by_headroom);
 }
 
+void testRetainedWorkspaceBatchSizing() {
+  using namespace cosmosim::core;
+  MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1000U});
+  governor.setBaselineOwnedBytes(800U);
+  const std::array<DeterministicBatchWorkspace, 3> workspaces{{
+      {8U, 0U}, {16U, 8U}, {4U, 8U},
+  }};
+  const DeterministicBatchSizingPolicy policy{
+      .requested_max_items = 16U, .bytes_per_item = 1U,
+      .fixed_reserve_bytes = 80U, .minimum_items = 1U,
+      .alignment_items = 1U, .headroom_use_basis_points = 10000U,
+  };
+  const auto first = selectDeterministicBatchSizeForWorkspaces(
+      governor.snapshot(), policy, workspaces);
+  // 8 retained event/row slots cost nothing; only the report is new.
+  assert(first.selected_items == 8U);
+  assert(first.selected_bytes == 64U);
+  auto fixed = governor.reserve(MemoryClass::kPhaseResident, 80U, "unit.index_rebuild");
+  fixed.commit();
+  auto report = governor.reserve(MemoryClass::kPhaseResident, first.selected_bytes, "unit.report");
+  report.commit();
+  assert(governor.snapshot().accounted_bytes == 944U);
+  report.release();
+  fixed.release();
+  assert(governor.snapshot().accounted_bytes == 800U);
+  // A larger headroom permits replacement, but the old capacity must coexist.
+  governor.setBaselineOwnedBytes(500U);
+  const auto grown = selectDeterministicBatchSizeForWorkspaces(
+      governor.snapshot(), policy, workspaces);
+  assert(grown.selected_items == 15U);
+  assert(grown.selected_bytes == 15U * 28U);
+  MemoryGovernor tight(MemoryGovernorPolicy{.hard_limit_bytes = 1000U});
+  tight.setBaselineOwnedBytes(920U);
+  const auto starved = selectDeterministicBatchSizeForWorkspaces(
+      tight.snapshot(), policy, workspaces);
+  assert(starved.selected_items == 0U);
+  assert(starved.constrained_by_headroom);
+  MemoryGovernor unlimited;
+  const auto all = selectDeterministicBatchSizeForWorkspaces(
+      unlimited.snapshot(), policy, workspaces);
+  assert(all.selected_items == 16U);
+  assert(all.selected_bytes == 16U * 28U);
+  bool overflow = false;
+  try {
+    (void)selectDeterministicBatchSizeForWorkspaces(
+        unlimited.snapshot(), DeterministicBatchSizingPolicy{
+            .requested_max_items = std::numeric_limits<std::uint64_t>::max(),
+            .bytes_per_item = 1U, .minimum_items = 1U, .alignment_items = 1U},
+        workspaces);
+  } catch (const std::overflow_error&) { overflow = true; }
+  assert(overflow);
+  // Two individually representable workspaces must not wrap their aggregate
+  // into a false fit, especially under the unlimited compatibility policy.
+  const std::array huge_workspaces{
+      cosmosim::core::DeterministicBatchWorkspace{.bytes_per_item =
+          std::numeric_limits<std::uint64_t>::max() / 2U, .retained_capacity_items = 0U},
+      cosmosim::core::DeterministicBatchWorkspace{.bytes_per_item =
+          std::numeric_limits<std::uint64_t>::max() / 2U, .retained_capacity_items = 0U},
+  };
+  bool aggregate_overflow_rejected = false;
+  try {
+    (void)cosmosim::core::selectDeterministicBatchSizeForWorkspaces(
+        unlimited.snapshot(), cosmosim::core::DeterministicBatchSizingPolicy{
+            .requested_max_items = 2U, .minimum_items = 1U}, huge_workspaces);
+  } catch (const std::overflow_error&) {
+    aggregate_overflow_rejected = true;
+  }
+  assert(aggregate_overflow_rejected);
+
+}
+
 void testConcurrentControlPlaneReservations() {
   MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1U << 20U});
   constexpr int k_threads = 8;
@@ -370,6 +442,7 @@ int main() {
   testCheckedArithmeticAndOversizedRequest();
   testCommittedReservationTransfersIntoBaselineAtomically();
   testDeterministicHeadroomAwareBatchSizing();
+  testRetainedWorkspaceBatchSizing();
   testConcurrentControlPlaneReservations();
   return 0;
 }

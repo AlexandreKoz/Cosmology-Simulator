@@ -5,10 +5,57 @@
 #include <limits>
 #include <stdexcept>
 #include <vector>
+#include <optional>
+#include <algorithm>
+#include "../../src/parallel/internal/memory_constrained_sfc.hpp"
 
 #include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace {
+
+using cosmosim::parallel::internal::SfcCutPoint;
+using cosmosim::parallel::internal::lessSfcPoint;
+using cosmosim::parallel::internal::repairMemoryConstrainedSfcCuts;
+bool feasibleMemoryPartition(const std::vector<std::uint64_t>& v, int begin,int ranks,std::uint64_t cap){
+ if(begin==(int)v.size())return true;
+ if(ranks==0)return false;
+ std::uint64_t sum=0;
+ for(int i=begin;i<(int)v.size();++i){sum+=v[i];if(sum>cap)break;if(feasibleMemoryPartition(v,i+1,ranks-1,cap))return true;}
+ return false;
+}
+void testExactDistributedCutRepairSynthetic(){
+ std::uint64_t cases=0;
+ for(int encoded=0;encoded<4096;++encoded){
+  int x=encoded;std::vector<std::uint64_t> v(6);
+  for(auto&b:v){b=x%4;x/=4;}
+  std::vector<SfcCutPoint> points;
+  for(std::uint64_t i=0;i<6;++i)points.push_back({i+1,i+1});
+  std::vector<std::uint64_t> prefix(7,0);
+  for(int i=0;i<6;++i)prefix[i+1]=prefix[i]+v[i];
+  auto globalPrefix=[&](SfcCutPoint p){auto it=std::upper_bound(points.begin(),points.end(),p,lessSfcPoint);return prefix[it-points.begin()];};
+  auto first=[&](std::uint64_t target){auto it=std::lower_bound(prefix.begin()+1,prefix.end(),target);if(it==prefix.end())throw std::logic_error("missing target");return points[it-prefix.begin()-1];};
+  auto neighbor=[&](SfcCutPoint p,bool pred)->std::optional<SfcCutPoint>{auto it=std::lower_bound(points.begin(),points.end(),p,lessSfcPoint);if(pred){if(it==points.begin())return{};return *std::prev(it);}if(it==points.end())return{};return *it;};
+  for(int ranks=2;ranks<=4;++ranks)for(std::uint64_t cap=1;cap<=7;++cap){
+   std::vector<SfcCutPoint> proposed(ranks-1,points.front());
+   bool found=false;
+   try{
+    std::vector<SfcCutPoint> mandatory(ranks-1);
+    std::vector<SfcCutPoint> repaired; repaired.reserve(ranks-1);
+    auto cuts=repairMemoryConstrainedSfcCuts(proposed,cap,prefix.back(),points.front(),points.back(),globalPrefix,first,neighbor,mandatory,repaired);
+    std::vector<std::uint64_t> totals(ranks,0);
+    for(int i=0;i<6;++i){auto it=std::lower_bound(cuts.begin(),cuts.end(),points[i],lessSfcPoint);totals[it-cuts.begin()]+=v[i];}
+    for(auto b:totals)if(b>cap)throw std::logic_error("unsafe result");
+    found=true;
+   }catch(const std::runtime_error&){found=false;}
+   if(found!=feasibleMemoryPartition(v,0,ranks,cap)){
+    assert(false && "exact SFC repair feasibility mismatch");
+   }
+   ++cases;
+  }
+ }
+ assert(cases == 86016U);
+}
+
 
 void testBoundedMpiTransferPlannerSyntheticLimits() {
   namespace parallel = cosmosim::parallel;
@@ -1701,6 +1748,78 @@ void testHardRankMemoryConstraintAndExpandedCostModel() {
   assert(rejected);
 }
 
+void testMemoryFeasibilityPrecedesWorkBalancing() {
+  using namespace cosmosim::parallel;
+  std::vector<DecompositionItem> items(4);
+  for (std::size_t i = 0U; i < items.size(); ++i) {
+    auto& item = items[i];
+    item.entity_id = 700U + i;
+    item.kind = DecompositionEntityKind::kParticle;
+    item.current_owner_rank = 0;
+    item.x_comov = 0.1 + 0.2 * static_cast<double>(i);
+    item.memory_bytes = 4U;
+    item.work_units = i == 0U ? 100.0 : 1.0;
+  }
+  DecompositionConfig config;
+  config.world_size = 2;
+  config.owned_particle_weight = 0.0;
+  config.work_weight = 1.0;
+  config.max_rank_memory_bytes = 8U;
+  const auto plan = buildMortonSfcDecomposition(items, config);
+  assert(plan.metrics.memory_bytes_by_rank == std::vector<std::uint64_t>({8U, 8U}));
+  assert(plan.ranges_by_rank[0].end_sorted == 2U);
+  RuntimeRebalanceConfig rebalance_config;
+  rebalance_config.world_size = 2;
+  rebalance_config.imbalance_trigger_ratio = 1000.0;
+  rebalance_config.memory_trigger_ratio = 1000.0;
+  rebalance_config.max_migrated_load_fraction = 0.01;
+  const auto rebalance = buildRuntimeRebalancePlan(items, config, rebalance_config);
+  assert(rebalance.should_rebalance);
+  assert(rebalance.reason == "rank_memory_limit");
+  assert(rebalance.target_decomposition.metrics.max_peak_memory_bytes == 8U);
+
+  // The same exact-capacity case must remain feasible with a transient reserve.
+  config.max_rank_memory_bytes = 12U;
+  config.rank_transient_reserve_bytes = 4U;
+  assert(buildMortonSfcDecomposition(items, config).metrics.max_peak_memory_bytes == 12U);
+  // Empty ranks and zero-byte groups may not manufacture an infeasible suffix.
+  config.world_size = 4;
+  config.max_rank_memory_bytes = 8U;
+  config.rank_transient_reserve_bytes = 0U;
+  items.resize(2U);
+  const auto sparse = buildMortonSfcDecomposition(items, config);
+  assert(sparse.ranges_by_rank.size() == 4U);
+  assert(sparse.metrics.max_peak_memory_bytes <= 8U);
+  items[0].memory_bytes = 0U;
+  items[1].memory_bytes = 0U;
+  assert(buildMortonSfcDecomposition(items, config).metrics.max_peak_memory_bytes == 0U);
+
+  // A single indivisible group above the cap and an impossible total fail.
+  items[0].memory_bytes = 9U;
+  bool rejected = false;
+  try { (void)buildMortonSfcDecomposition(items, config); }
+  catch (const std::runtime_error&) { rejected = true; }
+  assert(rejected);
+  items[0].memory_bytes = 4U;
+  items[1].memory_bytes = 4U;
+  config.world_size = 1;
+  config.max_rank_memory_bytes = 7U;
+  rejected = false;
+  try { (void)buildMortonSfcDecomposition(items, config); }
+  catch (const std::runtime_error&) { rejected = true; }
+  assert(rejected);
+
+  // Equal SFC point/ID records are indivisible in the distributed cut protocol.
+  config.world_size = 2;
+  config.max_rank_memory_bytes = 6U;
+  items[1].entity_id = items[0].entity_id;
+  items[1].x_comov = items[0].x_comov;
+  rejected = false;
+  try { (void)buildMortonSfcDecomposition(items, config); }
+  catch (const std::runtime_error&) { rejected = true; }
+  assert(rejected);
+}
+
 void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
   std::vector<cosmosim::parallel::DecompositionItem> items;
   for (std::uint64_t i = 0; i < 6U; ++i) {
@@ -1758,6 +1877,7 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
 }  // namespace
 
 int main() {
+  testExactDistributedCutRepairSynthetic();
   testBoundedMpiTransferPlannerSyntheticLimits();
   testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces();
   testGhostPackUnpackRoundTrip();
@@ -1796,6 +1916,7 @@ int main() {
   testPmSlabLayoutRoundTripAndCellOwnership();
   testPmSlabHaloSerialDoesNotRequireMpiInitialization();
   testHardRankMemoryConstraintAndExpandedCostModel();
+  testMemoryFeasibilityPrecedesWorkBalancing();
   testAuthoritativeTopDomainLeavesPreserveOwnedGeometry();
   return 0;
 }

@@ -1,5 +1,6 @@
 #include "cosmosim/workflows/output_restart_runtime.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
+#include "cosmosim/workflows/analysis_runtime.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 
 #include <algorithm>
@@ -399,6 +400,7 @@ bool maybeWriteOutputs(
     const core::HierarchicalTimeBinScheduler& scheduler,
     const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const workflows::GravityRestartStateProvider& gravity_state,
+    const workflows::AnalysisRuntime& analysis_state,
     const workflows::RuntimeServices& services,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
@@ -610,6 +612,12 @@ bool maybeWriteOutputs(
     restart_payload.gravity_force_cache = &gravity_force_cache;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    // Optional science cadence is explicitly best-effort and nonpersistent.
+    // Persist the pending/missed summary as provenance, not restart truth.
+    // A resumed run starts fresh; historical physical states are never
+    // fabricated by replaying a later state under an earlier epoch.
+    restart_payload.provenance.derived_runtime_state +=
+        analysis_state.optionalCadenceProvenance();
     applyExecutionTopologyToProvenance(
         &restart_payload.provenance, gravity_state.runtimeTopology());
     restart_payload.normalized_config_text = frozen_config.normalized_text;
@@ -1048,6 +1056,7 @@ OutputRestartRuntime::OutputRestartRuntime(
     const core::HierarchicalTimeBinScheduler& scheduler,
     const core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
     const GravityRestartStateProvider& gravity_state,
+    const AnalysisRuntime& analysis_state,
     const RuntimeServices& services,
     ReferenceWorkflowReport& report,
     core::ProfilerSession& profiler,
@@ -1058,6 +1067,7 @@ OutputRestartRuntime::OutputRestartRuntime(
       m_scheduler(scheduler),
       m_gas_cell_scheduler(gas_cell_scheduler),
       m_gravity_state(gravity_state),
+      m_analysis_state(analysis_state),
       m_services(services),
       m_report(report),
       m_profiler(profiler),
@@ -1127,6 +1137,7 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
       m_scheduler,
       m_gas_cell_scheduler,
       m_gravity_state,
+      m_analysis_state,
       m_services,
       m_report,
       m_profiler,

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -133,6 +134,83 @@ DeterministicBatchSizingResult selectDeterministicBatchSize(
   }
   result.selected_bytes = result.selected_items * policy.bytes_per_item;
   result.constrained_by_headroom = result.selected_items < policy.requested_max_items;
+  return result;
+}
+
+DeterministicBatchSizingResult selectDeterministicBatchSizeForWorkspaces(
+    const MemoryGovernorSnapshot& snapshot,
+    const DeterministicBatchSizingPolicy& policy,
+    std::span<const DeterministicBatchWorkspace> workspaces) {
+  if (policy.requested_max_items == 0U || policy.minimum_items == 0U ||
+      policy.minimum_items > policy.requested_max_items ||
+      policy.alignment_items == 0U || policy.headroom_use_basis_points == 0U ||
+      policy.headroom_use_basis_points > k_basis_point_denominator || workspaces.empty()) {
+    throw std::invalid_argument("deterministic workspace batch policy is invalid");
+  }
+  // Validate representability independently of available headroom. This
+  // prevents a huge requested count from wrapping into an apparently cheap
+  // allocation and makes unlimited mode use the same checked contract.
+  for (const auto& workspace : workspaces) {
+    if (workspace.bytes_per_item != 0U && policy.requested_max_items >
+        std::numeric_limits<std::uint64_t>::max() / workspace.bytes_per_item) {
+      throw std::overflow_error("deterministic workspace batch byte count overflows uint64");
+    }
+  }
+  const auto requiredBytes = [&](std::uint64_t count) {
+    std::uint64_t bytes = 0U;
+    for (const auto& workspace : workspaces) {
+      if (count <= workspace.retained_capacity_items) { continue; }
+      const std::uint64_t additional = count * workspace.bytes_per_item;
+      if (additional > std::numeric_limits<std::uint64_t>::max() - bytes) {
+        return std::optional<std::uint64_t>{};
+      }
+      bytes += additional;
+    }
+    return std::optional<std::uint64_t>{bytes};
+  };
+  // Reuse the established headroom and basis-point policy, including its
+  // fixed-reserve subtraction. The dummy unit width only obtains the usable
+  // byte budget; actual workspace costs are evaluated below.
+  const auto budget = selectDeterministicBatchSize(
+      snapshot, DeterministicBatchSizingPolicy{
+          .requested_max_items = 1U,
+          .bytes_per_item = 1U,
+          .fixed_reserve_bytes = policy.fixed_reserve_bytes,
+          .minimum_items = 1U,
+          .alignment_items = 1U,
+          .headroom_use_basis_points = policy.headroom_use_basis_points,
+      });
+  const std::uint64_t usable = budget.usable_headroom_bytes;
+  const auto fits = [&](std::uint64_t count) {
+    const auto bytes = requiredBytes(count);
+    return bytes.has_value() && *bytes <= usable;
+  };
+  if (snapshot.headroom_bytes == std::numeric_limits<std::uint64_t>::max() &&
+      !requiredBytes(policy.requested_max_items).has_value()) {
+    throw std::overflow_error("deterministic workspace aggregate byte count overflows uint64");
+  }
+  DeterministicBatchSizingResult result;
+  result.usable_headroom_bytes = usable;
+  if (!fits(policy.minimum_items)) {
+    result.constrained_by_headroom = true;
+    return result;
+  }
+  std::uint64_t low = policy.minimum_items;
+  std::uint64_t high = policy.requested_max_items;
+  while (low < high) {
+    const std::uint64_t mid = low + (high - low) / 2U + (high - low) % 2U;
+    if (fits(mid)) { low = mid; } else { high = mid - 1U; }
+  }
+  if (low >= policy.alignment_items) {
+    low -= low % policy.alignment_items;
+  }
+  if (low < policy.minimum_items) {
+    result.constrained_by_headroom = true;
+    return result;
+  }
+  result.selected_items = low;
+  result.selected_bytes = *requiredBytes(low);
+  result.constrained_by_headroom = low < policy.requested_max_items;
   return result;
 }
 

@@ -13,6 +13,7 @@
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
+#include "workflows/internal/optional_diagnostic_cadence.hpp"
 
 namespace cosmosim::workflows {
 namespace {
@@ -99,60 +100,109 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
                    m_config.analysis.science_heavy_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy ==
             core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
-    const bool science_light_requested =
-        science_light_due_now || m_science_light_deferred;
-    const bool science_heavy_requested =
-        science_heavy_due_now || m_science_heavy_deferred;
-    if (defer_optional_analysis &&
-        (science_light_requested || science_heavy_requested)) {
-      m_science_light_deferred = science_light_requested;
-      m_science_heavy_deferred = science_heavy_requested;
-      m_services.profiler.recordEvent(core::RuntimeEvent{
-          .event_kind = "analysis.memory_pressure_deferral",
-          .severity = core::RuntimeEventSeverity::kInfo,
-          .subsystem = "analysis.diagnostics",
-          .step_index = step,
-          .simulation_time_code = context.timeline_step.time_end_code,
-          .scale_factor = scale_factor,
-          .message = "optional science diagnostics deferred under process memory pressure",
-          .payload = {
-              {"pressure", std::string(core::memoryPressureLabel(memory_pressure))},
-              {"science_light_due", science_light_due_now ? "true" : "false"},
-              {"science_heavy_due", science_heavy_due_now ? "true" : "false"},
-              {"science_light_pending", m_science_light_deferred ? "true" : "false"},
-              {"science_heavy_pending", m_science_heavy_deferred ? "true" : "false"},
-          },
-      });
-    } else {
-      const bool science_light_catchup =
-          m_science_light_deferred && !science_light_due_now;
-      const bool science_heavy_catchup =
-          m_science_heavy_deferred && !science_heavy_due_now;
-      if (science_light_requested) {
-        run(analysis::DiagnosticClass::kScienceLight);
-        m_science_light_deferred = false;
-      }
-      if (science_heavy_requested) {
-        run(analysis::DiagnosticClass::kScienceHeavy);
-        m_science_heavy_deferred = false;
-      }
-      if (science_light_catchup || science_heavy_catchup) {
+    const bool science_light_requested = science_light_due_now || m_science_light_pending.pending;
+    const bool science_heavy_requested = science_heavy_due_now || m_science_heavy_pending.pending;
+    if (defer_optional_analysis) {
+      if (science_light_due_now) { m_science_light_pending.recordDue(step); }
+      if (science_heavy_due_now) { m_science_heavy_pending.recordDue(step); }
+      if (science_light_requested || science_heavy_requested) {
         m_services.profiler.recordEvent(core::RuntimeEvent{
-            .event_kind = "analysis.memory_pressure_catchup",
+            .event_kind = "analysis.memory_pressure_deferral",
             .severity = core::RuntimeEventSeverity::kInfo,
             .subsystem = "analysis.diagnostics",
             .step_index = step,
             .simulation_time_code = context.timeline_step.time_end_code,
             .scale_factor = scale_factor,
-            .message = "deferred optional science diagnostics completed after pressure eased",
+            .message = "optional science diagnostics deferred under process memory pressure",
             .payload = {
-                {"science_light_catchup", science_light_catchup ? "true" : "false"},
-                {"science_heavy_catchup", science_heavy_catchup ? "true" : "false"},
+                {"pressure", std::string(core::memoryPressureLabel(memory_pressure))},
+                {"science_light_due", science_light_due_now ? "true" : "false"},
+                {"science_heavy_due", science_heavy_due_now ? "true" : "false"},
+                {"science_light_pending", m_science_light_pending.pending ? "true" : "false"},
+                {"science_heavy_pending", m_science_heavy_pending.pending ? "true" : "false"},
+                {"science_light_missed_count", std::to_string(m_science_light_pending.missed_count)},
+                {"science_heavy_missed_count", std::to_string(m_science_heavy_pending.missed_count)},
             },
         });
       }
+    } else {
+      const auto executeOptional = [&](analysis::DiagnosticClass diagnostic_class,
+                                       internal::OptionalDiagnosticCadence& pending,
+                                       bool due_now, const char* class_name) {
+        if (!due_now && !pending.pending) { return; }
+        const auto previous = pending;
+        // Do not clear pending state until the physical product was written.
+        // The engine's existing memory admission remains authoritative.
+        run(diagnostic_class);
+        pending.clear();
+        if (previous.pending) {
+          m_services.profiler.recordEvent(core::RuntimeEvent{
+              .event_kind = "analysis.memory_pressure_catchup",
+              .severity = core::RuntimeEventSeverity::kInfo,
+              .subsystem = "analysis.diagnostics",
+              .step_index = step,
+              .simulation_time_code = context.timeline_step.time_end_code,
+              .scale_factor = scale_factor,
+              .message = "coalesced optional science diagnostic completed at the current physical epoch",
+              .payload = {
+                  {"diagnostic_class", class_name},
+                  {"first_due_step", std::to_string(previous.first_due_step)},
+                  {"latest_due_step", std::to_string(previous.latest_due_step)},
+                  {"missed_count", std::to_string(previous.missed_count)},
+                  {"coalesced_count", std::to_string(previous.missed_count - 1U)},
+                  {"actual_execution_step", std::to_string(step)},
+                  {"science_light_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceLight ? "true" : "false"},
+                  {"science_heavy_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceHeavy ? "true" : "false"},
+                  {"historical_state_replayed", "false"},
+              },
+          });
+        }
+      };
+      executeOptional(analysis::DiagnosticClass::kScienceLight,
+                      m_science_light_pending, science_light_due_now, "science_light");
+      executeOptional(analysis::DiagnosticClass::kScienceHeavy,
+                      m_science_heavy_pending, science_heavy_due_now, "science_heavy");
     }
     m_diagnostics.enforceRetentionPolicy();
+  }
+
+  [[nodiscard]] std::string optionalCadenceProvenance() const override {
+    const auto describe = [](const internal::OptionalDiagnosticCadence& state) {
+      return std::string("pending=") + (state.pending ? "true" : "false") +
+          ",first_due_step=" + std::to_string(state.first_due_step) +
+          ",latest_due_step=" + std::to_string(state.latest_due_step) +
+          ",missed_count=" + std::to_string(state.missed_count);
+    };
+    return "optional_diagnostic_cadence_policy=coalesced_nonpersistent\n"
+           "optional_diagnostic_science_light=" + describe(m_science_light_pending) + "\n" +
+           "optional_diagnostic_science_heavy=" + describe(m_science_heavy_pending) + "\n";
+  }
+
+  void finalizePending(std::uint64_t completed_step, double time_code,
+                       double scale_factor) override {
+    const auto drop = [&](internal::OptionalDiagnosticCadence& pending,
+                          const char* class_name) {
+      if (!pending.pending) { return; }
+      m_services.profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "analysis.optional_cadence_dropped",
+          .severity = core::RuntimeEventSeverity::kWarning,
+          .subsystem = "analysis.diagnostics",
+          .step_index = completed_step,
+          .simulation_time_code = time_code,
+          .scale_factor = scale_factor,
+          .message = "pending optional science cadence discarded at run termination; no historical state replay",
+          .payload = {
+              {"diagnostic_class", class_name},
+              {"first_due_step", std::to_string(pending.first_due_step)},
+              {"latest_due_step", std::to_string(pending.latest_due_step)},
+              {"dropped_count", std::to_string(pending.missed_count)},
+              {"reason", "run_termination"},
+          },
+      });
+      pending.clear();
+    };
+    drop(m_science_light_pending, "science_light");
+    drop(m_science_heavy_pending, "science_heavy");
   }
 
  private:
@@ -160,8 +210,8 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
   std::vector<std::string>* m_stage_sequence = nullptr;
   const RuntimeServices& m_services;
   analysis::DiagnosticsEngine m_diagnostics;
-  bool m_science_light_deferred = false;
-  bool m_science_heavy_deferred = false;
+  internal::OptionalDiagnosticCadence m_science_light_pending;
+  internal::OptionalDiagnosticCadence m_science_heavy_pending;
 };
 
 }  // namespace

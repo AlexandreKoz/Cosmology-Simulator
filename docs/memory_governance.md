@@ -292,3 +292,9 @@ pending state is runtime scheduling metadata, not scientific/restart authority.
 
 Detailed implementation and validation evidence is in
 `docs/repair/m2d_memory_aware_runtime_20260906.md`.
+
+## M2D-1 retained workspace and task admission contracts
+
+`selectDeterministicBatchSizeForWorkspaces` uses the existing governor snapshot and policy. Retained capacity is already accounted; growth charges the full replacement allocation, and temporary workspace is charged in full. The selector returns a decision, not ownership. The caller retains the actual physical reservation until its memory is released or reconciled. Aggregate arithmetic is checked in both finite and unlimited modes.
+
+The runtime registry distinguishes complete/unknown peaks and owner-managed/dispatcher-owned reservations. Dispatcher-owned tasks hold one RAII lease through execution. Owner-managed preflight is released before the owner's own reservation; no physical byte range is counted twice. All existing heavy built-in owners remain owner-managed. Unknown peaks cannot authorize concurrency. The production numerical order is unchanged, and completion of the remaining owner-specific peak models is a separate acceptance gate.

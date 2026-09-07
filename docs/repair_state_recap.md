@@ -2291,3 +2291,7 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
   HDF5 configuration detects HDF5 1.14.5 and the focused M2D/reference-workflow
   set passes 4/4. MPI C++ and FFTW development dependencies remain unavailable.
   Detailed evidence is in `docs/repair/m2d_memory_aware_runtime_20260906.md`.
+
+## 2026-09-06 M2D-1 source repair state
+
+The post-merge feasible-SFC rejection and soft-throttle hard-memory relief defects are repaired in source. Exact cut repair has 86,016 exhaustive synthetic feasibility cases and focused CPU tests passing. Retained-capacity-aware batching, dispatcher-owned task leases, conservative unknown-peak overlap refusal, and coalesced optional-cadence lifecycle are implemented. Full acceptance is provisional pending real MPI+FFTW, owner-specific major-task peak contracts, and broad scientific/topology validation. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`. Do not treat historical M2D reports as fresh distributed runtime evidence.

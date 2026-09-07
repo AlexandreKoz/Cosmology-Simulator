@@ -456,3 +456,7 @@ unchanged.
 | IO-M2C-CHUI-BOX-UNITS-20260906 | Closed | Snapshot HDF5 validation/readback | CHUI Mpc-valued axis box metadata was compared directly against CHUI-native code-unit coordinates. | Reader and validator now convert box bounds into the matching code/stored unit; regression covers valid 4.0965 kpc and invalid 50.1 kpc coordinates in a 0.05 Mpc box. |
 | MEMORY-M2C-DIFFUSION-FACE-GOVERNOR-20260906 | Closed | Metal-diffusion topology memory | The retained O(N_face) diffusion graph was reported but not governor-admitted during replacement. | Face capacity now has a dedicated phase-resident reservation; old/new coexistence is accounted during handoff. |
 | MEMORY-M2C-DIFFUSION-HIGH-WATER-20260906 | Closed | SourceRuntime memory truth | Move-replaced diffusion containers could report only current capacity after a later smaller topology. | Explicit historical high-water is retained for `rho*kappa` and face capacities and surfaced in the existing `MemoryReport`. |
+
+## 2026-09-06 M2D-1 remaining acceptance gates
+
+The P1 exact-feasibility and distributed soft-throttle defects have source repairs and focused CPU evidence. Open: dependency-complete MPI+FFTW rank/fault/transaction validation; complete owner-specific major-task incremental peak models before enabling concurrency; full CPU/HDF5/source-package and scientific/topology acceptance. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`. This historical ledger is not a substitute for CURRENT_STATUS.md.

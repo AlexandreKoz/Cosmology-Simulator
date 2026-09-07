@@ -90,3 +90,7 @@ is actually executed on a dependency-complete host.
 
 ### 2026-08-09 core audit-lineage closure
 The residual `src/core` integrity campaign closes the metadata/provenance escape gaps, introduces backward-compatible `provenance_v7` SHA-256 integrity, completes checked local-index narrowing, removes comparison sorting from active-set ordering via deterministic radix staging, and establishes measured scheduler/migration/memory-accounting envelopes. Previously closed P0 allocator/ownership/KDK/migration/timestep/profiler repairs remain regression constraints. MPI/CUDA runtime evidence is still environment-dependent and is not promoted without execution.
+
+## 2026-09-06 M2D-1 memory scheduling closure status
+
+The current source includes the focused M2D-1 repair for feasible hard-memory SFC partitioning, distributed cut refinement/progress, retained-capacity-aware batching, explicit task-admission ownership, and coalesced optional-diagnostic lifecycle. Focused CPU tests pass, including 86,016 exhaustive synthetic cut-feasibility cases. Full M2D acceptance remains provisional: real MPI+FFTW and broader scientific/topology validation are unavailable or unfinished, and complete major-task peak contracts are still required before nonserial production overlap. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`.

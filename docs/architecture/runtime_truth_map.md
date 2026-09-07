@@ -641,7 +641,7 @@ physical allocations. See `docs/memory_governance.md`.
 | Major production task order and dependency graph | Frozen `workflows::RuntimeExecutionPlan` from `RuntimeModuleRegistry` | `RuntimeTaskSchedulingProfile`, dependency keys, and `runtimeTasksMayOverlap()` | Registry freeze validates dependencies against the already-authoritative order. The current dispatcher remains serial; scheduling metadata is not restart/scientific state. |
 | Per-rank decomposition safety | Existing Morton/SFC decomposition and its `DecompositionConfig` | Hard `max_rank_memory_bytes`, transient reserve, expanded work-component telemetry | Recompute from current ownership and fresh process-governor headroom before rebalance. Any memory-unsafe target is rejected before migration; rank maximum, not mean, is the safety quantity. |
 | Node/rank/thread topology evidence | `parallel::MpiContext` plus OpenMP runtime configuration | `runtime.topology` profiler event | Rebuilt at process/runtime initialization. It is diagnostic/tuning evidence, not a second scheduling or memory authority. |
-| Deferred optional science diagnostics | `AnalysisRuntime` owner lifetime | Two pending booleans for light/heavy science plus deferral/catch-up profiler events | Set only when a due/pending optional diagnostic is blocked by Red/Trip pressure; cleared only after successful execution at a later non-Red analysis hook. Not serialized and never allowed to override the hard memory ceiling. |
+| Deferred optional science diagnostics | `AnalysisRuntime` owner lifetime | Two constant-size coalesced cadence records with first/latest due epoch and missed count | Record due epochs under Red/Trip; clear only after successful execution at a later safe analysis hook or explicit terminal drop. Checkpoint provenance records pending metadata but no restart authority is created. Never override the hard memory ceiling. |
 
 The M2D task graph does not supersede `RungZeroTimeState` scheduler authority or
 change accepted kick/drift/hydro/source ordering. It describes resource lifetime
@@ -649,3 +649,9 @@ and overlap legality around the existing scientific schedule. The decomposition
 hard cap likewise constrains ownership placement; it does not become a second
 whole-process memory ledger and must not be summed independently with governor
 baseline/commitment accounting.
+
+## M2D-1 task and optional cadence ownership
+
+The existing `MemoryGovernor` is the only budget authority. The runtime registry owns task declarations and deterministic dispatch; dispatcher-owned task leases have task-call lifetimes, while owner-managed leases remain with the actual subsystem allocation. The graph never becomes a second physical accounting authority. An unknown peak is not zero memory and cannot authorize overlap.
+
+`AnalysisRuntime` owns constant-size coalesced light/heavy cadence metadata (first/latest due epoch, missed count). It is not scientific/restart truth. Successful execution clears pending work; run-segment termination records and discards it. Checkpoint provenance records its pending summary, but restart starts a new cadence. No historical physical state is replayed or relabeled.

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 
@@ -77,6 +78,14 @@ struct DeterministicBatchSizingResult {
   bool constrained_by_headroom = false;
 };
 
+// A reusable workspace is already charged to the governor when retained.
+// Growing a vector requires the entire replacement allocation to coexist
+// with its old capacity. A temporary workspace has retained_capacity_items=0.
+struct DeterministicBatchWorkspace {
+  std::uint64_t bytes_per_item = 0U;
+  std::uint64_t retained_capacity_items = 0U;
+};
+
 struct MemoryGovernorSnapshot {
   std::uint64_t hard_limit_bytes = 0U;
   std::uint64_t baseline_owned_bytes = 0U;
@@ -106,6 +115,14 @@ struct MemoryGovernorSnapshot {
 [[nodiscard]] DeterministicBatchSizingResult selectDeterministicBatchSize(
     const MemoryGovernorSnapshot& snapshot,
     const DeterministicBatchSizingPolicy& policy);
+
+// Deterministic multi-workspace sizing. selected_bytes is the incremental
+// replacement/temporary allocation requirement, excluding fixed_reserve_bytes.
+// The caller must hold the corresponding physical reservations until release.
+[[nodiscard]] DeterministicBatchSizingResult selectDeterministicBatchSizeForWorkspaces(
+    const MemoryGovernorSnapshot& snapshot,
+    const DeterministicBatchSizingPolicy& policy,
+    std::span<const DeterministicBatchWorkspace> workspaces);
 
 class MemoryGovernor;
 

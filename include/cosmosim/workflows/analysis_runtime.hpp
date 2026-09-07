@@ -18,6 +18,12 @@ class AnalysisRuntime {
 
   virtual void audit(AnalysisStageView& view) = 0;
   virtual void executeDiagnostics(AnalysisStageView& view) = 0;
+  // Best-effort optional cadence is coalesced, not historical replay.
+  // Checkpoint metadata reports pending work; the pending queue is deliberately
+  // not restart truth. A resumed run starts a new optional cadence epoch.
+  [[nodiscard]] virtual std::string optionalCadenceProvenance() const = 0;
+  virtual void finalizePending(
+      std::uint64_t completed_step, double time_code, double scale_factor) = 0;
 
 };
 

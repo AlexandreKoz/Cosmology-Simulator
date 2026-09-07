@@ -1,6 +1,8 @@
 #include "cosmosim/workflows/runtime_module_registry.hpp"
 
 #include <algorithm>
+#include <exception>
+#include "cosmosim/workflows/runtime_services.hpp"
 #include <limits>
 #include <map>
 #include <optional>
@@ -203,6 +205,11 @@ void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
           "runtime task '" + task.task_id +
           "' declares a view that cannot execute its stage");
     }
+    if (task.scheduling.memory_ownership == RuntimeTaskMemoryOwnership::kDispatcherOwned &&
+        !task.scheduling.peak_is_known) {
+      throw std::invalid_argument(
+          "dispatcher-owned runtime task requires a complete incremental peak contract");
+    }
     if (task.scheduling.estimated_peak_bytes != 0U &&
         task.scheduling.memory_class == core::MemoryClass::kExternalRuntime) {
       throw std::invalid_argument(
@@ -334,7 +341,8 @@ void executeTypedStage(
     std::span<const RuntimeExecutionPlan::PlannedTask> tasks,
     core::IntegrationStage stage,
     RuntimeStageViewKind expected_view,
-    View& view) {
+    View& view,
+    const RuntimeServices* services) {
   view.requireFresh();
   for (const RuntimeExecutionPlan::PlannedTask& task : tasks) {
     if (task.declaration.stage != stage) {
@@ -347,6 +355,35 @@ void executeTypedStage(
       throw std::logic_error(
           "frozen runtime task '" + task.declaration.task_id +
           "' has an inconsistent typed stage view");
+    }
+    core::MemoryReservation task_reservation;
+    if (services != nullptr && services->memory_governor != nullptr) {
+      const auto& profile = task.declaration.scheduling;
+      std::exception_ptr admission_failure;
+      try {
+        if (profile.memory_ownership == RuntimeTaskMemoryOwnership::kDispatcherOwned) {
+          if (!profile.peak_is_known) {
+            throw std::logic_error("dispatcher-owned task requires a complete memory peak contract");
+          }
+          const std::uint64_t bytes = task.estimate_incremental_bytes
+              ? task.estimate_incremental_bytes() : profile.estimated_peak_bytes;
+          task_reservation = services->memory_governor->reserve(
+              profile.memory_class, bytes, task.declaration.task_id);
+          task_reservation.commit();
+        } else if (task.estimate_incremental_bytes) {
+          // Preflight only: the owner already reserves its physical workspace.
+          // Holding this duplicate reservation through execution would charge
+          // the same byte range twice and spuriously reject feasible work.
+          auto preflight = services->memory_governor->reserve(
+              profile.memory_class, task.estimate_incremental_bytes(),
+              task.declaration.task_id);
+          preflight.release();
+        }
+      } catch (...) {
+        admission_failure = std::current_exception();
+      }
+      FailureCoordinator(*services).rethrowCollectiveFailure(
+          admission_failure, "runtime task memory admission");
     }
     TaskGrantScope<View> grant_scope(view, task.declaration.resources);
     std::get<Task>(task.task)(view);
@@ -404,6 +441,12 @@ bool runtimeTasksMayOverlap(
     const RuntimeTaskDeclaration& lhs,
     const RuntimeTaskDeclaration& rhs,
     const core::MemoryGovernorSnapshot& memory_snapshot) noexcept {
+  if (!lhs.scheduling.peak_is_known || !rhs.scheduling.peak_is_known ||
+      !lhs.dependencies.empty() || !rhs.dependencies.empty() ||
+      lhs.scheduling.lifetime_boundary != RuntimeTaskLifetimeBoundary::kTaskEnd ||
+      rhs.scheduling.lifetime_boundary != RuntimeTaskLifetimeBoundary::kTaskEnd) {
+    return false;
+  }
   if (hasResourceConflict(lhs, rhs)) {
     return false;
   }
@@ -418,7 +461,7 @@ bool runtimeTasksMayOverlap(
   }
   const std::uint64_t lhs_peak = lhs.scheduling.estimated_peak_bytes;
   const std::uint64_t rhs_peak = rhs.scheduling.estimated_peak_bytes;
-  if (lhs_peak != 0U && rhs_peak != 0U) {
+  {
     if (rhs_peak > std::numeric_limits<std::uint64_t>::max() - lhs_peak) {
       return false;
     }
@@ -447,49 +490,49 @@ void RuntimeExecutionPlan::executeAuditStage(
     core::IntegrationStage stage,
     AnalysisStageView& view) const {
   executeTypedStage<AnalysisStageView, StageAuditTask>(
-      m_tasks, stage, RuntimeStageViewKind::kStageAudit, view);
+      m_tasks, stage, RuntimeStageViewKind::kStageAudit, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     DriftParticleStageView& view) const {
   executeTypedStage<DriftParticleStageView, DriftStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kDriftParticles, view);
+      m_tasks, stage, RuntimeStageViewKind::kDriftParticles, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     GravityStageView& view) const {
   executeTypedStage<GravityStageView, GravityStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kGravity, view);
+      m_tasks, stage, RuntimeStageViewKind::kGravity, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     HydroAmrStageView& view) const {
   executeTypedStage<HydroAmrStageView, HydroAmrStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kHydroAmr, view);
+      m_tasks, stage, RuntimeStageViewKind::kHydroAmr, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     SourceMutationStageView& view) const {
   executeTypedStage<SourceMutationStageView, SourceMutationStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kSourceMutation, view);
+      m_tasks, stage, RuntimeStageViewKind::kSourceMutation, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     AnalysisStageView& view) const {
   executeTypedStage<AnalysisStageView, AnalysisStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kAnalysis, view);
+      m_tasks, stage, RuntimeStageViewKind::kAnalysis, view, m_services);
 }
 
 void RuntimeExecutionPlan::executeStage(
     core::IntegrationStage stage,
     OutputRestartStageView& view) const {
   executeTypedStage<OutputRestartStageView, OutputRestartStageTask>(
-      m_tasks, stage, RuntimeStageViewKind::kOutputRestart, view);
+      m_tasks, stage, RuntimeStageViewKind::kOutputRestart, view, m_services);
 }
 
 void RuntimeModuleRegistry::registerModule(RuntimeModuleDescriptor descriptor) {
@@ -524,6 +567,7 @@ RuntimeExecutionPlan RuntimeModuleRegistry::freezeAndInstantiate(
 
   const std::vector<std::size_t> order = resolveModuleOrder(m_descriptors);
   RuntimeExecutionPlan plan;
+  plan.m_services = &context.services;
   for (const std::size_t descriptor_index : order) {
     const RuntimeModuleDescriptor& descriptor = m_descriptors[descriptor_index];
     plan.m_ordered_module_ids.push_back(descriptor.module_id);
@@ -559,6 +603,7 @@ RuntimeExecutionPlan RuntimeModuleRegistry::freezeAndInstantiate(
           .module_id = descriptor.module_id,
           .declaration = declaration,
           .task = std::move(contribution_it->second->task),
+          .estimate_incremental_bytes = std::move(contribution_it->second->estimate_incremental_bytes),
       });
     }
     plan.m_module_instances.push_back(std::move(instance));

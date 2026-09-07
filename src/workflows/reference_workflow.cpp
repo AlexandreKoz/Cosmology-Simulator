@@ -6,6 +6,7 @@
 #include "cosmosim/workflows/runtime_capabilities.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "cosmosim/workflows/time_coordinator.hpp"
+#include "cosmosim/workflows/analysis_runtime.hpp"
 #include "workflows/internal/initial_condition_runtime.hpp"
 #include "cosmosim/workflows/migration_balance_runtime.hpp"
 #include "workflows/internal/output_restart_runtime.hpp"
@@ -612,6 +613,26 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     std::max(mpi_context.worldRank(), 0)),
             });
     traceRuntimePhase("runtime_composition_complete");
+    if (restoring_from_restart) {
+      const std::string& prior_runtime_state =
+          options.restart_state_override->provenance.derived_runtime_state;
+      const std::size_t cadence_pos = prior_runtime_state.find(
+          "optional_diagnostic_cadence_policy=");
+      profiler.recordEvent(core::RuntimeEvent{
+          .event_kind = "analysis.optional_cadence_restart_policy",
+          .severity = core::RuntimeEventSeverity::kInfo,
+          .subsystem = "analysis.diagnostics",
+          .step_index = integrator_state.step_index,
+          .simulation_time_code = integrator_state.current_time_code,
+          .scale_factor = integrator_state.current_scale_factor,
+          .message = "optional science cadence starts fresh after restart; pending historical products are not replayed",
+          .payload = {
+              {"policy", "coalesced_nonpersistent"},
+              {"prior_checkpoint_cadence", cadence_pos == std::string::npos
+                  ? "legacy_unrecorded" : prior_runtime_state.substr(cadence_pos)},
+          },
+      });
+    }
     GravityRuntime& gravity_callback = *runtime_composition.gravity;
     if (restoring_from_restart) {
       const io::RestartReadResult& restart = *options.restart_state_override;
@@ -753,6 +774,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         mode_policy,
         restoring_from_restart);
     traceRuntimePhase("time_coordinator_complete");
+    runtime_composition.analysis->finalizePending(
+        integrator_state.step_index, integrator_state.current_time_code,
+        integrator_state.current_scale_factor);
 
     report.final_state_digest = computeStateDigest(state, integrator_state, mpi_context);
     report.local_particle_count = static_cast<std::uint64_t>(state.particles.size());

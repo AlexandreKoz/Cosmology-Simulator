@@ -439,3 +439,7 @@ record. Restart state additionally stores cumulative newly synthesized metals,
 unresolved enrichment mass/metals/energy/momentum, and cumulative deposited
 mass/metals/energy. Missing new lanes in a legacy restart default to zero under
 the existing backward-compatibility policy.
+
+## M2D-1 optional diagnostic provenance
+
+The existing provenance derived-runtime-state text may include `optional_diagnostic_cadence_policy=coalesced_nonpersistent` and light/heavy pending, first/latest due, and missed-count summaries. The operational event stream records actual execution epochs, coalescing, and terminal drops. No snapshot or restart schema field was added. A science product generated during catch-up represents its actual current physical epoch, never a reconstructed historical state.

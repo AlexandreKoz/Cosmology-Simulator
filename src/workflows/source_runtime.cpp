@@ -1033,17 +1033,27 @@ class SourceRuntimeImpl final : public SourceRuntime {
     std::size_t feedback_batch_max = std::min<std::size_t>(
         active_star_count, k_feedback_event_batch_max);
     if (m_memory_governor != nullptr && feedback_batch_max != 0U) {
+      // Only new physical allocations consume headroom. Reused event/index
+      // capacities remain charged to the governor; a vector replacement must
+      // coexist with its old storage, so growth costs its full new capacity.
+      const std::array<core::DeterministicBatchWorkspace, 3> workspaces{{
+          {sizeof(physics::StellarEvolutionStarBudget), 0U},
+          {sizeof(physics::StellarFeedbackEvent),
+           static_cast<std::uint64_t>(m_feedback_events.capacity())},
+          {all_stars_active ? sizeof(std::uint32_t) : 0U,
+           static_cast<std::uint64_t>(m_contiguous_star_batch.capacity())},
+      }};
       const core::DeterministicBatchSizingResult sizing =
-          core::selectDeterministicBatchSize(
+          core::selectDeterministicBatchSizeForWorkspaces(
               m_memory_governor->snapshot(),
               core::DeterministicBatchSizingPolicy{
                   .requested_max_items = static_cast<std::uint64_t>(feedback_batch_max),
-                  .bytes_per_item = k_feedback_batch_bytes_per_star,
+                  .bytes_per_item = 1U,
                   .fixed_reserve_bytes = static_cast<std::uint64_t>(feedback_index_bytes_size),
                   .minimum_items = 1U,
                   .alignment_items = 1U,
                   .headroom_use_basis_points = 10000U,
-              });
+              }, workspaces);
       if (sizing.selected_items == 0U) {
         throw std::runtime_error(
             "stellar-feedback headroom cannot admit one evolution/event item after spatial-index staging");

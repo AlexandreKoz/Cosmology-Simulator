@@ -253,3 +253,7 @@ non-Red analysis hook outside its original cadence, the profiler emits
 `analysis.memory_pressure_catchup` with light/heavy catch-up flags. These events
 make bounded deferral and starvation recovery auditable without promoting the
 pending bits into restart or scientific state.
+
+## M2D-1 optional cadence evidence
+
+`analysis.memory_pressure_deferral` includes pending state and missed counts. `analysis.memory_pressure_catchup` records class, first/latest due step, missed/coalesced count, actual execution step, and `historical_state_replayed=false`. `analysis.optional_cadence_dropped` records pending work discarded at segment termination; `analysis.optional_cadence_restart_policy` records the previous checkpoint's cadence summary and the nonpersistent restart policy. These are operational provenance events, not scientific outputs or an exact-cadence guarantee.

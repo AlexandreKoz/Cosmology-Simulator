@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +23,7 @@
 #include <utility>
 
 #include "cosmosim/core/build_config.hpp"
+#include "parallel/internal/memory_constrained_sfc.hpp"
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -230,17 +232,8 @@ void injectMpiTestFault(const MpiContext& mpi_context, std::string_view phase) {
   return mortonKey3d(qx, qy, qz);
 }
 
-struct SfcCutPoint {
-  std::uint64_t key = 0;
-  std::uint64_t entity_id = 0;
-};
-
-[[nodiscard]] bool lessSfcPoint(const SfcCutPoint& lhs, const SfcCutPoint& rhs) noexcept {
-  if (lhs.key != rhs.key) {
-    return lhs.key < rhs.key;
-  }
-  return lhs.entity_id < rhs.entity_id;
-}
+using internal::SfcCutPoint;
+using internal::lessSfcPoint;
 
 [[nodiscard]] int ownerForSfcPoint(
     const SfcCutPoint point,
@@ -521,6 +514,9 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
 
   std::vector<KeyedItem> keyed(items.size());
   for (std::size_t i = 0; i < items.size(); ++i) {
+    if (!std::isfinite(weightedLoad(items[i], config))) {
+      throw std::invalid_argument("decomposition item weighted load must be finite");
+    }
     keyed[i] = KeyedItem{
         .index = i,
         .morton_key = sfcKeyForItem(items[i], config),
@@ -567,17 +563,9 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
       keyed.begin(), keyed.end(), 0.0, [](double acc, const KeyedItem& entry) { return acc + entry.weighted_load; });
 
   if (!keyed.empty()) {
-    const std::size_t active_rank_count =
-        std::min<std::size_t>(static_cast<std::size_t>(config.world_size), keyed.size());
-    const double target_per_active_rank =
-        (active_rank_count > 0) ? total_load / static_cast<double>(active_rank_count) : 0.0;
-
-    std::size_t current_rank = 0;
-    std::size_t rank_begin = 0;
-    double cumulative_load = 0.0;
-    std::uint64_t current_rank_memory_bytes = 0;
     const bool enforce_rank_memory_limit = config.max_rank_memory_bytes != 0U;
-    if (enforce_rank_memory_limit && config.rank_transient_reserve_bytes >= config.max_rank_memory_bytes) {
+    if (enforce_rank_memory_limit &&
+        config.rank_transient_reserve_bytes >= config.max_rank_memory_bytes) {
       throw std::invalid_argument(
           "decomposition transient reserve must be smaller than the hard rank memory ceiling");
     }
@@ -585,61 +573,108 @@ DecompositionPlan buildMortonSfcDecomposition(std::span<const DecompositionItem>
         ? config.max_rank_memory_bytes - config.rank_transient_reserve_bytes
         : std::numeric_limits<std::uint64_t>::max();
 
-    for (std::size_t sorted_pos = 0; sorted_pos < keyed.size(); ++sorted_pos) {
-      const std::size_t original_index = keyed[sorted_pos].index;
-      const std::uint64_t item_memory_bytes = items[original_index].memory_bytes;
-      if (enforce_rank_memory_limit && item_memory_bytes > persistent_rank_limit) {
-        throw std::runtime_error(
-            "SFC decomposition cannot satisfy hard rank memory ceiling: one decomposition item exceeds the persistent allowance");
+    // An indivisible SFC point may represent several entities. Keep equal
+    // (key, ID) points together, matching the distributed ownership contract.
+    // Work is a secondary objective: a right-to-left greedy packing computes
+    // the earliest prefix that may be left to each rank without making the
+    // suffix infeasible. Greedy packing is exact for nonnegative integer bytes
+    // on an ordered sequence; no work-optimal cut may violate this boundary.
+    struct MemoryGroup {
+      std::size_t begin = 0U;
+      std::size_t end = 0U;
+      std::uint64_t memory_bytes = 0U;
+      double weighted_load = 0.0;
+    };
+    std::vector<MemoryGroup> groups;
+    groups.reserve(keyed.size());
+    for (std::size_t pos = 0U; pos < keyed.size(); ++pos) {
+      const auto& entry = keyed[pos];
+      const std::uint64_t bytes = items[entry.index].memory_bytes;
+      if (groups.empty() ||
+          keyed[groups.back().begin].morton_key != entry.morton_key ||
+          items[keyed[groups.back().begin].index].entity_id != items[entry.index].entity_id) {
+        groups.push_back(MemoryGroup{.begin = pos, .end = pos});
       }
-
-      const bool rank_has_items = sorted_pos > rank_begin;
+      auto& group = groups.back();
+      group.end = pos + 1U;
+      group.memory_bytes = checkedUint64Add(group.memory_bytes, bytes, "SFC grouped memory");
+      group.weighted_load += entry.weighted_load;
+      if (enforce_rank_memory_limit && group.memory_bytes > persistent_rank_limit) {
+        throw std::runtime_error(
+            "SFC decomposition cannot satisfy hard rank memory ceiling: one indivisible SFC group exceeds the persistent allowance");
+      }
+    }
+    const std::size_t active_rank_count =
+        std::min<std::size_t>(static_cast<std::size_t>(config.world_size), groups.size());
+    const double target_per_active_rank = active_rank_count > 0U
+        ? total_load / static_cast<double>(active_rank_count) : 0.0;
+    std::vector<std::size_t> mandatory_begin(active_rank_count + 1U, 0U);
+    mandatory_begin[0] = groups.size();
+    if (enforce_rank_memory_limit) {
+      std::size_t suffix_begin = groups.size();
+      std::uint64_t suffix_bytes = 0U;
+      for (std::size_t ranks = 1U; ranks < active_rank_count; ++ranks) {
+        while (suffix_begin > 0U &&
+               groups[suffix_begin - 1U].memory_bytes <= persistent_rank_limit - suffix_bytes) {
+          --suffix_begin;
+          suffix_bytes += groups[suffix_begin].memory_bytes;
+        }
+        mandatory_begin[ranks] = suffix_begin;
+        suffix_bytes = 0U;
+      }
+    }
+    std::size_t current_rank = 0U;
+    std::size_t rank_begin = 0U;
+    double cumulative_load = 0.0;
+    std::uint64_t current_rank_memory_bytes = 0U;
+    for (std::size_t group_pos = 0U; group_pos < groups.size(); ++group_pos) {
+      const auto& group = groups[group_pos];
+      const bool rank_has_items = group_pos > rank_begin;
       const bool would_exceed_memory = enforce_rank_memory_limit && rank_has_items &&
-          item_memory_bytes > persistent_rank_limit - current_rank_memory_bytes;
+          group.memory_bytes > persistent_rank_limit - current_rank_memory_bytes;
       if (would_exceed_memory) {
-        if (current_rank + 1U >= active_rank_count) {
+        if (current_rank + 1U >= active_rank_count ||
+            group_pos < mandatory_begin[active_rank_count - current_rank - 1U]) {
           throw std::runtime_error(
               "SFC decomposition cannot satisfy hard rank memory ceiling with the available ranks");
         }
         plan.ranges_by_rank[current_rank] = RankRange{
-            .begin_sorted = rank_begin,
-            .end_sorted = sorted_pos};
+            .begin_sorted = groups[rank_begin].begin, .end_sorted = group.begin};
         ++current_rank;
-        rank_begin = sorted_pos;
+        rank_begin = group_pos;
         current_rank_memory_bytes = 0U;
       }
-
       current_rank_memory_bytes = checkedUint64Add(
-          current_rank_memory_bytes, item_memory_bytes, "SFC rank persistent memory accumulation");
-      cumulative_load += keyed[sorted_pos].weighted_load;
-      if (current_rank + 1 >= active_rank_count) {
+          current_rank_memory_bytes, group.memory_bytes, "SFC rank persistent memory accumulation");
+      cumulative_load += group.weighted_load;
+      if (current_rank + 1U >= active_rank_count) {
         continue;
       }
-
-      const std::size_t items_remaining = keyed.size() - (sorted_pos + 1U);
-      const std::size_t ranks_remaining = active_rank_count - (current_rank + 1U);
-      const bool can_cut_after_current = (sorted_pos + 1U > rank_begin) && (items_remaining >= ranks_remaining);
-      if (!can_cut_after_current) {
+      const std::size_t groups_remaining = groups.size() - group_pos - 1U;
+      const std::size_t ranks_remaining = active_rank_count - current_rank - 1U;
+      if (groups_remaining < ranks_remaining) {
         continue;
       }
-
-      const bool must_cut_to_keep_one_item_per_remaining_rank = items_remaining == ranks_remaining;
-      const double next_target_prefix = target_per_active_rank * static_cast<double>(current_rank + 1U);
-      const bool crossed_target = cumulative_load >= next_target_prefix;
-      if (!must_cut_to_keep_one_item_per_remaining_rank && !crossed_target) {
+      const bool must_cut = groups_remaining == ranks_remaining;
+      const bool crossed_target = cumulative_load >=
+          target_per_active_rank * static_cast<double>(current_rank + 1U);
+      const bool suffix_feasible = !enforce_rank_memory_limit ||
+          group_pos + 1U >= mandatory_begin[ranks_remaining];
+      if (!suffix_feasible || (!must_cut && !crossed_target)) {
         continue;
       }
-
       plan.ranges_by_rank[current_rank] = RankRange{
-          .begin_sorted = rank_begin,
-          .end_sorted = sorted_pos + 1U};
+          .begin_sorted = groups[rank_begin].begin, .end_sorted = group.end};
       ++current_rank;
-      rank_begin = sorted_pos + 1U;
+      rank_begin = group_pos + 1U;
       current_rank_memory_bytes = 0U;
     }
-
-    plan.ranges_by_rank[current_rank] = RankRange{.begin_sorted = rank_begin, .end_sorted = keyed.size()};
-    for (std::size_t rank = current_rank + 1U; rank < static_cast<std::size_t>(config.world_size); ++rank) {
+    if (!groups.empty()) {
+      plan.ranges_by_rank[current_rank] = RankRange{
+          .begin_sorted = groups[rank_begin].begin, .end_sorted = keyed.size()};
+    }
+    for (std::size_t rank = current_rank + 1U;
+         rank < static_cast<std::size_t>(config.world_size); ++rank) {
       plan.ranges_by_rank[rank] = RankRange{.begin_sorted = keyed.size(), .end_sorted = keyed.size()};
     }
 
@@ -1217,6 +1252,214 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     cuts.push_back(final_point);
   }
 
+  // The sampled work cuts are only proposals. Before materializing migration
+  // intents, check their exact global persistent-memory totals. If a proposal
+  // is unsafe, refine the cuts with distributed prefix queries rather than
+  // gathering the population or incorrectly declaring a feasible case OOM.
+  // The refinement uses O(N_local) existing sorted records, O(N_local/256)
+  // prefix metadata, and O(P) control state. No per-particle global truth is
+  // replicated. Equal (key, ID) records are an indivisible ownership group.
+  std::vector<std::uint64_t> memory_block_prefix;
+  if (decomposition_config.max_rank_memory_bytes != 0U) {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (decomposition_config.rank_transient_reserve_bytes >=
+        decomposition_config.max_rank_memory_bytes) {
+      throw std::invalid_argument(
+          "distributed decomposition transient reserve must be smaller than the hard rank memory ceiling");
+    }
+    const std::uint64_t persistent_limit =
+        decomposition_config.max_rank_memory_bytes - decomposition_config.rank_transient_reserve_bytes;
+    const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
+    std::vector<std::uint64_t> proposed_memory;
+    std::vector<std::uint64_t> proposed_high;
+    std::exception_ptr memory_preparation_failure;
+    try {
+      proposed_memory.assign(rank_count, 0U);
+      proposed_high.assign(rank_count, 0U);
+      for (const auto& entry : keyed) {
+        const std::size_t owner = static_cast<std::size_t>(
+            ownerForSfcPoint(entry.point, cuts, mpi_context.worldSize()));
+        proposed_memory[owner] = checkedUint64Add(
+            proposed_memory[owner], local_items[entry.index].memory_bytes,
+            "distributed proposed rank persistent memory");
+      }
+    } catch (...) {
+      memory_preparation_failure = std::current_exception();
+    }
+    mpi_context.rethrowCollectivePreparationFailure(
+        memory_preparation_failure, "distributed memory cut preflight");
+    // Detect overflow before any rank can mistake a wrapped sum for safety.
+    for (std::size_t rank = 0U; rank < rank_count; ++rank) {
+      proposed_high[rank] = proposed_memory[rank] >> 32U;
+      proposed_memory[rank] &= 0xffffffffULL;
+    }
+    if (MPI_Allreduce(MPI_IN_PLACE, proposed_memory.data(), mpi_context.worldSize(),
+                      MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS ||
+        MPI_Allreduce(MPI_IN_PLACE, proposed_high.data(), mpi_context.worldSize(),
+                      MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("distributed memory cut preflight Allreduce failed");
+    }
+    for (std::size_t rank = 0U; rank < rank_count; ++rank) {
+      const std::uint64_t high = checkedUint64Add(
+          proposed_high[rank], proposed_memory[rank] >> 32U, "distributed proposed memory carry");
+      if (high > 0xffffffffULL) {
+        throw std::overflow_error("distributed proposed rank memory exceeds uint64");
+      }
+      proposed_memory[rank] = (high << 32U) | (proposed_memory[rank] & 0xffffffffULL);
+    }
+    [[maybe_unused]] std::uint64_t checked_total_memory = 0U;
+    for (const std::uint64_t bytes : proposed_memory) {
+      checked_total_memory = checkedUint64Add(
+          checked_total_memory, bytes, "distributed total persistent memory");
+    }
+    const bool needs_memory_repair = std::any_of(
+        proposed_memory.begin(), proposed_memory.end(),
+        [persistent_limit](std::uint64_t bytes) { return bytes > persistent_limit; });
+    if (needs_memory_repair) {
+      constexpr std::size_t k_memory_prefix_block_size = 256U;
+      std::uint64_t local_total_memory = 0U;
+      std::exception_ptr prefix_preparation_failure;
+      try {
+        const std::size_t block_count = keyed.size() / k_memory_prefix_block_size +
+            (keyed.size() % k_memory_prefix_block_size != 0U ? 1U : 0U);
+        memory_block_prefix.reserve(core::checkedSizeAdd(block_count, 1U, "memory prefix block count"));
+        for (std::size_t pos = 0U; pos < keyed.size(); ++pos) {
+          if (pos % k_memory_prefix_block_size == 0U) {
+            memory_block_prefix.push_back(local_total_memory);
+          }
+          local_total_memory = checkedUint64Add(
+              local_total_memory, local_items[keyed[pos].index].memory_bytes,
+              "distributed local persistent memory total");
+        }
+        memory_block_prefix.push_back(local_total_memory);
+      } catch (...) {
+        prefix_preparation_failure = std::current_exception();
+      }
+      mpi_context.rethrowCollectivePreparationFailure(
+          prefix_preparation_failure, "distributed memory prefix preparation");
+
+      // Split each exact uint64 sum into 32-bit limbs. With MPI's signed-int
+      // rank-count bound, each limb sum fits uint64; reconstruct with checked
+      // carry propagation. A wrapped MPI_SUM must never certify a false fit.
+      const auto exactGlobalSum = [&](std::uint64_t local_bytes) {
+        const std::uint64_t low = mpi_context.allreduceSumUint64(local_bytes & 0xffffffffULL);
+        const std::uint64_t high = mpi_context.allreduceSumUint64(local_bytes >> 32U);
+        const std::uint64_t high_with_carry = checkedUint64Add(
+            high, low >> 32U, "distributed memory sum carry");
+        if (high_with_carry > 0xffffffffULL) {
+          throw std::overflow_error("distributed total persistent memory exceeds uint64");
+        }
+        return (high_with_carry << 32U) | (low & 0xffffffffULL);
+      };
+      const std::uint64_t total_memory = exactGlobalSum(local_total_memory);
+      const auto localPrefix = [&](SfcCutPoint point) {
+        const auto it = std::upper_bound(
+            keyed.begin(), keyed.end(), point,
+            [](SfcCutPoint value, const LocalKeyedItem& entry) {
+              return lessSfcPoint(value, entry.point);
+            });
+        const std::size_t end = static_cast<std::size_t>(std::distance(keyed.begin(), it));
+        const std::size_t block = end / k_memory_prefix_block_size;
+        std::uint64_t bytes = memory_block_prefix[block];
+        for (std::size_t pos = block * k_memory_prefix_block_size; pos < end; ++pos) {
+          bytes += local_items[keyed[pos].index].memory_bytes;
+        }
+        return bytes;
+      };
+      const auto globalPrefix = [&](SfcCutPoint point) {
+        return exactGlobalSum(localPrefix(point));
+      };
+      // Select an actual SFC point whose inclusive prefix first reaches the
+      // requested byte threshold. Morton keys occupy 30 bits; IDs occupy 64.
+      // Both searches are monotone, fixed-iteration and population-independent.
+      const auto firstPrefixAtLeast = [&](std::uint64_t target) {
+        std::uint64_t key_low = 0U;
+        std::uint64_t key_high = (1ULL << 30U) - 1U;
+        while (key_low < key_high) {
+          const std::uint64_t mid = key_low + (key_high - key_low) / 2U;
+          if (globalPrefix(SfcCutPoint{mid, std::numeric_limits<std::uint64_t>::max()}) >= target) {
+            key_high = mid;
+          } else {
+            key_low = mid + 1U;
+          }
+        }
+        std::uint64_t id_low = 0U;
+        std::uint64_t id_high = std::numeric_limits<std::uint64_t>::max();
+        while (id_low < id_high) {
+          const std::uint64_t mid = id_low + (id_high - id_low) / 2U;
+          if (globalPrefix(SfcCutPoint{key_low, mid}) >= target) {
+            id_high = mid;
+          } else {
+            id_low = mid + 1U;
+          }
+        }
+        return SfcCutPoint{key_low, id_low};
+      };
+      // One bounded rank-level candidate per process. This also handles
+      // empty ranks and points with zero memory without inventing a sentinel
+      // that might coincide with a real particle ID.
+      const auto globalNeighbor = [&](SfcCutPoint point, bool predecessor) {
+        struct Candidate { std::uint64_t valid, key, entity_id; };
+        Candidate local{};
+        const auto it = std::lower_bound(
+            keyed.begin(), keyed.end(), point,
+            [](const LocalKeyedItem& entry, SfcCutPoint value) {
+              return lessSfcPoint(entry.point, value);
+            });
+        if (predecessor ? it != keyed.begin() : it != keyed.end()) {
+          const auto& entry = predecessor ? *std::prev(it) : *it;
+          local = Candidate{1U, entry.point.key, entry.point.entity_id};
+        }
+        const auto wire = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(&local), sizeof(local));
+        const std::vector<std::uint8_t> received = mpi_context.allgatherBytesBounded(wire);
+        if (received.size() != core::checkedSizeMultiply(
+                rank_count, sizeof(Candidate), "distributed SFC neighbor extent")) {
+          throw std::runtime_error("distributed SFC neighbor exchange has an invalid size");
+        }
+        std::optional<SfcCutPoint> result;
+        for (std::size_t rank = 0U; rank < rank_count; ++rank) {
+          Candidate candidate{};
+          std::memcpy(&candidate, received.data() + rank * sizeof(Candidate), sizeof(Candidate));
+          if (candidate.valid == 0U) { continue; }
+          const SfcCutPoint value{candidate.key, candidate.entity_id};
+          if (!result.has_value() ||
+              (predecessor ? lessSfcPoint(*result, value) : lessSfcPoint(value, *result))) {
+            result = value;
+          }
+        }
+        return result;
+      };
+      // Prepare all helper-owned O(P) metadata before the first refinement
+      // collective. A rank-local allocation failure must be agreed upon before
+      // any peer enters the fixed-sequence prefix reductions.
+      std::vector<SfcCutPoint> mandatory_cuts;
+      std::vector<SfcCutPoint> repaired_cuts;
+      std::exception_ptr repair_preparation_failure;
+      try {
+        mandatory_cuts.resize(rank_count - 1U);
+        repaired_cuts.reserve(rank_count - 1U);
+      } catch (...) {
+        repair_preparation_failure = std::current_exception();
+      }
+      mpi_context.rethrowCollectivePreparationFailure(
+          repair_preparation_failure, "distributed memory repair metadata preparation");
+      const auto first_candidate = globalNeighbor(SfcCutPoint{}, false);
+      if (!first_candidate.has_value()) {
+        throw std::logic_error("distributed memory repair requires a nonempty population");
+      }
+      const SfcCutPoint first_point = *first_candidate;
+      const SfcCutPoint last_point = global_samples.empty()
+          ? first_point
+          : SfcCutPoint{global_samples.back().key, global_samples.back().entity_id};
+      cuts = internal::repairMemoryConstrainedSfcCuts(
+          std::span<const SfcCutPoint>(cuts), persistent_limit, total_memory,
+          first_point, last_point, globalPrefix, firstPrefixAtLeast, globalNeighbor,
+          std::span<SfcCutPoint>(mandatory_cuts), repaired_cuts);
+    }
+#endif
+  }
+
   RuntimeRebalancePlan rebalance;
   rebalance.used_distributed_sfc_cuts = true;
   rebalance.local_entities_considered = static_cast<std::uint64_t>(local_items.size());
@@ -1388,7 +1631,8 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
   rebalance.global_control_bytes = mpi_context.allreduceSumUint64(rebalance.local_control_bytes);
   rebalance.peak_temporary_bytes = static_cast<std::uint64_t>(
       keyed.capacity() * sizeof(LocalKeyedItem) + local_samples.capacity() * sizeof(CompactCutSample) +
-      global_samples.capacity() * sizeof(CompactCutSample));
+      global_samples.capacity() * sizeof(CompactCutSample) +
+      memory_block_prefix.capacity() * sizeof(std::uint64_t));
   rebalance.cut_displacement_fraction =
       (global_entity_count > 0U) ? static_cast<double>(rebalance.global_entities_moved) / static_cast<double>(global_entity_count) : 0.0;
 
@@ -1401,6 +1645,10 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
   const bool target_memory_safe = decomposition_config.max_rank_memory_bytes == 0U ||
       rebalance.target_decomposition.metrics.max_peak_memory_bytes <= decomposition_config.max_rank_memory_bytes;
   if (!target_memory_safe) {
+    if (hard_memory_violated) {
+      throw std::runtime_error(
+          "distributed rebalance cannot find a hard-memory-safe target for the current overloaded ranks");
+    }
     rebalance.particle_migrations.clear();
     rebalance.amr_patch_ownership_updates.clear();
     rebalance.should_rebalance = false;
@@ -1420,16 +1668,21 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     rebalance.reason = "empty_decomposition";
   } else if (!load_imbalanced && !memory_imbalanced && !hard_memory_violated) {
     rebalance.reason = "below_rebalance_threshold";
-  } else if (rebalance.migrated_load_fraction > rebalance_config.max_migrated_load_fraction &&
+  } else if (!hard_memory_violated &&
+             rebalance.migrated_load_fraction > rebalance_config.max_migrated_load_fraction &&
              rebalance_config.max_migrated_load_fraction < 1.0) {
     rebalance.reason = "migration_fraction_limited";
   } else {
-    rebalance.reason = hard_memory_violated ? "rank_memory_limit" :
-        (load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
-         (load_imbalanced ? "load_imbalance" : "memory_imbalance"));
     rebalance.should_rebalance =
         rebalance.global_entities_moved > 0U &&
         actionable_migration_rank_count > 0U;
+    if (hard_memory_violated && !rebalance.should_rebalance) {
+      throw std::runtime_error(
+          "distributed rebalance cannot relieve the existing hard rank memory violation with the allowed migration operations");
+    }
+    rebalance.reason = hard_memory_violated ? "rank_memory_limit" :
+           (load_imbalanced && memory_imbalanced ? "load_and_memory_imbalance" :
+            (load_imbalanced ? "load_imbalance" : "memory_imbalance"));
   }
   return rebalance;
 }

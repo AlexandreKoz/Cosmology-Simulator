@@ -399,6 +399,7 @@ int main() {
       cosmosim::core::MemoryGovernor* governor = nullptr;
       std::uint64_t production_baseline_bytes = 0U;
       std::uint64_t analysis_invocations = 0U;
+      std::uint64_t red_invocations = 1U;
       bool baseline_restored = false;
     };
     auto pressure_toggle = std::make_shared<PressureToggleState>();
@@ -451,7 +452,7 @@ int main() {
                         [pressure_toggle](AnalysisStageView& view) {
                           view.requireFresh();
                           ++pressure_toggle->analysis_invocations;
-                          if (pressure_toggle->analysis_invocations != 1U) {
+                          if (pressure_toggle->analysis_invocations > pressure_toggle->red_invocations) {
                             return;
                           }
                           const auto snapshot = pressure_toggle->governor->snapshot();
@@ -475,7 +476,7 @@ int main() {
                     .task = OutputRestartStageTask(
                         [pressure_toggle](OutputRestartStageView& view) {
                           view.requireFresh();
-                          if (pressure_toggle->analysis_invocations == 1U &&
+                          if (pressure_toggle->analysis_invocations == pressure_toggle->red_invocations &&
                               !pressure_toggle->baseline_restored) {
                             pressure_toggle->governor->setBaselineOwnedBytes(
                                 pressure_toggle->production_baseline_bytes);
@@ -503,6 +504,53 @@ int main() {
            std::string::npos);
     assert(catchup_events.find("\"science_light_catchup\": \"true\"") !=
            std::string::npos);
+
+    // Two missed cadence epochs coalesce into one current-state product.
+    // No historical physical state is relabeled or silently reconstructed.
+    std::string repeated_config = catchup_config;
+    const auto cadence_pos = repeated_config.find("science_light_interval_steps = 4");
+    assert(cadence_pos != std::string::npos);
+    repeated_config.replace(cadence_pos, std::string("science_light_interval_steps = 4").size(),
+                            "science_light_interval_steps = 2");
+    const auto run_name_pos = repeated_config.find("reference_integration_analysis_catchup");
+    assert(run_name_pos != std::string::npos);
+    repeated_config.replace(run_name_pos, std::string("reference_integration_analysis_catchup").size(),
+                            "reference_integration_analysis_coalesced");
+    pressure_toggle->analysis_invocations = 0U;
+    pressure_toggle->red_invocations = 3U;
+    pressure_toggle->baseline_restored = false;
+    auto repeated_options = catchup_options;
+    const auto repeated_frozen = cosmosim::core::loadFrozenConfigFromString(
+        repeated_config, "test_reference_workflow_analysis_coalesced");
+    const auto repeated_report = cosmosim::workflows::ReferenceWorkflowRunner(repeated_frozen).run(
+        output_dir, repeated_options);
+    assert(repeated_report.completed_steps == 8U);
+    const std::string repeated_events = readFile(repeated_report.operational_report_json_path);
+    assert(repeated_events.find("\"missed_count\": \"2\"") != std::string::npos);
+    assert(repeated_events.find("\"coalesced_count\": \"1\"") != std::string::npos);
+    assert(repeated_events.find("\"actual_execution_step\": \"7\"") != std::string::npos);
+    assert(repeated_events.find("\"historical_state_replayed\": \"false\"") != std::string::npos);
+
+    // Persistent pressure through run termination must generate a dropped
+    // product event, never force an optional allocation through the ceiling.
+    pressure_toggle->analysis_invocations = 0U;
+    pressure_toggle->red_invocations = 1U;
+    pressure_toggle->baseline_restored = false;
+    repeated_options.max_steps_override = 1U;
+    std::string terminal_config = catchup_config;
+    const auto terminal_name_pos = terminal_config.find("reference_integration_analysis_catchup");
+    assert(terminal_name_pos != std::string::npos);
+    terminal_config.replace(terminal_name_pos, std::string("reference_integration_analysis_catchup").size(),
+                            "reference_integration_analysis_terminal_pressure");
+    const auto terminal_frozen = cosmosim::core::loadFrozenConfigFromString(
+        terminal_config, "test_reference_workflow_analysis_terminal_pressure");
+    const auto terminal_report = cosmosim::workflows::ReferenceWorkflowRunner(terminal_frozen).run(
+        output_dir, repeated_options);
+    assert(terminal_report.completed_steps == 1U);
+    const std::string terminal_events = readFile(terminal_report.operational_report_json_path);
+    assert(terminal_events.find("\"event_kind\": \"analysis.optional_cadence_dropped\"") !=
+           std::string::npos);
+    assert(terminal_events.find("\"dropped_count\": \"1\"") != std::string::npos);
   }
 
   std::string endpoint_config =

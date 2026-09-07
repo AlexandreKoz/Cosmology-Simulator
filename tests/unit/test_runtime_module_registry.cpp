@@ -104,12 +104,14 @@ void testTaskDependenciesAndConcurrencyGuards(
   bandwidth_a.task_id = "bandwidth_a";
   bandwidth_a.resources = {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kRead}};
   bandwidth_a.scheduling.estimated_peak_bytes = 256U;
+  bandwidth_a.scheduling.peak_is_known = true;
   bandwidth_a.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kHigh;
 
   RuntimeTaskDeclaration bandwidth_b;
   bandwidth_b.task_id = "bandwidth_b";
   bandwidth_b.resources = {{RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead}};
   bandwidth_b.scheduling.estimated_peak_bytes = 256U;
+  bandwidth_b.scheduling.peak_is_known = true;
   bandwidth_b.scheduling.memory_bandwidth_pressure = RuntimeTaskPressureClass::kHigh;
 
   cosmosim::core::MemoryGovernorSnapshot roomy;
@@ -126,6 +128,70 @@ void testTaskDependenciesAndConcurrencyGuards(
 
   bandwidth_b.resources = {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kWrite}};
   assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+  bandwidth_b.resources = {{RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead}};
+  bandwidth_b.scheduling.peak_is_known = false;
+  assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+  bandwidth_b.scheduling.peak_is_known = true;
+  bandwidth_b.dependencies = {"producer::producer.analysis"};
+  assert(!runtimeTasksMayOverlap(bandwidth_a, bandwidth_b, roomy));
+}
+
+
+void testDispatcherMemoryAdmission() {
+  using namespace cosmosim::workflows;
+  cosmosim::parallel::MpiContext mpi_context(false, 1, 0);
+  cosmosim::core::ProfilerSession profiler(true);
+  cosmosim::core::MemoryGovernor governor({.hard_limit_bytes = 256U});
+  RuntimeServices services{.mpi_context = mpi_context, .profiler = profiler,
+                           .memory_governor = &governor};
+  RuntimeModuleFactoryContext context{services};
+  std::vector<std::string> trace;
+  auto makeModule = [&](std::string name, std::uint64_t bytes, bool owner_managed) {
+    auto module = makeAnalysisModule(name, 0, 0, {}, &trace);
+    module.stage_tasks.front().scheduling.peak_is_known = true;
+    module.stage_tasks.front().scheduling.estimated_peak_bytes = bytes;
+    module.stage_tasks.front().scheduling.memory_ownership = owner_managed
+        ? RuntimeTaskMemoryOwnership::kOwnerManaged
+        : RuntimeTaskMemoryOwnership::kDispatcherOwned;
+    module.factory = [&, name, bytes, owner_managed](const RuntimeModuleFactoryContext& ctx) {
+      RuntimeModuleInstance instance;
+      instance.owner_lifetime = std::make_shared<std::string>(name);
+      instance.stage_tasks.push_back(RuntimeStageTaskContribution{
+          .task_id = name + ".analysis",
+          .estimate_incremental_bytes = [bytes] { return bytes; },
+          .task = AnalysisStageTask([&, bytes, owner_managed](AnalysisStageView& view) {
+            view.requireFresh();
+            const auto snapshot = governor.snapshot();
+            assert(snapshot.committed_bytes == (owner_managed ? 0U : bytes));
+            if (owner_managed) {
+              auto physical = governor.reserve(cosmosim::core::MemoryClass::kDiagnostic,
+                                               bytes, "test.owner");
+              physical.commit();
+              assert(governor.snapshot().committed_bytes == bytes);
+            }
+            trace.push_back("ran");
+          }),
+      });
+      return instance;
+    };
+    return module;
+  };
+  StableEpochSource epoch_source;
+  AnalysisStageView view(RuntimeResourceLease(epoch_source, RuntimeEpochField::kStepIndex));
+  const auto execute = [&](std::uint64_t bytes, bool owner_managed) {
+    RuntimeModuleRegistry registry;
+    registry.registerModule(makeModule("admission", bytes, owner_managed));
+    auto plan = registry.freezeAndInstantiate(context);
+    plan.executeStage(cosmosim::core::IntegrationStage::kAnalysisHooks, view);
+  };
+  execute(128U, false);
+  assert(governor.snapshot().committed_bytes == 0U);
+  execute(128U, true);
+  assert(governor.snapshot().committed_bytes == 0U);
+  bool rejected = false;
+  try { execute(300U, false); } catch (const std::exception&) { rejected = true; }
+  assert(rejected && governor.snapshot().reserved_bytes == 0U);
+  assert(governor.snapshot().committed_bytes == 0U);
 }
 
 }  // namespace
@@ -142,6 +208,7 @@ int main() {
 
   std::vector<std::string> trace;
   testTaskDependenciesAndConcurrencyGuards(context, &trace);
+  testDispatcherMemoryAdmission();
   cosmosim::workflows::RuntimeModuleRegistry registry;
   registry.registerModule(makeAnalysisModule("base", 20, 20, {}, &trace));
   // The prerequisite fixes construction order while task ordinals independently
