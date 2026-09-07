@@ -18,6 +18,10 @@ class AnalysisRuntime {
 
   virtual void audit(AnalysisStageView& view) = 0;
   virtual void executeDiagnostics(AnalysisStageView& view) = 0;
+  // Required-only owner preflight. Optional products have separate, deferrable
+  // physical leases and must never turn this callback into a hard stage gate.
+  [[nodiscard]] virtual std::uint64_t estimateRequiredIncrementalBytes(
+      const core::SimulationState& state, std::uint64_t completed_step) const = 0;
   // Best-effort optional cadence is coalesced, not historical replay.
   // Checkpoint metadata reports pending work; the pending queue is deliberately
   // not restart truth. A resumed run starts a new optional cadence epoch.

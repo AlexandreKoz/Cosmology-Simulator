@@ -460,3 +460,13 @@ unchanged.
 ## 2026-09-06 M2D-1 remaining acceptance gates
 
 The P1 exact-feasibility and distributed soft-throttle defects have source repairs and focused CPU evidence. Open: dependency-complete MPI+FFTW rank/fault/transaction validation; complete owner-specific major-task incremental peak models before enabling concurrency; full CPU/HDF5/source-package and scientific/topology acceptance. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`. This historical ledger is not a substitute for CURRENT_STATUS.md.
+
+## 2026-09-07 M2D final admission residuals
+
+The optional heavy-analysis admission defect is repaired in the current
+source patch. Remaining acceptance: complete gravity/source/output state-
+dependent peak and lifetime contracts; verify external-runtime reserve and
+whole-process memory under representative full physics; execute the real
+MPI+FFTW np2/np3/np4 safety/scaling/restart matrix and full test inventories.
+Nonserial full-physics scheduling and unconditional M2D closure remain blocked
+until the evidence is recorded. See the dated M2D final admission repair report.

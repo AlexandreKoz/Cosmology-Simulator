@@ -1,9 +1,53 @@
 #include "cosmosim/core/simulation_state.hpp"
 
+#include <algorithm>
 #include <limits>
+#include "cosmosim/core/memory_governor.hpp"
 #include <stdexcept>
 
 namespace cosmosim::core {
+
+std::uint64_t OwnershipValidationWorkspace::requiredBytes(
+    std::size_t particle_count, std::size_t cell_count) {
+  const auto mul = [](std::uint64_t count, std::uint64_t width) {
+    if (count != 0U && width > std::numeric_limits<std::uint64_t>::max() / count) {
+      throw std::overflow_error("ownership validation scratch byte overflow");
+    }
+    return count * width;
+  };
+  return checkedMemoryBytesAdd(
+      mul(static_cast<std::uint64_t>(particle_count),
+          sizeof(std::uint64_t) + 3U * sizeof(std::uint8_t)),
+      mul(static_cast<std::uint64_t>(cell_count), sizeof(std::uint32_t)),
+      "ownership validation scratch");
+}
+
+void OwnershipValidationWorkspace::resize(
+    std::size_t particle_count, std::size_t cell_count) {
+  (void)requiredBytes(particle_count, cell_count);
+  particle_ids.resize(particle_count);
+  star_rows.assign(particle_count, 0U);
+  bh_rows.assign(particle_count, 0U);
+  tracer_rows.assign(particle_count, 0U);
+  cell_owner.resize(cell_count);
+}
+
+std::uint64_t OwnershipValidationWorkspace::ownedCapacityBytes() const {
+  std::uint64_t bytes = 0U;
+  const auto add = [&bytes](std::uint64_t count, std::uint64_t width) {
+    if (count != 0U && width > std::numeric_limits<std::uint64_t>::max() / count) {
+      throw std::overflow_error("ownership validation retained capacity overflow");
+    }
+    bytes = checkedMemoryBytesAdd(bytes, count * width,
+                                  "ownership validation retained capacity");
+  };
+  add(static_cast<std::uint64_t>(particle_ids.capacity()), sizeof(std::uint64_t));
+  add(static_cast<std::uint64_t>(star_rows.capacity()), sizeof(std::uint8_t));
+  add(static_cast<std::uint64_t>(bh_rows.capacity()), sizeof(std::uint8_t));
+  add(static_cast<std::uint64_t>(tracer_rows.capacity()), sizeof(std::uint8_t));
+  add(static_cast<std::uint64_t>(cell_owner.capacity()), sizeof(std::uint32_t));
+  return bytes;
+}
 
 void SimulationState::resizeParticles(std::size_t count) {
   (void)checkedLocalCount(count, kMaxLocalParticleCount, "particle", "SimulationState::resizeParticles");
@@ -26,6 +70,17 @@ void SimulationState::resizePatches(std::size_t count) {
 }
 
 bool SimulationState::validateOwnershipInvariants() const {
+  OwnershipValidationWorkspace scratch;
+  return validateOwnershipInvariantsImpl(scratch, false);
+}
+
+bool SimulationState::validateOwnershipInvariants(
+    OwnershipValidationWorkspace& scratch) const {
+  return validateOwnershipInvariantsImpl(scratch, true);
+}
+
+bool SimulationState::validateOwnershipInvariantsImpl(
+    OwnershipValidationWorkspace& scratch, bool use_bounded_id_scratch) const {
   if (!particles.isConsistent() || !particle_sidecar.isConsistent() || !cells.isConsistent() ||
       !gas_cells.isConsistent() || !patches.isConsistent() || !star_particles.isConsistent() ||
       !black_holes.isConsistent() || !tracers.isConsistent()) {
@@ -36,7 +91,9 @@ bool SimulationState::validateOwnershipInvariants() const {
     return false;
   }
 
-  if (!validateUniqueParticleIds()) {
+  scratch.resize(particles.size(), cells.size());
+  if (!(use_bounded_id_scratch
+            ? validateUniqueParticleIds(scratch) : validateUniqueParticleIds())) {
     return false;
   }
 
@@ -53,12 +110,14 @@ bool SimulationState::validateOwnershipInvariants() const {
     return false;
   }
 
-  std::vector<std::uint8_t> star_rows_by_particle(particles.size(), 0);
-  std::vector<std::uint8_t> bh_rows_by_particle(particles.size(), 0);
-  std::vector<std::uint8_t> tracer_rows_by_particle(particles.size(), 0);
+  auto& star_rows_by_particle = scratch.star_rows;
+  auto& bh_rows_by_particle = scratch.bh_rows;
+  auto& tracer_rows_by_particle = scratch.tracer_rows;
 
   if (patches.size() != 0U) {
-    std::vector<std::uint32_t> cell_owner(cells.size(), std::numeric_limits<std::uint32_t>::max());
+    auto& cell_owner = scratch.cell_owner;
+    std::fill(cell_owner.begin(), cell_owner.end(),
+              std::numeric_limits<std::uint32_t>::max());
     for (std::size_t patch = 0; patch < patches.size(); ++patch) {
       const std::uint64_t begin = patches.first_cell[patch];
       const std::uint64_t count = patches.cell_count[patch];

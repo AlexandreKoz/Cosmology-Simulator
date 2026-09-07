@@ -257,3 +257,15 @@ pending bits into restart or scientific state.
 ## M2D-1 optional cadence evidence
 
 `analysis.memory_pressure_deferral` includes pending state and missed counts. `analysis.memory_pressure_catchup` records class, first/latest due step, missed/coalesced count, actual execution step, and `historical_state_replayed=false`. `analysis.optional_cadence_dropped` records pending work discarded at segment termination; `analysis.optional_cadence_restart_policy` records the previous checkpoint's cadence summary and the nonpersistent restart policy. These are operational provenance events, not scientific outputs or an exact-cadence guarantee.
+
+## M2D diagnostic admission evidence
+
+The existing governor snapshot/rejection counters and `RuntimeEvent` stream
+are the only memory-reporting authority. `analysis.memory_pressure_deferral`
+records class, requested bytes, headroom and reason; catch-up/terminal events
+retain actual versus due epochs. The model distinguishes FFT mesh coexistence
+from reduction workspace, and the existing process RSS/PSS report remains the
+measurement authority. Compare identical numerical configurations and thread
+counts; do not equate a declared reservation with measured RSS. A required
+health preflight is owner-managed and does not constitute a second physical
+allocation.

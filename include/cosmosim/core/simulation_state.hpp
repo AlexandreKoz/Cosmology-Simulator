@@ -831,6 +831,21 @@ struct ParticleMigrationCommit {
   bool preserve_gas_cell_state = false;
 };
 
+// Reusable scratch for full ownership/ID validation. It is not persistent
+// state and must be admitted before resizing on a governed production path.
+struct OwnershipValidationWorkspace {
+  std::vector<std::uint64_t> particle_ids;
+  std::vector<std::uint8_t> star_rows;
+  std::vector<std::uint8_t> bh_rows;
+  std::vector<std::uint8_t> tracer_rows;
+  std::vector<std::uint32_t> cell_owner;
+
+  void resize(std::size_t particle_count, std::size_t cell_count);
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
+  [[nodiscard]] static std::uint64_t requiredBytes(
+      std::size_t particle_count, std::size_t cell_count);
+};
+
 class SimulationState {
  public:
   // Single ownership root for persistent run state.
@@ -861,7 +876,9 @@ class SimulationState {
   void resizePatches(std::size_t count);
 
   [[nodiscard]] bool validateOwnershipInvariants() const;
+  [[nodiscard]] bool validateOwnershipInvariants(OwnershipValidationWorkspace& scratch) const;
   [[nodiscard]] bool validateUniqueParticleIds() const;
+  [[nodiscard]] bool validateUniqueParticleIds(OwnershipValidationWorkspace& scratch) const;
   [[nodiscard]] bool validatePersistentParticleIds() const;
   void rebuildSpeciesIndex();
   void refreshGasCellIdentityFromParticleOrder();
@@ -927,6 +944,8 @@ class SimulationState {
   void bumpCellIndexGeneration() noexcept;
 
  private:
+  [[nodiscard]] bool validateOwnershipInvariantsImpl(
+      OwnershipValidationWorkspace& scratch, bool use_bounded_id_scratch) const;
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecordsCore(
       std::span<const std::uint32_t> local_indices) const;
 

@@ -3,6 +3,10 @@
 #include <filesystem>
 #include <fstream>
 #include <numeric>
+#include <limits>
+#include <stdexcept>
+
+#include "cosmosim/core/memory_governor.hpp"
 
 #include "cosmosim/analysis/diagnostics.hpp"
 
@@ -398,6 +402,82 @@ void testMetalBudgetDiagnosticsCloseReturnedDepositAndCarry() {
   assert(std::abs(residual + 0.025) < 1.0e-15);
 }
 
+void testGovernedDiagnosticMemoryAndScientificEquivalence() {
+  using namespace cosmosim;
+  const auto mesh = analysis::estimatePowerSpectrumMemory(256U, 16U, 1U);
+  assert(mesh.mesh_coexistence_bytes == 402653184ULL);
+  assert(mesh.owned_peak_bytes >= mesh.mesh_coexistence_bytes);
+  assert(analysis::estimatePowerSpectrumMemory(512U, 16U, 1U)
+             .mesh_coexistence_bytes == 3221225472ULL);
+  bool overflow_rejected = false;
+  try {
+    (void)analysis::estimatePowerSpectrumMemory(
+        static_cast<std::size_t>(std::numeric_limits<int>::max()), 16U, 1U);
+  } catch (const std::overflow_error&) { overflow_rejected = true; }
+  assert(overflow_rejected);
+
+  auto config = makeConfig();
+  config.analysis.diagnostics_execution_policy =
+      core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
+  config.analysis.enable_diagnostics = true;
+  config.analysis.power_spectrum_mesh_n = 8;
+  config.analysis.power_spectrum_bin_count = 6;
+  const auto state = makeSingleModeState();
+  core::MemoryGovernor unlimited;
+  analysis::DiagnosticsEngine governed(config, &unlimited);
+  analysis::DiagnosticsEngine reference(config);
+  const auto required = governed.estimateBundleIncrementalBytes(
+      analysis::DiagnosticClass::kScienceHeavy, state);
+  assert(required >= core::OwnershipValidationWorkspace::requiredBytes(4U, 4U));
+  const auto expected = reference.generateBundle(
+      state, 4U, 0.7, analysis::DiagnosticClass::kScienceHeavy);
+  const auto actual = governed.generateBundle(
+      state, 4U, 0.7, analysis::DiagnosticClass::kScienceHeavy);
+  assert(unlimited.snapshot().committed_bytes == 0U);
+  assert(actual.power_spectrum.size() == expected.power_spectrum.size());
+  for (std::size_t i = 0; i < actual.power_spectrum.size(); ++i) {
+    assert(actual.power_spectrum[i].mode_count == expected.power_spectrum[i].mode_count);
+    assert(std::abs(actual.power_spectrum[i].k_center_code -
+                    expected.power_spectrum[i].k_center_code) < 1.0e-10);
+    assert(std::abs(actual.power_spectrum[i].power_code_volume -
+                    expected.power_spectrum[i].power_code_volume) < 1.0e-10);
+  }
+  assert(actual.health.ownership_invariants_ok == expected.health.ownership_invariants_ok);
+  assert(actual.health.unique_particle_ids_ok == expected.health.unique_particle_ids_ok);
+
+  // Green/Amber is not admission: this request exceeds the remaining bytes.
+  core::MemoryGovernor constrained(core::MemoryGovernorPolicy{
+      .hard_limit_bytes = required + 4096U});
+  constrained.setBaselineOwnedBytes(4097U);
+  assert(constrained.snapshot().pressure == core::MemoryPressure::kGreen);
+  analysis::DiagnosticsEngine constrained_engine(config, &constrained);
+  bool rejected = false;
+  try {
+    (void)constrained_engine.generateBundle(
+        state, 4U, 0.7, analysis::DiagnosticClass::kScienceHeavy);
+  } catch (const core::MemoryAdmissionError&) { rejected = true; }
+  assert(rejected);
+  assert(constrained.snapshot().committed_bytes == 0U);
+  constrained.setBaselineOwnedBytes(4096U);
+  const auto recovered = constrained_engine.generateBundle(
+      state, 5U, 0.7, analysis::DiagnosticClass::kScienceHeavy);
+  assert(recovered.power_spectrum.size() == expected.power_spectrum.size());
+  assert(constrained.snapshot().committed_bytes == 0U);
+
+  core::OwnershipValidationWorkspace scratch;
+  assert(scratch.ownedCapacityBytes() == 0U);
+  scratch.resize(4U, 4U);
+  assert(scratch.ownedCapacityBytes() >= 60U);
+  assert(state.validateUniqueParticleIds(scratch));
+  assert(state.validateOwnershipInvariants(scratch) ==
+         state.validateOwnershipInvariants());
+  auto invalid = makeSingleModeState();
+  invalid.particle_sidecar.particle_id[1] = invalid.particle_sidecar.particle_id[0];
+  assert(!invalid.validateUniqueParticleIds());
+  assert(!invalid.validateUniqueParticleIds(scratch));
+  assert(!invalid.validateOwnershipInvariants(scratch));
+}
+
 }  // namespace
 
 int main() {
@@ -409,5 +489,6 @@ int main() {
   testStarFormationHistoryCsvUsesBirthState();
   testEngineLevelHeavyDiagnosticsQuarantineAndTruthfulRecords();
   testMetalBudgetDiagnosticsCloseReturnedDepositAndCarry();
+  testGovernedDiagnosticMemoryAndScientificEquivalence();
   return 0;
 }

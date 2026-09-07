@@ -1,6 +1,7 @@
 #include "cosmosim/workflows/analysis_runtime.hpp"
 
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -27,7 +28,18 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
       : m_config(config),
         m_stage_sequence(&stage_sequence),
         m_services(services),
-        m_diagnostics(config) {}
+        m_diagnostics(config, services.memory_governor) {}
+
+  [[nodiscard]] std::uint64_t estimateRequiredIncrementalBytes(
+      const core::SimulationState& state, std::uint64_t completed_step) const override {
+    if (!m_config.analysis.enable_diagnostics ||
+        completed_step % static_cast<std::uint64_t>(
+            m_config.analysis.run_health_interval_steps) != 0U) {
+      return 0U;
+    }
+    return m_diagnostics.estimateBundleIncrementalBytes(
+        analysis::DiagnosticClass::kRunHealth, state);
+  }
 
   void audit(AnalysisStageView& view) override {
     view.requireFresh();
@@ -69,18 +81,39 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
       throw std::runtime_error(
           "analysis completed-state scale factor must be finite and positive");
     }
-    const auto run = [&](analysis::DiagnosticClass diagnostic_class) {
+    const auto run = [&](analysis::DiagnosticClass diagnostic_class,
+                         core::MemoryReservation* reservation = nullptr) {
       const analysis::DiagnosticsBundle bundle = m_diagnostics.generateBundle(
-          context.state,
-          step,
-          scale_factor,
-          diagnostic_class,
-          context.workspace);
+          context.state, step, scale_factor, diagnostic_class,
+          context.workspace, reservation);
       m_diagnostics.writeBundle(bundle);
     };
     if (step % static_cast<std::uint64_t>(
                    m_config.analysis.run_health_interval_steps) == 0) {
-      run(analysis::DiagnosticClass::kRunHealth);
+      // Required health is never silently skipped. Its owner admission failure
+      // is a controlled error, coordinated before any later collective phase.
+      std::exception_ptr health_failure;
+      core::MemoryReservation health_reservation;
+      try {
+        if (m_services.memory_governor != nullptr) {
+          health_reservation = m_services.memory_governor->reserve(
+              core::MemoryClass::kDiagnostic,
+              m_diagnostics.estimateBundleIncrementalBytes(
+                  analysis::DiagnosticClass::kRunHealth, context.state),
+              "analysis.run_health");
+          health_reservation.commit();
+        }
+      } catch (...) { health_failure = std::current_exception(); }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          health_failure, "required analysis memory admission");
+      std::exception_ptr health_execution_failure;
+      try {
+        run(analysis::DiagnosticClass::kRunHealth, &health_reservation);
+      } catch (...) {
+        health_execution_failure = std::current_exception();
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          health_execution_failure, "required analysis execution");
     }
 
     const core::MemoryPressure memory_pressure =
@@ -100,12 +133,43 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
                    m_config.analysis.science_heavy_interval_steps) == 0 &&
         m_config.analysis.diagnostics_execution_policy ==
             core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional;
-    const bool science_light_requested = science_light_due_now || m_science_light_pending.pending;
-    const bool science_heavy_requested = science_heavy_due_now || m_science_heavy_pending.pending;
-    if (defer_optional_analysis) {
-      if (science_light_due_now) { m_science_light_pending.recordDue(step); }
-      if (science_heavy_due_now) { m_science_heavy_pending.recordDue(step); }
-      if (science_light_requested || science_heavy_requested) {
+    const auto executeOptional = [&](analysis::DiagnosticClass diagnostic_class,
+                                     internal::OptionalDiagnosticCadence& pending,
+                                     bool due_now, const char* class_name) {
+      if (!due_now && !pending.pending) { return; }
+      const auto previous = pending;
+      core::MemoryReservation reservation;
+      std::exception_ptr admission_failure;
+      bool memory_rejected = defer_optional_analysis;
+      std::string rejection_reason = defer_optional_analysis
+          ? "process_memory_pressure" : "";
+      std::uint64_t requested_bytes = 0U;
+      // Each rank must make the same decision. A local hard-limit rejection
+      // is not an error in optional science; other failures remain fatal.
+      if (!memory_rejected) {
+        try {
+          requested_bytes = m_diagnostics.estimateBundleIncrementalBytes(
+              diagnostic_class, context.state);
+          if (m_services.memory_governor != nullptr) {
+            reservation = m_services.memory_governor->reserve(
+                core::MemoryClass::kDiagnostic, requested_bytes,
+                "analysis.optional_science");
+            reservation.commit();
+          }
+        } catch (const core::MemoryAdmissionError& error) {
+          memory_rejected = true;
+          rejection_reason = error.what();
+        } catch (...) {
+          admission_failure = std::current_exception();
+        }
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          admission_failure, "optional analysis memory preparation");
+      const bool any_rejected =
+          FailureCoordinator(m_services).failedRankCount(memory_rejected) != 0U;
+      if (any_rejected) {
+        reservation.release();
+        if (due_now) { pending.recordDue(step); }
         m_services.profiler.recordEvent(core::RuntimeEvent{
             .event_kind = "analysis.memory_pressure_deferral",
             .severity = core::RuntimeEventSeverity::kInfo,
@@ -113,9 +177,14 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
             .step_index = step,
             .simulation_time_code = context.timeline_step.time_end_code,
             .scale_factor = scale_factor,
-            .message = "optional science diagnostics deferred under process memory pressure",
+            .message = "optional science diagnostics deferred by collective memory admission",
             .payload = {
                 {"pressure", std::string(core::memoryPressureLabel(memory_pressure))},
+                {"diagnostic_class", class_name},
+                {"requested_bytes", std::to_string(requested_bytes)},
+                {"headroom_bytes", m_services.memory_governor != nullptr
+                    ? std::to_string(m_services.memory_governor->snapshot().headroom_bytes) : "unlimited"},
+                {"reason", memory_rejected ? rejection_reason : "peer_memory_rejection"},
                 {"science_light_due", science_light_due_now ? "true" : "false"},
                 {"science_heavy_due", science_heavy_due_now ? "true" : "false"},
                 {"science_light_pending", m_science_light_pending.pending ? "true" : "false"},
@@ -124,45 +193,46 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
                 {"science_heavy_missed_count", std::to_string(m_science_heavy_pending.missed_count)},
             },
         });
+        return;
       }
-    } else {
-      const auto executeOptional = [&](analysis::DiagnosticClass diagnostic_class,
-                                       internal::OptionalDiagnosticCadence& pending,
-                                       bool due_now, const char* class_name) {
-        if (!due_now && !pending.pending) { return; }
-        const auto previous = pending;
-        // Do not clear pending state until the physical product was written.
-        // The engine's existing memory admission remains authoritative.
-        run(diagnostic_class);
-        pending.clear();
-        if (previous.pending) {
-          m_services.profiler.recordEvent(core::RuntimeEvent{
-              .event_kind = "analysis.memory_pressure_catchup",
-              .severity = core::RuntimeEventSeverity::kInfo,
-              .subsystem = "analysis.diagnostics",
-              .step_index = step,
-              .simulation_time_code = context.timeline_step.time_end_code,
-              .scale_factor = scale_factor,
-              .message = "coalesced optional science diagnostic completed at the current physical epoch",
-              .payload = {
-                  {"diagnostic_class", class_name},
-                  {"first_due_step", std::to_string(previous.first_due_step)},
-                  {"latest_due_step", std::to_string(previous.latest_due_step)},
-                  {"missed_count", std::to_string(previous.missed_count)},
-                  {"coalesced_count", std::to_string(previous.missed_count - 1U)},
-                  {"actual_execution_step", std::to_string(step)},
-                  {"science_light_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceLight ? "true" : "false"},
-                  {"science_heavy_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceHeavy ? "true" : "false"},
-                  {"historical_state_replayed", "false"},
-              },
-          });
-        }
-      };
-      executeOptional(analysis::DiagnosticClass::kScienceLight,
-                      m_science_light_pending, science_light_due_now, "science_light");
-      executeOptional(analysis::DiagnosticClass::kScienceHeavy,
-                      m_science_heavy_pending, science_heavy_due_now, "science_heavy");
-    }
+      // The physical reservation survives computation, bundle materialization,
+      // serialization, and the final local write. Do not clear pending on error.
+      std::exception_ptr execution_failure;
+      try {
+        run(diagnostic_class, &reservation);
+      } catch (...) {
+        execution_failure = std::current_exception();
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          execution_failure, "optional analysis execution");
+      pending.clear();
+      if (previous.pending) {
+        m_services.profiler.recordEvent(core::RuntimeEvent{
+            .event_kind = "analysis.memory_pressure_catchup",
+            .severity = core::RuntimeEventSeverity::kInfo,
+            .subsystem = "analysis.diagnostics",
+            .step_index = step,
+            .simulation_time_code = context.timeline_step.time_end_code,
+            .scale_factor = scale_factor,
+            .message = "coalesced optional science diagnostic completed at the current physical epoch",
+            .payload = {
+                {"diagnostic_class", class_name},
+                {"first_due_step", std::to_string(previous.first_due_step)},
+                {"latest_due_step", std::to_string(previous.latest_due_step)},
+                {"missed_count", std::to_string(previous.missed_count)},
+                {"coalesced_count", std::to_string(previous.missed_count - 1U)},
+                {"actual_execution_step", std::to_string(step)},
+                {"science_light_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceLight ? "true" : "false"},
+                {"science_heavy_catchup", diagnostic_class == analysis::DiagnosticClass::kScienceHeavy ? "true" : "false"},
+                {"historical_state_replayed", "false"},
+            },
+        });
+      }
+    };
+    executeOptional(analysis::DiagnosticClass::kScienceLight,
+                    m_science_light_pending, science_light_due_now, "science_light");
+    executeOptional(analysis::DiagnosticClass::kScienceHeavy,
+                    m_science_heavy_pending, science_heavy_due_now, "science_heavy");
     m_diagnostics.enforceRetentionPolicy();
   }
 

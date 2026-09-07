@@ -435,7 +435,7 @@ MemoryReservation MemoryGovernor::reserve(
     current.pressure = MemoryPressure::kTrip;
     current.committed_by_class = m_committed_by_class;
     current.reserved_by_class = m_reserved_by_class;
-    throw std::runtime_error(rejectionDiagnostic(
+    throw MemoryAdmissionError(rejectionDiagnostic(
         memory_class,
         owner,
         requested_bytes,

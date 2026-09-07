@@ -57,7 +57,7 @@ void testAdmissionBoundariesAndZeroByteReservation() {
   bool rejected = false;
   try {
     (void)governor.reserve(MemoryClass::kCommunication, 1U, "unit.one_over");
-  } catch (const std::runtime_error& error) {
+  } catch (const cosmosim::core::MemoryAdmissionError& error) {
     rejected = true;
     const std::string message = error.what();
     assert(message.find("owner=unit.one_over") != std::string::npos);

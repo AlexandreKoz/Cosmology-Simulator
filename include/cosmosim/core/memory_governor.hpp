@@ -10,6 +10,14 @@
 
 namespace cosmosim::core {
 
+// A requested allocation would exceed the configured hard ceiling.
+// Only this rejection, not allocation failure or invalid scientific state,
+// may be interpreted as a reason to defer best-effort optional work.
+class MemoryAdmissionError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 enum class MemoryClass : std::uint8_t {
   kCanonicalPersistent = 0,
   kPersistentCache = 1,

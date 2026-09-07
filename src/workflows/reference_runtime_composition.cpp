@@ -178,7 +178,8 @@ namespace {
       .prerequisites = {},
       .incompatibilities = {},
       .stage_tasks = std::move(declarations),
-      .factory = [&config = inputs.config, &report = inputs.report, assembly](
+      .factory = [&config = inputs.config, &report = inputs.report, &inputs_state = inputs.state,
+                  &inputs_integrator_state = inputs.integrator_state, assembly](
                      const RuntimeModuleFactoryContext& context) {
         std::shared_ptr<AnalysisRuntime> owner(
             makeAnalysisRuntime(config, report.stage_sequence, context.services));
@@ -206,6 +207,15 @@ namespace {
         }
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
             .task_id = "analysis.diagnostics",
+            .estimate_incremental_bytes = [owner, &state = inputs_state,
+                                           &integrator_state = inputs_integrator_state]() {
+              if (integrator_state.step_index ==
+                  std::numeric_limits<std::uint64_t>::max()) {
+                throw std::overflow_error("analysis completed-step index overflows uint64");
+              }
+              return owner->estimateRequiredIncrementalBytes(
+                  state, integrator_state.step_index + 1U);
+            },
             .task = AnalysisStageTask([owner](AnalysisStageView& view) {
               owner->executeDiagnostics(view);
             }),

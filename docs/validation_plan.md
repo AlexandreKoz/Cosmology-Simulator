@@ -531,3 +531,16 @@ These tests are specifically designed to prove protocol correctness without
 separate from source closure; an environment without `MPI_CXX` keeps this gate
 environment-blocked rather than converting the source repair into a different
 algorithm or weakening the tests.
+
+## M2D final admission closure gates
+
+Run `unit_analysis_diagnostics`, `unit_memory_governor`,
+`unit_runtime_module_registry`, and `integration_reference_workflow` on the
+CPU and HDF5 Debug presets. The diagnostic unit test covers checked 256^3/512^3
+mesh models, below-Red insufficient headroom, exact-boundary recovery, lease
+release and scientific equivalence. The workflow test covers coalesced optional
+cadence. Follow with the full inventories, source-package completeness and
+MPI+HDF5+FFTW rank/fault-injection/science matrix on a provisioned host. Do not
+promote CPU algorithm checks into distributed runtime certification. The
+remaining owner-specific peak contracts and production full-process envelope
+must be measured before closing M2D or enabling nonserial full-physics work.

@@ -10,6 +10,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
 namespace cosmosim::analysis {
@@ -121,6 +122,18 @@ struct PowerSpectrumEstimate {
 [[nodiscard]] std::string_view powerSpectrumPowerUnits() noexcept;
 [[nodiscard]] std::string_view powerSpectrumFourierNormalization() noexcept;
 
+// Physical allocation model for the production complex-to-complex estimator.
+// The opaque FFTW planner is covered separately by the configured external
+// runtime reserve. No scientific precision or estimator policy is changed.
+struct PowerSpectrumMemoryEstimate {
+  std::uint64_t mesh_coexistence_bytes = 0U;
+  std::uint64_t owned_peak_bytes = 0U;
+  std::uint64_t external_runtime_bytes = 0U;
+};
+
+[[nodiscard]] PowerSpectrumMemoryEstimate estimatePowerSpectrumMemory(
+    std::size_t mesh_n, std::size_t bin_count, std::size_t thread_count);
+
 struct StarFormationHistoryBin {
   double scale_factor_center = 0.0;
   double formed_mass_code = 0.0;
@@ -208,7 +221,9 @@ struct DiagnosticsStateView {
   bool unique_particle_ids_ok = false;
 };
 
-[[nodiscard]] DiagnosticsStateView buildDiagnosticsStateView(const core::SimulationState& state);
+[[nodiscard]] DiagnosticsStateView buildDiagnosticsStateView(
+    const core::SimulationState& state,
+    core::OwnershipValidationWorkspace* scratch = nullptr);
 
 struct DiagnosticsBundle {
   std::uint64_t step_index = 0;
@@ -239,7 +254,14 @@ struct DiagnosticsTiming {
 
 class DiagnosticsEngine {
  public:
-  explicit DiagnosticsEngine(core::SimulationConfig config);
+  explicit DiagnosticsEngine(core::SimulationConfig config,
+                             core::MemoryGovernor* memory_governor = nullptr);
+
+  // A checked upper budget for the owned diagnostic arrays. The estimate is
+  // state-dependent for science-light products and is not a claim about an
+  // unbounded external allocator. The caller supplies the live-state counts.
+  [[nodiscard]] std::uint64_t estimateBundleIncrementalBytes(
+      DiagnosticClass diagnostic_class, const core::SimulationState& state) const;
 
   [[nodiscard]] RunHealthCounters computeRunHealth(const DiagnosticsStateView& view) const;
   [[nodiscard]] RunHealthCounters computeRunHealth(const core::SimulationState& state) const;
@@ -302,12 +324,22 @@ class DiagnosticsEngine {
       std::uint64_t step_index,
       double scale_factor,
       DiagnosticClass diagnostic_class,
-      const core::TransientStepWorkspace* workspace = nullptr) const;
+      const core::TransientStepWorkspace* workspace = nullptr,
+      core::MemoryReservation* enclosing_reservation = nullptr) const;
 
   void writeBundle(const DiagnosticsBundle& bundle) const;
   void enforceRetentionPolicy() const;
 
  private:
+  [[nodiscard]] PowerSpectrumEstimate computePowerSpectrumEstimateImpl(
+      const ParticleDiagnosticsView& particles,
+      const PowerSpectrumEstimateOptions& options,
+      const core::MemoryReservation* enclosing_reservation) const;
+  [[nodiscard]] std::vector<PowerSpectrumBin> computePowerSpectrumImpl(
+      const ParticleDiagnosticsView& particles, std::size_t mesh_n,
+      std::size_t bin_count,
+      const core::MemoryReservation* enclosing_reservation) const;
+  core::MemoryGovernor* m_memory_governor = nullptr;
   [[nodiscard]] std::filesystem::path diagnosticsOutputDirectory() const;
   [[nodiscard]] std::filesystem::path bundlePath(const DiagnosticsBundle& bundle) const;
   [[nodiscard]] std::filesystem::path quicklookPath(const DiagnosticsBundle& bundle) const;

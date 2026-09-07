@@ -2295,3 +2295,13 @@ Remaining intentional boundaries: active-bin emission still sorts for determinis
 ## 2026-09-06 M2D-1 source repair state
 
 The post-merge feasible-SFC rejection and soft-throttle hard-memory relief defects are repaired in source. Exact cut repair has 86,016 exhaustive synthetic feasibility cases and focused CPU tests passing. Retained-capacity-aware batching, dispatcher-owned task leases, conservative unknown-peak overlap refusal, and coalesced optional-cadence lifecycle are implemented. Full acceptance is provisional pending real MPI+FFTW, owner-specific major-task peak contracts, and broad scientific/topology validation. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`. Do not treat historical M2D reports as fresh distributed runtime evidence.
+
+## 2026-09-07 M2D final admission repair
+
+The post-M2D-1 optional FFT admission finding is repaired in source with an
+owner-held lease, checked workspace model and collective optional deferral.
+Required-health preflight is connected to the existing task registry without
+double charging. Complete major-owner peak contracts and dependency-complete
+MPI/FFTW acceptance remain open. See
+`docs/repair/m2d_final_admission_closure_20260907.md`. This entry is a repair
+record, not an unconditional M2D acceptance declaration.

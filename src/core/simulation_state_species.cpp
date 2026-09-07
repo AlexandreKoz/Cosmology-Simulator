@@ -364,6 +364,16 @@ bool SimulationState::validateUniqueParticleIds() const {
   return true;
 }
 
+bool SimulationState::validateUniqueParticleIds(
+    OwnershipValidationWorkspace& scratch) const {
+  scratch.particle_ids.resize(particle_sidecar.particle_id.size());
+  std::copy(particle_sidecar.particle_id.begin(), particle_sidecar.particle_id.end(),
+            scratch.particle_ids.begin());
+  std::sort(scratch.particle_ids.begin(), scratch.particle_ids.end());
+  return std::adjacent_find(scratch.particle_ids.begin(), scratch.particle_ids.end()) ==
+      scratch.particle_ids.end();
+}
+
 bool SimulationState::validatePersistentParticleIds() const {
   std::unordered_set<std::uint64_t> ids;
   ids.reserve(particle_sidecar.particle_id.size());

@@ -2,6 +2,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -372,9 +373,70 @@ std::string_view powerSpectrumFourierNormalization() noexcept {
   return "delta_k=sum(delta_grid*exp(-i*k*x_grid))/N_mesh;P=V*abs(delta_k)^2";
 }
 
-DiagnosticsEngine::DiagnosticsEngine(core::SimulationConfig config) : m_config(std::move(config)) {}
+PowerSpectrumMemoryEstimate estimatePowerSpectrumMemory(
+    std::size_t mesh_n, std::size_t bin_count, std::size_t thread_count) {
+  if (mesh_n < 2U || bin_count == 0U || thread_count == 0U ||
+      mesh_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("invalid production power-spectrum memory geometry");
+  }
+  const auto mul = [](std::uint64_t lhs, std::uint64_t rhs,
+                      std::string_view label) {
+    if (lhs != 0U && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
+      throw std::overflow_error(std::string(label) + ": byte multiplication overflow");
+    }
+    return lhs * rhs;
+  };
+  const auto add = [](std::uint64_t lhs, std::uint64_t rhs,
+                      std::string_view label) {
+    return core::checkedMemoryBytesAdd(lhs, rhs, label);
+  };
+  const std::uint64_t n = static_cast<std::uint64_t>(mesh_n);
+  const std::uint64_t bins = static_cast<std::uint64_t>(bin_count);
+  if (bin_count > std::vector<PowerSpectrumEstimateBin>{}.max_size() ||
+      bin_count > std::vector<PowerSpectrumBin>{}.max_size()) {
+    throw std::overflow_error("power spectrum bin count exceeds vector range");
+  }
+  const std::uint64_t threads = static_cast<std::uint64_t>(thread_count);
+  const std::uint64_t cells = mul(mul(n, n, "FFT mesh xy"), n, "FFT mesh xyz");
+  if (cells > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) ||
+      cells > static_cast<std::uint64_t>(std::vector<std::complex<double>>{}.max_size()) ||
+      cells > static_cast<std::uint64_t>(std::vector<double>{}.max_size())) {
+    throw std::overflow_error("power spectrum mesh exceeds supported vector or loop range");
+  }
+  const std::uint64_t real = mul(cells, sizeof(double), "FFT real mesh");
+  const std::uint64_t complex = mul(cells, sizeof(std::complex<double>), "FFT complex mesh");
+  PowerSpectrumMemoryEstimate result;
+  result.mesh_coexistence_bytes = add(real, complex, "FFT mesh coexistence");
+  // The built-in backend owns one complex line per worker. The FFTW backend
+  // uses its own opaque planner allocation, charged to the configured external
+  // allowance; reserve the line budget conservatively for either backend.
+  const std::uint64_t lines = mul(mul(n, sizeof(std::complex<double>), "FFT line"),
+                                  threads, "FFT worker lines");
+  const std::uint64_t accumulators = mul(
+      mul(bins, 2U * sizeof(double) + sizeof(std::uint64_t), "FFT bin accumulators"),
+      add(threads, 1U, "FFT worker count"), "FFT worker accumulators");
+  const std::uint64_t result_bins = mul(bins, sizeof(PowerSpectrumEstimateBin), "FFT result bins");
+  const std::uint64_t wrapper_bins = mul(bins, sizeof(PowerSpectrumBin), "FFT wrapper bins");
+  // The real mesh has been released before the per-worker reductions. The
+  // estimator result and wrapper can coexist; account both, not just size().
+  const std::uint64_t reduction_peak = add(
+      add(complex, lines, "FFT transform workspace"),
+      add(accumulators, add(result_bins, wrapper_bins, "FFT results"), "FFT reductions"),
+      "FFT reduction peak");
+  result.owned_peak_bytes = std::max(result.mesh_coexistence_bytes, reduction_peak);
+  return result;
+}
 
-DiagnosticsStateView buildDiagnosticsStateView(const core::SimulationState& state) {
+DiagnosticsEngine::DiagnosticsEngine(core::SimulationConfig config,
+                                     core::MemoryGovernor* memory_governor)
+    : m_memory_governor(memory_governor), m_config(std::move(config)) {}
+
+DiagnosticsStateView buildDiagnosticsStateView(
+    const core::SimulationState& state, core::OwnershipValidationWorkspace* scratch) {
+  core::OwnershipValidationWorkspace local_scratch;
+  if (scratch == nullptr) { scratch = &local_scratch; }
+  const bool ownership_ok = state.validateOwnershipInvariants(*scratch);
+  const bool unique_ids_ok = state.validateUniqueParticleIds(*scratch);
   return DiagnosticsStateView{
       .particles = ParticleDiagnosticsView{
           .position_x_comoving = state.particles.position_x_comoving,
@@ -401,8 +463,8 @@ DiagnosticsStateView buildDiagnosticsStateView(const core::SimulationState& stat
       .particle_count = static_cast<std::uint64_t>(state.particles.size()),
       .cell_count = static_cast<std::uint64_t>(state.cells.size()),
       .star_count = static_cast<std::uint64_t>(state.star_particles.size()),
-      .ownership_invariants_ok = state.validateOwnershipInvariants(),
-      .unique_particle_ids_ok = state.validateUniqueParticleIds(),
+      .ownership_invariants_ok = ownership_ok,
+      .unique_particle_ids_ok = unique_ids_ok,
   };
 }
 
@@ -453,13 +515,31 @@ std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
     const ParticleDiagnosticsView& particles,
     std::size_t mesh_n,
     std::size_t bin_count) const {
+  core::MemoryReservation reservation;
+  if (m_memory_governor != nullptr && mesh_n >= 2U && bin_count != 0U) {
+    const auto estimate = estimatePowerSpectrumMemory(
+        mesh_n, bin_count, static_cast<std::size_t>(core::openMpMaximumThreads()));
+    reservation = m_memory_governor->reserve(
+        core::MemoryClass::kDiagnostic, estimate.owned_peak_bytes,
+        "analysis.power_spectrum.wrapper");
+    reservation.commit();
+  }
+  return computePowerSpectrumImpl(particles, mesh_n, bin_count,
+                                  reservation.committed() ? &reservation : nullptr);
+}
+
+std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrumImpl(
+    const ParticleDiagnosticsView& particles,
+    std::size_t mesh_n,
+    std::size_t bin_count,
+    const core::MemoryReservation* enclosing_reservation) const {
   if (mesh_n == 0 || bin_count == 0) {
     throw std::invalid_argument("power spectrum requires mesh_n > 0 and bin_count > 0");
   }
   if (particles.mass_code.empty()) {
     return {};
   }
-  const PowerSpectrumEstimate estimate = computePowerSpectrumEstimate(
+  const PowerSpectrumEstimate estimate = computePowerSpectrumEstimateImpl(
       particles,
       PowerSpectrumEstimateOptions{
           .mesh_n = mesh_n,
@@ -467,7 +547,7 @@ std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
           .mass_assignment = PowerSpectrumMassAssignment::kNearestGridPoint,
           .window_correction = PowerSpectrumWindowCorrection::kNone,
           .shot_noise_policy = PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction,
-      });
+      }, enclosing_reservation);
   std::vector<PowerSpectrumBin> bins;
   bins.reserve(estimate.bins.size());
   for (const PowerSpectrumEstimateBin& bin : estimate.bins) {
@@ -493,6 +573,13 @@ std::vector<PowerSpectrumBin> DiagnosticsEngine::computePowerSpectrum(
 PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
     const ParticleDiagnosticsView& particles,
     const PowerSpectrumEstimateOptions& options) const {
+  return computePowerSpectrumEstimateImpl(particles, options, nullptr);
+}
+
+PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimateImpl(
+    const ParticleDiagnosticsView& particles,
+    const PowerSpectrumEstimateOptions& options,
+    const core::MemoryReservation* enclosing_reservation) const {
   if (options.mesh_n < 2 || options.bin_count == 0) {
     throw std::invalid_argument("power spectrum estimate requires mesh_n >= 2 and bin_count > 0");
   }
@@ -511,6 +598,24 @@ PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
   if (options.shot_noise_policy != PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction &&
       options.shot_noise_policy != PowerSpectrumShotNoisePolicy::kSubtractPoisson) {
     throw std::invalid_argument("power spectrum estimate received an unknown shot-noise policy");
+  }
+
+  const auto memory_estimate = estimatePowerSpectrumMemory(
+      options.mesh_n, options.bin_count,
+      static_cast<std::size_t>(core::openMpMaximumThreads()));
+  core::MemoryReservation local_reservation;
+  if (m_memory_governor != nullptr) {
+    if (enclosing_reservation != nullptr) {
+      if (!enclosing_reservation->committed() ||
+          enclosing_reservation->bytes() < memory_estimate.owned_peak_bytes) {
+        throw std::logic_error("power-spectrum enclosing memory lease is insufficient");
+      }
+    } else {
+      local_reservation = m_memory_governor->reserve(
+          core::MemoryClass::kDiagnostic, memory_estimate.owned_peak_bytes,
+          "analysis.power_spectrum.fft");
+      local_reservation.commit();
+    }
   }
 
   const double box_size_code = m_config.cosmology.box_size_mpc_comoving;
@@ -599,8 +704,7 @@ PowerSpectrumEstimate DiagnosticsEngine::computePowerSpectrumEstimate(
     const std::size_t i = static_cast<std::size_t>(index);
     fourier[i] = std::complex<double>{mass_mesh[i] / mean_cell_mass_code - 1.0, 0.0};
   }
-  mass_mesh.clear();
-  mass_mesh.shrink_to_fit();
+  std::vector<double>().swap(mass_mesh);
   forwardFft3d(fourier, mesh_n);
 
   const std::size_t nyquist_mode = mesh_n / 2;
@@ -1084,18 +1188,76 @@ std::vector<double> DiagnosticsEngine::computeGasXyProjectionDensity(
   return computeGasXyProjectionDensity(buildDiagnosticsStateView(state).gas_cells, grid_n);
 }
 
+std::uint64_t DiagnosticsEngine::estimateBundleIncrementalBytes(
+    DiagnosticClass diagnostic_class, const core::SimulationState& state) const {
+  const auto add = [](std::uint64_t lhs, std::uint64_t rhs) {
+    return core::checkedMemoryBytesAdd(lhs, rhs, "analysis bundle incremental peak");
+  };
+  const auto mul = [](std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0U && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
+      throw std::overflow_error("analysis bundle byte count overflow");
+    }
+    return lhs * rhs;
+  };
+  // Bounded metadata allowance: labels, report entries, JSON formatting and
+  // filesystem bookkeeping. Population-scale scientific arrays are explicit
+  // below. This is an engineering allowance, not a physical-memory measurement.
+  std::uint64_t bytes = 8U * 1024U * 1024U;
+  if (diagnostic_class != DiagnosticClass::kRunHealth) {
+    const auto bins = static_cast<std::uint64_t>(m_config.analysis.sf_history_bin_count);
+    const auto n = static_cast<std::uint64_t>(m_config.analysis.quicklook_grid_n);
+    bytes = add(bytes, mul(bins, sizeof(double) + sizeof(StarFormationHistoryBin)));
+    // Two persistent image arrays and a temporary count array coexist.
+    bytes = add(bytes, mul(mul(n, n), 2U * sizeof(double) + sizeof(std::uint32_t)));
+  }
+  if (diagnostic_class == DiagnosticClass::kScienceHeavy &&
+      m_config.analysis.diagnostics_execution_policy ==
+          core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional) {
+    bytes = add(bytes, estimatePowerSpectrumMemory(
+        static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
+        static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count),
+        static_cast<std::size_t>(core::openMpMaximumThreads())).owned_peak_bytes);
+  }
+  bytes = add(bytes, core::OwnershipValidationWorkspace::requiredBytes(
+      state.particles.size(), state.cells.size()));
+  return bytes;
+}
+
 DiagnosticsBundle DiagnosticsEngine::generateBundle(
     const core::SimulationState& state,
     std::uint64_t step_index,
     double scale_factor,
     DiagnosticClass diagnostic_class,
-    const core::TransientStepWorkspace* workspace) const {
+    const core::TransientStepWorkspace* workspace,
+    core::MemoryReservation* enclosing_reservation) const {
+  core::MemoryReservation local_reservation;
+  core::MemoryReservation* reservation = enclosing_reservation != nullptr
+      ? enclosing_reservation : &local_reservation;
+  if (m_memory_governor != nullptr) {
+    const std::uint64_t required_bytes =
+        estimateBundleIncrementalBytes(diagnostic_class, state);
+    if (reservation->committed()) {
+      if (reservation->bytes() < required_bytes) {
+        throw std::logic_error("analysis bundle enclosing lease is insufficient");
+      }
+    } else {
+      if (reservation->valid()) {
+        throw std::logic_error("analysis bundle requires an empty or committed lease");
+      }
+      *reservation = m_memory_governor->reserve(
+          core::MemoryClass::kDiagnostic, required_bytes,
+          "analysis.diagnostics.bundle");
+      reservation->commit();
+    }
+  }
+  core::OwnershipValidationWorkspace validation_scratch;
+  validation_scratch.resize(state.particles.size(), state.cells.size());
   DiagnosticsBundle bundle;
   bundle.step_index = step_index;
   bundle.scale_factor = scale_factor;
   bundle.diagnostic_class = diagnostic_class;
   bundle.diagnostics_execution_policy = m_config.analysis.diagnostics_execution_policy;
-  const DiagnosticsStateView view = buildDiagnosticsStateView(state);
+  const DiagnosticsStateView view = buildDiagnosticsStateView(state, &validation_scratch);
   bundle.health = computeRunHealth(view);
   bundle.memory_report = core::collectSimulationMemoryReport(state, workspace);
   bundle.records.push_back(DiagnosticRecord{
@@ -1164,10 +1326,11 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         (m_config.analysis.diagnostics_execution_policy ==
          core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
     if (power_spectrum_scheduled) {
-      bundle.power_spectrum = computePowerSpectrum(
+      bundle.power_spectrum = computePowerSpectrumImpl(
           view.particles,
           static_cast<std::size_t>(m_config.analysis.power_spectrum_mesh_n),
-          static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count));
+          static_cast<std::size_t>(m_config.analysis.power_spectrum_bin_count),
+          reservation->committed() ? reservation : nullptr);
     }
     bundle.records.push_back(DiagnosticRecord{
         .name = "power_spectrum",

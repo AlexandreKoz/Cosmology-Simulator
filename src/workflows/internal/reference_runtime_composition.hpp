@@ -10,6 +10,8 @@ namespace cosmosim::core {
 class HierarchicalTimeBinScheduler;
 class ProfilerSession;
 struct FrozenConfig;
+struct IntegratorState;
+class SimulationState;
 struct ModePolicy;
 struct SimulationConfig;
 struct UnitSystem;
@@ -34,6 +36,8 @@ struct PendingOutputBoundary;
 struct ReferenceRuntimeCompositionInputs {
   const core::FrozenConfig& frozen_config;
   const core::SimulationConfig& config;
+  const core::SimulationState& state;
+  const core::IntegratorState& integrator_state;
   const core::ModePolicy& mode_policy;
   const core::UnitSystem& units;
   const RuntimeServices& services;

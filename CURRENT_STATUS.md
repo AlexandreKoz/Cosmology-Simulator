@@ -94,3 +94,14 @@ The residual `src/core` integrity campaign closes the metadata/provenance escape
 ## 2026-09-06 M2D-1 memory scheduling closure status
 
 The current source includes the focused M2D-1 repair for feasible hard-memory SFC partitioning, distributed cut refinement/progress, retained-capacity-aware batching, explicit task-admission ownership, and coalesced optional-diagnostic lifecycle. Focused CPU tests pass, including 86,016 exhaustive synthetic cut-feasibility cases. Full M2D acceptance remains provisional: real MPI+FFTW and broader scientific/topology validation are unavailable or unfinished, and complete major-task peak contracts are still required before nonserial production overlap. See `docs/repair/m2d1_memory_scheduling_closure_20260906.md`.
+
+## M2D final admission repair — 2026-09-07
+
+A focused repair now governs optional FFT diagnostics and their population-
+scale validation scratch, preserves collective deferral/catch-up semantics and
+adds required-health owner preflight. The source-level SFC repair remains
+present. Full M2D acceptance is still provisional: remaining major-owner peak
+contracts, complete CPU/HDF5 and MPI+FFTW validation, and measured full-process
+resource/scaling evidence have not all been established. Independent M2E work
+may proceed, but unrestricted full-physics concurrency is not certified.
+See `docs/repair/m2d_final_admission_closure_20260907.md`.

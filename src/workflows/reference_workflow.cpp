@@ -599,6 +599,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             internal::ReferenceRuntimeCompositionInputs{
                 .frozen_config = m_frozen_config,
                 .config = config,
+                .state = state,
+                .integrator_state = integrator_state,
                 .mode_policy = mode_policy,
                 .units = runtime_units,
                 .services = runtime_services,
