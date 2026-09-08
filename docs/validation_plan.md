@@ -544,3 +544,20 @@ MPI+HDF5+FFTW rank/fault-injection/science matrix on a provisioned host. Do not
 promote CPU algorithm checks into distributed runtime certification. The
 remaining owner-specific peak contracts and production full-process envelope
 must be measured before closing M2D or enabling nonserial full-physics work.
+
+## M2D major-task contract acceptance (2026-09-07)
+
+The focused registry test covers checked retained-capacity arithmetic, dynamic
+estimate evaluation, complete/partial transitions, dispatcher-owned RAII
+release, owner-managed preflight without double charging, incomplete-owner
+batch freedom, and qualified task lookup. The end-to-end reference workflow
+continues to require a deterministic hard-memory rejection for an impossible
+one-byte process ceiling and preserves the scientific stage/diagnostic checks.
+
+Required remaining acceptance: complete source/AMR/output owner models,
+CPU/HDF5/source-package inventories, MPI+HDF5+FFTW np2/np3/np4 skew/empty/
+infeasible and fault-injection tests, migration coexistence and restart/science
+equivalence, measured rank max/mean RSS/PSS and work imbalance, and legal
+batch-size and Release rank/thread comparisons. Use the authoritative presets
+in `docs/build_instructions.md`; do not count unavailable dependencies as
+passing or change numerical tolerances for memory work.

@@ -90,11 +90,24 @@ using RuntimeStageTaskFunction = std::variant<
     AnalysisStageTask,
     OutputRestartStageTask>;
 
+// A phase-local estimate, not a process-wide memory total. Complete means
+// every significant incremental allocation in this task is covered by the
+// owner's model or an explicitly governed physical lease. Incomplete models
+// are useful diagnostics but cannot authorize speculative overlap or replace
+// the owner's allocation-time admission. External-runtime allowance remains
+// the process governor's responsibility.
+struct RuntimeTaskMemoryEstimate {
+  std::uint64_t incremental_bytes = 0U;
+  bool complete = false;
+  std::string_view uncertainty{};
+};
+
 struct RuntimeStageTaskContribution {
   std::string task_id;
   // Optional bounded, state-dependent incremental peak. Evaluated once at
   // the task boundary; owner-managed tasks retain their existing reservations.
   std::function<std::uint64_t()> estimate_incremental_bytes;
+  std::function<RuntimeTaskMemoryEstimate()> estimate_memory;
   RuntimeStageTaskFunction task;
 };
 
@@ -132,6 +145,7 @@ class RuntimeExecutionPlan {
     RuntimeTaskDeclaration declaration;
     RuntimeStageTaskFunction task;
     std::function<std::uint64_t()> estimate_incremental_bytes;
+    std::function<RuntimeTaskMemoryEstimate()> estimate_memory;
   };
 
   RuntimeExecutionPlan() = default;
@@ -143,6 +157,11 @@ class RuntimeExecutionPlan {
   [[nodiscard]] std::size_t moduleCount() const noexcept;
   [[nodiscard]] std::size_t taskCount() const noexcept;
   [[nodiscard]] std::span<const std::string> orderedModuleIds() const noexcept;
+  // Evaluate one frozen owner's current contract by module::task_id.
+  // This does not reserve RAM
+  // or grant a stage view. The execution boundary remains the admission owner.
+  [[nodiscard]] RuntimeTaskMemoryEstimate taskMemoryEstimate(
+      std::string_view task_id) const;
 
   void executeAuditStage(core::IntegrationStage stage, AnalysisStageView& view) const;
   void executeStage(core::IntegrationStage stage, DriftParticleStageView& view) const;
@@ -178,6 +197,12 @@ class RuntimeModuleRegistry {
     const RuntimeStageTaskFunction& task) noexcept;
 [[nodiscard]] std::string_view runtimeResourceKeyName(
     RuntimeResourceKey resource) noexcept;
+// Checked owner-model arithmetic; retained physical capacity is not new RAM.
+[[nodiscard]] std::uint64_t incrementalMemoryBeyondRetained(
+    std::uint64_t physical_peak_bytes, std::uint64_t retained_bytes) noexcept;
+[[nodiscard]] RuntimeTaskMemoryEstimate evaluateRuntimeTaskMemoryEstimate(
+    const RuntimeExecutionPlan::PlannedTask& task);
+
 [[nodiscard]] bool runtimeTasksMayOverlap(
     const RuntimeTaskDeclaration& lhs,
     const RuntimeTaskDeclaration& rhs,

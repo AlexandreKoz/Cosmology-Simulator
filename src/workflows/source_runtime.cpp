@@ -18,6 +18,7 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -29,6 +30,7 @@
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/metal_diffusion_topology.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
+#include "workflows/internal/retained_population_growth.hpp"
 #include "workflows/internal/star_formation_geometry.hpp"
 
 #if COSMOSIM_ENABLE_MPI
@@ -286,6 +288,17 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
   explicit DistributedParticleIdRegistry(const parallel::MpiContext& mpi_context)
       : m_mpi_context(mpi_context) {}
 
+  using GrowthHandler = void (*)(void*, core::SimulationState&, std::size_t, core::ParticleSpecies);
+  void setGrowthHandler(void* owner, GrowthHandler handler) noexcept {
+    m_growth_owner = owner;
+    m_growth_handler = handler;
+  }
+
+  void preparePopulationGrowth(core::SimulationState& state, std::size_t count,
+                               core::ParticleSpecies species) override {
+    if (m_growth_handler != nullptr) m_growth_handler(m_growth_owner, state, count, species);
+  }
+
   [[nodiscard]] std::vector<std::uint64_t> precommit(
       const core::SimulationState& state,
       std::span<const std::uint64_t> birth_keys) override {
@@ -478,6 +491,8 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
   }
 
   const parallel::MpiContext& m_mpi_context;
+  void* m_growth_owner = nullptr;
+  GrowthHandler m_growth_handler = nullptr;
   bool m_initialized = false;
   // Only IDs whose hash shard belongs to this rank are retained. Aggregate
   // memory remains O(N), not O(N * ranks), while collision decisions stay
@@ -562,6 +577,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_is_cosmological(
             config.mode.mode == core::SimulationMode::kCosmoCube ||
             config.mode.mode == core::SimulationMode::kZoomIn) {
+    m_particle_id_registry.setGrowthHandler(this,
+        &SourceRuntimeImpl::preparePopulationGrowthCallback);
     if (m_bh_seeding_requested) {
       if (!m_bh_enabled) {
         throw std::invalid_argument(
@@ -705,6 +722,73 @@ class SourceRuntimeImpl final : public SourceRuntime {
     return std::move(builder).finish();
   }
 
+  [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState& state) const override {
+    if (!m_star_formation.config().enabled &&
+        !m_stellar_evolution.config().enabled &&
+        !m_metal_diffusion.config().enabled && !m_bh_enabled) {
+      return {0U, true, {}};
+    }
+    const std::uint64_t cell_count = static_cast<std::uint64_t>(state.cells.size());
+    const std::uint64_t star_count = static_cast<std::uint64_t>(state.star_particles.size());
+    const auto multiply = [](std::uint64_t count, std::uint64_t width,
+                             std::string_view label) {
+      if (width != 0U && count > std::numeric_limits<std::uint64_t>::max() / width) {
+        throw std::overflow_error(std::string(label) + ": source memory estimate overflow");
+      }
+      return count * width;
+    };
+    const auto growth = [&](std::uint64_t count, std::uint64_t width,
+                            std::uint64_t retained, std::string_view label) {
+      return count > retained ? multiply(count, width, label) : 0U;
+    };
+    std::uint64_t peak = 0U;
+    if (m_star_formation.config().enabled) {
+      constexpr std::uint64_t k_batch = 4096U;
+      const std::uint64_t cells = std::min(cell_count, k_batch);
+      const std::uint64_t input_bytes = growth(
+          cells, sizeof(physics::StarFormationCellInput),
+          m_star_formation_inputs.capacity(), "source input batch");
+      const std::uint64_t row_bytes = growth(
+          cells, sizeof(std::uint32_t), m_contiguous_cell_batch.capacity(),
+          "source contiguous cell batch");
+      peak = core::checkedMemoryBytesAdd(input_bytes, row_bytes,
+                                         "source formation staging");
+    }
+    if (m_stellar_evolution.config().enabled) {
+      const std::uint64_t batch = std::min(star_count,
+          static_cast<std::uint64_t>(k_feedback_event_batch_max));
+      std::uint64_t evolution = multiply(batch,
+          sizeof(physics::StellarEvolutionStarBudget), "source evolution batch");
+      evolution = core::checkedMemoryBytesAdd(evolution,
+          growth(batch, sizeof(physics::StellarFeedbackEvent),
+                 m_feedback_events.capacity(), "source feedback events"),
+          "source feedback staging");
+      evolution = core::checkedMemoryBytesAdd(evolution,
+          growth(batch, sizeof(std::uint32_t), m_contiguous_star_batch.capacity(),
+                 "source contiguous star batch"), "source feedback staging");
+      evolution = core::checkedMemoryBytesAdd(evolution,
+          multiply(cell_count, sizeof(std::uint32_t), "source spatial index rebuild"),
+          "source feedback staging");
+      evolution = core::checkedMemoryBytesAdd(evolution,
+          growth(star_count, sizeof(std::uint32_t), m_active_star_indices.capacity(),
+                 "source active star rows"), "source feedback staging");
+      peak = std::max(peak, evolution);
+    }
+    if (m_metal_diffusion.config().enabled && cell_count != 0U) {
+      std::uint64_t diffusion = core::checkedMemoryBytesAdd(
+          m_metal_diffusion.requiredWorkspaceBytes(state.cells.size()),
+          multiply(cell_count, sizeof(std::uint8_t), "source diffusion mask"),
+          "source diffusion phase");
+      diffusion = core::checkedMemoryBytesAdd(diffusion,
+          multiply(cell_count, sizeof(double), "source diffusion rho-kappa"),
+          "source diffusion phase");
+      peak = std::max(peak, diffusion);
+    }
+    return {peak, false,
+            "source staging modeled; population growth, ID coordination and topology scratch require owner-local admission"};
+  }
+
   void execute(SourceMutationStageView& view) override {
     view.requireFresh();
     core::StepContext& context = internal::RuntimeStageAccess::sourceContext(
@@ -736,6 +820,14 @@ class SourceRuntimeImpl final : public SourceRuntime {
       throw std::runtime_error(
           "source runtime requires a finite positive source-stage scale factor");
     }
+
+    // Only the current source stage may borrow the scheduler. The hook itself
+    // was installed once at owner construction and performs no allocation here.
+    m_growth_scheduler = context.particle_scheduler;
+    struct GrowthSchedulerReset {
+      core::HierarchicalTimeBinScheduler*& slot;
+      ~GrowthSchedulerReset() { slot = nullptr; }
+    } growth_scheduler_reset{m_growth_scheduler};
 
     const std::size_t cell_count = context.state.cells.size();
     const bool local_has_mutable_gravity_sources =
@@ -947,6 +1039,53 @@ class SourceRuntimeImpl final : public SourceRuntime {
   }
 
  private:
+  void preparePopulationGrowth(core::SimulationState& state, std::size_t count,
+                               core::ParticleSpecies species) {
+    auto* scheduler = m_growth_scheduler;
+      std::exception_ptr local_failure;
+      try {
+        if (count != 0U) {
+          const std::size_t particle_target = core::checkedLocalCountAdd(
+              state.particles.size(), count, core::kMaxLocalParticleCount,
+              "particle", "source population growth");
+          const std::size_t species_target = core::checkedSizeAdd(
+              species == core::ParticleSpecies::kStar ? state.star_particles.size()
+                  : state.black_holes.size(), count, "source species growth");
+          const auto baseline = [&]() {
+            std::uint64_t bytes = core::memoryReportBaselineOwnedBytes(
+                core::collectSimulationMemoryReport(state));
+            if (scheduler != nullptr) bytes = core::checkedMemoryBytesAdd(
+                bytes, scheduler->ownedCapacityBytes(), "source scheduler baseline");
+            return bytes;
+          };
+          core::RetainedCapacityTransaction plan(baseline);
+          internal::planParticlePopulationGrowth(plan, state, particle_target,
+                                                 species_target, species);
+          if (scheduler != nullptr) {
+            scheduler->planAppendCapacity(plan,
+                core::checkedIntegralNarrow<std::uint32_t>(count,
+                    "source scheduler growth count"), 0U);
+          }
+          plan.execute(m_memory_governor, core::MemoryClass::kCanonicalPersistent,
+                       "sources.population_growth");
+        }
+      } catch (...) {
+        local_failure = std::current_exception();
+      }
+      if (m_runtime_services != nullptr) {
+        FailureCoordinator(*m_runtime_services).rethrowCollectiveFailure(
+            local_failure, "source population growth admission");
+      } else if (local_failure != nullptr) {
+        std::rethrow_exception(local_failure);
+      }
+  }
+
+  static void preparePopulationGrowthCallback(
+      void* owner, core::SimulationState& state, std::size_t count,
+      core::ParticleSpecies species) {
+    static_cast<SourceRuntimeImpl*>(owner)->preparePopulationGrowth(state, count, species);
+  }
+
   void buildOwnedLeafCellMetadata(const core::StepContext& context) {
     const core::SimulationState& state = context.state;
     const std::size_t cell_count = state.cells.size();
@@ -1588,6 +1727,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
   const parallel::MpiContext& m_mpi_context;
   const RuntimeServices* m_runtime_services = nullptr;
   core::MemoryGovernor* m_memory_governor = nullptr;
+  core::HierarchicalTimeBinScheduler* m_growth_scheduler = nullptr;
   core::MemoryReservation m_feedback_index_reservation;
   core::MemoryReservation m_feedback_event_reservation;
   core::MemoryReservation m_contiguous_star_batch_reservation;

@@ -72,6 +72,17 @@ namespace {
       one_cache, 2U, "restart force-cache export/readback coexistence");
 }
 
+[[nodiscard]] std::uint64_t incrementalOutputStagingBytes(
+    const workflows::RuntimeServices& services,
+    std::uint64_t physical_staging_bytes) {
+  if (services.memory_governor == nullptr) {
+    return physical_staging_bytes;
+  }
+  return incrementalMemoryBeyondRetained(
+      physical_staging_bytes,
+      services.memory_governor->policy().planned_overlap_reserve_bytes);
+}
+
 [[nodiscard]] core::MemoryReservation reserveOutputStaging(
     const workflows::RuntimeServices& services,
     std::uint64_t physical_staging_bytes,
@@ -79,11 +90,8 @@ namespace {
   if (services.memory_governor == nullptr) {
     return {};
   }
-  const std::uint64_t planned_overlap =
-      services.memory_governor->policy().planned_overlap_reserve_bytes;
-  const std::uint64_t incremental_bytes = physical_staging_bytes > planned_overlap
-      ? physical_staging_bytes - planned_overlap
-      : 0U;
+  const std::uint64_t incremental_bytes =
+      incrementalOutputStagingBytes(services, physical_staging_bytes);
   core::MemoryReservation reservation = services.memory_governor->reserve(
       core::MemoryClass::kDiagnostic, incremental_bytes, owner);
   reservation.commit();
@@ -1073,6 +1081,38 @@ OutputRestartRuntime::OutputRestartRuntime(
       m_profiler(profiler),
       m_pending_output(pending_output),
       m_write_outputs_enabled(write_outputs_enabled) {}
+
+RuntimeTaskMemoryEstimate OutputRestartRuntime::estimateMemory(
+    const core::SimulationState& state,
+    const core::IntegratorState& integrator_state) const {
+  if (!m_write_outputs_enabled ||
+      (!m_pending_output.snapshot_due && !m_pending_output.checkpoint_due) ||
+      integrator_state.step_index == 0U) {
+    return {0U, true, {}};
+  }
+  if (!core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+    return {0U, true, {}};
+  }
+  const std::uint64_t state_bytes = simulationOwnedCapacityBytes(state);
+  std::uint64_t peak = m_pending_output.snapshot_due
+      ? incrementalOutputStagingBytes(m_services, state_bytes) : 0U;
+  if (m_pending_output.checkpoint_due) {
+    const std::uint64_t scheduler_bytes = core::checkedMemoryBytesAdd(
+        m_scheduler.ownedCapacityBytes(), m_gas_cell_scheduler.ownedCapacityBytes(),
+        "restart scheduler readback staging");
+    std::uint64_t restart_bytes = core::checkedMemoryBytesAdd(
+        state_bytes, scheduler_bytes, "restart state/scheduler readback staging");
+    restart_bytes = core::checkedMemoryBytesAdd(
+        restart_bytes, restartForceCachePeakBytes(state),
+        "restart readback plus force-cache staging");
+    peak = std::max(peak, incrementalOutputStagingBytes(m_services, restart_bytes));
+  }
+  // Snapshot and restart staging have separate release boundaries. Do not sum
+  // their maxima. The writer's metadata, HDF5 internals, and reader-side
+  // capacity growth still need a complete owner model before overlap is legal.
+  return {peak, false,
+          "snapshot/restart staging modeled; complete writer/readback metadata peak unavailable"};
+}
 
 void OutputRestartRuntime::execute(OutputRestartStageView& view) {
   view.requireFresh();

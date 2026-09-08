@@ -1111,13 +1111,32 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     std::span<const DecompositionItem> local_items,
     const DecompositionConfig& decomposition_config,
     const RuntimeRebalanceConfig& rebalance_config) {
-  if (rebalance_config.world_size <= 0 || decomposition_config.world_size != rebalance_config.world_size ||
-      mpi_context.worldSize() != rebalance_config.world_size) {
-    throw std::invalid_argument("distributed runtime rebalance world sizes must agree");
+  // All rank-local entry validation precedes the first collective. A malformed
+  // configuration on one rank must not strand its peers in sample exchange.
+  std::exception_ptr entry_failure;
+  try {
+    if (rebalance_config.world_size <= 0 ||
+        decomposition_config.world_size != rebalance_config.world_size ||
+        mpi_context.worldSize() != rebalance_config.world_size) {
+      throw std::invalid_argument("distributed runtime rebalance world sizes must agree");
+    }
+    if (rebalance_config.imbalance_trigger_ratio < 1.0 ||
+        rebalance_config.memory_trigger_ratio < 1.0 ||
+        rebalance_config.max_migrated_load_fraction < 0.0 ||
+        rebalance_config.max_migrated_load_fraction > 1.0) {
+      throw std::invalid_argument("distributed runtime rebalance thresholds are invalid");
+    }
+    if (mpi_context.worldSize() > 1 && !mpi_context.isEnabled()) {
+      throw std::runtime_error("distributed runtime rebalance requires MPI when world_size > 1");
+    }
+  } catch (...) {
+    entry_failure = std::current_exception();
   }
-  if (rebalance_config.imbalance_trigger_ratio < 1.0 || rebalance_config.memory_trigger_ratio < 1.0 ||
-      rebalance_config.max_migrated_load_fraction < 0.0 || rebalance_config.max_migrated_load_fraction > 1.0) {
-    throw std::invalid_argument("distributed runtime rebalance thresholds are invalid");
+  if (mpi_context.isEnabled() && mpi_context.worldSize() > 1) {
+    mpi_context.rethrowCollectivePreparationFailure(entry_failure,
+        "distributed rebalance entry validation");
+  } else if (entry_failure != nullptr) {
+    std::rethrow_exception(entry_failure);
   }
   if (mpi_context.worldSize() == 1) {
     RuntimeRebalancePlan serial = buildRuntimeRebalancePlan(local_items, decomposition_config, rebalance_config);
@@ -1125,9 +1144,6 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     serial.local_entities_considered = static_cast<std::uint64_t>(local_items.size());
     serial.global_entities_considered = static_cast<std::uint64_t>(local_items.size());
     return serial;
-  }
-  if (!mpi_context.isEnabled()) {
-    throw std::runtime_error("distributed runtime rebalance requires MPI when world_size > 1");
   }
 
   struct LocalKeyedItem {
@@ -1143,7 +1159,12 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
   };
   static_assert(std::is_trivially_copyable_v<CompactCutSample>);
 
-  std::vector<LocalKeyedItem> keyed(local_items.size());
+  std::vector<LocalKeyedItem> keyed;
+  std::vector<CompactCutSample> local_samples;
+  std::exception_ptr local_preparation_failure;
+  try {
+    injectMpiTestFault(mpi_context, "sfc_local_preparation");
+    keyed.resize(local_items.size());
   for (std::size_t i = 0; i < local_items.size(); ++i) {
     if (local_items[i].current_owner_rank < 0 || local_items[i].current_owner_rank >= decomposition_config.world_size) {
       throw std::invalid_argument("distributed decomposition item current_owner_rank is outside world size");
@@ -1160,8 +1181,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     return lessSfcPoint(lhs.point, rhs.point);
   });
 
-  constexpr std::size_t k_samples_per_rank = 256U;
-  std::vector<CompactCutSample> local_samples;
+    constexpr std::size_t k_samples_per_rank = 256U;
   if (!keyed.empty()) {
     const std::size_t sample_count = std::min(k_samples_per_rank, keyed.size());
     local_samples.reserve(sample_count);
@@ -1181,11 +1201,18 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     }
   }
 
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure, "distributed rebalance local SFC preparation");
+
   std::vector<CompactCutSample> global_samples;
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   std::size_t local_sample_bytes = 0U;
   std::exception_ptr sample_preparation_failure;
   try {
+    injectMpiTestFault(mpi_context, "sfc_cut_sample");
     local_sample_bytes = core::checkedSizeMultiply(
         local_samples.size(), sizeof(CompactCutSample),
         "distributed rebalance local cut sample byte count");
@@ -1274,6 +1301,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
     std::vector<std::uint64_t> proposed_high;
     std::exception_ptr memory_preparation_failure;
     try {
+      injectMpiTestFault(mpi_context, "sfc_memory_preflight");
       proposed_memory.assign(rank_count, 0U);
       proposed_high.assign(rank_count, 0U);
       for (const auto& entry : keyed) {
@@ -1320,6 +1348,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
       std::uint64_t local_total_memory = 0U;
       std::exception_ptr prefix_preparation_failure;
       try {
+        injectMpiTestFault(mpi_context, "sfc_memory_prefix");
         const std::size_t block_count = keyed.size() / k_memory_prefix_block_size +
             (keyed.size() % k_memory_prefix_block_size != 0U ? 1U : 0U);
         memory_block_prefix.reserve(core::checkedSizeAdd(block_count, 1U, "memory prefix block count"));
@@ -1437,6 +1466,7 @@ RuntimeRebalancePlan buildDistributedRuntimeRebalancePlan(
       std::vector<SfcCutPoint> repaired_cuts;
       std::exception_ptr repair_preparation_failure;
       try {
+        injectMpiTestFault(mpi_context, "sfc_memory_repair_metadata");
         mandatory_cuts.resize(rank_count - 1U);
         repaired_cuts.reserve(rank_count - 1U);
       } catch (...) {

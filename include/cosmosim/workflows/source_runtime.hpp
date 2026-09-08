@@ -8,6 +8,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
 namespace cosmosim::physics {
@@ -29,6 +30,10 @@ class SourceRuntime {
   virtual ~SourceRuntime() = default;
 
   virtual void execute(SourceMutationStageView& view) = 0;
+  [[nodiscard]] virtual RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState&) const {
+    return {0U, false, "source owner does not publish a complete memory model"};
+  }
   [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
 
 };

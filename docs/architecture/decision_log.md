@@ -999,3 +999,48 @@ stage freshness; neither should be repurposed into runtime memory admission.
 - `docs/memory_governance.md`
 - `docs/state_model_memory_layout.md`
 - `docs/profiling.md`
+
+## 2026-09-07 — ADR-M2D-ACCEPTANCE-001: Explicit confidence in major-task memory estimates
+
+**Status:** Accepted as a fail-closed runtime-contract extension; full M2D
+performance/distributed acceptance remains provisional.
+
+The runtime registry must distinguish an actual complete incremental peak from
+a useful partial owner workspace model. A zero estimate or missing callback is
+not proof of zero allocation. Add state-dependent estimates to the existing
+registry, preserve legacy callbacks and custom owner interfaces, and expose
+qualified task lookup for admission tests and future scheduling research.
+Owner-managed physical leases remain authoritative; complete preflight leases
+are temporary, while dispatcher-owned leases span execution. Partial models
+cannot authorize overlap or force an adaptive kernel to fail at an unnecessarily
+large nominal batch. No second executor, governor, configuration surface, or
+scientific ordering authority is introduced. Existing gravity and output
+allocation models are reused rather than creating competing formulae.
+
+The source/hydro/output models remain explicitly incomplete where physical
+population growth, AMR transactions, or I/O metadata lack a complete bound.
+This is an intentional safety boundary, not acceptance closure. No solver
+precision, equations, tolerances, force criteria, CFL rules, refinement policy,
+restart schema, or provenance schema changes. Memory failures can occur earlier
+for complete owner models; the reference-workflow budget regression accepts
+both the original gravity phase and the new typed task-preflight boundary.
+
+## 2026-09-07 — ADR-M2D-CODING-001: Source population growth and collective SFC preparation
+
+**Status:** Source implementation; distributed runtime acceptance pending.
+
+The canonical source owner retains the existing star/BH ID-precommit and
+scheduler authorities. A phase-local checked replacement transaction reserves
+canonical/species/scheduler backing growth before physical birth mutation and
+reconciles retained capacity on success or partial failure. This is a narrow
+core utility, not a replacement allocator or memory governor. The existing
+source equations, birth identity, source iteration, and serial stage order are
+unchanged. A failed admission may reject a step earlier; successful scientific
+results and physical restart schema remain unchanged.
+
+The distributed SFC planner now agrees on rank-local entry and preparation
+failures before collectives and exposes test-only fault injection at the new
+memory-refinement preparation boundaries. The SFC ownership geometry and
+feasibility-first cut algorithm are unchanged. Full MPI fault/restart and
+whole-process memory certification remain required before production M2D
+acceptance. Incomplete owner contracts cannot authorize overlap.

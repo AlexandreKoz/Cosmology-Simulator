@@ -105,3 +105,30 @@ contracts, complete CPU/HDF5 and MPI+FFTW validation, and measured full-process
 resource/scaling evidence have not all been established. Independent M2E work
 may proceed, but unrestricted full-physics concurrency is not certified.
 See `docs/repair/m2d_final_admission_closure_20260907.md`.
+
+## M2D acceptance-gates update — 2026-09-07
+
+The post-final-admission source repair adds state-dependent major-owner memory
+contracts and explicit completeness to the existing runtime registry. Gravity
+reuses its conservative phase estimate; sources, hydro/AMR, and output/restart
+publish known bounds without claiming unmodeled terms are safe. Production
+remains serial and locally governed. The previous SFC and heavy-analysis
+repairs remain present. **M2D is not yet fully acceptance-certified.** The
+remaining complete owner models, distributed fault/scaling matrix, whole-process
+memory evidence, and topology/scientific acceptance are tracked in
+`docs/repair/m2d_acceptance_gates_20260907.md`. Independent M2E work may
+proceed, but unrestricted full-physics concurrency and workstation-scale memory
+certification remain prohibited. This dated update supersedes the older M2D
+status only; the rest of this document's historical scope is unchanged.
+
+## M2D coding closure continuation — 2026-09-07 (provisional)
+
+The source now includes the verified M2D acceptance-gates changes, governed
+retained-capacity population growth for source births, and additional SFC
+collective-preparation fault handling/regressions. The existing numerical stage
+order and accepted physics remain unchanged. Focused source validation is
+recorded in `docs/repair/m2d_coding_closure_20260907.md`. This entry is not a
+claim that every source/AMR/output allocation has a complete peak contract, or
+that MPI/FFTW, whole-process memory, and topology acceptance have passed.
+Unrestricted full-physics overlap and production memory certification remain
+outside the accepted envelope pending those gates.

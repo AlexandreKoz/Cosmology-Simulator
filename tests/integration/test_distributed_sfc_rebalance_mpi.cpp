@@ -2,6 +2,10 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -202,6 +206,156 @@ void checkMixedActionabilityCompletion(const cosmosim::parallel::MpiContext& mpi
          static_cast<std::uint64_t>(mpi_context.worldSize()));
 }
 
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+void setSfcTestFault(std::string_view phase, int rank) {
+  const std::string value = std::string(phase) + ":" + std::to_string(rank);
+#if defined(_WIN32)
+  _putenv_s("COSMOSIM_MPI_TEST_FAULT", value.c_str());
+#else
+  setenv("COSMOSIM_MPI_TEST_FAULT", value.c_str(), 1);
+#endif
+}
+void clearSfcTestFault() {
+#if defined(_WIN32)
+  _putenv_s("COSMOSIM_MPI_TEST_FAULT", "");
+#else
+  unsetenv("COSMOSIM_MPI_TEST_FAULT");
+#endif
+}
+
+std::vector<cosmosim::parallel::DecompositionItem> makeHardMemoryItems(
+    int world_rank, bool duplicate_keys = false) {
+  namespace parallel = cosmosim::parallel;
+  std::vector<parallel::DecompositionItem> items;
+  if (world_rank != 0) return items;
+  for (std::uint64_t i = 0U; i < 4U; ++i) {
+    parallel::DecompositionItem item;
+    item.entity_id = 10000U + i;
+    item.kind = parallel::DecompositionEntityKind::kParticle;
+    item.current_owner_rank = 0;
+    item.x_comov = duplicate_keys ? 0.5 : (static_cast<double>(i) + 0.5) / 4.0;
+    item.y_comov = 0.5;
+    item.z_comov = 0.5;
+    item.memory_bytes = 4U;
+    item.work_components = parallel::DecompositionWorkComponents{
+        .particle_count_cost = 0.0,
+        .generic_work_cost = i == 0U ? 100.0 : 1.0,
+        .has_explicit_components = true,
+    };
+    items.push_back(item);
+  }
+  return items;
+}
+
+void checkHardMemoryClosure(const cosmosim::parallel::MpiContext& mpi_context,
+                            bool duplicate_keys, bool infeasible,
+                            bool disable_migration = false) {
+  namespace parallel = cosmosim::parallel;
+  const auto items = makeHardMemoryItems(mpi_context.worldRank(), duplicate_keys);
+  parallel::DecompositionConfig config;
+  config.world_size = mpi_context.worldSize();
+  config.component_weights.particle_count = 0.0;
+  config.component_weights.generic_work = 1.0;
+  config.max_rank_memory_bytes = infeasible ? 3U : 10U;
+  config.rank_transient_reserve_bytes = 2U;
+  // A feasible partition needs two eight-byte ranks. The original work-greedy
+  // planner rejected it; the soft migration threshold must not veto relief.
+  parallel::RuntimeRebalanceConfig rebalance;
+  rebalance.world_size = mpi_context.worldSize();
+  rebalance.imbalance_trigger_ratio = 1000.0;
+  rebalance.memory_trigger_ratio = 1000.0;
+  rebalance.max_migrated_load_fraction = 0.01;
+  rebalance.allow_particle_migration = !disable_migration;
+  bool rejected = false;
+  std::string rejection;
+  parallel::RuntimeRebalancePlan plan;
+  try {
+    plan = parallel::buildDistributedRuntimeRebalancePlan(
+        mpi_context, items, config, rebalance);
+  } catch (const std::exception& error) {
+    rejected = true;
+    rejection = error.what();
+  }
+  const auto rejected_ranks = mpi_context.allreduceSumUint64(rejected ? 1ULL : 0ULL);
+  assert(rejected_ranks == 0U ||
+         rejected_ranks == static_cast<std::uint64_t>(mpi_context.worldSize()));
+  if (infeasible || disable_migration) {
+    assert(rejected_ranks == static_cast<std::uint64_t>(mpi_context.worldSize()));
+    assert(!rejection.empty());
+    return;
+  }
+  assert(rejected_ranks == 0U);
+  assert(plan.should_rebalance);
+  assert(plan.reason == "rank_memory_limit");
+  assert(plan.current_metrics.max_peak_memory_bytes == 18U);
+  assert(plan.target_decomposition.metrics.max_peak_memory_bytes <= 10U);
+  assert(plan.global_entities_considered == 4U);
+  assert(plan.global_entities_moved > 0U);
+  assert(plan.global_bytes_moved > 0U);
+  assert(plan.migrated_load_fraction > rebalance.max_migrated_load_fraction);
+  assert(plan.used_distributed_sfc_cuts);
+  // Check exact global ownership/memory without trusting the reported model.
+  std::vector<std::uint64_t> local_memory(static_cast<std::size_t>(mpi_context.worldSize()), 0U);
+  std::uint64_t local_id_sum = 0U;
+  for (std::size_t i = 0U; i < items.size(); ++i) {
+    const int owner = plan.target_decomposition.owning_rank_by_item[i];
+    assert(owner >= 0 && owner < mpi_context.worldSize());
+    local_memory[static_cast<std::size_t>(owner)] += items[i].memory_bytes;
+    local_id_sum += items[i].entity_id;
+  }
+  assert(mpi_context.allreduceSumUint64(local_id_sum) == 40006U);
+  for (std::size_t rank = 0U; rank < local_memory.size(); ++rank) {
+    const auto total = mpi_context.allreduceSumUint64(local_memory[rank]);
+    assert(total <= 8U);
+  }
+  assert(plan.global_control_bytes < 4U * sizeof(parallel::DecompositionItem) *
+      static_cast<std::uint64_t>(mpi_context.worldSize()));
+}
+
+void checkHardMemoryCollectivePreparation(
+    const cosmosim::parallel::MpiContext& mpi_context) {
+  namespace parallel = cosmosim::parallel;
+  const auto items = makeHardMemoryItems(mpi_context.worldRank());
+  parallel::DecompositionConfig config;
+  config.world_size = mpi_context.worldSize();
+  config.component_weights.particle_count = 0.0;
+  config.component_weights.generic_work = 1.0;
+  config.max_rank_memory_bytes = 10U;
+  config.rank_transient_reserve_bytes = 2U;
+  parallel::RuntimeRebalanceConfig rebalance;
+  rebalance.world_size = mpi_context.worldSize();
+  rebalance.imbalance_trigger_ratio = 1000.0;
+  rebalance.memory_trigger_ratio = 1000.0;
+  rebalance.max_migrated_load_fraction = 0.01;
+  const std::vector<std::string_view> phases{
+      "sfc_local_preparation", "sfc_cut_sample", "sfc_memory_preflight",
+      "sfc_memory_prefix", "sfc_memory_repair_metadata"};
+  for (const auto phase : phases) {
+    setSfcTestFault(phase, 0);
+    bool rejected = false;
+    try {
+      (void)parallel::buildDistributedRuntimeRebalancePlan(
+          mpi_context, items, config, rebalance);
+    } catch (const std::exception&) { rejected = true; }
+    clearSfcTestFault();
+    assert(mpi_context.allreduceSumUint64(rejected ? 1ULL : 0ULL) ==
+           static_cast<std::uint64_t>(mpi_context.worldSize()));
+  }
+  // A malformed rank-local configuration must be collectively rejected at
+  // entry, rather than leaving other ranks in the first sample exchange.
+  if (mpi_context.worldRank() == 0) config.world_size += 1;
+  bool rejected = false;
+  try {
+    (void)parallel::buildDistributedRuntimeRebalancePlan(
+        mpi_context, items, config, rebalance);
+  } catch (const std::exception&) { rejected = true; }
+  assert(mpi_context.allreduceSumUint64(rejected ? 1ULL : 0ULL) ==
+         static_cast<std::uint64_t>(mpi_context.worldSize()));
+  // Recovery after each coordinated failure is part of the contract.
+  checkHardMemoryClosure(mpi_context, false, false);
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -219,6 +373,11 @@ int main(int argc, char** argv) {
   if (world_size == 4) {
     checkMixedActionabilityCompletion(mpi_context);
   }
+  checkHardMemoryClosure(mpi_context, false, false);
+  checkHardMemoryClosure(mpi_context, true, false);
+  checkHardMemoryClosure(mpi_context, false, true);
+  checkHardMemoryClosure(mpi_context, false, false, true);
+  checkHardMemoryCollectivePreparation(mpi_context);
 
   MPI_Finalize();
 #else

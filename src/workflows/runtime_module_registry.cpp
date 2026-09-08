@@ -315,6 +315,29 @@ void validateDescriptor(const RuntimeModuleDescriptor& descriptor) {
   return ordered;
 }
 
+}  // namespace
+
+std::uint64_t incrementalMemoryBeyondRetained(
+    std::uint64_t physical_peak_bytes, std::uint64_t retained_bytes) noexcept {
+  return physical_peak_bytes > retained_bytes
+      ? physical_peak_bytes - retained_bytes : 0U;
+}
+
+RuntimeTaskMemoryEstimate evaluateRuntimeTaskMemoryEstimate(
+    const RuntimeExecutionPlan::PlannedTask& task) {
+  if (task.estimate_memory) {
+    return task.estimate_memory();
+  }
+  const std::uint64_t bytes = task.estimate_incremental_bytes
+      ? task.estimate_incremental_bytes()
+      : task.declaration.scheduling.estimated_peak_bytes;
+  return {bytes, task.declaration.scheduling.peak_is_known,
+          task.declaration.scheduling.peak_is_known
+              ? std::string_view{} : std::string_view{"owner peak is not complete"}};
+}
+
+namespace {
+
 template <class View>
 class TaskGrantScope final {
  public:
@@ -361,24 +384,29 @@ void executeTypedStage(
       const auto& profile = task.declaration.scheduling;
       std::exception_ptr admission_failure;
       try {
+        const RuntimeTaskMemoryEstimate estimate =
+            evaluateRuntimeTaskMemoryEstimate(task);
         if (profile.memory_ownership == RuntimeTaskMemoryOwnership::kDispatcherOwned) {
-          if (!profile.peak_is_known) {
-            throw std::logic_error("dispatcher-owned task requires a complete memory peak contract");
+          if (!estimate.complete) {
+            throw std::logic_error(
+                "dispatcher-owned task requires a complete memory peak contract");
           }
-          const std::uint64_t bytes = task.estimate_incremental_bytes
-              ? task.estimate_incremental_bytes() : profile.estimated_peak_bytes;
           task_reservation = services->memory_governor->reserve(
-              profile.memory_class, bytes, task.declaration.task_id);
+              profile.memory_class, estimate.incremental_bytes,
+              task.declaration.task_id);
           task_reservation.commit();
-        } else if (task.estimate_incremental_bytes) {
+        } else if (estimate.complete &&
+                   (task.estimate_memory || task.estimate_incremental_bytes)) {
           // Preflight only: the owner already reserves its physical workspace.
           // Holding this duplicate reservation through execution would charge
           // the same byte range twice and spuriously reject feasible work.
           auto preflight = services->memory_governor->reserve(
-              profile.memory_class, task.estimate_incremental_bytes(),
+              profile.memory_class, estimate.incremental_bytes,
               task.declaration.task_id);
           preflight.release();
         }
+        // Incomplete owner models remain allocation-time governed. A partial
+        // estimate must never be promoted to a certificate of concurrency.
       } catch (...) {
         admission_failure = std::current_exception();
       }
@@ -472,6 +500,21 @@ bool runtimeTasksMayOverlap(
     }
   }
   return true;
+}
+
+RuntimeTaskMemoryEstimate RuntimeExecutionPlan::taskMemoryEstimate(
+    std::string_view task_id) const {
+  const std::size_t separator = task_id.find("::");
+  if (separator == std::string_view::npos) {
+    throw std::invalid_argument("runtime task memory estimate requires module::task_id");
+  }
+  for (const PlannedTask& task : m_tasks) {
+    if (task.module_id == task_id.substr(0U, separator) &&
+        task.declaration.task_id == task_id.substr(separator + 2U)) {
+      return evaluateRuntimeTaskMemoryEstimate(task);
+    }
+  }
+  throw std::out_of_range("runtime task memory estimate requested for unknown task");
 }
 
 std::size_t RuntimeExecutionPlan::moduleCount() const noexcept {
@@ -604,6 +647,7 @@ RuntimeExecutionPlan RuntimeModuleRegistry::freezeAndInstantiate(
           .declaration = declaration,
           .task = std::move(contribution_it->second->task),
           .estimate_incremental_bytes = std::move(contribution_it->second->estimate_incremental_bytes),
+          .estimate_memory = std::move(contribution_it->second->estimate_memory),
       });
     }
     plan.m_module_instances.push_back(std::move(instance));

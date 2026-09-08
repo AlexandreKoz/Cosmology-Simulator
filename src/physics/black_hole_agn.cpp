@@ -348,6 +348,8 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
     throw std::runtime_error("BlackHoleAgnModel: particle-ID precommit returned the wrong seed count");
   }
 
+  registry.preparePopulationGrowth(state, accepted_candidates.size(), core::ParticleSpecies::kBlackHole);
+
   for (std::size_t seed_index = 0; seed_index < accepted_candidates.size(); ++seed_index) {
     const BlackHoleSeedCandidate& candidate = *accepted_candidates[seed_index];
     const std::size_t cell_index = candidate.cell_index;

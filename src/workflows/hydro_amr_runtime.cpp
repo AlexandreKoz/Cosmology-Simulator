@@ -578,6 +578,24 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
     return std::move(builder).finish();
   }
 
+  [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState& state) const override {
+    if (state.cells.size() == 0U && state.patches.size() == 0U) {
+      return {0U, true, {}};
+    }
+    const std::uint64_t batch = std::min<std::uint64_t>(
+        static_cast<std::uint64_t>(state.cells.size()),
+        m_config.numerics.hydro_active_batch_max_cells == 0U
+            ? hydro::k_hydro_automatic_active_batch_max_cells
+            : m_config.numerics.hydro_active_batch_max_cells);
+    const std::uint64_t width = hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell;
+    if (width != 0U && batch > std::numeric_limits<std::uint64_t>::max() / width) {
+      throw std::overflow_error("hydro task scratch estimate overflows uint64");
+    }
+    return {batch * width, false,
+            "active-batch scratch modeled; AMR transaction, ghost and geometry peaks require owner-local admission"};
+  }
+
   void execute(HydroAmrStageView& view) override {
     view.requireFresh();
     core::StepContext& context = internal::RuntimeStageAccess::hydroAmrContext(

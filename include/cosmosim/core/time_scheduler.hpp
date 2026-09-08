@@ -210,6 +210,8 @@ class TimeStepCriteriaRegistry {
 };
 
 // Integer timeline scheduler with power-of-two bins and compact active set extraction.
+class RetainedCapacityTransaction;
+
 class HierarchicalTimeBinScheduler {
  public:
   static constexpr std::uint8_t k_unset_pending_bin = 0xFF;
@@ -219,6 +221,8 @@ class HierarchicalTimeBinScheduler {
 
   void reset(std::uint32_t element_count, std::uint8_t initial_bin, std::uint64_t start_tick = 0);
   void appendElements(std::uint32_t new_element_count, std::uint8_t initial_bin, std::uint64_t first_activation_tick);
+  void planAppendCapacity(RetainedCapacityTransaction& plan,
+                          std::uint32_t new_element_count, std::uint8_t initial_bin);
   void setElementBin(std::uint32_t element_index, std::uint8_t bin_index, std::uint64_t current_tick);
   void submitCandidateTimeStep(
       std::uint32_t element_index,

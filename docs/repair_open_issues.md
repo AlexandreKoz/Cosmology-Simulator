@@ -470,3 +470,18 @@ whole-process memory under representative full physics; execute the real
 MPI+FFTW np2/np3/np4 safety/scaling/restart matrix and full test inventories.
 Nonserial full-physics scheduling and unconditional M2D closure remain blocked
 until the evidence is recorded. See the dated M2D final admission repair report.
+
+## 2026-09-07 M2D acceptance-gates residuals
+
+- M2D-F1: source population growth/ID coordination, AMR transaction/ghost
+  coexistence, and output writer/readback metadata still require complete
+  owner-specific peak models. Current partial models cannot authorize overlap.
+- M2D-F2: dependency-complete MPI+HDF5+FFTW np2/np3/np4 hard-memory relief,
+  collective preparation faults, transaction coexistence, conservation, and
+  restart equivalence remain unexecuted in this repair environment.
+- M2D-F3: full CPU/HDF5/source-package, rank max/mean RSS/PSS, work imbalance,
+  legal batch equivalence, and Release topology evidence remain acceptance
+  requirements. Do not claim a certified 48 GiB full-physics envelope.
+
+The former SFC and heavy-analysis source defects remain repaired. See the new
+acceptance-gates report for the exact current commands and outcomes.

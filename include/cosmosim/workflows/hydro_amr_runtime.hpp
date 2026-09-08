@@ -7,6 +7,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 
 namespace cosmosim::core {
 struct MemoryReport;
@@ -28,6 +29,10 @@ class HydroAmrRuntime {
   virtual ~HydroAmrRuntime() = default;
 
   virtual void execute(HydroAmrStageView& view) = 0;
+  [[nodiscard]] virtual RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState&) const {
+    return {0U, false, "hydro/AMR owner does not publish a complete memory model"};
+  }
 
   [[nodiscard]] virtual const hydro::HydroProfileEvent&
   lastHydroProfile() const noexcept = 0;

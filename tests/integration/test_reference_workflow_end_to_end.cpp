@@ -324,7 +324,9 @@ int main() {
       rejected =
           message.find("DMO process memory preflight requires") != std::string_view::npos ||
           (message.find("memory reservation rejected") != std::string_view::npos &&
-           message.find("gravity.treepm.phase_peak") != std::string_view::npos);
+           message.find("hard_limit_bytes=1") != std::string_view::npos &&
+           (message.find("gravity.treepm.phase_peak") != std::string_view::npos ||
+            message.find("gravity.gravity_kick_pre") != std::string_view::npos));
     }
     assert(rejected);
   }

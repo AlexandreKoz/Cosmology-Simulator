@@ -313,6 +313,9 @@ namespace {
                  core::IntegrationStage::kGravityKickPost}) {
           instance.stage_tasks.push_back(RuntimeStageTaskContribution{
               .task_id = "gravity." + std::string(core::integrationStageName(stage)),
+              .estimate_memory = [owner = assembly->gravity, &state = inputs.state]() {
+                return owner->estimateMemory(state);
+              },
               .task = GravityStageTask([owner = assembly->gravity](GravityStageView& view) {
                 owner->execute(view);
               }),
@@ -360,6 +363,9 @@ namespace {
         instance.owner_lifetime = assembly->hydro_amr;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
             .task_id = "hydro_amr.update",
+            .estimate_memory = [owner = assembly->hydro_amr, &state = inputs.state]() {
+              return owner->estimateMemory(state);
+            },
             .task = HydroAmrStageTask([owner = assembly->hydro_amr](HydroAmrStageView& view) {
               owner->execute(view);
             }),
@@ -402,7 +408,7 @@ namespace {
       .factory = [&config = inputs.config, &mode_policy = inputs.mode_policy,
                   &units = inputs.units, world_rank = inputs.world_rank,
                   &mpi_context = inputs.services.mpi_context,
-                  &services = inputs.services,
+                  &services = inputs.services, &state = inputs.state,
                   assembly](const RuntimeModuleFactoryContext&) {
         std::shared_ptr<SourceRuntime> owner(
             makeSourceRuntime(
@@ -418,6 +424,9 @@ namespace {
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
             .task_id = "sources.update",
+            .estimate_memory = [owner, &state]() {
+              return owner->estimateMemory(state);
+            },
             .task = SourceMutationStageTask([owner](SourceMutationStageView& view) {
               owner->execute(view);
             }),
@@ -475,6 +484,10 @@ namespace {
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
             .task_id = "output_restart.boundary",
+            .estimate_memory = [owner, &state = inputs.state,
+                                &integrator_state = inputs.integrator_state]() {
+              return owner->estimateMemory(state, integrator_state);
+            },
             .task = OutputRestartStageTask([owner](OutputRestartStageView& view) {
               owner->execute(view);
             }),

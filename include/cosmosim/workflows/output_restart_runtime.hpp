@@ -6,6 +6,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/workflows/gravity_runtime.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 
 namespace cosmosim::core {
 class ProfilerSession;
@@ -74,6 +75,9 @@ class OutputRestartRuntime final {
       bool write_outputs_enabled);
 
   void execute(OutputRestartStageView& view);
+  [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState& state,
+      const core::IntegratorState& integrator_state) const;
 
  private:
   const core::FrozenConfig& m_frozen_config;

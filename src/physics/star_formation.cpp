@@ -1062,6 +1062,8 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
     throw std::runtime_error("StarFormationModel: particle-ID precommit returned the wrong batch size");
   }
 
+  registry.preparePopulationGrowth(state, total_new_particles, core::ParticleSpecies::kStar);
+
   // Distributed precommit is collective. Empty-birth ranks must reach it for
   // every globally ordered source batch before returning.
   if (plans.empty()) {

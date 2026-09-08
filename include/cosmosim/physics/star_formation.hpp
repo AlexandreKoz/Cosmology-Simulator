@@ -237,6 +237,8 @@ struct StarFormationStepReport {
 class ParticleIdPrecommit {
  public:
   virtual ~ParticleIdPrecommit() = default;
+  virtual void preparePopulationGrowth(core::SimulationState&, std::size_t,
+                                       core::ParticleSpecies) {}
   [[nodiscard]] virtual std::vector<std::uint64_t> precommit(
       const core::SimulationState& state,
       std::span<const std::uint64_t> birth_keys) = 0;

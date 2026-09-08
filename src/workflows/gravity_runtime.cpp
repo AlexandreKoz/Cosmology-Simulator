@@ -28,6 +28,7 @@
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/gravity/gravity_memory.hpp"
@@ -799,6 +800,53 @@ class GravityRuntimeImpl final : public GravityRuntime {
     return "unknown";
   }
 
+  [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState& state) const override {
+    return {estimateIncrementalMemory(state), true, {}};
+  }
+
+  [[nodiscard]] std::uint64_t estimateIncrementalMemory(
+      const core::SimulationState& state) const {
+    const std::size_t particle_count = state.particles.size();
+    const std::size_t cell_count = state.cells.size();
+    const parallel::MpiContext& mpi_context = m_services.mpi_context;
+    const std::uint64_t gravity_baseline_before =
+        core::memoryReportBaselineOwnedBytes(memoryReport());
+    const std::size_t conservative_count = core::checkedSizeAdd(
+            particle_count, cell_count,
+            "gravity governed conservative source/target count");
+    const gravity::GravityMemoryEstimate governed_peak =
+            gravity::estimateGravityMemory(gravity::GravityMemoryEstimateInput{
+                .local_source_count = static_cast<std::uint64_t>(conservative_count),
+                .local_target_count = static_cast<std::uint64_t>(conservative_count),
+                .local_particle_count = static_cast<std::uint64_t>(particle_count),
+                .local_cell_count = static_cast<std::uint64_t>(cell_count),
+                .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
+                .multipole_order = m_tree_pm_options.tree_options.multipole_order,
+                .pm_shape = m_pm_grid_shape,
+                .assignment_scheme = m_tree_pm_options.pm_options.assignment_scheme,
+                .decomposition_mode = m_tree_pm_options.pm_options.decomposition_mode,
+                .mpi_rank_count = static_cast<std::uint32_t>(
+                    std::max(m_runtime_topology.world_size, 1)),
+                .mpi_world_rank = std::max(mpi_context.worldRank(), 0),
+                .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
+                .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
+                .periodic_tree_coordinates =
+                    m_tree_pm_options.pm_options.boundary_condition ==
+                    gravity::PmBoundaryCondition::kPeriodic,
+                .indexed_target_coordinates = true,
+                .cuda_resident = m_runtime_topology.usesCuda(),
+                .tree_exchange_batch_bytes =
+                    m_tree_pm_options.tree_exchange_batch_bytes,
+                .pm_exchange_batch_bytes =
+                    m_tree_pm_options.pm_options.routing_exchange_batch_bytes,
+                .backend_unknown_reserve_bytes = 0U,
+                .safety_margin_fraction = 0.0,
+            });
+    return incrementalMemoryBeyondRetained(
+        governed_peak.known_peak_bytes, gravity_baseline_before);
+  }
+
   void execute(GravityStageView& view) override {
     view.requireFresh();
     core::StepContext& context = internal::RuntimeStageAccess::gravityContext(
@@ -837,41 +885,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
           throw std::logic_error(
               "gravity governor baseline is stale: retained gravity capacity exceeds process baseline");
         }
-        const std::size_t conservative_count = core::checkedSizeAdd(
-            particle_count, cell_count,
-            "gravity governed conservative source/target count");
-        const gravity::GravityMemoryEstimate governed_peak =
-            gravity::estimateGravityMemory(gravity::GravityMemoryEstimateInput{
-                .local_source_count = static_cast<std::uint64_t>(conservative_count),
-                .local_target_count = static_cast<std::uint64_t>(conservative_count),
-                .local_particle_count = static_cast<std::uint64_t>(particle_count),
-                .local_cell_count = static_cast<std::uint64_t>(cell_count),
-                .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
-                .multipole_order = m_tree_pm_options.tree_options.multipole_order,
-                .pm_shape = m_pm_grid_shape,
-                .assignment_scheme = m_tree_pm_options.pm_options.assignment_scheme,
-                .decomposition_mode = m_tree_pm_options.pm_options.decomposition_mode,
-                .mpi_rank_count = static_cast<std::uint32_t>(
-                    std::max(m_runtime_topology.world_size, 1)),
-                .mpi_world_rank = std::max(mpi_context.worldRank(), 0),
-                .zoom_enabled = m_tree_pm_options.enable_zoom_long_range_correction,
-                .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
-                .periodic_tree_coordinates =
-                    m_tree_pm_options.pm_options.boundary_condition ==
-                    gravity::PmBoundaryCondition::kPeriodic,
-                .indexed_target_coordinates = true,
-                .cuda_resident = m_runtime_topology.usesCuda(),
-                .tree_exchange_batch_bytes =
-                    m_tree_pm_options.tree_exchange_batch_bytes,
-                .pm_exchange_batch_bytes =
-                    m_tree_pm_options.pm_options.routing_exchange_batch_bytes,
-                .backend_unknown_reserve_bytes = 0U,
-                .safety_margin_fraction = 0.0,
-            });
-        const std::uint64_t incremental_bytes =
-            governed_peak.known_peak_bytes > gravity_baseline_before
-            ? governed_peak.known_peak_bytes - gravity_baseline_before
-            : 0U;
+        const std::uint64_t incremental_bytes = estimateIncrementalMemory(context.state);
         gravity_phase_reservation = m_services.memory_governor->reserve(
             core::MemoryClass::kPhaseResident, incremental_bytes,
             "gravity.treepm.phase_peak");

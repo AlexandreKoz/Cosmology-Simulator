@@ -2305,3 +2305,26 @@ double charging. Complete major-owner peak contracts and dependency-complete
 MPI/FFTW acceptance remain open. See
 `docs/repair/m2d_final_admission_closure_20260907.md`. This entry is a repair
 record, not an unconditional M2D acceptance declaration.
+
+## 2026-09-07 M2D acceptance-gates source repair
+
+The owner-contract patch exposes dynamic estimates with explicit completeness,
+reuses the existing gravity phase and output staging models, publishes partial
+source/AMR bounds, and preserves all physical owner reservations and serial
+scientific ordering. The focused registry and reference-workflow gates pass.
+The full-physics aggregate peak and distributed/runtime acceptance remain open;
+see `docs/repair/m2d_acceptance_gates_20260907.md`. Historical M2D results are
+not promoted to current executable evidence.
+
+## 2026-09-07 — M2D coding closure continuation (provisional)
+
+The current source contains the verified M2D acceptance-gates patch plus
+precommitted retained-capacity growth for source births and additional
+collective-safe SFC preparation boundaries. New tests cover exact headroom,
+partial allocation failure/retry, scheduler/species-sidecar growth, and registered
+MPI hard-memory/fault scenarios. The previous SFC/analysis repairs and serial
+numerical execution are preserved. The source report
+`docs/repair/m2d_coding_closure_20260907.md` records fresh commands and
+limitations. Do not mark M2D fully accepted until remaining owner-local
+allocation contracts and dependency-complete distributed/whole-process gates
+are established; historical full-suite results are not fresh evidence.

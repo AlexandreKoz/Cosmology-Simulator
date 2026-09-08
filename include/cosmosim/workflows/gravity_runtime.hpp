@@ -12,6 +12,7 @@
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 #include "cosmosim/workflows/reference_workflow.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
 
 namespace cosmosim::workflows {
@@ -64,6 +65,12 @@ class GravityRuntime : public GravityAccelerationProvider,
   ~GravityRuntime() override = default;
 
   virtual void execute(GravityStageView& view) = 0;
+  // Current retained-capacity-aware phase model. The owner continues to hold
+  // its physical reservation; the dispatcher only performs a preflight.
+  [[nodiscard]] virtual RuntimeTaskMemoryEstimate estimateMemory(
+      const core::SimulationState&) const {
+    return {0U, false, "gravity owner does not publish a complete memory model"};
+  }
 
   [[nodiscard]] virtual std::size_t pmGridSize() const noexcept = 0;
   [[nodiscard]] virtual std::uint64_t longRangeRefreshCount() const noexcept = 0;

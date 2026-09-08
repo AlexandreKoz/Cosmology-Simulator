@@ -194,6 +194,99 @@ void testDispatcherMemoryAdmission() {
   assert(governor.snapshot().committed_bytes == 0U);
 }
 
+
+void testDynamicOwnerMemoryContracts() {
+  using namespace cosmosim::workflows;
+  using cosmosim::core::MemoryClass;
+  using cosmosim::core::MemoryGovernor;
+  using cosmosim::core::MemoryGovernorSnapshot;
+  assert(incrementalMemoryBeyondRetained(100U, 40U) == 60U);
+  assert(incrementalMemoryBeyondRetained(40U, 100U) == 0U);
+  assert(incrementalMemoryBeyondRetained(UINT64_MAX, 0U) == UINT64_MAX);
+
+  cosmosim::parallel::MpiContext mpi_context(false, 1, 0);
+  cosmosim::core::ProfilerSession profiler(true);
+  MemoryGovernor governor({.hard_limit_bytes = 256U});
+  RuntimeServices services{.mpi_context = mpi_context, .profiler = profiler,
+                           .memory_governor = &governor};
+  RuntimeModuleFactoryContext context{services};
+  StableEpochSource epoch_source;
+  AnalysisStageView view(RuntimeResourceLease(epoch_source, RuntimeEpochField::kStepIndex));
+  std::vector<std::string> trace;
+  std::uint64_t requested_bytes = 128U;
+  bool complete = true;
+  auto makeDynamicModule = [&](bool dispatcher_owned) {
+    auto module = makeAnalysisModule("dynamic", 0, 0, {}, &trace);
+    module.stage_tasks.front().scheduling.memory_ownership = dispatcher_owned
+        ? RuntimeTaskMemoryOwnership::kDispatcherOwned
+        : RuntimeTaskMemoryOwnership::kOwnerManaged;
+    module.stage_tasks.front().scheduling.peak_is_known = dispatcher_owned;
+    module.stage_tasks.front().scheduling.estimated_peak_bytes = dispatcher_owned ? 128U : 0U;
+    module.factory = [&, dispatcher_owned](const RuntimeModuleFactoryContext&) {
+      RuntimeModuleInstance instance;
+      instance.owner_lifetime = std::make_shared<int>(1);
+      instance.stage_tasks.push_back(RuntimeStageTaskContribution{
+          .task_id = "dynamic.analysis",
+          .estimate_memory = [&]() {
+            return RuntimeTaskMemoryEstimate{requested_bytes, complete,
+                complete ? std::string_view{} : std::string_view{"partial"}};
+          },
+          .task = AnalysisStageTask([&, dispatcher_owned](AnalysisStageView& stage_view) {
+            stage_view.requireFresh();
+            if (dispatcher_owned) {
+              assert(governor.snapshot().committed_bytes == requested_bytes);
+            } else {
+              assert(governor.snapshot().committed_bytes == 0U);
+              auto physical = governor.reserve(MemoryClass::kDiagnostic, 16U, "test.physical");
+              physical.commit();
+            }
+            trace.push_back("dynamic");
+          }),
+      });
+      return instance;
+    };
+    return module;
+  };
+  auto makePlan = [&](bool dispatcher_owned) {
+    RuntimeModuleRegistry registry;
+    registry.registerModule(makeDynamicModule(dispatcher_owned));
+    return registry.freezeAndInstantiate(context);
+  };
+  auto owner_plan = makePlan(false);
+  assert(owner_plan.taskMemoryEstimate("dynamic::dynamic.analysis").complete);
+  requested_bytes = 300U;
+  assert(owner_plan.taskMemoryEstimate("dynamic::dynamic.analysis").incremental_bytes == 300U);
+  bool rejected = false;
+  try { owner_plan.executeStage(cosmosim::core::IntegrationStage::kAnalysisHooks, view); }
+  catch (const cosmosim::core::MemoryAdmissionError&) { rejected = true; }
+  assert(rejected && trace.empty());
+  complete = false;
+  // Partial estimates cannot reject a legal smaller physical allocation.
+  owner_plan.executeStage(cosmosim::core::IntegrationStage::kAnalysisHooks, view);
+  assert(trace.size() == 1U);
+  assert(governor.snapshot().committed_bytes == 0U);
+  assert(governor.snapshot().reserved_bytes == 0U);
+  auto dispatcher_plan = makePlan(true);
+  rejected = false;
+  try { dispatcher_plan.executeStage(cosmosim::core::IntegrationStage::kAnalysisHooks, view); }
+  catch (const std::logic_error&) { rejected = true; }
+  assert(rejected && trace.size() == 1U);
+  complete = true;
+  requested_bytes = 128U;
+  dispatcher_plan.executeStage(cosmosim::core::IntegrationStage::kAnalysisHooks, view);
+  assert(trace.size() == 2U);
+  assert(governor.snapshot().committed_bytes == 0U);
+  assert(governor.snapshot().reserved_bytes == 0U);
+  rejected = false;
+  try { (void)owner_plan.taskMemoryEstimate("dynamic.analysis"); }
+  catch (const std::invalid_argument&) { rejected = true; }
+  assert(rejected);
+  rejected = false;
+  try { (void)owner_plan.taskMemoryEstimate("missing::dynamic.analysis"); }
+  catch (const std::out_of_range&) { rejected = true; }
+  assert(rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +302,7 @@ int main() {
   std::vector<std::string> trace;
   testTaskDependenciesAndConcurrencyGuards(context, &trace);
   testDispatcherMemoryAdmission();
+  testDynamicOwnerMemoryContracts();
   cosmosim::workflows::RuntimeModuleRegistry registry;
   registry.registerModule(makeAnalysisModule("base", 20, 20, {}, &trace));
   // The prerequisite fixes construction order while task ordinals independently

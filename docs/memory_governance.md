@@ -318,3 +318,69 @@ known required-health estimate as a complete analysis-stage peak or charge it
 again while the owner holds its physical reservation. Public APIs and the
 remaining limitations are documented in
 `docs/repair/m2d_final_admission_closure_20260907.md`.
+
+## M2D acceptance-gates owner contracts (2026-09-07)
+
+The existing `RuntimeExecutionPlan` now accepts an additive, state-dependent
+`RuntimeTaskMemoryEstimate` from each built-in major owner. The estimate carries
+an incremental byte count, an explicit completeness bit, and a static-lifetime
+uncertainty description. `taskMemoryEstimate("module::task_id")` exposes the
+current model without acquiring memory or a stage view. A missing implementation
+in a third-party owner defaults to incomplete, preserving source compatibility.
+
+Gravity reuses its actual conservative TreePM phase estimator and subtracts
+retained gravity baseline capacity once. Its existing physical phase lease is
+unchanged. Source and hydro/AMR publish checked bounded-workspace estimates;
+output/restart publishes the maximum of its separately released snapshot and
+restart staging demands, using the same planned-overlap policy as the physical
+writer. Disabled/no-op source and output paths can report a complete zero.
+
+Incomplete models are **not whole-task certificates**. Their byte count is
+informational and cannot authorize overlap or become a mandatory preflight:
+adaptive kernels must retain the ability to select a smaller legal batch.
+Complete owner-managed models may be preflighted, with the temporary lease
+released before the owner acquires its actual allocation lease. Dispatcher-owned
+tasks require a complete model and keep their RAII lease through execution.
+The production stage dispatcher remains serial. Static unknown peaks and
+resource/dependency conflicts continue to reject speculative overlap.
+
+The remaining unmodeled terms include source population growth and ID
+coordination, complete AMR transaction/ghost/geometry coexistence, and output
+writer/readback metadata and capacity growth. Those owners retain their
+allocation-time governors. The gravity model and the new task graph do not
+establish a measured whole-process ceiling, and no concurrency is enabled by
+this patch. The single process governor, baseline/commitment reconciliation,
+external-runtime reserve, and existing configuration keys remain authoritative.
+
+## M2D retained population-growth admission
+
+The source runtime now uses `core::RetainedCapacityTransaction` at the
+source-precommit boundary. It plans actual replacement capacities for canonical
+particle SoA, species-specific star/BH lanes, species indices and scheduler
+metadata. A single aggregate reservation covers the old/new backing coexistence
+before the first physical birth mutation. Each lane is replaced without
+changing its logical size; the existing source model then performs the original
+resize and numerical update. Successful growth transfers the measured retained
+capacity into the existing governor baseline exactly once. If a later lane
+throws, the already-retained capacity remains accounted and logical state is
+unchanged. A consumed transaction cannot be reused; a retry must rebuild the
+plan from current capacities. The production plan is phase-local, requires
+nonthrowing container swap, and uses standard numeric SoA vectors. Arbitrary
+third-party allocator over-allocation is not certified: the plan rejects a
+replacement capacity above its declared bound.
+
+The ID-precommit interface has an additive no-op compatibility hook. The
+production distributed registry connects it to the one source owner and its
+scheduler. All ranks, including ranks with no births, enter the same collective
+admission boundary. The existing governor remains the only byte authority.
+Unmodeled ID coordination, source metadata, and other source scratch do not
+become certified merely because canonical growth is now governed. The
+hydro/AMR and output contracts remain conservative/partial, and no speculative
+full-physics overlap is enabled.
+
+The distributed SFC planner also coordinates local entry, sorting/sample
+preparation, and memory-refinement metadata failures before their next
+collective. Test-only fault points are `sfc_local_preparation`,
+`sfc_cut_sample`, `sfc_memory_preflight`, `sfc_memory_prefix`, and
+`sfc_memory_repair_metadata`. The MPI test suite must verify these on real
+np2/np3/np4 ranks; CPU-only compilation is not distributed certification.

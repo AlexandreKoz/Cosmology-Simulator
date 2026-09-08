@@ -1,4 +1,5 @@
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/core/retained_capacity_transaction.hpp"
 
 #include "cosmosim/core/checked_arithmetic.hpp"
 
@@ -1293,6 +1294,29 @@ void HierarchicalTimeBinScheduler::reset(
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.occupancy_by_bin[clamped_bin] = element_count;
   refreshOwnedCapacityHighWater();
+}
+
+void HierarchicalTimeBinScheduler::planAppendCapacity(
+    RetainedCapacityTransaction& plan,
+    std::uint32_t new_element_count, std::uint8_t initial_bin) {
+  if (new_element_count == 0U) return;
+  const std::size_t target = checkedSizeAdd(m_hot.size(), new_element_count,
+      "scheduler population capacity target");
+  (void)checkedIntegralNarrow<std::uint32_t>(target,
+      "scheduler population capacity index range");
+  plan.add(m_hot.bin_index, target);
+  plan.add(m_hot.next_activation_tick, target);
+  plan.add(m_hot.active_flag, target);
+  plan.add(m_hot.pending_bin_index, target);
+  plan.add(m_position_in_bin, target);
+  plan.add(m_candidate_bin_index, target);
+  plan.add(m_candidate_source, target);
+  if (m_elements_by_bin.empty()) {
+    throw std::logic_error("scheduler population append requires initialized bins");
+  }
+  auto& members = m_elements_by_bin[clampBin(initial_bin)];
+  plan.add(members, checkedSizeAdd(members.size(), new_element_count,
+      "scheduler bin population capacity target"));
 }
 
 void HierarchicalTimeBinScheduler::appendElements(
