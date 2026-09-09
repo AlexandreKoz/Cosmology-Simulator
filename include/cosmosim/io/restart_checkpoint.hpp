@@ -12,6 +12,8 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
+namespace cosmosim::core { class MemoryGovernor; }
+
 namespace cosmosim::io {
 
 struct RestartSchema {
@@ -29,6 +31,8 @@ struct RestartSchema {
 struct RestartWritePolicy {
   bool enable_fsync_finalize = true;
   std::string temporary_suffix = ".part";
+  // Optional existing process authority for owner-local serialization scratch.
+  core::MemoryGovernor* memory_governor = nullptr;
 };
 
 struct RestartPersistentStateView {
@@ -159,8 +163,10 @@ struct RestartReadResult {
   std::string payload_integrity_sha256_hex;
 };
 
-[[nodiscard]] std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload);
-[[nodiscard]] std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload);
+[[nodiscard]] std::uint64_t restartPayloadIntegrityHash(
+    const RestartWritePayload& payload, core::MemoryGovernor* governor = nullptr);
+[[nodiscard]] std::string restartPayloadIntegrityHashHex(
+    const RestartWritePayload& payload, core::MemoryGovernor* governor = nullptr);
 
 void writeRestartCheckpointHdf5(
     const std::filesystem::path& output_path,

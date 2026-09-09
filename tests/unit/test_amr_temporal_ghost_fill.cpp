@@ -7,6 +7,8 @@
 
 #include "cosmosim/amr/amr_ghost_fill.hpp"
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 namespace {
 
@@ -280,6 +282,49 @@ void testActiveHistoryBlocksTopologyMutation() {
 }
 
 
+
+void testTemporalHistoryPhysicalAdmissionAndRetry() {
+  Fixture fixture;
+  const auto before = cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(fixture.state));
+  const double original_density = fixture.state.gas_cells.density_code[1];
+  const auto old_capacity = fixture.state.amr_temporal_boundary_history.ownedCapacityBytes();
+  cosmosim::core::MemoryGovernor tight({.hard_limit_bytes = before});
+  tight.setBaselineOwnedBytes(before);
+  bool rejected = false;
+  try {
+    cosmosim::amr::captureAmrTemporalBoundaryHistoryStart(
+        fixture.state, fixture.descriptors, 0.0, k_gamma, &tight);
+  } catch (const cosmosim::core::MemoryAdmissionError&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(fixture.state.amr_temporal_boundary_history.empty());
+  assert(fixture.state.amr_temporal_boundary_history.ownedCapacityBytes() == old_capacity);
+  assert(fixture.state.gas_cells.density_code[1] == original_density);
+  assert(tight.snapshot().baseline_owned_bytes == before);
+  assert(tight.snapshot().committed_bytes == 0U && tight.snapshot().reserved_bytes == 0U);
+
+  cosmosim::core::MemoryGovernor governor({.hard_limit_bytes = before + 1024U * 1024U});
+  governor.setBaselineOwnedBytes(before);
+  cosmosim::amr::captureAmrTemporalBoundaryHistoryStart(
+      fixture.state, fixture.descriptors, 0.0, k_gamma, &governor);
+  const auto retained = fixture.state.amr_temporal_boundary_history.ownedCapacityBytes();
+  assert(retained > 0U);
+  assert(governor.snapshot().baseline_owned_bytes == before - old_capacity + retained);
+  assert(governor.snapshot().committed_bytes == 0U && governor.snapshot().reserved_bytes == 0U);
+  cosmosim::amr::captureAmrTemporalBoundaryHistoryEnd(
+      fixture.state, fixture.descriptors, 1.0, k_gamma, &governor);
+  cosmosim::amr::retireAmrTemporalBoundaryHistory(fixture.state);
+  governor.setBaselineOwnedBytes(cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(fixture.state)));
+  cosmosim::amr::captureAmrTemporalBoundaryHistoryStart(
+      fixture.state, fixture.descriptors, 2.0, k_gamma, &governor);
+  assert(governor.snapshot().committed_bytes == 0U && governor.snapshot().reserved_bytes == 0U);
+  assert(governor.snapshot().baseline_owned_bytes == cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(fixture.state)));
+}
+
 }  // namespace
 
 int main() {
@@ -287,5 +332,6 @@ int main() {
   testRejectsOutOfRangeAndStaleHistory();
   testRejectsUnsynchronizedFineToCoarse();
   testActiveHistoryBlocksTopologyMutation();
+  testTemporalHistoryPhysicalAdmissionAndRetry();
   return 0;
 }

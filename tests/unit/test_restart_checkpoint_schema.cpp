@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "cosmosim/core/provenance.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
@@ -121,6 +122,23 @@ int main() {
   payload.distributed_gravity_state.pm_slab_end_x_by_rank = {4};
 
   const std::uint64_t hash_before = cosmosim::io::restartPayloadIntegrityHash(payload);
+  // Even an empty temporal index has a bounded arena; admission must fail
+  // before hashing publishes any result, and a retry must be byte-identical.
+  cosmosim::core::MemoryGovernor tight_integrity({.hard_limit_bytes = 255U});
+  bool integrity_rejected = false;
+  try {
+    (void)cosmosim::io::restartPayloadIntegrityHash(payload, &tight_integrity);
+  } catch (const cosmosim::core::MemoryAdmissionError&) {
+    integrity_rejected = true;
+  }
+  assert(integrity_rejected);
+  assert(tight_integrity.snapshot().committed_bytes == 0U);
+  assert(tight_integrity.snapshot().reserved_bytes == 0U);
+  cosmosim::core::MemoryGovernor integrity_governor({.hard_limit_bytes = 1024U * 1024U});
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload, &integrity_governor) == hash_before);
+  assert(integrity_governor.snapshot().committed_bytes == 0U);
+  assert(integrity_governor.snapshot().reserved_bytes == 0U);
+
   integrator_state.time_bins.active_bin = 1;
   const std::uint64_t hash_after = cosmosim::io::restartPayloadIntegrityHash(payload);
   assert(hash_before != hash_after);

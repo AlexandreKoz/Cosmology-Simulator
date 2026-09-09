@@ -702,7 +702,8 @@ bool maybeWriteOutputs(
         restart_payload.distributed_gravity_state.long_range_restart_policy;
 
     report.restart_path = report.run_directory / formatIndexedRankedFileStem(config.output.restart_stem, integrator_state.step_index, gravity_state.runtimeTopology().world_size, gravity_state.runtimeTopology().world_rank);
-    io::writeRestartCheckpointHdf5(report.restart_path, restart_payload);
+    io::writeRestartCheckpointHdf5(report.restart_path, restart_payload,
+        io::RestartWritePolicy{.memory_governor = services.memory_governor});
     report.restart_roundtrip_executed = true;
     const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
     const auto compatibility = parallel::evaluateDistributedRestartCompatibility(

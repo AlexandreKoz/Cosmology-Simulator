@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <memory_resource>
 #include <sstream>
 #include <streambuf>
 #include <stdexcept>
@@ -23,6 +24,8 @@
 #include <type_traits>
 
 #include "core/internal/sha256.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/io_contract.hpp"
@@ -2569,7 +2572,8 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     bool include_gas_cell_scheduler,
     bool include_gravity_force_cache,
     bool include_output_time_cadence,
-    bool include_star_formation_v22) {
+    bool include_star_formation_v22,
+    core::MemoryGovernor* memory_governor = nullptr) {
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
@@ -2797,17 +2801,36 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     }
   }
   if (include_temporal_boundary_history) {
-    std::vector<core::AmrTemporalBoundaryHistoryRecord> temporal_records(
-        state.amr_temporal_boundary_history.records().begin(),
-        state.amr_temporal_boundary_history.records().end());
-    std::sort(
-        temporal_records.begin(), temporal_records.end(),
-        [](const core::AmrTemporalBoundaryHistoryRecord& lhs,
-           const core::AmrTemporalBoundaryHistoryRecord& rhs) {
-          return lhs.patch_id < rhs.patch_id;
-        });
+    // Sort non-owning indexes instead of copying the entire historical state.
+    // The outer index and largest per-patch index coexist in one bounded arena.
+    const auto temporal_source = state.amr_temporal_boundary_history.records();
+    std::size_t max_history_cells = 0U;
+    for (const auto& record : temporal_source) {
+      max_history_cells = std::max(max_history_cells, record.cells.size());
+    }
+    const std::size_t temporal_index_bytes = core::checkedSizeAdd(
+        core::checkedSizeMultiply(temporal_source.size(), sizeof(const core::AmrTemporalBoundaryHistoryRecord*),
+                                  "restart temporal record index"),
+        core::checkedSizeMultiply(max_history_cells, sizeof(const core::AmrTemporalBoundaryHistoryCellRecord*),
+                                  "restart temporal cell index"),
+        "restart temporal index coexistence");
+    core::GovernedScratchArena temporal_index_arena(
+        memory_governor, core::MemoryClass::kScratchArena,
+        core::checkedMemoryBytesAdd(static_cast<std::uint64_t>(temporal_index_bytes), 256U,
+                                    "restart temporal index alignment"),
+        "io.restart.temporal_integrity_index");
+    std::pmr::vector<const core::AmrTemporalBoundaryHistoryRecord*> temporal_records(
+        temporal_index_arena.resource());
+    temporal_records.reserve(temporal_source.size());
+    for (const auto& record : temporal_source) temporal_records.push_back(&record);
+    std::sort(temporal_records.begin(), temporal_records.end(),
+        [](const auto* lhs, const auto* rhs) { return lhs->patch_id < rhs->patch_id; });
+    std::pmr::vector<const core::AmrTemporalBoundaryHistoryCellRecord*> cells(
+        temporal_index_arena.resource());
+    cells.reserve(max_history_cells);
     append_u64(static_cast<std::uint64_t>(temporal_records.size()));
-    for (const core::AmrTemporalBoundaryHistoryRecord& record : temporal_records) {
+    for (const auto* record_ptr : temporal_records) {
+      const auto& record = *record_ptr;
       append_u64(record.patch_id);
       append_u64(record.patch_level);
       append_u64(record.patch_geometry_fingerprint);
@@ -2815,14 +2838,16 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
       append_u64(std::bit_cast<std::uint64_t>(record.interval_start_code));
       append_u64(std::bit_cast<std::uint64_t>(record.interval_end_code));
       append_u64(record.end_state_valid ? 1U : 0U);
-      std::vector<core::AmrTemporalBoundaryHistoryCellRecord> cells = record.cells;
-      std::sort(cells.begin(), cells.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.patch_local_cell == rhs.patch_local_cell
-            ? lhs.gas_cell_id < rhs.gas_cell_id
-            : lhs.patch_local_cell < rhs.patch_local_cell;
+      cells.clear();
+      for (const auto& cell : record.cells) cells.push_back(&cell);
+      std::sort(cells.begin(), cells.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->patch_local_cell == rhs->patch_local_cell
+            ? lhs->gas_cell_id < rhs->gas_cell_id
+            : lhs->patch_local_cell < rhs->patch_local_cell;
       });
       append_u64(static_cast<std::uint64_t>(cells.size()));
-      for (const core::AmrTemporalBoundaryHistoryCellRecord& cell : cells) {
+      for (const auto* cell_ptr : cells) {
+        const auto& cell = *cell_ptr;
         append_u64(cell.gas_cell_id);
         append_u64(static_cast<std::uint64_t>(cell.patch_local_cell));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_mass_density_comoving));
@@ -3051,12 +3076,14 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   return RestartIntegrityDigests{hash, sha256DigestHex(strong_hash.finish())};
 }
 
-std::uint64_t restartPayloadIntegrityHash(const RestartWritePayload& payload) {
-  return restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true).legacy_fnv1a;
+std::uint64_t restartPayloadIntegrityHash(
+    const RestartWritePayload& payload, core::MemoryGovernor* governor) {
+  return restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true, governor).legacy_fnv1a;
 }
 
-std::string restartPayloadIntegrityHashHex(const RestartWritePayload& payload) {
-  return hexU64(restartPayloadIntegrityHash(payload));
+std::string restartPayloadIntegrityHashHex(
+    const RestartWritePayload& payload, core::MemoryGovernor* governor) {
+  return hexU64(restartPayloadIntegrityHash(payload, governor));
 }
 
 void writeRestartCheckpointHdf5(
@@ -3127,7 +3154,8 @@ void writeRestartCheckpointHdf5(
   }
 
   const RestartIntegrityDigests integrity =
-      restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true);
+      restartPayloadIntegrityDigestsImpl(payload, true, true, true, true, true, true, true,
+                                        policy.memory_governor);
 
   const auto& shared_names = sharedIoContractNames();
   writeScalarStringAttribute(

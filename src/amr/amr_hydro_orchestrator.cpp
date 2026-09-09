@@ -1,6 +1,7 @@
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 
 #include "cosmosim/amr/amr_patch_indexing.hpp"
+#include "amr/internal/amr_retained_state_admission.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/governed_scratch_arena.hpp"
 
@@ -1356,15 +1357,34 @@ std::size_t mergeFluxRegistersIntoPendingStore(
     core::SimulationState& state,
     std::span<const FluxRegisterEntry> entries,
     const ProductionAmrHydroOptions& options) {
+  const std::size_t max_records = core::checkedSizeAdd(
+      state.pending_flux_registers.size(), entries.size(),
+      "AMR pending register replacement count");
+  const std::uint64_t replacement_bound = static_cast<std::uint64_t>(
+      core::checkedSizeMultiply(max_records, sizeof(core::PendingFluxRegisterRecord),
+                                "AMR pending register replacement bytes"));
+  internal::AmrRetainedStateAdmission admission(
+      state, options.regrid_memory_governor, replacement_bound,
+      "amr.pending_flux_registers.replacement");
+  core::PendingFluxRegisterStore candidate_store;
+  std::vector<core::PendingFluxRegisterRecord> records;
+  records.reserve(max_records);
+  if (records.capacity() != max_records) {
+    throw std::length_error("AMR pending register capacity exceeds admission");
+  }
+  records.insert(records.end(), state.pending_flux_registers.records().begin(),
+                 state.pending_flux_registers.records().end());
+  candidate_store.assign(std::move(records));
   std::size_t created_count = 0;
+  auto& pending_store = candidate_store;
   for (const FluxRegisterEntry& entry : entries) {
     if (entry.register_key == 0U) {
       continue;
     }
-    auto* pending = state.pending_flux_registers.findByRegisterKey(entry.register_key);
+    auto* pending = pending_store.findByRegisterKey(entry.register_key);
     if (pending == nullptr) {
       core::PendingFluxRegisterRecord seed = makePendingRecordSeed(state, entry, options);
-      pending = &state.pending_flux_registers.upsertByRegisterKey(seed);
+      pending = &pending_store.upsertByRegisterKey(seed);
       ++created_count;
     } else {
       validatePendingCompatible(*pending, entry);
@@ -1412,6 +1432,12 @@ std::size_t mergeFluxRegistersIntoPendingStore(
       }
     }
   }
+  const std::uint64_t old_owned = state.pending_flux_registers.ownedCapacityBytes();
+  const std::uint64_t new_owned = candidate_store.ownedCapacityBytes();
+  static_assert(std::is_nothrow_move_assignable_v<core::PendingFluxRegisterStore>);
+  admission.commit(old_owned, new_owned, [&]() noexcept {
+    state.pending_flux_registers = std::move(candidate_store);
+  });
   return created_count;
 }
 
@@ -1421,6 +1447,7 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
     double adiabatic_index) {
   RefluxDiagnostics diagnostics;
   std::vector<std::uint64_t> applied_keys;
+  applied_keys.reserve(state.pending_flux_registers.size());
   for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
     if (!pending.isComplete()) {
       ++diagnostics.skipped_incomplete_register_count;
@@ -2019,6 +2046,10 @@ struct AmrSynchronizedSweepWorkspace {
         hydrogen[local_cell] = k_hydrogen_mass_fraction *
             mass_density_physical_cgs[local_cell] / k_proton_mass_g;
       }
+      if (options.source_density_rescale != 1.0) {
+        mass_density_physical_cgs[local_cell] *= options.source_density_rescale;
+        hydrogen[local_cell] *= options.source_density_rescale;
+      }
       if (row < global_source_context.metallicity_mass_fraction.size()) {
         metallicity[local_cell] = global_source_context.metallicity_mass_fraction[row];
       } else {
@@ -2258,7 +2289,7 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   const std::vector<std::uint32_t> fine_rows = activeRowsForLevel(state, max_level, active_cell_rows);
   const double coarse_start_code = options.state_time_code;
   const double coarse_end_code = coarse_start_code + coarse_update.dt_code;
-  captureAmrTemporalBoundaryHistoryStart(state, descriptors, coarse_start_code, options.adiabatic_index);
+  captureAmrTemporalBoundaryHistoryStart(state, descriptors, coarse_start_code, options.adiabatic_index, options.regrid_memory_governor);
 
   if (!coarse_rows.empty()) {
     ProductionAmrHydroOptions coarse_options = options;
@@ -2278,7 +2309,7 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
     diagnostics.substeps_by_level[static_cast<std::size_t>(min_level)] = 1U;
     diagnostics.subcycled_level_step_count += 1U;
   }
-  captureAmrTemporalBoundaryHistoryEnd(state, descriptors, coarse_end_code, options.adiabatic_index);
+  captureAmrTemporalBoundaryHistoryEnd(state, descriptors, coarse_end_code, options.adiabatic_index, options.regrid_memory_governor);
 
   const double fine_dt_code = coarse_update.dt_code / static_cast<double>(options.refinement_ratio);
   for (std::uint32_t substep = 0; substep < options.refinement_ratio; ++substep) {
@@ -2316,24 +2347,14 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
     fine_source_context.redshift = fine_update.scale_factor > 0.0
         ? std::max(0.0, 1.0 / fine_update.scale_factor - 1.0)
         : global_source_context.redshift;
-    std::vector<double> fine_mass_density_physical_cgs;
-    std::vector<double> fine_hydrogen_number_density_cgs;
+    double density_rescale = 1.0;
     if (fine_update.comoving_coordinates &&
         coarse_update.scale_factor > 0.0 && fine_update.scale_factor > 0.0) {
-      const double density_rescale = std::pow(
+      density_rescale = std::pow(
           coarse_update.scale_factor / fine_update.scale_factor, 3.0);
-      fine_mass_density_physical_cgs.assign(
-          global_source_context.mass_density_physical_cgs.begin(),
-          global_source_context.mass_density_physical_cgs.end());
-      fine_hydrogen_number_density_cgs.assign(
-          global_source_context.hydrogen_number_density_cgs.begin(),
-          global_source_context.hydrogen_number_density_cgs.end());
-      for (double& rho : fine_mass_density_physical_cgs) rho *= density_rescale;
-      for (double& n_h : fine_hydrogen_number_density_cgs) n_h *= density_rescale;
-      fine_source_context.mass_density_physical_cgs = fine_mass_density_physical_cgs;
-      fine_source_context.hydrogen_number_density_cgs = fine_hydrogen_number_density_cgs;
     }
     ProductionAmrHydroOptions fine_options = options;
+    fine_options.source_density_rescale = options.source_density_rescale * density_rescale;
     fine_options.sweep_mode = ProductionAmrHydroSweepMode::kSynchronized;
     fine_options.persist_incomplete_flux_registers = true;
     fine_options.reflux_interval_start_code = coarse_start_code;

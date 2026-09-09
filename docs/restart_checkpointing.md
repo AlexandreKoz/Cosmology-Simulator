@@ -390,3 +390,19 @@ Optional light/heavy science cadence is explicitly coalesced and nonpersistent. 
 ## M2D distributed metadata streaming continuation
 
 `DistributedRestartState::serializeTo(std::ostream&)` emits the same canonical text as the retained `serialize()` API. `serializedSizeBytes()` counts the exact emitted bytes without retaining the text. The HDF5 writer uses a fixed 64 KiB buffer and hyperslab writes to the existing contiguous uint8 `/distributed_gravity/state` dataset; the full integrity hash consumes the same stream. No schema migration is required. The canonical FNV-1a and SHA-256 digest streams retain the exact previous byte contract. The caller must keep the source state immutable for both passes. A changed length or failed write is a hard error; the existing temporary-file publication and full readback requirements remain in force. This is a bounded serialization path, not a complete owner-local restart-memory certificate.
+
+## M2D owner-local integrity scratch (2026-09-09)
+
+`RestartWritePolicy::memory_governor` optionally supplies the existing process
+MemoryGovernor. The production output workflow passes its authority. The
+canonical integrity traversal sorts non-owning pointers to temporal-history
+records and cells, rather than copying the conserved history. Its arena bound is
+`P * sizeof(record_pointer) + Cmax * sizeof(cell_pointer) + 256` bytes, where
+P is the history patch count and Cmax the largest history cell count per patch.
+The record and cell indexes coexist; other reader and writer allocations are
+not included in this narrow bound. The legacy hash and canonical SHA-256
+serialization order, restart schema and full verification policy are unchanged.
+The public hash helpers retain their one-argument compatibility surface and
+accept an optional governor for this scratch. This is not a complete restart
+readback admission certificate; full result ownership and verification-time
+scheduler/metadata coexistence remain separately tracked M2D gaps.

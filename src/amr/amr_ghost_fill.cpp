@@ -1,4 +1,5 @@
 #include "cosmosim/amr/amr_ghost_fill.hpp"
+#include "amr/internal/amr_retained_state_admission.hpp"
 
 #include <algorithm>
 #include <array>
@@ -901,23 +902,55 @@ void captureAmrTemporalBoundaryHistoryStart(
     core::SimulationState& state,
     std::span<const PatchDescriptor> patches,
     double interval_start_code,
-    double adiabatic_index) {
+    double adiabatic_index, core::MemoryGovernor* governor) {
   if (!std::isfinite(interval_start_code)) {
     throw std::invalid_argument("captureAmrTemporalBoundaryHistoryStart requires finite interval_start_code");
   }
   if (!state.amr_temporal_boundary_history.empty()) {
     throw std::runtime_error("cannot begin a new AMR temporal boundary interval while an earlier interval is active");
   }
-  std::vector<core::AmrTemporalBoundaryHistoryRecord> records;
+  std::size_t coarse_count = 0U;
+  std::size_t history_cells = 0U;
+  std::uint64_t geometry_bound = 0U;
+  std::uint64_t geometry_scratch_bound = 0U;
+  const auto isCoarseSource = [&](const PatchDescriptor& patch) {
+    return std::any_of(patches.begin(), patches.end(),
+        [&patch](const PatchDescriptor& candidate) { return candidate.level > patch.level; });
+  };
   for (const PatchDescriptor& patch : patches) {
-    const bool is_coarse_source = std::any_of(
-        patches.begin(), patches.end(),
-        [&patch](const PatchDescriptor& candidate) {
-          return candidate.level > patch.level;
-        });
-    if (!is_coarse_source) {
-      continue;
-    }
+    if (!isCoarseSource(patch)) continue;
+    ++coarse_count;
+    const auto capacity = amrHydroGeometryCapacity(patch);
+    history_cells = core::checkedSizeAdd(history_cells, capacity.real_cells,
+                                          "AMR temporal history cells");
+    geometry_bound = std::max(geometry_bound, capacity.retained_bytes);
+    geometry_scratch_bound = std::max(geometry_scratch_bound, capacity.construction_scratch_bytes);
+  }
+  const auto bytes = [](std::size_t count, std::size_t width) {
+    return static_cast<std::uint64_t>(core::checkedSizeMultiply(
+        count, width, "AMR temporal history capacity"));
+  };
+  const std::uint64_t history_bound = core::checkedMemoryBytesAdd(
+      bytes(coarse_count, sizeof(core::AmrTemporalBoundaryHistoryRecord)),
+      bytes(history_cells, sizeof(core::AmrTemporalBoundaryHistoryCellRecord)),
+      "AMR temporal history retained capacity");
+  internal::AmrRetainedStateAdmission admission(
+      state, governor, history_bound, "amr.temporal_history.replacement");
+  core::MemoryReservation geometry_reservation;
+  if (governor != nullptr) {
+    geometry_reservation = governor->reserve(core::MemoryClass::kPhaseResident,
+        core::checkedMemoryBytesAdd(geometry_bound, geometry_scratch_bound,
+                                    "AMR temporal history geometry and scratch"),
+        "amr.temporal_history.geometry");
+    geometry_reservation.commit();
+  }
+  std::vector<core::AmrTemporalBoundaryHistoryRecord> records;
+  records.reserve(coarse_count);
+  if (records.capacity() != coarse_count) {
+    throw std::length_error("AMR temporal history outer capacity exceeds admission");
+  }
+  for (const PatchDescriptor& patch : patches) {
+    if (!isCoarseSource(patch)) continue;
     const AmrHydroPatchGeometry geometry = buildAmrHydroPatchGeometry(state, patch);
     core::AmrTemporalBoundaryHistoryRecord record;
     record.patch_id = patch.patch_id;
@@ -928,6 +961,9 @@ void captureAmrTemporalBoundaryHistoryStart(
     record.interval_end_code = interval_start_code;
     record.end_state_valid = false;
     record.cells.reserve(geometry.real_cells.size());
+    if (record.cells.capacity() != geometry.real_cells.size()) {
+      throw std::length_error("AMR temporal history cell capacity exceeds admission");
+    }
     for (const AmrHydroCellDescriptor& descriptor : geometry.real_cells) {
       core::AmrTemporalBoundaryHistoryCellRecord cell;
       cell.gas_cell_id = descriptor.gas_cell_id;
@@ -937,14 +973,19 @@ void captureAmrTemporalBoundaryHistoryStart(
     }
     records.push_back(std::move(record));
   }
-  state.amr_temporal_boundary_history.assign(std::move(records));
+  const std::uint64_t old_owned = state.amr_temporal_boundary_history.ownedCapacityBytes();
+  const std::uint64_t new_owned = history_bound;
+  admission.commit(old_owned, new_owned, [&]() noexcept {
+    state.amr_temporal_boundary_history.assign(std::move(records));
+  });
 }
 
 void captureAmrTemporalBoundaryHistoryEnd(
     core::SimulationState& state,
     std::span<const PatchDescriptor> patches,
     double interval_end_code,
-    double adiabatic_index) {
+    double adiabatic_index, core::MemoryGovernor* governor) {
+  (void)governor;  // End capture updates the already admitted fixed-size records.
   if (!std::isfinite(interval_end_code)) {
     throw std::invalid_argument("captureAmrTemporalBoundaryHistoryEnd requires finite interval_end_code");
   }

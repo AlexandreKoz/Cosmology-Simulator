@@ -79,12 +79,12 @@ void captureAmrTemporalBoundaryHistoryStart(
     core::SimulationState& state,
     std::span<const PatchDescriptor> patches,
     double interval_start_code,
-    double adiabatic_index);
+    double adiabatic_index, core::MemoryGovernor* governor = nullptr);
 void captureAmrTemporalBoundaryHistoryEnd(
     core::SimulationState& state,
     std::span<const PatchDescriptor> patches,
     double interval_end_code,
-    double adiabatic_index);
+    double adiabatic_index, core::MemoryGovernor* governor = nullptr);
 void retireAmrTemporalBoundaryHistory(core::SimulationState& state);
 
 

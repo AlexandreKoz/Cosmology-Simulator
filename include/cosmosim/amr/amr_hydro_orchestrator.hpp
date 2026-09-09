@@ -45,6 +45,9 @@ struct ProductionAmrHydroOptions {
   // full-population thermodynamic helper vectors. A zero value preserves the
   // legacy span-provided source-context path used by focused tests.
   double physical_density_cgs_per_density_code = 0.0;
+  // Internal subcycling conversion, applied only to patch-local source lanes.
+  // The global source context remains a borrowed immutable view.
+  double source_density_rescale = 1.0;
   // Production regrid is an explicit memory transaction. Regrid entry points
   // fail closed when this authority is absent; ordinary hydro stepping does
   // not require it. Runtime composition must pass the process MemoryGovernor.

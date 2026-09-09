@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
+#include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 namespace {
 
@@ -196,9 +198,53 @@ void testStaleGenerationRejected() {
   assert(state.pending_flux_registers.size() == 1U);
 }
 
+
+void testPendingReplacementAdmissionAndRetry() {
+  auto state = makeState();
+  auto options = pendingOptions(0);
+  const auto first = makeEntry(true, false);
+  const auto second = makeEntry(false, true);
+  const auto before = cosmosim::core::memoryReportBaselineOwnedBytes(
+      cosmosim::core::collectSimulationMemoryReport(state));
+  cosmosim::core::MemoryGovernor governor({.hard_limit_bytes = before + 1024U * 1024U});
+  governor.setBaselineOwnedBytes(before);
+  options.regrid_memory_governor = &governor;
+  assert(cosmosim::amr::mergeFluxRegistersIntoPendingStore(state, {&first, 1}, options) == 1U);
+  const auto old_bytes = state.pending_flux_registers.ownedCapacityBytes();
+  const auto old_record = state.pending_flux_registers.records().front();
+  const auto baseline = governor.snapshot().baseline_owned_bytes;
+  cosmosim::core::MemoryGovernor tight({.hard_limit_bytes = baseline});
+  tight.setBaselineOwnedBytes(baseline);
+  options.regrid_memory_governor = &tight;
+  bool rejected = false;
+  try {
+    (void)cosmosim::amr::mergeFluxRegistersIntoPendingStore(state, {&second, 1}, options);
+  } catch (const cosmosim::core::MemoryAdmissionError&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(state.pending_flux_registers.ownedCapacityBytes() == old_bytes);
+  assert(state.pending_flux_registers.size() == 1U);
+  assert(state.pending_flux_registers.records().front().coarse_face_count == old_record.coarse_face_count);
+  assert(state.pending_flux_registers.records().front().fine_face_count == old_record.fine_face_count);
+  assert(tight.snapshot().baseline_owned_bytes == baseline);
+  assert(tight.snapshot().committed_bytes == 0U && tight.snapshot().reserved_bytes == 0U);
+  options.regrid_memory_governor = &governor;
+  (void)cosmosim::amr::mergeFluxRegistersIntoPendingStore(state, {&second, 1}, options);
+  assert(state.pending_flux_registers.size() == 1U);
+  assert(state.pending_flux_registers.records().front().fine_face_count == 1U);
+  assert(governor.snapshot().baseline_owned_bytes == before - old_bytes +
+      state.pending_flux_registers.ownedCapacityBytes() + old_bytes);
+  assert(governor.snapshot().committed_bytes == 0U && governor.snapshot().reserved_bytes == 0U);
+  const auto descriptors = cosmosim::amr::buildProductionAmrPatchDescriptors(state);
+  (void)cosmosim::amr::applyCompletePendingFluxRegistersToSimulationState(state, descriptors, k_gamma);
+  assert(governor.snapshot().committed_bytes == 0U && governor.snapshot().reserved_bytes == 0U);
+}
+
 }  // namespace
 
 int main() {
+  testPendingReplacementAdmissionAndRetry();
   testPendingAppliesOnlyAfterFinalFineSubstep();
   testAreaMismatchAndMissingTargetStayRejected();
   testStaleGenerationRejected();
